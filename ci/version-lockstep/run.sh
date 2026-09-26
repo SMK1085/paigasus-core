@@ -77,7 +77,7 @@ declare -A LOCK_MEMBERS=(
 )
 
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=2   # site_verdict, lock_reader
+SELF_TEST_COUNT=4   # site_verdict, lock_reader, cargo_package_writer, stamp_sites
 
 site_verdict() { # $1 expected  $2 actual
   if [ -n "$2" ] && [ "$1" = "$2" ]; then printf 'OK'; else printf 'MISMATCH'; fi
@@ -285,10 +285,272 @@ lock_reader_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
+# SMA-685: fixture table for the cargo-package writer. The fixtures deliberately vary the
+# layout: spacing, comments, table order, CRLF, and no trailing newline. A writer tested on
+# one layout only passes on the layout its author assumed.
+cargo_package_writer_self_test() {
+  local tmp rc got before after
+  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+
+  _cpw() { # $1 fixture file (relative to $tmp)  $2 head version -> sets rc and got
+    rc=0
+    got="$(REPO_ROOT="$tmp" write_site cargo-package "$1" "$2" 2>/dev/null)" || rc=$?
+  }
+  _cpw_expect() { # $1 fixture  $2 expected file content (printf format)
+    local want
+    want="$(printf "$2")"
+    [ "$(cat "$tmp/$1")" = "$want" ] \
+      || { fail "self-test: cargo-package writer produced the wrong text for $1"; return 1; }
+  }
+
+  # F1: plain layout; rust-version, a dependency version and an inline table stay untouched.
+  printf '[package]\nname = "a"\nversion = "0.1.0"\nrust-version = "1.95"\n\n[dependencies]\nfoo = { version = "0.1.0" }\n\n[dependencies.bar]\nversion = "0.1.0"\n' >"$tmp/f1.toml"
+  _cpw f1.toml 0.2.0
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] || { fail "self-test: F1 rc=$rc got='$got', expected rc 0 and 1"; return 1; }
+  _cpw_expect f1.toml '[package]\nname = "a"\nversion = "0.2.0"\nrust-version = "1.95"\n\n[dependencies]\nfoo = { version = "0.1.0" }\n\n[dependencies.bar]\nversion = "0.1.0"' || return 1
+
+  # F2: idempotent — same version prints 0, changes no byte and keeps the mtime.
+  touch -t 200001010000 "$tmp/f1.toml"
+  before="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_mtime_ns)' "$tmp/f1.toml")"
+  _cpw f1.toml 0.2.0
+  after="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_mtime_ns)' "$tmp/f1.toml")"
+  [ "$rc" -eq 0 ] && [ "$got" = 0 ] && [ "$before" = "$after" ] \
+    || { fail "self-test: F2 idempotence rc=$rc got='$got' mtime $before -> $after"; return 1; }
+
+  # F3: spacing variants and a trailing comment on the version line.
+  printf '[package]\nname="b"\nversion   =  "0.1.0"   # the floor\n' >"$tmp/f3.toml"
+  _cpw f3.toml 0.1.1
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] || { fail "self-test: F3 rc=$rc got='$got'"; return 1; }
+  _cpw_expect f3.toml '[package]\nname="b"\nversion   =  "0.1.1"   # the floor' || return 1
+
+  # F4: a commented header and comment lines between [package] and version.
+  printf '# top\n[package] # the crate\nname = "c"\n# The floor. version = "9.9.9" in a comment.\n# more\nversion = "0.1.0"\n' >"$tmp/f4.toml"
+  _cpw f4.toml 0.3.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F4 rc=$rc"; return 1; }
+  _cpw_expect f4.toml '# top\n[package] # the crate\nname = "c"\n# The floor. version = "9.9.9" in a comment.\n# more\nversion = "0.3.0"' || return 1
+
+  # F5: CRLF line endings are kept.
+  printf '[package]\r\nname = "d"\r\nversion = "0.1.0"\r\n' >"$tmp/f5.toml"
+  _cpw f5.toml 0.2.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F5 rc=$rc"; return 1; }
+  [ "$(od -An -c "$tmp/f5.toml" | tr -d ' \n')" = "$(printf '[package]\r\nname = "d"\r\nversion = "0.2.0"\r\n' | od -An -c | tr -d ' \n')" ] \
+    || { fail "self-test: F5 CRLF was not kept"; return 1; }
+
+  # F6: [package] is not the first table, and [package.metadata.x] has its own version key.
+  printf '[lib]\npath = "src/lib.rs"\n\n[package]\nname = "e"\nversion = "0.1.0"\n\n[package.metadata.x]\nversion = "7.7.7"\n' >"$tmp/f6.toml"
+  _cpw f6.toml 0.2.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F6 rc=$rc"; return 1; }
+  _cpw_expect f6.toml '[lib]\npath = "src/lib.rs"\n\n[package]\nname = "e"\nversion = "0.2.0"\n\n[package.metadata.x]\nversion = "7.7.7"' || return 1
+
+  # F7: a version key in a table BEFORE [package] stays untouched.
+  printf '[dependencies.foo]\nversion = "0.1.0"\n\n[package]\nname = "f"\nversion = "0.1.0"\n' >"$tmp/f7.toml"
+  _cpw f7.toml 0.2.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F7 rc=$rc"; return 1; }
+  _cpw_expect f7.toml '[dependencies.foo]\nversion = "0.1.0"\n\n[package]\nname = "f"\nversion = "0.2.0"' || return 1
+
+  # F8-F9, F11: shapes the writer must refuse with rc 2, leaving the file unchanged.
+  local f
+  printf '[package]\nname = "g"\nversion.workspace = true\n' >"$tmp/f8a.toml"
+  printf '[lib]\npath = "x"\n' >"$tmp/f8b.toml"
+  printf '[package]\nname = "g"\n' >"$tmp/f8c.toml"
+  # F9: a literal duplicate `version` key at the top level. This is invalid TOML, so
+  # tomllib.loads refuses it before the writer's OWN `len(keys) != 1` guard ever runs. F9b
+  # below is the guard's real fixture (SMA-685 review F5).
+  printf '[package]\nname = "g"\nversion = "0.1.0"\nversion = "0.1.0"\n' >"$tmp/f9.toml"
+  # F9b: VALID TOML with one real `version` key, but a multi-line string body that also
+  # contains a line starting with "version = ". The `[package]` body is scanned as text, not
+  # parsed structurally, so this line matches the writer's key-count regex too — two matches,
+  # not one — and the guard must refuse (SMA-685 review F5). Proven by mutation below.
+  printf '[package]\nname = "g"\ndescription = """\nversion = "5.5.5"\n"""\nversion = "0.1.0"\n' >"$tmp/f9b.toml"
+  printf '[package]\nname = "g"\nversion = "0.1.0-rc.1"\n' >"$tmp/f11.toml"
+  for f in f8a f8b f8c f9 f9b f11; do
+    before="$(cat "$tmp/$f.toml")"
+    _cpw "$f.toml" 0.2.0
+    [ "$rc" -eq 2 ] || { fail "self-test: $f must be refused with rc 2, got rc=$rc"; return 1; }
+    [ "$(cat "$tmp/$f.toml")" = "$before" ] || { fail "self-test: $f was changed although refused"; return 1; }
+  done
+
+  # F10: refuses to lower a version. This calls write_site directly, so it sees write_site's
+  # OWN exit code, rc 3 (SMA-685 review F1) — not stamp_sites' mapped rc 1. See
+  # stamp_sites_self_test for the rc 3 -> rc 1 mapping, exercised at the stamp_sites level.
+  printf '[package]\nname = "h"\nversion = "0.2.0"\n' >"$tmp/f10.toml"
+  _cpw f10.toml 0.1.0
+  [ "$rc" -eq 3 ] || { fail "self-test: F10 lowering must be rc 3, got rc=$rc"; return 1; }
+  _cpw_expect f10.toml '[package]\nname = "h"\nversion = "0.2.0"' || return 1
+
+  # F12: a multi-line description with a line that starts with "[" — never a wrong edit.
+  printf '[package]\nname = "i"\ndescription = """\n[not a table]\nversion = "5.5.5"\n"""\nversion = "0.1.0"\n' >"$tmp/f12.toml"
+  _cpw f12.toml 0.2.0
+  if [ "$rc" -eq 0 ]; then
+    _cpw_expect f12.toml '[package]\nname = "i"\ndescription = """\n[not a table]\nversion = "5.5.5"\n"""\nversion = "0.2.0"' || return 1
+  else
+    [ "$rc" -eq 2 ] || { fail "self-test: F12 must be a correct edit or rc 2, got rc=$rc"; return 1; }
+  fi
+
+  # F13: no trailing newline — none is added.
+  printf '[package]\nname = "j"\nversion = "0.1.0"' >"$tmp/f13.toml"
+  _cpw f13.toml 0.2.0
+  [ "$rc" -eq 0 ] || { fail "self-test: F13 rc=$rc"; return 1; }
+  [ "$(od -An -c "$tmp/f13.toml" | tr -d ' \n')" = "$(printf '[package]\nname = "j"\nversion = "0.2.0"' | od -An -c | tr -d ' \n')" ] \
+    || { fail "self-test: F13 changed the file end"; return 1; }
+
+  # SMA-685 review F7: publish.workspace = true is unresolved inheritance, not a knowable
+  # boolean. cargo_publish_false must fail closed (rc 2), not guess "publishable".
+  printf '[package]\nname = "k"\npublish.workspace = true\n' >"$tmp/f14.toml"
+  rc=0
+  got="$(REPO_ROOT="$tmp" cargo_publish_false f14.toml 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 2 ] \
+    || { fail "self-test: publish.workspace = true must be refused with rc 2, got rc=$rc got='$got'"; return 1; }
+
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
+# SMA-685 review F6+F15: force a Cargo [package] version line to an exact literal, independent
+# of write_site (the function under test elsewhere). Used to plant sentinel and drift versions.
+# Prints nothing on success. On a known failure, such as no version line found, it prints one
+# FATAL line and returns 2. On an unexpected failure, such as a missing file, it may instead
+# raise an uncaught python error and return non-zero without that FATAL line. Every caller
+# treats any non-zero return as an infrastructure failure, and removes its own scratch
+# directory before it dies.
+_force_cargo_version() { # $1 file  $2 version
+  local file="$1" version="$2" rc=0
+  python3 - "$file" "$version" <<'PY' || rc=$?
+import re, sys
+p, v = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+s, n = re.subn(r'(?m)^version = "[^"]*"$', f'version = "{v}"', s, count=1)
+if n != 1:
+    print(f"FATAL: no version line in {p}", file=sys.stderr)
+    raise SystemExit(2)
+open(p, "w", encoding="utf-8").write(s)
+PY
+  return "$rc"
+}
+
+# SMA-685: run the PRODUCTION loop (stamp_sites) on a staged copy of the real tree. The fixture
+# table above tests write_site alone and cannot see a kind dropped from stamp_sites' filter; this
+# table can, and it runs the writer on the real manifest shapes.
+stamp_sites_self_test() {
+  local tmp rc=0 entry group kind target got derive_before derive_after
+  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  stage_pristine_tree "$tmp"
+  derive_before="$(REPO_ROOT="$tmp" read_version cargo-package rs/crates/libs/paigasus-proto-derive/Cargo.toml)" || return 2
+
+  # SMA-685 review F4: the sentinels below must not collide with the real tree's own data, or a
+  # writer bug that fails to move a site could coincidentally match the sentinel already there
+  # and the assertions below would pass for the wrong reason. Check this BEFORE stamping.
+  #
+  # SMA-685 review F4 (round 2): this guard must read every site the two readback loops below
+  # assert. The old two-loop version read only the cargo-package sites. A kernel pyproject,
+  # pyproject-dep or packagejson site could already hold a sentinel value. So could the one
+  # proto pyproject site. Either case would make part of the readback assertion vacuous.
+  #
+  # This is now ONE loop over every kernel and proto site whose kind the readback loops check:
+  # cargo-package, pyproject, pyproject-dep, and packagejson. It reads each file once. It fails
+  # closed (rc 2) if a group has no such sites, or if any read is empty.
+  local kv="" pv="" kcount=0 pcount=0
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r group kind target <<<"$entry"
+    case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
+    [ -n "$got" ] \
+      || { rm -rf "$tmp"; die_infra "self-test: $kind $target read back empty while validating the sentinels"; }
+    case "$group" in
+      kernel) kv="$kv $got"; kcount=$((kcount + 1)) ;;
+      proto)  pv="$pv $got"; pcount=$((pcount + 1)) ;;
+    esac
+  done
+  [ "$kcount" -gt 0 ] \
+    || { rm -rf "$tmp"; die_infra "self-test: the kernel group has no sites to validate the sentinel against"; }
+  [ "$pcount" -gt 0 ] \
+    || { rm -rf "$tmp"; die_infra "self-test: the proto group has no sites to validate the sentinel against"; }
+  python3 - "9.9.9" "8.8.8" "$derive_before" "$kv" "$pv" <<'PY' \
+    || { rm -rf "$tmp"; die_infra "self-test: the sentinel versions are not valid; see stderr above"; }
+import sys
+
+def tup(v):
+    return tuple(int(x) for x in v.split("."))
+
+kernel_sentinel, proto_sentinel, derive_before = sys.argv[1], sys.argv[2], sys.argv[3]
+kernel_versions, proto_versions = sys.argv[4].split(), sys.argv[5].split()
+
+if kernel_sentinel == proto_sentinel:
+    print("FATAL: the kernel and proto sentinels must differ", file=sys.stderr)
+    sys.exit(1)
+if kernel_sentinel == derive_before or proto_sentinel == derive_before:
+    print("FATAL: a sentinel must differ from the real paigasus-proto-derive version", file=sys.stderr)
+    sys.exit(1)
+for v in kernel_versions:
+    if tup(kernel_sentinel) <= tup(v):
+        print(f"FATAL: the kernel sentinel {kernel_sentinel} is not higher than site version {v}", file=sys.stderr)
+        sys.exit(1)
+for v in proto_versions:
+    if tup(proto_sentinel) <= tup(v):
+        print(f"FATAL: the proto sentinel {proto_sentinel} is not higher than site version {v}", file=sys.stderr)
+        sys.exit(1)
+PY
+
+  # Move the kernel head to a sentinel, independently of the writer under test.
+  _force_cargo_version "$tmp/rs/crates/libs/paigasus-kernel/Cargo.toml" "9.9.9" \
+    || { rm -rf "$tmp"; die_infra "cannot force the kernel head to its sentinel version"; }
+  # Move the proto head to a SECOND, different sentinel.
+  # paigasus-proto-derive is publishable, not publish = false, and it is a non-head cargo-package
+  # site. In the real tree, it starts at the same version as the proto head.
+  # So this test needs a second, different sentinel. Without it, a mutation could delete the
+  # publish = false filter, and derive_before could then equal derive_after by coincidence.
+  # This table would then miss the mutation.
+  _force_cargo_version "$tmp/rs/crates/libs/paigasus-proto/Cargo.toml" "8.8.8" \
+    || { rm -rf "$tmp"; die_infra "cannot force the proto head to its sentinel version"; }
+  REPO_ROOT="$tmp" stamp_sites >/dev/null || rc=$?
+  [ "$rc" -eq 0 ] || { fail "self-test: stamp_sites on the staged tree returned $rc"; return 1; }
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r group kind target <<<"$entry"
+    [ "$group" = kernel ] || continue
+    case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
+    [ "$got" = "9.9.9" ] || { fail "self-test: stamp_sites left $kind $target at '$got', expected 9.9.9"; return 1; }
+  done
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r group kind target <<<"$entry"
+    [ "$group" = proto ] || continue
+    case "$kind" in pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
+    [ "$got" = "8.8.8" ] || { fail "self-test: stamp_sites left $kind $target at '$got', expected 8.8.8"; return 1; }
+  done
+  derive_after="$(REPO_ROOT="$tmp" read_version cargo-package rs/crates/libs/paigasus-proto-derive/Cargo.toml)" || return 2
+  [ "$derive_before" = "$derive_after" ] \
+    || { fail "self-test: stamp_sites touched the publishable paigasus-proto-derive ($derive_before -> $derive_after)"; return 1; }
+
+  # SMA-685 review F1: stamp_sites must map write_site's rc 3 (a site higher than the head) to
+  # its own rc 1. It must not pass the raw code through. This is checked at the stamp_sites
+  # call site, on its own pristine tree, not only at the write_site level (see F10 above).
+  local tmp2 rc3=0
+  tmp2="$(mktemp -d)" || { rm -rf "$tmp"; die_infra "cannot create a second scratch dir"; }
+  stage_pristine_tree "$tmp2"
+  _force_cargo_version "$tmp2/rs/crates/bindings/paigasus-wasm/Cargo.toml" "99.99.99" \
+    || { rm -rf "$tmp2"; die_infra "cannot force the wasm binding above its head version"; }
+  REPO_ROOT="$tmp2" stamp_sites >/dev/null 2>&1 || rc3=$?
+  rm -rf "$tmp2"
+  [ "$rc3" -eq 1 ] \
+    || { fail "self-test: stamp_sites must return 1 when a site is higher than the head, got rc=$rc3"; return 1; }
+
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
 run_self_tests() {
   SELF_TESTS_RAN=0
+  local defs
+  defs="$(grep -cE '^[a-z_]+_self_test\(\) \{$' "${BASH_SOURCE[0]}")" || die_infra "cannot count self-test definitions"
+  [ "$defs" -eq "$SELF_TEST_COUNT" ] \
+    || die_infra "found $defs *_self_test definitions, expected $SELF_TEST_COUNT"
   site_verdict_self_test
   lock_reader_self_test
+  cargo_package_writer_self_test
+  stamp_sites_self_test
   [ "$SELF_TESTS_RAN" -eq "$SELF_TEST_COUNT" ] \
     || die_infra "self-tests ran $SELF_TESTS_RAN, expected $SELF_TEST_COUNT"
   printf '== version-lockstep self-tests passed (%d tables) ==\n' "$SELF_TESTS_RAN"
@@ -343,6 +605,10 @@ run_check() {
 # whether the lock-row drift landed at all (SMA-577 review, Critical). Each drift now gets its
 # own pristine tree, so a later drift added to this control automatically gets isolation
 # instead of silently inheriting the same bug.
+#
+# SMA-685 review (round 2): on a staging failure this removes its OWN $dest before it dies.
+# `die_infra` exits the whole process. An `exit` does not run a caller's RETURN trap, so a
+# caller-owned cleanup would not fire. This function owns $dest, so it cleans $dest itself.
 stage_pristine_tree() { # $1 destination dir
   local dest="$1" entry kind target
   {
@@ -352,18 +618,19 @@ stage_pristine_tree() { # $1 destination dir
       [ "$kind" = cargo-wsdep ] || printf '%s\n' "$target"
     done
   } | sort -u | ( cd "$REPO_ROOT" && tar -cf - -T - ) | ( cd "$dest" && tar -xf - ) \
-    || die_infra "cannot stage a scratch copy of the version-carrying files"
+    || { rm -rf "$dest"; die_infra "cannot stage a scratch copy of the version-carrying files"; }
 }
 
 # Drift ONE site in its OWN pristine scratch tree, and assert the checker reports red. Driving
 # the real run_check (not a reimplementation) is what makes this a control rather than a
 # second, differently-wrong checker.
 negative_control() {
-  local tmp1 tmp2
+  local tmp1 tmp2 tmp3
   tmp1="$(mktemp -d)" || die_infra "cannot create a scratch dir"
   tmp2="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  tmp3="$(mktemp -d)" || die_infra "cannot create a scratch dir"
   # shellcheck disable=SC2064
-  trap "rm -rf '$tmp1' '$tmp2'" RETURN
+  trap "rm -rf '$tmp1' '$tmp2' '$tmp3'" RETURN
 
   stage_pristine_tree "$tmp1"
 
@@ -425,7 +692,94 @@ PY
     return 1
   fi
   printf '== negative control: version-lockstep reported red on both a packagejson and a lock drift ==\n'
+
+  stage_pristine_tree "$tmp3"
+
+  # Third drift (SMA-685): a cargo-package binding manifest. README L1 recorded that this kind had
+  # no end-to-end drift, and a release-plz bump of the kernel alone produces exactly this shape.
+  _force_cargo_version "$tmp3/rs/crates/bindings/paigasus-wasm/Cargo.toml" "99.99.99" \
+    || { rm -rf "$tmp1" "$tmp2" "$tmp3"; die_infra "cannot drift the cargo-package binding manifest"; }
+
+  local ec3=0
+  REPO_ROOT="$tmp3" run_check >/dev/null 2>&1 || ec3=$?
+  if [ "$ec3" -eq 2 ]; then
+    fail "negative control: run_check hit an infrastructure failure (exit 2) instead of
+      reporting the cargo-package drift."
+    return 1
+  fi
+  if [ "$ec3" -ne 1 ]; then
+    fail "negative control: a drifted binding manifest was ACCEPTED (run_check exited $ec3, expected 1)."
+    return 1
+  fi
+  printf '== negative control: version-lockstep reported red on a packagejson, a lock and a cargo-package drift ==\n'
   return 0
+}
+
+cargo_publish_false() { # $1 target -> prints 1 if Cargo `publish` is false or [], else 0
+  # SMA-685 review F7: `publish.workspace = true` inherits its real value from the workspace
+  # root, which this function does not read. Treating it as "publishable" would be a guess,
+  # not a fact. This arm fails closed (rc 2) on that shape, and on any other type it does not
+  # recognize, instead of silently guessing 0.
+  local abs="$REPO_ROOT/$1"
+  [ -r "$abs" ] || die_infra "cannot read $1"
+  python3 - "$abs" <<'PY'
+import sys, tomllib
+p = sys.argv[1]
+try:
+    pub = tomllib.load(open(p, "rb"))["package"].get("publish", True)
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+if pub is False or pub == []:
+    print(1)
+elif pub is True or (isinstance(pub, list) and len(pub) > 0):
+    print(0)
+else:
+    print(f"malformed {p}: cannot read publish = {pub!r} (workspace inheritance not resolved)", file=sys.stderr)
+    sys.exit(2)
+PY
+}
+
+# SMA-685: the per-site loop of --write, split out of run_write so the self-test runs the SAME
+# loop on a staged tree. It writes the pyproject, pyproject-dep and packagejson sites, and the
+# cargo-package sites that are NOT the group head and whose Cargo manifest says
+# `publish = false`. release-plz 0.3.158 never writes those (READ, updater.rs:283-302). A
+# publishable non-head (paigasus-proto-derive) is left to release-plz, so --check still sees a
+# version_group fault there. Prints the count of changed sites.
+#
+# Writer contract (SMA-685 review F1): write_site's own exit codes are 0 (wrote, or already
+# correct), 3 (refuses to lower an existing higher version), or 2 (any other failure). Passing
+# a raw write_site status straight through would break this script's 0/1/2 header contract —
+# a python traceback (rc 1) or a missing python3 (rc 127) would then read as "assertion
+# failed" instead of "infrastructure failed". stamp_sites maps write_site's rc 3 to its own
+# rc 1 (the repo is wrong: a site is higher than the head). It maps every other non-zero
+# write_site status to rc 2 (infrastructure failed).
+stamp_sites() {
+  local wrote=0 group kind target head expected changed pf rc
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r group kind target <<<"$entry"
+    head="${SOURCE_OF_TRUTH[$group]}"
+    case "$kind" in
+      pyproject|pyproject-dep|packagejson) ;;
+      cargo-package)
+        [ "$target" != "$head" ] || continue
+        pf="$(cargo_publish_false "$target")" || return 2
+        [ "$pf" = 1 ] || continue
+        ;;
+      *) continue ;;
+    esac
+    # Explicit status handling rather than errexit: stamp_sites may be called on the left of
+    # `||`, which suspends errexit (same discipline as run_check, SMA-576).
+    expected="$(read_version cargo-package "$head")" || return 2
+    rc=0
+    changed="$(write_site "$kind" "$target" "$expected")" || rc=$?
+    if [ "$rc" -eq 3 ]; then
+      return 1
+    elif [ "$rc" -ne 0 ]; then
+      return 2
+    fi
+    wrote=$((wrote + changed))
+  done
+  printf '%d\n' "$wrote"
 }
 
 write_site() { # $1 kind  $2 target  $3 version  -> prints 1 if it changed the file, else 0
@@ -559,23 +913,82 @@ open(p, "w", encoding="utf-8").write(new)
 print(int(new != s))
 PY
       ;;
-    *) printf '0' ;;   # release-plz- and regeneration-owned kinds are not written here
+    cargo-package)
+      # SMA-685: the [package] version of a Cargo manifest, edited in place (no TOML
+      # round-trip, so no unrelated churn). release-plz 0.3.158 never writes the version of a
+      # crate whose Cargo manifest says `publish = false`, version_group or not (READ,
+      # updater.rs:283-302), so --write stamps those. stamp_sites decides WHICH sites; this arm
+      # only edits one file. It fails closed (rc 2) on any shape it does not understand.
+      # It refuses to lower a version with rc 3 (SMA-685 review F1). This is write_site's own
+      # exit code, not the script's 0/1/2 header contract. A raw python error would otherwise
+      # exit rc 1, and a missing python3 would exit rc 127. Both must read as an infrastructure
+      # failure, not as "the repo is wrong". stamp_sites maps write_site's rc 3 to its own
+      # rc 1. It maps any other non-zero write_site status to rc 2.
+      [ -r "$abs" ] || die_infra "cannot read $target"
+      python3 - "$abs" "$version" <<'PY'
+import re, sys, tomllib
+
+def fatal(msg):
+    print(f"FATAL: {msg}", file=sys.stderr); raise SystemExit(2)
+
+def plain(v, what):
+    m = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", v)
+    if m is None:
+        fatal(f"{what} version '{v}' is not plain X.Y.Z")
+    return tuple(int(x) for x in m.groups())
+
+p, v = sys.argv[1], sys.argv[2]
+head = plain(v, "head")
+raw = open(p, "rb").read()
+try:
+    s = raw.decode("utf-8")
+    old_doc = tomllib.loads(s)
+except Exception as e:
+    fatal(f"malformed {p}: {e}")
+hdrs = list(re.finditer(r"(?m)^[ \t]*\[package\][ \t]*(?:#[^\r\n]*)?\r?$", s))
+if len(hdrs) != 1:
+    fatal(f"{p}: expected one [package] table header, found {len(hdrs)}")
+start = hdrs[0].end()
+nxt = re.search(r"(?m)^[ \t]*\[", s[start:])
+end = start + nxt.start() if nxt else len(s)
+body = s[start:end]
+keys = list(re.finditer(r"(?m)^[ \t]*version[ \t]*[=.]", body))
+if len(keys) != 1:
+    fatal(f"{p}: expected one version key in [package], found {len(keys)}")
+vm = re.search(r'(?m)^([ \t]*version[ \t]*=[ \t]*")([^"\r\n]*)(")', body)
+if vm is None:
+    fatal(f"{p}: the [package] version is not a literal string")
+cur = plain(vm.group(2), "site")
+if cur > head:
+    # rc 3, not rc 1 (SMA-685 review F1). stamp_sites maps this specific refusal to its
+    # own rc 1. A different write_site failure, such as a python error or a missing
+    # python3, must not also read as rc 1. Otherwise the caller cannot tell a repo
+    # fault from a broken check.
+    print(f"FAIL: {p} is at {vm.group(2)}, higher than the head {v}; not lowered", file=sys.stderr)
+    raise SystemExit(3)
+if cur == head:
+    print(0); raise SystemExit(0)
+a, b = start + vm.start(2), start + vm.end(2)
+new = s[:a] + v + s[b:]
+try:
+    new_doc = tomllib.loads(new)
+except Exception as e:
+    fatal(f"{p}: the edit made invalid TOML: {e}")
+old_doc.setdefault("package", {})["version"] = v
+if new_doc != old_doc:
+    fatal(f"{p}: the edit changed more than package.version")
+open(p, "wb").write(new.encode("utf-8"))
+print(1)
+PY
+      ;;
+    *) printf '0' ;;   # regeneration-owned kinds (cargo-wsdep, the locks, the napi glue) are not written here
   esac
 }
 
 run_write() {
-  local wrote=0 group kind target expected changed
-  for entry in "${SITES[@]}"; do
-    IFS='|' read -r group kind target <<<"$entry"
-    case "$kind" in pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
-    # Explicit `|| return 2` rather than relying on errexit: run_write may be invoked from
-    # inside an `||` list, which suspends errexit for it and everything it calls, so a
-    # failing capture would otherwise be swallowed into an empty string instead of
-    # propagating as an infrastructure failure (same discipline as run_check, SMA-576).
-    expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")" || return 2
-    changed="$(write_site "$kind" "$target" "$expected")" || return 2
-    wrote=$((wrote + changed))
-  done
+  local wrote rc=0
+  wrote="$(stamp_sites)" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
 
   # Regenerate the three derived files (SITES rows 16-20 — kernel's and proto's cargo-lock and
   # uv-lock rows each point at the same file, so five rows resolve to three files). Each file is
