@@ -48,7 +48,7 @@ const SUCCESS_TEXT: Readonly<Record<SuccessControl, string>> = {
   archive: 'Service account archived.',
 };
 
-/** § 5.3: a generic answer to "Allow model calls" can be a duplicate grant (§ 3.2). */
+/** § 5.3: a generic answer to "Allow model calls" can come after IAM committed the grant. Since SMA-676 D9 a second grant is OK, not an error. */
 const ALLOW_MAY_ALREADY = 'Model calls may already be allowed. The page was reloaded.';
 /** § 5.4: a plain denial and IAM's D15 check both answer forbidden. */
 const ISSUE_FORBIDDEN = 'You need permission to issue keys here and to grant every role this account holds.';

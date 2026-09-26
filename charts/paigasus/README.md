@@ -48,6 +48,12 @@ with its own message, rather than letting a bad values file produce broken Kuber
   a manifest the Kubernetes API server refuses. This is what stops that: every REQUIRED value is
   now refused at render time, so a values file missing one never reaches the API server at all.
 
+- **A bad bootstrap admin or `extraEnv` entry (SMA-697).** `paigasus.validateIamBackend` in
+  `templates/_iam-backend.tpl` refuses a bootstrap admin that IAM would refuse at boot (an empty
+  subject, an issuer that is not `https`), a subject that is not a string, and an issuer that is
+  not `oidc.issuer`, which IAM never matches. It refuses an `extraEnv` name that the chart sets
+  itself. See `docs/ops/RUNBOOK-chart.md` § 9.
+
 `tests/refusals.sh` renders each refusal case and asserts it fails with its own message, not an
 incidental template error from somewhere else — otherwise the chart could refuse by accident and
 a later edit would silently make it install.

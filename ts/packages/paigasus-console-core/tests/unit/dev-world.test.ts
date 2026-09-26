@@ -12,6 +12,8 @@ const REQUIRED = [
   'authn.introspect',
   'authz.isAuthorized',
   'authz.listRoleGrants',
+  'authz.grantRole',
+  'authz.revokeRole',
   'tenancy.getOrganization',
   'tenancy.getTeam',
   'tenancy.getProject',
@@ -174,5 +176,31 @@ describe('devWorld', () => {
     }
     expect(caught).toBeInstanceOf(ConnectError);
     expect((caught as ConnectError).code).toBe(Code.NotFound);
+  });
+
+  type Grant = { id: string; principalPrn: string; roleKey: string; scopePrn: string };
+  const ctx = { token: 'dev', correlationId: 'corr-dev' };
+
+  it('grants idempotently, lists at a scope, and revokes (SMA-676 D9)', () => {
+    const handlers = devWorld();
+    const org = 'prn:pgs:iam:::organization/0190a100-0000-7000-8000-00000000d002';
+    const person = 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-00000000d0aa';
+
+    const first = (handlers['authz.grantRole']?.({ principalPrn: person, roleKey: 'gateway_user', scopePrn: org } as never, ctx) as { grant: Grant }).grant;
+    const second = (handlers['authz.grantRole']?.({ principalPrn: person, roleKey: 'gateway_user', scopePrn: org } as never, ctx) as { grant: Grant }).grant;
+    expect(second.id).toBe(first.id);
+    expect((handlers['authz.listRoleGrants']?.({ principalPrn: '', scopePrn: org, roleKey: 'gateway_user', principalKind: 1 } as never, ctx as never) as { grants: Grant[] }).grants).toEqual([first]);
+    expect((handlers['authz.listRoleGrants']?.({ principalPrn: '', scopePrn: org, roleKey: 'gateway_user', principalKind: 2 } as never, ctx as never) as { grants: Grant[] }).grants).toEqual([]);
+
+    void handlers['authz.revokeRole']?.({ id: first.id } as never, ctx);
+    expect((handlers['authz.listRoleGrants']?.({ principalPrn: '', scopePrn: org, roleKey: 'gateway_user', principalKind: 0 } as never, ctx as never) as { grants: Grant[] }).grants).toEqual([]);
+    expect(() => handlers['authz.revokeRole']?.({ id: first.id } as never, ctx as never)).toThrow(ConnectError);
+  });
+
+  it('answers no member for a service-account kind filter (SMA-676 D8)', () => {
+    const handlers = devWorld();
+    const org = 'prn:pgs:iam:::organization/0190a100-0000-7000-8000-00000000d002';
+    expect((handlers['tenancy.listMemberships']?.({ filter: { case: 'nodePrn', value: org }, principalKind: 1 } as never, ctx as never) as { memberships: unknown[] }).memberships).toHaveLength(1);
+    expect((handlers['tenancy.listMemberships']?.({ filter: { case: 'nodePrn', value: org }, principalKind: 2 } as never, ctx as never) as { memberships: unknown[] }).memberships).toHaveLength(0);
   });
 });

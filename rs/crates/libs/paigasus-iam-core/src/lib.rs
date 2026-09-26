@@ -23,14 +23,14 @@ pub use authn::{AuthnError, AuthnPrincipal, Credential, ExternalIdentity, Issuer
 pub use authz::retirement::{GrantRef, RetireOutcome, StoredPolicy, StoredRole, SurvivingGrants, SystemRowRetirer};
 pub use authz::{
     AccessRequest, Action, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader, GrantScope, PolicyDocument, PolicyStore, PutOutcome, RequestContext, Role, RoleGrant,
-    RoleGrantRef, RoleGrantStore, SystemPolicyReconciler, SystemRoleReconciler,
+    RoleGrantFilter, RoleGrantQuery, RoleGrantRef, RoleGrantStore, SystemPolicyReconciler, SystemRoleReconciler,
 };
 pub use dead_letter::{BulkReplayRequest, DeadLetterEntry, DeadLetterFilter, DeadLetters};
 pub use domain_event::{DomainEvent, EventType};
 pub use ports::{
-    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, EntityGenBumper, EventPublisher, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository,
-    Mutated, NodeView, OrganizationRepository, Outbox, PolicyGenBumper, PreconditionKind, PrincipalRepository, ProjectRepository, PublishError, RepositoryError, Savepoint, SecretHasher,
-    ServiceAccountRepository, TeamRepository, Transaction, UnitOfWork,
+    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, EntityGenBumper, EventPublisher, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipAxis, MembershipKindQuery,
+    MembershipRecord, MembershipRepository, Mutated, NodeView, OrganizationRepository, Outbox, PolicyGenBumper, PreconditionKind, PrincipalRepository, ProjectRepository, PublishError,
+    RepositoryError, Savepoint, SecretHasher, ServiceAccountRepository, TeamRepository, Transaction, UnitOfWork,
 };
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
 pub use service_account::{ServiceAccount, ServiceAccountRecord};

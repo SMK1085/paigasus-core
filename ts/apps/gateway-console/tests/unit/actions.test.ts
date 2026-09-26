@@ -214,7 +214,7 @@ describe('allow, revoke and archive (§ 5.3, § 5.5, § 5.6)', () => {
 
   it.each([
     ['a success', null, true],
-    ['a generic error (a duplicate grant)', new ConnectError('duplicate', Code.Internal), true],
+    ['a generic error', new ConnectError('internal failure', Code.Internal), true],
     ['a refusal', denial(), true],
     ['relogin', new ConnectError('expired', Code.Unauthenticated), false],
   ] as const)('allow revalidates after %s: %s', async (_label, error, revalidates) => {

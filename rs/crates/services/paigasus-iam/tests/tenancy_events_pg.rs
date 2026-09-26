@@ -304,6 +304,7 @@ async fn a_cascading_detach_writes_exactly_one_audit_row_per_deleted_membership(
     assert_eq!(before, 6, "sanity: org + 2 teams + 2 projects + the other-org membership");
 
     let svc = MembershipService::new(MembershipServiceDeps {
+        kinds: Arc::new(membership_repo.clone()),
         repo: membership_repo,
         uow: Arc::new(SeaOrmUnitOfWork::new(db.clone())),
         outbox: Arc::new(PgOutbox::new(true)),

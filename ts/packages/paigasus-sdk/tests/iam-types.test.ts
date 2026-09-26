@@ -4,10 +4,10 @@
 // loaders and the e2e worlds can name a node status or an API key status only through this
 // guard-free entry. Each must be the registry enum ITSELF, as a runtime value, or a screen compares
 // against a copy that can drift.
-import { ApiKeyStatus as ProtoApiKeyStatus, NodeStatus as ProtoNodeStatus } from '@paigasus/proto/iam';
+import { ApiKeyStatus as ProtoApiKeyStatus, NodeStatus as ProtoNodeStatus, PrincipalKind as ProtoPrincipalKind } from '@paigasus/proto/iam';
 import { describe, expect, it } from 'vitest';
 
-import { ApiKeyStatus, NodeStatus } from '../src/iam/types.js';
+import { ApiKeyStatus, NodeStatus, PrincipalKind } from '../src/iam/types.js';
 
 describe('the guard-free ./iam/types entry', () => {
   it('re-exports NodeStatus as a runtime value', () => {
@@ -25,5 +25,12 @@ describe('the guard-free ./iam/types entry', () => {
     expect(ApiKeyStatus.ACTIVE).toBe(1);
     expect(ApiKeyStatus.REVOKED).toBe(2);
     expect(ApiKeyStatus).toBe(ProtoApiKeyStatus);
+  });
+
+  it('re-exports PrincipalKind as the registry enum object (SMA-676)', () => {
+    expect(PrincipalKind.UNSPECIFIED).toBe(0);
+    expect(PrincipalKind.USER).toBe(1);
+    expect(PrincipalKind.SERVICE_ACCOUNT).toBe(2);
+    expect(PrincipalKind).toBe(ProtoPrincipalKind);
   });
 });

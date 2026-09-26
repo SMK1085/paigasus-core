@@ -62,7 +62,8 @@ const EXPECTED_EXPORTS = [
 // literal, and the hash itself is held to its shape.
 const EXPECTED_IMPORTS = [/^\.\/paigasus_wasm_bg\.js\.__wbg_Error_[0-9a-f]{16}:function$/, /^\.\/paigasus_wasm_bg\.js\.__wbindgen_init_externref_table:function$/];
 
-const REGENERATE = 'Run `moon run paigasus-kernel-ts:generate-wasm` and commit all five files under rs/crates/bindings/paigasus-wasm/ (paigasus_wasm_bg.wasm and the four glue files).';
+const REGENERATE =
+  'Run `moon run paigasus-kernel-ts:generate-wasm` and commit all five files under rs/crates/bindings/paigasus-wasm/ (paigasus_wasm_bg.wasm and the four glue files). If wasm-bindgen moved, follow the wasm-bindgen runbook in rs/CLAUDE.md ("The wasm-bindgen family does not move through dependabot").';
 
 // The remedy for the two literal assertions below, which `generate-wasm` alone CANNOT repair. When a
 // kernel export is added, removed or renamed on purpose, a regeneration makes both binaries carry
