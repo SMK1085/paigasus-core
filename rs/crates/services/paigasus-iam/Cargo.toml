@@ -173,6 +173,8 @@ tempfile = "3"
 # variant, which safe Rust cannot do without a derive. Dev-only: the derive is gated behind
 # cfg(test) so strum_macros never enters the shipped binary (SMA-498).
 strum = { version = "0.28", features = ["derive"] }
+# SMA-686: captures the validator's refusal log line in a unit test.
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
