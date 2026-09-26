@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
-    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, EntityGenBumper, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, Mutated, NodeStatus, NodeView,
-    Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalKind, PrincipalStatus, Project,
-    ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord,
-    ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
+    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, EntityGenBumper, IdGenerator, KeyEntropy, Membership, MembershipAxis, MembershipKindQuery, MembershipRecord, MembershipRepository,
+    Mutated, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalKind,
+    PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount,
+    ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::any::Any;
@@ -637,6 +637,19 @@ impl MembershipRepository for InMemoryMemberships {
         let mut items: Vec<&Membership> = memberships.values().filter(|m| m.node == *node).collect();
         items.sort_by_key(|m| (m.created_at, m.id));
         Ok(items.into_iter().skip(offset as usize).take(limit as usize).map(to_record).collect())
+    }
+}
+
+#[async_trait]
+impl MembershipKindQuery for InMemoryMemberships {
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        let all = match axis {
+            MembershipAxis::Principal(principal) => self.list_by_principal(*principal, u64::MAX, 0).await?,
+            MembershipAxis::Node(node) => self.list_by_node(node, u64::MAX, 0).await?,
+        };
+        let kinds = self.0.principal_kinds.lock().unwrap().clone();
+        let of_kind = |r: &MembershipRecord| Prn::parse(&r.principal_prn).ok().map(|p| PrincipalId::from_prn(p).uuid()).and_then(|u| kinds.get(&u).copied()) == Some(kind);
+        Ok(all.into_iter().filter(of_kind).skip(offset as usize).take(limit as usize).collect())
     }
 }
 

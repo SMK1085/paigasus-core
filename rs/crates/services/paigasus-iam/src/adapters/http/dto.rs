@@ -192,10 +192,12 @@ pub struct CreateMembershipBody {
 /// Query params for `GET /v1/memberships`: exactly one of `principal`/`node` must be set —
 /// neither set yields `TenancyError::MissingRequiredField`, both set yields
 /// `TenancyError::MutuallyExclusiveFields` (mirrors the proto oneof rule).
+/// `principal_kind` (SMA-676 D8) is `user` or `service_account`; any other value is refused.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MembershipQuery {
     pub principal: Option<String>,
     pub node: Option<String>,
+    pub principal_kind: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

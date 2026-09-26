@@ -21,8 +21,10 @@
 
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
+use crate::application::principal_kind::PrincipalKindFilter;
 use paigasus_iam_core::{
-    Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, EventType, IdGenerator, Membership, MembershipRecord, MembershipRepository, Outbox, PrincipalId, Stamp, TenancyNodeRef, UnitOfWork,
+    Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, EventType, IdGenerator, Membership, MembershipAxis, MembershipKindQuery, MembershipRecord, MembershipRepository, Outbox,
+    PrincipalId, Stamp, TenancyNodeRef, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::sync::Arc;
@@ -62,6 +64,8 @@ fn parse_node_prn(raw: &str) -> Result<TenancyNodeRef, TenancyError> {
 /// slice, so a membership change invalidates nothing (D7).
 pub struct MembershipServiceDeps<M, I, C> {
     pub repo: M,
+    /// SMA-676 D8: the read port for a kind-filtered listing.
+    pub kinds: Arc<dyn MembershipKindQuery>,
     pub uow: Arc<dyn UnitOfWork>,
     pub outbox: Arc<dyn Outbox>,
     pub audit: Arc<dyn AuditLog>,
@@ -76,6 +80,7 @@ pub struct MembershipServiceDeps<M, I, C> {
 #[derive(Clone)]
 pub struct MembershipService<M, I, C> {
     repo: M,
+    kinds: Arc<dyn MembershipKindQuery>,
     uow: Arc<dyn UnitOfWork>,
     outbox: Arc<dyn Outbox>,
     audit: Arc<dyn AuditLog>,
@@ -92,6 +97,7 @@ where
     pub fn new(deps: MembershipServiceDeps<M, I, C>) -> Self {
         Self {
             repo: deps.repo,
+            kinds: deps.kinds,
             uow: deps.uow,
             outbox: deps.outbox,
             audit: deps.audit,
@@ -237,18 +243,19 @@ where
     }
 
     /// Lists memberships by principal or node, `ORDER BY created_at, id` (design doc §5.1
-    /// rule 9).
-    pub async fn list(&self, filter: MembershipFilter, page: Page) -> Result<Vec<MembershipRecord>, TenancyError> {
-        match filter {
-            MembershipFilter::Principal(raw) => {
-                let principal_id = parse_principal_prn(&raw)?;
-                Ok(self.repo.list_by_principal(principal_id.uuid(), page.limit, page.offset).await?)
-            }
-            MembershipFilter::Node(raw) => {
-                let node = parse_node_prn(&raw)?;
-                Ok(self.repo.list_by_node(&node, page.limit, page.offset).await?)
-            }
-        }
+    /// rule 9). SMA-676 D8: `kind` AND-s with the filter; an unknown kind is refused first
+    /// (D7). `Any` keeps the pre-SMA-676 repository path.
+    pub async fn list(&self, filter: MembershipFilter, kind: PrincipalKindFilter, page: Page) -> Result<Vec<MembershipRecord>, TenancyError> {
+        let kind = kind.resolve()?;
+        let axis = match filter {
+            MembershipFilter::Principal(raw) => MembershipAxis::Principal(parse_principal_prn(&raw)?.uuid()),
+            MembershipFilter::Node(raw) => MembershipAxis::Node(parse_node_prn(&raw)?),
+        };
+        Ok(match (axis, kind) {
+            (MembershipAxis::Principal(principal), None) => self.repo.list_by_principal(principal, page.limit, page.offset).await?,
+            (MembershipAxis::Node(node), None) => self.repo.list_by_node(&node, page.limit, page.offset).await?,
+            (axis, Some(kind)) => self.kinds.list_of_kind(&axis, kind, page.limit, page.offset).await?,
+        })
     }
 }
 
@@ -256,8 +263,9 @@ where
 mod tests {
     use super::*;
     use crate::application::fakes::{FakeAuditLog, FakeOutbox, FakeUnitOfWork, FixedClock, InMemoryMemberships, SeqIds, TenancyStore, test_stamp};
+    use crate::application::principal_kind::PrincipalKindFilter;
     use chrono::{DateTime, TimeZone, Utc};
-    use paigasus_iam_core::{NodeStatus, Organization, OrganizationId, Project, ProjectId, RepositoryError, Slug, Team, TeamId, Transaction};
+    use paigasus_iam_core::{NodeStatus, Organization, OrganizationId, PrincipalKind, Project, ProjectId, RepositoryError, Slug, Team, TeamId, Transaction};
 
     /// Builds a `MembershipService` over `store` with fresh, unobserved fakes for every
     /// dependency this SMA-606 conversion added — the tests that only care about lifecycle
@@ -265,7 +273,8 @@ mod tests {
     /// handles through.
     fn new_service(store: TenancyStore) -> MembershipService<InMemoryMemberships, SeqIds, FixedClock> {
         MembershipService::new(MembershipServiceDeps {
-            repo: InMemoryMemberships(store),
+            repo: InMemoryMemberships(store.clone()),
+            kinds: Arc::new(InMemoryMemberships(store.clone())),
             uow: Arc::new(FakeUnitOfWork::default()),
             outbox: Arc::new(FakeOutbox::default()),
             audit: Arc::new(FakeAuditLog::default()),
@@ -285,7 +294,8 @@ mod tests {
         let audit = FakeAuditLog::default();
         let uow = FakeUnitOfWork::default();
         let svc = MembershipService::new(MembershipServiceDeps {
-            repo: InMemoryMemberships(store),
+            repo: InMemoryMemberships(store.clone()),
+            kinds: Arc::new(InMemoryMemberships(store.clone())),
             uow: Arc::new(uow.clone()),
             outbox: Arc::new(outbox.clone()),
             audit: Arc::new(audit.clone()),
@@ -460,12 +470,12 @@ mod tests {
         let org_membership = svc.attach(&principal.canonical(), &org_prn, &actor(999)).await.unwrap();
         svc.attach(&principal.canonical(), &team_prn, &actor(999)).await.unwrap();
         svc.attach(&principal.canonical(), &project_prn, &actor(999)).await.unwrap();
-        assert_eq!(svc.list(MembershipFilter::Principal(principal.canonical()), page).await.unwrap().len(), 3);
+        assert_eq!(svc.list(MembershipFilter::Principal(principal.canonical()), PrincipalKindFilter::Any, page).await.unwrap().len(), 3);
 
         // Detaching the org membership cascades: the team and project memberships for the
         // same principal in that org go with it.
         svc.detach(org_membership.id, &actor(999)).await.unwrap();
-        assert!(svc.list(MembershipFilter::Principal(principal.canonical()), page).await.unwrap().is_empty());
+        assert!(svc.list(MembershipFilter::Principal(principal.canonical()), PrincipalKindFilter::Any, page).await.unwrap().is_empty());
 
         // Detaching an already-detached membership is `NotFound`.
         assert_eq!(svc.detach(org_membership.id, &actor(999)).await.unwrap_err(), TenancyError::NotFound);
@@ -474,7 +484,7 @@ mod tests {
         let org_membership2 = svc.attach(&principal.canonical(), &org_prn, &actor(999)).await.unwrap();
         let team_membership2 = svc.attach(&principal.canonical(), &team_prn, &actor(999)).await.unwrap();
         svc.detach(team_membership2.id, &actor(999)).await.unwrap();
-        let remaining = svc.list(MembershipFilter::Principal(principal.canonical()), page).await.unwrap();
+        let remaining = svc.list(MembershipFilter::Principal(principal.canonical()), PrincipalKindFilter::Any, page).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, org_membership2.id);
     }
@@ -545,6 +555,7 @@ mod tests {
         let uow = FakeUnitOfWork::default();
         let svc = MembershipService::new(MembershipServiceDeps {
             repo: StoredPrnDiffersRepo,
+            kinds: Arc::new(InMemoryMemberships::default()),
             uow: Arc::new(uow.clone()),
             outbox: Arc::new(outbox.clone()),
             audit: Arc::new(audit.clone()),
@@ -651,5 +662,53 @@ mod tests {
             .find(|e| e.detail["membership_id"] == org_membership.id.to_string())
             .expect("the directly requested org row has its own entry");
         assert!(direct.detail.get("cascade_of").is_none(), "the directly requested row must carry no cascade_of key");
+    }
+
+    /// SMA-676 D8: the kind filter AND-s with the node filter, and with the principal filter.
+    #[tokio::test]
+    async fn list_filters_by_principal_kind_on_both_axes() {
+        let store = TenancyStore::default();
+        let now = Utc.timestamp_opt(0, 0).unwrap();
+        let person = seed_principal(&store, 40);
+        let bot = seed_principal(&store, 41);
+        store.principal_kinds.lock().unwrap().insert(person.uuid(), PrincipalKind::User);
+        store.principal_kinds.lock().unwrap().insert(bot.uuid(), PrincipalKind::ServiceAccount);
+        let (org, _team) = seed_org_and_team(&store, 400, 401, now);
+        let org_prn = OrganizationId::from_uuid(org).canonical();
+        let svc = new_service(store);
+        svc.attach(&person.canonical(), &org_prn, &actor(999)).await.unwrap();
+        svc.attach(&bot.canonical(), &org_prn, &actor(999)).await.unwrap();
+        let page = Page::new(None, None).unwrap();
+
+        let users = svc.list(MembershipFilter::Node(org_prn.clone()), PrincipalKindFilter::Only(PrincipalKind::User), page).await.unwrap();
+        assert_eq!(users.iter().map(|r| r.principal_prn.clone()).collect::<Vec<_>>(), vec![person.canonical()]);
+        let bots = svc
+            .list(MembershipFilter::Node(org_prn.clone()), PrincipalKindFilter::Only(PrincipalKind::ServiceAccount), page)
+            .await
+            .unwrap();
+        assert_eq!(bots.iter().map(|r| r.principal_prn.clone()).collect::<Vec<_>>(), vec![bot.canonical()]);
+        assert_eq!(svc.list(MembershipFilter::Node(org_prn), PrincipalKindFilter::Any, page).await.unwrap().len(), 2);
+        assert!(
+            svc.list(MembershipFilter::Principal(bot.canonical()), PrincipalKindFilter::Only(PrincipalKind::User), page)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// D7 for memberships: an unknown kind is refused before the repository is read.
+    #[tokio::test]
+    async fn list_refuses_an_unknown_kind_before_the_repository() {
+        let svc = new_service(TenancyStore::default());
+        let page = Page::new(None, None).unwrap();
+        let err = svc
+            .list(MembershipFilter::Node(OrganizationId::from_uuid(Uuid::from_u128(1)).canonical()), PrincipalKindFilter::Unknown, page)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            TenancyError::InvalidPrincipalKind("principal_kind"),
+            "not NotFound: the node does not exist, and the kind is checked first"
+        );
     }
 }

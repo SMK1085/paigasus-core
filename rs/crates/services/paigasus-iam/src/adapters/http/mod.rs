@@ -436,6 +436,7 @@ impl AppState {
         // feed the entity slice, so a membership change invalidates nothing (D7).
         let memberships = MembershipService::new(MembershipServiceDeps {
             repo: PgMembershipRepository::new(db.clone()),
+            kinds: Arc::new(PgMembershipRepository::new(db.clone())),
             uow: tenancy_uow.clone(),
             outbox: tenancy_outbox.clone(),
             audit: audit_log.clone(),
