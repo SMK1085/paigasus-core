@@ -98,6 +98,12 @@ CLEARED_TAGS = tuple(
     for arg in ("--set", f"{key}=")
 )
 
+# Row 8c (SMA-696 D2a). A chain key that has no release yet, mapped to the reason. Row 8c needs no
+# tag for a listed key, and FAILS when a listed key has a tag, so an entry goes away at the first
+# release. It ships EMPTY; the self-test asserts that.
+UNRELEASED_CHAINS: dict[str, str] = {}
+APP_VERSION_ROW = "8c chart-app-version"
+
 # Check 4's pod-level identity (spec § 5, check 4). A container may omit these keys, but may not
 # set one to another value.
 POD_IDENTITY = {"runAsUser": 65532, "runAsGroup": 65532, "runAsNonRoot": True}
@@ -131,6 +137,7 @@ EXPECTED_ROW_LABELS = (
     "7 kind-values",
     "8a default-image-tags",
     "8b default-image-render",
+    "8c chart-app-version",
 )
 
 
@@ -815,6 +822,68 @@ def check8b(values, docs, stub_values=STUB_VALUES):
     return _row("8b default-image-render", body)
 
 
+def chart_app_version(chart):
+    """The raw appVersion of `<chart>/Chart.yaml`, or None. A missing or non-string value is NOT
+    an infrastructure error: row 8c fails on it. An unreadable file or bad YAML is rc 2."""
+    path = Path(chart) / "Chart.yaml"
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise InfraError(f"cannot read {path}: {exc}") from exc
+    return doc.get("appVersion") if isinstance(doc, dict) else None
+
+
+def release_tags(run=subprocess.run):
+    """Every `paigasus-*` git tag of the repository, one per line of plumbing output. `git tag
+    --list` is porcelain and follows column.ui, so it can put several tags on one line. No tag at
+    all is rc 2: a checkout with no tags, not a chart defect. `run` is a parameter only so
+    self_test() can drive this with no git."""
+    cmd = ["git", "-C", str(REPO_ROOT), "for-each-ref", "--format=%(refname:lstrip=2)", "refs/tags/paigasus-*"]
+    try:
+        proc = run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        raise InfraError(f"git is not on PATH: {exc}") from exc
+    if proc.returncode != 0:
+        raise InfraError(f"git for-each-ref exited {proc.returncode}: {proc.stderr.strip()}")
+    tags = frozenset(line.strip() for line in proc.stdout.splitlines() if line.strip())
+    if not tags:
+        raise InfraError("git lists no paigasus-* tag. Fetch the tags (fetch-depth: 0, or git fetch --tags)")
+    return tags
+
+
+def check8c(app_version, registry, tags, fallback_docs, unreleased=UNRELEASED_CHAINS):
+    """Row 8c (SMA-696): the chart appVersion is a version that EVERY chain released, so an empty
+    image.tag falls back to a real image. `fallback_docs` is the iam+gateway render with every
+    image.tag cleared; each of its Deployment images must carry exactly that tag."""
+
+    def body():
+        if not isinstance(app_version, str):
+            return [f"Chart.yaml appVersion is {app_version!r}, not a string. quote appVersion in Chart.yaml"]
+        if not app_version:
+            return ["Chart.yaml appVersion is empty, so an empty image.tag falls back to no tag"]
+        problems = []
+        for key in sorted(unreleased):
+            if key not in registry:
+                problems.append(f"UNRELEASED_CHAINS lists {key!r}, which is no chain in ci/images/chains.toml")
+            elif any(t.startswith(f"paigasus-{key}-v") for t in tags):
+                problems.append(f"UNRELEASED_CHAINS lists {key!r}, but that chain has a release tag. Remove the entry")
+        missing = [f"paigasus-{key}-v{app_version}" for key in sorted(registry)
+                   if key not in unreleased and f"paigasus-{key}-v{app_version}" not in tags]
+        if missing:
+            problems.append(f"no release tag {missing}. Move appVersion only after every chain released it; "
+                            "run git fetch --tags if the tags are not local")
+        for dep in _of_kind(fallback_docs, "Deployment"):
+            pod = _get(dep, "spec", "template", "spec")
+            for container in (pod.get("containers") or []) + (pod.get("initContainers") or []):
+                image = str(container.get("image"))
+                tag = image.rsplit(":", 1)[1] if ":" in image else ""
+                if tag != app_version:
+                    problems.append(f"{_name(dep)}/{container.get('name')}: the empty-tag render names {image!r}, not the tag {app_version!r}")
+        return problems
+
+    return _row(APP_VERSION_ROW, body)
+
+
 # --------------------------------------------------------------------------- run
 
 
@@ -1240,6 +1309,78 @@ def self_test():
                      lambda: chain_version({"kind": "cargo", "version_file": "none.toml"}, root))
         expect_infra("chain_registry: no [chain] table", lambda: chain_registry(root / "chains.toml"))
 
+    # ---- row 8c (SMA-696): the empty-tag fallback names an image every chain released
+    r8c = (APP_VERSION_ROW,)
+    tags8c = frozenset(f"paigasus-{k}-v0.1.0" for k in reg)
+    fallback = synthetic(both, tags={"iam": "0.1.0", "gateway": "0.1.0"}, backend_tag="0.1.0")
+
+    def expect_detail(label, row, word):
+        # A failure row must fail for ITS reason: the detail must hold `word`.
+        if row.ok or word not in row.detail:
+            failures.append(f"{label}: expected a FAIL whose detail holds {word!r}, got {row}")
+
+    expect("check8c good", [check8c("0.1.0", reg, tags8c, fallback)], passing=r8c)
+    expect_detail("check8c one chain has no release",
+                  check8c("0.1.0", reg, tags8c - {"paigasus-gateway-console-v0.1.0"}, fallback),
+                  "paigasus-gateway-console-v0.1.0")
+    fallback_020 = synthetic(both, tags={"iam": "0.2.0", "gateway": "0.2.0"}, backend_tag="0.2.0")
+    expect_detail("check8c prefix trap: iam-console's tag does not release iam",
+                  check8c("0.2.0", reg, frozenset({"paigasus-iam-console-v0.2.0", "paigasus-gateway-console-v0.2.0"}), fallback_020),
+                  "paigasus-iam-v0.2.0")
+    fallback_01 = synthetic(both, tags={"iam": "0.1", "gateway": "0.1"}, backend_tag="0.1")
+    expect_detail("check8c prefix trap: 0.1 is not 0.1.0", check8c("0.1", reg, tags8c, fallback_01), "paigasus-iam-v0.1")
+    # synthetic() defaults every image to :0.0.0, so only the missing tags can red this row.
+    expect_detail("check8c the SMA-696 value 0.0.0", check8c("0.0.0", reg, tags8c, synthetic(both)), "paigasus-iam-v0.0.0")
+    expect_detail("check8c empty", check8c("", reg, tags8c, fallback), "no tag")
+    expect_detail("check8c not a string", check8c(1.0, reg, tags8c, fallback), "quote")
+    expect_detail("check8c None", check8c(None, reg, tags8c, fallback), "quote")
+    v_render = copy.deepcopy(fallback)
+    _containers(_find(v_render, "Deployment", "r-iam-console"))[0]["image"] = "repo/iam-console:v0.1.0"
+    expect_detail("check8c the rendered fallback differs", check8c("0.1.0", reg, tags8c, v_render), "r-iam-console")
+    no_gc = tags8c - {"paigasus-gateway-console-v0.1.0"}
+    expect("check8c unreleased key with no tags",
+           [check8c("0.1.0", reg, no_gc, fallback, unreleased={"gateway-console": "new chain"})], passing=r8c)
+    expect_detail("check8c unreleased key that released",
+                  check8c("0.1.0", reg, tags8c, fallback, unreleased={"gateway-console": "new chain"}),
+                  "UNRELEASED_CHAINS")
+    expect_detail("check8c unreleased key that is not a chain",
+                  check8c("0.1.0", reg, tags8c, fallback, unreleased={"billing": "x"}), "billing")
+    if UNRELEASED_CHAINS != {}:
+        failures.append(f"UNRELEASED_CHAINS must ship empty, got {UNRELEASED_CHAINS}")
+
+    class _GitProc:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout, self.stderr = rc, out, "stub stderr"
+
+    def git_missing(cmd, **_kw):
+        raise FileNotFoundError("git")
+
+    expect_infra("release_tags: no tags", lambda: release_tags(run=lambda cmd, **_kw: _GitProc(0, "")))
+    expect_infra("release_tags: git exits 128", lambda: release_tags(run=lambda cmd, **_kw: _GitProc(128)))
+    expect_infra("release_tags: git is not found", lambda: release_tags(run=git_missing))
+    got_tags = release_tags(run=lambda cmd, **_kw: _GitProc(0, "paigasus-iam-v0.1.0\n\npaigasus-gateway-v0.1.0\n"))
+    if got_tags != frozenset({"paigasus-iam-v0.1.0", "paigasus-gateway-v0.1.0"}):
+        failures.append(f"release_tags: expected exactly the two tags, got {sorted(got_tags)}")
+    seen_cmd = []
+    release_tags(run=lambda cmd, **_kw: seen_cmd.append(cmd) or _GitProc(0, "paigasus-iam-v0.1.0\n"))
+    if not seen_cmd or "for-each-ref" not in seen_cmd[0]:
+        failures.append(f"release_tags: must use git for-each-ref (plumbing), got {seen_cmd}")
+    with tempfile.TemporaryDirectory(prefix="helm-render-8c-") as tmp:
+        chart_dir = Path(tmp)
+        (chart_dir / "Chart.yaml").write_text('apiVersion: v2\nname: x\nversion: 0.1.0\nappVersion: "0.4.0"\n')
+        if chart_app_version(chart_dir) != "0.4.0":
+            failures.append("chart_app_version: did not return 0.4.0")
+        (chart_dir / "Chart.yaml").write_text("apiVersion: v2\nname: x\nversion: 0.1.0\n")
+        if chart_app_version(chart_dir) is not None:
+            failures.append("chart_app_version: a Chart.yaml with no appVersion must give None")
+        (chart_dir / "Chart.yaml").write_text("apiVersion: v2\nname: x\nversion: 0.1.0\nappVersion: 1.0\n")
+        if chart_app_version(chart_dir) != 1.0:
+            failures.append("chart_app_version: an unquoted 1.0 must come back as the float, for the row to reject")
+        (chart_dir / "Chart.yaml").write_text("a: [\n")
+        expect_infra("chart_app_version: bad YAML", lambda: chart_app_version(chart_dir))
+        (chart_dir / "Chart.yaml").unlink()
+        expect_infra("chart_app_version: no Chart.yaml", lambda: chart_app_version(chart_dir))
+
     # ---- the exit-code contract and the parser's infrastructure errors
     if report([Row("x", True)], io.StringIO()) != 0 or report([Row("x", True), Row("y", False, "bad")], io.StringIO()) != 3:
         failures.append("report: the exit code does not follow the rows (want 0 and 3)")
@@ -1274,8 +1415,8 @@ def self_test():
 
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
-    if len(EXPECTED_ROW_LABELS) != 23:
-        failures.append(f"EXPECTED_ROW_LABELS: expected 23 labels, got {len(EXPECTED_ROW_LABELS)}")
+    if len(EXPECTED_ROW_LABELS) != 24:
+        failures.append(f"EXPECTED_ROW_LABELS: expected 24 labels, got {len(EXPECTED_ROW_LABELS)}")
     if len(set(EXPECTED_ROW_LABELS)) != len(EXPECTED_ROW_LABELS):
         failures.append("EXPECTED_ROW_LABELS: contains a duplicate label")
     _check_row_inventory(EXPECTED_ROW_LABELS)  # the constant against itself: must not raise
