@@ -453,7 +453,7 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
   (D8).
 - One pod that cannot discover, behind a round-robin balancer, fails the callbacks of logins that
   other pods started. Each retry then costs a full sign-in at the IdP. A readiness gate or an eager
-  discovery at start would prevent this. It is not in this issue (see the gate questions).
+  discovery at start would prevent this. SMA-705 tracks it.
 - A reload of the callback 503 page logs a `state_unknown` rejection (D10).
 
 ## 7. Documentation changes
@@ -485,6 +485,8 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
 - A discovery failure in the refresh path (it stays a transient failure) and in logout (it already
   falls back).
 - A readiness gate or an eager discovery at start (§ 6).
+- The refresh lock budget when discovery runs under the lock (3T > the lock TTL with the shipped
+  defaults). SMA-704 tracks it.
 - A rename of `storeUnavailableResponse`, `STORE_UNAVAILABLE_CSP` or `expectStoreUnavailable`.
 - A change to the heading or to the logout page text.
 - A Playwright e2e test with an IdP that is down. T11 and T16 cover the Next boundary.
