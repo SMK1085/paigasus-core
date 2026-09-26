@@ -158,7 +158,7 @@ pub struct ExternalIdentity {
 /// Why a presented token was rejected. Detail only — never surfaced in `AuthnError`'s
 /// `Display` (no token/claim material in logs); useful for tests and internal diagnostics
 /// via `Debug` (spec §3.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenDefect {
     Malformed,
     UnsupportedAlg,
@@ -169,6 +169,9 @@ pub enum TokenDefect {
     IssuerNotConfigured,
     AudienceMismatch,
     Oversized,
+    /// The payload `typ` claim marks the token as a Keycloak ID token or back-channel logout
+    /// token, not an access token (SMA-686).
+    NotAnAccessToken,
 }
 
 /// Why just-in-time provisioning of a new identity failed.

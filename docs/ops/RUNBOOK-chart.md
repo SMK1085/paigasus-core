@@ -96,18 +96,43 @@ late and unclearly. Check these four items before you install:
 
 1. **Audience.** The access token's `aud` claim must contain the audience that IAM accepts. IAM
    accepts `oidc.audience` when it is set. It accepts `oidc.clientId` when `oidc.audience` is not
-   set. Set `oidc.audience` only when you cannot make the IdP put the client id into `aud`. The
-   value replaces the client id. It does not add another value next to the client id. Before you
-   choose the value, decode a real access token and read its `aud` claim. The value helps only
-   when the IdP issues a JWT access token for the console's scopes (`openid profile email
-   offline_access`). The console sends no `audience` or `resource` parameter. This value does not
-   work with an opaque token, or a token for a different API. A wrong audience shows as a refused
-   token in the IAM log (`ci/kind/README.md`, "Where to look first").
+   set. Set `oidc.audience` in two cases. First, set it when you cannot make the IdP put the
+   client id into `aud`. Second, set it when the IdP's ID token has no Keycloak `typ` claim. The
+   paragraph after this list tells you how to choose the value in that case. The value replaces
+   the client id. It does not add another value next to the client id. Before you choose the
+   value, decode a real access token and read its `aud` claim. The value helps only when the IdP
+   issues a JWT access token for the console's scopes (`openid profile email offline_access`).
+   The console sends no `audience` or `resource` parameter. This value does not work with an
+   opaque token, or a token for a different API.
+   A wrong or missing audience shows in the IAM log at `info`, with the issuer and the accepted
+   audiences (`ci/kind/README.md`, "Where to look first"). The log does not show the token's
+   `aud`.
 2. **Email.** The access token must carry an `email` claim. IAM creates the principal on the first
    login from it.
 3. **Algorithm.** The token must be signed with RS256 or ES256, and its header must carry a `kid`.
 4. **Discovery.** The discovery document's `issuer` must equal `oidc.issuer`, and its `jwks_uri`
    must be `https`.
+
+**IAM refuses a token that is not an access token (SMA-686).** IAM refuses a bearer token that
+has one of these markers:
+
+- A `typ` claim of `ID` or `Logout`, in any letter case. Keycloak sets these values on its ID
+  token and on its back-channel logout token. Its access token has `typ: Bearer`.
+- A header `typ` of `logout+jwt`, or an `events` claim with the back-channel logout event. An IdP
+  that supports OpenID Connect Back-Channel Logout sets these on its logout token.
+
+The IAM log shows a refusal at `info`, with the issuer and the matched marker. For each issuer
+and each kind of refusal, IAM writes at most one line in 10 seconds. The next line gives the
+number of refusals that IAM did not log.
+
+This adds no requirement on the IdP. No Keycloak or Dex access token measured for SMA-686 has
+one of these markers. Do not add a mapper that sets `typ` on the access token.
+
+The check does not protect an IdP whose ID token has no `typ` claim. Dex is an example. Decode a
+real ID token and a real access token from your IdP. If the ID token has no `typ: ID`, find an
+audience for `oidc.audience`. The access token's `aud` must contain it. The ID token's `aud` must
+not contain it. If your IdP cannot do this, IAM accepts its ID token as a bearer token. For Dex,
+both tokens have the same `aud`, so this remedy does not work.
 
 The console requests the scopes `openid profile email offline_access`.
 
