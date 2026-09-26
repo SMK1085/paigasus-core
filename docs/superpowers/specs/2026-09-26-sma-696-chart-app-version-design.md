@@ -186,7 +186,9 @@ README "Delete-the-feature record". Each mutation must be valid Python that runs
 2. Make the body of `check8c` return no problems. The self-test must go red, and the negative
    control must report FAILED for `app-version-unreleased`.
 3. Make `run_checks()` read `appVersion` from `charts/paigasus` in place of `--chart`. The
-   negative control must report FAILED.
+   fallback render still uses the fixture chart, so § 3.2 item 4 still fails the row, and the
+   negative control reports OK. With mutation 4 also applied, the negative control must report
+   FAILED. (Corrected during planning: item 4 is a second guard for this mistake.)
 4. Remove the § 3.2 item 4 assertion. The "rendered fallback differs" self-test row must go red.
 
 ## 5. Files that change
