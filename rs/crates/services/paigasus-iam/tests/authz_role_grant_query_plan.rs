@@ -72,6 +72,19 @@ async fn m0012_refuses_an_invalid_leftover_index() {
     assert!(msg.contains(INDEX) && msg.contains("INVALID"), "the error must name the index and the cause: {msg}");
 }
 
+/// `CREATE INDEX IF NOT EXISTS` also skips a VALID index with this name but other columns (an
+/// operator build with a wrong definition). m0012 must refuse it, not pass.
+#[tokio::test]
+async fn m0012_refuses_a_valid_index_with_other_columns() {
+    let Some((_pg, db)) = support::start_raw_postgres().await else { return };
+    Migrator::up(&db, Some(M0012 - 1)).await.expect("m0001..m0011 must apply");
+    db.execute_unprepared(&format!(r#"CREATE INDEX {INDEX} ON "role_grant" (linked_policy_id);"#)).await.unwrap();
+
+    let err = Migrator::up(&db, Some(1)).await.expect_err("m0012 must refuse a valid index with the wrong definition");
+    let msg = err.to_string();
+    assert!(msg.contains(INDEX) && msg.contains("linked_policy_id"), "the error must name the index and the found definition: {msg}");
+}
+
 fn pid(u: Uuid) -> PrincipalId {
     PrincipalId::from_prn(Prn::build("iam", "", None, "principal", u).unwrap())
 }

@@ -20,14 +20,24 @@
 //! an INVALID index, so the query would scan again with no signal.
 //!
 //! **`IF NOT EXISTS` also accepts a VALID index with this name but other columns.** An operator
-//! build with a wrong definition passes this migration's check. The operator must build the
-//! index with the exact columns `(scope_node_prn, principal_id, id)`. This migration does not
-//! check the column list.
+//! build with a wrong definition would pass a bare validity check. This migration closes that
+//! gap: after the create, it reads the index definition back with `pg_get_indexdef` and compares
+//! it, byte for byte, against the definition this migration itself would produce. A VALID index
+//! with this name but a different definition — other columns, another table, a different index
+//! method — fails the migration with a message that names the index and shows the found
+//! definition.
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::{DbBackend, Statement};
 
 const INDEX: &str = "ix_role_grant_scope_node_prn_principal_id";
+
+/// The exact text Postgres 16's `pg_get_indexdef` returns for the index this migration creates.
+/// Measured on `postgres:16-alpine`: `pg_get_indexdef` schema-qualifies the table and spells out
+/// the index method even though the `CREATE INDEX` statement above names neither.
+fn expected_indexdef() -> String {
+    format!("CREATE INDEX {INDEX} ON public.role_grant USING btree (scope_node_prn, principal_id, id)")
+}
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -42,16 +52,25 @@ impl MigrationTrait for Migration {
         let row = conn
             .query_one_raw(Statement::from_string(
                 DbBackend::Postgres,
-                format!("SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass('public.{INDEX}')"),
+                format!("SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i WHERE i.indexrelid = to_regclass('public.{INDEX}')"),
             ))
             .await?;
-        let valid = match row {
-            Some(row) => row.try_get::<bool>("", "indisvalid")?,
-            None => false,
+        let Some(row) = row else {
+            return Err(DbErr::Migration(format!(
+                "m0012: index {INDEX} is INVALID or missing (a failed CREATE INDEX CONCURRENTLY leaves an INVALID index). Run `DROP INDEX {INDEX};`, then run the migration again."
+            )));
         };
+        let valid = row.try_get::<bool>("", "indisvalid")?;
         if !valid {
             return Err(DbErr::Migration(format!(
                 "m0012: index {INDEX} is INVALID or missing (a failed CREATE INDEX CONCURRENTLY leaves an INVALID index). Run `DROP INDEX {INDEX};`, then run the migration again."
+            )));
+        }
+        let def = row.try_get::<String>("", "def")?;
+        let expected = expected_indexdef();
+        if def != expected {
+            return Err(DbErr::Migration(format!(
+                "m0012: index {INDEX} exists but its definition does not match. Found: {def}. Expected: {expected}. Drop the index, then run the migration again."
             )));
         }
         Ok(())
