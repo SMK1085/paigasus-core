@@ -227,6 +227,8 @@ async fn lost_first_login_race_on_the_email_resolves_to_the_winner() {
     let users = user::Entity::find().filter(user::Column::Email.eq(email)).count(&db).await.unwrap();
     assert_eq!(users, 1, "exactly one user owns the email after the race");
     let text = logs.text();
+    // This assertion alone cannot fail: an empty capture also gives zero lines. The
+    // race-success assertion above is what proves the fix.
     assert_eq!(
         text.lines().filter(|line| line.contains(support::JIT_FAILURE_LINE)).count(),
         0,

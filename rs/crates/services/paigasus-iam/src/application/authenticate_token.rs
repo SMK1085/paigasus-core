@@ -305,8 +305,10 @@ where
                 .ok_or_else(|| AuthnError::Backend(Box::<dyn std::error::Error + Send + Sync>::from("external identity vanished after a provisioning conflict"))),
             // SMA-698 D1 (spec 4.6). In Postgres, `provision` inserts the `user` row before the
             // `external_identity` row, and `user.email` is unique. The loser of a race between two
-            // first logins of ONE identity therefore fails on the email first. Its insert waits on
-            // the unique index until the winner commits, so this re-read sees the winner's row.
+            // first logins of ONE identity therefore fails on the email first. If the winner has
+            // not committed yet, the loser's insert waits on the unique index until it does. If
+            // the winner has already committed, the loser's insert fails at once. The re-read is
+            // correct in both cases: it always finds the winner's row.
             Err(RepositoryError::Conflict(ConflictKind::EmailTaken)) => match self.identities.find_by_issuer_subject(&claims.issuer, &claims.subject).await.map_err(backend)? {
                 Some(winner) => Ok(winner.principal_id),
                 None => Err(self.provisioning_failed(&claims.issuer, JitFailure::EmailConflict)),
@@ -1399,9 +1401,38 @@ mod tests {
     }
 
     /// `true` when `line` carries `key` with `value`. `tracing-subscriber` writes a `&str` field
-    /// as `key="value"` and a number as `key=value`; both forms are accepted.
+    /// as `key="value"` and a number as `key=value`; both forms are accepted. The match is on
+    /// the whole token: whitespace or the line start must come before it, and whitespace or the
+    /// line end must come after it. So `suppressed=1` does not match a line that has
+    /// `suppressed=10`.
     fn has_field(line: &str, key: &str, value: &str) -> bool {
-        line.contains(&format!("{key}=\"{value}\"")) || line.contains(&format!("{key}={value}"))
+        is_whole_token(line, &format!("{key}=\"{value}\"")) || is_whole_token(line, &format!("{key}={value}"))
+    }
+
+    /// `true` when `token` occurs in `text` with whitespace, or the text start or end, on both
+    /// sides.
+    fn is_whole_token(text: &str, token: &str) -> bool {
+        let mut search_from = 0;
+        while let Some(found_at) = text[search_from..].find(token) {
+            let start = search_from + found_at;
+            let end = start + token.len();
+            let before_ok = start == 0 || text.as_bytes()[start - 1].is_ascii_whitespace();
+            let after_ok = end == text.len() || text.as_bytes()[end].is_ascii_whitespace();
+            if before_ok && after_ok {
+                return true;
+            }
+            search_from = start + 1;
+        }
+        false
+    }
+
+    /// Proves the whole-token fix (a prior substring match let `suppressed=1` match a line
+    /// holding `suppressed=10`, and this test was red against that old body).
+    #[test]
+    fn has_field_does_not_match_a_longer_numeric_value() {
+        let line = "defect=missing_email suppressed=10 issuer=\"https://idp.example.com\"";
+        assert!(!has_field(line, "suppressed", "1"), "suppressed=10 must not match a search for suppressed=1: {line}");
+        assert!(has_field(line, "suppressed", "10"), "suppressed=10 must match a search for suppressed=10: {line}");
     }
 
     /// Asserts that the WHOLE capture holds none of `secrets` (spec S2, 6.1).
