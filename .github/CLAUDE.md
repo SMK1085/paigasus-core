@@ -257,13 +257,19 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   V7 is NOT the last check: the roster has since grown through V8 to V12 (SMA-602), so read
   `ci/actionlint/release_guard.py`'s `^# V` comments rather than this entry alone.
 - `release.yml` must never gain a `pull_request` or `pull_request_target` trigger (SMA-579).
-- Each service image releases through **its own chain** in `release.yml`: `images-build-<svc>` →
-  `approve-images-<svc>` → `publish-images-<svc>` → `tag-<svc>`, for `iam` and `gateway`. The
-  chains are independent of the kernel chain and of each other, so a kernel-only release, an
+- Each image releases through **its own chain** in `release.yml`: `images-build-<key>` →
+  `approve-images-<key>` → `publish-images-<key>` → `tag-<key>`, for `iam`, `gateway`,
+  `iam-console` and `gateway-console` (SMA-688). `ci/images/chains.toml` is the one registry of
+  the chain keys, their kind, version file, changelog and image names; `release_plan.py`,
+  `release_decision.py`, `helm_render.py` and `release_guard.py` read it, and V16 asserts that
+  `release.yml` and `CHAIN_APPROVALS` agree with it. `iam` is a string prefix of `iam-console`:
+  a chain selects its jobs and artifacts by exact name, never by a prefix or a glob (V17).
+  The chains are independent of the kernel chain and of each other, so a kernel-only release, an
   image-only release and a combined release all work, and a failed image chain does not stop the
   kernel release. `release_guard.py` V8 asserts that a publisher's job depends, in the job graph,
   on the approval job of ITS OWN chain — a kernel approval job never gates an image push job. All
-  three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) share the
+  five approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`,
+  `approve-images-iam-console`, `approve-images-gateway-console`) share the
   one `release-approval` environment, though. GitHub approves a pending deployment by environment,
   not by job, so one human approval releases every chain that waits for approval in the same run.
   MEASURED on the first live release (run 35648073131, 2026-09-21): the run listed one pending
@@ -279,7 +285,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   recovery. `:<major>.<minor>` and `:latest` move only forward, compared as numbers. `:<major>`
   moves the same way, but only once the service leaves `0.x` — a `0.x` release writes no
   `:<major>` tag at all.
-- A service version is set **by hand**, in a normal pull request, with a `CHANGELOG.md` section.
+- A service or console version is set **by hand**, in a normal pull request, with a
+  `CHANGELOG.md` section, and update the tag in `charts/paigasus/values.yaml`; row 8 fails
+  otherwise. A console's version source is the `version` field of `ts/apps/<app>/package.json`
+  (SMA-688 D1).
   The two service crates are `publish = false` and sit in no `version_group`, so `release-plz
   update` never sees them, and `git_only` hard-errors on the second release because each has an
   unpublished workspace dependency (MEASURED, SMA-658 M7). The same holds inside a version group

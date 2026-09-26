@@ -3745,7 +3745,7 @@ EOF
 - Modify: `charts/paigasus/README.md` (new section before `## The golden files` `:137`)
 - Modify: `docs/ops/RUNBOOK-chart.md` (`:14-15`)
 - Modify: `docs/ops/RUNBOOK-containers.md` (`### If the release plan itself cannot be read` `:614-621`; new `## Release a console image` at the end)
-- Test: `ts:fmt` is not involved (no file under `ts/`); `repo:actionlint` check 12 (no new `ciReport` mention).
+- Test: `ts:fmt` is not involved (no file under `ts/`); `repo:actionlint` check 12 (no new mention of the moon CI report file).
 
 **Interfaces:**
 - Consumes: the behaviour of Tasks 1-9, and one measurement in Step 1.
@@ -3965,9 +3965,9 @@ Run:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" PROTO_REPORTER=text
 grep -c "the authenticated answer was not measured\|The authenticated answer was not measured" docs/ops/RUNBOOK-containers.md
-grep -rln "ciReport" .github/CLAUDE.md charts/CLAUDE.md ci/release-plan/README.md ci/helm-render/README.md charts/paigasus/README.md docs/ops/RUNBOOK-chart.md docs/ops/RUNBOOK-containers.md; echo "ciReport-grep rc=$?"
+grep -rln "the check-12 corpus token" .github/CLAUDE.md charts/CLAUDE.md ci/release-plan/README.md ci/helm-render/README.md charts/paigasus/README.md docs/ops/RUNBOOK-chart.md docs/ops/RUNBOOK-containers.md; echo "corpus-token-grep rc=$?"
 ```
-Expected: the first grep prints `1` (exactly one variant was appended), and `ciReport-grep rc=1` (no changed file names the moon CI report, so check 12 needs no marker).
+Expected: the first grep prints `1` (exactly one variant was appended), and `corpus-token-grep rc=1` (no changed file names the moon CI report, so check 12 needs no marker).
 
 - [ ] **Step 4: Read the text once more**
 

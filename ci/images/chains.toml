@@ -10,8 +10,9 @@
 #   ci/images/release_decision.py     kind (the SBOM floor)
 #   ci/helm-render/helm_render.py     kind, version_file, ghcr (row 8a)
 #   ci/actionlint/release_guard.py    the keys, ghcr, hub (V16)
-# ci/images/run.sh keeps its own bash tables. images.yml builds every key on each pull request
-# that changes ci/images/**, so a key that this file adds and run.sh does not know fails there.
+# ci/images/run.sh keeps its own bash tables. No workflow reads every key from this
+# file. images.yml names its own fixed key list. A new key in this file also needs
+# an entry in run.sh and in images.yml, or it never builds.
 #
 # kind = "cargo": version_file is the crate's Cargo.toml, and the version is `[package] version`.
 # kind = "npm":   version_file is the app's package.json, and the version is the top-level
