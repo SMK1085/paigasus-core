@@ -82,6 +82,14 @@ filter = 'package(=paigasus-iam) and binary(docker_preflight)'
 retries = 1
 
 [[profile.default.overrides]]
+# SMA-699: the query-plan suite asserts on planner choices. A plan that changes from run to run
+# must red at once, not show as FLAKY after a retry hides it. Scoped to the whole binary, for
+# the same reason as keycloak_e2e above. Does NOT set `test-group`; it inherits
+# `docker-containers` from the block below.
+filter = 'package(=paigasus-iam) and binary(authz_role_grant_query_plan)'
+retries = 0
+
+[[profile.default.overrides]]
 # `=` is an exact-match matcher. Verified that the bare form does NOT match `paigasus-iam-core`
 # either, but the explicit form means no reader has to know the matcher's semantics.
 # `kind(test)` selects integration-test targets only, so paigasus-iam's own --lib unit tests and
