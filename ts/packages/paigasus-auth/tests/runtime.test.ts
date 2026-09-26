@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAuthRuntime, getAuthRuntime } from '../src/runtime.js';
+import { createOidcClient, type CreateOidcClientOptions, type OidcClient } from '../src/adapters/oidc.js';
 import { AuthConfigError } from '../src/core/errors.js';
 
 // PAIGASUS_SESSION_LOCK_TTL_MS is 10000, not the package default's original 5000 (review round 1,
@@ -79,11 +80,48 @@ describe('createAuthRuntime', () => {
     expect((await createAuthRuntime(BASE, { logger })).logger).toBe(logger);
   });
 
-  // Smaller fix: PAIGASUS_OIDC_SCOPES was parsed and then unreachable — task 8 needs it to build
-  // the authorization URL.
-  it('exposes the configured scopes', async () => {
-    const rt = await createAuthRuntime({ ...BASE, PAIGASUS_OIDC_SCOPES: 'openid email' });
-    expect(rt.scopes).toBe('openid email');
+  // SMA-692 D4. The factory dependency is the only way a test sees the options the runtime derives
+  // from the env: AuthRuntime has no scopes field any more.
+  function recordingFactory(): { factory: (opts: CreateOidcClientOptions) => OidcClient; seen: CreateOidcClientOptions[]; built: OidcClient[] } {
+    const seen: CreateOidcClientOptions[] = [];
+    const built: OidcClient[] = [];
+    const factory = (opts: CreateOidcClientOptions): OidcClient => {
+      seen.push(opts);
+      const client = createOidcClient(opts);
+      built.push(client);
+      return client;
+    };
+    return { factory, seen, built };
+  }
+
+  it('passes the set env values to the OIDC client factory, and keeps the client it returns', async () => {
+    const { factory, seen, built } = recordingFactory();
+    const rt = await createAuthRuntime(
+      { ...BASE, PAIGASUS_OIDC_SCOPES: 'openid profile email offline_access api://paigasus-api/access', PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE: 'https://api.example.com' },
+      { oidcClientFactory: factory },
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      issuer: 'https://idp.example.com',
+      clientId: 'c',
+      scopes: 'openid profile email offline_access api://paigasus-api/access',
+      refreshScope: 'openid profile email offline_access api://paigasus-api/access',
+      audience: 'https://api.example.com',
+    });
+    expect(rt.oidc).toBe(built[0]);
+  });
+
+  // D3-a: an absent PAIGASUS_OIDC_SCOPES gives the default list to the authorization request, and
+  // NO refresh scope, so the refresh request stays the request of before SMA-692.
+  it('uses the default scopes for the authorization request only when the env is absent', async () => {
+    const { factory, seen } = recordingFactory();
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-sibling destructuring
+    const { PAIGASUS_OIDC_SCOPES: _omitted, ...withoutScopes } = BASE;
+    await createAuthRuntime(withoutScopes, { oidcClientFactory: factory });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.scopes).toBe('openid profile email offline_access');
+    expect(seen[0]).not.toHaveProperty('refreshScope');
+    expect(seen[0]).not.toHaveProperty('audience');
   });
 
   // Review round 1, "Add a test asserting an AuthConfigError message renders no value": every

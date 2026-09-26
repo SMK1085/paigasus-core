@@ -59,7 +59,6 @@ beforeEach(async () => {
     absoluteTtlMs: 86_400_000,
     zone: 'iam',
     basePath: '/iam',
-    scopes: 'openid profile email',
   };
 });
 

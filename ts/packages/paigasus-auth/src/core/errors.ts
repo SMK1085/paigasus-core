@@ -117,9 +117,9 @@ export class CallbackRejected extends AuthError {
  * the redaction claim resting on the call site, and a later edit widening the set would silently
  * widen what may be logged. The type and the classifier's membership test are one fact.
  *
- * NOT exported from src/server.ts, deliberately: no consumer can produce or observe one.
- * getSession() swallows every failure into `null`, and CreateAuthRuntimeDeps exposes no OIDC
- * override.
+ * NOT exported from src/server.ts, deliberately: no consumer can observe one. getSession()
+ * swallows every failure into `null`. CreateAuthRuntimeDeps.oidcClientFactory (SMA-692) lets a
+ * caller inject an OIDC client, but that client's errors reach the same swallowing path.
  */
 export class RefreshRejected extends AuthError {
   readonly code = 'oidc_refresh_rejected';

@@ -36,6 +36,14 @@ const httpsUrl = z
  */
 const overrideUrl = z.url();
 
+/**
+ * True when the whitespace-separated scope list holds the token `openid` exactly (SMA-692 D5).
+ * Without it the first login fails at once (`idTokenExpected: true` in adapters/oidc.ts), with an
+ * unclear error. `openidx` does not count. The chart refuses the same value at render time, with
+ * a readable reason (charts/paigasus/templates/_audience.tpl).
+ */
+const hasOpenidScope = (value: string): boolean => value.split(/\s+/).includes('openid');
+
 export const authEnvShape = {
   PAIGASUS_OIDC_ISSUER: httpsUrl,
   PAIGASUS_OIDC_CLIENT_ID: z.string().min(1),
@@ -43,7 +51,15 @@ export const authEnvShape = {
   PAIGASUS_PUBLIC_ORIGIN: httpsUrl,
   PAIGASUS_OIDC_REDIRECT_URI: overrideUrl.optional(),
   PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI: overrideUrl.optional(),
-  PAIGASUS_OIDC_SCOPES: z.string().min(1).default('openid profile email offline_access'),
+  // SMA-692 D3-a: NO default here. createAuthRuntime applies the default list to the
+  // authorization request only. The refresh request sends `scope` only when this key is set, so
+  // the parsed config must keep "absent" distinct from "the default".
+  PAIGASUS_OIDC_SCOPES: z.string().refine(hasOpenidScope, { error: 'must contain the scope openid' }).optional(),
+  // SMA-692 D1. The `audience` authorization parameter (Auth0). Not the IAM audience.
+  PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE: z
+    .string()
+    .refine((v) => v.length > 0 && v === v.trim(), { error: 'must be non-empty, with no leading or trailing whitespace' })
+    .optional(),
   PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS: seconds(30),
   PAIGASUS_OIDC_HTTP_TIMEOUT_MS: millis(3500),
   PAIGASUS_SESSION_STORE: z.enum(['redis', 'memory']),
