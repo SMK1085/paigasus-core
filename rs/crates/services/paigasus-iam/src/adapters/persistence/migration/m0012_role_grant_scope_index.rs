@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! m0012 — an index for the scope-filtered role grant query (SMA-699).
+//!
+//! `RoleGrantQuery::find` with a scope and no principal (the gateway-console org page) had no
+//! index to use: no index led with `scope_node_prn`, so each call could scan the full
+//! `role_grant` table. `(scope_node_prn, principal_id, id)` finds one node's rows and returns
+//! them in the query's `ORDER BY g.principal_id, g.id` order, so a page stops after
+//! `offset + limit` rows with no sort.
+//!
+//! **No `CONCURRENTLY`.** Production runs every pending migration in one outer transaction
+//! (`migrate_under_lock`), and `CREATE INDEX CONCURRENTLY` cannot run in a transaction. The
+//! build holds a SHARE lock on `role_grant` until that transaction commits: grants, revokes, org
+//! creation and cascading deletes wait, reads continue. `SET LOCAL lock_timeout` bounds the wait,
+//! as in m0008-m0011. For a large table, an operator builds the index `CONCURRENTLY` before the
+//! deploy; `IF NOT EXISTS` then makes this migration only check it.
+//!
+//! **An INVALID index fails the migration.** A failed `CREATE INDEX CONCURRENTLY` leaves an
+//! INVALID index with this name. `IF NOT EXISTS` would skip the create, and the planner ignores
+//! an INVALID index, so the query would scan again with no signal.
+//!
+//! **`IF NOT EXISTS` also accepts a VALID index with this name but other columns.** An operator
+//! build with a wrong definition would pass a bare validity check. This migration closes that
+//! gap: after the create, it reads the index definition back with `pg_get_indexdef` and compares
+//! it, byte for byte, against the definition this migration itself would produce. A VALID index
+//! with this name but a different definition — other columns, another table, a different index
+//! method — fails the migration with a message that names the index and shows the found
+//! definition.
+
+use sea_orm_migration::prelude::*;
+use sea_orm_migration::sea_orm::{DbBackend, Statement};
+
+const INDEX: &str = "ix_role_grant_scope_node_prn_principal_id";
+
+/// The exact text Postgres 16's `pg_get_indexdef` returns for the index this migration creates.
+/// Measured on `postgres:16-alpine`: `pg_get_indexdef` schema-qualifies the table and spells out
+/// the index method even though the `CREATE INDEX` statement above names neither.
+fn expected_indexdef() -> String {
+    format!("CREATE INDEX {INDEX} ON public.role_grant USING btree (scope_node_prn, principal_id, id)")
+}
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let conn = manager.get_connection();
+        conn.execute_unprepared("SET LOCAL lock_timeout = '5s';").await?;
+        conn.execute_unprepared(&format!(r#"CREATE INDEX IF NOT EXISTS {INDEX} ON "role_grant" (scope_node_prn, principal_id, id);"#))
+            .await?;
+        let row = conn
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!("SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i WHERE i.indexrelid = to_regclass('public.{INDEX}')"),
+            ))
+            .await?;
+        let Some(row) = row else {
+            return Err(DbErr::Migration(format!(
+                "m0012: index {INDEX} is INVALID or missing (a failed CREATE INDEX CONCURRENTLY leaves an INVALID index). Run `DROP INDEX {INDEX};`, then run the migration again."
+            )));
+        };
+        let valid = row.try_get::<bool>("", "indisvalid")?;
+        if !valid {
+            return Err(DbErr::Migration(format!(
+                "m0012: index {INDEX} is INVALID or missing (a failed CREATE INDEX CONCURRENTLY leaves an INVALID index). Run `DROP INDEX {INDEX};`, then run the migration again."
+            )));
+        }
+        let def = row.try_get::<String>("", "def")?;
+        let expected = expected_indexdef();
+        if def != expected {
+            return Err(DbErr::Migration(format!(
+                "m0012: index {INDEX} exists but its definition does not match. Found: {def}. Expected: {expected}. Drop the index, then run the migration again."
+            )));
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let conn = manager.get_connection();
+        conn.execute_unprepared("SET LOCAL lock_timeout = '5s';").await?;
+        conn.execute_unprepared(&format!("DROP INDEX IF EXISTS {INDEX};")).await?;
+        Ok(())
+    }
+}

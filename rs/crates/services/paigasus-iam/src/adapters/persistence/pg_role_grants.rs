@@ -246,43 +246,238 @@ impl RoleGrantStore for PgRoleGrantStore {
     }
 }
 
-/// `RoleGrantQuery::find` (SMA-676). One statement: the inner join on `principal` supplies the
-/// kind (every grant has a principal row, `fk_role_grant_principal`, so the join drops nothing
-/// unless a kind filter asks it to). A NULL parameter means "no filter on this column". The
-/// selected columns are exactly `role_grant`'s own, in `role_grant::Model`'s field order, so
-/// `role_grant::Model::find_by_statement` (its `DeriveEntityModel`-generated `FromQueryResult`
-/// impl) maps the row directly — no separate row struct needed.
-const FIND_SQL: &str = r#"
+/// The fixed head of `RoleGrantQuery::find`'s statement (SMA-676). The inner join on
+/// `principal` supplies the kind (every grant has a principal row, `fk_role_grant_principal`,
+/// so the join drops nothing unless a kind filter asks it to). The selected columns are exactly
+/// `role_grant`'s own, in `role_grant::Model`'s field order, so
+/// `role_grant::Model::find_by_statement` maps the row directly.
+const FIND_SELECT: &str = r#"
 SELECT g.id, g.principal_id, g.role_key, g.scope_kind, g.scope_node_prn, g.scope_org_id,
        g.scope_team_id, g.scope_project_id, g.linked_policy_id, g.created_at
-  FROM "role_grant" g JOIN "principal" pr ON pr.id = g.principal_id
- WHERE ($1::uuid IS NULL OR g.principal_id = $1)
-   AND ($2::text IS NULL OR g.scope_node_prn = $2)
-   AND ($3::boolean IS FALSE OR g.scope_kind = 'root')
-   AND ($4::text IS NULL OR g.role_key = $4)
-   AND ($5::text IS NULL OR pr.kind = $5)
- ORDER BY g.principal_id, g.id
- LIMIT $6 OFFSET $7"#;
+  FROM "role_grant" g JOIN "principal" pr ON pr.id = g.principal_id"#;
+
+/// The predicates and bound values of one `find` statement (SMA-699). Each set filter adds one
+/// plain `col = $n` predicate. There is no `($n IS NULL OR col = $n)` form: under a generic plan
+/// (sqlx caches `find_by_statement` as a named prepared statement) that form stops the planner
+/// from using any index.
+#[derive(Default)]
+struct FindSql {
+    predicates: Vec<String>,
+    values: Vec<sea_orm::Value>,
+}
+
+impl FindSql {
+    /// Adds `<column> = $n::<cast>` and binds `value` as `$n`.
+    fn bind(&mut self, column: &str, cast: &str, value: sea_orm::Value) {
+        self.values.push(value);
+        self.predicates.push(format!("{column} = ${}::{cast}", self.values.len()));
+    }
+
+    /// Adds a predicate that binds no value.
+    fn literal(&mut self, predicate: &str) {
+        self.predicates.push(predicate.to_owned());
+    }
+
+    /// The full statement. `limit` and `offset` take the last two numbers (D6). No predicates
+    /// gives `WHERE FALSE` (E7): D3 guarantees a principal or a scope, so no caller reaches it,
+    /// and if one does it must list nothing, not every tenant's grants.
+    fn render(mut self, limit: u64, offset: u64) -> Statement {
+        let predicates = if self.predicates.is_empty() { "FALSE".to_owned() } else { self.predicates.join("\n   AND ") };
+        self.values.push(limit.into());
+        let limit_n = self.values.len();
+        self.values.push(offset.into());
+        let offset_n = self.values.len();
+        let sql = format!("{FIND_SELECT}\n WHERE {predicates}\n ORDER BY g.principal_id, g.id\n LIMIT ${limit_n} OFFSET ${offset_n}");
+        Statement::from_sql_and_values(DbBackend::Postgres, sql, self.values)
+    }
+}
+
+/// `RoleGrantQuery::find`'s statement (SMA-676, SMA-699). One predicate per set filter, in a
+/// fixed order: principal, scope, role, kind. D5: a node scope matches its stored canonical PRN
+/// exactly (`ix_role_grant_scope_node_prn_principal_id`, m0012, serves it); the Root sentinel
+/// matches `scope_kind = 'root'` and binds nothing (spec E3: no stored-PRN invariant for Root).
+///
+/// `pub` but `#[doc(hidden)]`, so `tests/authz_role_grant_query_plan.rs` can `EXPLAIN` the exact
+/// statement, not a copy that can drift (the SMA-469 precedent, `published_sweep_sql`).
+#[doc(hidden)]
+#[must_use]
+pub fn find_statement(f: &RoleGrantFilter, limit: u64, offset: u64) -> Statement {
+    let mut q = FindSql::default();
+    if let Some(p) = f.principal() {
+        q.bind("g.principal_id", "uuid", p.uuid().into());
+    }
+    match f.scope() {
+        None => {}
+        Some(GrantScope::Root) => q.literal("g.scope_kind = 'root'"),
+        Some(scope @ GrantScope::Node(_)) => q.bind("g.scope_node_prn", "text", scope.canonical_prn().into()),
+    }
+    if let Some(role_key) = f.role_key() {
+        q.bind("g.role_key", "text", role_key.to_owned().into());
+    }
+    if let Some(kind) = f.principal_kind() {
+        q.bind("pr.kind", "text", kind.as_str().to_owned().into());
+    }
+    q.render(limit, offset)
+}
 
 #[async_trait]
 impl RoleGrantQuery for PgRoleGrantStore {
     async fn find(&self, f: &RoleGrantFilter, limit: u64, offset: u64) -> Result<Vec<RoleGrant>, AuthzError> {
-        let principal: Option<Uuid> = f.principal().map(PrincipalId::uuid);
-        // D5: the Root sentinel matches `scope_kind = 'root'`; a node matches its stored
-        // canonical PRN exactly (the column the duplicate key already uses).
-        let (scope_prn, root): (Option<String>, bool) = match f.scope() {
-            None => (None, false),
-            Some(GrantScope::Root) => (None, true),
-            Some(scope @ GrantScope::Node(_)) => (Some(scope.canonical_prn()), false),
-        };
-        let role_key: Option<String> = f.role_key().map(str::to_owned);
-        let kind: Option<String> = f.principal_kind().map(|k| k.as_str().to_owned());
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            FIND_SQL,
-            [principal.into(), scope_prn.into(), root.into(), role_key.into(), kind.into(), limit.into(), offset.into()],
-        );
-        let models = role_grant::Model::find_by_statement(stmt).all(&self.db).await.map_err(map_err)?;
+        let models = role_grant::Model::find_by_statement(find_statement(f, limit, offset)).all(&self.db).await.map_err(map_err)?;
         models.into_iter().map(model_to_grant).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paigasus_iam_core::{OrganizationId, PrincipalKind};
+    use sea_orm::Value;
+
+    fn principal() -> PrincipalId {
+        PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(7)).unwrap())
+    }
+
+    fn org_scope() -> GrantScope {
+        GrantScope::Node(TenancyNodeRef::Organization(OrganizationId::from_uuid(Uuid::from_u128(9))))
+    }
+
+    /// Every `$n` in `sql`, in order of appearance.
+    fn placeholders(sql: &str) -> Vec<usize> {
+        let bytes = sql.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' {
+                let start = i + 1;
+                let mut j = start;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > start {
+                    out.push(sql[start..j].parse().unwrap());
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn values(stmt: &Statement) -> Vec<Value> {
+        stmt.values.clone().map(|v| v.0).unwrap_or_default()
+    }
+
+    /// Every filter shape `RoleGrantFilter::new` accepts: principal x scope {none, node, Root}
+    /// x role x kind, minus the 4 shapes with no principal and no scope (D3). 20 shapes.
+    fn all_shapes() -> Vec<RoleGrantFilter> {
+        let mut out = Vec::new();
+        for principal in [None, Some(principal())] {
+            for scope in [None, Some(org_scope()), Some(GrantScope::Root)] {
+                for role in [None, Some("gateway_user".to_string())] {
+                    for kind in [None, Some(PrincipalKind::User)] {
+                        if let Some(f) = RoleGrantFilter::new(principal.clone(), scope.clone(), role.clone(), kind) {
+                            out.push(f);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(out.len(), 20);
+        out
+    }
+
+    #[test]
+    fn no_shape_keeps_an_is_null_or_predicate() {
+        for f in all_shapes() {
+            let stmt = find_statement(&f, 200, 0);
+            assert!(!stmt.sql.contains("IS NULL"), "{f:?}: {}", stmt.sql);
+            assert!(!stmt.sql.contains("IS FALSE"), "{f:?}: {}", stmt.sql);
+        }
+    }
+
+    #[test]
+    fn placeholders_are_numbered_one_to_k_with_no_gap() {
+        for f in all_shapes() {
+            let stmt = find_statement(&f, 200, 0);
+            let mut seen = placeholders(&stmt.sql);
+            seen.sort_unstable();
+            seen.dedup();
+            let k = values(&stmt).len();
+            assert_eq!(seen, (1..=k).collect::<Vec<_>>(), "{f:?}: {}", stmt.sql);
+        }
+    }
+
+    #[test]
+    fn limit_and_offset_are_the_last_two_values_after_the_fixed_order() {
+        for f in all_shapes() {
+            let stmt = find_statement(&f, 17, 34);
+            let vals = values(&stmt);
+            let k = vals.len();
+            assert_eq!(vals[k - 2], Value::from(17u64), "{f:?}");
+            assert_eq!(vals[k - 1], Value::from(34u64), "{f:?}");
+            assert!(stmt.sql.contains(&format!("ORDER BY g.principal_id, g.id\n LIMIT ${} OFFSET ${k}", k - 1)), "{f:?}: {}", stmt.sql);
+        }
+    }
+
+    #[test]
+    fn shape_b_binds_every_filter_in_the_fixed_order() {
+        let f = RoleGrantFilter::new(Some(principal()), Some(org_scope()), Some("gateway_user".to_string()), Some(PrincipalKind::User)).unwrap();
+        let stmt = find_statement(&f, 50, 0);
+        assert!(stmt.sql.contains("g.principal_id = $1::uuid"), "{}", stmt.sql);
+        assert!(stmt.sql.contains("g.scope_node_prn = $2::text"), "{}", stmt.sql);
+        assert!(stmt.sql.contains("g.role_key = $3::text"), "{}", stmt.sql);
+        assert!(stmt.sql.contains("pr.kind = $4::text"), "{}", stmt.sql);
+        assert_eq!(
+            values(&stmt),
+            vec![
+                Value::from(Uuid::from_u128(7)),
+                Value::from(org_scope().canonical_prn()),
+                Value::from("gateway_user".to_string()),
+                Value::from("user".to_string()),
+                Value::from(50u64),
+                Value::from(0u64),
+            ]
+        );
+    }
+
+    #[test]
+    fn shape_a_has_only_the_scope_and_kind_predicates() {
+        let f = RoleGrantFilter::new(None, Some(org_scope()), None, Some(PrincipalKind::User)).unwrap();
+        let stmt = find_statement(&f, 200, 800);
+        assert!(stmt.sql.contains("g.scope_node_prn = $1::text"), "{}", stmt.sql);
+        assert!(stmt.sql.contains("pr.kind = $2::text"), "{}", stmt.sql);
+        assert!(!stmt.sql.contains("g.principal_id ="), "{}", stmt.sql);
+        assert!(!stmt.sql.contains("g.role_key ="), "{}", stmt.sql);
+        assert!(!stmt.sql.contains("g.scope_kind ="), "{}", stmt.sql);
+        assert_eq!(values(&stmt).len(), 4);
+    }
+
+    #[test]
+    fn root_filters_on_scope_kind_and_binds_no_scope_value() {
+        let f = RoleGrantFilter::new(None, Some(GrantScope::Root), None, None).unwrap();
+        let stmt = find_statement(&f, 200, 0);
+        assert!(stmt.sql.contains("g.scope_kind = 'root'"), "{}", stmt.sql);
+        assert!(!stmt.sql.contains("g.scope_node_prn ="), "{}", stmt.sql);
+        assert_eq!(values(&stmt), vec![Value::from(200u64), Value::from(0u64)]);
+    }
+
+    #[test]
+    fn the_select_list_and_the_join_do_not_change() {
+        let f = RoleGrantFilter::new(Some(principal()), None, None, None).unwrap();
+        let stmt = find_statement(&f, 1, 0);
+        assert!(stmt.sql.contains(
+            "SELECT g.id, g.principal_id, g.role_key, g.scope_kind, g.scope_node_prn, g.scope_org_id,\n       g.scope_team_id, g.scope_project_id, g.linked_policy_id, g.created_at\n  FROM \"role_grant\" g JOIN \"principal\" pr ON pr.id = g.principal_id"
+        ));
+    }
+
+    /// E7: no caller can build an empty filter (`RoleGrantFilter::new` refuses it), so this
+    /// drives the private core directly. An empty filter must return no rows, never every grant.
+    #[test]
+    fn an_empty_predicate_list_matches_no_row() {
+        let stmt = FindSql::default().render(200, 0);
+        assert!(stmt.sql.contains(" WHERE FALSE\n"), "{}", stmt.sql);
+        assert_eq!(values(&stmt), vec![Value::from(200u64), Value::from(0u64)]);
     }
 }
