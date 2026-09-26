@@ -171,7 +171,8 @@ that behavior. § 6 records it as a known limit.
 
 ### 4.1 `src/core/errors.ts`
 
-Add, after `SessionStoreTimeout` and its classifier:
+Add, after `isRefreshRejected` (the classifiers `hasAuthErrorCode` and `isRefreshRejected` sit
+between `SessionStoreTimeout` and `AuthConfigError`):
 
 ```ts
 /** Why OIDC discovery failed (SMA-656 D8). The one list; the type derives from it. */
@@ -386,7 +387,8 @@ Add a small fixture module, `tests/fixtures/discovery-failures.ts`, next to `sta
 
   | Fixture | Expected `reason` |
   |---|---|
-  | unreachable issuer `http://127.0.0.1:1` | `network` |
+  | unreachable issuer `http://127.0.0.1:1` (a Fetch "bad port": undici refuses it before any connect, and the cause has no `code`, so this is D8 row 11's "none" case) | `network` |
+  | a closed local port (a real `ECONNREFUSED`) | `network` |
   | `status-404` | `http_client_error` |
   | `status-503` | `http_server_error` |
   | `not-json` | `invalid_metadata` |
@@ -474,11 +476,11 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
 - `tests/support/store-failure.ts` header (§ 5.1).
 - `README.md` (around lines 123–142): describe the discovery 503 on both routes, the `reason`
   values with the "probably" column and the ambiguity of D8, the `oidc.discovery_failed` event, the
-  reload behavior (D10), and the § 6 limits. Correct line 132: the IdP link carries `?returnTo=`.
+  reload behavior (D10), and the § 6 limits. Correct lines 129–130 and 132–133: the IdP link carries `?returnTo=`.
   Extend the ingress and mesh warning (SMA-653 § 8) to this 503.
 - SMA-506 design: add one line to § 7.1 that points to this spec (for the discovery row and for
   the token-exchange row, which now excludes a discovery failure), and add `oidc.discovery_failed`
-  to the § 12 event list, as SMA-626 and SMA-653 did.
+  to the § 12 event list, as SMA-626 did. (SMA-653 added only a § 7.2 pointer.)
 
 ## 8. Out of scope
 
