@@ -1,10 +1,11 @@
-# SMA-656: `/auth/login` gives a 503, not a 500, when OIDC discovery fails
+# SMA-656: `/auth/login` and `/auth/callback` give a 503 when OIDC discovery fails
 
 - Linear: SMA-656
 - Date: 2026-09-26
 - Package: `ts/packages/paigasus-auth`
 - Related: SMA-506 (auth design, § 7.1, § 12), SMA-653 (store 503, § 9 follow-up A), SMA-657 (D4, D7)
-- Revision 2: the adversarial challenge findings are in (see § 9).
+- Revision 3: the adversarial challenge findings are in (see § 9). The callback's discovery failure
+  is in scope, at the issue owner's request at GATE 1 (D10).
 
 ## 1. The problem
 
@@ -15,6 +16,13 @@ The code does not do this. `handleLogin` in `src/http/routes.ts` calls
 call. A discovery failure goes out of `handleLogin` and out of `createAuthRoutes.handle`.
 `createAuthRouteHandler` in `src/server.ts` catches only `CallbackRejected`, so it throws the error
 again, and Next returns its default 500.
+
+The callback has a second form of the same gap. `handleCallback` calls
+`runtime.oidc.authorizationCodeGrant`, which also runs `getConfig()` first. Its catch maps every
+error to `code_exchange_failed`, and `src/server.ts` answers that with a plain-text 502 and no retry
+link. The `login.callback_rejected { reason: 'code_exchange_failed' }` event looks the same as a
+failure at the token endpoint. The callback can reach a process that has not done discovery: the
+login ran on another pod, or the process restarted between the login and the callback.
 
 **When this path occurs.** The adapter keeps the discovered `Configuration` for the life of the
 process (`configPromise ??= …` in `src/adapters/oidc.ts`). Only a failed discovery clears it. So
@@ -29,6 +37,8 @@ that behavior. § 6 records it as a known limit.
 - A1. A discovery failure in `buildAuthorizationUrl` gives a 503 with a retry affordance.
 - A2. No error object and no URL from the OIDC library gets into the response or a log.
 - A3. A test proves the mapping.
+- A4 (added at GATE 1). A discovery failure in the callback's `authorizationCodeGrant` also gives a
+  503 with a retry affordance, and not the `code_exchange_failed` 502.
 
 ## 3. Decisions
 
@@ -48,6 +58,8 @@ that behavior. § 6 records it as a known limit.
   say "did not answer", because that is false for a 404 or an issuer mismatch.
   A failure AFTER discovery, `oidc build_authorization_url failed` (the discovered metadata has no
   `authorization_endpoint`), stays a plain `Error` and a 500.
+  In the callback, a failure after discovery (the token endpoint fails or refuses the code) stays
+  `code_exchange_failed` and the 502.
 - **D3. The error message does not change.** `OidcDiscoveryFailed`'s message is
   `oidc discovery failed: <ErrorName>`, the same text that `wrapError('discovery', …)` makes today.
   It holds only the library error's `name`. The adapter does NOT set `cause` on the new error: the
@@ -75,8 +87,8 @@ that behavior. § 6 records it as a known limit.
   is the D9 reason: a link to `/auth/login` from a signed-in browser would delete a session that is
   still valid when the IdP recovers.
 - **D7. One new log event, `oidc.discovery_failed`, with the fields `{ zone, stage, reason }`.**
-  `stage` is a closed union with one value today, `'login'`, in the same shape as
-  `store.unavailable`'s `stage`. A later callback or refresh stage then needs no new event name.
+  `stage` is a closed union, `'login' | 'callback'`, in the same shape as `store.unavailable`'s
+  `stage`. A later refresh or logout stage then needs no new event name.
   The event does not use `store.unavailable`, because an operator must tell a Redis fault from an
   IdP fault. The event never carries the caught error, its message, its name or a URL.
   **Meaning of the event:** "this process has no discovered configuration, and a login needed
@@ -104,6 +116,27 @@ that behavior. § 6 records it as a known limit.
 - **D9. No store call and no state change on this path.** The discovery failure happens before
   `putTransaction` and before the session delete. The session record and the session cookie stay
   as they were. `login.started` is not logged.
+- **D10. The callback maps a discovery failure to a 503 that starts a new login.** In
+  `handleCallback`, the existing catch around `authorizationCodeGrant` checks
+  `isOidcDiscoveryFailed` first. For that error it logs `oidc.discovery_failed { zone, stage:
+  'callback', reason }` and returns the IdP 503 with the link
+  `loginRetryHref(basePath, tx.returnTo)`. Every other error still gives
+  `reject('code_exchange_failed')`, as today. The facts that decide this:
+  - `takeTransaction` has already consumed the transaction, so a retry of the callback URL would
+    give `state_unknown`. The retry must start a new login. SMA-653 row 3 has the same rule.
+  - `getConfig()` runs before the token request, so on this path the authorization code is NOT
+    spent, and no tokens exist. No revoke is necessary (SMA-653 D10 does not apply).
+  - The retry keeps `tx.returnTo`, which passed validation at login. The D9 concern (a retry link to
+    `/auth/login` deletes a valid session) does not apply here: the browser is already in a login
+    that replaces its session, and `handleLogin` already deleted the old record at the start.
+  - No `login.callback_rejected` event is logged, because the callback was not rejected. The
+    `code_exchange_failed` event stays for a real token-endpoint failure, so the two are now
+    different in the log.
+  - No `Set-Cookie` (SMA-653 D4). The transaction cookie stays in the browser. Its transaction is
+    gone, and the next successful callback clears it, or the `MAX_OUTSTANDING_TXN_COOKIES`
+    rotation removes it. This is the SMA-653 row 3 behavior.
+  - `Referrer-Policy: no-referrer` matters on this row: the page is served at
+    `/auth/callback?code=…&state=…`, and the code is not spent.
 
 ## 4. Design
 
@@ -172,7 +205,7 @@ The implementation plan must read each of these sites again before it changes th
 ### 4.3 `src/ports/logger.ts`
 
 - Add `'oidc.discovery_failed'` to `AuthEventName`.
-- Add `export type OidcDiscoveryStage = 'login';` next to `StoreUnavailableStage`.
+- Add `export type OidcDiscoveryStage = 'login' | 'callback';` next to `StoreUnavailableStage`.
 
 ### 4.4 `src/http/store-unavailable.ts`
 
@@ -207,6 +240,23 @@ The implementation plan must read each of these sites again before it changes th
    list. (`retry` is always a `link` in `handleLogin`. The plan may type it as the `link` variant
    and drop the conditional.)
 3. Everything after the call stays the same.
+
+### 4.6 `src/http/routes.ts` (`handleCallback`)
+
+Change the bare `catch` around `authorizationCodeGrant` to:
+
+```ts
+} catch (err) {
+  if (isOidcDiscoveryFailed(err)) {
+    runtime.logger.event('oidc.discovery_failed', { zone: runtime.zone, stage: 'callback', reason: discoveryReason(err) });
+    return storeUnavailableResponse({ kind: 'link', href: loginRetryHref(runtime.basePath, tx.returnTo), service: 'identity_provider' });
+  }
+  return reject('code_exchange_failed');
+}
+```
+
+The comment above the catch states the D10 facts: the code is not spent, and no revoke is needed.
+`discoveryReason` is shared with `handleLogin`.
 
 ## 5. Tests (Vitest)
 
@@ -245,6 +295,22 @@ with today's strings as the default, so the SMA-653 rows do not change.
 - T7. A `reason` outside the closed list (for example `'https://idp.invalid/x'`) is logged as
   `'other'`.
 
+### 5.1b Callback route tests (the same new file)
+
+Add a field `codeGrantError?: Error` to `FakeOidc`. When it is set, `authorizationCodeGrant`
+rejects with it. Each row first stores a transaction and sends its cookie, so the callback reaches
+the code exchange.
+
+- T12. `authorizationCodeGrant` rejects with `OidcDiscoveryFailed` → 503, the IdP sentence, the
+  link is `/iam/auth/login?returnTo=<encoded tx.returnTo>`, all D5 headers, no `Set-Cookie`. It does
+  NOT throw `CallbackRejected`.
+- T13. For T12: exactly one event, `oidc.discovery_failed { zone: 'iam', stage: 'callback', reason }`;
+  no `login.callback_rejected`; no `session.created`; no store call after `takeTransaction`; no
+  revoke call; no sentinel byte in the body, a header or a logged field.
+- T14. A plain `Error` from `authorizationCodeGrant` still gives `CallbackRejected` with reason
+  `code_exchange_failed` and the `login.callback_rejected` event, as today.
+- T15. An `OidcDiscoveryFailed` from a second module copy gives the T12 503.
+
 ### 5.2 Builder tests
 
 - T8. `storeUnavailableResponse({ kind: 'link', href, service: 'identity_provider' })` holds the IdP
@@ -268,6 +334,9 @@ with today's strings as the default, so the SMA-653 rows do not change.
 - T11. `tests/http/route-handler.test.ts` already builds a real `createOidcClient`. Add one row with
   the issuer `http://127.0.0.1:1` and `allowInsecureRequests: true`. A GET to `/auth/login` through
   `createAuthRouteHandler` gives a 503. This covers the place where the defect occurs today.
+- T16. The same file, the callback: store a transaction in the runtime's store, then send a GET to
+  `/auth/callback?code=x&state=<txnId>` with its cookie through `createAuthRouteHandler`, with the
+  unreachable issuer. The answer is a 503, not the `login failed` 502.
 
 ### 5.5 Proof that the tests bite
 
@@ -276,11 +345,14 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
 | Mutation | Must fail |
 |---|---|
 | Delete the catch in `handleLogin` | T1–T4, T6, T7, T11 |
+| Delete the `isOidcDiscoveryFailed` branch in `handleCallback` | T12, T13, T15, T16 |
+| The callback branch catches every error | T14 |
+| The callback branch also calls `reject(...)` before it returns | T13 |
 | Catch every error (remove the `isOidcDiscoveryFailed` guard) | T5 |
-| `isOidcDiscoveryFailed` always returns `false` | T1, T2, T6, T11 |
+| `isOidcDiscoveryFailed` always returns `false` | T1, T2, T6, T11, T12, T15, T16 |
 | Put `String(err)` into the event fields | T4 |
 | Change the default `service` to `'identity_provider'` | T0 |
-| Adapter goes back to `wrapError('discovery', …)` | T9, T11 |
+| Adapter goes back to `wrapError('discovery', …)` | T9, T11, T16 |
 | Adapter sets `cause: err` | T9 |
 | `classifyDiscoveryError` always returns `'other'` | T9 |
 
@@ -297,21 +369,22 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
 - `src/http/routes.ts` header (around lines 27–31): it says the store failure is THE exception and
   that every other error propagates. Add the discovery failure as the second exception.
 - `src/server.ts` (around lines 85–86): it names only the store 503 as the response that passes
-  through. Add the discovery 503.
+  through. Add the discovery 503. The comment on the `code_exchange_failed` 502 must say that a
+  discovery failure no longer reaches it.
+- `src/http/routes.ts`, the comment at the `authorizationCodeGrant` catch (D10).
 - `src/adapters/oidc.ts` header (around lines 18–20): it says every method rethrows through
   `wrapError`. Add that a discovery failure is an `OidcDiscoveryFailed` with a closed `reason`.
 - `README.md` (around lines 123–142): describe the discovery 503, its `reason` values, the
   `oidc.discovery_failed` event, and the § 6 limits. Extend the ingress and mesh warning (SMA-653 §
   8) to this 503.
-- SMA-506 design: add one line to § 7.1 that points to this spec, and add `oidc.discovery_failed`
+- SMA-506 design: add one line to § 7.1 that points to this spec (for the discovery row and for
+  the token-exchange row, which now excludes a discovery failure), and add `oidc.discovery_failed`
   to the § 12 event list, as SMA-626 and SMA-653 did.
 
 ## 8. Out of scope
 
-- The callback's discovery failure. It gives a 502 in plain text through `code_exchange_failed`,
-  and its event looks the same as a token-endpoint failure. A follow-up issue records it (see the
-  gate question).
-- Logout. It already falls back when discovery fails.
+- A discovery failure in the refresh path (it stays a transient failure) and in logout (it already
+  falls back).
 - A rename of `storeUnavailableResponse`, `STORE_UNAVAILABLE_CSP` or `expectStoreUnavailable`.
 - A change to the heading or to the logout page text.
 - A Playwright e2e test with an IdP that is down. T11 covers the Next boundary.
@@ -338,6 +411,10 @@ Folded in:
   `link` variant only.
 - No test through the real adapter and the Next boundary → T11.
 - The event shape → `oidc.discovery_failed { zone, stage, reason }`, as the challenger asked.
+
+Added at GATE 1 (the issue owner's decision):
+
+- The callback's discovery failure → A4, D10, § 4.6, T12–T16. It was out of scope in revision 2.
 
 Not changed:
 
