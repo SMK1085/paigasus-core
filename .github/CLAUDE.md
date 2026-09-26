@@ -260,9 +260,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - Each image releases through **its own chain** in `release.yml`: `images-build-<key>` →
   `approve-images-<key>` → `publish-images-<key>` → `tag-<key>`, for `iam`, `gateway`,
   `iam-console` and `gateway-console` (SMA-688). `ci/images/chains.toml` is the one registry of
-  the chain keys, their kind, version file, changelog and image names; `release_plan.py`,
-  `release_decision.py`, `helm_render.py` and `release_guard.py` read it, and V16 asserts that
-  `release.yml` and `CHAIN_APPROVALS` agree with it. `iam` is a string prefix of `iam-console`:
+  the chain keys, their kind, version file, changelog and image names.
+  `release_plan.py`, `release_decision.py`, `helm_render.py` and `release_guard.py` read it.
+  V16 asserts that `release.yml` and `CHAIN_APPROVALS` agree with it.
+  `iam` is a string prefix of `iam-console`:
   a chain selects its jobs and artifacts by exact name, never by a prefix or a glob (V17).
   The chains are independent of the kernel chain and of each other, so a kernel-only release, an
   image-only release and a combined release all work, and a failed image chain does not stop the
@@ -285,9 +286,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   recovery. `:<major>.<minor>` and `:latest` move only forward, compared as numbers. `:<major>`
   moves the same way, but only once the service leaves `0.x` — a `0.x` release writes no
   `:<major>` tag at all.
-- A service or console version is set **by hand**, in a normal pull request, with a
-  `CHANGELOG.md` section, and update the tag in `charts/paigasus/values.yaml`; row 8 fails
-  otherwise. A console's version source is the `version` field of `ts/apps/<app>/package.json`
+- A person sets a service or console version **by hand**, in a normal pull request. The pull
+  request adds a `CHANGELOG.md` section. It also updates the image tag in
+  `charts/paigasus/values.yaml`. Row 8 of `repo:helm-render` fails when the tag differs.
+  A console's version source is the `version` field of `ts/apps/<app>/package.json`
   (SMA-688 D1).
   The two service crates are `publish = false` and sit in no `version_group`, so `release-plz
   update` never sees them, and `git_only` hard-errors on the second release because each has an
