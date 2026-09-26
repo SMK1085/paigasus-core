@@ -150,6 +150,18 @@ describe('createOidcClient — the rest of the surface', () => {
     expect(req.codeVerifier.length).toBeGreaterThan(0);
   });
 
+  // Final fix M4 (D2). Pins the DEFAULT authorization URL's full key set: no PAIGASUS_OIDC_
+  // AUTHORIZATION_AUDIENCE injected, so no `audience` key. Derived from the pre-SMA-692 params
+  // (git show 2346451d:.../adapters/oidc.ts — redirect_uri, scope, code_challenge,
+  // code_challenge_method, state, nonce) plus what openid-client itself adds (client_id,
+  // response_type). A future param added to the request without updating this row must red it.
+  it('buildAuthorizationUrl carries exactly the pre-SMA-692 key set when no audience is injected', async () => {
+    const oidc = makeClient();
+    const req = await oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE });
+    const url = new URL(req.url);
+    expect([...url.searchParams.keys()].sort()).toEqual(['client_id', 'code_challenge', 'code_challenge_method', 'nonce', 'redirect_uri', 'response_type', 'scope', 'state']);
+  });
+
   it('refresh exchanges a refresh token for new tokens', async () => {
     const oidc = makeClient();
     const refreshed = await oidc.refresh('some-refresh-token');
