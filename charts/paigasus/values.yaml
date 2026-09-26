@@ -43,6 +43,27 @@ zones:
       # rolls. Without it a stale pod keeps the old pepper and keeps accepting API keys
       # that a rotated pod rejects, so rotation does not revoke them consistently.
       apiKeysSecretVersion: ""
+      # NOT required. The first platform administrators (SMA-697). Each entry is an
+      # {issuer, subject} pair. IAM grants platform_admin at Root scope to that identity after its
+      # first login (authz.bootstrap_admins). Without an entry, IAM denies every action to every
+      # user, and no user can grant a role. The chart renders the list into
+      # IAM_AUTHZ__BOOTSTRAP_ADMINS.
+      #   issuer   must equal oidc.issuer. IAM compares the pair as exact strings, so an entry
+      #            with another issuer never matches.
+      #   subject  the IdP's "sub" claim for that user. Quote it: a subject of digits only is a
+      #            number in YAML, and the chart refuses a number.
+      # Example:
+      #   bootstrapAdmins:
+      #     - issuer: https://idp.example.com
+      #       subject: "392488538992280259"
+      # A change rolls the IAM pod. Removing an entry does NOT revoke a grant that IAM already
+      # made. See docs/ops/RUNBOOK-chart.md.
+      bootstrapAdmins: []
+      # NOT required. More env entries for the IAM backend container, as Kubernetes EnvVar
+      # objects (name plus value or valueFrom). The chart appends them after its own entries.
+      # Example: [{name: RUST_LOG, value: "paigasus_iam=debug,info"}]. The chart refuses a name
+      # that it sets itself (see docs/ops/RUNBOOK-chart.md). A change rolls the IAM pod.
+      extraEnv: []
   gateway:
     enabled: false
     basePath: /gateway

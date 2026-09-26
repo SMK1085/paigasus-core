@@ -135,6 +135,16 @@ spec:
             - name: IAM_AUTHN__EXTRA_CA_BUNDLE_PATH
               value: {{ printf "%s/%s" (include "paigasus.idpCaMountPath" $root) (include "paigasus.idpCaKey" $root) | quote }}
 {{- end }}
+{{- with include "paigasus.iamBootstrapAdmins" $root }}
+            # zones.iam.backend.bootstrapAdmins (SMA-697): authz.bootstrap_admins. IAM grants
+            # platform_admin at Root to each (issuer, subject) after its first login.
+            - name: IAM_AUTHZ__BOOTSTRAP_ADMINS
+              value: {{ . | quote }}
+{{- end }}
+{{- with dig "extraEnv" list $z.backend }}
+            # zones.iam.backend.extraEnv (SMA-697), appended after the chart's own entries.
+{{ toYaml . | indent 12 }}
+{{- end }}
           startupProbe:          # sized for config load + Database::connect ONLY. SMA-571 removed
             httpGet:             # the coupling to IAM_MIGRATION__LOCK_WAIT_SECS entirely.
               path: /healthz

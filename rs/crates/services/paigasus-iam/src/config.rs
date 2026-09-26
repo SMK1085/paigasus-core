@@ -1502,6 +1502,64 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_admins_env_in_the_chart_form_parses() {
+        // SMA-697: the exact string that charts/paigasus renders into IAM_AUTHZ__BOOTSTRAP_ADMINS
+        // for zones.iam.backend.bootstrapAdmins. It is the same inline form as IAM_AUTHN__ISSUERS.
+        // The subject is digits only, as Zitadel issues it. The chart quotes it with %q.
+        let issuer = "https://idp.example.test/realms/paigasus";
+        let admins = format!(r#"[{{issuer="{issuer}",subject="392488538992280259"}},{{issuer="{issuer}",subject="second-admin"}}]"#);
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+            jail.set_env("IAM_AUTHN__ISSUERS", format!(r#"[{{issuer="{issuer}",audiences=["paigasus-console"]}}]"#));
+            jail.set_env("IAM_AUTHZ__BOOTSTRAP_ADMINS", &admins);
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(
+                cfg.authz.bootstrap_admins,
+                vec![
+                    BootstrapAdmin {
+                        issuer: issuer.to_string(),
+                        subject: "392488538992280259".to_string()
+                    },
+                    BootstrapAdmin {
+                        issuer: issuer.to_string(),
+                        subject: "second-admin".to_string()
+                    },
+                ]
+            );
+            // The env key sets one field of [authz]. The other fields keep their defaults.
+            assert_eq!(cfg.authz.refresh_interval_secs, AuthzConfig::default().refresh_interval_secs);
+            assert!(cfg.validate().is_ok(), "the chart's bootstrap admin string must pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn bootstrap_admins_env_without_quotes_or_with_indexed_keys_does_not_load() {
+        // SMA-697: the two forms the chart must NOT render. Without quotes, figment reads a
+        // subject of digits as a number, and the extract fails. Indexed keys make a map with the
+        // key "0", not a list, and the extract fails too.
+        let issuer = "https://idp.example.test/realms/paigasus";
+        let unquoted = format!(r#"[{{issuer="{issuer}",subject=392488538992280259}}]"#);
+        let cases: [&[(&str, &str)]; 2] = [
+            &[("IAM_AUTHZ__BOOTSTRAP_ADMINS", unquoted.as_str())],
+            &[("IAM_AUTHZ__BOOTSTRAP_ADMINS__0__ISSUER", issuer), ("IAM_AUTHZ__BOOTSTRAP_ADMINS__0__SUBJECT", "admin-sub")],
+        ];
+        for vars in cases {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+                jail.set_env("IAM_AUTHN__ISSUERS", format!(r#"[{{issuer="{issuer}",audiences=["paigasus-console"]}}]"#));
+                for (key, value) in vars {
+                    jail.set_env(key, value);
+                }
+                assert!(IamConfig::figment().extract::<IamConfig>().is_err(), "{vars:?} must not load");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
     fn missing_issuers_is_a_load_error() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
