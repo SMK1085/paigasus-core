@@ -19,10 +19,11 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
   lines 1892-1897). Change both pins in one commit, or `repo:affected-smoke` goes red.
 - **A new chart script under `tests/` runs in CI through the `tests/*.sh` glob.** Raise the floor
   with it, and fix the counts in `ci/helm-render/README.md` and `helm_render.py`.
-- **Four negative-control fixtures are whole-file copies** of `templates/_helpers.tpl` (two) and
-  `templates/console-deployment.yaml` (two), under `ci/helm-render/fixtures/`. An edit to either
-  live file must re-sync them in the SAME commit, keeping each mutation. A stale `_helpers.tpl`
-  fixture has none of the new helpers, so its renders fail and the control reports INCONCLUSIVE.
+- **Five negative-control fixtures are whole-file copies:** of `templates/_helpers.tpl` (two),
+  `templates/console-deployment.yaml` (two) and `Chart.yaml` (one, `app-version-unreleased`),
+  under `ci/helm-render/fixtures/`. An edit to any of these live files must re-sync them in the
+  SAME commit, keeping each mutation. A stale `_helpers.tpl` fixture has none of the new helpers,
+  so its renders fail and the control reports INCONCLUSIVE.
 - **A YAML comment in a template renders into the manifest,** so it is part of the golden files.
   Put a comment for a conditional block INSIDE the `{{- if }}` block, or the default render and the
   goldens change.
@@ -33,4 +34,5 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
 - **Each default image tag is pinned to its image version.** `repo:helm-render` row 8a compares
   every `image.tag` in `values.yaml` with the version file that `ci/images/chains.toml` names
   (SMA-688). A version bump updates the tag in the same PR. An empty tag falls back to
-  `appVersion` (`0.0.0`), which names no published image.
+  `appVersion` (`0.1.0`). Row 8c requires a git tag `paigasus-<key>-v<appVersion>` for every chain
+  (SMA-696). Move `appVersion` in a later PR, after every chain released that version.

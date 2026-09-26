@@ -16,7 +16,7 @@ zones:
         repository: ghcr.io/smk1085/paigasus-iam-console
         # Pinned to the image version in ts/apps/iam-console/package.json (SMA-688). A version
         # bump updates this tag in the same PR; repo:helm-render row 8a fails otherwise. An empty
-        # tag falls back to .Chart.AppVersion, which names no published image.
+        # tag falls back to .Chart.AppVersion, a version every image released (row 8c).
         tag: "0.1.0"
       replicas: 2
     backend:
@@ -65,7 +65,8 @@ zones:
         repository: ghcr.io/smk1085/paigasus-gateway
         # Pinned to the image version in rs/crates/services/paigasus-gateway/Cargo.toml
         # (SMA-688). This chart does not render it today; the pin stops a later chart that
-        # deploys it from falling back to 0.0.0. repo:helm-render row 8a fails when the two differ.
+        # deploys it from falling back to an older appVersion.
+        # repo:helm-render row 8a fails when the two differ.
         tag: "0.1.0"
       httpPort: 8088
       # Genuinely missing from the original schema (SMA-513 Task 11) — the gateway backend is
