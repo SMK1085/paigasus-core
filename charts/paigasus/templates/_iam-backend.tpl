@@ -23,12 +23,14 @@ The form is the figment inline form that IAM_AUTHN__ISSUERS uses. Each string is
 without quotes figment reads a subject of digits only as a number, and IAM does not boot.
 The test bootstrap_admins_env_in_the_chart_form_parses in
 rs/crates/services/paigasus-iam/src/config.rs parses this exact form. paigasus.validate has
-already refused an entry that is not two strings.
+already refused an entry that is not two strings. The issuer is rendered trimmed, the same value
+that the validation compares with oidc.issuer. The subject is rendered as written: IAM does not
+trim a subject, and the match is exact.
 */}}
 {{- define "paigasus.iamBootstrapAdmins" -}}
 {{- $entries := list -}}
 {{- range (dig "bootstrapAdmins" list .Values.zones.iam.backend) -}}
-{{- $entries = append $entries (printf "{issuer=%q,subject=%q}" .issuer .subject) -}}
+{{- $entries = append $entries (printf "{issuer=%q,subject=%q}" (trim .issuer) .subject) -}}
 {{- end -}}
 {{- if $entries -}}
 {{- printf "[%s]" (join "," $entries) -}}

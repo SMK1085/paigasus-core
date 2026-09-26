@@ -439,14 +439,17 @@ fi
 #                   digits only stays a quoted string. config.rs parses this exact form in
 #                   bootstrap_admins_env_in_the_chart_form_parses.
 #   B4 two-admins   Two entries, in values order, joined by a comma.
-#   B5 extra-env    The extraEnv entries are the LAST entries, in values order, unchanged.
+#   B4b padded-issuer
+#                   An issuer with spaces renders trimmed: the value the validation compared.
+#   B5 extra-env    The extraEnv entries are the LAST entries, in values order, unchanged. The
+#                   whole entries are compared, value and valueFrom included.
 #   B6 reserved     With every optional chart entry on, the chart's own IAM env names EQUAL
 #                   paigasus.iamReservedEnv, so the extraEnv refusal knows every chart name.
-#   B7 restart-scope
-#                   Each value changes the IAM pod template and no console pod template.
+#   B7a, B7b restart-scope
+#                   Each value, alone, changes the IAM pod template and no console pod template.
 # A fourth row counter reds the script when a B row call line is deleted.
 BOOT_ROWS=0
-BOOT_ROWS_WANT=7
+BOOT_ROWS_WANT=9
 ISS=https://idp.example.test/realms/paigasus
 ADMIN0=zones.iam.backend.bootstrapAdmins[0]
 ADMIN1=zones.iam.backend.bootstrapAdmins[1]
@@ -462,8 +465,8 @@ check_boot() {
   if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/boot.yaml" 2>"$TMP/boot.err"; then
     echo "FAIL [$label]: render failed"; cat "$TMP/boot.err"; ec=1; return 0
   fi
-  if ! out="$(ADMINS="$admins" EXTRA="$extra" NAMES="$names" python3 -c '
-import os, sys, yaml
+  if ! out="$(ADMINS="$admins" EXTRA="$extra" NAMES="$names" EXTRA_JSON="${EXTRA_JSON:-}" python3 -c '
+import json, os, sys, yaml
 with open(sys.argv[1]) as fh:
     docs = [d for d in yaml.safe_load_all(fh) if d]
 problems = []
@@ -478,6 +481,10 @@ else:
     got_extra = [e.get("name") for e in env[len(own):]]
     if got_extra != extra:
         problems.append("the last env names are " + repr(got_extra) + ", want " + repr(extra))
+    elif os.environ.get("EXTRA_JSON"):
+        want_entries = json.loads(os.environ["EXTRA_JSON"])
+        if env[len(own):] != want_entries:
+            problems.append("the extraEnv entries are " + repr(env[len(own):]) + ", want " + repr(want_entries))
     admins = [e for e in own if e.get("name") == "IAM_AUTHZ__BOOTSTRAP_ADMINS"]
     if os.environ["ADMINS"] == "-":
         if admins:
@@ -543,12 +550,16 @@ check_boot "B3 one-admin" "[{issuer=\"$ISS\",subject=\"392488538992280259\"}]" -
 check_boot "B4 two-admins" "[{issuer=\"$ISS\",subject=\"a\"},{issuer=\"$ISS\",subject=\"b\"}]" - \
   "$CHART_NAMES IAM_AUTHZ__BOOTSTRAP_ADMINS" \
   --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=a" --set "$ADMIN1.issuer=$ISS" --set "$ADMIN1.subject=b"
+EXTRA_JSON='[{"name": "RUST_LOG", "value": "paigasus_iam=debug,info"}, {"name": "PAIGASUS_PROBE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}]' \
 check_boot "B5 extra-env" - "RUST_LOG PAIGASUS_PROBE" "$CHART_NAMES" \
   --set "$EXTRA0.name=RUST_LOG" --set "$EXTRA0.value=paigasus_iam=debug\,info" \
   --set "$EXTRA1.name=PAIGASUS_PROBE" --set "$EXTRA1.valueFrom.fieldRef.fieldPath=metadata.name"
+check_boot "B4b padded-issuer" "[{issuer=\"$ISS\",subject=\"a\"}]" - \
+  "$CHART_NAMES IAM_AUTHZ__BOOTSTRAP_ADMINS" \
+  --set-string "$ADMIN0.issuer= $ISS " --set "$ADMIN0.subject=a"
 check_boot_reserved "B6 reserved"
-check_boot_restart "B7 restart-scope" \
-  --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=s" --set "$EXTRA0.name=RUST_LOG" --set "$EXTRA0.value=info"
+check_boot_restart "B7a restart-scope-admins" --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=s"
+check_boot_restart "B7b restart-scope-extra-env" --set "$EXTRA0.name=RUST_LOG" --set "$EXTRA0.value=info"
 
 if [ "$BOOT_ROWS" -lt "$BOOT_ROWS_WANT" ]; then
   echo "FAIL [bootstrap rows]: $BOOT_ROWS bootstrap row(s) ran, want $BOOT_ROWS_WANT"; ec=1
