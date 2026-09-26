@@ -11,6 +11,9 @@
 //! the RS256 accept-path coverage the ES256-only in-process mock IdP could not exercise
 //! (spec §8).
 //!
+//! SMA-690: the test also gets a DPoP-bound token from the same client and asserts that IAM
+//! refuses it as SenderConstrained.
+//!
 //! Docker gating is the single policy owned by `tests/support/docker.rs`'s `start_or_skip`
 //! (SMA-538), not restated here — notably, this suite's 240-second Keycloak startup timeout is
 //! now a hard failure locally too, not the fast skip it used to be: a container failure against
@@ -32,6 +35,11 @@ mod support;
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use jsonwebtoken::jwk::Jwk;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use p256::elliptic_curve::Generate;
+use p256::elliptic_curve::sec1::ToSec1Point;
+use p256::pkcs8::{EncodePrivateKey, LineEnding};
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::entities::user;
 use paigasus_iam::application::authenticate_token::Provisioning;
@@ -39,6 +47,7 @@ use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, 
 use paigasus_iam_core::{AuthnError, TokenDefect};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
+use sha2::Digest;
 use std::time::Duration;
 use support::{provision_platform_admin, send, start_migrated_postgres};
 use testcontainers_modules::testcontainers::core::IntoContainerPort;
@@ -160,6 +169,38 @@ async fn keycloak_end_to_end_config_only_oidc() {
     let header: Value = serde_json::from_slice(&header_bytes).expect("json header");
     assert_eq!(header["alg"], "RS256", "keycloak access token must be RS256");
 
+    // SMA-690 AC 2: Keycloak's plain Bearer access token has no `cnf`.
+    assert!(access_claims.get("cnf").is_none(), "keycloak Bearer access token must carry no cnf: {access_claims}");
+
+    // SMA-690 AC 1: a DPoP-bound token from the SAME client. Keycloak binds a token when the
+    // client sends a DPoP proof, with no client setting (measurement M2).
+    let (dpop_key, dpop_x, dpop_y) = dpop_keypair();
+    let dpop_response = http
+        .post(&token_url)
+        .header("DPoP", dpop_proof(&dpop_key, &dpop_x, &dpop_y, "POST", &token_url))
+        .form(&[
+            ("grant_type", "password"),
+            ("client_id", "paigasus-cli"),
+            ("username", "alice"),
+            ("password", "alice-password"),
+            ("scope", "openid"),
+        ])
+        .send()
+        .await
+        .expect("DPoP token request");
+    let dpop_status = dpop_response.status();
+    let dpop_body: Value = dpop_response.json().await.expect("DPoP token response json");
+    assert!(dpop_status.is_success(), "DPoP password grant failed ({dpop_status}): {dpop_body}\n{}", dump_logs(&keycloak).await);
+    assert_eq!(dpop_body["token_type"], "DPoP", "keycloak must answer a DPoP proof with token_type DPoP: {dpop_body}");
+    let dpop_token = dpop_body["access_token"].as_str().expect("access_token in DPoP token response").to_string();
+    let dpop_claims = jwt_payload(&dpop_token);
+    assert_eq!(dpop_claims["typ"], "DPoP", "keycloak DPoP-bound access token must carry typ=DPoP: {dpop_claims}");
+    assert_eq!(
+        dpop_claims["cnf"]["jkt"],
+        jwk_thumbprint(&dpop_x, &dpop_y),
+        "cnf.jkt must be the RFC 7638 thumbprint of the proof key: {dpop_claims}"
+    );
+
     // Config-only: point the wired service at the container's issuer. `accept_invalid_tls` is
     // the sole concession to the self-signed dev cert — it is still a plain config flag.
     let cfg = keycloak_config(&issuer);
@@ -183,6 +224,20 @@ async fn keycloak_end_to_end_config_only_oidc() {
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(body["error"]["code"], "invalid-token", "{body}");
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": id_token })), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["code"], "invalid-token", "{body}");
+
+    // SMA-690 AC 1: the bound token is refused as SenderConstrained (the defect proves the cause;
+    // every defect renders the same 401).
+    let err = state.authn.resolve(&dpop_token, Provisioning::Enabled).await.expect_err("a DPoP-bound token must not authenticate");
+    assert!(
+        matches!(err, AuthnError::InvalidToken(TokenDefect::SenderConstrained)),
+        "DPoP-bound token must be refused as SenderConstrained, got {err:?}"
+    );
+    let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "dpop", "name": "DPoP token" })), Some(&dpop_token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["code"], "invalid-token", "{body}");
+    let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": dpop_token })), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(body["error"]["code"], "invalid-token", "{body}");
 
@@ -285,6 +340,36 @@ fn jwt_payload(token: &str) -> Value {
     let segment = token.split('.').nth(1).expect("jwt has a payload segment");
     let bytes = URL_SAFE_NO_PAD.decode(segment).expect("base64url-decodable payload");
     serde_json::from_slice(&bytes).expect("json payload")
+}
+
+/// An EC P-256 key for a DPoP proof (SMA-690 spec § 5.3): the signing key and the public key's
+/// base64url `x` and `y` coordinates.
+fn dpop_keypair() -> (EncodingKey, String, String) {
+    let secret_key = p256::SecretKey::generate();
+    let pem = secret_key.to_pkcs8_pem(LineEnding::LF).expect("valid pkcs8 pem");
+    let encoding_key = EncodingKey::from_ec_pem(pem.as_bytes()).expect("valid ec pem");
+    let point = secret_key.public_key().to_sec1_point(false);
+    let x = URL_SAFE_NO_PAD.encode(point.x().expect("uncompressed point has x"));
+    let y = URL_SAFE_NO_PAD.encode(point.y().expect("uncompressed point has y"));
+    (encoding_key, x, y)
+}
+
+/// A DPoP proof (RFC 9449 § 4.2) for one request: header `typ: dpop+jwt`, `alg: ES256` and the
+/// public `jwk`; payload `jti`, `htm`, `htu` and `iat`.
+fn dpop_proof(key: &EncodingKey, x: &str, y: &str, htm: &str, htu: &str) -> String {
+    let jwk: Jwk = serde_json::from_value(json!({ "kty": "EC", "crv": "P-256", "x": x, "y": y })).expect("public EC jwk");
+    let mut header = Header::new(Algorithm::ES256);
+    header.typ = Some("dpop+jwt".to_string());
+    header.jwk = Some(jwk);
+    let jti = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
+    let claims = json!({ "jti": jti, "htm": htm, "htu": htu, "iat": chrono::Utc::now().timestamp() });
+    jsonwebtoken::encode(&header, &claims, key).expect("sign the DPoP proof")
+}
+
+/// The RFC 7638 SHA-256 thumbprint of a P-256 public key, from the literal canonical JSON.
+fn jwk_thumbprint(x: &str, y: &str) -> String {
+    let canonical = format!(r#"{{"crv":"P-256","kty":"EC","x":"{x}","y":"{y}"}}"#);
+    URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(canonical.as_bytes()))
 }
 
 /// Best-effort container stdout+stderr, for the failure panics only (realm-import errors and
