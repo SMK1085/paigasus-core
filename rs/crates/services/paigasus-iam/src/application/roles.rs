@@ -206,6 +206,13 @@ where
         Ok(())
     }
 
+    /// The grant of `role_key` to `principal` at `scope`, if one exists (SMA-676 D9). An exact
+    /// (principal, role, scope) filter: the duplicate key `uq_role_grant_principal_role_scope`.
+    async fn existing_grant(&self, principal: &PrincipalId, role_key: &str, scope: &GrantScope) -> Result<Option<RoleGrant>, TenancyError> {
+        let filter = RoleGrantFilter::new(Some(principal.clone()), Some(scope.clone()), Some(role_key.to_string()), None).ok_or(TenancyError::Internal)?;
+        Ok(self.query.find(&filter, 1, 0).await?.into_iter().next())
+    }
+
     /// Grants `role_key` to `principal_prn` at `scope_prn`. Order of checks: (1) the
     /// principal PRN parses; (2) `role_key` names a known system role (else `UnknownRole`);
     /// (3) `scope_prn` parses into a `GrantScope`; (4) the scope's `NodeKind` is one the role
@@ -224,6 +231,10 @@ where
     /// actually trips. Only after all six succeed is the grant minted; it is then committed
     /// atomically with its `DomainEvent`/`AuditEntry` (module docs, the UoW reference
     /// pattern), and only once that commit succeeds does the awaited `gen_bumper.bump()` run.
+    /// SMA-676 D9: after step 6, an existing grant for the same (principal, role, scope) is
+    /// returned with OK — no event, no audit row, no bump. If the insert loses a race
+    /// (AuthzError::DuplicateGrant), the transaction is dropped and the winner's grant is
+    /// returned.
     pub async fn grant(&self, actor: &Prn, principal_prn: &str, role_key: &str, scope_prn: &str) -> Result<RoleGrant, TenancyError> {
         let principal = parse_principal_prn(principal_prn)?;
         let role = authz_roles::role(role_key).ok_or_else(|| TenancyError::UnknownRole(role_key.to_string()))?;
@@ -234,6 +245,12 @@ where
 
         self.authorize.check(actor, Action::GrantRole, &scope_resource_prn(&scope)).await?;
         self.resolve_scope(&scope).await?;
+
+        // SMA-676 D9: idempotent. AFTER the authorization check, so a caller without
+        // `GrantRole` at the scope learns nothing about existing grants (§6).
+        if let Some(existing) = self.existing_grant(&principal, role.key.as_str(), &scope).await? {
+            return Ok(existing);
+        }
 
         let id = self.ids.new_membership_id();
         let now = self.clock.now();
@@ -270,7 +287,17 @@ where
         };
 
         let tx = self.uow.begin().await?;
-        self.grants.grant_in(&*tx, &grant).await?;
+        match self.grants.grant_in(&*tx, &grant).await {
+            Ok(()) => {}
+            // D9: a concurrent insert of the same (principal, role, scope) won. The database
+            // aborted this transaction; drop it (a rollback) and return the winner's grant.
+            // The winner already wrote its event and audit row and bumped policy_gen.
+            Err(paigasus_iam_core::AuthzError::DuplicateGrant) => {
+                drop(tx);
+                return self.existing_grant(&grant.principal, &grant.role_key, &grant.scope).await?.ok_or(TenancyError::Internal);
+            }
+            Err(e) => return Err(e.into()),
+        }
         self.outbox.enqueue(&*tx, &event).await?;
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
@@ -929,5 +956,112 @@ mod tests {
             ..by_principal(&principal_prn(1).canonical())
         };
         assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap().len(), 3);
+    }
+
+    /// A `RoleGrantStore` whose `grant_in` loses a concurrent-insert race: the winner's row
+    /// appears in the shared map, then the insert fails with `DuplicateGrant` (D9).
+    struct RaceLostGrantStore {
+        map: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, RoleGrant>>>,
+        winner: RoleGrant,
+    }
+
+    #[async_trait]
+    impl RoleGrantStore for RaceLostGrantStore {
+        async fn grant(&self, _g: &RoleGrant) -> Result<(), AuthzError> {
+            unimplemented!("this fake only exercises grant_in")
+        }
+        async fn revoke(&self, _id: Uuid) -> Result<(), AuthzError> {
+            unimplemented!("this fake only exercises grant_in")
+        }
+        async fn grant_in(&self, _tx: &dyn Transaction, _g: &RoleGrant) -> Result<(), AuthzError> {
+            self.map.lock().unwrap().insert(self.winner.id, self.winner.clone());
+            Err(AuthzError::DuplicateGrant)
+        }
+        async fn revoke_in(&self, _tx: &dyn Transaction, _id: Uuid) -> Result<bool, AuthzError> {
+            unimplemented!("this fake only exercises grant_in")
+        }
+        async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
+            Ok(Vec::new())
+        }
+        async fn list_by_principal(&self, _p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
+            Ok(Vec::new())
+        }
+        async fn find(&self, _id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+            Ok(None)
+        }
+    }
+
+    /// D9: a second grant of the same role at the same scope returns the FIRST grant with OK,
+    /// and writes no event, no audit row and no policy-generation bump.
+    #[tokio::test]
+    async fn a_second_grant_returns_the_existing_grant_and_emits_nothing() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::GrantRole, &root_prn());
+        let grants = InMemoryRoleGrants::default();
+        let query = InMemoryRoleGrantQuery::over(&grants, &TenancyStore::default());
+        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(fake, Arc::new(grants.clone()), Arc::new(query), TenancyStore::default());
+        let (actor, target) = (principal_prn(1), principal_prn(2));
+
+        let first = svc.grant(&actor, &target.canonical(), "platform_admin", &root_prn().canonical()).await.unwrap();
+        let second = svc.grant(&actor, &target.canonical(), "platform_admin", &root_prn().canonical()).await.unwrap();
+
+        assert_eq!(second, first, "D9: the existing grant, not a new one");
+        assert_eq!(grants.0.lock().unwrap().len(), 1);
+        assert_eq!(outbox.0.lock().unwrap().len(), 1, "only the first grant enqueues an event");
+        assert_eq!(audit.0.lock().unwrap().len(), 1, "only the first grant records an audit row");
+        assert_eq!(bumper.calls(), 1, "only the first grant bumps policy_gen");
+    }
+
+    /// D9, §6: the pre-check runs AFTER the authorization check, so an actor without
+    /// `GrantRole` at the scope learns nothing about an existing grant.
+    #[tokio::test]
+    async fn the_existing_grant_is_not_revealed_to_an_actor_without_grant_role() {
+        let grants = InMemoryRoleGrants::default();
+        let existing = RoleGrant {
+            id: Uuid::from_u128(55),
+            principal: PrincipalId::from_prn(principal_prn(2)),
+            role_key: "platform_admin".to_string(),
+            scope: GrantScope::Root,
+            linked_policy_id: "grant:55".to_string(),
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+        };
+        grants.0.lock().unwrap().insert(existing.id, existing);
+        let query = InMemoryRoleGrantQuery::over(&grants, &TenancyStore::default());
+        let svc = new_service_with_fakes(FakeAuthorizer::default(), Arc::new(grants), Arc::new(query), TenancyStore::default()).svc;
+        let err = svc
+            .grant(&principal_prn(1), &principal_prn(2).canonical(), "platform_admin", &root_prn().canonical())
+            .await
+            .unwrap_err();
+        assert_eq!(err, TenancyError::Forbidden);
+    }
+
+    /// D9 and Review Focus 4: a concurrent insert won. The transaction rolled back; `grant`
+    /// reads the winner's grant and returns it, and emits nothing of its own.
+    #[tokio::test]
+    async fn a_lost_insert_race_returns_the_winner_s_grant_and_emits_nothing() {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::GrantRole, &root_prn());
+        let shared = InMemoryRoleGrants::default();
+        let winner = RoleGrant {
+            id: Uuid::from_u128(777),
+            principal: PrincipalId::from_prn(principal_prn(2)),
+            role_key: "platform_admin".to_string(),
+            scope: GrantScope::Root,
+            linked_policy_id: "grant:777".to_string(),
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+        };
+        let store = RaceLostGrantStore {
+            map: shared.0.clone(),
+            winner: winner.clone(),
+        };
+        let query = InMemoryRoleGrantQuery::over(&shared, &TenancyStore::default());
+        let ServiceWithFakes { svc, outbox, audit, bumper } = new_service_with_fakes(fake, Arc::new(store), Arc::new(query), TenancyStore::default());
+
+        let got = svc.grant(&principal_prn(1), &principal_prn(2).canonical(), "platform_admin", &root_prn().canonical()).await.unwrap();
+
+        assert_eq!(got, winner);
+        assert!(outbox.0.lock().unwrap().is_empty(), "the loser enqueues no event");
+        assert!(audit.0.lock().unwrap().is_empty(), "the loser records no audit row");
+        assert_eq!(bumper.calls(), 0, "the loser does not bump; the winner already did");
     }
 }
