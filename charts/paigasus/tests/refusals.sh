@@ -113,6 +113,10 @@ expect_fail "authorizationAudience with oidc.audience empty" "while oidc.audienc
   --set oidc.authorizationAudience=paigasus-console
 expect_fail "authorizationAudience differs from oidc.audience" "does not equal oidc.audience" \
   --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://other
+# Final fix M3. @paigasus/auth refuses the same value at pod start on the same rule; the chart
+# must refuse it too, at render time, or an install can succeed while the console pod cannot.
+expect_fail "authorizationAudience with surrounding whitespace" "has leading or trailing whitespace" \
+  --set oidc.audience=api://paigasus --set "oidc.authorizationAudience= api://paigasus"
 # SMA-692 D9. The scope list must hold the token openid. openidx does not count.
 expect_fail "scopes without openid" "oidc.scopes must contain the scope openid" \
   --set "oidc.scopes=profile email offline_access"
@@ -122,6 +126,10 @@ expect_render "authorizationAudience equal to oidc.audience" \
   --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://paigasus
 expect_render "scopes with openid not first" \
   --set "oidc.scopes=profile email openid offline_access"
+# Final fix I1. A whitespace-only oidc.scopes normalizes to empty, which renders no key — not a
+# refusal, the same as an absent value.
+expect_render "scopes whitespace-only" \
+  --set "oidc.scopes=   "
 
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \

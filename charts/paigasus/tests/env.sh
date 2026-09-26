@@ -83,6 +83,14 @@
 #                   A change of oidc.scopes changes both console pod templates, not the IAM one.
 #   O6 restart-audience
 #                   A change of oidc.authorizationAudience does the same.
+#   O7 tab-scopes   oidc.scopes holds a tab between two tokens. The rendered value holds a single
+#                   space instead (final fix I1).
+#   O8 newline-scopes
+#                   oidc.scopes holds a trailing newline (a YAML block scalar). The rendered
+#                   value has no trailing whitespace, and no trailing separator.
+#   O9 whitespace-only-scopes
+#                   oidc.scopes holds only separator characters. It normalizes to empty, and
+#                   renders no key — the same as an absent value, not a refusal.
 # A fourth row counter reds the script when an O row call line is deleted.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -448,7 +456,7 @@ fi
 
 # The console OIDC values (SMA-692). Renders go to a file, as for check_audience.
 OIDC_ROWS=0
-OIDC_ROWS_WANT=6
+OIDC_ROWS_WANT=9
 API_SCOPES="openid profile email offline_access api://paigasus/access"
 
 # check_console_oidc <label> <scopes|-> <authorization audience|-> [helm args...]
@@ -533,6 +541,16 @@ check_console_oidc "O3 reuse-values-no-key" - - --set oidc.scopes=null --set oid
 check_console_oidc "O4 number"             - 123 --set oidc.audience=123 --set oidc.authorizationAudience=123
 check_console_oidc_restart "O5 restart-scopes"   scopes
 check_console_oidc_restart "O6 restart-audience" audience
+# Final fix I1. TAB_SCOPES and NEWLINE_SCOPES hold a raw separator @paigasus/auth's config.ts and
+# the chart both now normalize on the SAME explicit class ([\t\n\f\r ]), so the rendered value
+# never carries the operator's raw whitespace.
+TAB_SCOPES=$'openid\tprofile email offline_access'
+NEWLINE_SCOPES=$'openid profile email offline_access\n'
+check_console_oidc "O7 tab-scopes"     "openid profile email offline_access" - \
+  --set-string "oidc.scopes=$TAB_SCOPES"
+check_console_oidc "O8 newline-scopes" "openid profile email offline_access" - \
+  --set-string "oidc.scopes=$NEWLINE_SCOPES"
+check_console_oidc "O9 whitespace-only-scopes" - - --set-string "oidc.scopes=   "
 
 if [ "$OIDC_ROWS" -lt "$OIDC_ROWS_WANT" ]; then
   echo "FAIL [oidc rows]: $OIDC_ROWS oidc row(s) ran, want $OIDC_ROWS_WANT"; ec=1

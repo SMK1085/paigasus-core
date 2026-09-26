@@ -166,9 +166,16 @@ them.
   `--reuse-values` then gives `""`. `console-env-configmap.yaml` calls them. That file renders on
   every install. Their refusals fire on every render. They are not part of `paigasus.validate`.
   Because of this, `_helpers.tpl` and its two fixture copies do not change.
-- The render fails in three cases:
-  - `oidc.scopes` is set and does not hold the token `openid`. The token `openidx` does not
-    count.
+- Both values are normalized before they render, on the explicit whitespace class
+  `[\t\n\f\r ]` (final fix I1, not the wider `\s`). `oidc.scopes` splits on that class, drops
+  empty tokens, and re-joins the rest with one space; a whitespace-only value normalizes to
+  empty and renders no key, the same as an absent value. `@paigasus/auth` normalizes on the same
+  class, so both sides agree.
+- The render fails in four cases:
+  - `oidc.scopes` is set, normalizes to a non-empty list, and that list does not hold the token
+    `openid`. The token `openidx` does not count.
+  - `oidc.authorizationAudience` is set with leading or trailing whitespace (final fix M3).
+    `@paigasus/auth` refuses the same value at pod start, on the same rule.
   - `oidc.authorizationAudience` is set and `oidc.audience` is empty.
   - `oidc.authorizationAudience` is set and does not equal `oidc.audience`.
 
@@ -177,8 +184,9 @@ them.
   restarts both consoles. IAM does not restart.
 
 `tests/env.sh` holds the rows `O1 unset`, `O2 both-set`, `O3 reuse-values-no-key`, `O4 number`,
-`O5 restart-scopes` and `O6 restart-audience`. A fourth row counter checks them.
-`tests/refusals.sh` holds the four refusals and two valid renders. See
+`O5 restart-scopes`, `O6 restart-audience`, `O7 tab-scopes`, `O8 newline-scopes` and
+`O9 whitespace-only-scopes`. A fourth row counter checks them.
+`tests/refusals.sh` holds the five refusals and three valid renders. See
 `docs/ops/RUNBOOK-chart.md` § 6 for the IdP setup.
 
 ## The default image tags
