@@ -42,6 +42,7 @@ beforeEach(async () => {
       clientSecret: fixture.clientSecret,
       httpTimeoutMs: 5000,
       clockToleranceSeconds: 30,
+      scopes: 'openid profile email',
       allowInsecureRequests: true, // the fixture is plain http on localhost — never set in production
     }),
     publicOrigin: 'https://rp.example.com',
@@ -56,7 +57,6 @@ beforeEach(async () => {
     absoluteTtlMs: 86_400_000,
     zone: 'iam',
     basePath: ZONE_BASE_PATH,
-    scopes: 'openid profile email',
   };
 });
 

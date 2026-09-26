@@ -292,6 +292,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   request adds a `CHANGELOG.md` section. It also updates the image tag in
   `charts/paigasus/values.yaml`. Row 8 of `repo:helm-render` fails when the tag differs.
 
+  The chart `appVersion` does NOT move in that pull request. `repo:helm-render` row 8c requires the
+  git tag `paigasus-<key>-v<appVersion>` for every chain, and a tag exists only after the release
+  (SMA-696). Move `appVersion` in a later pull request, after every chain released the version.
+
   A console's version source is the `version` field of `ts/apps/<app>/package.json`
   (SMA-688 D1). The two service crates are `publish = false` and sit in no `version_group`, so
   `release-plz update` never sees them, and `git_only` hard-errors on the second release because

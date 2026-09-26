@@ -33,8 +33,8 @@ export const KEYCLOAK_HTTPS_PORT = 8443;
  * CONFIDENTIAL (`publicClient: false`) with the standard (authorization code) flow enabled, this
  * fixed secret, and `redirectUris`/`postLogoutRedirectUris` entries matching FIXTURE_SERVER_ORIGIN
  * above. `offline_access` is promoted from Keycloak's default OPTIONAL client scope to a DEFAULT
- * one on that client so `PAIGASUS_OIDC_SCOPES`'s `openid profile email offline_access` issues a
- * refresh_token without any extra consent-flow wiring.
+ * one on that client so the default scope list (`src/runtime.ts`'s `DEFAULT_OIDC_SCOPES`, `openid
+ * profile email offline_access`) issues a refresh_token without any extra consent-flow wiring.
  *
  * The realm JSON itself carries NO explanatory comment field (JSON has none, and Keycloak's realm
  * importer rejects an unrecognised property — `_comment` on a `ClientRepresentation` was tried and

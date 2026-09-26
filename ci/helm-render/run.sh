@@ -40,6 +40,7 @@ FIXTURE_TABLE=(
   'template-only-diff|3a;3a-prime|'
   'slug-mirror|1a|'
   'security-context|4 security-context iam;4 security-context iam+gateway|'
+  'app-version-unreleased|8c chart-app-version|'
 )
 
 die_infra() { printf 'helm-render: infrastructure error (rc=2): %s\n' "$*" >&2; exit 2; }

@@ -43,7 +43,6 @@ function runtime(overrides: Partial<AuthRuntime> = {}): AuthRuntime {
     absoluteTtlMs: 86_400_000,
     zone: 'iam',
     basePath: '/iam',
-    scopes: 'openid',
     ...overrides,
   };
 }

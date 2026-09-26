@@ -90,6 +90,7 @@ beforeEach(async () => {
         clientSecret: fixture.clientSecret,
         httpTimeoutMs: 5000,
         clockToleranceSeconds: 30,
+        scopes: 'openid profile email',
         allowInsecureRequests: true, // the fixture is plain http on localhost — never set in production
       }),
     ),
@@ -105,7 +106,6 @@ beforeEach(async () => {
     absoluteTtlMs: 86_400_000,
     zone: 'iam',
     basePath: '/iam',
-    scopes: 'openid profile email',
   };
 });
 

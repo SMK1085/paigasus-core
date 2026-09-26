@@ -10,6 +10,10 @@
 //
 // Never pass a caught library error object into `fields`: node-redis embeds the DSN in its own
 // connection errors and openid-client may include a URL. Extract `name` and a fixed message.
+//
+// `session.refresh_failed` may carry `oauthError` (SMA-692 D10). Its value is a code of the RFC
+// 6749 § 5.2 list or 'other', never the IdP's raw string: core/errors.ts's toTokenErrorCode maps
+// it. This type admits any string key, so that function is the control, not this port.
 
 export type AuthEventName =
   | 'login.started'

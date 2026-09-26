@@ -176,9 +176,9 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   const txnId = newTransactionId();
   const secret = newTransactionSecret();
 
+  // The scopes and the audience are not passed here: runtime.oidc holds them (SMA-692 D4).
   const authorization = await runtime.oidc.buildAuthorizationUrl({
     redirectUri: runtime.redirectUri,
-    scopes: runtime.scopes,
     // The CSRF `state` IS the transaction id, so the callback can find its cookie and its stored
     // transaction from the same value the IdP hands back.
     state: txnId,
