@@ -207,12 +207,12 @@ const TLS_CAUSE_CODES: ReadonlySet<string> = new Set([
   'ERR_TLS_CERT_ALTNAME_INVALID',
 ]);
 
-/** The own `code` property of an object, or undefined. Reads nothing else. */
+/** The `code` property of an object, or undefined. Reads nothing else. */
 function codeOf(value: unknown): unknown {
   return typeof value === 'object' && value !== null ? (value as { code?: unknown }).code : undefined;
 }
 
-/** The own `name` property of an object, or undefined. Reads nothing else. */
+/** The `name` property of an object, or undefined. Reads nothing else. */
 function nameOf(value: unknown): unknown {
   return typeof value === 'object' && value !== null ? (value as { name?: unknown }).name : undefined;
 }
@@ -263,7 +263,7 @@ export function classifyDiscoveryError(err: unknown): OidcDiscoveryFailureReason
     const ownCode = codeOf(err);
     // Row 8: `new URL(as.issuer)` in performDiscovery runs outside errorHandler.
     if (ownCode === 'ERR_INVALID_URL') return 'invalid_metadata';
-    // Rows 9-11: a failed `fetch` is a TypeError with no own code.
+    // Rows 9-11: a failed `fetch` is a TypeError with no code.
     if (ownCode === undefined) {
       const causeCode = codeOf(err.cause);
       if (causeCode === 'ENOTFOUND') return 'dns';

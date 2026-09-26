@@ -180,8 +180,8 @@ loop.
 
 ### When the identity provider cannot be discovered (SMA-656)
 
-The OIDC client gets the IdP's discovery document on the first login, callback, refresh or logout
-of a process, and keeps it for the life of the process. A failed discovery is not kept: the next
+The OIDC client gets the IdP's discovery document on the first OIDC call (login, callback,
+refresh, revocation or logout) of a process, and keeps it for the life of the process. A failed discovery is not kept: the next
 call tries again, and it can wait up to `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`.
 
 **`/auth/login` and `/auth/callback` answer a discovery failure with a 503.** The headers are the

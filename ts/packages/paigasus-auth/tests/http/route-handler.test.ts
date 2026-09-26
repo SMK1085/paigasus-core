@@ -124,16 +124,19 @@ describe('createAuthRouteHandler under basePath /iam (SMA-511 spec § 7.1)', () 
   });
 
   it('T11: a discovery failure on /auth/login is the IdP 503, not a 500 (SMA-656)', async () => {
-    runtime = { ...runtime, oidc: unreachableOidc() };
+    const events: Array<[string, unknown]> = [];
+    runtime = { ...runtime, oidc: unreachableOidc(), logger: { event: (name, fields) => void events.push([name, { ...fields }]) } };
 
     const res = await createAuthRouteHandler(runtime)(new Request(`${BIND}/auth/login?returnTo=%2Fiam%2Forgs`));
 
     const body = await expectStoreUnavailable(res, { kind: 'link', target: '/iam/auth/login?returnTo=%2Fiam%2Forgs' }, ['127.0.0.1']);
     expect(body).toContain(IDP_SENTENCE);
+    expect(events).toEqual([['oidc.discovery_failed', { zone: runtime.zone, stage: 'login', reason: 'network' }]]);
   });
 
   it('T16: a discovery failure on /auth/callback is the IdP 503, not the login-failed 502 (SMA-656)', async () => {
-    runtime = { ...runtime, oidc: unreachableOidc() };
+    const events: Array<[string, unknown]> = [];
+    runtime = { ...runtime, oidc: unreachableOidc(), logger: { event: (name, fields) => void events.push([name, { ...fields }]) } };
     // Seeded directly: a login first cannot seed it, because on this issuer the login gives a 503.
     const txnId = 'txn-sma-656-0123456789';
     const secret = 'callback-secret-value-32-bytes-x';
@@ -144,5 +147,6 @@ describe('createAuthRouteHandler under basePath /iam (SMA-511 spec § 7.1)', () 
     const body = await expectStoreUnavailable(res, { kind: 'link', target: '/iam/auth/login?returnTo=%2Fiam%2Forgs' }, ['127.0.0.1']);
     expect(body).toContain(IDP_SENTENCE);
     expect(body).not.toContain('login failed');
+    expect(events).toEqual([['oidc.discovery_failed', { zone: runtime.zone, stage: 'callback', reason: 'network' }]]);
   });
 });
