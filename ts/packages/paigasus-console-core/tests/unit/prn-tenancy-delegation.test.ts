@@ -6,7 +6,7 @@
 // file mocks the kernel and asserts that its answers decide the result.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { prnBuild, prnErrorKind, prnOrg, prnRegion, prnResourceId, prnResourceType, prnService } from '@paigasus/kernel';
-import { organizationPrn, parseTenancyPrn, projectPrn, teamPrn } from '../../src/prn-tenancy';
+import { organizationPrn, parseTenancyPrn, principalPrn, projectPrn, teamPrn } from '../../src/prn-tenancy';
 
 vi.mock('@paigasus/kernel', () => ({
   prnErrorKind: vi.fn(),
@@ -174,8 +174,18 @@ describe('the builders call prnBuild with the IAM tenancy arguments', () => {
     expect(vi.mocked(prnBuild)).toHaveBeenCalledWith('iam', '', ORG, 'project', TEAM);
   });
 
+  it('principalPrn sends an EMPTY org field', () => {
+    expect(principalPrn(TEAM)).toBe('built-by-the-kernel');
+    expect(vi.mocked(prnBuild)).toHaveBeenCalledWith('iam', '', '', 'principal', TEAM);
+  });
+
   it('rejects an id that is not a UUID before it reaches the kernel', () => {
     expect(() => organizationPrn('x')).toThrow(TypeError);
+    expect(vi.mocked(prnBuild)).not.toHaveBeenCalled();
+  });
+
+  it('rejects a principal id that is not a UUID before it reaches the kernel', () => {
+    expect(() => principalPrn('x')).toThrow(TypeError);
     expect(vi.mocked(prnBuild)).not.toHaveBeenCalled();
   });
 });
