@@ -516,6 +516,48 @@ async fn a_store_error_mid_txn_leaves_no_outbox_or_audit_rows_and_no_gen_bump() 
     assert_eq!(gens.policy_gen().await.unwrap(), before, "a rolled-back mid-txn failure must not bump policy_gen");
 }
 
+/// SMA-676 controller A2 (deferred from Task 5): the grant race arm, against real Postgres.
+/// A grant row is seeded out of band; a second `grant_in` for the SAME `(principal, role,
+/// scope)`, inside its own transaction, must hit `uq_role_grant_principal_role_scope` and
+/// report `AuthzError::DuplicateGrant`. Dropping that transaction rolls it back, and
+/// `RoleGrantQuery::find` (fully qualified: `PgRoleGrantStore` also implements
+/// `RoleGrantStore::find(&self, id: Uuid)`, so a bare `store.find(..)` is ambiguous) must then
+/// see exactly the one seeded row — the race attempt left nothing behind.
+#[tokio::test]
+async fn a_racing_grant_in_for_the_same_principal_role_scope_is_rejected_and_the_seeded_row_survives() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let principal_uuid = mint_uuid7(1_700_000_000_010, [11u8; 10]);
+    let org_uuid = Uuid::from_u128(11);
+    seed_principal_and_org(&db, principal_uuid, org_uuid).await;
+    seed_role(&db, "org_admin", now).await;
+
+    let principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_uuid).unwrap());
+    let org = OrganizationId::from_uuid(org_uuid);
+    let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
+
+    // Seed a first, successfully committed grant out of band.
+    let seeded = make_grant(Uuid::from_u128(203), &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org.clone())), now);
+    store.grant(&seeded).await.unwrap();
+
+    // The racing arm: the same (principal, role, scope), a distinct grant id, inside its own
+    // transaction — never committed.
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let tx = uow.begin().await.unwrap();
+    let racer = make_grant(Uuid::from_u128(204), &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org.clone())), now);
+    let err = store.grant_in(&*tx, &racer).await.unwrap_err();
+    assert!(
+        matches!(err, AuthzError::DuplicateGrant),
+        "SMA-676 D9: expected AuthzError::DuplicateGrant for uq_role_grant_principal_role_scope, got {err:?}"
+    );
+    drop(tx); // no commit -> rollback
+
+    let filter = RoleGrantFilter::new(Some(principal), Some(GrantScope::Node(TenancyNodeRef::Organization(org))), None, None).expect("principal is set");
+    let found = RoleGrantQuery::find(&store, &filter, 200, 0).await.unwrap();
+    assert_eq!(found, vec![seeded], "only the seeded row survives; the racing grant_in left nothing behind");
+}
+
 /// SMA-481 D6 — a grant against a role key with no `role` row must report the role as
 /// unknown, not as an internal error. This is the state a concurrent grant lands in after a
 /// retirement commits: it blocked on the `role` row's `FOR UPDATE` lock, then resumed to find
