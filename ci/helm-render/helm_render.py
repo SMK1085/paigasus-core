@@ -699,8 +699,32 @@ def image_blocks(values, path="$"):
     return out
 
 
+def chain_zone_role(key):
+    """The (zone, role) at zones.<zone>.<role>.image for a chain key (spec § row 8, position).
+
+    A key that ends in "-console" names a console image; the zone is the key with that suffix
+    removed. Any other key names a backend image; the zone is the key itself. So "iam" gives
+    ("iam", "backend") and "iam-console" gives ("iam", "console").
+    """
+    if key.endswith("-console"):
+        return key[: -len("-console")], "console"
+    return key, "backend"
+
+
+def _image_at(values, zone, role):
+    """The image block at zones.<zone>.<role>.image in a values tree, or None if absent."""
+    node = values.get("zones")
+    for key in (zone, role, "image"):
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node if isinstance(node, dict) else None
+
+
 def check8a(values, registry, versions):
-    """Row 8a: each chain has exactly ONE image block, and its tag equals the chain's version."""
+    """Row 8a: each chain has exactly ONE image block, that block sits at the chain's own
+    zones.<zone>.<role>.image path (not merely somewhere in the tree), and its tag equals the
+    chain's version."""
 
     def body():
         problems = []
@@ -710,48 +734,82 @@ def check8a(values, registry, versions):
             if repo not in known:
                 problems.append(f"{where}: repository {repo!r} is named by no chain in ci/images/chains.toml")
         for key, entry in registry.items():
+            zone, role = chain_zone_role(key)
+            path = f"$.zones.{zone}.{role}.image"
             # Whole-string equality. `repo/iam` is a prefix of `repo/iam-console`.
             mine = [b for b in blocks if b[1] == entry["ghcr"]]
             if len(mine) != 1:
                 problems.append(f"chain {key}: {len(mine)} image blocks name {entry['ghcr']}, expected exactly one")
                 continue
-            where, _repo, tag = mine[0]
+            node = _image_at(values, zone, role)
+            if node is None:
+                problems.append(f"chain {key}: no image block at {path}")
+                continue
+            node_repo = node.get("repository")
+            if node_repo != entry["ghcr"]:
+                problems.append(f"the block at {path} names {node_repo!r}, expected {entry['ghcr']!r}")
+                continue
+            tag = node.get("tag")
             version = versions[key]
             if version == "0.0.0":
                 problems.append(f"chain {key}: {entry['version_file']} is at 0.0.0, which is never released, so no image carries that tag")
             elif not tag:
-                problems.append(f"{where}.tag is empty. It falls back to the chart appVersion, not to {version}")
+                problems.append(f"{path}.tag is empty. It falls back to the chart appVersion, not to {version}")
             elif tag != version:
-                problems.append(f"{where}.tag is {tag!r}, but {entry['version_file']} is at {version!r}. Update the tag in the same PR as the version bump")
+                problems.append(f"{path}.tag is {tag!r}, but {entry['version_file']} is at {version!r}. Update the tag in the same PR as the version bump")
         return problems
 
     return _row("8a default-image-tags", body)
 
 
+def deployment_zone_role(dep):
+    """The (zone, role) a rendered Deployment serves, from its app.kubernetes.io/name label
+    (spec § row 8, position): a label ending "-console" or "-backend" names the role, and the
+    zone is the label with that suffix removed."""
+    label = str(_app_label(dep))
+    for role in ("console", "backend"):
+        suffix = f"-{role}"
+        if label.endswith(suffix):
+            return label[: -len(suffix)], role
+    raise ShapeError(f"app.kubernetes.io/name {label!r} names neither a console nor a backend pod")
+
+
 def check8b(values, docs, stub_values=STUB_VALUES):
-    """Row 8b: the iam+gateway render holds RENDERED_IMAGES images, and each one equals
-    <repository>:<tag> of its values.yaml block. STUB_VALUES must set no image key, or the row
-    would read the stub, not the default."""
+    """Row 8b: the iam+gateway render holds RENDERED_IMAGES images, and each rendered Deployment's
+    container image equals <repository>:<tag> of the values.yaml block at ITS OWN zone/role path
+    (zones.<zone>.<role>.image) — not merely some values.yaml image, at any position. STUB_VALUES
+    must set no image key, or the row would read the stub, not the default."""
 
     def body():
         problems = []
         leaked = [k for k, _v in stub_values if ".image." in f".{k}."]
         if leaked:
             problems.append(f"STUB_VALUES sets {leaked}; row 8b must render the values.yaml defaults")
-        tags = {repo: tag for _where, repo, tag in image_blocks(values)}
+        deps = _of_kind(docs, "Deployment")
         images = set()
-        for dep in _of_kind(docs, "Deployment"):
+        for dep in deps:
             pod = _get(dep, "spec", "template", "spec")
             for container in (pod.get("containers") or []) + (pod.get("initContainers") or []):
                 images.add(str(container.get("image")))
         if len(images) != RENDERED_IMAGES:
             problems.append(f"the render holds {len(images)} distinct images {sorted(images)}, expected {RENDERED_IMAGES}")
-        for image in sorted(images):
-            repo, _sep, tag = image.rpartition(":")
-            if repo not in tags:
-                problems.append(f"{image}: no values.yaml image block names {repo}")
-            elif tag != tags[repo]:
-                problems.append(f"{image}: the rendered tag is {tag!r}, but the values.yaml default is {tags[repo]!r}")
+        for dep in deps:
+            try:
+                zone, role = deployment_zone_role(dep)
+            except ShapeError as exc:
+                problems.append(str(exc))
+                continue
+            path = f"$.zones.{zone}.{role}.image"
+            node = _image_at(values, zone, role)
+            if node is None:
+                problems.append(f"{_name(dep)}: no values.yaml image block at {path} for its own zone and role")
+                continue
+            want = f"{node.get('repository')}:{node.get('tag')}"
+            pod = _get(dep, "spec", "template", "spec")
+            for container in (pod.get("containers") or []) + (pod.get("initContainers") or []):
+                got = str(container.get("image"))
+                if got != want:
+                    problems.append(f"{_name(dep)}/{container.get('name')}: image is {got!r}, expected {want!r} from {path}")
         return problems
 
     return _row("8b default-image-render", body)
@@ -1143,6 +1201,14 @@ def self_test():
     # `repo/iam` is a string prefix of `repo/iam-console`. A second block for the SAME repository
     # must red; a prefix match would also count iam-console's block as iam's.
     expect("check8a two image blocks for one chain", [check8a(vals(extra="repo/iam"), reg, vers)], fail=r8a)
+    # POSITION, not membership (the finding this fix closes): the iam backend and iam console
+    # repositories are swapped, tags stay equal, so a membership-only check sees nothing wrong.
+    swapped_vals = {"zones": {
+        "iam": {"console": {"image": {"repository": "repo/iam", "tag": "0.1.0"}},
+                "backend": {"image": {"repository": "repo/iam-console", "tag": "0.1.0"}}},
+        "gateway": {"console": {"image": {"repository": "repo/gateway-console", "tag": "0.2.0"}}},
+    }}
+    expect("check8a position: iam backend and console repositories swapped", [check8a(swapped_vals, reg, vers)], fail=r8a)
     rendered = synthetic(both, tags={"iam": "0.1.0", "gateway": "0.2.0"}, backend_tag="0.1.0")
     expect("check8b good", [check8b(vals(), rendered)], passing=r8b)
     expect("check8b a rendered image with the wrong tag",
@@ -1151,6 +1217,13 @@ def self_test():
            [check8b(vals(), rendered, stub_values=(*STUB_VALUES, ("zones.iam.console.image.tag", "x")))], fail=r8b)
     expect("check8b only two images rendered",
            [check8b(vals(), synthetic(iam_only, tags={"iam": "0.1.0"}, backend_tag="0.1.0"))], fail=r8b)
+    # POSITION, not membership: the iam-console Deployment renders the iam backend's image (and
+    # vice versa) — both images are valid values.yaml entries, so set-membership alone passes this.
+    swapped_render = copy.deepcopy(rendered)
+    backend_container = _containers(_find(swapped_render, "Deployment", "r-iam-backend"))[0]
+    console_container = _containers(_find(swapped_render, "Deployment", "r-iam-console"))[0]
+    backend_container["image"], console_container["image"] = console_container["image"], backend_container["image"]
+    expect("check8b position: iam-console renders the iam-backend image", [check8b(vals(), swapped_render)], fail=r8b)
     with tempfile.TemporaryDirectory(prefix="helm-render-8-") as tmp:
         root = Path(tmp)
         (root / "Cargo.toml").write_text('[package]\nname = "x"\nversion = "0.3.0"\n')
