@@ -1,6 +1,6 @@
 # SMA-676 — gateway-console: grant `gateway_user` to a person at org scope
 
-**Status:** Draft, revision 2 (Gate 1 pending)
+**Status:** Approved (Gate 1, 2026-09-26), revision 2; implemented
 **Date:** 2026-09-26
 **Issue:** [SMA-676](https://linear.app/smaschek/issue/SMA-676)
 **Depends on:** SMA-635 (the playground, merged)
@@ -302,7 +302,9 @@ the README row list.
 - The holders list is not the full set of people who can call models. A `platform_admin`, or a
   custom Cedar policy, can give `InvokeModel` with no `gateway_user` grant at the org.
 - A revoke is not immediate on every IAM replica. A replica with the memory cache can allow
-  `InvokeModel` for about 31 s after the revoke (§3).
+  `InvokeModel` for about 31 s after the revoke (§3). The same lag applies after a grant: a person
+  just granted `gateway_user` can still see "You need the gateway_user role" in the playground for
+  up to about 31 s.
 
 ## 10. Rollout and version skew
 
