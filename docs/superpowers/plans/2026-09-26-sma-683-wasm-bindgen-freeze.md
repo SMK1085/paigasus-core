@@ -99,6 +99,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 2: The runbook in `rs/CLAUDE.md` and the pointer in `rs/Cargo.toml`
 
+> **Note (after execution):** the final review, the local review and the PR review changed the
+> runbook text after this task ran. The `reqwest` case is now a numbered procedure, and step 6
+> uses `@dependabot recreate` for a `Cargo.lock` conflict. `rs/CLAUDE.md` and spec section 4.2
+> are the authority. The text below is the version this task wrote.
+
 **Files:**
 - Modify: `rs/CLAUDE.md:170` (append a bullet at the end of the section `## Cargo, the lockfile and nextest`, directly before the blank line and `## Container images`)
 - Modify: `rs/Cargo.toml:148-150` (the `wasm-bindgen` comment, the words "(dependency-bump runbook)")

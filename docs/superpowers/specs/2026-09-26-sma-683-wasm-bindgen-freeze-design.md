@@ -120,8 +120,8 @@ moves `wasm-bindgen` (4.3), follow these steps in order:
    rs/crates/bindings/paigasus-wasm/paigasus_wasm*`. Commit and push.
 5. If the branch goes stale again: the merge-only `update-branch` call
    (`gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`), then
-   `git pull`, then run `generate-wasm` again only if the merge changed the kernel, the wasm
-   binding or the five artifacts.
+   `git pull`, then run `generate-wasm` again if the merge changed `rs/Cargo.lock`,
+   `.prototools`, the kernel, the wasm binding, or the five artifacts.
 6. For a `Cargo.lock` conflict, do not edit the lock by hand. Comment `@dependabot recreate`.
    Dependabot then writes a new lock on the current `main`. This deletes the glue commit.
    Wait for the new head commit. Then run `gh pr checkout <N> --force` and do step 4 again.

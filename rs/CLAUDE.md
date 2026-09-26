@@ -206,8 +206,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
      run `generate-wasm` and the test. Stage the five artifacts with `git add
      rs/crates/bindings/paigasus-wasm/paigasus_wasm*`. Commit and push.
   5. If the branch goes stale again: run the merge-only `update-branch` call, then `git pull`.
-     Run `generate-wasm` again only if the merge changed the kernel, the wasm binding, or the
-     five artifacts.
+     Run `generate-wasm` again if the merge changed `rs/Cargo.lock`, `.prototools`, the
+     kernel, the wasm binding, or the five artifacts.
   6. For a `Cargo.lock` conflict, do not edit the lock by hand. Comment `@dependabot recreate`.
      Dependabot then writes a new lock on the current `main`. This deletes the glue commit.
      Wait for the new head commit. Then run `gh pr checkout <N> --force` and do step 4 again.
