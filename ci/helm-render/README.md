@@ -40,6 +40,7 @@ exception: it renders against the kind job's own values files, not `STUB_VALUES`
 | `7 kind-values` | The kind job's values render (SMA-513 PR 3) | `helm template` with `ci/kind/values/a.yaml`, or with `a.yaml` plus `b.yaml`, exits non-zero. A missing values file is rc 2 |
 | `8a default-image-tags` | The default tags track the image versions (SMA-688) | For a chain of `ci/images/chains.toml`, `values.yaml` does not hold exactly one `image` block with its `ghcr` repository, or that block's `tag` is empty or differs from the version in the chain's version file, or that version is `0.0.0`; or an `image` block names a repository that no chain names |
 | `8b default-image-render` | The rendered images use those tags (SMA-688) | `STUB_VALUES` sets an `image` key, or the `iam+gateway` render does not hold exactly three images, each equal to `<repository>:<tag>` of its `values.yaml` block |
+| `8c chart-app-version` | The empty-tag fallback names a released image (SMA-696) | `Chart.yaml` `appVersion` is not a non-empty string; or a chain of `ci/images/chains.toml` that is not in `UNRELEASED_CHAINS` has no git tag `paigasus-<key>-v<appVersion>`; or an `UNRELEASED_CHAINS` key has a release tag or is no chain; or a Deployment image in the render with every `image.tag` cleared does not carry the tag `appVersion` |
 | `6 <script>` | Every chart script | A `charts/paigasus/tests/*.sh` exits non-zero. `render.sh` is check 5 (lint and golden files) |
 
 **Why equality for the slug mirror (spec A2).** The safety property is "chart ⊆ proto".
@@ -66,7 +67,7 @@ section together.
 Each fixture holds only the files it changes. `run.sh` builds the fixture chart as
 `cp -R charts/paigasus <tmp>/paigasus`, then `cp -R <fixture>/. <tmp>/paigasus/`. Per fixture,
 the module must exit 3 with the named row failed. Other rows may also fail. Measured one fixture
-at a time on 2026-09-22:
+at a time on 2026-09-22; `app-version-unreleased` on 2026-09-26:
 
 | Fixture | Mutation | Named row | Must stay green | Rows that failed |
 | -- | -- | -- | -- | -- |
@@ -76,6 +77,7 @@ at a time on 2026-09-22:
 | `template-only-diff` | every console reads `zones.iam`'s image tag | `3a`, `3a-prime` | — | `3a`, `3a-prime` |
 | `slug-mirror` | `paigasus.serviceSlugs` lists `billing` too | `1a` | — | `1a` |
 | `security-context` | the console pod drops `runAsNonRoot` | `4 security-context iam`, `4 security-context iam+gateway` | — | the two named rows |
+| `app-version-unreleased` | `appVersion` is `0.1.0-helm-render-unreleased`, which the pipeline never tags | `8c chart-app-version` | — | `8c chart-app-version` |
 
 `literal-ingress` also fails `1.2 iam` and `2` by construction: a literal `/gateway` rule both
 names the disabled zone and routes to a Service that does not exist.
@@ -96,7 +98,7 @@ For the rows no fixture covers, each assertion body was removed in turn and the 
 self-test went red (rc 3): check 1.2 routing (2 rows red), check 3 case b (1), check 3 case c
 (3), `4 iam-http` (3), `4 iam-grpc` (2), `4 console-port` (3). The wrapper's rc maps were broken
 in turn (3 to 3, any to 1, any to 0) and `--self-test` exited 1 each time. Deleting any one of
-the 35 `HELM_RENDER_SH_CALL_SITES` lines from `run.sh` makes `ci_targets.py` report it.
+the 36 `HELM_RENDER_SH_CALL_SITES` lines from `run.sh` makes `ci_targets.py` report it.
 
 Row 7 (SMA-513 PR 3), both measured on 2026-09-23: deleting `rows.append(check7(chart))` from
 `run_checks` and running `helm_render.py --chart charts/paigasus` directly (the module, as
@@ -109,6 +111,22 @@ ci/helm-render/run.sh --self-test` then exits `rc=1`, not `rc=2`, because `check
 a.yaml fails to render` and `check7 only the overlay fails to render`, and the summary line reads
 `FAIL helm_render.py --self-test passes: expected 0, got 1`.
 
+Row 8c (SMA-696), measured on 2026-09-26: deleting `rows.append(check8c(app_version, registry,
+tags, fallback_docs))` from `run_checks` and running `bash ci/helm-render/run.sh` exits `rc=2`
+and prints `helm-render row inventory does not match EXPECTED_ROW_LABELS: missing ['8c
+chart-app-version']`. Changing `check8c`'s return to `_row(APP_VERSION_ROW, lambda: [])` makes
+`--self-test` exit `rc=1` with ten red `check8c` rows, and makes `--negative-control` exit `rc=1`
+and report `negative-control FAILED: the module passed a mutated chart (rc=0)` for
+`app-version-unreleased`. Changing `run_checks`'s `app_version = chart_app_version(chart)` to read
+`charts/paigasus` directly, alone, still gives `negative-control OK [app-version-unreleased]`: the
+fallback render still uses the fixture chart, so item 4's render assertion catches the wrong tag.
+This corrects spec § 4.3 item 3, which expected `FAILED`; item 4 is a second guard for the same
+mistake. Adding mutation 4 on top of this change gives `negative-control FAILED: the module
+passed a mutated chart (rc=0)` and exits `rc=1`, because item 2 alone then reads the repository
+chart's released `0.1.0`. Replacing the `for dep in _of_kind(fallback_docs, "Deployment"):` loop
+body's `problems.append(...)` line with `pass`, alone, makes `--self-test` exit `rc=1` with the
+row `check8c the rendered fallback differs` red.
+
 ## Tool resolution
 
 - `helm` resolves once through `proto --reporter text bin helm` from the repo root, and must be
@@ -118,6 +136,9 @@ a.yaml fails to render` and `check7 only the overlay fails to render`, and the s
   under `ci/helm-render/.venv`. After that no `uv` runs.
 - The module and the chart scripts run with the venv's `bin` and the helm directory first on
   `PATH`. Chart scripts run as `"$BASH" <script>`, so the bash that runs `run.sh` runs them too.
+- `git` is not pinned. Row 8c runs `git for-each-ref` for the `paigasus-*` tags. The tags are an
+  input that Moon does not hash, so a cached PASS survives a deleted tag. A checkout with no
+  `paigasus-*` tag is rc 2. CI checks out with `fetch-depth: 0`.
 
 ## Read-only rule
 
@@ -153,3 +174,8 @@ bash ci/helm-render/run.sh
 It runs under `/bin/bash` 3.2.57 and under bash 5: it uses no `mapfile`, no `declare -A`, no
 here-string and no pipe into an early-exit reader. Measured 2026-09-22 under both, with a host
 pipe capacity of 65536 bytes: about 2 s per mode.
+
+Row 8c reads the LOCAL tags. A local-only tag gives a green that CI does not give, and a tag
+that is not fetched gives a red. Run `git fetch --tags` first. CI is the authority. Run the gate
+on the host under `/bin/bash`, not in the Docker workaround: a worktree's `.git` links to a
+directory on the host, so git fails in the container and the module exits rc 2.
