@@ -65,6 +65,12 @@ const ERROR: PaigasusError = {
   transport: { kind: 'grpc', code: 14, codeName: 'Unavailable' },
 };
 
+/** The revoke control needs its confirm step (§ 4.6 pattern, ConfirmButton): Revoke, then Confirm revoke. */
+async function revoke(user: ReturnType<typeof userEvent.setup>, row: HTMLElement): Promise<void> {
+  await user.click(within(row).getByRole('button', { name: PEOPLE_COPY.revoke }));
+  await user.click(within(row).getByRole('button', { name: 'Confirm revoke' }));
+}
+
 function ok(patch: Partial<PeopleModelAccessOk> = {}): PeopleModelAccessOk {
   return {
     kind: 'ok',
@@ -148,10 +154,19 @@ describe('peopleModelAccessBlock', () => {
     expect(form?.get('orgPrn')).toBe(ORG);
   });
 
+  it('needs the confirm step before it revokes (a single click does not call the action)', async () => {
+    const user = userEvent.setup();
+    render(await block(ok()));
+    const row = screen.getAllByTestId('people-holder-row')[0] as HTMLElement;
+    await user.click(within(row).getByRole('button', { name: PEOPLE_COPY.revoke }));
+    expect(actions.revoke).not.toHaveBeenCalled();
+    expect(within(row).getByRole('button', { name: 'Confirm revoke' })).toBeDefined();
+  });
+
   it('revokes with the principal, the org and the grant id of the row', async () => {
     const user = userEvent.setup();
     render(await block(ok()));
-    await user.click(within(screen.getAllByTestId('people-holder-row')[0] as HTMLElement).getByRole('button', { name: PEOPLE_COPY.revoke }));
+    await revoke(user, screen.getAllByTestId('people-holder-row')[0] as HTMLElement);
     const form = actions.revoke.mock.calls[0]?.[1];
     expect([form?.get('principalPrn'), form?.get('orgPrn'), form?.get('grantId')]).toEqual([HOLDER, ORG, GRANT_ID]);
   });
@@ -171,7 +186,7 @@ describe('peopleModelAccessBlock', () => {
     const user = userEvent.setup();
     actions.revoke.mockResolvedValueOnce({ ok: false, error: { ...ERROR, message: 'MARKER-REVOKE-DO-NOT-SHOW' } });
     render(await block(ok()));
-    await user.click(within(screen.getAllByTestId('people-holder-row')[0] as HTMLElement).getByRole('button', { name: PEOPLE_COPY.revoke }));
+    await revoke(user, screen.getAllByTestId('people-holder-row')[0] as HTMLElement);
     expect(await within(screen.getAllByTestId('people-holder-row')[0] as HTMLElement).findByTestId('form-error')).toBeDefined();
     expect(screen.queryByText('MARKER-REVOKE-DO-NOT-SHOW')).toBeNull();
   });
@@ -198,7 +213,7 @@ describe('peopleModelAccessBlock', () => {
     const user = userEvent.setup();
     actions.revoke.mockResolvedValueOnce({ ok: false, error: ERROR });
     const { rerender } = render(await block(ok()));
-    await user.click(within(screen.getAllByTestId('people-holder-row')[0] as HTMLElement).getByRole('button', { name: PEOPLE_COPY.revoke }));
+    await revoke(user, screen.getAllByTestId('people-holder-row')[0] as HTMLElement);
     expect(await within(screen.getAllByTestId('people-holder-row')[0] as HTMLElement).findByTestId('form-error')).toBeDefined();
 
     // The revoke failed, so the grant is still there: the row's key (its grantId) is unchanged,

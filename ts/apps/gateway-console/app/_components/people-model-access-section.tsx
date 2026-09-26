@@ -17,8 +17,9 @@
 'use client';
 
 import { useActionState, useState, type ReactElement } from 'react';
-import { Combobox, EmptyState, PRIMARY_BUTTON_CLASS, SECONDARY_BUTTON_CLASS, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@paigasus/ui';
+import { Combobox, EmptyState, PRIMARY_BUTTON_CLASS, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@paigasus/ui';
 import { PEOPLE_COPY, type CandidateView, type HolderRowView, type PeopleModelAccessActions, type PeopleModelAccessOk } from '../(console)/people-model-access/view';
+import { ConfirmButton } from './confirm-button';
 import { FormError } from './form-error';
 import { useHydrated } from './use-hydrated';
 
@@ -47,15 +48,18 @@ function HolderRow({
       </TableCell>
       <TableCell>
         {canRevoke && hydrated ? (
-          <form action={formAction} aria-label={`Revoke model access of ${row.principalPrn}`}>
-            <input type="hidden" name="principalPrn" value={row.principalPrn} />
-            <input type="hidden" name="orgPrn" value={orgPrn} />
-            <input type="hidden" name="grantId" value={row.grantId} />
-            <button type="submit" disabled={pending} className={SECONDARY_BUTTON_CLASS}>
-              {PEOPLE_COPY.revoke}
-            </button>
+          <div>
+            <ConfirmButton
+              testId={`revoke-model-access-${row.grantId}`}
+              label={PEOPLE_COPY.revoke}
+              confirmLabel="Confirm revoke"
+              confirmation={`Revoke model access of ${row.principalPrn}? The person loses the gateway_user role at this organization.`}
+              hidden={{ principalPrn: row.principalPrn, orgPrn, grantId: row.grantId }}
+              disabled={pending}
+              onConfirm={formAction}
+            />
             <FormError error={state?.ok === false ? state.error : null} />
-          </form>
+          </div>
         ) : null}
       </TableCell>
     </TableRow>
