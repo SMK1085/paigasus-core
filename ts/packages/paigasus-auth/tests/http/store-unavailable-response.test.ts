@@ -9,6 +9,35 @@ import type { AuthEventFields, AuthEventName } from '../../src/ports/logger.js';
 
 const HOSTILE = `/iam/a"b<c>d&e'f#g h`;
 
+// SMA-656 T0. The full page bodies, written on the code BEFORE SMA-656 changed the builder. They
+// must pass with no edit after that change: that is the proof that every SMA-653 call site's page
+// stays byte-identical (SMA-656 D4).
+const LINK_GOLDEN = [
+  '<!doctype html>',
+  '<html lang="en">',
+  '<head><meta charset="utf-8"><title>Sign-in is temporarily unavailable</title></head>',
+  '<body>',
+  '<h1>Sign-in is temporarily unavailable</h1>',
+  '<p>The session service did not answer. Try again in a few seconds.</p>',
+  '<p><a href="/iam/auth/login">Try again</a></p>',
+  '</body>',
+  '</html>',
+  '',
+].join('\n');
+
+const POST_GOLDEN = [
+  '<!doctype html>',
+  '<html lang="en">',
+  '<head><meta charset="utf-8"><title>Sign-out did not complete</title></head>',
+  '<body>',
+  '<h1>Sign-out did not complete</h1>',
+  '<p>The session service did not answer, so your session may still be active. Try again in a few seconds.</p>',
+  '<form method="post" action="/iam/auth/logout"><button type="submit">Sign out again</button></form>',
+  '</body>',
+  '</html>',
+  '',
+].join('\n');
+
 function recorder(): { ctx: { zone: string; logger: { event(name: AuthEventName, fields: AuthEventFields): void } }; events: Array<[AuthEventName, AuthEventFields]> } {
   const events: Array<[AuthEventName, AuthEventFields]> = [];
   return { ctx: { zone: 'iam', logger: { event: (name, fields) => void events.push([name, { ...fields }]) } }, events };
@@ -51,6 +80,16 @@ describe('storeUnavailableResponse', () => {
     const body = await storeUnavailableResponse({ kind: 'link', href: HOSTILE }).text();
     expect(body).toContain('href="/iam/a&quot;b&lt;c&gt;d&amp;e&#39;f#g h"');
     expect(body).not.toContain('b<c');
+  });
+});
+
+describe('storeUnavailableResponse — golden bodies (SMA-656 T0)', () => {
+  it('the link page is byte-identical', async () => {
+    expect(await storeUnavailableResponse({ kind: 'link', href: '/iam/auth/login' }).text()).toBe(LINK_GOLDEN);
+  });
+
+  it('the post page is byte-identical', async () => {
+    expect(await storeUnavailableResponse({ kind: 'post', action: '/iam/auth/logout' }).text()).toBe(POST_GOLDEN);
   });
 });
 
