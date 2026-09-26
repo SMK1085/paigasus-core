@@ -9,13 +9,14 @@
 #                          block, Postgres, Redis, Keycloak, the three chart Secrets, the gateway
 #                          stub at 0 replicas, the preflight
 #   run.sh images          build paigasus-iam, iam-console and gateway-console; load them into kind
-#   run.sh install a       helm install with values/a.yaml (both zones)
+#   run.sh install a       helm install with values/a.yaml (both zones), then the NOTES check
 #   run.sh specs a         Playwright project phase-a (R1, R1-control, R2, R3-control)
 #   run.sh stub up         scale the gateway stub to 1 and check /v1/service-info in-cluster (SMA-514)
 #   run.sh specs journeys  Playwright project journeys (SMA-514's two scenarios) with its guards:
 #                          the skip scan, the step-title check, exactly 2 tests, the JSON report
 #   run.sh stub down       scale the gateway stub to 0 (local re-runs only; README order rule)
-#   run.sh upgrade b       helm upgrade with a.yaml + b.yaml (gateway zone off), then settle
+#   run.sh upgrade b       helm upgrade with a.yaml + b.yaml (gateway zone off), then settle and
+#                          the NOTES check
 #   run.sh specs b         Playwright project phase-b (R3), then R3's Deployment check
 #   run.sh diagnose        evidence into <state>/diagnose (never a Secret, never the realm ConfigMap)
 #   run.sh down            delete the cluster
@@ -368,6 +369,20 @@ images() {
 
 # --------------------------------------------------------------------------- install/upgrade
 
+# The first line of the chart's NOTES when the IAM audience equals oidc.clientId (SMA-691,
+# charts/paigasus/templates/_audience.tpl). values/a.yaml and b.yaml keep the default audience,
+# so this job is the end-to-end positive control of NOTES.txt, on install and on upgrade.
+NOTES_MARKER='WARNING (SMA-691): the IAM audience equals oidc.clientId'
+# Capture first, then match with `case`: no pipe into an early-exit reader (actionlint check 13).
+assert_notes_marker() {  # $1 = the step name, for the messages
+  local notes
+  notes="$(h get notes "$RELEASE" --namespace "$NS")" || die_infra "$1: helm get notes $RELEASE failed"
+  case "$notes" in
+    *"$NOTES_MARKER"*) echo "  $1: NOTES shows the SMA-691 audience warning" ;;
+    *) die_assert "$1: the release NOTES have no line '$NOTES_MARKER'. The default audience must show the SMA-691 warning" ;;
+  esac
+}
+
 install_a() {
   local gw_name gw
   need kubectl; resolve_helm
@@ -380,6 +395,7 @@ install_a() {
   [ "$gw" = "deployment.apps/$gw_name" ] \
     || die_assert "phase A has no Deployment $gw_name: the name R3 checks does not match the chart's paigasus.name"
   echo "  phase A: $gw exists"
+  assert_notes_marker "install a"
   echo "== install a: done =="
 }
 
@@ -461,6 +477,7 @@ upgrade_b() {
   done
   echo "  iam-console pod-template-hash: old [${old% }] -> new [${new% }]"
   settle_gateway_404
+  assert_notes_marker "upgrade b"
   echo "== upgrade b: done =="
 }
 

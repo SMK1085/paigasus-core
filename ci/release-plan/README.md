@@ -93,11 +93,10 @@ refuses to guess and builds instead.
 `run.sh` has four modes, and one of them is required:
 
 - `--self-test` — runs `release_plan.py --self-test` in-process: the pure `decide()` fixture
-  table (nine rows) plus fifteen collection-layer rows, fourteen of which build throwaway trees
-  under `tempfile.mkdtemp()` to exercise paths a pure-function fixture cannot reach — the
-  fifteenth (the marker mutual-exclusivity check) needs no filesystem, but still cannot be
-  expressed as a `decide()`-only fixture. The original six: a
-  missing `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override,
+  table (nine rows) plus thirty-seven collection-layer rows (SMA-688 raises this from fifteen).
+  Most collection rows build a throwaway tree under `tempfile.mkdtemp()` to exercise a path the
+  pure `decide()` fixture cannot reach. The first fifteen rows are the original set. The original
+  six: a missing `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override,
   a publishable member declared OUTSIDE `crates/*/*`, an unresolvable `[workspace] members`
   entry, and a malformed `release-plz.toml` (which must exit 3, not 1). SMA-608 adds nine more:
   a non-table `[workspace]`, an array-of-tables `[workspace]`, a table-valued `package` section, a
@@ -105,7 +104,16 @@ refuses to guess and builds instead.
   an untyped collection failure making `--assert` exit 3, an untyped collection failure making
   `run()` build rather than raise, and a check that the five shape-validation error markers above
   are mutually exclusive (so a reworded message cannot silently start matching the wrong fixture).
-- `--negative-control` — eight rows against real and throwaway trees. Row 1 proves the checker's
+  The fifteenth row (the marker mutual-exclusivity check) needs no filesystem, but still cannot
+  be expressed as a `decide()`-only fixture. SMA-658 adds six more rows, for the service skip
+  decision, the changelog reader and the service version format. SMA-688 adds sixteen more rows,
+  for the chain registry, the `--keys` output, the console version source, the console changelog
+  and the `sed` parity read.
+- `--keys` — prints the chain keys of `ci/images/chains.toml`, one on each line, in file order,
+  and exits `0` (SMA-688). A registry that cannot be read prints no key and exits `3`. The
+  `--github-output` arm reads this list to name the outputs it writes. `run.sh` has no `--keys`
+  mode; call `release_plan.py --keys <repo_root>` directly.
+- `--negative-control` — thirteen rows against real and throwaway trees. Row 1 proves the checker's
   exit-3-to-1 translation; row 2 proves `--self-test` still notices a broken table. Rows 3 and 4
   each build their own throwaway git repository — one crate, one commit, tags added by the row
   — and invoke `release_plan.py` directly against it, asserting `nothing_to_release=true` when
@@ -117,15 +125,18 @@ refuses to guess and builds instead.
   `nothing_to_release=true` there would fail every time. Row 5 then closes the coverage gap
   rows 3/4 leave: it runs the real `--github-output` mode against the real repository, with
   `$GITHUB_OUTPUT` pointed at a scratch file, and asserts the wrapper exits `0` and writes
-  exactly one matching verdict line — proving the wrapper's non-zero/malformed-output catch, its
-  `::warning::` annotation, and its `$GITHUB_OUTPUT` append all still work. Row 5 asserts nothing
-  about *which* verdict comes back, for the same reason rows 3/4 no longer touch the real
+  exactly one line for the verdict and for each of the eight chain outputs (`^<key>=`, with the
+  `=`: `skip_iam` is a string prefix of `skip_iam-console`) — proving the wrapper's
+  non-zero/malformed-output catch, its `::warning::` annotation, and its `$GITHUB_OUTPUT` append
+  all still work. Row 5 asserts nothing about *which* verdict comes back, for the same reason
+  rows 3/4 no longer touch the real
   repository directionally: the real repository's tag state is not a safe thing for this control
   to depend on. **Row 6** is the C1 regression row: it runs `--github-output` under a
-  hermetic `PATH` holding symlinks to `bash`, `dirname`, `grep` and `tail` and nothing else,
-  asserts `uv` is genuinely unreachable under it, and then asserts the wrapper still exits
-  `0` and writes `nothing_to_release=false`. **Row 7** mutates a COPY of `release_plan.py`,
-  inverting the first fixture's expected verdict, and asserts the mutant's `--self-test`
+  hermetic `PATH` holding symlinks to `bash`, `dirname`, `grep`, `sed` and `tail` and nothing
+  else, asserts `uv` is genuinely unreachable under it, and then asserts the wrapper still exits
+  `0` and writes all nine outputs fail-safe: without `uv` it cannot run `--keys`, so it reads
+  the keys from `ci/images/chains.toml` with `sed` (SMA-688). **Row 7** mutates a COPY of
+  `release_plan.py`, inverting the first fixture's expected verdict, and asserts the mutant's `--self-test`
   exits 3 — which is what proves `self_test()`'s FIXTURES loop still evaluates its rows
   rather than having been deleted in silence. **Row 8** does the same for the
   COLLECTION_ROWS loop and the `[workspace]` shape check specifically: it mutates a COPY of
@@ -139,28 +150,51 @@ refuses to guess and builds instead.
   because rc 3 alone is not sufficient: `self_test()`'s own arity floor also returns 3 if
   `COLLECTION_ROWS` is short two or more rows, so an rc-only check would go green whether the
   shape check fired or the floor did — the two controls covering for each other's absence.
+  **Row 9** replaces the checker in a copy of this directory with a stub that names four keys and
+  prints one of them, and asserts the fail-safe branch writes all nine outputs. **Rows 10 to 13**
+  use a stub whose `--keys` answer the wrapper must not trust. Its decision run prints a complete
+  decision with every `skip_` set to `true`, so a wrapper that trusts it fails the row. In row 10
+  the answer is empty, and in row 11 it holds `IAM_X`. Both rows copy the real `chains.toml`, and
+  assert the sed read: exit `0` and the nine fail-safe lines. In rows 12 and 13 `--keys` fails,
+  and `chains.toml` is missing (row 12) or empty (row 13). They assert exit `2` with
+  `nothing_to_release=false` as the only line.
 - `--assert` — runs `release_plan.py --assert` against the real repository: the derived
   releasable set must equal `EXPECTED_RELEASABLE`, and the repository must report at least one
   tag (a shallow checkout with no tags cannot exercise the real decision).
 - `--github-output` — the runtime entry point invoked by the release workflow. See the next
-  section; it is the one mode that never fails its caller.
+  section; it is the one mode that fails its caller only when no source names a chain key.
 
 ## The `--github-output` arm inverts the usual contract, deliberately
 
 Every other mode follows this repo's usual three exit codes: `0` pass, `1` the repo is wrong,
-`2` infrastructure failed. `--github-output` always exits `0`.
+`2` infrastructure failed. `--github-output` exits `0` on every run that can name the chain
+keys.
 
 A failed `plan` job would **skip** its dependents rather than build them — GitHub applies an
 implicit `success()` to a job-level `if:` with no status function named — so a broken decision
 that exited non-zero would stop the release entirely rather than fail safe. `--github-output`
-therefore catches every failure mode of the underlying checker call, writes
-`nothing_to_release=false` to `$GITHUB_OUTPUT`, prints a `::warning::` annotation naming the
-failure, and exits `0`. The build proceeds; nothing is silently skipped.
+therefore catches every failure mode of the checker's decision, writes
+`nothing_to_release=false`, `skip_<key>=false` and an empty `version_<key>` for every key to
+`$GITHUB_OUTPUT`, prints a `::warning::` annotation naming the failure, and exits `0`. The build
+proceeds; nothing is silently skipped.
+
+**The chain keys (SMA-688, spec § 4.3).** The keys come from `release_plan.py --keys`. When that
+call fails, prints no key, or prints a line outside `[a-z][a-z0-9-]*`, the arm reads the keys from
+`ci/images/chains.toml` with `sed`, which needs no toolchain. It tests each key against the same
+shape. It then takes the fail-safe branch above for every key, without a run of the decision,
+and exits `0`. A missing `uv` on the runner is one cause, so the SMA-603 C1 contract stays true.
+`--assert` fails a pull request when this `sed` read and tomllib find different keys (for
+example, a chain header with a trailing comment), so the fallback always names every chain.
+
+**One exit `2`.** When the `sed` read also finds no key, `chains.toml` is missing, unreadable or
+empty. The arm then cannot name the chain outputs, and a chain output that nobody writes runs that
+chain with an empty version. So the arm writes `nothing_to_release=false` only, prints an
+`::error::` annotation, and exits `2`. The `plan` job fails, and every chain and the kernel
+release skip until a fix.
 
 `--self-test`, `--negative-control`, and `--assert` keep the normal contract. CI runs those
-three as the actual gate; `--github-output` is exercised by the negative control's row 5 (see
-above — direction-agnostic, against the real repository, with `$GITHUB_OUTPUT` pointed at a
-scratch file) and by the release workflow itself at runtime.
+three as the actual gate; `--github-output` is exercised by the negative control's rows 5, 6
+and 9 to 13.
 
 ## The checker's own exit codes, and why 3
 

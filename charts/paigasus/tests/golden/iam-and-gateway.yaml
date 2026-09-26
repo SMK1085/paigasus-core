@@ -83,6 +83,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: paigasus-paigasus-iam-backend
+  annotations:
+    paigasus.io/iam-audience-warning: "the IAM audience equals oidc.clientId, so an ID token passes IAM's audience check. See docs/ops/RUNBOOK-chart.md section 6 (SMA-691)."
 spec:
   replicas: 1
   strategy:
@@ -129,7 +131,7 @@ spec:
       terminationGracePeriodSeconds: 45
       containers:
         - name: backend
-          image: "ghcr.io/smk1085/paigasus-iam:0.0.0"
+          image: "ghcr.io/smk1085/paigasus-iam:0.1.0"
           securityContext:
             allowPrivilegeEscalation: false
             # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
@@ -225,7 +227,7 @@ spec:
         # every image in this repo. It is a follow-up to measure, not a default to ship.
       containers:
         - name: console
-          image: "ghcr.io/smk1085/paigasus-gateway-console:0.0.0"
+          image: "ghcr.io/smk1085/paigasus-gateway-console:0.1.0"
           securityContext:
             allowPrivilegeEscalation: false
             # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
@@ -311,7 +313,7 @@ spec:
         # every image in this repo. It is a follow-up to measure, not a default to ship.
       containers:
         - name: console
-          image: "ghcr.io/smk1085/paigasus-iam-console:0.0.0"
+          image: "ghcr.io/smk1085/paigasus-iam-console:0.1.0"
           securityContext:
             allowPrivilegeEscalation: false
             # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for

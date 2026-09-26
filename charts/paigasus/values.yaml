@@ -14,7 +14,10 @@ zones:
     console:
       image:
         repository: ghcr.io/smk1085/paigasus-iam-console
-        tag: ""          # defaults to .Chart.AppVersion
+        # Pinned to the image version in ts/apps/iam-console/package.json (SMA-688). A version
+        # bump updates this tag in the same PR; repo:helm-render row 8a fails otherwise. An empty
+        # tag falls back to .Chart.AppVersion, which names no published image.
+        tag: "0.1.0"
       replicas: 2
     backend:
       # Deployed by this chart. Kept true: the gRPC-to-IAM link from any other zone's backend has
@@ -23,7 +26,9 @@ zones:
       deploy: true
       image:
         repository: ghcr.io/smk1085/paigasus-iam
-        tag: ""
+        # Pinned to the image version in rs/crates/services/paigasus-iam/Cargo.toml (SMA-688).
+        # repo:helm-render row 8a fails when the two differ.
+        tag: "0.1.0"
       # replicas and maxSurge are pinned; see the comment in templates/backend-deployment.yaml.
       httpPort: 8080
       grpcPort: 9090
@@ -44,7 +49,9 @@ zones:
     console:
       image:
         repository: ghcr.io/smk1085/paigasus-gateway-console
-        tag: ""
+        # Pinned to the image version in ts/apps/gateway-console/package.json (SMA-688).
+        # repo:helm-render row 8a fails when the two differ.
+        tag: "0.1.0"
       replicas: 2
     backend:
       # NOT deployed by this chart (SMA-513 Task 11b). Measured in the tree:
@@ -56,7 +63,10 @@ zones:
       deploy: false
       image:
         repository: ghcr.io/smk1085/paigasus-gateway
-        tag: ""
+        # Pinned to the image version in rs/crates/services/paigasus-gateway/Cargo.toml
+        # (SMA-688). This chart does not render it today; the pin stops a later chart that
+        # deploys it from falling back to 0.0.0. repo:helm-render row 8a fails when the two differ.
+        tag: "0.1.0"
       httpPort: 8088
       # Genuinely missing from the original schema (SMA-513 Task 11) — the gateway backend is
       # stateless and horizontally scalable, unlike IAM's SMA-559-pinned single replica, so it
@@ -78,13 +88,22 @@ ingress:
 oidc:
   issuer: ""             # REQUIRED
   clientId: ""           # REQUIRED
-  audience: ""           # NOT required. This is the access-token audience that IAM accepts.
-                         # Empty: IAM uses oidc.clientId as the audience.
-                         # Set this value only when your IdP writes a different value into the
-                         # access token's `aud` claim. Example: Okta uses api://default.
+  audience: ""           # NOT required, but recommended. This is the access-token audience that
+                         # IAM accepts. Empty: IAM uses oidc.clientId as the audience. An OIDC ID
+                         # token has the client id as its audience, so an ID token then passes
+                         # IAM's audience check, and the chart shows a warning (SMA-691).
+                         # Recommended: give the API its own audience in the IdP, in the access
+                         # token only, and set it here. Example: api://paigasus.
                          # A set value REPLACES oidc.clientId. IAM then does not accept
-                         # oidc.clientId as the audience.
-                         # Quote this value in a values file. See docs/ops/RUNBOOK-chart.md § 6.
+                         # oidc.clientId as the audience. Follow the migration order in
+                         # docs/ops/RUNBOOK-chart.md § 6, or IAM refuses every live session.
+                         # Quote this value in a values file.
+  acknowledgeClientIdAudience: ""   # NOT required. Set it to the value of oidc.clientId to
+                                    # remove the warning (NOTES and the paigasus.io/iam-audience-
+                                    # warning annotation) that shows when the IAM audience equals
+                                    # oidc.clientId. It does not change what IAM accepts. A
+                                    # change of oidc.clientId shows the warning again. Quote the
+                                    # value in a values file. See RUNBOOK-chart.md § 6.
   existingSecret: ""     # REQUIRED. Must hold keys: oidc-client-secret, session-redis-url.
   secretVersion: ""      # NOT required. The chart does not own existingSecret and cannot observe
                          # its contents, so it cannot detect a rotation on its own. Bump this

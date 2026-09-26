@@ -10,12 +10,14 @@
 #
 # usage: ci/images/run.sh build [iam|gateway]     # [iam|gateway] scopes the build
 #        ci/images/run.sh smoke [iam|gateway]...   # no argument: both images; else exactly those
+#        ci/images/run.sh smoke <iam-console|gateway-console>...   # SMA-688: paigasus-<key>:dev
 #        ci/images/run.sh all                       # build both + smoke; takes no service arg
-#        ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
+#        ci/images/run.sh build-oci <key> <outdir>  # SMA-658/SMA-688: OCI archive, no --load
 #        ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
 #        ci/images/run.sh rehearse <archive.oci.tar>...      # SMA-658: publish steps vs two local registries
 #        ci/images/run.sh build-console [iam|gateway]   # SMA-513: console image; [iam|gateway] scopes the build
 #        ci/images/run.sh all-consoles                    # SMA-513: build both consoles + smoke; takes no service arg
+# <key> is a chain key of ci/images/chains.toml: iam, gateway, iam-console or gateway-console.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +61,27 @@ crate_for() {
     iam)     echo "paigasus-iam" ;;
     gateway) echo "paigasus-gateway" ;;
     *) echo "unknown service: $1" >&2; return 1 ;;
+  esac
+}
+
+# SMA-688: every release key, mapped ONCE. A key is a chain key of ci/images/chains.toml. This
+# file keeps its own bash table on purpose (spec § 4.1). A key that the registry names and this
+# table does not know fails kind_for_key, and so fails build-oci and smoke for that key.
+kind_for_key() {
+  case "$1" in
+    iam|gateway) echo cargo ;;
+    iam-console|gateway-console) echo npm ;;
+    *) echo "unknown release key: $1" >&2; return 1 ;;
+  esac
+}
+
+# The console zone of a console key: `iam-console` -> `iam`. The console helpers below
+# (app_for, base_path_for, console_probe_path_for) take the zone, never the key.
+zone_for_key() {
+  case "$1" in
+    iam-console) echo iam ;;
+    gateway-console) echo gateway ;;
+    *) echo "not a console key: $1" >&2; return 1 ;;
   esac
 }
 
@@ -204,19 +227,40 @@ assert_console_pins() {
   # stage goes into /app, so the builder's digest matters as much as the runtime's.
   # `grep -c` over the FILE, not `grep -q` from a pipe: rc 1 (no match) prints 0 and is folded
   # into the count, and rc 2 (unreadable file) also leaves 0, so both fail closed below.
-  local n_runtime_pin n_builder_pin
-  n_runtime_pin="$(grep -cE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}([[:space:]]|$)' "$df")" || n_runtime_pin=0
+  # The two pin regexes are locals because S-FROM below reads them a second time, on the
+  # normalised file, so the count of FROM lines and the pins read the same view (SMA-670 D6).
+  local n_runtime_pin n_builder_pin rt_pin_re bd_pin_re
+  rt_pin_re='^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}([[:space:]]|$)'
+  bd_pin_re='^FROM node:[0-9]+\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}[[:space:]]+AS[[:space:]]+builder([[:space:]]|$)'
+  n_runtime_pin="$(grep -cE "$rt_pin_re" "$df")" || n_runtime_pin=0
   if [ "${n_runtime_pin:-0}" -ne 1 ]; then
     echo "::error::ts/Dockerfile: the runtime FROM line must be exactly one gcr.io/distroless/nodejsNN-debian12:nonroot@sha256:<64 hex> — a missing digest or a different tag leaves the runtime base unpinned." >&2
     return 1
   fi
-  n_builder_pin="$(grep -cE '^FROM node:[0-9]+\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}[[:space:]]+AS[[:space:]]+builder([[:space:]]|$)' "$df")" || n_builder_pin=0
+  n_builder_pin="$(grep -cE "$bd_pin_re" "$df")" || n_builder_pin=0
   if [ "${n_builder_pin:-0}" -ne 1 ]; then
     echo "::error::ts/Dockerfile: the builder FROM line must be exactly one node:X.Y.Z-bookworm@sha256:<64 hex> AS builder — without the digest, the code compiled into /app comes from an unpinned image." >&2
     return 1
   fi
 
-  # The next two checks read a NORMALISED copy of ts/Dockerfile, written to a temp file, never a
+  # S-DIRECTIVE (SMA-670 D6). On the RAW file, because a parser directive decides how the
+  # normaliser below must read the file. Only the comment lines before the first line that is not a
+  # comment can be directives. A `# syntax=` makes BuildKit pull an unpinned frontend image, and an
+  # `# escape=` changes the continuation character that the normaliser joins on. The match is
+  # case-insensitive, because Docker reads directives case-insensitively. awk reads the FILE, not a
+  # pipe, and it has no `exit`, so it reads its whole input.
+  local directive directive_rc=0
+  directive="$(awk 'done { next } !/^[[:space:]]*#/ { done = 1; next } { l = tolower($0) } l ~ /^#[[:space:]]*(syntax|escape|check)[[:space:]]*=/ { print; done = 1 }' "$df")" || directive_rc=$?
+  if [ "$directive_rc" -ne 0 ]; then
+    echo "::error::assert_console_pins: awk exited ${directive_rc} while reading ts/Dockerfile's parser directives; the directive check could not run." >&2
+    return 1
+  fi
+  if [ -n "$directive" ]; then
+    echo "::error::ts/Dockerfile starts with a parser directive (${directive}); a '# syntax=' pulls an unpinned BuildKit frontend and '# escape=' changes how this check reads the file — remove it." >&2
+    return 1
+  fi
+
+  # The checks below read a NORMALISED copy of ts/Dockerfile, written to a temp file, never a
   # here-string: Homebrew bash 5 deadlocks on a here-string over 512 bytes on the development Mac
   # (CLAUDE.md, SMA-612). The normalisation follows assert_pins: `\`-continued lines are joined
   # into one, so a flag or an assignment on a continuation line is seen on its instruction's line.
@@ -240,8 +284,8 @@ assert_console_pins() {
   # instruction: a later variable on a multi-variable ENV line (ts/Dockerfile's own house style),
   # a continuation line, an indented instruction, or an ARG. The instruction keyword matches
   # case-insensitively, because Docker parses `env` and `ENV` the same; PAIGASUS_ stays
-  # case-sensitive, as IAM_/GATEWAY_ do in assert_pins. What this does NOT see: a PAIGASUS_ value
-  # written by a RUN step into a file, or passed in through a COPY — it reads ENV and ARG only.
+  # case-sensitive, as IAM_/GATEWAY_ do in assert_pins. This check reads ENV and ARG only. A
+  # PAIGASUS_ in a RUN, COPY, ADD or ONBUILD step or in a heredoc body is S-PAIGASUS's job, below.
   local n_baked baked_rc=0
   n_baked="$(grep -cE '^[[:space:]]*([Ee][Nn][Vv]|[Aa][Rr][Gg])[[:space:]]+.*PAIGASUS_' "$norm")" || baked_rc=$?
   if [ "$baked_rc" -gt 1 ]; then
@@ -256,20 +300,122 @@ assert_console_pins() {
     return 1
   fi
 
+  # S-FROM (SMA-670 gap 2a, D6). Every image that the build reads must be one of the two
+  # digest-pinned FROM images. So the normalised file holds exactly two FROM instructions, and each
+  # one matches one of the two pin regexes above. An extra stage, an unpinned stage, or a `from`
+  # instruction in lower case all red here. The count and the pins read the SAME normalised view.
+  local from_lines from_rc=0 n_from n_from_bad from_bad_lines from_bad_rc=0
+  from_lines="$(grep -E '^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]' "$norm")" || from_rc=$?
+  if [ "$from_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${from_rc} on the normalised ts/Dockerfile; the FROM check could not run." >&2
+    return 1
+  fi
+  # printf into grep -c reads the whole input: grep -c is not an early-exit reader.
+  n_from="$(printf '%s\n' "$from_lines" | grep -c .)" || n_from=0
+  # The -vE grep is captured on its own, and its rc is read before grep -c runs. Piping the two
+  # greps together lets `pipefail` report grep -c's rc, which is always 0 or 1. A real failure
+  # (rc > 1) in the -vE grep was then folded into "no bad lines" (SMA-670, S-HCTIMEOUT precedent).
+  from_bad_lines="$(printf '%s\n' "$from_lines" | grep -vE "$rt_pin_re|$bd_pin_re")" || from_bad_rc=$?
+  if [ "$from_bad_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${from_bad_rc} on the FROM lines; the pinned-stage check could not run." >&2
+    return 1
+  fi
+  n_from_bad="$(printf '%s\n' "$from_bad_lines" | grep -c .)" || n_from_bad=0
+  if [ "$n_from" -ne 2 ] || [ "$n_from_bad" -ne 0 ]; then
+    echo "::error::ts/Dockerfile has ${n_from} FROM instruction(s), or a FROM that is not one of the two digest-pinned stages (the node builder and the distroless runtime); an extra or unpinned stage pulls an unpinned image into the build. The FROM lines of the normalised file follow." >&2
+    printf '%s\n' "$from_lines" >&2
+    rm -f "$norm"
+    return 1
+  fi
+
+  # S-COPYFROM (SMA-670 D6). A `--from=<image>` pulls an image that no FROM line pins. So every
+  # `--from=` value (COPY --from=) and every `from=` inside a `--mount=` argument (RUN --mount=…)
+  # must name the builder stage or the named build context `bindings`. Each extraction is guarded:
+  # grep rc 1 is "none found", and only rc > 1 is a failure.
+  local cf_from cf_from_rc=0 cf_mount cf_mount_rc=0 cf_values cf_bad cf_v
+  local cf_extract cf_extract_rc=0 cf_bad_rc=0
+  cf_from="$(grep -oE -- '--from=[^[:space:],]+' "$norm")" || cf_from_rc=$?
+  cf_mount="$(grep -oE -- '--mount=[^[:space:]]+' "$norm")" || cf_mount_rc=$?
+  if [ "$cf_from_rc" -gt 1 ] || [ "$cf_mount_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${cf_from_rc}/${cf_mount_rc} on the normalised ts/Dockerfile; the --from= check could not run." >&2
+    return 1
+  fi
+  # grep rc 1 below means "no value at all" or "no bad value", and both leave the variable empty,
+  # which is the correct reading. `from=` also finds the value inside each `--from=` match. Each
+  # grep is captured on its own, and its rc is read before the next step runs. Piping them together
+  # lets `pipefail` report only the LAST command's rc, so a real failure (rc > 1) in an earlier
+  # grep was folded into "no bad value" (SMA-670, S-HCTIMEOUT precedent).
+  cf_extract="$(printf '%s\n' "$cf_from" "$cf_mount" | grep -oE 'from=[^[:space:],]+')" || cf_extract_rc=$?
+  if [ "$cf_extract_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${cf_extract_rc} on the --from= values; the --from= check could not run." >&2
+    return 1
+  fi
+  cf_values="$(printf '%s\n' "$cf_extract" | sed 's/^from=//')" || cf_values=""
+  cf_bad="$(printf '%s\n' "$cf_values" | grep -vxE 'builder|bindings')" || cf_bad_rc=$?
+  if [ "$cf_bad_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${cf_bad_rc} on the --from= values; the --from= check could not run." >&2
+    return 1
+  fi
+  if [ -n "$cf_bad" ]; then
+    while IFS= read -r cf_v; do
+      echo "::error::ts/Dockerfile reads from '${cf_v}', which is not the builder stage or the bindings context; a --from=<image> pulls an image that no FROM line pins." >&2
+    done < <(printf '%s\n' "$cf_bad")
+    rm -f "$norm"
+    return 1
+  fi
+
+  # S-PAIGASUS (SMA-670 gap 2c, the text half). The ENV/ARG check above has passed, so every
+  # PAIGASUS_ that is left is outside an ENV or ARG instruction: a RUN, COPY, ADD or ONBUILD step,
+  # a heredoc body line, or a continuation that the normaliser does not join (a blank line inside
+  # an ENV value). None may name PAIGASUS_ at all. There is no PAIGASUS_COMPILED_* exemption:
+  # ts/Dockerfile never writes those values, createNextConfig does (SMA-670 D7). Comment lines
+  # cannot trigger this, because the normaliser dropped them. The lines are printed without line
+  # numbers, because a normalised line number is not a ts/Dockerfile line number.
+  local n_named named_rc=0
+  n_named="$(grep -c 'PAIGASUS_' "$norm")" || named_rc=$?
+  if [ "$named_rc" -gt 1 ]; then
+    rm -f "$norm"
+    echo "::error::assert_console_pins: grep exited ${named_rc} on the normalised ts/Dockerfile; the PAIGASUS_ outside ENV/ARG check could not run." >&2
+    return 1
+  fi
+  if [ "${n_named:-0}" -ne 0 ]; then
+    echo "::error::ts/Dockerfile names PAIGASUS_ outside an ENV/ARG instruction (a RUN, COPY, ADD or ONBUILD step, or a heredoc body); console config is deployment-varying and must stay runtime-only. The line(s) of the normalised file follow." >&2
+    grep 'PAIGASUS_' "$norm" >&2 || true
+    rm -f "$norm"
+    return 1
+  fi
+
   # EVERY `pnpm install` invocation carries --frozen-lockfile, not only the first one found. Each
   # invocation is cut at the next `&&`, `;` or `|`, so two installs chained in one RUN are two
   # invocations here. `--frozen-lockfile` must stand as a bare flag. Any `--frozen-lockfile=<value>`
   # form (`=false` switches it off) and `--no-frozen-lockfile` are rejected outright, even beside
   # a bare flag, so the check never has to decide which of two conflicting flags pnpm obeys.
-  local inst inst_rc=0 n_inst n_frozen n_unfrozen
-  inst="$(grep -oE 'pnpm[[:space:]]+install([[:space:]][^&;|]*)?' "$norm")" || inst_rc=$?
+  #
+  # S-INSTALL (SMA-670 gap 2b). The extraction takes EVERY pnpm invocation first, from the word
+  # `pnpm` to the next `&&`, `;` or `|`. awk then splits each one into whitespace-separated tokens
+  # and keeps it when a token is exactly `install`, `i`, `install-test` or `it`. So
+  # `pnpm --filter x install`, `pnpm -C ts i` and a bare `pnpm i` are installs, and `pnpm info`,
+  # `pnpm import`, `pnpm init` and `pnpm exec next build` are not. awk tokens, not `\b`, `\<` or
+  # `\>`: those are not POSIX ERE, and BSD grep and GNU grep read them differently. Each token
+  # loses its quote, backtick and parenthesis characters before the compare, so
+  # `sh -c "pnpm install"` stays an install, as it was under the old `pnpm[[:space:]]+install`
+  # match (MEASURED: without the strip the token is `install"` and the install is missed). The awk
+  # has no `exit`, so it reads its whole input. `\047` is the single quote.
+  local inv inv_rc=0 inst n_inst n_frozen n_unfrozen
+  inv="$(grep -oE '(^|[^[:alnum:]_./-])pnpm([[:space:]][^&;|]*)?' "$norm")" || inv_rc=$?
   rm -f "$norm"
-  if [ "$inst_rc" -gt 1 ]; then
-    echo "::error::assert_console_pins: grep exited ${inst_rc} on the normalised ts/Dockerfile; the --frozen-lockfile check could not run." >&2
+  if [ "$inv_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${inv_rc} on the normalised ts/Dockerfile; the --frozen-lockfile check could not run." >&2
     return 1
   fi
+  inst="$(printf '%s\n' "$inv" | awk '{ for (i = 1; i <= NF; i++) { t = $i; gsub(/["\047()`]/, "", t); if (t == "install" || t == "i" || t == "install-test" || t == "it") { print; next } } }')" || inst=""
   if [ -z "$inst" ]; then
-    echo "::error::ts/Dockerfile: no 'pnpm install' instruction found; the image would not be built from the committed lockfile." >&2
+    echo "::error::ts/Dockerfile: no 'pnpm install'/'pnpm i' instruction found; the image would not be built from the committed lockfile." >&2
     return 1
   fi
   # printf into grep -c reads the whole input: grep -c is not an early-exit reader.
@@ -277,11 +423,69 @@ assert_console_pins() {
   n_frozen="$(printf '%s\n' "$inst" | grep -cE -- '--frozen-lockfile([[:space:]]|$)')" || n_frozen=0
   n_unfrozen="$(printf '%s\n' "$inst" | grep -cE -- '--frozen-lockfile=|--no-frozen-lockfile')" || n_unfrozen=0
   if [ "$n_unfrozen" -ne 0 ] || [ "$n_frozen" -ne "$n_inst" ]; then
-    echo "::error::ts/Dockerfile: ${n_frozen} of ${n_inst} 'pnpm install' invocation(s) carry --frozen-lockfile, and ${n_unfrozen} switch it off; every install must be frozen, or the image would not be built from the committed lockfile. The invocations follow." >&2
+    echo "::error::ts/Dockerfile: ${n_frozen} of ${n_inst} 'pnpm install'/'pnpm i' invocation(s) carry --frozen-lockfile, and ${n_unfrozen} switch it off; every install must be frozen, or the image would not be built from the committed lockfile. The invocations follow." >&2
     printf '%s\n' "$inst" >&2
     return 1
   fi
-  echo "  ts/Dockerfile: distroless Node ${base_major} and builder Node ${builder_node}/pnpm ${builder_pnpm} match .prototools, both FROM lines digest-pinned, no baked PAIGASUS_* ENV/ARG, all ${n_inst} pnpm install(s) --frozen-lockfile"
+
+  # S-HCTIMEOUT (SMA-670 D2). On the RAW file. The healthcheck printf line must hold exactly one
+  # AbortSignal.timeout(<ms>), the HEALTHCHECK instruction must hold --timeout=<s>s, and the signal
+  # must fire before Docker kills the probe. Without the signal, a server that accepts the
+  # connection and never answers hangs the probe until Docker kills it, and only undici's 300 s
+  # headersTimeout bounds a `docker exec` of the same program. ts/Dockerfile must also hold exactly
+  # one HEALTHCHECK instruction (SMA-670 review finding 3): Docker obeys only the LAST one, and the
+  # read below always takes the FIRST, so a second instruction would check the wrong timeout.
+  local hc_line hc_line_rc=0 n_hc_line sig_grep sig_grep_rc=0 n_sig sig_ms
+  local hc_instr hc_instr_rc=0 n_hc_instr to_grep to_grep_rc=0 hc_to_s
+  hc_line="$(grep -E '^RUN printf .*> /app/healthcheck\.mjs$' "$df")" || hc_line_rc=$?
+  if [ "$hc_line_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${hc_line_rc} on ts/Dockerfile; the healthcheck timeout check could not run." >&2
+    return 1
+  fi
+  n_hc_line="$(printf '%s\n' "$hc_line" | grep -c .)" || n_hc_line=0
+  # Each grep below is captured on its own, and its rc is read before the next one runs (SMA-670
+  # review finding 4): piping two greps together lets `pipefail` report the RIGHTMOST one's rc, so
+  # a real failure (rc > 1) in the first grep of the pair was silently folded into "no match".
+  sig_grep="$(printf '%s\n' "$hc_line" | grep -oE 'AbortSignal\.timeout\([0-9]+\)')" || sig_grep_rc=$?
+  if [ "$sig_grep_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${sig_grep_rc} on the healthcheck printf line; the healthcheck timeout check could not run." >&2
+    return 1
+  fi
+  n_sig="$(printf '%s\n' "$sig_grep" | grep -c .)" || n_sig=0
+  sig_ms="$(printf '%s\n' "$hc_line" | sed -n 's/.*AbortSignal\.timeout(\([0-9][0-9]*\)).*/\1/p' | sed -n 1p)" || sig_ms=""
+  hc_instr="$(grep -E '^[[:space:]]*HEALTHCHECK[[:space:]]' "$df")" || hc_instr_rc=$?
+  if [ "$hc_instr_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${hc_instr_rc} on ts/Dockerfile; the healthcheck timeout check could not run." >&2
+    return 1
+  fi
+  n_hc_instr="$(printf '%s\n' "$hc_instr" | grep -c .)" || n_hc_instr=0
+  if [ "$n_hc_instr" -ne 1 ]; then
+    echo "::error::ts/Dockerfile holds ${n_hc_instr} HEALTHCHECK instructions; exactly one is required, because Docker obeys only the LAST one and this check reads the FIRST." >&2
+    return 1
+  fi
+  to_grep="$(printf '%s\n' "$hc_instr" | grep -oE -- '--timeout=[0-9]+s')" || to_grep_rc=$?
+  if [ "$to_grep_rc" -gt 1 ]; then
+    echo "::error::assert_console_pins: grep exited ${to_grep_rc} on the HEALTHCHECK instruction; the healthcheck timeout check could not run." >&2
+    return 1
+  fi
+  hc_to_s="$(printf '%s\n' "$to_grep" | sed -n 's/^--timeout=\([0-9]*\)s$/\1/p' | sed -n 1p)" || hc_to_s=""
+  # SMA-670 review finding 1: refuse a --timeout value of more than 5 digits before it is read as
+  # an arithmetic operand, so the multiplication below cannot overflow. The same `case` also
+  # catches a LEADING ZERO (--timeout=08s): bash reads a leading 0 as an octal prefix, `08` is not
+  # a valid octal digit, and the bare `$((hc_to_s * 1000))` this replaces threw and aborted the
+  # whole script with no ::error:: line at all.
+  case "$hc_to_s" in
+    ??????*)
+      echo "::error::ts/Dockerfile's HEALTHCHECK --timeout=${hc_to_s}s has more than 5 digits, which is not a sane seconds value; the healthcheck timeout check could not run." >&2
+      return 1
+      ;;
+  esac
+  if [ "$n_hc_line" -ne 1 ] || [ "$n_sig" -ne 1 ] || [ -z "$sig_ms" ] || [ -z "$hc_to_s" ] \
+    || [ "$sig_ms" -ge $((10#$hc_to_s * 1000)) ]; then
+    echo "::error::ts/Dockerfile's healthcheck.mjs fetch has no AbortSignal.timeout(<ms>) below the HEALTHCHECK --timeout (found: ${n_hc_line} healthcheck printf line(s), ${n_sig} signal(s), signal ${sig_ms:-<none>} ms, HEALTHCHECK --timeout ${hc_to_s:-<none>} s; only a --timeout=<N>s value in whole seconds is read); without it, a server that stops answering hangs the probe until Docker kills it." >&2
+    return 1
+  fi
+  echo "  ts/Dockerfile: distroless Node ${base_major} and builder Node ${builder_node}/pnpm ${builder_pnpm} match .prototools, both FROM lines digest-pinned, no parser directive, exactly 2 FROM stages, every --from= is builder/bindings, no PAIGASUS_* anywhere, all ${n_inst} pnpm install(s) --frozen-lockfile, healthcheck signal ${sig_ms} ms < --timeout=${hc_to_s}s"
 }
 
 # Writes the chisel package list that a build log names into $2, and fails when it is empty
@@ -295,13 +499,23 @@ extract_chisel_manifest() {
   fi
 }
 
-# The version line of a service crate's own Cargo.toml. Both services carry a literal version
-# (not `version.workspace = true`), which is what the image's version label must equal.
+# The version that the image's version label must equal, read from the chain's version file
+# (ci/images/chains.toml). SMA-688: a console key reads the top-level "version" of its
+# package.json. The sed reads the two-space-indented top-level key only; release_plan.py reads
+# the same value with a JSON parser, and the publish job's label compare fails when the two
+# disagree.
 version_for() {
-  local crate="$1" v
-  v="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$ROOT/rs/crates/services/${crate}/Cargo.toml" | sed -n 1p)"
+  local key="$1" kind file v
+  kind="$(kind_for_key "$key")"
+  if [ "$kind" = cargo ]; then
+    file="rs/crates/services/$(crate_for "$key")/Cargo.toml"
+    v="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$ROOT/$file" | sed -n 1p)"
+  else
+    file="ts/apps/$(app_for "$(zone_for_key "$key")")/package.json"
+    v="$(sed -n 's/^  "version": "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)",\{0,1\}$/\1/p' "$ROOT/$file" | sed -n 1p)"
+  fi
   if [ -z "$v" ]; then
-    echo "::error::no literal version line in rs/crates/services/${crate}/Cargo.toml" >&2
+    echo "::error::no literal MAJOR.MINOR.PATCH version line in ${file}" >&2
     return 1
   fi
   echo "$v"
@@ -450,15 +664,22 @@ build_console_one() {
 # already aliases `docker build` to the same buildx call, which is how the containerd-image-store
 # Mac measurement in docs/ops/RUNBOOK-containers.md was taken). Do NOT "simplify" this back to
 # bare `docker build` — that is the exact regression this comment exists to prevent.
-build_oci() {
+build_oci_service() {
   local service="$1" outdir="$2" crate version arch archive build_log
   crate="$(crate_for "$service")"
-  version="$(version_for "$crate")"
+  version="$(version_for "$service")"
   arch="$(docker version --format '{{.Server.Arch}}')"
   mkdir -p "$outdir"
   archive="${outdir}/${crate}-${arch}.oci.tar"
   build_log="$(mktemp "${TMPDIR:-/tmp}/paigasus-build-${service}.XXXXXX")"
-  trap 'rm -f "$build_log"' RETURN
+  # SMA-688: this trap must disarm ITSELF once it fires. build_oci_service now runs INSIDE the
+  # build_oci dispatcher, not straight from the top-level case block, and a bash RETURN trap
+  # stays armed for the NEXT function return too — measured: without the self-disarming
+  # `trap - RETURN` here, this trap fired again when build_oci (the caller) returned, and died
+  # there on `build_log: unbound variable` under `set -u`, since build_log is this function's own
+  # local and is out of scope in its caller. build_one's copy of this trap needs no such fix: it
+  # is still called straight from the top-level case block, one call frame up, not two.
+  trap 'rm -f "$build_log"; trap - RETURN' RETURN
   echo "== build-oci ${crate} ${version} (${arch}) =="
   docker buildx build \
     --progress=plain \
@@ -476,6 +697,49 @@ build_oci() {
     "$ROOT/rs" 2>&1 | tee "$build_log"
   extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}-${arch}.txt"
   echo "  built ${archive}"
+}
+
+# SMA-688: the console release build. The same OCI transport as build_oci_service
+# (--provenance=false --sbom=false, one image, no --load) and the same label set, with
+# title=paigasus-<key>. It has no --no-cache-filter=rootfs and no chisel manifest: both exist for
+# the chisel-cut service base only (spec § 5.1). The build inputs are build_console_one's.
+build_oci_console() {
+  local key="$1" outdir="$2" zone app base_path version arch archive
+  zone="$(zone_for_key "$key")"
+  app="$(app_for "$zone")"
+  base_path="$(base_path_for "$zone")"
+  version="$(version_for "$key")"
+  arch="$(docker version --format '{{.Server.Arch}}')"
+  mkdir -p "$outdir"
+  archive="${outdir}/paigasus-${key}-${arch}.oci.tar"
+  echo "== build-oci paigasus-${key} ${version} (${arch}) =="
+  docker buildx build \
+    --progress=plain \
+    --provenance=false --sbom=false \
+    --output "type=oci,dest=${archive},name=paigasus-${key}:dev" \
+    -f "$ROOT/ts/Dockerfile" \
+    --build-context "bindings=$ROOT/rs/crates/bindings" \
+    --build-arg "APP=${app}" \
+    --build-arg "BASE_PATH=${base_path}" \
+    --label "org.opencontainers.image.title=paigasus-${key}" \
+    --label "org.opencontainers.image.description=Paigasus ${zone} console" \
+    --label "org.opencontainers.image.source=https://github.com/SMK1085/paigasus-core" \
+    --label "org.opencontainers.image.revision=${REVISION}" \
+    --label "org.opencontainers.image.version=${version}" \
+    --label "org.opencontainers.image.licenses=Apache-2.0" \
+    "$ROOT/ts"
+  echo "  built ${archive}"
+}
+
+# SMA-688: the key decides the build. The dispatcher has already run the pins for this kind.
+build_oci() {
+  local key="$1" outdir="$2" kind
+  kind="$(kind_for_key "$key")"
+  if [ "$kind" = npm ]; then
+    build_oci_console "$key" "$outdir"
+  else
+    build_oci_service "$key" "$outdir"
+  fi
 }
 
 # SMA-658 spec § 4.2: the image the smoke suite tests must be the image in the archive. What a
@@ -915,6 +1179,11 @@ CONSOLE_SMOKE_ENV=(
   -e "PAIGASUS_IAM_GRPC_URL=http://iam:9090"
 )
 
+# SMA-670 gap 3: the wall-clock bound, in seconds, on the smoke row that runs the image's own
+# HEALTHCHECK program with `docker exec`. The program's own fetch signal (2500 ms, ts/Dockerfile)
+# ends a hang first; this bound is for a hang that the signal does not end.
+CONSOLE_HC_DEADLINE=20
+
 # Walks the image's staged tree with the image's OWN node — the runtime base is distroless and has
 # no shell, so there is no `find` in there to call. Prints `public=0|1` on line 1 and one staged
 # .next/static path per line after it, with the BUILD_ID directory rewritten to the literal
@@ -936,6 +1205,181 @@ const rel = walk(root + "/.next/static")
 console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(rel).join("\n"));
 '
 
+# --- SMA-670 smoke rows ----------------------------------------------------------------------------
+# smoke_consoles calls each function in this section as `<fn> … || ec=1`. Because of the `||`,
+# errexit is OFF inside them: each one checks the rc of every command itself and must not depend on
+# `set -e`. Each one keeps its JS program in a `local`, so it needs no global except ROOT (and
+# with_deadline, for the HEALTHCHECK row). ci/images/console-selftest.sh copies them out of this
+# file with awk and calls them in this same `|| rc=$?` shape against a stub `docker`.
+# SMA-688: each image row takes `<app> <image>`. The image is the one smoke_consoles tests:
+# `<app>:dev` from build-console, or `paigasus-<key>:dev` from load-oci. A row never builds an
+# image name from `<app>` itself, or it would test a different image than the smoke run.
+
+# R-NODE (SMA-670 gap 1). The runtime base pins only the Node MAJOR (distroless publishes no
+# patch-level tags), so nothing else records which Node the image runs. This row prints it. A
+# different major, an unparseable version or an unreadable .prototools pin is an error. A different
+# minor or patch is a WARNING and the row stays green (SMA-670 D1): no change in this repository can
+# make the patch equal, because the runtime tag `nonroot` holds no version and the digest is the only
+# pin. It needs only the image, not a running container. stdout only is parsed; docker's own stderr
+# passes through.
+console_node_version_row() {
+  local app="$1" image="$2" pin ver_out ver_rc=0 line maj min pat pmaj pmin ppat advice
+  local pin_re='^([0-9]+)\.([0-9]+)\.([0-9]+)$' ver_re='^v([0-9]+)\.([0-9]+)\.([0-9]+)$'
+  pin="$(sed -n 's/^node = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")" || pin=""
+  if ! [[ $pin =~ $pin_re ]]; then
+    echo "::error::${app}: runtime Node version NOT checked — no node = \"X.Y.Z\" pin in .prototools." >&2
+    return 1
+  fi
+  pmaj="${BASH_REMATCH[1]}"; pmin="${BASH_REMATCH[2]}"; ppat="${BASH_REMATCH[3]}"
+  ver_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" --version)" || ver_rc=$?
+  if [ "$ver_rc" -ne 0 ]; then
+    echo "::error::${app}: runtime Node version NOT checked — docker exited ${ver_rc} on ${image} before node printed a version, so the image is missing or unreadable." >&2
+    return 1
+  fi
+  line="$(printf '%s\n' "$ver_out" | sed -n 1p)" || line=""
+  if ! [[ $line =~ $ver_re ]]; then
+    echo "::error::${app}: could not parse the runtime Node version from '${line}' — /nodejs/bin/node --version must print vX.Y.Z." >&2
+    return 1
+  fi
+  maj="${BASH_REMATCH[1]}"; min="${BASH_REMATCH[2]}"; pat="${BASH_REMATCH[3]}"
+  if [ "$maj" -ne "$pmaj" ]; then
+    echo "::error::${app}: the runtime image runs Node ${line#v}, but .prototools pins ${pin} — a different major; the runtime FROM line in ts/Dockerfile and .prototools disagree." >&2
+    return 1
+  fi
+  if [ "$min" -ne "$pmin" ] || [ "$pat" -ne "$ppat" ]; then
+    if [ "$min" -lt "$pmin" ] || { [ "$min" -eq "$pmin" ] && [ "$pat" -lt "$ppat" ]; }; then
+      advice="The runtime is older: a later runtime digest refresh closes the gap."
+    else
+      advice="The runtime is newer: bump .prototools and the builder FROM line together."
+    fi
+    echo "::warning::${app}: the runtime image runs Node ${line#v}, .prototools pins ${pin}. distroless publishes no patch-level tags, so only the major is held. ${advice}" >&2
+    echo "  ${app}: runtime Node ${line#v}, same major as .prototools ${pin} (minor/patch differ, see the warning)"
+    return 0
+  fi
+  echo "  ${app}: runtime Node ${line#v} matches .prototools"
+}
+
+# R-CONFIG (SMA-670 gap 2c, the behavioural half). Two reads of the image, and both need only the
+# image. (1) Config.Env must hold no PAIGASUS_* key; the error names the key, never the value.
+# (2) The image's own node walks /app without following symlinks, and no file whose base name
+# starts with `.env` may be there outside node_modules: Next loads `.env*` from the server's own
+# directory at runtime, so a value in such a file is baked configuration. A dependency can ship an
+# `.env.example`, so a path with a node_modules directory in it is not reported. The walk still
+# counts those files, and a count under 100 means that it read the wrong tree. Both zones measure
+# well over 1000 files; the per-zone count moves with every dependency bump, so the floor is set
+# far below either zone's count rather than pinned to a value that goes stale (SMA-670 review
+# finding 5: an earlier comment named 1367 and 1324, and a later measurement already read 1353).
+console_image_config_row() {
+  local app="$1" image="$2" rc=0 env_out env_rc=0 keys key walk_out walk_rc=0 first n paths paths_rc=0
+  local walk_js='
+const fs = require("fs");
+let walked = 0;
+const found = [];
+const walk = (d) => {
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    const p = d + "/" + e.name;
+    if (e.isDirectory()) { walk(p); continue; }
+    walked++;
+    if (e.name.startsWith(".env")) found.push(p);
+  }
+};
+walk(process.argv[1]);
+console.log(["walked=" + walked].concat(found).join("\n"));
+'
+  env_out="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image")" || env_rc=$?
+  if [ "$env_rc" -ne 0 ]; then
+    echo "::error::${app}: image config NOT checked — docker image inspect exited ${env_rc} on ${image}, so the image is missing or unreadable." >&2
+    rc=1
+  else
+    keys="$(printf '%s\n' "$env_out" | sed -n 's/^\(PAIGASUS_[^=]*\)=.*$/\1/p')" || keys=""
+    if [ -n "$keys" ]; then
+      while IFS= read -r key; do
+        echo "::error::${image} bakes ${key} into Config.Env — console config is deployment-varying and must stay runtime-only (the value is not printed)." >&2
+      done < <(printf '%s\n' "$keys")
+      rc=1
+    fi
+  fi
+  walk_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" -e "$walk_js" /app)" || walk_rc=$?
+  if [ "$walk_rc" -ne 0 ]; then
+    echo "::error::${app}: .env scan NOT checked — the walk exited ${walk_rc} on ${image}, so the image is missing or unreadable." >&2
+    return 1
+  fi
+  first="$(printf '%s\n' "$walk_out" | sed -n 1p)" || first=""
+  n=""
+  case "$first" in walked=*) n="${first#walked=}" ;; esac
+  case "$n" in ''|*[!0-9]*) n="" ;; esac
+  if [ -z "$n" ] || [ "$n" -lt 100 ]; then
+    echo "::error::${app}: .env scan walked ${n:-an unreadable number of ('${first}')} files under /app — too few to prove anything; the walk read the wrong tree." >&2
+    return 1
+  fi
+  # The node_modules filter is here, not in the JS, so the self-test's stub rows exercise it.
+  # grep -v rc 1 means "every path was under node_modules", which leaves `paths` empty. Under
+  # pipefail, this pipeline's own rc is grep's rc (printf and sed do not fail here), so rc 0/1
+  # both read as today; rc > 1 means grep itself could not run, and a silent paths="" there would
+  # be a false-clear on a secret scan (global-constraints.md: a grep rc > 1 needs its own
+  # ::error::, per assert_console_pins's cf_from_rc/cf_mount_rc precedent).
+  paths="$(printf '%s\n' "$walk_out" | sed -n '2,$p' | grep -v '/node_modules/')" || paths_rc=$?
+  if [ "$paths_rc" -gt 1 ]; then
+    echo "::error::${app}: .env scan NOT checked — grep exited ${paths_rc} while filtering the walk output for node_modules paths." >&2
+    return 1
+  fi
+  if [ -n "$paths" ]; then
+    echo "::error::${app}: the image holds .env file(s) under /app outside node_modules; Next loads them at runtime, so a value in them is baked configuration. The paths follow." >&2
+    printf '%s\n' "$paths" >&2
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then return 1; fi
+  echo "  ${app}: no PAIGASUS_* in Config.Env and no .env file in /app (${n} files walked)"
+}
+
+# R-HEALTH (SMA-670 gap 3). The image's OWN HEALTHCHECK program, run inside the running container.
+# Nothing else in this suite executes /app/healthcheck.mjs: ts/Dockerfile writes it with a `printf`
+# that carries a backtick template literal and a `%s` substitution, so an escaping or path
+# regression would otherwise ship with every other row green. `docker exec` of the image's node
+# needs no shell. The call runs under with_deadline, so a probe that hangs cannot hang this suite.
+# Its output goes to a mktemp FILE, never to a `$( )` capture: MEASURED (SMA-670 M7), a captured
+# with_deadline waits for its full deadline under bash 5, because the watchdog's orphan `sleep`
+# holds the capture pipe open. A timeout is reported only when the rc is 143 or 137 AND the elapsed
+# time reached the deadline; any other 137 (for example from the OOM killer) takes the "exited"
+# message. A killed `docker exec` client can leave node running in the container;
+# console_smoke_cleanup and the EXIT trap remove the container.
+console_healthcheck_row() {
+  local name="$1" app="$2" base_path="$3" deadline="$4" out hc_rc=0 start elapsed deadline_ok
+  # SMA-670 review finding 2: a `case` pattern of `??????*` also refuses 6-or-more digits (for
+  # example 99999999999999999999), never reaching `[ "$deadline" -lt 1 ]` on such a value. That
+  # comparison overflows bash's integer test, exits 2 (an error, not a true/false answer), and the
+  # `||` above it then read that 2 as "false" — so the huge deadline was ACCEPTED, fail-open.
+  case "$deadline" in
+    ''|*[!0-9]*|??????*) deadline_ok=0 ;;
+    *) deadline_ok=1 ;;
+  esac
+  if [ "$deadline_ok" -eq 0 ] || [ "$deadline" -lt 1 ]; then
+    echo "::error::${app}: HEALTHCHECK program NOT checked — the deadline '${deadline}' is not a positive integer number of seconds." >&2
+    return 1
+  fi
+  out="$(mktemp "${TMPDIR:-/tmp}/paigasus-console-hc.XXXXXX")" || out=""
+  if [ -z "$out" ]; then
+    echo "::error::${app}: HEALTHCHECK program NOT checked — mktemp failed." >&2
+    return 1
+  fi
+  start=$SECONDS
+  with_deadline "$deadline" docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs >"$out" 2>&1 || hc_rc=$?
+  elapsed=$((SECONDS - start))
+  if [ "$hc_rc" -eq 0 ]; then
+    rm -f "$out"
+    echo "  ${app}: HEALTHCHECK program /app/healthcheck.mjs exits 0"
+    return 0
+  fi
+  if { [ "$hc_rc" -eq 143 ] || [ "$hc_rc" -eq 137 ]; } && [ "$elapsed" -ge "$deadline" ]; then
+    echo "::error::${app}: the image's HEALTHCHECK program (/app/healthcheck.mjs) did not finish within ${deadline}s against a server that renders ${base_path} — the probe hangs; check the fetch timeout in ts/Dockerfile's healthcheck printf. Its output follows." >&2
+  else
+    echo "::error::${app}: the image's HEALTHCHECK program (/app/healthcheck.mjs) exited ${hc_rc} against a server that renders ${base_path} — check the healthcheck printf in ts/Dockerfile. Its output follows." >&2
+  fi
+  cat "$out" >&2 || true
+  rm -f "$out"
+  return 1
+}
+
 # Every `$( )` here is either guarded with `|| <var>=""` and followed by an explicit check that
 # prints its own named ::error::, or provably unable to fail before its own message. That is not
 # decoration: under `set -euo pipefail` an unguarded failing capture aborts the whole script on
@@ -947,9 +1391,9 @@ console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(r
 # `[ "$ec" -eq 0 ] && echo …` — a failing `[ ]` as the last top-level command would make the
 # function return 1 on its own.
 smoke_consoles() {
-  local service app base_path console_path other name port origin status html chunk bytes code uid console_status
+  local spec image service app base_path console_path other name port origin status html chunk bytes code uid console_status
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
-  local host_std host_static host_id run_rc sh_rc img_rc cstate hc_rc hc_out
+  local host_std host_static host_id run_rc sh_rc img_rc cstate
   local ec=0 bad started
   # This REPLACES the script-global `trap load_oci_cleanup EXIT` at the top of the load-oci
   # section, exactly as `smoke()` and `rehearse` already do — harmless today because no dispatch
@@ -959,14 +1403,23 @@ smoke_consoles() {
   trap console_smoke_cleanup EXIT
   console_smoke_cleanup
 
-  # The zone list comes from the caller (the `all-consoles` arm passes `console_services`), so the
-  # list lives in ONE place rather than being restated here. An empty list must not read as a pass.
+  # The zone list comes from the caller, as `<zone>=<image>` words (SMA-688). `all-consoles`
+  # passes `<zone>=<app>:dev`, the image build_console_one makes; `smoke <console-key>` passes
+  # `<zone>=paigasus-<key>:dev`, the image load-oci makes from the release archive. An empty list
+  # must not read as a pass.
   if [ "$#" -eq 0 ]; then
     echo "::error::smoke_consoles: called with no zones — nothing was smoked, and an empty run must not report OK." >&2
     return 1
   fi
 
-  for service in "$@"; do
+  for spec in "$@"; do
+    service="${spec%%=*}"
+    image="${spec#*=}"
+    if [ "$service" = "$spec" ] || [ -z "$image" ]; then
+      echo "::error::smoke_consoles: '${spec}' is not a <zone>=<image> word." >&2
+      ec=1
+      continue
+    fi
     # GUARDED, because $service is now caller-supplied rather than a loop literal: app_for and
     # base_path_for print their own "unknown console: …" and return 1, and an unguarded capture
     # would abort the script there and cancel every remaining zone's rows.
@@ -975,6 +1428,13 @@ smoke_consoles() {
     console_path="$(console_probe_path_for "$service")" || console_path=""
     if [ -z "$app" ] || [ -z "$base_path" ] || [ -z "$console_path" ]; then
       echo "::error::smoke_consoles: unknown console zone '${service}' — add it to app_for, base_path_for and console_probe_path_for." >&2
+      ec=1
+      continue
+    fi
+    # SMA-688: the image under test must be the one THIS checkout built — the rule assert_fresh
+    # already applies to the services (spec § 5.1). Both image names carry this checkout's
+    # revision label: build_console_one sets it, and load-oci keeps the archive's own labels.
+    if ! assert_fresh "$image"; then
       ec=1
       continue
     fi
@@ -1006,9 +1466,9 @@ smoke_consoles() {
       -e PAIGASUS_ZONE="$service" \
       -e PAIGASUS_ZONES="{\"iam\":\"/iam\",\"gateway\":\"/gateway\"}" \
       "${CONSOLE_SMOKE_ENV[@]}" \
-      "${app}:dev" 2>&1)" || run_rc=$?
+      "$image" 2>&1)" || run_rc=$?
     if [ "$run_rc" -ne 0 ]; then
-      echo "::error::${app}: the container did not start from ${app}:dev — docker exited ${run_rc}; its own message follows. If the image is missing, run 'ci/images/run.sh build-console ${service}' first." >&2
+      echo "::error::${app}: the container did not start from ${image} — docker exited ${run_rc}; its own message follows. If the image is missing, build it first: 'ci/images/run.sh build-console ${service}', or 'build-oci' and 'load-oci' for the release archive." >&2
       printf '%s\n' "$run_out" >&2
       ec=1; bad=1
     else
@@ -1072,23 +1532,11 @@ smoke_consoles() {
       fi
     fi
 
-    # The image's OWN HEALTHCHECK program, run inside the container. Nothing else in this suite
-    # executes /app/healthcheck.mjs: ts/Dockerfile writes it with a `printf` that carries a
-    # backtick template literal and a `%s` substitution, so an escaping or path regression would
-    # otherwise ship with every other row green. `docker exec` of the image's node needs no shell.
-    # It runs only once the page rendered, because the probe it makes is the same server's
+    # The image's OWN HEALTHCHECK program (console_healthcheck_row above, SMA-670 gap 3). It runs
+    # only once the page rendered, because the probe it makes is the same server's
     # <basePath>/healthz. It does not set `bad`: the chunk rows below do not depend on it.
-    # GUARDED: a non-zero exit is the finding, and must reach the named message, not abort.
     if [ "$bad" -eq 0 ]; then
-      hc_rc=0
-      hc_out="$(docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs 2>&1)" || hc_rc=$?
-      if [ "$hc_rc" -ne 0 ]; then
-        echo "::error::${app}: the image's HEALTHCHECK program (/app/healthcheck.mjs) exited ${hc_rc} against a server that renders ${base_path} — check the healthcheck printf in ts/Dockerfile. Its output follows." >&2
-        printf '%s\n' "$hc_out" >&2
-        ec=1
-      else
-        echo "  ${app}: HEALTHCHECK program /app/healthcheck.mjs exits 0"
-      fi
+      console_healthcheck_row "$name" "$app" "$base_path" "$CONSOLE_HC_DEADLINE" || ec=1
     fi
 
     # SMA-634. A (console) route, which imports @paigasus/console-core and so evaluates the kernel's
@@ -1179,11 +1627,15 @@ smoke_consoles() {
       fi
     fi
 
-    # Step 4: the other zone's prefix does not serve it. This proves ONLY that a basePath is in
-    # effect in this one container. It does NOT prove the two zones' assets do not collide:
+    # Step 4: the other zone's prefix does not serve it. SMA-513 acceptance criterion 3 has two
+    # halves (SMA-670 spec § 4.4). Steps 2 to 4 of this smoke test prove the PER-IMAGE half
+    # (SMA-513 spec D4): each zone emits its asset URLs under its own basePath and serves them
+    # there. This step alone proves only that a basePath is in effect in this one container:
     # MEASURED on iam-console:dev, the real chunk also 404s under /zzz/… and with no prefix at all,
-    # so any unknown prefix gives this result. The real acceptance-criterion-3 proof needs both
-    # zones behind one ingress, and belongs to that ingress (SMA-513 PR 2a), not to this row.
+    # so any unknown prefix gives this result, and this step does not prove that the two zones'
+    # assets do not collide. The ONE-ORIGIN half is kind row R2
+    # (ts/apps/iam-console/tests/cluster/phase-a/cross-zone.spec.ts): both zones hydrate through
+    # one Traefik ingress.
     # GUARDED: `curl` without -f still exits non-zero on a connection failure or a timeout, and an
     # unguarded capture would abort the script before the named message.
     if [ "$bad" -eq 0 ]; then
@@ -1196,7 +1648,7 @@ smoke_consoles() {
         echo "::error::${app}: ${other} also served the chunk (HTTP ${code}); the chunk is served outside ${base_path}, so no basePath is in effect." >&2
         ec=1
       else
-        echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other} (a basePath is in effect; cross-zone collision is NOT checked here — that needs the ingress)"
+        echo "  ${app}: serves ${chunk} (${bytes} bytes), 404 under ${other} (a basePath is in effect: the per-image half of AC 3; the one-origin half is kind row R2, cross-zone.spec.ts)"
       fi
     fi
 
@@ -1223,16 +1675,21 @@ smoke_consoles() {
     # "no shell in the runtime image" row for an image that was never read, which is the shape
     # the uid check three lines above already avoids.
     sh_rc=0
-    docker run --rm --entrypoint /bin/sh "${app}:dev" -c true >/dev/null 2>&1 || sh_rc=$?
+    docker run --rm --entrypoint /bin/sh "$image" -c true >/dev/null 2>&1 || sh_rc=$?
     if [ "$sh_rc" -eq 0 ]; then
-      echo "::error::${app}:dev has a shell; the runtime base must stay distroless." >&2
+      echo "::error::${image} has a shell; the runtime base must stay distroless." >&2
       ec=1
     elif [ "$sh_rc" -eq 127 ]; then
       echo "  ${app}: no shell in the runtime image"
     else
-      echo "::error::${app}: shell absence NOT checked — docker exited ${sh_rc} on ${app}:dev before reaching an entrypoint, so the image is missing or unreadable and nothing was proved about the runtime base." >&2
+      echo "::error::${app}: shell absence NOT checked — docker exited ${sh_rc} on ${image} before reaching an entrypoint, so the image is missing or unreadable and nothing was proved about the runtime base." >&2
       ec=1
     fi
+
+    # SMA-670: image-only rows. They need only the image, so they run whether or not the
+    # container started. ci/images/console-selftest.sh pins each call line, `|| ec=1` included.
+    console_node_version_row "$app" "$image" || ec=1
+    console_image_config_row "$app" "$image" || ec=1
 
     # Spec § 5.5 assertion 4 — staged-tree parity. ts/Dockerfile's staging of .next/static and
     # public/ and ts/apps/<app>/moon.yml's `build` script are a SECOND staging site each, created
@@ -1252,18 +1709,18 @@ smoke_consoles() {
       # about staging at all. stderr is captured rather than discarded, for the same reason as the
       # `docker run -d` above: the tool's own message names the cause.
       img_rc=0
-      img_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" \
+      img_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" \
         -e "$CONSOLE_STAGED_TREE_JS" "/app/apps/${app}" 2>&1)" || img_rc=$?
       if [ "$img_rc" -eq 1 ]; then
         echo "::error::${app}: /app/apps/${app}/.next/static is absent or unreadable inside the image — the staging copy in ts/Dockerfile did not run. node's message follows." >&2
         printf '%s\n' "$img_out" >&2
         ec=1
       elif [ "$img_rc" -ne 0 ]; then
-        echo "::error::${app}: staged-tree parity NOT checked — docker exited ${img_rc} on ${app}:dev before node ran, so the image is missing or unreadable and nothing was proved about staging. Its message follows." >&2
+        echo "::error::${app}: staged-tree parity NOT checked — docker exited ${img_rc} on ${image} before node ran, so the image is missing or unreadable and nothing was proved about staging. Its message follows." >&2
         printf '%s\n' "$img_out" >&2
         ec=1
       elif [ -z "$img_out" ]; then
-        echo "::error::${app}: the staged-tree walk exited 0 but printed nothing — that is neither a staging failure nor a docker failure; inspect ${app}:dev by hand." >&2
+        echo "::error::${app}: the staged-tree walk exited 0 but printed nothing — that is neither a staging failure nor a docker failure; inspect ${image} by hand." >&2
         ec=1
       else
         # Line 1 is the public= marker, the rest is the tree. `sed -n 1p` / `sed -n '2,$p'` read
@@ -1516,7 +1973,7 @@ rehearse() {
 
 # One usage string for both the missing-command case and the unknown-command case below, so the
 # two never drift apart. Lists every command the case block accepts, in the order it accepts them.
-USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles"
+USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway|iam-console|gateway-console> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh smoke <iam-console|gateway-console>... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles"
 cmd="${1:?$USAGE}"
 target="${2:-}"
 services=("iam" "gateway")
@@ -1531,7 +1988,26 @@ case "$cmd" in
   build) assert_pins; for s in "${services[@]}"; do build_one "$s"; done ;;
   smoke)
     shift
-    if [ "$#" -eq 0 ]; then smoke gateway iam; else smoke "$@"; fi
+    if [ "$#" -eq 0 ]; then smoke gateway iam; exit 0; fi
+    # SMA-688. A console key smokes the RELEASE archive's image, paigasus-<key>:dev: the name that
+    # images.yml and release.yml give it with load-oci. Service keys and console keys run two
+    # different suites with two different EXIT traps, so one call takes one kind only.
+    smoke_kind="$(kind_for_key "$1")"
+    for k in "$@"; do
+      k_kind="$(kind_for_key "$k")"
+      if [ "$k_kind" != "$smoke_kind" ]; then
+        echo "usage: ci/images/run.sh smoke takes service keys or console keys, not both: $*" >&2
+        exit 1
+      fi
+    done
+    if [ "$smoke_kind" = cargo ]; then smoke "$@"; exit 0; fi
+    smoke_keys=("$@")
+    set --
+    for k in "${smoke_keys[@]}"; do
+      k_zone="$(zone_for_key "$k")"
+      set -- "$@" "${k_zone}=paigasus-${k}:dev"
+    done
+    smoke_consoles "$@"
     ;;
   all)
     if [ -n "$target" ]; then
@@ -1544,10 +2020,13 @@ case "$cmd" in
     ;;
   build-oci)
     if [ -z "$target" ] || [ -z "${3:-}" ]; then
-      echo "usage: ci/images/run.sh build-oci <iam|gateway> <outdir>" >&2
+      echo "usage: ci/images/run.sh build-oci <iam|gateway|iam-console|gateway-console> <outdir>" >&2
       exit 1
     fi
-    assert_pins
+    # SMA-688: the pins of the key's own Dockerfile. assert_pins reads rs/Dockerfile and the
+    # chisel release; assert_console_pins reads ts/Dockerfile. An unknown key stops here.
+    oci_kind="$(kind_for_key "$target")"
+    if [ "$oci_kind" = npm ]; then assert_console_pins; else assert_pins; fi
     build_oci "$target" "$3"
     ;;
   load-oci)
@@ -1570,8 +2049,14 @@ case "$cmd" in
     assert_console_pins
     for s in "${console_services[@]}"; do build_console_one "$s"; done
     # The zone list is passed, not restated inside smoke_consoles, so the build loop and the smoke
-    # loop cannot disagree about which zones this run covers.
-    smoke_consoles "${console_services[@]}"
+    # loop cannot disagree about which zones this run covers. SMA-688: each zone is passed with
+    # the image it smokes, <app>:dev, the name build_console_one gives it.
+    set --
+    for s in "${console_services[@]}"; do
+      s_app="$(app_for "$s")"
+      set -- "$@" "${s}=${s_app}:dev"
+    done
+    smoke_consoles "$@"
     ;;
   *)
     echo "unknown command: $cmd" >&2

@@ -129,10 +129,33 @@ renders that list, with one element, into `IAM_AUTHN__ISSUERS` in
 - When the value is set, one more YAML comment line renders above `IAM_AUTHN__ISSUERS`:
   `# oidc.audience is set: IAM accepts that audience, not the client id.`
 - A change of the value restarts the IAM pod and no console pod.
+- **The warning (SMA-691).** When the IAM audience equals `oidc.clientId`, an ID token passes
+  IAM's audience check. The chart then shows a warning in two places: the release NOTES
+  (`templates/NOTES.txt`) and the annotation `paigasus.io/iam-audience-warning` in the IAM backend
+  Deployment's `metadata`. `oidc.acknowledgeClientIdAudience`, set to the value of
+  `oidc.clientId`, removes both. It does not change what IAM accepts.
+- The helpers are in `templates/_audience.tpl`. Both signals call `paigasus.iamAudienceWarns`. The
+  recommended setup is a dedicated API audience in `oidc.audience`.
+- **NOTES has no offline render.** `helm template` executes `NOTES.txt` but does not print it, and
+  `helm install --dry-run` needs a cluster. So `tests/env.sh` wraps the bytes of `NOTES.txt` in a
+  named template in a copy of the chart and renders it through a probe ConfigMap. The kind job
+  checks the NOTES of the real release (`ci/kind/README.md`).
 
 `tests/env.sh` holds the rows: `A1 unset`, `A2 reuse-values-no-key` (`--set oidc.audience=null`),
-`A3 set`, `A4 number`, `A5 number-in-file` and `A6 restart-scope`. A row counter reds the script
-when a row call line is deleted. See `docs/ops/RUNBOOK-chart.md` § 6 for when to set the value.
+`A3 set`, `A4 number`, `A5 number-in-file` and `A6 restart-scope`. For the warning annotation it
+holds `W1 default` to `W14 no-restart`. For the NOTES text it holds `N0 pin` (the bytes of
+`NOTES.txt`) and `N1 default` to `N6 other-client`. Three row counters red the script when a row call
+line is deleted. See `docs/ops/RUNBOOK-chart.md` § 6 for the recommended setup and the migration
+order.
+
+## The default image tags
+
+Each `image.tag` in `values.yaml` is pinned to the published version of that image. The version
+lives in the file that `ci/images/chains.toml` names for the image: a service's `Cargo.toml` or a
+console's `package.json`. `repo:helm-render` row 8a fails when a tag and its version differ, so a
+version bump must update the tag in the same pull request. The tags no longer default to
+`appVersion`. An empty tag still falls back to `.Chart.AppVersion`, which is `0.0.0` and names no
+published image.
 
 ## The golden files
 
