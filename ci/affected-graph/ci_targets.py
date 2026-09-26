@@ -382,11 +382,12 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ci/next-public/**/*",
         "ts/**/*",
     ),
-    # SMA-513 PR 2b. Three globs then five literals, in check_gate_inputs' comparison order (globs
+    # SMA-513 PR 2b. Globs first, then literals, in check_gate_inputs' comparison order (globs
     # sorted, then files sorted — `.proto/plugins/helm.toml` sorts before `.prototools` because
     # `/` < `t`). The two helm files are the byte pin the golden files depend on: drop them and a
     # helm bump serves a cached PASS. The proto and the two TypeScript files are what check 1a
     # reads; drop one and a new capability slug or a changed derivation line no longer re-keys it.
+    # SMA-688: the chain registry and the four version files are what row 8a reads.
     "helm-render": (
         "charts/**/*",
         "ci/helm-render/**/*",
@@ -394,7 +395,12 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ci/kind/values/**/*",
         ".proto/plugins/helm.toml",
         ".prototools",
+        "ci/images/chains.toml",
         "contracts/proto/paigasus/common/v1/service_info.proto",
+        "rs/crates/services/paigasus-gateway/Cargo.toml",
+        "rs/crates/services/paigasus-iam/Cargo.toml",
+        "ts/apps/gateway-console/package.json",
+        "ts/apps/iam-console/package.json",
         "ts/packages/paigasus-discovery/src/core/state.ts",
         "ts/packages/paigasus-proto/src/capability.ts",
     ),
