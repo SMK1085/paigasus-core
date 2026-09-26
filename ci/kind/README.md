@@ -51,7 +51,7 @@ It fails with rc 2 when `--list` finds any count other than 2, or when the repor
 `install a` and `upgrade b` end with `helm get notes`. The release NOTES must contain the line `WARNING (SMA-691): the IAM audience equals oidc.clientId`. `values/a.yaml` and `values/b.yaml` keep the default audience, so the chart must show this warning. This check is the end-to-end positive control of `charts/paigasus/templates/NOTES.txt`, on install and on upgrade.
 
 - A missing line is rc 1. A failed `helm get notes` is rc 2.
-- The check is inside `install a`. A NOTES failure there stops the later steps of that run. The rows N0-N5 in `charts/paigasus/tests/env.sh` test the NOTES text offline, on every pull request, so they find a text change first.
+- The check is inside `install a`. A NOTES failure there stops the later steps of that run. The rows N0-N6 in `charts/paigasus/tests/env.sh` test the NOTES text offline, on every pull request, so they find a text change first.
 - This job is not a required check. If a change deletes the NOTES check, nothing fails (SMA-691 spec, residual R2).
 
 ## Reading the evidence

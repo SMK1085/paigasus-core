@@ -144,7 +144,7 @@ renders that list, with one element, into `IAM_AUTHN__ISSUERS` in
 `tests/env.sh` holds the rows: `A1 unset`, `A2 reuse-values-no-key` (`--set oidc.audience=null`),
 `A3 set`, `A4 number`, `A5 number-in-file` and `A6 restart-scope`. For the warning annotation it
 holds `W1 default` to `W14 no-restart`. For the NOTES text it holds `N0 pin` (the bytes of
-`NOTES.txt`) and `N1 default` to `N5 stale-ack`. Three row counters red the script when a row call
+`NOTES.txt`) and `N1 default` to `N6 other-client`. Three row counters red the script when a row call
 line is deleted. See `docs/ops/RUNBOOK-chart.md` § 6 for the recommended setup and the migration
 order.
 

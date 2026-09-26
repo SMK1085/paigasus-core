@@ -42,6 +42,7 @@ harness (not committed).
 | M13 | the compare without `toString` | (plan) | W6, W10, W11, each `render failed`: incompatible types for comparison (exact match) |
 | M14 | the acknowledgement fed into a pod checksum | (plan) | W14: `iam-backend: spec.template differs; it must be equal` (exact match) |
 | M15 | delete the `upgrade b` NOTES check in `ci/kind/run.sh` | nothing (R2) | no committed check reds; the scratch harness reds `FAIL [call site upgrade b]: 0 line(s), want 1` (exact match) |
+| M16 | replace `{{ include "paigasus.iamAudience" . \| quote }}` in `_audience.tpl` with the literal `"paigasus-console"` (the N6 test gap fix) | N6 | N6 (exact match); `/bin/bash` and `/opt/homebrew/bin/bash` both rc 0 after the inverse edit |
 
 ## Two equivalent mutants
 

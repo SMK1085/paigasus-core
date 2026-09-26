@@ -37,7 +37,7 @@ true
 {{/*
 paigasus.iamAudienceNotes: the NOTES.txt body when paigasus.iamAudienceWarns is "true", else "".
 NOTES.txt only includes this helper, so charts/paigasus/tests/env.sh can test the text offline
-(rows N0-N5). The first line is the marker that ci/kind/run.sh asserts. Keep the text equal to
+(rows N0-N6). The first line is the marker that ci/kind/run.sh asserts. Keep the text equal to
 § 4.3 of docs/superpowers/specs/2026-09-26-sma-691-default-audience-warning-design.md.
 */}}
 {{- define "paigasus.iamAudienceNotes" -}}

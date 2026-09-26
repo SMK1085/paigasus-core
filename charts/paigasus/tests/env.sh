@@ -66,6 +66,7 @@
 #   N3 distinct     oidc.audience differs from the client id. Empty.
 #   N4 acknowledged The acknowledgement equals the client id. Empty.
 #   N5 stale-ack    The acknowledgement names another client id. The body.
+#   N6 other-client The client id is not "paigasus-console". The body, with that audience.
 # A third row counter reds the script when an N row call line is deleted.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -352,7 +353,7 @@ fi
 # a cluster. So a copy of the chart gets a probe. The probe wraps the bytes of NOTES.txt in a
 # named template and renders it into a ConfigMap. N0 pins those bytes.
 NOTES_ROWS=0
-NOTES_ROWS_WANT=6
+NOTES_ROWS_WANT=7
 NOTES_CHART="$TMP/notes-chart"
 
 # check_notes_pin <label>
@@ -372,20 +373,20 @@ print("OK" if got == want else "templates/NOTES.txt is " + repr(got) + ", want "
   if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
 }
 
-# check_notes <label> <body|empty> [helm args...]
+# check_notes <label> <body|empty> <audience> [helm args...]
 check_notes() {
-  local label="$1" want="$2"; shift 2
+  local label="$1" want="$2" audience="$3"; shift 3
   local out
   NOTES_ROWS=$((NOTES_ROWS + 1))
   if ! helm template paigasus "$NOTES_CHART" "${BASE[@]+"${BASE[@]}"}" "$@" \
       --show-only templates/zz-notes-probe.yaml >"$TMP/notes.yaml" 2>"$TMP/notes.err"; then
     echo "FAIL [$label]: render failed"; cat "$TMP/notes.err"; ec=1; return 0
   fi
-  if ! out="$(WANT="$want" python3 -c '
+  if ! out="$(WANT="$want" AUDIENCE="$audience" python3 -c '
 import os, sys, yaml
 body = "\n".join([
     "WARNING (SMA-691): the IAM audience equals oidc.clientId, so an ID token passes IAM" + chr(39) + "s audience check.",
-    "IAM accepts the audience \"paigasus-console\". An OIDC ID token has the client id as its audience.",
+    "IAM accepts the audience \"" + os.environ["AUDIENCE"] + "\". An OIDC ID token has the client id as its audience.",
     "IAM refuses a Keycloak ID token by its typ claim (SMA-686). Dex does not set that claim.",
     "Other IdPs are not measured.",
     "Recommended: give the API its own audience and set oidc.audience to it.",
@@ -418,11 +419,12 @@ else
 fi
 
 check_notes_pin "N0 pin"
-check_notes "N1 default"        body
-check_notes "N2 explicit-equal" body  --set oidc.audience=paigasus-console
-check_notes "N3 distinct"       empty --set oidc.audience=api://paigasus
-check_notes "N4 acknowledged"   empty --set oidc.acknowledgeClientIdAudience=paigasus-console
-check_notes "N5 stale-ack"      body  --set oidc.acknowledgeClientIdAudience=old-client
+check_notes "N1 default"        body  paigasus-console
+check_notes "N2 explicit-equal" body  paigasus-console --set oidc.audience=paigasus-console
+check_notes "N3 distinct"       empty paigasus-console --set oidc.audience=api://paigasus
+check_notes "N4 acknowledged"   empty paigasus-console --set oidc.acknowledgeClientIdAudience=paigasus-console
+check_notes "N5 stale-ack"      body  paigasus-console --set oidc.acknowledgeClientIdAudience=old-client
+check_notes "N6 other-client"   body  other-client      --set oidc.clientId=other-client
 
 if [ "$NOTES_ROWS" -lt "$NOTES_ROWS_WANT" ]; then
   echo "FAIL [notes rows]: $NOTES_ROWS notes row(s) ran, want $NOTES_ROWS_WANT"; ec=1
