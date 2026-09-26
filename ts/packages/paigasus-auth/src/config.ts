@@ -37,12 +37,33 @@ const httpsUrl = z
 const overrideUrl = z.url();
 
 /**
- * True when the whitespace-separated scope list holds the token `openid` exactly (SMA-692 D5).
- * Without it the first login fails at once (`idTokenExpected: true` in adapters/oidc.ts), with an
- * unclear error. `openidx` does not count. The chart refuses the same value at render time, with
- * a readable reason (charts/paigasus/templates/_audience.tpl).
+ * The one separator class both sides agree on (SMA-692 final fix I1). RFC 6749 § 3.3 allows only
+ * a single space (%x20) between scope tokens, but JS `\s` and RE2 `\s` (the chart's `regexSplit`)
+ * do not agree on their own: JS `\s` also matches NBSP and `\v`, RE2 `\s` does not. This explicit
+ * class removes that disagreement. `charts/paigasus/templates/_audience.tpl`'s
+ * `paigasus.consoleScopes` uses the same class, as a Go regex literal.
  */
-const hasOpenidScope = (value: string): boolean => value.split(/\s+/).includes('openid');
+const OIDC_SCOPES_SEPARATOR = /[\t\n\f\r ]+/;
+
+/**
+ * Splits on OIDC_SCOPES_SEPARATOR, drops empty tokens (a leading, trailing or repeated
+ * separator), and joins the rest with one space. `openid\u00a0profile` (an NBSP, not in the
+ * class) stays ONE token, so it does not equal `openid` — an operator whose value carries an NBSP
+ * still gets refused, but by the openid check below, not silently accepted.
+ */
+const normalizeOidcScopes = (value: string): string =>
+  value
+    .split(OIDC_SCOPES_SEPARATOR)
+    .filter((token) => token.length > 0)
+    .join(' ');
+
+/**
+ * True when the normalized, space-separated scope list holds the token `openid` exactly (SMA-692
+ * D5). Without it the first login fails at once (`idTokenExpected: true` in adapters/oidc.ts),
+ * with an unclear error. `openidx` does not count. The chart refuses the same value at render
+ * time, with a readable reason (charts/paigasus/templates/_audience.tpl).
+ */
+const hasOpenidScope = (value: string): boolean => value.split(' ').includes('openid');
 
 export const authEnvShape = {
   PAIGASUS_OIDC_ISSUER: httpsUrl,
@@ -54,7 +75,18 @@ export const authEnvShape = {
   // SMA-692 D3-a: NO default here. createAuthRuntime applies the default list to the
   // authorization request only. The refresh request sends `scope` only when this key is set, so
   // the parsed config must keep "absent" distinct from "the default".
-  PAIGASUS_OIDC_SCOPES: z.string().refine(hasOpenidScope, { error: 'must contain the scope openid' }).optional(),
+  //
+  // Final fix I1: the transform runs first and normalizes whitespace. Both refines then read the
+  // NORMALIZED value, so a whitespace-only input refuses as empty, and the parsed config (so both
+  // the authorization `scope` and the refresh `scope`) carries the normalized string, never the
+  // raw one. `.optional()` still wraps the whole chain, so an absent key skips it and stays
+  // `undefined` — the inferred type is unchanged: `string | undefined`.
+  PAIGASUS_OIDC_SCOPES: z
+    .string()
+    .transform(normalizeOidcScopes)
+    .refine((v) => v.length > 0, { error: 'must not be empty after whitespace normalization' })
+    .refine(hasOpenidScope, { error: 'must contain the scope openid' })
+    .optional(),
   // SMA-692 D1. The `audience` authorization parameter (Auth0). Not the IAM audience.
   PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE: z
     .string()

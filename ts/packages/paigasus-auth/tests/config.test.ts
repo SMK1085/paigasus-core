@@ -84,14 +84,38 @@ describe('authEnvShape', () => {
   });
 
   // SMA-692 D5. A token-exact match on whitespace-separated tokens.
-  it.each(['openid', 'openid profile email offline_access', 'profile email openid', 'profile\topenid', 'openid api://paigasus-api/access'])(
-    'accepts PAIGASUS_OIDC_SCOPES %j, which holds the token openid',
-    (value) => {
-      expect(schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value }).PAIGASUS_OIDC_SCOPES).toBe(value);
-    },
-  );
+  it.each(['openid', 'openid profile email offline_access', 'profile email openid', 'openid api://paigasus-api/access'])('accepts PAIGASUS_OIDC_SCOPES %j, which holds the token openid', (value) => {
+    expect(schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value }).PAIGASUS_OIDC_SCOPES).toBe(value);
+  });
 
   it.each(['profile email', 'openidx profile', 'profile openid-connect', 'OPENID profile', '', '   '])('refuses PAIGASUS_OIDC_SCOPES %j, which does not hold the token openid', (value) => {
+    expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value })).toThrow();
+  });
+
+  // Final fix I1. RFC 6749 § 3.3 allows only a single space between scope tokens. TS and the
+  // chart now normalize on the SAME explicit class ([\t\n\f\r ]), not `\s`, so a value that
+  // reaches the render agrees with the value that reached the parse. Each row asserts the exact
+  // normalized string, not the raw input.
+  it.each([
+    ['openid\tprofile', 'openid profile'],
+    ['openid profile\n', 'openid profile'],
+    [' openid profile ', 'openid profile'],
+    ['openid   profile', 'openid profile'],
+    ['profile\topenid', 'profile openid'],
+    ['openid\r\nprofile\femail', 'openid profile email'],
+  ])('normalizes PAIGASUS_OIDC_SCOPES %j to %j', (value, normalized) => {
+    expect(schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value }).PAIGASUS_OIDC_SCOPES).toBe(normalized);
+  });
+
+  // NBSP (U+00A0) is not in the explicit separator class, so the two words stay ONE token and
+  // that token is not `openid` — unlike the old `\s`-based split, which would have accepted it.
+  it('refuses PAIGASUS_OIDC_SCOPES holding openid\\u00a0profile — NBSP is not a separator', () => {
+    expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: 'openid profile' })).toThrow();
+  });
+
+  // A value that normalizes to empty (only separator characters) is refused, distinctly from the
+  // openid check — it never has a token to test.
+  it.each(['\t', '\n', '  \t \n  '])('refuses PAIGASUS_OIDC_SCOPES %j, which normalizes to empty', (value) => {
     expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value })).toThrow();
   });
 
