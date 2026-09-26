@@ -78,13 +78,16 @@ ingress:
 oidc:
   issuer: ""             # REQUIRED
   clientId: ""           # REQUIRED
-  audience: ""           # NOT required. This is the access-token audience that IAM accepts.
-                         # Empty: IAM uses oidc.clientId as the audience.
-                         # Set this value only when your IdP writes a different value into the
-                         # access token's `aud` claim. Example: Okta uses api://default.
+  audience: ""           # NOT required, but recommended. This is the access-token audience that
+                         # IAM accepts. Empty: IAM uses oidc.clientId as the audience. An OIDC ID
+                         # token has the client id as its audience, so an ID token then passes
+                         # IAM's audience check, and the chart shows a warning (SMA-691).
+                         # Recommended: give the API its own audience in the IdP, in the access
+                         # token only, and set it here. Example: api://paigasus.
                          # A set value REPLACES oidc.clientId. IAM then does not accept
-                         # oidc.clientId as the audience.
-                         # Quote this value in a values file. See docs/ops/RUNBOOK-chart.md § 6.
+                         # oidc.clientId as the audience. Follow the migration order in
+                         # docs/ops/RUNBOOK-chart.md § 6, or IAM refuses every live session.
+                         # Quote this value in a values file.
   acknowledgeClientIdAudience: ""   # NOT required. Set it to the value of oidc.clientId to
                                     # remove the warning (NOTES and the paigasus.io/iam-audience-
                                     # warning annotation) that shows when the IAM audience equals
