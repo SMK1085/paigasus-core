@@ -137,7 +137,13 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_token_is_401_with_bearer_challenge() {
-        for defect in [TokenDefect::Malformed, TokenDefect::Expired, TokenDefect::Oversized, TokenDefect::BadSignature] {
+        for defect in [
+            TokenDefect::Malformed,
+            TokenDefect::Expired,
+            TokenDefect::Oversized,
+            TokenDefect::BadSignature,
+            TokenDefect::NotAnAccessToken,
+        ] {
             let (status, challenge, body) = rendered(AuthnError::InvalidToken(defect)).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             // AC 7: RFC 6750 §3.1 standardises `invalid_token` in the CHALLENGE. It is not ours
