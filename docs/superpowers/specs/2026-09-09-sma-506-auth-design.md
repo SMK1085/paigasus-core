@@ -425,6 +425,11 @@ coupling, and revision 1 did not answer it.
 | revocation | same | logged, logout continues |
 | Redis command | `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` | § 7.2 |
 
+The discovery row and the token-exchange row are refined by
+`2026-09-26-sma-656-auth-login-oidc-503-design.md` (SMA-656): a discovery failure gives a 503 with
+a retry link on `/auth/login` AND on `/auth/callback`, and the token-exchange row no longer covers
+a discovery failure.
+
 **`2 × refresh timeout` must be below the lock TTL.** § 8.4 invariant 5 depends
 on it, and `createAuthRuntime` asserts it at startup. The factor of two is
 because § 11.3's non-repudiation opt-in makes one refresh two sequential bounded
@@ -1038,10 +1043,13 @@ Minimum event set: `login.started`, `login.callback_rejected` (with a `reason`
 enum — `txn_missing`, `txn_mismatch`, `state_unknown`, `code_exchange_failed`),
 `session.created`, `session.refreshed`, `session.refresh_failed`,
 `session.refresh_timeout`, `session.refresh.persist_failed`, `session.deleted`,
-`session.resolve_failed`, `logout.completed`, `store.unavailable`.
+`session.resolve_failed`, `logout.completed`, `store.unavailable`, `oidc.discovery_failed`.
 
 - `session.resolve_failed` — `getSession` could not resolve the session for a reason that is NOT a
   store outage (SMA-626 § 2.4). `store.unavailable` is reserved for the store itself.
+- `oidc.discovery_failed` — `{ zone, stage, reason }`: a login or a callback needed the OIDC
+  discovery document, and this process could not get it (SMA-656). `stage` is `login` or
+  `callback`; `reason` is a closed list. Its absence does not mean that the IdP is healthy.
 
 **Redaction rule, stated per field:** no event carries a token, a refresh token,
 an authorization code, the client secret, the Redis DSN, or a txn secret. `sid`

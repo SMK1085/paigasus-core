@@ -126,11 +126,11 @@ longer than 4T in the process itself fires the deadlines before the replies are 
 `Set-Cookie`, and a small HTML page with a retry control:
 
 - `/auth/login`: a link. If the browser holds a session cookie, the link goes to `returnTo`, so a
-  session that survived the stall is not deleted by the retry. Otherwise it goes to `/auth/login`.
-  If `returnTo` is a public page, the link opens that page directly, and the user must choose
-  sign-in again.
-- `/auth/callback`: a link to `/auth/login`. If the code exchange already succeeded, the route first
-  revokes the new refresh token, best effort.
+  session that survived the stall is not deleted by the retry. Otherwise it goes to
+  `/auth/login?returnTo=…`. If `returnTo` is a public page, the link opens that page directly, and
+  the user must choose sign-in again.
+- `/auth/callback`: a link to `/auth/login`. If the code exchange already succeeded, the link
+  carries `?returnTo=…`, and the route first revokes the new refresh token, best effort.
 - `/auth/logout`: if only the read fails, the delete still runs and logout completes. If the delete
   fails, the route revokes the refresh token it read (best effort), keeps the session cookie, and
   shows a form that posts to `/auth/logout` again. The user sees that logout did not finish.
@@ -139,7 +139,8 @@ Each failed store call logs `store.unavailable` with a `stage` of `login_put_tra
 `login_delete`, `callback_take_transaction`, `callback_delete`, `callback_set`, `logout_get` or
 `logout_delete` (pages use `get_session`, the refresh lock uses `release_lock`). Do not put an
 ingress custom error page or a mesh retry policy for 503 in front of the auth routes: the first
-removes the retry control, and the second replays logins and logouts.
+removes the retry control, and the second replays logins and logouts. This applies to the
+discovery 503 too (see "When the identity provider cannot be discovered" below).
 
 **Redis ACL.** The store's Redis user needs `+get`, `+set`, `+del`, `+eval` and `+ping`.
 `+client|setinfo` is optional (node-redis sends CLIENT SETINFO at connect and ignores the error).
@@ -176,6 +177,61 @@ from `runtime.redirectUri`, never from the request URL, so it always equals the 
 IdP's `/authorize`. `/auth/login` resolves the dot segments of a `returnTo` path first. It then
 replaces a path under the zone's own `/auth/` routes with the zone root, so a crafted link cannot
 loop.
+
+### When the identity provider cannot be discovered (SMA-656)
+
+The OIDC client gets the IdP's discovery document on the first login, callback, refresh or logout
+of a process, and keeps it for the life of the process. A failed discovery is not kept: the next
+call tries again, and it can wait up to `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`.
+
+**`/auth/login` and `/auth/callback` answer a discovery failure with a 503.** The headers are the
+same as the store 503 above: `Retry-After: 5`, `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer`, the strict CSP, and no `Set-Cookie`. The page says "The identity
+provider is not available. Try again in a few seconds." The retry link:
+
+- `/auth/login`: with a session cookie, the link goes to `returnTo`. Without one, it goes to
+  `/auth/login?returnTo=…`. The route makes no store call, so the session record and its cookie
+  stay as they were.
+- `/auth/callback`: the route has already consumed the login transaction, so the link starts a new
+  login. With a session cookie, the link goes to the transaction's `returnTo`, so a session that a
+  second tab created is not deleted. Without one, it goes to `/auth/login?returnTo=…`. The
+  authorization code is not spent and no tokens exist, so nothing is revoked. Before SMA-656 this
+  case gave the `login failed` 502.
+
+A reload of the callback 503 page sends the callback URL again. The transaction is gone, so that
+request logs `login.callback_rejected` with `reason: 'state_unknown'` and redirects to
+`/auth/login`. This is not a replay attack.
+
+**The `oidc.discovery_failed` event.** Each such 503 logs one event, `{ zone, stage, reason }`.
+`stage` is `login` or `callback`. The event never holds the caught error, its message, its name or
+a URL. It means "this process has no discovered configuration, and a login or a callback needed
+one". Its absence does NOT mean that the IdP is healthy. `reason` is one of:
+
+| `reason`            | What failed                                                                        | Probably                                                    |
+| ------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `timeout`           | no answer within `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`, or the body timed out            | an outage                                                   |
+| `network`           | the connection failed (refused, reset, `EAI_AGAIN`, …)                             | an outage, but an egress block gives the same value         |
+| `dns`               | the host name does not exist (`ENOTFOUND`)                                         | a defect                                                    |
+| `tls`               | the certificate was refused                                                        | a defect (this package has no CA-bundle setting)            |
+| `http_server_error` | the document answered with a 5xx status                                            | an outage, but a misconfigured ingress gives the same value |
+| `http_client_error` | the document answered with another status, for example 404 for a wrong realm       | a defect                                                    |
+| `invalid_metadata`  | the body is not JSON, is not valid metadata, or its `issuer` is not a URL          | a defect                                                    |
+| `issuer_mismatch`   | the document's `issuer` is not `PAIGASUS_OIDC_ISSUER` (a trailing slash is enough) | a defect                                                    |
+| `other`             | anything else                                                                      | unknown                                                     |
+
+So the 503 is NOT a promise that the fault is temporary. A configuration defect gives the same page,
+and its retry link cannot work until the configuration is correct. Read `reason` first.
+
+**Known limits.**
+
+- An IdP outage that starts AFTER the first successful discovery does not give this 503.
+  `/auth/login` then redirects to an IdP that does not answer.
+- One pod that cannot discover, behind a round-robin balancer, fails the callbacks of logins that
+  other pods started. Each retry then costs a full sign-in at the IdP. SMA-705 tracks a readiness
+  gate or an eager discovery at start.
+- The refresh path does not use this 503; a discovery failure there stays a transient failure. If
+  discovery runs while the refresh path holds its per-session lock, discovery's own time budget can
+  exceed the lock's TTL under the shipped defaults. SMA-704 tracks this.
 
 ## Cookies
 
