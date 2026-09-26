@@ -10,4 +10,6 @@
 pub mod adapters;
 pub mod application;
 pub mod config;
+#[cfg(test)]
+mod log_capture;
 pub mod service_info;
