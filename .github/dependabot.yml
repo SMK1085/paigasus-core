@@ -5,12 +5,13 @@ version: 2
 updates:
   # ---- Rust: Cargo workspace at rs/ ----
   # SMA-683: this entry cannot move wasm-bindgen. js-sys, web-sys and wasm-bindgen-futures pin it
-  # with `=`, and dependabot updates one package at a time. `cargo update -p wasm-bindgen` then
-  # locks 0 packages (MEASURED, spec M0). Since SMA-680 the release PR does not move it either, so
-  # wasm-bindgen stays frozen until a person moves the whole family. The runbook is in
+  # with `=`. Dependabot updates one package at a time. `cargo update -p wasm-bindgen` then
+  # locks 0 packages (MEASURED, spec M0). Since SMA-680 the release PR does not move it either.
+  # So wasm-bindgen stays frozen until a person moves the whole family. The runbook is in
   # rs/CLAUDE.md, "The wasm-bindgen family does not move through dependabot".
-  # One exception (INFERRED): a new reqwest can need newer wasm crates. Then a cargo-minor-patch
-  # PR moves wasm-bindgen and fails committed-wasm.test.ts. The same runbook covers that PR.
+  # One exception (INFERRED): a new reqwest can need newer wasm crates. Then a cargo PR (usually
+  # cargo-minor-patch) moves wasm-bindgen and fails committed-wasm.test.ts. The same runbook
+  # covers that PR.
   - package-ecosystem: cargo
     directory: /rs
     schedule:

@@ -34,7 +34,7 @@ or it arrives separately from the rest of the cargo group with a documented one-
 
 | # | Fact | Source |
 |---|------|--------|
-| F1 | `wasm-bindgen = "0.2"` is in `[workspace.dependencies]` (`rs/Cargo.toml:151`). dependabot-core's cargo parser reads `workspace.dependencies` as direct dependencies, so `wasm-bindgen` is an update candidate. Being a candidate does not mean dependabot can resolve a newer version (M0). | `rs/Cargo.toml`; dependabot-core `cargo/lib/dependabot/cargo/file_parser.rb` (READ) |
+| F1 | `wasm-bindgen = "0.2"` is in `[workspace.dependencies]` (`rs/Cargo.toml:152`). dependabot-core's cargo parser reads `workspace.dependencies` as direct dependencies, so `wasm-bindgen` is an update candidate. Being a candidate does not mean dependabot can resolve a newer version (M0). | `rs/Cargo.toml`; dependabot-core `cargo/lib/dependabot/cargo/file_parser.rb` (READ) |
 | F2 | By default, dependabot version updates cover direct dependencies only. | docs.github.com, "Controlling dependencies updated" (READ) |
 | F3 | Three crates in the lock pin `wasm-bindgen` exactly: `js-sys` 0.3.105 (`wasm-bindgen = "=0.2.128"`), `web-sys` 0.3.105 (`js-sys = "=0.3.105"`, `wasm-bindgen = "=0.2.128"`), `wasm-bindgen-futures` 0.4.78 (the same two pins). `wasm-bindgen` 0.2.128 pins `-macro` and `-shared` exactly. | registry manifests `js-sys-0.3.105/Cargo.toml:73-74`, `web-sys-0.3.105/Cargo.toml:2821-2826`, `wasm-bindgen-futures-0.4.78/Cargo.toml:54-59`, `wasm-bindgen-0.2.128/Cargo.toml:78-82` (READ by the challenger) |
 | F4 | Crates in the lock with a CARET requirement on a family crate: `chrono`, `getrandom` 0.2 and 0.4, `iana-time-zone`, `jsonwebtoken`, `reqwest`, `rust_decimal`, `uuid`, `wasm-streams`, `web-time`, `quanta` (`web-sys = "0.3"`). Only `reqwest` depends on all three pinning crates of F3. | `rs/Cargo.lock` (READ 2026-09-26; `reqwest` at `rs/Cargo.lock:4156-4195`) |
@@ -91,7 +91,7 @@ runs it; nothing schedules it until the follow-up lands.
 
 ```bash
 ( cd rs && cargo update -p wasm-bindgen -p js-sys -p web-sys -p wasm-bindgen-futures )
-git diff -- rs/Cargo.lock          # only the seven family entries, all crates.io sources
+git diff -- rs/Cargo.lock   # the family entries (seven at M0) plus any new dep, crates.io only
 moon run paigasus-kernel-ts:generate-wasm
 moon run paigasus-kernel-ts:test   # the drift gate, before the push
 git add rs/Cargo.lock rs/crates/bindings/paigasus-wasm/paigasus_wasm*
@@ -103,20 +103,28 @@ git commit -m "build(deps): move wasm-bindgen to <version> and regenerate the wa
   available. The same risk changed the SMA-680 design.
 - Run `generate-wasm` on ONE host (SMA-634 F12). The gate compares only the glue and the interfaces.
 - If `generate-wasm` fails because the pinned `wasm-pack` does not support the new 0.2.z, bump
-  `wasm-pack` in `.prototools` in the same PR (`rs/Cargo.toml:144-150`, the invariant). The runbook
+  `wasm-pack` in `.prototools` in the same PR (`rs/Cargo.toml:144-151`, the invariant). The runbook
   quotes the error text when a bump first shows it; it is not measured yet.
 
 **The `reqwest` case on a dependabot branch.** When a `cargo-minor-patch` PR moves `wasm-bindgen`
-(4.3), check out the PR (`gh pr checkout <N>` keeps the `dependabot/*` name that the pre-push hook
-needs), then run the `git diff` check, `generate-wasm`, the test, commit and push. After the push:
+(4.3), follow these steps in order:
 
-- Merge every other open cargo PR first. The regeneration is the last action before the merge.
-- Bring the branch up to date only with a merge:
-  `gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`.
-  Never use `--rebase`, `@dependabot recreate` or `[dependabot skip]`: each one deletes the glue
-  commit (F6).
-- If the merge of `main` brings a change to the kernel, the wasm binding or the five artifacts,
-  run `generate-wasm` again. For a conflict in the five files, take either side and regenerate.
+1. Merge every other open cargo PR.
+2. Let dependabot rebase this PR (its head commit changes), or comment `@dependabot rebase`.
+3. `gh pr checkout <N>` (it keeps the `dependabot/*` name that the pre-push hook needs).
+4. `git fetch origin`, then check `git diff origin/main...HEAD -- rs/Cargo.lock`: every changed
+   entry must have a crates.io source, and the wasm family entries must be among them (not
+   necessarily only them — a group PR also holds `reqwest` and other bumps). Then run
+   `generate-wasm`, the test, commit and push.
+5. If the branch goes stale again: the merge-only `update-branch` call
+   (`gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`), then
+   `git pull`, then run `generate-wasm` again only if the merge changed the kernel, the wasm
+   binding or the five artifacts.
+6. For a `Cargo.lock` conflict: merge `origin/main` locally, resolve the lock with
+   `( cd rs && cargo update -w )`, then do step 4 again.
+
+Never use `--rebase`, `@dependabot recreate` or `[dependabot skip]`: each one deletes the glue
+commit (F6).
 
 ### 4.3 The `reqwest` case — documented, not fixed
 

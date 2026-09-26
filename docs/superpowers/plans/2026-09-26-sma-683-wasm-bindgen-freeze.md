@@ -90,7 +90,7 @@ Expected: `same`.
 
 ```bash
 git add .github/dependabot.yml
-git commit -m "ci: record that dependabot cannot move wasm-bindgen (SMA-683)
+git commit -m "docs(ci): record that dependabot cannot move wasm-bindgen (SMA-683)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
