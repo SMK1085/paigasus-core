@@ -17,3 +17,13 @@ data:
   # zones.gateway.backend.url even when the gateway zone is disabled. Check 2 must fail and
   # check 1.1 must stay green.
   PAIGASUS_UPSTREAM_URL: {{ .Values.zones.gateway.backend.url | quote }}
+{{- with include "paigasus.consoleScopes" . }}
+  # oidc.scopes is set (SMA-692). Both consoles request these scopes, and send them again on
+  # each refresh.
+  PAIGASUS_OIDC_SCOPES: {{ . | quote }}
+{{- end }}
+{{- with include "paigasus.consoleAuthorizationAudience" . }}
+  # oidc.authorizationAudience is set (SMA-692). Both consoles send it as the audience
+  # parameter of the authorization request. It equals oidc.audience.
+  PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE: {{ . | quote }}
+{{- end }}

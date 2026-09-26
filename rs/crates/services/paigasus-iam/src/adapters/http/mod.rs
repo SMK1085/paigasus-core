@@ -436,6 +436,7 @@ impl AppState {
         // feed the entity slice, so a membership change invalidates nothing (D7).
         let memberships = MembershipService::new(MembershipServiceDeps {
             repo: PgMembershipRepository::new(db.clone()),
+            kinds: Arc::new(PgMembershipRepository::new(db.clone())),
             uow: tenancy_uow.clone(),
             outbox: tenancy_outbox.clone(),
             audit: audit_log.clone(),
@@ -534,6 +535,10 @@ impl AppState {
         let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
         let roles = RoleService::new(RoleServiceDeps {
             grants: role_grant_store.clone(),
+            // SMA-676: the read port for `list`'s query path and `grant`'s idempotency
+            // pre-check. A second `PgRoleGrantStore` value over the same `db` and `gens`
+            // handles — the struct is not what must be shared (the SMA-477 policy-store note).
+            query: Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone())),
             orgs: role_orgs,
             teams: role_teams,
             projects: role_projects,

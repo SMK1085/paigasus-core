@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 60 keys rather than 59.
+// demanding an entry for it would make the table 61 keys rather than 60.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -54,6 +54,7 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.INVALID_UUID]: 'from-transport',
   [ErrorReason.INVALID_CURSOR]: 'from-transport',
   [ErrorReason.INVALID_AUDIT_OUTCOME]: 'from-transport',
+  [ErrorReason.INVALID_PRINCIPAL_KIND]: 'from-transport',
   [ErrorReason.MISSING_REQUIRED_FIELD]: 'from-transport',
   [ErrorReason.MUTUALLY_EXCLUSIVE_FIELDS]: 'from-transport',
   [ErrorReason.SERVICE_MIGRATING]: 'from-transport',

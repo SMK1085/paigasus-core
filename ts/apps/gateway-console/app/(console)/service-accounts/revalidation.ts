@@ -21,7 +21,7 @@ export function refreshesAfterCreate(state: Exclude<CreateState, null>): boolean
   return state.error.presentation !== 'invalid-input' && state.error.presentation !== 'relogin';
 }
 
-/** §§ 5.3, 5.5, 5.6: after every result. A `generic` allow can be a duplicate grant (§ 3.2). */
+/** §§ 5.3, 5.5, 5.6: after every result. A `generic` allow can have committed before the answer was lost. */
 export function refreshesAfterMutation(result: ActionResult): boolean {
   return result.ok || result.error.presentation !== 'relogin';
 }

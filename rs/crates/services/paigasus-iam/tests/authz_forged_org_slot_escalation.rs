@@ -140,3 +140,28 @@ async fn forged_org_slot_in_a_team_scope_grant_is_denied_not_escalated() {
         "confederate must hold no authority over team_b after the denied escalation attempt: {decision}"
     );
 }
+
+/// SMA-676 D5 and §6: a team `scope_prn` with a forged org slot matches no stored row, and
+/// Cedar decides the `ListRoleGrants` check against the team's STORED ancestry. An org_admin
+/// of ORG_A is refused for team_b (really under ORG_B), and is allowed at ORG_A itself — so
+/// the 403 is the forged slot, not a missing grant.
+#[tokio::test]
+async fn forged_org_slot_in_a_team_scope_list_is_denied() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db.clone()).await;
+    let (org_a, _team_a) = seed_org_with_team(&db, "list-org-a", "list-team-a").await;
+    let (_org_b, team_b) = seed_org_with_team(&db, "list-org-b", "list-team-b").await;
+    let actor_token = idp.bearer("list-mallory", Some("list-mallory@example.com"), "paigasus", 3600);
+    let actor_prn = support::provision(&state, &actor_token).await;
+    seed_org_admin(&state, &actor_prn, &org_a.id.canonical()).await;
+
+    let forged_team_prn = TeamId::from_parts(org_a.id.uuid(), team_b.id.uuid()).canonical();
+    let (status, body) = send(&app, "GET", &format!("/v1/authz/role-grants?scope_prn={forged_team_prn}"), None, Some(actor_token.as_str())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a forged org slot must not list team_b's grants: {body}");
+    assert_eq!(body["error"]["code"], "forbidden");
+
+    let (status, body) = send(&app, "GET", &format!("/v1/authz/role-grants?scope_prn={}", org_a.id.canonical()), None, Some(actor_token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "control: the same actor lists at its own org: {body}");
+}

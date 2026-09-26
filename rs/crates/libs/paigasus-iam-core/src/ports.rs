@@ -8,7 +8,7 @@ use crate::audit::{AuditEntry, AuditFilter};
 use crate::authn::{AuthnError, ExternalIdentity, Issuer, ValidatedClaims};
 use crate::authz::model::RoleGrant;
 use crate::domain_event::DomainEvent;
-use crate::principal::{Principal, PrincipalStatus};
+use crate::principal::{Principal, PrincipalKind, PrincipalStatus};
 use crate::service_account::{ServiceAccount, ServiceAccountRecord};
 use crate::tenancy::{Membership, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef};
 use crate::user::User;
@@ -222,6 +222,24 @@ pub trait MembershipRepository: Send + Sync {
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
     /// Resolves node by uuid; PrnMismatch if the supplied ref's canonical != stored prn; NotFound if absent.
     async fn list_by_node(&self, node: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
+}
+
+/// Which axis a membership listing reads: one principal's memberships, or one node's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MembershipAxis {
+    Principal(Uuid),
+    Node(TenancyNodeRef),
+}
+
+/// Read port: a membership listing narrowed to one principal kind (SMA-676 D8). A separate
+/// port, not a new [`MembershipRepository`] method: that trait has six implementations, five
+/// of them test fakes (the rule `authz::ports::SystemPolicyReconciler` records).
+#[async_trait]
+pub trait MembershipKindQuery: Send + Sync {
+    /// The same order (`created_at, id`), paging and node guards (`NotFound`, `PrnMismatch`)
+    /// as [`MembershipRepository::list_by_principal`] and [`MembershipRepository::list_by_node`],
+    /// but only memberships whose principal is of `kind`.
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
 }
 
 /// Mints new identities (UUIDv7 + PRN). Impure (clock + entropy) — hence a port.

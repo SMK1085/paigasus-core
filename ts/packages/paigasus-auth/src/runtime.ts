@@ -32,7 +32,7 @@
 // copies of this module), keyed on `PAIGASUS_ZONE` (there is exactly one configuration per zone per
 // process), and resets that zone's slot on failure so a misconfigured-at-boot process can recover
 // once the config is fixed and the container is asked to try again.
-import { createOidcClient, type OidcClient } from './adapters/oidc';
+import { createOidcClient, type CreateOidcClientOptions, type OidcClient } from './adapters/oidc';
 import { claimsPrincipalResolver } from './adapters/claims-resolver';
 import { MemorySessionStore } from './adapters/memory-store';
 import { noopLogger } from './adapters/noop-logger';
@@ -57,6 +57,11 @@ export interface CreateAuthRuntimeDeps {
   store?: SessionStore;
   resolver?: PrincipalResolver;
   logger?: AuthLogger;
+  /**
+   * Builds the OIDC client (SMA-692 D4). The default is createOidcClient. A test injects a
+   * recording factory to see the options that the runtime derives from the env.
+   */
+  oidcClientFactory?: (opts: CreateOidcClientOptions) => OidcClient;
 }
 
 export interface AuthRuntime {
@@ -86,8 +91,6 @@ export interface AuthRuntime {
   absoluteTtlMs: number;
   zone: string;
   basePath: string;
-  /** Parsed but otherwise unreachable before this — task 8 needs it to build the authorization URL. */
-  scopes: string;
 }
 
 /** Invariant 1. Called once for validation and again (cheaply) when the store is actually built. */
@@ -98,6 +101,13 @@ function requireRedisUrl(cfg: ComposedConfig): string {
   }
   return url;
 }
+
+/**
+ * The scopes of the authorization request when PAIGASUS_OIDC_SCOPES is absent (SMA-692 D3-a).
+ * The default is here, not in authEnvShape: the refresh request sends `scope` only when the
+ * operator set the variable, so the parsed config keeps "absent" distinct from "the default".
+ */
+const DEFAULT_OIDC_SCOPES = 'openid profile email offline_access';
 
 export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRuntimeDeps = {}): Promise<AuthRuntime> {
   // Invariant 4 first: the zone map is read for basePath below, so membership is a precondition
@@ -135,12 +145,20 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
   const redirectUri = cfg.PAIGASUS_OIDC_REDIRECT_URI ?? `${cfg.PAIGASUS_PUBLIC_ORIGIN}${basePath}/auth/callback`;
   const postLogoutRedirectUri = cfg.PAIGASUS_OIDC_POST_LOGOUT_REDIRECT_URI ?? `${cfg.PAIGASUS_PUBLIC_ORIGIN}${basePath}/`;
 
-  const oidc = createOidcClient({
+  // SMA-692 D3-a, D4. `refreshScope` and `audience` are set only when their variables are set.
+  // A key with an `undefined` value would reach openid-client as the string "undefined" (spec F7),
+  // and exactOptionalPropertyTypes refuses it too.
+  const scopes = cfg.PAIGASUS_OIDC_SCOPES;
+  const audience = cfg.PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE;
+  const oidc = (deps.oidcClientFactory ?? createOidcClient)({
     issuer: cfg.PAIGASUS_OIDC_ISSUER,
     clientId: cfg.PAIGASUS_OIDC_CLIENT_ID,
     clientSecret: cfg.PAIGASUS_OIDC_CLIENT_SECRET,
     httpTimeoutMs: cfg.PAIGASUS_OIDC_HTTP_TIMEOUT_MS,
     clockToleranceSeconds: cfg.PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS,
+    scopes: scopes ?? DEFAULT_OIDC_SCOPES,
+    ...(scopes !== undefined ? { refreshScope: scopes } : {}),
+    ...(audience !== undefined ? { audience } : {}),
   });
 
   const logger = deps.logger ?? noopLogger;
@@ -175,7 +193,6 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
     absoluteTtlMs: cfg.PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS * 1000,
     zone: cfg.PAIGASUS_ZONE,
     basePath,
-    scopes: cfg.PAIGASUS_OIDC_SCOPES,
   };
 }
 

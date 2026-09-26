@@ -25,8 +25,8 @@ use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceCli
 use paigasus_proto::paigasus::iam::v1::{ArchiveOrganizationRequest, RestoreOrganizationRequest};
 use paigasus_proto::paigasus::iam::v1::{
     ArchiveProjectRequest, ArchiveTeamRequest, AttachMembershipRequest, CreateOrganizationRequest, CreateProjectRequest, CreateTeamRequest, GetOrganizationRequest, GetProjectRequest, GetTeamRequest,
-    ListProjectsRequest, ListTeamsRequest, Organization as ProtoOrganization, Project as ProtoProject, RenameOrganizationRequest, RenameProjectRequest, RenameTeamRequest, RestoreProjectRequest,
-    RestoreTeamRequest, Team as ProtoTeam,
+    ListMembershipsRequest, ListProjectsRequest, ListTeamsRequest, Organization as ProtoOrganization, PrincipalKind as ProtoPrincipalKind, Project as ProtoProject, RenameOrganizationRequest,
+    RenameProjectRequest, RenameTeamRequest, RestoreProjectRequest, RestoreTeamRequest, Team as ProtoTeam, list_memberships_request,
 };
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
@@ -386,6 +386,57 @@ async fn team_membership_flow_over_grpc() {
         .expect("membership");
     assert_eq!(membership.node_prn, team.prn);
     assert_eq!(membership.principal_prn, principal_prn);
+
+    // SMA-676 D8: `ListMemberships` at the org node, filtered by `principal_kind`. `alice`
+    // is a `user` (`create_user.rs` always mints `PrincipalKind::User`), so `USER` keeps the
+    // org membership and `SERVICE_ACCOUNT` keeps none; an unknown kind is refused before any
+    // repository read (mirrors `grpc_authz.rs`'s `ListRoleGrants` kind-filter coverage, D10
+    // adapter parity with `http_memberships.rs`'s `principal_kind` case).
+    let users_at_org = client
+        .list_memberships(authed(
+            ListMembershipsRequest {
+                filter: Some(list_memberships_request::Filter::NodePrn(org_prn.clone())),
+                principal_kind: ProtoPrincipalKind::User as i32,
+                ..Default::default()
+            },
+            &token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .memberships;
+    assert!(users_at_org.iter().any(|m| m.principal_prn == principal_prn), "{users_at_org:?}");
+
+    let service_accounts_at_org = client
+        .list_memberships(authed(
+            ListMembershipsRequest {
+                filter: Some(list_memberships_request::Filter::NodePrn(org_prn.clone())),
+                principal_kind: ProtoPrincipalKind::ServiceAccount as i32,
+                ..Default::default()
+            },
+            &token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .memberships;
+    assert!(service_accounts_at_org.is_empty(), "{service_accounts_at_org:?}");
+
+    let err = client
+        .list_memberships(authed(
+            ListMembershipsRequest {
+                filter: Some(list_memberships_request::Filter::NodePrn(org_prn.clone())),
+                principal_kind: 7,
+                ..Default::default()
+            },
+            &token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    let details = tonic_types::StatusExt::get_error_details(&err);
+    let info = details.error_info().expect("every IAM status carries ErrorInfo");
+    assert_eq!(info.reason, "invalid-principal-kind", "unexpected reason: {info:?}");
 
     // GetTeam with a forged org slot (correct team uuid, wrong org uuid) -> InvalidArgument,
     // `ErrorInfo.reason` carries `prn-mismatch` (the forged-org-slot defense, brief rule 8).

@@ -68,6 +68,30 @@
 #   N5 stale-ack    The acknowledgement names another client id. The body.
 #   N6 other-client The client id is not "paigasus-console". The body, with that audience.
 # A third row counter reds the script when an N row call line is deleted.
+#
+# The script also checks the SMA-692 console OIDC values in the console-env ConfigMap
+# (check_console_oidc, check_console_oidc_restart):
+#   O1 unset        PAIGASUS_OIDC_SCOPES and PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE are absent,
+#                   and so are their comment lines.
+#   O2 both-set     Both keys hold the exact values.
+#   O3 reuse-values-no-key
+#                   `--set oidc.scopes=null --set oidc.authorizationAudience=null`. The render
+#                   succeeds, both keys are absent, and the D7 check does not fail.
+#   O4 number       oidc.audience and oidc.authorizationAudience are both the number 123. The
+#                   render succeeds, and the key holds the string "123".
+#   O5 restart-scopes
+#                   A change of oidc.scopes changes both console pod templates, not the IAM one.
+#   O6 restart-audience
+#                   A change of oidc.authorizationAudience does the same.
+#   O7 tab-scopes   oidc.scopes holds a tab between two tokens. The rendered value holds a single
+#                   space instead (final fix I1).
+#   O8 newline-scopes
+#                   oidc.scopes holds a trailing newline (a YAML block scalar). The rendered
+#                   value has no trailing whitespace, and no trailing separator.
+#   O9 whitespace-only-scopes
+#                   oidc.scopes holds only separator characters. It normalizes to empty, and
+#                   renders no key — the same as an absent value, not a refusal.
+# A fourth row counter reds the script when an O row call line is deleted.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
@@ -428,6 +452,243 @@ check_notes "N6 other-client"   body  other-client      --set oidc.clientId=othe
 
 if [ "$NOTES_ROWS" -lt "$NOTES_ROWS_WANT" ]; then
   echo "FAIL [notes rows]: $NOTES_ROWS notes row(s) ran, want $NOTES_ROWS_WANT"; ec=1
+fi
+
+# The console OIDC values (SMA-692). Renders go to a file, as for check_audience.
+OIDC_ROWS=0
+OIDC_ROWS_WANT=9
+API_SCOPES="openid profile email offline_access api://paigasus/access"
+
+# check_console_oidc <label> <scopes|-> <authorization audience|-> [helm args...]
+# "-" means the key, and its comment line, must be absent from the whole render.
+check_console_oidc() {
+  local label="$1" scopes="$2" aud="$3"; shift 3
+  local out
+  OIDC_ROWS=$((OIDC_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/oidc.yaml" 2>"$TMP/oidc.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/oidc.err"; ec=1; return 0
+  fi
+  if ! out="$(SCOPES="$scopes" AUD="$aud" python3 -c '
+import os, sys, yaml
+want = {"PAIGASUS_OIDC_SCOPES": os.environ["SCOPES"], "PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE": os.environ["AUD"]}
+marker = {"PAIGASUS_OIDC_SCOPES": "oidc.scopes is set", "PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE": "oidc.authorizationAudience is set"}
+with open(sys.argv[1]) as fh:
+    raw = fh.read()
+docs = [d for d in yaml.safe_load_all(raw) if d]
+cms = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-console-env")]
+problems = []
+if len(cms) != 1:
+    problems.append(str(len(cms)) + " console-env ConfigMap(s), want 1")
+else:
+    data = cms[0].get("data") or {}
+    for key in sorted(want):
+        if want[key] == "-":
+            if key in raw or marker[key] in raw:
+                problems.append(key + " or its comment is in the render, want it absent")
+        elif data.get(key) != want[key]:
+            problems.append(key + " is " + repr(data.get(key)) + ", want " + repr(want[key]))
+print("|".join(problems) if problems else "OK")' "$TMP/oidc.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# check_console_oidc_restart <label> <scopes|audience>
+# The second render changes only the named value. Both console pod templates must differ from
+# the first render. The IAM pod template must be equal. The gateway zone is on.
+check_console_oidc_restart() {
+  local label="$1" mode="$2" out
+  local first second
+  if [ "$mode" = "scopes" ]; then
+    first=(--set zones.gateway.enabled=true)
+    second=(--set zones.gateway.enabled=true --set "oidc.scopes=$API_SCOPES")
+  else
+    first=(--set zones.gateway.enabled=true --set oidc.audience=api://paigasus)
+    second=(--set zones.gateway.enabled=true --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://paigasus)
+  fi
+  OIDC_ROWS=$((OIDC_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "${first[@]}" >"$TMP/oidc-restart-1.yaml" 2>"$TMP/oidc-restart.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/oidc-restart.err"; ec=1; return 0
+  fi
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "${second[@]}" >"$TMP/oidc-restart-2.yaml" 2>"$TMP/oidc-restart.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/oidc-restart.err"; ec=1; return 0
+  fi
+  if ! out="$(python3 -c '
+import sys, yaml
+def templates(path):
+    with open(path) as fh:
+        docs = [d for d in yaml.safe_load_all(fh) if d]
+    return {d["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"]: d["spec"]["template"] for d in docs if d.get("kind") == "Deployment"}
+a, b = templates(sys.argv[1]), templates(sys.argv[2])
+want = ["gateway-console", "iam-backend", "iam-console"]
+problems = []
+if sorted(a) != want or sorted(b) != want:
+    problems.append("Deployments are " + repr(sorted(a)) + " and " + repr(sorted(b)) + ", want " + repr(want))
+else:
+    problems += [n + ": spec.template is equal; it must differ" for n in ("gateway-console", "iam-console") if a[n] == b[n]]
+    if a["iam-backend"] != b["iam-backend"]:
+        problems.append("iam-backend: spec.template differs; it must be equal")
+print("|".join(problems) if problems else "OK")' "$TMP/oidc-restart-1.yaml" "$TMP/oidc-restart-2.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+check_console_oidc "O1 unset"              - -
+check_console_oidc "O2 both-set"           "$API_SCOPES" api://paigasus \
+  --set "oidc.scopes=$API_SCOPES" --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://paigasus
+check_console_oidc "O3 reuse-values-no-key" - - --set oidc.scopes=null --set oidc.authorizationAudience=null
+check_console_oidc "O4 number"             - 123 --set oidc.audience=123 --set oidc.authorizationAudience=123
+check_console_oidc_restart "O5 restart-scopes"   scopes
+check_console_oidc_restart "O6 restart-audience" audience
+# Final fix I1. TAB_SCOPES and NEWLINE_SCOPES hold a raw separator @paigasus/auth's config.ts and
+# the chart both now normalize on the SAME explicit class ([\t\n\f\r ]), so the rendered value
+# never carries the operator's raw whitespace.
+TAB_SCOPES=$'openid\tprofile email offline_access'
+NEWLINE_SCOPES=$'openid profile email offline_access\n'
+check_console_oidc "O7 tab-scopes"     "openid profile email offline_access" - \
+  --set-string "oidc.scopes=$TAB_SCOPES"
+check_console_oidc "O8 newline-scopes" "openid profile email offline_access" - \
+  --set-string "oidc.scopes=$NEWLINE_SCOPES"
+check_console_oidc "O9 whitespace-only-scopes" - - --set-string "oidc.scopes=   "
+
+if [ "$OIDC_ROWS" -lt "$OIDC_ROWS_WANT" ]; then
+  echo "FAIL [oidc rows]: $OIDC_ROWS oidc row(s) ran, want $OIDC_ROWS_WANT"; ec=1
+fi
+
+# zones.iam.backend.bootstrapAdmins and zones.iam.backend.extraEnv (SMA-697). Renders go to a
+# file, as for check_audience. One row per property:
+#   B1 default      Neither value renders an entry. The IAM env names are exactly the chart's own.
+#   B2 reuse-values-no-key
+#                   `--set ...=null` for both keys. The template reads nil. No entry renders.
+#   B3 one-admin    IAM_AUTHZ__BOOTSTRAP_ADMINS is the exact figment inline string. The subject of
+#                   digits only stays a quoted string. config.rs parses this exact form in
+#                   bootstrap_admins_env_in_the_chart_form_parses.
+#   B4 two-admins   Two entries, in values order, joined by a comma.
+#   B4b padded-issuer
+#                   An issuer with spaces renders trimmed: the value the validation compared.
+#   B5 extra-env    The extraEnv entries are the LAST entries, in values order, unchanged. The
+#                   whole entries are compared, value and valueFrom included.
+#   B6 reserved     With every optional chart entry on, the chart's own IAM env names EQUAL
+#                   paigasus.iamReservedEnv, so the extraEnv refusal knows every chart name.
+#   B7a, B7b restart-scope
+#                   Each value, alone, changes the IAM pod template and no console pod template.
+# A fourth row counter reds the script when a B row call line is deleted.
+BOOT_ROWS=0
+BOOT_ROWS_WANT=9
+ISS=https://idp.example.test/realms/paigasus
+ADMIN0=zones.iam.backend.bootstrapAdmins[0]
+ADMIN1=zones.iam.backend.bootstrapAdmins[1]
+EXTRA0=zones.iam.backend.extraEnv[0]
+EXTRA1=zones.iam.backend.extraEnv[1]
+CHART_NAMES="IAM_HTTP_ADDR IAM_GRPC_ADDR IAM_MIGRATION__LOCK_WAIT_SECS IAM_DATABASE_URL IAM_AUTHN__ISSUERS IAM_API_KEYS__PEPPER"
+
+# check_boot <label> <want admins value or -> <want extra names or -> <want chart names> [helm args...]
+check_boot() {
+  local label="$1" admins="$2" extra="$3" names="$4"; shift 4
+  local out
+  BOOT_ROWS=$((BOOT_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/boot.yaml" 2>"$TMP/boot.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/boot.err"; ec=1; return 0
+  fi
+  if ! out="$(ADMINS="$admins" EXTRA="$extra" NAMES="$names" EXTRA_JSON="${EXTRA_JSON:-}" python3 -c '
+import json, os, sys, yaml
+with open(sys.argv[1]) as fh:
+    docs = [d for d in yaml.safe_load_all(fh) if d]
+problems = []
+deps = [d for d in docs if d.get("kind") == "Deployment"
+        and d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name") == "iam-backend"]
+if len(deps) != 1:
+    problems.append(str(len(deps)) + " iam-backend Deployment(s), want 1")
+else:
+    env = deps[0]["spec"]["template"]["spec"]["containers"][0].get("env") or []
+    extra = [] if os.environ["EXTRA"] == "-" else os.environ["EXTRA"].split()
+    own = env[:len(env) - len(extra)] if extra else env
+    got_extra = [e.get("name") for e in env[len(own):]]
+    if got_extra != extra:
+        problems.append("the last env names are " + repr(got_extra) + ", want " + repr(extra))
+    elif os.environ.get("EXTRA_JSON"):
+        want_entries = json.loads(os.environ["EXTRA_JSON"])
+        if env[len(own):] != want_entries:
+            problems.append("the extraEnv entries are " + repr(env[len(own):]) + ", want " + repr(want_entries))
+    admins = [e for e in own if e.get("name") == "IAM_AUTHZ__BOOTSTRAP_ADMINS"]
+    if os.environ["ADMINS"] == "-":
+        if admins:
+            problems.append("IAM_AUTHZ__BOOTSTRAP_ADMINS renders; want it absent")
+    elif len(admins) != 1 or admins[0].get("value") != os.environ["ADMINS"]:
+        problems.append("IAM_AUTHZ__BOOTSTRAP_ADMINS is " + repr([a.get("value") for a in admins]) + ", want " + repr(os.environ["ADMINS"]))
+    if [e.get("name") for e in own] != os.environ["NAMES"].split():
+        problems.append("the chart env names are " + repr([e.get("name") for e in own]) + ", want " + repr(os.environ["NAMES"].split()))
+print("|".join(problems) if problems else "OK")' "$TMP/boot.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# check_boot_reserved <label>: the chart's own names, with every optional entry on, equal the
+# paigasus.iamReservedEnv list. The list is read from the template file, not copied here.
+check_boot_reserved() {
+  local label="$1" reserved
+  BOOT_ROWS=$((BOOT_ROWS + 1))
+  reserved="$(sed -n '/define "paigasus.iamReservedEnv"/{n;p;}' "$CHART/templates/_iam-backend.tpl")"
+  if [ -z "$reserved" ]; then
+    echo "FAIL [$label]: cannot read paigasus.iamReservedEnv"; ec=1; return 0
+  fi
+  BOOT_ROWS=$((BOOT_ROWS - 1))
+  check_boot "$label" "[{issuer=\"$ISS\",subject=\"s\"}]" - "$reserved" \
+    --set oidc.caBundle.existingConfigMap=idp-ca --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=s"
+}
+
+# check_boot_restart <label> [helm args...]: the args change the IAM pod template only.
+check_boot_restart() {
+  local label="$1" out; shift
+  BOOT_ROWS=$((BOOT_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" --set zones.gateway.enabled=true >"$TMP/boot-1.yaml" 2>"$TMP/boot.err" \
+    || ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" --set zones.gateway.enabled=true "$@" >"$TMP/boot-2.yaml" 2>>"$TMP/boot.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/boot.err"; ec=1; return 0
+  fi
+  if ! out="$(python3 -c '
+import sys, yaml
+def templates(path):
+    with open(path) as fh:
+        docs = [d for d in yaml.safe_load_all(fh) if d]
+    return {d["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"]: d["spec"]["template"] for d in docs if d.get("kind") == "Deployment"}
+a, b = templates(sys.argv[1]), templates(sys.argv[2])
+want = ["gateway-console", "iam-backend", "iam-console"]
+problems = []
+if sorted(a) != want or sorted(b) != want:
+    problems.append("Deployments are " + repr(sorted(a)) + " and " + repr(sorted(b)) + ", want " + repr(want))
+elif a["iam-backend"] == b["iam-backend"]:
+    problems.append("iam-backend: spec.template is equal; it must differ")
+problems += [n + ": spec.template differs; it must be equal" for n in ("gateway-console", "iam-console") if n in a and n in b and a[n] != b[n]]
+print("|".join(problems) if problems else "OK")' "$TMP/boot-1.yaml" "$TMP/boot-2.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+check_boot "B1 default"             - - "$CHART_NAMES"
+check_boot "B2 reuse-values-no-key" - - "$CHART_NAMES" \
+  --set zones.iam.backend.bootstrapAdmins=null --set zones.iam.backend.extraEnv=null
+check_boot "B3 one-admin" "[{issuer=\"$ISS\",subject=\"392488538992280259\"}]" - \
+  "$CHART_NAMES IAM_AUTHZ__BOOTSTRAP_ADMINS" \
+  --set "$ADMIN0.issuer=$ISS" --set-string "$ADMIN0.subject=392488538992280259"
+check_boot "B4 two-admins" "[{issuer=\"$ISS\",subject=\"a\"},{issuer=\"$ISS\",subject=\"b\"}]" - \
+  "$CHART_NAMES IAM_AUTHZ__BOOTSTRAP_ADMINS" \
+  --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=a" --set "$ADMIN1.issuer=$ISS" --set "$ADMIN1.subject=b"
+EXTRA_JSON='[{"name": "RUST_LOG", "value": "paigasus_iam=debug,info"}, {"name": "PAIGASUS_PROBE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}]' \
+check_boot "B5 extra-env" - "RUST_LOG PAIGASUS_PROBE" "$CHART_NAMES" \
+  --set "$EXTRA0.name=RUST_LOG" --set "$EXTRA0.value=paigasus_iam=debug\,info" \
+  --set "$EXTRA1.name=PAIGASUS_PROBE" --set "$EXTRA1.valueFrom.fieldRef.fieldPath=metadata.name"
+check_boot "B4b padded-issuer" "[{issuer=\"$ISS\",subject=\"a\"}]" - \
+  "$CHART_NAMES IAM_AUTHZ__BOOTSTRAP_ADMINS" \
+  --set-string "$ADMIN0.issuer= $ISS " --set "$ADMIN0.subject=a"
+check_boot_reserved "B6 reserved"
+check_boot_restart "B7a restart-scope-admins" --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=s"
+check_boot_restart "B7b restart-scope-extra-env" --set "$EXTRA0.name=RUST_LOG" --set "$EXTRA0.value=info"
+
+if [ "$BOOT_ROWS" -lt "$BOOT_ROWS_WANT" ]; then
+  echo "FAIL [bootstrap rows]: $BOOT_ROWS bootstrap row(s) ran, want $BOOT_ROWS_WANT"; ec=1
 fi
 
 if [ "$ec" -eq 0 ]; then echo "== chart env OK =="; fi

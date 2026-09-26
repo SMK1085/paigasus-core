@@ -9,7 +9,8 @@ import { ErrorReason } from '@paigasus/sdk/errors/types';
 import { disposeTransports } from '@paigasus/sdk/iam';
 import { organizationPrn, projectPrn } from '@paigasus/console-core';
 import { denial, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
-import { GATEWAY_ROLE, allowModelCalls, archiveServiceAccount, createServiceAccount, issueApiKey, revokeApiKey } from '../../app/(console)/service-accounts/commands';
+import { GATEWAY_ROLE } from '../../app/(console)/gateway-role';
+import { allowModelCalls, archiveServiceAccount, createServiceAccount, issueApiKey, revokeApiKey } from '../../app/(console)/service-accounts/commands';
 import { serviceAccountPrn } from '../../app/(console)/service-accounts/service-account-id';
 import { IDS, callsSince, clientsFor } from './support';
 
@@ -140,11 +141,11 @@ describe('allowModelCalls (§ 5.3)', () => {
     expect(calls('authz.grantRole')).toHaveLength(0);
   });
 
-  it('returns a duplicate grant as IAM answers it: an internal error (spec § 3.2)', async () => {
+  it('returns an internal IAM failure as generic', async () => {
     iam.setHandlers({
       'serviceAccounts.getServiceAccount': () => storedAccount(OWNER),
       'authz.grantRole': () => {
-        throw new ConnectError('duplicate', Code.Internal);
+        throw new ConnectError('internal failure', Code.Internal);
       },
     });
     const clients = clientsFor(iam);

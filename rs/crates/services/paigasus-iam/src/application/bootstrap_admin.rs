@@ -100,6 +100,23 @@ enum SeedError {
     Authz(#[from] paigasus_iam_core::AuthzError),
 }
 
+/// What one seed attempt means for the caller (SMA-676 D9).
+#[derive(Debug)]
+enum SeedOutcome {
+    Seeded,
+    /// A concurrent seed of the same grant won the unique key: the admin IS seeded.
+    AlreadySeeded,
+    Failed(SeedError),
+}
+
+fn classify_seed(result: Result<(), SeedError>) -> SeedOutcome {
+    match result {
+        Ok(()) => SeedOutcome::Seeded,
+        Err(SeedError::Authz(paigasus_iam_core::AuthzError::DuplicateGrant)) => SeedOutcome::AlreadySeeded,
+        Err(e) => SeedOutcome::Failed(e),
+    }
+}
+
 impl<I, C> BootstrapAdminSeeder<I, C>
 where
     I: IdGenerator,
@@ -236,13 +253,16 @@ where
             linked_policy_id: format!("grant:{id}"),
             created_at: self.clock.now(),
         };
-        if let Err(e) = self.seed_grant(&grant, issuer).await {
-            counter!(names::IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL, "stage" => "txn").increment(1);
-            tracing::warn!(
-                principal = %principal.canonical(),
-                error = ?e,
-                "bootstrap-admin seeding: failed to persist the platform_admin grant with its audit row; will retry on the next authentication. If this persists the bootstrap admin is NEVER seeded (lockout) — seed it manually and record the matching audit row"
-            );
+        match classify_seed(self.seed_grant(&grant, issuer).await) {
+            SeedOutcome::Seeded | SeedOutcome::AlreadySeeded => {}
+            SeedOutcome::Failed(e) => {
+                counter!(names::IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL, "stage" => "txn").increment(1);
+                tracing::warn!(
+                    principal = %principal.canonical(),
+                    error = ?e,
+                    "bootstrap-admin seeding: failed to persist the platform_admin grant with its audit row; will retry on the next authentication. If this persists the bootstrap admin is NEVER seeded (lockout) — seed it manually and record the matching audit row"
+                );
+            }
         }
     }
 }
@@ -441,6 +461,93 @@ mod tests {
             issuer: "https://idp.example.com".to_string(),
             subject: "sub-admin".to_string(),
         }]
+    }
+
+    /// A store whose insert always loses the race to a concurrent seed (SMA-676 D9).
+    #[derive(Default)]
+    struct DuplicateGrants;
+
+    #[async_trait::async_trait]
+    impl RoleGrantStore for DuplicateGrants {
+        async fn list_by_principal(&self, _p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
+            Ok(Vec::new())
+        }
+        async fn grant_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _g: &RoleGrant) -> Result<(), AuthzError> {
+            Err(AuthzError::DuplicateGrant)
+        }
+        async fn grant(&self, _g: &RoleGrant) -> Result<(), AuthzError> {
+            unimplemented!("the seeder only uses grant_in")
+        }
+        async fn revoke(&self, _id: Uuid) -> Result<(), AuthzError> {
+            unimplemented!("the seeder never revokes")
+        }
+        async fn revoke_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _id: Uuid) -> Result<bool, AuthzError> {
+            unimplemented!("the seeder never revokes")
+        }
+        async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
+            Ok(Vec::new())
+        }
+        async fn find(&self, _id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+            unimplemented!("the seeder never looks up by id")
+        }
+    }
+
+    /// SMA-676 D9: a concurrent seed that already won is a SUCCESS, not a "lockout" warning.
+    /// A thread-local recorder proves the failure counter is not emitted; `#[tokio::test]` is
+    /// current-thread, so the recorder sees every increment of this future.
+    #[tokio::test]
+    async fn a_concurrent_seed_that_already_won_is_not_a_seed_failure() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let seeder = BootstrapAdminSeeder::new(BootstrapAdminSeederDeps {
+            admins_config: admin_cfg(),
+            grants: Arc::new(DuplicateGrants),
+            uow: Arc::new(FakeUnitOfWork::default()),
+            outbox: Arc::new(FakeOutbox::default()),
+            audit: Arc::new(FakeAuditLog::default()),
+            gen_bumper: Arc::new(FakePolicyGenBumper::default()),
+            ids: SeqIds::default(),
+            clock: FixedClock::default(),
+        });
+
+        seeder.ensure_platform_admin(&principal(1), &issuer("https://idp.example.com"), "sub-admin").await;
+
+        let failures = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == names::IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL)
+            .count();
+        assert_eq!(failures, 0, "a lost seed race must not count as a seed failure");
+    }
+
+    /// Control for the test above: a real write failure still counts.
+    #[tokio::test]
+    async fn a_failed_seed_write_still_counts_as_a_seed_failure() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let seeder = BootstrapAdminSeeder::new(BootstrapAdminSeederDeps {
+            admins_config: admin_cfg(),
+            grants: Arc::new(FailingGrants),
+            uow: Arc::new(FakeUnitOfWork::default()),
+            outbox: Arc::new(FakeOutbox::default()),
+            audit: Arc::new(FakeAuditLog::default()),
+            gen_bumper: Arc::new(FakePolicyGenBumper::default()),
+            ids: SeqIds::default(),
+            clock: FixedClock::default(),
+        });
+
+        seeder.ensure_platform_admin(&principal(1), &issuer("https://idp.example.com"), "sub-admin").await;
+
+        let failures = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == names::IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL)
+            .count();
+        assert_eq!(failures, 1);
     }
 
     /// Test 1 — the audit row is correct and, crucially, SELF-DESCRIBING. With

@@ -192,6 +192,20 @@ pub fn to_page(limit: u32, offset: u64) -> Result<Page, TenancyError> {
     Page::new(limit, Some(offset as i64))
 }
 
+/// SMA-676 D7: the wire `PrincipalKind` into the service's filter. A proto3 enum is open, so
+/// an unknown number (for example a newer client's kind) is `Unknown`, which the service
+/// refuses — never `Any`, which would widen the listing.
+pub fn principal_kind_filter(raw: i32) -> crate::application::principal_kind::PrincipalKindFilter {
+    use crate::application::principal_kind::PrincipalKindFilter;
+    use paigasus_proto::paigasus::iam::v1::PrincipalKind as ProtoPrincipalKind;
+    match ProtoPrincipalKind::try_from(raw) {
+        Ok(ProtoPrincipalKind::Unspecified) => PrincipalKindFilter::Any,
+        Ok(ProtoPrincipalKind::User) => PrincipalKindFilter::Only(paigasus_iam_core::PrincipalKind::User),
+        Ok(ProtoPrincipalKind::ServiceAccount) => PrincipalKindFilter::Only(paigasus_iam_core::PrincipalKind::ServiceAccount),
+        Err(_) => PrincipalKindFilter::Unknown,
+    }
+}
+
 /// Builds a `prost_types::Timestamp` from a `chrono::DateTime<Utc>`.
 pub fn ts(dt: DateTime<Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
@@ -840,6 +854,7 @@ mod tests {
 
         let cases = [
             (AuthnError::InvalidToken(TokenDefect::Malformed), Code::Unauthenticated, "invalid-token", "invalid bearer token"),
+            (AuthnError::InvalidToken(TokenDefect::SenderConstrained), Code::Unauthenticated, "invalid-token", "invalid bearer token"),
             (AuthnError::IdentityNotProvisioned, Code::PermissionDenied, "identity-not-provisioned", "identity not provisioned"),
             (
                 AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail),
@@ -1601,5 +1616,17 @@ mod tests {
         assert_eq!(response.role_grants.len(), 1);
         assert_eq!(response.role_grants[0].scope_prn, "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-0000000000aa");
         assert_eq!(response.role_grants[0].role_key, "billing-admin");
+    }
+
+    /// SMA-676 D7 and Review Focus 3: a proto3 enum is open, so an unknown number reaches the
+    /// server. It maps to `Unknown` (refused by the service), never to `Any`.
+    #[test]
+    fn principal_kind_filter_maps_the_wire_and_refuses_unknown_values() {
+        use crate::application::principal_kind::PrincipalKindFilter;
+        assert_eq!(principal_kind_filter(0), PrincipalKindFilter::Any);
+        assert_eq!(principal_kind_filter(1), PrincipalKindFilter::Only(paigasus_iam_core::PrincipalKind::User));
+        assert_eq!(principal_kind_filter(2), PrincipalKindFilter::Only(paigasus_iam_core::PrincipalKind::ServiceAccount));
+        assert_eq!(principal_kind_filter(3), PrincipalKindFilter::Unknown);
+        assert_eq!(principal_kind_filter(-1), PrincipalKindFilter::Unknown);
     }
 }

@@ -124,6 +124,7 @@ in BOTH consoles. The TypeScript already rejects it; the chart should never rend
 {{- if and (include "paigasus.idpCaConfigMap" .) (not (include "paigasus.idpCaKey" .)) -}}
 {{- fail "oidc.caBundle.key is empty while oidc.caBundle.existingConfigMap is set: every pod mounts ONE key of that ConfigMap, so the key must name it (the default is ca.crt)" -}}
 {{- end -}}
+{{- include "paigasus.validateIamBackend" . -}}
 {{- end -}}
 
 {{- define "paigasus.zoneMapJson" -}}

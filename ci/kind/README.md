@@ -70,7 +70,7 @@ Secrets and the realm ConfigMap are never collected. The Playwright traces hold 
 
 Where to look first:
 
-- The login ends on the IAM console, but IAM shows as unusable: IAM refused the token. Read `logs/paigasus-*-iam-backend-*.log` for the JWKS fetch or the `aud` check (spec F3, F4). A wrong or missing `aud` is the `info` line "its aud claim holds none of the accepted audiences" (at most one line per issuer in 10 seconds).
+- The login ends on the IAM console, but IAM shows as unusable: IAM refused the token. Read `logs/paigasus-*-iam-backend-*.log` for the JWKS fetch or the `aud` check (spec F3, F4). A wrong or missing `aud` is the `info` line "its aud claim holds none of the accepted audiences" (at most one line per issuer in 10 seconds). IAM logs two other refusals at `info`. A token that is not an access token shows "a verified marker shows it is not an access token" (SMA-686). A sender-constrained token shows "it is bound to a key, and IAM cannot check the binding" (SMA-690).
 - The preflight fails: read `idp-preflight.json` and `keycloak.log`. A wrong `issuer` comes from Keycloak hostname options. A TLS error comes from the CA or the CoreDNS block.
 
 ## Hazards

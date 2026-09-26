@@ -31,7 +31,9 @@ use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::authz::roles::FORBID_ARCHIVED_WRITES_ID;
 use paigasus_proto::paigasus::iam::v1::authorization_service_client::AuthorizationServiceClient;
-use paigasus_proto::paigasus::iam::v1::{DeletePolicyRequest, GrantRoleRequest, IsAuthorizedRequest, ListPoliciesRequest, ListRoleGrantsRequest, Policy, PutPolicyRequest, RevokeRoleRequest};
+use paigasus_proto::paigasus::iam::v1::{
+    DeletePolicyRequest, GrantRoleRequest, IsAuthorizedRequest, ListPoliciesRequest, ListRoleGrantsRequest, Policy, PrincipalKind as ProtoPrincipalKind, PutPolicyRequest, RevokeRoleRequest,
+};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tonic::Code;
@@ -222,8 +224,7 @@ async fn grant_list_revoke_role_grant_lifecycle_over_grpc() {
         .list_role_grants(authed(
             ListRoleGrantsRequest {
                 principal_prn: member_prn.clone(),
-                limit: 0,
-                offset: 0,
+                ..Default::default()
             },
             &admin_token,
         ))
@@ -241,8 +242,7 @@ async fn grant_list_revoke_role_grant_lifecycle_over_grpc() {
         .list_role_grants(authed(
             ListRoleGrantsRequest {
                 principal_prn: member_prn,
-                limit: 0,
-                offset: 0,
+                ..Default::default()
             },
             &admin_token,
         ))
@@ -404,6 +404,61 @@ async fn delete_policy_over_grpc_is_failed_precondition_for_a_system_policy() {
         .unwrap_err();
 
     assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+
+    server.abort();
+}
+
+/// Reads `ErrorInfo.reason` off a `tonic::Status` (mirrors `tests/grpc_whoami.rs::reason_of`).
+fn reason_of(err: &tonic::Status) -> String {
+    let details = tonic_types::StatusExt::get_error_details(err);
+    details.error_info().expect("every IAM status carries ErrorInfo").reason.clone()
+}
+
+/// SMA-676 D3, D6, D7 over gRPC: no principal and no scope is refused; an unknown kind is
+/// refused; a scope page over 200 is refused; a scope request with a kind and a page works.
+#[tokio::test]
+async fn list_role_grants_over_grpc_applies_the_scope_path_rules() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state.clone()).await;
+    let mut authz = AuthorizationServiceClient::new(channel(addr).await);
+
+    let admin_token = idp.bearer("grpc-scope-admin", Some("grpc-scope-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision(&state, &admin_token).await;
+    support::seed_platform_admin(&state, &admin_prn).await;
+
+    let err = authz.list_role_grants(authed(ListRoleGrantsRequest::default(), &admin_token)).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(reason_of(&err), "missing-required-field");
+
+    let unknown_kind = ListRoleGrantsRequest {
+        scope_prn: root_prn().canonical(),
+        principal_kind: 7,
+        ..Default::default()
+    };
+    let err = authz.list_role_grants(authed(unknown_kind, &admin_token)).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(reason_of(&err), "invalid-principal-kind");
+
+    let too_big = ListRoleGrantsRequest {
+        scope_prn: root_prn().canonical(),
+        limit: 201,
+        ..Default::default()
+    };
+    let err = authz.list_role_grants(authed(too_big, &admin_token)).await.unwrap_err();
+    assert_eq!(reason_of(&err), "invalid-pagination");
+
+    let users_at_root = ListRoleGrantsRequest {
+        scope_prn: root_prn().canonical(),
+        principal_kind: ProtoPrincipalKind::User as i32,
+        limit: 200,
+        ..Default::default()
+    };
+    let listed = authz.list_role_grants(authed(users_at_root, &admin_token)).await.unwrap().into_inner().grants;
+    assert!(listed.iter().any(|g| g.principal_prn == admin_prn && g.role_key == "platform_admin"), "{listed:?}");
 
     server.abort();
 }

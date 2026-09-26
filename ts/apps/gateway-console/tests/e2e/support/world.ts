@@ -9,6 +9,8 @@
 // sees another test's accounts. IsAuthorized about a SERVICE ACCOUNT answers from the recorded
 // gateway_user grants, so the main row cannot show "Can call models: Yes" without a grant.
 // IsAuthorized about the signed-in USER answers from an allow list, as in iam-console's world.
+// A second grant of the same role at the same scope returns the existing grant (SMA-676 D9). With
+// orgCreator, IsAuthorized(InvokeModel) about the user reads the grants too (SMA-676 § 7.3).
 //
 // The two-zone tier serves the iam-console app from this same world, so the handlers that app's
 // organization page needs (listTeams, listMemberships) are here too.
@@ -19,7 +21,7 @@
 import { randomUUID } from 'node:crypto';
 import { Code, ConnectError } from '@connectrpc/connect';
 import { denial, type FakeIamHandlers } from '@paigasus/console-core/testing';
-import { ApiKeyStatus, NodeStatus } from '@paigasus/sdk/iam/types';
+import { ApiKeyStatus, NodeStatus, PrincipalKind } from '@paigasus/sdk/iam/types';
 
 export const PRINCIPAL_PRN = 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000e0';
 export const ORG_ID = '0190a100-0000-7000-8000-0000000000e1';
@@ -61,6 +63,13 @@ export type WorldOptions = {
   readonly seedServiceAccount?: boolean;
   /** true: the user is project_admin of PROJECT only — no membership, and no organization access (§ 7.2 row 5). */
   readonly projectAdmin?: boolean;
+  /**
+   * SMA-676 § 7.3: the user CREATED the organization. It holds org_admin at ORG_PRN and is not an
+   * org member (§ 1.1 fact 6), and IsAuthorized(InvokeModel) about the user answers from the
+   * recorded gateway_user grants, as the service-account branch does. Off by default, so R24 and
+   * R25 keep a user whose InvokeModel is allowed with no grant.
+   */
+  readonly orgCreator?: boolean;
 };
 
 const ACTIVE = { status: NodeStatus.ACTIVE, effectiveStatus: NodeStatus.ACTIVE };
@@ -95,15 +104,19 @@ function page<T>(items: readonly T[], request: { readonly limit: number; readonl
 }
 
 /** The signed-in user's OWN role grants (myScopes() lists them). */
-function userGrants(projectAdmin: boolean, withScopes: boolean) {
+function userGrants(projectAdmin: boolean, withScopes: boolean, orgCreator: boolean): Grant[] {
   if (projectAdmin) return [{ id: '0190a1d4-0000-7000-8000-0000000000f6', principalPrn: PRINCIPAL_PRN, roleKey: 'project_admin', scopePrn: PROJECT_PRN }];
-  if (withScopes) return [{ id: '0190a1d4-0000-7000-8000-0000000000f3', principalPrn: PRINCIPAL_PRN, roleKey: 'project_viewer', scopePrn: PROJECT_PRN }];
-  return [];
+  const own: Grant[] = withScopes ? [{ id: '0190a1d4-0000-7000-8000-0000000000f3', principalPrn: PRINCIPAL_PRN, roleKey: 'project_viewer', scopePrn: PROJECT_PRN }] : [];
+  if (orgCreator) own.push({ id: '0190a1d4-0000-7000-8000-0000000000f7', principalPrn: PRINCIPAL_PRN, roleKey: 'org_admin', scopePrn: ORG_PRN });
+  return own;
 }
 
 export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
   const projectAdmin = options.projectAdmin === true;
-  const withScopes = (options.memberships ?? true) && !projectAdmin;
+  const orgCreator = options.orgCreator === true;
+  // F9: the org creator holds org_admin but is not a member (§ 1.1 fact 6), so whoAmI reports NO
+  // org/team membership for it.
+  const withScopes = (options.memberships ?? true) && !projectAdmin && !orgCreator;
   const allow = options.allow === undefined ? null : new Set(options.allow);
   const accounts: Account[] = options.seedServiceAccount === true ? [{ prn: SEEDED_SA_PRN, ownerPrn: ORG_PRN, name: SEEDED_SA_NAME, status: 'active' }] : [];
   const keys: Key[] = [];
@@ -129,6 +142,10 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
   const organizationOnly = (): void => {
     if (projectAdmin) throw denial();
   };
+  /** A principal is a service account when the world made it one; every other principal is a user. */
+  const isServiceAccount = (prn: string): boolean => accounts.some((account) => account.prn === prn);
+  const ofKind = (prn: string, kind: PrincipalKind): boolean => kind === PrincipalKind.UNSPECIFIED || (kind === PrincipalKind.SERVICE_ACCOUNT) === isServiceAccount(prn);
+  const grantsAt = (): Grant[] => [...userGrants(projectAdmin, withScopes, orgCreator), ...grants];
 
   const e2ePrincipal = () => ({
     principalPrn: PRINCIPAL_PRN,
@@ -148,9 +165,31 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
     // stays scripted because IAM still serves it and a test may drive it directly.
     'authn.introspect': e2ePrincipal,
     'authn.whoAmI': e2ePrincipal,
-    'authz.listRoleGrants': () => ({ grants: userGrants(projectAdmin, withScopes) }),
+    // The bare principal request (myScopes) keeps its old answer. A request with a scope, a role or a
+    // kind is IAM's query path (SMA-676 D2, D6): exact scope match, principal order, IAM's paging.
+    'authz.listRoleGrants': (req) => {
+      const query = req.scopePrn !== '' || req.roleKey !== '' || req.principalKind !== PrincipalKind.UNSPECIFIED;
+      if (!query) return { grants: userGrants(projectAdmin, withScopes, orgCreator) };
+      const hits = grantsAt()
+        .filter(
+          (grant) =>
+            (req.principalPrn === '' || grant.principalPrn === req.principalPrn) &&
+            (req.scopePrn === '' || grant.scopePrn === req.scopePrn) &&
+            (req.roleKey === '' || grant.roleKey === req.roleKey) &&
+            ofKind(grant.principalPrn, req.principalKind),
+        )
+        .sort((a, b) => (a.principalPrn < b.principalPrn ? -1 : a.principalPrn > b.principalPrn ? 1 : a.id < b.id ? -1 : 1));
+      return { grants: page(hits, req) };
+    },
     'authz.isAuthorized': (req) => {
-      if (req.principalPrn === PRINCIPAL_PRN) return { allowed: allow === null || allow.has(req.action), determiningPolicies: [], reason: '' };
+      if (req.principalPrn === PRINCIPAL_PRN) {
+        // SMA-676 § 7.3: the org creator's InvokeModel answers from the recorded grants.
+        if (orgCreator && req.action === 'InvokeModel') {
+          const allowed = grants.some((grant) => grant.principalPrn === PRINCIPAL_PRN && grant.roleKey === 'gateway_user' && covers(grant.scopePrn, req.resourcePrn));
+          return { allowed, determiningPolicies: [], reason: '' };
+        }
+        return { allowed: allow === null || allow.has(req.action), determiningPolicies: [], reason: '' };
+      }
       // About a service account: only InvokeModel, and only from a recorded gateway_user grant.
       const allowed = req.action === 'InvokeModel' && grants.some((grant) => grant.principalPrn === req.principalPrn && grant.roleKey === 'gateway_user' && covers(grant.scopePrn, req.resourcePrn));
       return { allowed, determiningPolicies: [], reason: '' };
@@ -160,13 +199,18 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
         grantFailuresLeft -= 1;
         throw new ConnectError('the e2e world fails this grant', Code.Internal);
       }
-      // IAM answers a duplicate grant with an internal error, not a conflict (SMA-636 spec § 3.2).
-      if (grants.some((grant) => grant.principalPrn === req.principalPrn && grant.roleKey === req.roleKey && grant.scopePrn === req.scopePrn)) {
-        throw new ConnectError('duplicate grant', Code.Internal);
-      }
+      // SMA-676 D9: a second grant of the same role at the same scope returns the existing grant.
+      const existing = grants.find((grant) => grant.principalPrn === req.principalPrn && grant.roleKey === req.roleKey && grant.scopePrn === req.scopePrn);
+      if (existing !== undefined) return { grant: existing };
       const grant: Grant = { id: randomUUID(), principalPrn: req.principalPrn, roleKey: req.roleKey, scopePrn: req.scopePrn };
       grants.push(grant);
       return { grant };
+    },
+    'authz.revokeRole': (req) => {
+      const index = grants.findIndex((grant) => grant.id === req.id);
+      if (index === -1) throw notFound();
+      grants.splice(index, 1);
+      return {};
     },
     'tenancy.getOrganization': (req) => {
       organizationOnly();
@@ -188,9 +232,13 @@ export function worldHandlers(options: WorldOptions = {}): FakeIamHandlers {
     },
     'tenancy.listProjects': (req) => ({ projects: req.teamPrn === TEAM_PRN ? [PROJECT] : [] }),
     // `filter` is a oneof: its type includes `{ case: undefined }`, so narrow instead of annotating.
-    'tenancy.listMemberships': (req) => ({
-      memberships: [{ id: '0190a1d4-0000-7000-8000-0000000000f4', principalPrn: PRINCIPAL_PRN, nodePrn: req.filter.case === 'nodePrn' ? req.filter.value : '' }],
-    }),
+    // SMA-676: the org creator is no member of the org; the kind filter keeps only users.
+    'tenancy.listMemberships': (req) => {
+      const nodePrn = req.filter.case === 'nodePrn' ? req.filter.value : '';
+      if (orgCreator && nodePrn === ORG_PRN) return { memberships: [] };
+      if (!ofKind(PRINCIPAL_PRN, req.principalKind)) return { memberships: [] };
+      return { memberships: [{ id: '0190a1d4-0000-7000-8000-0000000000f4', principalPrn: PRINCIPAL_PRN, nodePrn }] };
+    },
     'serviceAccounts.createServiceAccount': (req) => {
       const name = req.name.trim();
       if (accounts.some((account) => account.ownerPrn === req.ownerPrn && account.name === name)) throw denial({ code: Code.AlreadyExists, reason: 'service-account-name-conflict' });

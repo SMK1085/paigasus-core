@@ -40,7 +40,6 @@ beforeEach(() => {
     store,
     basePath: BASE_PATH,
     zone: 'iam',
-    scopes: 'openid profile',
     redirectUri: 'https://rp.example.com/iam/auth/callback',
     logger: { event: () => undefined },
     oidc: {
