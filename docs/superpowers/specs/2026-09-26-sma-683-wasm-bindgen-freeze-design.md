@@ -24,9 +24,10 @@ The issue: "A dependabot cargo PR that moves `wasm-bindgen` can merge with no ma
 or it arrives separately from the rest of the cargo group with a documented one-step fix."
 
 - **A direct `wasm-bindgen` bump:** dependabot cannot make one (M0). The case does not occur.
-- **The `reqwest` case (4.3):** a `cargo-minor-patch` PR can move `wasm-bindgen` through a new
-  `reqwest`. That PR does NOT arrive separately, so it does not meet the acceptance. It gets the
-  documented fix in 4.2. Sven accepted this remaining risk on 2026-09-26 when he chose this design.
+- **The `reqwest` case (4.3):** a cargo PR (usually `cargo-minor-patch`) can move `wasm-bindgen`
+  through a new `reqwest`. That PR does NOT arrive separately, so it does not meet the
+  acceptance. It gets the documented fix in 4.2. Sven accepted this remaining risk on
+  2026-09-26 when he chose this design.
 - **The freeze:** a person moves `wasm-bindgen` on purpose with the runbook in 4.2, in a normal
   feature PR. The follow-up (section 7) automates it.
 
@@ -106,31 +107,35 @@ git commit -m "build(deps): move wasm-bindgen to <version> and regenerate the wa
   `wasm-pack` in `.prototools` in the same PR (`rs/Cargo.toml:144-151`, the invariant). The runbook
   quotes the error text when a bump first shows it; it is not measured yet.
 
-**The `reqwest` case on a dependabot branch.** When a `cargo-minor-patch` PR moves `wasm-bindgen`
-(4.3), follow these steps in order:
+**The `reqwest` case on a dependabot branch.** When a cargo PR (usually `cargo-minor-patch`)
+moves `wasm-bindgen` (4.3), follow these steps in order:
 
 1. Merge every other open cargo PR.
 2. Let dependabot rebase this PR (its head commit changes), or comment `@dependabot rebase`.
 3. `gh pr checkout <N>` (it keeps the `dependabot/*` name that the pre-push hook needs).
-4. `git fetch origin`, then check `git diff origin/main...HEAD -- rs/Cargo.lock`: every changed
-   entry must have a crates.io source, and the wasm family entries must be among them (not
-   necessarily only them — a group PR also holds `reqwest` and other bumps). Then run
-   `generate-wasm`, the test, commit and push.
+4. Run `git fetch origin`. Then read `git diff origin/main...HEAD -- rs/Cargo.lock`. Every
+   changed entry must have a crates.io source. The wasm family entries must be among the
+   changes. A group PR also holds `reqwest` and other bumps. Then run `generate-wasm` and the
+   test. Commit and push.
 5. If the branch goes stale again: the merge-only `update-branch` call
    (`gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`), then
    `git pull`, then run `generate-wasm` again only if the merge changed the kernel, the wasm
    binding or the five artifacts.
-6. For a `Cargo.lock` conflict: merge `origin/main` locally, resolve the lock with
-   `( cd rs && cargo update -w )`, then do step 4 again.
+6. For a `Cargo.lock` conflict, do not edit the lock by hand. Comment `@dependabot recreate`.
+   Dependabot then writes a new lock on the current `main`. This deletes the glue commit.
+   Wait for the new head commit. Then run `gh pr checkout <N> --force` and do step 4 again.
+   A hand merge of the lock cannot keep both sides: `main`'s side drops the PR's bumps, and
+   the PR's side drops `main`'s changes.
 
-Never use `--rebase`, `@dependabot recreate` or `[dependabot skip]`: each one deletes the glue
-commit (F6).
+Except in step 6, never use `--rebase`, `@dependabot recreate` or `[dependabot skip]`. Each one
+deletes the glue commit (F6).
 
 ### 4.3 The `reqwest` case — documented, not fixed
 
 `cargo update -p reqwest` unlocks `reqwest` and its own dependencies. `reqwest` depends on all
 three pinning crates (F4), so a new `reqwest` that needs newer wasm crates can move `wasm-bindgen`
-inside a `cargo-minor-patch` PR. That PR then fails the drift gate and gets the fix in 4.2. Today's
+inside a cargo PR (usually `cargo-minor-patch`). That PR then fails the drift gate and gets the
+fix in 4.2. Today's
 `reqwest` 0.12.28 asks only for `js-sys 0.3.77` and `wasm-bindgen 0.2.89`, so the case needs a
 future `reqwest` release. INFERRED, not measured.
 

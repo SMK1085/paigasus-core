@@ -200,18 +200,20 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   1. Merge every other open cargo PR.
   2. Let dependabot rebase this PR (its head commit changes), or comment `@dependabot rebase`.
   3. Run `gh pr checkout <N>` (it keeps the `dependabot/*` branch name the pre-push hook needs).
-  4. Run `git fetch origin`. Check `git diff origin/main...HEAD -- rs/Cargo.lock`: every changed
-     entry must have a crates.io source, and the wasm family entries must be among them. Then
-     run `generate-wasm` and the test, commit, and push.
+  4. Run `git fetch origin`. Then read `git diff origin/main...HEAD -- rs/Cargo.lock`. Every
+     changed entry must have a crates.io source. The wasm family entries must be among the
+     changes. A group PR also holds `reqwest` and other bumps. Then run `generate-wasm` and the
+     test. Commit and push.
   5. If the branch goes stale again: run the merge-only `update-branch` call, then `git pull`.
      Run `generate-wasm` again only if the merge changed the kernel, the wasm binding, or the
      five artifacts.
-  6. For a `Cargo.lock` conflict: merge `origin/main` locally, resolve the lock with
-     `( cd rs && cargo update -w )`, then repeat step 4.
+  6. For a `Cargo.lock` conflict, do not edit the lock by hand. Comment `@dependabot recreate`.
+     Dependabot then writes a new lock on the current `main`. This deletes the glue commit.
+     Wait for the new head commit. Then run `gh pr checkout <N> --force` and do step 4 again.
   The merge-only `update-branch` call:
   `gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`.
-  Never use `--rebase`, `@dependabot recreate` or `[dependabot skip]`. Each one deletes the glue
-  commit.
+  Except in step 6, never use `--rebase`, `@dependabot recreate` or `[dependabot skip]`. Each one
+  deletes the glue commit.
   A conflict or a merge can let git replace the five files. That breaks the pnpm hard link. Run
   `rm -rf ts/node_modules && pnpm -C ts install` after (ts/CLAUDE.md rule).
   Finish before the next Monday 06:00 UTC dependabot run (INFERRED). A new run can supersede a
