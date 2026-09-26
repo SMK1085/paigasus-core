@@ -137,7 +137,6 @@ EXPECTED_ROW_LABELS = (
     "7 kind-values",
     "8a default-image-tags",
     "8b default-image-render",
-    "8c chart-app-version",
 )
 
 
@@ -858,7 +857,7 @@ def check8c(app_version, registry, tags, fallback_docs, unreleased=UNRELEASED_CH
 
     def body():
         if not isinstance(app_version, str):
-            return [f"Chart.yaml appVersion is {app_version!r}, not a string. quote appVersion in Chart.yaml"]
+            return [f"Chart.yaml appVersion is {app_version!r}, not a string. Quote appVersion in Chart.yaml"]
         if not app_version:
             return ["Chart.yaml appVersion is empty, so an empty image.tag falls back to no tag"]
         problems = []
@@ -1332,8 +1331,8 @@ def self_test():
     # synthetic() defaults every image to :0.0.0, so only the missing tags can red this row.
     expect_detail("check8c the SMA-696 value 0.0.0", check8c("0.0.0", reg, tags8c, synthetic(both)), "paigasus-iam-v0.0.0")
     expect_detail("check8c empty", check8c("", reg, tags8c, fallback), "no tag")
-    expect_detail("check8c not a string", check8c(1.0, reg, tags8c, fallback), "quote")
-    expect_detail("check8c None", check8c(None, reg, tags8c, fallback), "quote")
+    expect_detail("check8c not a string", check8c(1.0, reg, tags8c, fallback), "Quote")
+    expect_detail("check8c None", check8c(None, reg, tags8c, fallback), "Quote")
     v_render = copy.deepcopy(fallback)
     _containers(_find(v_render, "Deployment", "r-iam-console"))[0]["image"] = "repo/iam-console:v0.1.0"
     expect_detail("check8c the rendered fallback differs", check8c("0.1.0", reg, tags8c, v_render), "r-iam-console")
@@ -1415,8 +1414,8 @@ def self_test():
 
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
-    if len(EXPECTED_ROW_LABELS) != 24:
-        failures.append(f"EXPECTED_ROW_LABELS: expected 24 labels, got {len(EXPECTED_ROW_LABELS)}")
+    if len(EXPECTED_ROW_LABELS) != 23:
+        failures.append(f"EXPECTED_ROW_LABELS: expected 23 labels, got {len(EXPECTED_ROW_LABELS)}")
     if len(set(EXPECTED_ROW_LABELS)) != len(EXPECTED_ROW_LABELS):
         failures.append("EXPECTED_ROW_LABELS: contains a duplicate label")
     _check_row_inventory(EXPECTED_ROW_LABELS)  # the constant against itself: must not raise
