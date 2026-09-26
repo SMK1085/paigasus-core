@@ -154,6 +154,47 @@ holds `W1 default` to `W14 no-restart`. For the NOTES text it holds `N0 pin` (th
 line is deleted. See `docs/ops/RUNBOOK-chart.md` § 6 for the recommended setup and the migration
 order.
 
+## The console authorization request (`oidc.scopes`, `oidc.authorizationAudience`)
+
+Two values change what both consoles request from the IdP (SMA-692). Both values are empty by
+default. An empty value renders no key. The render is then byte-identical to a chart without
+them.
+
+- `oidc.scopes` renders `PAIGASUS_OIDC_SCOPES` into the `console-env` ConfigMap. When empty, the
+  console uses its default scopes: `openid profile email offline_access`. When set, the consoles
+  also send this list as the `scope` of each refresh request. Entra ID needs one scope of its
+  API.
+- `oidc.authorizationAudience` renders `PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE`. The consoles send
+  it as the `audience` parameter of the authorization request. They do not send it on a refresh.
+  Auth0 needs it.
+- The helpers are `paigasus.consoleScopes` and `paigasus.consoleAuthorizationAudience` in
+  `templates/_audience.tpl`. They read the values with `dig`. An absent key under
+  `--reuse-values` then gives `""`. `console-env-configmap.yaml` calls them. That file renders on
+  every install. Their refusals fire on every render. They are not part of `paigasus.validate`.
+  Because of this, `_helpers.tpl` and its two fixture copies do not change.
+- Both values are normalized before they render, on the explicit whitespace class
+  `[\t\n\f\r ]` (final fix I1, not the wider `\s`). `oidc.scopes` splits on that class, drops
+  empty tokens, and re-joins the rest with one space; a whitespace-only value normalizes to
+  empty and renders no key, the same as an absent value. `@paigasus/auth` normalizes on the same
+  class, so both sides agree.
+- The render fails in four cases:
+  - `oidc.scopes` is set, normalizes to a non-empty list, and that list does not hold the token
+    `openid`. The token `openidx` does not count.
+  - `oidc.authorizationAudience` is set with leading or trailing whitespace (final fix M3).
+    `@paigasus/auth` refuses the same value at pod start, on the same rule.
+  - `oidc.authorizationAudience` is set and `oidc.audience` is empty.
+  - `oidc.authorizationAudience` is set and does not equal `oidc.audience`.
+
+  The compare is exact, as strings.
+- A change of either value changes the `console-env` ConfigMap. `checksum/console-env` then
+  restarts both consoles. IAM does not restart.
+
+`tests/env.sh` holds the rows `O1 unset`, `O2 both-set`, `O3 reuse-values-no-key`, `O4 number`,
+`O5 restart-scopes`, `O6 restart-audience`, `O7 tab-scopes`, `O8 newline-scopes` and
+`O9 whitespace-only-scopes`. A fourth row counter checks them.
+`tests/refusals.sh` holds the five refusals and three valid renders. See
+`docs/ops/RUNBOOK-chart.md` § 6 for the IdP setup.
+
 ## The default image tags
 
 Each `image.tag` in `values.yaml` is pinned to the published version of that image. The version

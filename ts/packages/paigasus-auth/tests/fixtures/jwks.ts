@@ -82,6 +82,12 @@ export interface OidcFixture {
    * parses the body).
    */
   setNextTokenError(error: string | undefined, wwwAuthenticate?: string): void;
+  /**
+   * The body of every /token request this fixture received, in order (SMA-692). A test reads the
+   * real `scope` and `audience` of a refresh request here. The bodies hold the client secret, so a
+   * test must never print one.
+   */
+  tokenRequests(): readonly URLSearchParams[];
   close(): Promise<void>;
 }
 
@@ -118,6 +124,7 @@ export async function startOidcFixture(): Promise<OidcFixture> {
   let expiresInOverride: { value: number | undefined } | undefined;
   let nextTokenError: { error: string; wwwAuthenticate?: string } | undefined;
   let issuer = '';
+  const tokenRequestBodies: URLSearchParams[] = [];
 
   const server: Server = createServer((req, res) => {
     void (async () => {
@@ -147,6 +154,7 @@ export async function startOidcFixture(): Promise<OidcFixture> {
       }
       if (req.method === 'POST' && url.pathname === '/token') {
         const rawBody = await readBody(req);
+        tokenRequestBodies.push(new URLSearchParams(rawBody));
         if (nextTokenError !== undefined) {
           const forced = nextTokenError;
           nextTokenError = undefined; // one-shot
@@ -249,6 +257,9 @@ export async function startOidcFixture(): Promise<OidcFixture> {
     },
     setNextTokenError(error: string | undefined, wwwAuthenticate?: string) {
       nextTokenError = error === undefined ? undefined : { error, ...(wwwAuthenticate !== undefined ? { wwwAuthenticate } : {}) };
+    },
+    tokenRequests(): readonly URLSearchParams[] {
+      return [...tokenRequestBodies];
     },
     close(): Promise<void> {
       return new Promise<void>((resolve, reject) => {

@@ -106,6 +106,31 @@ expect_fail "duplicate basePath" "is already used by zone" \
 expect_fail "oidc.caBundle key empty" "oidc.caBundle.key is empty while oidc.caBundle.existingConfigMap is set" \
   --set oidc.caBundle.existingConfigMap=paigasus-idp-ca --set oidc.caBundle.key=""
 
+# SMA-692 D7. The console must not ask for a token that IAM refuses. The chart fails when
+# oidc.authorizationAudience is set and oidc.audience is empty (IAM then accepts only the client
+# id, and Auth0 refuses a client id as an API audience), or when the two values differ.
+expect_fail "authorizationAudience with oidc.audience empty" "while oidc.audience is empty" \
+  --set oidc.authorizationAudience=paigasus-console
+expect_fail "authorizationAudience differs from oidc.audience" "does not equal oidc.audience" \
+  --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://other
+# Final fix M3. @paigasus/auth refuses the same value at pod start on the same rule; the chart
+# must refuse it too, at render time, or an install can succeed while the console pod cannot.
+expect_fail "authorizationAudience with surrounding whitespace" "has leading or trailing whitespace" \
+  --set oidc.audience=api://paigasus --set "oidc.authorizationAudience= api://paigasus"
+# SMA-692 D9. The scope list must hold the token openid. openidx does not count.
+expect_fail "scopes without openid" "oidc.scopes must contain the scope openid" \
+  --set "oidc.scopes=profile email offline_access"
+expect_fail "scopes with openidx" "oidc.scopes must contain the scope openid" \
+  --set "oidc.scopes=openidx profile email"
+expect_render "authorizationAudience equal to oidc.audience" \
+  --set oidc.audience=api://paigasus --set oidc.authorizationAudience=api://paigasus
+expect_render "scopes with openid not first" \
+  --set "oidc.scopes=profile email openid offline_access"
+# Final fix I1. A whitespace-only oidc.scopes normalizes to empty, which renders no key — not a
+# refusal, the same as an absent value.
+expect_render "scopes whitespace-only" \
+  --set "oidc.scopes=   "
+
 # zones.iam.backend.bootstrapAdmins and extraEnv (SMA-697). A bad bootstrap admin is either a
 # boot failure (IamConfig::validate) or an entry that IAM never matches. Both are refused here.
 ADMIN=zones.iam.backend.bootstrapAdmins[0]

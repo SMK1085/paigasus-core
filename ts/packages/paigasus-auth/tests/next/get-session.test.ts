@@ -81,7 +81,6 @@ function baseRuntime(store: SessionStore): AuthRuntime {
     absoluteTtlMs: 86_400_000,
     zone: 'iam',
     basePath: '/iam',
-    scopes: 'openid profile email offline_access',
   };
 }
 

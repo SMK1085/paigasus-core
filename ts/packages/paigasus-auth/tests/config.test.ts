@@ -21,7 +21,6 @@ describe('authEnvShape', () => {
 
   it('applies every documented default', () => {
     const parsed = schema.parse(VALID);
-    expect(parsed.PAIGASUS_OIDC_SCOPES).toBe('openid profile email offline_access');
     expect(parsed.PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS).toBe(30);
     expect(parsed.PAIGASUS_OIDC_HTTP_TIMEOUT_MS).toBe(3500);
     expect(parsed.PAIGASUS_SESSION_REDIS_TIMEOUT_MS).toBe(1000);
@@ -76,5 +75,60 @@ describe('authEnvShape', () => {
   it('caps PAIGASUS_SESSION_REDIS_TIMEOUT_MS at 536870911 ms', () => {
     expect(schema.parse({ ...VALID, PAIGASUS_SESSION_REDIS_TIMEOUT_MS: '536870911' }).PAIGASUS_SESSION_REDIS_TIMEOUT_MS).toBe(536_870_911);
     expect(() => schema.parse({ ...VALID, PAIGASUS_SESSION_REDIS_TIMEOUT_MS: '536870912' })).toThrow();
+  });
+
+  // SMA-692 D3-a. No default here: createAuthRuntime applies the default list for the
+  // authorization request only, so "absent" must stay visible after the parse.
+  it('gives PAIGASUS_OIDC_SCOPES no default', () => {
+    expect(schema.parse(VALID).PAIGASUS_OIDC_SCOPES).toBeUndefined();
+  });
+
+  // SMA-692 D5. A token-exact match on whitespace-separated tokens.
+  it.each(['openid', 'openid profile email offline_access', 'profile email openid', 'openid api://paigasus-api/access'])('accepts PAIGASUS_OIDC_SCOPES %j, which holds the token openid', (value) => {
+    expect(schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value }).PAIGASUS_OIDC_SCOPES).toBe(value);
+  });
+
+  it.each(['profile email', 'openidx profile', 'profile openid-connect', 'OPENID profile', '', '   '])('refuses PAIGASUS_OIDC_SCOPES %j, which does not hold the token openid', (value) => {
+    expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value })).toThrow();
+  });
+
+  // Final fix I1. RFC 6749 § 3.3 allows only a single space between scope tokens. TS and the
+  // chart now normalize on the SAME explicit class ([\t\n\f\r ]), not `\s`, so a value that
+  // reaches the render agrees with the value that reached the parse. Each row asserts the exact
+  // normalized string, not the raw input.
+  it.each([
+    ['openid\tprofile', 'openid profile'],
+    ['openid profile\n', 'openid profile'],
+    [' openid profile ', 'openid profile'],
+    ['openid   profile', 'openid profile'],
+    ['profile\topenid', 'profile openid'],
+    ['openid\r\nprofile\femail', 'openid profile email'],
+  ])('normalizes PAIGASUS_OIDC_SCOPES %j to %j', (value, normalized) => {
+    expect(schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value }).PAIGASUS_OIDC_SCOPES).toBe(normalized);
+  });
+
+  // NBSP (U+00A0) is not in the explicit separator class, so the two words stay ONE token and
+  // that token is not `openid` — unlike the old `\s`-based split, which would have accepted it.
+  it('refuses PAIGASUS_OIDC_SCOPES holding openid\\u00a0profile — NBSP is not a separator', () => {
+    expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: 'openid profile' })).toThrow();
+  });
+
+  // A value that normalizes to empty (only separator characters) is refused, distinctly from the
+  // openid check — it never has a token to test.
+  it.each(['\t', '\n', '  \t \n  '])('refuses PAIGASUS_OIDC_SCOPES %j, which normalizes to empty', (value) => {
+    expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_SCOPES: value })).toThrow();
+  });
+
+  // SMA-692 D1.
+  it('leaves PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE undefined when absent', () => {
+    expect(schema.parse(VALID).PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE).toBeUndefined();
+  });
+
+  it('accepts a set PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE', () => {
+    expect(schema.parse({ ...VALID, PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE: 'https://api.example.com' }).PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE).toBe('https://api.example.com');
+  });
+
+  it.each(['', ' https://api.example.com', 'https://api.example.com ', '\thttps://api.example.com'])('refuses PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE %j', (value) => {
+    expect(() => schema.parse({ ...VALID, PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE: value })).toThrow();
   });
 });

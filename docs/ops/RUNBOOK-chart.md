@@ -27,6 +27,8 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `oidc.clientId` | yes | The console's OIDC client. By default IAM also uses it as the access-token audience. Then an ID token passes IAM's audience check, and the chart shows a warning (§ 6) |
 | `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Recommended: a dedicated API audience. Follow the migration order in § 6 |
 | `oidc.acknowledgeClientIdAudience` | no | Set it to the value of `oidc.clientId` to remove the audience warning (§ 6). It does not change what IAM accepts |
+| `oidc.scopes` | no | The scopes that both consoles request. Empty: `openid profile email offline_access`. The list must contain `openid`, or the render fails. Keep `offline_access`, or the IdP issues no refresh token. When set, the consoles also send it on each refresh. Entra ID needs it (§ 6) |
+| `oidc.authorizationAudience` | no | The `audience` parameter that both consoles send in the authorization request. Empty: no `audience` parameter. It must equal `oidc.audience`, or the render fails. Auth0 needs it (§ 6) |
 | `oidc.existingSecret` | yes | A Secret with keys `oidc-client-secret` and `session-redis-url` |
 | `oidc.secretVersion` | no | Change it after the Secret changes, so the console pods restart |
 | `oidc.caBundle.existingConfigMap` | no | A ConfigMap with the PEM root certificates of a private IdP CA (§ 7) |
@@ -37,8 +39,9 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 
 ## 2. Refused combinations
 
-`paigasus.validate` in `templates/_helpers.tpl` stops the render with its own message. The chart
-refuses:
+`paigasus.validate` in `templates/_helpers.tpl` stops the render with its own message. The last
+two items in this list are in `templates/_audience.tpl` instead. `templates/console-env-configmap.yaml`
+calls them, and that file renders on every install. The chart refuses:
 
 - no enabled zone;
 - the `gateway` zone without the `iam` zone;
@@ -49,6 +52,10 @@ refuses:
 - `zones.gateway.backend.deploy: true` (the chart cannot run the gateway backend);
 - `zones.<id>.backend.url` empty when the chart does not deploy that backend;
 - `oidc.caBundle.existingConfigMap` set with an empty `oidc.caBundle.key`;
+- `oidc.scopes` set without the scope `openid` (`openidx` does not count);
+- `oidc.authorizationAudience` set with leading or trailing whitespace;
+- `oidc.authorizationAudience` set while `oidc.audience` is empty, or set to a value that does not
+  equal `oidc.audience`;
 - a `zones.iam.backend.bootstrapAdmins` value that is not a list, or an entry that is not a map;
 - a bootstrap admin with an empty or missing `issuer` or `subject`, or with a value that is not a
   string (quote a subject of digits only);
@@ -96,6 +103,7 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). IAM is not available during the restart. |
 | `zones.iam.backend.bootstrapAdmins` or `zones.iam.backend.extraEnv` | the IAM pod, not the consoles | it changes the env in the IAM pod template (`tests/env.sh` rows B7a and B7b). IAM is not available during the restart, as for `oidc.audience` |
 | `oidc.acknowledgeClientIdAudience` | nothing | it changes only the IAM Deployment's `metadata` annotation and the NOTES, not a pod template (`tests/env.sh` row W14) |
+| `oidc.scopes` or `oidc.authorizationAudience` | both consoles, not IAM | it changes the `console-env` ConfigMap and so `checksum/console-env` (`tests/env.sh` rows O5 and O6) |
 
 A change of `oidc.caBundle.version` restarts every pod that mounts the bundle: both consoles and
 IAM. That is expected, as for `oidc.secretVersion`.
@@ -113,8 +121,10 @@ late and unclearly. Check these four items before you install:
    after this list. The value replaces the client id. It does not add another value next to the
    client id. Before you choose the value, decode a real access token and read its `aud` claim.
    The value helps only when the IdP issues a JWT access token for the console's scopes
-   (`openid profile email offline_access`). The console sends no `audience` or `resource`
-   parameter. This value does not work with an opaque token, or a token for a different API.
+   (`oidc.scopes`, default `openid profile email offline_access`). The console sends an
+   `audience` parameter only when `oidc.authorizationAudience` is set. It never sends a
+   `resource` parameter. This value does not work with an opaque token, or a token for a
+   different API.
    A wrong or missing audience shows in the IAM log at `info`, with the issuer and the accepted
    audiences (`ci/kind/README.md`, "Where to look first"). The log does not show the token's
    `aud`.
@@ -170,7 +180,19 @@ The IAM log shows the refusal at `info`: "it is bound to a key, and IAM cannot c
 binding". The line gives the issuer and the marker `cnf` or `typ DPoP`. The same rate limit
 applies as for the refusal of a token that is not an access token.
 
-The console requests the scopes `openid profile email offline_access`.
+By default the console requests the scopes `openid profile email offline_access`. Set
+`oidc.scopes` to request a different list. The list must contain `openid`. Keep `offline_access`.
+
+Without it, the IdP issues no refresh token. Every user must log in again when the access token
+expires. When `oidc.scopes` is set, the console also sends the list as the `scope` of each
+refresh request. When it is empty, a refresh request has no `scope`, as before SMA-692.
+
+**Set `oidc.scopes` only when your IdP needs it.** This applies to any IdP, not only Entra ID
+(see "Entra ID moving to a new scope list" below). RFC 6749 § 6 lets an authorization server
+refuse a refresh `scope` that is not a subset of the originally granted scope. So a refresh with
+this list can fail on an IdP that enforces that rule. The user is then signed out at each
+access-token expiry, not only at the next login. After you set or change `oidc.scopes`, read the
+`oauthError` field of the `session.refresh_failed` log line to check for this.
 
 **The recommended audience setup (SMA-691).** An OIDC ID token has the client id as its `aud`.
 So when the IAM audience equals `oidc.clientId`, an ID token passes IAM's audience check. This is
@@ -192,6 +214,26 @@ one replica and `maxSurge: 0` (§ 5). Do the steps in this order:
 
 If you do step 3 before step 1, IAM refuses the token of every console session. An IdP change
 that replaces `aud`, and does not add to it, has the same result.
+
+**Migration for Auth0 and Entra ID (SMA-692).** Step 1 above adds a second audience next to the
+client id. Auth0 has no equal step: an Auth0 access token has one API audience. The chart also
+refuses `oidc.authorizationAudience` unless it equals `oidc.audience`, so IAM and the consoles
+change in one upgrade. The real cases:
+
+- **Auth0 with a tenant Default Audience D, moving to `oidc.authorizationAudience` = D.** The
+  tokens do not change. Nothing breaks.
+- **Auth0 moving from no API (or from D) to a new API A.** This is a hard cut. A session that
+  logged in before the upgrade keeps a token for the old audience, and an Auth0 refresh keeps
+  that audience. IAM refuses those tokens. Every user must log in again. IAM and the consoles
+  restart at different times.
+- **Entra ID moving to a new scope list.** The refresh of an old session can fail, because the
+  refresh now sends the new `oidc.scopes`. The error code is not measured. Entra ID reports many
+  conditions as `invalid_grant`, which deletes the session. It reports others as
+  `invalid_scope`, which ends the session when the access token expires. In both cases the user
+  must log in again. The console log line `session.refresh_failed` shows `reason: rejected` for
+  `invalid_grant`, and the code in the field `oauthError` for the other codes.
+- **Mixed pods.** During the rollout, old and new console pods share one session store. For a
+  short time, a pod with the other scope list can refresh a session.
 
 **The warning.** The chart shows a warning when both of these conditions are true:
 
@@ -237,13 +279,32 @@ them.
   (SMA-686).
 - **Okta.** Use a custom authorization server whose audience is the API identifier. See the Okta
   example below.
-- **Auth0.** The console cannot send the `audience` parameter today. It sends only `scope`
-  (`ts/packages/paigasus-auth/src/adapters/oidc.ts`). The tenant "Default Audience" setting is a
-  possible path. It is not measured.
-- **Entra ID.** An access token for an API application ID URI needs a scope of that API. The
-  console reads its scopes from `PAIGASUS_OIDC_SCOPES`, but the chart has no value for it. So
-  Entra ID cannot use a dedicated audience with this chart today. A follow-up issue tracks a
-  configurable scope list.
+- **Auth0.** Auth0 issues an access token for an API only when the authorization request has the
+  `audience` parameter, or when the tenant has a "Default Audience".
+  - Create an API. Its identifier is the audience. Enable "Allow Offline Access" on the API, or
+    the console gets no refresh token.
+  - Set `oidc.audience` and `oidc.authorizationAudience` to that identifier. Quote both values in
+    a values file.
+  - IAM needs `email` in the access token (item 2). Auth0 does not put it into an API access
+    token by default. Add it with a post-login Action. Not measured.
+  - The console does not send `audience` on a refresh. Auth0 keeps the original audience on a
+    refresh.
+  - Alternative: the tenant "Default Audience". It applies to every application of the tenant.
+    With it, `oidc.authorizationAudience` can stay empty.
+- **Entra ID.** An access token for an API needs a scope of that API.
+  - Register a SEPARATE app registration for the API. Do not expose the API on the console's own
+    registration. The v2 `aud` would then be the console's client id. That setup is the one the
+    warning above is about.
+  - Set its `accessTokenAcceptedVersion` to 2. IAM refuses a v1.0 access token: its `iss`
+    (`https://sts.windows.net/<tenant>/`) is not the v2 issuer of the discovery document. v1.0 is
+    not supported.
+  - Expose one scope. Give the console's registration the delegated permission. Give consent.
+  - Set `oidc.scopes` to `openid profile email offline_access` plus exactly one scope of that API,
+    for example `api://paigasus-api/access`. One request can hold scopes of only one resource.
+  - Set `oidc.audience` to the API registration's application (client) id, a GUID. A v2 access
+    token has that value as its `aud`.
+  - Add `email` as an optional claim of the access token. Not measured.
+  - Before the switch, decode a real access token and check its `aud`, `iss` and `email`.
 - **Dex.** Dex gives the ID token and the access token the same `aud`. No audience setting helps.
   Set `oidc.acknowledgeClientIdAudience` to remove the warning. IAM still accepts a Dex ID token
   as a bearer token. SMA-686 residual R1 stays open for Dex.

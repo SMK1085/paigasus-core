@@ -117,13 +117,57 @@ export class CallbackRejected extends AuthError {
  * the redaction claim resting on the call site, and a later edit widening the set would silently
  * widen what may be logged. The type and the classifier's membership test are one fact.
  *
- * NOT exported from src/server.ts, deliberately: no consumer can produce or observe one.
- * getSession() swallows every failure into `null`, and CreateAuthRuntimeDeps exposes no OIDC
- * override.
+ * NOT exported from src/server.ts, deliberately: no consumer can observe one. getSession()
+ * swallows every failure into `null`. CreateAuthRuntimeDeps.oidcClientFactory (SMA-692) lets a
+ * caller inject an OIDC client, but that client's errors reach the same swallowing path.
  */
 export class RefreshRejected extends AuthError {
   readonly code = 'oidc_refresh_rejected';
   constructor(readonly oauthError: 'invalid_grant') {
     super(`oidc refresh rejected: ${oauthError}`);
   }
+}
+
+/**
+ * RFC 6749 § 5.2: the error codes of a token endpoint response. A CLOSED set (SMA-692 D10). The
+ * refresh log line carries one of these codes, or 'other'. The IdP writes the response body, so
+ * a value outside this list never reaches a log line as it is. The type and toTokenErrorCode are
+ * one fact, like RefreshRejected's `oauthError` above.
+ */
+export const TOKEN_ERROR_CODES = ['invalid_request', 'invalid_client', 'invalid_grant', 'unauthorized_client', 'unsupported_grant_type', 'invalid_scope'] as const;
+
+export type TokenErrorCode = (typeof TOKEN_ERROR_CODES)[number];
+
+/** Maps an untrusted value onto TOKEN_ERROR_CODES. Any other value, and a non-string, gives 'other'. */
+export function toTokenErrorCode(value: unknown): TokenErrorCode | 'other' {
+  return (TOKEN_ERROR_CODES as readonly unknown[]).includes(value) ? (value as TokenErrorCode) : 'other';
+}
+
+/**
+ * The identity provider answered a refresh with an OAuth error that is NOT definitive (SMA-626
+ * § 2.2, SMA-692 D11): the session stays, and a later request tries again. `oauthError` is the
+ * code from the closed set above (SMA-692 D10). The message holds only the class name of the
+ * library error, as adapters/oidc.ts's wrapError does. It holds no code, no URL and no token.
+ *
+ * NOT exported from src/server.ts, for the reason RefreshRejected records above.
+ */
+export class RefreshFailed extends AuthError {
+  readonly code = 'oidc_refresh_failed';
+  constructor(
+    readonly oauthError: TokenErrorCode | 'other',
+    causeName: string,
+  ) {
+    super(`oidc refresh_token_grant failed: ${causeName}`);
+  }
+}
+
+/**
+ * The OAuth code of a RefreshFailed from ANY copy of this module, or undefined for every other
+ * error (SMA-692 D10). It classifies by `code`, not `instanceof`, for the reason
+ * isRefreshRejected records. The value goes through toTokenErrorCode again: an object that only
+ * claims the code can hold any string.
+ */
+export function refreshFailureCode(err: unknown): TokenErrorCode | 'other' | undefined {
+  if (!hasAuthErrorCode(err, 'oidc_refresh_failed')) return undefined;
+  return toTokenErrorCode((err as { oauthError?: unknown }).oauthError);
 }
