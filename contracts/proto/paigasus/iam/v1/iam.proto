@@ -38,6 +38,15 @@ enum NodeStatus {
   NODE_STATUS_ARCHIVED = 2;
 }
 
+// SMA-676 D7. The kind of a principal, as IAM stores it. UNSPECIFIED on a
+// filter means "any kind". IAM refuses any other number with
+// ERROR_REASON_INVALID_PRINCIPAL_KIND: an unknown value never widens a filter.
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;
+  PRINCIPAL_KIND_USER = 1;
+  PRINCIPAL_KIND_SERVICE_ACCOUNT = 2;
+}
+
 message Organization {
   string prn = 1;
   string slug = 2;
@@ -223,6 +232,8 @@ message ListMembershipsRequest {
   }
   uint32 limit = 3;
   uint64 offset = 4;
+  // SMA-676 D8. AND-ed with the filter above. UNSPECIFIED = any kind.
+  PrincipalKind principal_kind = 5;
 }
 message ListMembershipsResponse {
   repeated Membership memberships = 1;
@@ -380,9 +391,18 @@ message RevokeRoleRequest {
 }
 message RevokeRoleResponse {}
 message ListRoleGrantsRequest {
+  // Optional when scope_prn is set. A request must set principal_prn or
+  // scope_prn, or both (SMA-676 D3).
   string principal_prn = 1;
+  // Honoured when scope_prn, role_key or principal_kind is set. A request
+  // with only principal_prn returns every grant and ignores both (D6).
   uint32 limit = 2;
   uint64 offset = 3;
+  // An exact match on the grant's scope node (D5). No descendant grants.
+  string scope_prn = 4;
+  string role_key = 5;
+  // UNSPECIFIED = any kind (D7).
+  PrincipalKind principal_kind = 6;
 }
 message ListRoleGrantsResponse {
   repeated RoleGrant grants = 1;

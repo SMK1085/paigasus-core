@@ -3350,7 +3350,6 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn list_service_accounts(
             &mut self,
             request: impl tonic::IntoRequest<super::ListServiceAccountsRequest>,
@@ -3380,7 +3379,6 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn archive_service_account(
             &mut self,
             request: impl tonic::IntoRequest<super::ArchiveServiceAccountRequest>,
@@ -3528,7 +3526,6 @@ pub mod service_account_service_server {
             tonic::Response<super::GetServiceAccountResponse>,
             tonic::Status,
         >;
-        ///
         async fn list_service_accounts(
             &self,
             request: tonic::Request<super::ListServiceAccountsRequest>,
@@ -3536,7 +3533,6 @@ pub mod service_account_service_server {
             tonic::Response<super::ListServiceAccountsResponse>,
             tonic::Status,
         >;
-        ///
         async fn archive_service_account(
             &self,
             request: tonic::Request<super::ArchiveServiceAccountRequest>,

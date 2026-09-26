@@ -66,6 +66,9 @@ pub enum TenancyError {
     InvalidCursor(&'static str),
     #[error("{0} is not a known audit outcome")]
     InvalidAuditOutcome(&'static str),
+    /// SMA-676 D7: a `principal_kind` filter named no known kind. Refused, never read as "any".
+    #[error("{0} is not a known principal kind")]
+    InvalidPrincipalKind(&'static str),
     #[error("{0} is required")]
     MissingRequiredField(&'static str),
     /// HTTP-only, structurally — see the registry comment on
@@ -182,6 +185,7 @@ impl TenancyError {
             Self::InvalidUuid(_) => "invalid-uuid",
             Self::InvalidCursor(_) => "invalid-cursor",
             Self::InvalidAuditOutcome(_) => "invalid-audit-outcome",
+            Self::InvalidPrincipalKind(_) => "invalid-principal-kind",
             Self::MissingRequiredField(_) => "missing-required-field",
             Self::MutuallyExclusiveFields(_) => "mutually-exclusive-fields",
             Self::InvalidQueryParameter => "invalid-query-parameter",
@@ -218,6 +222,7 @@ impl TenancyError {
             | Self::InvalidUuid(_)
             | Self::InvalidCursor(_)
             | Self::InvalidAuditOutcome(_)
+            | Self::InvalidPrincipalKind(_)
             | Self::MissingRequiredField(_)
             | Self::MutuallyExclusiveFields(_)
             | Self::InvalidQueryParameter
@@ -261,6 +266,7 @@ impl TenancyError {
             | Self::InvalidUuid(f)
             | Self::InvalidCursor(f)
             | Self::InvalidAuditOutcome(f)
+            | Self::InvalidPrincipalKind(f)
             | Self::MissingRequiredField(f)
             | Self::MutuallyExclusiveFields(f)
             | Self::InvalidPathSegment(f) => Some(f),
@@ -492,6 +498,7 @@ mod tests {
             (TenancyError::InvalidAuditOutcome("outcome"), "invalid-audit-outcome"),
             (TenancyError::MissingRequiredField("owner_prn"), "missing-required-field"),
             (TenancyError::MutuallyExclusiveFields("principal|node"), "mutually-exclusive-fields"),
+            (TenancyError::InvalidPrincipalKind("principal_kind"), "invalid-principal-kind"),
         ] {
             assert_eq!(err.code(), code);
             assert_eq!(err.class(), ErrorClass::Validation, "{code} must stay a 400");
@@ -540,5 +547,15 @@ mod tests {
         assert_eq!(p.class(), ErrorClass::Validation);
         assert_eq!(p.field(), Some("policy_id"));
         assert_eq!(p.to_string(), "policy_id is not a valid path segment");
+    }
+
+    /// SMA-676 D7. An unknown principal kind is a 400 that names its field, so a client can see
+    /// which filter it got wrong. It never widens the filter to "any kind".
+    #[test]
+    fn an_unknown_principal_kind_is_a_named_validation_error() {
+        let err = TenancyError::InvalidPrincipalKind("principal_kind");
+        assert_eq!(err.class(), ErrorClass::Validation);
+        assert_eq!(err.field(), Some("principal_kind"));
+        assert_eq!(err.to_string(), "principal_kind is not a known principal kind");
     }
 }

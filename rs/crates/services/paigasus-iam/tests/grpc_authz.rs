@@ -222,8 +222,7 @@ async fn grant_list_revoke_role_grant_lifecycle_over_grpc() {
         .list_role_grants(authed(
             ListRoleGrantsRequest {
                 principal_prn: member_prn.clone(),
-                limit: 0,
-                offset: 0,
+                ..Default::default()
             },
             &admin_token,
         ))
@@ -241,8 +240,7 @@ async fn grant_list_revoke_role_grant_lifecycle_over_grpc() {
         .list_role_grants(authed(
             ListRoleGrantsRequest {
                 principal_prn: member_prn,
-                limit: 0,
-                offset: 0,
+                ..Default::default()
             },
             &admin_token,
         ))

@@ -170,6 +170,11 @@ enum ErrorReason {
   // this registry is a 409, and this is a 400.
   ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS = 38;
 
+  // "invalid-principal-kind" — a principal_kind filter did not name a known
+  // kind (SMA-676 D7). Refused, never widened to "any kind": a proto3 enum is
+  // open, so an unknown number reaches the server. Both transports carry it.
+  ERROR_REASON_INVALID_PRINCIPAL_KIND = 40;
+
   // ---- IAM: lifecycle (1-299) ----------------------------------------------
   // SMA-571. Emitted by the boot-time deferred router, before any AppState
   // exists — so it never travels through TenancyError or the authn funnel.
