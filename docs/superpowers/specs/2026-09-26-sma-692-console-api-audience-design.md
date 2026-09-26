@@ -4,7 +4,7 @@
 - Related: SMA-691 (§ 8, the origin of this issue), SMA-678 (`oidc.audience`, D8),
   SMA-626 (§ 2.2, the refresh error classes)
 - Status: design approved in chat on 2026-09-26. Revised after the adversarial challenge
-  (§ 10). D3 is open for Gate 1.
+  (§ 10). The written spec was approved at Gate 1 on 2026-09-26, with D3-a.
 
 ## 1. Problem
 
@@ -32,8 +32,8 @@ spec means both.
 ## 2. Intent and success criteria
 
 An operator of Auth0 or Entra ID can use the recommended dedicated-audience setup with the
-consoles. An operator who sets neither new chart value gets the same authorization request as
-today. The refresh request of such an operator depends on the Gate 1 decision for D3.
+consoles. An operator who sets neither new chart value gets the same authorization request and
+the same refresh request as today.
 
 Acceptance criteria (from the issue):
 
@@ -101,23 +101,23 @@ tenant.
     (`--set-string …=false` is a true string) that SMA-691 D4 avoided.
 - **D2. The default authorization request does not change.** With neither value set, the
   authorization URL has the same parameters as today.
-- **D3. The refresh `scope`. OPEN FOR GATE 1.** In chat, the choice was: the refresh grant sends
+- **D3. The refresh `scope`: D3-a, decided at Gate 1.** In chat, the choice was: the refresh grant sends
   `scope` = `PAIGASUS_OIDC_SCOPES` for every IdP. The challenge found facts that the chat choice
   did not have: F8 (the refresh scope must not exceed the GRANTED scope) and F9 (an
   `invalid_scope` on every refresh ends each session at access-token expiry, silently, for every
   user). Nothing in the repo runs a real refresh grant against Keycloak: the e2e tier only checks
   that a refresh token is issued (`tests/e2e/roundtrip.spec.ts:117-120`), the console fake IdP
   ignores `scope`, and the kind job has no refresh step. The two variants:
-  - **D3-a (recommended by the challenge).** Send the refresh `scope` only when the operator set
+  - **D3-a (CHOSEN at Gate 1).** Send the refresh `scope` only when the operator set
     `PAIGASUS_OIDC_SCOPES` explicitly. `authEnvShape` makes the key optional with no default, and
     `createAuthRuntime` applies the default for the authorization request only. The chart renders
     the key only when `oidc.scopes` is set (D6), so only an Entra operator (or any operator who
     sets `oidc.scopes`) opts in. The default refresh request stays byte-identical to today, and
     § 2 holds for every request. Cost: the code carries an "explicitly set" distinction.
-  - **D3-b (the chat choice).** Send `scope` on every refresh, for every IdP. Cost: a behaviour
-    change on Keycloak, Okta and Dex, not measured anywhere; F8 can end sessions for users with a
-    trimmed grant. If D3-b stays, the plan adds a real refresh grant with `scope` against
-    Keycloak 26.4 in the auth e2e tier, including a user without the `offline_access` role.
+  - **D3-b (the chat choice, REJECTED at Gate 1).** Send `scope` on every refresh, for every
+    IdP. Cost: a behaviour change on Keycloak, Okta and Dex, not measured anywhere; F8 can end
+    sessions for users with a trimmed grant. It would have needed a real refresh grant with
+    `scope` against Keycloak 26.4 in the auth e2e tier.
   - In both variants the refresh grant never sends `audience`: F1 says Auth0 keeps it.
 - **D4. The scopes and the audience are injected once.** `createOidcClient` receives them at
   construction (dependency injection). `BuildAuthorizationUrlParams` loses its `scopes` field.
@@ -177,17 +177,19 @@ tenant.
 - `PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE`: optional, at least one character, and no surrounding
   whitespace (the rule `httpsUrl` uses, `config.ts:25`).
 - `PAIGASUS_OIDC_SCOPES`: the `openid` refinement (D5). A token-exact match: `openidx` fails.
-  With D3-b it keeps its default. With D3-a it becomes optional with no default, and
-  `createAuthRuntime` holds the default list.
+  It becomes optional with no default (D3-a). `createAuthRuntime` holds the default list
+  `openid profile email offline_access` for the authorization request.
 
 `src/adapters/oidc.ts`:
 
-- The `createOidcClient` options gain `scopes: string`, `audience?: string` and (D3-a only)
-  `refreshScope?: string`.
+- The `createOidcClient` options gain `scopes: string` (always set; the default list when the env
+  is absent), `audience?: string`, and `refreshScope?: string` (set only when the env is set,
+  D3-a).
 - `BuildAuthorizationUrlParams` becomes `{ redirectUri, state }`.
 - `buildAuthorizationUrl` passes `scope: scopes`, and spreads `audience` only when it is defined
   (F7).
-- `refresh` passes `{ scope }` per D3, and never `audience`.
+- `refresh` passes `{ scope: refreshScope }` only when `refreshScope` is defined (D3-a, F7), and
+  never `audience`. With no `refreshScope`, the call stays `refreshTokenGrant(config, refreshToken)`.
 - D10: the wrapped refresh error carries the OAuth code.
 
 `src/runtime.ts`:
@@ -268,8 +270,8 @@ changes:
     before the upgrade keeps a token for the old audience, and an Auth0 refresh keeps it (F1).
     IAM refuses those tokens. Every user must log in again, and IAM and the consoles restart at
     different times.
-  - **Entra ID moving to a new scope list.** An old session's refresh can fail (with D3-b always;
-    with D3-a when `oidc.scopes` is set). The error code is not measured; Entra reports many
+  - **Entra ID moving to a new scope list.** An old session's refresh can fail, because the
+    refresh now sends the new `oidc.scopes` (D3-a). The error code is not measured; Entra reports many
     conditions as `invalid_grant` (AADSTS codes), which deletes the session, and others as
     `invalid_scope`, which ends it at access-token expiry (F9). In both cases the user must log
     in again.
@@ -295,7 +297,7 @@ changes:
   with `openid` in any position accepted, and `openidx` refused.
 - `tests/adapters/oidc.test.ts`: the authorization URL has no `audience` when unset (and no
   `"undefined"` string), and has it when set; `scope` equals the injected scopes; the refresh
-  request body carries `scope` per D3 and never `audience`; the D10 code reaches the wrapped
+  request body carries `scope` only when `refreshScope` is injected, and never `audience`; the D10 code reaches the wrapped
   error. The tests read the real request that the fake IdP receives. `tests/fixtures/jwks.ts:148-191`
   reads the token request body but does not expose it, so the plan adds a recorder there.
 - `tests/runtime.test.ts`: through the new factory dependency, the runtime passes the env values
@@ -305,8 +307,8 @@ changes:
   `tests/next/get-session.test.ts:84`, `tests/http/callback.test.ts:108`,
   `tests/http/logout.test.ts:151`, `tests/http/login.test.ts:59`,
   `tests/http/route-handler.test.ts:61`, `tests/http/login-returnto-table.test.ts:43`.
-- D3-b only: a real refresh grant with `scope` against Keycloak 26.4 in the auth e2e tier,
-  including a user without the `offline_access` role.
+- D3-a: with the env absent, the refresh request body has no `scope` (byte-identical to today);
+  with the env set, it has `scope` equal to the env value.
 - Chart, in `charts/paigasus/tests/env.sh` (not a new script: a new script raises
   `CHART_SCRIPT_FLOOR` in `ci/helm-render/run.sh:33` and its pin in `ci_targets.py`). Rows:
   - both values set: both keys in the ConfigMap;
@@ -375,7 +377,7 @@ Folded in:
 - MINOR, mixed pods: § 5.3.
 - QUESTION, which Entra error code: § 5.3 no longer names one code; R4.
 - QUESTION, the Auth0 and Entra `email` steps: marked not measured; R3.
-- QUESTION, § 2 vs D3: Gate 1 decision.
+- QUESTION, § 2 vs D3: decided at Gate 1 as D3-a. § 2 holds for every request.
 
 Rejected:
 
