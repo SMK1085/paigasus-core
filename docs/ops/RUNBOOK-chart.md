@@ -22,8 +22,9 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `ingress.tlsSecretName` | yes | The TLS Secret for `ingress.host`. The ingress must end TLS |
 | `ingress.annotations` | no | Extra annotations. Do not add a rewrite annotation (§ 3) |
 | `oidc.issuer` | yes | The IdP issuer URL. It must be `https` |
-| `oidc.clientId` | yes | The console's OIDC client. IAM also uses it as the access-token audience. Set `oidc.audience` to use a different value (§ 6) |
-| `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Set it only when the IdP puts another value in `aud` (§ 6) |
+| `oidc.clientId` | yes | The console's OIDC client. By default IAM also uses it as the access-token audience. Then an ID token passes IAM's audience check, and the chart shows a warning (§ 6) |
+| `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Recommended: a dedicated API audience. Follow the migration order in § 6 |
+| `oidc.acknowledgeClientIdAudience` | no | Set it to the value of `oidc.clientId` to remove the audience warning (§ 6). It does not change what IAM accepts |
 | `oidc.existingSecret` | yes | A Secret with keys `oidc-client-secret` and `session-redis-url` |
 | `oidc.secretVersion` | no | Change it after the Secret changes, so the console pods restart |
 | `oidc.caBundle.existingConfigMap` | no | A ConfigMap with the PEM root certificates of a private IdP CA (§ 7) |
@@ -83,6 +84,7 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | the contents of `postgres.existingSecret` or the pepper Secret | nothing, until you change its version value | the same |
 | the contents of the CA ConfigMap | nothing, until you change `oidc.caBundle.version` | Node and IAM read the file once, at start |
 | `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). IAM is not available during the restart. |
+| `oidc.acknowledgeClientIdAudience` | nothing | it changes only the IAM Deployment's `metadata` annotation and the NOTES, not a pod template (`tests/env.sh` row W14) |
 
 A change of `oidc.caBundle.version` restarts every pod that mounts the bundle: both consoles and
 IAM. That is expected, as for `oidc.secretVersion`.
@@ -96,14 +98,12 @@ late and unclearly. Check these four items before you install:
 
 1. **Audience.** The access token's `aud` claim must contain the audience that IAM accepts. IAM
    accepts `oidc.audience` when it is set. It accepts `oidc.clientId` when `oidc.audience` is not
-   set. Set `oidc.audience` in two cases. First, set it when you cannot make the IdP put the
-   client id into `aud`. Second, set it when the IdP's ID token has no Keycloak `typ` claim. The
-   paragraph after this list tells you how to choose the value in that case. The value replaces
-   the client id. It does not add another value next to the client id. Before you choose the
-   value, decode a real access token and read its `aud` claim. The value helps only when the IdP
-   issues a JWT access token for the console's scopes (`openid profile email offline_access`).
-   The console sends no `audience` or `resource` parameter. This value does not work with an
-   opaque token, or a token for a different API.
+   set. The recommended setup is a dedicated API audience. See "The recommended audience setup"
+   after this list. The value replaces the client id. It does not add another value next to the
+   client id. Before you choose the value, decode a real access token and read its `aud` claim.
+   The value helps only when the IdP issues a JWT access token for the console's scopes
+   (`openid profile email offline_access`). The console sends no `audience` or `resource`
+   parameter. This value does not work with an opaque token, or a token for a different API.
    A wrong or missing audience shows in the IAM log at `info`, with the issuer and the accepted
    audiences (`ci/kind/README.md`, "Where to look first"). The log does not show the token's
    `aud`.
@@ -128,16 +128,92 @@ number of refusals that IAM did not log.
 This adds no requirement on the IdP. No Keycloak or Dex access token measured for SMA-686 has
 one of these markers. Do not add a mapper that sets `typ` on the access token.
 
-The check does not protect an IdP whose ID token has no `typ` claim. Dex is an example. Decode a
-real ID token and a real access token from your IdP. If the ID token has no `typ: ID`, find an
-audience for `oidc.audience`. The access token's `aud` must contain it. The ID token's `aud` must
-not contain it. If your IdP cannot do this, IAM accepts its ID token as a bearer token. For Dex,
-both tokens have the same `aud`, so this remedy does not work.
+The check does not protect an IdP whose ID token has no `typ` claim. For such an IdP, a
+dedicated API audience is the only protection. This works only when the IdP can put a different
+audience into the access token than into the ID token. Dex cannot: both tokens have the same
+`aud`, so IAM accepts a Dex ID token as a bearer token. See "Dex" below.
 
 The console requests the scopes `openid profile email offline_access`.
 
-**Keycloak example.** Keycloak does not put the client id into the access token's `aud` by
-default. Add an audience mapper to the client:
+**The recommended audience setup (SMA-691).** An OIDC ID token has the client id as its `aud`.
+So when the IAM audience equals `oidc.clientId`, an ID token passes IAM's audience check. This is
+the default.
+
+Give the API its own audience, for example `api://paigasus`. Put it into the access token's
+`aud`. Do not put it into the ID token's `aud`. Then set `oidc.audience` to it.
+
+**Migration order.** A set `oidc.audience` replaces the client id. IAM then refuses every live
+access token whose `aud` holds only the client id. IAM also restarts with a gap, because it has
+one replica and `maxSurge: 0` (§ 5). Do the steps in this order:
+
+1. In the IdP, add the API audience to the access token, next to the client id. Do not add it to
+   the ID token.
+2. Wait for one access-token lifetime. Then every live access token has the new audience.
+3. Set `oidc.audience` to the API audience and upgrade. IAM restarts and then accepts only the
+   API audience.
+4. Optional: remove the client id from the access token's `aud`.
+
+If you do step 3 before step 1, IAM refuses the token of every console session. An IdP change
+that replaces `aud`, and does not add to it, has the same result.
+
+**The warning.** The chart shows a warning when both of these conditions are true:
+
+- The IAM audience equals `oidc.clientId`. The IAM audience is `oidc.audience`, or
+  `oidc.clientId` when `oidc.audience` is empty.
+- `oidc.acknowledgeClientIdAudience` does not equal `oidc.clientId`.
+
+The warning has two forms:
+
+- `helm install` and `helm upgrade` print it in the release NOTES. Flux's helm-controller also
+  stores the NOTES in the release. The first line is `WARNING (SMA-691): the IAM audience equals
+  oidc.clientId, so an ID token passes IAM's audience check.`
+- The IAM backend Deployment gets the annotation `paigasus.io/iam-audience-warning` in its
+  `metadata`. A tool that renders with `helm template`, for example Argo CD, does not show NOTES.
+  Read the annotation there. The annotation is not on the pod template, so it does not restart a
+  pod.
+
+The warning does not stop an install or an upgrade. It does not change what IAM accepts. A GitOps
+sync does not fail because of it.
+
+**The acknowledgement.** If your IdP cannot give the API its own audience, set
+`oidc.acknowledgeClientIdAudience` to the value of `oidc.clientId`. The warning then does not
+show. The acknowledgement does not change what IAM accepts. IAM still accepts an ID token as a
+bearer token, except a Keycloak ID token (SMA-686).
+
+- The value must equal the client id exactly, with the same letter case. `true` does not work.
+- When you change `oidc.clientId`, the warning shows again.
+- Quote the value in a values file. An unquoted large number can change to an exponent form
+  (`1e+06`), and the warning then continues to show.
+
+**No warning does not mean a safe setup.** Any `oidc.audience` that differs from the client id
+removes the warning. If the IdP also puts that audience into the ID token, the ID token still
+passes IAM's audience check, and nothing warns. Decode a real ID token. Its `aud` must not
+contain the value of `oidc.audience`.
+
+**Per IdP. Not measured.** These lines state what each IdP offers. This chart did not measure
+them.
+
+- **Keycloak.** Add an "Audience" protocol mapper to the console client, or to a client scope of
+  that client. Set "Included Custom Audience" to the API audience. Set "Add to access token" on
+  and "Add to ID token" off. The mapper adds a value to `aud`. It does not replace `aud`. Keycloak
+  example 2 below shows the mapper. IAM also refuses a Keycloak ID token by its `typ` claim
+  (SMA-686).
+- **Okta.** Use a custom authorization server whose audience is the API identifier. See the Okta
+  example below.
+- **Auth0.** The console cannot send the `audience` parameter today. It sends only `scope`
+  (`ts/packages/paigasus-auth/src/adapters/oidc.ts`). The tenant "Default Audience" setting is a
+  possible path. It is not measured.
+- **Entra ID.** An access token for an API application ID URI needs a scope of that API. The
+  console reads its scopes from `PAIGASUS_OIDC_SCOPES`, but the chart has no value for it. So
+  Entra ID cannot use a dedicated audience with this chart today. A follow-up issue tracks a
+  configurable scope list.
+- **Dex.** Dex gives the ID token and the access token the same `aud`. No audience setting helps.
+  Set `oidc.acknowledgeClientIdAudience` to remove the warning. IAM still accepts a Dex ID token
+  as a bearer token. SMA-686 residual R1 stays open for Dex.
+
+**Keycloak example 1: the kind job's setup. This setup shows the warning.** Keycloak does not put
+the client id into the access token's `aud` by default. The kind job adds an audience mapper to
+the client. The mapper adds the client id, so the IAM audience equals `oidc.clientId`:
 
 ```json
 {
@@ -155,7 +231,25 @@ default. Add an audience mapper to the client:
 Put `basic`, `profile`, `email` and `offline_access` in the client's default client scopes. In
 Keycloak 25 and later the `sub` claim comes from the `basic` scope. Give each user an email
 address and the `offline_access` role. The kind job's realm, `ci/kind/realm/paigasus-realm.json`,
-is a complete example.
+is a complete example of this setup.
+
+**Keycloak example 2: a dedicated API audience. Not tested in the kind job.** Add this mapper to
+the console client (step 1 of the migration order). Keep the mapper of example 1 until step 4:
+
+```json
+{
+  "name": "paigasus-api-audience",
+  "protocol": "openid-connect",
+  "protocolMapper": "oidc-audience-mapper",
+  "config": {
+    "included.custom.audience": "api://paigasus",
+    "id.token.claim": "false",
+    "access.token.claim": "true"
+  }
+}
+```
+
+Then set `oidc.audience=api://paigasus` (step 3). Quote the value in a values file.
 
 **Okta example. Not tested against a live Okta tenant.** An Okta authorization server puts its own
 audience into the access token's `aud`, not the client id. The default authorization server uses

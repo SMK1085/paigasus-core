@@ -68,6 +68,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: paigasus-paigasus-iam-backend
+  annotations:
+    paigasus.io/iam-audience-warning: "the IAM audience equals oidc.clientId, so an ID token passes IAM's audience check. See docs/ops/RUNBOOK-chart.md section 6 (SMA-691)."
 spec:
   replicas: 1
   strategy:

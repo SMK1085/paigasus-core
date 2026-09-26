@@ -12,12 +12,12 @@ Spec: `docs/superpowers/specs/2026-09-23-sma-513-pr3-kind-chart-job-design.md`.
 | -- | -- |
 | `bash ci/kind/run.sh up` | kind v0.31.0 with a Kubernetes 1.31.14 node; Traefik 3.7.13 (chart 41.6.0, SHA-256 checked); a throwaway CA and two leaves; the CoreDNS `hosts` block; Postgres, Redis and Keycloak; the three chart Secrets; the discovery preflight |
 | `bash ci/kind/run.sh images` | `ci/images/run.sh build iam` and `build-console`, then `kind load` the three images: `paigasus-iam:dev`, `iam-console:dev`, `gateway-console:dev` |
-| `bash ci/kind/run.sh install a` | `helm install` with `values/a.yaml` (both zones, the CA bundle set) |
+| `bash ci/kind/run.sh install a` | `helm install` with `values/a.yaml` (both zones, the CA bundle set), then the NOTES check (SMA-691) |
 | `bash ci/kind/run.sh specs a` | Playwright project `phase-a` (tests R1, R1-control, R2, R3-control) |
 | `bash ci/kind/run.sh stub up` | scale the gateway stub to 1 replica, wait for it, and GET `/v1/service-info` from inside the cluster (`manifests/stub-check.yaml`, `stub-check.mjs`). Any failure is rc 2 |
 | `bash ci/kind/run.sh specs journeys` | Playwright project `journeys` (SMA-514: J1 auth round trip, J2 cross-zone round trip). Before the run: the skip scan, the step-title check and the checkers' own unit tests. After `--list`: exactly 2 tests. After the run: the JSON report check (`journeys-report.mjs`) |
 | `bash ci/kind/run.sh stub down` | scale the gateway stub to 0 and wait until its Service has no endpoints. For local re-runs only |
-| `bash ci/kind/run.sh upgrade b` | `helm upgrade` with `a.yaml` + `b.yaml` (the gateway zone off), then the settle step |
+| `bash ci/kind/run.sh upgrade b` | `helm upgrade` with `a.yaml` + `b.yaml` (the gateway zone off), then the settle step and the NOTES check (SMA-691) |
 | `bash ci/kind/run.sh specs b` | Playwright project `phase-b` (test R3), then check that R3's Deployment does not exist |
 | `bash ci/kind/run.sh diagnose` | write evidence into `<state>/diagnose` |
 | `bash ci/kind/run.sh down` | delete the cluster |
@@ -45,6 +45,14 @@ The chart does not deploy the gateway backend. `values/a.yaml` points `zones.gat
 `specs journeys` fails with rc 1 when any of these occur. A test file in `tests/cluster/` calls `.skip(`, `.fixme(`, `.fail(` or `.only(`. A step title in `tests/cluster/journeys/` differs from `EXPECTED_STEPS` in `journeys-report.mjs`. The report shows a skipped, failed, flaky or `test.fail()` test, or a step that never ran.
 
 It fails with rc 2 when `--list` finds any count other than 2, or when the report is missing. Change a step title in the spec file and in `EXPECTED_STEPS` in the same commit. The checkers' unit tests run with `node --test ci/kind/journeys-report.test.mjs ci/kind/stub-check.test.mjs`; no Moon task and no required check runs them, only `specs journeys`.
+
+## The NOTES check (SMA-691)
+
+`install a` and `upgrade b` end with `helm get notes`. The release NOTES must contain the line `WARNING (SMA-691): the IAM audience equals oidc.clientId`. `values/a.yaml` and `values/b.yaml` keep the default audience, so the chart must show this warning. This check is the end-to-end positive control of `charts/paigasus/templates/NOTES.txt`, on install and on upgrade.
+
+- A missing line is rc 1. A failed `helm get notes` is rc 2.
+- The check is inside `install a`. A NOTES failure there stops the later steps of that run. The rows N0-N6 in `charts/paigasus/tests/env.sh` test the NOTES text offline, on every pull request, so they find a text change first.
+- This job is not a required check. If a change deletes the NOTES check, nothing fails (SMA-691 spec, residual R2).
 
 ## Reading the evidence
 
