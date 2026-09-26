@@ -143,6 +143,7 @@ mod tests {
             TokenDefect::Oversized,
             TokenDefect::BadSignature,
             TokenDefect::NotAnAccessToken,
+            TokenDefect::SenderConstrained,
         ] {
             let (status, challenge, body) = rendered(AuthnError::InvalidToken(defect)).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED);

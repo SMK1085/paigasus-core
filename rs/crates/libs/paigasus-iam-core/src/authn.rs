@@ -172,6 +172,10 @@ pub enum TokenDefect {
     /// The payload `typ` claim marks the token as a Keycloak ID token or back-channel logout
     /// token, not an access token (SMA-686).
     NotAnAccessToken,
+    /// The token is bound to a key: it has a `cnf` claim (RFC 7800), or a Keycloak payload
+    /// `typ` of `DPoP`. IAM cannot check the binding, so it does not accept the token as a
+    /// bearer token (SMA-690).
+    SenderConstrained,
 }
 
 /// Why just-in-time provisioning of a new identity failed.

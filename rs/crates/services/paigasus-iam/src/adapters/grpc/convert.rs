@@ -840,6 +840,7 @@ mod tests {
 
         let cases = [
             (AuthnError::InvalidToken(TokenDefect::Malformed), Code::Unauthenticated, "invalid-token", "invalid bearer token"),
+            (AuthnError::InvalidToken(TokenDefect::SenderConstrained), Code::Unauthenticated, "invalid-token", "invalid bearer token"),
             (AuthnError::IdentityNotProvisioned, Code::PermissionDenied, "identity-not-provisioned", "identity not provisioned"),
             (
                 AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail),

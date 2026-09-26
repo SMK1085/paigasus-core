@@ -4,10 +4,13 @@
 //! validator. Pipeline: length cap -> header decode + alg allowlist + `kid` presence ->
 //! unverified `iss` read -> exact issuer match -> JWKS `kid` lookup -> JWK/alg family
 //! consistency -> signature + claims validation (issuer/audience/expiry) -> payload `typ`
-//! check -> `ValidatedClaims`. The token-type check (SMA-686) refuses an ID token or a logout
-//! token: a Keycloak payload `typ` (`ID`, `Logout`) or a standard back-channel logout marker
-//! (header `typ: logout+jwt`, the `events` member). Two refusals are logged, rate-limited
-//! (`log_refusal`). Never logs token or claim material (`TokenDefect` itself carries no payload).
+//! check -> sender-constraint check -> `ValidatedClaims`. The token-type check (SMA-686) refuses
+//! an ID token or a logout token: a Keycloak payload `typ` (`ID`, `Logout`) or a standard
+//! back-channel logout marker (header `typ: logout+jwt`, the `events` member). The
+//! sender-constraint check (SMA-690) refuses a token bound to a key (a `cnf` claim, or a Keycloak
+//! payload `typ: DPoP`), because IAM cannot check the binding. Three refusals are logged,
+//! rate-limited (`log_refusal`). Never logs token or claim material (`TokenDefect` itself carries
+//! no payload).
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -31,11 +34,17 @@ use crate::config::IssuerConfig;
 /// model as an `Algorithm` variant).
 const ALLOWED_ALGORITHMS: [Algorithm; 2] = [Algorithm::RS256, Algorithm::ES256];
 
-/// Payload `typ` values that mark a token as NOT an access token (SMA-686 spec D2). Keycloak
-/// sets `ID` on its ID token and `Logout` on its back-channel logout token; its access token
-/// carries `Bearer` (or `DPoP`). Compared ASCII case-insensitively. A denylist, not an
-/// allowlist: an IdP that sets no `typ` (Dex, measured) must keep working (spec D1).
+/// Payload `typ` values that mark a token as NOT an access token (SMA-686 spec D2). Keycloak sets
+/// `ID` on its ID token and `Logout` on its back-channel logout token; its access token carries
+/// `Bearer`. A Keycloak DPoP-bound access token carries `DPoP`, which step 7 refuses (SMA-690).
+/// Compared ASCII case-insensitively. A denylist, not an allowlist: an IdP that sets no `typ`
+/// (Dex, measured) must keep working (spec D1).
 const NON_ACCESS_TOKEN_TYPES: [&str; 2] = ["ID", "Logout"];
+
+/// Payload `typ` values that mark a sender-constrained token (SMA-690 D3). Keycloak sets `DPoP` on
+/// a DPoP-bound access token (measured, SMA-690 measurements M2). Compared ASCII
+/// case-insensitively.
+const SENDER_CONSTRAINED_TYPES: [&str; 1] = ["DPoP"];
 
 /// Header `typ` values of a back-channel logout token (OIDC Back-Channel Logout 1.0 § 2.4; the
 /// `application/` form per RFC 8725 § 3.11). Compared ASCII case-insensitively (SMA-686 D12).
@@ -50,7 +59,7 @@ const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Rate limit for the refusal log lines (SMA-686 D14). A realm user with one signed token could
 /// otherwise write one `info` line per request. Keyed by (issuer, defect), so the map holds at
-/// most `issuers × 2` entries. A suppressed refusal is counted, and the next admitted line
+/// most `issuers × 3` entries. A suppressed refusal is counted, and the next admitted line
 /// reports the count.
 struct RefusalLog {
     interval: Duration,
@@ -95,6 +104,8 @@ enum RefusalDetail<'a> {
     Marker(&'static str),
     /// The CONFIGURED audiences of the issuer.
     Accepted(&'a [String]),
+    /// The static marker that shows a verified token is bound to a key (SMA-690 D8).
+    Binding(&'static str),
 }
 
 /// One configured issuer, parsed once at construction — replacing the per-request
@@ -148,10 +159,10 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
         self.issuers.iter().find(|cfg| cfg.issuer.as_str() == iss)
     }
 
-    /// The one place that decides which refusals are logged (SMA-686 D8, D11, D14, D15): only
-    /// `NotAnAccessToken` and `AudienceMismatch`, both reachable only for a correctly signed
-    /// token from a configured issuer, and both rate-limited per (issuer, defect). Logs the
-    /// issuer and a static or configured detail — never a token claim.
+    /// The one place that decides which refusals are logged (SMA-686 D8, D11, D14, D15; SMA-690
+    /// D8): only `NotAnAccessToken`, `AudienceMismatch` and `SenderConstrained`, each reachable
+    /// only for a correctly signed token from a configured issuer, and each rate-limited per
+    /// (issuer, defect). Logs the issuer and a static or configured detail — never a token claim.
     fn log_refusal(&self, issuer: &Issuer, defect: TokenDefect, detail: RefusalDetail<'_>) {
         let Some(suppressed) = self.refusal_log.admit_at(issuer.as_str(), defect, Instant::now()) else {
             return;
@@ -167,6 +178,14 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
             }
             RefusalDetail::Accepted(accepted) => {
                 tracing::info!(issuer = issuer.as_str(), accepted = ?accepted, suppressed, "refused a bearer token: its aud claim holds none of the accepted audiences");
+            }
+            RefusalDetail::Binding(marker) => {
+                tracing::info!(
+                    issuer = issuer.as_str(),
+                    marker,
+                    suppressed,
+                    "refused a bearer token: it is bound to a key, and IAM cannot check the binding"
+                );
             }
         }
     }
@@ -229,9 +248,10 @@ impl WireAudience {
 /// with `MissingRequiredClaim("aud")` because `authenticate` puts `aud` in
 /// `required_spec_claims` (SMA-686 D13); a wrong-typed `aud` still fails serde (`Malformed`); a
 /// JSON `null` `aud` counts as missing (`AudienceMismatch`).
-/// The profile claims are optional since an IdP may omit any of them. `typ` and `events` are
-/// untyped `Value`s on purpose (SMA-686 D6, D12): a non-string `typ` or a non-object `events`
-/// must not become `Malformed`.
+/// The profile claims are optional since an IdP may omit any of them. `typ`, `events` and `cnf`
+/// are untyped `Value`s on purpose (SMA-686 D6, D12; SMA-690 D6): a non-string `typ`, a
+/// non-object `events` or any shape of `cnf` must not become `Malformed`. A JSON `null` `cnf`
+/// deserializes as `None`.
 #[derive(Deserialize)]
 struct WireClaims {
     sub: String,
@@ -243,6 +263,7 @@ struct WireClaims {
     zoneinfo: Option<String>,
     typ: Option<serde_json::Value>,
     events: Option<serde_json::Value>,
+    cnf: Option<serde_json::Value>,
 }
 
 /// Maps a `jsonwebtoken` decode/validation failure to a `TokenDefect` (spec §4.1). Every
@@ -295,6 +316,19 @@ fn non_access_token_marker(header_typ: Option<&str>, claims: &WireClaims) -> Opt
     NON_ACCESS_TOKEN_TYPES.iter().find(|marker| typ.eq_ignore_ascii_case(marker)).copied()
 }
 
+/// The static marker that shows a signature-verified token is bound to a key, or `None`
+/// (SMA-690 D2, D3). Marker 1: a `cnf` claim with any value except `null`. Marker 2: a payload
+/// `typ` of `DPoP`. Marker 1 is checked first.
+fn sender_constraint_marker(claims: &WireClaims) -> Option<&'static str> {
+    if claims.cnf.is_some() {
+        return Some("cnf");
+    }
+    let Some(serde_json::Value::String(typ)) = &claims.typ else {
+        return None;
+    };
+    SENDER_CONSTRAINED_TYPES.iter().any(|marker| typ.eq_ignore_ascii_case(marker)).then_some("typ DPoP")
+}
+
 #[async_trait]
 impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator<F, K, C> {
     async fn authenticate(&self, token: &str) -> Result<ValidatedClaims, AuthnError> {
@@ -341,6 +375,12 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
         if let Some(marker) = non_access_token_marker(token_data.header.typ.as_deref(), &token_data.claims) {
             self.log_refusal(&issuer, TokenDefect::NotAnAccessToken, RefusalDetail::Marker(marker));
             return Err(invalid(TokenDefect::NotAnAccessToken));
+        }
+
+        // 7. Sender-constraint check on the verified token (SMA-690): IAM cannot check a binding.
+        if let Some(marker) = sender_constraint_marker(&token_data.claims) {
+            self.log_refusal(&issuer, TokenDefect::SenderConstrained, RefusalDetail::Binding(marker));
+            return Err(invalid(TokenDefect::SenderConstrained));
         }
 
         let expires_at = i64::try_from(token_data.claims.exp)
@@ -782,16 +822,17 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_non_marker_typ_values() {
-        // Spec § 5.1 tests 5-10. The check is a denylist of two values: every other shape passes.
+        // Spec § 5.1 tests 5-10 (SMA-686), and SMA-690 test 10: `DPoP` moved to
+        // `refuses_sender_constrained_tokens`. Every other shape here passes.
         let cases = [
             ("Bearer (Keycloak access token)", serde_json::json!({ "typ": "Bearer" })),
-            ("DPoP (Keycloak DPoP-bound access token)", serde_json::json!({ "typ": "DPoP" })),
             // Every Dex access token: no `typ`, but `at_hash` and `nonce` (measured). `c_hash`
             // added too: none of the three is a marker (spec D3).
             ("Dex shape", serde_json::json!({ "at_hash": "x", "c_hash": "y", "nonce": "abc123" })),
             ("typ null", serde_json::json!({ "typ": null })),
             ("typ number", serde_json::json!({ "typ": 1 })),
             ("typ with leading space", serde_json::json!({ "typ": " ID" })),
+            ("typ DPoP with leading space", serde_json::json!({ "typ": " DPoP" })),
         ];
         for (name, extra) in cases {
             authenticate_json(&claims_with(extra)).await.unwrap_or_else(|err| panic!("{name}: must be accepted, got {err:?}"));
@@ -804,6 +845,67 @@ mod tests {
         let claims = claims_with(serde_json::json!({ "typ": "ID", "exp": Utc::now().timestamp() - 120 }));
         let err = authenticate_json(&claims).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)), "got {err:?}");
+    }
+
+    // ---- SMA-690: the sender-constraint check ---------------------------------------------
+
+    #[tokio::test]
+    async fn refuses_sender_constrained_tokens() {
+        // Spec § 5.1 tests 1-8, plus an array `cnf` (Review Focus 1).
+        let cases = [
+            ("cnf.jkt (Keycloak DPoP, M2)", serde_json::json!({ "cnf": { "jkt": "abc" } })),
+            ("cnf.x5t#S256 (RFC 8705)", serde_json::json!({ "cnf": { "x5t#S256": "abc" } })),
+            ("cnf.jwk (RFC 7800)", serde_json::json!({ "cnf": { "jwk": { "kty": "EC" } } })),
+            ("cnf empty object", serde_json::json!({ "cnf": {} })),
+            ("cnf string", serde_json::json!({ "cnf": "x" })),
+            ("cnf array", serde_json::json!({ "cnf": ["x"] })),
+            ("typ DPoP", serde_json::json!({ "typ": "DPoP" })),
+            ("typ dpop", serde_json::json!({ "typ": "dpop" })),
+            ("full Keycloak shape", serde_json::json!({ "typ": "DPoP", "cnf": { "jkt": "abc" } })),
+        ];
+        for (name, extra) in cases {
+            let err = authenticate_json(&claims_with(extra)).await.unwrap_err();
+            assert!(
+                matches!(err, AuthnError::InvalidToken(TokenDefect::SenderConstrained)),
+                "{name}: must be refused as SenderConstrained, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_null_cnf() {
+        // Spec D2 / § 5.1 test 9: a `null` `cnf` confirms no key.
+        authenticate_json(&claims_with(serde_json::json!({ "cnf": null }))).await.expect("cnf: null must be accepted");
+    }
+
+    #[tokio::test]
+    async fn id_token_with_cnf_reports_not_an_access_token() {
+        // Spec D5 / § 5.1 test 11: the SMA-686 check runs first.
+        let err = authenticate_json(&claims_with(serde_json::json!({ "typ": "ID", "cnf": { "jkt": "abc" } }))).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn expired_bound_token_reports_expired() {
+        // Spec D5 / § 5.1 test 12: the check runs after `decode`.
+        let claims = claims_with(serde_json::json!({ "cnf": { "jkt": "abc" }, "exp": Utc::now().timestamp() - 120 }));
+        let err = authenticate_json(&claims).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)), "got {err:?}");
+    }
+
+    /// `WireClaims` from a JSON payload, for the direct marker test.
+    fn wire_claims(extra: serde_json::Value) -> WireClaims {
+        serde_json::from_value(claims_with(extra)).expect("test claims deserialize")
+    }
+
+    #[test]
+    fn sender_constraint_marker_names_the_marker() {
+        // Spec § 5.1 test 13: the marker text and the D3 order.
+        assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "cnf": { "jkt": "abc" } }))), Some("cnf"));
+        assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "typ": "DPoP", "cnf": { "jkt": "abc" } }))), Some("cnf"));
+        assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "typ": "dpop" }))), Some("typ DPoP"));
+        assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "cnf": null }))), None);
+        assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "typ": "Bearer" }))), None);
     }
 
     // ---- log capture (copy of the `LogBuffer` helper in paigasus-gateway's
@@ -985,6 +1087,58 @@ mod tests {
         let text = logs.text();
         assert_eq!(text.lines().filter(|line| line.contains("not an access token")).count(), 1, "typ lines:\n{text}");
         assert_eq!(text.lines().filter(|line| line.contains("holds none of the accepted audiences")).count(), 1, "aud lines:\n{text}");
+    }
+
+    /// The SMA-690 log message (spec D8). Filter on this text, not on the SMA-686 text.
+    const BINDING_REFUSAL: &str = "it is bound to a key, and IAM cannot check the binding";
+
+    #[tokio::test]
+    async fn sender_constrained_refusal_logs_issuer_and_cnf_marker_only() {
+        // Spec § 5.1 test 14.
+        let (logs, _guard) = capture_logs();
+        let err = authenticate_json(&claims_with(serde_json::json!({ "cnf": { "jkt": "jkt-secret-value" } }))).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::SenderConstrained)), "got {err:?}");
+
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(BINDING_REFUSAL)).collect();
+        assert_eq!(lines.len(), 1, "exactly one binding refusal line expected, got:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("INFO"), "the refusal logs at info: {line}");
+        assert!(line.contains(ISSUER), "the refusal names the issuer: {line}");
+        assert!(line.contains("\"cnf\"") || line.contains("=cnf"), "the refusal names the marker cnf: {line}");
+        assert!(!text.contains("not an access token"), "the SMA-686 line must not appear:\n{text}");
+        for secret in ["jkt-secret-value", "sub-1", "alice@example.com"] {
+            assert!(!text.contains(secret), "the log must not contain {secret:?}:\n{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dpop_typ_refusal_logs_canonical_marker() {
+        // Spec § 5.1 test 15: the canonical marker, not the token's own spelling.
+        let (logs, _guard) = capture_logs();
+        let err = authenticate_json(&claims_with(serde_json::json!({ "typ": "dpop" }))).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::SenderConstrained)), "got {err:?}");
+
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(BINDING_REFUSAL)).collect();
+        assert_eq!(lines.len(), 1, "exactly one binding refusal line expected, got:\n{text}");
+        assert!(lines[0].contains("typ DPoP"), "the refusal names the marker typ DPoP: {}", lines[0]);
+        assert!(!text.contains("\"dpop\""), "the log must not contain the token's own spelling:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn repeated_sender_constrained_refusals_log_once() {
+        // Spec § 5.1 test 16: the SMA-686 D14 rate limit covers the new defect.
+        let (logs, _guard) = capture_logs();
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+        for _ in 0..3 {
+            let token = sign(&encoding_key, Some(&kid), &claims_with(serde_json::json!({ "cnf": { "jkt": "abc" } })));
+            let err = authenticator.authenticate(&token).await.unwrap_err();
+            assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::SenderConstrained)));
+        }
+        let text = logs.text();
+        assert_eq!(text.lines().filter(|line| line.contains(BINDING_REFUSAL)).count(), 1, "binding lines:\n{text}");
     }
 
     #[test]
