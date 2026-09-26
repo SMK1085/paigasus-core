@@ -10,6 +10,6 @@ pub mod roles;
 pub mod schema;
 
 pub use action::Action;
-pub use model::{AccessRequest, AuthzError, Decision, Effect, GrantScope, PolicyDocument, PutOutcome, RequestContext, Role, RoleGrant, RoleGrantRef};
-pub use ports::{AuditSink, Authorizer, DecisionCache, EntitySliceLoader, PolicyStore, RoleGrantStore, SystemPolicyReconciler, SystemRoleReconciler};
+pub use model::{AccessRequest, AuthzError, Decision, Effect, GrantScope, PolicyDocument, PutOutcome, RequestContext, Role, RoleGrant, RoleGrantFilter, RoleGrantRef};
+pub use ports::{AuditSink, Authorizer, DecisionCache, EntitySliceLoader, PolicyStore, RoleGrantQuery, RoleGrantStore, SystemPolicyReconciler, SystemRoleReconciler};
 pub use reconcile::{PolicyContent, RoleOutcome, StarterPolicyOutcome, StoredPolicyRow, StoredRoleRow};

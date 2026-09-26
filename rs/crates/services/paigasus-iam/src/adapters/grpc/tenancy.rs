@@ -677,7 +677,12 @@ impl TenancyService for TenancyGrpc {
                 self.state.authorize.check(&actor, Action::ListMemberships, &resource).await.map_err(convert::status_to_grpc)?;
             }
             let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
-            let records = self.state.memberships.list(filter, page).await.map_err(convert::status_to_grpc)?;
+            let records = self
+                .state
+                .memberships
+                .list(filter, convert::principal_kind_filter(req.principal_kind), page)
+                .await
+                .map_err(convert::status_to_grpc)?;
             Ok(Response::new(ListMembershipsResponse {
                 memberships: records.iter().map(convert::to_proto_membership).collect(),
             }))

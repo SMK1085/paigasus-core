@@ -5,6 +5,7 @@
 //! M3 tasks).
 
 use super::action::Action;
+use crate::principal::PrincipalKind;
 use crate::tenancy::TenancyNodeRef;
 use crate::value::PrincipalId;
 use chrono::{DateTime, Utc};
@@ -149,6 +150,76 @@ pub struct RoleGrant {
     pub created_at: DateTime<Utc>,
 }
 
+/// The AND-ed filter of a role-grant listing (SMA-676 D2). A filter always names a principal or
+/// a scope, or both: [`RoleGrantFilter::new`] refuses a filter with neither (D3), so no caller
+/// can list the grants of every tenant by leaving both out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleGrantFilter {
+    principal: Option<PrincipalId>,
+    scope: Option<GrantScope>,
+    role_key: Option<String>,
+    principal_kind: Option<PrincipalKind>,
+}
+
+impl RoleGrantFilter {
+    /// `None` when neither `principal` nor `scope` is set (D3).
+    #[must_use]
+    pub fn new(principal: Option<PrincipalId>, scope: Option<GrantScope>, role_key: Option<String>, principal_kind: Option<PrincipalKind>) -> Option<Self> {
+        if principal.is_none() && scope.is_none() {
+            return None;
+        }
+        Some(Self {
+            principal,
+            scope,
+            role_key,
+            principal_kind,
+        })
+    }
+
+    #[must_use]
+    pub fn principal(&self) -> Option<&PrincipalId> {
+        self.principal.as_ref()
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> Option<&GrantScope> {
+        self.scope.as_ref()
+    }
+
+    #[must_use]
+    pub fn role_key(&self) -> Option<&str> {
+        self.role_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn principal_kind(&self) -> Option<PrincipalKind> {
+        self.principal_kind
+    }
+
+    /// The principal, when it is the ONLY filter: the request shape every caller sent before
+    /// SMA-676. That path keeps its old behaviour — every row, no paging (D6).
+    #[must_use]
+    pub fn principal_only(&self) -> Option<&PrincipalId> {
+        if self.scope.is_none() && self.role_key.is_none() && self.principal_kind.is_none() {
+            self.principal.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Whether `grant` satisfies every set filter. The scope compares canonical PRNs, which is
+    /// the stored `scope_node_prn` column's exact match (D5). `grantee_kind` is the grantee's
+    /// stored kind; `None` (no principal row) never matches a kind filter, as an inner join
+    /// drops such a row.
+    #[must_use]
+    pub fn matches(&self, grant: &RoleGrant, grantee_kind: Option<PrincipalKind>) -> bool {
+        self.principal.as_ref().is_none_or(|p| *p == grant.principal)
+            && self.scope.as_ref().is_none_or(|s| s.canonical_prn() == grant.scope.canonical_prn())
+            && self.role_key.as_deref().is_none_or(|r| r == grant.role_key)
+            && self.principal_kind.is_none_or(|k| grantee_kind == Some(k))
+    }
+}
+
 /// A lightweight, wire-friendly reference to a [`RoleGrant`]'s scope + role — the scope's
 /// canonical identity string (a tenancy PRN, or [`root_prn`]'s canonical PRN for `Root`)
 /// plus the role key, without the grant's own id/timestamps/linked-policy.
@@ -255,6 +326,11 @@ pub enum AuthzError {
     /// stored row belongs to the race's winner, not this caller.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// A grant insert hit `uq_role_grant_principal_role_scope`: a grant for the same
+    /// (principal, role, scope) already exists (SMA-676 D9). Raised ONLY by the grant insert.
+    /// `RoleService::grant` answers it with the existing grant; nothing else may see it.
+    #[error("a grant for this principal, role and scope already exists")]
+    DuplicateGrant,
     /// A backend (storage/transport) failure. `#[error(transparent)]` forwards `Display`
     /// (and `source()`) to the wrapped error verbatim — callers never see more than what
     /// the underlying source already exposes.
@@ -336,5 +412,70 @@ mod tests {
         let source: Box<dyn std::error::Error + Send + Sync> = "boom".into();
         let err = AuthzError::Backend(source);
         assert_eq!(err.to_string(), "boom");
+    }
+
+    fn pid(n: u128) -> PrincipalId {
+        PrincipalId::from_prn(Prn::build("iam", "", None, "principal", u(n)).unwrap())
+    }
+
+    fn org_scope(n: u128) -> GrantScope {
+        GrantScope::Node(TenancyNodeRef::Organization(OrganizationId::from_uuid(u(n))))
+    }
+
+    fn a_grant(principal: u128, role: &str, scope: GrantScope) -> RoleGrant {
+        RoleGrant {
+            id: u(9),
+            principal: pid(principal),
+            role_key: role.to_string(),
+            scope,
+            linked_policy_id: "grant:9".to_string(),
+            created_at: Utc::now(),
+        }
+    }
+
+    /// SMA-676 D3: a filter needs a principal or a scope. A role key alone is not enough, so
+    /// no caller can list every grant of one role across all tenants.
+    #[test]
+    fn role_grant_filter_needs_a_principal_or_a_scope() {
+        assert_eq!(RoleGrantFilter::new(None, None, None, None), None);
+        assert_eq!(RoleGrantFilter::new(None, None, Some("gateway_user".to_string()), Some(PrincipalKind::User)), None);
+        assert!(RoleGrantFilter::new(Some(pid(1)), None, None, None).is_some());
+        assert!(RoleGrantFilter::new(None, Some(GrantScope::Root), None, None).is_some());
+    }
+
+    /// SMA-676 D6: only the request shape of the pre-SMA-676 callers is "principal-only".
+    #[test]
+    fn principal_only_is_the_bare_principal_filter() {
+        let bare = RoleGrantFilter::new(Some(pid(1)), None, None, None).unwrap();
+        assert_eq!(bare.principal_only(), Some(&pid(1)));
+        let with_role = RoleGrantFilter::new(Some(pid(1)), None, Some("gateway_user".to_string()), None).unwrap();
+        assert_eq!(with_role.principal_only(), None);
+        let with_kind = RoleGrantFilter::new(Some(pid(1)), None, None, Some(PrincipalKind::User)).unwrap();
+        assert_eq!(with_kind.principal_only(), None);
+        let with_scope = RoleGrantFilter::new(Some(pid(1)), Some(org_scope(5)), None, None).unwrap();
+        assert_eq!(with_scope.principal_only(), None);
+    }
+
+    /// SMA-676 D2, D5: every set filter is AND-ed; the scope is an EXACT match on the canonical
+    /// scope PRN (a team grant does not match its org); a kind filter needs a known kind.
+    #[test]
+    fn matches_ands_every_set_filter_with_an_exact_scope() {
+        let g = a_grant(1, "gateway_user", org_scope(5));
+        let f = RoleGrantFilter::new(None, Some(org_scope(5)), Some("gateway_user".to_string()), Some(PrincipalKind::User)).unwrap();
+        assert!(f.matches(&g, Some(PrincipalKind::User)));
+        assert!(!f.matches(&g, Some(PrincipalKind::ServiceAccount)));
+        assert!(!f.matches(&g, None), "a grantee with no known kind never matches a kind filter");
+        assert!(!f.matches(&a_grant(1, "org_admin", org_scope(5)), Some(PrincipalKind::User)));
+        assert!(!f.matches(&a_grant(1, "gateway_user", org_scope(6)), Some(PrincipalKind::User)));
+        let team = GrantScope::Node(TenancyNodeRef::Team(crate::tenancy::TeamId::from_parts(u(5), u(50))));
+        assert!(!f.matches(&a_grant(1, "gateway_user", team), Some(PrincipalKind::User)), "D5: no descendant match");
+        let by_principal = RoleGrantFilter::new(Some(pid(1)), None, None, None).unwrap();
+        assert!(by_principal.matches(&g, None));
+        assert!(!by_principal.matches(&a_grant(2, "gateway_user", org_scope(5)), None));
+    }
+
+    #[test]
+    fn duplicate_grant_has_a_static_message() {
+        assert_eq!(AuthzError::DuplicateGrant.to_string(), "a grant for this principal, role and scope already exists");
     }
 }

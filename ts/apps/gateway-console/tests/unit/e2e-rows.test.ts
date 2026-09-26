@@ -10,6 +10,7 @@
 // that touches the app, even when the e2e task does not run. Mirrors
 // ts/apps/iam-console/tests/unit/e2e-rows.test.ts.
 // SMA-635 § 7.2 adds eight: R22-R28 (the playground project, which runs the real gateway binary) and R29 (the streaming-off composer row, in the single-zone project).
+// SMA-676 § 7.3 adds R30 (one identity grants model access to themself, in the playground project).
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +48,7 @@ const ROWS = [
   'R27',
   'R28',
   'R29',
+  'R30',
 ];
 
 describe('the e2e tier covers every row this zone ships', () => {
