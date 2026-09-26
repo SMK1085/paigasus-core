@@ -337,3 +337,34 @@ async fn who_am_i_grpc_http_parity() {
 
     server.abort();
 }
+
+/// SMA-698 T2: the same token on `WhoAmI` is `PermissionDenied` with reason `provisioning-failed`,
+/// and IAM writes one `warn` line. The tests here run on the default current-thread runtime, so
+/// the spawned tonic server runs on the test thread and the thread-local subscriber sees it.
+#[tokio::test]
+async fn who_am_i_with_a_token_without_email_logs_the_provisioning_failure() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (logs, _logs_guard) = support::capture_logs();
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let token = idp.bearer("t2-no-email-subject", None, "paigasus", 3600);
+    let (addr, server) = spawn_server(state).await;
+    let mut client = AuthnServiceClient::new(channel(addr).await);
+
+    let status = client.who_am_i(authed(WhoAmIRequest {}, &token)).await.unwrap_err();
+
+    assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+    assert_eq!(reason_of(&status), "provisioning-failed", "{status:?}");
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(support::JIT_FAILURE_LINE)).collect();
+    assert_eq!(lines.len(), 1, "exactly one JIT failure line expected:\n{text}");
+    let line = lines[0];
+    assert!(line.contains("WARN"), "the line is at warn: {line}");
+    assert!(line.contains("missing_email"), "the line names the defect: {line}");
+    assert!(line.contains(&idp.issuer), "the line names the issuer: {line}");
+    assert!(!text.contains("t2-no-email-subject"), "the log must not contain the subject:\n{text}");
+
+    server.abort();
+}
