@@ -122,6 +122,7 @@ moves `wasm-bindgen` (4.3), follow these steps in order:
    (`gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`), then
    `git pull`, then run `generate-wasm` again if the merge changed `rs/Cargo.lock`,
    `.prototools`, the kernel, the wasm binding, or the five artifacts.
+   Then run the test. If the five artifacts changed, stage, commit and push them as in step 4.
 6. For a `Cargo.lock` conflict, do not edit the lock by hand. Comment `@dependabot recreate`.
    Dependabot then writes a new lock on the current `main`. This deletes the glue commit.
    Wait for the new head commit. Then run `gh pr checkout <N> --force` and do step 4 again.
