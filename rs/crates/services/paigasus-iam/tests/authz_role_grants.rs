@@ -29,33 +29,15 @@ use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement};
 use uuid::Uuid;
 
-/// Seeds a `principal` + `organization` row via raw SQL — this test only needs valid FK
-/// targets, not the domain layer — mirroring `authz_schema.rs`'s `seed_principal_and_org`.
-/// UUIDs are inlined literals (not bind params): a bound `text` parameter against a `uuid`
-/// column needs an explicit cast, whereas an inline literal is coerced from Postgres's
-/// "unknown"-typed constant (same reasoning as `authz_schema.rs`).
+/// Seeds a `principal` + `organization` row — this test only needs valid FK targets, not the
+/// domain layer — mirroring `authz_schema.rs`'s `seed_principal_and_org`. SMA-676 R4: this is
+/// a thin wrapper over `seed_principal_of_kind`/`seed_org` below, not a second copy of their
+/// INSERTs; the principal is always `user`-kind and the org keeps its pre-SMA-676 `acme` slug
+/// (nothing in this file reads it — every seeded org has its own unique id per test — but it
+/// stays fixed rather than becoming an unlabelled magic literal at this call site).
 async fn seed_principal_and_org(db: &DatabaseConnection, principal_id: Uuid, org_id: Uuid) {
-    db.execute_raw(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        format!(
-            r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
-               VALUES ('{principal_id}', 'prn:pgs:iam:::principal/{principal_id}', 'user', 'active', now(), now())"#
-        ),
-        [],
-    ))
-    .await
-    .unwrap();
-
-    db.execute_raw(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        format!(
-            r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
-               VALUES ('{org_id}', 'prn:pgs:iam:::organization/{org_id}', 'acme', 'Acme', 'active', now(), now())"#
-        ),
-        [],
-    ))
-    .await
-    .unwrap();
+    seed_principal_of_kind(db, principal_id, "user").await;
+    seed_org(db, org_id, "acme").await;
 }
 
 /// Seeds a `team` row under an already-seeded organization — the FK target

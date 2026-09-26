@@ -101,7 +101,8 @@ fn map_grant_err(e: DbErr, role_key: &str) -> AuthzError {
         Some(SqlErr::ForeignKeyConstraintViolation(ref msg)) if msg.contains("fk_role_grant_role") => AuthzError::UnknownRole(role_key.to_string()),
         // SMA-676 D9. By constraint NAME, like the FK arm above: `uq_role_grant_linked_policy`
         // is a different defect and must stay `Backend`. The caller's transaction is now
-        // aborted at the database; `RoleService::grant` drops it and reads the winner.
+        // aborted at the database; the caller must drop it and read the winner
+        // (RoleService::grant, SMA-676 D9).
         Some(SqlErr::UniqueConstraintViolation(ref msg)) if msg.contains("uq_role_grant_principal_role_scope") => AuthzError::DuplicateGrant,
         _ => map_err(e),
     }

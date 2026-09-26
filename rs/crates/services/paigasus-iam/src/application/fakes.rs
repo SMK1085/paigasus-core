@@ -45,6 +45,11 @@ pub struct TenancyStore {
     /// D8) — a separate map from `MembershipRepository`'s own fakes above, mirroring the
     /// real schema's `role_grant` table being wholly separate from `membership`.
     pub role_grants: Arc<Mutex<HashMap<Uuid, RoleGrant>>>,
+    /// SMA-676: the `principal.kind` column, shared by every kind-filtered in-memory fake
+    /// (`InMemoryRoleGrantQuery` here, `MembershipKindQuery for InMemoryMemberships` in Task
+    /// 6). A principal with no entry has no known kind and drops out of every kind-filtered
+    /// listing — mirroring the real inner join on `principal` dropping the same row.
+    pub principal_kinds: Arc<Mutex<HashMap<Uuid, PrincipalKind>>>,
 }
 
 /// In-memory `OrganizationRepository` fake, faithful to the port's doc contracts:
@@ -847,11 +852,13 @@ impl RoleGrantStore for InMemoryRoleGrants {
     }
 }
 
-/// In-memory `RoleGrantQuery` fake (SMA-676). It reads the SAME map as the
+/// In-memory `RoleGrantQuery` fake (SMA-676). It reads the SAME grants map as the
 /// `InMemoryRoleGrants` it was built over, so a grant written through the store is visible to
-/// the query. `kinds` stands in for the `principal` table's `kind` column: a principal with no
+/// the query — and the SAME `principal_kinds` map as the `TenancyStore` it was built over, so
+/// `set_kind` here and a kind set directly on that shared store agree: a principal with no
 /// entry has no row, and `PgRoleGrantStore::find`'s inner join drops its grants from a
-/// kind-filtered answer, so this fake drops them too.
+/// kind-filtered answer, so this fake drops them too. Task 6's `MembershipKindQuery for
+/// InMemoryMemberships` reads the same `principal_kinds` map, over the same `TenancyStore`.
 #[derive(Clone, Default)]
 pub struct InMemoryRoleGrantQuery {
     grants: Arc<Mutex<HashMap<Uuid, RoleGrant>>>,
@@ -859,10 +866,10 @@ pub struct InMemoryRoleGrantQuery {
 }
 
 impl InMemoryRoleGrantQuery {
-    pub fn over(store: &InMemoryRoleGrants) -> Self {
+    pub fn over(store: &InMemoryRoleGrants, tenancy: &TenancyStore) -> Self {
         Self {
             grants: store.0.clone(),
-            kinds: Arc::default(),
+            kinds: tenancy.principal_kinds.clone(),
         }
     }
 
@@ -1584,10 +1591,13 @@ mod role_grant_query_fake_tests {
 
     /// The fake agrees with `PgRoleGrantStore::find`: the same filter semantics, the same
     /// `principal_id, id` order, and a grantee with no known kind drops out of a kind filter.
+    /// The `TenancyStore` passed to `over` is the SAME store `set_kind` writes through (SMA-676
+    /// R3): `principal_kinds` lives there, not on the query fake itself.
     #[tokio::test]
     async fn the_in_memory_query_filters_orders_and_pages_like_postgres() {
         let store = InMemoryRoleGrants::default();
-        let query = InMemoryRoleGrantQuery::over(&store);
+        let tenancy = TenancyStore::default();
+        let query = InMemoryRoleGrantQuery::over(&store, &tenancy);
         let org = GrantScope::Node(TenancyNodeRef::Organization(OrganizationId::from_uuid(Uuid::from_u128(100))));
         for g in [
             grant(12, 2, "gateway_user", org.clone()),
@@ -1608,5 +1618,19 @@ mod role_grant_query_fake_tests {
         let all = RoleGrantFilter::new(None, Some(org), None, None).unwrap();
         let page: Vec<u128> = query.find(&all, 2, 1).await.unwrap().iter().map(|g| g.id.as_u128()).collect();
         assert_eq!(page, vec![14, 12], "order (1,11) (1,14) (2,12) (3,13); offset 1, limit 2");
+
+        // Minor 3: the full, unpaged order — including grant 13, principal 3's, who has no
+        // kind entry at all. No kind filter applies here, so the missing principal row must
+        // not drop it (unlike the `users` kind-filtered query above).
+        let full: Vec<u128> = query.find(&all, 200, 0).await.unwrap().iter().map(|g| g.id.as_u128()).collect();
+        assert_eq!(full, vec![11, 14, 12, 13], "principal_id, id order over every grant, kind-known or not");
+
+        // Minor 3: a Root-scoped grant must show up only under a Root filter, never under the
+        // org filter above (D5's exact-scope match).
+        let root_grant = grant(15, 1, "platform_admin", GrantScope::Root);
+        store.0.lock().unwrap().insert(root_grant.id, root_grant);
+        let at_root = RoleGrantFilter::new(None, Some(GrantScope::Root), None, None).unwrap();
+        let root_ids: Vec<u128> = query.find(&at_root, 200, 0).await.unwrap().iter().map(|g| g.id.as_u128()).collect();
+        assert_eq!(root_ids, vec![15]);
     }
 }
