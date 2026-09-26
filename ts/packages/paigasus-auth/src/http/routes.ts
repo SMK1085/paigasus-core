@@ -28,17 +28,24 @@
 // from any store call on these routes becomes a 503 with a retry control (http/store-unavailable.ts;
 // SMA-506 design § 7.2). Unlike CallbackRejected, the 503 is a fixed rule of the design, not a
 // caller choice, and only this file knows WHICH store call failed — the logout route needs that to
-// still attempt its delete when its read fails. Every other error still propagates.
-import type { OidcTokens } from '../adapters/oidc';
+// still attempt its delete when its read fails.
+//
+// AN OIDC DISCOVERY FAILURE IS THE SECOND EXCEPTION (SMA-656). An `OidcDiscoveryFailed` from
+// `buildAuthorizationUrl` (login) or `authorizationCodeGrant` (callback) becomes a 503 with a retry
+// link that names the identity provider, and one `oidc.discovery_failed` event
+// (`discoveryFailedResponse`). It is classified by its `code` (`isOidcDiscoveryFailed`), because the
+// shared `runtime.oidc` builds it in whichever module copy created the runtime (SMA-657 D7). Every
+// other error still propagates.
+import type { AuthorizationRequest, OidcTokens } from '../adapters/oidc';
 import { hashSecret, newSessionId, newTransactionId, newTransactionSecret, secretMatchesHash } from '../core/ids';
 import { validateReturnTo } from '../core/return-to';
-import { CallbackRejected } from '../core/errors';
+import { CallbackRejected, isOidcDiscoveryFailed, oidcDiscoveryReason } from '../core/errors';
 import type { SessionRecord } from '../core/session';
-import { sidTag } from '../ports/logger';
+import { sidTag, type OidcDiscoveryStage } from '../ports/logger';
 import type { AuthRuntime } from '../runtime';
 import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies';
 import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table';
-import { STORE_DOWN, loginRetryHref, storeStep, storeUnavailableResponse, type RetryAffordance } from './store-unavailable';
+import { STORE_DOWN, loginRetryHref, storeStep, storeUnavailableResponse, type RetryLink } from './store-unavailable';
 
 /** Design doc § 9.3: 10 minutes. */
 const TXN_TTL_MS = 10 * 60 * 1000;
@@ -120,6 +127,17 @@ export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
   };
 }
 
+/**
+ * The 503 for an OIDC discovery failure (SMA-656 D4, D7), shared by the login and the callback
+ * route. Logs one `oidc.discovery_failed` event with the zone, the typed stage and the closed
+ * `reason` — never the caught error, its message, its name or a URL (ports/logger.ts's redaction
+ * contract; A2). `oidcDiscoveryReason` maps any value outside the closed list to 'other'.
+ */
+function discoveryFailedResponse(runtime: AuthRuntime, stage: OidcDiscoveryStage, err: unknown, href: string): Response {
+  runtime.logger.event('oidc.discovery_failed', { zone: runtime.zone, stage, reason: oidcDiscoveryReason(err) });
+  return storeUnavailableResponse({ kind: 'link', href, service: 'identity_provider' });
+}
+
 async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promise<Response> {
   // /auth/login unconditionally clears __Host-pgs_sid (design doc § 10.1's stale-cookie recovery
   // depends on that staying unconditional), which is exactly what makes a cross-site
@@ -176,22 +194,34 @@ async function handleLogin(runtime: AuthRuntime, req: Request, url: URL): Promis
   const txnId = newTransactionId();
   const secret = newTransactionSecret();
 
-  const authorization = await runtime.oidc.buildAuthorizationUrl({
-    redirectUri: runtime.redirectUri,
-    scopes: runtime.scopes,
-    // The CSRF `state` IS the transaction id, so the callback can find its cookie and its stored
-    // transaction from the same value the IdP hands back.
-    state: txnId,
-  });
-
-  // SMA-653 D9: read the presented sid BEFORE the first store call, because it decides where the
-  // 503's retry link points. When this browser holds a session, the link goes to `returnTo`, NOT to
-  // /auth/login: during a wedge `requireSession` sends a signed-in user here, the store call below
-  // fails first, and the session record and cookie both survive. A retry link to /auth/login would
-  // delete that still-valid session once Redis recovers (SMA-651 § 5). `returnTo` has already
-  // passed validateReturnTo and the auth-route guard above, so it cannot loop back into this route.
+  // SMA-653 D9: read the presented sid BEFORE the IdP call and the first store call, because it
+  // decides where the 503's retry link points. When this browser holds a session, the link goes to
+  // `returnTo`, NOT to /auth/login: during a wedge `requireSession` sends a signed-in user here, the
+  // store call below fails first, and the session record and cookie both survive. A retry link to
+  // /auth/login would delete that still-valid session once Redis recovers (SMA-651 § 5). The same
+  // holds while the IdP cannot be discovered (SMA-656 D6). `returnTo` has already passed
+  // validateReturnTo and the auth-route guard above, so it cannot loop back into this route.
+  // `readCookies` is pure and cannot throw, so this read before the IdP call changes nothing else.
   const presentedSid = readCookies(req.headers.get('cookie')).get(SESSION_COOKIE);
-  const retry: RetryAffordance = { kind: 'link', href: presentedSid !== undefined ? returnTo : loginRetryHref(runtime.basePath, returnTo) };
+  const retry: RetryLink = { kind: 'link', href: presentedSid !== undefined ? returnTo : loginRetryHref(runtime.basePath, returnTo) };
+
+  // SMA-656 D1, D2: a discovery failure is the one IdP error that this route answers itself, with a
+  // 503. It happens before putTransaction and before the session delete, so no store call runs and
+  // nothing changes (D9). Any other error — for example `oidc build_authorization_url failed` when
+  // the discovered metadata has no authorization_endpoint — still propagates.
+  let authorization: AuthorizationRequest;
+  try {
+    authorization = await runtime.oidc.buildAuthorizationUrl({
+      redirectUri: runtime.redirectUri,
+      scopes: runtime.scopes,
+      // The CSRF `state` IS the transaction id, so the callback can find its cookie and its stored
+      // transaction from the same value the IdP hands back.
+      state: txnId,
+    });
+  } catch (err) {
+    if (!isOidcDiscoveryFailed(err)) throw err;
+    return discoveryFailedResponse(runtime, 'login', err, retry.href);
+  }
 
   const put = await storeStep(runtime, 'login_put_transaction', undefined, () =>
     runtime.store.putTransaction(txnId, { codeVerifier: authorization.codeVerifier, nonce: authorization.nonce, returnTo, secretHash: hashSecret(secret), createdAt: Date.now() }, TXN_TTL_MS),
