@@ -153,7 +153,6 @@ export function harness(failOn: readonly StoreMethod[], makeError: () => Error):
     absoluteTtlMs: 86_400_000,
     zone: 'iam',
     basePath: BASE_PATH,
-    scopes: 'openid profile email',
   };
   return { runtime, inner, calls, events, oidc };
 }

@@ -10,13 +10,17 @@ import {
   CallbackRejected,
   OIDC_DISCOVERY_FAILURE_REASONS,
   OidcDiscoveryFailed,
+  RefreshFailed,
   RefreshRejected,
   SessionStoreTimeout,
   SessionStoreUnavailable,
+  TOKEN_ERROR_CODES,
   isOidcDiscoveryFailed,
   isRefreshRejected,
   isSessionStoreUnavailable,
   oidcDiscoveryReason,
+  refreshFailureCode,
+  toTokenErrorCode,
 } from '../../src/core/errors.js';
 
 describe('isSessionStoreUnavailable (SMA-653 D2)', () => {
@@ -153,5 +157,56 @@ describe('oidcDiscoveryReason (SMA-656 D8, T10)', () => {
     ['a bare string', 'timeout'],
   ] as const)('returns other for %s', (_label, err) => {
     expect(oidcDiscoveryReason(err)).toBe('other');
+  });
+});
+
+// SMA-692 D10. The refresh log line carries the OAuth code of a transient failure. The IdP writes
+// that code, so only a value of the RFC 6749 § 5.2 list may reach the log. Any other value is
+// 'other'.
+describe('toTokenErrorCode (SMA-692 D10)', () => {
+  it('keeps each code of the closed list', () => {
+    for (const code of TOKEN_ERROR_CODES) {
+      expect(toTokenErrorCode(code)).toBe(code);
+    }
+  });
+
+  it('gives other for any value outside the list', () => {
+    expect(toTokenErrorCode('server_error')).toBe('other');
+    expect(toTokenErrorCode('INVALID_SCOPE')).toBe('other');
+    expect(toTokenErrorCode('https://idp.example.com/token?code=abc')).toBe('other');
+    expect(toTokenErrorCode(undefined)).toBe('other');
+    expect(toTokenErrorCode(42)).toBe('other');
+  });
+});
+
+describe('refreshFailureCode (SMA-692 D10)', () => {
+  it('reads the code of a RefreshFailed', () => {
+    expect(refreshFailureCode(new RefreshFailed('invalid_scope', 'ResponseBodyError'))).toBe('invalid_scope');
+  });
+
+  it('reads the code of a RefreshFailed from a SECOND copy of core/errors', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    // Precondition: without this, the test passes vacuously if the import returns the same module.
+    expect(foreign.RefreshFailed).not.toBe(RefreshFailed);
+    expect(refreshFailureCode(new foreign.RefreshFailed('invalid_client', 'ResponseBodyError'))).toBe('invalid_client');
+  });
+
+  it('gives other for an Error that only claims the code and holds any string', () => {
+    const forged = Object.assign(new Error('x'), { code: 'oidc_refresh_failed', oauthError: 'https://idp.example.com/secret' });
+    expect(refreshFailureCode(forged)).toBe('other');
+  });
+
+  it('is undefined for every other error and for a non-error', () => {
+    expect(refreshFailureCode(new RefreshRejected('invalid_grant'))).toBeUndefined();
+    expect(refreshFailureCode(new Error('oidc refresh_token_grant failed: TypeError'))).toBeUndefined();
+    expect(refreshFailureCode({ code: 'oidc_refresh_failed', oauthError: 'invalid_scope' })).toBeUndefined();
+    expect(refreshFailureCode(undefined)).toBeUndefined();
+  });
+
+  it('keeps the message free of the code and of any URL', () => {
+    const err = new RefreshFailed('invalid_scope', 'ResponseBodyError');
+    expect(err.message).toBe('oidc refresh_token_grant failed: ResponseBodyError');
+    expect(err.code).toBe('oidc_refresh_failed');
   });
 });

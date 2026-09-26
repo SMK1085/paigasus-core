@@ -11,26 +11,38 @@
 // `nbf` is the real mechanism this test exercises instead.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as client from 'openid-client';
-import { classifyDiscoveryError, createOidcClient, type OidcClient } from '../../src/adapters/oidc.js';
+import { classifyDiscoveryError, createOidcClient, type CreateOidcClientOptions, type OidcClient } from '../../src/adapters/oidc.js';
 import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
 import { closedPortIssuer, startDiscoveryFailureFixture, type DiscoveryFailureFixture } from '../fixtures/discovery-failures.js';
-import { OidcDiscoveryFailed, RefreshRejected, isOidcDiscoveryFailed, type OidcDiscoveryFailureReason } from '../../src/core/errors.js';
+import { OidcDiscoveryFailed, RefreshFailed, RefreshRejected, isOidcDiscoveryFailed, type OidcDiscoveryFailureReason } from '../../src/core/errors.js';
 
 const REDIRECT_URI = 'https://rp.example.com/auth/callback';
 const STATE = 'txn-state-value';
 const NONCE = 'expected-nonce-value';
+const SCOPES = 'openid profile email offline_access';
+const API_AUDIENCE = 'https://api.example.com';
 
 let fixture: OidcFixture;
 
-function makeClient(clockToleranceSeconds = 30): OidcClient {
+function makeClient(clockToleranceSeconds = 30, extra: Partial<Pick<CreateOidcClientOptions, 'audience' | 'refreshScope'>> = {}): OidcClient {
   return createOidcClient({
     issuer: fixture.issuer,
     clientId: fixture.clientId,
     clientSecret: fixture.clientSecret,
     httpTimeoutMs: 5000,
     clockToleranceSeconds,
+    scopes: SCOPES,
+    ...extra,
     allowInsecureRequests: true, // the fixture is plain http on localhost — never set in production
   });
+}
+
+/** The one refresh_token request the fixture received. Throws, and so fails the test, otherwise. */
+function onlyRefreshRequest(): URLSearchParams {
+  const refreshes = fixture.tokenRequests().filter((p) => p.get('grant_type') === 'refresh_token');
+  const [only] = refreshes;
+  if (refreshes.length !== 1 || only === undefined) throw new Error(`expected exactly one refresh request, got ${String(refreshes.length)}`);
+  return only;
 }
 
 function callbackUrl(): URL {
@@ -130,13 +142,25 @@ describe('createOidcClient — authorizationCodeGrant ID Token validation', () =
 describe('createOidcClient — the rest of the surface', () => {
   it('buildAuthorizationUrl carries PKCE, state and nonce', async () => {
     const oidc = makeClient();
-    const req = await oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, scopes: 'openid profile', state: STATE });
+    const req = await oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE });
     const url = new URL(req.url);
     expect(url.searchParams.get('state')).toBe(STATE);
     expect(url.searchParams.get('nonce')).toBe(req.nonce);
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('code_challenge')).toBeTruthy();
     expect(req.codeVerifier.length).toBeGreaterThan(0);
+  });
+
+  // Final fix M4 (D2). Pins the DEFAULT authorization URL's full key set: no PAIGASUS_OIDC_
+  // AUTHORIZATION_AUDIENCE injected, so no `audience` key. Derived from the pre-SMA-692 params
+  // (git show 2346451d:.../adapters/oidc.ts — redirect_uri, scope, code_challenge,
+  // code_challenge_method, state, nonce) plus what openid-client itself adds (client_id,
+  // response_type). A future param added to the request without updating this row must red it.
+  it('buildAuthorizationUrl carries exactly the pre-SMA-692 key set when no audience is injected', async () => {
+    const oidc = makeClient();
+    const req = await oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE });
+    const url = new URL(req.url);
+    expect([...url.searchParams.keys()].sort()).toEqual(['client_id', 'code_challenge', 'code_challenge_method', 'nonce', 'redirect_uri', 'response_type', 'scope', 'state']);
   });
 
   it('refresh exchanges a refresh token for new tokens', async () => {
@@ -207,6 +231,7 @@ describe('createOidcClient — the rest of the surface', () => {
       clientSecret: fixture.clientSecret,
       httpTimeoutMs: 500,
       clockToleranceSeconds: 30,
+      scopes: SCOPES,
       allowInsecureRequests: true,
     });
     await expect(oidc.refresh('rt')).rejects.toThrow(/oidc discovery failed/);
@@ -340,11 +365,11 @@ describe('createOidcClient — a discovery failure is an OidcDiscoveryFailed wit
   });
 
   function clientFor(issuer: string, httpTimeoutMs = 2000): OidcClient {
-    return createOidcClient({ issuer, clientId: 'test-client', clientSecret: 'test-secret', httpTimeoutMs, clockToleranceSeconds: 30, allowInsecureRequests: true });
+    return createOidcClient({ issuer, clientId: 'test-client', clientSecret: 'test-secret', httpTimeoutMs, clockToleranceSeconds: 30, scopes: 'openid', allowInsecureRequests: true });
   }
 
   function buildUrl(oidc: OidcClient): Promise<unknown> {
-    return oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, scopes: 'openid', state: STATE });
+    return oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE });
   }
 
   function expectDiscoveryFailed(err: unknown, reason: OidcDiscoveryFailureReason): void {
@@ -476,4 +501,69 @@ describe('classifyDiscoveryError — constructed errors (SMA-656 T9b)', () => {
       expect(classifyDiscoveryError(fetchFailed(code))).toBe('tls');
     },
   );
+});
+
+// SMA-692. The tests read the REAL request: the authorization URL the adapter builds, and the
+// /token body the fixture records. openid-client sends an `undefined` value as the string
+// "undefined" (spec F7), so an absent value must leave its key out.
+describe('createOidcClient — the scopes, the audience and the refresh scope (SMA-692)', () => {
+  it('sends the injected scopes as scope', async () => {
+    const req = await makeClient().buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE });
+    expect(new URL(req.url).searchParams.get('scope')).toBe(SCOPES);
+  });
+
+  it('sends no audience parameter, and no "undefined" string, when none is injected', async () => {
+    const req = await makeClient().buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE });
+    expect(new URL(req.url).searchParams.has('audience')).toBe(false);
+    expect(req.url).not.toContain('undefined');
+  });
+
+  it('sends the injected audience as the audience parameter', async () => {
+    const req = await makeClient(30, { audience: API_AUDIENCE }).buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE });
+    expect(new URL(req.url).searchParams.get('audience')).toBe(API_AUDIENCE);
+  });
+
+  // D3-a: with no refreshScope the refresh body keeps exactly the keys it had before SMA-692.
+  it('sends the refresh request of today when no refreshScope is injected, even with an audience', async () => {
+    await makeClient(30, { audience: API_AUDIENCE }).refresh('some-refresh-token');
+    expect([...onlyRefreshRequest().keys()].sort()).toEqual(['client_id', 'client_secret', 'grant_type', 'refresh_token']);
+  });
+
+  it('sends the injected refreshScope as scope on a refresh, and never audience (spec F1)', async () => {
+    await makeClient(30, { audience: API_AUDIENCE, refreshScope: 'openid api://paigasus-api/access' }).refresh('some-refresh-token');
+    const body = onlyRefreshRequest();
+    expect(body.get('scope')).toBe('openid api://paigasus-api/access');
+    expect(body.has('audience')).toBe(false);
+  });
+});
+
+// SMA-692 D10. Every OAuth code except invalid_grant stays transient (D11), and the error now
+// carries the code. The codes outside RFC 6749 § 5.2 map to 'other'.
+describe('createOidcClient — the OAuth code of a transient refresh failure (SMA-692 D10)', () => {
+  it.each(['invalid_client', 'unauthorized_client', 'invalid_scope', 'invalid_request', 'unsupported_grant_type'])('carries %s on the transient error', async (code) => {
+    fixture.setNextTokenError(code);
+    const err: unknown = await makeClient()
+      .refresh('some-refresh-token')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RefreshFailed);
+    expect((err as RefreshFailed).oauthError).toBe(code);
+    expect((err as Error).message).toBe('oidc refresh_token_grant failed: ResponseBodyError');
+  });
+
+  it.each(['server_error', 'temporarily_unavailable'])('carries other for %s, a code outside RFC 6749 § 5.2', async (code) => {
+    fixture.setNextTokenError(code);
+    const err: unknown = await makeClient()
+      .refresh('some-refresh-token')
+      .catch((e: unknown) => e);
+    expect((err as RefreshFailed).oauthError).toBe('other');
+  });
+
+  it('carries no code when the response has WWW-Authenticate (no .error field to read)', async () => {
+    fixture.setNextTokenError('invalid_client', 'Basic realm="idp"');
+    const err: unknown = await makeClient()
+      .refresh('some-refresh-token')
+      .catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(RefreshFailed);
+    expect((err as Error).message).toMatch(/oidc refresh_token_grant failed/);
+  });
 });

@@ -25,7 +25,15 @@ const IDP_SENTENCE = 'The identity provider is not available. Try again in a few
  * list, so undici refuses it with no connect and no wait (SMA-656 plan, Review Focus 5).
  */
 function unreachableOidc(): OidcClient {
-  return createOidcClient({ issuer: 'http://127.0.0.1:1', clientId: 'paigasus-console', clientSecret: 'a-client-secret', httpTimeoutMs: 2000, clockToleranceSeconds: 30, allowInsecureRequests: true });
+  return createOidcClient({
+    issuer: 'http://127.0.0.1:1',
+    clientId: 'paigasus-console',
+    clientSecret: 'a-client-secret',
+    httpTimeoutMs: 2000,
+    clockToleranceSeconds: 30,
+    scopes: 'openid',
+    allowInsecureRequests: true,
+  });
 }
 
 let fixture: OidcFixture;
@@ -41,6 +49,7 @@ beforeEach(async () => {
     clientSecret: fixture.clientSecret,
     httpTimeoutMs: 5000,
     clockToleranceSeconds: 30,
+    scopes: 'openid profile email',
     allowInsecureRequests: true, // the fixture is plain http on localhost — never set in production
   });
   runtime = {
@@ -69,7 +78,6 @@ beforeEach(async () => {
     absoluteTtlMs: 86_400_000,
     zone: 'iam',
     basePath: '/iam',
-    scopes: 'openid profile email',
   };
 });
 

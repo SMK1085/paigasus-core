@@ -1377,7 +1377,7 @@ NEXT_PUBLIC_FREE_SH_CALL_SITES = (
 #     pinned, deleting every assertion left a control that printed "passed" (the
 #     WORKFLOW_CREDENTIALS_SH_CALL_SITES measurement);
 #   - both report arms, so a control that counted failures cannot swallow them;
-#   - the six FIXTURE_TABLE rows, so a fixture cannot be dropped with its directory in silence;
+#   - the seven FIXTURE_TABLE rows, so a fixture cannot be dropped with its directory in silence;
 #   - the two rc maps, so 3 -> 1 and "anything else -> 2" cannot be rewritten to 0;
 #   - the real run: the module call and the chart-script loop (glob, floor, floor guard and
 #     invocation). Without these a deleted loop leaves the gate green with no `helm lint` and no
@@ -1407,6 +1407,7 @@ HELM_RENDER_SH_CALL_SITES = (
     "'template-only-diff|3a;3a-prime|'",
     "'slug-mirror|1a|'",
     "'security-context|4 security-context iam;4 security-context iam+gateway|'",
+    "'app-version-unreleased|8c chart-app-version|'",
     'case "$1" in 0) echo 0 ;; 3) echo 1 ;; *) echo 2 ;; esac',
     'case "$1" in 0) echo 0 ;; 1) echo 1 ;; *) echo 2 ;; esac',
     'mod_rc=0; mapped_run_module "$PY" "$HERE/helm_render.py" --chart "$CHART" || mod_rc=$?',

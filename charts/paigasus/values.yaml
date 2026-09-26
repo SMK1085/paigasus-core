@@ -16,7 +16,7 @@ zones:
         repository: ghcr.io/smk1085/paigasus-iam-console
         # Pinned to the image version in ts/apps/iam-console/package.json (SMA-688). A version
         # bump updates this tag in the same PR; repo:helm-render row 8a fails otherwise. An empty
-        # tag falls back to .Chart.AppVersion, which names no published image.
+        # tag falls back to .Chart.AppVersion, a version every image released (row 8c).
         tag: "0.1.0"
       replicas: 2
     backend:
@@ -43,6 +43,27 @@ zones:
       # rolls. Without it a stale pod keeps the old pepper and keeps accepting API keys
       # that a rotated pod rejects, so rotation does not revoke them consistently.
       apiKeysSecretVersion: ""
+      # NOT required. The first platform administrators (SMA-697). Each entry is an
+      # {issuer, subject} pair. IAM grants platform_admin at Root scope to that identity after its
+      # first login (authz.bootstrap_admins). Without an entry, IAM denies every action to every
+      # user, and no user can grant a role. The chart renders the list into
+      # IAM_AUTHZ__BOOTSTRAP_ADMINS.
+      #   issuer   must equal oidc.issuer. IAM compares the pair as exact strings, so an entry
+      #            with another issuer never matches.
+      #   subject  the IdP's "sub" claim for that user. Quote it: a subject of digits only is a
+      #            number in YAML, and the chart refuses a number.
+      # Example:
+      #   bootstrapAdmins:
+      #     - issuer: https://idp.example.com
+      #       subject: "392488538992280259"
+      # A change rolls the IAM pod. Removing an entry does NOT revoke a grant that IAM already
+      # made. See docs/ops/RUNBOOK-chart.md.
+      bootstrapAdmins: []
+      # NOT required. More env entries for the IAM backend container, as Kubernetes EnvVar
+      # objects (name plus value or valueFrom). The chart appends them after its own entries.
+      # Example: [{name: RUST_LOG, value: "paigasus_iam=debug,info"}]. The chart refuses a name
+      # that it sets itself (see docs/ops/RUNBOOK-chart.md). A change rolls the IAM pod.
+      extraEnv: []
   gateway:
     enabled: false
     basePath: /gateway
@@ -65,7 +86,8 @@ zones:
         repository: ghcr.io/smk1085/paigasus-gateway
         # Pinned to the image version in rs/crates/services/paigasus-gateway/Cargo.toml
         # (SMA-688). This chart does not render it today; the pin stops a later chart that
-        # deploys it from falling back to 0.0.0. repo:helm-render row 8a fails when the two differ.
+        # deploys it from falling back to an older appVersion.
+        # repo:helm-render row 8a fails when the two differ.
         tag: "0.1.0"
       httpPort: 8088
       # Genuinely missing from the original schema (SMA-513 Task 11) — the gateway backend is
@@ -104,6 +126,24 @@ oidc:
                                     # oidc.clientId. It does not change what IAM accepts. A
                                     # change of oidc.clientId shows the warning again. Quote the
                                     # value in a values file. See RUNBOOK-chart.md § 6.
+  scopes: ""             # NOT required. The scopes that both consoles request (SMA-692). Empty:
+                         # the console default, openid profile email offline_access. Entra ID
+                         # needs it: add exactly one scope of the API app registration, for
+                         # example api://paigasus-api/access. The list must contain openid (the
+                         # render fails without it). It should contain offline_access: without
+                         # it the IdP issues no refresh token, and every user must log in again
+                         # at each access-token expiry. When set, the consoles also send it on
+                         # each refresh. Set it only when your IdP needs it: on any IdP, a
+                         # refresh scope wider than the granted scope can fail (RFC 6749 § 6) and
+                         # sign the user out at each access-token expiry. Read the oauthError
+                         # field of the session.refresh_failed log after a change. A change
+                         # restarts both consoles, not IAM. See RUNBOOK-chart.md § 6.
+  authorizationAudience: ""   # NOT required. The audience parameter that both consoles send in
+                              # the authorization request (SMA-692). Empty: no audience
+                              # parameter. Auth0 needs it to issue an access token for an API.
+                              # It must equal oidc.audience (the render fails otherwise). A change
+                              # restarts both consoles, not IAM. Quote the value in a values file.
+                              # See RUNBOOK-chart.md § 6.
   existingSecret: ""     # REQUIRED. Must hold keys: oidc-client-secret, session-redis-url.
   secretVersion: ""      # NOT required. The chart does not own existingSecret and cannot observe
                          # its contents, so it cannot detect a rotation on its own. Bump this
