@@ -5,7 +5,19 @@
 // store error can be an instance of the OTHER copy's class, and `instanceof` is then false. These
 // tests build that second copy with vi.resetModules() and a dynamic import.
 import { describe, expect, it, vi } from 'vitest';
-import { CallbackRejected, RefreshRejected, SessionStoreTimeout, SessionStoreUnavailable, isRefreshRejected, isSessionStoreUnavailable } from '../../src/core/errors.js';
+import {
+  AuthError,
+  CallbackRejected,
+  OIDC_DISCOVERY_FAILURE_REASONS,
+  OidcDiscoveryFailed,
+  RefreshRejected,
+  SessionStoreTimeout,
+  SessionStoreUnavailable,
+  isOidcDiscoveryFailed,
+  isRefreshRejected,
+  isSessionStoreUnavailable,
+  oidcDiscoveryReason,
+} from '../../src/core/errors.js';
 
 describe('isSessionStoreUnavailable (SMA-653 D2)', () => {
   it('is true for a SessionStoreUnavailable and for its SessionStoreTimeout subclass', () => {
@@ -67,5 +79,79 @@ describe('isRefreshRejected (SMA-657)', () => {
     // A plain object, not an Error.
     expect(isRefreshRejected({ code: 'oidc_refresh_rejected' })).toBe(false);
     expect(isRefreshRejected(undefined)).toBe(false);
+  });
+});
+
+// SMA-656 D1. The runtime and its `oidc` client are shared through globalThis, so the adapter can
+// build an OidcDiscoveryFailed in one module copy and http/routes.ts can classify it in the other.
+describe('isOidcDiscoveryFailed (SMA-656 D1, T10)', () => {
+  it('is true for an OidcDiscoveryFailed', () => {
+    expect(isOidcDiscoveryFailed(new OidcDiscoveryFailed('oidc discovery failed: TypeError', 'network'))).toBe(true);
+  });
+
+  it('is true for an error from a SECOND copy of core/errors', async () => {
+    vi.resetModules();
+    const foreign = await import('../../src/core/errors.js');
+    // Precondition: without this, the test passes vacuously if the import returns the same module.
+    expect(foreign.OidcDiscoveryFailed).not.toBe(OidcDiscoveryFailed);
+    const err = new foreign.OidcDiscoveryFailed('oidc discovery failed: TypeError', 'network');
+    expect(err instanceof OidcDiscoveryFailed).toBe(false);
+    expect(isOidcDiscoveryFailed(err)).toBe(true);
+  });
+
+  it('is true for any Error carrying the code, not only an OidcDiscoveryFailed', () => {
+    expect(isOidcDiscoveryFailed(Object.assign(new Error('x'), { code: 'oidc_discovery_failed' }))).toBe(true);
+  });
+
+  it('is false for other errors and for non-errors', () => {
+    // A plain object, not an Error.
+    expect(isOidcDiscoveryFailed({ code: 'oidc_discovery_failed' })).toBe(false);
+    // The literal in the MESSAGE, not in `code`.
+    expect(isOidcDiscoveryFailed(new Error('oidc_discovery_failed'))).toBe(false);
+    // What the adapter threw before SMA-656.
+    expect(isOidcDiscoveryFailed(new Error('oidc discovery failed: TypeError'))).toBe(false);
+    expect(isOidcDiscoveryFailed(new SessionStoreUnavailable('down'))).toBe(false);
+    expect(isOidcDiscoveryFailed(new RefreshRejected('invalid_grant'))).toBe(false);
+    expect(isOidcDiscoveryFailed(undefined)).toBe(false);
+  });
+
+  it('is neither a store failure nor a refresh rejection', () => {
+    const err = new OidcDiscoveryFailed('oidc discovery failed: TypeError', 'timeout');
+    expect(isSessionStoreUnavailable(err)).toBe(false);
+    expect(isRefreshRejected(err)).toBe(false);
+  });
+});
+
+describe('OidcDiscoveryFailed (SMA-656 D3)', () => {
+  it('has a fixed name and code, keeps the message, and has no cause', () => {
+    const err = new OidcDiscoveryFailed('oidc discovery failed: ClientError', 'issuer_mismatch');
+    expect(err).toBeInstanceOf(AuthError);
+    expect(err.name).toBe('OidcDiscoveryFailed');
+    expect(err.code).toBe('oidc_discovery_failed');
+    expect(err.message).toBe('oidc discovery failed: ClientError');
+    expect(err.reason).toBe('issuer_mismatch');
+    expect(err.cause).toBeUndefined();
+  });
+});
+
+describe('oidcDiscoveryReason (SMA-656 D8, T10)', () => {
+  it('the closed list is exactly the D8 list, in order', () => {
+    expect(OIDC_DISCOVERY_FAILURE_REASONS).toEqual(['timeout', 'network', 'dns', 'tls', 'http_server_error', 'http_client_error', 'invalid_metadata', 'issuer_mismatch', 'other']);
+  });
+
+  it.each(OIDC_DISCOVERY_FAILURE_REASONS)('returns %s unchanged', (reason) => {
+    expect(oidcDiscoveryReason(new OidcDiscoveryFailed('oidc discovery failed: TypeError', reason))).toBe(reason);
+  });
+
+  it.each([
+    ['a missing reason', Object.assign(new Error('x'), { code: 'oidc_discovery_failed' })],
+    ['a URL', Object.assign(new Error('x'), { code: 'oidc_discovery_failed', reason: 'https://idp.invalid/x' })],
+    ['a near miss', Object.assign(new Error('x'), { code: 'oidc_discovery_failed', reason: 'TIMEOUT' })],
+    ['a number', Object.assign(new Error('x'), { code: 'oidc_discovery_failed', reason: 42 })],
+    ['undefined', undefined],
+    ['null', null],
+    ['a bare string', 'timeout'],
+  ] as const)('returns other for %s', (_label, err) => {
+    expect(oidcDiscoveryReason(err)).toBe('other');
   });
 });
