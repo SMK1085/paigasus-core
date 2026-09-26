@@ -185,7 +185,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   git diff -- rs/Cargo.lock   # the family entries (seven at M0) plus any new dep, crates.io only
   moon run paigasus-kernel-ts:generate-wasm
   moon run paigasus-kernel-ts:test   # the drift gate, before the push
-  git add rs/Cargo.lock rs/crates/bindings/paigasus-wasm/paigasus_wasm*
+  git add rs/Cargo.lock .prototools rs/crates/bindings/paigasus-wasm/paigasus_wasm*
   git commit -m "build(deps): move wasm-bindgen to <version> and regenerate the wasm glue"
   ```
   Push the branch, then open the PR.
@@ -203,8 +203,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   4. Run `git fetch origin`. Then read `git diff origin/main...HEAD -- rs/Cargo.lock`. Every
      changed entry must have a crates.io source. The wasm family entries must be among the
      changes. A group PR also holds `reqwest` and other bumps. Then
-     run `generate-wasm` and the test. Stage the five artifacts with `git add
-     rs/crates/bindings/paigasus-wasm/paigasus_wasm*`. Commit and push.
+     run `generate-wasm` and the test. Stage the five artifacts and `.prototools`
+     with `git add .prototools rs/crates/bindings/paigasus-wasm/paigasus_wasm*`.
+     Commit and push.
   5. If the branch goes stale again: run the merge-only `update-branch` call, then `git pull`.
      Run `generate-wasm` again if the merge changed `rs/Cargo.lock`, `.prototools`, the
      kernel, the wasm binding, or the five artifacts.

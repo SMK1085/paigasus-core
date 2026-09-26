@@ -95,7 +95,7 @@ runs it; nothing schedules it until the follow-up lands.
 git diff -- rs/Cargo.lock   # the family entries (seven at M0) plus any new dep, crates.io only
 moon run paigasus-kernel-ts:generate-wasm
 moon run paigasus-kernel-ts:test   # the drift gate, before the push
-git add rs/Cargo.lock rs/crates/bindings/paigasus-wasm/paigasus_wasm*
+git add rs/Cargo.lock .prototools rs/crates/bindings/paigasus-wasm/paigasus_wasm*
 git commit -m "build(deps): move wasm-bindgen to <version> and regenerate the wasm glue"
 ```
 
@@ -116,7 +116,7 @@ moves `wasm-bindgen` (4.3), follow these steps in order:
 4. Run `git fetch origin`. Then read `git diff origin/main...HEAD -- rs/Cargo.lock`. Every
    changed entry must have a crates.io source. The wasm family entries must be among the
    changes. A group PR also holds `reqwest` and other bumps. Then run `generate-wasm` and the
-   test. Stage the five artifacts with `git add
+   test. Stage the five artifacts and `.prototools` with `git add .prototools
    rs/crates/bindings/paigasus-wasm/paigasus_wasm*`. Commit and push.
 5. If the branch goes stale again: the merge-only `update-branch` call
    (`gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`), then
