@@ -28,18 +28,19 @@ const SCOPES = { organization: 1, team: 1, project: 1 } as const;
 /** The default world's teams in the organization (support/world.ts `tenancy.listTeams`). */
 const TEAMS = 1;
 
-/** § 7.3's table for S scopes and T teams, with no `sa` parameter. */
+/** § 7.3's table for S scopes and T teams, with no `sa` parameter. SMA-676 adds the people section. */
 function formula(): Record<string, number> {
   return {
     'authn.whoAmI': 1, // the session principal, memoized per request
-    'authz.listRoleGrants': 1, // myScopes(), with iam.authz.cedar present
+    'authz.listRoleGrants': 2, // myScopes(), with iam.authz.cedar present; and the people section's user grants at the org (SMA-676): one short page, no probe
     'tenancy.getOrganization': 1 + SCOPES.organization, // the page, plus myScopes()'s label of the org scope
     'tenancy.getTeam': SCOPES.team, // myScopes() labels
     'tenancy.getProject': SCOPES.project, // myScopes() labels
-    'authz.isAuthorized': 5, // mayI(), five distinct actions
+    'authz.isAuthorized': 6, // mayI(), six distinct questions: the five of SMA-636, and RevokeRole at the org (SMA-676); GrantRole at the org is memoized
     'serviceAccounts.listServiceAccounts': 1, // the section
     'tenancy.listTeams': 1, // the Projects list
     'tenancy.listProjects': TEAMS, // the Projects list, one per shown team
+    'tenancy.listMemberships': 1, // the people section's user members of the org (SMA-676): one short page, no probe
   };
 }
 

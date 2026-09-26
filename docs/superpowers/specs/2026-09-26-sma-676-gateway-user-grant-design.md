@@ -342,3 +342,6 @@ the README row list.
   - §7: real-Cedar tests, a Docker end-to-end grant/revoke test, a one-identity e2e row, and the
     list of tests that change on purpose.
   - New §10 rollout and §11 non-functional facts; citation fixes.
+- 2026-09-26, implementation: the new error reason `ERROR_REASON_INVALID_PRINCIPAL_KIND = 40`
+  (`invalid-principal-kind`) implements D7's refusal. The e2e world's grant-reading `InvokeModel`
+  self branch is opt-in through an `orgCreator` option. Other e2e rows keep their own world.

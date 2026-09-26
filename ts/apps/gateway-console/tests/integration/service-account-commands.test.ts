@@ -141,11 +141,11 @@ describe('allowModelCalls (§ 5.3)', () => {
     expect(calls('authz.grantRole')).toHaveLength(0);
   });
 
-  it('returns a duplicate grant as IAM answers it: an internal error (spec § 3.2)', async () => {
+  it('returns an internal IAM failure as generic', async () => {
     iam.setHandlers({
       'serviceAccounts.getServiceAccount': () => storedAccount(OWNER),
       'authz.grantRole': () => {
-        throw new ConnectError('duplicate', Code.Internal);
+        throw new ConnectError('internal failure', Code.Internal);
       },
     });
     const clients = clientsFor(iam);
