@@ -324,6 +324,16 @@ image has the same shape as the Rust service images:
   both the amd64 and the arm64 leg of `images.yml`. Code that the builder compiles goes into
   `/app`, so this pin controls what the image runs. `assert_console_pins` in `ci/images/run.sh`
   fails if either `FROM` line has no `@sha256:` digest, or if the runtime tag is not `nonroot`.
+- **Every image that the build reads is one of the two digest-pinned `FROM` images.**
+  `assert_console_pins` reads `ts/Dockerfile` after it drops comment lines and joins continuation
+  lines. It fails if the file has a number of `FROM` instructions that is not 2. It also fails if
+  a `FROM` line does not match one of the two pin patterns. It fails if a `--from=` value, or a
+  `from=` value in a `RUN --mount=` argument, is not `builder` or `bindings`. A `--from=<image>`
+  pulls an image that no `FROM` line pins. It also fails if the file starts with a parser
+  directive (`# syntax=`, `# escape=` or `# check=`, in any letter case). A `# syntax=` directive
+  pulls an unpinned BuildKit frontend image. An `# escape=` directive changes how the check reads
+  the file. A heredoc body line that starts with `from` counts as a `FROM` line, so it gives a
+  false failure.
 - **The image runs as uid:gid `65532:65532`** (`USER 65532:65532`). The Rust service images use
   the same uid (`rs/Dockerfile`'s `USER 65532:65532`). So one Kubernetes `securityContext`
   (`runAsNonRoot: true`, `runAsUser: 65532`) covers all four images. `smoke_consoles` reads the
@@ -334,30 +344,61 @@ image has the same shape as the Rust service images:
   `ARG` or `ENV`, so neither instruction can use `${APP}`. The files are `.mjs`, not `.js`, because
   every console `package.json` sets `"type": "module"`. Next copies that `package.json` into the
   standalone tree, so a CJS `require()` shim would need `require(esm)` interop and would fail.
-- **The healthcheck file fetches `<BASE_PATH>/healthz` on `127.0.0.1:$PORT`.** `smoke_consoles`
-  runs this file in the running container with `docker exec` and the image's own node. It fails if
-  the file exits with a code that is not 0.
+- **The healthcheck file fetches `<BASE_PATH>/healthz` on `127.0.0.1:$PORT`, with a 2500 ms
+  signal.** The `fetch` call passes `signal: AbortSignal.timeout(2500)`. Docker kills the probe
+  after `--timeout=3s`. Without the signal, a server that accepts the connection and never answers
+  holds the probe until Docker kills it. `assert_console_pins` fails if the `printf` line that
+  writes the file does not hold exactly one `AbortSignal.timeout(<ms>)`. It also fails if that
+  value is not less than the `HEALTHCHECK --timeout`. It reads only a `--timeout=<N>s` value in
+  whole seconds, of at most 5 digits. `ts/Dockerfile` must hold exactly one `HEALTHCHECK`
+  instruction. Docker obeys only the last one, and this check always reads the first.
+- **`smoke_consoles` runs the healthcheck file in the running container, with a deadline.** It
+  uses `docker exec` and the image's own node, under `with_deadline` with `CONSOLE_HC_DEADLINE`
+  (20 s). It fails if the file exits with a code that is not 0. It reports a timeout only when the
+  exit code is 143 or 137 and the elapsed time reached the deadline.
 - **`assert_console_pins` holds three values equal to the pins in `.prototools`.** The three
   values are the Node major of the runtime base, the exact Node version of the builder, and the
   pnpm version of the builder. `.prototools` is the only record of those versions; this runbook
   does not copy them. The runtime base can hold only the major, because distroless publishes no
   patch-level tags.
+- **`smoke_consoles` prints the Node version that the runtime image runs.** The runtime base pins
+  only the Node major, so no file records the full version. A different major, a version that the
+  row cannot parse, or a missing `node` pin in `.prototools` is an error. A different minor or
+  patch version is a `::warning::`, and the row stays green. On 2026-09-25 the runtime image ran
+  Node 24.14.0 and `.prototools` pinned 24.16.0. When the runtime is older, a later digest refresh
+  of the runtime base closes the gap. When the runtime is newer, change `.prototools` and the
+  builder `FROM` line together.
 - **The image uses runtime configuration only.** The image bakes no `PAIGASUS_*` environment
   variable. `assert_console_pins` reads `ENV` and `ARG` instructions in `ts/Dockerfile` to enforce
-  this. It joins continuation lines first and matches `ENV` and `ARG` in any letter case. It does
-  not see a value that a `RUN` step writes into a file. There is one exception:
+  this. It joins continuation lines first and matches `ENV` and `ARG` in any letter case. After
+  that check, no other line of `ts/Dockerfile` can hold the text `PAIGASUS_`. A `RUN`, `COPY`,
+  `ADD` or `ONBUILD` step and a heredoc body line are errors. The check does not read comment
+  lines. The text check needs the literal text `PAIGASUS_`, so a name that a step builds from
+  parts, or a name from `--build-arg`, gets past it. There is one exception to the rule:
   `PAIGASUS_COMPILED_*` (`PAIGASUS_COMPILED_ZONE`, `PAIGASUS_COMPILED_BASE_PATH`).
   `createNextConfig` in `ts/packages/paigasus-next-config` writes these at build time on purpose.
   They record the zone that the artifact was built for, so `runtime.ts` can compare them with the
   `PAIGASUS_ZONE` that a deployment supplies. They are not deployment-varying configuration.
+  `ts/Dockerfile` never writes them, so the text check has no exemption for them.
+- **`smoke_consoles` reads the built image for baked configuration.** It fails if `Config.Env` of
+  the image holds a `PAIGASUS_*` key. The error names the key and never the value. It also walks
+  `/app` with the image's own node, and it fails if a file whose name starts with `.env` is there
+  outside `node_modules`. The walk must count at least 100 files, or it read the wrong tree. It
+  does not see a `PAIGASUS_*` value in a file with a different name, or an `.env*` file under
+  `node_modules`. It reports the `.env` scan as not checked if the grep that filters
+  `node_modules` paths exits above 1.
 - **The build context excludes `.env` files.** `ts/.dockerignore` excludes `**/.env` and
   `**/.env.*`. This is necessary because Next copies an app's `.env` and `.env.production` into
   `.next/standalone`, and the Next server loads them at runtime. Without the exclusion, a local
   `build-console` on a tree that holds real values ships those values in the image. CI is not
   affected, because `.gitignore` ignores `.env*` and CI builds from a clean checkout.
-- **Every `pnpm install` in `ts/Dockerfile` uses `--frozen-lockfile`.** `assert_console_pins`
-  fails if one `pnpm install` has no bare `--frozen-lockfile` flag. It also fails on any
-  `--frozen-lockfile=<value>` form and on `--no-frozen-lockfile`.
+- **Every `pnpm install` and `pnpm i` in `ts/Dockerfile` uses `--frozen-lockfile`.**
+  `assert_console_pins` finds each `pnpm` invocation and splits it into words. It treats the
+  invocation as an install when a word is `install`, `i`, `install-test` or `it`. So
+  `pnpm --filter x install`, `pnpm -C ts i` and `sh -c "pnpm install"` are installs, and
+  `pnpm info` and `pnpm exec` are not. It fails if one install has no bare `--frozen-lockfile`
+  flag. It also fails on any `--frozen-lockfile=<value>` form and on `--no-frozen-lockfile`. It
+  does not check `pnpm add`, `pnpm update` or `npm install`.
 - **Dependabot updates the two pinned images of the `/ts` docker block as follows.** This is
   read from the source of `dependabot-core`, not from the published GitHub documentation, which
   does not describe it. A change in `dependabot-core` can change it.
@@ -383,9 +424,12 @@ image has the same shape as the Rust service images:
   check keeps the two staging sites in agreement.
 - **The zone row of `smoke_consoles` proves only that a basePath is in effect.** It checks that
   the zone's chunk returns 404 under the other zone's prefix. The chunk also returns 404 under an
-  unknown prefix and under no prefix (measured on `iam-console:dev`). So the row does not prove
-  that the assets of the two zones do not collide. That proof needs both zones behind one ingress,
-  and it belongs to the ingress work (SMA-513 PR 2a).
+  unknown prefix and under no prefix (measured on `iam-console:dev`). So the row alone does not
+  prove that the assets of the two zones do not collide. Acceptance criterion 3 of SMA-513 has two
+  halves. The container smoke test (steps 2 to 4 of `smoke_consoles`) proves the per-image half
+  (SMA-513 spec D4): each zone emits its asset URLs under its own basePath and serves them there.
+  Kind row R2 (`ts/apps/iam-console/tests/cluster/phase-a/cross-zone.spec.ts`) proves the
+  one-origin half: both zones hydrate through one Traefik ingress.
 
 Two more facts about the staged-tree parity check are important:
 
@@ -403,6 +447,15 @@ Two more facts about the staged-tree parity check are important:
   filtered `pnpm install` resolves a different optional platform dependency than a full install.
   When the assumption fails, it fails on every run. The failure goes to the parity error that
   already states that the mismatch is not a drift between `ts/Dockerfile` and `moon.yml`.
+
+`ci/images/console-selftest.sh` proves the checks of this section. For each check it applies one
+mutation and requires the check's own error text, and the unchanged files must stay green. It runs
+the rendered healthcheck file in the pinned runtime image against a server that never answers:
+with the signal the file exits 1 with a `TimeoutError`, and without it the file hangs until a
+watchdog kills it. `images.yml` runs the self-test directly before the console build. Run it
+locally with `/bin/bash ci/images/console-selftest.sh`. `ci/kind/run.sh` reports every
+`build-console` failure as an infrastructure error (rc 2), so a failure of a static check in
+`assert_console_pins` shows there as rc 2, not as a test failure.
 
 ## 7. What the first Deployment needs
 

@@ -145,9 +145,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   new top-level app directory needs a line in `sources`, or an edit to it serves a cached lint PASS.
   The same holds for a top-level app file such as `playwright.config.ts`.
 - The console image rules live in two places already. Do not copy them here. The static-asset
-  staging rule is at `docs/ops/RUNBOOK-containers.md:364-369`. The exec-form
-  `ENTRYPOINT`/`HEALTHCHECK` rule (no `ARG`/`ENV` expansion) is at `rs/CLAUDE.md:207` and
-  `docs/ops/RUNBOOK-containers.md:317-322`.
+  staging rule is in `docs/ops/RUNBOOK-containers.md` section 6, the bullet "The standalone output
+  has no static assets". The exec-form `ENTRYPOINT`/`HEALTHCHECK` rule (no `ARG`/`ENV` expansion)
+  is at `rs/CLAUDE.md:207` and in the same RUNBOOK section, the bullet "The image holds two
+  fixed-path `.mjs` files".
   The kind-only specs in `apps/iam-console/tests/cluster/` run only from `ci/kind/run.sh specs a|b|journeys`.
 
 ## Auth, sessions and the console packages
