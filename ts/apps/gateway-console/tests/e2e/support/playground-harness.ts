@@ -31,7 +31,7 @@ export type PlaygroundHarness = {
   url(path: string): string;
   serverOutput(): string;
   gatewayLog(): readonly GatewayLogLine[];
-  useWorld(options?: Pick<WorldOptions, 'overrides' | 'allow'>): void;
+  useWorld(options?: Pick<WorldOptions, 'overrides' | 'allow' | 'orgCreator'>): void;
 };
 
 async function startStack(): Promise<{ harness: PlaygroundHarness; close: () => Promise<void> }> {
