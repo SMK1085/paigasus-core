@@ -368,7 +368,9 @@ impl From<AuthzError> for TenancyError {
             AuthzError::SystemImmutable(s) => Self::SystemImmutable(s),
             AuthzError::PolicyParse(s) | AuthzError::SchemaValidation(s) | AuthzError::TemplateLink(s) => Self::PolicyInvalid(s),
             AuthzError::Conflict(s) => Self::PolicyConflict(s),
-            AuthzError::Evaluation(_) | AuthzError::Backend(_) | AuthzError::ResourceNotFound(_) => Self::Internal,
+            // SMA-676 D9: `RoleService::grant` consumes `DuplicateGrant`. Reaching this funnel
+            // means another path let it through — a defect, so `Internal`, not a 409.
+            AuthzError::Evaluation(_) | AuthzError::Backend(_) | AuthzError::ResourceNotFound(_) | AuthzError::DuplicateGrant => Self::Internal,
         }
     }
 }
@@ -419,6 +421,13 @@ mod tests {
         assert_eq!(TenancyError::from(AuthzError::Backend(backend)), TenancyError::Internal);
         assert_eq!(TenancyError::from(AuthzError::Conflict("p1".to_string())), TenancyError::PolicyConflict("p1".to_string()));
         assert_eq!(TenancyError::from(AuthzError::ResourceNotFound("org 1".to_string())), TenancyError::Internal);
+    }
+
+    /// SMA-676 D9: only `RoleService::grant` handles `DuplicateGrant`. Any other path that lets
+    /// it reach this funnel is a defect, so it is an `Internal`, never a 409.
+    #[test]
+    fn a_duplicate_grant_that_escapes_the_grant_path_is_internal() {
+        assert_eq!(TenancyError::from(AuthzError::DuplicateGrant), TenancyError::Internal);
     }
 
     #[test]

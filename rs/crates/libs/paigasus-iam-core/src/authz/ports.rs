@@ -4,7 +4,7 @@
 //! abstractions, not on the eventual Postgres/cache/audit adapters (ADR-0005). Later M3
 //! tasks provide the service-crate implementations.
 
-use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, PutOutcome, Role, RoleGrant};
+use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, PutOutcome, Role, RoleGrant, RoleGrantFilter};
 use super::reconcile::{RoleOutcome, StarterPolicyOutcome};
 use crate::ports::Transaction;
 use crate::value::PrincipalId;
@@ -74,6 +74,16 @@ pub trait RoleGrantStore: Send + Sync {
     /// revoked. `RoleService::revoke` (SMA-444 Task 17) uses this to resolve the grant's
     /// `GrantScope` before authorizing the revoke itself against it.
     async fn find(&self, id: Uuid) -> Result<Option<RoleGrant>, AuthzError>;
+}
+
+/// Read port: role grants that match a [`RoleGrantFilter`] (SMA-676 D2), ordered by
+/// `principal_id`, then `id`, with `limit`/`offset` applied after the order (D6). A separate
+/// port, not a new [`RoleGrantStore`] method: that trait has nine implementations, seven of
+/// them test fakes that would gain a method nothing calls — the rule
+/// [`SystemPolicyReconciler`] records.
+#[async_trait]
+pub trait RoleGrantQuery: Send + Sync {
+    async fn find(&self, f: &RoleGrantFilter, limit: u64, offset: u64) -> Result<Vec<RoleGrant>, AuthzError>;
 }
 
 /// Loads the minimal [`EntitySlice`] needed to decide one request (principal, resource,
@@ -159,4 +169,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn assert_reconciler_object_safe(_: &dyn SystemPolicyReconciler, _: &dyn SystemRoleReconciler) {}
+
+    #[allow(dead_code)]
+    fn assert_query_object_safe(_: &dyn RoleGrantQuery, _: &dyn crate::ports::MembershipKindQuery) {}
 }
