@@ -17,7 +17,16 @@
 //
 // NEVER LOG A CAUGHT LIBRARY ERROR OBJECT. `openid-client` errors may embed a URL (the discovery
 // document location, a token endpoint). Every method here catches and rethrows through
-// `wrapError`, which keeps only the error's `name`.
+// `wrapError`, which keeps only the error's `name`. A DISCOVERY failure is different (SMA-656):
+// `getConfig` throws `OidcDiscoveryFailed` (core/errors.ts) with the same name-only message, no
+// `cause`, and a `reason` from a closed list that `classifyDiscoveryError` below sets.
+//
+// THE NO-REVOKE INVARIANT (SMA-656 D10). `OidcDiscoveryFailed` comes only from `getConfig()`, and
+// every method below awaits `getConfig()` before it sends any other request. So a caller that sees
+// one knows that no token request was sent: no authorization code was spent and no token exists.
+// http/routes.ts's callback 503 does not revoke because of this. A change that throws it AFTER a
+// token request (for example a re-discovery on a JWKS `kid` miss inside the grant) breaks that
+// route, which must then revoke.
 //
 // NON-REPUDIATION CHECKS ARE ALWAYS ENABLED, AND THAT IS NOT FREE. `authorizationCodeGrant` does
 // NOT verify the id_token's JWS signature by default (M1 addendum) — enabling it is the right
@@ -32,7 +41,7 @@
 // exists to state.
 import * as client from 'openid-client';
 import type { IdTokenClaims } from '../ports/principal-resolver';
-import { RefreshRejected } from '../core/errors';
+import { OidcDiscoveryFailed, RefreshRejected, type OidcDiscoveryFailureReason } from '../core/errors';
 import type { RefreshedTokens } from '../core/single-flight';
 
 /**
@@ -126,13 +135,20 @@ class RedactedSecret {
 }
 
 /**
+ * The library error's `name`, and nothing else. `wrapError` and the discovery throw (SMA-656 D3)
+ * both use it, so the two messages cannot drift apart.
+ */
+function libraryErrorName(err: unknown): string {
+  return err instanceof Error ? err.name : 'unknown_error';
+}
+
+/**
  * Never rethrow a caught openid-client/oauth4webapi error object — several of its error classes
  * (`ResponseBodyError`, `OperationProcessingError`, ...) can carry the request URL. Keep only the
  * error's `name`, which identifies the failure class without any request or response content.
  */
 function wrapError(stage: string, cause: unknown): Error {
-  const name = cause instanceof Error ? cause.name : 'unknown_error';
-  return new Error(`oidc ${stage} failed: ${name}`);
+  return new Error(`oidc ${stage} failed: ${libraryErrorName(cause)}`);
 }
 
 /**
@@ -171,6 +187,94 @@ function classifyRefreshError(cause: unknown): Error {
   return wrapError('refresh_token_grant', cause);
 }
 
+/** SMA-656 D8 row 6: the ClientError codes that mean "the document is not usable metadata". The
+ * last two are defensive: discovery does not validate endpoints. */
+const INVALID_METADATA_CODES: ReadonlySet<string> = new Set([
+  'OAUTH_RESPONSE_IS_NOT_JSON',
+  'OAUTH_PARSE_ERROR',
+  'OAUTH_INVALID_RESPONSE',
+  'OAUTH_INVALID_SERVER_METADATA',
+  'OAUTH_MISSING_SERVER_METADATA',
+]);
+
+/** SMA-656 D8 row 10: the Node TLS codes that a failed `fetch` carries on its `cause`. */
+const TLS_CAUSE_CODES: ReadonlySet<string> = new Set([
+  'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
+
+/** The own `code` property of an object, or undefined. Reads nothing else. */
+function codeOf(value: unknown): unknown {
+  return typeof value === 'object' && value !== null ? (value as { code?: unknown }).code : undefined;
+}
+
+/** The own `name` property of an object, or undefined. Reads nothing else. */
+function nameOf(value: unknown): unknown {
+  return typeof value === 'object' && value !== null ? (value as { name?: unknown }).name : undefined;
+}
+
+/**
+ * Why discovery failed, as one value of a closed list (SMA-656 D8). The rows are tested in the D8
+ * order, and the first match wins. Derived from openid-client 6.8.8's `errorHandler` and
+ * `performDiscovery` (build/index.js:117-165, 260-299) and measured by tests/adapters/oidc.test.ts
+ * (T9); the rows that a fixture cannot produce cheaply are tested with constructed errors (T9b).
+ *
+ * Reads only the class, `code`, `cause.code`, `cause.status` and the `name` of the nested cause of
+ * an OAUTH_PARSE_ERROR. Each string is compared against a fixed literal or a closed set, and
+ * `status` is read only as a number range, so the return value is always one of the fixed literals:
+ * no library value, message or URL can come out of this function (A2).
+ *
+ * `instanceof client.ClientError` is SAFE here, for the reason classifyRefreshError records above:
+ * this check and the `client.discovery` call in getConfig read the one module-level `client`
+ * binding. This is the fourth non-builtin `instanceof` site that core/errors.ts's rule counts, and
+ * it is on the `instanceof` side of that line. Its OUTPUT crosses module copies as
+ * OidcDiscoveryFailed, which is why routes classify THAT by `code`. `TypeError` and `Response` are
+ * builtins, which both copies share.
+ */
+export function classifyDiscoveryError(err: unknown): OidcDiscoveryFailureReason {
+  if (err instanceof client.ClientError) {
+    const code = err.code;
+    // Row 1. OAUTH_ABORT is defensive: the adapter passes no abort signal.
+    if (code === 'OAUTH_TIMEOUT' || code === 'OAUTH_ABORT') return 'timeout';
+    // Rows 2 and 3. oauth4webapi puts the Response itself on `cause` for this code.
+    if (code === 'OAUTH_RESPONSE_IS_NOT_CONFORM') {
+      const response = err.cause;
+      return response instanceof Response && response.status >= 500 && response.status <= 599 ? 'http_server_error' : 'http_client_error';
+    }
+    // Rows 4 and 5: the body failed after the headers arrived. The other PARSE_ERROR cases fall
+    // through to row 6.
+    if (code === 'OAUTH_PARSE_ERROR') {
+      const nested = err.cause instanceof Error ? err.cause.cause : undefined;
+      const nestedName = nameOf(nested);
+      if (nestedName === 'TimeoutError' || nestedName === 'AbortError') return 'timeout';
+      if (nested instanceof TypeError) return 'network';
+    }
+    // Row 6.
+    if (code !== undefined && INVALID_METADATA_CODES.has(code)) return 'invalid_metadata';
+    // Row 7.
+    if (code === 'OAUTH_JSON_ATTRIBUTE_COMPARISON_FAILED') return 'issuer_mismatch';
+    return 'other';
+  }
+  if (err instanceof TypeError) {
+    const ownCode = codeOf(err);
+    // Row 8: `new URL(as.issuer)` in performDiscovery runs outside errorHandler.
+    if (ownCode === 'ERR_INVALID_URL') return 'invalid_metadata';
+    // Rows 9-11: a failed `fetch` is a TypeError with no own code.
+    if (ownCode === undefined) {
+      const causeCode = codeOf(err.cause);
+      if (causeCode === 'ENOTFOUND') return 'dns';
+      if (typeof causeCode === 'string' && TLS_CAUSE_CODES.has(causeCode)) return 'tls';
+      return 'network';
+    }
+  }
+  // Row 12.
+  return 'other';
+}
+
 export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
   const secret = new RedactedSecret(opts.clientSecret);
   let configPromise: Promise<client.Configuration> | undefined;
@@ -204,7 +308,9 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
       .catch((err: unknown) => {
         // Let the NEXT call retry discovery instead of replaying this rejection forever.
         configPromise = undefined;
-        throw wrapError('discovery', err);
+        // SMA-656 D1, D3, D8: the same name-only message that wrapError('discovery', …) made, a
+        // closed `reason`, and NO `cause`.
+        throw new OidcDiscoveryFailed(`oidc discovery failed: ${libraryErrorName(err)}`, classifyDiscoveryError(err));
       });
     return configPromise;
   }
