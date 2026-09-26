@@ -9,4 +9,5 @@
 // type imports included). Without these names a screen receives `status: 2` and cannot write the
 // name. It is the same trade `./errors/types` makes for ErrorReason: small frozen enum objects in a
 // client bundle. ApiKeyStatus serves the gateway zone's key list and its e2e world (SMA-636).
-export { ApiKeyStatus, NodeStatus } from '@paigasus/proto/iam';
+// PrincipalKind serves the gateway zone's "Model access for people" filter and its e2e world (SMA-676).
+export { ApiKeyStatus, NodeStatus, PrincipalKind } from '@paigasus/proto/iam';

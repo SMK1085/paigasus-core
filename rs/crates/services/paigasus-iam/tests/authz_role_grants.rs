@@ -22,40 +22,22 @@ use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox, pol
 use paigasus_iam::adapters::persistence::{PgAuditLog, PgOutbox, PgRoleGrantStore, SeaOrmUnitOfWork};
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::{
-    AuditEntry, AuditLog, AuditOutcome, AuthzError, DomainEvent, EventType, GrantScope, IdGenerator, OrganizationId, Outbox, PrincipalId, ProjectId, RoleGrant, RoleGrantStore, TeamId, TenancyNodeRef,
-    UnitOfWork,
+    AuditEntry, AuditLog, AuditOutcome, AuthzError, DomainEvent, EventType, GrantScope, IdGenerator, OrganizationId, Outbox, PrincipalId, PrincipalKind, ProjectId, RoleGrant, RoleGrantFilter,
+    RoleGrantQuery, RoleGrantStore, TeamId, TenancyNodeRef, UnitOfWork,
 };
 use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement};
 use uuid::Uuid;
 
-/// Seeds a `principal` + `organization` row via raw SQL — this test only needs valid FK
-/// targets, not the domain layer — mirroring `authz_schema.rs`'s `seed_principal_and_org`.
-/// UUIDs are inlined literals (not bind params): a bound `text` parameter against a `uuid`
-/// column needs an explicit cast, whereas an inline literal is coerced from Postgres's
-/// "unknown"-typed constant (same reasoning as `authz_schema.rs`).
+/// Seeds a `principal` + `organization` row — this test only needs valid FK targets, not the
+/// domain layer — mirroring `authz_schema.rs`'s `seed_principal_and_org`. SMA-676 R4: this is
+/// a thin wrapper over `seed_principal_of_kind`/`seed_org` below, not a second copy of their
+/// INSERTs; the principal is always `user`-kind and the org keeps its pre-SMA-676 `acme` slug
+/// (nothing in this file reads it — every seeded org has its own unique id per test — but it
+/// stays fixed rather than becoming an unlabelled magic literal at this call site).
 async fn seed_principal_and_org(db: &DatabaseConnection, principal_id: Uuid, org_id: Uuid) {
-    db.execute_raw(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        format!(
-            r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
-               VALUES ('{principal_id}', 'prn:pgs:iam:::principal/{principal_id}', 'user', 'active', now(), now())"#
-        ),
-        [],
-    ))
-    .await
-    .unwrap();
-
-    db.execute_raw(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        format!(
-            r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
-               VALUES ('{org_id}', 'prn:pgs:iam:::organization/{org_id}', 'acme', 'Acme', 'active', now(), now())"#
-        ),
-        [],
-    ))
-    .await
-    .unwrap();
+    seed_principal_of_kind(db, principal_id, "user").await;
+    seed_org(db, org_id, "acme").await;
 }
 
 /// Seeds a `team` row under an already-seeded organization — the FK target
@@ -229,7 +211,10 @@ async fn authz_role_grant_duplicate_principal_role_scope_is_rejected_not_silentl
     // what must reject this.
     let dup = make_grant(Uuid::from_u128(103), &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org.clone())), now);
     let err = store.grant(&dup).await.unwrap_err();
-    assert!(matches!(err, AuthzError::Backend(_)), "expected AuthzError::Backend for a unique-constraint violation, got {err:?}");
+    assert!(
+        matches!(err, AuthzError::DuplicateGrant),
+        "SMA-676 D9: expected AuthzError::DuplicateGrant for uq_role_grant_principal_role_scope, got {err:?}"
+    );
 
     assert_eq!(gens.policy_gen().await.unwrap(), before, "a rejected grant must not bump policy_gen");
     let listed = store.list_by_principal(&principal).await.unwrap();
@@ -514,7 +499,10 @@ async fn a_store_error_mid_txn_leaves_no_outbox_or_audit_rows_and_no_gen_bump() 
     // it; the txn is now aborted at the DB level and must be dropped, never committed.
     let dup = make_grant(Uuid::from_u128(202), &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org)), now);
     let err = store.grant_in(&*tx, &dup).await.unwrap_err();
-    assert!(matches!(err, AuthzError::Backend(_)), "expected AuthzError::Backend for a unique-constraint violation, got {err:?}");
+    assert!(
+        matches!(err, AuthzError::DuplicateGrant),
+        "SMA-676 D9: expected AuthzError::DuplicateGrant for uq_role_grant_principal_role_scope, got {err:?}"
+    );
     drop(tx); // no commit -> rollback
 
     assert!(
@@ -526,6 +514,48 @@ async fn a_store_error_mid_txn_leaves_no_outbox_or_audit_rows_and_no_gen_bump() 
         "the rolled-back audit row must never become visible"
     );
     assert_eq!(gens.policy_gen().await.unwrap(), before, "a rolled-back mid-txn failure must not bump policy_gen");
+}
+
+/// SMA-676 controller A2 (deferred from Task 5): the grant race arm, against real Postgres.
+/// A grant row is seeded out of band; a second `grant_in` for the SAME `(principal, role,
+/// scope)`, inside its own transaction, must hit `uq_role_grant_principal_role_scope` and
+/// report `AuthzError::DuplicateGrant`. Dropping that transaction rolls it back, and
+/// `RoleGrantQuery::find` (fully qualified: `PgRoleGrantStore` also implements
+/// `RoleGrantStore::find(&self, id: Uuid)`, so a bare `store.find(..)` is ambiguous) must then
+/// see exactly the one seeded row — the race attempt left nothing behind.
+#[tokio::test]
+async fn a_racing_grant_in_for_the_same_principal_role_scope_is_rejected_and_the_seeded_row_survives() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let principal_uuid = mint_uuid7(1_700_000_000_010, [11u8; 10]);
+    let org_uuid = Uuid::from_u128(11);
+    seed_principal_and_org(&db, principal_uuid, org_uuid).await;
+    seed_role(&db, "org_admin", now).await;
+
+    let principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_uuid).unwrap());
+    let org = OrganizationId::from_uuid(org_uuid);
+    let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
+
+    // Seed a first, successfully committed grant out of band.
+    let seeded = make_grant(Uuid::from_u128(203), &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org.clone())), now);
+    store.grant(&seeded).await.unwrap();
+
+    // The racing arm: the same (principal, role, scope), a distinct grant id, inside its own
+    // transaction — never committed.
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let tx = uow.begin().await.unwrap();
+    let racer = make_grant(Uuid::from_u128(204), &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org.clone())), now);
+    let err = store.grant_in(&*tx, &racer).await.unwrap_err();
+    assert!(
+        matches!(err, AuthzError::DuplicateGrant),
+        "SMA-676 D9: expected AuthzError::DuplicateGrant for uq_role_grant_principal_role_scope, got {err:?}"
+    );
+    drop(tx); // no commit -> rollback
+
+    let filter = RoleGrantFilter::new(Some(principal), Some(GrantScope::Node(TenancyNodeRef::Organization(org))), None, None).expect("principal is set");
+    let found = RoleGrantQuery::find(&store, &filter, 200, 0).await.unwrap();
+    assert_eq!(found, vec![seeded], "only the seeded row survives; the racing grant_in left nothing behind");
 }
 
 /// SMA-481 D6 — a grant against a role key with no `role` row must report the role as
@@ -585,4 +615,130 @@ async fn a_missing_principal_is_not_reported_as_an_unknown_role() {
         matches!(err, AuthzError::Backend(_)),
         "a missing principal must not be reported as an unknown role — the role is fine, the principal is what's gone; got {err:?}"
     );
+}
+
+/// Seeds a bare `principal` row of `kind` (`user` or `service_account`) — the query's kind
+/// join reads this column. Inline literals, for the reason `seed_principal_and_org` states.
+async fn seed_principal_of_kind(db: &DatabaseConnection, principal_id: Uuid, kind: &str) {
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
+               VALUES ('{principal_id}', 'prn:pgs:iam:::principal/{principal_id}', '{kind}', 'active', now(), now())"#
+        ),
+        [],
+    ))
+    .await
+    .unwrap();
+}
+
+/// Seeds a bare `organization` row with its own slug (the slug is unique).
+async fn seed_org(db: &DatabaseConnection, org_id: Uuid, slug: &str) {
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
+               VALUES ('{org_id}', 'prn:pgs:iam:::organization/{org_id}', '{slug}', 'Org', 'active', now(), now())"#
+        ),
+        [],
+    ))
+    .await
+    .unwrap();
+}
+
+fn pid(uuid: Uuid) -> PrincipalId {
+    PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).unwrap())
+}
+
+fn ids(grants: &[RoleGrant]) -> Vec<u128> {
+    grants.iter().map(|g| g.id.as_u128()).collect()
+}
+
+/// SMA-676 D2, D5, D6, D7 against Postgres: the kind join, the EXACT scope match (a team grant
+/// is not an org grant), the Root case, and `ORDER BY principal_id, id` with paging.
+#[tokio::test]
+async fn role_grant_query_filters_by_exact_scope_role_and_kind_in_principal_then_id_order() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let (user_a, user_b, bot) = (Uuid::from_u128(0x1), Uuid::from_u128(0x2), Uuid::from_u128(0x3));
+    seed_principal_of_kind(&db, user_a, "user").await;
+    seed_principal_of_kind(&db, user_b, "user").await;
+    seed_principal_of_kind(&db, bot, "service_account").await;
+    let (org_o, org_p, team_t) = (Uuid::from_u128(0x100), Uuid::from_u128(0x200), Uuid::from_u128(0x110));
+    seed_org(&db, org_o, "org-o").await;
+    seed_org(&db, org_p, "org-p").await;
+    seed_team(&db, org_o, team_t).await;
+    for role in ["gateway_user", "org_admin", "platform_admin"] {
+        seed_role(&db, role, now).await;
+    }
+
+    let o = GrantScope::Node(TenancyNodeRef::Organization(OrganizationId::from_uuid(org_o)));
+    let p = GrantScope::Node(TenancyNodeRef::Organization(OrganizationId::from_uuid(org_p)));
+    let t = GrantScope::Node(TenancyNodeRef::Team(TeamId::from_parts(org_o, team_t)));
+    let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
+    for g in [
+        make_grant(Uuid::from_u128(0x1001), &pid(user_b), "gateway_user", o.clone(), now),
+        make_grant(Uuid::from_u128(0x1002), &pid(user_a), "gateway_user", o.clone(), now),
+        make_grant(Uuid::from_u128(0x1003), &pid(bot), "gateway_user", o.clone(), now),
+        make_grant(Uuid::from_u128(0x1004), &pid(user_a), "org_admin", o.clone(), now),
+        make_grant(Uuid::from_u128(0x1005), &pid(user_a), "gateway_user", t.clone(), now),
+        make_grant(Uuid::from_u128(0x1006), &pid(user_b), "gateway_user", p.clone(), now),
+        make_grant(Uuid::from_u128(0x1007), &pid(user_a), "platform_admin", GrantScope::Root, now),
+    ] {
+        store.grant(&g).await.unwrap();
+    }
+
+    let people = RoleGrantFilter::new(None, Some(o.clone()), Some("gateway_user".to_string()), Some(PrincipalKind::User)).unwrap();
+    assert_eq!(ids(&RoleGrantQuery::find(&store, &people, 200, 0).await.unwrap()), vec![0x1002, 0x1001], "users only, principal order");
+
+    let all_at_o = RoleGrantFilter::new(None, Some(o.clone()), None, None).unwrap();
+    assert_eq!(
+        ids(&RoleGrantQuery::find(&store, &all_at_o, 200, 0).await.unwrap()),
+        vec![0x1002, 0x1004, 0x1001, 0x1003],
+        "principal_id, then id; no team grant"
+    );
+    assert_eq!(
+        ids(&RoleGrantQuery::find(&store, &all_at_o, 2, 1).await.unwrap()),
+        vec![0x1004, 0x1001],
+        "limit and offset apply after the order"
+    );
+
+    let bots = RoleGrantFilter::new(None, Some(o.clone()), None, Some(PrincipalKind::ServiceAccount)).unwrap();
+    assert_eq!(ids(&RoleGrantQuery::find(&store, &bots, 200, 0).await.unwrap()), vec![0x1003]);
+
+    let at_team = RoleGrantFilter::new(None, Some(t), None, None).unwrap();
+    assert_eq!(ids(&RoleGrantQuery::find(&store, &at_team, 200, 0).await.unwrap()), vec![0x1005], "D5: exact match, the team only");
+
+    let at_root = RoleGrantFilter::new(None, Some(GrantScope::Root), None, None).unwrap();
+    assert_eq!(ids(&RoleGrantQuery::find(&store, &at_root, 200, 0).await.unwrap()), vec![0x1007]);
+
+    let a_as_gateway_user = RoleGrantFilter::new(Some(pid(user_a)), None, Some("gateway_user".to_string()), None).unwrap();
+    assert_eq!(ids(&RoleGrantQuery::find(&store, &a_as_gateway_user, 200, 0).await.unwrap()), vec![0x1002, 0x1005]);
+}
+
+/// SMA-676 Review Focus 4. Only `uq_role_grant_principal_role_scope` means "this grant already
+/// exists". A `uq_role_grant_linked_policy` collision is a different grant with a clashing
+/// policy id — a defect, and it must stay `Backend`, or `RoleService::grant` would answer it
+/// with an unrelated "existing" grant.
+#[tokio::test]
+async fn a_linked_policy_collision_stays_a_backend_error_not_a_duplicate_grant() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+    let principal_uuid = mint_uuid7(1_700_000_000_020, [20u8; 10]);
+    let org_uuid = Uuid::from_u128(20);
+    seed_principal_and_org(&db, principal_uuid, org_uuid).await;
+    seed_role(&db, "org_admin", now).await;
+    seed_role(&db, "gateway_user", now).await;
+
+    let principal = pid(principal_uuid);
+    let org = GrantScope::Node(TenancyNodeRef::Organization(OrganizationId::from_uuid(org_uuid)));
+    let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
+    let first = make_grant(Uuid::from_u128(400), &principal, "org_admin", org.clone(), now);
+    store.grant(&first).await.unwrap();
+
+    let mut second = make_grant(Uuid::from_u128(401), &principal, "gateway_user", org, now);
+    second.linked_policy_id = first.linked_policy_id.clone();
+    let err = store.grant(&second).await.unwrap_err();
+    assert!(matches!(err, AuthzError::Backend(_)), "a linked-policy collision is not a duplicate grant; got {err:?}");
 }

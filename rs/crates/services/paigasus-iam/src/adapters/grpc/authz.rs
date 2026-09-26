@@ -38,10 +38,10 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use super::convert;
-use super::convert::require_present;
 use crate::adapters::auth::AuthContext;
 use crate::adapters::http::AppState;
 use crate::application::error::TenancyError;
+use crate::application::roles::ListRoleGrantsInput;
 
 /// The `AuthorizationService` gRPC server — a thin adapter over the same `AppState` use
 /// cases the HTTP surface uses.
@@ -230,12 +230,17 @@ impl AuthorizationService for AuthzGrpc {
         let result: Result<Response<ListRoleGrantsResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            // `RoleService::list` has no pagination of its own (an M3 simplification —
-            // `adapters::http::authz`'s `RoleGrantQuery` doesn't expose `limit`/`offset` at all
-            // either); the wire fields exist for proto-shape parity with `ListPoliciesRequest`
-            // but aren't enforced here.
-            let principal_prn = require_present(&req.principal_prn, "principal_prn").map_err(convert::status_to_grpc)?;
-            let grants = self.state.roles.list(&actor, principal_prn).await.map_err(convert::status_to_grpc)?;
+            // SMA-676 D10: move fields only. `RoleService::list` owns D3, D4, D6 and D7. A
+            // `limit` of 0 is "unset" on the wire (`to_page`'s rule).
+            let input = ListRoleGrantsInput {
+                principal_prn: Some(req.principal_prn),
+                scope_prn: Some(req.scope_prn),
+                role_key: Some(req.role_key),
+                principal_kind: convert::principal_kind_filter(req.principal_kind),
+                limit: (req.limit != 0).then(|| i64::from(req.limit)),
+                offset: Some(req.offset as i64),
+            };
+            let grants = self.state.roles.list(&actor, input).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ListRoleGrantsResponse {
                 grants: grants.iter().map(convert::to_proto_role_grant).collect(),
             }))

@@ -46,6 +46,8 @@ function world(opts: { teams?: number; projectsPerTeam?: number } = {}): FakeIam
     'tenancy.listTeams': () => ({ teams: teams(opts.teams ?? 1) }),
     'tenancy.listProjects': (req) => ({ projects: projects(req.teamPrn, opts.projectsPerTeam ?? 1) }),
     'serviceAccounts.listServiceAccounts': () => ({ serviceAccounts: [] }),
+    'authz.listRoleGrants': () => ({ grants: [] }),
+    'tenancy.listMemberships': () => ({ memberships: [] }),
   };
 }
 
@@ -119,6 +121,9 @@ describe('loadOrganizationSettings', () => {
     expect(data.error.presentation).toBe('forbidden');
     expect(calls('tenancy.listTeams')).toHaveLength(0);
     expect(calls('serviceAccounts.listServiceAccounts')).toHaveLength(0);
+    // SMA-676: a denied GetOrganization must make no people call either (controller ruling F10).
+    expect(calls('authz.listRoleGrants')).toHaveLength(0);
+    expect(calls('tenancy.listMemberships')).toHaveLength(0);
   });
 
   it.each([
@@ -200,5 +205,15 @@ describe('loadOrganizationSettings', () => {
     });
     await loadOrganizationSettings(deps(), params());
     expect(peak).toBe(8);
+  });
+
+  it('loads the people section with the org PRN, reading role grants and memberships for it (SMA-676)', async () => {
+    iam.setHandlers(world());
+    const calls = callsSince(iam);
+    const data = await loadOrganizationSettings(deps(), params());
+    if (data.kind !== 'ok') throw new Error(`expected ok, got ${data.kind}`);
+    expect(data.people).toMatchObject({ kind: 'ok', orgPrn: ORG, holders: [], candidates: [] });
+    expect(calls('authz.listRoleGrants')[0]?.request).toMatchObject({ scopePrn: ORG });
+    expect(calls('tenancy.listMemberships')[0]?.request).toMatchObject({ filter: { case: 'nodePrn', value: ORG } });
   });
 });

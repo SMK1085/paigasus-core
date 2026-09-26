@@ -16,11 +16,11 @@ use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::{PgMembershipRepository, PgOrganizationRepository, PgPrincipalRepository, PgProjectRepository, PgTeamRepository};
 use paigasus_iam_core::{
-    Clock, ConflictKind, Email, IdGenerator, Membership, MembershipRepository, NodeStatus, Organization, OrganizationRepository, PreconditionKind, Principal, PrincipalId, PrincipalKind,
-    PrincipalRepository, PrincipalStatus, Project, ProjectRepository, RepositoryError, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, User,
+    Clock, ConflictKind, Email, IdGenerator, Membership, MembershipAxis, MembershipKindQuery, MembershipRepository, NodeStatus, Organization, OrganizationRepository, PreconditionKind, Principal,
+    PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, Project, ProjectRepository, RepositoryError, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, User,
 };
 use paigasus_kernel::{Prn, mint_uuid7};
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use uuid::Uuid;
 
 /// Seeds a single user-principal via `PgPrincipalRepository::create_user` (M0 pattern from
@@ -399,4 +399,50 @@ async fn every_membership_read_path_agrees_on_the_creator() {
         let from_node_list = by_node.iter().find(|r| r.id == attached.id).expect("membership present in list_by_node");
         assert_eq!(from_node_list.created_by, expected, "{node_list_label} must select created_by");
     }
+}
+
+/// Seeds a bare service-account `principal` row (raw SQL: this test needs only the kind).
+async fn seed_service_account_principal(db: &DatabaseConnection, uuid: Uuid) -> PrincipalId {
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            r#"INSERT INTO "principal" (id, prn, kind, status, created_at, updated_at)
+               VALUES ('{uuid}', 'prn:pgs:iam:::principal/{uuid}', 'service_account', 'active', now(), now())"#
+        ),
+        [],
+    ))
+    .await
+    .unwrap();
+    PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).unwrap())
+}
+
+/// SMA-676 D8 against Postgres: `list_of_kind` keeps only members of that kind, on the node
+/// axis and on the principal axis, and still applies the node guard.
+#[tokio::test]
+async fn list_of_kind_keeps_only_members_of_that_kind_on_both_axes() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let (org, _team, _project) = seed_chain(&db).await;
+    let person = seed_user(&db, 71).await;
+    let bot = seed_service_account_principal(&db, mint_uuid7(1_700_000_000_500, [72u8; 10])).await;
+    let repo = PgMembershipRepository::new(db.clone());
+    for p in [&person, &bot] {
+        let m = membership_at(&ids, p, TenancyNodeRef::Organization(org.id.clone()), clock.now());
+        repo.attach(&m, &stamp_of(&m)).await.unwrap();
+    }
+    let at_org = MembershipAxis::Node(TenancyNodeRef::Organization(org.id.clone()));
+
+    let users = repo.list_of_kind(&at_org, PrincipalKind::User, 200, 0).await.unwrap();
+    assert_eq!(users.iter().map(|r| r.principal_prn.clone()).collect::<Vec<_>>(), vec![person.canonical()]);
+    let bots = repo.list_of_kind(&at_org, PrincipalKind::ServiceAccount, 200, 0).await.unwrap();
+    assert_eq!(bots.iter().map(|r| r.principal_prn.clone()).collect::<Vec<_>>(), vec![bot.canonical()]);
+    assert!(repo.list_of_kind(&MembershipAxis::Principal(bot.uuid()), PrincipalKind::User, 200, 0).await.unwrap().is_empty());
+    assert_eq!(
+        repo.list_by_node(&TenancyNodeRef::Organization(org.id.clone()), 200, 0).await.unwrap().len(),
+        2,
+        "the unfiltered path is unchanged"
+    );
 }

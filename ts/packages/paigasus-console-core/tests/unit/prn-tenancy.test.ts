@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ROOT_PRN, isUuid, organizationPrn, parseTenancyPrn, projectPrn, teamPrn, type TenancyRef } from '../../src/prn-tenancy';
+import { ROOT_PRN, isUuid, organizationPrn, parsePrincipalPrn, parseTenancyPrn, principalPrn, projectPrn, teamPrn, type TenancyRef } from '../../src/prn-tenancy';
 
 // tests/unit -> tests -> paigasus-console-core -> packages -> ts -> repo root: five `../`. Same
 // depth as the original ts/apps/iam-console location (apps/iam-console and packages/paigasus-console-core
@@ -127,6 +127,45 @@ describe('parseTenancyPrn', () => {
     ['a valid team PRN of 571 characters (a 480-character region)', `prn:pgs:iam:${'a'.repeat(480)}:${ORG}:team/${TEAM}`],
   ])('returns null for %s', (_label, prn) => {
     expect(parseTenancyPrn(prn)).toBeNull();
+  });
+});
+
+const PRINCIPAL = '0190a1e5-0000-7000-8000-0000000000d1';
+
+describe('parsePrincipalPrn', () => {
+  it('parses a canonical principal PRN', () => {
+    expect(parsePrincipalPrn(`prn:pgs:iam:::principal/${PRINCIPAL}`)).toEqual({ id: PRINCIPAL });
+  });
+
+  it('lower-cases the id of an upper-case PRN, and principalPrn rebuilds the canonical form', () => {
+    const ref = parsePrincipalPrn(`prn:pgs:iam:::principal/${PRINCIPAL.toUpperCase()}`);
+    expect(ref).toEqual({ id: PRINCIPAL });
+    expect(principalPrn(ref?.id ?? '')).toBe(`prn:pgs:iam:::principal/${PRINCIPAL}`);
+  });
+
+  it.each([
+    ['an organization PRN', `prn:pgs:iam:::organization/${PRINCIPAL}`],
+    ['a team PRN', `prn:pgs:iam::${ORG}:team/${TEAM}`],
+    ['a project PRN', `prn:pgs:iam::${ORG}:project/${TEAM}`],
+    ['another service', `prn:pgs:gateway:::principal/${PRINCIPAL}`],
+    ['a principal WITH an org field', `prn:pgs:iam::${ORG}:principal/${PRINCIPAL}`],
+    ['a malformed PRN', 'not-a-prn'],
+    ['the empty string', ''],
+    // Valid in every field except its length (MAX_LEN 512), the same shape of case parseTenancyPrn
+    // is tested with above.
+    ['a principal PRN over MAX_LEN characters', `prn:pgs:iam:::principal/${'a'.repeat(500)}`],
+  ])('returns null for %s', (_label, prn) => {
+    expect(parsePrincipalPrn(prn)).toBeNull();
+  });
+});
+
+describe('principalPrn', () => {
+  it('builds a canonical, lower-case PRN', () => {
+    expect(principalPrn(PRINCIPAL.toUpperCase())).toBe(`prn:pgs:iam:::principal/${PRINCIPAL}`);
+  });
+
+  it('throws a TypeError for an id that is not a UUID, so a bad URL segment cannot become a PRN', () => {
+    expect(() => principalPrn('x')).toThrow(TypeError);
   });
 });
 

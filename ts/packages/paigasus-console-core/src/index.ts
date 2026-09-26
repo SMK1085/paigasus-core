@@ -6,7 +6,7 @@
 import 'server-only';
 
 export { principalPrnOf } from './principal-prn';
-export { ROOT_PRN, isUuid, organizationPrn, parseTenancyPrn, projectPrn, teamPrn, type TenancyKind, type TenancyRef } from './prn-tenancy';
+export { ROOT_PRN, isUuid, organizationPrn, parsePrincipalPrn, parseTenancyPrn, principalPrn, projectPrn, teamPrn, type PrincipalRef, type TenancyKind, type TenancyRef } from './prn-tenancy';
 export { CORRELATION_HEADER, REQUEST_PATH_HEADER } from './correlation-header';
 export { createJsonLogger, logger, type AppEventFields, type AppEventName, type ConsoleLogger } from './logger';
 export { callIam, neverReachedIam, sessionExpired, type ActionState, type IamResult } from './errors';

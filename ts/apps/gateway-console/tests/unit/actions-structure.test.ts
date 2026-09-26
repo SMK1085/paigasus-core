@@ -24,6 +24,7 @@ import { describe, expect, it } from 'vitest';
 const APP_DIR = fileURLToPath(new URL('../../app', import.meta.url));
 
 const EXPECTED: Readonly<Record<string, readonly string[]>> = {
+  '(console)/people-model-access/actions.ts': ['grantModelAccessAction', 'revokeModelAccessAction'],
   '(console)/service-accounts/actions.ts': ['allowModelCallsAction', 'archiveServiceAccountAction', 'createServiceAccountAction', 'issueApiKeyAction', 'revokeApiKeyAction'],
 };
 
