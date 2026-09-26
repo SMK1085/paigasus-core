@@ -33,3 +33,22 @@ annotation) call this helper. No other file repeats the condition.
 true
 {{- end -}}
 {{- end -}}
+
+{{/*
+paigasus.iamAudienceNotes: the NOTES.txt body when paigasus.iamAudienceWarns is "true", else "".
+NOTES.txt only includes this helper, so charts/paigasus/tests/env.sh can test the text offline
+(rows N0-N5). The first line is the marker that ci/kind/run.sh asserts. Keep the text equal to
+§ 4.3 of docs/superpowers/specs/2026-09-26-sma-691-default-audience-warning-design.md.
+*/}}
+{{- define "paigasus.iamAudienceNotes" -}}
+{{- if include "paigasus.iamAudienceWarns" . -}}
+WARNING (SMA-691): the IAM audience equals oidc.clientId, so an ID token passes IAM's audience check.
+IAM accepts the audience {{ include "paigasus.iamAudience" . | quote }}. An OIDC ID token has the client id as its audience.
+IAM refuses a Keycloak ID token by its typ claim (SMA-686). Dex does not set that claim.
+Other IdPs are not measured.
+Recommended: give the API its own audience and set oidc.audience to it.
+Follow the order in docs/ops/RUNBOOK-chart.md section 6, or every session breaks.
+If your IdP cannot do this (Dex), set oidc.acknowledgeClientIdAudience to the value of
+oidc.clientId to remove this warning.
+{{- end -}}
+{{- end -}}

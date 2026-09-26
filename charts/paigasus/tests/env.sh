@@ -55,6 +55,18 @@
 #   W13 gateway-on  The gateway zone is on. The key still occurs once.
 #   W14 no-restart  The acknowledgement changes no pod template, so it restarts no pod.
 # A second row counter reds the script when a W row call line is deleted.
+#
+# The script also checks the SMA-691 NOTES text. No offline helm command prints NOTES, so a copy
+# of the chart renders the bytes of NOTES.txt through a probe ConfigMap (check_notes_pin,
+# check_notes):
+#   N0 pin          The bytes of templates/NOTES.txt equal the three lines of the spec.
+#   N1 default      The NOTES body, with the audience "paigasus-console".
+#   N2 explicit-equal
+#                   oidc.audience is set to the client id. The same body.
+#   N3 distinct     oidc.audience differs from the client id. Empty.
+#   N4 acknowledged The acknowledgement equals the client id. Empty.
+#   N5 stale-ack    The acknowledgement names another client id. The body.
+# A third row counter reds the script when an N row call line is deleted.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
@@ -334,6 +346,86 @@ check_warning_restart "W14 no-restart"
 
 if [ "$WARNING_ROWS" -lt "$WARNING_ROWS_WANT" ]; then
   echo "FAIL [warning rows]: $WARNING_ROWS warning row(s) ran, want $WARNING_ROWS_WANT"; ec=1
+fi
+
+# The NOTES text (SMA-691). No offline helm command prints NOTES: `helm install --dry-run` needs
+# a cluster. So a copy of the chart gets a probe. The probe wraps the bytes of NOTES.txt in a
+# named template and renders it into a ConfigMap. N0 pins those bytes.
+NOTES_ROWS=0
+NOTES_ROWS_WANT=6
+NOTES_CHART="$TMP/notes-chart"
+
+# check_notes_pin <label>
+check_notes_pin() {
+  local label="$1" out
+  NOTES_ROWS=$((NOTES_ROWS + 1))
+  if ! out="$(python3 -c '
+import sys
+want = ("{{- /* SPDX-License-Identifier: Apache-2.0 */ -}}\n"
+        "{{- include \"paigasus.validate\" . -}}\n"
+        "{{- include \"paigasus.iamAudienceNotes\" . -}}\n")
+with open(sys.argv[1]) as fh:
+    got = fh.read()
+print("OK" if got == want else "templates/NOTES.txt is " + repr(got) + ", want " + repr(want))' "$CHART/templates/NOTES.txt" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# check_notes <label> <body|empty> [helm args...]
+check_notes() {
+  local label="$1" want="$2"; shift 2
+  local out
+  NOTES_ROWS=$((NOTES_ROWS + 1))
+  if ! helm template paigasus "$NOTES_CHART" "${BASE[@]+"${BASE[@]}"}" "$@" \
+      --show-only templates/zz-notes-probe.yaml >"$TMP/notes.yaml" 2>"$TMP/notes.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/notes.err"; ec=1; return 0
+  fi
+  if ! out="$(WANT="$want" python3 -c '
+import os, sys, yaml
+body = "\n".join([
+    "WARNING (SMA-691): the IAM audience equals oidc.clientId, so an ID token passes IAM" + chr(39) + "s audience check.",
+    "IAM accepts the audience \"paigasus-console\". An OIDC ID token has the client id as its audience.",
+    "IAM refuses a Keycloak ID token by its typ claim (SMA-686). Dex does not set that claim.",
+    "Other IdPs are not measured.",
+    "Recommended: give the API its own audience and set oidc.audience to it.",
+    "Follow the order in docs/ops/RUNBOOK-chart.md section 6, or every session breaks.",
+    "If your IdP cannot do this (Dex), set oidc.acknowledgeClientIdAudience to the value of",
+    "oidc.clientId to remove this warning.",
+])
+want = body if os.environ["WANT"] == "body" else ""
+with open(sys.argv[1]) as fh:
+    docs = [d for d in yaml.safe_load_all(fh) if d]
+cms = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "notes-probe"]
+if len(cms) != 1:
+    print(str(len(cms)) + " notes-probe ConfigMap(s), want 1")
+else:
+    got = (cms[0].get("data") or {}).get("notes")
+    print("OK" if got == want else "NOTES is " + repr(got) + ", want " + repr(want))' "$TMP/notes.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+if cp -R "$CHART" "$NOTES_CHART" \
+  && { printf '%s\n' '{{- define "paigasus.notesProbe" -}}' && cat "$CHART/templates/NOTES.txt" \
+    && printf '%s\n' '{{- end -}}'; } >"$NOTES_CHART/templates/_zz-notes-probe.tpl" \
+  && printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: notes-probe' 'data:' \
+    '  notes: {{ include "paigasus.notesProbe" . | quote }}' >"$NOTES_CHART/templates/zz-notes-probe.yaml"; then
+  :
+else
+  echo "FAIL [notes probe]: cannot build the probe chart under $NOTES_CHART"; ec=1
+fi
+
+check_notes_pin "N0 pin"
+check_notes "N1 default"        body
+check_notes "N2 explicit-equal" body  --set oidc.audience=paigasus-console
+check_notes "N3 distinct"       empty --set oidc.audience=api://paigasus
+check_notes "N4 acknowledged"   empty --set oidc.acknowledgeClientIdAudience=paigasus-console
+check_notes "N5 stale-ack"      body  --set oidc.acknowledgeClientIdAudience=old-client
+
+if [ "$NOTES_ROWS" -lt "$NOTES_ROWS_WANT" ]; then
+  echo "FAIL [notes rows]: $NOTES_ROWS notes row(s) ran, want $NOTES_ROWS_WANT"; ec=1
 fi
 
 if [ "$ec" -eq 0 ]; then echo "== chart env OK =="; fi
