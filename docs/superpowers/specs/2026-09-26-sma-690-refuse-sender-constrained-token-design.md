@@ -2,7 +2,7 @@
 
 - Linear: SMA-690 (residual R4 of SMA-686, `2026-09-25-sma-686-refuse-id-token-bearer-design.md`
   § 8; SMA-686 code review finding 4)
-- Status: revised after the spec challenge (2026-09-26). The challenge is in § 9.
+- Status: approved at GATE 1 (2026-09-26). The spec challenge is in § 9.
 - Path: architectural (a change to what IAM accepts from a client)
 - Evidence: `2026-09-26-sma-690-measurements.md`
 
@@ -92,7 +92,7 @@ fixtures (`ci/kind/realm/paigasus-realm.json`, `tests/fixtures/keycloak-realm.js
 | D8 | The refusal has its own log line at `info`, with its own static message: "refused a bearer token: it is bound to a key, and IAM cannot check the binding". The line names the issuer and a static marker, `cnf` or `typ DPoP`. The SMA-686 line stays byte-identical. Both go through `log_refusal` and its rate limit (SMA-686 D14, D15). | An operator who gets 401s must see why, and must see the cause without reading the `marker` field. A separate message keeps the two existing SMA-686 log tests (`validator.rs:854`, `:986`) valid. Only a correctly signed token from a configured issuer reaches the line. |
 | D9 | A follow-up Linear issue tracks the DPoP proof check (RFC 9449 § 4.3 and § 7) on the IAM HTTP and gRPC paths and through the gateway. On the `Bearer` scheme, that issue keeps both markers. On the `DPoP` scheme, it requires `cnf.jkt` and a proof whose key thumbprint matches it. | D1. D3's guard is still needed on the `Bearer` scheme after DPoP support. |
 | D10 | No switch. The check applies to every configured issuer. | No shipped client uses DPoP (§ 2). A switch that accepts a bound token as a bearer token restores the gap. |
-| D11 | No Notion ADR. **Open: Sven decides at GATE 1.** | The change hardens one check and changes no interface, like SMA-686 D10. But it also records that IAM does not support DPoP, which is a protocol-support decision. SMA-686 D10 was Sven's choice for SMA-686 only. |
+| D11 | No Notion ADR. Sven approved the spec with this decision at GATE 1 on 2026-09-26. | The change hardens one check and changes no interface, like SMA-686 D10. But it also records that IAM does not support DPoP, which is a protocol-support decision. SMA-686 D10 was Sven's choice for SMA-686 only. |
 
 ## 4. Change
 
@@ -352,6 +352,6 @@ No BLOCKER.
 | § 7 gives no evidence for "no kind run" | MINOR | Folded in: § 7 lists the four facts. |
 | D9 contradicts D3 | MINOR | Folded in: D9 keeps both markers on the `Bearer` scheme. |
 | The evidence file contradicts itself | MINOR | Fixed in the evidence file (§ 4.6). |
-| Did Sven choose "no ADR" for SMA-690? | QUESTION | Open for GATE 1 (D11). |
+| Did Sven choose "no ADR" for SMA-690? | QUESTION | Sven approved the spec with D11 (no ADR) at GATE 1. |
 | Should the runbook name Keycloak client policies? | QUESTION | Folded in: § 4.3 and R5, marked "not measured". |
 | Should the e2e call a gRPC endpoint? | QUESTION | No: § 5.2 states that `resolve` plus test 18 covers the gRPC paths. The e2e app is HTTP only; a gRPC server in the test adds cost and proves the same use case call. |
