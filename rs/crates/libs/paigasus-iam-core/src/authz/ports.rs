@@ -78,7 +78,7 @@ pub trait RoleGrantStore: Send + Sync {
 
 /// Read port: role grants that match a [`RoleGrantFilter`] (SMA-676 D2), ordered by
 /// `principal_id`, then `id`, with `limit`/`offset` applied after the order (D6). A separate
-/// port, not a new [`RoleGrantStore`] method: that trait has nine implementations, seven of
+/// port, not a new [`RoleGrantStore`] method: that trait has eleven implementations, ten of
 /// them test fakes that would gain a method nothing calls — the rule
 /// [`SystemPolicyReconciler`] records.
 #[async_trait]

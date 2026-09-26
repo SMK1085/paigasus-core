@@ -232,7 +232,7 @@ pub enum MembershipAxis {
 }
 
 /// Read port: a membership listing narrowed to one principal kind (SMA-676 D8). A separate
-/// port, not a new [`MembershipRepository`] method: that trait has six implementations, four
+/// port, not a new [`MembershipRepository`] method: that trait has six implementations, five
 /// of them test fakes (the rule `authz::ports::SystemPolicyReconciler` records).
 #[async_trait]
 pub trait MembershipKindQuery: Send + Sync {
