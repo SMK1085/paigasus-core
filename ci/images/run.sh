@@ -10,12 +10,14 @@
 #
 # usage: ci/images/run.sh build [iam|gateway]     # [iam|gateway] scopes the build
 #        ci/images/run.sh smoke [iam|gateway]...   # no argument: both images; else exactly those
+#        ci/images/run.sh smoke <iam-console|gateway-console>...   # SMA-688: paigasus-<key>:dev
 #        ci/images/run.sh all                       # build both + smoke; takes no service arg
-#        ci/images/run.sh build-oci <iam|gateway> <outdir>   # SMA-658: OCI archive, no --load
+#        ci/images/run.sh build-oci <key> <outdir>  # SMA-658/SMA-688: OCI archive, no --load
 #        ci/images/run.sh load-oci <archive> <image-name>     # load + identity check (prints M3)
 #        ci/images/run.sh rehearse <archive.oci.tar>...      # SMA-658: publish steps vs two local registries
 #        ci/images/run.sh build-console [iam|gateway]   # SMA-513: console image; [iam|gateway] scopes the build
 #        ci/images/run.sh all-consoles                    # SMA-513: build both consoles + smoke; takes no service arg
+# <key> is a chain key of ci/images/chains.toml: iam, gateway, iam-console or gateway-console.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +61,27 @@ crate_for() {
     iam)     echo "paigasus-iam" ;;
     gateway) echo "paigasus-gateway" ;;
     *) echo "unknown service: $1" >&2; return 1 ;;
+  esac
+}
+
+# SMA-688: every release key, mapped ONCE. A key is a chain key of ci/images/chains.toml. This
+# file keeps its own bash table on purpose (spec § 4.1). A key that the registry names and this
+# table does not know fails kind_for_key, and so fails build-oci and smoke for that key.
+kind_for_key() {
+  case "$1" in
+    iam|gateway) echo cargo ;;
+    iam-console|gateway-console) echo npm ;;
+    *) echo "unknown release key: $1" >&2; return 1 ;;
+  esac
+}
+
+# The console zone of a console key: `iam-console` -> `iam`. The console helpers below
+# (app_for, base_path_for, console_probe_path_for) take the zone, never the key.
+zone_for_key() {
+  case "$1" in
+    iam-console) echo iam ;;
+    gateway-console) echo gateway ;;
+    *) echo "not a console key: $1" >&2; return 1 ;;
   esac
 }
 
@@ -476,13 +499,23 @@ extract_chisel_manifest() {
   fi
 }
 
-# The version line of a service crate's own Cargo.toml. Both services carry a literal version
-# (not `version.workspace = true`), which is what the image's version label must equal.
+# The version that the image's version label must equal, read from the chain's version file
+# (ci/images/chains.toml). SMA-688: a console key reads the top-level "version" of its
+# package.json. The sed reads the two-space-indented top-level key only; release_plan.py reads
+# the same value with a JSON parser, and the publish job's label compare fails when the two
+# disagree.
 version_for() {
-  local crate="$1" v
-  v="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$ROOT/rs/crates/services/${crate}/Cargo.toml" | sed -n 1p)"
+  local key="$1" kind file v
+  kind="$(kind_for_key "$key")"
+  if [ "$kind" = cargo ]; then
+    file="rs/crates/services/$(crate_for "$key")/Cargo.toml"
+    v="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$ROOT/$file" | sed -n 1p)"
+  else
+    file="ts/apps/$(app_for "$(zone_for_key "$key")")/package.json"
+    v="$(sed -n 's/^  "version": "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)",\{0,1\}$/\1/p' "$ROOT/$file" | sed -n 1p)"
+  fi
   if [ -z "$v" ]; then
-    echo "::error::no literal version line in rs/crates/services/${crate}/Cargo.toml" >&2
+    echo "::error::no literal MAJOR.MINOR.PATCH version line in ${file}" >&2
     return 1
   fi
   echo "$v"
@@ -631,15 +664,22 @@ build_console_one() {
 # already aliases `docker build` to the same buildx call, which is how the containerd-image-store
 # Mac measurement in docs/ops/RUNBOOK-containers.md was taken). Do NOT "simplify" this back to
 # bare `docker build` — that is the exact regression this comment exists to prevent.
-build_oci() {
+build_oci_service() {
   local service="$1" outdir="$2" crate version arch archive build_log
   crate="$(crate_for "$service")"
-  version="$(version_for "$crate")"
+  version="$(version_for "$service")"
   arch="$(docker version --format '{{.Server.Arch}}')"
   mkdir -p "$outdir"
   archive="${outdir}/${crate}-${arch}.oci.tar"
   build_log="$(mktemp "${TMPDIR:-/tmp}/paigasus-build-${service}.XXXXXX")"
-  trap 'rm -f "$build_log"' RETURN
+  # SMA-688: this trap must disarm ITSELF once it fires. build_oci_service now runs INSIDE the
+  # build_oci dispatcher, not straight from the top-level case block, and a bash RETURN trap
+  # stays armed for the NEXT function return too — measured: without the self-disarming
+  # `trap - RETURN` here, this trap fired again when build_oci (the caller) returned, and died
+  # there on `build_log: unbound variable` under `set -u`, since build_log is this function's own
+  # local and is out of scope in its caller. build_one's copy of this trap needs no such fix: it
+  # is still called straight from the top-level case block, one call frame up, not two.
+  trap 'rm -f "$build_log"; trap - RETURN' RETURN
   echo "== build-oci ${crate} ${version} (${arch}) =="
   docker buildx build \
     --progress=plain \
@@ -657,6 +697,49 @@ build_oci() {
     "$ROOT/rs" 2>&1 | tee "$build_log"
   extract_chisel_manifest "$build_log" "$ROOT/chisel-manifest-${service}-${arch}.txt"
   echo "  built ${archive}"
+}
+
+# SMA-688: the console release build. The same OCI transport as build_oci_service
+# (--provenance=false --sbom=false, one image, no --load) and the same label set, with
+# title=paigasus-<key>. It has no --no-cache-filter=rootfs and no chisel manifest: both exist for
+# the chisel-cut service base only (spec § 5.1). The build inputs are build_console_one's.
+build_oci_console() {
+  local key="$1" outdir="$2" zone app base_path version arch archive
+  zone="$(zone_for_key "$key")"
+  app="$(app_for "$zone")"
+  base_path="$(base_path_for "$zone")"
+  version="$(version_for "$key")"
+  arch="$(docker version --format '{{.Server.Arch}}')"
+  mkdir -p "$outdir"
+  archive="${outdir}/paigasus-${key}-${arch}.oci.tar"
+  echo "== build-oci paigasus-${key} ${version} (${arch}) =="
+  docker buildx build \
+    --progress=plain \
+    --provenance=false --sbom=false \
+    --output "type=oci,dest=${archive},name=paigasus-${key}:dev" \
+    -f "$ROOT/ts/Dockerfile" \
+    --build-context "bindings=$ROOT/rs/crates/bindings" \
+    --build-arg "APP=${app}" \
+    --build-arg "BASE_PATH=${base_path}" \
+    --label "org.opencontainers.image.title=paigasus-${key}" \
+    --label "org.opencontainers.image.description=Paigasus ${zone} console" \
+    --label "org.opencontainers.image.source=https://github.com/SMK1085/paigasus-core" \
+    --label "org.opencontainers.image.revision=${REVISION}" \
+    --label "org.opencontainers.image.version=${version}" \
+    --label "org.opencontainers.image.licenses=Apache-2.0" \
+    "$ROOT/ts"
+  echo "  built ${archive}"
+}
+
+# SMA-688: the key decides the build. The dispatcher has already run the pins for this kind.
+build_oci() {
+  local key="$1" outdir="$2" kind
+  kind="$(kind_for_key "$key")"
+  if [ "$kind" = npm ]; then
+    build_oci_console "$key" "$outdir"
+  else
+    build_oci_service "$key" "$outdir"
+  fi
 }
 
 # SMA-658 spec § 4.2: the image the smoke suite tests must be the image in the archive. What a
@@ -1128,6 +1211,9 @@ console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(r
 # `set -e`. Each one keeps its JS program in a `local`, so it needs no global except ROOT (and
 # with_deadline, for the HEALTHCHECK row). ci/images/console-selftest.sh copies them out of this
 # file with awk and calls them in this same `|| rc=$?` shape against a stub `docker`.
+# SMA-688: each image row takes `<app> <image>`. The image is the one smoke_consoles tests:
+# `<app>:dev` from build-console, or `paigasus-<key>:dev` from load-oci. A row never builds an
+# image name from `<app>` itself, or it would test a different image than the smoke run.
 
 # R-NODE (SMA-670 gap 1). The runtime base pins only the Node MAJOR (distroless publishes no
 # patch-level tags), so nothing else records which Node the image runs. This row prints it. A
@@ -1137,7 +1223,7 @@ console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(r
 # pin. It needs only the image, not a running container. stdout only is parsed; docker's own stderr
 # passes through.
 console_node_version_row() {
-  local app="$1" pin ver_out ver_rc=0 line maj min pat pmaj pmin ppat advice
+  local app="$1" image="$2" pin ver_out ver_rc=0 line maj min pat pmaj pmin ppat advice
   local pin_re='^([0-9]+)\.([0-9]+)\.([0-9]+)$' ver_re='^v([0-9]+)\.([0-9]+)\.([0-9]+)$'
   pin="$(sed -n 's/^node = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")" || pin=""
   if ! [[ $pin =~ $pin_re ]]; then
@@ -1145,9 +1231,9 @@ console_node_version_row() {
     return 1
   fi
   pmaj="${BASH_REMATCH[1]}"; pmin="${BASH_REMATCH[2]}"; ppat="${BASH_REMATCH[3]}"
-  ver_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" --version)" || ver_rc=$?
+  ver_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" --version)" || ver_rc=$?
   if [ "$ver_rc" -ne 0 ]; then
-    echo "::error::${app}: runtime Node version NOT checked — docker exited ${ver_rc} on ${app}:dev before node printed a version, so the image is missing or unreadable." >&2
+    echo "::error::${app}: runtime Node version NOT checked — docker exited ${ver_rc} on ${image} before node printed a version, so the image is missing or unreadable." >&2
     return 1
   fi
   line="$(printf '%s\n' "$ver_out" | sed -n 1p)" || line=""
@@ -1184,7 +1270,7 @@ console_node_version_row() {
 # far below either zone's count rather than pinned to a value that goes stale (SMA-670 review
 # finding 5: an earlier comment named 1367 and 1324, and a later measurement already read 1353).
 console_image_config_row() {
-  local app="$1" rc=0 env_out env_rc=0 keys key walk_out walk_rc=0 first n paths paths_rc=0
+  local app="$1" image="$2" rc=0 env_out env_rc=0 keys key walk_out walk_rc=0 first n paths paths_rc=0
   local walk_js='
 const fs = require("fs");
 let walked = 0;
@@ -1200,22 +1286,22 @@ const walk = (d) => {
 walk(process.argv[1]);
 console.log(["walked=" + walked].concat(found).join("\n"));
 '
-  env_out="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${app}:dev")" || env_rc=$?
+  env_out="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image")" || env_rc=$?
   if [ "$env_rc" -ne 0 ]; then
-    echo "::error::${app}: image config NOT checked — docker image inspect exited ${env_rc} on ${app}:dev, so the image is missing or unreadable." >&2
+    echo "::error::${app}: image config NOT checked — docker image inspect exited ${env_rc} on ${image}, so the image is missing or unreadable." >&2
     rc=1
   else
     keys="$(printf '%s\n' "$env_out" | sed -n 's/^\(PAIGASUS_[^=]*\)=.*$/\1/p')" || keys=""
     if [ -n "$keys" ]; then
       while IFS= read -r key; do
-        echo "::error::${app}:dev bakes ${key} into Config.Env — console config is deployment-varying and must stay runtime-only (the value is not printed)." >&2
+        echo "::error::${image} bakes ${key} into Config.Env — console config is deployment-varying and must stay runtime-only (the value is not printed)." >&2
       done < <(printf '%s\n' "$keys")
       rc=1
     fi
   fi
-  walk_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" -e "$walk_js" /app)" || walk_rc=$?
+  walk_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" -e "$walk_js" /app)" || walk_rc=$?
   if [ "$walk_rc" -ne 0 ]; then
-    echo "::error::${app}: .env scan NOT checked — the walk exited ${walk_rc} on ${app}:dev, so the image is missing or unreadable." >&2
+    echo "::error::${app}: .env scan NOT checked — the walk exited ${walk_rc} on ${image}, so the image is missing or unreadable." >&2
     return 1
   fi
   first="$(printf '%s\n' "$walk_out" | sed -n 1p)" || first=""
@@ -1305,7 +1391,7 @@ console_healthcheck_row() {
 # `[ "$ec" -eq 0 ] && echo …` — a failing `[ ]` as the last top-level command would make the
 # function return 1 on its own.
 smoke_consoles() {
-  local service app base_path console_path other name port origin status html chunk bytes code uid console_status
+  local spec image service app base_path console_path other name port origin status html chunk bytes code uid console_status
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
   local host_std host_static host_id run_rc sh_rc img_rc cstate
   local ec=0 bad started
@@ -1317,14 +1403,23 @@ smoke_consoles() {
   trap console_smoke_cleanup EXIT
   console_smoke_cleanup
 
-  # The zone list comes from the caller (the `all-consoles` arm passes `console_services`), so the
-  # list lives in ONE place rather than being restated here. An empty list must not read as a pass.
+  # The zone list comes from the caller, as `<zone>=<image>` words (SMA-688). `all-consoles`
+  # passes `<zone>=<app>:dev`, the image build_console_one makes; `smoke <console-key>` passes
+  # `<zone>=paigasus-<key>:dev`, the image load-oci makes from the release archive. An empty list
+  # must not read as a pass.
   if [ "$#" -eq 0 ]; then
     echo "::error::smoke_consoles: called with no zones — nothing was smoked, and an empty run must not report OK." >&2
     return 1
   fi
 
-  for service in "$@"; do
+  for spec in "$@"; do
+    service="${spec%%=*}"
+    image="${spec#*=}"
+    if [ "$service" = "$spec" ] || [ -z "$image" ]; then
+      echo "::error::smoke_consoles: '${spec}' is not a <zone>=<image> word." >&2
+      ec=1
+      continue
+    fi
     # GUARDED, because $service is now caller-supplied rather than a loop literal: app_for and
     # base_path_for print their own "unknown console: …" and return 1, and an unguarded capture
     # would abort the script there and cancel every remaining zone's rows.
@@ -1333,6 +1428,13 @@ smoke_consoles() {
     console_path="$(console_probe_path_for "$service")" || console_path=""
     if [ -z "$app" ] || [ -z "$base_path" ] || [ -z "$console_path" ]; then
       echo "::error::smoke_consoles: unknown console zone '${service}' — add it to app_for, base_path_for and console_probe_path_for." >&2
+      ec=1
+      continue
+    fi
+    # SMA-688: the image under test must be the one THIS checkout built — the rule assert_fresh
+    # already applies to the services (spec § 5.1). Both image names carry this checkout's
+    # revision label: build_console_one sets it, and load-oci keeps the archive's own labels.
+    if ! assert_fresh "$image"; then
       ec=1
       continue
     fi
@@ -1364,9 +1466,9 @@ smoke_consoles() {
       -e PAIGASUS_ZONE="$service" \
       -e PAIGASUS_ZONES="{\"iam\":\"/iam\",\"gateway\":\"/gateway\"}" \
       "${CONSOLE_SMOKE_ENV[@]}" \
-      "${app}:dev" 2>&1)" || run_rc=$?
+      "$image" 2>&1)" || run_rc=$?
     if [ "$run_rc" -ne 0 ]; then
-      echo "::error::${app}: the container did not start from ${app}:dev — docker exited ${run_rc}; its own message follows. If the image is missing, run 'ci/images/run.sh build-console ${service}' first." >&2
+      echo "::error::${app}: the container did not start from ${image} — docker exited ${run_rc}; its own message follows. If the image is missing, build it first: 'ci/images/run.sh build-console ${service}', or 'build-oci' and 'load-oci' for the release archive." >&2
       printf '%s\n' "$run_out" >&2
       ec=1; bad=1
     else
@@ -1573,21 +1675,21 @@ smoke_consoles() {
     # "no shell in the runtime image" row for an image that was never read, which is the shape
     # the uid check three lines above already avoids.
     sh_rc=0
-    docker run --rm --entrypoint /bin/sh "${app}:dev" -c true >/dev/null 2>&1 || sh_rc=$?
+    docker run --rm --entrypoint /bin/sh "$image" -c true >/dev/null 2>&1 || sh_rc=$?
     if [ "$sh_rc" -eq 0 ]; then
-      echo "::error::${app}:dev has a shell; the runtime base must stay distroless." >&2
+      echo "::error::${image} has a shell; the runtime base must stay distroless." >&2
       ec=1
     elif [ "$sh_rc" -eq 127 ]; then
       echo "  ${app}: no shell in the runtime image"
     else
-      echo "::error::${app}: shell absence NOT checked — docker exited ${sh_rc} on ${app}:dev before reaching an entrypoint, so the image is missing or unreadable and nothing was proved about the runtime base." >&2
+      echo "::error::${app}: shell absence NOT checked — docker exited ${sh_rc} on ${image} before reaching an entrypoint, so the image is missing or unreadable and nothing was proved about the runtime base." >&2
       ec=1
     fi
 
     # SMA-670: image-only rows. They need only the image, so they run whether or not the
     # container started. ci/images/console-selftest.sh pins each call line, `|| ec=1` included.
-    console_node_version_row "$app" || ec=1
-    console_image_config_row "$app" || ec=1
+    console_node_version_row "$app" "$image" || ec=1
+    console_image_config_row "$app" "$image" || ec=1
 
     # Spec § 5.5 assertion 4 — staged-tree parity. ts/Dockerfile's staging of .next/static and
     # public/ and ts/apps/<app>/moon.yml's `build` script are a SECOND staging site each, created
@@ -1607,18 +1709,18 @@ smoke_consoles() {
       # about staging at all. stderr is captured rather than discarded, for the same reason as the
       # `docker run -d` above: the tool's own message names the cause.
       img_rc=0
-      img_out="$(docker run --rm --entrypoint /nodejs/bin/node "${app}:dev" \
+      img_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" \
         -e "$CONSOLE_STAGED_TREE_JS" "/app/apps/${app}" 2>&1)" || img_rc=$?
       if [ "$img_rc" -eq 1 ]; then
         echo "::error::${app}: /app/apps/${app}/.next/static is absent or unreadable inside the image — the staging copy in ts/Dockerfile did not run. node's message follows." >&2
         printf '%s\n' "$img_out" >&2
         ec=1
       elif [ "$img_rc" -ne 0 ]; then
-        echo "::error::${app}: staged-tree parity NOT checked — docker exited ${img_rc} on ${app}:dev before node ran, so the image is missing or unreadable and nothing was proved about staging. Its message follows." >&2
+        echo "::error::${app}: staged-tree parity NOT checked — docker exited ${img_rc} on ${image} before node ran, so the image is missing or unreadable and nothing was proved about staging. Its message follows." >&2
         printf '%s\n' "$img_out" >&2
         ec=1
       elif [ -z "$img_out" ]; then
-        echo "::error::${app}: the staged-tree walk exited 0 but printed nothing — that is neither a staging failure nor a docker failure; inspect ${app}:dev by hand." >&2
+        echo "::error::${app}: the staged-tree walk exited 0 but printed nothing — that is neither a staging failure nor a docker failure; inspect ${image} by hand." >&2
         ec=1
       else
         # Line 1 is the public= marker, the rest is the tree. `sed -n 1p` / `sed -n '2,$p'` read
@@ -1871,7 +1973,7 @@ rehearse() {
 
 # One usage string for both the missing-command case and the unknown-command case below, so the
 # two never drift apart. Lists every command the case block accepts, in the order it accepts them.
-USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles"
+USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway|iam-console|gateway-console> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh smoke <iam-console|gateway-console>... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles"
 cmd="${1:?$USAGE}"
 target="${2:-}"
 services=("iam" "gateway")
@@ -1886,7 +1988,26 @@ case "$cmd" in
   build) assert_pins; for s in "${services[@]}"; do build_one "$s"; done ;;
   smoke)
     shift
-    if [ "$#" -eq 0 ]; then smoke gateway iam; else smoke "$@"; fi
+    if [ "$#" -eq 0 ]; then smoke gateway iam; exit 0; fi
+    # SMA-688. A console key smokes the RELEASE archive's image, paigasus-<key>:dev: the name that
+    # images.yml and release.yml give it with load-oci. Service keys and console keys run two
+    # different suites with two different EXIT traps, so one call takes one kind only.
+    smoke_kind="$(kind_for_key "$1")"
+    for k in "$@"; do
+      k_kind="$(kind_for_key "$k")"
+      if [ "$k_kind" != "$smoke_kind" ]; then
+        echo "usage: ci/images/run.sh smoke takes service keys or console keys, not both: $*" >&2
+        exit 1
+      fi
+    done
+    if [ "$smoke_kind" = cargo ]; then smoke "$@"; exit 0; fi
+    smoke_keys=("$@")
+    set --
+    for k in "${smoke_keys[@]}"; do
+      k_zone="$(zone_for_key "$k")"
+      set -- "$@" "${k_zone}=paigasus-${k}:dev"
+    done
+    smoke_consoles "$@"
     ;;
   all)
     if [ -n "$target" ]; then
@@ -1899,10 +2020,13 @@ case "$cmd" in
     ;;
   build-oci)
     if [ -z "$target" ] || [ -z "${3:-}" ]; then
-      echo "usage: ci/images/run.sh build-oci <iam|gateway> <outdir>" >&2
+      echo "usage: ci/images/run.sh build-oci <iam|gateway|iam-console|gateway-console> <outdir>" >&2
       exit 1
     fi
-    assert_pins
+    # SMA-688: the pins of the key's own Dockerfile. assert_pins reads rs/Dockerfile and the
+    # chisel release; assert_console_pins reads ts/Dockerfile. An unknown key stops here.
+    oci_kind="$(kind_for_key "$target")"
+    if [ "$oci_kind" = npm ]; then assert_console_pins; else assert_pins; fi
     build_oci "$target" "$3"
     ;;
   load-oci)
@@ -1925,8 +2049,14 @@ case "$cmd" in
     assert_console_pins
     for s in "${console_services[@]}"; do build_console_one "$s"; done
     # The zone list is passed, not restated inside smoke_consoles, so the build loop and the smoke
-    # loop cannot disagree about which zones this run covers.
-    smoke_consoles "${console_services[@]}"
+    # loop cannot disagree about which zones this run covers. SMA-688: each zone is passed with
+    # the image it smokes, <app>:dev, the name build_console_one gives it.
+    set --
+    for s in "${console_services[@]}"; do
+      s_app="$(app_for "$s")"
+      set -- "$@" "${s}=${s_app}:dev"
+    done
+    smoke_consoles "$@"
     ;;
   *)
     echo "unknown command: $cmd" >&2

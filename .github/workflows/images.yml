@@ -148,22 +148,54 @@ jobs:
       - name: Rehearse the publish steps against local registries
         run: ci/images/run.sh rehearse "out/paigasus-gateway-${ARCH}.oci.tar"
 
-      # A MEASUREMENT for spec M8, not an assertion: does syft see libc6 and the Rust crates?
+      # This step is a MEASUREMENT for spec M8. It checks that syft finds libc6 and the Rust
+      # crates. SMA-688: the step now also checks the cargo SBOM floor. Each pull request
+      # proves the floor that release.yml uses.
       - name: SBOM for each archive
         run: |
-          for crate in paigasus-iam paigasus-gateway; do
+          for key in iam gateway; do
+            crate="paigasus-${key}"
             syft "oci-archive:out/${crate}-${ARCH}.oci.tar" -o "spdx-json=sbom-${crate}-${ARCH}.spdx.json"
             summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-${crate}-${ARCH}.spdx.json")"
             echo "M8 image=${crate} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
+            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" "sbom-${crate}-${ARCH}.spdx.json"
           done
 
       # SMA-670: the self-test of the console image checks in ci/images/run.sh. Each static check
       # and each console smoke row must red on its own mutation, against a stub docker, and the
       # healthcheck's fetch signal must end a hang in the pinned runtime image. It sits directly
-      # before the console build, so all rs evidence above already exists when it runs. With
-      # CI=true a skipped row is a failure.
+      # before the two console build steps, so all rs evidence above already exists when it runs.
+      # With CI=true a skipped row is a failure.
       - name: Console image self-test
         run: ci/images/console-selftest.sh
+
+      # SMA-688 (spec section 5.3). This step runs the console RELEASE sequence. It matches the
+      # sequence that release.yml runs for each images-build-<key> job. The sequence has six
+      # actions. It builds the OCI archive, loads it, and checks its identity. It then smokes the
+      # image, takes its SBOM, and checks the SBOM floor.
+      #
+      # This workflow builds two console keys here: iam-console and gateway-console. The step
+      # runs on each pull request that changes a console's package.json or ci/images/**. A pull
+      # request leg builds only the amd64 archive. Start this workflow by hand on the branch to
+      # get the arm64 leg (spec R1).
+      #
+      # The "Build + smoke both consoles" step below still runs. It smokes the build-console path
+      # only.
+      - name: Console release sequence
+        run: |
+          set -euo pipefail
+          df -h /
+          for key in iam-console gateway-console; do
+            ci/images/run.sh build-oci "$key" out
+            archive="out/paigasus-${key}-${ARCH}.oci.tar"
+            ci/images/run.sh load-oci "$archive" "paigasus-${key}:dev"
+            ci/images/run.sh smoke "$key"
+            syft "oci-archive:${archive}" -o "spdx-json=sbom-paigasus-${key}-${ARCH}.spdx.json"
+            summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-paigasus-${key}-${ARCH}.spdx.json")"
+            echo "M8 image=paigasus-${key} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
+            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" "sbom-paigasus-${key}-${ARCH}.spdx.json"
+          done
+          df -h /
 
       # Placed AFTER the rs release-path evidence (build, load, smoke, rehearse, SBOM) and BEFORE
       # the `if: always()` upload steps: a console failure here stops the job, but only once every

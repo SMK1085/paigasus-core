@@ -987,7 +987,8 @@ tasks:
     # a byte pin of that helm, so without them a helm bump serves a cached PASS. The proto and the
     # two TypeScript files are what check 1a reads. ci/kind/values/**/* is what row 7 renders;
     # without it an edit to the kind values serves a cached PASS. There are no `deps`: nothing
-    # here reads a build output.
+    # here reads a build output. ci/images/chains.toml and the four version files are what row 8a
+    # reads (SMA-688).
     #
     # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
     # is REQUIRED: Moon does not enable errexit for `script:` blocks and takes the block's status
@@ -1004,7 +1005,14 @@ tasks:
       - '.proto/plugins/helm.toml'
       - 'charts/**/*'
       - 'ci/helm-render/**/*'
+      # SMA-688: row 8a reads the chain registry and each chain's version file. Without these
+      # five, a version bump that forgets the chart tag serves a cached PASS.
+      - 'ci/images/chains.toml'
       - 'ci/kind/values/**/*'
       - 'contracts/proto/paigasus/common/v1/service_info.proto'
+      - 'rs/crates/services/paigasus-gateway/Cargo.toml'
+      - 'rs/crates/services/paigasus-iam/Cargo.toml'
+      - 'ts/apps/gateway-console/package.json'
+      - 'ts/apps/iam-console/package.json'
       - 'ts/packages/paigasus-discovery/src/core/state.ts'
       - 'ts/packages/paigasus-proto/src/capability.ts'

@@ -592,8 +592,9 @@ yet".
    - add a `## [<version>] - <date>` section to that crate's `CHANGELOG.md`.
    `repo:actionlint` check 11 fails the pull request when the changelog section is missing.
 2. Merge it. The `plan` job selects the service, because its version has no tag.
-3. Approve the `approve-images-<svc>` job. Each service chain has its own approval job, but all
-   three approval jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`) use the
+3. Approve the `approve-images-<svc>` job. Each chain has its own approval job. All five approval
+   jobs (`approve-release`, `approve-images-iam`, `approve-images-gateway`,
+   `approve-images-iam-console`, `approve-images-gateway-console`) use the
    same `release-approval` environment. GitHub approves a pending deployment by environment, not by
    job. So one approval releases every chain that waits for approval in the same run. This was
    measured on the first live release (run 35648073131): one approval released both image
@@ -666,9 +667,57 @@ every build.
 
 ### If the release plan itself cannot be read
 
-`ci/release-plan/run.sh`'s fail-safe branch writes `skip_iam=false` and `skip_gateway=false` (S12,
-so both chains RUN — the fail-safe direction), and it writes `version_iam` and `version_gateway` as
-explicit EMPTY strings, not as outputs left unwritten. Every chain job that got past its gate then
-hard-fails at the label compare (`the archive carries version , but plan says .`), because `plan`'s
-version output is empty. Read that specific failure as "the release plan could not be read" — check
-the `plan` job's own log — not as a build problem in `images-build-<svc>`.
+`ci/release-plan/run.sh` has two failure paths (SMA-688).
+
+- **The decision or `--keys` cannot be read, but the registry can.** When `release_plan.py
+  --keys` fails (for example, `uv` is missing), the wrapper reads the keys from
+  `ci/images/chains.toml` with `sed`, and the `plan` log shows a `::warning::release-plan --keys
+  gave no usable key list` line. In both cases the fail-safe branch writes
+  `skip_<key>=false` for every key of `ci/images/chains.toml` (so every chain RUNS — the fail-safe
+  direction) and writes each `version_<key>` as an explicit EMPTY string. Every chain job that got
+  past its gate then hard-fails at the label compare (`the archive carries version , but plan says
+  .`), because `plan`'s version output is empty. Read that specific failure as "the release plan
+  could not be read" — check the `plan` job's own log — not as a build problem in
+  `images-build-<key>`.
+- **No source names a key.** `release_plan.py --keys` failed or printed no usable key, and the
+  `sed` read of `ci/images/chains.toml` found no key either: the file is missing, unreadable or
+  empty. The wrapper cannot name the chain outputs. It writes `nothing_to_release=false`, prints
+  `::error::release-plan could not name the chain keys`, and fails the `plan` job. Every chain and
+  the kernel release then skip. Fix `ci/images/chains.toml`, and re-run the workflow.
+
+## Release a console image
+
+A maintainer sets a console version by hand, in the `version` field of
+`ts/apps/<app>/package.json`. release-plz does not process the console apps (SMA-688, spec D1).
+The chain key is `iam-console` or `gateway-console`, and the release name is `paigasus-<key>`.
+
+Before you release a console for the first time, create the public Docker Hub repository
+`smaschek/paigasus-<key>`. The `release-images` and `release-approval` environments and the
+`DOCKERHUB_TOKEN` need no change.
+
+1. Open a pull request. In it:
+   - set `version` in `ts/apps/<app>/package.json`;
+   - add a `## [<version>] - <date>` section to `ts/apps/<app>/CHANGELOG.md`;
+   - set the same version as `tag` of `zones.<zone>.console.image` in
+     `charts/paigasus/values.yaml`, and re-baseline the golden files with
+     `charts/paigasus/tests/render.sh --update`.
+   `repo:actionlint` check 11 fails the pull request when the changelog section is missing.
+   `repo:helm-render` row 8a fails it when the chart tag differs from the version.
+2. Merge it. The `plan` job selects the console, because its version has no tag. From the merge
+   until the publish, the chart default names a tag that is not yet published.
+3. Approve the newest pending run. Reject older pending runs, if any. One approval releases every
+   chain that waits in the same run, because all approval jobs use the `release-approval`
+   environment.
+4. `publish-images-<key>` pushes, copies, signs and attests the image, exactly as for a service.
+   `tag-<key>` then makes `paigasus-<key>-v<version>`.
+5. After the first push, set the GHCR package `paigasus-<key>` to public and link it to the
+   repository.
+6. Check each default chart image with an anonymous pull:
+   `crane manifest ghcr.io/smk1085/paigasus-<key>:<version>`.
+
+If the Docker Hub repository does not exist when you approve, the job fails at the decide step or
+at the Docker Hub copy. The decide step reads Docker Hub with a login, before any registry write.
+Both failures are safe: no `:<version>` tag exists yet in either registry. Create the repository
+and re-run the failed job. The re-run takes the `push-new` path with the same build artifacts, so
+with the same digest. An anonymous read of a missing repository answers "no such tag" (measured
+for SMA-688); the authenticated read in the decide step was not measured.
