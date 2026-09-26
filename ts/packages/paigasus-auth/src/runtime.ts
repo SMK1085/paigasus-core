@@ -141,6 +141,7 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
     clientSecret: cfg.PAIGASUS_OIDC_CLIENT_SECRET,
     httpTimeoutMs: cfg.PAIGASUS_OIDC_HTTP_TIMEOUT_MS,
     clockToleranceSeconds: cfg.PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS,
+    scopes: cfg.PAIGASUS_OIDC_SCOPES,
   });
 
   const logger = deps.logger ?? noopLogger;

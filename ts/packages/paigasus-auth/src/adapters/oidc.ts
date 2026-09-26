@@ -32,7 +32,7 @@
 // exists to state.
 import * as client from 'openid-client';
 import type { IdTokenClaims } from '../ports/principal-resolver';
-import { RefreshRejected } from '../core/errors';
+import { RefreshFailed, RefreshRejected, toTokenErrorCode } from '../core/errors';
 import type { RefreshedTokens } from '../core/single-flight';
 
 /**
@@ -58,9 +58,9 @@ export interface AuthorizationRequest {
   nonce: string;
 }
 
+/** The scopes and the audience are not here: createOidcClient receives them once (SMA-692 D4). */
 export interface BuildAuthorizationUrlParams {
   redirectUri: string;
-  scopes: string;
   /** The caller's CSRF state value — task 8 binds this to the stored login transaction id. */
   state: string;
 }
@@ -95,6 +95,23 @@ export interface CreateOidcClientOptions {
   clientSecret: string;
   httpTimeoutMs: number;
   clockToleranceSeconds: number;
+  /**
+   * The `scope` of every authorization request (SMA-692). Always set: createAuthRuntime passes
+   * PAIGASUS_OIDC_SCOPES, or the default list when that variable is absent.
+   */
+  scopes: string;
+  /**
+   * The `audience` parameter of the authorization request (SMA-692 D1). Only Auth0 needs it. When it
+   * is absent, the request has no `audience` key: openid-client sends an `undefined` value as the
+   * string "undefined" (spec F7). The refresh request never sends it: Auth0 keeps the original
+   * audience on a refresh (spec F1).
+   */
+  audience?: string;
+  /**
+   * The `scope` of every refresh request (SMA-692 D3-a). Set only when the operator set
+   * PAIGASUS_OIDC_SCOPES. When it is absent, the refresh request has no `scope`, as before SMA-692.
+   */
+  refreshScope?: string;
   /**
    * Lifts the HTTPS-only restriction for discovery and every later call on the resulting
    * Configuration (M1). Defaults to false. `authEnvShape.PAIGASUS_OIDC_ISSUER` is a strict
@@ -165,8 +182,12 @@ function classifyRefreshError(cause: unknown): Error {
   // not any one closure — classifyRefreshError is not part of the object createOidcClient returns.
   // It is this function's OUTPUT that crosses copies, as RefreshRejected — which is exactly why
   // that one needs a code check.
-  if (cause instanceof client.ResponseBodyError && cause.error === 'invalid_grant') {
-    return new RefreshRejected('invalid_grant');
+  if (cause instanceof client.ResponseBodyError) {
+    if (cause.error === 'invalid_grant') return new RefreshRejected('invalid_grant');
+    // SMA-692 D10. Every other OAuth code stays transient (D11), but the error now carries the
+    // code, so the refresh log line can tell an `invalid_scope` from a network error. The IdP
+    // writes `.error`, so toTokenErrorCode maps a value outside RFC 6749 § 5.2 to 'other'.
+    return new RefreshFailed(toTokenErrorCode(cause.error), cause.name);
   }
   return wrapError('refresh_token_grant', cause);
 }
@@ -228,7 +249,9 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
         const nonce = client.randomNonce();
         const url = client.buildAuthorizationUrl(config, {
           redirect_uri: params.redirectUri,
-          scope: params.scopes,
+          scope: opts.scopes,
+          // SMA-692 D1, spec F7: leave the key out when it is absent. Never pass `undefined`.
+          ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
           code_challenge: codeChallenge,
           code_challenge_method: 'S256',
           state: params.state,
@@ -283,7 +306,9 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
     async refresh(refreshToken): Promise<RefreshedTokens> {
       const config = await getConfig();
       try {
-        const tokens = await client.refreshTokenGrant(config, refreshToken);
+        // SMA-692 D3-a. With no refreshScope the call is the call of before SMA-692, with no third
+        // argument. `audience` is never sent here (spec F1).
+        const tokens = opts.refreshScope !== undefined ? await client.refreshTokenGrant(config, refreshToken, { scope: opts.refreshScope }) : await client.refreshTokenGrant(config, refreshToken);
         // See the identical check and comment in authorizationCodeGrant above — the same silent
         // login-loop risk applies to a refresh response missing `expires_in`.
         const expiresIn = tokens.expiresIn();
