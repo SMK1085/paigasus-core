@@ -119,7 +119,9 @@ late and unclearly. Check these four items before you install:
    audiences (`ci/kind/README.md`, "Where to look first"). The log does not show the token's
    `aud`.
 2. **Email.** The access token must carry a valid `email` claim. IAM creates the principal on the
-   first login from it. Without a valid claim, IAM answers `403 provisioning-failed`. IAM then
+   first login from it. Without a valid claim, IAM refuses the call. On gRPC, IAM answers
+   `PermissionDenied` with the reason `provisioning-failed`. On HTTP, IAM answers
+   `403 provisioning-failed`. IAM then
    writes a `warn` line that starts with `just-in-time provisioning failed`. The line has the
    fields `defect="missing_email"`, `issuer` and `email_claim`. `email_claim` is `absent` when the
    token has no `email` claim. `email_claim` is `invalid` when the value is not an email address.
@@ -406,8 +408,9 @@ grant heals at the next login.
   user ID, which is digits only. Quote it. YAML reads digits as a number, and a number with 18
   digits loses precision. The chart refuses a number. With `--set`, use `--set-string`.
 - **The user must provision first.** IAM grants the role only after JIT provisioning succeeds.
-  Provisioning needs a valid `email` claim in the access token. Without it, IAM answers
-  `403 provisioning-failed` and grants nothing. IAM also writes the `warn` line that § 6 item 2
+  Provisioning needs a valid `email` claim in the access token. Without it, IAM refuses the
+  call with `provisioning-failed` (`PermissionDenied` on gRPC, `403` on HTTP). IAM grants
+  nothing. IAM also writes the `warn` line that § 6 item 2
   describes. Look for `just-in-time provisioning failed` in the IAM log.
 - **Removing an entry does not revoke the grant.** Revoke `platform_admin` through the IAM API.
 
