@@ -51,6 +51,7 @@ calls them, and that file renders on every install. The chart refuses:
 - `zones.<id>.backend.url` empty when the chart does not deploy that backend;
 - `oidc.caBundle.existingConfigMap` set with an empty `oidc.caBundle.key`;
 - `oidc.scopes` set without the scope `openid` (`openidx` does not count);
+- `oidc.authorizationAudience` set with leading or trailing whitespace;
 - `oidc.authorizationAudience` set while `oidc.audience` is empty, or set to a value that does not
   equal `oidc.audience`.
 
@@ -149,6 +150,13 @@ Without it, the IdP issues no refresh token. Every user must log in again when t
 expires. When `oidc.scopes` is set, the console also sends the list as the `scope` of each
 refresh request. When it is empty, a refresh request has no `scope`, as before SMA-692.
 
+**Set `oidc.scopes` only when your IdP needs it.** This applies to any IdP, not only Entra ID
+(see "Entra ID moving to a new scope list" below). RFC 6749 § 6 lets an authorization server
+refuse a refresh `scope` that is not a subset of the originally granted scope. So a refresh with
+this list can fail on an IdP that enforces that rule. The user is then signed out at each
+access-token expiry, not only at the next login. After you set or change `oidc.scopes`, read the
+`oauthError` field of the `session.refresh_failed` log line to check for this.
+
 **The recommended audience setup (SMA-691).** An OIDC ID token has the client id as its `aud`.
 So when the IAM audience equals `oidc.clientId`, an ID token passes IAM's audience check. This is
 the default.
@@ -185,8 +193,8 @@ change in one upgrade. The real cases:
   refresh now sends the new `oidc.scopes`. The error code is not measured. Entra ID reports many
   conditions as `invalid_grant`, which deletes the session. It reports others as
   `invalid_scope`, which ends the session when the access token expires. In both cases the user
-  must log in again. The console log line `session.refresh_failed` shows the code in the field
-  `oauthError`.
+  must log in again. The console log line `session.refresh_failed` shows `reason: rejected` for
+  `invalid_grant`, and the code in the field `oauthError` for the other codes.
 - **Mixed pods.** During the rollout, old and new console pods share one session store. For a
   short time, a pod with the other scope list can refresh a session.
 
