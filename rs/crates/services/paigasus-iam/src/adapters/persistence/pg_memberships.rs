@@ -12,7 +12,10 @@ use super::map_err;
 use super::uow::{SeaOrmTransaction, recover_txn};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{Membership, MembershipRecord, MembershipRepository, NodeStatus, PreconditionKind, PrincipalId, RepositoryError, Stamp, TenancyNodeRef, Transaction};
+use paigasus_iam_core::{
+    Membership, MembershipAxis, MembershipKindQuery, MembershipRecord, MembershipRepository, NodeStatus, PreconditionKind, PrincipalId, PrincipalKind, RepositoryError, Stamp, TenancyNodeRef,
+    Transaction,
+};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set, Statement, TransactionTrait};
 use uuid::Uuid;
@@ -93,43 +96,44 @@ SELECT m.id, pr.prn, pj.prn, m.created_at, m.created_by FROM "membership" m
  WHERE m.id = $1"#;
 
 /// `list_by_principal`'s UNION-ALL shape (binding SQL), `ORDER BY created_at, id` (rule 9)
-/// with `LIMIT`/`OFFSET` bind params.
+/// with `LIMIT`/`OFFSET` bind params. `$4` is the SMA-676 kind filter; NULL = any kind.
 const LIST_BY_PRINCIPAL_SQL: &str = r#"
 SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "organization" o ON o.id = m.org_id
- WHERE m.principal_id = $1
+ WHERE m.principal_id = $1 AND ($4::text IS NULL OR pr.kind = $4)
 UNION ALL
 SELECT m.id, pr.prn, t.prn, m.created_at, m.created_by FROM "membership" m
   JOIN "principal" pr ON pr.id = m.principal_id JOIN "team" t ON t.id = m.team_id
- WHERE m.principal_id = $1
+ WHERE m.principal_id = $1 AND ($4::text IS NULL OR pr.kind = $4)
 UNION ALL
 SELECT m.id, pr.prn, pj.prn, m.created_at, m.created_by FROM "membership" m
   JOIN "principal" pr ON pr.id = m.principal_id JOIN "project" pj ON pj.id = m.project_id
- WHERE m.principal_id = $1
+ WHERE m.principal_id = $1 AND ($4::text IS NULL OR pr.kind = $4)
 ORDER BY created_at, id LIMIT $2 OFFSET $3"#;
 
 /// `list_by_node`'s single-target-table shape (no UNION needed — the node kind is already
-/// known from the resolved ref), same ordering/pagination as `list_by_principal`.
+/// known from the resolved ref), same ordering/pagination as `list_by_principal`. `$4` is the
+/// SMA-676 kind filter; NULL = any kind.
 const LIST_BY_ORG_SQL: &str = r#"
 SELECT m.id, pr.prn AS principal_prn, o.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "organization" o ON o.id = m.org_id
- WHERE m.org_id = $1
+ WHERE m.org_id = $1 AND ($4::text IS NULL OR pr.kind = $4)
  ORDER BY m.created_at, m.id LIMIT $2 OFFSET $3"#;
 
 const LIST_BY_TEAM_SQL: &str = r#"
 SELECT m.id, pr.prn AS principal_prn, t.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "team" t ON t.id = m.team_id
- WHERE m.team_id = $1
+ WHERE m.team_id = $1 AND ($4::text IS NULL OR pr.kind = $4)
  ORDER BY m.created_at, m.id LIMIT $2 OFFSET $3"#;
 
 const LIST_BY_PROJECT_SQL: &str = r#"
 SELECT m.id, pr.prn AS principal_prn, pj.prn AS node_prn, m.created_at, m.created_by
   FROM "membership" m JOIN "principal" pr ON pr.id = m.principal_id
   JOIN "project" pj ON pj.id = m.project_id
- WHERE m.project_id = $1
+ WHERE m.project_id = $1 AND ($4::text IS NULL OR pr.kind = $4)
  ORDER BY m.created_at, m.id LIMIT $2 OFFSET $3"#;
 
 /// `detach`'s cascade delete (binding SQL): removing an org membership also removes that
@@ -365,46 +369,58 @@ impl MembershipRepository for PgMembershipRepository {
     }
 
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
-        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, LIST_BY_PRINCIPAL_SQL, [principal.into(), limit.into(), offset.into()]);
-        let rows = MembershipRow::find_by_statement(stmt).all(&self.db).await.map_err(map_err)?;
-        Ok(rows.into_iter().map(MembershipRecord::from).collect())
+        self.list_rows(LIST_BY_PRINCIPAL_SQL, principal, None, limit, offset).await
     }
 
     async fn list_by_node(&self, node: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
-        // Read path: resolves the node by uuid with no lock (unlike attach's step 2, this is
-        // a plain listing, not a guarded mutation), but the same NotFound/PrnMismatch guard.
-        let (sql, node_uuid): (&str, Uuid) = match node {
-            TenancyNodeRef::Organization(id) => {
-                let Some(org) = organization::Entity::find_by_id(id.uuid()).one(&self.db).await.map_err(map_err)? else {
-                    return Err(RepositoryError::NotFound);
-                };
-                if org.prn != node.canonical() {
-                    return Err(RepositoryError::PrnMismatch);
-                }
-                (LIST_BY_ORG_SQL, id.uuid())
-            }
-            TenancyNodeRef::Team(id) => {
-                let Some(team_model) = team::Entity::find_by_id(id.uuid()).one(&self.db).await.map_err(map_err)? else {
-                    return Err(RepositoryError::NotFound);
-                };
-                if team_model.prn != node.canonical() {
-                    return Err(RepositoryError::PrnMismatch);
-                }
-                (LIST_BY_TEAM_SQL, id.uuid())
-            }
-            TenancyNodeRef::Project(id) => {
-                let Some(project_model) = project::Entity::find_by_id(id.uuid()).one(&self.db).await.map_err(map_err)? else {
-                    return Err(RepositoryError::NotFound);
-                };
-                if project_model.prn != node.canonical() {
-                    return Err(RepositoryError::PrnMismatch);
-                }
-                (LIST_BY_PROJECT_SQL, id.uuid())
-            }
-        };
+        let (sql, node_uuid) = self.node_list_sql(node).await?;
+        self.list_rows(sql, node_uuid, None, limit, offset).await
+    }
+}
 
-        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, [node_uuid.into(), limit.into(), offset.into()]);
+impl PgMembershipRepository {
+    /// Resolves `node` by uuid with no lock (a plain listing, not a guarded mutation) and
+    /// applies the NotFound/PrnMismatch guard; returns the list SQL for that node's kind.
+    async fn node_list_sql(&self, node: &TenancyNodeRef) -> Result<(&'static str, Uuid), RepositoryError> {
+        let (stored, sql, uuid) = match node {
+            TenancyNodeRef::Organization(id) => (
+                organization::Entity::find_by_id(id.uuid()).one(&self.db).await.map_err(map_err)?.map(|m| m.prn),
+                LIST_BY_ORG_SQL,
+                id.uuid(),
+            ),
+            TenancyNodeRef::Team(id) => (team::Entity::find_by_id(id.uuid()).one(&self.db).await.map_err(map_err)?.map(|m| m.prn), LIST_BY_TEAM_SQL, id.uuid()),
+            TenancyNodeRef::Project(id) => (
+                project::Entity::find_by_id(id.uuid()).one(&self.db).await.map_err(map_err)?.map(|m| m.prn),
+                LIST_BY_PROJECT_SQL,
+                id.uuid(),
+            ),
+        };
+        let stored = stored.ok_or(RepositoryError::NotFound)?;
+        if stored != node.canonical() {
+            return Err(RepositoryError::PrnMismatch);
+        }
+        Ok((sql, uuid))
+    }
+
+    /// Runs one of the four list SQLs. `kind` binds `$4`; `None` = any kind.
+    async fn list_rows(&self, sql: &str, id: Uuid, kind: Option<PrincipalKind>, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        let kind: Option<String> = kind.map(|k| k.as_str().to_owned());
+        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, [id.into(), limit.into(), offset.into(), kind.into()]);
         let rows = MembershipRow::find_by_statement(stmt).all(&self.db).await.map_err(map_err)?;
         Ok(rows.into_iter().map(MembershipRecord::from).collect())
+    }
+}
+
+/// SMA-676 D8: the same four statements, with `$4` bound to the kind.
+#[async_trait]
+impl MembershipKindQuery for PgMembershipRepository {
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        match axis {
+            MembershipAxis::Principal(principal) => self.list_rows(LIST_BY_PRINCIPAL_SQL, *principal, Some(kind), limit, offset).await,
+            MembershipAxis::Node(node) => {
+                let (sql, node_uuid) = self.node_list_sql(node).await?;
+                self.list_rows(sql, node_uuid, Some(kind), limit, offset).await
+            }
+        }
     }
 }

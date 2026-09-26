@@ -40,6 +40,7 @@ use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::memberships::MembershipFilter;
 use crate::application::pagination::Page;
+use crate::application::principal_kind::PrincipalKindFilter;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -127,7 +128,7 @@ async fn list_memberships(State(s): State<AppState>, Extension(ctx): Extension<A
         s.authorize.check(&actor_prn(&ctx), Action::ListMemberships, &resource).await?;
     }
     let page = Page::new(q.limit, q.offset)?;
-    let records = s.memberships.list(filter, page).await?;
+    let records = s.memberships.list(filter, PrincipalKindFilter::from_query(q.principal_kind.as_deref()), page).await?;
     Ok(Json(records.into_iter().map(MembershipDto::from).collect()))
 }
 

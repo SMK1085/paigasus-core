@@ -423,6 +423,13 @@ class ErrorReason(betterproto2.Enum):
     this registry is a 409, and this is a 400.
     """
 
+    INVALID_PRINCIPAL_KIND = 40
+    """
+    "invalid-principal-kind" — a principal_kind filter did not name a known
+    kind (SMA-676 D7). Refused, never widened to "any kind": a proto3 enum is
+    open, so an unknown number reaches the server. Both transports carry it.
+    """
+
     SERVICE_MIGRATING = 39
     """
     ---- IAM: lifecycle (1-299) ----------------------------------------------
@@ -622,6 +629,7 @@ class ErrorReason(betterproto2.Enum):
             36: "ERROR_REASON_INVALID_AUDIT_OUTCOME",
             37: "ERROR_REASON_MISSING_REQUIRED_FIELD",
             38: "ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS",
+            40: "ERROR_REASON_INVALID_PRINCIPAL_KIND",
             39: "ERROR_REASON_SERVICE_MIGRATING",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
@@ -687,6 +695,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_INVALID_AUDIT_OUTCOME": 36,
             "ERROR_REASON_MISSING_REQUIRED_FIELD": 37,
             "ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS": 38,
+            "ERROR_REASON_INVALID_PRINCIPAL_KIND": 40,
             "ERROR_REASON_SERVICE_MIGRATING": 39,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,

@@ -21,6 +21,7 @@ import { getPublicConfig } from '../../../../lib/config';
 import { GATEWAY_BASE_PATH, iamManageHref } from '../../../../lib/nav';
 import { parseOffset } from '../../../../lib/paging';
 import { statusColumnLabel } from '../../node-status';
+import { peopleModelAccessBlock } from '../../people-model-access/block';
 import { loadSettingsPrelude } from '../../settings-prelude';
 import { serviceAccountsBlock } from '../../service-accounts/block';
 import { parseAccountParam } from '../../service-accounts/service-account-id';
@@ -56,6 +57,7 @@ export default async function OrganizationSettingsPage({ params, searchParams }:
         </ZoneLink>
       </p>
       {await serviceAccountsBlock({ view: data.section, ownerKind: 'organization', ownerPrn: data.orgPrn, path })}
+      {await peopleModelAccessBlock({ view: data.people })}
       {await projectsBlock({ orgId: data.orgId, projects: data.projects })}
     </div>
   );

@@ -168,6 +168,60 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   match a dot-directory. `napi build` stages its output in `.<crate>.napi-stage-<random>`
   beside the crate, with no `Cargo.toml`. A concurrent `cargo metadata` then exits 101.
   `repo:affected-smoke`'s **A11** reds on any `*`, `?` or `[` in `members`.
+- **The wasm-bindgen family does not move through dependabot (SMA-683).** `js-sys`, `web-sys`
+  and `wasm-bindgen-futures` pin `wasm-bindgen` with `=`. Dependabot updates one package at a
+  time. `cargo update -p wasm-bindgen` then locks 0 packages (MEASURED, spec M0). Since SMA-680
+  the release PR does not move it either. So `wasm-bindgen` stays frozen until a person moves
+  the whole family. Do that at a `rust-toolchain.toml` or `wasm-pack` bump, at a `repo:deny`
+  advisory for the family, or when a newer `wasm-bindgen` is needed. Use a normal
+  `feature/sma-NNN-<slug>` PR.
+  Before you start:
+  - Put the proto shims on `PATH`.
+  - In a fresh worktree, run `proto install` and `pnpm -C ts install`.
+  - Check network access (`wasm-pack` downloads `wasm-bindgen-cli`).
+  - Unlock 1Password for commit signing.
+  ```bash
+  ( cd rs && cargo update -p wasm-bindgen -p js-sys -p web-sys -p wasm-bindgen-futures )
+  git diff -- rs/Cargo.lock   # the family entries (seven at M0) plus any new dep, crates.io only
+  moon run paigasus-kernel-ts:generate-wasm
+  moon run paigasus-kernel-ts:test   # the drift gate, before the push
+  git add rs/Cargo.lock .prototools rs/crates/bindings/paigasus-wasm/paigasus_wasm*
+  git commit -m "build(deps): move wasm-bindgen to <version> and regenerate the wasm glue"
+  ```
+  Push the branch, then open the PR.
+  Read the `git diff` BEFORE `generate-wasm`. That task compiles the new proc-macro and build
+  scripts on your machine, where your `gh` token and signing agent are available. Run
+  `generate-wasm` on ONE host (SMA-634 F12). If the pinned `wasm-pack` does not support the new
+  0.2.z, bump it in `.prototools` in the same PR (the invariant above `wasm-bindgen` in
+  `rs/Cargo.toml`). Record its error text here when a bump first shows it. It is not measured.
+  **The `reqwest` case (INFERRED).** A new `reqwest` can need newer wasm crates. Then a cargo PR
+  (usually `cargo-minor-patch`) moves `wasm-bindgen` and fails `committed-wasm.test.ts`. Follow
+  these steps in order:
+  1. Merge every other open cargo PR.
+  2. Let dependabot rebase this PR (its head commit changes), or comment `@dependabot rebase`.
+  3. Run `gh pr checkout <N>` (it keeps the `dependabot/*` branch name the pre-push hook needs).
+  4. Run `git fetch origin`. Then read `git diff origin/main...HEAD -- rs/Cargo.lock`. Every
+     changed entry must have a crates.io source. The wasm family entries must be among the
+     changes. A group PR also holds `reqwest` and other bumps. Then
+     run `generate-wasm` and the test. Stage the five artifacts and `.prototools`
+     with `git add .prototools rs/crates/bindings/paigasus-wasm/paigasus_wasm*`.
+     Commit and push.
+  5. If the branch goes stale again: run the merge-only `update-branch` call, then `git pull`.
+     Run `generate-wasm` again if the merge changed `rs/Cargo.lock`, `.prototools`, the
+     kernel, the wasm binding, or the five artifacts.
+     Then run the test. If the five artifacts changed, stage, commit and push them as in
+     step 4.
+  6. For a `Cargo.lock` conflict, do not edit the lock by hand. Comment `@dependabot recreate`.
+     Dependabot then writes a new lock on the current `main`. This deletes the glue commit.
+     Wait for the new head commit. Then run `gh pr checkout <N> --force` and do step 4 again.
+  The merge-only `update-branch` call:
+  `gh api -X PUT repos/<owner>/<repo>/pulls/<N>/update-branch -f expected_head_sha=<sha>`.
+  Except in step 6, never use `--rebase`, `@dependabot recreate` or `[dependabot skip]`. Each one
+  deletes the glue commit.
+  A conflict or a merge can let git replace the five files. That breaks the pnpm hard link. Run
+  `rm -rf ts/node_modules && pnpm -C ts install` after (ts/CLAUDE.md rule).
+  Finish before the next Monday 06:00 UTC dependabot run (INFERRED). A new run can supersede a
+  grouped PR.
 
 ## Container images
 

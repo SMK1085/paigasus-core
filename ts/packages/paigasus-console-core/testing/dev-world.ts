@@ -17,7 +17,7 @@
 // through rather than a database.
 import { randomUUID } from 'node:crypto';
 import { Code } from '@connectrpc/connect';
-import { NodeStatus } from '@paigasus/sdk/iam/types';
+import { NodeStatus, PrincipalKind } from '@paigasus/sdk/iam/types';
 import type { GatewayDescriptorBody } from './fake-gateway';
 import { denial, type FakeIamHandlers, type ServiceDescriptorBody } from './fake-iam';
 
@@ -143,6 +143,10 @@ export function devWorld(): FakeIamHandlers {
   const projects = new Map<string, ProjectNode>([[PROJECT_PRN, PROJECT]]);
   // SMA-629: replay and discard remove the entry, as IAM does; an unknown id answers NotFound.
   const deadLetters = seededDeadLetters();
+  // SMA-676: role grants live in per-devWorld() state, so the "Model access for people" section can
+  // grant and revoke. Every dev principal is a USER: the dev world makes no service account.
+  type DevGrant = { id: string; principalPrn: string; roleKey: string; scopePrn: string };
+  const grants: DevGrant[] = [{ id: '0190a1d4-0000-7000-8000-00000000d103', principalPrn: PRINCIPAL_PRN, roleKey: 'project_viewer', scopePrn: PROJECT_PRN }];
 
   function takeDeadLetter(id: string): DeadLetterFixture {
     const entry = deadLetters.get(id);
@@ -184,7 +188,29 @@ export function devWorld(): FakeIamHandlers {
     'authn.introspect': devPrincipal,
     'authn.whoAmI': devPrincipal,
     'authz.isAuthorized': () => ({ allowed: true, determiningPolicies: [], reason: '' }),
-    'authz.listRoleGrants': () => ({ grants: [{ id: '0190a1d4-0000-7000-8000-00000000d103', principalPrn: PRINCIPAL_PRN, roleKey: 'project_viewer', scopePrn: PROJECT_PRN }] }),
+    'authz.listRoleGrants': (req) => ({
+      grants: grants.filter(
+        (grant) =>
+          (req.principalPrn === '' || grant.principalPrn === req.principalPrn) &&
+          (req.scopePrn === '' || grant.scopePrn === req.scopePrn) &&
+          (req.roleKey === '' || grant.roleKey === req.roleKey) &&
+          req.principalKind !== PrincipalKind.SERVICE_ACCOUNT,
+      ),
+    }),
+    // SMA-676 D9: a second grant of the same role at the same scope returns the existing grant.
+    'authz.grantRole': (req) => {
+      const existing = grants.find((grant) => grant.principalPrn === req.principalPrn && grant.roleKey === req.roleKey && grant.scopePrn === req.scopePrn);
+      if (existing !== undefined) return { grant: existing };
+      const grant: DevGrant = { id: randomUUID(), principalPrn: req.principalPrn, roleKey: req.roleKey, scopePrn: req.scopePrn };
+      grants.push(grant);
+      return { grant };
+    },
+    'authz.revokeRole': (req) => {
+      const index = grants.findIndex((grant) => grant.id === req.id);
+      if (index === -1) throw notFound();
+      grants.splice(index, 1);
+      return {};
+    },
     // `serviceInfo.getServiceInfo` is deliberately NOT scripted here. `dispatch()` in fake-iam.ts
     // always prefers a scripted handler over `defaults()`, so scripting it would freeze the gRPC
     // answer at whatever this map returned, even after a later `setServiceInfo()` call moved the
@@ -199,7 +225,10 @@ export function devWorld(): FakeIamHandlers {
     'tenancy.listTeams': () => ({ teams: [...teams.values()] }),
     'tenancy.listProjects': () => ({ projects: [...projects.values()] }),
     'tenancy.listMemberships': (req) => ({
-      memberships: [{ id: '0190a1d4-0000-7000-8000-00000000d104', principalPrn: PRINCIPAL_PRN, nodePrn: req.filter.case === 'nodePrn' ? req.filter.value : '' }],
+      memberships:
+        req.principalKind === PrincipalKind.SERVICE_ACCOUNT
+          ? []
+          : [{ id: '0190a1d4-0000-7000-8000-00000000d104', principalPrn: PRINCIPAL_PRN, nodePrn: req.filter.case === 'nodePrn' ? req.filter.value : '' }],
     }),
     'tenancy.createOrganization': (req: { slug: string; name: string }) => {
       const organization: OrganizationNode = { prn: `prn:pgs:iam:::organization/${randomUUID()}`, slug: req.slug, name: req.name, ...ACTIVE };

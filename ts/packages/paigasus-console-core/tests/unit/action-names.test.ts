@@ -25,9 +25,10 @@ function wireNames(source: string): Set<string> {
 
 const LIFECYCLE = ['RenameOrganization', 'ArchiveOrganization', 'RestoreOrganization', 'RenameTeam', 'ArchiveTeam', 'RestoreTeam', 'RenameProject', 'ArchiveProject', 'RestoreProject'];
 
-// SMA-636 spec § 4.5. mayI() asks about the CURRENT user only, so InvokeModel (asked about a service
-// account, through modelCallState) and ListRoleGrants (Root-only for another principal) stay out.
-const SERVICE_ACCOUNT = ['CreateServiceAccount', 'ArchiveServiceAccount', 'IssueApiKey', 'RevokeApiKey', 'GrantRole'];
+// SMA-636 spec § 4.5, SMA-676. mayI() asks about the CURRENT user only. InvokeModel is asked about a
+// service account through modelCallState, so it stays out. ListRoleGrants stays out: no page shows
+// a control for it. RevokeRole joins for the "Model access for people" section (SMA-676 D14).
+const SERVICE_ACCOUNT = ['CreateServiceAccount', 'ArchiveServiceAccount', 'IssueApiKey', 'RevokeApiKey', 'GrantRole', 'RevokeRole'];
 
 describe('IAM_ACTIONS against the Rust action catalog', () => {
   const wire = wireNames(readFileSync(fileURLToPath(new URL(ACTION_RS, REPO_ROOT)), 'utf8'));
@@ -53,7 +54,7 @@ describe('IAM_ACTIONS against the Rust action catalog', () => {
     expect(wire.has('renameTeam')).toBe(false);
   });
 
-  it('holds the five gateway-settings names of SMA-636, and neither InvokeModel nor ListRoleGrants', () => {
+  it('holds the gateway-settings names of SMA-636 and SMA-676, and neither InvokeModel nor ListRoleGrants', () => {
     expect(IAM_ACTIONS).toEqual(expect.arrayContaining(SERVICE_ACCOUNT));
     expect([...IAM_ACTIONS]).not.toContain('InvokeModel');
     expect([...IAM_ACTIONS]).not.toContain('ListRoleGrants');

@@ -15,7 +15,7 @@ import type { ComposerNotice } from './playground-notice';
 
 /** The route under the zone's basePath: a browser fetch does not add the basePath. */
 export const CHAT_PATH = '/gateway/api/chat';
-/** D10: a person needs gateway_user at the org, granted out of band. */
+/** D10: a person needs gateway_user at the org. An org admin grants it on the organization page (SMA-676). */
 export const MISSING_ROLE_TEXT = 'You need the gateway_user role on this organization. Ask an organization admin to grant it.';
 const UNREACHABLE_TEXT = 'The console could not reach the chat route.';
 

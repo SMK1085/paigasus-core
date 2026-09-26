@@ -82,6 +82,7 @@ __all__ = (
     "Organization",
     "OutboxServiceStub",
     "Policy",
+    "PrincipalKind",
     "Project",
     "PutPolicyRequest",
     "PutPolicyResponse",
@@ -184,6 +185,36 @@ class NodeStatus(betterproto2.Enum):
             "NODE_STATUS_UNSPECIFIED": 0,
             "NODE_STATUS_ACTIVE": 1,
             "NODE_STATUS_ARCHIVED": 2,
+        }
+
+
+class PrincipalKind(betterproto2.Enum):
+    """
+    SMA-676 D7. The kind of a principal, as IAM stores it. UNSPECIFIED on a
+    filter means "any kind". IAM refuses any other number with
+    ERROR_REASON_INVALID_PRINCIPAL_KIND: an unknown value never widens a filter.
+    """
+
+    UNSPECIFIED = 0
+
+    USER = 1
+
+    SERVICE_ACCOUNT = 2
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "PRINCIPAL_KIND_UNSPECIFIED",
+            1: "PRINCIPAL_KIND_USER",
+            2: "PRINCIPAL_KIND_SERVICE_ACCOUNT",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "PRINCIPAL_KIND_UNSPECIFIED": 0,
+            "PRINCIPAL_KIND_USER": 1,
+            "PRINCIPAL_KIND_SERVICE_ACCOUNT": 2,
         }
 
 
@@ -1200,6 +1231,13 @@ class ListMembershipsRequest(betterproto2.Message):
 
     offset: "int" = betterproto2.field(4, betterproto2.TYPE_UINT64)
 
+    principal_kind: "PrincipalKind" = betterproto2.field(
+        5, betterproto2.TYPE_ENUM, default_factory=lambda: PrincipalKind(0)
+    )
+    """
+    SMA-676 D8. AND-ed with the filter above. UNSPECIFIED = any kind.
+    """
+
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "ListMembershipsRequest", ListMembershipsRequest
@@ -1295,10 +1333,32 @@ default_message_pool.register_message(
 @dataclass(eq=False, repr=False)
 class ListRoleGrantsRequest(betterproto2.Message):
     principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+    """
+    Optional when scope_prn is set. A request must set principal_prn or
+    scope_prn, or both (SMA-676 D3).
+    """
 
     limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+    """
+    Honoured when scope_prn, role_key or principal_kind is set. A request
+    with only principal_prn returns every grant and ignores both (D6).
+    """
 
     offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+    scope_prn: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+    """
+    An exact match on the grant's scope node (D5). No descendant grants.
+    """
+
+    role_key: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+    principal_kind: "PrincipalKind" = betterproto2.field(
+        6, betterproto2.TYPE_ENUM, default_factory=lambda: PrincipalKind(0)
+    )
+    """
+    UNSPECIFIED = any kind (D7).
+    """
 
 
 default_message_pool.register_message(

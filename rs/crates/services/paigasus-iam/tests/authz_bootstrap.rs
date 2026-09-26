@@ -206,6 +206,7 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
     let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
     let role_service = RoleService::new(RoleServiceDeps {
         grants: role_grant_store,
+        query: Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone())),
         orgs: role_orgs,
         teams: role_teams,
         projects: role_projects,

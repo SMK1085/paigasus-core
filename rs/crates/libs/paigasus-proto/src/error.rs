@@ -194,6 +194,7 @@ mod tests {
         "invalid-audit-outcome",
         "missing-required-field",
         "mutually-exclusive-fields",
+        "invalid-principal-kind",
         // IAM: lifecycle (SMA-571)
         "service-migrating",
         // Gateway
@@ -229,7 +230,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 59, "the registry should hold 59 reasons");
+        assert_eq!(actual.len(), 60, "the registry should hold 60 reasons");
     }
 
     #[test]
@@ -357,6 +358,7 @@ mod tests {
             (ErrorReason::InvalidAuditOutcome, "invalid-audit-outcome"),
             (ErrorReason::MissingRequiredField, "missing-required-field"),
             (ErrorReason::MutuallyExclusiveFields, "mutually-exclusive-fields"),
+            (ErrorReason::InvalidPrincipalKind, "invalid-principal-kind"),
         ] {
             assert_eq!(variant.as_wire_reason().as_deref(), Some(wire));
             assert_eq!(ErrorReason::from_wire_reason(wire), Some(variant));

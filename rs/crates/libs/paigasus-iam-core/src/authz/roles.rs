@@ -690,6 +690,37 @@ mod tests {
                 resource: uni.org_o.prn().clone(),
                 expect: Effect::Allow,
             },
+            // -- SMA-676 D4 (b): ListRoleGrants at a SCOPE node, decided by the real starter
+            // policy set. An org_admin passes at its own org only; a team_admin does not pass
+            // at its parent org; an org_member holds no ListRoleGrants.
+            Case {
+                name: "org_admin allows ListRoleGrants at its own org (SMA-676 D4)",
+                grants: vec![grant(94, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ListRoleGrants,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "org_admin denies ListRoleGrants at another org (SMA-676 D4)",
+                grants: vec![grant(95, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ListRoleGrants,
+                resource: OrganizationId::from_uuid(uni.team_other.org_uuid()).prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "team_admin denies ListRoleGrants at its parent org (SMA-676 D4)",
+                grants: vec![grant(96, &uni.principal, "team_admin", GrantScope::Node(TenancyNodeRef::Team(uni.team_o.clone())))],
+                action: Action::ListRoleGrants,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "org_member denies ListRoleGrants at its own org (SMA-676 D4)",
+                grants: vec![grant(97, &uni.principal, "org_member", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ListRoleGrants,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
         ];
 
         for case in cases {
