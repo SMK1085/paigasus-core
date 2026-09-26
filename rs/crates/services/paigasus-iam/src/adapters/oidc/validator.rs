@@ -893,6 +893,45 @@ mod tests {
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)), "got {err:?}");
     }
 
+    /// Builds a token whose payload holds a DUPLICATE `cnf` key. The `json!` macro cannot make
+    /// one (a JSON object literal cannot repeat a key), so this signs a raw JSON string by hand:
+    /// the header, then `claims_with`'s usual fields, then `cnf_fields` verbatim. Signs with
+    /// `jsonwebtoken::crypto::sign` directly, since `jsonwebtoken::encode` takes a typed struct
+    /// and so cannot emit a duplicate key either.
+    fn token_with_duplicate_cnf(encoding_key: &EncodingKey, kid: &str, cnf_fields: &str) -> String {
+        let header_json = format!(r#"{{"alg":"ES256","typ":"JWT","kid":"{kid}"}}"#);
+        let exp = Utc::now().timestamp() + 3600;
+        let payload_json = format!(r#"{{"iss":"{ISSUER}","sub":"sub-1","aud":"aud","exp":{exp},"email":"alice@example.com",{cnf_fields}}}"#);
+        let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let message = format!("{header_b64}.{payload_b64}");
+        let signature = jsonwebtoken::crypto::sign(message.as_bytes(), encoding_key, Algorithm::ES256).expect("signing a test token");
+        format!("{message}.{signature}")
+    }
+
+    #[tokio::test]
+    async fn duplicate_cnf_claim_is_never_authenticated() {
+        // Finding 2 of the final whole-branch review: no test pinned a DUPLICATE `cnf` key. Today
+        // `serde`'s derived `Deserialize` for `WireClaims` refuses a repeated map key outright, so
+        // `serde_json::from_slice` errors and `map_jwt_error`'s fallback arm reports `Malformed`.
+        // A later refactor away from that derive (a map, `#[serde(flatten)]`, a `Value` pre-parse)
+        // could take the last `cnf` value instead and let a sender-constrained token pass. This
+        // test does not pin the exact defect, only that the token is never authenticated.
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+
+        for (name, cnf_fields) in [
+            ("cnf object then null", r#""cnf":{"jkt":"abc"},"cnf":null"#),
+            ("cnf null then object", r#""cnf":null,"cnf":{"jkt":"abc"}"#),
+        ] {
+            let token = token_with_duplicate_cnf(&encoding_key, &kid, cnf_fields);
+            let err = authenticator.authenticate(&token).await.unwrap_err();
+            // Observed today: TokenDefect::Malformed (the duplicate key fails serde before the
+            // sender-constraint check ever runs).
+            assert!(matches!(err, AuthnError::InvalidToken(_)), "{name}: must never authenticate, got {err:?}");
+        }
+    }
+
     /// `WireClaims` from a JSON payload, for the direct marker test.
     fn wire_claims(extra: serde_json::Value) -> WireClaims {
         serde_json::from_value(claims_with(extra)).expect("test claims deserialize")
@@ -1123,7 +1162,10 @@ mod tests {
         let lines: Vec<&str> = text.lines().filter(|line| line.contains(BINDING_REFUSAL)).collect();
         assert_eq!(lines.len(), 1, "exactly one binding refusal line expected, got:\n{text}");
         assert!(lines[0].contains("typ DPoP"), "the refusal names the marker typ DPoP: {}", lines[0]);
-        assert!(!text.contains("\"dpop\""), "the log must not contain the token's own spelling:\n{text}");
+        // Case-sensitive on purpose: the canonical text is "typ DPoP", which does not contain
+        // "dpop". A quoted check (`"\"dpop\""`) only catches the quoted spelling; an unquoted
+        // future log line (for example `typ=dpop`) would slip past it and stay undetected.
+        assert!(!text.contains("dpop"), "the log must not contain the token's own spelling:\n{text}");
     }
 
     #[tokio::test]
