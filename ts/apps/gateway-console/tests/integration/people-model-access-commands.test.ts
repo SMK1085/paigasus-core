@@ -7,13 +7,15 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Code } from '@connectrpc/connect';
 import { disposeTransports } from '@paigasus/sdk/iam';
-import { organizationPrn } from '@paigasus/console-core';
+import { PrincipalKind } from '@paigasus/sdk/iam/types';
+import { organizationPrn, teamPrn } from '@paigasus/console-core';
 import { denial, startFakeIam, type FakeIam } from '@paigasus/console-core/testing';
 import { grantModelAccess, revokeModelAccess } from '../../app/(console)/people-model-access/commands';
 import { IDS, callsSince, clientsFor } from './support';
 
 const ORG = organizationPrn(IDS.orgA);
-const PERSON = 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000c1';
+const PERSON_ID = '0190a1e5-0000-7000-8000-0000000000c1';
+const PERSON = `prn:pgs:iam:::principal/${PERSON_ID}`;
 const GRANT_ID = '0190a1d4-0000-7000-8000-0000000000c2';
 const ADMIN_GRANT_ID = '0190a1d4-0000-7000-8000-0000000000c3';
 
@@ -53,7 +55,7 @@ describe('revokeModelAccess (§ 5.3)', () => {
     });
     const calls = callsSince(iam);
     expect(await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: PERSON, orgPrn: ORG, grantId: GRANT_ID })).toEqual({ ok: true });
-    expect(calls('authz.listRoleGrants')[0]?.request).toMatchObject({ principalPrn: PERSON, scopePrn: ORG, roleKey: 'gateway_user' });
+    expect(calls('authz.listRoleGrants')[0]?.request).toMatchObject({ principalPrn: PERSON, scopePrn: ORG, roleKey: 'gateway_user', principalKind: PrincipalKind.USER });
     expect(calls('authz.revokeRole').map((call) => call.request)).toEqual([expect.objectContaining({ id: GRANT_ID })]);
   });
 
@@ -79,6 +81,57 @@ describe('revokeModelAccess (§ 5.3)', () => {
     const result = await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: PERSON, orgPrn: ORG, grantId: ADMIN_GRANT_ID });
     expect(result).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
     expect(calls('authz.revokeRole')).toHaveLength(0);
+  });
+
+  // Review round 1, Important 1a: proves the `grant.scopePrn === orgPrn` clause. An old IAM answers
+  // every grant of the principal, including one at ANOTHER org; the form still names only this org.
+  it('refuses a grant id of the same person’s gateway_user grant at ANOTHER org, even when IAM ignores the filters (proves the scope clause)', async () => {
+    const otherOrg = organizationPrn(IDS.orgB);
+    const otherOrgGrantId = '0190a1d4-0000-7000-8000-0000000000c4';
+    iam.setHandlers({
+      'authz.listRoleGrants': () => ({
+        grants: [
+          { id: GRANT_ID, principalPrn: PERSON, roleKey: 'gateway_user', scopePrn: ORG },
+          { id: otherOrgGrantId, principalPrn: PERSON, roleKey: 'gateway_user', scopePrn: otherOrg },
+        ],
+      }),
+    });
+    const calls = callsSince(iam);
+    const result = await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: PERSON, orgPrn: ORG, grantId: otherOrgGrantId });
+    expect(result).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
+    expect(calls('authz.revokeRole')).toHaveLength(0);
+  });
+
+  // Review round 1, Important 1b: proves the `grant.principalPrn === principalPrn` clause. An old
+  // IAM answers every grant at this org, including one of ANOTHER principal; the form still names
+  // only this person.
+  it('refuses a grant id of ANOTHER principal’s gateway_user grant at this org, even when IAM ignores the filters (proves the principal clause)', async () => {
+    const otherPerson = 'prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-0000000000d1';
+    const otherPersonGrantId = '0190a1d4-0000-7000-8000-0000000000c5';
+    iam.setHandlers({
+      'authz.listRoleGrants': () => ({
+        grants: [
+          { id: GRANT_ID, principalPrn: PERSON, roleKey: 'gateway_user', scopePrn: ORG },
+          { id: otherPersonGrantId, principalPrn: otherPerson, roleKey: 'gateway_user', scopePrn: ORG },
+        ],
+      }),
+    });
+    const calls = callsSince(iam);
+    const result = await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: PERSON, orgPrn: ORG, grantId: otherPersonGrantId });
+    expect(result).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
+    expect(calls('authz.revokeRole')).toHaveLength(0);
+  });
+
+  // Review round 1, Important 1c: proves the `kind === 'organization'` guard. A team PRN and a
+  // malformed PRN both fail it, and neither reaches IAM: there is nothing a canonical form could
+  // ever match.
+  it('refuses a form orgPrn that does not name an organization at all, with no IAM call (proves the organization-kind guard)', async () => {
+    const calls = callsSince(iam);
+    const teamResult = await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: PERSON, orgPrn: teamPrn(IDS.orgA, IDS.teamA1), grantId: GRANT_ID });
+    expect(teamResult).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
+    const malformedResult = await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: PERSON, orgPrn: 'not-a-prn', grantId: GRANT_ID });
+    expect(malformedResult).toMatchObject({ ok: false, error: { presentation: 'invalid-input' } });
+    expect(calls('authz.listRoleGrants')).toHaveLength(0);
   });
 
   it('is a success with no revoke when the grant is already gone (§ 5.3 step 4)', async () => {
@@ -121,10 +174,10 @@ describe('revokeModelAccess (§ 5.3)', () => {
     expect(await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: PERSON, orgPrn: ORG, grantId: GRANT_ID })).toMatchObject({ ok: false, error: { presentation: 'forbidden' } });
   });
 
-  // Controller ruling (canonical PRN): IAM answers with canonical PRNs; the form is client text. A
-  // form orgPrn that names the SAME organization, but with the UUID in a different case, must bind
-  // exactly as the canonical form does — the check is on organization identity, not on the byte
-  // form of the PRN string. Chosen result: success, the same as with the canonical-case orgPrn.
+  // IAM answers with canonical PRNs; the form is client text. A form orgPrn that names the SAME
+  // organization, but with the UUID in a different case, must bind exactly as the canonical form
+  // does — the check is on organization identity, not on the byte form of the PRN string. Chosen
+  // result: success, the same as with the canonical-case orgPrn.
   it('binds on organization identity, not on the exact case of the form’s org PRN UUID (§ 6)', async () => {
     const differentCaseOrgPrn = ORG.replace(IDS.orgA, IDS.orgA.toUpperCase());
     iam.setHandlers({
@@ -133,6 +186,18 @@ describe('revokeModelAccess (§ 5.3)', () => {
     });
     const calls = callsSince(iam);
     expect(await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: PERSON, orgPrn: differentCaseOrgPrn, grantId: GRANT_ID })).toEqual({ ok: true });
+    expect(calls('authz.revokeRole').map((call) => call.request)).toEqual([expect.objectContaining({ id: GRANT_ID })]);
+  });
+
+  // Review round 1, Minor 1: the same canonicalization applies to the principal PRN.
+  it('binds on principal identity too, not on the exact case of the form’s principal PRN UUID (§ 6)', async () => {
+    const differentCasePersonPrn = `prn:pgs:iam:::principal/${PERSON_ID.toUpperCase()}`;
+    iam.setHandlers({
+      'authz.listRoleGrants': () => ({ grants: [{ id: GRANT_ID, principalPrn: PERSON, roleKey: 'gateway_user', scopePrn: ORG }] }),
+      'authz.revokeRole': () => ({}),
+    });
+    const calls = callsSince(iam);
+    expect(await revokeModelAccess({ authz: clientsFor(iam).authz }, { principalPrn: differentCasePersonPrn, orgPrn: ORG, grantId: GRANT_ID })).toEqual({ ok: true });
     expect(calls('authz.revokeRole').map((call) => call.request)).toEqual([expect.objectContaining({ id: GRANT_ID })]);
   });
 });
