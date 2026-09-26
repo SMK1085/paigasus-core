@@ -12,6 +12,9 @@ use paigasus_iam_core::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use metrics::counter;
+use paigasus_observability::names;
+
 /// Whether `resolve` may just-in-time provision an unknown `(issuer, subject)` identity.
 /// The middleware calls `resolve(.., Enabled)`; `Introspect` always calls `resolve(..,
 /// Disabled)` (D10) — an unauthenticated, middleware-exempt endpoint must not have a
@@ -58,6 +61,32 @@ fn backend(err: RepositoryError) -> AuthnError {
 /// fails the call — it must never degrade to an empty grant list.
 fn backend_authz(err: AuthzError) -> AuthnError {
     AuthnError::Backend(Box::new(err))
+}
+
+/// Every `ProvisioningDefect` value. [`prime_jit_provisioning_failures`] registers one series for
+/// each entry. `the_defect_array_lists_every_defect_once` fails to compile when a variant is added
+/// and not listed.
+const PROVISIONING_DEFECTS: [ProvisioningDefect; 2] = [ProvisioningDefect::MissingEmail, ProvisioningDefect::EmailConflict];
+
+/// The `defect` label of `iam_jit_provisioning_failures_total` and the `defect` field of the JIT
+/// failure log line (SMA-698 spec 4.3). One exhaustive `match`, no wildcard: the log field, the
+/// counter label and the prime use this one function, so they cannot differ, and a new variant
+/// does not compile until it has a label.
+fn provisioning_defect_label(defect: ProvisioningDefect) -> &'static str {
+    match defect {
+        ProvisioningDefect::MissingEmail => "missing_email",
+        ProvisioningDefect::EmailConflict => "email_conflict",
+    }
+}
+
+/// Registers every `defect` series of `iam_jit_provisioning_failures_total` at zero (SMA-698
+/// spec 4.4). A metrics-rs series first appears at its first increment's value, and `increase()`
+/// takes the first sample as its baseline, so without this the first failure is invisible to an
+/// `increase() > 0` query. `main` calls this when metrics are on, even if no issuer has JIT on.
+pub fn prime_jit_provisioning_failures() {
+    for defect in PROVISIONING_DEFECTS {
+        counter!(names::IAM_JIT_PROVISIONING_FAILURES_TOTAL, "defect" => provisioning_defect_label(defect)).increment(0);
+    }
 }
 
 /// Generic-by-value over the ports it depends on, mirroring the M1 use cases
@@ -239,6 +268,7 @@ mod tests {
     use crate::application::fakes::{FixedClock, InMemoryMembershipRepository, InMemoryRoleGrants, SeqIds};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use paigasus_iam_core::{ApiKeyId, GrantScope, Membership, MembershipRecord, RoleGrant, Stamp, TenancyNodeRef, TokenDefect, Transaction};
     use paigasus_kernel::Prn;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1155,5 +1185,56 @@ mod tests {
             }],
             "context_for must read the grants of an API-key principal: WhoAmI reports them for both credential kinds"
         );
+    }
+
+    type MetricsSnapshot = Vec<(metrics_util::CompositeKey, Option<metrics::Unit>, Option<metrics::SharedString>, DebugValue)>;
+
+    /// The value of `iam_jit_provisioning_failures_total{defect}` in `snapshot`, or `None` when that
+    /// series does not exist. It reads the VALUE: a series primed with `increment(0)` also has a
+    /// key. `Snapshotter::snapshot` resets the counters it reads, so take ONE snapshot per test.
+    fn jit_failures(snapshot: &MetricsSnapshot, defect: &str) -> Option<u64> {
+        snapshot.iter().find_map(|(key, _, _, value)| {
+            let key = key.key();
+            let matches = key.name() == names::IAM_JIT_PROVISIONING_FAILURES_TOTAL && key.labels().any(|label| label.key() == "defect" && label.value() == defect);
+            match (matches, value) {
+                (false, _) => None,
+                (true, DebugValue::Counter(n)) => Some(*n),
+                (true, other) => panic!("expected a counter, got {other:?}"),
+            }
+        })
+    }
+
+    /// How many `iam_jit_provisioning_failures_total` series exist in `snapshot`, at any value.
+    fn jit_series(snapshot: &MetricsSnapshot) -> usize {
+        snapshot.iter().filter(|(key, ..)| key.key().name() == names::IAM_JIT_PROVISIONING_FAILURES_TOTAL).count()
+    }
+
+    /// U10 (SMA-698 spec 4.4): the prime registers both `defect` series at zero, so `increase()`
+    /// sees the first failure.
+    #[test]
+    fn prime_registers_both_defect_series_at_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, prime_jit_provisioning_failures);
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(jit_failures(&snapshot, "missing_email"), Some(0));
+        assert_eq!(jit_failures(&snapshot, "email_conflict"), Some(0));
+        assert_eq!(jit_series(&snapshot), 2, "exactly the two defect series");
+    }
+
+    /// `PROVISIONING_DEFECTS` names every `ProvisioningDefect` once, with its own label. The
+    /// `match` has no wildcard: a new variant stops this test from compiling until someone adds
+    /// it here AND to `PROVISIONING_DEFECTS`.
+    #[test]
+    fn the_defect_array_lists_every_defect_once() {
+        fn listed(defect: ProvisioningDefect) -> usize {
+            match defect {
+                ProvisioningDefect::MissingEmail | ProvisioningDefect::EmailConflict => PROVISIONING_DEFECTS.iter().filter(|d| **d == defect).count(),
+            }
+        }
+        assert_eq!(listed(ProvisioningDefect::MissingEmail), 1);
+        assert_eq!(listed(ProvisioningDefect::EmailConflict), 1);
+        let labels: std::collections::HashSet<&str> = PROVISIONING_DEFECTS.iter().map(|d| provisioning_defect_label(*d)).collect();
+        assert_eq!(labels.len(), PROVISIONING_DEFECTS.len(), "each defect needs its own label");
     }
 }
