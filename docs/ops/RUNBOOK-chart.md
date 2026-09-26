@@ -129,15 +129,19 @@ number of refusals that IAM did not log.
 This adds no requirement on the IdP. No Keycloak or Dex access token measured for SMA-686 has
 one of these markers. Do not add a mapper that sets `typ` on the access token.
 
-The check does not protect an IdP whose ID token has no `typ` claim. Dex is an example. For such
-an IdP, the audience setup below is the only protection.
+The check does not protect an IdP whose ID token has no `typ` claim. For such an IdP, a
+dedicated API audience is the only protection. This works only when the IdP can put a different
+audience into the access token than into the ID token. Dex cannot: both tokens have the same
+`aud`, so IAM accepts a Dex ID token as a bearer token. See "Dex" below.
 
 The console requests the scopes `openid profile email offline_access`.
 
 **The recommended audience setup (SMA-691).** An OIDC ID token has the client id as its `aud`.
 So when the IAM audience equals `oidc.clientId`, an ID token passes IAM's audience check. This is
-the default. Give the API its own audience, for example `api://paigasus`. Put it into the access
-token's `aud`. Do not put it into the ID token's `aud`. Then set `oidc.audience` to it.
+the default.
+
+Give the API its own audience, for example `api://paigasus`. Put it into the access token's
+`aud`. Do not put it into the ID token's `aud`. Then set `oidc.audience` to it.
 
 **Migration order.** A set `oidc.audience` replaces the client id. IAM then refuses every live
 access token whose `aud` holds only the client id. IAM also restarts with a gap, because it has
@@ -175,10 +179,12 @@ sync does not fail because of it.
 **The acknowledgement.** If your IdP cannot give the API its own audience, set
 `oidc.acknowledgeClientIdAudience` to the value of `oidc.clientId`. The warning then does not
 show. The acknowledgement does not change what IAM accepts. IAM still accepts an ID token as a
-bearer token, except a Keycloak ID token (SMA-686). The value must equal the client id exactly,
-with the same letter case. `true` does not work. When you change `oidc.clientId`, the warning
-shows again. Quote the value in a values file. An unquoted large number can change to an
-exponent form (`1e+06`), and the warning then continues to show.
+bearer token, except a Keycloak ID token (SMA-686).
+
+- The value must equal the client id exactly, with the same letter case. `true` does not work.
+- When you change `oidc.clientId`, the warning shows again.
+- Quote the value in a values file. An unquoted large number can change to an exponent form
+  (`1e+06`), and the warning then continues to show.
 
 **No warning does not mean a safe setup.** Any `oidc.audience` that differs from the client id
 removes the warning. If the IdP also puts that audience into the ID token, the ID token still
