@@ -458,6 +458,10 @@ stub_docker_main() {
       ;;
     network) exit "$STUB_NET_RC" ;;
     create)
+      # SMA-675 D4: X11 records the cleanup registry that the caller exported at create time.
+      if [ -n "${STUB_NAMES_FILE:-}" ]; then
+        printf '%s\n' "${CONSOLE_SMOKE_NAMES-<unset>}" > "$STUB_NAMES_FILE"
+      fi
       if [ "$STUB_CREATE_RC" -eq 0 ]; then echo "stub-container-id"; fi
       exit "$STUB_CREATE_RC"
       ;;
@@ -962,6 +966,27 @@ stub_reset; STUB_CREATE_RC=125; curl_reset X9
 x_row X9 1 "was not created from paigasus-iam-console:dev" ""
 stub_reset; STUB_RM_RC=1; curl_reset X10; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
 x_row X10 0 "::warning::iam-console: the kernel control container ${X_CTL} was not removed" "::error::"
+
+# X11: spec D4 registers the control container in CONSOLE_SMOKE_NAMES BEFORE docker create, so
+# the EXIT trap removes it after an abort. run_fn runs the row in a subshell, so the case exports
+# the registry and the stub docker writes it to a file at `docker create`. docker create fails
+# here (the abort path), and the name must still be registered, after the name already there.
+x_reg_case() {
+  CONSOLE_SMOKE_NAMES=" smoke-earlier"
+  STUB_NAMES_FILE="$T/x11-names"
+  export CONSOLE_SMOKE_NAMES STUB_NAMES_FILE
+  console_kernel_control_row "$@"
+}
+stub_reset; STUB_CREATE_RC=125; curl_reset X11; rm -f "$T/x11-names"
+run_fn X11 1 "was not created from paigasus-iam-console:dev" "" any x_reg_case iam-console paigasus-iam-console:dev /iam /orgs smoke-redis-1 "$T/x-args" "$X_LINE"
+X11_NAMES="$(cat "$T/x11-names" 2>/dev/null || echo "<no docker create call>")"
+if [ "$X11_NAMES" = " smoke-earlier ${X_CTL}" ]; then
+  say_pass X11-registered
+else
+  say_fail X11-registered "CONSOLE_SMOKE_NAMES at docker create was '${X11_NAMES}', expected ' smoke-earlier ${X_CTL}'"
+fi
+# shellcheck disable=SC2016 # the pinned line is literal text
+pin_rows X11-pin "$T/fn-console_kernel_control_row.sh" 'CONSOLE_SMOKE_NAMES="${CONSOLE_SMOKE_NAMES:-} ${ctl}"'
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
