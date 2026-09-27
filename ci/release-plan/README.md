@@ -93,7 +93,8 @@ refuses to guess and builds instead.
 `run.sh` has four modes, and one of them is required:
 
 - `--self-test` — runs `release_plan.py --self-test` in-process: the pure `decide()` fixture
-  table (nine rows) plus thirty-seven collection-layer rows (SMA-688 raises this from fifteen).
+  table (nine rows) plus thirty-eight collection-layer rows (SMA-688 raised this from fifteen;
+  SMA-708 added one).
   Most collection rows build a throwaway tree under `tempfile.mkdtemp()` to exercise a path the
   pure `decide()` fixture cannot reach. The first fifteen rows are the original set. The original
   six: a missing `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override,
@@ -109,6 +110,8 @@ refuses to guess and builds instead.
   decision, the changelog reader and the service version format. SMA-688 adds sixteen more rows,
   for the chain registry, the `--keys` output, the console version source, the console changelog
   and the `sed` parity read.
+  SMA-708's row builds a committed fixture under a git trace2 event log and fails if git starts a
+  background `git maintenance` or `gc` child, which raced the row's `shutil.rmtree` on Python 3.12.
 - `--keys` — prints the chain keys of `ci/images/chains.toml`, one on each line, in file order,
   and exits `0` (SMA-688). A registry that cannot be read prints no key and exits `3`. The
   `--github-output` arm reads this list to name the outputs it writes. `run.sh` has no `--keys`

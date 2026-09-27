@@ -83,9 +83,12 @@ ecosystem::build_fixture() { # dir real_release_plz_toml(ignored)
   [ -f "$_SR_PATH_FILTER" ] || { echo "FATAL: path-filter missing: $_SR_PATH_FILTER" >&2; return 1; }
   [ -f "$_SR_RUNNER" ] || { echo "FATAL: runner missing: $_SR_RUNNER" >&2; return 1; }
 
+  # SMA-708: maintenance.auto false / gc.auto 0 — no background `git maintenance run --auto`
+  # after a commit or a fetch here; it races check_case's `rm -rf`. gc.auto is a second layer.
   ( cd "$dir" && git -c init.defaultBranch=main init -q \
     && git config user.email "parity@example.com" && git config user.name "parity" \
-    && git config commit.gpgsign false && git config tag.gpgsign false )
+    && git config commit.gpgsign false && git config tag.gpgsign false \
+    && git config maintenance.auto false && git config gc.auto 0 )
 
   # Keep the local bare origin (created below) and the run_update sentinels out of
   # the working tree's commits — else apply_commit's `git add -A` would pollute the
@@ -120,10 +123,13 @@ EOF
   # init.defaultBranch is `master` (e.g. CI runners) the remote HEAD points at a branch
   # that was never pushed and `git fetch` dies with "couldn't find remote ref HEAD".
   # Fully offline.
+  # The bare origin gets the SMA-708 keys before the push: receive-pack can start maintenance.
   ( cd "$dir" \
     && git add -A && git commit -qm "chore: seed fixture" \
     && git tag "a-v$BASELINE" && git tag "b-v$BASELINE" \
     && git -c init.defaultBranch=main init --bare "$dir/origin.git" -q \
+    && git -C "$dir/origin.git" config maintenance.auto false \
+    && git -C "$dir/origin.git" config gc.auto 0 \
     && git remote add origin "$dir/origin.git" \
     && git push -q origin main --tags )
 }

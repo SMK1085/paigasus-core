@@ -30,6 +30,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1015,33 +1016,47 @@ def _write_chain_fixture(repo_root: Path, *, console_versions: dict[str, str] | 
         path.write_text((console_texts or {}).get(key, default))
 
 
-def _git_commit_and_tag(tmp: str, tags: tuple[str, ...]) -> None:
+def _git_commit_and_tag(tmp: str, tags: tuple[str, ...], *,
+                        git_env: dict[str, str] | None = None) -> None:
     """One commit, then each tag in `tags`. Moved here unchanged from
-    _service_unparsable_version_asserts_three_tree, so that several trees can share it."""
-    subprocess.run(["git", "init", "-q", tmp], check=True)
-    subprocess.run(["git", "-C", tmp, "config", "user.email", "release-plan-self-test@example.com"],
-                    check=True)
-    subprocess.run(["git", "-C", tmp, "config", "user.name", "release-plan self-test"], check=True)
-    subprocess.run(["git", "-C", tmp, "add", "-A"], check=True)
+    _service_unparsable_version_asserts_three_tree, so that several trees can share it.
+
+    `git_env` is the environment of every git call here. None inherits this process's
+    environment, as before. The SMA-708 row passes a copy with a trace2 target and no host config.
+    """
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], check=True, env=git_env)
+
+    git("init", "-q", tmp)
+    # SMA-708: no background `git maintenance run --auto --detach` after the commit below. It
+    # writes .git/objects/maintenance.lock while the caller's shutil.rmtree runs, and on Python
+    # 3.12 that race raised FileNotFoundError. maintenance.auto alone stops it (spec §3 M2);
+    # gc.auto 0 is a second layer only, for a git that runs `gc --auto` directly.
+    git("-C", tmp, "config", "maintenance.auto", "false")
+    git("-C", tmp, "config", "gc.auto", "0")
+    git("-C", tmp, "config", "user.email", "release-plan-self-test@example.com")
+    git("-C", tmp, "config", "user.name", "release-plan self-test")
+    git("-C", tmp, "add", "-A")
     # `-c commit.gpgsign=false` / `-c tag.gpgSign=false`: this repo's global git config signs
     # every commit and tag (1Password-backed SSH signing). A throwaway fixture tree must not
     # depend on that being unlocked, and an unsigned, unannotated tag is all `repo_tags` reads.
-    subprocess.run(["git", "-C", tmp, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"],
-                    check=True)
+    git("-C", tmp, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
     for tag in tags:
-        subprocess.run(["git", "-C", tmp, "-c", "tag.gpgSign=false", "tag", tag], check=True)
+        git("-C", tmp, "-c", "tag.gpgSign=false", "tag", tag)
 
 
 def _complete_chain_tree(tmp: str, *, versions: dict[str, str] | None = None,
                          changelogs: dict[str, str] | None = None,
                          console_texts: dict[str, str] | None = None,
-                         tags: tuple[str, ...] = ("unrelated-tag",)) -> Path:
+                         tags: tuple[str, ...] = ("unrelated-tag",),
+                         git_env: dict[str, str] | None = None) -> Path:
     """A whole repository that `_assert_repo` reads as CLEAN while every chain is at 0.0.0.
 
     The derived releasable set equals EXPECTED_RELEASABLE, the tree carries a tag, and every chain
     of the fixture registry resolves. So a fixture built on it gets exactly the problem it names
     and no other. `versions` maps a chain key to its version (default 0.0.0). `changelogs` maps a
     chain key to the text of its CHANGELOG.md. `console_texts` replaces a console's package.json.
+    `git_env` goes to _git_commit_and_tag unchanged.
     """
     all_versions = {"iam": "0.0.0", "gateway": "0.0.0", "iam-console": "0.0.0",
                     "gateway-console": "0.0.0", **(versions or {})}
@@ -1066,7 +1081,7 @@ def _complete_chain_tree(tmp: str, *, versions: dict[str, str] | None = None,
         console_texts=console_texts)
     for key, text in (changelogs or {}).items():
         (repo_root / _FIXTURE_CHAINS[key]["changelog"]).write_text(text)
-    _git_commit_and_tag(tmp, tags)
+    _git_commit_and_tag(tmp, tags, git_env=git_env)
     return repo_root
 
 
@@ -1403,6 +1418,54 @@ def _console_package_inconclusive(text: str, what: str) -> str | None:
         shutil.rmtree(tmp)
 
 
+def _fixture_repo_starts_no_maintenance() -> str | None:
+    """SMA-708. A fixture repository that commits must start no background git maintenance.
+
+    After a commit, git starts `git maintenance run --auto --detach`, which creates and deletes
+    .git/objects/maintenance.lock. A `shutil.rmtree` of the fixture that races it raised
+    FileNotFoundError on Python 3.12 (CI run 36273324959; reproduced 7 times in 2,400 runs under
+    load, spec §3 M7). The row records a trace2 event log of a real fixture build and fails on any
+    maintenance or gc child. GIT_CONFIG_GLOBAL / GIT_CONFIG_NOSYSTEM stop a host setting from
+    making it pass, and the row also drops inherited GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT and
+    any GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n, so a parent `git -c maintenance.auto=false` cannot
+    suppress the maintenance child it exists to catch. It also requires a `commit` start event, so
+    an empty trace cannot pass, and it reads maintenance.auto back from the fixture's own
+    .git/config.
+
+    Mutations: delete the two config lines in _git_commit_and_tag; move them after the commit;
+    drop `env=git_env` there. Each one reds this row.
+    """
+    tmp = tempfile.mkdtemp()
+    trace = Path(f"{tmp}.trace2.json")
+    try:
+        inherited = {k: v for k, v in os.environ.items()
+                     if k != "GIT_CONFIG_PARAMETERS" and k != "GIT_CONFIG_COUNT"
+                     and not k.startswith("GIT_CONFIG_KEY_")
+                     and not k.startswith("GIT_CONFIG_VALUE_")}
+        git_env = {**inherited, "GIT_TRACE2_EVENT": str(trace),
+                   "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        _complete_chain_tree(tmp, git_env=git_env)
+        events = ([json.loads(line) for line in trace.read_text().splitlines() if line.strip()]
+                  if trace.exists() else [])
+        spawned = [e["argv"] for e in events if e.get("event") == "child_start"
+                   and ("maintenance" in e.get("argv", []) or "gc" in e.get("argv", []))]
+        if spawned:
+            return f"the fixture commit started background git maintenance: {spawned!r}"
+        if not any(e.get("event") == "start" and "commit" in e.get("argv", []) for e in events):
+            return (f"the trace2 log {trace} holds no `commit` start event "
+                    f"({len(events)} events); the row did not observe the fixture build")
+        got = subprocess.run(["git", "-C", tmp, "config", "--local", "--get", "maintenance.auto"],
+                             capture_output=True, text=True, env=git_env).stdout.strip()
+        if got != "false":
+            return f"the fixture's .git/config has maintenance.auto={got!r}, want 'false'"
+        return None
+    finally:
+        try:
+            shutil.rmtree(tmp)
+        finally:
+            trace.unlink(missing_ok=True)
+
+
 def _console_package_no_version() -> str | None:
     return _console_package_inconclusive(
         '{"name": "@paigasus/iam-console", "private": true}\n', "no version")
@@ -1615,10 +1678,10 @@ def _sed_parity_fixture_registry() -> str | None:
     return None
 
 
-# The collection-layer rows: paths a pure-function fixture cannot reach. Fourteen of the fifteen
-# need a filesystem (they build throwaway trees under tempfile.mkdtemp()); row 15
-# (_markers_are_mutually_exclusive) needs none, but still cannot be expressed as a decide()-only
-# FIXTURES row, since it asserts a property of config_sections' own error messages. Module-level
+# The collection-layer rows: paths a pure-function fixture cannot reach. Most of them need a
+# filesystem (they build throwaway trees under tempfile.mkdtemp()); a few, such as
+# _markers_are_mutually_exclusive, need none but still cannot be expressed as decide()-only
+# FIXTURES rows, since they assert a property of a helper other than decide(). Module-level
 # so `--collection-count` can count them and so self_test()'s floor below has something to floor;
 # the FIXTURES floor's own comment explains why a countable table matters.
 COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
@@ -1678,6 +1741,8 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
      _sed_parity_crlf_header),
     ("SMA-688 sed parity: the fixture registry gives both readers the same keys",
      _sed_parity_fixture_registry),
+    ("SMA-708 a committed fixture repository starts no background git maintenance",
+     _fixture_repo_starts_no_maintenance),
 )
 
 
