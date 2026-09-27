@@ -20,8 +20,8 @@
 // login/refresh/logout triggers `openid-client`'s discovery call. That is what lets every
 // cross-field-rule check below reject synchronously-fast, before any network call, even against
 // an issuer URL that resolves to nothing (exactly what tests/runtime.test.ts's BASE fixture is).
-// SMA-705: the readiness route (http/readiness.ts) starts discovery through `oidc.discover()`, and
-// it is the first caller in a normal process.
+// SMA-705: the readiness route (http/readiness.ts) starts discovery through
+// `oidc.ensureDiscovered()`, and it is the first caller in a normal process.
 //
 // ONE RUNTIME PER PROCESS — THE CALLER'S CONTRACT. `createAuthRuntime` itself builds a FRESH
 // OidcClient, a fresh store, and (for the redis backend) a fresh Redis connection on every

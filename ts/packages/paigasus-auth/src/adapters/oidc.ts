@@ -10,10 +10,12 @@
 // cross-field rule (§ runtime.ts) WITHOUT making a network call — discovery only happens when a
 // login, refresh, or logout actually occurs. On a discovery failure the cached promise is
 // cleared, so the NEXT call retries rather than replaying the same rejection forever. SMA-705: the
-// readiness route (http/readiness.ts) starts discovery through `discover()`, and it is the first
-// caller in a normal process. `discoveryStatus()` reads the state with no I/O.
+// readiness route (http/readiness.ts) starts discovery through `ensureDiscovered()`, and it is the
+// first caller in a normal process. `discoveryStatus()` reads the state with no I/O.
 //
-// `ensureDiscovered` (SMA-704) runs that discovery and sends no other request.
+// `ensureDiscovered` (SMA-704) runs that discovery and sends no other request. It goes through
+// getConfig(), so a probe, a login, a callback and a refresh that run at the same time share one
+// configPromise, and the IdP gets one discovery request.
 // core/single-flight.ts's resolveSession calls it, as `prepareRefresh`, BEFORE it takes the
 // session lock. After it resolves, `refresh` finds a resolved `configPromise` and sends no
 // discovery request under the lock. Without it, the first refresh of a cold process sends a third
@@ -117,11 +119,6 @@ export interface OidcClient {
   buildEndSessionUrl(params: BuildEndSessionUrlParams): Promise<string>;
   /** SMA-705 D3. Synchronous, no I/O: the state of this client's discovery. */
   discoveryStatus(): OidcDiscoveryStatus;
-  /**
-   * SMA-705. Resolves when discovery has succeeded. Starts it when none is in flight; joins the one
-   * in flight otherwise. Rejects with OidcDiscoveryFailed exactly as every other method does.
-   */
-  discover(): Promise<void>;
 }
 
 export interface CreateOidcClientOptions {
@@ -506,12 +503,6 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
     discoveryStatus(): OidcDiscoveryStatus {
       if (discovered) return 'discovered';
       return configPromise !== undefined ? 'discovering' : 'idle';
-    },
-
-    async discover(): Promise<void> {
-      // Through getConfig(), never client.discovery directly. A probe, a login and a callback that
-      // run at the same time then share one configPromise, and the IdP gets one request.
-      await getConfig();
     },
   };
 }

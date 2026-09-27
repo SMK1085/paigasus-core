@@ -24,8 +24,8 @@
 // is unaffected.
 //
 // THE REQUEST LOG (SMA-704). `requests()` returns each discovery, JWKS, token and revocation
-// request in arrival order, with `Date.now()` at arrival. tests/adapters/oidc.test.ts counts the
-// discovery requests with it, and tests/core/single-flight-discovery.test.ts compares the arrival
+// request in arrival order, with `Date.now()` at arrival. tests/adapters/oidc.test.ts and
+// tests/http/readiness.test.ts (SMA-705) count the discovery requests with it, and tests/core/single-flight-discovery.test.ts compares the arrival
 // times with the time the session lock was held.
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
@@ -110,11 +110,6 @@ export interface OidcFixture {
    * test must never print one.
    */
   tokenRequests(): readonly URLSearchParams[];
-  /**
-   * The number of discovery requests (`GET /.well-known/openid-configuration`) this fixture
-   * received (SMA-705). A test uses it to prove that two callers share one discovery.
-   */
-  discoveryRequests(): number;
   /** SMA-704. Each discovery, JWKS, token and revocation request, in arrival order. See the file header. */
   requests(): readonly FixtureRequest[];
   /**
@@ -159,7 +154,6 @@ export async function startOidcFixture(): Promise<OidcFixture> {
   let nextTokenError: { error: string; wwwAuthenticate?: string } | undefined;
   let issuer = '';
   const tokenRequestBodies: URLSearchParams[] = [];
-  let discoveryRequestCount = 0;
   const requestLog: FixtureRequest[] = [];
   const responseDelays = new Map<FixtureEndpoint, number>();
 
@@ -173,7 +167,6 @@ export async function startOidcFixture(): Promise<OidcFixture> {
         if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
       if (req.method === 'GET' && url.pathname === '/.well-known/openid-configuration') {
-        discoveryRequestCount += 1;
         const body = {
           issuer,
           authorization_endpoint: `${issuer}/authorize`,
@@ -304,9 +297,6 @@ export async function startOidcFixture(): Promise<OidcFixture> {
     },
     tokenRequests(): readonly URLSearchParams[] {
       return [...tokenRequestBodies];
-    },
-    discoveryRequests(): number {
-      return discoveryRequestCount;
     },
     requests(): readonly FixtureRequest[] {
       return [...requestLog];

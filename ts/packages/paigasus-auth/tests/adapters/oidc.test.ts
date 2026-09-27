@@ -609,16 +609,17 @@ describe('createOidcClient — the OAuth code of a transient refresh failure (SM
 });
 
 // SMA-705 T1-T4. The two members that the readiness route uses, against the real local fixture.
-// The top-level beforeEach starts a fresh fixture for each row, so `discoveryRequests()` starts at 0.
-describe('createOidcClient — discoveryStatus() and discover() (SMA-705 T1-T4)', () => {
-  it('T1: idle, then discovering during discover(), then discovered', async () => {
+// The top-level beforeEach starts a fresh fixture for each row, so its `requests()` log starts empty.
+// The rows count the discovery requests in SMA-704's request log.
+describe('createOidcClient — discoveryStatus() and ensureDiscovered() (SMA-705 T1-T4)', () => {
+  it('T1: idle, then discovering during ensureDiscovered(), then discovered', async () => {
     const oidc = makeClient();
     expect(oidc.discoveryStatus()).toBe('idle');
-    const pending = oidc.discover();
+    const pending = oidc.ensureDiscovered();
     expect(oidc.discoveryStatus()).toBe('discovering');
     await pending;
     expect(oidc.discoveryStatus()).toBe('discovered');
-    expect(fixture.discoveryRequests()).toBe(1);
+    expect(fixture.requests().filter((r) => r.endpoint === 'discovery').length).toBe(1);
   });
 
   it('T2: an unreachable issuer rejects with OidcDiscoveryFailed, and the status is idle again', async () => {
@@ -631,24 +632,24 @@ describe('createOidcClient — discoveryStatus() and discover() (SMA-705 T1-T4)'
       scopes: 'openid',
       allowInsecureRequests: true,
     });
-    const pending = oidc.discover();
+    const pending = oidc.ensureDiscovered();
     expect(oidc.discoveryStatus()).toBe('discovering');
     const err: unknown = await pending.catch((e: unknown) => e);
     expect(isOidcDiscoveryFailed(err)).toBe(true);
     expect(oidc.discoveryStatus()).toBe('idle');
   });
 
-  it('T3: discover() and buildAuthorizationUrl started together send ONE discovery request', async () => {
+  it('T3: ensureDiscovered() and buildAuthorizationUrl started together send ONE discovery request', async () => {
     const oidc = makeClient();
-    await Promise.all([oidc.discover(), oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE })]);
-    expect(fixture.discoveryRequests()).toBe(1);
+    await Promise.all([oidc.ensureDiscovered(), oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE })]);
+    expect(fixture.requests().filter((r) => r.endpoint === 'discovery').length).toBe(1);
   });
 
-  it('T4: after discovered, a second discover() sends no request and the status stays discovered', async () => {
+  it('T4: after discovered, a second ensureDiscovered() sends no request and the status stays discovered', async () => {
     const oidc = makeClient();
-    await oidc.discover();
-    await oidc.discover();
-    expect(fixture.discoveryRequests()).toBe(1);
+    await oidc.ensureDiscovered();
+    await oidc.ensureDiscovered();
+    expect(fixture.requests().filter((r) => r.endpoint === 'discovery').length).toBe(1);
     expect(oidc.discoveryStatus()).toBe('discovered');
   });
 });

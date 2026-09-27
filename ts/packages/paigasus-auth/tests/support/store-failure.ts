@@ -89,33 +89,41 @@ export interface FakeOidc extends OidcClient {
   codeGrantError?: Error;
   /** SMA-705: what `discoveryStatus()` answers. The default is 'discovered'. */
   status: OidcDiscoveryStatus;
-  /** SMA-705: the number of `discover()` calls. */
-  discoverCalls: number;
-  /** SMA-705: resolves the promise of the latest `discover()` call. That call sets it. */
-  resolveDiscover?: () => void;
-  /** SMA-705: rejects the promise of the latest `discover()` call. That call sets it. */
-  rejectDiscover?: (err: Error) => void;
+  /** SMA-705: the number of `ensureDiscovered()` calls. */
+  ensureDiscoveredCalls: number;
+  /**
+   * SMA-705: when true, each `ensureDiscovered()` call returns a pending promise. The default is
+   * false: the call resolves at once, as SMA-704's rows expect.
+   */
+  holdEnsureDiscovered: boolean;
+  /** SMA-705: resolves the promise of the latest held `ensureDiscovered()` call. That call sets it. */
+  resolveEnsureDiscovered?: () => void;
+  /** SMA-705: rejects the promise of the latest held `ensureDiscovered()` call. That call sets it. */
+  rejectEnsureDiscovered?: (err: Error) => void;
 }
 
 /**
  * No network. Unless `codeGrantError` is set, the code exchange succeeds and returns
- * NEW_REFRESH_TOKEN. SMA-705: each `discover()` call returns a pending promise. The test settles it
- * with `resolveDiscover` or `rejectDiscover`, so it controls when the detached promise settles.
+ * NEW_REFRESH_TOKEN. SMA-704: `ensureDiscovered()` resolves at once by default. SMA-705: when
+ * `holdEnsureDiscovered` is true, each call returns a pending promise. The test settles it with
+ * `resolveEnsureDiscovered` or `rejectEnsureDiscovered`, so it controls when the detached promise
+ * settles.
  */
 export function fakeOidc(): FakeOidc {
   const oidc: FakeOidc = {
     revokeCalls: [],
     failRevoke: false,
     endSessionCalls: [],
-    ensureDiscovered: (): Promise<void> => Promise.resolve(),
     status: 'discovered',
-    discoverCalls: 0,
+    ensureDiscoveredCalls: 0,
+    holdEnsureDiscovered: false,
     discoveryStatus: (): OidcDiscoveryStatus => oidc.status,
-    discover: (): Promise<void> => {
-      oidc.discoverCalls += 1;
+    ensureDiscovered: (): Promise<void> => {
+      oidc.ensureDiscoveredCalls += 1;
+      if (!oidc.holdEnsureDiscovered) return Promise.resolve();
       return new Promise<void>((resolve, reject) => {
-        oidc.resolveDiscover = () => resolve();
-        oidc.rejectDiscover = (err: Error) => reject(err);
+        oidc.resolveEnsureDiscovered = () => resolve();
+        oidc.rejectEnsureDiscovered = (err: Error) => reject(err);
       });
     },
     buildAuthorizationUrl: (): Promise<AuthorizationRequest> =>

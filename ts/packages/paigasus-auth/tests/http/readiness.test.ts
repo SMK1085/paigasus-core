@@ -107,38 +107,40 @@ function redisUrlError(): TypeError {
 }
 
 describe('readinessResponse — the discovery states (SMA-705 D2, D3, D7)', () => {
-  it('T5: discovered -> 200 ready, no discover() call, no event', async () => {
+  it('T5: discovered -> 200 ready, no ensureDiscovered() call, no event', async () => {
     const h = harness([], noStoreFailure);
     h.oidc.status = 'discovered';
     await expectProbe(await readinessResponse(getterFor(h), h.runtime.logger), 200, 'ready');
-    expect(h.oidc.discoverCalls).toBe(0);
+    expect(h.oidc.ensureDiscoveredCalls).toBe(0);
     expect(h.events).toEqual([]);
   });
 
-  it('T6: discovering -> 503 unready, no discover() call', async () => {
+  it('T6: discovering -> 503 unready, no ensureDiscovered() call', async () => {
     const h = harness([], noStoreFailure);
     h.oidc.status = 'discovering';
     await expectProbe(await readinessResponse(getterFor(h), h.runtime.logger), 503, 'unready');
-    expect(h.oidc.discoverCalls).toBe(0);
+    expect(h.oidc.ensureDiscoveredCalls).toBe(0);
     expect(h.events).toEqual([]);
   });
 
-  it('T7: idle -> 503 unready at once, with exactly one discover() call that is still pending', async () => {
+  it('T7: idle -> 503 unready at once, with exactly one ensureDiscovered() call that is still pending', async () => {
     const h = harness([], noStoreFailure);
     h.oidc.status = 'idle';
+    h.oidc.holdEnsureDiscovered = true;
     const res = await within(readinessResponse(getterFor(h), h.runtime.logger), 1_000);
     expect(res, 'the handler waited for discovery (D3)').not.toBe('timed_out');
     await expectProbe(res as Response, 503, 'unready');
-    expect(h.oidc.discoverCalls).toBe(1);
-    h.oidc.resolveDiscover?.();
+    expect(h.oidc.ensureDiscoveredCalls).toBe(1);
+    h.oidc.resolveEnsureDiscovered?.();
     await settle();
   });
 
-  it('T10: idle, and discover() resolves -> no event', async () => {
+  it('T10: idle, and ensureDiscovered() resolves -> no event', async () => {
     const h = harness([], noStoreFailure);
     h.oidc.status = 'idle';
+    h.oidc.holdEnsureDiscovered = true;
     await expectProbe(await readinessResponse(getterFor(h), h.runtime.logger), 503, 'unready');
-    h.oidc.resolveDiscover?.();
+    h.oidc.resolveEnsureDiscovered?.();
     await settle();
     expect(h.events).toEqual([]);
     expect(unhandled).toEqual([]);
@@ -149,8 +151,9 @@ describe('readinessResponse — a discovery failure it started (SMA-705 D8, D11)
   it('T8: OidcDiscoveryFailed with a URL in its message -> one readiness event, nothing leaks', async () => {
     const h = harness([], noStoreFailure);
     h.oidc.status = 'idle';
+    h.oidc.holdEnsureDiscovered = true;
     const res = await readinessResponse(getterFor(h), h.runtime.logger);
-    h.oidc.rejectDiscover?.(new OidcDiscoveryFailed(`oidc discovery failed at ${SENTINEL_IDP_URL}`, 'dns'));
+    h.oidc.rejectEnsureDiscovered?.(new OidcDiscoveryFailed(`oidc discovery failed at ${SENTINEL_IDP_URL}`, 'dns'));
     await settle();
     await expectProbe(res, 503, 'unready', IDP_SENTINELS);
     expect(h.events).toEqual([['oidc.discovery_failed', { zone: 'iam', stage: 'readiness', reason: 'dns' }]]);
@@ -164,8 +167,9 @@ describe('readinessResponse — a discovery failure it started (SMA-705 D8, D11)
     expect(foreign.OidcDiscoveryFailed).not.toBe(OidcDiscoveryFailed);
     const h = harness([], noStoreFailure);
     h.oidc.status = 'idle';
+    h.oidc.holdEnsureDiscovered = true;
     await expectProbe(await readinessResponse(getterFor(h), h.runtime.logger), 503, 'unready');
-    h.oidc.rejectDiscover?.(new foreign.OidcDiscoveryFailed(`oidc discovery failed at ${SENTINEL_IDP_URL}`, 'tls'));
+    h.oidc.rejectEnsureDiscovered?.(new foreign.OidcDiscoveryFailed(`oidc discovery failed at ${SENTINEL_IDP_URL}`, 'tls'));
     await settle();
     expect(h.events).toEqual([['oidc.discovery_failed', { zone: 'iam', stage: 'readiness', reason: 'tls' }]]);
     expectEventsClean(h.events, IDP_SENTINELS);
@@ -175,8 +179,9 @@ describe('readinessResponse — a discovery failure it started (SMA-705 D8, D11)
   it('T9: a plain Error -> one event with the reason other', async () => {
     const h = harness([], noStoreFailure);
     h.oidc.status = 'idle';
+    h.oidc.holdEnsureDiscovered = true;
     await expectProbe(await readinessResponse(getterFor(h), h.runtime.logger), 503, 'unready');
-    h.oidc.rejectDiscover?.(new Error(`fetch failed at ${SENTINEL_IDP_URL}`));
+    h.oidc.rejectEnsureDiscovered?.(new Error(`fetch failed at ${SENTINEL_IDP_URL}`));
     await settle();
     expect(h.events).toEqual([['oidc.discovery_failed', { zone: 'iam', stage: 'readiness', reason: 'other' }]]);
     expectEventsClean(h.events, IDP_SENTINELS);
@@ -191,8 +196,9 @@ describe('readinessResponse — a discovery failure it started (SMA-705 D8, D11)
       },
     };
     h.oidc.status = 'idle';
+    h.oidc.holdEnsureDiscovered = true;
     const res = await readinessResponse(getterFor(h), { event: () => undefined });
-    h.oidc.rejectDiscover?.(new OidcDiscoveryFailed('oidc discovery failed: TypeError', 'network'));
+    h.oidc.rejectEnsureDiscovered?.(new OidcDiscoveryFailed('oidc discovery failed: TypeError', 'network'));
     await settle();
     expect(unhandled).toEqual([]);
     await expectProbe(res, 503, 'unready');
@@ -269,11 +275,11 @@ describe('readinessResponse through the real adapter (SMA-705 T13a, T13b, D8)', 
     const runtime = await realRuntime(fixture.issuer, events);
     const getter = (): Promise<AuthRuntime> => Promise.resolve(runtime);
     const first = await readinessResponse(getter, runtime.logger);
-    await runtime.oidc.discover();
+    await runtime.oidc.ensureDiscovered();
     await settle();
     await expectProbe(first, 503, 'unready');
     await expectProbe(await readinessResponse(getter, runtime.logger), 200, 'ready');
-    expect(fixture.discoveryRequests()).toBe(1);
+    expect(fixture.requests().filter((r) => r.endpoint === 'discovery').length).toBe(1);
     expect(events).toEqual([]);
   });
 
@@ -283,7 +289,7 @@ describe('readinessResponse through the real adapter (SMA-705 T13a, T13b, D8)', 
     const getter = (): Promise<AuthRuntime> => Promise.resolve(runtime);
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const res = await readinessResponse(getter, runtime.logger);
-      await runtime.oidc.discover().catch(() => undefined);
+      await runtime.oidc.ensureDiscovered().catch(() => undefined);
       await settle();
       await expectProbe(res, 503, 'unready');
       expect(events).toHaveLength(attempt);

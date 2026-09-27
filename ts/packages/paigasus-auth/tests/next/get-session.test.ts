@@ -79,7 +79,15 @@ function lockOrderStore(inner: SessionStore, order: string[]): SessionStore {
  * (SMA-704). */
 function unusedOidc(): AuthRuntime['oidc'] {
   const fail = () => Promise.reject(new Error('unexpectedly called'));
-  return { ensureDiscovered: () => Promise.resolve(), buildAuthorizationUrl: fail, authorizationCodeGrant: fail, refresh: fail, revoke: fail, buildEndSessionUrl: fail, discoveryStatus: () => 'discovered', discover: fail };
+  return {
+    ensureDiscovered: () => Promise.resolve(),
+    buildAuthorizationUrl: fail,
+    authorizationCodeGrant: fail,
+    refresh: fail,
+    revoke: fail,
+    buildEndSessionUrl: fail,
+    discoveryStatus: () => 'discovered',
+  };
 }
 
 function baseRuntime(store: SessionStore): AuthRuntime {

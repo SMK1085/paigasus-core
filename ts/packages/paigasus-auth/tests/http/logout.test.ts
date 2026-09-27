@@ -109,9 +109,6 @@ function fakeOidc(opts: { revokeImpl?: (token: string) => Promise<void>; endSess
     discoveryStatus(): OidcDiscoveryStatus {
       return 'discovered';
     },
-    discover(): Promise<void> {
-      throw new Error('not used in logout tests');
-    },
   };
 }
 

@@ -14,7 +14,7 @@
 // users, and it would not make a sign-in work.
 //
 // THE ROUTE NEVER WAITS FOR DISCOVERY (D3). It reads a synchronous status. When discovery is idle,
-// it starts one without `await` and answers at once. The next probe sees the result. One wait
+// it starts one through `ensureDiscovered()` (SMA-704) without `await` and answers at once. The next probe sees the result. One wait
 // stays: the first call of a process builds the runtime, and that includes the Redis connect.
 //
 // THE LOG (D8, D10). A discovery attempt that this route started and that fails logs one
@@ -63,7 +63,7 @@ export async function readinessResponse(getRuntime: () => Promise<AuthRuntime>, 
   if (status === 'idle') {
     // Not awaited (D3). The `.catch` logs every rejection and never rethrows. A rejection that is
     // not an OidcDiscoveryFailed gets the reason 'other' from oidcDiscoveryReason (D8).
-    runtime.oidc.discover().catch((err: unknown) => {
+    runtime.oidc.ensureDiscovered().catch((err: unknown) => {
       try {
         logDiscoveryFailed(runtime, 'readiness', err);
       } catch {
