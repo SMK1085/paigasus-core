@@ -1400,7 +1400,8 @@ both cases, also confirm that the identity provider verifies emails.
 - **Metrics are off** (`metrics.enabled = false`). `/metrics` is not mounted. If Prometheus still
   scrapes the target, the scrape fails and `TargetDown` fires.
 - **A JIT-disabled issuer.** IAM returns `identity-not-provisioned` and does not count it
-  (SMA-707).
+  (SMA-707). IAM writes an `info` line for the refusal instead. The line starts with
+  `request refused: the identity is not provisioned` and names the issuer.
 - **An IAM binary older than SMA-698.** The series does not exist.
 
 ### `IamRedisBreakerOpen` — Redis circuit breaker is not closed (warning)

@@ -51,7 +51,7 @@
 # jit_provisioning = true             # default shown
 #
 # jit_provisioning = false closes the user set of this issuer. IAM creates an identity only by
-# just-in-time provisioning. No API links an issuer and a subject to a user. So with false, only
+# just-in-time provisioning. No API links an issuer and a subject to a user. With false, only
 # the identities that IAM created while the flag was true can sign in. You cannot add a new user
 # of this issuer in a different way.
 # When IAM refuses an unknown identity of such an issuer on a protected request (HTTP or gRPC), it
@@ -59,8 +59,8 @@
 # It has the fields issuer, reason="jit_disabled" and suppressed. It does not show the subject,
 # the email, another claim or the token. IAM writes at most one line for each issuer in 10
 # seconds. The field suppressed gives the number of refusals since the last line.
-# Introspect writes no line. For an unknown identity, the gateway makes no IAM call other than
-# Introspect. So a user that gets to IAM only through the gateway causes no line.
+# Introspect and IntrospectApiKey write no line. For an unknown identity, the gateway calls IAM
+# only through these two RPCs. So a user that gets to IAM only through the gateway causes no line.
 
 # --- Cedar authorization (M3) ---
 
