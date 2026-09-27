@@ -99,6 +99,7 @@ zones:
       url: ""
 
 ingress:
+  enabled: true
   host: ""               # REQUIRED. Feeds PAIGASUS_PUBLIC_ORIGIN as https://<host>.
   className: ""
   tlsSecretName: ""      # REQUIRED. The ingress must terminate TLS: PAIGASUS_PUBLIC_ORIGIN is

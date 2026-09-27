@@ -61,5 +61,64 @@ print("COUPLED" if sorted(zones)==sorted(services) and paths==sorted(zones.value
 coupling "iam only" "gateway" --set zones.gateway.enabled=false
 coupling "iam and gateway" "" --set zones.gateway.enabled=true
 
+# SMA-695. ingress.enabled=false renders no Ingress. Every enabled zone keeps its console Service
+# (port name http, port 3000), because the operator's own route targets it. PAIGASUS_ZONES and
+# PAIGASUS_SERVICES must still hold exactly the enabled zones. A separate function from
+# `coupling`, which compares Ingress paths with the zone map and so needs an Ingress.
+no_ingress() {
+  local label="$1" want="$2"; shift 2
+  local out got
+  if ! out="$(helm template t "$CHART" "${BASE[@]+"${BASE[@]}"}" --set ingress.enabled=false "$@" 2>&1)"; then
+    echo "FAIL [$label]: expected a successful render"; printf '%s\n' "$out"; ec=1; return
+  fi
+  got="$(printf '%s' "$out" | python3 -c '
+import sys,yaml,json
+want=sorted(sys.argv[1].split(","))
+docs=[d for d in yaml.safe_load_all(sys.stdin) if d]
+problems=[]
+if any(d["kind"]=="Ingress" for d in docs):
+    problems.append("an Ingress is rendered")
+cm=[d for d in docs if d["kind"]=="ConfigMap" and d["metadata"]["name"].endswith("-zonemap")][0]
+zones=sorted(json.loads(cm["data"]["PAIGASUS_ZONES"]))
+services=sorted(json.loads(cm["data"]["PAIGASUS_SERVICES"]))
+if zones!=want or services!=want:
+    problems.append("zones=%s services=%s, want %s" % (zones,services,want))
+for z in want:
+    svc=[d for d in docs if d["kind"]=="Service" and d["metadata"]["name"].endswith("-%s-console" % z)]
+    ports=[p for s in svc for p in s["spec"]["ports"] if p.get("name")=="http" and p.get("port")==3000]
+    if len(svc)!=1 or len(ports)!=1:
+        problems.append("zone %s: want one console Service with port http/3000, got %d Service(s)" % (z,len(svc)))
+print("; ".join(problems) if problems else "NO-INGRESS-OK")' "$want")"
+  if [ "$got" = "NO-INGRESS-OK" ]; then
+    echo "  ok [$label]: no Ingress; console Services for $want"
+  else
+    echo "FAIL [$label]: $got"; ec=1
+  fi
+}
+
+# SMA-695. A release made before ingress.enabled existed has no such key under
+# `helm upgrade --reuse-values`. `--set ingress.enabled=null` deletes the key (measured on helm
+# 3.22.0), which gives that shape. The Ingress must stay: a plain .Values.ingress.enabled reads nil
+# there and would delete the live Ingress.
+ingress_count() {
+  local label="$1" want="$2"; shift 2
+  local out n
+  if ! out="$(helm template t "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" 2>&1)"; then
+    echo "FAIL [$label]: expected a successful render"; printf '%s\n' "$out"; ec=1; return
+  fi
+  n="$(printf '%s' "$out" | python3 -c '
+import sys,yaml
+print(sum(1 for d in yaml.safe_load_all(sys.stdin) if d and d["kind"]=="Ingress"))')"
+  if [ "$n" = "$want" ]; then
+    echo "  ok [$label]: $n Ingress"
+  else
+    echo "FAIL [$label]: $n Ingress, want $want"; ec=1
+  fi
+}
+
+no_ingress "ingress disabled, iam only" "iam" --set zones.gateway.enabled=false
+no_ingress "ingress disabled, iam and gateway" "iam,gateway" --set zones.gateway.enabled=true
+ingress_count "ingress.enabled key absent" 1 --set ingress.enabled=null
+
 if [ "$ec" -eq 0 ]; then echo "== chart ingress coupling OK =="; fi
 exit "$ec"
