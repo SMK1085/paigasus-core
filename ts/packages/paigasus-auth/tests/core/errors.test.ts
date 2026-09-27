@@ -6,6 +6,7 @@
 // tests build that second copy with vi.resetModules() and a dynamic import.
 import { describe, expect, it, vi } from 'vitest';
 import {
+  AuthConfigError,
   AuthError,
   CallbackRejected,
   OIDC_DISCOVERY_FAILURE_REASONS,
@@ -208,5 +209,17 @@ describe('refreshFailureCode (SMA-692 D10)', () => {
     const err = new RefreshFailed('invalid_scope', 'ResponseBodyError');
     expect(err.message).toBe('oidc refresh_token_grant failed: ResponseBodyError');
     expect(err.code).toBe('oidc_refresh_failed');
+  });
+});
+
+describe('AuthConfigError (SMA-705 deviation 3)', () => {
+  // readiness.runtime_failed logs only an error's `name`. A production bundle can mangle
+  // `constructor.name`, so the class sets its name explicitly, as SessionStoreTimeout does.
+  it('has the name AuthConfigError and keeps its code and message', () => {
+    const err = new AuthConfigError('PAIGASUS_ZONE has no entry in PAIGASUS_ZONES');
+    expect(err.name).toBe('AuthConfigError');
+    expect(err.code).toBe('auth_config_invalid');
+    expect(err.message).toBe('PAIGASUS_ZONE has no entry in PAIGASUS_ZONES');
+    expect(err).toBeInstanceOf(AuthError);
   });
 });
