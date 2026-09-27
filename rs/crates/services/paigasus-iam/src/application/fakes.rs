@@ -16,9 +16,11 @@ use paigasus_iam_core::{
     PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount,
     ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
 };
+use paigasus_iam_core::{Email, EmailChange, ExternalIdentity, IdentityLinkStore, Issuer, User, UserWithIdentities};
 use paigasus_kernel::Prn;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -803,17 +805,25 @@ impl IdGenerator for SeqIds {
 #[derive(Clone, Default)]
 pub struct FakeAuthorizer {
     allowed: Arc<Mutex<HashSet<(Action, String)>>>,
+    checks: Arc<Mutex<Vec<(Action, String)>>>,
 }
 
 impl FakeAuthorizer {
     pub fn allow(&self, action: Action, resource: &Prn) {
         self.allowed.lock().unwrap().insert((action, resource.canonical()));
     }
+
+    /// Every `(action, resource canonical prn)` pair this fake was asked about, in call order
+    /// (SMA-712). A test reads it to prove WHICH action a method checks, and at WHICH resource.
+    pub fn checks(&self) -> Vec<(Action, String)> {
+        self.checks.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl Authorizer for FakeAuthorizer {
     async fn is_authorized(&self, req: &AccessRequest) -> Result<Decision, AuthzError> {
+        self.checks.lock().unwrap().push((req.action, req.resource.canonical()));
         let allow = self.allowed.lock().unwrap().contains(&(req.action, req.resource.canonical()));
         Ok(Decision {
             effect: if allow { Effect::Allow } else { Effect::Deny },
@@ -1493,6 +1503,129 @@ impl EntityGenBumper for BumpSnapshotBumper {
     async fn bump(&self) {
         *self.snapshot_at_bump.lock().unwrap() = Some(self.uow.commits());
         self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// In-memory [`IdentityLinkStore`] for `user_identities.rs` unit tests (SMA-712). Like every fake
+/// here it ignores the `&dyn Transaction` and mutates at once (see [`FakeUnitOfWork`]), so a
+/// write that the service later abandons is NOT rolled back here. `tests/user_identities_pg.rs`
+/// proves the rollback against Postgres. `calls()` counts every port call, so a test can prove
+/// that a denied caller never reached the store.
+#[derive(Clone, Default)]
+pub struct InMemoryIdentityLinks {
+    users: Arc<Mutex<Vec<User>>>,
+    identities: Arc<Mutex<Vec<ExternalIdentity>>>,
+    calls: Arc<AtomicUsize>,
+    fail_next_link: Arc<AtomicBool>,
+}
+
+impl InMemoryIdentityLinks {
+    pub fn seed_user(&self, user: User) {
+        self.users.lock().unwrap().push(user);
+    }
+
+    pub fn seed_identity(&self, identity: ExternalIdentity) {
+        self.identities.lock().unwrap().push(identity);
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    /// The next `link_in` fails with `Conflict(ExternalIdentityExists)`, as when a JIT login
+    /// inserts the same `(issuer, subject)` between the service's read and its insert.
+    pub fn fail_next_link_with_conflict(&self) {
+        self.fail_next_link.store(true, Ordering::SeqCst);
+    }
+
+    pub fn identities(&self) -> Vec<ExternalIdentity> {
+        self.identities.lock().unwrap().clone()
+    }
+
+    pub fn user(&self, id: &PrincipalId) -> Option<User> {
+        self.users.lock().unwrap().iter().find(|u| u.principal_id.uuid() == id.uuid()).cloned()
+    }
+
+    fn touch(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn view(&self, id: &PrincipalId) -> Option<UserWithIdentities> {
+        let user = self.user(id)?;
+        let mut identities: Vec<ExternalIdentity> = self.identities.lock().unwrap().iter().filter(|i| i.principal_id.uuid() == id.uuid()).cloned().collect();
+        identities.sort_by_key(|i| (i.created_at, i.id));
+        Some(UserWithIdentities {
+            user,
+            status: PrincipalStatus::Active,
+            identities,
+        })
+    }
+}
+
+#[async_trait]
+impl IdentityLinkStore for InMemoryIdentityLinks {
+    async fn find_user_by_email(&self, email: &Email) -> Result<Option<UserWithIdentities>, RepositoryError> {
+        self.touch();
+        let id = self.users.lock().unwrap().iter().find(|u| u.email == *email).map(|u| u.principal_id.clone());
+        Ok(id.and_then(|id| self.view(&id)))
+    }
+
+    async fn lock_user_in(&self, _tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<User>, RepositoryError> {
+        self.touch();
+        Ok(self.user(id))
+    }
+
+    async fn find_identity_in(&self, _tx: &dyn Transaction, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError> {
+        self.touch();
+        Ok(self.identities.lock().unwrap().iter().find(|i| i.issuer == *issuer && i.subject == subject).cloned())
+    }
+
+    async fn link_in(&self, _tx: &dyn Transaction, identity: &ExternalIdentity) -> Result<(), RepositoryError> {
+        self.touch();
+        let mut identities = self.identities.lock().unwrap();
+        let taken = identities.iter().any(|i| i.issuer == identity.issuer && i.subject == identity.subject);
+        if self.fail_next_link.swap(false, Ordering::SeqCst) || taken {
+            return Err(RepositoryError::Conflict(ConflictKind::ExternalIdentityExists));
+        }
+        identities.push(identity.clone());
+        Ok(())
+    }
+
+    async fn unlink_in(&self, _tx: &dyn Transaction, user: &PrincipalId, identity_id: Uuid) -> Result<Option<ExternalIdentity>, RepositoryError> {
+        self.touch();
+        let mut identities = self.identities.lock().unwrap();
+        let position = identities.iter().position(|i| i.id == identity_id && i.principal_id.uuid() == user.uuid());
+        Ok(position.map(|p| identities.remove(p)))
+    }
+
+    async fn change_email_in(&self, _tx: &dyn Transaction, user: &PrincipalId, email: &Email, now: DateTime<Utc>) -> Result<Option<Mutated<EmailChange>>, RepositoryError> {
+        self.touch();
+        let mut users = self.users.lock().unwrap();
+        // Postgres locks the row first, so an unknown user is `None` before any conflict.
+        let Some(index) = users.iter().position(|u| u.principal_id.uuid() == user.uuid()) else {
+            return Ok(None);
+        };
+        let old = users[index].email.clone();
+        if old == *email {
+            return Ok(Some(Mutated {
+                value: EmailChange { old: old.clone(), new: old },
+                changed: false,
+            }));
+        }
+        if users.iter().any(|u| u.email == *email) {
+            return Err(RepositoryError::Conflict(ConflictKind::EmailTaken));
+        }
+        users[index].email = email.clone();
+        users[index].updated_at = now;
+        Ok(Some(Mutated {
+            value: EmailChange { old, new: email.clone() },
+            changed: true,
+        }))
+    }
+
+    async fn user_view_in(&self, _tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<UserWithIdentities>, RepositoryError> {
+        self.touch();
+        Ok(self.view(id))
     }
 }
 
