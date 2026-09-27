@@ -846,3 +846,92 @@ tests:
       - eval_time: 25m
         alertname: IamAuthzGenerationRewound
         exp_alerts: []
+
+  # IamJitProvisioningFailures (SMA-706): sum by (job, defect) (increase(...[15m])) > 0, for: 0m.
+  #
+  # Block A, the primed shape. Both series are seeded at 0 from t=0. That is faithful to
+  # production ONLY because `main` calls `prime_jit_provisioning_failures` before the listener
+  # binds. `missing_email` stays flat and is the control: under the correct rule its group's
+  # increase() is 0 and stays silent, so a `>= 0` mutant fires on it. `email_conflict` steps
+  # 0 -> 1 once at t=10m: exactly one failure, the shape of the first acceptance criterion.
+  # The correct rule fires from 10m to 23m. At 24m the 9m sample leaves the left-open window
+  # (t-15m, t], so the rule is quiet. A3 (23m) and A4 (25m) keep one sample of margin, so a
+  # left-closed window gives the same result. The rows pin the window to [15m]..[16m].
+  - interval: 1m
+    input_series:
+      - series: 'iam_jit_provisioning_failures_total{job="iam", instance="a:8080", defect="missing_email"}'
+        values: '0x40'
+      - series: 'iam_jit_provisioning_failures_total{job="iam", instance="a:8080", defect="email_conflict"}'
+        values: '0x9 1x30'
+    alert_rule_test:
+      # A1, baseline: nothing moved yet.
+      - eval_time: 5m
+        alertname: IamJitProvisioningFailures
+        exp_alerts: []
+      # A2: the first evaluation that sees the step. It fires at once (kills `for: 5m`). The
+      # flat control stays silent (kills `>= 0`). The labels carry `job` and no `instance`
+      # (kills a dropped `job` and a dropped aggregation).
+      - eval_time: 10m
+        alertname: IamJitProvisioningFailures
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, defect: email_conflict }
+            exp_annotations: { summary: "IAM refused just-in-time provisioning (email_conflict)", description: "IAM refused just-in-time provisioning for a new identity (HTTP 403 provisioning-failed, or gRPC PermissionDenied with the reason provisioning-failed). The value counts refused requests, not users. One user with a bad token makes several refused requests. defect=missing_email: the access token has no valid email claim. Make the issuer put a valid email claim into the ACCESS token, not only into the ID token. defect=email_conflict: another IAM user already has this exact email, and IAM does not link identities by email. Follow the runbook. Do not link identities by hand before the identity check in the runbook. The warn log line that starts with 'just-in-time provisioning failed' names the issuer. See RUNBOOK section 4." }
+      # A3: 13 minutes after the step, still active (kills [14m] and shorter).
+      - eval_time: 23m
+        alertname: IamJitProvisioningFailures
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, defect: email_conflict }
+            exp_annotations: { summary: "IAM refused just-in-time provisioning (email_conflict)", description: "IAM refused just-in-time provisioning for a new identity (HTTP 403 provisioning-failed, or gRPC PermissionDenied with the reason provisioning-failed). The value counts refused requests, not users. One user with a bad token makes several refused requests. defect=missing_email: the access token has no valid email claim. Make the issuer put a valid email claim into the ACCESS token, not only into the ID token. defect=email_conflict: another IAM user already has this exact email, and IAM does not link identities by email. Follow the runbook. Do not link identities by hand before the identity check in the runbook. The warn log line that starts with 'just-in-time provisioning failed' names the issuer. See RUNBOOK section 4." }
+      # A4: the step has left the window, so the alert resolved (kills [17m] and longer).
+      - eval_time: 25m
+        alertname: IamJitProvisioningFailures
+        exp_alerts: []
+
+  # Block B, the un-primed shape: the known residual (SMA-706 spec section 7). `_` is promtool's
+  # absent-sample marker, and `_x9` gives 9 samples (0m..8m). The series first appears at 9m
+  # ALREADY at 1: a failure before the first scrape of a new series. increase() takes that
+  # first sample as its baseline, so B1 is silent. A second failure at 15m (1 -> 2) fires (B2).
+  # If a later change fixes the residual, B1 must change in the same commit, and so must the
+  # runbook section.
+  - interval: 1m
+    input_series:
+      - series: 'iam_jit_provisioning_failures_total{job="iam", instance="a:8080", defect="email_conflict"}'
+        values: '_x9 1x5 2x10'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: IamJitProvisioningFailures
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: IamJitProvisioningFailures
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, defect: email_conflict }
+            exp_annotations: { summary: "IAM refused just-in-time provisioning (email_conflict)", description: "IAM refused just-in-time provisioning for a new identity (HTTP 403 provisioning-failed, or gRPC PermissionDenied with the reason provisioning-failed). The value counts refused requests, not users. One user with a bad token makes several refused requests. defect=missing_email: the access token has no valid email claim. Make the issuer put a valid email claim into the ACCESS token, not only into the ID token. defect=email_conflict: another IAM user already has this exact email, and IAM does not link identities by email. Follow the runbook. Do not link identities by hand before the identity check in the runbook. The warn log line that starts with 'just-in-time provisioning failed' names the issuer. See RUNBOOK section 4." }
+
+  # Block C, two replicas of one job. Both refuse an `email_conflict` login, at 10m and at 12m.
+  # The operator gets ONE alert for the job and defect, not one per replica.
+  - interval: 1m
+    input_series:
+      - series: 'iam_jit_provisioning_failures_total{job="iam", instance="a:8080", defect="email_conflict"}'
+        values: '0x9 1x20'
+      - series: 'iam_jit_provisioning_failures_total{job="iam", instance="b:8080", defect="email_conflict"}'
+        values: '0x11 1x18'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: IamJitProvisioningFailures
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, defect: email_conflict }
+            exp_annotations: { summary: "IAM refused just-in-time provisioning (email_conflict)", description: "IAM refused just-in-time provisioning for a new identity (HTTP 403 provisioning-failed, or gRPC PermissionDenied with the reason provisioning-failed). The value counts refused requests, not users. One user with a bad token makes several refused requests. defect=missing_email: the access token has no valid email claim. Make the issuer put a valid email claim into the ACCESS token, not only into the ID token. defect=email_conflict: another IAM user already has this exact email, and IAM does not link identities by email. Follow the runbook. Do not link identities by hand before the identity check in the runbook. The warn log line that starts with 'just-in-time provisioning failed' names the issuer. See RUNBOOK section 4." }
+
+  # Block D documents the no-series case: metrics are off, or the binary is older than SMA-698.
+  # `sum by (...)` over an empty vector is EMPTY, not 0, so the alert stays silent. Block D kills
+  # no mutant in this battery. A1 (Block A, eval_time 5m) already fails an `or vector(0)`
+  # mutant: `vector(0)` would fire there, where exp_alerts is empty. Controller ruling: do not
+  # add a battery mutant for Block D.
+  - interval: 1m
+    input_series:
+      - series: 'iam_authz_decisions_total{cache="hit",decision="allow"}'
+        values: '0+5x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: IamJitProvisioningFailures
+        exp_alerts: []
