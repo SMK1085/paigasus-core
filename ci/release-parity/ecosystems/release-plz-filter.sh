@@ -253,11 +253,127 @@ rpf::filter_suite() { # real_toml mode(real|no-release-commits) -> 0/1/2
   if [ "$fails" != 0 ]; then return 1; fi
 }
 
+# --- the group fixture (spec section 4.3, G1-G4) --------------------------------------------
+
+# Four independent version groups in ONE repo, so one release-plz run covers G1-G4. Group X has
+# members rpg-X1 and rpg-X2. With RPG_DEP_EDGE=1, rpg-X1 depends on rpg-X2 by path AND version:
+# the real paigasus-proto -> paigasus-proto-derive shape (rs/Cargo.toml:173).
+# 0: MEASURED (SMA-716) — release-plz 0.3.158 in git_only mode rejects the path+version edge:
+# "error: failed to prepare local package for uploading; Caused by: no matching package named
+# `rpg-a2` found; location searched: crates.io index; required by package `rpg-a1 v0.1.0`". The
+# edge is dropped. With R1 all members have the same commits, so G1-G4 do not change; NC2's
+# intermediate value for rpg-b1 changes from 0.1.1 (cascade) to 0.1.0.
+RPG_GROUPS="a b c d"
+RPG_DEP_EDGE=0
+
+# The shape of the real crates' CHANGELOG.md: release-plz's header with `## [Unreleased]`, then a
+# release section. So release-plz takes the PREPEND path, where P1 happened
+# (updater.rs:1026-1029, changelog.rs:67-89, READ).
+rpf::_seed_changelog() { # crate_dir
+  printf '%s\n' \
+    '# Changelog' '' \
+    'All notable changes to this project will be documented in this file.' '' \
+    'The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),' \
+    'and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).' '' \
+    '## [Unreleased]' '' \
+    '## [0.1.0] - 2026-01-01' '' \
+    '### Other' '' \
+    '- seed the fixture' >"$1/CHANGELOG.md" || return 2
+}
+
+rpf::_group_package() { # toml name group other with_include(0|1)
+  printf '\n[[package]]\nname = "%s"\nversion_group = "%s"\n' "$2" "$3" >>"$1" || return 2
+  if [ "$5" = 1 ]; then
+    printf 'changelog_include = ["%s"]\n' "$4" >>"$1" || return 2
+  fi
+}
+
+rpf::_commit_pair() { # dir crate1 crate2 subject  (one commit that touches both crates)
+  printf '// change for: %s\n' "$4" >>"$1/crates/$2/src/lib.rs" || return 2
+  printf '// change for: %s\n' "$4" >>"$1/crates/$3/src/lib.rs" || return 2
+  ( cd "$1" && git add -A && git commit -qm "$4" ) || return 2
+}
+
+rpf::_build_group_fixture() { # dir real_toml with_release_commits with_include
+  local dir="$1" real="$2" with_rc="$3" with_inc="$4" g dep crates=""
+  rpf::_write_workspace "$dir" || return 2
+  for g in $RPG_GROUPS; do
+    dep=""
+    if [ "$RPG_DEP_EDGE" = 1 ]; then
+      dep="rpg-${g}2 = { path = \"../rpg-${g}2\", version = \"0.1.0\" }"
+    fi
+    rpf::_write_crate "$dir" "rpg-${g}1" "$dep" || return 2
+    rpf::_write_crate "$dir" "rpg-${g}2" || return 2
+    rpf::_seed_changelog "$dir/crates/rpg-${g}1" || return 2
+    rpf::_seed_changelog "$dir/crates/rpg-${g}2" || return 2
+    crates="$crates rpg-${g}1 rpg-${g}2"
+  done
+  rpf::_write_config "$real" "$dir/release-plz.toml" "$with_rc" || return 2
+  for g in $RPG_GROUPS; do
+    rpf::_group_package "$dir/release-plz.toml" "rpg-${g}1" "g$g" "rpg-${g}2" "$with_inc" || return 2
+    rpf::_group_package "$dir/release-plz.toml" "rpg-${g}2" "g$g" "rpg-${g}1" "$with_inc" || return 2
+  done
+  rpf::_git_init "$dir" || return 2
+  # shellcheck disable=SC2086  # the crate list splits into one argument per crate
+  rpf::_seed_and_tag "$dir" $crates || return 2
+}
+
+rpf::_check_once() { # id dir line crate...  (the line is in each crate's first section once)
+  local id="$1" dir="$2" line="$3" c sec n all=""
+  shift 3
+  for c in "$@"; do
+    sec="$dir/.rpf-section-$c"
+    rpf::_first_release_section "$dir/crates/$c/CHANGELOG.md" "$sec" || return 1
+    n="$(grep -cxF -- "$line" "$sec" || true)"
+    all="$all $c=${n:-0}"
+    if [ "${n:-0}" != 1 ]; then
+      printf 'FAIL  %-14s "%s" count per first section:%s, expected 1 each\n' "$id" "$line" "$all" >&2
+      return 1
+    fi
+  done
+  printf 'PASS  %-14s "%s" once in each first section:%s\n' "$id" "$line" "$all"
+}
+
+rpf::group_suite() { # real_toml mode(real|no-include|no-include-no-filter) -> 0/1/2
+  local real="$1" mode="$2" with_rc with_inc dir fails=0
+  case "$mode" in
+    real) with_rc=1; with_inc=1 ;;
+    no-include) with_rc=1; with_inc=0 ;;
+    no-include-no-filter) with_rc=0; with_inc=0 ;;
+    *) echo "FATAL: rpf::group_suite: bad mode $mode" >&2; return 2 ;;
+  esac
+  dir="$(mktemp -d)" || return 2
+  if ! rpf::_build_group_fixture "$dir" "$real" "$with_rc" "$with_inc"; then
+    echo "FATAL: group fixture build failed" >&2; rm -rf "$dir"; return 2
+  fi
+  if ! { rpf::_commit "$dir" rpg-a1 src 'fix(rs): x' &&       # G1: leader only
+         rpf::_commit "$dir" rpg-b2 src 'feat(rs): x' &&      # G2: follower only
+         rpf::_commit "$dir" rpg-c1 src 'fix(ci): x' &&       # G3: non-releasing
+         rpf::_commit_pair "$dir" rpg-d1 rpg-d2 'fix(rs): x'; }; then  # G4: both crates
+    echo "FATAL: group fixture commits failed" >&2; rm -rf "$dir"; return 2
+  fi
+  if ! ecosystem::run_update "$dir"; then
+    echo "FATAL: release-plz update failed on the group fixture" >&2; rm -rf "$dir"; return 2
+  fi
+  rpf::_check_versions G1-version "$dir" 0.1.1 rpg-a1 rpg-a2 || fails=$((fails + 1))
+  rpf::_check_section G1-changelog "$dir" rpg-a2 0.1.1 '### Fixed' '- *(rs)* x' || fails=$((fails + 1))
+  rpf::_check_versions G2-version "$dir" 0.2.0 rpg-b1 rpg-b2 || fails=$((fails + 1))
+  rpf::_check_section G2-changelog "$dir" rpg-b1 0.2.0 '### Added' '- *(rs)* x' || fails=$((fails + 1))
+  rpf::_check_versions G3-version "$dir" 0.1.0 rpg-c1 rpg-c2 || fails=$((fails + 1))
+  rpf::_check_versions G4-version "$dir" 0.1.1 rpg-d1 rpg-d2 || fails=$((fails + 1))
+  rpf::_check_once G4-changelog "$dir" '- *(rs)* x' rpg-d1 rpg-d2 || fails=$((fails + 1))
+  rm -rf "$dir"
+  if [ "$fails" != 0 ]; then return 1; fi
+}
+
 # --- entry points for the hooks in release-plz.sh -------------------------------------------
 
 rpf::suites() { # real_toml -> 0/1/2
   local real="$1" rc worst=0
   rc=0; rpf::filter_suite "$real" real || rc=$?
+  if [ "$rc" = 2 ]; then return 2; fi
+  if [ "$rc" != 0 ]; then worst=1; fi
+  rc=0; rpf::group_suite "$real" real || rc=$?
   if [ "$rc" = 2 ]; then return 2; fi
   if [ "$rc" != 0 ]; then worst=1; fi
   return "$worst"

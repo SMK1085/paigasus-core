@@ -138,7 +138,19 @@ after the keys `ecosystem::_derive_config` copies. A missing or duplicated key i
 touches. One `release-plz update` run covers all rows. Row 20 also asserts that the first
 release section lists both commits (consequence C1).
 
-**Cost.** One filter fixture run: 31 s on the development Mac.
+**Group fixture.** A second fixture repo with four independent version groups (`rpg-a*` …
+`rpg-d*`), so one `release-plz update` run covers G1–G4. Each group has two members with R1's
+symmetric `changelog_include`. Each member has a seeded `CHANGELOG.md` in the real crates' shape
+(release-plz's header, `## [Unreleased]`, a `## [0.1.0]` section), so release-plz takes the
+prepend path where P1 happened. G1: `fix(rs):` on the leader only; both reach 0.1.1, and the
+follower's first release section has `- *(rs)* x` under `### Fixed`. G2: `feat(rs):` on the
+follower only; both reach 0.2.0, and the leader gets a section. G3: `fix(ci):` only; both stay at
+0.1.0. G4: one `fix(rs):` commit on both crates; the line is in each new section exactly once.
+The path+version edge (`rpg-X1` depends on `rpg-X2`, the real proto → derive shape): dropped —
+release-plz 0.3.158 in `git_only` mode rejects it, with `cargo package` failing to find the
+unpublished dependency crate in the crates.io index.
+
+**Cost.** One filter fixture run: 46.8 s. One group fixture run: 8.2 s (development Mac).
 
 ## Tool resolution policy (SMA-596)
 
