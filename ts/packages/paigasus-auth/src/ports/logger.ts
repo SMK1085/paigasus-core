@@ -28,7 +28,8 @@ export type AuthEventName =
   | 'session.deleted'
   | 'logout.completed'
   | 'store.unavailable'
-  | 'store.operation_timeout';
+  | 'store.operation_timeout'
+  | 'oidc.discovery_failed';
 
 export type AuthEventFields = Readonly<Record<string, string | number | boolean>>;
 
@@ -38,6 +39,14 @@ export type AuthEventFields = Readonly<Record<string, string | number | boolean>
  */
 export type StoreUnavailableStage =
   'get_session' | 'release_lock' | 'login_put_transaction' | 'login_delete' | 'callback_take_transaction' | 'callback_delete' | 'callback_set' | 'logout_get' | 'logout_delete';
+
+/**
+ * The closed set of `stage` values for `oidc.discovery_failed` (SMA-656 D7): the route that needed
+ * the discovered configuration. `AuthEventFields` is a free record, so the one emitter,
+ * http/routes.ts's `discoveryFailedResponse`, takes this type as a typed parameter. A later refresh
+ * or logout stage is a new member here, not a new event name.
+ */
+export type OidcDiscoveryStage = 'login' | 'callback';
 
 export interface AuthLogger {
   event(name: AuthEventName, fields: AuthEventFields): void;

@@ -5,10 +5,9 @@
 // once with its SessionStoreTimeout subclass. Every row also asserts redaction (the sentinel DSN
 // in the thrown error reaches neither the response nor a log).
 import { describe, expect, it, vi } from 'vitest';
-import { hashSecret } from '../../src/core/ids.js';
 import { SessionStoreUnavailable } from '../../src/core/errors.js';
 import type { SessionRecord } from '../../src/core/session.js';
-import { SESSION_COOKIE, txnCookieName } from '../../src/http/cookies.js';
+import { SESSION_COOKIE } from '../../src/http/cookies.js';
 import { createAuthRoutes } from '../../src/http/routes.js';
 import { sidTag } from '../../src/ports/logger.js';
 import {
@@ -19,12 +18,14 @@ import {
   NEW_REFRESH_TOKEN,
   ORIGIN,
   SENTINEL_DSN,
+  STATE,
+  callbackRequest,
   expectEventsClean,
   expectStoreUnavailable,
   harness,
+  seedTransaction,
   storeError,
   storeUnavailableEvents,
-  type Harness,
 } from '../support/store-failure.js';
 
 const RETURN_TO = '/iam/orgs';
@@ -130,22 +131,10 @@ describe('GET /auth/login — escaping and classification', () => {
   });
 });
 
-const STATE = 'state-0123456789';
-const TXN_SECRET = 'correct-secret-value-32-bytes-ok';
-
-async function seedTransaction(h: Harness): Promise<void> {
-  await h.inner.putTransaction(STATE, { codeVerifier: 'a-verifier', nonce: 'a-nonce', returnTo: RETURN_TO, secretHash: hashSecret(TXN_SECRET), createdAt: Date.now() }, 600_000);
-}
-
-function callbackRequest(sid?: string): Request {
-  const cookies = [`${txnCookieName(STATE)}=${TXN_SECRET}`, ...(sid !== undefined ? [`${SESSION_COOKIE}=${sid}`] : [])];
-  return new Request(`${ORIGIN}${BASE_PATH}/auth/callback?code=a-code&state=${STATE}`, { headers: { cookie: cookies.join('; ') } });
-}
-
 describe.each(FAILURE_KINDS)('GET /auth/callback with the store down (%s)', (kind) => {
   it('row 3: takeTransaction fails -> 503, link to login, no exchange, no revoke', async () => {
     const h = harness(['takeTransaction'], () => storeError(kind));
-    await seedTransaction(h);
+    await seedTransaction(h, RETURN_TO);
 
     const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
 
@@ -158,7 +147,7 @@ describe.each(FAILURE_KINDS)('GET /auth/callback with the store down (%s)', (kin
 
   it('row 4: the delete of the presented session fails -> revoke the new token, then 503', async () => {
     const h = harness(['delete'], () => storeError(kind));
-    await seedTransaction(h);
+    await seedTransaction(h, RETURN_TO);
 
     const res = await createAuthRoutes(h.runtime).handle(callbackRequest(OLD_SID));
 
@@ -172,7 +161,7 @@ describe.each(FAILURE_KINDS)('GET /auth/callback with the store down (%s)', (kin
 
   it('row 5: the set of the new session fails -> revoke the new token, then 503', async () => {
     const h = harness(['set'], () => storeError(kind));
-    await seedTransaction(h);
+    await seedTransaction(h, RETURN_TO);
 
     const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
 
@@ -189,7 +178,7 @@ describe.each(FAILURE_KINDS)('GET /auth/callback with the store down (%s)', (kin
   it('rows 4 and 5: a failing revoke changes nothing in the response or the log', async () => {
     const h = harness(['set'], () => storeError(kind));
     h.oidc.failRevoke = true;
-    await seedTransaction(h);
+    await seedTransaction(h, RETURN_TO);
 
     const res = await createAuthRoutes(h.runtime).handle(callbackRequest());
 

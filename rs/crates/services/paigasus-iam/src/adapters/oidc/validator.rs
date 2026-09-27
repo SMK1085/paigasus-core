@@ -21,11 +21,10 @@ use jsonwebtoken::jwk::{AlgorithmParameters, Jwk};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use paigasus_iam_core::{Authenticator, AuthnError, Clock, Issuer, TokenDefect, ValidatedClaims};
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::adapters::oidc::jwks::{JwksCache, JwksFetcher, JwksProvider};
+use crate::application::log_rate_limit::{LOG_RATE_LIMIT_INTERVAL, LogRateLimiter};
 use crate::config::IssuerConfig;
 
 /// Algorithms this validator accepts (spec §4.1) — RSA/EC signature algorithms only.
@@ -53,49 +52,6 @@ const LOGOUT_TOKEN_HEADER_TYPES: [&str; 2] = ["logout+jwt", "application/logout+
 /// The `events` member every back-channel logout token carries (OIDC Back-Channel Logout 1.0
 /// § 2.4). No access token carries it (SMA-686 D12).
 const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
-
-/// At most one refusal log line per (issuer, defect) in this interval (SMA-686 D14).
-const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Rate limit for the refusal log lines (SMA-686 D14). A realm user with one signed token could
-/// otherwise write one `info` line per request. Keyed by (issuer, defect), so the map holds at
-/// most `issuers × 3` entries. A suppressed refusal is counted, and the next admitted line
-/// reports the count.
-struct RefusalLog {
-    interval: Duration,
-    last: Mutex<HashMap<(String, TokenDefect), (Instant, u64)>>,
-}
-
-impl RefusalLog {
-    fn new(interval: Duration) -> Self {
-        RefusalLog {
-            interval,
-            last: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// `Some(suppressed)` when a line may be written at `now` (with the count of refusals
-    /// suppressed since the last line); `None` when this refusal is suppressed and counted.
-    fn admit_at(&self, issuer: &str, defect: TokenDefect, now: Instant) -> Option<u64> {
-        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
-        match last.get_mut(&(issuer.to_owned(), defect)) {
-            Some((at, suppressed)) if now.saturating_duration_since(*at) < self.interval => {
-                *suppressed += 1;
-                None
-            }
-            Some((at, suppressed)) => {
-                let count = *suppressed;
-                *at = now;
-                *suppressed = 0;
-                Some(count)
-            }
-            None => {
-                last.insert((issuer.to_owned(), defect), (now, 0));
-                Some(0)
-            }
-        }
-    }
-}
 
 /// What a refusal log line names besides the issuer (SMA-686 D8, D11). Static or configured
 /// values only — never a token claim.
@@ -126,7 +82,7 @@ pub struct OidcAuthenticator<F: JwksFetcher, K: JwksCache, C: Clock> {
     provider: JwksProvider<F, K, C>,
     leeway_secs: u64,
     max_token_bytes: usize,
-    refusal_log: RefusalLog,
+    refusal_log: LogRateLimiter<TokenDefect>,
 }
 
 impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
@@ -146,7 +102,7 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
             provider,
             leeway_secs,
             max_token_bytes,
-            refusal_log: RefusalLog::new(REFUSAL_LOG_INTERVAL),
+            refusal_log: LogRateLimiter::new(LOG_RATE_LIMIT_INTERVAL),
         })
     }
 
@@ -408,6 +364,7 @@ mod tests {
     use super::*;
     use crate::adapters::clock::SystemClock;
     use crate::adapters::oidc::jwks::{CachedJwks, InMemoryJwksCache};
+    use crate::log_capture::capture_logs;
     use jsonwebtoken::EncodingKey;
     use jsonwebtoken::jwk::{CommonParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType, JwkSet, KeyAlgorithm};
     use p256::elliptic_curve::Generate;
@@ -947,42 +904,6 @@ mod tests {
         assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "typ": "Bearer" }))), None);
     }
 
-    // ---- log capture (copy of the `LogBuffer` helper in paigasus-gateway's
-    // `adapters/http/auth.rs` tests; a crate cannot share a `#[cfg(test)]` helper) ----------
-
-    #[derive(Clone, Default)]
-    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogBuffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
-        type Writer = LogBuffer;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    impl LogBuffer {
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-        }
-    }
-
-    /// TRACE, not INFO: the "no personal data" assertion below must see every level.
-    fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
-        let buffer = LogBuffer::default();
-        let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).with_max_level(tracing::Level::TRACE).finish();
-        (buffer, tracing::subscriber::set_default(subscriber))
-    }
-
     #[tokio::test]
     async fn refusal_logs_issuer_and_marker_only() {
         // Spec D8 / § 5.1 test 12. `#[tokio::test]` is current-thread, so the thread-local
@@ -1181,20 +1102,5 @@ mod tests {
         }
         let text = logs.text();
         assert_eq!(text.lines().filter(|line| line.contains(BINDING_REFUSAL)).count(), 1, "binding lines:\n{text}");
-    }
-
-    #[test]
-    fn refusal_log_counts_suppressed_refusals() {
-        // D14 unit: admit, suppress twice within the interval, then admit with the count.
-        let log = RefusalLog::new(Duration::from_secs(10));
-        let t0 = Instant::now();
-        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0), Some(0));
-        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(1)), None);
-        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(2)), None);
-        // Independent keys: another defect and another issuer are admitted at once.
-        assert_eq!(log.admit_at("iss", TokenDefect::AudienceMismatch, t0 + Duration::from_secs(2)), Some(0));
-        assert_eq!(log.admit_at("other", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(2)), Some(0));
-        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(11)), Some(2));
-        assert_eq!(log.admit_at("iss", TokenDefect::NotAnAccessToken, t0 + Duration::from_secs(12)), None);
     }
 }

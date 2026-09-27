@@ -14,6 +14,7 @@ pub mod dead_letters;
 pub mod error;
 #[cfg(test)]
 pub mod fakes;
+pub(crate) mod log_rate_limit;
 pub mod memberships;
 pub mod organizations;
 pub mod pagination;
