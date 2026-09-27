@@ -57,6 +57,7 @@ beforeEach(async () => {
     resolver: claimsPrincipalResolver,
     logger: { event: () => undefined },
     oidc: {
+      ensureDiscovered: () => inner.ensureDiscovered(),
       buildAuthorizationUrl: (params) => inner.buildAuthorizationUrl(params),
       authorizationCodeGrant: (params) => {
         grantUrls.push(params.currentUrl.href);
