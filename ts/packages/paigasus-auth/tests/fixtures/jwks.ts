@@ -25,8 +25,9 @@
 //
 // THE REQUEST LOG (SMA-704). `requests()` returns each discovery, JWKS, token and revocation
 // request in arrival order, with `Date.now()` at arrival. tests/adapters/oidc.test.ts and
-// tests/http/readiness.test.ts (SMA-705) count the discovery requests with it, and tests/core/single-flight-discovery.test.ts compares the arrival
-// times with the time the session lock was held.
+// tests/http/readiness.test.ts (SMA-705) count the discovery requests with it, and
+// tests/core/single-flight-discovery.test.ts compares the arrival times with the time the session
+// lock was held.
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';

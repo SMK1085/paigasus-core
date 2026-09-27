@@ -132,8 +132,8 @@ In `createOidcClient`:
 - `ensureDiscovered()` (SMA-704) is `async () => { await getConfig(); }`. SMA-705 does not change it.
 
 The flag is set inside the promise chain, so the status is `'discovered'` before any caller of the
-same promise resumes. A probe, a login and a callback that run at the same time share one
-`configPromise`, so the IdP gets one discovery request.
+same promise resumes. A probe, a login, a callback and a refresh that run at the same time share
+one `configPromise`, so the IdP gets one discovery request.
 
 The file header's "DISCOVERY IS LAZY" paragraph gets one sentence: the readiness route (SMA-705)
 starts discovery through `ensureDiscovered()`, and it is the first caller in a normal process.
@@ -241,8 +241,8 @@ Below, "the discovery count" is that value.
 
 - T1. A new client reports `'idle'`. During `ensureDiscovered()` it reports `'discovering'`. After
   `ensureDiscovered()` resolves it reports `'discovered'`.
-- T2. Against the unreachable issuer (`http://127.0.0.1:1`), `ensureDiscovered()` rejects with an error for
-  which `isOidcDiscoveryFailed` is true. After the rejection the status is `'idle'` again.
+- T2. Against the unreachable issuer (`http://127.0.0.1:1`), `ensureDiscovered()` rejects with an
+  error for which `isOidcDiscoveryFailed` is true. After the rejection the status is `'idle'` again.
 - T3. `ensureDiscovered()` and `buildAuthorizationUrl` started together give a discovery count of 1.
 - T4. After `'discovered'`, a second `ensureDiscovered()` sends no request, and the status stays
   `'discovered'`.
@@ -250,7 +250,8 @@ Below, "the discovery count" is that value.
 ### 5.2 The fakes
 
 The package `tsconfig.json` includes `tests/`, so every `OidcClient` fake must get
-`discoveryStatus()` or `:typecheck` reds. SMA-704 already gave each fake `ensureDiscovered()`. The five fakes:
+`discoveryStatus()` or `:typecheck` reds. SMA-704 already gave each fake `ensureDiscovered()`. The
+five fakes:
 
 - `tests/support/store-failure.ts` (`FakeOidc`)
 - `tests/next/get-session.test.ts`
@@ -273,11 +274,12 @@ rejection waits for it: it settles the fake's promise, then awaits one `setImmed
   `ensureDiscovered()`, no event.
 - T6. `'discovering'` → 503, body `{"status":"unready"}`, `cache-control: no-store`, no call to
   `ensureDiscovered()`.
-- T7. `'idle'` → 503 `unready`, exactly one call to `ensureDiscovered()`. The response exists before the
-  fake settles its promise (the fake holds it open).
-- T8. `'idle'`, and `ensureDiscovered()` rejects with `OidcDiscoveryFailed` whose message holds the SMA-656
-  sentinel URL → exactly one event `oidc.discovery_failed { zone: 'iam', stage: 'readiness',
-  reason }`. Neither `idp.invalid` nor `sentinel-656` gets into the body, a header or a logged field.
+- T7. `'idle'` → 503 `unready`, exactly one call to `ensureDiscovered()`. The response exists before
+  the fake settles its promise (the fake holds it open).
+- T8. `'idle'`, and `ensureDiscovered()` rejects with `OidcDiscoveryFailed` whose message holds the
+  SMA-656 sentinel URL → exactly one event `oidc.discovery_failed { zone: 'iam', stage: 'readiness',
+  reason }`. Neither `idp.invalid` nor `sentinel-656` gets into the body, a header or a logged
+  field.
 - T9. `ensureDiscovered()` rejects with an `OidcDiscoveryFailed` from a second module copy
   (`vi.resetModules()`) → the event has that error's `reason`. It rejects with a plain `Error` →
   one event with `reason: 'other'`. In both cases no `unhandledRejection` occurs (a listener is

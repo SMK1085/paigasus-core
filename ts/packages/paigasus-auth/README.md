@@ -220,9 +220,10 @@ a replay attack.
 `stage` is `login`, `callback` or `readiness`. The readiness route logs `readiness` for an attempt
 that it started (SMA-705). The event never holds the caught error, its message, its name or a URL.
 It means "this process has no discovered configuration, and a login, a callback or the readiness
-route needed one". A login or a callback can join an attempt that the readiness route started.
-Then one failure logs one event for each of them. Its absence does NOT mean that the IdP is
-healthy.
+route needed one". A login or a callback can join an attempt that the readiness route started. A
+refresh can join it too, but it logs `session.refresh_failed` with `stage: 'discovery'`, not
+`oidc.discovery_failed`. Then one failure logs one event for each joiner. Its absence does NOT
+mean that the IdP is healthy.
 `reason` is one of:
 
 | `reason`            | What failed                                                                        | Probably                                                    |
@@ -296,7 +297,8 @@ the route is public. Read the log.
 - A configuration defect (a wrong issuer, a wrong CA, a malformed Redis URL) keeps the pod not
   ready for ever. The log shows the `reason` or the error name.
 - A failing pod logs about one `oidc.discovery_failed` line each 10 s: each probe after a settled
-  failure starts a new attempt. A login or a callback that joins the attempt adds its own event.
+  failure starts a new attempt. A login, a callback or a refresh that joins the attempt adds its
+  own event.
 - Ready proves discovery only. It does not prove that the pod reaches `token_endpoint` or
   `jwks_uri`. A pod-local fault after the first success (DNS or egress on one node) does not make
   the pod not ready.

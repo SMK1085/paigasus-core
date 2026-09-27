@@ -14,8 +14,9 @@
 // users, and it would not make a sign-in work.
 //
 // THE ROUTE NEVER WAITS FOR DISCOVERY (D3). It reads a synchronous status. When discovery is idle,
-// it starts one through `ensureDiscovered()` (SMA-704) without `await` and answers at once. The next probe sees the result. One wait
-// stays: the first call of a process builds the runtime, and that includes the Redis connect.
+// it starts one through `ensureDiscovered()` (SMA-704) without `await` and answers at once. The
+// next probe sees the result. One wait stays: the first call of a process builds the runtime, and
+// that includes the Redis connect.
 //
 // THE LOG (D8, D10). A discovery attempt that this route started and that fails logs one
 // `oidc.discovery_failed { zone, stage: 'readiness', reason }` through logDiscoveryFailed. A runtime
