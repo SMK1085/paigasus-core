@@ -24,6 +24,12 @@ else, so a zone cannot be routable but unadvertised or advertised but unrouted:
 A disabled zone leaves no trace in any of the six — no path, no map entry, no Deployment, no
 Service. `tests/ingress.sh` and `tests/maps.sh` assert this directly.
 
+**Exception: `ingress.enabled: false` (SMA-695).** The chart then renders no Ingress, so the first
+projection is gone. The operator's own route is a projection of `zones` that the operator keeps
+by hand. A route to a disabled zone points to a deleted Service. An enabled zone with no route
+gives a 404 for its `PAIGASUS_ZONES` link. SMA-694 (a chart-owned HTTPRoute) will restore D6 for
+Gateway API.
+
 ## The refusals
 
 `paigasus.validate` (`templates/_helpers.tpl`) runs first in every template and fails the render,
@@ -40,13 +46,19 @@ with its own message, rather than letting a bad values file produce broken Kuber
   `_helpers.tpl` must be kept equal to it by hand.
 - **A backend the chart does not deploy, with no `backend.url`.** See the next section.
 - **Every value `values.yaml` marks REQUIRED, when it is empty.** `ingress.host`,
-  `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`,
-  `postgres.existingSecret` and `zones.iam.backend.apiKeysPepperSecret` each fail with their own
-  named message the moment they are unset. Before SMA-513 Task 14, `paigasus.validate` refused
+  `ingress.tlsSecretName` (only when `ingress.enabled` is true), `oidc.issuer`, `oidc.clientId`,
+  `oidc.existingSecret`, `postgres.existingSecret` and `zones.iam.backend.apiKeysPepperSecret` each
+  fail with their own named message the moment they are unset. Before SMA-513 Task 14, `paigasus.validate` refused
   only `ingress.host`; the other seven were required by comment alone, and a default
   `helm install` rendered a Deployment with an empty `secretKeyRef.name` for the pepper secret —
   a manifest the Kubernetes API server refuses. This is what stops that: every REQUIRED value is
   now refused at render time, so a values file missing one never reaches the API server at all.
+
+- **A non-boolean `ingress.enabled`, and an `ingress.host` with a scheme, path or port
+  (SMA-695).** A quoted `"false"` is a string, and a string is true in a template `if`, so the
+  Ingress would stay. A host such as `https://console.example.com` renders
+  `PAIGASUS_PUBLIC_ORIGIN=https://https://console.example.com`. With the Ingress on, the API server
+  refuses such a host. With it off, only this refusal does.
 
 - **A bad bootstrap admin or `extraEnv` entry (SMA-697).** `paigasus.validateIamBackend` in
   `templates/_iam-backend.tpl` refuses a bootstrap admin that IAM would refuse at boot (an empty
@@ -74,6 +86,17 @@ rewrite annotation of its own. Do not add one. Each console compiles its `basePa
 its full path already; a rewrite that strips a prefix such as `/iam` breaks every route in that
 zone. This is the change an operator is most likely to add by reflex, so it is called out in both
 `values.yaml` and `templates/ingress.yaml` as well as here.
+
+## Running without an Ingress controller
+
+Set `ingress.enabled: false` when the cluster has no Ingress controller, for example a cluster
+that uses Gateway API. The chart then renders no Ingress, and `ingress.tlsSecretName` is not
+required. `ingress.host` stays required, because it feeds `PAIGASUS_PUBLIC_ORIGIN` and the OIDC
+redirect URIs. `ingress.className` and `ingress.annotations` then do nothing.
+
+`templates/ingress.yaml` wraps its body in `paigasus.ingressEnabled` (`templates/_helpers.tpl`).
+`tests/ingress.sh` and `tests/refusals.sh` hold the SMA-695 rows. The routing contract that the
+operator must meet is in `docs/ops/RUNBOOK-chart.md` § 11.
 
 ## A zone may supply its backend address instead of having it deployed
 
