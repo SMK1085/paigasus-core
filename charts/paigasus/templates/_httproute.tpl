@@ -65,5 +65,14 @@ to nothing.
 {{- if ne $host (lower $host) -}}
 {{- fail (printf "ingress.host must be lowercase when httpRoute.enabled is true (Gateway API hostnames are lowercase RFC 1123 names), got %q" $host) -}}
 {{- end -}}
+{{- $ann := dig "annotations" dict $h -}}
+{{- if not (or (kindIs "invalid" $ann) (kindIs "map" $ann)) -}}
+{{- fail (printf "httpRoute.annotations must be a map, got %s" (kindOf $ann)) -}}
+{{- end -}}
+{{- range $k, $v := ($ann | default dict) -}}
+{{- if not (kindIs "string" $v) -}}
+{{- fail (printf "httpRoute.annotations.%s must be a string, got %s; quote it in a values file or use --set-string" $k (kindOf $v)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

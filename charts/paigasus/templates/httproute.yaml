@@ -11,6 +11,10 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: {{ $name }}
+  {{- with (dig "annotations" dict $h) }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   # DO NOT add a filter here or in values. Each console compiles basePath in and serves its FULL
   # path already: a URLRewrite that strips {{ $z.basePath }} breaks every route in this zone, and a
   # hostname rewrite breaks the Server Action origin check.

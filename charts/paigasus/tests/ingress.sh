@@ -232,6 +232,11 @@ ingress_count "route, ingress disabled: no Ingress" 0 "${ROUTE[@]}" --set zones.
 # H4 (AC5). A release made before this change has no httpRoute map.
 route_shape "route, httpRoute key absent" "none" "${ROUTE[@]}" --set zones.gateway.enabled=true \
   --set httpRoute=null
+# H8 (AC10). The annotations go on every HTTPRoute. The empty default renders no annotations key.
+route_shape "route, annotations" \
+  'gateway:-:{"example.test/owner":"team"} iam:-:{"example.test/owner":"team"}' \
+  "${ROUTE[@]}" --set zones.gateway.enabled=true --set 'httpRoute.annotations.example\.test/owner=team'
+route_shape "route, no annotations" 'gateway:-:- iam:-:-' "${ROUTE[@]}" --set zones.gateway.enabled=true
 
 if [ "$ec" -eq 0 ]; then echo "== chart ingress coupling OK =="; fi
 exit "$ec"

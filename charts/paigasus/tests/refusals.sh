@@ -233,6 +233,11 @@ expect_render "upper-case host, httpRoute off" \
 expect_render "httpRoute parentRef with port" \
   --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw' \
   --set 'httpRoute.parentRefs[0].port=443'
+# R8, R9 (D14). The API server needs string annotation values; --set gives a boolean for "true".
+expect_fail "httpRoute annotations not a map" "httpRoute.annotations must be a map" \
+  "${ROUTE[@]}" --set httpRoute.annotations=x
+expect_fail "httpRoute annotation not a string" "httpRoute.annotations.owner must be a string" \
+  "${ROUTE[@]}" --set httpRoute.annotations.owner=true
 
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \

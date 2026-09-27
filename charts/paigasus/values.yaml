@@ -129,6 +129,9 @@ httpRoute:
   # Example: [{name: cilium-gateway, namespace: kube-system, sectionName: https}]
   # The listener must end TLS for ingress.host and allow this release's namespace.
   parentRefs: []
+  # NOT required. Annotations on each HTTPRoute, for example for external-dns. Each value must be
+  # a string. The chart does not check the text: a value that names a zone id is your own text.
+  annotations: {}
   # DO NOT add a rewrite or any other filter. Each console serves its full basePath.
 
 oidc:
