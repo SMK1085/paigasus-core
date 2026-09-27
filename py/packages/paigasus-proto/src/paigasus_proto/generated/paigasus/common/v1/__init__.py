@@ -445,6 +445,39 @@ class ErrorReason(betterproto2.Enum):
     of which transport it used.
     """
 
+    INVALID_REASON = 41
+    """
+    ---- IAM: identity links (1-299) -----------------------------------------
+    SMA-712. Emitted by the operator identity-link calls on UserService and
+    on /v1/users/*. Both transports carry every one of them.
+
+    "invalid-reason" — the audit reason is empty after trim, or it is longer
+    than 500 characters.
+    """
+
+    UNKNOWN_ISSUER = 42
+    """
+    "unknown-issuer" — the issuer is not one of the configured authn issuers.
+    """
+
+    INVALID_SUBJECT = 43
+    """
+    "invalid-subject" — the subject is empty, it is longer than 255
+    characters, or it starts or ends with whitespace.
+    """
+
+    CANNOT_UNLINK_OWN_IDENTITY = 44
+    """
+    "cannot-unlink-own-identity" — the call would unlink the identity that
+    authenticated the request.
+    """
+
+    EXTERNAL_IDENTITY_EXISTS = 45
+    """
+    "external-identity-exists" — another user already holds this
+    (issuer, subject) pair.
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -631,6 +664,11 @@ class ErrorReason(betterproto2.Enum):
             38: "ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS",
             40: "ERROR_REASON_INVALID_PRINCIPAL_KIND",
             39: "ERROR_REASON_SERVICE_MIGRATING",
+            41: "ERROR_REASON_INVALID_REASON",
+            42: "ERROR_REASON_UNKNOWN_ISSUER",
+            43: "ERROR_REASON_INVALID_SUBJECT",
+            44: "ERROR_REASON_CANNOT_UNLINK_OWN_IDENTITY",
+            45: "ERROR_REASON_EXTERNAL_IDENTITY_EXISTS",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -697,6 +735,11 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS": 38,
             "ERROR_REASON_INVALID_PRINCIPAL_KIND": 40,
             "ERROR_REASON_SERVICE_MIGRATING": 39,
+            "ERROR_REASON_INVALID_REASON": 41,
+            "ERROR_REASON_UNKNOWN_ISSUER": 42,
+            "ERROR_REASON_INVALID_SUBJECT": 43,
+            "ERROR_REASON_CANNOT_UNLINK_OWN_IDENTITY": 44,
+            "ERROR_REASON_EXTERNAL_IDENTITY_EXISTS": 45,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,

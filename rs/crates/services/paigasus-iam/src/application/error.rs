@@ -165,6 +165,24 @@ pub enum TenancyError {
     /// whose catalog still defines the id re-seeds it unconditionally.
     #[error("the fleet has not converged past this binary's starter policy revision")]
     FleetNotConverged,
+    /// SMA-712. The audit `reason` of an identity-link write is empty after trim, or it is
+    /// longer than 500 characters. A unit variant, so the caller's text never reaches a body.
+    #[error("reason must have 1 to 500 characters after trim")]
+    InvalidReason,
+    /// SMA-712. The `issuer` of a link call is not one of the configured `authn.issuers`.
+    #[error("issuer is not a configured issuer")]
+    UnknownIssuer,
+    /// SMA-712. The `subject` of a link call is empty, is longer than 255 characters, or starts
+    /// or ends with whitespace.
+    #[error("subject must have 1 to 255 characters and no leading or trailing whitespace")]
+    InvalidSubject,
+    /// SMA-712. The unlink would remove the identity that authenticated this request.
+    #[error("cannot unlink the identity that authenticated this request")]
+    CannotUnlinkOwnIdentity,
+    /// SMA-712. Another user already holds this `(issuer, subject)` pair
+    /// (`ConflictKind::ExternalIdentityExists`, `uq_external_identity_issuer_subject`).
+    #[error("this external identity is linked to another user")]
+    ExternalIdentityConflict,
     #[error("internal server error")]
     Internal,
 }
@@ -207,6 +225,11 @@ impl TenancyError {
             Self::InvalidBulkReplay => "invalid-bulk-replay",
             Self::NotSystemOwned(_) => "not-system-owned",
             Self::FleetNotConverged => "fleet-not-converged",
+            Self::InvalidReason => "invalid-reason",
+            Self::UnknownIssuer => "unknown-issuer",
+            Self::InvalidSubject => "invalid-subject",
+            Self::CannotUnlinkOwnIdentity => "cannot-unlink-own-identity",
+            Self::ExternalIdentityConflict => "external-identity-exists",
             Self::Internal => "internal",
         }
     }
@@ -234,10 +257,15 @@ impl TenancyError {
             | Self::InvalidScope(_)
             | Self::PolicyInvalid(_)
             | Self::InvalidAction(_)
-            | Self::InvalidBulkReplay => ErrorClass::Validation,
+            | Self::InvalidBulkReplay
+            | Self::InvalidReason
+            | Self::UnknownIssuer
+            | Self::InvalidSubject => ErrorClass::Validation,
             Self::NotFound => ErrorClass::NotFound,
-            Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict | Self::ServiceAccountNameConflict | Self::PolicyConflict(_) => ErrorClass::Conflict,
-            Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) | Self::NotSystemOwned(_) | Self::FleetNotConverged => ErrorClass::Precondition,
+            Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict | Self::ServiceAccountNameConflict | Self::PolicyConflict(_) | Self::ExternalIdentityConflict => ErrorClass::Conflict,
+            Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) | Self::NotSystemOwned(_) | Self::FleetNotConverged | Self::CannotUnlinkOwnIdentity => {
+                ErrorClass::Precondition
+            }
             Self::Forbidden => ErrorClass::Forbidden,
             Self::Internal => ErrorClass::Internal,
         }
@@ -270,6 +298,9 @@ impl TenancyError {
             | Self::MissingRequiredField(f)
             | Self::MutuallyExclusiveFields(f)
             | Self::InvalidPathSegment(f) => Some(f),
+            Self::InvalidReason => Some("reason"),
+            Self::UnknownIssuer => Some("issuer"),
+            Self::InvalidSubject => Some("subject"),
             Self::SlugConflict
             | Self::DuplicateMembership
             | Self::EmailConflict
@@ -296,6 +327,8 @@ impl TenancyError {
             | Self::InvalidBulkReplay
             | Self::NotSystemOwned(_)
             | Self::FleetNotConverged
+            | Self::CannotUnlinkOwnIdentity
+            | Self::ExternalIdentityConflict
             | Self::Internal => None,
         }
     }
@@ -308,9 +341,10 @@ impl From<RepositoryError> for TenancyError {
                 ConflictKind::SlugTaken => Self::SlugConflict,
                 ConflictKind::DuplicateMembership => Self::DuplicateMembership,
                 ConflictKind::EmailTaken => Self::EmailConflict,
-                // Authn-only variant (SMA-443): tenancy operations never produce it, but the
-                // match must stay exhaustive as `ConflictKind` grows across milestones.
-                ConflictKind::ExternalIdentityExists => Self::Internal,
+                // SMA-712: `UserIdentityService::link` produces it (another user holds the
+                // `(issuer, subject)` pair, or a JIT login inserted it first). JIT itself
+                // handles its own conflict in `authenticate_token.rs` before any conversion.
+                ConflictKind::ExternalIdentityExists => Self::ExternalIdentityConflict,
                 // M4 (SMA-445) variant: `ServiceAccountService::create` is the one caller
                 // that can actually hit this (Task 16) — a genuine 409, not a placeholder.
                 ConflictKind::ServiceAccountNameTaken => Self::ServiceAccountNameConflict,
@@ -566,5 +600,31 @@ mod tests {
         assert_eq!(err.class(), ErrorClass::Validation);
         assert_eq!(err.field(), Some("principal_kind"));
         assert_eq!(err.to_string(), "principal_kind is not a known principal kind");
+    }
+
+    /// SMA-712: the five identity-link codes. Each is a unit variant, so no caller input can
+    /// reach an error body. The three validation codes name their field for `ErrorInfo`.
+    #[test]
+    fn the_identity_link_codes_classify_and_name_their_field() {
+        for (err, code, class, field) in [
+            (TenancyError::InvalidReason, "invalid-reason", ErrorClass::Validation, Some("reason")),
+            (TenancyError::UnknownIssuer, "unknown-issuer", ErrorClass::Validation, Some("issuer")),
+            (TenancyError::InvalidSubject, "invalid-subject", ErrorClass::Validation, Some("subject")),
+            (TenancyError::CannotUnlinkOwnIdentity, "cannot-unlink-own-identity", ErrorClass::Precondition, None),
+            (TenancyError::ExternalIdentityConflict, "external-identity-exists", ErrorClass::Conflict, None),
+        ] {
+            assert_eq!(err.code(), code);
+            assert_eq!(err.class(), class, "{code}");
+            assert_eq!(err.field(), field, "{code}");
+        }
+    }
+
+    /// SMA-712 spec 5.7: the link call is the first tenancy call that produces this conflict, so
+    /// it is a 409, not the `Internal` placeholder it was while only JIT produced it.
+    #[test]
+    fn an_external_identity_conflict_from_the_store_is_a_409() {
+        let err = TenancyError::from(RepositoryError::Conflict(ConflictKind::ExternalIdentityExists));
+        assert_eq!(err, TenancyError::ExternalIdentityConflict);
+        assert_eq!(err.class(), ErrorClass::Conflict);
     }
 }

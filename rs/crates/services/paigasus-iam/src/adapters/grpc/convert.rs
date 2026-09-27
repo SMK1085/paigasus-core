@@ -973,6 +973,26 @@ mod tests {
         }
     }
 
+    /// SMA-712: the five identity-link reasons reach gRPC with the code of their class, and the
+    /// three validation reasons carry their field in `ErrorInfo.metadata["field"]`.
+    #[test]
+    fn the_identity_link_reasons_map_to_their_grpc_codes() {
+        for (err, code, field) in [
+            (TenancyError::InvalidReason, Code::InvalidArgument, Some("reason")),
+            (TenancyError::UnknownIssuer, Code::InvalidArgument, Some("issuer")),
+            (TenancyError::InvalidSubject, Code::InvalidArgument, Some("subject")),
+            (TenancyError::CannotUnlinkOwnIdentity, Code::FailedPrecondition, None),
+            (TenancyError::ExternalIdentityConflict, Code::AlreadyExists, None),
+        ] {
+            let wire = err.code();
+            let status = status_to_grpc(err);
+            assert_eq!(status.code(), code, "{wire}");
+            let info = status.get_error_details().error_info().cloned().expect("every IAM status carries ErrorInfo");
+            assert_eq!(info.reason, wire);
+            assert_eq!(info.metadata.get("field").map(String::as_str), field, "{wire}");
+        }
+    }
+
     #[test]
     fn parse_opt_ts_treats_an_absent_timestamp_as_unfiltered() {
         assert_eq!(parse_opt_ts(None, "parked_from").unwrap(), None);
