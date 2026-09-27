@@ -2,14 +2,16 @@
 
 - Issue: [SMA-704](https://linear.app/smaschek/issue/SMA-704)
 - Package: `ts/packages/paigasus-auth` (`@paigasus/auth`)
-- Related: SMA-656 (its spec, § 8, defers this gap to SMA-704)
-- Status: design approved in chat on 2026-09-27; written spec awaits review
+- Related: SMA-656 (its spec, § 8, defers this gap to SMA-704); SMA-705 (readiness gate or eager
+  discovery at start)
+- Status: design approved in chat on 2026-09-27. Revised after the spec challenge (§ 9). The written
+  spec awaits review.
 
 ## 1. Problem
 
 `createAuthRuntime` (`src/runtime.ts:130-143`) refuses a configuration unless
 `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS < PAIGASUS_SESSION_LOCK_TTL_MS`. Call the timeout T. The rule
-counts the calls that `refresh()` makes while `resolveSession` holds the session lock:
+counts the IdP calls that `refresh()` makes while `resolveSession` holds the session lock:
 
 1. the token call (`client.refreshTokenGrant`), bounded by T;
 2. the JWKS call that the non-repudiation hook makes when the response has an `id_token`, bounded
@@ -34,17 +36,20 @@ Facts from `openid-client@6.8.8` (`build/index.js`), read on this branch:
 
 - `discovery()` → `performDiscovery()` (`:260-302`) sends exactly ONE request, under one
   `AbortSignal.timeout(timeout * 1000)`. It does not prefetch JWKS.
-- `refreshTokenGrant()` (`:999-1030`) sends the token request with `signal(timeout)`, then, when the
-  response has an `id_token`, the non-repudiation hook (`:748-761`) fetches JWKS with the same
-  `signal(timeout)`.
+- `refreshTokenGrant()` (`:999-1030`) sends the token request with `signal(timeout)`. When the
+  response has an `id_token`, the non-repudiation hook (`:748-761`) fetches JWKS with its own
+  `signal(timeout)`. `signal()` (`:1150-1152`) makes a NEW `AbortSignal.timeout` on each call, so
+  each of the two calls is bounded by T separately, and together they take at most 2T.
+- Without DPoP, openid-client adds no retries (`:1185-1190`).
 
-So a warm refresh is at most 2T, and a cold refresh is at most 3T. This is reasoned from the code.
-The measurement test in § 5 measures it.
+So the IdP calls of a warm refresh take at most 2T, and those of a cold refresh at most 3T. This
+is reasoned from the code. Test 13 (§ 5.4) measures it.
 
 ## 2. Decision
 
 Discovery runs BEFORE `resolveSession` takes the lock. Under the lock, `getConfig()` is then a
-resolved promise and sends nothing, so the existing 2T rule is true by construction.
+resolved promise and sends nothing. So the IdP calls under the lock are at most 2T, and the
+existing 2T rule covers all of them. The store calls under the lock are NOT in that rule; see § 6.
 
 Rejected alternatives:
 
@@ -53,6 +58,12 @@ Rejected alternatives:
   then fail at start after an upgrade. A larger TTL also blocks refresh for longer after a holder
   crashes.
 - **Both.** With discovery outside the lock, a 3T check refuses configurations that are safe.
+- **Eager discovery at `getAuthRuntime` time.** It cannot give the guarantee alone: when the eager
+  discovery fails, the lazy discovery in `refresh()` runs under the lock again. SMA-656 § 8 put it
+  out of scope, and SMA-705 tracks it for readiness.
+- **Make `refresh()` fail closed when the configuration is not resolved.** This would make a wiring
+  mistake visible in every test. But it changes the contract of `refresh()` for every caller, and
+  test 9 (§ 5.2) already guards the production wiring. Not done.
 
 No default changes. No configuration rule changes.
 
@@ -76,7 +87,7 @@ The implementation is `await getConfig();`. It throws the same `OidcDiscoveryFai
 Why a later `refresh()` sends no discovery request: `getConfig()` assigns `configPromise` once
 (`??=`) and clears it only in its own `.catch`. A promise that resolved is never cleared. So after
 `ensureDiscovered()` resolves, every `getConfig()` in the same `OidcClient` returns that resolved
-promise.
+promise. Concurrent `ensureDiscovered()` calls share one discovery request for the same reason.
 
 The SMA-656 D10 no-revoke invariant does not change: `ensureDiscovered()` sends no token request,
 and `OidcDiscoveryFailed` still comes only from `getConfig()`.
@@ -87,68 +98,125 @@ and `OidcDiscoveryFailed` still comes only from `getConfig()`.
 
 ```ts
 /**
- * Called once per resolveSession, only when a refresh is due, BEFORE the first tryAcquireLock
- * (SMA-704). Production wires it to OidcClient.ensureDiscovered, so the OIDC discovery request
- * never runs under the lock. A rejection is a transient refresh failure.
+ * Called at most once per resolveSession, only when a refresh is due and the record has a refresh
+ * token, BEFORE the first tryAcquireLock (SMA-704). Production wires it to
+ * OidcClient.ensureDiscovered, so the OIDC discovery request never runs under the lock. A
+ * rejection is a transient refresh failure.
  */
 prepareRefresh: () => Promise<void>;
 ```
 
-It is required, not optional, so that a caller cannot omit it and silently put discovery back under
-the lock.
+It is required, not optional, so that the type check forces every caller to supply it
+(`tsconfig.json` includes `tests/**`).
 
 Order in `resolveSession`:
 
 1. `store.get(sid)`; the absolute-expiry check; `shouldRefresh`. Unchanged. A read of a session
    that needs no refresh does not call `prepareRefresh`.
-2. NEW: `await prepareRefresh()`.
+2. NEW: when `rec.refreshToken !== undefined`, `await prepareRefresh()`. A record with no refresh
+   token skips this step, so it reaches the `no_refresh_token` delete under the lock as today and
+   waits for no discovery.
 3. `deadline = Date.now() + lockWaitMs`. This line moves AFTER step 2, so a waiter keeps its full
    `lockWaitMs` after discovery.
 4. The lock loop. Unchanged.
 
-Concurrent requests on one process share one discovery request, because `getConfig()` caches the
-promise.
+When `prepareRefresh` rejects in step 2, `resolveSession` takes no lock and:
 
-Failure of `prepareRefresh`: the outcome is the outcome of today's transient refresh failure. Today
-a discovery failure throws `OidcDiscoveryFailed` from `refresh()` under the lock. It is never a
-`RefreshRejected`, so it takes the transient branch. To keep one definition of that branch, the
-failure logic in the `refresh` catch (`:176-225`) moves into one helper, and both sites call it.
-For the new site the helper:
+1. re-reads the record with `store.get(sid)`, as the lock-timeout branch does (`:329`). Up to T has
+   passed, and another process may have refreshed or deleted the record in that time;
+2. if the re-read gives `null`, returns `null`;
+3. if `!shouldRefresh(Date.now(), reread.accessExpiresAt, skewMs)`, returns the re-read record.
+   Another process refreshed it, so no refresh is needed (the same rule as invariant 1);
+4. otherwise calls the transient helper (below) with the re-read record and the error.
 
-- logs `session.refresh_failed` with `reason: 'transient'` and `degraded`, and with no `oauthError`
-  (a discovery failure has no OAuth code — `refreshFailureCode` returns `undefined` for it);
-- returns `{ ...rec, refreshState: 'failed' }` when `Date.now() < min(rec.accessExpiresAt,
-  rec.absoluteExpiresAt)`;
-- otherwise throws the error, as today. `get-session.ts`'s catch then handles it as it does today.
+A store failure during the re-read propagates, as any store failure in `resolveSession` does
+today.
 
-The lock is never taken on this path. The new site passes `rec`, the record read before the lock,
-because no lock is held and there is no fresher record.
+The transient helper: the transient half of the `refresh` catch (`:176-225`) moves into one helper,
+and both sites call it. The helper:
+
+- logs `session.refresh_failed` with `reason: 'transient'` and `degraded`, plus `oauthError` when
+  the error has one (the site under the lock), or `stage: 'discovery'` (the new site). A discovery
+  failure has no OAuth code, so the new site never sets `oauthError`;
+- returns `{ ...record, refreshState: 'failed' }` when
+  `Date.now() < min(record.accessExpiresAt, record.absoluteExpiresAt)`;
+- otherwise throws the error. `get-session.ts`'s catch then handles it as it does today.
 
 The helper covers ONLY the transient outcome. The site under the lock keeps its `rejected` branch
 (the `session.refresh_failed` line with `reason: 'rejected'`, the delete, `session.deleted`) and
 calls the helper for everything else. The new site calls the helper directly and never checks for
-a rejection. So the new site can never delete a record. Test 3 and test 4 pin that.
+a rejection, so it never deletes a record. The `stage` field is new: `src/ports/logger.ts`
+documents the fields of `session.refresh_failed`, and it gets the new field with the closed value
+`'discovery'`.
 
-### 3.3 Wiring — `src/next/get-session.ts`
+Differences from today, stated on purpose:
+
+- A record that passed its absolute cap during the discovery wait is not deleted on this path. The
+  helper's `min(...)` finds it not live and throws, so `getSession` returns `null`. The next read
+  deletes it through the outer absolute-expiry check. Today the site under the lock deletes it.
+- On a cold pod, concurrent requests that need a refresh share ONE discovery request and ONE
+  failure. Each of them logs one `session.refresh_failed` line with `stage: 'discovery'`. Today each
+  lock holder in turn runs its own discovery under the lock.
+
+### 3.3 Wiring — one function for production and the e2e fixture
+
+A new exported function in `src/next/get-session.ts` (or a sibling module that the plan names)
+builds the `ResolveDeps` from an `AuthRuntime`:
 
 ```ts
-prepareRefresh: () => runtime.oidc.ensureDiscovered(),
+export function resolveDepsFor(runtime: AuthRuntime): ResolveDeps {
+  return {
+    store: runtime.store,
+    prepareRefresh: () => runtime.oidc.ensureDiscovered(),
+    refresh: (refreshToken) => runtime.oidc.refresh(refreshToken),
+    revoke: (token) => runtime.oidc.revoke(token),
+    logger: runtime.logger,
+    skewMs: runtime.skewMs,
+    lockTtlMs: runtime.lockTtlMs,
+    lockWaitMs: runtime.lockWaitMs,
+    ttlMs: runtime.ttlMs,
+  };
+}
 ```
 
-Every other `resolveSession` caller (tests and fixtures, for example
-`tests/fixtures/refresh-worker.ts` and `tests/containers/single-flight-redis.test.ts`) passes a
-`prepareRefresh`. A fake that has no discovery passes `async () => {}`.
+`getSession` (`get-session.ts:53-65`) and `tests/e2e/fixture-server.ts:151-162` both call it. So the
+e2e tier uses the production wiring, not a copy. All three IdP calls go to the same `runtime.oidc`
+instance, so `prepareRefresh` and `refresh` share one discovery cache.
 
-### 3.4 The bound and its documentation
+The other `resolveSession` callers pass their own `prepareRefresh`: `tests/core/single-flight.test.ts`,
+`tests/fixtures/refresh-worker.ts`, `tests/containers/single-flight-redis.test.ts`,
+`tests/http/logout.test.ts:236`. A fake with no discovery passes `async () => {}`.
 
-- `src/runtime.ts`: the 2T check and its message do not change. The invariant 3 comment adds that
+The `OidcClient` fakes and wrappers get an `ensureDiscovered` that RESOLVES, so that their existing
+tests keep their current path: `tests/next/get-session.test.ts:61-63` (`unusedOidc`),
+`tests/http/logout.test.ts:78`, `tests/support/store-failure.ts:80`,
+`tests/http/callback.test.ts:58-70`, `tests/http/route-handler.test.ts` (around `:46-67`). The plan
+lists every fake that the type check reports; this list is the known set.
+
+### 3.4 The runtime cache key
+
+The cached runtime lives on `globalThis` under `paigasus.auth.runtime.v1:<zone>`
+(`src/runtime.ts:217-230`). That comment's own rule is to change the version when the runtime's
+shape changes incompatibly. The `OidcClient` inside it gains a required method, and a runtime that
+an older module copy made (for example across a dev HMR reload) has no `ensureDiscovered`. So
+`RUNTIME_KEY_PREFIX` becomes `paigasus.auth.runtime.v2`, and `tests/runtime.test.ts:155` follows.
+
+### 3.5 The bound and its documentation
+
+- `src/runtime.ts`: the 2T check and its message do not change. The invariant 3 comment says that
   discovery is NOT one of the calls under the lock, because `resolveSession` calls
-  `prepareRefresh` first (SMA-704).
-- `src/core/single-flight.ts`: invariant 5's comment gets the same statement.
+  `prepareRefresh` first (SMA-704). It also says that the rule covers the IdP calls only, and names
+  the store-call residual (§ 6).
+- `src/core/single-flight.ts`: invariant 5's comment gets the same statement. It also says that
+  the waiter's `lockWaitMs` starts after `prepareRefresh`.
 - `src/adapters/oidc.ts`: the header's "DISCOVERY IS LAZY" paragraph names `ensureDiscovered` and
   the reason for it.
-- `README.md` rows for `PAIGASUS_OIDC_HTTP_TIMEOUT_MS` and `PAIGASUS_SESSION_LOCK_TTL_MS`: add
-  that discovery runs before the lock and is not in the 2x budget.
+- `README.md`:
+  - the rows for `PAIGASUS_OIDC_HTTP_TIMEOUT_MS` and `PAIGASUS_SESSION_LOCK_TTL_MS` say that
+    discovery runs before the lock and is not in the 2x budget;
+  - the limitation bullet at `README.md:239-241` ("SMA-704 tracks this") is rewritten. It keeps the
+    first sentence, says that discovery now runs before the lock, and states the store-call
+    residual with its follow-up issue.
 
 ## 4. What does not change
 
@@ -156,8 +224,12 @@ Every other `resolveSession` caller (tests and fixtures, for example
 - The Helm chart. It sets neither variable (checked: no match in `charts/`).
 - Login, callback, logout. They take no session lock.
 - The revokes after release (SMA-681).
-- Latency on a warm process. On a cold process, a request that must refresh waits up to T for
-  discovery once, before the lock. Today it waits for the same discovery, under the lock.
+- Latency on a warm process.
+
+What changes for latency: on a cold process, a request that must refresh waits up to T for
+discovery once, before the lock. A waiter on a cold pod can now wait up to T + `lockWaitMs`, plus
+its store calls. Today it waits for the same discovery, but under the lock, and a waiter's
+`lockWaitMs` includes it.
 
 ## 5. Tests
 
@@ -165,53 +237,137 @@ Every other `resolveSession` caller (tests and fixtures, for example
 
 With a recording store and a recording `prepareRefresh`:
 
-1. When a refresh is due, `prepareRefresh` resolves BEFORE the first `tryAcquireLock` call.
+1. When a refresh is due, `prepareRefresh` resolves BEFORE the first `tryAcquireLock` call. The fake
+   resolves after a macrotask (`setTimeout(…, 20)`) and records its resolution time there, so a
+   missing `await` fails the test.
 2. When no refresh is due, `prepareRefresh` is not called.
-3. `prepareRefresh` rejects, and the access token is live: the result has `refreshState: 'failed'`,
-   `session.refresh_failed` is logged with `reason: 'transient'` and `degraded: true`,
-   `tryAcquireLock` is never called, and nothing is deleted.
-4. `prepareRefresh` rejects, and the access token is expired: `resolveSession` rejects with that
-   error, `tryAcquireLock` is never called, and nothing is deleted.
-5. The `lockWaitMs` deadline starts after `prepareRefresh` resolves. Another holder keeps the lock
+3. When the record has no refresh token, `prepareRefresh` is not called, and the record is deleted
+   with `reason: 'no_refresh_token'` as today.
+4. `prepareRefresh` rejects, and the re-read access token is live: the result has
+   `refreshState: 'failed'`; `session.refresh_failed` is logged with `reason: 'transient'`,
+   `degraded: true` and `stage: 'discovery'`; `tryAcquireLock` is never called; nothing is deleted.
+5. `prepareRefresh` rejects, and the re-read access token is expired: `resolveSession` rejects with
+   that error, `tryAcquireLock` is never called, and nothing is deleted.
+6. Tests 4 and 5 each run twice: once with a plain `Error`, and once with an error that carries the
+   `RefreshRejected` code. The second run must also not delete. So a new site that goes through
+   the full classifier fails the test.
+7. `prepareRefresh` rejects, and during its wait another writer (a) refreshes the record, or (b)
+   deletes it. (a) returns the refreshed record with no `refreshState`. (b) returns `null`.
+8. The `lockWaitMs` deadline starts after `prepareRefresh` resolves. Another holder keeps the lock
    for the whole test, and `prepareRefresh` takes longer than `lockWaitMs`. The time from
-   `prepareRefresh` resolving to the `'pending'` return is at least `lockWaitMs`, and the waiter
-   makes more than one lock attempt. With the deadline set before `prepareRefresh`, the waiter
-   makes exactly one attempt and returns at once, so this test fails. (The loop always makes one
-   attempt before it checks the deadline, so "at least one attempt" would not bite.)
+   `prepareRefresh` resolving to the `'pending'` return, measured with `Date.now()` (the clock the
+   code uses), is at least `lockWaitMs`, and the waiter makes more than one lock attempt. With the
+   deadline set before `prepareRefresh`, the waiter makes exactly one attempt and returns at once,
+   so this test fails. (The loop always makes one attempt before it checks the deadline, so "at
+   least one attempt" would not fail.)
 
-### 5.2 Adapter — `tests/adapters/oidc.test.ts`
+### 5.2 Wiring — `tests/next/get-session.test.ts`
 
-6. `ensureDiscovered()` then `refresh()` sends exactly one discovery request in total.
-7. A failed `ensureDiscovered()` rejects with `OidcDiscoveryFailed`, and a second call retries.
+9. `getSession` with a recording `oidc` whose `ensureDiscovered` resolves after a macrotask, and a
+   recording store. When a refresh is due, `ensureDiscovered` resolves before the first
+   `store.tryAcquireLock`. This is the test that guards the production line in `resolveDepsFor`.
 
-### 5.3 Measurement — the acceptance criterion
+### 5.3 Adapter — `tests/adapters/oidc.test.ts`
 
-8. A real `createOidcClient` on a cold client, against a fixture IdP that delays the discovery
-   response, the token response and the JWKS response by about 0.9 T each (T small, for example
-   300 ms). The response carries an `id_token`, so the JWKS call happens. A store wrapper records
-   the time between `tryAcquireLock` returning true and `releaseLock`. Assertions:
-   - the lock is held for less than 2T;
-   - the whole `resolveSession` takes more than 2T (so discovery really ran, outside the lock).
+10. The discovery request count is 1 after `ensureDiscovered()` alone, and still 1 after a
+    following `refresh()`. So a no-op `ensureDiscovered` fails the first assertion.
+11. Two concurrent `ensureDiscovered()` calls on a cold client send one discovery request.
+12. A failed `ensureDiscovered()` rejects with `OidcDiscoveryFailed`, and a second call retries (a
+    second discovery request).
 
-   The test is written first and run against the code before the fix. There it must FAIL, with the
-   lock held for about 2.7T. The plan records the measured value in this spec's § 7.
+### 5.4 Measurement — the acceptance criterion
 
-The worst case with every call AT its timeout is a failed refresh, not a slow success, so the test
-uses delays just below T. A companion case with a hanging discovery (the existing
-`startDiscoveryFailureFixture('hang')`) asserts that `tryAcquireLock` is never called.
+13. A real `createOidcClient` on a cold client, driven through `resolveSession` with a `ResolveDeps`
+    whose `prepareRefresh` and `refresh` go to that client. The fixture IdP is
+    `tests/fixtures/jwks.ts`. It gets two additions: a per-endpoint response delay, and a request
+    log with a timestamp for each discovery, token and JWKS request. The response carries an
+    `id_token`, so the JWKS call happens. The record's `idTokenClaims` use the fixture's issuer and
+    `sub` (`jwks.ts:222-224`), so the refresh succeeds and `session.refreshed` is logged, and the
+    D5 `id_token_mismatch` branch does not run. A store wrapper records when `tryAcquireLock`
+    returns true and when `releaseLock` is called.
 
-### 5.4 Proof that the tests bite
+    The pass or fail assertion is CAUSAL, not a duration:
+    - no discovery request reaches the fixture while the lock is held;
+    - exactly one token request and exactly one JWKS request reach it while the lock is held;
+    - exactly one discovery request reaches it before the lock is taken.
 
-After the fix, delete the `await prepareRefresh()` line. Tests 1 and 8 must go red. Then delete only
-the `deadline` move; test 5 must go red. Restore by editing the line back, not by `git checkout`.
+    The delays (discovery 0.9T, token and JWKS 0.55T each, T = 1000 ms) make the durations
+    readable. The durations are recorded, not asserted: the lock hold time, and the time of the
+    whole `resolveSession`. The plan records them in § 7.
+
+    The test is written first and run against the code before the fix. There it must FAIL on the
+    first assertion (a discovery request while the lock is held). The plan records the lock hold
+    time of that run in § 7.
+
+    A second case uses a hanging discovery (the existing `startDiscoveryFailureFixture('hang')`)
+    and asserts that `tryAcquireLock` is never called.
+
+The worst case with every call AT its timeout is a failed refresh, not a slow success. So the
+measurement uses delays below T, and the hanging case covers the timeout.
+
+Test 13 runs in the default `test` task. Its assertions do not depend on timing, and it takes
+about 2 s.
+
+### 5.5 Proof that the tests bite
+
+After the fix, make each change below, run the tests, and then restore the line by editing it
+back, not by `git checkout` (which would also discard the fix):
+
+- delete `await prepareRefresh()` in `single-flight.ts`: tests 1 and 13 go red;
+- replace `resolveDepsFor`'s `prepareRefresh` with `async () => {}`: test 9 goes red;
+- move the `deadline` line back before `prepareRefresh`: test 8 goes red;
+- make `ensureDiscovered` a no-op: test 10 goes red;
+- remove the re-read on failure (use `rec`): test 7 goes red;
+- remove the `rec.refreshToken !== undefined` condition: test 3 goes red.
+
+Every change must compile, so that the red comes from a test, not from `tsc`.
 
 ## 6. Residuals
 
+- **Store calls under the lock are not in the 2T rule.** The lock TTL starts at the Redis
+  `SET NX PX` inside `tryAcquireLock` (`single-flight.ts:144`). The post-lock `store.get` (`:150`)
+  and the fenced `store.set` (`:278`) then run under the lock. Each store call is bounded only by
+  `withOperationDeadline` at `DEADLINE_FACTOR` (4) × `PAIGASUS_SESSION_REDIS_TIMEOUT_MS`
+  (`src/adapters/operation-deadline.ts:38`), 4000 ms at the default. So one slow `get` that still
+  succeeds plus 2T is 11000 ms at the defaults, which is more than the 10000 ms TTL. Event-loop lag
+  also delays `AbortSignal.timeout`. SMA-704 does not fix this. A follow-up Linear issue tracks it;
+  its key replaces this sentence once it exists.
 - A custom `OidcClient` whose `ensureDiscovered` is a no-op, or whose `refresh` re-runs discovery,
-  would put discovery back under the lock. Only the shipped adapter is covered.
-- JWKS key rotation: an unknown `kid` makes oauth4webapi refetch JWKS inside the refresh. That is
-  still the one JWKS call bounded by T, so it stays inside 2T. It is not discovery.
+  puts discovery back under the lock. Only the shipped adapter is covered.
+- JWKS key rotation: an unknown `kid` makes oauth4webapi refetch JWKS inside the refresh. That
+  refetch replaces the JWKS call; oauth4webapi fetches at most once per validation
+  (`getPublicSigKeyFromIssuerJwksUri`, oauth4webapi `:1025-1098`). So it stays inside 2T. It is not
+  discovery.
 
 ## 7. Measurements
 
-To be filled in by the implementation (test 8 before and after the fix).
+To be filled in by the implementation: test 13 before the fix (lock hold time, discovery requests
+under the lock) and after the fix.
+
+## 8. Out of scope
+
+- The store-call budget under the lock (§ 6, follow-up issue).
+- A readiness gate or an eager discovery at start (SMA-705).
+
+## 9. Spec challenge (2026-09-27)
+
+Verdict: APPROVE WITH CHANGES. Folded in:
+
+- BLOCKER, no test guards the production wiring → `resolveDepsFor` (§ 3.3), test 9, § 5.5.
+- MAJOR, the failure path was not today's outcome → the refresh-token condition, the re-read
+  (§ 3.2), tests 3 and 7, and the stated differences.
+- MAJOR, "true by construction" overclaimed → § 2 wording, the store-call residual (§ 6).
+- MAJOR, the timing test could flake → causal assertions, asymmetric delays, T = 1000 ms, the named
+  fixture, seeded claims (test 13).
+- MINOR: all callers and fakes named (§ 3.3); test 1 macrotask; test 8 uses `Date.now()`; test 6
+  (a rejection code); tests 10 and 11; the README bullet (§ 3.5); the per-call `signal()` wording
+  (§ 1); the waiter latency (§ 3.5, § 4); `stage: 'discovery'` on the log line (§ 3.2); the cache
+  key version (§ 3.4); the eager warm-up alternative (§ 2).
+
+Considered and not done:
+
+- A fail-closed `refresh()`: see § 2. Test 9 guards the wiring at a lower cost.
+- One port object for `prepareRefresh`, `refresh` and `revoke`: `resolveDepsFor` already binds all
+  three to one `runtime.oidc`. A new `ResolveDeps` shape is a larger change with no added
+  guarantee here.
+- A separate suite for test 13: its assertions are causal, not timing, so it stays in `test`.
