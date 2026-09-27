@@ -233,11 +233,12 @@ inside `run.sh` itself
 (`RELEASE_PARITY_SH_CALL_SITES`: the flag parse `--negative-control) NEGATIVE=1; shift ;;`,
 the `if [ "$NEGATIVE" = 1 ]; then` guard, the assertion body `check_case "neg-fix-bang" …`,
 and both report arms — the `exit 0` on "reported red as expected" and the `exit 1` on
-"accepted a wrong expectation"), SMA-716 adds ten more whole lines: for each of the two hooks,
-the guard that fails the release-plz run when the module lost the hook, the call, and the
-verdict arm(s) — one for the suite hook, three (pass, fail, and the control-hook's OWN `*)`
-infra arm) for the control hook, so an infra fault inside `ecosystem::extra_negative_control`
-itself is pinned too and cannot silently report as a pass — from inside
+"accepted a wrong expectation"), SMA-716 adds eleven more whole lines: for each of the two
+hooks, the guard that fails the release-plz run when the module lost the hook, the call, and
+the verdict arm(s) — two (fail, and the suite hook's OWN `*)` infra arm, added in the final
+whole-branch review) for the suite hook, three (pass, fail, and the control-hook's OWN `*)`
+infra arm) for the control hook, so an infra fault inside either hook's own verdict block
+is pinned too and cannot silently report as a pass — from inside
 `repo:affected-smoke` — a separately scheduled
 gate, so neither judges its own wiring. Five discrete lines, not one span, because pinning
 the block as a unit left two MEASURED bypasses with different failure shapes: neutering the

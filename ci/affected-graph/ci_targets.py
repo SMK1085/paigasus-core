@@ -1117,8 +1117,8 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
 # case ever changes, this entry must be updated with it, or the pin will fire on a legitimate
 # edit.
 #
-# SMA-716 adds the release-plz-only suite hook (entries 6-9) and the extra negative-control
-# hook (entries 10-15). The hook BODIES live in ecosystems/release-plz.sh and
+# SMA-716 adds the release-plz-only suite hook (entries 6-10) and the extra negative-control
+# hook (entries 11-16). The hook BODIES live in ecosystems/release-plz.sh and
 # release-plz-filter.sh, which no haystack here reads: a body replaced with `return 0` still
 # passes these pins (ci/release-parity/README.md, L6).
 RELEASE_PARITY_SH_CALL_SITES = (
@@ -1128,12 +1128,17 @@ RELEASE_PARITY_SH_CALL_SITES = (
     '1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;',
     '0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;',
     # SMA-716 — the release-plz-only suite hook. The first line fails the run when the
-    # release-plz module no longer defines the hook; the other three are the call and its
-    # verdict. Deleting any one lets the suite be skipped or its failures be dropped.
+    # release-plz module no longer defines the hook; the next two are the call and its "fail"
+    # verdict arm. The final line (final whole-branch review, SMA-716) is this block's OWN `*)`
+    # infra arm — deleting it left an `xec=2` infrastructure fault matching no case arm at all,
+    # so the gate printed "all parity cases passed" instead of aborting. Deleting any one of
+    # these five lets the suite be skipped, its failures be dropped, or an infra fault inside
+    # the suite hook report as a plain pass.
     '[ "$ECOSYSTEM" != release-plz ] || declare -F ecosystem::extra_suite >/dev/null || { echo "FATAL: release-parity ABORTED: infrastructure error (rc=2): ecosystems/release-plz.sh defines no ecosystem::extra_suite (SMA-716)" >&2; exit 2; }',
     'if declare -F ecosystem::extra_suite >/dev/null; then',
     'xec=0; ecosystem::extra_suite "$REAL_TOML" || xec=$?',
     '1) echo "== extra suite FAILURES (see above) ==" >&2; rc=1 ;;',
+    '*) echo "== parity ABORTED: infrastructure error in the extra suite (rc=$xec) ==" >&2; exit 2 ;;',
     # SMA-716 — the extra negative-control hook: its guard, its call and both verdict arms,
     # including this block's OWN infra arm (`*)`, distinct from the older base control's `*)`
     # arm below, which stays unpinned). Deleting the call or either verdict arm lets NC1-NC3

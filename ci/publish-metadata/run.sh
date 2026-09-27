@@ -1774,6 +1774,10 @@ PY
   _expect_rc 1 "Check 5 (R1 extra name from another group)" \
     metadata_checks "$tmp/r1.json" "$tmp/r1-extra.toml" "$r1_csv" "$fix_snap"
 
+  _r1_toml "$tmp/r1-dup.toml" 'changelog_include = ["paigasus-proto-derive", "paigasus-proto-derive"]' "$inc_d" '' ''
+  _expect_rc 1 "Check 5 (R1 duplicate name in changelog_include)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-dup.toml" "$r1_csv" "$fix_snap"
+
   _r1_toml "$tmp/r1-typo.toml" 'changelog_include = ["paigasus-proto-derivee"]' "$inc_d" '' ''
   _expect_rc 1 "Check 5 (R1 misspelt name)" \
     metadata_checks "$tmp/r1.json" "$tmp/r1-typo.toml" "$r1_csv" "$fix_snap"
