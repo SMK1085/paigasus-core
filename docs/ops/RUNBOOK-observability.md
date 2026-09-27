@@ -122,7 +122,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_audit_partitions_dropped_total` | counter | `outcome` | Monthly leaf partitions dropped by retention. `outcome` ∈ `denied`/`committed`. |
 | `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled while retention stays enabled — the ticks counter is the primary liveness signal there; when retention is **disabled** neither metric exists at all, see §4 "Audit partition maintenance stalled"). |
 | `iam_bootstrap_admin_seed_failures_total` | counter | `stage` | Swallowed `BootstrapAdminSeeder` seed failures (SMA-468 D6). `stage` ∈ `list` (the `list_by_principal` existence check errored) / `txn` (the `begin`/`grant_in`/`enqueue`/`record`/`commit` sequence errored). Deliberately has **no alert** (D6) — watch the "Bootstrap-admin seed failures" panel on the IAM dashboard, or query `/metrics` directly. **Read it as a rate, not a level.** It is monotonic, so a single historical failure leaves it nonzero forever, including long after the identity was successfully seeded on a later attempt — an absolute nonzero value proves nothing on its own. What indicates an ongoing lockout is a counter that is **still climbing** (`increase(iam_bootstrap_admin_seed_failures_total[15m]) > 0`, sustained): the seed is idempotent-by-existence, so once the grant row commits this stops incrementing for that identity, and a seed that never commits is retried on every subsequent authentication. Confirm by looking for the grant row itself before concluding lockout. **A low, one-off increase is benign**: two concurrent first authentications by the same bootstrap identity can both pass the existence check and both attempt `grant_in`; the loser violates the unique grant constraint and rolls back under `stage="txn"` while the winner's grant commits — net state is correct and self-correcting. |
-| `iam_jit_provisioning_failures_total` | counter | `defect` | Just-in-time provisioning attempts that IAM refused (SMA-698). `defect` ∈ `missing_email` (the access token has no valid `email` claim) / `email_conflict` (another user already has the email). IAM does not link identities by email. It counts refused **requests**, not identities. One user with a bad token makes several refused requests. This happens because a console session makes several IAM calls. The log rate limit (one `warn` line per issuer and defect in 10 s) does not apply to this counter. A lost race between two first logins of one identity is a success and is not counted. Both series are **primed at zero** when metrics are on. A flat zero is the healthy state. `increase()` sees the first failure. A refusal also writes a `warn` line that starts with `just-in-time provisioning failed`. The rate limit above applies to this line, so a refusal in the same 10 s window can write no new line. The line names the issuer. Read the issuer there. The counter has no `issuer` label. The alert `IamJitProvisioningFailures` fires on it (§4, SMA-706). |
+| `iam_jit_provisioning_failures_total` | counter | `defect` | Just-in-time provisioning attempts that IAM refused (SMA-698). `defect` ∈ `missing_email` (the access token has no valid `email` claim) / `email_conflict` (another user already has the email). IAM does not link identities by email. It counts refused **requests**, not identities. One user with a bad token makes several refused requests. This happens because a console session makes several IAM calls. The log rate limit (one `warn` line per issuer and defect in 10 s) does not apply to this counter. A lost race between two first logins of one identity is a success and is not counted. Both series are **primed at zero** when metrics are on. A flat zero is the healthy state. `increase()` sees the first failure after the first scrape of the series (see §4 `IamJitProvisioningFailures`, "When the alert is silent"). A refusal also writes a `warn` line that starts with `just-in-time provisioning failed`. The rate limit above applies to this line, so a refusal in the same 10 s window can write no new line. The line names the issuer. Read the issuer there. The counter has no `issuer` label. The alert `IamJitProvisioningFailures` fires on it (§4, SMA-706). |
 | `iam_system_rows_retired_total` | counter | `outcome` | Retirements of orphaned system-owned `policy`/`role` rows via `POST /v1/authz/system-policies/{id}/retire` (SMA-481, §4 "Retiring an orphaned system-owned row"). `outcome` ∈ `retired` (the deletes, the `PolicyDeleted` event and the audit row all committed) / `blocked` (surviving grants stopped it — nothing written) / `refused` (`fleet-not-converged`, or a static policy retired without `acknowledge_decision_change` — nothing written). **Not one increment per call:** `403` (non-Root), `409 system-immutable` (the id is still code-defined), `404`, and `409 not-system-owned` all return WITHOUT touching this counter — none of them are the fleet-skew / decision-change / blast-radius concerns it exists to page on. **No alert rule ships for it today** — retirement is a rare, deliberate, Root-only action, so this is a signal you query rather than one that pages you. It is nevertheless the only *monitorable* trace of the action: the `RetireSystemPolicy` `audit_log` row written in the same transaction is durable evidence, but nothing polls `audit_log` for it, and durable is not the same as monitored. |
 | `iam_nats_publish_duplicates_total` | counter | — | Only emitted under `[outbox.publisher].backend = "nats"` (SMA-471). Every JetStream publish ack that came back `duplicate = true` — the `Nats-Msg-Id` dedup (D3) collapsing a relay redelivery of a row it already published once (the common case: the first publish's own ack was lost, so the relay retried a row JetStream already has). The adapter treats a duplicate ack as `Ok(())`, same as a fresh publish. Primed at zero in `NatsEventPublisher::connect`, before any publish, specifically so the *first* duplicate can still satisfy an `increase() > 0` query (a metrics-rs counter otherwise only appears at its first increment's value). A rising rate is not itself broken — it means acks are being lost somewhere in the round trip — but a rate that tracks the publish rate closely is worth investigating (§ D3 in the design doc: dedup covers a lost-ack retry, not a crash/DB-outage republish or an operator dead-letter replay, all of which are legitimately-intentional duplicates too). No dedicated alert ships for it (spec §7 — dashboard panels are out of scope); read it from `/metrics` or the dashboard panel. |
 | `iam_nats_publish_duration_seconds` | histogram | — | Only emitted under `backend = "nats"`. The JetStream publish-ack round trip (`send_publish` request leg **and** the ack await, both — D2), recorded around every `publish_ack` call regardless of outcome. This sits inside the outbox relay's single lock-holding transaction (§1.3 of the design doc), so a rising p99 here is not just "NATS is slow" — it is directly lengthening how long `event_outbox` row locks and a pool connection are held per tick. Compare against `[outbox.publisher].publish_timeout_secs` (default 2s): a p99 approaching that ceiling means publishes are close to timing out, which is a leading indicator for `IamOutboxPublishFailures` below. |
@@ -1307,7 +1307,8 @@ what stops selective eviction of the two generation keys from happening at all. 
 **Meaning.** `sum by (job, defect) (increase(iam_jit_provisioning_failures_total[15m])) > 0`,
 `for: 0m` (SMA-706). IAM refused to provision a new identity on its first login (SMA-698). On
 HTTP, IAM answered `403 provisioning-failed`. On gRPC, IAM answered `PermissionDenied` with the
-reason `provisioning-failed`. One refused request fires the alert at the next rule evaluation.
+reason `provisioning-failed`. One refused request fires the alert at the first rule evaluation
+after the next scrape (but see "When the alert is silent" below).
 The alert stays active for about 15 minutes after the last refusal. The counter counts refused
 requests, not users. One user with a bad token makes several refused requests, because a console
 session makes several IAM calls. This is `warning`: a refusal blocks one user's first login, but
@@ -1354,13 +1355,26 @@ causes are:
 **Remediation (`email_conflict`):**
 1. Get the email from the user or from the identity provider's login events. The IAM log does
    not contain it.
-2. If the issuer URL changed, restore the old issuer string in the IAM configuration. Do not edit
-   user rows.
+2. If the issuer URL changed, IAM accepts only a token whose `iss` equals the configured issuer.
+   Restoring the old issuer string alone makes IAM refuse every token, including users with a
+   working link. Use one of these two options instead:
+   - Make the identity provider issue the old `iss` again, for example with Keycloak's hostname
+     or frontend URL setting. Then restore `oidc.issuer` to the old value.
+   - Or keep the new issuer, and move the stored keys in one statement:
+     `UPDATE external_identity SET issuer = '<new>', updated_at = now() WHERE issuer = '<old>';`.
+     Also update any `zones.iam.backend.bootstrapAdmins` entries that name the old issuer. This
+     keeps the same subjects on the same principals, so it carries no takeover risk.
 3. If the email is wrong at the identity provider, correct it there.
 4. Otherwise a link is necessary. IAM has no API to update a user, change an email or link an
-   identity (SMA-712 tracks one). The only write call is `POST /v1/users` / `CreateUser`. A link
-   needs a manual Postgres change: add an `external_identity` row with the new `issuer` and
-   `subject` for the existing `principal_id`, or change `"user".email`.
+   identity (SMA-712 tracks one). The only write call is `POST /v1/users` / `CreateUser`. Pick the
+   right case:
+   - (a) Same person: a second issuer, a new `sub`, or a user made with `CreateUser`. After the
+     identity check in the Warning below, insert an `external_identity` row for the existing
+     `principal_id`:
+     `INSERT INTO external_identity (id, principal_id, issuer, subject, created_at, updated_at)
+     VALUES (gen_random_uuid(), '<principal_id>', '<issuer>', '<subject>', now(), now());`
+   - (b) The email now belongs to a different person. Change the old user's `"user".email`. JIT
+     then makes a new user for the new person at the next login.
 
 **Warning.** A manual link or a manual email change brings back the account-takeover risk that
 rule D5 prevents. Before you change a row, confirm that the new identity is the same person.
@@ -1375,7 +1389,8 @@ Also confirm that the identity provider verifies emails.
   with pod-level service discovery. The chart runs IAM with `replicas: 1` and `maxSurge: 0`, so
   every rollout opens this gap for one scrape interval. Only an extra rule branch could close it,
   and that branch fires falsely after a Prometheus data gap. The SMA-706 spec, section 7, has the
-  details.
+  details:
+  `docs/superpowers/specs/2026-09-27-sma-706-jit-failure-alert-design.md`.
 - **Metrics are off** (`metrics.enabled = false`). `/metrics` is not mounted. If Prometheus still
   scrapes the target, the scrape fails and `TargetDown` fires.
 - **A JIT-disabled issuer.** IAM returns `identity-not-provisioned` and does not count it

@@ -266,12 +266,25 @@ Content of the new section:
 - **`email_conflict`, remediation:**
   - Get the email from the user or from the identity provider's login events. The IAM log does
     not contain it.
-  - For an issuer URL change, restore the old issuer string in the IAM configuration. Do not
-    edit user rows.
+  - For an issuer URL change: IAM accepts only a token whose `iss` equals the configured issuer.
+    Restoring the old issuer string alone makes IAM refuse every token, including users with a
+    working link. Use one of these two options instead:
+    - Make the identity provider issue the old `iss` again, for example with Keycloak's hostname
+      or frontend URL setting. Then restore `oidc.issuer` to the old value.
+    - Or keep the new issuer, and move the stored keys in one statement:
+      `UPDATE external_identity SET issuer = '<new>', updated_at = now() WHERE issuer = '<old>';`.
+      Also update any `zones.iam.backend.bootstrapAdmins` entries that name the old issuer. This
+      keeps the same subjects on the same principals, so it carries no takeover risk.
   - Otherwise, correct the email at the identity provider if it is wrong there.
   - IAM has no API to update a user, change an email, or link an identity. The only write call
-    is `POST /v1/users` / `CreateUser`. A link needs a manual Postgres change to the
-    `"user".email` and `external_identity` rows.
+    is `POST /v1/users` / `CreateUser`. Pick the right case:
+    - Same person: a second issuer, a new `sub`, or a user made with `CreateUser`. After the
+      identity check in the Warning below, insert an `external_identity` row for the existing
+      `principal_id`:
+      `INSERT INTO external_identity (id, principal_id, issuer, subject, created_at, updated_at)
+      VALUES (gen_random_uuid(), '<principal_id>', '<issuer>', '<subject>', now(), now());`
+    - The email now belongs to a different person. Change the old user's `"user".email`. JIT
+      then makes a new user for the new person at the next login.
   - **Warning.** A manual link or a manual email move brings back the account-takeover risk
     that the "no auto-link by email" rule (D5) prevents. First confirm that the new identity is
     the same person, and that the identity provider verifies emails.
