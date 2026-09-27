@@ -18,14 +18,22 @@ groups:
         labels: { severity: warning }
         annotations: { summary: "IAM outbox parked a poison event" }
       # SMA-471: with a real broker, publish failures are the earliest signal that delivery is
-      # broken — earlier than parking (max_attempts × poll_interval) and earlier than backlog
-      # age. The counter is already primed: relay.rs increments it by 0 on every tick, so the
-      # series exists before the first failure and `increase()` can fire on it.
+      # broken — earlier than parking (max_attempts × poll_interval, about 5 min) and earlier than
+      # backlog age. `main` primes the counter at zero when the relay is enabled (SMA-713), and
+      # relay.rs increments it by 0 on every tick, so `increase()` sees the first failure.
+      #
+      # SMA-713. `[2m]` with `for: 2m`: a failure spell of about 90 s or more fires this alert about
+      # 2 to 3 minutes after onset. One isolated failure does NOT fire it, on purpose: SMA-471 D9
+      # absorbs a short broker restart with no operator action. The old `[5m]` with `for: 5m` fired
+      # only 5 to 6 minutes after onset, which is not earlier than parking.
+      #
+      # The 2m window must hold at least 2 samples, so this rule needs a scrape interval of 1m or
+      # less. The repo scrapes every 15s.
       - alert: IamOutboxPublishFailures
-        expr: increase(iam_outbox_relay_publish_failures_total[5m]) > 0
-        for: 5m
+        expr: increase(iam_outbox_relay_publish_failures_total[2m]) > 0
+        for: 2m
         labels: { severity: warning }
-        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)" }
+        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The outbox relay failed to publish events for at least 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
       - alert: IamOutboxRelayStalled
         expr: rate(iam_outbox_relay_ticks_total[10m]) == 0
         for: 10m
