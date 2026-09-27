@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -817,6 +817,61 @@ stub_reset
 run_fn A2 1 "with no Redis URL" "" none console_container_args iam-console iam "$A_ZONES" smoke-net-1 "" "$T/a-env"
 stub_reset
 run_fn A3 1 "is not readable" "" none console_container_args iam-console iam "$A_ZONES" "" "" "$T/a-env-missing"
+
+# --- SMA-675: Redis sidecar, seeded session and cleanup (R, S, C rows) ------------------------
+stub_reset
+run_fn R0 0 "" "::error::" any console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub 2
+expect_call R0 "network create --label paigasus.smoke=console smoke-net-1"
+expect_call R0 "run -d --name smoke-redis-1 --network smoke-net-1 --label paigasus.smoke=console redis:stub"
+stub_reset; STUB_NET_RC=1
+run_fn R1 1 "the per-run network smoke-net-1 was not created" "" any console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub 2
+expect_no_call R1 "run -d"
+stub_reset; STUB_RUND_RC=125
+run_fn R2 1 "the Redis sidecar smoke-redis-1 did not start" "" any console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub 2
+stub_reset; STUB_PING_OUT="LOADING"
+run_fn R3 1 "did not answer PONG within 2 tries" "" any console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub 2
+stub_reset
+run_fn R4 1 "is not a positive integer" "" none console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub x
+
+# The seeded record. TIME 1790000000 s + 123456 us = 1790000000123 ms; + 600000 = 1790000600123.
+S_SID="$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+stub_reset
+run_fn S0 0 "" "::error::" any console_seed_session smoke-redis-1 "$S_SID"
+expect_call S0 "exec smoke-redis-1 redis-cli SET pgs:sess:${S_SID} "
+expect_call S0 '"email":"smoke-0123456789ab@example.com"'
+expect_call S0 '"version":2,"rev":1,'
+expect_call S0 '"accessExpiresAt":1790000600123,"absoluteExpiresAt":1790000600123,'
+expect_call S0 '"principalPrn":null,'
+expect_call S0 " PX 600000"
+expect_no_call S0 "refreshToken"
+stub_reset; STUB_SET_OUT="ERR wrong number of arguments"
+run_fn S1 1 "replied 'ERR wrong number of arguments', not OK" "" any console_seed_session smoke-redis-1 "$S_SID"
+stub_reset; STUB_TIME_OUT=""; STUB_TIME_RC=1
+run_fn S2 1 "'redis-cli TIME' on smoke-redis-1 exited 1" "" any console_seed_session smoke-redis-1 "$S_SID"
+expect_no_call S2 " SET "
+# Review Focus 2: a microsecond value with a leading zero is decimal, not octal.
+# 012345 us = 12 ms, so 1790000000012 + 600000 = 1790000600012.
+stub_reset; STUB_TIME_OUT="$(printf '%s\n' 1790000000 012345)"
+run_fn S3 0 "" "::error::" any console_seed_session smoke-redis-1 "$S_SID"
+expect_call S3 '"accessExpiresAt":1790000600012,'
+stub_reset; STUB_TIME_OUT="$(printf '%s\n' 1790000000 089123)"
+run_fn S4 0 "" "::error::" any console_seed_session smoke-redis-1 "$S_SID"
+expect_call S4 '"accessExpiresAt":1790000600089,'
+
+# cleanup_case <names> <network> — sets the two cleanup globals, then runs the cleanup.
+cleanup_case() {
+  # shellcheck disable=SC2034 # console_smoke_cleanup reads the two globals.
+  CONSOLE_SMOKE_NAMES="$1"
+  # shellcheck disable=SC2034 # console_smoke_cleanup reads the two globals.
+  CONSOLE_SMOKE_NETWORK="$2"
+  console_smoke_cleanup
+}
+printf '%s\n' rm -f smoke-a -- rm -f smoke-b -- network rm smoke-net-1 -- > "$T/argv-cleanup"
+stub_reset
+run_fn C0 0 "" "" "$T/argv-cleanup" cleanup_case " smoke-a smoke-b" smoke-net-1
+printf '%s\n' rm -f smoke-a -- > "$T/argv-cleanup-nonet"
+stub_reset
+run_fn C1 0 "" "" "$T/argv-cleanup-nonet" cleanup_case " smoke-a" ""
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"

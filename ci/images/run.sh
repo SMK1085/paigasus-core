@@ -1155,6 +1155,12 @@ console_smoke_cleanup() {
     docker rm -f "$n" >/dev/null 2>&1 || true
   done
   CONSOLE_SMOKE_NAMES=""
+  # SMA-675 D6: the network goes AFTER the containers. Docker refuses to remove a network that
+  # still has endpoints.
+  if [ -n "$CONSOLE_SMOKE_NETWORK" ]; then
+    docker network rm "$CONSOLE_SMOKE_NETWORK" >/dev/null 2>&1 || true
+  fi
+  CONSOLE_SMOKE_NETWORK=""
 }
 
 # SMA-675 D2: a session id of 64 lowercase hex characters from /dev/urandom. It prints nothing and
@@ -1198,6 +1204,80 @@ console_container_args() {
     printf '%s\n' -e "PAIGASUS_SESSION_STORE=memory"
   fi
   printf '%s\n' -p 0:3000
+}
+
+# SMA-675 D6: the per-run network and the Redis sidecar, one for both zones (D7). Both carry the
+# label paigasus.smoke=console, so the leftovers of a killed run can be pruned (RUNBOOK). No Redis
+# port is published. Readiness is a bounded `redis-cli PING` loop, one second apart; the smoke
+# passes 20 tries, the self-test 2. The caller registers <name> in CONSOLE_SMOKE_NAMES and
+# <network> in CONSOLE_SMOKE_NETWORK BEFORE this call, so the EXIT trap removes them after an abort.
+console_smoke_redis_start() {
+  local network="$1" name="$2" image="$3" tries="$4" out rc=0 i=0 pong
+  case "$tries" in
+    ''|*[!0-9]*|????*) tries="" ;;
+  esac
+  if [ -z "$tries" ] || [ "$tries" -lt 1 ]; then
+    echo "::error::smoke_consoles: the Redis sidecar was NOT started — the try count '$4' is not a positive integer of at most 3 digits." >&2
+    return 1
+  fi
+  out="$(docker network create --label paigasus.smoke=console "$network" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::smoke_consoles: the per-run network ${network} was not created — docker exited ${rc}; its own message follows. The kernel rows are skipped for every zone, and the other rows run on the memory store." >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  out="$(docker run -d --name "$name" --network "$network" --label paigasus.smoke=console "$image" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::smoke_consoles: the Redis sidecar ${name} did not start from ${image} — docker exited ${rc}; its own message follows. The kernel rows are skipped for every zone, and the other rows run on the memory store." >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  while [ "$i" -lt "$tries" ]; do
+    pong="$(docker exec "$name" redis-cli PING 2>/dev/null)" || pong=""
+    if [ "$pong" = "PONG" ]; then
+      echo "  Redis sidecar ${name} answers PONG on network ${network}"
+      return 0
+    fi
+    i=$((i + 1))
+    if [ "$i" -lt "$tries" ]; then sleep 1; fi
+  done
+  echo "::error::smoke_consoles: the Redis sidecar ${name} did not answer PONG within ${tries} tries — the kernel rows are skipped for every zone. Its last log lines follow." >&2
+  docker logs "$name" 2>&1 | tail -30 >&2 || true
+  return 1
+}
+
+# SMA-675 D2: one literal SessionRecord (version 2) under pgs:sess:<sid>, valid for 10 minutes,
+# with the per-run nonce smoke-<first 12 sid chars>@example.com in the email claim. `now` comes
+# from the SIDECAR's clock (redis-cli TIME), not from the host: after a development Mac sleeps,
+# the Docker VM clock can differ from the host clock, and the consoles read the VM clock. Ten
+# minutes is far above the 30 s refresh skew (F7), and there is no refreshToken field, so no
+# refresh and no IdP call can start. `10#` because a microsecond value can have a leading zero,
+# and bash reads a leading zero as octal.
+# WARNING, INTENTIONAL COUPLING: this literal must pass isSessionRecord in
+# ts/packages/paigasus-auth/src/core/session.ts. If the record shape changes, the store deletes
+# this record, and the kernel route row reds with its requireSession message. Change the literal
+# here too. There is deliberately no second copy of isSessionRecord in bash.
+console_seed_session() {
+  local redis="$1" sid="$2" t t_rc=0 secs usecs now exp nonce rec reply reply_rc=0
+  t="$(docker exec "$redis" redis-cli TIME)" || t_rc=$?
+  secs="$(printf '%s\n' "$t" | sed -n 1p)" || secs=""
+  usecs="$(printf '%s\n' "$t" | sed -n 2p)" || usecs=""
+  case "$secs" in ''|*[!0-9]*) secs="" ;; esac
+  case "$usecs" in ''|*[!0-9]*) usecs="" ;; esac
+  if [ "$t_rc" -ne 0 ] || [ -z "$secs" ] || [ -z "$usecs" ]; then
+    echo "::error::smoke_consoles: the session was NOT seeded — 'redis-cli TIME' on ${redis} exited ${t_rc} and did not give two integers. Its output follows." >&2
+    printf '%s\n' "$t" >&2
+    return 1
+  fi
+  now=$((10#$secs * 1000 + 10#$usecs / 1000))
+  exp=$((now + 600000))
+  nonce="smoke-${sid:0:12}@example.com"
+  rec="{\"version\":2,\"rev\":1,\"accessToken\":\"smoke-access-token\",\"accessExpiresAt\":${exp},\"absoluteExpiresAt\":${exp},\"idToken\":\"smoke.id.token\",\"idTokenClaims\":{\"iss\":\"https://idp.example.com\",\"sub\":\"smoke-user\",\"email\":\"${nonce}\"},\"principal\":{\"principalPrn\":null,\"issuer\":\"https://idp.example.com\",\"subject\":\"smoke-user\",\"memberships\":[],\"roleGrants\":[],\"grantsAvailable\":false}}"
+  reply="$(docker exec "$redis" redis-cli SET "pgs:sess:${sid}" "$rec" PX 600000)" || reply_rc=$?
+  if [ "$reply_rc" -ne 0 ] || [ "$reply" != "OK" ]; then
+    echo "::error::smoke_consoles: the session was NOT seeded — 'redis-cli SET' on ${redis} exited ${reply_rc} and replied '${reply}', not OK." >&2
+    return 1
+  fi
 }
 
 # A FULL, schema-valid dummy runtime configuration, not just PAIGASUS_ZONE and PAIGASUS_ZONES. Both
