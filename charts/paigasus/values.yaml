@@ -77,6 +77,12 @@ zones:
         # repo:helm-render row 8a fails when the two differ.
         tag: "0.2.0"
       replicas: 2
+      # Used only when httpRoute.enabled is true. The chat relay streams text/event-stream for
+      # longer than the 15 s default route timeout of Envoy, so this rule gets a longer request
+      # timeout. 10m still ends a hung stream. Same shape as httpRoute.timeouts; a key here wins.
+      # See docs/ops/RUNBOOK-chart.md § 11.
+      httpRouteTimeouts:
+        request: 10m
     backend:
       # NOT deployed by this chart (SMA-513 Task 11b). Measured in the tree:
       # GatewayConfig::validate hard-fails boot on an empty upstream.openai.api_key
@@ -132,6 +138,12 @@ httpRoute:
   # NOT required. Annotations on each HTTPRoute, for example for external-dns. Each value must be
   # a string. The chart does not check the text: a value that names a zone id is your own text.
   annotations: {}
+  # NOT required. Gateway API HTTPRouteTimeouts for the rule of every enabled zone: request and
+  # backendRequest, each a duration such as 30s, 10m or 1h (form ([0-9]{1,5}(h|m|s|ms)){1,4}).
+  # 0s means no timeout. backendRequest must not be longer than request, unless request is 0s.
+  # A non-empty key in zones.<id>.console.httpRouteTimeouts wins over the same key here.
+  # Needs Gateway API v1.2.0 or later on the cluster. See docs/ops/RUNBOOK-chart.md § 11.
+  timeouts: {}
   # DO NOT add a rewrite or any other filter. Each console serves its full basePath.
 
 oidc:

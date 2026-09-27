@@ -234,9 +234,27 @@ route_shape "route, httpRoute key absent" "none" "${ROUTE[@]}" --set zones.gatew
   --set httpRoute=null
 # H8 (AC10). The annotations go on every HTTPRoute. The empty default renders no annotations key.
 route_shape "route, annotations" \
-  'gateway:-:{"example.test/owner":"team"} iam:-:{"example.test/owner":"team"}' \
+  'gateway:{"request":"10m"}:{"example.test/owner":"team"} iam:-:{"example.test/owner":"team"}' \
   "${ROUTE[@]}" --set zones.gateway.enabled=true --set 'httpRoute.annotations.example\.test/owner=team'
-route_shape "route, no annotations" 'gateway:-:- iam:-:-' "${ROUTE[@]}" --set zones.gateway.enabled=true
+route_shape "route, no annotations" 'gateway:{"request":"10m"}:- iam:-:-' "${ROUTE[@]}" --set zones.gateway.enabled=true
+# H5-H7 (AC9). The gateway zone has a 10m request default; the iam zone has none. A zone key wins
+# over the same chart key, per key. With no key set, no rule has a timeouts key.
+route_shape "route, default timeouts" 'gateway:{"request":"10m"}:- iam:-:-' \
+  "${ROUTE[@]}" --set zones.gateway.enabled=true
+route_shape "route, chart timeouts merge per key" \
+  'gateway:{"backendRequest":"20s","request":"10m"}:- iam:{"backendRequest":"20s","request":"30s"}:-' \
+  "${ROUTE[@]}" --set zones.gateway.enabled=true \
+  --set httpRoute.timeouts.request=30s --set httpRoute.timeouts.backendRequest=20s
+route_shape "route, no timeouts set" 'gateway:-:- iam:-:-' "${ROUTE[@]}" --set zones.gateway.enabled=true \
+  --set zones.gateway.console.httpRouteTimeouts=null
+# Review Focus 3. An empty zone key is "not set": the chart key applies.
+route_shape "route, empty zone key keeps the chart key" \
+  'gateway:{"request":"30s"}:- iam:{"request":"30s"}:-' "${ROUTE[@]}" --set zones.gateway.enabled=true \
+  --set httpRoute.timeouts.request=30s --set zones.gateway.console.httpRouteTimeouts.request=""
+# Review Focus 5. A release made before this change, upgraded with --reuse-values and
+# httpRoute.enabled=true, has no timeouts or annotations key.
+route_shape "route, timeouts and annotations keys absent" 'gateway:{"request":"10m"}:- iam:-:-' \
+  "${ROUTE[@]}" --set zones.gateway.enabled=true --set httpRoute.timeouts=null --set httpRoute.annotations=null
 
 if [ "$ec" -eq 0 ]; then echo "== chart ingress coupling OK =="; fi
 exit "$ec"

@@ -6,6 +6,7 @@
 {{- range $id, $z := .Values.zones }}
 {{- if $z.enabled }}
 {{- $name := include "paigasus.name" (list $root (printf "%s-console" $id)) }}
+{{- $timeouts := include "paigasus.httpRouteTimeouts" (list $root $z) }}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -35,6 +36,10 @@ spec:
       backendRefs:
         - name: {{ $name }}
           port: {{ include "paigasus.consoleServicePort" $root }}
+      {{- with $timeouts }}
+      timeouts:
+        {{- . | nindent 8 }}
+      {{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

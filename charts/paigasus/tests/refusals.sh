@@ -238,6 +238,33 @@ expect_fail "httpRoute annotations not a map" "httpRoute.annotations must be a m
   "${ROUTE[@]}" --set httpRoute.annotations=x
 expect_fail "httpRoute annotation not a string" "httpRoute.annotations.owner must be a string" \
   "${ROUTE[@]}" --set httpRoute.annotations.owner=true
+# R10-R16 (D13). The chart refuses what the HTTPRoute v1 CRD refuses, before Argo CD sync time.
+GW=(--set zones.gateway.enabled=true --set zones.gateway.backend.url=http://gw.example.test:8088)
+expect_fail "httpRoute timeouts not a map" "httpRoute.timeouts must be a map" \
+  "${ROUTE[@]}" --set httpRoute.timeouts=10s
+expect_fail "httpRoute timeouts unknown key" "httpRoute.timeouts has the unknown key requestTimeout" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.requestTimeout=10s
+expect_fail "httpRoute timeout bad form" "httpRoute.timeouts.request must be a duration" \
+  "${ROUTE[@]}" --set-string httpRoute.timeouts.request=10
+expect_fail "httpRoute timeout a number" "httpRoute.timeouts.request must be a duration" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=10
+expect_fail "zone timeout bad form" "zones.gateway.console.httpRouteTimeouts.request must be a duration" \
+  "${ROUTE[@]}" "${GW[@]}" --set zones.gateway.console.httpRouteTimeouts.request=ten
+expect_fail "httpRoute backendRequest longer than request" "zones.iam: the HTTPRoute backendRequest timeout 1m" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=10s --set httpRoute.timeouts.backendRequest=1m
+expect_render "httpRoute request 0s with backendRequest" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=0s --set httpRoute.timeouts.backendRequest=1m
+expect_render "zone timeout on a disabled zone is not checked" \
+  "${ROUTE[@]}" --set zones.gateway.enabled=false --set zones.gateway.console.httpRouteTimeouts.request=ten
+# Review Focus 1. "ms" is not "m": 1s is longer than 900ms, and 59s999ms is shorter than 1m.
+expect_fail "httpRoute backendRequest 1s over request 900ms" "zones.iam: the HTTPRoute backendRequest timeout 1s" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=900ms --set httpRoute.timeouts.backendRequest=1s
+expect_render "httpRoute backendRequest 59s999ms under request 1m" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=1m --set httpRoute.timeouts.backendRequest=59s999ms
+# Review Focus 2. The gateway zone's 10m default is its merged request, so a chart-wide
+# backendRequest of 20m is refused for that zone only.
+expect_fail "chart backendRequest over the zone default" "zones.gateway: the HTTPRoute backendRequest timeout 20m" \
+  "${ROUTE[@]}" "${GW[@]}" --set httpRoute.timeouts.backendRequest=20m
 
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
