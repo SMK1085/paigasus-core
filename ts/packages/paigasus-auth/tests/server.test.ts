@@ -6,7 +6,7 @@
 // covers how each CallbackRejected reason actually arises; this suite mocks `createAuthRoutes`
 // itself so it can assert the MAPPING in isolation, for all five reasons, without re-running a
 // full OIDC fixture.
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { CallbackRejected } from '../src/core/errors.js';
 
 // `src/server.ts` opens with `import 'server-only'` (AC 5). Its real module throws
@@ -22,7 +22,8 @@ vi.mock('../src/http/routes.js', () => ({
   createAuthRoutes: () => ({ handle: handleMock }),
 }));
 
-import { createAuthRouteHandler } from '../src/server.js';
+import { createAuthRouteHandler, readinessResponse, type OidcDiscoveryStatus } from '../src/server.js';
+import { readinessResponse as readinessFromModule } from '../src/http/readiness.js';
 import type { AuthRuntime } from '../src/runtime.js';
 
 function runtime(overrides: Partial<AuthRuntime> = {}): AuthRuntime {
@@ -156,5 +157,18 @@ describe('createAuthRouteHandler rebuilds the request URL (SMA-511 spec § 7.1)'
     expect(seen.method).toBe('POST');
     expect(seen.headers.get('cookie')).toBe('a=b');
     expect(await seen.text()).toBe('x=1');
+  });
+});
+
+// SMA-705 D5. The apps import the readiness handler and the status type from the server entry.
+describe('the readiness exports (SMA-705)', () => {
+  it('re-exports readinessResponse from http/readiness.ts', () => {
+    expect(readinessResponse).toBe(readinessFromModule);
+  });
+
+  it('exports the OidcDiscoveryStatus type with its three states', () => {
+    // A type-level check: `moon run paigasus-auth-ts:typecheck` fails if the type is not exported
+    // or if its union changes.
+    expectTypeOf<OidcDiscoveryStatus>().toEqualTypeOf<'idle' | 'discovering' | 'discovered'>();
   });
 });

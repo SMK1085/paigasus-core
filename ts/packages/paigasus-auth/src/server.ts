@@ -14,7 +14,8 @@
 // response — see its own doc comment below), `getSession`/`requireSession` (the Next read path),
 // `toSessionView` (the ONLY function that may construct what crosses to `@paigasus/auth/client`),
 // `authEnvShape` (the env shape an app composes into `@paigasus/next-config`'s
-// `defineRuntimeConfig`), and every port and adapter.
+// `defineRuntimeConfig`), `readinessResponse` (the console readiness probe, SMA-705), and every
+// port and adapter.
 import 'server-only';
 import { CallbackRejected } from './core/errors';
 import { AUTH_ROUTE_SUFFIXES } from './http/route-table';
@@ -32,6 +33,9 @@ export type { RequireSessionOptions } from './next/get-session';
 
 /** The session cookie's name. Every zone must check the same name (see http/cookies.ts). */
 export { SESSION_COOKIE } from './http/cookies';
+
+/** The console readiness probe, `<basePath>/readyz` (SMA-705). See http/readiness.ts. */
+export { readinessResponse } from './http/readiness';
 
 /** A `RequestInit` that can carry a streamed body: Node's `Request` needs `duplex: 'half'` for one. */
 interface RequestInitWithDuplex extends RequestInit {
@@ -168,6 +172,7 @@ export type {
   BuildEndSessionUrlParams,
   CreateOidcClientOptions,
   OidcClient,
+  OidcDiscoveryStatus,
   OidcTokens,
   RefreshedTokens as OidcRefreshedTokens,
 } from './adapters/oidc';
