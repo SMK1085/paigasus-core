@@ -127,8 +127,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   commit. The filter runs in `update` and `release-pr`, not in `release`.
 - **A stale release PR can stay open (SMA-716, READ).** When no package needs an update,
   release-plz returns before it reads open PRs (`release_pr/mod.rs:152-175`). Close such a PR by
-  hand; never merge it. Rollout check for SMA-716: after the merge, confirm that release PR #306
-  was force-updated and no longer lists `paigasus-kernel`. Rollback: remove the two keys.
+  hand; never merge it. Rollout check for SMA-716: after the merge, the next release PR must not
+  list a crate whose only new commits are non-releasing. (#306 merged before SMA-716, so it
+  still shipped kernel 0.1.1 for a comment-only change.) Rollback: remove the two keys.
 - The fixture proof for both keys is `ci/release-parity/ecosystems/release-plz-filter.sh`
   (`repo:release-parity`); see the SMA-716 section of `ci/release-parity/README.md`.
 

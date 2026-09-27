@@ -190,6 +190,10 @@ publishes every local version that is not yet on the registry.
 - **C5.** A dependency floor change needs a `fix(deps)` commit to release. Dependabot writes
   `build(deps)` (`.github/dependabot.yml:23`), which does not release (row 15).
 
+**Update, 2026-09-28:** #306 merged into `main` (`1a45803f`) before this change. Its release
+run waits for approval. So the paragraph below is history; the rollout check in
+`.github/CLAUDE.md` is the general form.
+
 **Effect on PR #306** (MEASURED inputs, INFERRED result). If this change merges before #306,
 release-plz regenerates #306. The kernel then has only `fix(ci):` and drops out. The proto family
 stays, because of `feat:` (#315), with a correct section for both crates. Rollout check after the
