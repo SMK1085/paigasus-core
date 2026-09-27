@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -416,12 +416,23 @@ stub_docker_main() {
   printf '%s\n' "--" >> "$STUB_ARGV"
   case "${1:-}" in
     run)
+      # SMA-675: `docker run -d` starts the Redis sidecar.
+      if [ "${2:-}" = "-d" ]; then exit "$STUB_RUND_RC"; fi
       for a in "$@"; do
         if [ "$a" = "--version" ]; then
           if [ -n "$STUB_VERSION_ERR" ]; then printf '%s\n' "$STUB_VERSION_ERR" >&2; fi
           if [ -n "$STUB_VERSION_OUT" ]; then printf '%s\n' "$STUB_VERSION_OUT"; fi
           exit "$STUB_VERSION_RC"
         fi
+      done
+      # SMA-675: the kernel control row's walk for the wasm chunks.
+      for a in "$@"; do
+        case "$a" in
+          */.next/server/chunks)
+            if [ -n "$STUB_CHUNKS_OUT" ]; then printf '%s\n' "$STUB_CHUNKS_OUT"; fi
+            exit "$STUB_CHUNKS_RC"
+            ;;
+        esac
       done
       if [ -n "$STUB_WALK_OUT" ]; then printf '%s\n' "$STUB_WALK_OUT"; fi
       exit "$STUB_WALK_RC"
@@ -431,9 +442,33 @@ stub_docker_main() {
       exit "$STUB_ENV_RC"
       ;;
     exec)
+      # SMA-675: `docker exec <redis> redis-cli <command> …`.
+      if [ "${3:-}" = "redis-cli" ]; then
+        case "${4:-}" in
+          PING) printf '%s\n' "$STUB_PING_OUT"; exit 0 ;;
+          TIME)
+            if [ -n "$STUB_TIME_OUT" ]; then printf '%s\n' "$STUB_TIME_OUT"; fi
+            exit "$STUB_TIME_RC"
+            ;;
+          SET) printf '%s\n' "$STUB_SET_OUT"; exit "$STUB_SET_RC" ;;
+        esac
+      fi
       if [ "$STUB_EXEC_SLEEP" -gt 0 ]; then exec sleep "$STUB_EXEC_SLEEP"; fi
       exit "$STUB_EXEC_RC"
       ;;
+    network) exit "$STUB_NET_RC" ;;
+    create)
+      if [ "$STUB_CREATE_RC" -eq 0 ]; then echo "stub-container-id"; fi
+      exit "$STUB_CREATE_RC"
+      ;;
+    start) exit "$STUB_START_RC" ;;
+    cp) exit "$STUB_CP_RC" ;;
+    port) printf '%s\n' "$STUB_PORT_OUT"; exit 0 ;;
+    logs)
+      if [ -n "$STUB_LOGS_OUT" ]; then printf '%s\n' "$STUB_LOGS_OUT"; fi
+      exit 0
+      ;;
+    rm) exit "$STUB_RM_RC" ;;
   esac
   echo "stub docker: unexpected argv: $*" >&2
   exit 99
@@ -449,14 +484,132 @@ mkdir -p "$T/stub"
 } > "$T/stub/docker"
 chmod +x "$T/stub/docker"
 
+# SMA-675: the stub curl. Call <n> (counted in $STUB_CURL_DIR/count) answers from
+# $STUB_CURL_DIR/<n>.w (printed as the -w output), <n>.body (written to the -o file) and <n>.rc
+# (its exit code). A call with no files of its own answers like the last call that has them. It
+# records its argv in $STUB_CURL_DIR/argv in the stub docker's format.
+stub_curl_main() {
+  local n=0 a o="" prev="" k
+  if [ -s "$STUB_CURL_DIR/count" ]; then n="$(cat "$STUB_CURL_DIR/count")"; fi
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$STUB_CURL_DIR/count"
+  for a in "$@"; do
+    if [ "$prev" = "-o" ]; then o="$a"; fi
+    prev="$a"
+    printf '%s\n' "$a" >> "$STUB_CURL_DIR/argv"
+  done
+  printf '%s\n' "--" >> "$STUB_CURL_DIR/argv"
+  k="$n"
+  while [ "$k" -gt 1 ] && [ ! -e "$STUB_CURL_DIR/$k.w" ]; do k=$((k - 1)); done
+  if [ -n "$o" ] && [ "$o" != "/dev/null" ]; then
+    : > "$o"
+    if [ -e "$STUB_CURL_DIR/$k.body" ]; then cat "$STUB_CURL_DIR/$k.body" > "$o"; fi
+  fi
+  if [ -e "$STUB_CURL_DIR/$k.w" ]; then printf '%s' "$(cat "$STUB_CURL_DIR/$k.w")"; fi
+  if [ -e "$STUB_CURL_DIR/$k.rc" ]; then exit "$(cat "$STUB_CURL_DIR/$k.rc")"; fi
+  exit 0
+}
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  declare -f stub_curl_main
+  # shellcheck disable=SC2016 # the line is written into the stub file literally
+  printf '%s\n' 'stub_curl_main "$@"'
+} > "$T/stub/curl"
+chmod +x "$T/stub/curl"
+
+# curl_reset <name> — a new, empty answer directory for the stub curl.
+curl_reset() {
+  STUB_CURL_DIR="$T/curl-$1"
+  rm -rf "$STUB_CURL_DIR"
+  mkdir -p "$STUB_CURL_DIR"
+}
+
+# curl_resp <n> <w-output> <body> <rc> — the answer of stub curl call <n>.
+curl_resp() {
+  printf '%s' "$2" > "$STUB_CURL_DIR/$1.w"
+  printf '%s' "$3" > "$STUB_CURL_DIR/$1.body"
+  printf '%s\n' "$4" > "$STUB_CURL_DIR/$1.rc"
+}
+
+# curl_count_is <row> <n> — a PASS row <row>-count when the stub curl was called exactly <n> times.
+curl_count_is() {
+  local got=0
+  if [ -s "$STUB_CURL_DIR/count" ]; then got="$(cat "$STUB_CURL_DIR/count")"; fi
+  if [ "$got" -eq "$2" ]; then
+    say_pass "$1-count"
+  else
+    say_fail "$1-count" "the stub curl was called ${got} times, expected $2" "$STUB_CURL_DIR/argv"
+  fi
+}
+
+# argv_calls <argv-file> — one line per stub call, its arguments joined by one space.
+argv_calls() {
+  awk '$0 == "--" { print line; line = ""; next } { line = (line == "" ? $0 : line " " $0) }' "$1"
+}
+
+# expect_call <row> <substring> — a PASS row <row>-argv when one stub docker call of the last
+# run_fn holds <substring>. expect_no_call is the reverse.
+expect_call() {
+  local calls=""
+  if [ -e "$T/argv" ]; then calls="$(argv_calls "$T/argv")"; fi
+  case "$calls" in
+    *"$2"*) say_pass "$1-argv" ;;
+    *) say_fail "$1-argv" "no stub docker call holds '$2'" "$T/argv" ;;
+  esac
+}
+expect_no_call() {
+  local calls=""
+  if [ -e "$T/argv" ]; then calls="$(argv_calls "$T/argv")"; fi
+  case "$calls" in
+    *"$2"*) say_fail "$1-argv" "a stub docker call holds '$2', and none may" "$T/argv" ;;
+    *) say_pass "$1-argv" ;;
+  esac
+}
+
+# count_calls <prefix> — the number of stub docker calls of the last run_fn that start with
+# <prefix>.
+count_calls() {
+  if [ ! -e "$T/argv" ]; then echo 0; return 0; fi
+  argv_calls "$T/argv" | awk -v p="$1" 'index($0, p) == 1 { n++ } END { print n + 0 }'
+}
+
+# expect_in <row> <file> <substring> / expect_not_in — a PASS row when <file> holds (or does not
+# hold) <substring>. `case`, not grep: no regex and no early-exit reader.
+expect_in() {
+  local text=""
+  if [ -e "$2" ]; then text="$(cat "$2")"; fi
+  case "$text" in
+    *"$3"*) say_pass "$1" ;;
+    *) say_fail "$1" "${2##*/} does not hold '$3'" "$2" ;;
+  esac
+}
+expect_not_in() {
+  local text=""
+  if [ -e "$2" ]; then text="$(cat "$2")"; fi
+  case "$text" in
+    *"$3"*) say_fail "$1" "${2##*/} holds '$3', which it must not" "$2" ;;
+    *) say_pass "$1" ;;
+  esac
+}
+
 stub_reset() {
   STUB_VERSION_OUT="v24.16.0"; STUB_VERSION_RC=0; STUB_VERSION_ERR=""
   STUB_ENV_OUT="PATH=/usr/bin"; STUB_ENV_RC=0
   STUB_WALK_OUT="walked=1300"; STUB_WALK_RC=0
   STUB_EXEC_SLEEP=0; STUB_EXEC_RC=0
+  # SMA-675 defaults: every new docker command succeeds.
+  STUB_RUND_RC=0
+  STUB_CHUNKS_OUT="/app/apps/iam-console/.next/server/chunks/ssr/x_paigasus_wasm_bg_1.wasm"; STUB_CHUNKS_RC=0
+  STUB_PING_OUT="PONG"
+  STUB_TIME_OUT="$(printf '%s\n' 1790000000 123456)"; STUB_TIME_RC=0
+  STUB_SET_OUT="OK"; STUB_SET_RC=0
+  STUB_NET_RC=0; STUB_CREATE_RC=0; STUB_START_RC=0; STUB_CP_RC=0; STUB_RM_RC=0
+  STUB_PORT_OUT="0.0.0.0:32768"
+  STUB_LOGS_OUT="CompileError: WebAssembly.Module(): expected magic word 00 61 73 6d"
+  curl_reset default
   FX_ROOT="$T/fx-node"
-  # A row-scoped extra PATH entry, prepended ahead of the docker stub, empty by default. E6 (the
-  # grep-rc-2 row) is the only row that sets it.
+  # A row-scoped extra PATH entry, prepended ahead of the docker stub, empty by default. E6 and K7
+  # (the grep-rc-2 rows) set it.
   STUB_PATH_EXTRA=""
 }
 
@@ -474,7 +627,7 @@ T_IMAGE="paigasus-iam-console:dev"
 # The argv that console_node_version_row must hand to docker.
 printf '%s\n' run --rm --entrypoint /nodejs/bin/node "$T_IMAGE" --version -- > "$T/argv-node"
 
-# run_fn <row> <want_rc> <present> <absent> <want-argv-file|none> <fn> [<arg>...] — the
+# run_fn <row> <want_rc> <present> <absent> <want-argv-file|none|any> <fn> [<arg>...] — the
 # production shape: `fn … || rc=$?`, so errexit is off inside the function.
 run_fn() {
   local row="$1" want_rc="$2" present="$3" absent="$4" want_argv="$5" rc=0 o e
@@ -486,13 +639,17 @@ run_fn() {
     PATH="${STUB_PATH_EXTRA:+$STUB_PATH_EXTRA:}$T/stub:$PATH"
     STUB_ARGV="$T/argv"
     export PATH STUB_ARGV STUB_VERSION_OUT STUB_VERSION_RC STUB_VERSION_ERR STUB_ENV_OUT STUB_ENV_RC \
-      STUB_WALK_OUT STUB_WALK_RC STUB_EXEC_SLEEP STUB_EXEC_RC
+      STUB_WALK_OUT STUB_WALK_RC STUB_EXEC_SLEEP STUB_EXEC_RC STUB_RUND_RC STUB_CHUNKS_OUT \
+      STUB_CHUNKS_RC STUB_PING_OUT STUB_TIME_OUT STUB_TIME_RC STUB_SET_OUT STUB_SET_RC STUB_NET_RC \
+      STUB_CREATE_RC STUB_START_RC STUB_CP_RC STUB_RM_RC STUB_PORT_OUT STUB_LOGS_OUT STUB_CURL_DIR
     # shellcheck disable=SC2034 # ROOT is read by the function under test.
     ROOT="$FX_ROOT"
     set -uo pipefail
     "$@"
   ) >"$o" 2>"$e" || rc=$?
-  if [ "$want_argv" = "none" ]; then
+  if [ "$want_argv" = "any" ]; then
+    :
+  elif [ "$want_argv" = "none" ]; then
     if [ -e "$T/argv" ]; then
       say_fail "$row" "the stub docker was called, and it must not be" "$T/argv" "$o" "$e"
       return 0
@@ -621,6 +778,45 @@ run_fn H6 1 "positive integer" "" none console_healthcheck_row smoke-selftest ia
 pin_rows P1c "$T/fn-smoke_consoles.sh" 'console_healthcheck_row "$name" "$app" "$base_path" "$CONSOLE_HC_DEADLINE" || ec=1'
 # shellcheck disable=SC2016 # the pinned call lines are literal text
 pin_rows P2 "$T/fn-console_healthcheck_row.sh" 'with_deadline "$deadline" docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs >"$out" 2>&1 || hc_rc=$?'
+
+# --- SMA-675: console_new_sid and console_container_args (SID, A rows) ------------------------
+stub_reset
+run_fn SID0 0 "" "::error::" none console_new_sid
+SID0_OUT="$(cat "$T/SID0.out")"
+case "$SID0_OUT" in
+  *[!0-9a-f]*|'') say_fail SID0-shape "the sid is not lowercase hex: '${SID0_OUT}'" ;;
+  *) if [ "${#SID0_OUT}" -eq 64 ]; then say_pass SID0-shape; else say_fail SID0-shape "the sid has ${#SID0_OUT} characters, expected 64"; fi ;;
+esac
+
+printf '%s\n' -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com" > "$T/a-env"
+A_ZONES='{"iam":"/iam","gateway":"/gateway"}'
+printf '%s\n' -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com" -e "PAIGASUS_ZONE=iam" \
+  -e "PAIGASUS_ZONES=${A_ZONES}" --network smoke-net-1 -e "PAIGASUS_SESSION_STORE=redis" \
+  -e "PAIGASUS_SESSION_REDIS_URL=redis://smoke-redis-1:6379" --add-host iam:127.0.0.1 \
+  --add-host gateway:127.0.0.1 -p 0:3000 > "$T/a-want-net"
+printf '%s\n' -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com" -e "PAIGASUS_ZONE=iam" \
+  -e "PAIGASUS_ZONES=${A_ZONES}" -e "PAIGASUS_SESSION_STORE=memory" -p 0:3000 > "$T/a-want-mem"
+
+# a_cmp <row> <want-file> — a PASS row <row>-list when the row's stdout is exactly <want-file>.
+a_cmp() {
+  if cmp -s "$2" "$T/$1.out"; then
+    say_pass "$1-list"
+  else
+    diff "$2" "$T/$1.out" > "$T/$1.list-diff" 2>&1 || true
+    say_fail "$1-list" "a different argument list (< expected, > got)" "$T/$1.list-diff"
+  fi
+}
+
+stub_reset
+run_fn A0 0 "" "::error::" none console_container_args iam-console iam "$A_ZONES" smoke-net-1 "redis://smoke-redis-1:6379" "$T/a-env"
+a_cmp A0 "$T/a-want-net"
+stub_reset
+run_fn A1 0 "" "::error::" none console_container_args iam-console iam "$A_ZONES" "" "" "$T/a-env"
+a_cmp A1 "$T/a-want-mem"
+stub_reset
+run_fn A2 1 "with no Redis URL" "" none console_container_args iam-console iam "$A_ZONES" smoke-net-1 "" "$T/a-env"
+stub_reset
+run_fn A3 1 "is not readable" "" none console_container_args iam-console iam "$A_ZONES" "" "" "$T/a-env-missing"
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"

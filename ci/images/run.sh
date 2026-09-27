@@ -1145,6 +1145,9 @@ smoke() {
 # NOT fire when `set -e` aborts a function from inside, which is exactly the path that would leak a
 # container.
 CONSOLE_SMOKE_NAMES=""
+# SMA-675 D6: the per-run Docker network of the console smoke. Script-global for the same reason
+# as CONSOLE_SMOKE_NAMES: the EXIT trap reads it after smoke_consoles has returned.
+CONSOLE_SMOKE_NETWORK=""
 
 console_smoke_cleanup() {
   local n
@@ -1152,6 +1155,49 @@ console_smoke_cleanup() {
     docker rm -f "$n" >/dev/null 2>&1 || true
   done
   CONSOLE_SMOKE_NAMES=""
+}
+
+# SMA-675 D2: a session id of 64 lowercase hex characters from /dev/urandom. It prints nothing and
+# returns 1 when the read does not give exactly 64 hex characters.
+console_new_sid() {
+  local sid
+  sid="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \t\n')" || sid=""
+  case "$sid" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  if [ "${#sid}" -ne 64 ]; then return 1; fi
+  printf '%s\n' "$sid"
+}
+
+# SMA-675 D4 step 2 and spec 6.1: the ONE argument list for `docker create` of a console
+# container, the main container and the kernel control container. So the control cannot miss an
+# argument that the main container has (for example PAIGASUS_SESSION_REDIS_URL, F17). One
+# argument per line on stdout. <env_file> holds the fixed CONSOLE_SMOKE_ENV words, one per line.
+# An empty <network> is the D6 fallback: the old memory store and no network flags. The two
+# --add-host flags make the IAM and gateway calls fail at once with "connection refused". This
+# function reads no global.
+console_container_args() {
+  local app="$1" zone="$2" zones_json="$3" network="$4" redis_url="$5" env_file="$6" line
+  if [ ! -r "$env_file" ]; then
+    echo "::error::${app}: the container arguments were NOT built — the fixed env file '${env_file}' is not readable." >&2
+    return 1
+  fi
+  if [ -n "$network" ] && [ -z "$redis_url" ]; then
+    echo "::error::${app}: the container arguments were NOT built — the network '${network}' was given with no Redis URL." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+  done < "$env_file"
+  printf '%s\n' -e "PAIGASUS_ZONE=${zone}" -e "PAIGASUS_ZONES=${zones_json}"
+  if [ -n "$network" ]; then
+    printf '%s\n' --network "$network" \
+      -e "PAIGASUS_SESSION_STORE=redis" -e "PAIGASUS_SESSION_REDIS_URL=${redis_url}" \
+      --add-host iam:127.0.0.1 --add-host gateway:127.0.0.1
+  else
+    printf '%s\n' -e "PAIGASUS_SESSION_STORE=memory"
+  fi
+  printf '%s\n' -p 0:3000
 }
 
 # A FULL, schema-valid dummy runtime configuration, not just PAIGASUS_ZONE and PAIGASUS_ZONES. Both
@@ -1183,6 +1229,16 @@ CONSOLE_SMOKE_ENV=(
 # HEALTHCHECK program with `docker exec`. The program's own fetch signal (2500 ms, ts/Dockerfile)
 # ends a hang first; this bound is for a hang that the signal does not end.
 CONSOLE_HC_DEADLINE=20
+
+# SMA-675 D1: the session store of the console smoke. This is the SAME digest as the kind tier's
+# Redis. The other copy is ci/kind/manifests/redis.yaml. No check compares the two copies (SMA-675
+# Q3). Refresh the two together.
+CONSOLE_SMOKE_REDIS_IMAGE="redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
+
+# SMA-675 D4 step 5: the line that the kernel control container must log when its wasm chunk is
+# corrupt. MEASURED in M4 (the PR description records the full line and when it appears). The row
+# searches the FULL log, because Next preloads route modules at start.
+CONSOLE_KERNEL_LINE="CompileError"
 
 # Walks the image's staged tree with the image's OWN node — the runtime base is distroless and has
 # no shell, so there is no `find` in there to call. Prints `public=0|1` on line 1 and one staged
