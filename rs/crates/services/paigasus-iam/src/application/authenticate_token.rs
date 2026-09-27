@@ -1928,20 +1928,32 @@ mod tests {
         assert_eq!(jit_disabled_lines(&text).len(), 1, "control: the protected path writes one line:\n{text}");
     }
 
-    /// SMA-707 U4: a KNOWN identity of a JIT-disabled issuer resolves and writes no line.
+    /// SMA-707 U4: a KNOWN identity of a JIT-disabled issuer resolves and writes no line. Control:
+    /// an UNKNOWN subject of the same issuer, resolved next in the same capture, then writes
+    /// exactly one line — proving the capture would have caught a line had the known-identity
+    /// path wrongly written one.
     #[tokio::test]
     async fn jit_disabled_known_identity_resolves_and_writes_no_line() {
         let (logs, _logs_guard) = capture_logs();
         let store = AuthnStore::default();
         let issuer = Issuer::parse(ISSUER).unwrap();
         let pid = seeded_principal(&store, &issuer, "sub-jd-u4");
-        let uc = jit_disabled_use_case(FakeAuthenticator::ok(claims(ISSUER, "sub-jd-u4", None, None)), &store);
+        let uc = jit_disabled_use_case(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-jd-u4", None, None), claims(ISSUER, "sub-jd-u4-unknown", None, None)]),
+            &store,
+        );
 
         let resolved = uc.resolve("token", Provisioning::Enabled).await.unwrap();
 
         assert_eq!(resolved.principal_id, pid);
         let text = logs.text();
         assert!(jit_disabled_lines(&text).is_empty(), "a known identity writes no line:\n{text}");
+
+        let err = uc.resolve("token2", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        let text = logs.text();
+        assert_eq!(jit_disabled_lines(&text).len(), 1, "control: an unknown subject writes one line:\n{text}");
     }
 
     /// SMA-707 U5a (and Review Focus R2): two refusals for one issuer in one window write one line.
