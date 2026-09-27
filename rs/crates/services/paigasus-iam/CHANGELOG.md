@@ -15,16 +15,22 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 ### Added
 
 - `ListRoleGrants` accepts new filters: `scope_prn`, `role_key` and `principal_kind`. A request
-  needs a `principal_prn` or a `scope_prn`. An unknown `principal_kind` is refused with the
-  reason `invalid-principal-kind` (SMA-676).
-- `ListMemberships` accepts a `principal_kind` filter. An unknown value is refused with the same
+  needs a `principal_prn` or a `scope_prn`. IAM refuses an unknown `principal_kind` with the
+  reason `invalid-principal-kind`. IAM pages a filtered request: `limit` and `offset` range from
+  1 to 200, with a default of 50. IAM orders the page by `principal_id`, then `id`. `scope_prn`
+  matches its scope exactly. It does not match a descendant scope (SMA-676).
+- `ListMemberships` accepts a `principal_kind` filter. IAM refuses an unknown value with the same
   reason, `invalid-principal-kind` (SMA-676).
 - `GrantRole` is idempotent. A repeat grant for the same principal, role and scope returns the
   existing grant and writes nothing new. A race between two concurrent grants for the same
-  principal, role and scope also returns one grant to both callers (SMA-676).
-- A new database index speeds up a scope-filtered role grant query with no principal. The
-  migration builds the index at startup. IAM refuses to start when an operator already built an
-  index with this name but a different definition (SMA-699).
+  principal, role and scope also returns one grant to both callers. Before, a repeat grant failed
+  with `internal` (HTTP 500) (SMA-676).
+- IAM adds a new database index. It speeds up a scope-filtered role grant query with no
+  principal. The migration builds the index at startup. IAM refuses to start when the index
+  already exists but its definition differs. IAM also refuses to start when the index exists but
+  is INVALID. The build holds a SHARE lock on `role_grant`, with `lock_timeout = '5s'`: grants
+  and revokes wait during the build. On a large table, an operator builds the index
+  CONCURRENTLY before the upgrade (SMA-699).
 - IAM logs a refused just-in-time provisioning at `warn`. The line starts with
   `just-in-time provisioning failed`. The line names the defect (`missing_email` or
   `email_conflict`). The line also names the issuer. For `missing_email`, the field `email_claim`
@@ -42,10 +48,18 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   10 seconds. `Introspect` writes no line. Before, IAM answered `403 identity-not-provisioned`
   (gRPC `PermissionDenied`) and logged nothing (SMA-707).
 
+### Changed
+
+- Over HTTP, IAM refuses a non-numeric `limit` or `offset` on the `ListRoleGrants`
+  principal-only path with 400 `invalid-query-parameter`. Before, IAM ignored it (SMA-676).
+
 ### Fixed
 
 - Two first logins of the same identity at the same time both succeed. Before, in Postgres the
   second login failed on the email and got `403 provisioning-failed` (SMA-698).
+- A bootstrap-admin seed that loses a concurrent race is now `AlreadySeeded`. IAM no longer
+  increments `iam_bootstrap_admin_seed_failures_total{stage="txn"}` for it. IAM no longer logs
+  the lockout warning for it either (SMA-676).
 
 ### Security
 

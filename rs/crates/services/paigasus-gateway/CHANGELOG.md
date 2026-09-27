@@ -15,16 +15,18 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 ### Added
 
 - The gateway chat surface accepts an OIDC access token from an interactive user, not only an
-  API key. IAM authorizes `InvokeModel` against the user's own token and an organization scope
-  (SMA-635).
+  API key. IAM authorizes `InvokeModel` against the user's own token and an organization scope.
+  The `org_admin` role does not carry `InvokeModel`: a person needs a `gateway_user` grant to
+  call the chat surface (SMA-635).
 - A new request header, `paigasus-org`, names the organization for an OIDC caller. The header is
-  optional when the user belongs to exactly one organization: the gateway then infers that
-  organization. The header is ignored, with one warning, for an API key: an API key's scope
-  comes from the key itself (SMA-635).
-- Two new error responses. `invalid-org-header` (400) fires when `paigasus-org` is not exactly
-  one organization UUID in the 36-character form. `org-required` (400) fires when the caller
-  sends no header and reaches zero or more than one organization. Both name the header
-  `paigasus-org` in the response `param` field (SMA-635).
+  optional when the caller reaches exactly one organization through its memberships and role
+  grants: the gateway then infers that organization. The gateway ignores the header for an API
+  key: an API key's scope comes from the key itself. The gateway logs one warning for each
+  request that carries the header with an API key (SMA-635).
+- The gateway returns two new error responses. It returns `invalid-org-header` (400) when
+  `paigasus-org` is not exactly one organization UUID in the 36-character form. It returns
+  `org-required` (400) when the caller sends no header and reaches zero or more than one
+  organization. Both name the header `paigasus-org` in the response `param` field (SMA-635).
 
 ### Changed
 
