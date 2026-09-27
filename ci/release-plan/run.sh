@@ -238,6 +238,10 @@ negative_control() {
     git -C "$dir" config tag.gpgsign false
     git -C "$dir" config user.email "release-plan-negative-control@example.invalid"
     git -C "$dir" config user.name "release-plan negative control"
+    # SMA-708: no background `git maintenance run --auto` after the commit below; it races the
+    # caller's `rm -rf`. gc.auto 0 is a second layer only.
+    git -C "$dir" config maintenance.auto false
+    git -C "$dir" config gc.auto 0
     git -C "$dir" add -A
     git -C "$dir" commit -q -m "synthetic fixture"
   }

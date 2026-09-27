@@ -165,6 +165,10 @@ ecosystem::build_fixture() { # dir real_release_plz_toml(ignored)
       git config user.name "parity"
       git config commit.gpgsign false   # fixture repo: never sign (CI/dev have no key)
       git config tag.gpgsign false
+      # SMA-708: no background `git maintenance run --auto` after a commit here, by us or by
+      # PSR; it races check_case's `rm -rf`. gc.auto 0 is a second layer only.
+      git config maintenance.auto false
+      git config gc.auto 0
       git add -A
       git commit -qm "chore: seed fixture"
       git tag "$tag"

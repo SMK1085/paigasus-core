@@ -101,7 +101,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `ci/release-parity/ecosystems/*.sh`; bare `ci/**/*.sh` MENTIONS stay unfollowed, measured at
   six prose edges (comments and pin arrays) and zero true positives. Arm 1 reports ZERO rows on
   the corpus and is labelled forward cover in the code; arm 2 reports one, at
-  `ci/release-parity/ecosystems/release-plz.sh:152`, waived because it runs against a
+  `ci/release-parity/ecosystems/release-plz.sh:156`, waived because it runs against a
   `mktemp -d` fixture outside the repo. What is still true: A4 covers each
   crate's `lint`/`fmt`, A5 the three derived FFI tasks, and `repo:input-liveness` proves
   DECLARED inputs are live, never that NEEDED ones are declared. A future `repo:*` task can omit
