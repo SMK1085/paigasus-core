@@ -357,6 +357,18 @@ After the fix, 13a and 13b pass, and the lock hold time no longer contains the d
 lock hold time dropped from 1235 ms to 611 ms, a drop of 624 ms — close to the discovery delay of
 600 ms that moved outside the lock.
 
+Mutation battery (§ 5.5), run after the fix. Each mutation compiled (`tsc --noEmit` exit 0), and
+each was restored with an edit, not with `git checkout`.
+
+| Mutation | Red tests |
+| --- | --- |
+| Delete `await prepareRefresh()` | `single-flight.test.ts`: SMA-704 test 1 ("expected `['tryAcquireLock']` to deeply equal `['prepareRefresh:called', 'prepareRefresh:resolved', 'tryAcquireLock']`"); `single-flight-discovery.test.ts`: SMA-704 test 13a ("discovery requests while the lock is held: expected 1 to be +0") and test 13b ("tryAcquireLock calls: expected 1 to be +0") |
+| `resolveDepsFor`'s `prepareRefresh` is `async () => {}` | `get-session.test.ts`: SMA-704 test 9 ("expected `['tryAcquireLock', 'refresh']` to deeply equal `['ensureDiscovered:resolved', 'tryAcquireLock', 'refresh']`") |
+| The `deadline` line before `prepareRefresh` | `single-flight.test.ts`: SMA-704 test 8 ("expected 0 to be greater than or equal to 120", the `returnedAt - marks.preparedAt` assertion) |
+| `ensureDiscovered` is a no-op | `oidc.test.ts`: SMA-704 test 10 ("expected +0 to be 1", `count('discovery')`) |
+| The failure path uses `rec`, not a re-read | `single-flight.test.ts`: SMA-704 test 7a and 7b, both threw `Error: oidc discovery failed: TypeError` uncaught out of `resolveSession` instead of returning the other writer's record/`null` |
+| No `rec.refreshToken !== undefined` condition | `single-flight.test.ts`: SMA-704 test 3 ("expected `vi.fn()` to not be called at all, but actually been called 1 times", the `prepareRefresh` spy) |
+
 ## 8. Out of scope
 
 - The store-call budget under the lock (§ 6; no issue tracks it).
