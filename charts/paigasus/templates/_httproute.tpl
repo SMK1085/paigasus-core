@@ -10,6 +10,16 @@ live chart (ci/helm-render/run.sh copies the live chart, then overlays the fixtu
 */}}
 
 {{/*
+paigasus.consoleServicePort: the port NUMBER of each console Service. An HTTPRoute backendRef needs
+a number and cannot name the port "http" as the Ingress does. console-service.yaml and
+httproute.yaml both read it here, so the two cannot drift (spec D6). The container side (the
+containerPort and PORT in console-deployment.yaml) is reached by the port name http.
+*/}}
+{{- define "paigasus.consoleServicePort" -}}
+3000
+{{- end -}}
+
+{{/*
 paigasus.httpRouteEnabled yields "true" or "". Nil counts as not set, which is false here.
 paigasus.validateHttpRoute refuses a non-boolean value, so a quoted "false" never reaches an `if`.
 Read httpRoute.enabled ONLY through this helper.
