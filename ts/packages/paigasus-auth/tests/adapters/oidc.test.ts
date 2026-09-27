@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as client from 'openid-client';
 import { classifyDiscoveryError, createOidcClient, type CreateOidcClientOptions, type OidcClient } from '../../src/adapters/oidc.js';
-import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
+import { startOidcFixture, type FixtureEndpoint, type OidcFixture } from '../fixtures/jwks.js';
 import { closedPortIssuer, startDiscoveryFailureFixture, type DiscoveryFailureFixture } from '../fixtures/discovery-failures.js';
 import { OidcDiscoveryFailed, RefreshFailed, RefreshRejected, isOidcDiscoveryFailed, type OidcDiscoveryFailureReason } from '../../src/core/errors.js';
 
@@ -238,6 +238,34 @@ describe('createOidcClient — the rest of the surface', () => {
   });
 });
 
+// SMA-704. resolveSession calls ensureDiscovered (as `prepareRefresh`) before it takes the session
+// lock. It must send the discovery request, and nothing else, so that `refresh` under the lock finds
+// the cached configuration and sends no discovery request of its own.
+describe('createOidcClient — ensureDiscovered (SMA-704)', () => {
+  const count = (endpoint: FixtureEndpoint): number => fixture.requests().filter((r) => r.endpoint === endpoint).length;
+
+  it('SMA-704 test 10: sends one discovery request, and a later refresh sends no second one', async () => {
+    const oidc = makeClient();
+
+    await oidc.ensureDiscovered();
+    // A no-op ensureDiscovered fails here.
+    expect(count('discovery')).toBe(1);
+    expect(count('token')).toBe(0); // it sends no token request
+
+    await oidc.refresh('some-refresh-token');
+    expect(count('discovery')).toBe(1);
+    expect(count('token')).toBe(1);
+  });
+
+  it('SMA-704 test 11: two concurrent calls on a cold client send one discovery request', async () => {
+    const oidc = makeClient();
+
+    await Promise.all([oidc.ensureDiscovered(), oidc.ensureDiscovered()]);
+
+    expect(count('discovery')).toBe(1);
+  });
+});
+
 // SMA-681 § 4.2. Keycloak returns a new ID token on a refresh (spec § 3 row M-e). The adapter hands
 // it back only when the response carries one. It does not compare `sub` with the login token:
 // core/single-flight.ts does that. `setNextIdToken` stays set across requests
@@ -427,6 +455,18 @@ describe('createOidcClient — a discovery failure is an OidcDiscoveryFailed wit
     const oidc = clientFor(failing.issuer);
     expectDiscoveryFailed(await buildUrl(oidc).catch((e: unknown) => e), 'http_server_error');
     expectDiscoveryFailed(await buildUrl(oidc).catch((e: unknown) => e), 'http_server_error');
+    expect(failing.requests).toBe(2);
+  });
+
+  // SMA-704 test 12. ensureDiscovered throws the same OidcDiscoveryFailed as getConfig, and a failed
+  // discovery is not cached, so the next call sends a second discovery request.
+  it('SMA-704 test 12: a failed ensureDiscovered rejects with OidcDiscoveryFailed, and a second call retries', async () => {
+    failing = await startDiscoveryFailureFixture('status-503');
+    const oidc = clientFor(failing.issuer);
+
+    expectDiscoveryFailed(await oidc.ensureDiscovered().catch((e: unknown) => e), 'http_server_error');
+    expectDiscoveryFailed(await oidc.ensureDiscovered().catch((e: unknown) => e), 'http_server_error');
+
     expect(failing.requests).toBe(2);
   });
 });

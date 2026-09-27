@@ -22,6 +22,11 @@
 // looking at it. When `setNextCodeChallenge` has not been called (undefined), the check is
 // skipped, so every OTHER caller of this fixture (oidc.test.ts, single-flight's containers tests)
 // is unaffected.
+//
+// THE REQUEST LOG (SMA-704). `requests()` returns each discovery, JWKS, token and revocation
+// request in arrival order, with `Date.now()` at arrival. tests/adapters/oidc.test.ts counts the
+// discovery requests with it, and tests/core/single-flight-discovery.test.ts compares the arrival
+// times with the time the session lock was held.
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -30,6 +35,23 @@ import { CompactSign, exportJWK, generateKeyPair } from 'jose';
 export const FIXTURE_CLIENT_ID = 'test-client';
 export const FIXTURE_CLIENT_SECRET = 'test-secret';
 const PRIMARY_KID = 'primary';
+
+/** SMA-704. The four endpoints that the request log records. */
+export type FixtureEndpoint = 'discovery' | 'jwks' | 'token' | 'revoke';
+
+/** SMA-704. One logged request. `at` is `Date.now()` when the request arrived. */
+export interface FixtureRequest {
+  readonly endpoint: FixtureEndpoint;
+  readonly at: number;
+}
+
+function endpointOf(method: string | undefined, pathname: string): FixtureEndpoint | undefined {
+  if (method === 'GET' && pathname === '/.well-known/openid-configuration') return 'discovery';
+  if (method === 'GET' && pathname === '/jwks') return 'jwks';
+  if (method === 'POST' && pathname === '/token') return 'token';
+  if (method === 'POST' && pathname === '/revoke') return 'revoke';
+  return undefined;
+}
 
 export interface MintIdTokenOptions {
   iss?: string;
@@ -88,6 +110,13 @@ export interface OidcFixture {
    * test must never print one.
    */
   tokenRequests(): readonly URLSearchParams[];
+  /** SMA-704. Each discovery, JWKS, token and revocation request, in arrival order. See the file header. */
+  requests(): readonly FixtureRequest[];
+  /**
+   * SMA-704. Waits `ms` before it answers each later request to `endpoint`. The arrival time in
+   * `requests()` is taken before the wait. Not one-shot: each test starts a fresh fixture.
+   */
+  setResponseDelay(endpoint: FixtureEndpoint, ms: number): void;
   close(): Promise<void>;
 }
 
@@ -125,10 +154,18 @@ export async function startOidcFixture(): Promise<OidcFixture> {
   let nextTokenError: { error: string; wwwAuthenticate?: string } | undefined;
   let issuer = '';
   const tokenRequestBodies: URLSearchParams[] = [];
+  const requestLog: FixtureRequest[] = [];
+  const responseDelays = new Map<FixtureEndpoint, number>();
 
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://placeholder');
+      const endpoint = endpointOf(req.method, url.pathname);
+      if (endpoint !== undefined) {
+        requestLog.push({ endpoint, at: Date.now() });
+        const delayMs = responseDelays.get(endpoint) ?? 0;
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
       if (req.method === 'GET' && url.pathname === '/.well-known/openid-configuration') {
         const body = {
           issuer,
@@ -260,6 +297,12 @@ export async function startOidcFixture(): Promise<OidcFixture> {
     },
     tokenRequests(): readonly URLSearchParams[] {
       return [...tokenRequestBodies];
+    },
+    requests(): readonly FixtureRequest[] {
+      return [...requestLog];
+    },
+    setResponseDelay(endpoint: FixtureEndpoint, ms: number) {
+      responseDelays.set(endpoint, ms);
     },
     close(): Promise<void> {
       return new Promise<void>((resolve, reject) => {

@@ -147,12 +147,13 @@ describe('createAuthRuntime', () => {
 // The cache lives on globalThis (runtime.ts), so `vi.resetModules()` alone no longer clears it.
 // The key comes from the GLOBAL symbol registry, the same way runtime.ts builds it, so this test
 // file needs no export of its own from the source. It is keyed BY ZONE (SMA-511 final review,
-// minor 8), so clearing it takes the zone as well.
+// minor 8), so clearing it takes the zone as well. The shape version is v2 since SMA-704.
 const ZONES = ['iam', 'gateway', 'ghost'] as const;
+const RUNTIME_KEY_PREFIX = 'paigasus.auth.runtime.v2';
 
 function clearSharedRuntime(): void {
   for (const zone of ZONES) {
-    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[Symbol.for(`paigasus.auth.runtime.v1:${zone}`)];
+    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[Symbol.for(`${RUNTIME_KEY_PREFIX}:${zone}`)];
   }
 }
 
@@ -212,6 +213,17 @@ describe('getAuthRuntime', () => {
     expect(second).not.toBe(first);
 
     expect(await second.getAuthRuntime(BASE)).toBe(await first.getAuthRuntime(BASE));
+  });
+
+  // SMA-704. AuthRuntime.oidc gained a required method (ensureDiscovered), so the key's shape
+  // version moved to v2: a runtime that an older module copy cached under v1 has no such method.
+  // This row reds if the prefix moves back.
+  it('caches the runtime under the v2 shape key, not v1 (SMA-704)', async () => {
+    const rt = await getAuthRuntime(BASE);
+    const holder = globalThis as typeof globalThis & Record<symbol, Promise<unknown> | undefined>;
+
+    await expect(holder[Symbol.for('paigasus.auth.runtime.v2:iam')]).resolves.toBe(rt);
+    expect(holder[Symbol.for('paigasus.auth.runtime.v1:iam')]).toBeUndefined();
   });
 });
 
