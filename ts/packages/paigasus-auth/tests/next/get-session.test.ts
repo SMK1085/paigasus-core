@@ -56,11 +56,13 @@ function cookieJar(sid?: string): { get(name: string): { name: string; value: st
   };
 }
 
-/** Every method throws: getSession never needs to call the OIDC client or the resolver in this
- * suite (the test records are never near their skew window), so a call here is a defect. */
+/** Every method but `ensureDiscovered` throws: getSession never needs to call the OIDC client or
+ * the resolver in this suite (the test records are never near their skew window), so a call here
+ * is a defect. `ensureDiscovered` resolves, so a test that overrides `refresh` keeps its path
+ * (SMA-704). */
 function unusedOidc(): AuthRuntime['oidc'] {
   const fail = () => Promise.reject(new Error('unexpectedly called'));
-  return { buildAuthorizationUrl: fail, authorizationCodeGrant: fail, refresh: fail, revoke: fail, buildEndSessionUrl: fail };
+  return { ensureDiscovered: () => Promise.resolve(), buildAuthorizationUrl: fail, authorizationCodeGrant: fail, refresh: fail, revoke: fail, buildEndSessionUrl: fail };
 }
 
 function baseRuntime(store: SessionStore): AuthRuntime {

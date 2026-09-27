@@ -11,6 +11,12 @@
 // login, refresh, or logout actually occurs. On a discovery failure the cached promise is
 // cleared, so the NEXT call retries rather than replaying the same rejection forever.
 //
+// `ensureDiscovered` (SMA-704) runs that discovery and sends no other request.
+// core/single-flight.ts's resolveSession calls it, as `prepareRefresh`, BEFORE it takes the
+// session lock. After it resolves, `refresh` finds a resolved `configPromise` and sends no
+// discovery request under the lock. Without it, the first refresh of a cold process sends a third
+// IdP request under the lock, and runtime.ts invariant 3 counts only two.
+//
 // CLOCK TOLERANCE IS SYMBOL-KEYED (M1). `[client.clockTolerance]` on the client metadata object,
 // not a string option and not a `Configuration` property — `Configuration` only exposes a plain
 // `timeout` accessor (also M1), which is what carries PAIGASUS_OIDC_HTTP_TIMEOUT_MS.
@@ -89,6 +95,11 @@ export interface BuildEndSessionUrlParams {
 }
 
 export interface OidcClient {
+  /**
+   * Runs OIDC discovery if this process has not completed it, and waits for it. Sends no token
+   * request. resolveSession calls it before it takes the session lock (SMA-704).
+   */
+  ensureDiscovered(): Promise<void>;
   buildAuthorizationUrl(params: BuildAuthorizationUrlParams): Promise<AuthorizationRequest>;
   authorizationCodeGrant(params: AuthorizationCodeGrantParams): Promise<OidcTokens>;
   /** Matches core/single-flight.ts's `ResolveDeps.refresh` signature exactly. */
@@ -347,6 +358,11 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
   }
 
   return {
+    async ensureDiscovered(): Promise<void> {
+      // The same OidcDiscoveryFailed as every other method, from getConfig() only (SMA-656 D10).
+      await getConfig();
+    },
+
     async buildAuthorizationUrl(params): Promise<AuthorizationRequest> {
       const config = await getConfig();
       try {

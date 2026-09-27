@@ -72,8 +72,9 @@ function seededRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
 
 /**
  * A minimal fake OidcClient. `revoke` and `buildEndSessionUrl` are the only two methods logout
- * ever reaches; the other three throw if called, which would fail any test that mistakenly
- * exercises the login/callback/refresh paths through this fake.
+ * ever reaches; three others throw if called, which would fail any test that mistakenly
+ * exercises the login/callback/refresh paths through this fake. `ensureDiscovered` resolves: a
+ * fake with no discovery (SMA-704).
  */
 function fakeOidc(opts: { revokeImpl?: (token: string) => Promise<void>; endSessionUrl?: string; onCall?: (name: string) => void } = {}): OidcClient & {
   buildEndSessionUrlCalls: BuildEndSessionUrlParams[];
@@ -84,6 +85,9 @@ function fakeOidc(opts: { revokeImpl?: (token: string) => Promise<void>; endSess
   return {
     buildEndSessionUrlCalls,
     revokeCalls,
+    ensureDiscovered(): Promise<void> {
+      return Promise.resolve();
+    },
     buildAuthorizationUrl(): Promise<AuthorizationRequest> {
       throw new Error('not used in logout tests');
     },

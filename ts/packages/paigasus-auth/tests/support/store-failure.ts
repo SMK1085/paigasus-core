@@ -95,6 +95,7 @@ export function fakeOidc(): FakeOidc {
     revokeCalls: [],
     failRevoke: false,
     endSessionCalls: [],
+    ensureDiscovered: (): Promise<void> => Promise.resolve(),
     buildAuthorizationUrl: (): Promise<AuthorizationRequest> =>
       oidc.authorizationError !== undefined
         ? Promise.reject(oidc.authorizationError)
