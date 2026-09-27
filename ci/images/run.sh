@@ -1381,6 +1381,163 @@ console_kernel_route_row() {
   return "$rc"
 }
 
+# SMA-675 D4: the kernel control row. It proves that the kernel route row can see a kernel
+# failure. It runs on every images.yml smoke run, so the control cannot go stale. The work is in
+# console_kernel_control_probe; this function owns the control container's life. It registers the
+# name BEFORE docker create, so the EXIT trap removes the container after an abort, and it keeps
+# the name registered (a `docker rm -f` of a removed container is harmless). SMA-675 Q2: it
+# removes the container as soon as the row finishes, on every path, to limit the disk use of the
+# images.yml job. A failed remove is a warning only; the EXIT-trap cleanup removes it again.
+# This is the one row function that writes a global (the cleanup registry), because D4 requires
+# the registration before docker create.
+console_kernel_control_row() {
+  local app="$1" ctl rc=0 rm_out rm_rc=0 tmp
+  ctl="smoke-${app}-nokernel-$$"
+  CONSOLE_SMOKE_NAMES="${CONSOLE_SMOKE_NAMES:-} ${ctl}"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-control.XXXXXX")" || tmp=""
+  if [ -z "$tmp" ]; then
+    echo "::error::${app}: kernel control row NOT run — mktemp failed." >&2
+    return 1
+  fi
+  console_kernel_control_probe "$ctl" "$tmp" "$@" || rc=$?
+  rm_out="$(docker rm -f "$ctl" 2>&1)" || rm_rc=$?
+  if [ "$rm_rc" -ne 0 ]; then
+    echo "::warning::${app}: the kernel control container ${ctl} was not removed (docker exited ${rm_rc}); the EXIT-trap cleanup removes it again." >&2
+    printf '%s\n' "$rm_out" >&2
+  fi
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+# SMA-675 D4 steps 1 to 5, called only by console_kernel_control_row.
+# 1. The image's OWN node (the runtime base has no shell) walks the server chunks and prints every
+#    file whose name matches *paigasus_wasm_bg*.wasm (the glob of ts/Dockerfile and moon.yml). At
+#    least one is required, and EVERY match is corrupted, so a build that writes one file per
+#    layer cannot give a false control.
+# 2. docker create from the SAME argument list as the main container (console_container_args).
+# 3. docker cp of an 8-byte file (the wasm magic and a wrong version) over each chunk. The file is
+#    0644: docker cp makes it root-owned, and a 0600 file then fails with EACCES, not with a
+#    compile error.
+# 4. docker start, wait for <basePath>/healthz (the public route loads no kernel; /readyz answers
+#    503 here, F18), seed a new sid, and send the kernel row's request.
+# 5. Pass only on a 5xx AND the kernel line in the FULL log: Next preloads route modules at start,
+#    so the compile error can come before the request.
+console_kernel_control_probe() {
+  local ctl="$1" tmp="$2" app="$3" image="$4" base_path="$5" probe_path="$6" redis="$7" args_file="$8" kernel_line="$9"
+  local out rc=0 n path line port origin status sid code logs_rc=0 g_rc=0 cargs
+  cargs=()
+  local chunk_js='
+const fs = require("fs");
+const out = [];
+const walk = (d) => {
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    const p = d + "/" + e.name;
+    if (e.isDirectory()) { walk(p); } else if (/paigasus_wasm_bg.*\.wasm$/.test(e.name)) { out.push(p); }
+  }
+};
+walk(process.argv[1]);
+console.log(out.join("\n"));
+'
+  if [ -z "$kernel_line" ]; then
+    echo "::error::${app}: kernel control row NOT run — the kernel line is empty; set CONSOLE_KERNEL_LINE to the M4 literal." >&2
+    return 1
+  fi
+  out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" -e "$chunk_js" "/app/apps/${app}/.next/server/chunks")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::${app}: kernel control row NOT run — the chunk walk exited ${rc} on ${image}." >&2
+    return 1
+  fi
+  printf '%s\n' "$out" | sed '/^$/d' > "$tmp/chunks"
+  n="$(wc -l < "$tmp/chunks" | tr -d ' ')" || n=""
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -lt 1 ]; then
+    echo "::error::${app}: kernel control row NOT run — found 0 *paigasus_wasm_bg*.wasm files under /app/apps/${app}/.next/server/chunks in ${image}; at least 1 is required. A bundler that inlines the wasm into a JS chunk also gives 0." >&2
+    return 1
+  fi
+  printf '\000asm\377\000\000\000' > "$tmp/bad.wasm"
+  chmod 0644 "$tmp/bad.wasm"
+  while IFS= read -r line; do
+    cargs[${#cargs[@]}]="$line"
+  done < "$args_file"
+  out="$(docker create --name "$ctl" "${cargs[@]}" "$image" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::${app}: the kernel control container ${ctl} was not created from ${image} — docker exited ${rc}; its own message follows." >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  while IFS= read -r path; do
+    out="$(docker cp "$tmp/bad.wasm" "${ctl}:${path}" 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "::error::${app}: kernel control row NOT run — docker cp exited ${rc} on ${path}; its own message follows." >&2
+      printf '%s\n' "$out" >&2
+      return 1
+    fi
+  done < "$tmp/chunks"
+  out="$(docker start "$ctl" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::${app}: the kernel control container ${ctl} did not start — docker exited ${rc}; its own message follows." >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  port="$(docker port "$ctl" 3000/tcp | sed -n 1p)" || port=""
+  port="${port##*:}"
+  case "$port" in
+    ''|*[!0-9]*)
+      echo "::error::${app}: kernel control row NOT run — no host port for ${ctl} ('${port}'). Its last log lines follow." >&2
+      docker logs "$ctl" 2>&1 | tail -30 >&2 || true
+      return 1
+      ;;
+  esac
+  origin="http://127.0.0.1:${port}"
+  status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --retry 20 --retry-delay 1 \
+    --retry-all-errors "${origin}${base_path}/healthz")" || status=""
+  if [ "$status" != "200" ]; then
+    echo "::error::${app}: the kernel control container never answered 200 on ${base_path}/healthz (HTTP ${status:-no response}), so it cannot tell 'started' from 'broken'. Its last log lines follow." >&2
+    docker logs "$ctl" 2>&1 | tail -30 >&2 || true
+    return 1
+  fi
+  sid="$(console_new_sid)" || sid=""
+  if [ -z "$sid" ]; then
+    echo "::error::${app}: kernel control row NOT run — no session id could be read from /dev/urandom." >&2
+    return 1
+  fi
+  if ! console_seed_session "$redis" "$sid"; then
+    return 1
+  fi
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+    -H "Cookie: __Host-pgs_sid=${sid}" "${origin}${base_path}${probe_path}")" || code=""
+  docker logs "$ctl" > "$tmp/ctl.log" 2>&1 || logs_rc=$?
+  if [ "$logs_rc" -ne 0 ]; then
+    echo "::error::${app}: kernel control row NOT checked — docker logs exited ${logs_rc} on ${ctl}." >&2
+    return 1
+  fi
+  grep -F -q -- "$kernel_line" "$tmp/ctl.log" || g_rc=$?
+  case "$code" in
+    5??)
+      if [ "$g_rc" -eq 0 ]; then
+        echo "  ${app}: kernel control: ${base_path}${probe_path} answers ${code} with ${n} corrupted wasm chunk(s), and the log holds '${kernel_line}' — the kernel route row can see a kernel failure"
+        return 0
+      fi
+      if [ "$g_rc" -eq 1 ]; then
+        echo "::error::${app}: the kernel control answered ${code} for a reason that is not the kernel — its full log holds no '${kernel_line}'. Check that the control container gets the same arguments as the main one (console_container_args). Its last log lines follow." >&2
+      else
+        echo "::error::${app}: kernel control row NOT checked — grep exited ${g_rc} on the control log." >&2
+      fi
+      tail -30 "$tmp/ctl.log" >&2 || true
+      return 1
+      ;;
+    200)
+      echo "::error::${app}: the kernel control answered 200 with every wasm chunk corrupted — the kernel route row cannot see a kernel failure. This is the defect SMA-675 closes." >&2
+      return 1
+      ;;
+    *)
+      echo "::error::${app}: the kernel control answered '${code:-no response}', not a 5xx. Its last log lines follow." >&2
+      tail -30 "$tmp/ctl.log" >&2 || true
+      return 1
+      ;;
+  esac
+}
+
 # A FULL, schema-valid dummy runtime configuration, not just PAIGASUS_ZONE and PAIGASUS_ZONES. Both
 # consoles validate their ENTIRE runtime config (@paigasus/auth's OIDC/session shape,
 # @paigasus/discovery's PAIGASUS_SERVICES, and PAIGASUS_IAM_GRPC_URL — see ts/apps/<app>/lib/

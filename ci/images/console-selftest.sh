@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -916,6 +916,52 @@ curl_count_is K9 2
 stub_reset; curl_reset K10
 k_row K10 1 "is not a positive integer" "" abc
 curl_count_is K10 0
+
+# --- SMA-675: console_kernel_control_row (X rows) ---------------------------------------------
+# Every X row asserts that the row removes its control container before it returns (SMA-675 Q2).
+X_CTL="smoke-iam-console-nokernel-$$"
+X_LINE="CompileError"
+printf '%s\n' -e "PAIGASUS_ZONE=iam" --network smoke-net-1 -p 0:3000 > "$T/x-args"
+X_CHUNK_A="/app/apps/iam-console/.next/server/chunks/ssr/a_paigasus_wasm_bg_1.wasm"
+X_CHUNK_B="/app/apps/iam-console/.next/server/chunks/ssr/b_paigasus_wasm_bg_2.wasm"
+# x_row <row> <want_rc> <present> <absent> [<kernel-line>] — the control row against the stubs.
+x_row() {
+  run_fn "$1" "$2" "$3" "$4" any console_kernel_control_row iam-console paigasus-iam-console:dev /iam /orgs smoke-redis-1 "$T/x-args" "${5-$X_LINE}"
+  expect_call "$1-rm" "rm -f ${X_CTL}"
+}
+
+stub_reset; curl_reset X0; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
+x_row X0 0 "" "::error::"
+expect_call X0-create "create --name ${X_CTL} -e PAIGASUS_ZONE=iam --network smoke-net-1 -p 0:3000 paigasus-iam-console:dev"
+expect_call X0-cp "cp "
+expect_call X0-cp-target "${X_CTL}:${STUB_CHUNKS_OUT}"
+expect_call X0-seed "exec smoke-redis-1 redis-cli SET pgs:sess:"
+expect_in X0-healthz "$STUB_CURL_DIR/argv" "http://127.0.0.1:32768/iam/healthz"
+expect_in X0-probe "$STUB_CURL_DIR/argv" "http://127.0.0.1:32768/iam/orgs"
+stub_reset; STUB_CHUNKS_OUT=""; curl_reset X1
+x_row X1 1 "found 0 *paigasus_wasm_bg*.wasm files" ""
+expect_no_call X1 "create "
+stub_reset; STUB_CHUNKS_OUT="$(printf '%s\n' "$X_CHUNK_A" "$X_CHUNK_B")"; curl_reset X2; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
+x_row X2 0 "" "::error::"
+X2_CP="$(count_calls "cp ")"
+if [ "$X2_CP" -eq 2 ]; then say_pass X2-cp-count; else say_fail X2-cp-count "${X2_CP} docker cp calls, expected 2" "$T/argv"; fi
+stub_reset; STUB_CP_RC=1; curl_reset X3
+x_row X3 1 "docker cp exited 1" ""
+expect_no_call X3 "start "
+stub_reset; curl_reset X4; curl_resp 1 "200" "" 0; curl_resp 2 "200" "" 0
+x_row X4 1 "answered 200 with every wasm chunk corrupted" ""
+stub_reset; curl_reset X5; curl_resp 1 "200" "" 0; curl_resp 2 "302" "" 0
+x_row X5 1 "answered '302'" ""
+stub_reset; STUB_LOGS_OUT="AuthConfigError: PAIGASUS_SESSION_REDIS_URL is required"; curl_reset X6; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
+x_row X6 1 "for a reason that is not the kernel" ""
+stub_reset; curl_reset X7
+x_row X7 1 "the kernel line is empty" "" ""
+stub_reset; curl_reset X8; curl_resp 1 "503" "" 0
+x_row X8 1 "never answered 200 on /iam/healthz" ""
+stub_reset; STUB_CREATE_RC=125; curl_reset X9
+x_row X9 1 "was not created from paigasus-iam-console:dev" ""
+stub_reset; STUB_RM_RC=1; curl_reset X10; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
+x_row X10 0 "::warning::iam-console: the kernel control container ${X_CTL} was not removed" "::error::"
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
