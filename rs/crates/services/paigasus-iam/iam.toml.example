@@ -59,8 +59,8 @@
 # It has the fields issuer, reason="jit_disabled" and suppressed. It does not show the subject,
 # the email, another claim or the token. IAM writes at most one line for each issuer in 10
 # seconds. The field suppressed gives the number of refusals since the last line.
-# Introspect writes no line. A user that gets to IAM only through the gateway causes no line: the
-# gateway calls Introspect first, and it answers 401.
+# Introspect writes no line. The gateway calls IAM only through Introspect. So a user that gets to
+# IAM only through the gateway causes no line.
 
 # --- Cedar authorization (M3) ---
 
