@@ -238,6 +238,19 @@ describe('readinessResponse — the runtime build fails (SMA-705 D10)', () => {
     expect(events).toEqual([['readiness.runtime_failed', { error: 'TypeError' }]]);
   });
 
+  it('T11c. The logger throws on the runtime-failure path -> still 503 unready (D7)', async () => {
+    let calls = 0;
+    const throwingLogger: AuthLogger = {
+      event: () => {
+        calls += 1;
+        throw new Error('the logger failed');
+      },
+    };
+    const getter = (): Promise<AuthRuntime> => Promise.reject(redisUrlError());
+    await expectProbe(await readinessResponse(getter, throwingLogger), 503, 'unready', RUNTIME_SENTINELS);
+    expect(calls).toBe(1);
+  });
+
   // Review Focus 5. AuthConfigError sets its own `name` (plan deviation 3, Step 0).
   it('a real cross-field refusal from createAuthRuntime -> 503 unready, error AuthConfigError', async () => {
     const events: Events = [];

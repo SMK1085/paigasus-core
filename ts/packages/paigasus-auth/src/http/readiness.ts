@@ -26,6 +26,9 @@
 //
 // NO THROW OUT OF A DETACHED PROMISE (D11). The `.catch` of the started attempt wraps its log call
 // in try/catch. A logger that throws would otherwise make a new unhandled rejection.
+//
+// A LOGGER THAT THROWS NEVER CHANGES THE RESPONSE (D7). The runtime-failure log call is also
+// wrapped in try/catch. A throwing logger must not turn the 503 answer into a rejected promise.
 import type { AuthLogger } from '../ports/logger';
 import type { AuthRuntime } from '../runtime';
 import { logDiscoveryFailed } from './discovery-log';
@@ -56,7 +59,11 @@ export async function readinessResponse(getRuntime: () => Promise<AuthRuntime>, 
     // The call is inside the try, so a synchronous throw from the getter lands here too.
     runtime = await getRuntime();
   } catch (err) {
-    logger.event('readiness.runtime_failed', { error: errorName(err) });
+    try {
+      logger.event('readiness.runtime_failed', { error: errorName(err) });
+    } catch {
+      // D7. A logger that throws must not replace the readiness response.
+    }
     return probeResponse(503, 'unready');
   }
   const status = runtime.oidc.discoveryStatus();
