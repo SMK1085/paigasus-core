@@ -21,6 +21,13 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 - The counter `iam_jit_provisioning_failures_total` carries the label `defect`. It counts each
   refused request. The log rate limit does not apply to it. Both series start at zero when
   metrics are on (SMA-698).
+- IAM logs a refused request at `info` when the identity is not provisioned and the issuer has
+  `jit_provisioning = false`. The line starts with
+  `request refused: the identity is not provisioned`. The line names the issuer and has the
+  fields `reason="jit_disabled"` and `suppressed`. The line does not show the subject, the email,
+  another claim or the token. IAM writes at most one line for each issuer in 10 seconds.
+  `Introspect` writes no line. Before, IAM answered `403 identity-not-provisioned` and logged
+  nothing (SMA-707).
 
 ### Fixed
 

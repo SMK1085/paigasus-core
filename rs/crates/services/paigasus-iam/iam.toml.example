@@ -49,6 +49,18 @@
 # issuer = "https://idp.example.com/realms/acme"
 # audiences = ["paigasus"]
 # jit_provisioning = true             # default shown
+#
+# jit_provisioning = false closes the user set of this issuer. IAM creates an identity only by
+# just-in-time provisioning. No API links an issuer and a subject to a user. So with false, only
+# the identities that IAM created while the flag was true can sign in. You cannot add a new user
+# of this issuer in a different way.
+# When IAM refuses an unknown identity of such an issuer on a protected request (HTTP or gRPC), it
+# writes one `info` line. The line starts with "request refused: the identity is not provisioned".
+# It has the fields issuer, reason="jit_disabled" and suppressed. It does not show the subject,
+# the email, another claim or the token. IAM writes at most one line for each issuer in 10
+# seconds. The field suppressed gives the number of refusals since the last line.
+# Introspect writes no line. A user that gets to IAM only through the gateway causes no line: the
+# gateway calls Introspect first, and it answers 401.
 
 # --- Cedar authorization (M3) ---
 
