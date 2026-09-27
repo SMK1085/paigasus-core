@@ -4,8 +4,7 @@
 - Package: `ts/packages/paigasus-auth` (`@paigasus/auth`)
 - Related: SMA-656 (its spec, § 8, defers this gap to SMA-704); SMA-705 (readiness gate or eager
   discovery at start)
-- Status: design approved in chat on 2026-09-27. Revised after the spec challenge (§ 9). The written
-  spec awaits review.
+- Status: approved on 2026-09-27 (Gate 1), after the spec challenge (§ 9).
 
 ## 1. Problem
 
@@ -216,7 +215,7 @@ an older module copy made (for example across a dev HMR reload) has no `ensureDi
     discovery runs before the lock and is not in the 2x budget;
   - the limitation bullet at `README.md:239-241` ("SMA-704 tracks this") is rewritten. It keeps the
     first sentence, says that discovery now runs before the lock, and states the store-call
-    residual with its follow-up issue.
+    residual (no issue tracks it).
 
 ## 4. What does not change
 
@@ -330,8 +329,8 @@ Every change must compile, so that the red comes from a test, not from `tsc`.
   `withOperationDeadline` at `DEADLINE_FACTOR` (4) × `PAIGASUS_SESSION_REDIS_TIMEOUT_MS`
   (`src/adapters/operation-deadline.ts:38`), 4000 ms at the default. So one slow `get` that still
   succeeds plus 2T is 11000 ms at the defaults, which is more than the 10000 ms TTL. Event-loop lag
-  also delays `AbortSignal.timeout`. SMA-704 does not fix this. A follow-up Linear issue tracks it;
-  its key replaces this sentence once it exists.
+  also delays `AbortSignal.timeout`. SMA-704 does not fix this. On 2026-09-27 Sven decided not to open
+  a follow-up issue for it, so this residual is recorded here and in the README only.
 - A custom `OidcClient` whose `ensureDiscovered` is a no-op, or whose `refresh` re-runs discovery,
   puts discovery back under the lock. Only the shipped adapter is covered.
 - JWKS key rotation: an unknown `kid` makes oauth4webapi refetch JWKS inside the refresh. That
@@ -346,7 +345,7 @@ under the lock) and after the fix.
 
 ## 8. Out of scope
 
-- The store-call budget under the lock (§ 6, follow-up issue).
+- The store-call budget under the lock (§ 6; no issue tracks it).
 - A readiness gate or an eager discovery at start (SMA-705).
 
 ## 9. Spec challenge (2026-09-27)
