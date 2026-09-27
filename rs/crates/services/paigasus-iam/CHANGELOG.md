@@ -25,9 +25,9 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   `jit_provisioning = false`. The line starts with
   `request refused: the identity is not provisioned`. The line names the issuer and has the
   fields `reason="jit_disabled"` and `suppressed`. The line does not show the subject, the email,
-  another claim or the token. IAM writes at most one line for each issuer in 10 seconds.
-  `Introspect` writes no line. Before, IAM answered `403 identity-not-provisioned` (gRPC
-  `PermissionDenied`) and logged nothing (SMA-707).
+  another claim or the token. Each IAM replica writes at most one line for each issuer in
+  10 seconds. `Introspect` writes no line. Before, IAM answered `403 identity-not-provisioned`
+  (gRPC `PermissionDenied`) and logged nothing (SMA-707).
 
 ### Fixed
 

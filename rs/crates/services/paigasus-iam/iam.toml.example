@@ -57,8 +57,8 @@
 # When IAM refuses an unknown identity of such an issuer on a protected request (HTTP or gRPC), it
 # writes one `info` line. The line starts with "request refused: the identity is not provisioned".
 # It has the fields issuer, reason="jit_disabled" and suppressed. It does not show the subject,
-# the email, another claim or the token. IAM writes at most one line for each issuer in 10
-# seconds. The field suppressed gives the number of refusals since the last line.
+# the email, another claim or the token. Each IAM replica writes at most one line for each
+# issuer in 10 seconds. The field suppressed gives the number of refusals since the last line.
 # Introspect and IntrospectApiKey write no line. For an unknown identity, the gateway calls IAM
 # only through these two RPCs. So a user that gets to IAM only through the gateway causes no line.
 
