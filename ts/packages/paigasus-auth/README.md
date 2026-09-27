@@ -186,9 +186,12 @@ loop.
 
 ### When the identity provider cannot be discovered (SMA-656)
 
-The OIDC client gets the IdP's discovery document on the first OIDC call (login, callback,
-refresh, revocation or logout) of a process, and keeps it for the life of the process. A failed discovery is not kept: the next
-call tries again, and it can wait up to `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`.
+The OIDC client gets the IdP's discovery document on the first call that needs it, and keeps it
+for the life of the process. In a console behind the chart, the first caller is the readiness
+route (`/readyz`, SMA-705, below). A login, a callback, a refresh, a revocation or a logout is the
+first caller only where nothing probes `/readyz`, for example a local `next start`. A failed
+discovery is not kept: the next call tries again, and it can wait up to
+`PAIGASUS_OIDC_HTTP_TIMEOUT_MS`.
 
 **`/auth/login` and `/auth/callback` answer a discovery failure with a 503.** The headers are the
 same as the store 503 above: `Retry-After: 5`, `Cache-Control: no-store`,
@@ -210,9 +213,12 @@ request logs `login.callback_rejected` with `reason: 'state_unknown'` and redire
 a replay attack.
 
 **The `oidc.discovery_failed` event.** Each such 503 logs one event, `{ zone, stage, reason }`.
-`stage` is `login` or `callback`. The event never holds the caught error, its message, its name or
-a URL. It means "this process has no discovered configuration, and a login or a callback needed
-one". Its absence does NOT mean that the IdP is healthy. `reason` is one of:
+`stage` is `login`, `callback` or `readiness`. The readiness route logs `readiness` for an attempt
+that it started (SMA-705). The event never holds the caught error, its message, its name or a URL.
+It means "this process has no discovered configuration, and a login, a callback or the readiness
+route needed one". When a login or a callback joins an attempt that the readiness route started,
+one failure logs one event for each of them. Its absence does NOT mean that the IdP is healthy.
+`reason` is one of:
 
 | `reason`            | What failed                                                                        | Probably                                                    |
 | ------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
@@ -233,12 +239,61 @@ and its retry link cannot work until the configuration is correct. Read `reason`
 
 - An IdP outage that starts AFTER the first successful discovery does not give this 503.
   `/auth/login` then redirects to an IdP that does not answer.
-- One pod that cannot discover, behind a round-robin balancer, fails the callbacks of logins that
-  other pods started. Each retry then costs a full sign-in at the IdP. SMA-705 tracks a readiness
-  gate or an eager discovery at start.
+- A pod that cannot discover is not ready, so the Service sends it no login or callback traffic
+  (SMA-705, "The readiness route" below). Before SMA-705 such a pod stayed ready. Behind a
+  round-robin balancer it then failed the callbacks of logins that other pods started.
 - The refresh path does not use this 503; a discovery failure there stays a transient failure. If
   discovery runs while the refresh path holds its per-session lock, discovery's own time budget can
   exceed the lock's TTL under the shipped defaults. SMA-704 tracks this.
+
+### The readiness route (SMA-705)
+
+`@paigasus/auth/server` exports `readinessResponse(getRuntime, logger)`. Each console mounts it as
+`app/readyz/route.ts`, so the route is `<basePath>/readyz`. The route is public: each app's
+`proxy.ts` lists `/readyz` in `publicPaths`. The Helm chart's readiness probe calls it. `/healthz`
+does not change: it parses the configuration and touches no dependency.
+
+| State                        | Answer                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| The runtime build failed     | 503 `{"status":"unready"}`, and one `readiness.runtime_failed` event            |
+| Discovery has not started    | 503 `{"status":"unready"}`. The route starts discovery and does not wait for it |
+| Discovery is in flight       | 503 `{"status":"unready"}`                                                      |
+| Discovery succeeded one time | 200 `{"status":"ready"}`                                                        |
+
+Every answer has `Cache-Control: no-store`. The body never says why the pod is not ready, because
+the route is public. Read the log.
+
+- **Ready is sticky.** After one successful discovery, the pod stays ready for the life of the
+  process. The adapter never discovers again. An IdP outage after that affects every pod.
+  Removing every pod would also remove the pages of signed-in users.
+- **The route never waits for discovery.** The next probe sees the result. The first call of a
+  process builds the runtime, and that includes the Redis connect (bounded by
+  `PAIGASUS_SESSION_REDIS_TIMEOUT_MS`). So the first probe can pass the kubelet's default 1 s
+  timeout. The kubelet then counts one failure, and the next probe finds the runtime.
+- **Readiness does not check Redis.** Every console pod shares one Redis, so a Redis fault would
+  take every pod out of rotation. The store 503 above answers a store fault.
+- **`readiness.runtime_failed { error }`.** The runtime build failed: a configuration parse error,
+  a cross-field rule, or the Redis client build. `error` is the error's `name` only, for example
+  `TypeError`. A cross-field rule logs `AuthConfigError`. The event
+  never holds the message: a malformed Redis URL puts the password into the message of
+  node-redis's `TypeError`. Each probe tries the build again.
+
+**Known limits.**
+
+- A fresh install or a full restart during an IdP outage leaves no ready console pod. The ingress
+  then answers 503 for every console page, also for a signed-in user. A rolling update keeps the
+  old ready pods.
+- A configuration defect (a wrong issuer, a wrong CA, a malformed Redis URL) keeps the pod not
+  ready for ever. The log shows the `reason` or the error name.
+- A failing pod logs about one `oidc.discovery_failed` line each 10 s: each probe after a settled
+  failure starts a new attempt. A login or a callback that joins the attempt adds its own event.
+- Ready proves discovery only. It does not prove that the pod reaches `token_endpoint` or
+  `jwks_uri`. A pod-local fault after the first success (DNS or egress on one node) does not make
+  the pod not ready.
+- The route is not rate-limited. The adapter joins an attempt in flight, so the IdP gets at most
+  one discovery request at a time per pod. A caller that loops `/readyz` against a fast failure
+  gets back-to-back IdP requests and one log line per attempt.
+- Nothing makes a third console app ship `app/readyz/route.ts`.
 
 ## Cookies
 

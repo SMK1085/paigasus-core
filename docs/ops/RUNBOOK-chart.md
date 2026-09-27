@@ -484,3 +484,21 @@ starts with one of these names and `__`. Set those values through their chart va
 `paigasus.iamReservedEnv` in `templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it
 equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
 `IAM_AUTHZ__ENFORCE_TENANCY`. The chart does not check those values; IAM checks them at boot.
+
+## 10. Console pods stay NotReady (SMA-705)
+
+A console pod is ready only after its auth runtime is built and one OIDC discovery succeeded. Its
+readiness probe is `<basePath>/readyz`. So when a console cannot reach the IdP, or cannot build
+its runtime, the pod stays `0/1 Ready` and `helm install --wait` does not finish. The probe body
+does not say why. Read the pod log:
+
+- `oidc.discovery_failed` with `"stage":"readiness"`: discovery failed. The `reason` field names
+  the class of the fault. `ts/packages/paigasus-auth/README.md` has the table of reasons. A `tls`
+  reason usually means a missing or wrong `oidc.caBundle` (§ 7). A `dns` reason means that the pod
+  cannot resolve the issuer host.
+- `readiness.runtime_failed`: the runtime build failed. The `error` field holds only the error's
+  name. Check the console env (`PAIGASUS_*`), and check `PAIGASUS_SESSION_REDIS_URL` for a
+  malformed URL. A cross-field rule logs `AuthConfigError`.
+
+A pod that was ready one time stays ready for the life of the process. An IdP outage after that
+does not make it not ready. Readiness does not check Redis (SMA-705 D1).
