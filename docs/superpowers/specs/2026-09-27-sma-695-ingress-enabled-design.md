@@ -97,9 +97,16 @@ A new helper in `_helpers.tpl` reads the value with `dig`, with the default `tru
 
 ```
 {{- define "paigasus.ingressEnabled" -}}
-{{- if (dig "enabled" true .Values.ingress) -}}true{{- end -}}
+{{- $v := dig "enabled" true .Values.ingress -}}
+{{- if or $v (kindIs "invalid" $v) -}}true{{- end -}}
 {{- end -}}
 ```
+
+A nil value counts as "not set", which is the default `true`. Helm deletes a `null` that shadows
+a chart default, so with `enabled: true` in `values.yaml` a nil does not reach the template. It
+does reach it when no chart default exists, for example under `--reuse-values` together with
+`--set ingress.enabled=null`. Measured on the prototype: without the `invalid` branch, that case
+renders no Ingress.
 
 It yields the string `true` or an empty string, the same convention as the `paigasus.idpCa*`
 helpers, so a caller tests it with `if (include "paigasus.ingressEnabled" .)`. The template and
@@ -138,8 +145,8 @@ with no message. § 4.4 refuses it.
 
 ### 4.4 Validation `paigasus.validate`
 
-- **New: the kind of `ingress.enabled`.** When `hasKey .Values.ingress "enabled"` and the value is
-  not of kind `bool`, fail: `ingress.enabled must be true or false (a boolean), got <kind> <value>;
+- **New: the kind of `ingress.enabled`.** When `dig "enabled" true .Values.ingress` is neither of
+  kind `bool` nor nil (kind `invalid`, see § 4.2), fail: `ingress.enabled must be true or false (a boolean), got <kind> <value>;
   a quoted "false" is a string and would keep the Ingress`. The chart refuses wrong kinds the same
   way in `_iam-backend.tpl`. This check runs before the `tlsSecretName` check, so a string
   `"false"` gets this message and not a misleading `tlsSecretName` message.
