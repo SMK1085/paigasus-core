@@ -1,3 +1,5 @@
+<!-- moon-diagnosis:ok -->
+
 # SMA-708 Stop Background Git Maintenance in CI Fixtures — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
