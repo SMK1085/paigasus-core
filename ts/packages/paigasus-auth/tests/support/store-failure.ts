@@ -3,27 +3,46 @@
 // SMA-653 route-test harness: a store that fails on chosen methods, a network-free OIDC fake, and
 // the assertions that every 503 row shares.
 //
-// THE SENTINEL. Every thrown store error carries SENTINEL_DSN in its message, the same way the
-// real adapter puts the (redacted) DSN there. expectStoreUnavailable and expectEventsClean then
-// assert that no byte of it reaches the body, a header, or a logged field. A test that forgets to
-// call them is weaker; every row in store-unavailable.test.ts that produces a response calls both.
+// SMA-656 uses it for the OIDC discovery rows too (tests/http/discovery-failed.test.ts). The fake
+// can reject `buildAuthorizationUrl` and `authorizationCodeGrant` with a chosen error. The
+// transaction seed and the callback request live here, so both route test files use one copy. The
+// two redaction assertions take the forbidden strings as a parameter.
+//
+// THE SENTINELS. Every thrown store error carries SENTINEL_DSN in its message, the same way the
+// real adapter puts the (redacted) DSN there. A discovery test error carries SENTINEL_IDP_URL, a URL
+// that the OIDC library could put in its own error text. expectStoreUnavailable and
+// expectEventsClean then assert that no forbidden string reaches the body, a header, or a logged
+// field. The default is STORE_SENTINELS, so the SMA-653 rows did not change. A test that forgets to
+// call them is weaker; every row in store-unavailable.test.ts and discovery-failed.test.ts that
+// produces a response calls both.
 import { expect } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
 import type { AuthorizationRequest, BuildEndSessionUrlParams, OidcClient, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
 import { SessionStoreTimeout, SessionStoreUnavailable } from '../../src/core/errors.js';
+import { hashSecret } from '../../src/core/ids.js';
+import { SESSION_COOKIE, txnCookieName } from '../../src/http/cookies.js';
 import { STORE_UNAVAILABLE_CSP } from '../../src/http/store-unavailable.js';
 import type { AuthEventFields, AuthEventName } from '../../src/ports/logger.js';
 import type { SessionStore } from '../../src/ports/session-store.js';
 import type { AuthRuntime } from '../../src/runtime.js';
 
 export const SENTINEL_DSN = 'redis://user:sentinel-pw@redis.invalid:6379';
+/** The parts of SENTINEL_DSN that no response and no event may hold (the SMA-653 rows). */
+export const STORE_SENTINELS: readonly string[] = ['sentinel-pw', 'redis.invalid'];
+/** SMA-656: a URL the OIDC library could put in its error text. Each discovery test error's message holds it. */
+export const SENTINEL_IDP_URL = 'https://idp.invalid/.well-known/openid-configuration?sentinel-656';
+/** The parts of SENTINEL_IDP_URL that no response and no event may hold (the SMA-656 rows). */
+export const IDP_SENTINELS: readonly string[] = ['idp.invalid', 'sentinel-656'];
 export const ORIGIN = 'https://rp.example.com';
 export const BASE_PATH = '/iam';
 export const END_SESSION_URL = 'https://issuer.example.com/logout';
 export const NEW_REFRESH_TOKEN = 'new-refresh-token';
 /** The harness runtime's OIDC client id. */
 export const CLIENT_ID = 'paigasus-console';
+/** The callback rows' transaction id (the `state`) and its browser-bound secret. */
+export const STATE = 'state-0123456789';
+export const TXN_SECRET = 'correct-secret-value-32-bytes-ok';
 const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
 /**
  * The raw ID token that `fakeOidc().authorizationCodeGrant` returns. JWT-shaped, not signed. Its
@@ -64,23 +83,32 @@ export interface FakeOidc extends OidcClient {
   failRevoke: boolean;
   /** The parameters of every `buildEndSessionUrl` call, in order (SMA-681: does it carry a hint?). */
   endSessionCalls: BuildEndSessionUrlParams[];
+  /** SMA-656: when set, `buildAuthorizationUrl` rejects with this error. */
+  authorizationError?: Error;
+  /** SMA-656: when set, `authorizationCodeGrant` rejects with this error. */
+  codeGrantError?: Error;
 }
 
-/** No network. The code exchange always succeeds and returns NEW_REFRESH_TOKEN. */
+/** No network. Unless `codeGrantError` is set, the code exchange succeeds and returns NEW_REFRESH_TOKEN. */
 export function fakeOidc(): FakeOidc {
   const oidc: FakeOidc = {
     revokeCalls: [],
     failRevoke: false,
     endSessionCalls: [],
-    buildAuthorizationUrl: (): Promise<AuthorizationRequest> => Promise.resolve({ url: 'https://issuer.example.com/authorize?client_id=test', codeVerifier: 'a-verifier', nonce: 'a-nonce' }),
+    buildAuthorizationUrl: (): Promise<AuthorizationRequest> =>
+      oidc.authorizationError !== undefined
+        ? Promise.reject(oidc.authorizationError)
+        : Promise.resolve({ url: 'https://issuer.example.com/authorize?client_id=test', codeVerifier: 'a-verifier', nonce: 'a-nonce' }),
     authorizationCodeGrant: (): Promise<OidcTokens> =>
-      Promise.resolve({
-        accessToken: 'new-access-token',
-        refreshToken: NEW_REFRESH_TOKEN,
-        expiresIn: 300,
-        idToken: FAKE_ID_TOKEN,
-        idTokenClaims: { iss: 'https://issuer.example.com', sub: 'a-subject' },
-      }),
+      oidc.codeGrantError !== undefined
+        ? Promise.reject(oidc.codeGrantError)
+        : Promise.resolve({
+            accessToken: 'new-access-token',
+            refreshToken: NEW_REFRESH_TOKEN,
+            expiresIn: 300,
+            idToken: FAKE_ID_TOKEN,
+            idTokenClaims: { iss: 'https://issuer.example.com', sub: 'a-subject' },
+          }),
     refresh: (): Promise<RefreshedTokens> => Promise.reject(new Error('refresh is not used by the auth routes')),
     revoke: (token: string): Promise<void> => {
       oidc.revokeCalls.push(token);
@@ -129,14 +157,25 @@ export function harness(failOn: readonly StoreMethod[], makeError: () => Error):
   return { runtime, inner, calls, events, oidc };
 }
 
+/** Stores the callback rows' transaction under STATE, directly in the real store (no recorded call). */
+export async function seedTransaction(h: Harness, returnTo: string): Promise<void> {
+  await h.inner.putTransaction(STATE, { codeVerifier: 'a-verifier', nonce: 'a-nonce', returnTo, secretHash: hashSecret(TXN_SECRET), createdAt: Date.now() }, 600_000);
+}
+
+/** A callback for STATE with its transaction cookie, and a session cookie when `sid` is given. */
+export function callbackRequest(sid?: string): Request {
+  const cookies = [`${txnCookieName(STATE)}=${TXN_SECRET}`, ...(sid !== undefined ? [`${SESSION_COOKIE}=${sid}`] : [])];
+  return new Request(`${ORIGIN}${BASE_PATH}/auth/callback?code=a-code&state=${STATE}`, { headers: { cookie: cookies.join('; ') } });
+}
+
 const HTML_ENTITIES: Readonly<Record<string, string>> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
 
 export function htmlDecode(value: string): string {
   return value.replace(/&(?:amp|lt|gt|quot|#39);/g, (entity) => HTML_ENTITIES[entity] ?? entity);
 }
 
-/** Asserts every § 3 property of a 503, and that the retry target is exactly `target`. */
-export async function expectStoreUnavailable(res: Response, expected: { kind: 'link' | 'post'; target: string }): Promise<string> {
+/** Asserts every § 3 property of a 503, that the retry target is exactly `target`, and that no `forbidden` string is in the body or a header. */
+export async function expectStoreUnavailable(res: Response, expected: { kind: 'link' | 'post'; target: string }, forbidden: readonly string[] = STORE_SENTINELS): Promise<string> {
   expect(res.status).toBe(503);
   expect(res.headers.get('retry-after')).toBe('5');
   expect(res.headers.get('cache-control')).toBe('no-store');
@@ -151,17 +190,15 @@ export async function expectStoreUnavailable(res: Response, expected: { kind: 'l
   expect(htmlDecode(match?.[1] ?? '')).toBe(expected.target);
   if (expected.kind === 'post') expect(body).toContain('method="post"');
   for (const text of [body, ...[...res.headers].map(([name, value]) => `${name}: ${value}`)]) {
-    expect(text).not.toContain('sentinel-pw');
-    expect(text).not.toContain('redis.invalid');
+    for (const sentinel of forbidden) expect(text).not.toContain(sentinel);
   }
   return body;
 }
 
-/** No logged field of any event holds any part of SENTINEL_DSN. */
-export function expectEventsClean(events: ReadonlyArray<[AuthEventName, AuthEventFields]>): void {
+/** No logged field of any event holds a `forbidden` string. */
+export function expectEventsClean(events: ReadonlyArray<[AuthEventName, AuthEventFields]>, forbidden: readonly string[] = STORE_SENTINELS): void {
   const text = JSON.stringify(events);
-  expect(text).not.toContain('sentinel-pw');
-  expect(text).not.toContain('redis.invalid');
+  for (const sentinel of forbidden) expect(text).not.toContain(sentinel);
 }
 
 /** The fields of each `store.unavailable` event, in order. */

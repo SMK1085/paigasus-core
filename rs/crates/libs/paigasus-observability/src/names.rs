@@ -39,6 +39,14 @@ pub const IAM_DENIAL_AUDITS_ENQUEUED_TOTAL: &str = "iam_denial_audits_enqueued_t
 /// pathological: two concurrent first authentications by the same admin race, and the loser
 /// rolls back on the unique constraint with the net state still correct.
 pub const IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL: &str = "iam_bootstrap_admin_seed_failures_total";
+/// SMA-698: a just-in-time provisioning attempt that IAM refused, by `defect`
+/// (`missing_email` | `email_conflict`). It counts refused REQUESTS, not identities: one person
+/// with a bad token makes several refused requests, because a console session makes several IAM
+/// calls. The log rate limit (one `warn` line per issuer and defect in 10 s) does NOT apply to
+/// this counter. A lost race between two first logins of one identity is a success and is not
+/// counted. Both series are primed at zero when metrics are on
+/// (`authenticate_token::prime_jit_provisioning_failures`).
+pub const IAM_JIT_PROVISIONING_FAILURES_TOTAL: &str = "iam_jit_provisioning_failures_total";
 /// SMA-477: one increment per starter policy per boot, labelled by what reconciliation did —
 /// PLUS one `failed` increment per system ROLE reconciliation error (`bootstrap::
 /// reconcile_roles`'s own `count("failed")` call). A role's successful outcome
@@ -256,6 +264,7 @@ pub const ALL: &[&str] = &[
     IAM_DENIAL_AUDITS_DROPPED_TOTAL,
     IAM_DENIAL_AUDITS_ENQUEUED_TOTAL,
     IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL,
+    IAM_JIT_PROVISIONING_FAILURES_TOTAL,
     IAM_STARTER_POLICY_RECONCILES_TOTAL,
     IAM_OUTBOX_RELAY_TICKS_TOTAL,
     IAM_OUTBOX_RELAY_DRAINED_TOTAL,

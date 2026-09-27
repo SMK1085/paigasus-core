@@ -11,6 +11,12 @@ use paigasus_iam_core::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
+
+use metrics::counter;
+use paigasus_observability::names;
+
+use crate::application::log_rate_limit::{LOG_RATE_LIMIT_INTERVAL, LogRateLimiter};
 
 /// Whether `resolve` may just-in-time provision an unknown `(issuer, subject)` identity.
 /// The middleware calls `resolve(.., Enabled)`; `Introspect` always calls `resolve(..,
@@ -60,6 +66,67 @@ fn backend_authz(err: AuthzError) -> AuthnError {
     AuthnError::Backend(Box::new(err))
 }
 
+/// Every `ProvisioningDefect` value. [`prime_jit_provisioning_failures`] registers one series for
+/// each entry. `the_defect_array_lists_every_defect_once` fails to compile when a variant is added
+/// and not listed.
+const PROVISIONING_DEFECTS: [ProvisioningDefect; 2] = [ProvisioningDefect::MissingEmail, ProvisioningDefect::EmailConflict];
+
+/// The `defect` label of `iam_jit_provisioning_failures_total` and the `defect` field of the JIT
+/// failure log line (SMA-698 spec 4.3). One exhaustive `match`, no wildcard: the log field, the
+/// counter label and the prime use this one function, so they cannot differ, and a new variant
+/// does not compile until it has a label.
+fn provisioning_defect_label(defect: ProvisioningDefect) -> &'static str {
+    match defect {
+        ProvisioningDefect::MissingEmail => "missing_email",
+        ProvisioningDefect::EmailConflict => "email_conflict",
+    }
+}
+
+/// Registers every `defect` series of `iam_jit_provisioning_failures_total` at zero (SMA-698
+/// spec 4.4). A metrics-rs series first appears at its first increment's value, and `increase()`
+/// takes the first sample as its baseline, so without this the first failure is invisible to an
+/// `increase() > 0` query. `main` calls this when metrics are on, even if no issuer has JIT on.
+pub fn prime_jit_provisioning_failures() {
+    for defect in PROVISIONING_DEFECTS {
+        counter!(names::IAM_JIT_PROVISIONING_FAILURES_TOTAL, "defect" => provisioning_defect_label(defect)).increment(0);
+    }
+}
+
+/// The state of the `email` claim when JIT provisioning failed. It never holds the claim value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmailClaim {
+    /// The token has no `email` claim.
+    Absent,
+    /// The token has an `email` claim, and `Email::parse` refused it.
+    Invalid,
+}
+
+impl EmailClaim {
+    fn label(self) -> &'static str {
+        match self {
+            EmailClaim::Absent => "absent",
+            EmailClaim::Invalid => "invalid",
+        }
+    }
+}
+
+/// A JIT provisioning failure with its detail (SMA-698 spec 4.2). An invalid combination, such as
+/// an `EmailConflict` with an `EmailClaim`, cannot be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JitFailure {
+    MissingEmail(EmailClaim),
+    EmailConflict,
+}
+
+impl JitFailure {
+    fn defect(self) -> ProvisioningDefect {
+        match self {
+            JitFailure::MissingEmail(_) => ProvisioningDefect::MissingEmail,
+            JitFailure::EmailConflict => ProvisioningDefect::EmailConflict,
+        }
+    }
+}
+
 /// Generic-by-value over the ports it depends on, mirroring the M1 use cases
 /// (`CreateUser` et al.): the composition root instantiates this once per concrete adapter
 /// set (Task 14).
@@ -76,6 +143,10 @@ pub struct AuthenticateToken<A, E, P, M, I, C> {
     id_gen: I,
     clock: C,
     jit: JitPolicy,
+    /// SMA-698 D2: at most one JIT failure line per (issuer, defect) in 10 s. An `Arc`, because
+    /// `AppState` clones this use case for each request, and a plain field would reset on each
+    /// clone. Keyed by the `defect` label, because `ProvisioningDefect` does not implement `Hash`.
+    provisioning_log: Arc<LogRateLimiter<&'static str>>,
 }
 
 impl<A, E, P, M, I, C> AuthenticateToken<A, E, P, M, I, C>
@@ -98,6 +169,7 @@ where
             id_gen,
             clock,
             jit,
+            provisioning_log: Arc::new(LogRateLimiter::new(LOG_RATE_LIMIT_INTERVAL)),
         }
     }
 
@@ -194,13 +266,17 @@ where
     /// `ProvisioningFailed(MissingEmail)`); `display_name` is the `name` claim, falling back
     /// to the email's local part; `locale`/`zoneinfo` pass through untouched. One call to
     /// `ExternalIdentityRepository::provision` spans principal + user + external_identity in
-    /// a single transaction (D9). A lost race (`Conflict(ExternalIdentityExists)`) re-reads
-    /// the winner's row and proceeds with it — no orphan principal/user, no auto-linking by
-    /// email (D5): an email conflict fails provisioning instead.
+    /// a single transaction (D9). A lost race re-reads the winner's row and proceeds with it — no
+    /// orphan principal/user. The race has two forms: `Conflict(ExternalIdentityExists)`, and
+    /// `Conflict(EmailTaken)` with the identity present at the re-read (SMA-698 D1). No
+    /// auto-linking by email (D5): an email conflict with the identity absent fails provisioning.
     async fn jit_provision(&self, claims: &ValidatedClaims) -> Result<PrincipalId, AuthnError> {
+        // The `Email::parse` error is dropped here on purpose: `DomainError::InvalidEmail` holds
+        // the raw claim, and the helper must never see it (SMA-698 spec 4.3).
         let email = match claims.email.as_deref().map(Email::parse) {
             Some(Ok(email)) => email,
-            _ => return Err(AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)),
+            Some(Err(_)) => return Err(self.provisioning_failed(&claims.issuer, JitFailure::MissingEmail(EmailClaim::Invalid))),
+            None => return Err(self.provisioning_failed(&claims.issuer, JitFailure::MissingEmail(EmailClaim::Absent))),
         };
         let local_part = email.as_str().split('@').next().unwrap_or_default().to_string();
         let display_name = claims.name.clone().unwrap_or(local_part);
@@ -227,20 +303,61 @@ where
                 .map_err(backend)?
                 .map(|winner| winner.principal_id)
                 .ok_or_else(|| AuthnError::Backend(Box::<dyn std::error::Error + Send + Sync>::from("external identity vanished after a provisioning conflict"))),
-            Err(RepositoryError::Conflict(ConflictKind::EmailTaken)) => Err(AuthnError::ProvisioningFailed(ProvisioningDefect::EmailConflict)),
+            // SMA-698 D1 (spec 4.6). In Postgres, `provision` inserts the `user` row before the
+            // `external_identity` row, and `user.email` is unique. The loser of a race between two
+            // first logins of ONE identity therefore fails on the email first. If the winner has
+            // not committed yet, the loser's insert waits on the unique index until it does. If
+            // the winner has already committed, the loser's insert fails at once. The re-read is
+            // correct in both cases: it always finds the winner's row.
+            Err(RepositoryError::Conflict(ConflictKind::EmailTaken)) => match self.identities.find_by_issuer_subject(&claims.issuer, &claims.subject).await.map_err(backend)? {
+                Some(winner) => Ok(winner.principal_id),
+                None => Err(self.provisioning_failed(&claims.issuer, JitFailure::EmailConflict)),
+            },
             Err(other) => Err(backend(other)),
         }
+    }
+
+    /// The only way a JIT failure arm builds its error (SMA-698 spec 4.2). It counts the failure,
+    /// asks the rate limiter, writes one `warn` line when admitted, and returns
+    /// `ProvisioningFailed`. It never receives the email, the subject, the name or the token, so
+    /// the line cannot carry them (spec S2).
+    fn provisioning_failed(&self, issuer: &Issuer, failure: JitFailure) -> AuthnError {
+        let defect = failure.defect();
+        let label = provisioning_defect_label(defect);
+        counter!(names::IAM_JIT_PROVISIONING_FAILURES_TOTAL, "defect" => label).increment(1);
+        if let Some(suppressed) = self.provisioning_log.admit_at(issuer.as_str(), label, Instant::now()) {
+            match failure {
+                JitFailure::MissingEmail(claim) => tracing::warn!(
+                    defect = label,
+                    issuer = issuer.as_str(),
+                    email_claim = claim.label(),
+                    suppressed,
+                    "just-in-time provisioning failed: the access token has no valid email claim; configure the issuer to put a valid email claim into the access token"
+                ),
+                JitFailure::EmailConflict => tracing::warn!(
+                    defect = label,
+                    issuer = issuer.as_str(),
+                    suppressed,
+                    "just-in-time provisioning failed: another user already has this email address, and IAM does not link identities by email"
+                ),
+            }
+        }
+        AuthnError::ProvisioningFailed(defect)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::id::KernelIdGenerator;
     use crate::application::fakes::{FixedClock, InMemoryMembershipRepository, InMemoryRoleGrants, SeqIds};
+    use crate::log_capture::capture_logs;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use paigasus_iam_core::{ApiKeyId, GrantScope, Membership, MembershipRecord, RoleGrant, Stamp, TenancyNodeRef, TokenDefect, Transaction};
     use paigasus_kernel::Prn;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
@@ -368,13 +485,35 @@ mod tests {
         }
     }
 
+    /// The Postgres form of a lost race (SMA-698 spec 4.6). The winner commits all three rows;
+    /// the loser's `user` insert fails on the email first, so its `provision` returns
+    /// `Conflict(EmailTaken)`. `provision` inserts the winner's identity into the shared store
+    /// and then returns that error, so the identity is present at the re-read.
+    struct EmailTakenRaceIdentities {
+        inner: InMemoryIdentities,
+        winner: ExternalIdentity,
+    }
+
+    #[async_trait]
+    impl ExternalIdentityRepository for EmailTakenRaceIdentities {
+        async fn find_by_issuer_subject(&self, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError> {
+            self.inner.find_by_issuer_subject(issuer, subject).await
+        }
+
+        async fn provision(&self, _principal: &Principal, _user: &User, _identity: &ExternalIdentity) -> Result<(), RepositoryError> {
+            let key = (self.winner.issuer.as_str().to_string(), self.winner.subject.clone());
+            self.inner.0.identities.lock().unwrap().insert(key, self.winner.clone());
+            Err(RepositoryError::Conflict(ConflictKind::EmailTaken))
+        }
+    }
+
     /// `list_by_principal` fake: a plain, insertion-ordered map keyed by principal uuid.
     /// The other `MembershipRepository` methods are unused by `AuthenticateToken` (it only
     /// ever calls `list_by_principal`, D13) and panic if invoked so a wiring mistake fails
     /// loudly instead of silently returning nonsense.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct InMemoryMemberships {
-        rows: Mutex<HashMap<Uuid, Vec<MembershipRecord>>>,
+        rows: Arc<Mutex<HashMap<Uuid, Vec<MembershipRecord>>>>,
     }
 
     impl InMemoryMemberships {
@@ -440,6 +579,38 @@ mod tests {
     impl Authenticator for FakeAuthenticator {
         async fn authenticate(&self, _token: &str) -> Result<ValidatedClaims, AuthnError> {
             self.result.lock().unwrap().take().expect("FakeAuthenticator.authenticate called more than once")
+        }
+    }
+
+    /// Yields its claims in order, one per call, for tests that resolve more than once. `Clone`
+    /// shares the queue, so a cloned use case reads from the same queue (U13).
+    #[derive(Clone)]
+    struct QueueAuthenticator(Arc<Mutex<VecDeque<ValidatedClaims>>>);
+
+    impl QueueAuthenticator {
+        fn new(claims: Vec<ValidatedClaims>) -> Self {
+            QueueAuthenticator(Arc::new(Mutex::new(claims.into())))
+        }
+    }
+
+    #[async_trait]
+    impl Authenticator for QueueAuthenticator {
+        async fn authenticate(&self, _token: &str) -> Result<ValidatedClaims, AuthnError> {
+            Ok(self.0.lock().unwrap().pop_front().expect("QueueAuthenticator ran out of claims"))
+        }
+    }
+
+    /// The initial lookup misses, and `provision` fails with a repository error that is not a
+    /// conflict (U7). `RepositoryError::Backend` wraps a boxed error.
+    struct FailingProvisionIdentities;
+
+    #[async_trait]
+    impl ExternalIdentityRepository for FailingProvisionIdentities {
+        async fn find_by_issuer_subject(&self, _issuer: &Issuer, _subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError> {
+            Ok(None)
+        }
+        async fn provision(&self, _principal: &Principal, _user: &User, _identity: &ExternalIdentity) -> Result<(), RepositoryError> {
+            Err(RepositoryError::Backend("database connection lost".into()))
         }
     }
 
@@ -765,8 +936,14 @@ mod tests {
         assert!(store.identities.lock().unwrap().is_empty());
     }
 
+    /// U5: the lost race in its `ExternalIdentityExists` form resolves to the winner, and it
+    /// writes no helper line and makes no series (spec 4.7).
     #[tokio::test]
     async fn provision_race_loser_reuses_winner_row() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
         let store = AuthnStore::default();
         let issuer = Issuer::parse("https://idp.example.com").unwrap();
         let winner_id = principal_id(42);
@@ -800,6 +977,9 @@ mod tests {
         assert_eq!(resolved.principal_id, winner_id);
         // The loser's own (different-email) user must never have been persisted.
         assert!(!store.principals.lock().unwrap().values().any(|(_, u)| u.email.as_str() == "racer2@example.com"));
+        let text = logs.text();
+        assert!(jit_lines(&text).is_empty(), "a lost race writes no helper line:\n{text}");
+        assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0, "a lost race is not counted");
     }
 
     #[tokio::test]
@@ -1155,5 +1335,481 @@ mod tests {
             }],
             "context_for must read the grants of an API-key principal: WhoAmI reports them for both credential kinds"
         );
+    }
+
+    type MetricsSnapshot = Vec<(metrics_util::CompositeKey, Option<metrics::Unit>, Option<metrics::SharedString>, DebugValue)>;
+
+    /// The value of `iam_jit_provisioning_failures_total{defect}` in `snapshot`, or `None` when that
+    /// series does not exist. It reads the VALUE: a series primed with `increment(0)` also has a
+    /// key. `Snapshotter::snapshot` resets the counters it reads, so take ONE snapshot per test.
+    fn jit_failures(snapshot: &MetricsSnapshot, defect: &str) -> Option<u64> {
+        snapshot.iter().find_map(|(key, _, _, value)| {
+            let key = key.key();
+            let matches = key.name() == names::IAM_JIT_PROVISIONING_FAILURES_TOTAL && key.labels().any(|label| label.key() == "defect" && label.value() == defect);
+            match (matches, value) {
+                (false, _) => None,
+                (true, DebugValue::Counter(n)) => Some(*n),
+                (true, other) => panic!("expected a counter, got {other:?}"),
+            }
+        })
+    }
+
+    /// How many `iam_jit_provisioning_failures_total` series exist in `snapshot`, at any value.
+    fn jit_series(snapshot: &MetricsSnapshot) -> usize {
+        snapshot.iter().filter(|(key, ..)| key.key().name() == names::IAM_JIT_PROVISIONING_FAILURES_TOTAL).count()
+    }
+
+    /// U10 (SMA-698 spec 4.4): the prime registers both `defect` series at zero, so `increase()`
+    /// sees the first failure.
+    #[test]
+    fn prime_registers_both_defect_series_at_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, prime_jit_provisioning_failures);
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(jit_failures(&snapshot, "missing_email"), Some(0));
+        assert_eq!(jit_failures(&snapshot, "email_conflict"), Some(0));
+        assert_eq!(jit_series(&snapshot), 2, "exactly the two defect series");
+    }
+
+    /// `PROVISIONING_DEFECTS` names every `ProvisioningDefect` once, with its own label. The
+    /// `match` has no wildcard: a new variant stops this test from compiling until someone adds
+    /// it here AND to `PROVISIONING_DEFECTS`.
+    #[test]
+    fn the_defect_array_lists_every_defect_once() {
+        fn listed(defect: ProvisioningDefect) -> usize {
+            match defect {
+                ProvisioningDefect::MissingEmail | ProvisioningDefect::EmailConflict => PROVISIONING_DEFECTS.iter().filter(|d| **d == defect).count(),
+            }
+        }
+        assert_eq!(listed(ProvisioningDefect::MissingEmail), 1);
+        assert_eq!(listed(ProvisioningDefect::EmailConflict), 1);
+        let labels: std::collections::HashSet<&str> = PROVISIONING_DEFECTS.iter().map(|d| provisioning_defect_label(*d)).collect();
+        assert_eq!(labels.len(), PROVISIONING_DEFECTS.len(), "each defect needs its own label");
+    }
+
+    const ISSUER: &str = "https://idp.example.com";
+    const OTHER_ISSUER: &str = "https://other-idp.example.com";
+    /// The fixed prefix of both helper messages. Tests select the helper's lines with it.
+    const JIT_LINE: &str = "just-in-time provisioning failed";
+    const MISSING_EMAIL_TEXT: &str = "just-in-time provisioning failed: the access token has no valid email claim; configure the issuer to put a valid email claim into the access token";
+    const EMAIL_CONFLICT_TEXT: &str = "just-in-time provisioning failed: another user already has this email address, and IAM does not link identities by email";
+
+    /// The helper's lines only. `AppState::new` and other code can write other `warn` lines.
+    fn jit_lines(text: &str) -> Vec<&str> {
+        text.lines().filter(|line| line.contains(JIT_LINE)).collect()
+    }
+
+    /// `true` when `line` carries `key` with `value`. `tracing-subscriber` writes a `&str` field
+    /// as `key="value"` and a number as `key=value`; both forms are accepted. The match is on
+    /// the whole token: whitespace or the line start must come before it, and whitespace or the
+    /// line end must come after it. So `suppressed=1` does not match a line that has
+    /// `suppressed=10`.
+    fn has_field(line: &str, key: &str, value: &str) -> bool {
+        is_whole_token(line, &format!("{key}=\"{value}\"")) || is_whole_token(line, &format!("{key}={value}"))
+    }
+
+    /// `true` when `token` occurs in `text` with whitespace, or the text start or end, on both
+    /// sides.
+    fn is_whole_token(text: &str, token: &str) -> bool {
+        let mut search_from = 0;
+        while let Some(found_at) = text[search_from..].find(token) {
+            let start = search_from + found_at;
+            let end = start + token.len();
+            let before_ok = start == 0 || text.as_bytes()[start - 1].is_ascii_whitespace();
+            let after_ok = end == text.len() || text.as_bytes()[end].is_ascii_whitespace();
+            if before_ok && after_ok {
+                return true;
+            }
+            search_from = start + 1;
+        }
+        false
+    }
+
+    /// Proves the whole-token fix (a prior substring match let `suppressed=1` match a line
+    /// holding `suppressed=10`, and this test was red against that old body).
+    #[test]
+    fn has_field_does_not_match_a_longer_numeric_value() {
+        let line = "defect=missing_email suppressed=10 issuer=\"https://idp.example.com\"";
+        assert!(!has_field(line, "suppressed", "1"), "suppressed=10 must not match a search for suppressed=1: {line}");
+        assert!(has_field(line, "suppressed", "10"), "suppressed=10 must match a search for suppressed=10: {line}");
+    }
+
+    /// Asserts that the WHOLE capture holds none of `secrets` (spec S2, 6.1).
+    fn assert_no_secrets(text: &str, secrets: &[&str]) {
+        for secret in secrets {
+            assert!(!text.contains(secret), "the log must not contain {secret:?}:\n{text}");
+        }
+    }
+
+    /// A user that already owns `email`, with no external identity: an email conflict for anyone else.
+    fn seed_user(store: &AuthnStore, n: u128, email: &str) {
+        let id = principal_id(n);
+        let principal = Principal::new(id.clone(), PrincipalKind::User, PrincipalStatus::Active, epoch(), epoch());
+        let user = User::new(id.clone(), Email::parse(email).unwrap(), "Existing".into(), None, None, epoch(), epoch());
+        store.principals.lock().unwrap().insert(id.uuid(), (principal, user));
+    }
+
+    /// A use case over `store`, with JIT on for `ISSUER`.
+    fn jit_use_case<A: Authenticator>(authenticator: A, store: &AuthnStore) -> AuthenticateToken<A, InMemoryIdentities, InMemoryPrincipals, InMemoryMemberships, SeqIds, FixedClock> {
+        AuthenticateToken::new(
+            authenticator,
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), true)]),
+        )
+    }
+
+    /// U1: no `email` claim. One `warn` line with the defect, `absent` and the issuer; one count.
+    #[tokio::test]
+    async fn jit_missing_email_writes_one_warn_line_and_counts_once() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        let uc = jit_use_case(FakeAuthenticator::ok(claims(ISSUER, "sub-u1-distinct", None, Some("Nora Distinctname"))), &store);
+
+        let err = uc.resolve("bearer-u1-secret", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)), "got {err:?}");
+        let text = logs.text();
+        let lines = jit_lines(&text);
+        assert_eq!(lines.len(), 1, "exactly one helper line expected:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("WARN"), "the helper logs at warn: {line}");
+        assert!(line.contains(MISSING_EMAIL_TEXT), "the fixed missing_email message: {line}");
+        assert!(has_field(line, "defect", "missing_email"), "names the defect: {line}");
+        assert!(has_field(line, "email_claim", "absent"), "names the claim state: {line}");
+        assert!(has_field(line, "issuer", ISSUER), "names the issuer: {line}");
+        assert!(has_field(line, "suppressed", "0"), "the first line suppressed nothing: {line}");
+        assert_no_secrets(&text, &["sub-u1-distinct", "Nora Distinctname", "bearer-u1-secret"]);
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(jit_failures(&snapshot, "missing_email"), Some(1));
+        assert_eq!(jit_series(&snapshot), 1, "no email_conflict series");
+    }
+
+    /// U2: an email-like claim that fails `Email::parse` (a second `@`). `invalid`, and the
+    /// capture holds no part of the claim.
+    #[tokio::test]
+    async fn jit_invalid_email_claim_writes_one_warn_line_without_the_claim() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        let uc = jit_use_case(
+            FakeAuthenticator::ok(claims(ISSUER, "sub-u2-distinct", Some("alice.distinct@example.com@x"), Some("Otto Distinctname"))),
+            &store,
+        );
+
+        let err = uc.resolve("bearer-u2-secret", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)), "got {err:?}");
+        let text = logs.text();
+        let lines = jit_lines(&text);
+        assert_eq!(lines.len(), 1, "exactly one helper line expected:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("WARN"), "the helper logs at warn: {line}");
+        assert!(line.contains(MISSING_EMAIL_TEXT), "the fixed missing_email message: {line}");
+        assert!(has_field(line, "defect", "missing_email"), "names the defect: {line}");
+        assert!(has_field(line, "email_claim", "invalid"), "names the claim state: {line}");
+        assert!(has_field(line, "issuer", ISSUER), "names the issuer: {line}");
+        assert_no_secrets(&text, &["alice.distinct", "sub-u2-distinct", "Otto Distinctname", "bearer-u2-secret"]);
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(jit_failures(&snapshot, "missing_email"), Some(1));
+    }
+
+    /// U3: another principal already has the email, and the identity is absent.
+    #[tokio::test]
+    async fn jit_email_conflict_writes_one_warn_line_without_the_email() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        seed_user(&store, 7, "taken.distinct@example.com");
+        let uc = jit_use_case(
+            FakeAuthenticator::ok(claims(ISSUER, "sub-u3-distinct", Some("taken.distinct@example.com"), Some("Paula Distinctname"))),
+            &store,
+        );
+
+        let err = uc.resolve("bearer-u3-secret", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::EmailConflict)), "got {err:?}");
+        let text = logs.text();
+        let lines = jit_lines(&text);
+        assert_eq!(lines.len(), 1, "exactly one helper line expected:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("WARN"), "the helper logs at warn: {line}");
+        assert!(line.contains(EMAIL_CONFLICT_TEXT), "the fixed email_conflict message: {line}");
+        assert!(has_field(line, "defect", "email_conflict"), "names the defect: {line}");
+        assert!(has_field(line, "issuer", ISSUER), "names the issuer: {line}");
+        assert!(!line.contains("email_claim"), "email_claim belongs to missing_email only: {line}");
+        assert_no_secrets(&text, &["taken.distinct", "sub-u3-distinct", "Paula Distinctname", "bearer-u3-secret"]);
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(jit_failures(&snapshot, "email_conflict"), Some(1));
+        assert_eq!(jit_series(&snapshot), 1, "no missing_email series");
+    }
+
+    /// U4: a successful JIT provision writes no helper line and makes no series.
+    #[tokio::test]
+    async fn jit_success_writes_no_line_and_no_series() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        let uc = jit_use_case(FakeAuthenticator::ok(claims(ISSUER, "sub-u4", Some("u4@example.com"), Some("U Four"))), &store);
+
+        uc.resolve("token", Provisioning::Enabled).await.unwrap();
+
+        let text = logs.text();
+        assert!(jit_lines(&text).is_empty(), "a success writes no helper line:\n{text}");
+        assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0);
+    }
+
+    /// U7: `provision` fails with a repository error that is not a conflict. `Backend`, no helper
+    /// line, no series (the adapters already log `Backend`).
+    #[tokio::test]
+    async fn jit_backend_error_writes_no_line_and_no_series() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims(ISSUER, "sub-u7", Some("u7@example.com"), None)),
+            FailingProvisionIdentities,
+            PanicIfCalledPrincipals,
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), true)]),
+        );
+
+        let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::Backend(_)), "got {err:?}");
+        let text = logs.text();
+        assert!(jit_lines(&text).is_empty(), "a backend error writes no helper line:\n{text}");
+        assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0);
+    }
+
+    /// U8: a JIT-disabled issuer, and `introspect` for an unknown identity. Both return
+    /// `IdentityNotProvisioned` before `jit_provision` runs: no helper line, no series.
+    #[tokio::test]
+    async fn identity_not_provisioned_writes_no_line_and_no_series() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        let disabled = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims(ISSUER, "sub-u8-a", None, None)),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), false)]),
+        );
+        let introspecting = jit_use_case(FakeAuthenticator::ok(claims(ISSUER, "sub-u8-b", None, None)), &store);
+
+        let err = disabled.resolve("token", Provisioning::Enabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        let err = introspecting.introspect("token").await.unwrap_err();
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+
+        let text = logs.text();
+        assert!(jit_lines(&text).is_empty(), "IdentityNotProvisioned writes no helper line:\n{text}");
+        assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0);
+    }
+
+    /// U9 (spec S1, D2): three `missing_email` failures for one issuer in one window. One line,
+    /// three counts: the rate limit does not apply to the counter.
+    #[tokio::test]
+    async fn jit_repeated_failures_log_once_and_count_each() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        let uc = jit_use_case(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-u9", None, None), claims(ISSUER, "sub-u9", None, None), claims(ISSUER, "sub-u9", None, None)]),
+            &store,
+        );
+
+        for _ in 0..3 {
+            let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+            assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)), "got {err:?}");
+        }
+
+        let text = logs.text();
+        assert_eq!(jit_lines(&text).len(), 1, "one line per (issuer, defect) in the window:\n{text}");
+        assert_no_secrets(&text, &["sub-u9"]);
+        assert_eq!(jit_failures(&snapshotter.snapshot().into_vec(), "missing_email"), Some(3));
+    }
+
+    /// U11 (Review Focus R1): the limiter key holds the issuer. Two issuers, two lines.
+    #[tokio::test]
+    async fn jit_failures_from_two_issuers_log_one_line_each() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = AuthenticateToken::new(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-u11-a", None, None), claims(OTHER_ISSUER, "sub-u11-b", None, None)]),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), true), (Issuer::parse(OTHER_ISSUER).unwrap(), true)]),
+        );
+
+        uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+        uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        let text = logs.text();
+        let lines = jit_lines(&text);
+        assert_eq!(lines.len(), 2, "one line for each issuer:\n{text}");
+        assert!(lines.iter().any(|line| has_field(line, "issuer", ISSUER)), "{text}");
+        assert!(lines.iter().any(|line| has_field(line, "issuer", OTHER_ISSUER)), "{text}");
+        assert_no_secrets(&text, &["sub-u11-a", "sub-u11-b"]);
+    }
+
+    /// U12 (Review Focus R2): the limiter key holds the defect. Two defects for one issuer, two lines.
+    #[tokio::test]
+    async fn jit_two_defects_for_one_issuer_log_one_line_each() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        seed_user(&store, 8, "taken.u12@example.com");
+        let uc = jit_use_case(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-u12-a", None, None), claims(ISSUER, "sub-u12-b", Some("taken.u12@example.com"), None)]),
+            &store,
+        );
+
+        let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)), "got {err:?}");
+        let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::EmailConflict)), "got {err:?}");
+
+        let text = logs.text();
+        let lines = jit_lines(&text);
+        assert_eq!(lines.len(), 2, "one line for each defect:\n{text}");
+        assert!(lines.iter().any(|line| has_field(line, "defect", "missing_email")), "{text}");
+        assert!(lines.iter().any(|line| has_field(line, "defect", "email_conflict")), "{text}");
+        assert_no_secrets(&text, &["sub-u12-a", "sub-u12-b", "taken.u12"]);
+    }
+
+    /// U13 (Review Focus R3, spec 4.5): `AppState` clones the use case for each request. The clone
+    /// shares the limiter through its `Arc`, so a failure on the clone inside the window is suppressed.
+    #[tokio::test]
+    async fn a_cloned_use_case_shares_the_rate_limiter() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = AuthenticateToken::new(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-u13-a", None, None), claims(ISSUER, "sub-u13-b", None, None)]),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            KernelIdGenerator,
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), true)]),
+        );
+        let twin = uc.clone();
+
+        uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+        twin.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        let text = logs.text();
+        assert_eq!(jit_lines(&text).len(), 1, "the clone must share the limiter:\n{text}");
+        assert_no_secrets(&text, &["sub-u13-a", "sub-u13-b"]);
+    }
+
+    /// U14 (Review Focus R4): an `email` claim that is present but empty is `invalid`, not `absent`.
+    #[tokio::test]
+    async fn jit_empty_email_claim_is_invalid_not_absent() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = jit_use_case(FakeAuthenticator::ok(claims(ISSUER, "sub-u14", Some(""), None)), &store);
+
+        let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)), "got {err:?}");
+        let text = logs.text();
+        let lines = jit_lines(&text);
+        assert_eq!(lines.len(), 1, "exactly one helper line expected:\n{text}");
+        assert!(has_field(lines[0], "email_claim", "invalid"), "a present, empty claim is invalid: {}", lines[0]);
+        assert_no_secrets(&text, &["sub-u14"]);
+    }
+
+    /// U15 (Review Focus R5): the next admitted line carries the limiter's `suppressed` count.
+    /// The test module can reach the private `provisioning_log`, so it injects two earlier
+    /// failures in an old window instead of waiting 10 s.
+    #[tokio::test]
+    async fn the_next_admitted_line_carries_the_suppressed_count() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = jit_use_case(FakeAuthenticator::ok(claims(ISSUER, "sub-u15", None, None)), &store);
+        let old = Instant::now().checked_sub(std::time::Duration::from_secs(30)).expect("the monotonic clock is older than 30 s");
+        assert_eq!(uc.provisioning_log.admit_at(ISSUER, "missing_email", old), Some(0));
+        assert_eq!(uc.provisioning_log.admit_at(ISSUER, "missing_email", old + std::time::Duration::from_secs(1)), None);
+
+        uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        let text = logs.text();
+        let lines = jit_lines(&text);
+        assert_eq!(lines.len(), 1, "the window is over, so the line is admitted:\n{text}");
+        assert!(has_field(lines[0], "suppressed", "1"), "the line reports the one suppressed failure: {}", lines[0]);
+        assert_no_secrets(&text, &["sub-u15"]);
+    }
+
+    /// U6 (spec 4.6, D1): `Conflict(EmailTaken)` with the identity present at the re-read is a
+    /// lost race, not a conflict. The loser resolves to the winner, with no line and no count.
+    #[tokio::test]
+    async fn jit_email_taken_with_the_identity_present_resolves_to_the_winner() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse(ISSUER).unwrap();
+        let winner_id = principal_id(43);
+        seed_user(&store, 43, "racer.u6@example.com");
+        let winner = ExternalIdentity {
+            id: Uuid::from_u128(4343),
+            principal_id: winner_id.clone(),
+            issuer: issuer.clone(),
+            subject: "sub-u6-race".into(),
+            created_at: epoch(),
+            updated_at: epoch(),
+        };
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims(ISSUER, "sub-u6-race", Some("racer.u6@example.com"), None)),
+            EmailTakenRaceIdentities {
+                inner: InMemoryIdentities(store.clone()),
+                winner,
+            },
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer, true)]),
+        );
+
+        let resolved = uc.resolve("token", Provisioning::Enabled).await.unwrap();
+
+        assert_eq!(resolved.principal_id, winner_id, "the loser resolves to the winner");
+        let text = logs.text();
+        assert!(jit_lines(&text).is_empty(), "a lost race writes no helper line:\n{text}");
+        assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0, "a lost race is not counted");
     }
 }

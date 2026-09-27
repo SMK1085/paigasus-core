@@ -7,8 +7,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
-import { createOidcClient } from '../../src/adapters/oidc.js';
-import { SESSION_COOKIE, TXN_COOKIE_PREFIX } from '../../src/http/cookies.js';
+import { createOidcClient, type OidcClient } from '../../src/adapters/oidc.js';
+import { hashSecret } from '../../src/core/ids.js';
+import { SESSION_COOKIE, TXN_COOKIE_PREFIX, txnCookieName } from '../../src/http/cookies.js';
 import type { AuthRuntime } from '../../src/runtime.js';
 import { createAuthRouteHandler } from '../../src/server.js';
 import { startOidcFixture, type OidcFixture } from '../fixtures/jwks.js';
@@ -16,6 +17,24 @@ import { expectStoreUnavailable, failingStore, storeError } from '../support/sto
 
 const BIND = 'http://0.0.0.0:3000';
 const PUBLIC_ORIGIN = 'https://console.example.com';
+
+const IDP_SENTENCE = 'The identity provider is not available. Try again in a few seconds.';
+
+/**
+ * The REAL adapter, on an issuer where discovery fails at once. Port 1 is on the Fetch "bad port"
+ * list, so undici refuses it with no connect and no wait (SMA-656 plan, Review Focus 5).
+ */
+function unreachableOidc(): OidcClient {
+  return createOidcClient({
+    issuer: 'http://127.0.0.1:1',
+    clientId: 'paigasus-console',
+    clientSecret: 'a-client-secret',
+    httpTimeoutMs: 2000,
+    clockToleranceSeconds: 30,
+    scopes: 'openid',
+    allowInsecureRequests: true,
+  });
+}
 
 let fixture: OidcFixture;
 let runtime: AuthRuntime;
@@ -110,5 +129,32 @@ describe('createAuthRouteHandler under basePath /iam (SMA-511 spec § 7.1)', () 
     const res = await createAuthRouteHandler(runtime)(new Request(`${BIND}/auth/login?returnTo=%2Fiam%2Forgs`));
 
     await expectStoreUnavailable(res, { kind: 'link', target: '/iam/auth/login?returnTo=%2Fiam%2Forgs' });
+  });
+
+  it('T11: a discovery failure on /auth/login is the IdP 503, not a 500 (SMA-656)', async () => {
+    const events: Array<[string, unknown]> = [];
+    runtime = { ...runtime, oidc: unreachableOidc(), logger: { event: (name, fields) => void events.push([name, { ...fields }]) } };
+
+    const res = await createAuthRouteHandler(runtime)(new Request(`${BIND}/auth/login?returnTo=%2Fiam%2Forgs`));
+
+    const body = await expectStoreUnavailable(res, { kind: 'link', target: '/iam/auth/login?returnTo=%2Fiam%2Forgs' }, ['127.0.0.1']);
+    expect(body).toContain(IDP_SENTENCE);
+    expect(events).toEqual([['oidc.discovery_failed', { zone: runtime.zone, stage: 'login', reason: 'network' }]]);
+  });
+
+  it('T16: a discovery failure on /auth/callback is the IdP 503, not the login-failed 502 (SMA-656)', async () => {
+    const events: Array<[string, unknown]> = [];
+    runtime = { ...runtime, oidc: unreachableOidc(), logger: { event: (name, fields) => void events.push([name, { ...fields }]) } };
+    // Seeded directly: a login first cannot seed it, because on this issuer the login gives a 503.
+    const txnId = 'txn-sma-656-0123456789';
+    const secret = 'callback-secret-value-32-bytes-x';
+    await runtime.store.putTransaction(txnId, { codeVerifier: 'a-verifier', nonce: 'a-nonce', returnTo: '/iam/orgs', secretHash: hashSecret(secret), createdAt: Date.now() }, 600_000);
+
+    const res = await createAuthRouteHandler(runtime)(new Request(`${BIND}/auth/callback?code=x&state=${txnId}`, { headers: { cookie: `${txnCookieName(txnId)}=${secret}` } }));
+
+    const body = await expectStoreUnavailable(res, { kind: 'link', target: '/iam/auth/login?returnTo=%2Fiam%2Forgs' }, ['127.0.0.1']);
+    expect(body).toContain(IDP_SENTENCE);
+    expect(body).not.toContain('login failed');
+    expect(events).toEqual([['oidc.discovery_failed', { zone: runtime.zone, stage: 'callback', reason: 'network' }]]);
   });
 });

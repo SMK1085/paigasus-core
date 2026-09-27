@@ -64,7 +64,7 @@ dev = [
     "pytest>=9.1.1,<10",
     # Floor stays at 10.6.1: 10.6.2 caps click at 8.1.8 (CVE-2026-7246). See the
     # [tool.uv] constraint-dependencies note at the top of this file.
-    "python-semantic-release>=10.6.1,<11",
+    "python-semantic-release>=10.7.0,<11",
     "pyyaml==6.0.3",
     "ruff>=0.16.8,<0.17",
     # SMA-539 — shellcheck for actionlint's `run:` blocks. Sourced from PyPI, not a proto plugin,
