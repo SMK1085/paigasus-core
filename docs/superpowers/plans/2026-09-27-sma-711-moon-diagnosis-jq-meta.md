@@ -204,7 +204,7 @@ In each of the seven files, replace the one line that is exactly `<!-- moon-diag
 > `CLAUDE.md` between the `moon-diagnosis` markers.
 ```
 
-In the files sma-502, sma-508 and sma-509, the next paragraph claims the copied procedure is correct. Add a fifth blockquote line to those three files: `> **Note:** This claim no longer applies (SMA-711).`
+In the files sma-502, sma-508 and sma-509, the next paragraph claims the copied procedure is correct. Add a fifth blockquote line to those three files. It says that the claim in the next paragraph no longer applies. The wording in each file fits that paragraph. In these three files and in sma-632 and sma-633, the pointer names "The `jq` query in this document (a copy of the moon-diagnosis Step 1 query)", because their query is not in their own Step 1.
 
 In the two sma-597 files the marker is line 1, above the `#` heading. Keep a blank line between the new blockquote and the heading, as the file has now.
 
