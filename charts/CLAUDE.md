@@ -9,7 +9,11 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
 - **One values block renders three projections that must agree:** `PAIGASUS_ZONES`,
   `PAIGASUS_SERVICES` and the ingress rules. All three come from `zones.<id>.enabled` through one
   `range`. Do not write a zone literally in a template: `repo:helm-render` check 1 and check 2
-  fail on it.
+  fail on it. With `ingress.enabled: false` (SMA-695) the chart renders no ingress rules, so only
+  two projections remain, and the operator keeps the route by hand.
+- **Read `ingress.enabled` only through `paigasus.ingressEnabled`.** It reads the value with `dig`
+  and a default of `true`, and counts nil as not set. A plain `.Values.ingress.enabled` reads nil
+  under `--reuse-values` on a release from before the value, and deletes the live Ingress.
 - **Check 1a couples the chart to `contracts/proto/paigasus/common/v1/service_info.proto`.**
   `paigasus.serviceSlugs` in `_helpers.tpl` must EQUAL the slugs of `enum Capability`. A PR that adds
   a capability for a new service must also edit `_helpers.tpl`.

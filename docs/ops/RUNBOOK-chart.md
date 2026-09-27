@@ -19,9 +19,10 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `zones.iam.backend.bootstrapAdmins` | no | A list of `{issuer, subject}`. IAM grants `platform_admin` at Root to each identity after its first login. Default `[]`: no user can do anything (§ 9) |
 | `zones.iam.backend.extraEnv` | no | More env entries (Kubernetes `EnvVar`) for the IAM container, for example `RUST_LOG`. Default `[]` (§ 9) |
 | `zones.gateway.backend.url` | when `gateway` is on | The base URL of an existing gateway backend. The chart does not deploy it |
-| `ingress.host` | yes | The one public host. `PAIGASUS_PUBLIC_ORIGIN` is `https://<host>` |
+| `ingress.enabled` | no | Default `true`. `false`: the chart renders no Ingress, and you route the traffic yourself (§ 11). It must be a boolean |
+| `ingress.host` | yes, also when `ingress.enabled` is false | The one public host. `PAIGASUS_PUBLIC_ORIGIN` is `https://<host>`. A bare host name: no scheme, no path, no port |
 | `ingress.className` | no | The IngressClass of your controller |
-| `ingress.tlsSecretName` | yes | The TLS Secret for `ingress.host`. The ingress must end TLS |
+| `ingress.tlsSecretName` | when `ingress.enabled` is true | The TLS Secret for `ingress.host`. The ingress must end TLS |
 | `ingress.annotations` | no | Extra annotations. Do not add a rewrite annotation (§ 3) |
 | `oidc.issuer` | yes | The IdP issuer URL. It must be `https` |
 | `oidc.clientId` | yes | The console's OIDC client. By default IAM also uses it as the access-token audience. Then an ID token passes IAM's audience check, and the chart shows a warning (§ 6) |
@@ -48,6 +49,8 @@ calls them, and that file renders on every install. The chart refuses:
 - a zone id that is not a known service slug;
 - a `basePath` that is empty, has no leading `/`, ends with `/`, or is used by two zones;
 - an empty value for each required key in § 1;
+- `ingress.enabled` set to a value that is not a boolean (a quoted `"false"` is a string);
+- `ingress.host` with a scheme, a path or a port;
 - `zones.iam.backend.deploy: false` (an external IAM is not supported);
 - `zones.gateway.backend.deploy: true` (the chart cannot run the gateway backend);
 - `zones.<id>.backend.url` empty when the chart does not deploy that backend;
@@ -79,6 +82,11 @@ shown, or shown but not routed. This is decision D6.
 
 **The limit of D6.** The chart cannot express "the gateway zone is shown but not routed", or the
 reverse. That is on purpose.
+
+**D6 and `ingress.enabled: false` (SMA-695).** With the Ingress off, the chart renders no routing.
+Your own route is then a seventh projection, and you keep it by hand. Change the route in the same
+change as any `zones.<id>.enabled` edit. A route to a disabled zone points to a deleted Service. An
+enabled zone with no route gives a 404 for its link.
 
 **Upgrade order for a zone-map change.** One `helm upgrade` changes the Ingress, the zone-map
 ConfigMap and the Deployments at the same time. Helm does not order them. The consoles restart
@@ -503,3 +511,32 @@ does not say why. Read the pod log:
 
 A pod that was ready one time stays ready for the life of the process. An IdP outage after that
 does not make it not ready. Readiness does not check Redis (SMA-705 D1).
+
+## 11. Running without an Ingress controller (`ingress.enabled: false`)
+
+Use this when the cluster has no Ingress controller, for example a K3s cluster with Cilium
+Gateway API. Without a controller, the Ingress never gets a load-balancer status, and Argo CD
+reports the Application as Progressing forever.
+
+**The routing contract.** Your route must:
+
+1. Send each enabled zone's `basePath` prefix on `ingress.host` to that zone's console Service,
+   port name `http` (port 3000). Take the Service name from the rendered manifest
+   (`helm template` or `kubectl get svc`). The chart shortens the base of a long release name, so
+   `<release>-paigasus-<zone>-console` is not always the name.
+2. Not rewrite the path. Each console serves its full `basePath` (§ 3).
+3. Forward the `Host` header (or `X-Forwarded-Host`) unchanged. Next's Server Action origin check
+   fails otherwise. An HTTPRoute `URLRewrite` hostname filter breaks it.
+4. End TLS for `ingress.host` at the Gateway or proxy in front of the chart's Services.
+5. Send traffic only to the console Services. Never expose a `*-backend` Service.
+6. Change together with `zones.<id>.enabled` (§ 4).
+
+**Cut-over on a release that has a live Ingress.**
+
+1. Create the new route and verify it.
+2. Set `ingress.enabled: false` and sync.
+3. Remove the old Ingress. `helm upgrade` deletes it. Argo CD marks it "requires pruning" and
+   keeps it, unless the sync prunes. Sync with prune, or delete the Ingress by hand. A kept Ingress
+   can keep the Application Progressing.
+
+SMA-694 will add a chart-owned Gateway API HTTPRoute.
