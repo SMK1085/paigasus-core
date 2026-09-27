@@ -10,8 +10,21 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
 ### Added
 
+- `ListRoleGrants` accepts new filters: `scope_prn`, `role_key` and `principal_kind`. A request
+  needs a `principal_prn` or a `scope_prn`. An unknown `principal_kind` is refused with the
+  reason `invalid-principal-kind` (SMA-676).
+- `ListMemberships` accepts a `principal_kind` filter. An unknown value is refused with the same
+  reason, `invalid-principal-kind` (SMA-676).
+- `GrantRole` is idempotent. A repeat grant for the same principal, role and scope returns the
+  existing grant and writes nothing new. A race between two concurrent grants for the same
+  principal, role and scope also returns one grant to both callers (SMA-676).
+- A new database index speeds up a scope-filtered role grant query with no principal. The
+  migration builds the index at startup. IAM refuses to start when an operator already built an
+  index with this name but a different definition (SMA-699).
 - IAM logs a refused just-in-time provisioning at `warn`. The line starts with
   `just-in-time provisioning failed`. The line names the defect (`missing_email` or
   `email_conflict`). The line also names the issuer. For `missing_email`, the field `email_claim`
