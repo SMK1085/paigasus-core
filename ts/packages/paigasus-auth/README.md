@@ -188,8 +188,9 @@ loop.
 
 The OIDC client gets the IdP's discovery document on the first call that needs it, and keeps it
 for the life of the process. In a console behind the chart, the first caller is the readiness
-route (`/readyz`, SMA-705, below). A login, a callback, a refresh, a revocation or a logout is the
-first caller only where nothing probes `/readyz`, for example a local `next start`. A failed
+route (`/readyz`, SMA-705, below). A login, a callback, a refresh, a revocation or a logout can be
+the first caller instead. This happens only when nothing probes `/readyz`, for example a local
+`next start`. A failed
 discovery is not kept: the next call tries again, and it can wait up to
 `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`.
 
@@ -216,8 +217,9 @@ a replay attack.
 `stage` is `login`, `callback` or `readiness`. The readiness route logs `readiness` for an attempt
 that it started (SMA-705). The event never holds the caught error, its message, its name or a URL.
 It means "this process has no discovered configuration, and a login, a callback or the readiness
-route needed one". When a login or a callback joins an attempt that the readiness route started,
-one failure logs one event for each of them. Its absence does NOT mean that the IdP is healthy.
+route needed one". A login or a callback can join an attempt that the readiness route started.
+Then one failure logs one event for each of them. Its absence does NOT mean that the IdP is
+healthy.
 `reason` is one of:
 
 | `reason`            | What failed                                                                        | Probably                                                    |
@@ -274,9 +276,9 @@ the route is public. Read the log.
   take every pod out of rotation. The store 503 above answers a store fault.
 - **`readiness.runtime_failed { error }`.** The runtime build failed: a configuration parse error,
   a cross-field rule, or the Redis client build. `error` is the error's `name` only, for example
-  `TypeError`. A cross-field rule logs `AuthConfigError`. The event
-  never holds the message: a malformed Redis URL puts the password into the message of
-  node-redis's `TypeError`. Each probe tries the build again.
+  `TypeError`. A cross-field rule logs `AuthConfigError`. A malformed Redis URL puts the password
+  into the `input` property of the `TypeError` from `new URL()`. The event never holds the message
+  or the `input`. Each probe tries the build again.
 
 **Known limits.**
 
