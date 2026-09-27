@@ -2,7 +2,7 @@
 
 - Linear: SMA-706 (blocked by SMA-698, which is merged as `da89b79a`)
 - Date: 2026-09-27
-- Status: draft, revised after the spec challenge (section 12)
+- Status: approved by Sven on 2026-09-27
 
 ## 1. Problem
 
@@ -25,10 +25,11 @@ to do for each `defect` value. The IAM dashboard shows the failure rate by `defe
    label. The operator reads the issuer from the `warn` log line (SMA-698).
 2. No Alertmanager routing. The repo has no Alertmanager configuration.
 3. No operator API to link an identity or to change an email. Section 8 gives the manual path.
+   SMA-712 tracks the API.
 4. No threshold from production data. There is no baseline yet. Section 4.2 gives the reason
    for the chosen values.
-5. No change to `IamOutboxPublishFailures`. Section 4.2 describes a defect in it. That defect
-   needs its own issue.
+5. No change to `IamOutboxPublishFailures`. Section 4.2 describes a defect in it. SMA-713
+   tracks that defect.
 
 ## 4. Alert rule
 
@@ -75,7 +76,7 @@ comments above `IamOutboxPublishFailures` and `IamAuthzGenerationRewound`.
   the 5-minute window. At a 15 s scrape that is about 4 min 45 s, which is shorter than the 5 min
   hold. So one isolated failure never fires that rule. Its runbook entry says that it "can fire
   on the very first failure" (`RUNBOOK-observability.md:520-522`). This spec does not change it
-  (non-goal 5). Section 11 asks whether to open an issue.
+  (non-goal 5). SMA-713 tracks it.
 
 ### 4.3 Annotations
 
@@ -210,8 +211,8 @@ the operator's Prometheus.
   That branch has its own false positive. If Prometheus has no data for more than 5 minutes
   around `t - 15m`, every series looks new, and a replica with an old failure fires.
 
-**Decision.** This spec does not add the branch. Section 11 asks Sven to confirm this. The
-runbook states the residual.
+**Decision.** This spec does not add the branch. Sven confirmed this on 2026-09-27 (section
+11). The runbook states the residual.
 
 **Other paths where the alert is silent.** The runbook lists them:
 
@@ -300,14 +301,14 @@ No other file lists alerts. There is no Helm copy of the rules and no Alertmanag
 - `iam.json` is valid JSON, and no two panels share an `id` or overlap in `gridPos`.
 - The full gate graph from the root `CLAUDE.md` passes before the push.
 
-## 11. Open decisions for Sven
+## 11. Decisions by Sven (2026-09-27)
 
-1. Accept the residual in section 7 without the `unless ... offset 15m` rule branch?
-   Recommendation: yes. The gap is one scrape interval after each new series. The branch adds a
-   false positive after every Prometheus data gap of more than 5 minutes.
-2. Is a manual Postgres edit an acceptable remediation for `email_conflict`, or is a follow-up
-   issue needed for an operator API that links an identity or changes an email?
-3. Open a Linear issue for the `IamOutboxPublishFailures` defect in section 4.2?
+1. Accept the residual in section 7 without the `unless ... offset 15m` rule branch: **yes**. The
+   gap is one scrape interval after each new series. The branch adds a false positive after every
+   Prometheus data gap of more than 5 minutes.
+2. The manual Postgres edit is the remediation for now. **SMA-712** tracks an operator API that
+   links an identity or changes an email. The runbook section names SMA-712.
+3. **SMA-713** tracks the `IamOutboxPublishFailures` defect in section 4.2.
 
 ## 12. Spec challenge changelog (2026-09-27)
 
