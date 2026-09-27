@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-kernel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proptest",
  "thiserror",
@@ -3289,7 +3289,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-node-bindings"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -3318,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "paigasus-proto-derive",
  "prost",
@@ -3330,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-proto-derive"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3339,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-py-bindings"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "paigasus-kernel",
  "pyo3",
@@ -3356,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "paigasus-kernel",
  "wasm-bindgen",
