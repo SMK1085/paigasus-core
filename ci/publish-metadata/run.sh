@@ -45,6 +45,11 @@
 #            non-comment run: line whose exit status is not discarded, and does not suppress
 #            it with continue-on-error or if:. Nothing else guards a workflow job:
 #            repo:actionlint's call-site machinery is keyed on ci.yml only (SMA-529).
+#   Check 5  rule R1 (SMA-716): in each version group, each member that release-plz
+#            processes (Cargo-publishable, or git_only) sets `changelog_include` to exactly
+#            the other processed members. No other [[package]] sets the key. It lives here,
+#            not in repo:release-parity, because it needs the Cargo manifests, and only this
+#            task lists them as inputs (moon.yml, repo:publish-metadata).
 #
 # The P* checks are the PYTHON arm (SMA-578). The crates.io half above is discovered from
 # Cargo's `publish` flag; PyPI has no equivalent, and in this repo the version field means
@@ -312,6 +317,90 @@ if stubs:
                     "crates.io — keep `[workspace] release = false` (and no `[[package]] "
                     "release = true` override) until SMA-407 moves the floor to 0.1.0."
                 )
+
+# --- Check 5: rule R1, symmetric changelog_include in each version group (SMA-716) ---
+# release-plz 0.3.158 appends a changelog_include package's OWN commits to this package's
+# diff (updater.rs:241-257, READ). The include is not transitive, so each processed member
+# of a version group must list EVERY other processed member. Then all members see the same
+# commits, the release_commits filter gives the same answer for all of them, and a member
+# with no own commits still gets a CHANGELOG section. "Processed" mirrors
+# packages_to_process() (updater.rs:283-302, READ): Cargo-publishable, or git_only.
+# Re-read both citations when .prototools moves the release-plz pin.
+try:
+    with open(rp_path, "rb") as fh:
+        r1_config = tomllib.load(fh)
+except FileNotFoundError:
+    r1_config = {}  # no config: no group and no include, so R1 holds; Check 3 owns this case
+except Exception as exc:
+    print(f"FATAL: cannot parse {rp_path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+all_pkgs = {p["name"]: p for p in meta.get("packages", []) if "name" in p}
+r1_workspace = r1_config.get("workspace") or {}
+r1_entries = [
+    e for e in (r1_config.get("package") or [])
+    if isinstance(e, dict) and isinstance(e.get("name"), str)
+]
+
+
+def r1_processed(entry):
+    pkg = all_pkgs.get(entry["name"])
+    if pkg is None:
+        return False
+    git_only = entry.get("git_only")
+    if git_only is None:
+        git_only = r1_workspace.get("git_only")
+    return is_publishable(pkg) or git_only is True
+
+
+r1_groups = {}
+for entry in r1_entries:
+    group = entry.get("version_group")
+    if group is not None and r1_processed(entry):
+        r1_groups.setdefault(group, []).append(entry["name"])
+
+for entry in r1_entries:
+    name = entry["name"]
+    raw = entry.get("changelog_include")
+    group = entry.get("version_group")
+    if raw is None:
+        include = []
+    elif isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+        include = raw
+    else:
+        errors.append(
+            f"{name}: `changelog_include` must be a list of package names, got {raw!r} "
+            "(rule R1, SMA-716)"
+        )
+        continue
+    if group is None or not r1_processed(entry):
+        if include:
+            errors.append(
+                f"{name}: sets `changelog_include` {include}, but it is not a processed "
+                "member of a version group. Rule R1 (SMA-716) allows the key only on a group "
+                "member that release-plz processes (Cargo-publishable, or git_only)."
+            )
+        continue
+    want = sorted(m for m in r1_groups[group] if m != name)
+    got = set(include)
+    missing = sorted(set(want) - got)
+    unknown = sorted(x for x in got if x not in all_pkgs)
+    extra = sorted(x for x in got - set(want) if x in all_pkgs)
+    problems = []
+    if missing:
+        problems.append(f"missing {missing}")
+    if extra:
+        problems.append(f"extra {extra}")
+    if unknown:
+        problems.append(f"unknown {unknown}")
+    if len(include) != len(got):
+        problems.append("duplicate names")
+    if problems:
+        errors.append(
+            f"{name}: version group {group!r}: `changelog_include` must be exactly the other "
+            f"processed members {want}; " + ", ".join(problems) + ". Rule R1 (SMA-716): "
+            "every member lists every other member, so all members get the same commits."
+        )
 
 if errors:
     print(
@@ -1639,6 +1728,77 @@ $scanroot/rs/crates/bindings/paigasus-py-bindings/pyproject.toml"
     assert_sdist_lint_tables "$tmp/sdist-ok"
   _expect_rc 2 "Check P1 (the sdist wrapper with no crate dirs is INFRA, not a vacuous pass)" \
     assert_sdist_lint_tables
+
+  # --- Check 5 fixtures: rule R1, symmetric changelog_include (SMA-716) ------------
+  # A multi-package metadata file. _meta writes exactly one package; R1 needs a group.
+  _meta_many() { # $1 out-file, rest = one JSON object per package
+    local out="$1"; shift
+    python3 - "$out" "$@" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump({"packages": [json.loads(a) for a in sys.argv[2:]]}, fh)
+PY
+  }
+  # The real repo shape: kernel group (one processed member plus a publish = false binding)
+  # and the proto group (two processed members).
+  _r1_toml() { # $1 out  $2 proto lines  $3 derive lines  $4 kernel lines  $5 binding lines
+    printf '[workspace]\n\n[[package]]\nname = "paigasus-kernel"\nversion_group = "kernel"\n%s\n\n[[package]]\nname = "paigasus-py-bindings"\nversion_group = "kernel"\npublish = false\n%s\n\n[[package]]\nname = "paigasus-proto"\nversion_group = "proto"\n%s\n\n[[package]]\nname = "paigasus-proto-derive"\nversion_group = "proto"\n%s\n' \
+      "$4" "$5" "$2" "$3" >"$1"
+  }
+  local r1_base r1_proto r1_derive r1_bind r1_derive_np
+  r1_base="$(printf '%s' "$base" | sed 's/"version":"0.0.0"/"version":"0.1.0"/')"
+  r1_proto="$(printf '%s' "$r1_base" | sed 's/"paigasus-kernel"/"paigasus-proto"/')"
+  r1_derive="$(printf '%s' "$r1_base" | sed 's/"paigasus-kernel"/"paigasus-proto-derive"/')"
+  r1_bind="$(printf '%s' "$r1_base" | sed 's/"paigasus-kernel"/"paigasus-py-bindings"/; s/"publish":null/"publish":[]/')"
+  r1_derive_np="$(printf '%s' "$r1_derive" | sed 's/"publish":null/"publish":[]/')"
+  _meta_many "$tmp/r1.json" "$r1_base" "$r1_proto" "$r1_derive" "$r1_bind"
+  _meta_many "$tmp/r1-np.json" "$r1_base" "$r1_proto" "$r1_derive_np" "$r1_bind"
+  local r1_csv="paigasus-kernel,paigasus-proto,paigasus-proto-derive"
+  local r1_csv_np="paigasus-kernel,paigasus-proto"
+  local inc_p='changelog_include = ["paigasus-proto-derive"]'
+  local inc_d='changelog_include = ["paigasus-proto"]'
+
+  _r1_toml "$tmp/r1-ok.toml" "$inc_p" "$inc_d" '' ''
+  _expect_rc 0 "Check 5 (R1 symmetric proto group passes)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-ok.toml" "$r1_csv" "$fix_snap"
+
+  _r1_toml "$tmp/r1-missing.toml" 'changelog_include = []' "$inc_d" '' ''
+  _expect_rc 1 "Check 5 (R1 member missing from changelog_include)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-missing.toml" "$r1_csv" "$fix_snap"
+
+  _r1_toml "$tmp/r1-absent.toml" '' "$inc_d" '' ''
+  _expect_rc 1 "Check 5 (R1 changelog_include absent on one member)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-absent.toml" "$r1_csv" "$fix_snap"
+
+  _r1_toml "$tmp/r1-extra.toml" 'changelog_include = ["paigasus-proto-derive", "paigasus-kernel"]' "$inc_d" '' ''
+  _expect_rc 1 "Check 5 (R1 extra name from another group)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-extra.toml" "$r1_csv" "$fix_snap"
+
+  _r1_toml "$tmp/r1-typo.toml" 'changelog_include = ["paigasus-proto-derivee"]' "$inc_d" '' ''
+  _expect_rc 1 "Check 5 (R1 misspelt name)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-typo.toml" "$r1_csv" "$fix_snap"
+
+  _r1_toml "$tmp/r1-string.toml" 'changelog_include = "paigasus-proto-derive"' "$inc_d" '' ''
+  _expect_rc 1 "Check 5 (R1 changelog_include is a string, not a list)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-string.toml" "$r1_csv" "$fix_snap"
+
+  _r1_toml "$tmp/r1-unprocessed.toml" "$inc_p" "$inc_d" '' 'changelog_include = ["paigasus-kernel"]'
+  _expect_rc 1 "Check 5 (R1 key on a group member release-plz does not process)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-unprocessed.toml" "$r1_csv" "$fix_snap"
+
+  printf '[workspace]\n\n[[package]]\nname = "paigasus-kernel"\nchangelog_include = ["paigasus-proto"]\n\n[[package]]\nname = "paigasus-proto"\nversion_group = "proto"\n%s\n\n[[package]]\nname = "paigasus-proto-derive"\nversion_group = "proto"\n%s\n' \
+    "$inc_p" "$inc_d" >"$tmp/r1-nogroup.toml"
+  _expect_rc 1 "Check 5 (R1 key on a crate in no version group)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-nogroup.toml" "$r1_csv" "$fix_snap"
+
+  # Review Focus 4: a Cargo publish = false member with git_only = true IS processed.
+  _r1_toml "$tmp/r1-gitonly-ok.toml" "$inc_p" $'git_only = true\nchangelog_include = ["paigasus-proto"]' '' ''
+  _expect_rc 0 "Check 5 (R1 counts a git_only publish = false member)" \
+    metadata_checks "$tmp/r1-np.json" "$tmp/r1-gitonly-ok.toml" "$r1_csv_np" "$fix_snap"
+
+  _r1_toml "$tmp/r1-gitonly-bad.toml" 'changelog_include = []' $'git_only = true\nchangelog_include = ["paigasus-proto"]' '' ''
+  _expect_rc 1 "Check 5 (R1 git_only member missing from the other member)" \
+    metadata_checks "$tmp/r1-np.json" "$tmp/r1-gitonly-bad.toml" "$r1_csv_np" "$fix_snap"
 
   # Positive control: a clean fixture must pass, or every "red" above is meaningless.
   _meta "$tmp/good.json" "$(printf '%s' "$base" | sed 's/"version":"0.0.0"/"version":"0.1.0"/')"

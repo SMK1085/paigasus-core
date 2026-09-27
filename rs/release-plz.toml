@@ -131,16 +131,31 @@ git_release_enable = false
 # `release = true` here only makes them eligible for the release PR.
 # GITHUB RELEASES: same policy as paigasus-kernel above (SMA-579 §2.1). paigasus-proto is this
 # family's head, so it keeps its GitHub release; paigasus-proto-derive below does not.
+# CHANGELOG_INCLUDE (SMA-716, rule R1). A version group gives every member the group's highest
+# next version, also a member with no own commits (updater.rs:161-189 and 796-828, READ). Such a
+# member got NO CHANGELOG section: git-cliff drops a release with no commits (git-cliff-core
+# changelog.rs:143-175), and the release PR body then quoted the member's OLD section
+# (next_ver.rs:432-437). This was P1 on release PR #306 for paigasus-proto-derive.
+# `changelog_include` appends the named packages' own commits to this package's diff
+# (updater.rs:241-257, READ). The include is not transitive, so each member names EVERY other
+# member (rule R1). It also feeds the version and the `release_commits` filter above, so all
+# members see the same commits and stay in lockstep. Consequence (accepted at GATE 1, Q4): the
+# section of EACH member, and the paigasus-proto GitHub Release body, lists the whole group's
+# commits. repo:publish-metadata Check 5 enforces R1. A new member: add it to the other members'
+# lists in the same PR; its own list takes effect only after its first tag or publish.
+# READ in release-plz 0.3.158. Read the source again when .prototools moves the pin.
 [[package]]
 name = "paigasus-proto"
 version_group = "proto"
 release = true
+changelog_include = ["paigasus-proto-derive"]
 
 [[package]]
 name = "paigasus-proto-derive"
 version_group = "proto"
 release = true
 git_release_enable = false
+changelog_include = ["paigasus-proto"]
 
 # --- Not releasable ------------------------------------------------------------------------
 # Every other member. `release = false` removes a package from the release-PR proposal
