@@ -38,7 +38,9 @@ helper). `readinessResponse` adds `code` to `readiness.runtime_failed` only for 
   deleting the mutation with Edit, never with `git checkout --`.
 - Prefix every shell command with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`.
   Worktree root: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-715-redis-url-parse-redaction`
-  (called `$WT` below; use the absolute path in every command).
+  (called `$WT` below). Every command block below uses `$WT`. In a fresh shell, first run
+  `export WT=/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-715-redis-url-parse-redaction`,
+  or put the absolute path in place of `$WT`.
 
 ## Review Focus
 
