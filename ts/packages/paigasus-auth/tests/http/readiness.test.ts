@@ -256,7 +256,18 @@ describe('readinessResponse — the runtime build fails (SMA-705 D10)', () => {
     const events: Events = [];
     const getter = (): Promise<AuthRuntime> => createAuthRuntime({ ...BASE_CONFIG, PAIGASUS_ZONES: { iam: '/iam', gateway: '/gateway' } });
     await expectProbe(await readinessResponse(getter, recordingLogger(events)), 503, 'unready');
-    expect(events).toEqual([['readiness.runtime_failed', { error: 'AuthConfigError' }]]);
+    expect(events).toEqual([['readiness.runtime_failed', { error: 'AuthConfigError', code: 'auth_config_invalid' }]]);
+  });
+
+  // SMA-715 D4. The real error of a malformed Redis URL: the name and the code of AuthConfigError,
+  // and no part of the URL anywhere. T11 and T11b above keep `{ error: 'TypeError' }` with NO `code`,
+  // although their fixture carries `code: 'ERR_INVALID_URL'`: a foreign code is never logged.
+  it('SMA-715: a malformed Redis URL from createAuthRuntime -> error AuthConfigError, code auth_config_invalid, no password', async () => {
+    const events: Events = [];
+    const getter = (): Promise<AuthRuntime> => createAuthRuntime({ ...BASE_CONFIG, PAIGASUS_SESSION_STORE: 'redis' as const, PAIGASUS_SESSION_REDIS_URL: 'redis//u:sentinel-715@h' });
+    await expectProbe(await readinessResponse(getter, recordingLogger(events)), 503, 'unready', ['sentinel-715']);
+    expect(events).toEqual([['readiness.runtime_failed', { error: 'AuthConfigError', code: 'auth_config_invalid' }]]);
+    expectEventsClean(events, ['sentinel-715']);
   });
 });
 

@@ -295,11 +295,13 @@ the route is public. Read the log.
   timeout. The kubelet then counts one failure, and the next probe finds the runtime.
 - **Readiness does not check Redis.** Every console pod shares one Redis, so a Redis fault would
   take every pod out of rotation. The store 503 above answers a store fault.
-- **`readiness.runtime_failed { error }`.** The runtime build failed: a configuration parse error,
-  a cross-field rule, or the Redis client build. `error` is the error's `name` only, for example
-  `TypeError`. A cross-field rule logs `AuthConfigError`. A malformed Redis URL puts the password
-  into the `input` property of the `TypeError` from `new URL()`. The event never holds the message
-  or the `input`. Each probe tries the build again.
+- **`readiness.runtime_failed { error, code }`.** The runtime build failed: a configuration parse
+  error, a cross-field rule, or the Redis client build. `error` is the error's `name` only, for
+  example `TypeError`. `code` is present only when the error is one of this package's own errors
+  (an `AuthError`). A cross-field rule and a malformed, empty or whitespace-only
+  `PAIGASUS_SESSION_REDIS_URL` both log `error: 'AuthConfigError', code: 'auth_config_invalid'`
+  (SMA-715; see "Redaction"). The event never holds the error message, its other properties, or
+  the `code` of an error from another library. Each probe tries the build again.
 
 **Known limits.**
 
@@ -307,7 +309,8 @@ the route is public. Read the log.
   then answers 503 for every console page, also for a signed-in user. A rolling update keeps the
   old ready pods.
 - A configuration defect (a wrong issuer, a wrong CA, a malformed Redis URL) keeps the pod not
-  ready for ever. The log shows the `reason` or the error name.
+  ready for ever. The log shows the `reason`, or the error name and, for a configuration refusal,
+  the `code` `auth_config_invalid`.
 - A failing pod logs about one `oidc.discovery_failed` line each 10 s: each probe after a settled
   failure starts a new attempt. A login, a callback or a refresh that joins the attempt adds its
   own event.
