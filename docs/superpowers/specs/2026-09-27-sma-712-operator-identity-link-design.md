@@ -171,8 +171,9 @@ handler runs (`http/json.rs:126-139`).
 - Reason: with `enforce_tenancy = false`, the adapter checks of `CreateUser` do not run
   (`http/users.rs:61-63`, `grpc/users.rs:83-85`). If the new calls used that pattern, any
   authenticated principal could link its own identity to a `platform_admin` user. The boot
-  warning (`http/mod.rs:788-791`) says that application-layer authorization "still applies". The
-  new calls are in that group, and the warning text needs no change.
+  warning (`http/mod.rs:788-791`) says that application-layer authorization "still applies", and
+  it names each such service. The new calls are in that group, so the warning adds
+  "user identity links" to its list.
 - The check runs before any input validation and before any row read. A denied caller cannot
   use the calls to test if an email or an identity exists. The exception is a body that the
   extractor refuses (section 4.3).
