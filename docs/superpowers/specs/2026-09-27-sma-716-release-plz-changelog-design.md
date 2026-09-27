@@ -129,14 +129,15 @@ Because the scope list is closed, the regex is an ALLOWLIST of scopes, not an ex
 avoids look-ahead, which the Rust `regex` crate does not have. The approved regex (Q1):
 
 ```toml
-release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(,(rs|py|ts|contracts|deps))*\))?!?:|^[a-z]+(\([^)]*\))?!:|(?m:^BREAKING[ -]CHANGE:)'
+release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(, ?(rs|py|ts|contracts|deps))*\))?!?:|^[a-z]+(\([^)]*\))?!:|(?m:^BREAKING[ -]CHANGE:)'
 ```
 
 - Releasing scopes: `rs`, `py`, `ts`, `contracts` (code), and `deps` (a dependency fix, for
   example a RUSTSEC floor raise). No scope also releases, because PR titles are not linted.
 - Non-releasing scopes: `ci`, `docs`, `release`, `repo`, `claude`, `workspace`.
 - A scope list such as `fix(rs,ci)` releases only if EVERY scope in it is releasing. That is
-  the conservative reading.
+  the conservative reading. One optional space after each comma is allowed (`fix(rs, py)`),
+  because PR titles are not linted (decided with the plan review, 2026-09-27).
 - Any type with `!`, and a `BREAKING CHANGE:` footer, always release.
 - `^` without the `m` flag anchors to the start of the message, that is, the subject line.
 

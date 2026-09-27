@@ -31,13 +31,13 @@
 - Bash per gate on this Mac: `repo:release-parity*` has no bash-4 builtins, so run it with `/bin/bash`. `repo:publish-metadata` needs bash 4+ (`declare -A` at `run.sh:662`): use `/opt/homebrew/bin/bash`. `repo:affected-smoke` needs `/bin/bash` 3.2. `repo:ruff-ci` needs bash 4+. A gate that sits at 0% CPU is a host pipe hang, not a verdict.
 - Do not touch anything under `rs/crates/`.
 - The regex is fixed by the spec (Q1). Copy it exactly:
-  `release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(,(rs|py|ts|contracts|deps))*\))?!?:|^[a-z]+(\([^)]*\))?!:|(?m:^BREAKING[ -]CHANGE:)'`
+  `release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(, ?(rs|py|ts|contracts|deps))*\))?!?:|^[a-z]+(\([^)]*\))?!:|(?m:^BREAKING[ -]CHANGE:)'`
 
 ## Review Focus
 
 1. **A squash merge whose PR title does not release, but whose body lists a releasing sub-commit** (`fix(ci): x` with body `fix(rs): y`). A person expects the title to decide, because `^` has no `m` flag. Pinned by filter row `r24` (expect 0.1.0) in Task 2.
 2. **The hyphen footer `BREAKING-CHANGE: y` on a non-releasing type.** A person expects it to release like the space form (row 19). Pinned by row `r25` (expect 0.2.0) in Task 2.
-3. **A PR title with a space after the comma in the scope list** (`fix(rs, py): x`). PR titles are not linted. The approved regex does not match it, so it does NOT release. A person could expect a release. Row `r26` pins the approved behaviour (0.1.0), and Task 5 documents "no space after the comma". The controller must show this to Sven.
+3. **A PR title with a space after the comma in the scope list** (`fix(rs, py): x`). PR titles are not linted. DECIDED (Sven, 2026-09-27): allow one optional space after each comma. The regex uses `, ?`, and row `r26` expects 0.1.1. Task 5 documents that the space is allowed.
 4. **A group member that is Cargo `publish = false` but `git_only = true`.** release-plz processes it, so R1 must count it as a member. Pinned by two Check 5 fixture rows in Task 1.
 5. **`changelog_include` written as a string, not a list.** A person expects a clear rc-1 message, not a Python traceback. Pinned by a Check 5 fixture row in Task 1.
 
@@ -488,9 +488,9 @@ RPF_ROWS="r01 r02 r03 r04 r05 r06 r07 r08 r09 r10 r11 r12 r13 r14 r15 r16 r17 r1
 
 rpf::_row_expected() { # id -> version from the 0.1.0 baseline
   case "$1" in
-    r01|r02|r04|r05|r06|r20|r23) echo 0.1.1 ;;
+    r01|r02|r04|r05|r06|r20|r23|r26) echo 0.1.1 ;;
     r03|r18|r19|r21|r25) echo 0.2.0 ;;
-    r07|r08|r09|r10|r11|r12|r13|r14|r15|r16|r17|r22|r24|r26) echo 0.1.0 ;;
+    r07|r08|r09|r10|r11|r12|r13|r14|r15|r16|r17|r22|r24) echo 0.1.0 ;;
     *) echo "FATAL: no expected version for row $1" >&2; return 2 ;;
   esac
 }
@@ -628,7 +628,7 @@ Insert directly after `features_always_increment_minor = true` (line 17):
 # verbatim and asserts one fixture crate per case of the spec's classification table.
 # - Releasing: feat, fix, perf with the scopes rs, py, ts, contracts, deps, or with NO scope
 #   (squash subjects on main are PR titles, and nothing lints them). A scope list releases only
-#   if EVERY scope in it releases, and only with no space after the comma. Any type with `!`, and
+#   if EVERY scope in it releases; one optional space after each comma is allowed. Any type with `!`, and
 #   a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer, always release.
 # - Not releasing: the scopes ci, docs, release, repo, claude, workspace; every other type; a
 #   GitHub `Revert "..."` subject (Q3). `^` has no m flag, so only the SUBJECT line counts.
@@ -647,7 +647,7 @@ Insert directly after `features_always_increment_minor = true` (line 17):
 # The filter runs in `update` and `release-pr`, not in `release`. The commitlint scope list
 # (ts/packages/commitlint-config/index.cjs) is closed; a new scope does not release until it is
 # added here. READ in release-plz 0.3.158. Read the source again when .prototools moves the pin.
-release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(,(rs|py|ts|contracts|deps))*\))?!?:|^[a-z]+(\([^)]*\))?!:|(?m:^BREAKING[ -]CHANGE:)'
+release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(, ?(rs|py|ts|contracts|deps))*\))?!?:|^[a-z]+(\([^)]*\))?!:|(?m:^BREAKING[ -]CHANGE:)'
 ```
 
 Update the two sentences that say the harness derives only one key:
@@ -1229,8 +1229,8 @@ crate only when one of its commits is a releasing commit (`release_commits` in
 
 - `feat`, `fix` or `perf` with the scope `rs`, `py`, `ts`, `contracts` or
   `deps`, or with no scope. A scope list such as `fix(rs,py)` releases only if
-  every scope in it releases. Do not put a space after the comma: `fix(rs, py)`
-  does not release.
+  every scope in it releases. One space after the comma is allowed:
+  `fix(rs, py)` also releases.
 - Any type with `!`, or a `BREAKING CHANGE:` footer.
 
 The scopes `ci`, `docs`, `release`, `repo`, `claude` and `workspace` do not
@@ -1259,8 +1259,8 @@ Append these bullets at the end of the `## release-plz` section (before `## Publ
   `paigasus-proto` GitHub Release body, lists the whole group's commits. `repo:publish-metadata`
   Check 5 enforces R1. A new member: add it to the other members' lists in the same PR.
 - **A crate releases only on a releasing commit (SMA-716, `release_commits`).** Releasing:
-  `feat`/`fix`/`perf` with scope `rs`, `py`, `ts`, `contracts`, `deps` or no scope (no space
-  after a comma in a scope list); any `!`; a `BREAKING CHANGE:` footer. Only the subject line
+  `feat`/`fix`/`perf` with scope `rs`, `py`, `ts`, `contracts`, `deps` or no scope (one optional
+  space after a comma in a scope list); any `!`; a `BREAKING CHANGE:` footer. Only the subject line
   counts. Consequences: **C1** a non-releasing change to shipped code rides along with the next
   releasing commit; **C2** the filter decides WHETHER, not the LEVEL, so `feat(ci)` on a crate
   path makes the next release minor; **C3** a new publishable crate first releases only after a
