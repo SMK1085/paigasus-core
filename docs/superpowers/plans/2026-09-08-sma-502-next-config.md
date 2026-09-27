@@ -2649,7 +2649,10 @@ Expected: all green.
 
 - [ ] **Step 3: Diagnose any genuine failure before re-running**
 
-<!-- moon-diagnosis:ok -->
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-711).** The Step 1 `jq` query in this document prints `null` for the command
+> and the exit code, because moon writes both under `.meta`. The corrected procedure is in
+> `CLAUDE.md` between the `moon-diagnosis` markers.
 
 The procedure below is copied from CLAUDE.md's `moon-diagnosis` block and reproduces it faithfully: there is **no** action-level `exitCode` key, the real exit code and command live in `operations[]` on the `task-execution` entry, and the logs must be proved to belong to this run before they are trusted. `repo:actionlint`'s check 12 requires any document mentioning `ciReport.json` to carry `<!-- moon-diagnosis:ok -->` (a correct reference) or `<!-- moon-diagnosis:superseded -->` (a historical one), so that the widely-copied broken advice cannot spread unmarked.
 

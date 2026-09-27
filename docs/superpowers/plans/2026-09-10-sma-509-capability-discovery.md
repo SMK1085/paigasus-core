@@ -3598,7 +3598,10 @@ Two known false alarms:
 - A sub-3s `repo:affected-smoke` abort under a concurrent `moon ci`, whose output contains `proto-shim: … Permission denied (os error 13)`. Grep for that line. If present, re-run `moon run repo:affected-smoke --force`; it passes in the usual 6s.
 - A local hang in `affected-smoke` or `actionlint` is this machine's bash 5.3.15 here-string deadlock, not a gate failure. Re-run under `/bin/bash`.
 
-<!-- moon-diagnosis:ok -->
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-711).** The Step 1 `jq` query in this document prints `null` for the command
+> and the exit code, because moon writes both under `.meta`. The corrected procedure is in
+> `CLAUDE.md` between the `moon-diagnosis` markers.
 
 The marker above is what `repo:actionlint`'s check 12 requires of any file mentioning
 `ciReport.json` (SMA-597). It is `:ok` rather than `:superseded` because the passages above

@@ -1419,7 +1419,10 @@ There is no action-level `exitCode` key — the real exit code and the full comm
 command, compare the action's `finishedAt` against `lastRun.json`'s `lastRunTime`; if they disagree
 the logs are from a different run.
 
-<!-- moon-diagnosis:ok -->
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-711).** The Step 1 `jq` query in this document prints `null` for the command
+> and the exit code, because moon writes both under `.meta`. The corrected procedure is in
+> `CLAUDE.md` between the `moon-diagnosis` markers.
 
 The marker above is what `repo:actionlint`'s check 12 requires of any file mentioning
 `ciReport.json` (SMA-597). It is `:ok` rather than `:superseded` because the two paragraphs above
