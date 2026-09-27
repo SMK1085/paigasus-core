@@ -197,12 +197,14 @@ Expected: exactly the seven paths above.
 
 In each of the seven files, replace the one line that is exactly `<!-- moon-diagnosis:ok -->` with these four lines. Use the Edit tool on the line number given above, and check the line content first. Change nothing else.
 
-```
+```text
 <!-- moon-diagnosis:superseded -->
 > **Superseded (SMA-711).** The Step 1 `jq` query in this document prints `null` for the command
 > and the exit code, because moon writes both under `.meta`. The corrected procedure is in
 > `CLAUDE.md` between the `moon-diagnosis` markers.
 ```
+
+In the files sma-502, sma-508 and sma-509, the next paragraph claims the copied procedure is correct. Add a fifth blockquote line to those three files: `> **Note:** This claim no longer applies (SMA-711).`
 
 In the two sma-597 files the marker is line 1, above the `#` heading. Keep a blank line between the new blockquote and the heading, as the file has now.
 
@@ -214,7 +216,7 @@ git grep -cx '<!-- moon-diagnosis:superseded -->' -- docs/superpowers | grep -E 
 git diff --stat
 ```
 
-Expected: the first command prints nothing and `ok-lines rc=1`. The second prints seven paths, each with count `1`. The diff stat shows a total of `28 insertions(+), 7 deletions(-)` over seven files. Each file's own bar reads `5 ++++-`, which is 4 insertions and 1 deletion.
+Expected: the first command prints nothing and `ok-lines rc=1`. The second prints seven paths, each with count `1`. The total is `31 insertions(+), 7 deletions(-)` over seven files; four files show 4 insertions and 1 deletion, and sma-502, sma-508 and sma-509 show 5 insertions and 1 deletion.
 
 - [ ] **Step 4: Commit**
 
