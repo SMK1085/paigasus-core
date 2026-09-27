@@ -88,6 +88,11 @@ export interface OidcFixture {
    * test must never print one.
    */
   tokenRequests(): readonly URLSearchParams[];
+  /**
+   * The number of discovery requests (`GET /.well-known/openid-configuration`) this fixture
+   * received (SMA-705). A test uses it to prove that two callers share one discovery.
+   */
+  discoveryRequests(): number;
   close(): Promise<void>;
 }
 
@@ -125,11 +130,13 @@ export async function startOidcFixture(): Promise<OidcFixture> {
   let nextTokenError: { error: string; wwwAuthenticate?: string } | undefined;
   let issuer = '';
   const tokenRequestBodies: URLSearchParams[] = [];
+  let discoveryRequestCount = 0;
 
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://placeholder');
       if (req.method === 'GET' && url.pathname === '/.well-known/openid-configuration') {
+        discoveryRequestCount += 1;
         const body = {
           issuer,
           authorization_endpoint: `${issuer}/authorize`,
@@ -260,6 +267,9 @@ export async function startOidcFixture(): Promise<OidcFixture> {
     },
     tokenRequests(): readonly URLSearchParams[] {
       return [...tokenRequestBodies];
+    },
+    discoveryRequests(): number {
+      return discoveryRequestCount;
     },
     close(): Promise<void> {
       return new Promise<void>((resolve, reject) => {

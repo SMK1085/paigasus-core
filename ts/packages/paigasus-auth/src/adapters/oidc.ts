@@ -9,7 +9,9 @@
 // call. This is what lets `createAuthRuntime` validate configuration and fail fast on a bad
 // cross-field rule (§ runtime.ts) WITHOUT making a network call — discovery only happens when a
 // login, refresh, or logout actually occurs. On a discovery failure the cached promise is
-// cleared, so the NEXT call retries rather than replaying the same rejection forever.
+// cleared, so the NEXT call retries rather than replaying the same rejection forever. SMA-705: the
+// readiness route (http/readiness.ts) starts discovery through `discover()`, and it is the first
+// caller in a normal process. `discoveryStatus()` reads the state with no I/O.
 //
 // CLOCK TOLERANCE IS SYMBOL-KEYED (M1). `[client.clockTolerance]` on the client metadata object,
 // not a string option and not a `Configuration` property — `Configuration` only exposes a plain
@@ -88,6 +90,12 @@ export interface BuildEndSessionUrlParams {
   state?: string;
 }
 
+/**
+ * SMA-705. The state of one client's discovery. `discovered` is final: the adapter keeps the first
+ * successful result for the life of the process. A failure goes back to `idle`.
+ */
+export type OidcDiscoveryStatus = 'idle' | 'discovering' | 'discovered';
+
 export interface OidcClient {
   buildAuthorizationUrl(params: BuildAuthorizationUrlParams): Promise<AuthorizationRequest>;
   authorizationCodeGrant(params: AuthorizationCodeGrantParams): Promise<OidcTokens>;
@@ -96,6 +104,13 @@ export interface OidcClient {
   /** Best-effort (design doc § 9.5) — callers decide whether a rejection blocks logout. */
   revoke(token: string): Promise<void>;
   buildEndSessionUrl(params: BuildEndSessionUrlParams): Promise<string>;
+  /** SMA-705 D3. Synchronous, no I/O: the state of this client's discovery. */
+  discoveryStatus(): OidcDiscoveryStatus;
+  /**
+   * SMA-705. Resolves when discovery has succeeded. Starts it when none is in flight; joins the one
+   * in flight otherwise. Rejects with OidcDiscoveryFailed exactly as every other method does.
+   */
+  discover(): Promise<void>;
 }
 
 export interface CreateOidcClientOptions {
@@ -299,6 +314,9 @@ export function classifyDiscoveryError(err: unknown): OidcDiscoveryFailureReason
 export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
   const secret = new RedactedSecret(opts.clientSecret);
   let configPromise: Promise<client.Configuration> | undefined;
+  // SMA-705. True after the first successful discovery, for the life of this client. Only the
+  // `.then` in getConfig sets it.
+  let discovered = false;
 
   function getConfig(): Promise<client.Configuration> {
     // M1: openid-client does NOT verify the id_token's JWS signature by default for a plain
@@ -325,6 +343,12 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
       .discovery(new URL(opts.issuer), opts.clientId, { client_secret: secret.reveal(), [client.clockTolerance]: opts.clockToleranceSeconds }, undefined, {
         timeout: opts.httpTimeoutMs / 1000,
         execute,
+      })
+      .then((config) => {
+        // SMA-705. The flag is set inside the chain, so the status is 'discovered' before any
+        // caller of this promise resumes. A failure skips this handler and never sets the flag.
+        discovered = true;
+        return config;
       })
       .catch((err: unknown) => {
         // Let the NEXT call retry discovery instead of replaying this rejection forever.
@@ -461,6 +485,17 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
         // Throws (synchronously) when the discovered server metadata has no end_session_endpoint.
         throw wrapError('build_end_session_url', err);
       }
+    },
+
+    discoveryStatus(): OidcDiscoveryStatus {
+      if (discovered) return 'discovered';
+      return configPromise !== undefined ? 'discovering' : 'idle';
+    },
+
+    async discover(): Promise<void> {
+      // Through getConfig(), never client.discovery directly. A probe, a login and a callback that
+      // run at the same time then share one configPromise, and the IdP gets one request.
+      await getConfig();
     },
   };
 }

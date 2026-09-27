@@ -23,7 +23,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
-import type { AuthorizationRequest, BuildEndSessionUrlParams, OidcClient, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
+import type { AuthorizationRequest, BuildEndSessionUrlParams, OidcClient, OidcDiscoveryStatus, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
 import { resolveSession } from '../../src/core/single-flight.js';
 import type { SessionRecord } from '../../src/core/session.js';
 import { SESSION_COOKIE, txnCookieName } from '../../src/http/cookies.js';
@@ -101,6 +101,12 @@ function fakeOidc(opts: { revokeImpl?: (token: string) => Promise<void>; endSess
     buildEndSessionUrl(params: BuildEndSessionUrlParams): Promise<string> {
       buildEndSessionUrlCalls.push(params);
       return Promise.resolve(opts.endSessionUrl ?? END_SESSION_URL);
+    },
+    discoveryStatus(): OidcDiscoveryStatus {
+      return 'discovered';
+    },
+    discover(): Promise<void> {
+      throw new Error('not used in logout tests');
     },
   };
 }

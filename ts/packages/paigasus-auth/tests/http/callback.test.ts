@@ -66,6 +66,8 @@ function countingOidc(inner: OidcClient): OidcClient {
     refresh: (token) => inner.refresh(token),
     revoke: (token) => inner.revoke(token),
     buildEndSessionUrl: (params) => inner.buildEndSessionUrl(params),
+    discoveryStatus: () => inner.discoveryStatus(),
+    discover: () => inner.discover(),
   };
 }
 

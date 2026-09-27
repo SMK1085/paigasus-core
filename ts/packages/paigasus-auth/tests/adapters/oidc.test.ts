@@ -567,3 +567,48 @@ describe('createOidcClient — the OAuth code of a transient refresh failure (SM
     expect((err as Error).message).toMatch(/oidc refresh_token_grant failed/);
   });
 });
+
+// SMA-705 T1-T4. The two members that the readiness route uses, against the real local fixture.
+// The top-level beforeEach starts a fresh fixture for each row, so `discoveryRequests()` starts at 0.
+describe('createOidcClient — discoveryStatus() and discover() (SMA-705 T1-T4)', () => {
+  it('T1: idle, then discovering during discover(), then discovered', async () => {
+    const oidc = makeClient();
+    expect(oidc.discoveryStatus()).toBe('idle');
+    const pending = oidc.discover();
+    expect(oidc.discoveryStatus()).toBe('discovering');
+    await pending;
+    expect(oidc.discoveryStatus()).toBe('discovered');
+    expect(fixture.discoveryRequests()).toBe(1);
+  });
+
+  it('T2: an unreachable issuer rejects with OidcDiscoveryFailed, and the status is idle again', async () => {
+    const oidc = createOidcClient({
+      issuer: 'http://127.0.0.1:1',
+      clientId: 'test-client',
+      clientSecret: 'test-secret',
+      httpTimeoutMs: 2000,
+      clockToleranceSeconds: 30,
+      scopes: 'openid',
+      allowInsecureRequests: true,
+    });
+    const pending = oidc.discover();
+    expect(oidc.discoveryStatus()).toBe('discovering');
+    const err: unknown = await pending.catch((e: unknown) => e);
+    expect(isOidcDiscoveryFailed(err)).toBe(true);
+    expect(oidc.discoveryStatus()).toBe('idle');
+  });
+
+  it('T3: discover() and buildAuthorizationUrl started together send ONE discovery request', async () => {
+    const oidc = makeClient();
+    await Promise.all([oidc.discover(), oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE })]);
+    expect(fixture.discoveryRequests()).toBe(1);
+  });
+
+  it('T4: after discovered, a second discover() sends no request and the status stays discovered', async () => {
+    const oidc = makeClient();
+    await oidc.discover();
+    await oidc.discover();
+    expect(fixture.discoveryRequests()).toBe(1);
+    expect(oidc.discoveryStatus()).toBe('discovered');
+  });
+});

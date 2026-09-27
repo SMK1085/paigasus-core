@@ -60,7 +60,7 @@ function cookieJar(sid?: string): { get(name: string): { name: string; value: st
  * suite (the test records are never near their skew window), so a call here is a defect. */
 function unusedOidc(): AuthRuntime['oidc'] {
   const fail = () => Promise.reject(new Error('unexpectedly called'));
-  return { buildAuthorizationUrl: fail, authorizationCodeGrant: fail, refresh: fail, revoke: fail, buildEndSessionUrl: fail };
+  return { buildAuthorizationUrl: fail, authorizationCodeGrant: fail, refresh: fail, revoke: fail, buildEndSessionUrl: fail, discoveryStatus: () => 'discovered', discover: fail };
 }
 
 function baseRuntime(store: SessionStore): AuthRuntime {
