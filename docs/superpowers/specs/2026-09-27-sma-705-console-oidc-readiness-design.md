@@ -434,8 +434,7 @@ Folded in:
 - No test proved that the built app serves `/readyz` → T15 (standalone server), T16 (e2e harness),
   the mutation "delete `app/readyz/route.ts`".
 - D10 was wrong, and a malformed Redis URL would log its password each 10 s (measured) → D10
-  rewritten, `readinessResponse` catches the runtime getter, `readiness.runtime_failed`, T11, a
-  follow-up issue.
+  rewritten, `readinessResponse` catches the runtime getter, `readiness.runtime_failed`, T11, SMA-715.
 - No rollout plan against the released `0.1.0` images → § 9, a version bump in this pull request.
 - T11 (old) could not work: `createAuthRuntime` does not pass `allowInsecureRequests` → T13a/T13b
   inject the factory and state the settle procedure.
