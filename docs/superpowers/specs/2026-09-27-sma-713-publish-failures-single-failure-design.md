@@ -156,7 +156,7 @@ Severity stays `warning`.
   expr: increase(iam_outbox_relay_publish_failures_total[2m]) > 0
   for: 2m
   labels: { severity: warning }
-  annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The outbox relay failed to publish events for at least 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
+  annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
 ```
 
 The expression stays per series. It has no `sum by`. The labels `job` and `instance` stay on the
@@ -165,7 +165,7 @@ alert, so the operator sees the failing replica. The summary does not change. Th
 
 Fire time, measured (section 2): a spell of 6 or more scrapes (about 90 s) always fires, 2 to 3
 minutes after onset. A spell of 3 to 5 scrapes fires only for some phases against the 1 m
-evaluation tick. A spell of 1 or 2 scrapes never fires. The alert resolves about 0 to 1 minute
+evaluation tick. A spell of 1 or 2 scrapes never fires. The alert resolves about 2 to 3 minutes
 after the last failure.
 
 ### 4.2 The promtool block
@@ -208,7 +208,7 @@ that this design depends on.
   the `for: 5m` hold" with: the counter increased in each 2-minute window for a 2-minute hold. A
   failure spell of about 90 s or more fires the alert about 2 to 3 minutes after onset. One
   isolated failure does NOT fire it: SMA-471 D9 absorbs a short broker restart with no operator
-  action. The alert resolves about 0 to 1 minute after the last failure. Keep the "earliest
+  action. The alert resolves about 2 to 3 minutes after the last failure. Keep the "earliest
   outbox signal" sentence and the "before `IamOutboxEventsParked`" sentence. They are now true:
   2 to 3 minutes against about 5 minutes. Replace "primed at zero from boot … can fire on the
   very first failure" with: `main` primes the counter at zero when `outbox.relay_enabled` is
@@ -234,9 +234,9 @@ that this design depends on.
   - a tick that returns `Err` before `relay.rs:232` (the row query, `active.update` or
     `txn.commit` fails). The failures of that tick are never counted.
 - "Remediation", the "Broker down" item: add one sentence. When this alert fires, the outage
-  lasted at least about 90 s, which is longer than a routine restart blip. If
-  `iam_nats_connected` is back at 1 and the counter is flat again, the alert resolves about 0 to
-  1 minute later.
+  lasted at least about 45 s, and usually 90 s or more. That is longer than a routine restart
+  blip. If `iam_nats_connected` is back at 1 and the counter is flat again, the alert resolves
+  about 2 to 3 minutes later.
 
 `docs/ops/RUNBOOK-nats.md:35` and `:66`, and `RUNBOOK-observability.md:300`, `:580`, `:623`
 say only that the alert fires. `RUNBOOK-nats.md:35` says it "eventually fires once a tick actually"

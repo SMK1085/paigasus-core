@@ -519,7 +519,7 @@ is also what produces the audit trail (`ReplayOutboxDeadLetter`, in `audit_log`)
 `for: 2m` hold. A row's `EventPublisher::publish` call failed during relay ticks. A failure spell
 of about 90 s or more fires the alert about 2 to 3 minutes after onset. One isolated failure does
 NOT fire it, on purpose: SMA-471 D9 absorbs a short broker restart with no operator action. The
-alert resolves about 0 to 1 minute after the last failure (SMA-713).
+alert resolves about 2 to 3 minutes after the last failure (SMA-713).
 
 This is the **earliest** outbox signal. It can fire before `IamOutboxBacklogAgeHigh` (which needs
 the backlog to age past 5 minutes) and before `IamOutboxEventsParked` (which needs a row to exhaust
@@ -578,9 +578,9 @@ permission revoked), or an oversized payload past NATS's `max_payload`.
   `max_attempts` specifically so this no longer needs urgent action within the first ~25 seconds).
   `async-nats` reconnects in the background on its own once the broker returns; no service restart
   is needed.
-  When this alert fires, the outage lasted at least about 90 s, which is longer than a routine
-  restart blip. If `iam_nats_connected` is back at 1 and the counter is flat again, the alert
-  resolves about 0 to 1 minute later.
+  When this alert fires, the outage lasted at least about 45 s, and usually 90 s or more. That is
+  longer than a routine restart blip. If `iam_nats_connected` is back at 1 and the counter is flat
+  again, the alert resolves about 2 to 3 minutes later.
 - Stream deleted or permission revoked: this does not self-heal — `NatsEventPublisher` never
   recreates or re-authenticates a stream after boot (D7 is boot-time only). Restore the stream
   (or the permission) and, if the stream itself was recreated from scratch, restart IAM so

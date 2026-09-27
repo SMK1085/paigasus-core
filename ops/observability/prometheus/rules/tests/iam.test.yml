@@ -76,14 +76,14 @@ tests:
           - exp_labels: { severity: warning, job: "iam", instance: "s:8080" }
             exp_annotations:
               summary: "IAM outbox publishes are failing (broker unreachable or rejecting)"
-              description: "The outbox relay failed to publish events for at least 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
+              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
       - eval_time: 14m
         alertname: IamOutboxPublishFailures
         exp_alerts:
           - exp_labels: { severity: warning, job: "iam", instance: "s:8080" }
             exp_annotations:
               summary: "IAM outbox publishes are failing (broker unreachable or rejecting)"
-              description: "The outbox relay failed to publish events for at least 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
+              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
       - eval_time: 15m
         alertname: IamOutboxPublishFailures
         exp_alerts: []

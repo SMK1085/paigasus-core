@@ -33,7 +33,7 @@ groups:
         expr: increase(iam_outbox_relay_publish_failures_total[2m]) > 0
         for: 2m
         labels: { severity: warning }
-        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The outbox relay failed to publish events for at least 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
+        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
       - alert: IamOutboxRelayStalled
         expr: rate(iam_outbox_relay_ticks_total[10m]) == 0
         for: 10m

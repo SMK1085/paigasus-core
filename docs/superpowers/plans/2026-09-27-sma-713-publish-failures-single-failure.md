@@ -106,14 +106,14 @@ line) with:
           - exp_labels: { severity: warning, job: "iam", instance: "s:8080" }
             exp_annotations:
               summary: "IAM outbox publishes are failing (broker unreachable or rejecting)"
-              description: "The outbox relay failed to publish events for at least 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
+              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
       - eval_time: 14m
         alertname: IamOutboxPublishFailures
         exp_alerts:
           - exp_labels: { severity: warning, job: "iam", instance: "s:8080" }
             exp_annotations:
               summary: "IAM outbox publishes are failing (broker unreachable or rejecting)"
-              description: "The outbox relay failed to publish events for at least 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
+              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
       - eval_time: 15m
         alertname: IamOutboxPublishFailures
         exp_alerts: []
@@ -150,7 +150,7 @@ In `iam.rules.yml`, replace lines 20-28 (the SMA-471 comment and the rule) with:
         expr: increase(iam_outbox_relay_publish_failures_total[2m]) > 0
         for: 2m
         labels: { severity: warning }
-        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The outbox relay failed to publish events for at least 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
+        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
 ```
 
 Do not touch the SMA-706 comment near `iam.rules.yml:319-321` ("see SMA-713"). It stays true.
@@ -498,7 +498,7 @@ stale-wording lines.
 `for: 2m` hold. A row's `EventPublisher::publish` call failed during relay ticks. A failure spell
 of about 90 s or more fires the alert about 2 to 3 minutes after onset. One isolated failure does
 NOT fire it, on purpose: SMA-471 D9 absorbs a short broker restart with no operator action. The
-alert resolves about 0 to 1 minute after the last failure (SMA-713).
+alert resolves about 2 to 3 minutes after the last failure (SMA-713).
 
 This is the **earliest** outbox signal. It can fire before `IamOutboxBacklogAgeHigh` (which needs
 the backlog to age past 5 minutes) and before `IamOutboxEventsParked` (which needs a row to exhaust
@@ -541,9 +541,9 @@ At the end of the first "Remediation" bullet (the one that starts "Broker down o
 add:
 
 ```markdown
-  When this alert fires, the outage lasted at least about 90 s, which is longer than a routine
-  restart blip. If `iam_nats_connected` is back at 1 and the counter is flat again, the alert
-  resolves about 0 to 1 minute later.
+  When this alert fires, the outage lasted at least about 45 s, and usually 90 s or more. That is
+  longer than a routine restart blip. If `iam_nats_connected` is back at 1 and the counter is flat
+  again, the alert resolves about 2 to 3 minutes later.
 ```
 
 - [ ] **Step 6: Correct the two one-failure sentences**
