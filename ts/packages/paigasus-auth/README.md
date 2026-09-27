@@ -37,14 +37,14 @@ is present and well-formed.
 | `PAIGASUS_OIDC_SCOPES`                   | no                                       | `openid profile email offline_access`, for the authorization request only       | A space-separated scope string. Whitespace is normalized to single spaces: tabs, newlines, form feeds, carriage returns and repeated or surrounding spaces all collapse to one space each (final fix I1). It must contain the scope `openid` after normalization; the parse fails without it, and `openidx` does not count. A value that normalizes to empty (only whitespace) is refused. Keep `offline_access` unless the IdP issues a refresh token without it — removing it can make every access-token expiry log the user out (see "Why `offline_access` is a default scope" below). When the variable is set, each refresh request also sends it as `scope`. When it is absent, a refresh request sends no `scope` (SMA-692). Entra ID needs it: add one scope of the API, for example `api://paigasus-api/access`. |
 | `PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE`   | no                                       | — (no `audience` parameter)                                                     | A non-empty string with no leading or trailing whitespace. The authorization request sends it as the `audience` parameter; Auth0 needs it to issue an access token for an API. A refresh request never sends it. Set it to the audience that IAM accepts (`oidc.audience` in the chart) (SMA-692).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `PAIGASUS_OIDC_CLOCK_TOLERANCE_SECONDS`  | no                                       | `30`                                                                            | A positive integer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`          | no                                       | `3500`                                                                          | A positive integer. Must satisfy `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS < PAIGASUS_SESSION_LOCK_TTL_MS` — see that variable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`          | no                                       | `3500`                                                                          | A positive integer. Must satisfy `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS < PAIGASUS_SESSION_LOCK_TTL_MS` — see that variable. OIDC discovery runs before the refresh path takes the session lock, so discovery is not in this 2x budget (SMA-704).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `PAIGASUS_SESSION_STORE`                 | yes                                      | —                                                                               | `redis` or `memory`. There is no third value and no presence-based fallback — a typo fails startup rather than silently downgrading to `memory`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `PAIGASUS_SESSION_REDIS_URL`             | when `PAIGASUS_SESSION_STORE` is `redis` | —                                                                               | A node-redis connection string, e.g. `redis://[[user][:password]@]host[:port][/db-number]`. Required at startup when the store is `redis`; the value is never logged (see "Redaction" below).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `PAIGASUS_SESSION_REDIS_TIMEOUT_MS`      | no                                       | `1000`                                                                          | A positive integer. At most 536870911 ms.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `PAIGASUS_SESSION_TTL_SECONDS`           | no                                       | `28800` (8 hours)                                                               | A positive integer. Idle timeout for a session record.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS`  | no                                       | `86400` (24 hours)                                                              | A positive integer. Hard ceiling on a session's lifetime regardless of activity.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `PAIGASUS_SESSION_REFRESH_SKEW_SECONDS`  | no                                       | `30`                                                                            | A positive integer. How early, before actual access-token expiry, a refresh is attempted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `PAIGASUS_SESSION_LOCK_TTL_MS`           | no                                       | `10000`                                                                         | A positive integer. Must stay strictly above `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS` — a refresh makes two sequential bounded calls (token exchange, then a JWKS fetch) under this lock, and a refresh that outlives its lock is exactly what the single-flight guarantee (AC 2) depends on not happening. The shipped defaults (`3500`, `10000`) already satisfy this.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `PAIGASUS_SESSION_LOCK_TTL_MS`           | no                                       | `10000`                                                                         | A positive integer. Must stay strictly above `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS` — a refresh makes two sequential bounded calls (token exchange, then a JWKS fetch) under this lock, and a refresh that outlives its lock is exactly what the single-flight guarantee (AC 2) depends on not happening. The shipped defaults (`3500`, `10000`) already satisfy this. OIDC discovery is not one of these calls: on a cold process it runs before the lock is taken (SMA-704). The store calls under the lock are not in this rule either; see "Known limits" under "When the identity provider cannot be discovered".                                                                                                                                                                                                        |
 | `PAIGASUS_SESSION_LOCK_WAIT_MS`          | no                                       | `3000`                                                                          | A positive integer. How long a concurrent request waits for another request's in-flight refresh before giving up.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 `createAuthRuntime` also reads two variables this package does **not** own —
@@ -162,6 +162,9 @@ transient refresh failure: one code of the RFC 6749 § 5.2 list, or `other` for 
 It shows, for example, an `invalid_scope` after a scope change. A failure with no OAuth code, such
 as a network error, has no `oauthError`.
 
+`session.refresh_failed` can also carry `stage: 'discovery'` (SMA-704). This value means OIDC
+discovery failed before the session lock was taken. No token request was sent.
+
 ## Routes
 
 `createAuthRoutes` / `createAuthRoutes(...).handle` (see `@paigasus/auth/server`) serve four
@@ -186,9 +189,13 @@ loop.
 
 ### When the identity provider cannot be discovered (SMA-656)
 
-The OIDC client gets the IdP's discovery document on the first OIDC call (login, callback,
-refresh, revocation or logout) of a process, and keeps it for the life of the process. A failed discovery is not kept: the next
-call tries again, and it can wait up to `PAIGASUS_OIDC_HTTP_TIMEOUT_MS`.
+The OIDC client gets the IdP's discovery document on the first call that needs it, and keeps it
+for the life of the process. In a console behind the chart, the first caller is the readiness
+route (`/readyz`, SMA-705, below). A login, a callback, a refresh, a revocation or a logout can be
+the first caller instead. This happens only when nothing probes `/readyz`, for example a local
+`next start`. A failed
+discovery is not kept: the next call tries again, and it can wait up to
+`PAIGASUS_OIDC_HTTP_TIMEOUT_MS`.
 
 **`/auth/login` and `/auth/callback` answer a discovery failure with a 503.** The headers are the
 same as the store 503 above: `Retry-After: 5`, `Cache-Control: no-store`,
@@ -210,9 +217,14 @@ request logs `login.callback_rejected` with `reason: 'state_unknown'` and redire
 a replay attack.
 
 **The `oidc.discovery_failed` event.** Each such 503 logs one event, `{ zone, stage, reason }`.
-`stage` is `login` or `callback`. The event never holds the caught error, its message, its name or
-a URL. It means "this process has no discovered configuration, and a login or a callback needed
-one". Its absence does NOT mean that the IdP is healthy. `reason` is one of:
+`stage` is `login`, `callback` or `readiness`. The readiness route logs `readiness` for an attempt
+that it started (SMA-705). The event never holds the caught error, its message, its name or a URL.
+It means "this process has no discovered configuration, and a login, a callback or the readiness
+route needed one". A login or a callback can join an attempt that the readiness route started. A
+refresh can join it too, but it logs `session.refresh_failed` with `stage: 'discovery'`, not
+`oidc.discovery_failed`. Then one failure logs one event for each joiner. Its absence does NOT
+mean that the IdP is healthy.
+`reason` is one of:
 
 | `reason`            | What failed                                                                        | Probably                                                    |
 | ------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
@@ -233,12 +245,67 @@ and its retry link cannot work until the configuration is correct. Read `reason`
 
 - An IdP outage that starts AFTER the first successful discovery does not give this 503.
   `/auth/login` then redirects to an IdP that does not answer.
-- One pod that cannot discover, behind a round-robin balancer, fails the callbacks of logins that
-  other pods started. Each retry then costs a full sign-in at the IdP. SMA-705 tracks a readiness
-  gate or an eager discovery at start.
-- The refresh path does not use this 503; a discovery failure there stays a transient failure. If
-  discovery runs while the refresh path holds its per-session lock, discovery's own time budget can
-  exceed the lock's TTL under the shipped defaults. SMA-704 tracks this.
+- A pod that cannot discover is not ready, so the Service sends it no login or callback traffic
+  (SMA-705, "The readiness route" below). Before SMA-705 such a pod stayed ready. Behind a
+  round-robin balancer it then failed the callbacks of logins that other pods started.
+- The refresh path does not use this 503; a discovery failure there stays a transient failure.
+  Discovery runs before the refresh path takes its per-session lock (SMA-704). So the lock's
+  budget, `2 * PAIGASUS_OIDC_HTTP_TIMEOUT_MS`, holds only the token call and the JWKS call. On a
+  cold process, a request that must refresh first waits up to `PAIGASUS_OIDC_HTTP_TIMEOUT_MS` for
+  discovery, outside the lock.
+- The store calls under the refresh lock are not in that budget. Each one can take up to 4 ×
+  `PAIGASUS_SESSION_REDIS_TIMEOUT_MS` (4000 ms at the default). One slow store read plus two slow
+  IdP calls (11000 ms at the defaults) can outlast the 10000 ms lock TTL. No issue tracks this.
+
+### The readiness route (SMA-705)
+
+`@paigasus/auth/server` exports `readinessResponse(getRuntime, logger)`. Each console mounts it as
+`app/readyz/route.ts`, so the route is `<basePath>/readyz`. The route is public: each app's
+`proxy.ts` lists `/readyz` in `publicPaths`. The Helm chart's readiness probe calls it. `/healthz`
+does not change: it parses the configuration and touches no dependency.
+
+| State                        | Answer                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| The runtime build failed     | 503 `{"status":"unready"}`, and one `readiness.runtime_failed` event            |
+| Discovery has not started    | 503 `{"status":"unready"}`. The route starts discovery and does not wait for it |
+| Discovery is in flight       | 503 `{"status":"unready"}`                                                      |
+| Discovery succeeded one time | 200 `{"status":"ready"}`                                                        |
+
+Every answer has `Cache-Control: no-store`. The body never says why the pod is not ready, because
+the route is public. Read the log.
+
+- **Ready is sticky.** After one successful discovery, the pod stays ready for the life of the
+  process. The adapter never discovers again. An IdP outage after that affects every pod.
+  Removing every pod would also remove the pages of signed-in users.
+- **The route never waits for discovery.** The next probe sees the result. The first call of a
+  process builds the runtime, and that includes the Redis connect (bounded by
+  `PAIGASUS_SESSION_REDIS_TIMEOUT_MS`). So the first probe can pass the kubelet's default 1 s
+  timeout. The kubelet then counts one failure, and the next probe finds the runtime.
+- **Readiness does not check Redis.** Every console pod shares one Redis, so a Redis fault would
+  take every pod out of rotation. The store 503 above answers a store fault.
+- **`readiness.runtime_failed { error }`.** The runtime build failed: a configuration parse error,
+  a cross-field rule, or the Redis client build. `error` is the error's `name` only, for example
+  `TypeError`. A cross-field rule logs `AuthConfigError`. A malformed Redis URL puts the password
+  into the `input` property of the `TypeError` from `new URL()`. The event never holds the message
+  or the `input`. Each probe tries the build again.
+
+**Known limits.**
+
+- A fresh install or a full restart during an IdP outage leaves no ready console pod. The ingress
+  then answers 503 for every console page, also for a signed-in user. A rolling update keeps the
+  old ready pods.
+- A configuration defect (a wrong issuer, a wrong CA, a malformed Redis URL) keeps the pod not
+  ready for ever. The log shows the `reason` or the error name.
+- A failing pod logs about one `oidc.discovery_failed` line each 10 s: each probe after a settled
+  failure starts a new attempt. A login, a callback or a refresh that joins the attempt adds its
+  own event.
+- Ready proves discovery only. It does not prove that the pod reaches `token_endpoint` or
+  `jwks_uri`. A pod-local fault after the first success (DNS or egress on one node) does not make
+  the pod not ready.
+- The route is not rate-limited. The adapter joins an attempt in flight, so the IdP gets at most
+  one discovery request at a time per pod. A caller that loops `/readyz` against a fast failure
+  gets back-to-back IdP requests and one log line per attempt.
+- Nothing makes a third console app ship `app/readyz/route.ts`.
 
 ## Cookies
 

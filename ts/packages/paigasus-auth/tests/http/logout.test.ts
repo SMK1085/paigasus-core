@@ -23,7 +23,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
-import type { AuthorizationRequest, BuildEndSessionUrlParams, OidcClient, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
+import type { AuthorizationRequest, BuildEndSessionUrlParams, OidcClient, OidcDiscoveryStatus, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
 import { resolveSession } from '../../src/core/single-flight.js';
 import type { SessionRecord } from '../../src/core/session.js';
 import { SESSION_COOKIE, txnCookieName } from '../../src/http/cookies.js';
@@ -72,8 +72,9 @@ function seededRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
 
 /**
  * A minimal fake OidcClient. `revoke` and `buildEndSessionUrl` are the only two methods logout
- * ever reaches; the other three throw if called, which would fail any test that mistakenly
- * exercises the login/callback/refresh paths through this fake.
+ * ever reaches; three others throw if called, which would fail any test that mistakenly
+ * exercises the login/callback/refresh paths through this fake. `ensureDiscovered` resolves: a
+ * fake with no discovery (SMA-704).
  */
 function fakeOidc(opts: { revokeImpl?: (token: string) => Promise<void>; endSessionUrl?: string; onCall?: (name: string) => void } = {}): OidcClient & {
   buildEndSessionUrlCalls: BuildEndSessionUrlParams[];
@@ -84,6 +85,9 @@ function fakeOidc(opts: { revokeImpl?: (token: string) => Promise<void>; endSess
   return {
     buildEndSessionUrlCalls,
     revokeCalls,
+    ensureDiscovered(): Promise<void> {
+      return Promise.resolve();
+    },
     buildAuthorizationUrl(): Promise<AuthorizationRequest> {
       throw new Error('not used in logout tests');
     },
@@ -101,6 +105,9 @@ function fakeOidc(opts: { revokeImpl?: (token: string) => Promise<void>; endSess
     buildEndSessionUrl(params: BuildEndSessionUrlParams): Promise<string> {
       buildEndSessionUrlCalls.push(params);
       return Promise.resolve(opts.endSessionUrl ?? END_SESSION_URL);
+    },
+    discoveryStatus(): OidcDiscoveryStatus {
+      return 'discovered';
     },
   };
 }
@@ -236,6 +243,7 @@ describe('POST /auth/logout — delete-first ordering (AC 3)', () => {
     const result = await resolveSession(
       {
         store,
+        prepareRefresh: () => Promise.reject(new Error('must not be called: the session is already deleted')),
         // Never expected to be called: the record is gone, so resolveSession returns before ever
         // needing a refresh function.
         refresh: () => Promise.reject(new Error('must not be called: the session is already deleted')),

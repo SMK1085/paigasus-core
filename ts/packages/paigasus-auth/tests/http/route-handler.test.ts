@@ -57,6 +57,7 @@ beforeEach(async () => {
     resolver: claimsPrincipalResolver,
     logger: { event: () => undefined },
     oidc: {
+      ensureDiscovered: () => inner.ensureDiscovered(),
       buildAuthorizationUrl: (params) => inner.buildAuthorizationUrl(params),
       authorizationCodeGrant: (params) => {
         grantUrls.push(params.currentUrl.href);
@@ -65,6 +66,7 @@ beforeEach(async () => {
       refresh: (token) => inner.refresh(token),
       revoke: (token) => inner.revoke(token),
       buildEndSessionUrl: (params) => inner.buildEndSessionUrl(params),
+      discoveryStatus: () => inner.discoveryStatus(),
     },
     publicOrigin: PUBLIC_ORIGIN,
     redirectUri: `${PUBLIC_ORIGIN}/iam/auth/callback`,

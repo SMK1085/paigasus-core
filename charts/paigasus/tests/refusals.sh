@@ -72,6 +72,32 @@ expect_fail "ingress.host empty" "ingress.host is required" \
   --set ingress.host=""
 expect_fail "ingress.tlsSecretName empty" "ingress.tlsSecretName is required" \
   --set ingress.tlsSecretName=""
+# SMA-695. With ingress.enabled=false the chart renders no Ingress, so it needs no TLS Secret. The
+# host stays required: it feeds PAIGASUS_PUBLIC_ORIGIN (spec D1).
+expect_render "ingress disabled, tlsSecretName empty" \
+  --set ingress.enabled=false --set ingress.tlsSecretName=""
+expect_fail "ingress disabled, host empty" "ingress.host is required" \
+  --set ingress.enabled=false --set ingress.host=""
+# A quoted "false" is a string, and a non-empty string is true in a template `if`. Without this
+# refusal the Ingress stays, which is the SMA-695 bug.
+expect_fail "ingress.enabled a string" "ingress.enabled must be true or false" \
+  --set-string ingress.enabled=false
+# The kind check must run before the TLS check. With an empty TLS Secret, a string "false" must
+# still get the kind message.
+expect_fail "ingress.enabled a string, tlsSecretName empty" "ingress.enabled must be true or false" \
+  --set-string ingress.enabled=false --set ingress.tlsSecretName=""
+# --set ingress.enabled=null deletes the key. The TLS refusal must then still fire, which catches a
+# validator that reads .Values.ingress.enabled without paigasus.ingressEnabled.
+expect_fail "ingress.enabled key absent, tlsSecretName empty" "ingress.tlsSecretName is required" \
+  --set ingress.enabled=null --set ingress.tlsSecretName=""
+# With the Ingress on, the API server refuses such a host. With it off, nothing else does, and
+# https://https://… passes the console's https-URL parse.
+expect_fail "ingress.host with a scheme" "must be a bare host name" \
+  --set ingress.host=https://console.example.test
+expect_fail "ingress.host with a port, ingress disabled" "must be a bare host name" \
+  --set ingress.enabled=false --set ingress.host=console.example.test:8443
+expect_fail "ingress.host with a path" "must be a bare host name" \
+  --set ingress.host=console.example.test/iam
 expect_fail "oidc.issuer empty" "oidc.issuer is required" \
   --set oidc.issuer=""
 expect_fail "oidc.clientId empty" "oidc.clientId is required" \

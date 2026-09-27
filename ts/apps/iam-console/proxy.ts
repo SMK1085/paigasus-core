@@ -25,7 +25,9 @@ const CORRELATION_HEADER = 'paigasus-correlation-id';
 const REQUEST_PATH_HEADER = 'x-paigasus-request-path';
 
 const authMiddleware = createAuthMiddleware({
-  publicPaths: [...authRoutePaths(), '/', '/healthz'],
+  // '/readyz' (SMA-705 D9): the kubelet's readiness probe sends no session cookie. Without this
+  // entry the proxy redirects the probe to the login route, and the probe never reaches /readyz.
+  publicPaths: [...authRoutePaths(), '/', '/healthz', '/readyz'],
   loginPath: '/auth/login',
 });
 

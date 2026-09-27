@@ -5,6 +5,9 @@
 # backend Deployments. A zone's `enabled` flag governs ALL of them together — that is what makes
 # "routable but unadvertised" unrepresentable rather than merely checked (spec D6).
 #
+# Exception (SMA-695, spec D2): with ingress.enabled false the chart renders no ingress path rules,
+# and the operator's own route is a projection of `zones` that the operator keeps by hand.
+#
 # A zone id MUST be a member of SERVICE_SLUGS (ts/packages/paigasus-discovery/src/core/state.ts).
 # parseServiceMap THROWS on an unknown key, in BOTH consoles, at first request (spec F8).
 zones:
@@ -17,7 +20,7 @@ zones:
         # Pinned to the image version in ts/apps/iam-console/package.json (SMA-688). A version
         # bump updates this tag in the same PR; repo:helm-render row 8a fails otherwise. An empty
         # tag falls back to .Chart.AppVersion, a version every image released (row 8c).
-        tag: "0.1.0"
+        tag: "0.2.0"
       replicas: 2
     backend:
       # Deployed by this chart. Kept true: the gRPC-to-IAM link from any other zone's backend has
@@ -72,7 +75,7 @@ zones:
         repository: ghcr.io/smk1085/paigasus-gateway-console
         # Pinned to the image version in ts/apps/gateway-console/package.json (SMA-688).
         # repo:helm-render row 8a fails when the two differ.
-        tag: "0.1.0"
+        tag: "0.2.0"
       replicas: 2
     backend:
       # NOT deployed by this chart (SMA-513 Task 11b). Measured in the tree:
@@ -99,10 +102,16 @@ zones:
       url: ""
 
 ingress:
-  host: ""               # REQUIRED. Feeds PAIGASUS_PUBLIC_ORIGIN as https://<host>.
+  enabled: true          # false: the chart renders no Ingress. Route https://<host><basePath> to
+                         # each enabled zone's console Service yourself: port name http, no
+                         # rewrite, Host forwarded unchanged, TLS ended in front of the Services.
+                         # See docs/ops/RUNBOOK-chart.md § 11. A boolean: a quoted "false" is refused.
+  host: ""               # REQUIRED, also when enabled is false. Feeds PAIGASUS_PUBLIC_ORIGIN as
+                         # https://<host>. A bare host name: no scheme, no path, no port.
   className: ""
-  tlsSecretName: ""      # REQUIRED. The ingress must terminate TLS: PAIGASUS_PUBLIC_ORIGIN is
-                         # validated as https, and __Host-pgs_sid requires Secure.
+  tlsSecretName: ""      # REQUIRED when enabled is true. The ingress must terminate TLS:
+                         # PAIGASUS_PUBLIC_ORIGIN is validated as https, and __Host-pgs_sid
+                         # requires Secure.
   annotations: {}
   # DO NOT add a rewrite annotation. Each console compiles basePath in and serves its full path
   # already; a rewrite that strips /iam breaks every route in that zone.

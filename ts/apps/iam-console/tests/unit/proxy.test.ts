@@ -49,7 +49,7 @@ function forwarded(res: Response, name: string): string | null {
 }
 
 describe('proxy', () => {
-  it.each(['/iam', '/iam/healthz', '/iam/auth/login', '/iam/auth/callback', '/iam/auth/logout', '/iam/auth/logout/callback'])('lets %s through with no cookie', (path) => {
+  it.each(['/iam', '/iam/healthz', '/iam/readyz', '/iam/auth/login', '/iam/auth/callback', '/iam/auth/logout', '/iam/auth/logout/callback'])('lets %s through with no cookie', (path) => {
     const res = proxy(request(path));
     expect(res.headers.get('location')).toBeNull();
   });
@@ -118,7 +118,7 @@ describe('config.matcher (spec § 7.5, § 13 #4)', () => {
     expect(config.matcher).toEqual(['/((?!_next/static|_next/image|favicon.ico).*)']);
   });
 
-  it.each(['/iam/', '/iam/orgs', '/iam/orgs?offset=50', '/iam/healthz', '/iam/auth/login'])('runs the proxy for the page %s', (url) => {
+  it.each(['/iam/', '/iam/orgs', '/iam/orgs?offset=50', '/iam/healthz', '/iam/readyz', '/iam/auth/login'])('runs the proxy for the page %s', (url) => {
     expect(unstable_doesMiddlewareMatch({ config, url, nextConfig: NEXT_CONFIG })).toBe(true);
   });
 

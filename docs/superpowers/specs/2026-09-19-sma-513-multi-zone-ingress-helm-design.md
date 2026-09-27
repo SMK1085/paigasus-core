@@ -477,6 +477,11 @@ check satisfies both constraints without inventing a route in this issue.
 Redis is down still reports Ready while every session read fails. A real `/readyz` is the fix and
 is out of scope here (§ 11).
 
+**Superseded by SMA-705.** The consoles now have `<basePath>/readyz`, and the readiness probe uses
+it. It gates on the auth runtime and one OIDC discovery. It does NOT check Redis, by decision
+(SMA-705 D1): every console pod shares one Redis, so a Redis fault would take every pod out of
+rotation. SMA-653's store 503 page answers a store fault.
+
 ### 7.9 Service deployments and the SMA-559 handoff
 
 The IAM Deployment carries `replicas: 1`, `strategy.rollingUpdate.maxSurge: 0`,
