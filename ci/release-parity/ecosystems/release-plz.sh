@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # release-plz ecosystem module for the SMA-398 parity harness.
-# Interface: ecosystem::build_fixture / apply_commit / run_update / version
+# Interface: ecosystem::build_fixture / apply_commit / run_update / version (+ ecosystem::extra_suite, SMA-716)
 set -euo pipefail
 
 A_CRATE="paigasus-release-parity-a"
@@ -163,4 +163,17 @@ ecosystem::version() { # dir slot -> version string
   local cdir
   cdir="$(ecosystem::_crate_dir "$1" "$2")"
   grep -m1 -E '^version[[:space:]]*=' "$cdir/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/'
+}
+
+# --- SMA-716: the release-plz-only suites ---------------------------------------------------
+# run.sh calls ecosystem::extra_suite (and, from the negative control, a second hook) only when
+# the module defines it. Only this module does. The suites live in release-plz-filter.sh.
+# _RP_DIR uses the BASH_SOURCE idiom on purpose: repo:affected-smoke's source resolver
+# (ci/affected-graph/cargo_moon_parity.py, HERE_IDIOM_ASSIGN_RE) follows it to the new file.
+_RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/release-parity/ecosystems/release-plz-filter.sh
+source "$_RP_DIR/release-plz-filter.sh"
+
+ecosystem::extra_suite() { # real_toml -> 0/1/2
+  rpf::suites "$1"
 }

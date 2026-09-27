@@ -28,6 +28,10 @@ done
 # shellcheck source=ci/release-parity/ecosystems/release-plz.sh
 source "$HERE/ecosystems/$ECOSYSTEM.sh"
 
+# SMA-716: the release-plz module MUST define its extra-suite hook. Without this line, a deleted
+# hook in ecosystems/release-plz.sh would skip the whole release-plz-only suite in silence.
+[ "$ECOSYSTEM" != release-plz ] || declare -F ecosystem::extra_suite >/dev/null || { echo "FATAL: release-parity ABORTED: infrastructure error (rc=2): ecosystems/release-plz.sh defines no ecosystem::extra_suite (SMA-716)" >&2; exit 2; }
+
 # Default: the canonical 0.x expectation (expected_0x). An ecosystem MAY define
 # `ecosystem::expected` to assert a documented, intentional divergence (e.g.
 # semantic-release's strict-semver breaking->major). release-plz / PSR do NOT
@@ -89,6 +93,18 @@ while IFS=$'\t' read -r -u 3 id subject footer expected_0x _expected_1x _discr |
     *) echo "== parity ABORTED: infrastructure error on case $id ==" >&2; exit 2 ;;
   esac
 done 3<"$CASES"
+
+# SMA-716: the release-plz-only suites (ecosystems/release-plz-filter.sh). They are not in
+# cases.tsv, because cases.tsv is the cross-tool parity contract. `|| xec=$?` turns errexit off
+# inside the hook, so the hook checks each step itself.
+if declare -F ecosystem::extra_suite >/dev/null; then
+  xec=0; ecosystem::extra_suite "$REAL_TOML" || xec=$?
+  case "$xec" in
+    0) ;;
+    1) echo "== extra suite FAILURES (see above) ==" >&2; rc=1 ;;
+    *) echo "== parity ABORTED: infrastructure error in the extra suite (rc=$xec) ==" >&2; exit 2 ;;
+  esac
+fi
 
 if [ "$rc" = 0 ]; then echo "== all parity cases passed =="; else echo "== parity FAILURES (see above) ==" >&2; fi
 exit "$rc"

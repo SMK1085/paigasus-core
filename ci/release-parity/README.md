@@ -120,6 +120,26 @@ loudly if either adds a `releaseRules` clamp (the documented divergence would no
 longer hold) or if the two disagree. Both configs are task inputs, so editing
 either re-runs this check.
 
+## The release-plz-only suites (SMA-716)
+
+`ecosystems/release-plz-filter.sh` tests two release-plz keys that the other two tools do not
+have: `release_commits` and `changelog_include`. Its cases are NOT in `cases.tsv`, because
+`cases.tsv` is the cross-tool parity contract. `run.sh` calls the hook
+`ecosystem::extra_suite` after the `cases.tsv` loop, only if the module defines it. Only
+`ecosystems/release-plz.sh` defines it, so `repo:release-parity-py` and `-ts` skip the suite.
+For the `release-plz` ecosystem, `run.sh` exits 2 if the hook is missing.
+
+**Config (F3).** The fixture config takes `release_commits` verbatim from `rs/release-plz.toml`,
+after the keys `ecosystem::_derive_config` copies. A missing or duplicated key is rc 2.
+
+**Filter fixture.** One fixture repo with one crate per row of the spec's classification table
+(`rpf-r01` … `rpf-r23`), three Review Focus rows (`rpf-r24` squash body, `rpf-r25`
+`BREAKING-CHANGE:` footer, `rpf-r26` space after the comma), and `rpf-b`, which no commit
+touches. One `release-plz update` run covers all rows. Row 20 also asserts that the first
+release section lists both commits (consequence C1).
+
+**Cost.** One filter fixture run: 31 s on the development Mac.
+
 ## Tool resolution policy (SMA-596)
 
 Both `release-plz.sh` and `python-semantic-release.sh` resolve their tool binary once, at

@@ -1116,12 +1116,24 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
 # ("neg-fix-bang") and its "0.1.1" wrong-expectation literal. If cases.tsv's contract for that
 # case ever changes, this entry must be updated with it, or the pin will fire on a legitimate
 # edit.
+#
+# SMA-716 adds the release-plz-only suite hook (entries 6-9) and, in a later task, the extra
+# negative-control hook. The hook BODIES live in ecosystems/release-plz.sh and
+# release-plz-filter.sh, which no haystack here reads: a body replaced with `return 0` still
+# passes these pins (ci/release-parity/README.md, L6).
 RELEASE_PARITY_SH_CALL_SITES = (
     '--negative-control) NEGATIVE=1; shift ;;',
     'if [ "$NEGATIVE" = 1 ]; then',
     'ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?',
     '1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;',
     '0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;',
+    # SMA-716 — the release-plz-only suite hook. The first line fails the run when the
+    # release-plz module no longer defines the hook; the other three are the call and its
+    # verdict. Deleting any one lets the suite be skipped or its failures be dropped.
+    '[ "$ECOSYSTEM" != release-plz ] || declare -F ecosystem::extra_suite >/dev/null || { echo "FATAL: release-parity ABORTED: infrastructure error (rc=2): ecosystems/release-plz.sh defines no ecosystem::extra_suite (SMA-716)" >&2; exit 2; }',
+    'if declare -F ecosystem::extra_suite >/dev/null; then',
+    'xec=0; ecosystem::extra_suite "$REAL_TOML" || xec=$?',
+    '1) echo "== extra suite FAILURES (see above) ==" >&2; rc=1 ;;',
 )
 
 
@@ -2691,6 +2703,8 @@ def self_test():
         '    0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;\n'
         '  esac\n'
         'fi\n'
+        # SMA-716 — derived from the registry so the fixture cannot drift from the pins.
+        + "".join(f"  {site}\n" for site in RELEASE_PARITY_SH_CALL_SITES[5:])
     )
     # SMA-593 — the same shape for ci/workflow-credentials/run.sh. Indented exactly as the real
     # file indents these lines, so the stripped-whole-line rule is exercised on realistic text
@@ -3915,12 +3929,13 @@ def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, 
          "    A row prefixed `ci/actionlint/run.sh:` means repo:actionlint would run its checks\n"
          "    while asserting nothing — its self-tests or its mutation battery are no longer\n"
          "    invoked.\n"
-         "    A row prefixed `ci/release-parity/run.sh:` means one of the five pinned\n"
-         "    --negative-control lines — the flag parse, the NEGATIVE guard, the check_case\n"
-         "    assertion, or either report arm — is gone from run.sh: whichever one the row\n"
-         "    names is missing, so the control can no longer do its job (a missing parse or\n"
-         "    guard falls straight through to the real suite and reports nothing; a missing\n"
-         "    assertion or report arm breaks or misreports the control's own verdict).\n"
+         "    A row prefixed `ci/release-parity/run.sh:` means one of the pinned lines is\n"
+         "    gone from run.sh: a --negative-control line (the flag parse, the NEGATIVE\n"
+         "    guard, the check_case assertion, or either report arm) or an SMA-716 hook\n"
+         "    line (a hook guard, a hook call, or its verdict arm). Either way the control\n"
+         "    can no longer do its job (a missing parse or guard falls straight through to\n"
+         "    the real suite and reports nothing; a missing assertion or report arm breaks\n"
+         "    or misreports the control's own verdict).\n"
          "    A row prefixed `ci/workflow-credentials/run.sh:` means the same for that gate's\n"
          "    five pinned --negative-control lines — the flag parse, the dispatch arm, the\n"
          "    failure guard, or the report line.\n"

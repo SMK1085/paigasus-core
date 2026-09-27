@@ -3,6 +3,7 @@
 # The SMA-398 parity harness DERIVES its fixture config from the classification keys below,
 # so this file is the single source of truth for commit->semver behaviour. Do not duplicate
 # them into ci/release-parity/.
+# The SMA-716 suite also copies release_commits verbatim.
 
 [workspace]
 # NO workspace-level `release` key. It was `release = false` while every package sat at the
@@ -16,9 +17,38 @@
 # In 0.x: fix -> patch, feat -> minor, breaking (! or BREAKING CHANGE) -> minor.
 features_always_increment_minor = true
 
+# --- Which commits open a release (SMA-716, decision D2) -----------------------------------
+# A crate releases only when at least one commit in its diff matches this regex
+# (Diff::any_commit_matches, diff.rs:104-108; applied per package at updater.rs:90-97, READ).
+# The SMA-716 fixture suite (ci/release-parity/ecosystems/release-plz-filter.sh) copies this line
+# verbatim and asserts one fixture crate per case of the spec's classification table.
+# - Releasing: feat, fix, perf with the scopes rs, py, ts, contracts, deps, or with NO scope
+#   (squash subjects on main are PR titles, and nothing lints them). A scope list releases only
+#   if EVERY scope in it releases; one optional space after each comma is allowed. Any type with `!`, and
+#   a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer, always release.
+# - Not releasing: the scopes ci, docs, release, repo, claude, workspace; every other type; a
+#   GitHub `Revert "..."` subject (Q3). `^` has no m flag, so only the SUBJECT line counts.
+# Consequences:
+#   C1 A non-releasing change to shipped code is not lost. The next releasing commit on that
+#      crate carries it into the release and its section.
+#   C2 The filter decides only WHETHER a crate releases. The LEVEL comes from all commits in the
+#      diff (version.rs:13-21). So `feat(ci)` on a crate path makes the next release a minor
+#      bump. For a crate-file change that must not ship, use chore, ci, build, docs, refactor or
+#      test, never feat(ci) or fix(ci).
+#   C3 A new publishable crate first releases only after a releasing commit touches it.
+#   C4 The "dependencies changed" cascade bypasses the filter (updater.rs:155-157). A dependent
+#      of a released crate still gets a patch bump.
+#   C5 A dependency floor change needs a `fix(deps)` commit to release. Dependabot writes
+#      `build(deps)`, which does not release.
+# The filter runs in `update` and `release-pr`, not in `release`. The commitlint scope list
+# (ts/packages/commitlint-config/index.cjs) is closed; a new scope does not release until it is
+# added here. READ in release-plz 0.3.158. Read the source again when .prototools moves the pin.
+release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(, ?(rs|py|ts|contracts|deps))*\))?!?:|^[a-z]+(\([^)]*\))?!:|(?m:^BREAKING[ -]CHANGE:)'
+
 # --- Lockfile scope of the release PR (SMA-680) --------------------------------------------
 # NOT a classification key. The SMA-398 parity harness does not read it:
-# ci/release-parity/ecosystems/release-plz.sh derives only `features_always_increment_minor`.
+# ci/release-parity/ecosystems/release-plz.sh derives `features_always_increment_minor`, and
+# release-plz-filter.sh copies `release_commits` (SMA-716).
 #
 # WHAT IT DOES. Read from the release-plz 0.3.158 source, not measured. Read it again when
 # .prototools moves the release-plz pin. Its only reader is `update_cargo_lock`
