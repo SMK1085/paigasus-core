@@ -177,13 +177,22 @@ a gate. Do not copy it here.
   ```bash
   jq '.actions[] | select(.status=="failed")
       | {label, error,
-         exec: (.operations[] | select(.meta.type=="task-execution") | {command, exitCode})}' \
+         exec: [.operations[] | select(.meta.type=="task-execution")
+                | {status, command: .meta.command, exitCode: .meta.exitCode}]}' \
      .moon/cache/ciReport.json
   ```
   There is **no action-level `exitCode` key** — `has("exitCode")` is `false`. The widely copied
   query projects `{label, status, exitCode}` and so reports `null` for a key moon never writes,
   which is why this file has a reputation for being empty. It is not: the real exit code and the
-  full command are in `operations[]`, on the entry whose `meta.type` is `task-execution`.
+  command are in `operations[]`. They are the `command` and `exitCode` fields of the `.meta`
+  object of the entry whose `meta.type` is `task-execution`. Until SMA-711 this query read the
+  two fields from the entry itself, so it printed `null`. No gate runs this query
+  (`ci/actionlint/README.md` L29, SMA-714).
+  `exec: []` means that the action failed before a task ran. Read `error` and the other
+  operations of that action. A `null` exit code with the `status` `timed-out` means that moon
+  stopped the task, so there is no exit code. `command` is a one-line display string, not the
+  script: moon joins the lines of a `script:` with spaces. For a `script:` task, read the script
+  in its `moon.yml` and reproduce with Step 3.
 
   **Step 2 — why.** `cat .moon/cache/states/<project>/<task>/stdout.log` and `stderr.log`. This is
   the only place task output exists. It works for a task that never started: a missing binary
