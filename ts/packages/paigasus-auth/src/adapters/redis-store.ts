@@ -23,7 +23,7 @@ import { createClient } from 'redis';
 import type { SetOptions } from 'redis';
 import type { SessionRecord } from '../core/session';
 import { isSessionRecord } from '../core/session';
-import { SessionStoreUnavailable } from '../core/errors';
+import { AuthConfigError, SessionStoreUnavailable } from '../core/errors';
 import type { LoginTransaction, SessionStore } from '../ports/session-store';
 import type { AuthLogger } from '../ports/logger';
 import { noopLogger } from './noop-logger';
@@ -282,26 +282,49 @@ async function connectWithin(client: { connect(): Promise<unknown> }, timeoutMs:
   }
 }
 
+/** SMA-715. The one message for a malformed, empty or whitespace-only URL. It holds no part of the URL. */
+const INVALID_REDIS_URL = 'PAIGASUS_SESSION_REDIS_URL is not a valid Redis URL';
+
+/**
+ * Builds the node-redis client, or throws AuthConfigError(INVALID_REDIS_URL). A local function, so
+ * the client keeps the type the compiler infers (see the RedisClient comment above: naming
+ * `ReturnType<typeof createClient>` does not typecheck with `commandOptions`).
+ */
+function buildClient(opts: CreateRedisSessionStoreOptions) {
+  // SMA-715 D5: node-redis skips ALL parsing for an empty URL and connects to localhost:6379. The
+  // URL that goes to createClient is not trimmed: `new URL()` strips outer whitespace itself, so
+  // ' redis://h:1 ' keeps working.
+  if (opts.url.trim() === '') throw new AuthConfigError(INVALID_REDIS_URL);
+  try {
+    return createClient({
+      url: opts.url,
+      // LOAD-BEARING: node-redis queues commands while disconnected by default, so an outage
+      // becomes hung requests instead of fast failures, and every page in the console stalls
+      // rather than erroring. See § 7.2 of the design doc.
+      disableOfflineQueue: true,
+      commandOptions: { timeout: opts.commandTimeoutMs },
+      // SMA-651 D1: a PING every T keeps a healthy idle socket under the idle timer. The Redis user
+      // needs `+ping`, or every PING gets -NOPERM (still socket activity, so it is silent).
+      pingInterval: opts.commandTimeoutMs,
+      socket: {
+        connectTimeout: opts.commandTimeoutMs,
+        // SMA-651 D1: an IDLE timer, not a reply deadline. It is the only thing that tears down a
+        // wedged socket; withOperationDeadline's circuit goes silent so that it can fire.
+        socketTimeout: opts.commandTimeoutMs * 2,
+        reconnectStrategy,
+      },
+    });
+  } catch {
+    // SMA-715: node-redis parses the URL here with `new URL()`. Its ERR_INVALID_URL TypeError holds
+    // the whole DSN, password included, in `input`. Rethrow a fixed message with no cause. The catch
+    // has no binding on purpose: the original error is never read, so no later edit can copy it.
+    throw new AuthConfigError(INVALID_REDIS_URL);
+  }
+}
+
 export async function createRedisSessionStore(opts: CreateRedisSessionStoreOptions): Promise<SessionStore> {
   const dsn = new RedactedDsn();
-  const client = createClient({
-    url: opts.url,
-    // LOAD-BEARING: node-redis queues commands while disconnected by default, so an outage
-    // becomes hung requests instead of fast failures, and every page in the console stalls
-    // rather than erroring. See § 7.2 of the design doc.
-    disableOfflineQueue: true,
-    commandOptions: { timeout: opts.commandTimeoutMs },
-    // SMA-651 D1: a PING every T keeps a healthy idle socket under the idle timer. The Redis user
-    // needs `+ping`, or every PING gets -NOPERM (still socket activity, so it is silent).
-    pingInterval: opts.commandTimeoutMs,
-    socket: {
-      connectTimeout: opts.commandTimeoutMs,
-      // SMA-651 D1: an IDLE timer, not a reply deadline. It is the only thing that tears down a
-      // wedged socket; withOperationDeadline's circuit goes silent so that it can fire.
-      socketTimeout: opts.commandTimeoutMs * 2,
-      reconnectStrategy,
-    },
-  });
+  const client = buildClient(opts);
 
   // node-redis emits 'error' on the client's EventEmitter for connection-level failures; with no
   // listener that is an unhandled event that crashes the process. This handler is intentionally

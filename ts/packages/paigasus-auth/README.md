@@ -157,6 +157,18 @@ holds even for an unhandled adapter error: this package never logs a caught node
 `openid-client` error object directly (both can embed a URL or a DSN in their own error text) —
 only a fixed name and message are extracted for logging.
 
+A malformed, empty or whitespace-only `PAIGASUS_SESSION_REDIS_URL` fails with an `AuthConfigError`
+with the fixed message `PAIGASUS_SESSION_REDIS_URL is not a valid Redis URL` (SMA-715). The
+node-redis parse error is dropped: its `input` property holds the whole URL, password included. The
+message gives no detail, so check the value for these usual causes:
+
+- an empty or whitespace-only value, for example an empty `session-redis-url` Secret key (without
+  this check, node-redis would connect to `localhost:6379`);
+- a password that holds `@`, `:`, `/`, `?`, `#` or `%` and is not percent-encoded;
+- a port above 65535;
+- a scheme other than `redis:`, `rediss:` or `unix:`;
+- a database path or a `db` parameter that is not a number.
+
 `session.refresh_failed` can carry `oauthError` (SMA-692). It is the OAuth error code of a
 transient refresh failure: one code of the RFC 6749 § 5.2 list, or `other` for any other value.
 It shows, for example, an `invalid_scope` after a scope change. A failure with no OAuth code, such
