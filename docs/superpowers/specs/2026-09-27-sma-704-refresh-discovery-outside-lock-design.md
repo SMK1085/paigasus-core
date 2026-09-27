@@ -295,6 +295,11 @@ With a recording store and a recording `prepareRefresh`:
     0.9T and 0.55T: 0.9T left only 100 ms, and a late timer on a loaded runner would time out.) The durations are recorded, not asserted: the lock hold time, and the time of the
     whole `resolveSession`. The plan records them in § 7.
 
+    After the final whole-branch review, the client's HTTP timeout moved to its own
+    `CLIENT_TIMEOUT_MS = 5000` constant, separate from T. A 400 ms margin (T minus the 600 ms
+    discovery delay) was too tight on a loaded CI runner: an event-loop stall could let the
+    client's abort win test 13a for a reason unrelated to the lock. The delays are unchanged.
+
     The test is written first and run against the code before the fix. There it must FAIL on the
     first assertion (a discovery request while the lock is held). The plan records the lock hold
     time of that run in § 7.
@@ -344,6 +349,10 @@ Every change must compile, so that the red comes from a test, not from `tsc`.
 Test 13 (`ts/packages/paigasus-auth/tests/core/single-flight-discovery.test.ts`). 13a uses T = 1000 ms
 and the response delays discovery 600 ms, token 300 ms, JWKS 300 ms. 13b uses a hanging discovery and
 T = 200 ms. Measured on the development Mac with `vitest run` on that one file.
+
+After the final review, the client's HTTP timeout moved to a separate `CLIENT_TIMEOUT_MS = 5000`
+constant (13a and R5); the delays recorded below are unchanged, and these measurements, taken with
+the old T = 1000 ms client timeout, still hold for a successful run's timing.
 
 | Run | Commit | 13a: discovery under the lock | 13a: token / JWKS under the lock | 13a: discovery before the lock | 13a: lock hold (ms) | 13a: `resolveSession` (ms) | 13b: `tryAcquireLock` calls |
 | --- | --- | --- | --- | --- | --- | --- | --- |

@@ -162,6 +162,9 @@ transient refresh failure: one code of the RFC 6749 § 5.2 list, or `other` for 
 It shows, for example, an `invalid_scope` after a scope change. A failure with no OAuth code, such
 as a network error, has no `oauthError`.
 
+`session.refresh_failed` can also carry `stage: 'discovery'` (SMA-704). This value means OIDC
+discovery failed before the session lock was taken. No token request was sent.
+
 ## Routes
 
 `createAuthRoutes` / `createAuthRoutes(...).handle` (see `@paigasus/auth/server`) serve four

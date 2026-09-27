@@ -153,7 +153,7 @@ const MIN_ACCESS_TTL_BUFFER_MS = 1_000;
  *     before the first `tryAcquireLock`, so runtime.ts's 2x bound counts only the token call and
  *     the JWKS call. A waiter's `lockWaitMs` starts after `prepareRefresh`, so a waiter keeps its
  *     full wait after discovery. The bound counts the IdP calls only. The store calls under the
- *     lock (the post-lock `get` and the fenced `set`) are not in it (SMA-704 spec § 6).
+ *     lock (such as the post-lock `get` and the fenced `set`) are not in it (SMA-704 spec § 6).
  *
  * `now` is re-read EVERY ITERATION. Binding it once makes the deadline unreachable and the loop
  * never terminates.

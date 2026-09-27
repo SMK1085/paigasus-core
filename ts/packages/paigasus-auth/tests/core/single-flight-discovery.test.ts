@@ -9,6 +9,12 @@
 // held. The delays (discovery 0.6T, token and JWKS 0.3T each, T = 1000 ms) only make the
 // durations readable. The durations are printed, not asserted; the spec's § 7 records them.
 //
+// The cold client's HTTP timeout (CLIENT_TIMEOUT_MS) is a SEPARATE constant from the delay unit T,
+// on purpose (final review, SMA-704): with the client timeout equal to T, the margin before the
+// client aborts was only 400 ms (T minus the 600 ms discovery delay), and an event-loop stall on a
+// loaded runner could let the abort win test 13a for a reason that has nothing to do with the
+// lock. CLIENT_TIMEOUT_MS = 5000 ms restores a wide margin while the delays stay the same.
+//
 // `depsFor` returns its object from a function, so tsc does not check it for excess members. That
 // is how this file compiled against the code BEFORE the fix, when ResolveDeps had no
 // `prepareRefresh` and resolveSession ignored it (plan Task 2).
@@ -28,6 +34,8 @@ const T = 1000;
 const DISCOVERY_DELAY_MS = 0.6 * T;
 const TOKEN_DELAY_MS = 0.3 * T;
 const JWKS_DELAY_MS = 0.3 * T;
+// The cold client's HTTP timeout, decoupled from T (see the header comment).
+const CLIENT_TIMEOUT_MS = 5000;
 
 /** When the lock was taken and released, and how often tryAcquireLock was called. */
 interface LockWindow {
@@ -124,7 +132,7 @@ describe('OIDC discovery and the session lock (SMA-704 test 13)', () => {
     const { logger, events } = recordingLogger();
 
     const startedAt = Date.now();
-    await resolveSession(depsFor(lockTimingStore(inner, window), coldClient(fixture.issuer, T), logger), 's');
+    await resolveSession(depsFor(lockTimingStore(inner, window), coldClient(fixture.issuer, CLIENT_TIMEOUT_MS), logger), 's');
     const totalMs = Date.now() - startedAt;
 
     const { acquiredAt, releasedAt } = window;
@@ -170,7 +178,7 @@ describe('OIDC discovery and the session lock (SMA-704 test 13)', () => {
   // before the fix too, because discovery then ran under the lock of the one holder.
   it('SMA-704 R5: two concurrent refreshes on a cold client send one discovery and one token request', async () => {
     fixture.setResponseDelay('discovery', 100);
-    const oidc = coldClient(fixture.issuer, T);
+    const oidc = coldClient(fixture.issuer, CLIENT_TIMEOUT_MS);
     const inner = new MemorySessionStore();
     await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
     const { logger } = recordingLogger();
