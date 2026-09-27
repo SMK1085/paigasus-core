@@ -1118,7 +1118,7 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
 # edit.
 #
 # SMA-716 adds the release-plz-only suite hook (entries 6-9) and the extra negative-control
-# hook (entries 10-14). The hook BODIES live in ecosystems/release-plz.sh and
+# hook (entries 10-15). The hook BODIES live in ecosystems/release-plz.sh and
 # release-plz-filter.sh, which no haystack here reads: a body replaced with `return 0` still
 # passes these pins (ci/release-parity/README.md, L6).
 RELEASE_PARITY_SH_CALL_SITES = (
@@ -1134,13 +1134,16 @@ RELEASE_PARITY_SH_CALL_SITES = (
     'if declare -F ecosystem::extra_suite >/dev/null; then',
     'xec=0; ecosystem::extra_suite "$REAL_TOML" || xec=$?',
     '1) echo "== extra suite FAILURES (see above) ==" >&2; rc=1 ;;',
-    # SMA-716 — the extra negative-control hook: its guard, its call and both verdict arms.
-    # Deleting the call or the rc-1 arm lets NC1-NC3 stop failing the gate.
+    # SMA-716 — the extra negative-control hook: its guard, its call and both verdict arms,
+    # including this block's OWN infra arm (`*)`, distinct from the older base control's `*)`
+    # arm below, which stays unpinned). Deleting the call or either verdict arm lets NC1-NC3
+    # stop failing the gate, or lets an infra fault there report as a plain pass.
     '[ "$ECOSYSTEM" != release-plz ] || declare -F ecosystem::extra_negative_control >/dev/null || { echo "FATAL: release-parity ABORTED: infrastructure error (rc=2): ecosystems/release-plz.sh defines no ecosystem::extra_negative_control (SMA-716)" >&2; exit 2; }',
     'if declare -F ecosystem::extra_negative_control >/dev/null; then',
     'xnc=0; ecosystem::extra_negative_control "$REAL_TOML" || xnc=$?',
     '0) echo "negative-control OK: every extra control reported red as expected" ;;',
     '1) echo "negative-control FAILED: an extra control did not report red" >&2; exit 1 ;;',
+    '*) echo "negative-control INCONCLUSIVE: extra control infrastructure error (rc=$xnc)" >&2; exit 2 ;;',
 )
 
 

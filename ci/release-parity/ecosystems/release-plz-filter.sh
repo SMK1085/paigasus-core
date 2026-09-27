@@ -223,7 +223,7 @@ rpf::_build_filter_fixture() { # dir real_toml with_release_commits
 }
 
 rpf::filter_suite() { # real_toml mode(real|no-release-commits) -> 0/1/2
-  local real="$1" mode="$2" with_rc dir id want fails=0
+  local real="$1" mode="$2" with_rc dir id want fails=0 infra=0 crc
   case "$mode" in
     real) with_rc=1 ;;
     no-release-commits) with_rc=0 ;;
@@ -241,15 +241,22 @@ rpf::filter_suite() { # real_toml mode(real|no-release-commits) -> 0/1/2
   if ! ecosystem::run_update "$dir"; then
     echo "FATAL: release-plz update failed on the filter fixture" >&2; rm -rf "$dir"; return 2
   fi
+  # SMA-716 (controller ruling): fold each check's rc into $infra when it is 2, so a helper's
+  # own infrastructure fault is not indistinguishable from an assertion failure at this suite's
+  # own return code — a `_check_*` that returns 2 must make the whole suite return 2, not 1.
   for id in $RPF_ROWS; do
     if ! want="$(rpf::_row_expected "$id")"; then rm -rf "$dir"; return 2; fi
-    rpf::_check_versions "$id" "$dir" "$want" "rpf-$id" || fails=$((fails + 1))
+    crc=0; rpf::_check_versions "$id" "$dir" "$want" "rpf-$id" || crc=$?
+    case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
   done
-  rpf::_check_versions b "$dir" 0.1.0 rpf-b || fails=$((fails + 1))
+  crc=0; rpf::_check_versions b "$dir" 0.1.0 rpf-b || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
   # Row 20, C1: a non-releasing commit is carried into the next release and its section.
-  rpf::_check_section r20-changelog "$dir" rpf-r20 0.1.1 - '- *(rs)* x' '- *(rs)* y' \
-    || fails=$((fails + 1))
+  crc=0
+  rpf::_check_section r20-changelog "$dir" rpf-r20 0.1.1 - '- *(rs)* x' '- *(rs)* y' || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
   rm -rf "$dir"
+  if [ "$infra" != 0 ]; then return 2; fi
   if [ "$fails" != 0 ]; then return 1; fi
 }
 
@@ -323,7 +330,7 @@ rpf::_check_once() { # id dir line crate...  (the line is in each crate's first 
   shift 3
   for c in "$@"; do
     sec="$dir/.rpf-section-$c"
-    rpf::_first_release_section "$dir/crates/$c/CHANGELOG.md" "$sec" || return 1
+    rpf::_first_release_section "$dir/crates/$c/CHANGELOG.md" "$sec" || return 2
     n="$(grep -cxF -- "$line" "$sec" || true)"
     all="$all $c=${n:-0}"
     if [ "${n:-0}" != 1 ]; then
@@ -335,7 +342,7 @@ rpf::_check_once() { # id dir line crate...  (the line is in each crate's first 
 }
 
 rpf::group_suite() { # real_toml mode(real|no-include|no-include-no-filter) -> 0/1/2
-  local real="$1" mode="$2" with_rc with_inc dir fails=0
+  local real="$1" mode="$2" with_rc with_inc dir fails=0 infra=0 crc
   case "$mode" in
     real) with_rc=1; with_inc=1 ;;
     no-include) with_rc=1; with_inc=0 ;;
@@ -355,42 +362,65 @@ rpf::group_suite() { # real_toml mode(real|no-include|no-include-no-filter) -> 0
   if ! ecosystem::run_update "$dir"; then
     echo "FATAL: release-plz update failed on the group fixture" >&2; rm -rf "$dir"; return 2
   fi
-  rpf::_check_versions G1-version "$dir" 0.1.1 rpg-a1 rpg-a2 || fails=$((fails + 1))
-  rpf::_check_section G1-changelog "$dir" rpg-a2 0.1.1 '### Fixed' '- *(rs)* x' || fails=$((fails + 1))
-  rpf::_check_versions G2-version "$dir" 0.2.0 rpg-b1 rpg-b2 || fails=$((fails + 1))
-  rpf::_check_section G2-changelog "$dir" rpg-b1 0.2.0 '### Added' '- *(rs)* x' || fails=$((fails + 1))
-  rpf::_check_versions G3-version "$dir" 0.1.0 rpg-c1 rpg-c2 || fails=$((fails + 1))
-  rpf::_check_versions G4-version "$dir" 0.1.1 rpg-d1 rpg-d2 || fails=$((fails + 1))
-  rpf::_check_once G4-changelog "$dir" '- *(rs)* x' rpg-d1 rpg-d2 || fails=$((fails + 1))
+  # SMA-716 (controller ruling): same infra/assertion fold as filter_suite above — a `_check_*`
+  # that returns 2 must make the whole suite return 2, not fold into the flat assertion count.
+  crc=0; rpf::_check_versions G1-version "$dir" 0.1.1 rpg-a1 rpg-a2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_section G1-changelog "$dir" rpg-a2 0.1.1 '### Fixed' '- *(rs)* x' || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_versions G2-version "$dir" 0.2.0 rpg-b1 rpg-b2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_section G2-changelog "$dir" rpg-b1 0.2.0 '### Added' '- *(rs)* x' || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_versions G3-version "$dir" 0.1.0 rpg-c1 rpg-c2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_versions G4-version "$dir" 0.1.1 rpg-d1 rpg-d2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_once G4-changelog "$dir" '- *(rs)* x' rpg-d1 rpg-d2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
   rm -rf "$dir"
+  if [ "$infra" != 0 ]; then return 2; fi
   if [ "$fails" != 0 ]; then return 1; fi
 }
 
 # --- negative controls (spec section 4.3) ---------------------------------------------------
 
 # One control: run a suite on a mutated config. It must return rc 1, the FAIL line of $must
-# must be there, and the FAIL line of $mustnot (if given) must NOT be there. rc 0 means the
-# suite accepted the mutation; rc 2 is INCONCLUSIVE, and both fail the control.
+# must be there. If $mustnot is given, its FAIL line must be absent from stderr AND its PASS
+# line must be present in the suite's captured STDOUT (a temp file, not a here-string — SMA-716
+# controller ruling): the mere absence of a FAIL line is not proof $mustnot is green, because a
+# `_check_*` helper's own infrastructure fault also emits no FAIL line for that id, yet the
+# suite call below still folds to a flat rc 1 whenever ANOTHER check on the same run failed a
+# pure assertion (only an ALL-infra run returns rc 2). rc 0 means the suite accepted the
+# mutation; rc 2 is INCONCLUSIVE, and both fail the control.
 rpf::_one_control() { # label suite mode must mustnot real_toml -> 0/1/2
-  local label="$1" suite="$2" mode="$3" must="$4" mustnot="$5" real="$6" errf rc=0
+  local label="$1" suite="$2" mode="$3" must="$4" mustnot="$5" real="$6" errf outf rc=0
   errf="$(mktemp)" || return 2
-  "$suite" "$real" "$mode" >/dev/null 2>"$errf" || rc=$?
+  outf="$(mktemp)" || { rm -f "$errf"; return 2; }
+  "$suite" "$real" "$mode" >"$outf" 2>"$errf" || rc=$?
   case "$rc" in
     1) ;;
     0) echo "negative-control FAILED: $label: the suite passed on a mutated config" >&2
-       rm -f "$errf"; return 1 ;;
+       rm -f "$errf" "$outf"; return 1 ;;
     *) echo "negative-control INCONCLUSIVE: $label: infrastructure error (rc=$rc)" >&2
-       cat "$errf" >&2; rm -f "$errf"; return 2 ;;
+       cat "$errf" >&2; rm -f "$errf" "$outf"; return 2 ;;
   esac
   if ! grep -qE "^FAIL  $must " "$errf"; then
     echo "negative-control FAILED: $label: the suite went red, but not on $must" >&2
-    cat "$errf" >&2; rm -f "$errf"; return 1
+    cat "$errf" >&2; rm -f "$errf" "$outf"; return 1
   fi
-  if [ -n "$mustnot" ] && grep -qE "^FAIL  $mustnot " "$errf"; then
-    echo "negative-control FAILED: $label: $mustnot went red too; this control needs it green" >&2
-    cat "$errf" >&2; rm -f "$errf"; return 1
+  if [ -n "$mustnot" ]; then
+    if grep -qE "^FAIL  $mustnot " "$errf"; then
+      echo "negative-control FAILED: $label: $mustnot went red too; this control needs it green" >&2
+      cat "$errf" >&2; rm -f "$errf" "$outf"; return 1
+    fi
+    if ! grep -qE "^PASS  $mustnot " "$outf"; then
+      echo "negative-control FAILED: $label: $mustnot did not report PASS (no FAIL line is not" \
+        "proof it's green — it may have hit an infrastructure fault instead)" >&2
+      cat "$errf" >&2; rm -f "$errf" "$outf"; return 1
+    fi
   fi
-  rm -f "$errf"
+  rm -f "$errf" "$outf"
   echo "negative-control OK: $label reported red on $must"
 }
 
