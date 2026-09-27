@@ -1,4 +1,7 @@
-<!-- moon-diagnosis:ok -->
+<!-- moon-diagnosis:superseded -->
+> **Superseded (SMA-711).** The Step 1 `jq` query in this document prints `null` for the command
+> and the exit code, because moon writes both under `.meta`. The corrected procedure is in
+> `CLAUDE.md` between the `moon-diagnosis` markers.
 
 # SMA-597 — Diagnosing an unattributed `moon ci` failure
 

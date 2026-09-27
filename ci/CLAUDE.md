@@ -320,3 +320,17 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   host named `oci-archive`. `oci-archive:` is a syft/skopeo transport, not a crane one. Read an
   image config from a local archive with `ci/images/release_decision.py labels <archive>` instead
   (SMA-658 C1); it prints `version=` and `revision=` from the same labels.
+
+## Fixture git repositories: no background maintenance (SMA-708)
+
+- A fixture repository under `ci/` in which any process runs `git commit`, `merge`, `fetch`,
+  `pull`, `am`, `rebase` or `cherry-pick`, or which receives a push, sets
+  `maintenance.auto false` and `gc.auto 0` with `git config` directly after `git init`. This
+  includes git calls that an external tool (release-plz, semantic-release, PSR) makes in it.
+- Why: after such a command, git starts a detached `git maintenance run --auto`. It writes
+  `.git/objects/maintenance.lock` while the fixture's `shutil.rmtree` or `rm -rf` runs. On Python
+  3.12 that raced into `FileNotFoundError: 'maintenance.lock'` (7 of 2,400 runs under load).
+- A fixture with only `init`, `add`, `tag`, `ls-files` or `rm --cached` needs no keys. If you add
+  one of the commands above to such a fixture, add the two keys in the same edit.
+- Do not hide the race with `ignore_errors=True`, a retry, or `|| true`.
+- Spec: `docs/superpowers/specs/2026-09-27-sma-708-git-maintenance-fixtures-design.md`.

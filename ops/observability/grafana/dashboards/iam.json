@@ -347,6 +347,23 @@
           "legendFormat": "{{counter}} {{outcome}}"
         }
       ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "JIT provisioning failures",
+      "description": "iam_jit_provisioning_failures_total by defect — refused JIT provisioning requests (SMA-698); alert IamJitProvisioningFailures",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 72 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(iam_jit_provisioning_failures_total[$__rate_interval])) by (defect)",
+          "legendFormat": "{{defect}}"
+        }
+      ]
     }
   ]
 }

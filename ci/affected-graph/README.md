@@ -160,7 +160,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   NEVER is, because the flag would reach the tool and not the cargo behind it, so it carries the
   same wrapper rule `FFI_MARKERS` does. Arm 1 reports **zero** rows on the corpus and is labelled
   forward cover in the code; arm 2 reports exactly one, at
-  `ci/release-parity/ecosystems/release-plz.sh:152`, waived with a measured reason.
+  `ci/release-parity/ecosystems/release-plz.sh:156`, waived with a measured reason.
   Script-following is now transitive over `source` / `.` statements, cycle-guarded and confined
   to the repo (`script_source_refs`, `task_script_closure`, floored by
   `REQUIRED_SOURCED_SCRIPTS`). Bare `ci/**/*.sh` MENTIONS are deliberately not followed:
