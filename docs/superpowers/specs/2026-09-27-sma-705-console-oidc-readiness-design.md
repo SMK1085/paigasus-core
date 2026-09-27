@@ -7,7 +7,7 @@
 - Related: SMA-656 (the discovery 503, § 6 known limits), SMA-506 (auth design, § 12), SMA-513
   (chart design, § 7.8), SMA-688 (console versions and images), SMA-704 (discovery under the
   refresh lock), `docs/ops/RUNBOOK-containers.md` § 4 (the `/healthz` and `/readyz` contract)
-- Revision 2. One adversarial challenge is folded in (§ 11).
+- Revision 2, approved at GATE 1 (2026-09-27). One adversarial challenge is folded in (§ 11).
 
 ## 1. The problem
 
@@ -366,8 +366,8 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
 - **Nothing makes a third console app ship `app/readyz/route.ts`** (§ 4.6).
 - **SMA-704.** A pod that is ready has discovered, and it never discovers again. So on a gated
   deployment, discovery never runs under the refresh lock. SMA-704 then applies only to a
-  deployment without this probe (for example local `next start` or a plain Docker run). A comment on
-  SMA-704 records this.
+  deployment without this probe (for example local `next start` or a plain Docker run). At GATE 1
+  the issue owner chose not to comment on SMA-704.
 
 ## 7. Documentation changes
 
@@ -422,7 +422,7 @@ does not exist yet. This window exists for every console version bump under SMA-
 - A `startupProbe`.
 - A change to `/healthz`.
 - A rate limit on `/readyz` (§ 6).
-- The Redis DSN leak on the user request path (D10). A new Linear issue tracks it: `redis-store.ts`
+- The Redis DSN leak on the user request path (D10). SMA-715 tracks it: `redis-store.ts`
   must catch the `createClient` URL error and rethrow a redacted error.
 
 ## 11. Challenge changelog
