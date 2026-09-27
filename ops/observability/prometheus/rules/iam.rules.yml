@@ -309,3 +309,23 @@ groups:
         for: 5m
         labels: { severity: warning }
         annotations: { summary: "IAM authz generation counter rewound", description: "A Redis authz generation counter (iam:authz:policy_gen / iam:authz:entity_gen) came back lower than this process had already observed, and was repaired forward. Neither key carries a TTL, so the usual cause is allkeys-* eviction — check CONFIG GET maxmemory-policy, which must be volatile-*. A FLUSHALL, a restart without persistence, or a failover to an EMPTY replica also produce this and are benign — they destroy the slice/decision caches along with the counter, leaving a cold cache rather than a stale one. A failover to a stale but NON-EMPTY replica is NOT benign: it returns a lower generation (reason=lower) while still holding cache entries written under it. Triage on the caches, not the cause: check whether iam:authz:slice:* and iam:authz:dec:* are also empty — if they survived, treat it as hazardous. outcome=repair_failed means Redis rejected the repair write (INCRBY is denyoom) and the replica is serving a process-local generation with no cross-replica cache sharing. See RUNBOOK's \"Authz availability posture\"." }
+
+      # SMA-706. IAM refused just-in-time provisioning for a new identity (SMA-698). The counter
+      # counts refused REQUESTS, not users. `main` primes both `defect` series at zero before the
+      # listener binds, so increase() can see the first failure after the first scrape.
+      #
+      # `sum by (job, defect)`, never a bare `sum()`: the grouping puts `defect` on the alert,
+      # keeps two deployments apart by `job`, and lets the promtool fixture use a flat series as
+      # a control. `[15m]` with `for: 0m`, the shape of IamOutboxEventsParked: one isolated
+      # failure fires at the next evaluation and stays active for about 15 minutes. A hold near
+      # the window length lets one failure resolve before it fires (see SMA-713).
+      #
+      # Known residual (SMA-706 spec section 7): a failure before the FIRST scrape of a NEW
+      # series is invisible, because the first scraped value is already above zero. Only a rule
+      # branch could close that gap, and it adds a false positive after a Prometheus data gap, so
+      # the rule does not have one. Block B of the promtool test pins the residual.
+      - alert: IamJitProvisioningFailures
+        expr: sum by (job, defect) (increase(iam_jit_provisioning_failures_total[15m])) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "IAM refused just-in-time provisioning ({{ $labels.defect }})", description: "IAM refused just-in-time provisioning for a new identity (HTTP 403 provisioning-failed, or gRPC PermissionDenied with the reason provisioning-failed). The value counts refused requests, not users. One user with a bad token makes several refused requests. defect=missing_email: the access token has no valid email claim. Make the issuer put a valid email claim into the ACCESS token, not only into the ID token. defect=email_conflict: another IAM user already has this exact email, and IAM does not link identities by email. Follow the runbook. Do not link identities by hand before the identity check in the runbook. The warn log line that starts with 'just-in-time provisioning failed' names the issuer. See RUNBOOK section 4." }
