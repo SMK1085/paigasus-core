@@ -8,6 +8,7 @@
   (chart design, § 7.8), SMA-688 (console versions and images), SMA-704 (discovery under the
   refresh lock), `docs/ops/RUNBOOK-containers.md` § 4 (the `/healthz` and `/readyz` contract)
 - Revision 2, approved at GATE 1 (2026-09-27). One adversarial challenge is folded in (§ 11).
+- Revision 3. Rebased on SMA-704 by a merge (2026-09-27). § 11 lists the changes.
 
 ## 1. The problem
 
@@ -106,17 +107,17 @@ Each retry costs the user a full sign-in at the IdP. Nothing takes the pod out o
 
 ### 4.1 `src/adapters/oidc.ts`
 
-Add two members to `OidcClient`:
+The readiness route uses two members of `OidcClient`. SMA-705 adds only the first:
 
 ```ts
 /** SMA-705 D3. Synchronous, no I/O: the state of this client's discovery. */
 discoveryStatus(): OidcDiscoveryStatus;
-/**
- * SMA-705. Resolves when discovery has succeeded. Starts it when none is in flight; joins the one
- * in flight otherwise. Rejects with OidcDiscoveryFailed exactly as every other method does.
- */
-discover(): Promise<void>;
 ```
+
+The second member is SMA-704's `ensureDiscovered(): Promise<void>`. It resolves when discovery has
+succeeded. It starts discovery when none is in flight, and it joins the attempt in flight
+otherwise. It rejects with `OidcDiscoveryFailed` exactly as every other method does. SMA-705 does
+not add a second member with the same behavior (§ 11, revision 2 → 3).
 
 `export type OidcDiscoveryStatus = 'idle' | 'discovering' | 'discovered';` sits next to
 `OidcClient`.
@@ -128,14 +129,14 @@ In `createOidcClient`:
   `configPromise` and throws `OidcDiscoveryFailed`.
 - `discoveryStatus()` returns `'discovered'` when `discovered` is true, `'discovering'` when
   `configPromise` is set, and `'idle'` otherwise.
-- `discover()` is `async () => { await getConfig(); }`.
+- `ensureDiscovered()` (SMA-704) is `async () => { await getConfig(); }`. SMA-705 does not change it.
 
 The flag is set inside the promise chain, so the status is `'discovered'` before any caller of the
 same promise resumes. A probe, a login and a callback that run at the same time share one
 `configPromise`, so the IdP gets one discovery request.
 
 The file header's "DISCOVERY IS LAZY" paragraph gets one sentence: the readiness route (SMA-705)
-starts discovery through `discover()`, and it is the first caller in a normal process.
+starts discovery through `ensureDiscovered()`, and it is the first caller in a normal process.
 `src/runtime.ts` lines 19-22 get the same sentence.
 
 ### 4.2 `src/ports/logger.ts`
@@ -165,7 +166,7 @@ export async function readinessResponse(getRuntime: () => Promise<AuthRuntime>, 
   const status = runtime.oidc.discoveryStatus();
   if (status === 'discovered') return probeResponse(200, 'ready');
   if (status === 'idle') {
-    runtime.oidc.discover().catch((err: unknown) => {
+    runtime.oidc.ensureDiscovered().catch((err: unknown) => {
       try { logDiscoveryFailed(runtime, 'readiness', err); } catch { /* D11 */ }
     });
   }
@@ -234,21 +235,22 @@ Each `proxy.ts` adds `'/readyz'` to `publicPaths` (D9).
 
 ### 5.1 Adapter (`tests/adapters/oidc.test.ts`, with the real local fixture)
 
-The plan adds `discoveryRequests(): number` to `startOidcFixture` (`tests/fixtures/jwks.ts`),
-which today has no counter.
+The rows count discovery requests with SMA-704's request log of `startOidcFixture`
+(`tests/fixtures/jwks.ts`): `fixture.requests().filter((r) => r.endpoint === 'discovery').length`.
+Below, "the discovery count" is that value.
 
-- T1. A new client reports `'idle'`. During `discover()` it reports `'discovering'`. After
-  `discover()` resolves it reports `'discovered'`.
-- T2. Against the unreachable issuer (`http://127.0.0.1:1`), `discover()` rejects with an error for
+- T1. A new client reports `'idle'`. During `ensureDiscovered()` it reports `'discovering'`. After
+  `ensureDiscovered()` resolves it reports `'discovered'`.
+- T2. Against the unreachable issuer (`http://127.0.0.1:1`), `ensureDiscovered()` rejects with an error for
   which `isOidcDiscoveryFailed` is true. After the rejection the status is `'idle'` again.
-- T3. `discover()` and `buildAuthorizationUrl` started together give `discoveryRequests() === 1`.
-- T4. After `'discovered'`, a second `discover()` sends no request, and the status stays
+- T3. `ensureDiscovered()` and `buildAuthorizationUrl` started together give a discovery count of 1.
+- T4. After `'discovered'`, a second `ensureDiscovered()` sends no request, and the status stays
   `'discovered'`.
 
 ### 5.2 The fakes
 
-The package `tsconfig.json` includes `tests/`, so every `OidcClient` fake must get the two members
-or `:typecheck` reds. The five fakes:
+The package `tsconfig.json` includes `tests/`, so every `OidcClient` fake must get
+`discoveryStatus()` or `:typecheck` reds. SMA-704 already gave each fake `ensureDiscovered()`. The five fakes:
 
 - `tests/support/store-failure.ts` (`FakeOidc`)
 - `tests/next/get-session.test.ts`
@@ -257,7 +259,8 @@ or `:typecheck` reds. The five fakes:
 - `tests/http/route-handler.test.ts`
 
 (`tests/http/login-returnto-table.test.ts` uses `as unknown as` and compiles without a change.)
-`FakeOidc` gets a settable status and a `discover()` that records its calls and resolves or
+`FakeOidc` gets a settable status. Its `ensureDiscovered()` records its calls. By default it
+resolves at once, as SMA-704's rows expect. When `holdEnsureDiscovered` is true, it resolves or
 rejects under test control. The other four get the smallest members that compile.
 
 ### 5.3 Handler (`tests/http/readiness.test.ts`, new, with `FakeOidc`)
@@ -267,19 +270,19 @@ rejection waits for it: it settles the fake's promise, then awaits one `setImmed
 `unhandledRejection` only after the microtask queue drains.
 
 - T5. `'discovered'` → 200, body `{"status":"ready"}`, `cache-control: no-store`, no call to
-  `discover()`, no event.
+  `ensureDiscovered()`, no event.
 - T6. `'discovering'` → 503, body `{"status":"unready"}`, `cache-control: no-store`, no call to
-  `discover()`.
-- T7. `'idle'` → 503 `unready`, exactly one call to `discover()`. The response exists before the
+  `ensureDiscovered()`.
+- T7. `'idle'` → 503 `unready`, exactly one call to `ensureDiscovered()`. The response exists before the
   fake settles its promise (the fake holds it open).
-- T8. `'idle'`, and `discover()` rejects with `OidcDiscoveryFailed` whose message holds the SMA-656
+- T8. `'idle'`, and `ensureDiscovered()` rejects with `OidcDiscoveryFailed` whose message holds the SMA-656
   sentinel URL → exactly one event `oidc.discovery_failed { zone: 'iam', stage: 'readiness',
   reason }`. Neither `idp.invalid` nor `sentinel-656` gets into the body, a header or a logged field.
-- T9. `discover()` rejects with an `OidcDiscoveryFailed` from a second module copy
+- T9. `ensureDiscovered()` rejects with an `OidcDiscoveryFailed` from a second module copy
   (`vi.resetModules()`) → the event has that error's `reason`. It rejects with a plain `Error` →
   one event with `reason: 'other'`. In both cases no `unhandledRejection` occurs (a listener is
   registered).
-- T10. `'idle'`, and `discover()` resolves → no event.
+- T10. `'idle'`, and `ensureDiscovered()` resolves → no event.
 - T11. The runtime getter rejects with an error whose message and `input` hold
   `redis://u:sentinel-705@h` → 503 `unready`, one event `readiness.runtime_failed { error:
   '<name>' }`, and `sentinel-705` is in no body, header or logged field. The same for a getter that
@@ -291,7 +294,7 @@ rejection waits for it: it settles the fake's promise, then awaits one `setImmed
 - T13a. A runtime from `createAuthRuntime` with
   `oidcClientFactory: (o) => createOidcClient({ ...o, allowInsecureRequests: true })` and the
   healthy local fixture: the first call gives 503. The test joins the attempt
-  (`await runtime.oidc.discover()`), awaits one `setImmediate`, and the next call gives 200.
+  (`await runtime.oidc.ensureDiscovered()`), awaits one `setImmediate`, and the next call gives 200.
 - T13b. The same factory with the unreachable issuer `http://127.0.0.1:1`: every call gives 503.
   The test joins each attempt with `.catch(() => {})` and one `setImmediate`. Each settled attempt
   logs one `readiness` event with `reason: 'network'`.
@@ -322,11 +325,11 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
 |---|---|
 | `discoveryStatus()` never returns `'discovered'` | T1, T4, T13a, T16 |
 | The `.catch` in `getConfig` does not clear `configPromise` | T2 |
-| `discover()` calls `client.discovery` directly, not `getConfig()` | T3, T4 |
+| `ensureDiscovered()` calls `client.discovery` directly, not `getConfig()` | T3, T4 |
 | The handler answers 200 for `'discovering'` | T6 |
-| The handler does not start `discover()` for `'idle'` | T7, T13b, T15 |
-| The handler starts `discover()` for `'discovering'` too | T6 |
-| The handler awaits `discover()` | T7 |
+| The handler does not start `ensureDiscovered()` for `'idle'` | T7, T13b, T15 |
+| The handler starts `ensureDiscovered()` for `'discovering'` too | T6 |
+| The handler awaits `ensureDiscovered()` | T7 |
 | The handler logs `String(err)` in the discovery event | T8 |
 | The handler logs `err.reason` without `oidcDiscoveryReason` | T9 |
 | The handler logs only when `err instanceof OidcDiscoveryFailed` | T9 |
@@ -364,10 +367,11 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
   IdP requests and one log line per attempt. SMA-656's `/auth/login` has the same exposure. A
   minimum interval after a failed attempt is not added: no measurement shows the need.
 - **Nothing makes a third console app ship `app/readyz/route.ts`** (§ 4.6).
-- **SMA-704.** A pod that is ready has discovered, and it never discovers again. So on a gated
-  deployment, discovery never runs under the refresh lock. SMA-704 then applies only to a
-  deployment without this probe (for example local `next start` or a plain Docker run). At GATE 1
-  the issue owner chose not to comment on SMA-704.
+- **SMA-704.** SMA-704 is fixed on `main`: `resolveSession` runs discovery through `prepareRefresh`
+  (`ensureDiscovered()`) before it takes the refresh lock. On a gated deployment the readiness
+  probe usually runs discovery first, and a pod that is ready never discovers again. On a
+  deployment without this probe (for example local `next start` or a plain Docker run), the first
+  refresh runs discovery through `prepareRefresh`. In both cases no discovery runs under the lock.
 
 ## 7. Documentation changes
 
@@ -426,6 +430,21 @@ does not exist yet. This window exists for every console version bump under SMA-
   must catch the `createClient` URL error and rethrow a redacted error.
 
 ## 11. Challenge changelog
+
+### Integration with SMA-704 (revision 2 → 3)
+
+SMA-704 merged to `main` while this branch was open. A merge of `origin/main` brought it in.
+
+- `OidcClient.discover()` is removed. The readiness route calls SMA-704's `ensureDiscovered()`.
+  Reason: both members awaited `getConfig()`, so the port had two members with one behavior (§ 4.1,
+  § 4.4).
+- The fixture's `discoveryRequests()` counter is removed. The tests count discovery requests in
+  SMA-704's `requests()` log. Reason: the fixture had two counters for the same requests (§ 5.1).
+- `FakeOidc`'s `ensureDiscovered()` resolves at once by default and holds its promise only when
+  `holdEnsureDiscovered` is true. Reason: SMA-704's rows need the default, and T7-T10 and T12 need
+  the control (§ 5.2).
+- The SMA-704 limit in § 6 now states the fix on `main`. Reason: the old text described a defect
+  that `main` no longer has.
 
 ### Challenge 1 (revision 1 → 2), verdict "approve with changes"
 
