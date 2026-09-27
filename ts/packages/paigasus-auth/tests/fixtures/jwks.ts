@@ -112,6 +112,11 @@ export interface OidcFixture {
   tokenRequests(): readonly URLSearchParams[];
   /** SMA-704. Each discovery, JWKS, token and revocation request, in arrival order. See the file header. */
   requests(): readonly FixtureRequest[];
+  /**
+   * SMA-704. Waits `ms` before it answers each later request to `endpoint`. The arrival time in
+   * `requests()` is taken before the wait. Not one-shot: each test starts a fresh fixture.
+   */
+  setResponseDelay(endpoint: FixtureEndpoint, ms: number): void;
   close(): Promise<void>;
 }
 
@@ -150,12 +155,17 @@ export async function startOidcFixture(): Promise<OidcFixture> {
   let issuer = '';
   const tokenRequestBodies: URLSearchParams[] = [];
   const requestLog: FixtureRequest[] = [];
+  const responseDelays = new Map<FixtureEndpoint, number>();
 
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://placeholder');
       const endpoint = endpointOf(req.method, url.pathname);
-      if (endpoint !== undefined) requestLog.push({ endpoint, at: Date.now() });
+      if (endpoint !== undefined) {
+        requestLog.push({ endpoint, at: Date.now() });
+        const delayMs = responseDelays.get(endpoint) ?? 0;
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
       if (req.method === 'GET' && url.pathname === '/.well-known/openid-configuration') {
         const body = {
           issuer,
@@ -290,6 +300,9 @@ export async function startOidcFixture(): Promise<OidcFixture> {
     },
     requests(): readonly FixtureRequest[] {
       return [...requestLog];
+    },
+    setResponseDelay(endpoint: FixtureEndpoint, ms: number) {
+      responseDelays.set(endpoint, ms);
     },
     close(): Promise<void> {
       return new Promise<void>((resolve, reject) => {

@@ -341,8 +341,16 @@ Every change must compile, so that the red comes from a test, not from `tsc`.
 
 ## 7. Measurements
 
-To be filled in by the implementation: test 13 before the fix (lock hold time, discovery requests
-under the lock) and after the fix.
+Test 13 (`ts/packages/paigasus-auth/tests/core/single-flight-discovery.test.ts`). 13a uses T = 1000 ms
+and the response delays discovery 600 ms, token 300 ms, JWKS 300 ms. 13b uses a hanging discovery and
+T = 200 ms. Measured on the development Mac with `vitest run` on that one file.
+
+| Run | Commit | 13a: discovery under the lock | 13a: token / JWKS under the lock | 13a: discovery before the lock | 13a: lock hold (ms) | 13a: `resolveSession` (ms) | 13b: `tryAcquireLock` calls |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Before the fix | `ae418fc6` | 1 | 1 / 1 | 0 | 1235 | 1235 | 1 |
+
+Before the fix, 13a failed on its first assertion (a discovery request while the lock was held), as
+§ 5.4 requires.
 
 ## 8. Out of scope
 
