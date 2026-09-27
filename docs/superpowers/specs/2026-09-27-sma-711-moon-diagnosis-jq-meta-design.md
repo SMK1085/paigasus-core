@@ -68,7 +68,7 @@ Replace the `exec:` projection with an array of operation objects:
 
 ```
 exec: [.operations[] | select(.meta.type=="task-execution")
-       | {status, command: .meta.command, exitCode: .meta.exitCode}]
+       | {status, exitCode: .meta.exitCode, command: .meta.command}]
 ```
 
 - `.meta.command` and `.meta.exitCode` fix the `null` defect.

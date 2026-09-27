@@ -85,12 +85,12 @@ check() {
   if [ "$got" = "$expected" ]; then echo "PASS $dir"; else
     echo "FAIL $dir"; echo "  expected: $expected"; echo "  got:      $got"; rc=1; fi
 }
-check recorded '{"label":"RunTask(repo:next-public-free)","error":"Task repo:next-public-free failed to run.","exec":[{"status":"failed","command":"set -euo pipefail bash ci/next-public/run.sh --self-test bash ci/next-public/run.sh --negative-control bash ci/next-public/run.sh","exitCode":1}]}
-{"label":"RunTask(repo:actionlint)","error":"Task repo:actionlint failed to run.","exec":[{"status":"failed","command":"ci/actionlint/run.sh","exitCode":1}]}'
-check fresh '{"label":"RunTask(probe:fail3)","error":"Task probe:fail3 failed to run.","exec":[{"status":"failed","command":"exit 3","exitCode":3}]}
-{"label":"RunTask(probe:missing)","error":"Task probe:missing failed to run.","exec":[{"status":"failed","command":"no-such-binary-xyz","exitCode":127}]}
-{"label":"RunTask(probe:multi)","error":"Task probe:multi failed to run.","exec":[{"status":"failed","command":"echo a exit 4","exitCode":4}]}
-{"label":"RunTask(probe:slow)","error":"Task probe:slow failed to run.","exec":[{"status":"timed-out","command":"sleep 20","exitCode":null}]}'
+check recorded '{"label":"RunTask(repo:next-public-free)","error":"Task repo:next-public-free failed to run.","exec":[{"status":"failed","exitCode":1,"command":"set -euo pipefail bash ci/next-public/run.sh --self-test bash ci/next-public/run.sh --negative-control bash ci/next-public/run.sh"}]}
+{"label":"RunTask(repo:actionlint)","error":"Task repo:actionlint failed to run.","exec":[{"status":"failed","exitCode":1,"command":"ci/actionlint/run.sh"}]}'
+check fresh '{"label":"RunTask(probe:fail3)","error":"Task probe:fail3 failed to run.","exec":[{"status":"failed","exitCode":3,"command":"exit 3"}]}
+{"label":"RunTask(probe:missing)","error":"Task probe:missing failed to run.","exec":[{"status":"failed","exitCode":127,"command":"no-such-binary-xyz"}]}
+{"label":"RunTask(probe:multi)","error":"Task probe:multi failed to run.","exec":[{"status":"failed","exitCode":4,"command":"echo a exit 4"}]}
+{"label":"RunTask(probe:slow)","error":"Task probe:slow failed to run.","exec":[{"status":"timed-out","exitCode":null,"command":"sleep 20"}]}'
 check synthetic '{"label":"RunTask(x:y)","error":"hash failed","exec":[]}'
 exit "$rc"
 ```
@@ -126,7 +126,7 @@ with:
   jq '.actions[] | select(.status=="failed")
       | {label, error,
          exec: [.operations[] | select(.meta.type=="task-execution")
-                | {status, command: .meta.command, exitCode: .meta.exitCode}]}' \
+                | {status, exitCode: .meta.exitCode, command: .meta.command}]}' \
      .moon/cache/ciReport.json
   ```
   There is **no action-level `exitCode` key** — `has("exitCode")` is `false`. The widely copied

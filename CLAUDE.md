@@ -178,7 +178,7 @@ a gate. Do not copy it here.
   jq '.actions[] | select(.status=="failed")
       | {label, error,
          exec: [.operations[] | select(.meta.type=="task-execution")
-                | {status, command: .meta.command, exitCode: .meta.exitCode}]}' \
+                | {status, exitCode: .meta.exitCode, command: .meta.command}]}' \
      .moon/cache/ciReport.json
   ```
   There is **no action-level `exitCode` key** — `has("exitCode")` is `false`. The widely copied
