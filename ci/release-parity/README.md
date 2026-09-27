@@ -154,7 +154,15 @@ crates.io index; required by package `rpg-a1 v0.1.0`". Because the edge is dropp
 drops `changelog_include` (NC2) sees a follower-only commit on `rpg-b2` bump only the follower,
 with `rpg-b1` staying at 0.1.0 rather than cascading to 0.1.1 — NC2 still reds.
 
-**Cost.** One filter fixture run: 46.8 s. One group fixture run: 8.2 s (development Mac).
+**Negative controls.** `run.sh --negative-control` calls the hook
+`ecosystem::extra_negative_control` BEFORE the base control, because the base control exits on
+its own verdict. Each control mutates the fixture config and must make one named assertion fail
+with rc 1; rc 2 is INCONCLUSIVE and fails the control. NC1: no `release_commits`, so row 7
+bumps (`r07`). NC2: no `changelog_include`, so G2's lockstep breaks (`G2-version`). NC3: neither
+key, which is P1 exactly: `G1-changelog` must red while `G1-version` stays green.
+
+**Cost.** One filter fixture run: 46.8 s. One group fixture run: 8.2 s (development Mac). The
+three controls add one filter run and two group runs: 41.3 s in all.
 
 ## Tool resolution policy (SMA-596)
 
@@ -225,7 +233,9 @@ inside `run.sh` itself
 (`RELEASE_PARITY_SH_CALL_SITES`: the flag parse `--negative-control) NEGATIVE=1; shift ;;`,
 the `if [ "$NEGATIVE" = 1 ]; then` guard, the assertion body `check_case "neg-fix-bang" …`,
 and both report arms — the `exit 0` on "reported red as expected" and the `exit 1` on
-"accepted a wrong expectation"), from inside `repo:affected-smoke` — a separately scheduled
+"accepted a wrong expectation"), SMA-716 adds nine more whole lines: for each of the two hooks,
+the guard that fails the release-plz run when the module lost the hook, the call, and the
+verdict arm (both arms for the control hook), from inside `repo:affected-smoke` — a separately scheduled
 gate, so neither judges its own wiring. Five discrete lines, not one span, because pinning
 the block as a unit left two MEASURED bypasses with different failure shapes: neutering the
 flag parse (dropping `NEGATIVE=1`) leaves `NEGATIVE` at its initialized 0, so the control
@@ -286,3 +296,10 @@ reachable.
   fragile and out of scope (spec decision). The narrower fail-safe available if this ever bites:
   a count assertion such as `release_parity_sh_text.count("NEGATIVE=") == 2`, which can only
   false-red, never silently pass a bypass — not implemented here, just recorded as the option.
+- **L6 — the SMA-716 hook bodies are not pinned.** `RELEASE_PARITY_SH_CALL_SITES` reads only
+  `run.sh`. The hook bodies in `ecosystems/release-plz.sh` and all of
+  `ecosystems/release-plz-filter.sh` are in no haystack. A hook body replaced with `return 0`
+  passes every pin, and the suite or the controls then assert nothing. The guard lines in
+  `run.sh` stop only the DELETION of a hook. A second haystack parameter for
+  `check_self_invocation` would close this; it was not added because that function has 65 call
+  sites in `ci_targets.py`.

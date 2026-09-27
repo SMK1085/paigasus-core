@@ -31,6 +31,7 @@ source "$HERE/ecosystems/$ECOSYSTEM.sh"
 # SMA-716: the release-plz module MUST define its extra-suite hook. Without this line, a deleted
 # hook in ecosystems/release-plz.sh would skip the whole release-plz-only suite in silence.
 [ "$ECOSYSTEM" != release-plz ] || declare -F ecosystem::extra_suite >/dev/null || { echo "FATAL: release-parity ABORTED: infrastructure error (rc=2): ecosystems/release-plz.sh defines no ecosystem::extra_suite (SMA-716)" >&2; exit 2; }
+[ "$ECOSYSTEM" != release-plz ] || declare -F ecosystem::extra_negative_control >/dev/null || { echo "FATAL: release-parity ABORTED: infrastructure error (rc=2): ecosystems/release-plz.sh defines no ecosystem::extra_negative_control (SMA-716)" >&2; exit 2; }
 
 # Default: the canonical 0.x expectation (expected_0x). An ecosystem MAY define
 # `ecosystem::expected` to assert a documented, intentional divergence (e.g.
@@ -70,6 +71,16 @@ check_case() { # id subject footer expected
 }
 
 if [ "$NEGATIVE" = 1 ]; then
+  # SMA-716: the release-plz-only controls NC1-NC3 run FIRST, because the base control below
+  # exits on its own verdict. A control that does not go red is rc 1; rc 2 is INCONCLUSIVE.
+  if declare -F ecosystem::extra_negative_control >/dev/null; then
+    xnc=0; ecosystem::extra_negative_control "$REAL_TOML" || xnc=$?
+    case "$xnc" in
+      0) echo "negative-control OK: every extra control reported red as expected" ;;
+      1) echo "negative-control FAILED: an extra control did not report red" >&2; exit 1 ;;
+      *) echo "negative-control INCONCLUSIVE: extra control infrastructure error (rc=$xnc)" >&2; exit 2 ;;
+    esac
+  fi
   echo "== negative control: feeding a deliberately wrong expectation =="
   # fix! in 0.x bumps to 0.2.0 (minor), so 0.1.1 (patch) is deliberately wrong.
   ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?

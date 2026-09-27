@@ -177,3 +177,7 @@ source "$_RP_DIR/release-plz-filter.sh"
 ecosystem::extra_suite() { # real_toml -> 0/1/2
   rpf::suites "$1"
 }
+
+ecosystem::extra_negative_control() { # real_toml -> 0/1/2
+  rpf::negative_controls "$1"
+}

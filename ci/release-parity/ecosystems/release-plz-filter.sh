@@ -118,7 +118,7 @@ rpf::_check_versions() { # id dir want crate...
   local id="$1" dir="$2" want="$3" c got bad="" all=""
   shift 3
   for c in "$@"; do
-    got="$(rpf::_version "$dir/crates/$c/Cargo.toml")"
+    got="$(rpf::_version "$dir/crates/$c/Cargo.toml")" || return 2
     all="$all $c=$got"
     if [ "$got" != "$want" ]; then bad=1; fi
   done
@@ -135,7 +135,7 @@ rpf::_check_section() { # id dir crate version heading line...
   local id="$1" dir="$2" crate="$3" ver="$4" heading="$5" sec first line n under
   shift 5
   sec="$dir/.rpf-section-$crate"
-  rpf::_first_release_section "$dir/crates/$crate/CHANGELOG.md" "$sec" || return 1
+  rpf::_first_release_section "$dir/crates/$crate/CHANGELOG.md" "$sec" || return 2
   first="$(sed -n 1p "$sec")"
   case "$first" in
     "## [$ver]"*) ;;
@@ -364,6 +364,56 @@ rpf::group_suite() { # real_toml mode(real|no-include|no-include-no-filter) -> 0
   rpf::_check_once G4-changelog "$dir" '- *(rs)* x' rpg-d1 rpg-d2 || fails=$((fails + 1))
   rm -rf "$dir"
   if [ "$fails" != 0 ]; then return 1; fi
+}
+
+# --- negative controls (spec section 4.3) ---------------------------------------------------
+
+# One control: run a suite on a mutated config. It must return rc 1, the FAIL line of $must
+# must be there, and the FAIL line of $mustnot (if given) must NOT be there. rc 0 means the
+# suite accepted the mutation; rc 2 is INCONCLUSIVE, and both fail the control.
+rpf::_one_control() { # label suite mode must mustnot real_toml -> 0/1/2
+  local label="$1" suite="$2" mode="$3" must="$4" mustnot="$5" real="$6" errf rc=0
+  errf="$(mktemp)" || return 2
+  "$suite" "$real" "$mode" >/dev/null 2>"$errf" || rc=$?
+  case "$rc" in
+    1) ;;
+    0) echo "negative-control FAILED: $label: the suite passed on a mutated config" >&2
+       rm -f "$errf"; return 1 ;;
+    *) echo "negative-control INCONCLUSIVE: $label: infrastructure error (rc=$rc)" >&2
+       cat "$errf" >&2; rm -f "$errf"; return 2 ;;
+  esac
+  if ! grep -qE "^FAIL  $must " "$errf"; then
+    echo "negative-control FAILED: $label: the suite went red, but not on $must" >&2
+    cat "$errf" >&2; rm -f "$errf"; return 1
+  fi
+  if [ -n "$mustnot" ] && grep -qE "^FAIL  $mustnot " "$errf"; then
+    echo "negative-control FAILED: $label: $mustnot went red too; this control needs it green" >&2
+    cat "$errf" >&2; rm -f "$errf"; return 1
+  fi
+  rm -f "$errf"
+  echo "negative-control OK: $label reported red on $must"
+}
+
+rpf::negative_controls() { # real_toml -> 0/1/2
+  local real="$1" nc rc worst=0
+  for nc in 1 2 3; do
+    rc=0
+    case "$nc" in
+      # NC1: no release_commits. Row 7 (`fix(ci): x`) then bumps to 0.1.1.
+      1) rpf::_one_control "NC1 (no release_commits)" rpf::filter_suite no-release-commits \
+           r07 "" "$real" || rc=$? ;;
+      # NC2: no changelog_include, release_commits kept. G2's lockstep breaks.
+      2) rpf::_one_control "NC2 (no changelog_include)" rpf::group_suite no-include \
+           G2-version "" "$real" || rc=$? ;;
+      # NC3: neither key: P1 exactly. G1's versions pass, and the follower's first section
+      # stays 0.1.0. The CHANGELOG half must red while the version half passes.
+      3) rpf::_one_control "NC3 (no changelog_include, no release_commits)" rpf::group_suite \
+           no-include-no-filter G1-changelog G1-version "$real" || rc=$? ;;
+    esac
+    if [ "$rc" = 2 ]; then return 2; fi
+    if [ "$rc" != 0 ]; then worst=1; fi
+  done
+  return "$worst"
 }
 
 # --- entry points for the hooks in release-plz.sh -------------------------------------------
