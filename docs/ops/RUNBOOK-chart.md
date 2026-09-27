@@ -536,9 +536,11 @@ reports the Application as Progressing forever.
 1. Create the new route and verify it. If the Ingress gets its certificate from a cert-manager
    annotation in `ingress.annotations` (for example `cert-manager.io/cluster-issuer`),
    cert-manager owns that `Certificate` through the Ingress. Step 3 deletes the Ingress, and
-   the `Certificate` goes with it. The Secret stays, so TLS works at first, but nothing renews
-   the certificate. Before step 3, create a standalone `Certificate` (or a Gateway-annotated
-   one) for `ingress.host`.
+   the `Certificate` goes with it. By default the Secret stays, so TLS works at first, but
+   nothing renews the certificate. If the cert-manager controller runs with
+   `--enable-certificate-owner-ref`, the Secret goes too, and TLS stops at once. So before
+   step 3, create a standalone `Certificate` (or a Gateway-annotated one) for `ingress.host`,
+   wait until it is `Ready`, and make sure that the Gateway uses its Secret.
 2. Set `ingress.enabled: false` and sync.
 3. Remove the old Ingress. `helm upgrade` deletes it. Argo CD marks it "requires pruning" and
    keeps it, unless the sync prunes. Sync with prune, or delete the Ingress by hand. A kept Ingress
