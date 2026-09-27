@@ -5,6 +5,7 @@
   (`docs/superpowers/specs/2026-09-27-sma-706-jit-failure-alert-design.md`)
 - Related: SMA-698 (the `email_conflict` defect), SMA-706 (the alert and the runbook)
 - Status: approved at Gate 1 (2026-09-27)
+- ADR: [ADR-0024: Operator-attested external identity linking in IAM](https://www.notion.so/3e8830e8fbaa814c98daf3cdace8251e)
 
 ## 1. Problem
 
@@ -469,8 +470,7 @@ Change the `IamJitProvisioningFailures` remediation in `docs/ops/RUNBOOK-observa
 ## 9. ADR
 
 The issue asks for an ADR before code. Plan task 1 creates it in Notion, in the ADR database
-that `CONTRIBUTING.md` links. The highest number in the repo is ADR-0023, so this is probably
-ADR-0024. The plan confirms the number in Notion. Section 10 is the draft text.
+that `CONTRIBUTING.md` links. It is ADR-0024 (link in the header). Section 10 is the draft text.
 
 ## 10. ADR draft
 
