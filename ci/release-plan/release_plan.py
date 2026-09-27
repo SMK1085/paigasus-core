@@ -1426,8 +1426,11 @@ def _fixture_repo_starts_no_maintenance() -> str | None:
     FileNotFoundError on Python 3.12 (CI run 36273324959; reproduced 7 times in 2,400 runs under
     load, spec §3 M7). The row records a trace2 event log of a real fixture build and fails on any
     maintenance or gc child. GIT_CONFIG_GLOBAL / GIT_CONFIG_NOSYSTEM stop a host setting from
-    making it pass. It also requires a `commit` start event, so an empty trace cannot pass, and it
-    reads maintenance.auto back from the fixture's own .git/config.
+    making it pass, and the row also drops inherited GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT and
+    any GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n, so a parent `git -c maintenance.auto=false` cannot
+    suppress the maintenance child it exists to catch. It also requires a `commit` start event, so
+    an empty trace cannot pass, and it reads maintenance.auto back from the fixture's own
+    .git/config.
 
     Mutations: delete the two config lines in _git_commit_and_tag; move them after the commit;
     drop `env=git_env` there. Each one reds this row.
@@ -1435,7 +1438,11 @@ def _fixture_repo_starts_no_maintenance() -> str | None:
     tmp = tempfile.mkdtemp()
     trace = Path(f"{tmp}.trace2.json")
     try:
-        git_env = {**os.environ, "GIT_TRACE2_EVENT": str(trace),
+        inherited = {k: v for k, v in os.environ.items()
+                     if k != "GIT_CONFIG_PARAMETERS" and k != "GIT_CONFIG_COUNT"
+                     and not k.startswith("GIT_CONFIG_KEY_")
+                     and not k.startswith("GIT_CONFIG_VALUE_")}
+        git_env = {**inherited, "GIT_TRACE2_EVENT": str(trace),
                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
         _complete_chain_tree(tmp, git_env=git_env)
         events = ([json.loads(line) for line in trace.read_text().splitlines() if line.strip()]
@@ -1453,8 +1460,10 @@ def _fixture_repo_starts_no_maintenance() -> str | None:
             return f"the fixture's .git/config has maintenance.auto={got!r}, want 'false'"
         return None
     finally:
-        shutil.rmtree(tmp)
-        trace.unlink(missing_ok=True)
+        try:
+            shutil.rmtree(tmp)
+        finally:
+            trace.unlink(missing_ok=True)
 
 
 def _console_package_no_version() -> str | None:
