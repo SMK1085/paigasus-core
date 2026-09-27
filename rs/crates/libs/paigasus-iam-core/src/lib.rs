@@ -36,4 +36,4 @@ pub use principal::{Principal, PrincipalKind, PrincipalStatus};
 pub use service_account::{ServiceAccount, ServiceAccountRecord};
 pub use tenancy::{Membership, NAME_MAX_CHARS, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef, validate_name};
 pub use user::User;
-pub use value::{DomainError, Email, PrincipalId, Stamp};
+pub use value::{AUDIT_REASON_MAX_CHARS, AuditReason, DomainError, EXTERNAL_SUBJECT_MAX_CHARS, Email, ExternalSubject, PrincipalId, Stamp};

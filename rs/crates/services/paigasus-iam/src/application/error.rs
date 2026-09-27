@@ -379,6 +379,9 @@ impl From<DomainError> for TenancyError {
             // API-key-only variant (SMA-445): tenancy operations never produce it, but the
             // match must stay exhaustive as `DomainError` grows across milestones.
             DomainError::InvalidApiKeyToken(_) => Self::Internal,
+            // SMA-712: the identity-link value types.
+            DomainError::InvalidReason => Self::InvalidReason,
+            DomainError::InvalidSubject => Self::InvalidSubject,
         }
     }
 }
@@ -626,5 +629,12 @@ mod tests {
         let err = TenancyError::from(RepositoryError::Conflict(ConflictKind::ExternalIdentityExists));
         assert_eq!(err, TenancyError::ExternalIdentityConflict);
         assert_eq!(err.class(), ErrorClass::Conflict);
+    }
+
+    /// SMA-712: the two identity-link value types keep their own codes through the funnel.
+    #[test]
+    fn the_identity_link_domain_errors_map_to_their_own_codes() {
+        assert_eq!(TenancyError::from(DomainError::InvalidReason), TenancyError::InvalidReason);
+        assert_eq!(TenancyError::from(DomainError::InvalidSubject), TenancyError::InvalidSubject);
     }
 }
