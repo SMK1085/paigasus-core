@@ -625,11 +625,16 @@ forever. In both cases, check `status.parents` by hand, as above.
 **Migration from a hand-written route to the chart route.**
 
 1. Look for a hand-written HTTPRoute with the name of a console Service
-   (`kubectl -n <ns> get httproute`). The chart route uses that name. If one exists, rename it or
-   delete it first. Otherwise `helm upgrade` fails with "invalid ownership metadata".
+   (`kubectl -n <ns> get httproute`). The chart route uses that name. Otherwise `helm upgrade`
+   fails with "invalid ownership metadata". Kubernetes cannot rename an object. If a route with
+   that name exists, do not delete it yet: that stops the traffic for the zone. First apply a
+   copy of it under a different name (for example `<name>-handover`), and wait until the copy
+   shows `Accepted` and `ResolvedRefs` in `status.parents`. Then delete the route with the
+   console Service name. The copy is now the oldest route with its host and `PathPrefix`, so it
+   carries the traffic. Verify that with a `curl --resolve` request through the Gateway address.
 2. Set `httpRoute.enabled: true` and `httpRoute.parentRefs`, and sync.
-3. Delete the hand-written route. Two routes with the same host and the same `PathPrefix` tie, and
-   Gateway API gives the tie to the OLDEST route. While the old route exists, the chart route shows
-   `Accepted` but carries no traffic.
+3. Delete the remaining hand-written routes (the copy from step 1 included). Two routes with the
+   same host and the same `PathPrefix` tie, and Gateway API gives the tie to the OLDEST route.
+   While an old route exists, the chart route shows `Accepted` but carries no traffic.
 4. Verify with a request through the Gateway address (`curl --resolve`), not only with
    `status.parents`.

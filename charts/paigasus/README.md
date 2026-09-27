@@ -91,8 +91,11 @@ with its own message, rather than letting a bad values file produce broken Kuber
   - a merged `backendRequest` longer than the merged `request`, when `request` is not `0s`:
     `zones.<id>: the HTTPRoute backendRequest timeout <b> is longer than the request timeout <r>`.
 
-  The HTTPRoute CRD refuses the same values, but only at apply time. In Argo CD that is a sync
-  error that is easy to miss.
+  The HTTPRoute CRD and the API server refuse some of these values too (an upper-case hostname,
+  a bad duration, a `backendRequest` longer than `request`, a non-string annotation), but only at
+  apply time. In Argo CD that is a sync error that is easy to miss. The CRD accepts the others:
+  an absent `parentRefs` gives a route that attaches to no Gateway, and a parentRef without
+  `sectionName` or `port` attaches to every listener. Only the chart refuses those two.
 
 `tests/refusals.sh` renders each refusal case and asserts it fails with its own message, not an
 incidental template error from somewhere else — otherwise the chart could refuse by accident and
