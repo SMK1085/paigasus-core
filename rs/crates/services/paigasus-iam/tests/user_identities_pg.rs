@@ -161,6 +161,114 @@ async fn each_write_commits_with_its_audit_row() {
     assert_eq!(svc.unlink(&actor(), &operator(), &user, first.value.id, "retry").await.unwrap_err(), TenancyError::NotFound);
 }
 
+/// Fix round 1 finding: `find_user_by_email` and `user_view_in` (via `change_email`) must read
+/// the REAL principal status. A `Disabled` principal proves neither path hard-codes `Active`.
+#[tokio::test]
+async fn find_user_by_email_and_change_email_report_a_disabled_principal_status() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let svc = service(&db, Arc::new(PgAuditLog::new(db.clone())));
+    let id = pid(10);
+    let now = Utc::now().trunc_subsecs(6);
+    let principal = Principal::new(id.clone(), PrincipalKind::User, PrincipalStatus::Disabled, now, now);
+    let user = User::new(id.clone(), Email::parse("disabled@example.com").unwrap(), "Disabled".to_string(), None, None, now, now);
+    PgPrincipalRepository::new(db.clone()).create_user(&principal, &user).await.unwrap();
+
+    let view = svc.find_by_email(&actor(), "disabled@example.com").await.unwrap();
+    assert_eq!(view.status, PrincipalStatus::Disabled, "find_user_by_email must read the real principal status, not a hard-coded one");
+
+    // Spec 5.4: a Disabled user may still have its email changed. This return value comes from
+    // `user_view_in`, the other `load_view` call site.
+    let changed = svc.change_email(&actor(), &id, "disabled-2@example.com", "r").await.unwrap();
+    assert_eq!(changed.status, PrincipalStatus::Disabled, "user_view_in must read the real principal status too");
+}
+
+/// Fix round 1 finding: `find_user_by_email` must sort identities by `created_at`, not by
+/// insertion order (which usually tracks id anyway). This seeds the later-created row FIRST,
+/// and gives it the SMALLER id, so an id-only sort would return the wrong order too.
+#[tokio::test]
+async fn find_user_by_email_orders_identities_by_created_at_not_insertion_order() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let svc = service(&db, Arc::new(PgAuditLog::new(db.clone())));
+    let user = seed_user(&db, 10, "order-created@example.com").await;
+    let earlier = Utc::now().trunc_subsecs(6);
+    let later = earlier + chrono::Duration::seconds(10);
+
+    // Inserted first, but created_at is LATER and id is SMALLER than the second insert.
+    external_identity::ActiveModel {
+        id: Set(Uuid::from_u128(0xB1)),
+        principal_id: Set(user.uuid()),
+        issuer: Set(ISSUER.to_string()),
+        subject: Set("second-by-time".to_string()),
+        created_at: Set(later),
+        updated_at: Set(later),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    // Inserted second, but created_at is EARLIER and id is LARGER.
+    external_identity::ActiveModel {
+        id: Set(Uuid::from_u128(0xB2)),
+        principal_id: Set(user.uuid()),
+        issuer: Set(ISSUER.to_string()),
+        subject: Set("first-by-time".to_string()),
+        created_at: Set(earlier),
+        updated_at: Set(earlier),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+    let view = svc.find_by_email(&actor(), "order-created@example.com").await.unwrap();
+    let subjects: Vec<&str> = view.identities.iter().map(|i| i.subject.as_str()).collect();
+    assert_eq!(subjects, vec!["first-by-time", "second-by-time"], "identities must sort by created_at, not insertion order or id order");
+}
+
+/// Fix round 1 finding: two identities with the SAME `created_at` must break the tie by `id`
+/// ascending. Insertion order is the reverse of id order, so a plain "keep insertion order"
+/// bug and a "no tie-break" bug would both fail this.
+#[tokio::test]
+async fn find_user_by_email_breaks_a_created_at_tie_by_id_ascending() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let svc = service(&db, Arc::new(PgAuditLog::new(db.clone())));
+    let user = seed_user(&db, 10, "order-tie@example.com").await;
+    let same = Utc::now().trunc_subsecs(6);
+
+    // Same created_at. The higher id is inserted FIRST.
+    external_identity::ActiveModel {
+        id: Set(Uuid::from_u128(0xC2)),
+        principal_id: Set(user.uuid()),
+        issuer: Set(ISSUER.to_string()),
+        subject: Set("higher-id".to_string()),
+        created_at: Set(same),
+        updated_at: Set(same),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    // The lower id is inserted SECOND.
+    external_identity::ActiveModel {
+        id: Set(Uuid::from_u128(0xC1)),
+        principal_id: Set(user.uuid()),
+        issuer: Set(ISSUER.to_string()),
+        subject: Set("lower-id".to_string()),
+        created_at: Set(same),
+        updated_at: Set(same),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+    let view = svc.find_by_email(&actor(), "order-tie@example.com").await.unwrap();
+    let subjects: Vec<&str> = view.identities.iter().map(|i| i.subject.as_str()).collect();
+    assert_eq!(subjects, vec!["lower-id", "higher-id"], "a created_at tie must break by id ascending, not insertion order");
+}
+
 #[tokio::test]
 async fn a_failed_audit_write_rolls_every_change_back() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
