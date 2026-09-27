@@ -1380,4 +1380,67 @@ The code in Tasks 1-4 was rendered on a scratch copy of the chart before this pl
 
 ## Mutation record
 
-Not yet run. Task 7 fills this section.
+Measured on 2026-09-28 at commit `c21d7dc7` (Tasks 1-6), helm `v3.22.0+g144ca65`, chart scripts
+under `/bin/bash` 3.2.57, with `--set ingress.host=console.example.test`.
+
+### Gate results (Step 1)
+
+| Command | rc | Note |
+|---|---|---|
+| `/bin/bash ci/helm-render/run.sh` | 0 | `helm-render: all checks passed`; render.sh has `ok [iam-and-gateway-httproute]` |
+| `/bin/bash ci/helm-render/run.sh --self-test` | 0 | `helm-render self-test passed` |
+| `/bin/bash ci/helm-render/run.sh --negative-control` | 0 | `helm-render negative control passed (7 fixtures)` |
+| `/opt/homebrew/bin/bash ci/actionlint/run.sh` | 0 | preflight: `pipe capacity 65536 bytes (floor 8192)`, so the local verdict is valid |
+| `moon run repo:affected-smoke` | 0 | `affected-graph cascade intact`; no hang |
+
+### Mutation battery (Step 2)
+
+A scratch script applied each mutation to the worktree, ran the named scripts and `render.sh`,
+then restored with `git checkout -- charts/paigasus` and checked that `git status --short` was
+empty. The tree was clean before and after every row. `render.sh` ran on every row: `iam-only`
+and `iam-and-gateway` stayed green on every row except M2, as the plan requires. The battery ran
+once, whole. No row needed a fix, so no re-run was necessary.
+
+| # | Rows that went red (`FAIL [...]` labels) | Verdict |
+|---|---|---|
+| M1 | ingress.sh: `route, iam only`, `route, iam and gateway`, `route, ingress disabled, no TLS Secret` (0 HTTPRoute(s)), and every `route_shape` row except `route, httpRoute key absent` (got `none`); render.sh: `iam-and-gateway-httproute` | as expected |
+| M2 | render.sh: `iam-only`, `iam-and-gateway` (the proof); ingress.sh: `route, httpRoute key absent` (H4), and the existing `iam only` row (disabled zone "gateway" appears) | as expected |
+| M3 | ingress.sh: `route, iam only`, `route, iam and gateway`, `route, ingress disabled, no TLS Secret` (2 rules, want 1); render.sh: `iam-and-gateway-httproute` | as expected |
+| M4 | ingress.sh: `route, iam only` (2 HTTPRoute(s), want 1; and disabled zone "gateway" appears) | as expected |
+| M5 | ingress.sh: the three H1/H3 `route_coupling` rows (the rule has filters); render.sh: `iam-and-gateway-httproute` | as expected |
+| M6 | ingress.sh: the three `route_coupling` rows (hostnames `['console.example.com']`); render.sh: `iam-and-gateway-httproute` | as expected |
+| M7 | ingress.sh: `route, httpRoute key absent` (render fails: `nil pointer evaluating interface {}.enabled`) | as expected |
+| M8 | refusals.sh: `httpRoute not a map` (refused, but by `interface conversion: interface {} is bool`, not by the chart message) | as expected |
+| M9 | refusals.sh: `httpRoute.enabled a string` (refused, but not with the chart message) | as expected |
+| M10 | refusals.sh: `httpRoute parentRefs null` (R2b, rendered); R2 `httpRoute without parentRefs` stayed green | as expected |
+| M11 | refusals.sh: `httpRoute without parentRefs`, `httpRoute parentRefs null`, `httpRoute parentRefs a map` | as expected |
+| M12 | refusals.sh: `httpRoute parentRef without name` | as expected |
+| M13 | refusals.sh: `httpRoute parentRef without listener` | as expected |
+| M14 | refusals.sh: `httpRoute host not lowercase` | as expected |
+| M15 | refusals.sh: `httpRoute parentRef with port` (R7, refused by the listener check) | as expected |
+| M16 | ingress.sh: `route, ingress disabled, no TLS Secret` (H3) and `route, ingress disabled: no Ingress` (refused: `ingress.tlsSecretName is required`) | as expected |
+| M17 | ingress.sh: the three `route_coupling` rows (backendRef port 3001 is not a port of the Service); render.sh: `iam-and-gateway-httproute` | as expected |
+| M18 | names.sh: `short release`, `40-char release`, `52-char release`, `53-char release` (2 HTTPRoute objects share the name paigasus-console); render.sh: `iam-and-gateway-httproute` | as expected |
+| M19 | ingress.sh: `route, annotations`, `route, no annotations`, `route, default timeouts`, `route, chart timeouts merge per key`, `route, empty zone key keeps the chart key`, `route, timeouts and annotations keys absent`; render.sh: `iam-and-gateway-httproute` | as expected |
+| M20 | ingress.sh: `route, chart timeouts merge per key` (H6: gateway got `request: 30s`) | as expected |
+| M21 | ingress.sh: `route, annotations`, `route, no annotations`, `route, default timeouts` (iam got `{}`), `route, no timeouts set` (H7), `route, timeouts and annotations keys absent` | as expected. The mutation renders `timeouts: {}` through `default "{}"`. |
+| M22 | ingress.sh: `route, annotations`, `route, no annotations`, `route, default timeouts`, `route, chart timeouts merge per key`, `route, timeouts and annotations keys absent`; render.sh: `iam-and-gateway-httproute` | as expected. The golden row also went red: the third golden holds the `10m` default. |
+| M23 | ingress.sh: `route, annotations` (H8); render.sh: `iam-and-gateway-httproute` | as expected |
+| M24 | ingress.sh: `route, no annotations` and every other `route_shape` row with no annotations set (got `{}`) | as expected |
+| M25 | kind check deleted: refusals.sh `httpRoute annotations not a map` (refused by `range can't iterate over x`, not the chart message). String check deleted: refusals.sh `httpRoute annotation not a string` (rendered) | as expected |
+| M26 | kind check deleted: refusals.sh `httpRoute timeouts not a map` (refused by `range can't iterate over 10s`). Unknown-key check deleted: `httpRoute timeouts unknown key` (rendered). Form check deleted: `httpRoute timeout bad form`, `httpRoute timeout a number`, `zone timeout bad form` (rendered) | as expected |
+| M27 | refusals.sh: `httpRoute backendRequest longer than request` (R14), `httpRoute backendRequest 1s over request 900ms` (Review Focus 1), `chart backendRequest over the zone default` (Review Focus 2) | as expected |
+| M28 | refusals.sh: `httpRoute request 0s with backendRequest` (R15) | as expected |
+| M29 | refusals.sh: `zone timeout on a disabled zone is not checked` (R16) | as expected |
+| M30 | refusals.sh: `httpRoute backendRequest 1s over request 900ms` (rendered) and `httpRoute backendRequest 59s999ms under request 1m` (refused) | as expected: both Review Focus 1 rows |
+
+### Full gate graph (Step 4)
+
+The full `ci-targets` command (`moon ci … --base origin/main --include-relations`) exited
+`rc=0`. It ran 24 actions. The four selected tasks all passed: `repo:input-liveness`,
+`repo:helm-render`, `repo:affected-smoke` and `repo:actionlint`. No task failed, so no gate
+needed the bash-version or pipe-size exception.
+
+Note: at this run `origin/main` was `1a45803f` (`chore: release (#306)`), one commit after this
+branch's base `4051df5e` (#332). The branch is not rebased onto it. The `open-pr` stage must
+rebase before the push.
