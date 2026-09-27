@@ -285,15 +285,17 @@ Content of the new section:
   - IAM has no API to update a user, change an email, or link an identity. The only write call
     is `POST /v1/users` / `CreateUser`. Pick the right case:
     - Same person: a second issuer, a new `sub`, or a user made with `CreateUser`. After the
-      identity check in the Warning below, insert an `external_identity` row for the existing
+      same-person check in the Warning below, insert an `external_identity` row for the existing
       `principal_id`:
       `INSERT INTO external_identity (id, principal_id, issuer, subject, created_at, updated_at)
       VALUES (gen_random_uuid(), '<principal_id>', '<issuer>', '<subject>', now(), now());`
     - The email now belongs to a different person. Change the old user's `"user".email`. JIT
       then makes a new user for the new person at the next login.
-  - **Warning.** A manual link or a manual email move brings back the account-takeover risk
-    that the "no auto-link by email" rule (D5) prevents. First confirm that the new identity is
-    the same person, and that the identity provider verifies emails.
+  - **Warning.** A manual change can bring back the account-takeover risk that the "no
+    auto-link by email" rule (D5) prevents. For the same-person case, first confirm that the new
+    identity is the same person. For the different-person case, first confirm at the identity
+    provider that the email now belongs to the new person. For both cases, confirm that the
+    identity provider verifies emails.
 - **When the alert is silent:** the residual and the silent paths in section 7.
 
 Also add one line to `docs/ops/RUNBOOK-chart.md` (lines 131-142), where the counter is described

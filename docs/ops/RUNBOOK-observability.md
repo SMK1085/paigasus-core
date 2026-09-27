@@ -1370,20 +1370,21 @@ causes are:
      identity provider, one `subject` value can name a different person. Then the statement
      gives that person the old account. In that case, do not run it. Use step 4 for each user.
 3. If the email is wrong at the identity provider, correct it there.
-4. Otherwise a link is necessary. IAM has no API to update a user, change an email or link an
+4. Otherwise a manual Postgres change is necessary. IAM has no API to update a user, change an email or link an
    identity (SMA-712 tracks one). The only write call is `POST /v1/users` / `CreateUser`. Pick the
    right case:
    - (a) Same person: a second issuer, a new `sub`, or a user made with `CreateUser`. After the
-     identity check in the Warning below, insert an `external_identity` row for the existing
+     same-person check in the Warning below, insert an `external_identity` row for the existing
      `principal_id`:
      `INSERT INTO external_identity (id, principal_id, issuer, subject, created_at, updated_at)
      VALUES (gen_random_uuid(), '<principal_id>', '<issuer>', '<subject>', now(), now());`
    - (b) The email now belongs to a different person. Change the old user's `"user".email`. JIT
      then makes a new user for the new person at the next login.
 
-**Warning.** A manual link or a manual email change brings back the account-takeover risk that
-rule D5 prevents. Before you change a row, confirm that the new identity is the same person.
-Also confirm that the identity provider verifies emails.
+**Warning.** A manual change can bring back the account-takeover risk that rule D5 prevents.
+For case (a), confirm that the new identity is the same person before you insert the row. For
+case (b), confirm at the identity provider that the email now belongs to the new person. For
+both cases, also confirm that the identity provider verifies emails.
 
 **When the alert is silent:**
 - **The first refusal of a new series.** IAM primes both series at zero before it serves. But

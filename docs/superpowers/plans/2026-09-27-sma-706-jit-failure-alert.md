@@ -510,7 +510,8 @@ after it:
 **Meaning.** `sum by (job, defect) (increase(iam_jit_provisioning_failures_total[15m])) > 0`,
 `for: 0m` (SMA-706). IAM refused to provision a new identity on its first login (SMA-698). On
 HTTP, IAM answered `403 provisioning-failed`. On gRPC, IAM answered `PermissionDenied` with the
-reason `provisioning-failed`. One refused request fires the alert at the next rule evaluation.
+reason `provisioning-failed`. One refused request fires the alert at the first rule evaluation
+after the next scrape (but see "When the alert is silent" below).
 The alert stays active for about 15 minutes after the last refusal. The counter counts refused
 requests, not users. One user with a bad token makes several refused requests, because a console
 session makes several IAM calls. This is `warning`: a refusal blocks one user's first login, but
@@ -557,17 +558,36 @@ causes are:
 **Remediation (`email_conflict`):**
 1. Get the email from the user or from the identity provider's login events. The IAM log does
    not contain it.
-2. If the issuer URL changed, restore the old issuer string in the IAM configuration. Do not edit
-   user rows.
+2. If the issuer URL changed, IAM accepts only a token whose `iss` equals the configured issuer.
+   Restoring the old issuer string alone makes IAM refuse every token, including users with a
+   working link. Use one of these two options instead:
+   - Make the identity provider issue the old `iss` again, for example with Keycloak's hostname
+     or frontend URL setting. Then restore `oidc.issuer` to the old value.
+   - Or keep the new issuer, and move the stored keys in one statement:
+     `UPDATE external_identity SET issuer = '<new>', updated_at = now() WHERE issuer = '<old>';`.
+     Also update any `zones.iam.backend.bootstrapAdmins` entries that name the old issuer.
+     Use this option only when the new issuer is the same identity provider realm at a new
+     URL. Before you run the statement, confirm that the identity provider keeps the same `sub`
+     for every user after the change. A check of some users is not enough proof. If you cannot
+     confirm it for every user, or if the new issuer is a different realm or a different
+     identity provider, one `subject` value can name a different person. Then the statement
+     gives that person the old account. In that case, do not run it. Use step 4 for each user.
 3. If the email is wrong at the identity provider, correct it there.
-4. Otherwise a link is necessary. IAM has no API to update a user, change an email or link an
-   identity (SMA-712 tracks one). The only write call is `POST /v1/users` / `CreateUser`. A link
-   needs a manual Postgres change: add an `external_identity` row with the new `issuer` and
-   `subject` for the existing `principal_id`, or change `"user".email`.
+4. Otherwise a manual Postgres change is necessary. IAM has no API to update a user, change an email or link an
+   identity (SMA-712 tracks one). The only write call is `POST /v1/users` / `CreateUser`. Pick the
+   right case:
+   - (a) Same person: a second issuer, a new `sub`, or a user made with `CreateUser`. After the
+     same-person check in the Warning below, insert an `external_identity` row for the existing
+     `principal_id`:
+     `INSERT INTO external_identity (id, principal_id, issuer, subject, created_at, updated_at)
+     VALUES (gen_random_uuid(), '<principal_id>', '<issuer>', '<subject>', now(), now());`
+   - (b) The email now belongs to a different person. Change the old user's `"user".email`. JIT
+     then makes a new user for the new person at the next login.
 
-**Warning.** A manual link or a manual email change brings back the account-takeover risk that
-rule D5 prevents. Before you change a row, confirm that the new identity is the same person.
-Also confirm that the identity provider verifies emails.
+**Warning.** A manual change can bring back the account-takeover risk that rule D5 prevents.
+For case (a), confirm that the new identity is the same person before you insert the row. For
+case (b), confirm at the identity provider that the email now belongs to the new person. For
+both cases, also confirm that the identity provider verifies emails.
 
 **When the alert is silent:**
 - **The first refusal of a new series.** IAM primes both series at zero before it serves. But
@@ -578,13 +598,18 @@ Also confirm that the identity provider verifies emails.
   with pod-level service discovery. The chart runs IAM with `replicas: 1` and `maxSurge: 0`, so
   every rollout opens this gap for one scrape interval. Only an extra rule branch could close it,
   and that branch fires falsely after a Prometheus data gap. The SMA-706 spec, section 7, has the
-  details.
+  details:
+  `docs/superpowers/specs/2026-09-27-sma-706-jit-failure-alert-design.md`.
 - **Metrics are off** (`metrics.enabled = false`). `/metrics` is not mounted. If Prometheus still
   scrapes the target, the scrape fails and `TargetDown` fires.
 - **A JIT-disabled issuer.** IAM returns `identity-not-provisioned` and does not count it
   (SMA-707).
 - **An IAM binary older than SMA-698.** The series does not exist.
 ````
+
+> **Note (after Task 3).** The final branch review and the CodeRabbit review corrected this text:
+> the issuer-change remediation, the split of step 4 into a link and an email move, the per-case
+> Warning, and the qualified catalog row. The blocks in Steps 2 and 5 now hold the final text.
 
 - [ ] **Step 6: Add the chart runbook pointer**
 
