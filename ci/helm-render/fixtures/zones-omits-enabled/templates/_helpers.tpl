@@ -45,6 +45,9 @@ release made before ingress.enabled existed has no such key under `helm upgrade 
 and a plain .Values.ingress.enabled would read nil and delete the live Ingress with no warning. A
 nil value also counts as "not set": Helm keeps a null when no chart default shadows it.
 paigasus.validate refuses a non-boolean value, so a quoted "false" never reaches this `if`.
+The nil branch (`kindIs "invalid"`) is untested by design: with the chart default present, `helm
+template` cannot produce a nil value, so it was measured on a prototype without the default
+(spec § 4.2).
 */}}
 {{- define "paigasus.ingressEnabled" -}}
 {{- $v := dig "enabled" true .Values.ingress -}}

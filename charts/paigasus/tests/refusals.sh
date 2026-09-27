@@ -82,6 +82,10 @@ expect_fail "ingress disabled, host empty" "ingress.host is required" \
 # refusal the Ingress stays, which is the SMA-695 bug.
 expect_fail "ingress.enabled a string" "ingress.enabled must be true or false" \
   --set-string ingress.enabled=false
+# The kind check must run before the TLS check. With an empty TLS Secret, a string "false" must
+# still get the kind message.
+expect_fail "ingress.enabled a string, tlsSecretName empty" "ingress.enabled must be true or false" \
+  --set-string ingress.enabled=false --set ingress.tlsSecretName=""
 # --set ingress.enabled=null deletes the key. The TLS refusal must then still fire, which catches a
 # validator that reads .Values.ingress.enabled without paigasus.ingressEnabled.
 expect_fail "ingress.enabled key absent, tlsSecretName empty" "ingress.tlsSecretName is required" \
@@ -92,6 +96,8 @@ expect_fail "ingress.host with a scheme" "must be a bare host name" \
   --set ingress.host=https://console.example.test
 expect_fail "ingress.host with a port, ingress disabled" "must be a bare host name" \
   --set ingress.enabled=false --set ingress.host=console.example.test:8443
+expect_fail "ingress.host with a path" "must be a bare host name" \
+  --set ingress.host=console.example.test/iam
 expect_fail "oidc.issuer empty" "oidc.issuer is required" \
   --set oidc.issuer=""
 expect_fail "oidc.clientId empty" "oidc.clientId is required" \

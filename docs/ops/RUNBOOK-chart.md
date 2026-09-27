@@ -21,9 +21,9 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `zones.gateway.backend.url` | when `gateway` is on | The base URL of an existing gateway backend. The chart does not deploy it |
 | `ingress.enabled` | no | Default `true`. `false`: the chart renders no Ingress, and you route the traffic yourself (§ 11). It must be a boolean |
 | `ingress.host` | yes, also when `ingress.enabled` is false | The one public host. `PAIGASUS_PUBLIC_ORIGIN` is `https://<host>`. A bare host name: no scheme, no path, no port |
-| `ingress.className` | no | The IngressClass of your controller |
+| `ingress.className` | no | The IngressClass of your controller. Ignored when `ingress.enabled` is false |
 | `ingress.tlsSecretName` | when `ingress.enabled` is true | The TLS Secret for `ingress.host`. The ingress must end TLS |
-| `ingress.annotations` | no | Extra annotations. Do not add a rewrite annotation (§ 3) |
+| `ingress.annotations` | no | Extra annotations. Do not add a rewrite annotation (§ 3). Ignored when `ingress.enabled` is false |
 | `oidc.issuer` | yes | The IdP issuer URL. It must be `https` |
 | `oidc.clientId` | yes | The console's OIDC client. By default IAM also uses it as the access-token audience. Then an ID token passes IAM's audience check, and the chart shows a warning (§ 6) |
 | `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Recommended: a dedicated API audience. Follow the migration order in § 6 |
@@ -84,7 +84,7 @@ shown, or shown but not routed. This is decision D6.
 reverse. That is on purpose.
 
 **D6 and `ingress.enabled: false` (SMA-695).** With the Ingress off, the chart renders no routing.
-Your own route is then a seventh projection, and you keep it by hand. Change the route in the same
+Your own route then takes the place of the ingress rule, and you keep it by hand. Change the route in the same
 change as any `zones.<id>.enabled` edit. A route to a disabled zone points to a deleted Service. An
 enabled zone with no route gives a 404 for its link.
 
@@ -533,7 +533,12 @@ reports the Application as Progressing forever.
 
 **Cut-over on a release that has a live Ingress.**
 
-1. Create the new route and verify it.
+1. Create the new route and verify it. If the Ingress gets its certificate from a cert-manager
+   annotation in `ingress.annotations` (for example `cert-manager.io/cluster-issuer`),
+   cert-manager owns that `Certificate` through the Ingress. Step 3 deletes the Ingress, and
+   the `Certificate` goes with it. The Secret stays, so TLS works at first, but nothing renews
+   the certificate. Before step 3, create a standalone `Certificate` (or a Gateway-annotated
+   one) for `ingress.host`.
 2. Set `ingress.enabled: false` and sync.
 3. Remove the old Ingress. `helm upgrade` deletes it. Argo CD marks it "requires pruning" and
    keeps it, unless the sync prunes. Sync with prune, or delete the Ingress by hand. A kept Ingress
