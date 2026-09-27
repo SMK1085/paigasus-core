@@ -922,9 +922,11 @@ tests:
           - exp_labels: { severity: warning, job: iam, defect: email_conflict }
             exp_annotations: { summary: "IAM refused just-in-time provisioning (email_conflict)", description: "IAM refused just-in-time provisioning for a new identity (HTTP 403 provisioning-failed, or gRPC PermissionDenied with the reason provisioning-failed). The value counts refused requests, not users. One user with a bad token makes several refused requests. defect=missing_email: the access token has no valid email claim. Make the issuer put a valid email claim into the ACCESS token, not only into the ID token. defect=email_conflict: another IAM user already has this exact email, and IAM does not link identities by email. Follow the runbook. Do not link identities by hand before the identity check in the runbook. The warn log line that starts with 'just-in-time provisioning failed' names the issuer. See RUNBOOK section 4." }
 
-  # Block D, no series at all: metrics are off, or the binary is older than SMA-698.
-  # `sum by (...)` over an empty vector is EMPTY, not 0, so the alert stays silent. A rule
-  # "hardened" with `or vector(0)` must not turn this into a permanent alert.
+  # Block D documents the no-series case: metrics are off, or the binary is older than SMA-698.
+  # `sum by (...)` over an empty vector is EMPTY, not 0, so the alert stays silent. Block D kills
+  # no mutant in this battery. A1 (Block A, eval_time 5m) already fails an `or vector(0)`
+  # mutant: `vector(0)` would fire there, where exp_alerts is empty. Controller ruling: do not
+  # add a battery mutant for Block D.
   - interval: 1m
     input_series:
       - series: 'iam_authz_decisions_total{cache="hit",decision="allow"}'
