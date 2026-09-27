@@ -219,7 +219,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamDenialAuditDrops` | `rate(iam_denial_audits_dropped_total[5m]) > 0` | warning |
 | `IamOutboxBacklogAgeHigh` | `iam_outbox_oldest_unpublished_age_seconds > 300` | warning |
 | `IamOutboxEventsParked` | `increase(iam_outbox_relay_parked_total[15m]) > 0` | warning |
-| `IamOutboxPublishFailures` | `increase(iam_outbox_relay_publish_failures_total[5m]) > 0` for 5m | warning |
+| `IamOutboxPublishFailures` | `increase(iam_outbox_relay_publish_failures_total[2m]) > 0` for 2m | warning |
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
 | `IamOutboxNotificationsAbsent` | `(sum by (job, instance) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job, instance) (increase(iam_outbox_relay_drained_total[30m])) > 0) and on (job) (sum by (job) (increase(iam_outbox_notifying_enqueues_total[30m])) > 0)` for 15m | warning |
 | `IamPolicySnapshotReloadsStalled` | `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m | critical |
@@ -515,14 +515,43 @@ is also what produces the audit trail (`ReplayOutboxDeadLetter`, in `audit_log`)
 
 ### `IamOutboxPublishFailures` — outbox publishes are failing (warning)
 
-**Meaning.** `iam_outbox_relay_publish_failures_total` increased in the last 5 minutes and stayed
-increased for the `for: 5m` hold — a row's `EventPublisher::publish` call errored during a relay
-tick. This is deliberately the **earliest** outbox signal: it can fire before
-`IamOutboxBacklogAgeHigh` (which needs the backlog to actually age past 5 minutes) and well before
-`IamOutboxEventsParked` (which needs a row to exhaust `[outbox].max_attempts`, now ~5 minutes at
-the default `poll_interval_secs`, see above). The counter is primed at zero from boot
-(`relay.rs` increments it by 0 on every tick, even a tick that fails nothing), so `increase() > 0`
-can fire on the very first failure rather than needing a pre-existing nonzero baseline.
+**Meaning.** `iam_outbox_relay_publish_failures_total` increased in each 2-minute window for the
+`for: 2m` hold. A row's `EventPublisher::publish` call failed during relay ticks. A failure spell
+of about 90 s or more fires the alert about 2 to 3 minutes after onset. One isolated failure does
+NOT fire it, on purpose: SMA-471 D9 absorbs a short broker restart with no operator action. The
+alert resolves about 0 to 1 minute after the last failure (SMA-713).
+
+This is the **earliest** outbox signal. It can fire before `IamOutboxBacklogAgeHigh` (which needs
+the backlog to age past 5 minutes) and before `IamOutboxEventsParked` (which needs a row to exhaust
+`[outbox].max_attempts`, about 5 minutes at the default `poll_interval_secs`, see above). `main`
+primes the counter at zero when `outbox.relay_enabled` is true, and `relay.rs` increments it by 0
+on every tick. So `increase()` has a zero baseline before the first failure.
+
+**Scrape interval.** This rule **needs a scrape interval of 1 m or less**. The 2-minute window must
+hold at least 2 samples. At a longer interval `increase()` has too few samples and the alert does
+not fire. The repo scrapes every 15 s (`ops/observability/prometheus/prometheus.yml:3`).
+
+**One alert for each replica.** The rule is per series, so each IAM replica gives its own alert
+with its `instance` label. A broker outage gives one alert for each replica. This repo has no
+Alertmanager routing. If your Alertmanager does not group by `alertname` or `job`, expect one
+notification for each replica.
+
+**When the alert is silent:**
+- one isolated failure, or a failure spell shorter than about 45 s (by design);
+- a failure spell of about 45 to 75 s, for some phases against the 1-minute evaluation tick;
+- a scrape interval longer than 1 minute;
+- `outbox.relay_enabled = false` (no relay runs, and `main` does not prime the series);
+- `outbox.publisher.backend = "tracing"` (a publish almost never fails);
+- `metrics.enabled = false` (no series);
+- a broker that is down at boot: `NatsEventPublisher::connect` fails, `boot_deferred` returns
+  `Err` and the process drains and exits. No relay tick runs. Look for `CrashLoopBackOff` and the
+  log line `boot failed after the listeners were bound`;
+- a tick that returns `Err` before `relay.rs` counts its failures (the row query,
+  `active.update` or `txn.commit` fails). The failures of that tick are not counted.
+
+A short spell that does not fire this alert is still visible in the counter, in the relay log
+(`outbox event publish failed; will retry`) and in `event_outbox.last_error`. If such a spell
+parks a row, `IamOutboxEventsParked` fires.
 
 **Likely causes.** With the `tracing` backend (the default) this alert should never fire —
 `TracingEventPublisher::publish` only errors on serialization-adjacent bugs. With
@@ -549,6 +578,9 @@ permission revoked), or an oversized payload past NATS's `max_payload`.
   `max_attempts` specifically so this no longer needs urgent action within the first ~25 seconds).
   `async-nats` reconnects in the background on its own once the broker returns; no service restart
   is needed.
+  When this alert fires, the outage lasted at least about 90 s, which is longer than a routine
+  restart blip. If `iam_nats_connected` is back at 1 and the counter is flat again, the alert
+  resolves about 0 to 1 minute later.
 - Stream deleted or permission revoked: this does not self-heal — `NatsEventPublisher` never
   recreates or re-authenticates a stream after boot (D7 is boot-time only). Restore the stream
   (or the permission) and, if the stream itself was recreated from scratch, restart IAM so
@@ -620,7 +652,7 @@ the only signal.
 > (SMA-493). A denied publish does not fail its *request* with a permissions error — it times out,
 > so it never crash-loops like anything in this section. It is not silent, though: the broker's
 > permissions-violation text is still logged at `error` level (`RUNBOOK-nats.md` §1), and
-> `IamOutboxPublishFailures` (§4 above) still fires once a tick's publish times out.
+> `IamOutboxPublishFailures` (§4 above) still fires when publishes keep timing out for about 90 s or more.
 
 ### `IamOutboxRelayStalled` — the relay has stopped ticking (critical)
 
