@@ -640,12 +640,25 @@ impl MembershipRepository for InMemoryMemberships {
     }
 }
 
+/// SMA-649: faithful to the port doc. The principal arm runs the same guard `attach_in`
+/// applies in this fake (`store.principals`: absent -> `NotFound`, stored PRN differs from the
+/// supplied canonical PRN -> `PrnMismatch`); the node arm reuses `list_by_node`'s guard.
+/// `kind = None` keeps every row, also for a principal that has no `principal_kinds` entry.
 #[async_trait]
 impl MembershipKindQuery for InMemoryMemberships {
-    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: Option<PrincipalKind>, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
         let all = match axis {
-            MembershipAxis::Principal(principal) => self.list_by_principal(*principal, u64::MAX, 0).await?,
+            MembershipAxis::Principal(principal) => {
+                let stored = { self.0.principals.lock().unwrap().get(&principal.uuid()).cloned() }.ok_or(RepositoryError::NotFound)?;
+                if stored != principal.canonical() {
+                    return Err(RepositoryError::PrnMismatch);
+                }
+                self.list_by_principal(principal.uuid(), u64::MAX, 0).await?
+            }
             MembershipAxis::Node(node) => self.list_by_node(node, u64::MAX, 0).await?,
+        };
+        let Some(kind) = kind else {
+            return Ok(all.into_iter().skip(offset as usize).take(limit as usize).collect());
         };
         let kinds = self.0.principal_kinds.lock().unwrap().clone();
         let of_kind = |r: &MembershipRecord| Prn::parse(&r.principal_prn).ok().map(|p| PrincipalId::from_prn(p).uuid()).and_then(|u| kinds.get(&u).copied()) == Some(kind);

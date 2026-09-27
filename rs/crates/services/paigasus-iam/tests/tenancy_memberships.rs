@@ -417,7 +417,8 @@ async fn seed_service_account_principal(db: &DatabaseConnection, uuid: Uuid) -> 
 }
 
 /// SMA-676 D8 against Postgres: `list_of_kind` keeps only members of that kind, on the node
-/// axis and on the principal axis, and still applies the node guard.
+/// axis and on the principal axis. The guards of both axes are pinned by
+/// `list_of_kind_confirms_the_node_prn` and `list_of_kind_confirms_the_principal_prn`.
 #[tokio::test]
 async fn list_of_kind_keeps_only_members_of_that_kind_on_both_axes() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -435,11 +436,11 @@ async fn list_of_kind_keeps_only_members_of_that_kind_on_both_axes() {
     }
     let at_org = MembershipAxis::Node(TenancyNodeRef::Organization(org.id.clone()));
 
-    let users = repo.list_of_kind(&at_org, PrincipalKind::User, 200, 0).await.unwrap();
+    let users = repo.list_of_kind(&at_org, Some(PrincipalKind::User), 200, 0).await.unwrap();
     assert_eq!(users.iter().map(|r| r.principal_prn.clone()).collect::<Vec<_>>(), vec![person.canonical()]);
-    let bots = repo.list_of_kind(&at_org, PrincipalKind::ServiceAccount, 200, 0).await.unwrap();
+    let bots = repo.list_of_kind(&at_org, Some(PrincipalKind::ServiceAccount), 200, 0).await.unwrap();
     assert_eq!(bots.iter().map(|r| r.principal_prn.clone()).collect::<Vec<_>>(), vec![bot.canonical()]);
-    assert!(repo.list_of_kind(&MembershipAxis::Principal(bot.uuid()), PrincipalKind::User, 200, 0).await.unwrap().is_empty());
+    assert!(repo.list_of_kind(&MembershipAxis::Principal(bot.clone()), Some(PrincipalKind::User), 200, 0).await.unwrap().is_empty());
     assert_eq!(
         repo.list_by_node(&TenancyNodeRef::Organization(org.id.clone()), 200, 0).await.unwrap().len(),
         2,
