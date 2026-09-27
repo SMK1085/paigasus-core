@@ -460,12 +460,19 @@ Change the `IamJitProvisioningFailures` remediation in `docs/ops/RUNBOOK-observa
 - **Disable the calls without a binary revert.** A static Cedar `forbid` policy through
   `PutPolicy` that names the three write actions overrides the `platform_admin` permit. The
   runbook gives this policy. So no capability key is necessary.
-- **Binary rollback.** The plan reads the rollback analysis of SMA-584 (section 4.4) and records
-  what the old binary does with starter revision 4 in the database. Other state that stays after
-  a rollback: audit rows with the new action names (the audit query reads `action` as text, so
-  they stay readable), and the new `ERROR_REASON_*` values (old clients see an unknown enum
-  value). No row that the new calls wrote needs an old-binary change: links and email values are
-  ordinary rows.
+- **Binary rollback.** Plan Task 4 read the SMA-584 analysis (SMA-584 spec, section 4.4) and the
+  code. An old binary (revision 3) that boots against starter revision 4 leaves the stored rows
+  alone: a replica whose `STARTER_POLICY_REVISION` is lower than a stored row's revision does not
+  rewrite that row (SMA-477 D11, `roles.rs:46-51`). So a mixed or rolled-back fleet keeps the
+  revision-4 set and does not flap. The old binary compiles the stored `forbid-archived-writes`
+  source without a schema check (`engine.rs` uses the schema only for entities and the request,
+  lines 119 and 129). The three new action names in its `action in [...]` list therefore never
+  match a request of the old binary, and the old binary has no route that asks for them. The
+  forbid also cannot match at `Root`, because `Root` has no `effective_status` attribute. Other
+  state that stays after a rollback: audit rows with the new action names (the audit query reads
+  `action` as text, so they stay readable), and the new `ERROR_REASON_*` values (old clients see
+  an unknown enum value). No row that the new calls wrote needs an old-binary change: links and
+  email values are ordinary rows.
 
 ## 9. ADR
 

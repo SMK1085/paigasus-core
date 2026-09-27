@@ -60,6 +60,16 @@ pub enum Action {
     /// narrower resource to scope against. Checked in `adapters::http::users` and
     /// `adapters::grpc::users`.
     CreateUser,
+    /// Read one user with its external identities (SMA-712, `FindUserByEmail`). Authorized at
+    /// `Root` only, in `UserIdentityService`, not in the Cedar schema.
+    GetUser,
+    /// Link an external `(issuer, subject)` to a user (SMA-712). Equal to `platform_admin` in
+    /// power: a holder can attach an identity that it controls to any user.
+    LinkExternalIdentity,
+    /// Unlink an external identity from a user (SMA-712). A holder can lock out any user.
+    UnlinkExternalIdentity,
+    /// Change a user's email (SMA-712).
+    ChangeUserEmail,
 }
 
 impl Action {
@@ -106,6 +116,10 @@ impl Action {
         Action::RetireSystemPolicy,
         Action::InvokeModel,
         Action::CreateUser,
+        Action::GetUser,
+        Action::LinkExternalIdentity,
+        Action::UnlinkExternalIdentity,
+        Action::ChangeUserEmail,
     ];
 
     /// The exact Cedar action id, verbatim from `SCHEMA_SRC` — this string doubles as
@@ -154,6 +168,10 @@ impl Action {
             Action::RetireSystemPolicy => "RetireSystemPolicy",
             Action::InvokeModel => "InvokeModel",
             Action::CreateUser => "CreateUser",
+            Action::GetUser => "GetUser",
+            Action::LinkExternalIdentity => "LinkExternalIdentity",
+            Action::UnlinkExternalIdentity => "UnlinkExternalIdentity",
+            Action::ChangeUserEmail => "ChangeUserEmail",
         }
     }
 
@@ -188,7 +206,8 @@ impl Action {
             | Action::ListServiceAccounts
             | Action::ListApiKeys
             | Action::ListAuditLog
-            | Action::ListOutboxDeadLetters => false,
+            | Action::ListOutboxDeadLetters
+            | Action::GetUser => false,
             Action::CreateOrganization
             | Action::RenameOrganization
             | Action::ArchiveOrganization
@@ -215,7 +234,10 @@ impl Action {
             | Action::DiscardOutboxDeadLetter
             | Action::RetireSystemPolicy
             | Action::InvokeModel
-            | Action::CreateUser => true,
+            | Action::CreateUser
+            | Action::LinkExternalIdentity
+            | Action::UnlinkExternalIdentity
+            | Action::ChangeUserEmail => true,
         }
     }
 
@@ -299,7 +321,11 @@ mod tests {
                 | Action::DiscardOutboxDeadLetter
                 | Action::RetireSystemPolicy
                 | Action::InvokeModel
-                | Action::CreateUser => {}
+                | Action::CreateUser
+                | Action::GetUser
+                | Action::LinkExternalIdentity
+                | Action::UnlinkExternalIdentity
+                | Action::ChangeUserEmail => {}
             }
         }
         for a in Action::ALL {
@@ -307,8 +333,8 @@ mod tests {
         }
         assert_eq!(
             Action::ALL.len(),
-            41,
-            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser"
+            45,
+            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity"
         );
     }
     #[test]
@@ -350,5 +376,19 @@ mod tests {
         assert!(Action::RetireSystemPolicy.is_write(), "retirement deletes policy and role rows");
         assert!(!Action::RetireSystemPolicy.is_restore());
         assert!(Action::ALL.contains(&Action::RetireSystemPolicy), "must be in the catalog or the forbid list misses it");
+    }
+    /// SMA-712: `GetUser` is a read; the three identity writes are writes, not restores, so
+    /// they reach the generated `forbid-archived-writes` list.
+    #[test]
+    fn the_user_identity_actions_are_classified_and_round_trip() {
+        assert!(!Action::GetUser.is_write(), "finding a user is a read");
+        for a in [Action::LinkExternalIdentity, Action::UnlinkExternalIdentity, Action::ChangeUserEmail] {
+            assert!(a.is_write(), "{} changes a user", a.as_wire());
+            assert!(!a.is_restore(), "{} is not a restore", a.as_wire());
+        }
+        for a in [Action::GetUser, Action::LinkExternalIdentity, Action::UnlinkExternalIdentity, Action::ChangeUserEmail] {
+            assert_eq!(Action::parse(a.as_wire()), Some(a), "{} must round-trip", a.as_wire());
+            assert!(Action::ALL.contains(&a), "{} must be in ALL", a.as_wire());
+        }
     }
 }
