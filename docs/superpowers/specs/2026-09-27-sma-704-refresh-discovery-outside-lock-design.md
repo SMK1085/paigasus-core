@@ -290,8 +290,9 @@ With a recording store and a recording `prepareRefresh`:
     - exactly one token request and exactly one JWKS request reach it while the lock is held;
     - exactly one discovery request reaches it before the lock is taken.
 
-    The delays (discovery 0.9T, token and JWKS 0.55T each, T = 1000 ms) make the durations
-    readable. The durations are recorded, not asserted: the lock hold time, and the time of the
+    The delays (discovery 0.6T, token and JWKS 0.3T each, T = 1000 ms) make the durations
+    readable. Each leaves at least 400 ms before the client timeout. (Changed at plan review from
+    0.9T and 0.55T: 0.9T left only 100 ms, and a late timer on a loaded runner would time out.) The durations are recorded, not asserted: the lock hold time, and the time of the
     whole `resolveSession`. The plan records them in § 7.
 
     The test is written first and run against the code before the fix. There it must FAIL on the
