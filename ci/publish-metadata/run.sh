@@ -374,7 +374,9 @@ for entry in r1_entries:
         )
         continue
     if group is None or not r1_processed(entry):
-        if include:
+        # The key itself is the violation, even as an empty list (spec §4.1: such a crate
+        # "sets no changelog_include").
+        if raw is not None:
             errors.append(
                 f"{name}: sets `changelog_include` {include}, but it is not a processed "
                 "member of a version group. Rule R1 (SMA-716) allows the key only on a group "
@@ -1789,6 +1791,10 @@ PY
   _r1_toml "$tmp/r1-unprocessed.toml" "$inc_p" "$inc_d" '' 'changelog_include = ["paigasus-kernel"]'
   _expect_rc 1 "Check 5 (R1 key on a group member release-plz does not process)" \
     metadata_checks "$tmp/r1.json" "$tmp/r1-unprocessed.toml" "$r1_csv" "$fix_snap"
+
+  _r1_toml "$tmp/r1-unprocessed-empty.toml" "$inc_p" "$inc_d" '' 'changelog_include = []'
+  _expect_rc 1 "Check 5 (R1 empty key on a group member release-plz does not process)" \
+    metadata_checks "$tmp/r1.json" "$tmp/r1-unprocessed-empty.toml" "$r1_csv" "$fix_snap"
 
   printf '[workspace]\n\n[[package]]\nname = "paigasus-kernel"\nchangelog_include = ["paigasus-proto"]\n\n[[package]]\nname = "paigasus-proto"\nversion_group = "proto"\n%s\n\n[[package]]\nname = "paigasus-proto-derive"\nversion_group = "proto"\n%s\n' \
     "$inc_p" "$inc_d" >"$tmp/r1-nogroup.toml"

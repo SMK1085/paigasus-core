@@ -1348,4 +1348,4 @@ Expected: `rc=0`. One bash cannot run every gate on this Mac. For a gate that fa
 
 - [ ] **Step 6: Report**
 
-Report to the controller: each gate's verdict, the measured durations (filter run, group run, three controls), the `RPG_DEP_EDGE` measurement, and the Review Focus 3 behaviour (`fix(rs, py)` does not release) for Sven. Put the post-merge rollout check in the PR description: confirm that release PR #306 was force-updated and no longer lists `paigasus-kernel`; close a stale release PR by hand.
+Report to the controller: each gate's verdict, the measured durations (filter run, group run, three controls), the `RPG_DEP_EDGE` measurement, and the Review Focus 3 behaviour (`fix(rs, py)` releases at 0.1.1, row r26, as decided by Sven). Put the post-merge rollout check in the PR description: confirm that release PR #306 was force-updated and no longer lists `paigasus-kernel`; close a stale release PR by hand.
