@@ -455,7 +455,8 @@ Run each mutation, record the result in the PR, and restore by an edit (not `git
   (D8).
 - One pod that cannot discover, behind a round-robin balancer, fails the callbacks of logins that
   other pods started. Each retry then costs a full sign-in at the IdP. A readiness gate or an eager
-  discovery at start would prevent this. SMA-705 tracks it.
+  discovery at start would prevent this. SMA-705 tracks it. **Closed by SMA-705:** the chart's
+  readiness probe is now `<basePath>/readyz`, so such a pod is not ready and gets no traffic.
 - A reload of the callback 503 page logs a `state_unknown` rejection (D10).
 
 ## 7. Documentation changes

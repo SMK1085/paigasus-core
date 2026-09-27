@@ -1043,13 +1043,17 @@ Minimum event set: `login.started`, `login.callback_rejected` (with a `reason`
 enum — `txn_missing`, `txn_mismatch`, `state_unknown`, `code_exchange_failed`),
 `session.created`, `session.refreshed`, `session.refresh_failed`,
 `session.refresh_timeout`, `session.refresh.persist_failed`, `session.deleted`,
-`session.resolve_failed`, `logout.completed`, `store.unavailable`, `oidc.discovery_failed`.
+`session.resolve_failed`, `logout.completed`, `store.unavailable`, `oidc.discovery_failed`,
+`readiness.runtime_failed`.
 
 - `session.resolve_failed` — `getSession` could not resolve the session for a reason that is NOT a
   store outage (SMA-626 § 2.4). `store.unavailable` is reserved for the store itself.
-- `oidc.discovery_failed` — `{ zone, stage, reason }`: a login or a callback needed the OIDC
-  discovery document, and this process could not get it (SMA-656). `stage` is `login` or
-  `callback`; `reason` is a closed list. Its absence does not mean that the IdP is healthy.
+- `oidc.discovery_failed` — `{ zone, stage, reason }`: a login, a callback or the readiness route
+  needed the OIDC discovery document, and this process could not get it (SMA-656, SMA-705).
+  `stage` is `login`, `callback` or `readiness`; `reason` is a closed list. Its absence does not
+  mean that the IdP is healthy.
+- `readiness.runtime_failed` — `{ error }`: the readiness route could not build the auth runtime
+  (SMA-705). `error` is the caught error's `name` only, never its message.
 
 **Redaction rule, stated per field:** no event carries a token, a refresh token,
 an authorization code, the client secret, the Redis DSN, or a txn secret. `sid`

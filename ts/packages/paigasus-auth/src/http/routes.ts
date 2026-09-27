@@ -39,11 +39,12 @@
 import type { AuthorizationRequest, OidcTokens } from '../adapters/oidc';
 import { hashSecret, newSessionId, newTransactionId, newTransactionSecret, secretMatchesHash } from '../core/ids';
 import { validateReturnTo } from '../core/return-to';
-import { CallbackRejected, isOidcDiscoveryFailed, oidcDiscoveryReason } from '../core/errors';
+import { CallbackRejected, isOidcDiscoveryFailed } from '../core/errors';
 import type { SessionRecord } from '../core/session';
 import { sidTag, type OidcDiscoveryStage } from '../ports/logger';
 import type { AuthRuntime } from '../runtime';
 import { SESSION_COOKIE, TXN_COOKIE_PREFIX, clearCookie, readCookies, serializeCookie, txnCookieName } from './cookies';
+import { logDiscoveryFailed } from './discovery-log';
 import { AUTH_ROUTE_SUFFIXES, type AuthRouteSuffix } from './route-table';
 import { STORE_DOWN, loginRetryHref, storeStep, storeUnavailableResponse, type RetryLink } from './store-unavailable';
 
@@ -129,12 +130,13 @@ export function createAuthRoutes(runtime: AuthRuntime): AuthRoutes {
 
 /**
  * The 503 for an OIDC discovery failure (SMA-656 D4, D7), shared by the login and the callback
- * route. Logs one `oidc.discovery_failed` event with the zone, the typed stage and the closed
- * `reason` — never the caught error, its message, its name or a URL (ports/logger.ts's redaction
- * contract; A2). `oidcDiscoveryReason` maps any value outside the closed list to 'other'.
+ * route. Logs one `oidc.discovery_failed` event through http/discovery-log.ts's
+ * `logDiscoveryFailed`, the one emitter of that event (SMA-705 D8): the zone, the typed stage and
+ * the closed `reason`, never the caught error, its message, its name or a URL (ports/logger.ts's
+ * redaction contract; A2).
  */
 function discoveryFailedResponse(runtime: AuthRuntime, stage: OidcDiscoveryStage, err: unknown, href: string): Response {
-  runtime.logger.event('oidc.discovery_failed', { zone: runtime.zone, stage, reason: oidcDiscoveryReason(err) });
+  logDiscoveryFailed(runtime, stage, err);
   return storeUnavailableResponse({ kind: 'link', href, service: 'identity_provider' });
 }
 

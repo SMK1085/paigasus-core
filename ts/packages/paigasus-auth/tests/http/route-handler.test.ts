@@ -66,6 +66,7 @@ beforeEach(async () => {
       refresh: (token) => inner.refresh(token),
       revoke: (token) => inner.revoke(token),
       buildEndSessionUrl: (params) => inner.buildEndSessionUrl(params),
+      discoveryStatus: () => inner.discoveryStatus(),
     },
     publicOrigin: PUBLIC_ORIGIN,
     redirectUri: `${PUBLIC_ORIGIN}/iam/auth/callback`,

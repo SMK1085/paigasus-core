@@ -212,7 +212,7 @@ spec:
         # every image in this repo. It is a follow-up to measure, not a default to ship.
       containers:
         - name: console
-          image: "ghcr.io/smk1085/paigasus-iam-console:0.1.0"
+          image: "ghcr.io/smk1085/paigasus-iam-console:0.2.0"
           securityContext:
             allowPrivilegeEscalation: false
             # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for
@@ -250,14 +250,18 @@ spec:
           # parse and its failure is deliberately not memoized, so using it for liveness puts a
           # misconfigured pod into CrashLoopBackOff instead of leaving it running and NotReady
           # with a readable log — and RUNBOOK-containers.md § 4 requires liveness never to touch
-          # a dependency. The consoles have no /readyz; that is a recorded gap (spec § 7.8).
+          # a dependency.
+          # Readiness is /readyz (SMA-705). The pod is not ready until its auth runtime is built
+          # and one OIDC discovery succeeded. After that it stays ready for the life of the
+          # process. Readiness does not check Redis (SMA-705 D1). No timeoutSeconds: the route
+          # never waits for discovery (SMA-705 D3).
           livenessProbe:
             tcpSocket:
               port: http
             periodSeconds: 20
           readinessProbe:
             httpGet:
-              path: /iam/healthz
+              path: /iam/readyz
               port: http
             periodSeconds: 10
             failureThreshold: 3

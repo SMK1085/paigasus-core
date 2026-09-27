@@ -607,3 +607,49 @@ describe('createOidcClient — the OAuth code of a transient refresh failure (SM
     expect((err as Error).message).toMatch(/oidc refresh_token_grant failed/);
   });
 });
+
+// SMA-705 T1-T4. The two members that the readiness route uses, against the real local fixture.
+// The top-level beforeEach starts a fresh fixture for each row, so its `requests()` log starts empty.
+// The rows count the discovery requests in SMA-704's request log.
+describe('createOidcClient — discoveryStatus() and ensureDiscovered() (SMA-705 T1-T4)', () => {
+  it('T1: idle, then discovering during ensureDiscovered(), then discovered', async () => {
+    const oidc = makeClient();
+    expect(oidc.discoveryStatus()).toBe('idle');
+    const pending = oidc.ensureDiscovered();
+    expect(oidc.discoveryStatus()).toBe('discovering');
+    await pending;
+    expect(oidc.discoveryStatus()).toBe('discovered');
+    expect(fixture.requests().filter((r) => r.endpoint === 'discovery').length).toBe(1);
+  });
+
+  it('T2: an unreachable issuer rejects with OidcDiscoveryFailed, and the status is idle again', async () => {
+    const oidc = createOidcClient({
+      issuer: 'http://127.0.0.1:1',
+      clientId: 'test-client',
+      clientSecret: 'test-secret',
+      httpTimeoutMs: 2000,
+      clockToleranceSeconds: 30,
+      scopes: 'openid',
+      allowInsecureRequests: true,
+    });
+    const pending = oidc.ensureDiscovered();
+    expect(oidc.discoveryStatus()).toBe('discovering');
+    const err: unknown = await pending.catch((e: unknown) => e);
+    expect(isOidcDiscoveryFailed(err)).toBe(true);
+    expect(oidc.discoveryStatus()).toBe('idle');
+  });
+
+  it('T3: ensureDiscovered() and buildAuthorizationUrl started together send ONE discovery request', async () => {
+    const oidc = makeClient();
+    await Promise.all([oidc.ensureDiscovered(), oidc.buildAuthorizationUrl({ redirectUri: REDIRECT_URI, state: STATE })]);
+    expect(fixture.requests().filter((r) => r.endpoint === 'discovery').length).toBe(1);
+  });
+
+  it('T4: after discovered, a second ensureDiscovered() sends no request and the status stays discovered', async () => {
+    const oidc = makeClient();
+    await oidc.ensureDiscovered();
+    await oidc.ensureDiscovered();
+    expect(fixture.requests().filter((r) => r.endpoint === 'discovery').length).toBe(1);
+    expect(oidc.discoveryStatus()).toBe('discovered');
+  });
+});

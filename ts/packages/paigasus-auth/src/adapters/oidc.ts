@@ -9,9 +9,13 @@
 // call. This is what lets `createAuthRuntime` validate configuration and fail fast on a bad
 // cross-field rule (§ runtime.ts) WITHOUT making a network call — discovery only happens when a
 // login, refresh, or logout actually occurs. On a discovery failure the cached promise is
-// cleared, so the NEXT call retries rather than replaying the same rejection forever.
+// cleared, so the NEXT call retries rather than replaying the same rejection forever. SMA-705: the
+// readiness route (http/readiness.ts) starts discovery through `ensureDiscovered()`, and it is the
+// first caller in a normal process. `discoveryStatus()` reads the state with no I/O.
 //
-// `ensureDiscovered` (SMA-704) runs that discovery and sends no other request.
+// `ensureDiscovered` (SMA-704) runs that discovery and sends no other request. It goes through
+// getConfig(), so a probe, a login, a callback and a refresh that run at the same time share one
+// configPromise, and the IdP gets one discovery request.
 // core/single-flight.ts's resolveSession calls it, as `prepareRefresh`, BEFORE it takes the
 // session lock. After it resolves, `refresh` finds a resolved `configPromise` and sends no
 // discovery request under the lock. Without it, the first refresh of a cold process sends a third
@@ -94,6 +98,12 @@ export interface BuildEndSessionUrlParams {
   state?: string;
 }
 
+/**
+ * SMA-705. The state of one client's discovery. `discovered` is final: the adapter keeps the first
+ * successful result for the life of the process. A failure goes back to `idle`.
+ */
+export type OidcDiscoveryStatus = 'idle' | 'discovering' | 'discovered';
+
 export interface OidcClient {
   /**
    * Runs OIDC discovery if this process has not completed it, and waits for it. Sends no token
@@ -107,6 +117,8 @@ export interface OidcClient {
   /** Best-effort (design doc § 9.5) — callers decide whether a rejection blocks logout. */
   revoke(token: string): Promise<void>;
   buildEndSessionUrl(params: BuildEndSessionUrlParams): Promise<string>;
+  /** SMA-705 D3. Synchronous, no I/O: the state of this client's discovery. */
+  discoveryStatus(): OidcDiscoveryStatus;
 }
 
 export interface CreateOidcClientOptions {
@@ -310,6 +322,9 @@ export function classifyDiscoveryError(err: unknown): OidcDiscoveryFailureReason
 export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
   const secret = new RedactedSecret(opts.clientSecret);
   let configPromise: Promise<client.Configuration> | undefined;
+  // SMA-705. True after the first successful discovery, for the life of this client. Only the
+  // `.then` in getConfig sets it.
+  let discovered = false;
 
   function getConfig(): Promise<client.Configuration> {
     // M1: openid-client does NOT verify the id_token's JWS signature by default for a plain
@@ -336,6 +351,12 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
       .discovery(new URL(opts.issuer), opts.clientId, { client_secret: secret.reveal(), [client.clockTolerance]: opts.clockToleranceSeconds }, undefined, {
         timeout: opts.httpTimeoutMs / 1000,
         execute,
+      })
+      .then((config) => {
+        // SMA-705. The flag is set inside the chain, so the status is 'discovered' before any
+        // caller of this promise resumes. A failure skips this handler and never sets the flag.
+        discovered = true;
+        return config;
       })
       .catch((err: unknown) => {
         // Let the NEXT call retry discovery instead of replaying this rejection forever.
@@ -477,6 +498,11 @@ export function createOidcClient(opts: CreateOidcClientOptions): OidcClient {
         // Throws (synchronously) when the discovered server metadata has no end_session_endpoint.
         throw wrapError('build_end_session_url', err);
       }
+    },
+
+    discoveryStatus(): OidcDiscoveryStatus {
+      if (discovered) return 'discovered';
+      return configPromise !== undefined ? 'discovering' : 'idle';
     },
   };
 }

@@ -18,7 +18,7 @@
 import { expect } from 'vitest';
 import { claimsPrincipalResolver } from '../../src/adapters/claims-resolver.js';
 import { MemorySessionStore } from '../../src/adapters/memory-store.js';
-import type { AuthorizationRequest, BuildEndSessionUrlParams, OidcClient, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
+import type { AuthorizationRequest, BuildEndSessionUrlParams, OidcClient, OidcDiscoveryStatus, OidcTokens, RefreshedTokens } from '../../src/adapters/oidc.js';
 import { SessionStoreTimeout, SessionStoreUnavailable } from '../../src/core/errors.js';
 import { hashSecret } from '../../src/core/ids.js';
 import { SESSION_COOKIE, txnCookieName } from '../../src/http/cookies.js';
@@ -87,15 +87,45 @@ export interface FakeOidc extends OidcClient {
   authorizationError?: Error;
   /** SMA-656: when set, `authorizationCodeGrant` rejects with this error. */
   codeGrantError?: Error;
+  /** SMA-705: what `discoveryStatus()` answers. The default is 'discovered'. */
+  status: OidcDiscoveryStatus;
+  /** SMA-705: the number of `ensureDiscovered()` calls. */
+  ensureDiscoveredCalls: number;
+  /**
+   * SMA-705: when true, each `ensureDiscovered()` call returns a pending promise. The default is
+   * false: the call resolves at once, as SMA-704's rows expect.
+   */
+  holdEnsureDiscovered: boolean;
+  /** SMA-705: resolves the promise of the latest held `ensureDiscovered()` call. That call sets it. */
+  resolveEnsureDiscovered?: () => void;
+  /** SMA-705: rejects the promise of the latest held `ensureDiscovered()` call. That call sets it. */
+  rejectEnsureDiscovered?: (err: Error) => void;
 }
 
-/** No network. Unless `codeGrantError` is set, the code exchange succeeds and returns NEW_REFRESH_TOKEN. */
+/**
+ * No network. Unless `codeGrantError` is set, the code exchange succeeds and returns
+ * NEW_REFRESH_TOKEN. SMA-704: `ensureDiscovered()` resolves at once by default. SMA-705: when
+ * `holdEnsureDiscovered` is true, each call returns a pending promise. The test settles it with
+ * `resolveEnsureDiscovered` or `rejectEnsureDiscovered`, so it controls when the detached promise
+ * settles.
+ */
 export function fakeOidc(): FakeOidc {
   const oidc: FakeOidc = {
     revokeCalls: [],
     failRevoke: false,
     endSessionCalls: [],
-    ensureDiscovered: (): Promise<void> => Promise.resolve(),
+    status: 'discovered',
+    ensureDiscoveredCalls: 0,
+    holdEnsureDiscovered: false,
+    discoveryStatus: (): OidcDiscoveryStatus => oidc.status,
+    ensureDiscovered: (): Promise<void> => {
+      oidc.ensureDiscoveredCalls += 1;
+      if (!oidc.holdEnsureDiscovered) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        oidc.resolveEnsureDiscovered = () => resolve();
+        oidc.rejectEnsureDiscovered = (err: Error) => reject(err);
+      });
+    },
     buildAuthorizationUrl: (): Promise<AuthorizationRequest> =>
       oidc.authorizationError !== undefined
         ? Promise.reject(oidc.authorizationError)

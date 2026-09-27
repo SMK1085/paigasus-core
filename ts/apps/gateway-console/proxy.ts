@@ -26,8 +26,9 @@ const REQUEST_PATH_HEADER = 'x-paigasus-request-path';
 
 const authMiddleware = createAuthMiddleware({
   // '/api/chat' (SMA-635): the playground route answers its own 401 JSON. An exact match, so it
-  // opens no other path.
-  publicPaths: [...authRoutePaths(), '/', '/healthz', '/api/chat'],
+  // opens no other path. '/readyz' (SMA-705 D9): the kubelet's readiness probe sends no session
+  // cookie. Without this entry the proxy redirects the probe to the login route.
+  publicPaths: [...authRoutePaths(), '/', '/healthz', '/readyz', '/api/chat'],
   loginPath: '/auth/login',
 });
 

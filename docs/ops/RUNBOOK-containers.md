@@ -344,6 +344,12 @@ image has the same shape as the Rust service images:
   `ARG` or `ENV`, so neither instruction can use `${APP}`. The files are `.mjs`, not `.js`, because
   every console `package.json` sets `"type": "module"`. Next copies that `package.json` into the
   standalone tree, so a CJS `require()` shim would need `require(esm)` interop and would fail.
+- **The consoles have two probe routes (SMA-705).** `<BASE_PATH>/healthz` parses the
+  configuration and touches no dependency. The image `HEALTHCHECK`, `ci/images/run.sh` and the
+  test harnesses use it. `<BASE_PATH>/readyz` answers 200 `{"status":"ready"}` only after the
+  auth runtime is built and one OIDC discovery succeeded, and 503 `{"status":"unready"}` before
+  that. It does not check Redis. The Helm chart's `readinessProbe` uses `/readyz`, and its liveness
+  probe is a TCP check. See `ts/packages/paigasus-auth/README.md`, "The readiness route".
 - **The healthcheck file fetches `<BASE_PATH>/healthz` on `127.0.0.1:$PORT`, with a 2500 ms
   signal.** The `fetch` call passes `signal: AbortSignal.timeout(2500)`. Docker kills the probe
   after `--timeout=3s`. Without the signal, a server that accepts the connection and never answers
