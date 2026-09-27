@@ -16,9 +16,10 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 - `ListRoleGrants` accepts new filters: `scope_prn`, `role_key` and `principal_kind`. A request
   needs a `principal_prn` or a `scope_prn`. IAM refuses an unknown `principal_kind` with the
-  reason `invalid-principal-kind`. IAM pages a filtered request: `limit` and `offset` range from
-  1 to 200, with a default of 50. IAM orders the page by `principal_id`, then `id`. `scope_prn`
-  matches its scope exactly. It does not match a descendant scope (SMA-676).
+  reason `invalid-principal-kind`. IAM pages a filtered request. `limit` is 1 to 200, with a
+  default of 50. `offset` is 0 or more, with a default of 0. IAM orders the page by
+  `principal_id`, then `id`. `scope_prn` matches its scope exactly. It does not match a
+  descendant scope (SMA-676).
 - `ListMemberships` accepts a `principal_kind` filter. IAM refuses an unknown value with the same
   reason, `invalid-principal-kind` (SMA-676).
 - `GrantRole` is idempotent. A repeat grant for the same principal, role and scope returns the
@@ -57,7 +58,7 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 - Two first logins of the same identity at the same time both succeed. Before, in Postgres the
   second login failed on the email and got `403 provisioning-failed` (SMA-698).
-- A bootstrap-admin seed that loses a concurrent race is now `AlreadySeeded`. IAM no longer
+- A bootstrap-admin seed that loses a concurrent race is now a success. IAM no longer
   increments `iam_bootstrap_admin_seed_failures_total{stage="txn"}` for it. IAM no longer logs
   the lockout warning for it either (SMA-676).
 
