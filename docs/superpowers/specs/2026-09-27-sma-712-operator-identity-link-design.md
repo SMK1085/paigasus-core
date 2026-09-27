@@ -4,7 +4,7 @@
 - Source: SMA-706 spec, section 11, decision 2
   (`docs/superpowers/specs/2026-09-27-sma-706-jit-failure-alert-design.md`)
 - Related: SMA-698 (the `email_conflict` defect), SMA-706 (the alert and the runbook)
-- Status: revised after the spec challenge (section 14), for Gate 1
+- Status: approved at Gate 1 (2026-09-27)
 
 ## 1. Problem
 
@@ -559,9 +559,10 @@ ADR-0024. The plan confirms the number in Notion. Section 10 is the draft text.
 - `ci/error-registry/check.py` (`MANIFEST`), only if a test file spells a code as a literal.
 - `docs/ops/RUNBOOK-observability.md`.
 
-## 13. Open questions for Gate 1
+## 13. Questions from the spec challenge
 
-These came from the spec challenge. Each has a recommendation.
+Sven approved the spec at Gate 1 (2026-09-27) with no change to these recommendations. So each
+recommendation below is the decision.
 
 1. **Audit a successful find by email?** It reads personal data. Recommendation: no. No other
    read call in IAM writes an audit row, and the calls that change data are audited.
