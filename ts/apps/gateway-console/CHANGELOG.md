@@ -10,6 +10,18 @@ A maintainer writes this file by hand. The version source is the `version` field
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
+### Added
+
+- A readiness route, `GET /gateway/readyz`. It answers 503 `{"status":"unready"}` until the auth
+  runtime is built and one OIDC discovery succeeded. After that it answers 200
+  `{"status":"ready"}` for the life of the process. It never waits for discovery. The proxy lets
+  it through with no session cookie. The Helm chart's readiness probe uses it (SMA-705).
+- Two log events. `oidc.discovery_failed` has the stage `readiness` for a discovery that the
+  route started. `readiness.runtime_failed` holds only the name of the error that stopped the
+  runtime build (SMA-705).
+
 ## [0.1.0] - 2026-09-26
 
 ### Added
