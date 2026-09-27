@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# ONE values block. Six projections derive from `zones` and from nothing else: the ingress path
-# rules, PAIGASUS_ZONES, PAIGASUS_SERVICES, PAIGASUS_IAM_GRPC_URL, the console Deployments and the
+# ONE values block. Six projections derive from `zones` and from nothing else: the route path
+# rules (the Ingress rules, and the HTTPRoute rules when httpRoute.enabled is true),
+# PAIGASUS_ZONES, PAIGASUS_SERVICES, PAIGASUS_IAM_GRPC_URL, the console Deployments and the
 # backend Deployments. A zone's `enabled` flag governs ALL of them together — that is what makes
 # "routable but unadvertised" unrepresentable rather than merely checked (spec D6).
 #
-# Exception (SMA-695, spec D2): with ingress.enabled false the chart renders no ingress path rules,
-# and the operator's own route is a projection of `zones` that the operator keeps by hand.
+# Exception (SMA-695, spec D2): with ingress.enabled false AND httpRoute.enabled false the chart
+# renders no route path rules, and the operator's own route is a projection of `zones` that the
+# operator keeps by hand.
 #
 # A zone id MUST be a member of SERVICE_SLUGS (ts/packages/paigasus-discovery/src/core/state.ts).
 # parseServiceMap THROWS on an unknown key, in BOTH consoles, at first request (spec F8).
@@ -108,9 +110,10 @@ zones:
       url: ""
 
 ingress:
-  enabled: true          # false: the chart renders no Ingress. Route https://<host><basePath> to
-                         # each enabled zone's console Service yourself: port name http, no
-                         # rewrite, Host forwarded unchanged, TLS ended in front of the Services.
+  enabled: true          # false: the chart renders no Ingress. Then set httpRoute.enabled for the
+                         # chart-owned HTTPRoute (below), or route https://<host><basePath> to each
+                         # enabled zone's console Service yourself: port name http, no rewrite,
+                         # Host forwarded unchanged, TLS ended in front of the Services.
                          # See docs/ops/RUNBOOK-chart.md § 11. A boolean: a quoted "false" is refused.
   host: ""               # REQUIRED, also when enabled is false. Feeds PAIGASUS_PUBLIC_ORIGIN as
                          # https://<host>. A bare host name: no scheme, no path, no port.
