@@ -139,7 +139,8 @@ late and unclearly. Check these four items before you install:
    link identities by email. The line does not show the email, the subject or the token. IAM writes
    at most one line for each issuer and defect in 10 seconds. The field `suppressed` gives the
    number of failures since the last line. The counter `iam_jit_provisioning_failures_total`
-   counts each refused request.
+   counts each refused request. The alert `IamJitProvisioningFailures` fires on it.
+   `RUNBOOK-observability.md` §4 gives the operator action for each `defect` value.
 3. **Algorithm.** The token must be signed with RS256 or ES256, and its header must carry a `kid`.
 4. **Discovery.** The discovery document's `issuer` must equal `oidc.issuer`, and its `jwks_uri`
    must be `https`.

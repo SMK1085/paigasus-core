@@ -33,11 +33,32 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { isSessionStoreUnavailable } from '../core/errors';
 import { validateReturnTo } from '../core/return-to';
-import { resolveSession, type ResolvedSession } from '../core/single-flight';
+import { resolveSession, type ResolveDeps, type ResolvedSession } from '../core/single-flight';
 import { SESSION_COOKIE } from '../http/cookies';
 import type { StoreUnavailableStage } from '../ports/logger';
 import { sidTag } from '../ports/logger';
 import type { AuthRuntime } from '../runtime';
+
+/**
+ * The ResolveDeps for one runtime (SMA-704). getSession uses it, and so does the e2e fixture server
+ * (tests/e2e/fixture-server.ts), so the e2e tier runs this wiring and not a copy. All three IdP
+ * functions go to the one `runtime.oidc`, so `prepareRefresh` and `refresh` share one discovery
+ * cache: after `prepareRefresh` resolves, `refresh` sends no discovery request under the lock.
+ * tests/next/get-session.test.ts (SMA-704 test 9) fails if `prepareRefresh` is not wired here.
+ */
+export function resolveDepsFor(runtime: AuthRuntime): ResolveDeps {
+  return {
+    store: runtime.store,
+    prepareRefresh: () => runtime.oidc.ensureDiscovered(),
+    refresh: (refreshToken) => runtime.oidc.refresh(refreshToken),
+    revoke: (token) => runtime.oidc.revoke(token),
+    logger: runtime.logger,
+    skewMs: runtime.skewMs,
+    lockTtlMs: runtime.lockTtlMs,
+    lockWaitMs: runtime.lockWaitMs,
+    ttlMs: runtime.ttlMs,
+  };
+}
 
 /**
  * Read the current session, if any. NEVER redirects and NEVER throws — every failure mode (no
@@ -50,19 +71,7 @@ export async function getSession(runtime: AuthRuntime): Promise<ResolvedSession 
   if (sid === undefined) return null;
 
   try {
-    return await resolveSession(
-      {
-        store: runtime.store,
-        refresh: (refreshToken) => runtime.oidc.refresh(refreshToken),
-        revoke: (token) => runtime.oidc.revoke(token),
-        logger: runtime.logger,
-        skewMs: runtime.skewMs,
-        lockTtlMs: runtime.lockTtlMs,
-        lockWaitMs: runtime.lockWaitMs,
-        ttlMs: runtime.ttlMs,
-      },
-      sid,
-    );
+    return await resolveSession(resolveDepsFor(runtime), sid);
   } catch (err) {
     // A store blip degrades to signed-out rather than a 500 — see the file header. That degrade
     // must not also be SILENT, so every failure still logs exactly one line.

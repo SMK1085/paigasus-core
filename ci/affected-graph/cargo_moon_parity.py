@@ -246,7 +246,7 @@ CARGO_CONFIG_INPUT = "rs/.cargo/config.toml"
 #
 # FORWARD COVER, NOT MEASURED COVERAGE — the same warning FFI_MARKERS carries for `maturin`.
 # Arm 1 reports ZERO rows on the real corpus and always has; arm 2 reports exactly one, at
-# ci/release-parity/ecosystems/release-plz.sh:152, and only once script_source_refs makes that
+# ci/release-parity/ecosystems/release-plz.sh:156, and only once script_source_refs makes that
 # file reachable. Do not read a green run as proof either arm works — the self-test fixtures are
 # the proof.
 #
@@ -267,8 +267,8 @@ CARGO_VAR_CMD_RE = re.compile(
 CARGO_VAR_NAME = "cargo"
 
 # Arm 2 — the `CARGO=` environment prefix, the shape this repo actually uses
-# (ci/release-parity/ecosystems/release-plz.sh:152). The name is EXACTLY `CARGO`: CARGO_HOME,
-# CARGO_TERM_COLOR and CARGO_NET_OFFLINE configure cargo without redirecting it, and line 152
+# (ci/release-parity/ecosystems/release-plz.sh:156). The name is EXACTLY `CARGO`: CARGO_HOME,
+# CARGO_TERM_COLOR and CARGO_NET_OFFLINE configure cargo without redirecting it, and line 156
 # carries both `CARGO=` and `CARGO_NET_OFFLINE=` so a "name mentions cargo" predicate reports the
 # wrong one (spec M6).
 #

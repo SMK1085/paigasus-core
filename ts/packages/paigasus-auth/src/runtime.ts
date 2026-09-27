@@ -140,6 +140,18 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
   // "At or above" — not just "above" — because a refresh taking exactly the bound still races a
   // second holder. The best-effort revokes of SMA-681 are not in this bound: single-flight runs
   // them after it releases the lock.
+  //
+  // DISCOVERY IS NOT ONE OF THE CALLS UNDER THE LOCK (SMA-704). core/single-flight.ts's
+  // resolveSession calls `prepareRefresh` before it takes the lock, and next/get-session.ts's
+  // resolveDepsFor wires that to OidcClient.ensureDiscovered. Under the lock, the `getConfig()` in
+  // `refresh()` is then a resolved promise and sends nothing. With discovery under the lock, the
+  // shipped defaults would need 3x (10500 ms) inside a 10000 ms TTL.
+  //
+  // This rule covers the IdP calls only. The store calls under the lock — such as the post-lock
+  // `get` and the fenced `set` — are each bounded by 4x PAIGASUS_SESSION_REDIS_TIMEOUT_MS
+  // (adapters/operation-deadline.ts), and they are not in this rule. One slow `get` plus 2x the
+  // OIDC timeout is 11000 ms at the defaults. No issue tracks this residual. The SMA-704 spec § 6
+  // and the README record it.
   if (2 * cfg.PAIGASUS_OIDC_HTTP_TIMEOUT_MS >= cfg.PAIGASUS_SESSION_LOCK_TTL_MS) {
     throw new AuthConfigError('2x PAIGASUS_OIDC_HTTP_TIMEOUT_MS must be strictly below PAIGASUS_SESSION_LOCK_TTL_MS');
   }
@@ -222,8 +234,13 @@ export async function createAuthRuntime(cfg: ComposedConfig, deps: CreateAuthRun
  * its basePath, redirect URI and post-logout URI. Every login would then leave the second zone. The
  * global symbol registry is also shared with every other library in the process, so the version
  * segment keeps a future, incompatible `AuthRuntime` off this slot rather than on it.
+ *
+ * v2 SINCE SMA-704. `OidcClient` gained the required `ensureDiscovered`, and `AuthRuntime.oidc` is
+ * one. A runtime that an older module copy cached under v1 (for example across a dev HMR reload)
+ * has no such method, and every refresh would fail on it. The new version keeps this copy off that
+ * slot.
  */
-const RUNTIME_KEY_PREFIX = 'paigasus.auth.runtime.v1';
+const RUNTIME_KEY_PREFIX = 'paigasus.auth.runtime.v2';
 
 function runtimeKey(zone: string): symbol {
   return Symbol.for(`${RUNTIME_KEY_PREFIX}:${zone}`);

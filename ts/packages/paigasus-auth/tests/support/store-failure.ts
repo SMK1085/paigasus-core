@@ -107,6 +107,7 @@ export function fakeOidc(): FakeOidc {
     revokeCalls: [],
     failRevoke: false,
     endSessionCalls: [],
+    ensureDiscovered: (): Promise<void> => Promise.resolve(),
     status: 'discovered',
     discoverCalls: 0,
     discoveryStatus: (): OidcDiscoveryStatus => oidc.status,

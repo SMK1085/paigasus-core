@@ -18,6 +18,10 @@
 // `readiness.runtime_failed` carries `error`, the caught error's `name` only (SMA-705 D10). Never
 // its message or its `input`: node-redis parses the Redis URL with `new URL()`, and that TypeError
 // holds the URL, password included.
+//
+// `session.refresh_failed` may also carry `stage` (SMA-704), from RefreshFailedStage below. It is
+// present only when the refresh failed BEFORE the session lock. The line never carries both `stage`
+// and `oauthError`: a discovery failure has no OAuth code.
 
 export type AuthEventName =
   | 'login.started'
@@ -52,6 +56,13 @@ export type StoreUnavailableStage =
  * refresh or logout stage is a new member here, not a new event name.
  */
 export type OidcDiscoveryStage = 'login' | 'callback' | 'readiness';
+
+/**
+ * The closed set of `stage` values for `session.refresh_failed` (SMA-704). `'discovery'` means
+ * `prepareRefresh` (OIDC discovery) failed before the session lock was taken, so no token request
+ * was sent. A failure of the token call under the lock has no `stage`.
+ */
+export type RefreshFailedStage = 'discovery';
 
 export interface AuthLogger {
   event(name: AuthEventName, fields: AuthEventFields): void;
