@@ -325,11 +325,17 @@ async fn readyz_and_introspect_do_not_require_bearer() {
     assert_eq!(body["error"]["code"], "identity-not-provisioned");
 }
 
+/// A valid token from a JIT-disabled issuer for an unknown identity is 403
+/// `identity-not-provisioned`. SMA-707 T1: IAM also writes one `info` line that names the issuer,
+/// and not the subject or the email.
 #[tokio::test]
 async fn jit_disabled_unknown_identity_is_403() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
+    // Installed before `AppState::new`, which writes its own `accept_invalid_tls` warn line; the
+    // filter on `JIT_DISABLED_LINE` below skips it.
+    let (logs, _logs_guard) = support::capture_logs();
     let jit_enabled = start_mock_idp().await;
     let jit_disabled = start_mock_idp().await;
     // Two configured issuers; the second has jit_provisioning = false.
@@ -339,10 +345,19 @@ async fn jit_disabled_unknown_identity_is_403() {
     // A valid token from the JIT-disabled issuer for an unknown identity: the middleware
     // verifies the signature but refuses to provision (per-issuer flag, D5), so the request
     // is 403 `identity-not-provisioned` instead of a JIT success.
-    let token = jit_disabled.bearer("no-jit-user", Some("nojit@example.com"), "paigasus", 3600);
+    let token = jit_disabled.bearer("t1-jd-subject-5e2c", Some("t1-jd-mail-5e2c@example.com"), "paigasus", 3600);
     let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), Some(&token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"]["code"], "identity-not-provisioned");
+
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(support::JIT_DISABLED_LINE)).collect();
+    assert_eq!(lines.len(), 1, "exactly one JIT-disabled line expected:\n{text}");
+    let line = lines[0];
+    assert!(line.contains("INFO"), "the line is at info: {line}");
+    assert!(line.contains(&format!("issuer=\"{}\"", jit_disabled.issuer)), "the line names the JIT-disabled issuer: {line}");
+    assert!(!text.contains("t1-jd-subject-5e2c"), "the log must not contain the subject:\n{text}");
+    assert!(!text.contains("t1-jd-mail-5e2c"), "the log must not contain the email:\n{text}");
 }
 
 #[tokio::test]
@@ -490,4 +505,42 @@ async fn protected_route_with_a_token_without_email_logs_the_provisioning_failur
     assert!(line.contains("missing_email"), "the line names the defect: {line}");
     assert!(line.contains(&idp.issuer), "the line names the issuer: {line}");
     assert!(!text.contains("t1-no-email-subject"), "the log must not contain the subject:\n{text}");
+}
+
+/// SMA-707 T3: `POST /v1/authn/introspect` for an unknown identity of a JIT-disabled issuer is
+/// 403 and writes no JIT-disabled line (D10). The issuer must be JIT-disabled: with JIT on, a
+/// misplaced line would not appear either, so `introspect_unknown_identity_is_403_and_never_provisions`
+/// cannot detect it. Control in the same test: a protected request with the same token then writes
+/// exactly one line, so the capture can see the line on every run.
+#[tokio::test]
+async fn introspect_on_a_jit_disabled_issuer_writes_no_jit_disabled_line() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (logs, _logs_guard) = support::capture_logs();
+    let idp = start_mock_idp().await;
+    let state = AppState::new(db, &test_config_with(&[(&idp, false)], 30)).await.expect("AppState::new");
+    let app = router(state);
+    let token = idp.bearer("t3-jd-subject-8b4d", Some("t3-jd-mail-8b4d@example.com"), "paigasus", 3600);
+
+    let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "identity-not-provisioned");
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(support::JIT_DISABLED_LINE)).collect();
+    assert!(lines.is_empty(), "introspect must not write the JIT-disabled line:\n{text}");
+
+    let (status, body) = send(&app, "GET", "/v1/organizations", None, Some(&token)).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "identity-not-provisioned");
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(support::JIT_DISABLED_LINE)).collect();
+    assert_eq!(lines.len(), 1, "control: the protected request writes exactly one line:\n{text}");
+    let line = lines[0];
+    assert!(line.contains("INFO"), "the line is at info: {line}");
+    assert!(line.contains(&format!("issuer=\"{}\"", idp.issuer)), "the line names the issuer: {line}");
+    assert!(!text.contains("t3-jd-subject-8b4d"), "the log must not contain the subject:\n{text}");
+    assert!(!text.contains("t3-jd-mail-8b4d"), "the log must not contain the email:\n{text}");
 }
