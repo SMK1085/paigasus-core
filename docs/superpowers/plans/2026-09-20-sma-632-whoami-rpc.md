@@ -1922,9 +1922,9 @@ need bash 4+ are re-run in Step 4.
 - [ ] **Step 3: If a task fails, diagnose it before re-running**
 
 <!-- moon-diagnosis:superseded -->
-> **Superseded (SMA-711).** The Step 1 `jq` query in this document prints `null` for the command
-> and the exit code, because moon writes both under `.meta`. The corrected procedure is in
-> `CLAUDE.md` between the `moon-diagnosis` markers.
+> **Superseded (SMA-711).** The `jq` query in this document (a copy of the moon-diagnosis Step 1
+> query) prints `null` for the command and the exit code, because moon writes both under `.meta`.
+> The corrected procedure is in `CLAUDE.md` between the `moon-diagnosis` markers.
 
 **Capture first.** A re-run overwrites the evidence, and a *passing* re-run is as destructive as
 a failing one:

@@ -103,7 +103,7 @@ defines `:ok` as "a deliberate reference to the corrected procedure". After this
 marker is false in these files. In five of them, the marker sits directly above a copyable
 broken query.
 
-In each file, change `:ok` to `:superseded` and add one pointer line under it, in the format that
+In each file, change `:ok` to `:superseded` and add a short pointer blockquote under it, in the format that
 SMA-597 used (`docs/superpowers/specs/2026-08-16-sma-376-kernel-cratesio-publish-design.md:549-553`):
 the Step 1 query in this file prints `null`; the corrected procedure is in `CLAUDE.md` between
 the `moon-diagnosis` markers (SMA-711). The rest of each file stays as it is. The files:

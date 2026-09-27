@@ -187,7 +187,8 @@ a gate. Do not copy it here.
   command are in `operations[]`. They are the `command` and `exitCode` fields of the `.meta`
   object of the entry whose `meta.type` is `task-execution`. Until SMA-711 this query read the
   two fields from the entry itself, so it printed `null`. No gate runs this query
-  (`ci/actionlint/README.md` L29, SMA-714).
+  (limitation L29 in `ci/actionlint/README.md`, SMA-714).
+
   `exec: []` means that the action failed before a task ran. Read `error` and the other
   operations of that action. A `null` exit code with the `status` `timed-out` means that moon
   stopped the task, so there is no exit code. `command` is a one-line display string, not the

@@ -170,7 +170,7 @@ Expected: `1`, `1`, five `ok` rows, and `0`.
 
 ```bash
 git add CLAUDE.md docs/superpowers/specs/2026-09-27-sma-711-moon-diagnosis-jq-meta-design.md docs/superpowers/plans/2026-09-27-sma-711-moon-diagnosis-jq-meta.md
-git commit -m "docs: read command and exit code from .meta in the moon-diagnosis query (SMA-711)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "docs(ci): read command and exit code from .meta in the moon-diagnosis query (SMA-711)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ### Task 2: Mark the seven dated copies `:superseded`
@@ -214,13 +214,13 @@ git grep -cx '<!-- moon-diagnosis:superseded -->' -- docs/superpowers | grep -E 
 git diff --stat
 ```
 
-Expected: the first command prints nothing and `ok-lines rc=1`. The second prints seven paths, each with count `1`. The diff stat shows seven files, each `4 insertions(+), 1 deletion(-)`.
+Expected: the first command prints nothing and `ok-lines rc=1`. The second prints seven paths, each with count `1`. The diff stat shows a total of `28 insertions(+), 7 deletions(-)` over seven files. Each file's own bar reads `5 ++++-`, which is 4 insertions and 1 deletion.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-09-03-sma-597-moon-failure-diagnosis-design.md docs/superpowers/plans/2026-09-03-sma-597-moon-failure-diagnosis.md docs/superpowers/plans/2026-09-08-sma-502-next-config.md docs/superpowers/plans/2026-09-09-sma-508-sdk-package-transport-iam.md docs/superpowers/plans/2026-09-10-sma-509-capability-discovery.md docs/superpowers/plans/2026-09-20-sma-632-whoami-rpc.md docs/superpowers/plans/2026-09-20-sma-633-introspect-role-grants.md
-git commit -m "docs: mark the dated copies of the old diagnosis query superseded (SMA-711)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "docs(ci): mark the dated copies of the old diagnosis query superseded (SMA-711)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ### Task 3: Run the gate

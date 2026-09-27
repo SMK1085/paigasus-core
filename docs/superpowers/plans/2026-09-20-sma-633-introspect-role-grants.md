@@ -815,9 +815,9 @@ An empty stdout plus a one-line `declare: -A: invalid option` or `mapfile: comma
 If a task fails, **capture before you re-run** — a passing re-run overwrites the evidence:
 
 <!-- moon-diagnosis:superseded -->
-> **Superseded (SMA-711).** The Step 1 `jq` query in this document prints `null` for the command
-> and the exit code, because moon writes both under `.meta`. The corrected procedure is in
-> `CLAUDE.md` between the `moon-diagnosis` markers.
+> **Superseded (SMA-711).** The `jq` query in this document (a copy of the moon-diagnosis Step 1
+> query) prints `null` for the command and the exit code, because moon writes both under `.meta`.
+> The corrected procedure is in `CLAUDE.md` between the `moon-diagnosis` markers.
 
 ```bash
 cp .moon/cache/ciReport.json /tmp/sma-633-ciReport.json
