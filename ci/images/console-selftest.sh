@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe kernel_control_flag"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -987,6 +987,127 @@ else
 fi
 # shellcheck disable=SC2016 # the pinned line is literal text
 pin_rows X11-pin "$T/fn-console_kernel_control_row.sh" 'CONSOLE_SMOKE_NAMES="${CONSOLE_SMOKE_NAMES:-} ${ctl}"'
+
+# --- SMA-675: the Q5 switch (KC, Z, D1 rows) --------------------------------------------------
+# shellcheck disable=SC2034 # kernel_control_flag reads the variable.
+kc_set() { PAIGASUS_SMOKE_KERNEL_CONTROL="$1"; kernel_control_flag; }
+kc_unset() { unset PAIGASUS_SMOKE_KERNEL_CONTROL; kernel_control_flag; }
+stub_reset
+run_fn KC0 0 "" "::error::" none kc_unset
+expect_in KC0-out "$T/KC0.out" "--kernel-control=on"
+stub_reset
+run_fn KC1 0 "" "::error::" none kc_set off
+expect_in KC1-out "$T/KC1.out" "--kernel-control=off"
+stub_reset
+run_fn KC2 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" none kc_set bogus
+# Review Focus 3: an empty value is a usage error, not a silent default.
+stub_reset
+run_fn KC3 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" none kc_set ""
+
+# smoke_case <args...> — smoke_consoles with its globals set to dummy values and every row that
+# needs a real image replaced, so only the zone loop's wiring runs. Z_CALLS records which kernel
+# rows smoke_consoles called. Z_REDIS_RC is what the Redis start returns.
+Z_CALLS="$T/z-calls"
+Z_REDIS_RC=0
+# shellcheck disable=SC2034 # smoke_consoles reads the globals that the case sets.
+smoke_case() {
+  CONSOLE_SMOKE_ENV=(-e "PAIGASUS_OIDC_ISSUER=https://idp.example.com")
+  CONSOLE_HC_DEADLINE=5
+  RUN_ID="z"
+  CONSOLE_SMOKE_NAMES=""
+  CONSOLE_SMOKE_NETWORK=""
+  CONSOLE_SMOKE_REDIS_IMAGE="redis:stub"
+  CONSOLE_KERNEL_LINE="CompileError"
+  CONSOLE_STAGED_TREE_JS=""
+  assert_fresh() { return 0; }
+  console_node_version_row() { return 0; }
+  console_image_config_row() { return 0; }
+  console_healthcheck_row() { return 0; }
+  console_smoke_redis_start() { return "$Z_REDIS_RC"; }
+  console_seed_session() { return 0; }
+  console_kernel_route_row() { echo "route $2$3" >> "$Z_CALLS"; }
+  console_kernel_control_row() { echo "control $1" >> "$Z_CALLS"; }
+  smoke_consoles "$@"
+}
+# The stub curl answers the zone loop's three requests per zone in order: the page status (200),
+# the cookie-less row (302), and the page body (no chunk URL, so the chunk rows red; Z rows do not
+# read the rc).
+z_curl() {
+  curl_reset "$1"
+  curl_resp 1 "200" "" 0; curl_resp 2 "302" "" 0; curl_resp 3 "<html></html>" "" 0
+  curl_resp 4 "200" "" 0; curl_resp 5 "302" "" 0; curl_resp 6 "<html></html>" "" 0
+}
+
+stub_reset; z_curl Z1; rm -f "$Z_CALLS"; Z_REDIS_RC=0
+run_fn Z1 1 "" "" any smoke_case --kernel-control=off iam=img:dev gateway=img:dev
+expect_in Z1-skip-iam "$T/Z1.out" "iam-console: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off, the release path; SMA-675 Q5)"
+expect_in Z1-skip-gw "$T/Z1.out" "gateway-console: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off"
+expect_in Z1-route-iam "$Z_CALLS" "route /iam/orgs"
+expect_in Z1-route-gw "$Z_CALLS" "route /gateway/overview"
+expect_not_in Z1-nocontrol "$Z_CALLS" "control"
+expect_no_call Z1 "-nokernel-"
+expect_call Z1-net "--network smoke-net-z"
+expect_call Z1-redis "PAIGASUS_SESSION_REDIS_URL=redis://smoke-redis-z:6379"
+expect_no_call Z1-nomem "PAIGASUS_SESSION_STORE=memory"
+stub_reset; z_curl Z2; rm -f "$Z_CALLS"; Z_REDIS_RC=0
+run_fn Z2 1 "" "" any smoke_case --kernel-control=on iam=img:dev gateway=img:dev
+expect_in Z2-control-iam "$Z_CALLS" "control iam-console"
+expect_in Z2-control-gw "$Z_CALLS" "control gateway-console"
+expect_not_in Z2-noskip "$T/Z2.out" "kernel control row skipped"
+stub_reset
+run_fn Z3 1 "the first argument must be --kernel-control=on or --kernel-control=off, not 'iam=img:dev'" "" none smoke_case iam=img:dev
+stub_reset
+run_fn Z4 1 "not '--kernel-control=maybe'" "" none smoke_case --kernel-control=maybe iam=img:dev
+# D6: with no Redis, the kernel rows do not run and the containers get the memory store.
+stub_reset; z_curl Z5; rm -f "$Z_CALLS"; Z_REDIS_RC=1
+run_fn Z5 1 "iam-console: kernel rows NOT run" "" any smoke_case --kernel-control=on iam=img:dev gateway=img:dev
+expect_not_in Z5-norows "$Z_CALLS" "route"
+expect_call Z5-mem "PAIGASUS_SESSION_STORE=memory"
+expect_no_call Z5 "--network"
+Z_REDIS_RC=0
+
+# AC 3: CONSOLE_SMOKE_ENV sets no session store any more; console_container_args owns it.
+awk '/^CONSOLE_SMOKE_ENV=\($/ { on = 1 } on { print } on && /^\)$/ { on = 0 }' "$RUN_SH" > "$T/env-block"
+if [ -s "$T/env-block" ]; then say_pass ENV0-found; else say_fail ENV0-found "no CONSOLE_SMOKE_ENV=( block in run.sh"; fi
+expect_not_in ENV0 "$T/env-block" "PAIGASUS_SESSION_STORE"
+
+# D1: the dispatch arm, through the REAL script. It must stop before any docker call.
+rm -f "$T/argv"
+D1_RC=0
+( PATH="$T/stub:$PATH"; STUB_ARGV="$T/argv"; export PATH STUB_ARGV
+  PAIGASUS_SMOKE_KERNEL_CONTROL=bogus "$BASH" "$RUN_SH" all-consoles ) >"$T/D1.out" 2>"$T/D1.err" || D1_RC=$?
+check_row D1 "$D1_RC" 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" "$T/D1.out" "$T/D1.err"
+if [ -e "$T/argv" ]; then say_fail D1-nodocker "the stub docker was called" "$T/argv"; else say_pass D1-nodocker; fi
+
+# --- SMA-675 call-site pins (P3 to P16) --------------------------------------------------------
+# shellcheck disable=SC2016 # the pinned lines are literal text
+pin_rows P3 "$T/fn-smoke_consoles.sh" 'if console_smoke_redis_start "$CONSOLE_SMOKE_NETWORK" "$redis_name" "$CONSOLE_SMOKE_REDIS_IMAGE" 20; then kernel_ok=1; else ec=1; fi'
+# shellcheck disable=SC2016
+pin_rows P4 "$T/fn-smoke_consoles.sh" 'console_container_args "$app" "$service" "$zones_json" "$net" "$redis_url" "$work/env" > "$args_file" || args_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P5 "$T/fn-smoke_consoles.sh" 'run_out="$(docker create --name "$name" "${cargs[@]}" "$image" 2>&1)" || run_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P6 "$T/fn-smoke_consoles.sh" 'elif console_seed_session "$redis_name" "$sid"; then'
+# shellcheck disable=SC2016
+pin_rows P7 "$T/fn-smoke_consoles.sh" 'console_kernel_route_row "$origin" "$base_path" "$console_path" "$sid" "$name" 3 || ec=1'
+# shellcheck disable=SC2016
+pin_rows P8 "$T/fn-smoke_consoles.sh" 'console_kernel_control_row "$app" "$image" "$base_path" "$console_path" "$redis_name" "$args_file" "$CONSOLE_KERNEL_LINE" || ec=1'
+# shellcheck disable=SC2016
+pin_rows P9 "$T/fn-console_kernel_control_row.sh" 'rm_out="$(docker rm -f "$ctl" 2>&1)" || rm_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P10 "$T/fn-console_kernel_control_row.sh" 'console_kernel_control_probe "$ctl" "$tmp" "$@" || rc=$?'
+# shellcheck disable=SC2016
+pin_rows P11 "$T/fn-console_kernel_route_row.sh" 'grep -F -q -- "$nonce" "$body" || g_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P12 "$T/fn-console_kernel_control_probe.sh" 'grep -F -q -- "$kernel_line" "$tmp/ctl.log" || g_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P13 "$T/fn-console_kernel_control_probe.sh" 'out="$(docker create --name "$ctl" "${cargs[@]}" "$image" 2>&1)" || rc=$?'
+# shellcheck disable=SC2016
+pin_rows P14 "$T/fn-console_kernel_control_probe.sh" 'if ! console_seed_session "$redis" "$sid"; then'
+# shellcheck disable=SC2016
+pin_rows P15 "$T/fn-console_smoke_redis_start.sh" 'out="$(docker network create --label paigasus.smoke=console "$network" 2>&1)" || rc=$?'
+# shellcheck disable=SC2016
+pin_rows P16 "$T/fn-console_smoke_cleanup.sh" 'docker network rm "$CONSOLE_SMOKE_NETWORK" >/dev/null 2>&1 || true'
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
