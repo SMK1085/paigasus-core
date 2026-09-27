@@ -17,7 +17,7 @@ The spec was checked against the tree at `1ff0f8fe`. These are the differences. 
 
 1. **§ 4.5, `import 'server-only'` in the route file (left open by the spec).** No route file in either app imports it: `app/healthz/route.ts`, `app/auth/[...auth]/route.ts` and `gateway-console/app/api/chat/route.ts`. `lib/auth.ts`, which the route imports, already starts with `import 'server-only'`. The plan leaves the line out.
 2. **§ 4.4, `errorName` (left open by the spec).** The plan does not share `libraryErrorName`. That helper is private to `adapters/oidc.ts`, and it names library errors. `http/readiness.ts` gets its own one-line `errorName` with the same rule.
-3. **D10 and § 6, "the log shows ... the error name".** `AuthConfigError` (every cross-field rule of `createAuthRuntime`) sets no `name`, so its `name` is `Error`. A cross-field refusal therefore logs `readiness.runtime_failed { error: 'Error' }`. The spec is not wrong, but the log says less than a reader expects. The plan does not change the code (D10 is approved). Task 3 pins the value with a test, and Task 10 writes it into the README.
+3. **D10 and § 6, "the log shows ... the error name".** `AuthConfigError` (every cross-field rule of `createAuthRuntime`) set no `name`, so its `name` was `Error`. **Decided after GATE 1 by the issue owner: add the name in this PR.** Task 3 Step 0 sets `this.name = 'AuthConfigError'`, as `SessionStoreTimeout` does, with a test. A cross-field refusal then logs `readiness.runtime_failed { error: 'AuthConfigError' }`. Side effect, accepted: Next also prints `AuthConfigError: …` in place of `Error: …` when this error escapes an auth route.
 4. **§ 4.6 and § 9, the golden files change twice.** The golden files also pin the console image tags. So Task 9 (the version bump) regenerates them again, for the image lines only.
 5. **§ 7, `ci/kind/README.md` "Where to look first".** It is a paragraph label inside "## Reading the evidence", not a heading. Task 10 adds the row there.
 6. **§ 5.5 T15, added pin.** The spec asks for `"stage":"readiness"` in the output. The plan also pins `zone` and `reason: 'network'` (port 1 is on the Fetch "bad port" list, measured by SMA-656). A STOP rule covers a different `reason`.
@@ -50,7 +50,7 @@ These five input classes are the most likely to bite a person, and no spec test 
 2. **A probe and a login at the same moment on a cold pod.** Expected: one discovery request to the IdP. Tests: Task 1 (T3), Task 3 (T13a asserts `discoveryRequests() === 1`).
 3. **A login that overlaps a failing readiness attempt.** Expected: one `oidc.discovery_failed` event for each caller, with the stages `login` and `readiness` (D8), and a 503 for both. Test: Task 3 (the D8 overlap row, through the real adapter and the real login route).
 4. **The runtime build fails, then the operator fixes the cause.** `getAuthRuntime` clears its slot, so the next probe builds again. Expected: the handler keeps no state, so the second call reaches the discovery status and answers 200. Test: Task 3 (T11b).
-5. **A real cross-field refusal from `createAuthRuntime`.** Expected: 503 `unready` and `readiness.runtime_failed { error: 'Error' }`, because `AuthConfigError` sets no `name` (deviation 3). Test: Task 3 (the `AuthConfigError` row).
+5. **A real cross-field refusal from `createAuthRuntime`.** Expected: 503 `unready` and `readiness.runtime_failed { error: 'AuthConfigError' }` (deviation 3). Test: Task 3 (the `AuthConfigError` row).
 
 ## File Structure
 
@@ -805,12 +805,62 @@ git -C /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-705-oidc
 ### Task 3: `readinessResponse` (T5–T13b and Review Focus 3–5)
 
 **Files:**
+- Modify: `PKG/src/core/errors.ts` (`AuthConfigError` gets a `name`, Step 0)
+- Modify: `PKG/tests/core/errors.test.ts` (Step 0)
 - Create: `PKG/src/http/readiness.ts`
 - Create: `PKG/tests/http/readiness.test.ts`
 
 **Interfaces:**
 - Consumes: `logDiscoveryFailed` (Task 2); `OidcClient.discoveryStatus()`, `OidcClient.discover()`, `FakeOidc.status|discoverCalls|resolveDiscover|rejectDiscover`, `OidcFixture.discoveryRequests()` (Task 1); `createAuthRuntime(cfg, deps)` with `deps.oidcClientFactory` and `deps.logger` (`src/runtime.ts`); `createAuthRoutes` (`src/http/routes.ts`).
 - Produces: `export async function readinessResponse(getRuntime: () => Promise<AuthRuntime>, logger: AuthLogger): Promise<Response>` in `src/http/readiness.ts`. Answers exactly 200 `{"status":"ready"}` or 503 `{"status":"unready"}`, always with `cache-control: no-store`.
+
+- [ ] **Step 0: `AuthConfigError` gets a `name` (plan deviation 3)**
+
+First add the failing test. In `PKG/tests/core/errors.test.ts`, add `AuthConfigError` to the import list from `'../../src/core/errors.js'` (keep the list sorted), and add this block at the end of the file:
+
+```ts
+describe('AuthConfigError (SMA-705 deviation 3)', () => {
+  // readiness.runtime_failed logs only an error's `name`. A production bundle can mangle
+  // `constructor.name`, so the class sets its name explicitly, as SessionStoreTimeout does.
+  it('has the name AuthConfigError and keeps its code and message', () => {
+    const err = new AuthConfigError('PAIGASUS_ZONE has no entry in PAIGASUS_ZONES');
+    expect(err.name).toBe('AuthConfigError');
+    expect(err.code).toBe('auth_config_invalid');
+    expect(err.message).toBe('PAIGASUS_ZONE has no entry in PAIGASUS_ZONES');
+    expect(err).toBeInstanceOf(AuthError);
+  });
+});
+```
+
+Run: `pnpm -C /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-705-oidc-readiness/ts/packages/paigasus-auth exec vitest run tests/core/errors.test.ts`
+Expected: FAIL, `expected 'Error' to be 'AuthConfigError'`.
+
+Then, in `PKG/src/core/errors.ts`, replace
+
+```ts
+export class AuthConfigError extends AuthError {
+  readonly code = 'auth_config_invalid';
+}
+```
+
+with
+
+```ts
+export class AuthConfigError extends AuthError {
+  readonly code = 'auth_config_invalid';
+
+  constructor(message: string) {
+    super(message);
+    // SMA-705: readiness.runtime_failed logs only the name. Set it explicitly, because a
+    // production bundle can mangle `constructor.name` (the SessionStoreTimeout reason).
+    this.name = 'AuthConfigError';
+  }
+}
+```
+
+Run the same command. Expected: PASS. Then run `moon run paigasus-auth-ts:test` and `moon run paigasus-auth-ts:typecheck`. Expected: PASS. If an existing test fails because it expected the name `Error` or the text `Error: `, STOP and report it. Do not edit that test.
+
+Commit: `git -C /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-705-oidc-readiness add ts/packages/paigasus-auth/src/core/errors.ts ts/packages/paigasus-auth/tests/core/errors.test.ts`, then `git -C /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-705-oidc-readiness commit -m "fix(ts): give AuthConfigError its own name (SMA-705)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1051,12 +1101,12 @@ describe('readinessResponse — the runtime build fails (SMA-705 D10)', () => {
     expect(events).toEqual([['readiness.runtime_failed', { error: 'TypeError' }]]);
   });
 
-  // Review Focus 5. AuthConfigError sets no `name`, so the log says `Error` (plan deviation 3).
-  it('a real cross-field refusal from createAuthRuntime -> 503 unready, error Error', async () => {
+  // Review Focus 5. AuthConfigError sets its own `name` (plan deviation 3, Step 0).
+  it('a real cross-field refusal from createAuthRuntime -> 503 unready, error AuthConfigError', async () => {
     const events: Events = [];
     const getter = (): Promise<AuthRuntime> => createAuthRuntime({ ...BASE_CONFIG, PAIGASUS_ZONES: { iam: '/iam', gateway: '/gateway' } });
     await expectProbe(await readinessResponse(getter, recordingLogger(events)), 503, 'unready');
-    expect(events).toEqual([['readiness.runtime_failed', { error: 'Error' }]]);
+    expect(events).toEqual([['readiness.runtime_failed', { error: 'AuthConfigError' }]]);
   });
 });
 
@@ -1223,7 +1273,7 @@ export async function readinessResponse(getRuntime: () => Promise<AuthRuntime>, 
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run: `pnpm -C /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-705-oidc-readiness/ts/packages/paigasus-auth exec vitest run tests/http/readiness.test.ts`
-Expected: PASS, every row. **If T13b or the D8 row fails only because `reason` is not `network`, STOP.** Report the measured reason. Do not edit the test or the adapter to make it pass. **If the `AuthConfigError` row logs a value other than `Error`, STOP** and report the value.
+Expected: PASS, every row. **If T13b or the D8 row fails only because `reason` is not `network`, STOP.** Report the measured reason. Do not edit the test or the adapter to make it pass. **If the `AuthConfigError` row logs a value other than `AuthConfigError`, STOP** and report the value.
 
 - [ ] **Step 5: Typecheck, lint, format, suite**
 
@@ -2345,7 +2395,7 @@ the route is public. Read the log.
   take every pod out of rotation. The store 503 above answers a store fault.
 - **`readiness.runtime_failed { error }`.** The runtime build failed: a configuration parse error,
   a cross-field rule, or the Redis client build. `error` is the error's `name` only, for example
-  `TypeError`. A cross-field rule logs `Error`, because `AuthConfigError` sets no name. The event
+  `TypeError`. A cross-field rule logs `AuthConfigError`. The event
   never holds the message: a malformed Redis URL puts the password into the message of
   node-redis's `TypeError`. Each probe tries the build again.
 
@@ -2612,6 +2662,12 @@ with
 
 Run AUTH. Must fail: T12.
 Restore the five lines by an edit.
+
+- [ ] **Step 13b: M18 — `AuthConfigError` sets no `name`**
+
+Edit: in `PKG/src/core/errors.ts`, delete the line `    this.name = 'AuthConfigError';`.
+Run AUTH. Must fail: the `AuthConfigError (SMA-705 deviation 3)` row in `tests/core/errors.test.ts`, and the `AuthConfigError` row in `tests/http/readiness.test.ts`.
+Restore the line by an edit.
 
 - [ ] **Step 14: M13 — the handler does not catch a runtime-getter failure**
 
