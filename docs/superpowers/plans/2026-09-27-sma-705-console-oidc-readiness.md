@@ -66,6 +66,7 @@ These five input classes are the most likely to bite a person, and no spec test 
 | `PKG/src/http/discovery-log.ts` | create: `logDiscoveryFailed` | 2 |
 | `PKG/src/http/routes.ts` | modify: `discoveryFailedResponse` calls the helper | 2 |
 | `PKG/tests/http/discovery-log.test.ts` | create | 2 |
+| `PKG/src/core/errors.ts`, `PKG/tests/core/errors.test.ts` | modify: `AuthConfigError` gets a `name` (Step 0) | 3 |
 | `PKG/src/http/readiness.ts` | create: `readinessResponse` | 3 |
 | `PKG/tests/http/readiness.test.ts` | create: T5–T13b and Review Focus 3–5 | 3 |
 | `PKG/src/server.ts`, `PKG/tests/server.test.ts` | modify: the exports | 4 |
@@ -1166,7 +1167,7 @@ describe('readinessResponse through the real adapter (SMA-705 T13a, T13b, D8)', 
   });
 
   // Review Focus 3. D8: each caller that needed a configuration logs its own event.
-  it('D8: a login that overlaps a failing readiness attempt -> two 503s and one event for each stage', async () => {
+  it('D8: a login next to a failing readiness attempt -> two 503s and one event for each stage', async () => {
     const events: Events = [];
     const runtime = await realRuntime(UNREACHABLE_ISSUER, events);
     const probe = await readinessResponse(() => Promise.resolve(runtime), runtime.logger);
@@ -1321,6 +1322,8 @@ import { createAuthRouteHandler, readinessResponse, type OidcDiscoveryStatus } f
 import { readinessResponse as readinessFromModule } from '../src/http/readiness.js';
 ```
 
+Also replace line 9, `import { describe, expect, it, vi } from 'vitest';`, with `import { describe, expect, expectTypeOf, it, vi } from 'vitest';`.
+
 Append at the end of the file:
 
 ```ts
@@ -1332,9 +1335,9 @@ describe('the readiness exports (SMA-705)', () => {
   });
 
   it('exports the OidcDiscoveryStatus type with its three states', () => {
-    // A type-level check: `moon run paigasus-auth-ts:typecheck` fails if the type is not exported.
-    const states: readonly OidcDiscoveryStatus[] = ['idle', 'discovering', 'discovered'];
-    expect(states).toHaveLength(3);
+    // A type-level check: `moon run paigasus-auth-ts:typecheck` fails if the type is not exported
+    // or if its union changes.
+    expectTypeOf<OidcDiscoveryStatus>().toEqualTypeOf<'idle' | 'discovering' | 'discovered'>();
   });
 });
 ```
@@ -2453,7 +2456,7 @@ does not say why. Read the pod log:
   cannot resolve the issuer host.
 - `readiness.runtime_failed`: the runtime build failed. The `error` field holds only the error's
   name. Check the console env (`PAIGASUS_*`), and check `PAIGASUS_SESSION_REDIS_URL` for a
-  malformed URL. A cross-field rule logs `Error`.
+  malformed URL. A cross-field rule logs `AuthConfigError`.
 
 A pod that was ready one time stays ready for the life of the process. An IdP outage after that
 does not make it not ready. Readiness does not check Redis (SMA-705 D1).
@@ -2615,7 +2618,7 @@ Restore the line by an edit.
 - [ ] **Step 8: M7 — the handler awaits `discover()`**
 
 Edit: replace `    runtime.oidc.discover().catch((err: unknown) => {` with `    await runtime.oidc.discover().catch((err: unknown) => {`.
-Run AUTH. Must fail: T7 (`timed_out`).
+Run AUTH. Must fail: T7 (`timed_out`). T8, T9, T10 and T12 can also fail by the vitest timeout, because the fake settles only after the handler returns. That is expected.
 Restore the line by an edit.
 
 - [ ] **Step 9: M8 — the discovery event holds `String(err)`**
@@ -2666,7 +2669,7 @@ Restore the five lines by an edit.
 - [ ] **Step 13b: M18 — `AuthConfigError` sets no `name`**
 
 Edit: in `PKG/src/core/errors.ts`, delete the line `    this.name = 'AuthConfigError';`.
-Run AUTH. Must fail: the `AuthConfigError (SMA-705 deviation 3)` row in `tests/core/errors.test.ts`, and the `AuthConfigError` row in `tests/http/readiness.test.ts`.
+Run: `pnpm -C /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-705-oidc-readiness/ts/packages/paigasus-auth exec vitest run tests/core/errors.test.ts tests/http/readiness.test.ts` (NOT AUTH: AUTH does not hold `tests/core/`). Must fail: the `AuthConfigError (SMA-705 deviation 3)` row in `tests/core/errors.test.ts`, and the `AuthConfigError` row in `tests/http/readiness.test.ts`.
 Restore the line by an edit.
 
 - [ ] **Step 14: M13 — the handler does not catch a runtime-getter failure**
@@ -2712,7 +2715,7 @@ Expected: PASS for each.
 
 - [ ] **Step 20: Report**
 
-Report the table M1–M17 with the tests that failed for each row. There is nothing to commit in this task.
+Report the table M1–M18 with the tests that failed for each row. There is nothing to commit in this task.
 
 ---
 
@@ -2765,7 +2768,7 @@ Record these for the PR description:
 | A1 (no traffic before runtime and discovery) | Task 3 (T5–T13b), Tasks 5–6 (T15), Task 7 (T16), Task 8 (probe path) |
 | A2 (the chart uses the route; the pinned tag serves it) | Task 8 (T17), Task 9 (`0.2.0`, row 8a) |
 | A3 (nothing leaks into a probe response; the log has only the reason or the name) | Task 3 (T8, T9, T11 with sentinels), Task 11 M8, M14 |
-| A4 (tests through the built app; a mutation table) | Tasks 5–7 (T15, T16), Task 11 (M1–M17) |
+| A4 (tests through the built app; a mutation table) | Tasks 5–7 (T15, T16), Task 11 (M1–M18) |
 | D1 (no Redis) | By construction in Task 3; comments in Tasks 3 and 8; docs in Task 10 |
 | D2 (sticky) | Task 1 (T4), Task 3 (T5), header in Task 3 |
 | D3 (never waits) | Task 3 (T7), Task 11 M7 |
@@ -2788,7 +2791,7 @@ Record these for the PR description:
 | § 5.3 T5–T12 | Task 3 |
 | § 5.4 T13a, T13b | Task 3 |
 | § 5.5 T14, T15, T16, T17 | Tasks 5, 6, 7, 8 |
-| § 5.6 mutation table (17 rows) | Task 11 (M1–M17, one per row) |
+| § 5.6 mutation table (17 spec rows plus M18 (a plan addition for deviation 3)) | Task 11 (M1–M18, one per row) |
 | § 7 documentation | Task 10, plus the code comments in Tasks 1–3, 5, 6, 8 |
 | § 8 kind | Task 12 Step 5 (cite the green run) |
 | § 9 rollout | Task 9 |
