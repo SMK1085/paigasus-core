@@ -91,6 +91,8 @@ async fn serve() -> anyhow::Result<()> {
     // no-op anyway.
     if metrics_handle.is_some() {
         describe_iam_metrics();
+        // SMA-698: both `defect` series start at zero, so `increase()` sees the first JIT failure.
+        paigasus_iam::application::authenticate_token::prime_jit_provisioning_failures();
         // SMA-495 / SMA-489 D12 priming. A metrics-rs series first appears already at its first
         // increment's VALUE, and `increase()` baselines on that first sample — so without this an
         // `increase(...) > 0` control could never fire on a replica's first notifying enqueue,
@@ -642,11 +644,12 @@ async fn drain_bounded(servers: &mut JoinSet<anyhow::Result<()>>, budget: Durati
     servers.len()
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 38 metric families `paigasus-iam` emits
+/// Registers `# HELP`/`# TYPE` exposition text for the 39 metric families `paigasus-iam` emits
 /// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families, the
 /// SMA-469 outbox retention/dead-letter families, the SMA-476 Redis circuit-breaker families,
-/// the SMA-481 system-row-retirement family, the SMA-471 NATS publisher families, and the
-/// SMA-489 commit-nudge/listener families and the SMA-495 notifying-enqueue family), via the
+/// the SMA-481 system-row-retirement family, the SMA-471 NATS publisher families, the
+/// SMA-489 commit-nudge/listener families, the SMA-495 notifying-enqueue family and the SMA-698
+/// JIT provisioning-failure family), via the
 /// `names::` consts so the string used here can't drift from the one used at the increment/set
 /// call site, plus the 2 gRPC families via `paigasus_observability::describe_grpc()`. Mirrors
 /// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
@@ -697,6 +700,10 @@ fn describe_iam_metrics() {
     describe_counter!(
         names::IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL,
         "Bootstrap-admin seed attempts that failed and were swallowed, by stage (list = the pre-seed existence check, txn = the grant+audit+event transaction). A lost policy_gen bump is not counted."
+    );
+    describe_counter!(
+        names::IAM_JIT_PROVISIONING_FAILURES_TOTAL,
+        "Just-in-time provisioning attempts that IAM refused, labeled by defect (missing_email/email_conflict). Counts refused requests, not identities. The log rate limit does not apply."
     );
     describe_counter!(
         names::IAM_STARTER_POLICY_RECONCILES_TOTAL,

@@ -464,3 +464,30 @@ async fn every_protected_v1_route_requires_bearer() {
     assert_eq!(status, StatusCode::FORBIDDEN, "/v1/authn/introspect must stay exempt from bearer enforcement: {body}");
     assert_eq!(body["error"]["code"], "identity-not-provisioned");
 }
+
+/// SMA-698 T1: a token with no `email` claim on a protected route is 403 `provisioning-failed`,
+/// and IAM writes one `warn` line that names the defect and the issuer, and not the subject.
+#[tokio::test]
+async fn protected_route_with_a_token_without_email_logs_the_provisioning_failure() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    // Installed before `AppState::new`, which writes its own `accept_invalid_tls` warn line; the
+    // filter on `JIT_FAILURE_LINE` below skips it.
+    let (logs, _logs_guard) = support::capture_logs();
+    let (app, idp) = support::app(db).await;
+    let token = idp.bearer("t1-no-email-subject", None, "paigasus", 3600);
+
+    let (status, body) = send(&app, "GET", "/v1/organizations", None, Some(&token)).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "provisioning-failed");
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(support::JIT_FAILURE_LINE)).collect();
+    assert_eq!(lines.len(), 1, "exactly one JIT failure line expected:\n{text}");
+    let line = lines[0];
+    assert!(line.contains("WARN"), "the line is at warn: {line}");
+    assert!(line.contains("missing_email"), "the line names the defect: {line}");
+    assert!(line.contains(&idp.issuer), "the line names the issuer: {line}");
+    assert!(!text.contains("t1-no-email-subject"), "the log must not contain the subject:\n{text}");
+}
