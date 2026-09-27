@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -872,6 +872,50 @@ run_fn C0 0 "" "" "$T/argv-cleanup" cleanup_case " smoke-a smoke-b" smoke-net-1
 printf '%s\n' rm -f smoke-a -- > "$T/argv-cleanup-nonet"
 stub_reset
 run_fn C1 0 "" "" "$T/argv-cleanup-nonet" cleanup_case " smoke-a" ""
+
+# --- SMA-675: console_kernel_route_row (K rows) -----------------------------------------------
+K_SID="$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+K_NONCE="smoke-0123456789ab@example.com"
+K_BODY_OK="<html><title>Paigasus IAM</title><script>self.__next_f.push([1,\"{\\\"email\\\":\\\"${K_NONCE}\\\"}\"])</script></html>"
+K_BODY_BRAND="<html><title>Paigasus IAM</title></html>"
+K_PROXY="302 http://127.0.0.1:32768/iam/auth/login?returnTo=%2Fiam%2Forgs"
+K_SESSION="307 http://127.0.0.1:32768/iam/auth/login?returnTo=%2Fiam%2F"
+# k_row <row> <want_rc> <present> <absent> [<tries>] — the route row against the stub curl.
+k_row() {
+  run_fn "$1" "$2" "$3" "$4" any console_kernel_route_row http://127.0.0.1:32768 /iam /orgs "$K_SID" smoke-iam-console-1 "${5:-3}"
+}
+
+stub_reset; curl_reset K0; curl_resp 1 "200 " "$K_BODY_OK" 0
+k_row K0 0 "" "::error::"
+curl_count_is K0 1
+expect_in K0-cookie "$STUB_CURL_DIR/argv" "Cookie: __Host-pgs_sid=${K_SID}"
+expect_not_in K0-nofollow "$STUB_CURL_DIR/argv" "-L"
+# Review Focus 1: the proxy value is tested first and is never retried.
+stub_reset; curl_reset K1; curl_resp 1 "$K_PROXY" "" 0
+k_row K1 1 "the proxy did not see the session cookie" "requireSession"
+curl_count_is K1 1
+stub_reset; curl_reset K2; curl_resp 1 "$K_SESSION" "" 0
+k_row K2 1 "requireSession found no session after 3 requests" "the proxy did not see"
+curl_count_is K2 3
+stub_reset; curl_reset K3; curl_resp 1 "302 http://elsewhere.example/x" "" 0
+k_row K3 1 "redirected (302) to 'http://elsewhere.example/x'" ""
+curl_count_is K3 1
+stub_reset; curl_reset K4; curl_resp 1 "404 " "" 0
+k_row K4 1 "answered 404" ""
+stub_reset; curl_reset K5; curl_resp 1 "500 " "" 0
+k_row K5 1 "answered 500" ""
+stub_reset; curl_reset K6; curl_resp 1 "000 " "" 7
+k_row K6 1 "curl exited 7" ""
+stub_reset; curl_reset K7; curl_resp 1 "200 " "$K_BODY_OK" 0; STUB_PATH_EXTRA="$T/stub-grep"
+k_row K7 1 "grep exited 2" "holds no"
+stub_reset; curl_reset K8; curl_resp 1 "200 " "$K_BODY_BRAND" 0
+k_row K8 1 "the body holds no ${K_NONCE}" ""
+stub_reset; curl_reset K9; curl_resp 1 "$K_SESSION" "" 0; curl_resp 2 "200 " "$K_BODY_OK" 0
+k_row K9 0 "" "::error::"
+curl_count_is K9 2
+stub_reset; curl_reset K10
+k_row K10 1 "is not a positive integer" "" abc
+curl_count_is K10 0
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"

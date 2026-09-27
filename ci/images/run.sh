@@ -1280,6 +1280,107 @@ console_seed_session() {
   fi
 }
 
+# SMA-675 D3: the kernel route row. ONE request with the seeded session cookie to the zone's
+# (console) route, so the status, the Location and the body come from the same request. It passes
+# only on 200 with the per-run nonce in the body. The nonce reaches the HTML only through
+# toSessionView(session) in the (console) layout (F13), and that layout imports
+# @paigasus/console-core, which evaluates the kernel's wasm at module scope (F1 to F4). The brand
+# label is NOT a marker: the root layout puts it in the <title> of every page (F12).
+# Deliberately no -L: the redirect is part of the verdict.
+# The two 3xx causes have different Location values (F14). proxy.ts writes
+# returnTo=<basePath><probePath>; requireSession writes returnTo=<basePath>/. The second one is a
+# PREFIX of the first, so the proxy value is tested first, and the requireSession value only as
+# the END of the Location. Only the requireSession 3xx is retried (<tries> requests, 1 s apart):
+# a slow first Redis connect makes the store read fail (F15), and curl --retry does not retry a
+# 3xx.
+console_kernel_route_row() {
+  local origin="$1" base_path="$2" probe_path="$3" sid="$4" name="$5" tries="$6"
+  local url label nonce body w status loc curl_rc=0 g_rc retry rc=1 i=0 p proxy_rt session_rt
+  label="${base_path}${probe_path}"
+  url="${origin}${label}"
+  nonce="smoke-${sid:0:12}@example.com"
+  p="${base_path}${probe_path}"
+  proxy_rt="returnTo=${p//\//%2F}"
+  p="${base_path}/"
+  session_rt="returnTo=${p//\//%2F}"
+  case "$tries" in
+    ''|*[!0-9]*|????*) tries="" ;;
+  esac
+  if [ -z "$tries" ] || [ "$tries" -lt 1 ]; then
+    echo "::error::kernel row ${label}: NOT run — the try count '$6' is not a positive integer of at most 3 digits." >&2
+    return 1
+  fi
+  body="$(mktemp "${TMPDIR:-/tmp}/paigasus-console-kernel.XXXXXX")" || body=""
+  if [ -z "$body" ]; then
+    echo "::error::kernel row ${label}: NOT run — mktemp failed." >&2
+    return 1
+  fi
+  while :; do
+    i=$((i + 1))
+    curl_rc=0
+    w="$(curl -sS -o "$body" -w '%{http_code} %{redirect_url}' --max-time 30 \
+      -H "Cookie: __Host-pgs_sid=${sid}" "$url")" || curl_rc=$?
+    status="${w%% *}"
+    loc="${w#* }"
+    retry=0
+    if [ "$curl_rc" -eq 0 ] && [ "$i" -lt "$tries" ]; then
+      case "$status" in
+        3??)
+          case "$loc" in
+            *"$proxy_rt"*) ;;
+            *"$session_rt") retry=1 ;;
+          esac
+          ;;
+      esac
+    fi
+    if [ "$retry" -eq 0 ]; then break; fi
+    sleep 1
+  done
+  if [ "$curl_rc" -ne 0 ]; then
+    echo "::error::kernel row ${label}: the request failed — curl exited ${curl_rc} (connection failure or timeout), so nothing was proved about the kernel." >&2
+  else
+    case "$status" in
+      200)
+        g_rc=0
+        grep -F -q -- "$nonce" "$body" || g_rc=$?
+        if [ "$g_rc" -eq 0 ]; then
+          echo "  kernel row ${label}: 200 with the seeded session's nonce — the (console) layout ran, and it loads the kernel"
+          rc=0
+        elif [ "$g_rc" -eq 1 ]; then
+          echo "::error::kernel row ${label}: answered 200, but the body holds no ${nonce}. So the (console) layout did not render this session: the probe route is not in (console) any more, or a Suspense boundary streams a 200 around a redirect. The brand label is not proof, because every page holds it." >&2
+        else
+          echo "::error::kernel row ${label}: NOT checked — grep exited ${g_rc} on the response body." >&2
+        fi
+        ;;
+      3??)
+        case "$loc" in
+          *"$proxy_rt"*)
+            echo "::error::kernel row ${label}: redirected (${status}) to '${loc}' — the proxy did not see the session cookie. Check the Cookie header of this request; the session store is not the cause." >&2
+            ;;
+          *"$session_rt")
+            echo "::error::kernel row ${label}: requireSession found no session after ${i} requests (${status} to '${loc}'). Three causes: the seeded record no longer passes isSessionRecord (ts/packages/paigasus-auth/src/core/session.ts; change console_seed_session), the store wiring (PAIGASUS_SESSION_REDIS_URL in console_container_args), or a slow first Redis connect." >&2
+            ;;
+          *)
+            echo "::error::kernel row ${label}: redirected (${status}) to '${loc}', which is neither the proxy login redirect nor the requireSession redirect." >&2
+            ;;
+        esac
+        ;;
+      404)
+        echo "::error::kernel row ${label}: answered 404 — the route is gone. Next answers from the ROOT not-found, and the (console) layout never runs. Add the zone's route to console_probe_path_for." >&2
+        ;;
+      5??)
+        echo "::error::kernel row ${label}: answered ${status} — the kernel's wasm did not load, or the runtime configuration is wrong. The last log lines of ${name} follow." >&2
+        docker logs "$name" 2>&1 | tail -30 >&2 || true
+        ;;
+      *)
+        echo "::error::kernel row ${label}: answered '${status}', not 200." >&2
+        ;;
+    esac
+  fi
+  rm -f "$body"
+  return "$rc"
+}
+
 # A FULL, schema-valid dummy runtime configuration, not just PAIGASUS_ZONE and PAIGASUS_ZONES. Both
 # consoles validate their ENTIRE runtime config (@paigasus/auth's OIDC/session shape,
 # @paigasus/discovery's PAIGASUS_SERVICES, and PAIGASUS_IAM_GRPC_URL — see ts/apps/<app>/lib/
