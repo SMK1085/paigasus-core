@@ -2,7 +2,7 @@
 
 - Linear: SMA-707 (milestone "IAM Gaps")
 - Related: SMA-698 (JIT provisioning failure line and counter), SMA-686 D14 (log rate-limit policy)
-- Status: draft for approval, revised after the spec challenge on 2026-09-27 (section 10)
+- Status: approved by Sven on 2026-09-27, after the spec challenge (section 10)
 
 ## 1. Problem
 
@@ -63,7 +63,7 @@ These are the SMA-707 acceptance criteria, with G4 added from the issue's propos
   (`rs/crates/services/paigasus-gateway/src/adapters/http/auth.rs:97-117`, `:419-426`). The gateway
   calls a bearer-enforced IAM route only after `Introspect` succeeds. So a user who reaches IAM
   only through the gateway, from a JIT-disabled issuer, produces no line (G2, D10). The
-  `iam.toml.example` text states this. A follow-up issue can cover it if necessary.
+  `iam.toml.example` text states this.
 
 ## 4. Design
 
@@ -146,7 +146,7 @@ the environment (section 1.1).
   an unknown identity is then the intended result of the operator's setting, not a defect. `info`
   stays visible at the production default level (`src/config.rs:814`). Sven chose `info` on
   2026-09-27. The first draft gave a wrong reason ("a deployment that pre-provisions its users").
-  IAM cannot pre-provision an OIDC identity. Sven must confirm D2 with the corrected reason.
+  IAM cannot pre-provision an OIDC identity. Sven confirmed D2 with the corrected reason on 2026-09-27.
 - D3. No counter. The line is for diagnosis. An alert on an intended refusal has no clear use. A
   later issue can add a counter if an alert becomes necessary. Sven chose this on 2026-09-27.
 - D4. A separate limiter instance, keyed by `()`. The SMA-698 keys and these keys cannot collide:
@@ -277,8 +277,7 @@ Mutations:
 ## 9. Follow-ups
 
 - The gateway-only case (section 3). A user who reaches IAM only through the gateway, from a
-  JIT-disabled issuer, gets a silent 401. This needs a decision on whether the gateway or IAM logs
-  it.
+  JIT-disabled issuer, gets a silent 401. Sven decided on 2026-09-27 not to open an issue for it.
 
 ## 10. Spec challenge, 2026-09-27
 
@@ -288,8 +287,8 @@ Verdict: APPROVE WITH CHANGES. Folded in:
   (section 1.1). The message and D2 now describe the closed user set.
 - MAJOR: the documentation moved from `RUNBOOK-chart.md` to `iam.toml.example` (D5), because the
   chart cannot turn JIT off.
-- MAJOR: D2 had a wrong reason. It is corrected, and Sven must confirm it.
-- MAJOR: the gateway path is now a stated non-goal and a follow-up (sections 3 and 9).
+- MAJOR: D2 had a wrong reason. It is corrected, and Sven confirmed it.
+- MAJOR: the gateway path is now a stated non-goal (sections 3 and 9).
 - MAJOR: mutations M4-M8 cover the rate limit, the level and the issuer field.
 - MINOR: M1 and M2 now compile and are exact. The Docker and restore rules are added. The U8
   premise is corrected. U5 is split. T3 is a new test with a JIT-disabled issuer. U2, U3 and T3
