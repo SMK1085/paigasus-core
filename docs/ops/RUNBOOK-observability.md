@@ -1362,8 +1362,13 @@ causes are:
      or frontend URL setting. Then restore `oidc.issuer` to the old value.
    - Or keep the new issuer, and move the stored keys in one statement:
      `UPDATE external_identity SET issuer = '<new>', updated_at = now() WHERE issuer = '<old>';`.
-     Also update any `zones.iam.backend.bootstrapAdmins` entries that name the old issuer. This
-     keeps the same subjects on the same principals, so it carries no takeover risk.
+     Also update any `zones.iam.backend.bootstrapAdmins` entries that name the old issuer.
+     Use this option only when the new issuer is the same identity provider realm at a new
+     URL. Before you run the statement, confirm that the identity provider keeps the same `sub`
+     for every user after the change. A check of some users is not enough proof. If you cannot
+     confirm it for every user, or if the new issuer is a different realm or a different
+     identity provider, one `subject` value can name a different person. Then the statement
+     gives that person the old account. In that case, do not run it. Use step 4 for each user.
 3. If the email is wrong at the identity provider, correct it there.
 4. Otherwise a link is necessary. IAM has no API to update a user, change an email or link an
    identity (SMA-712 tracks one). The only write call is `POST /v1/users` / `CreateUser`. Pick the
