@@ -130,8 +130,13 @@ crate only when one of its commits is a releasing commit (`release_commits` in
 - Any type with `!`, or a `BREAKING CHANGE:` footer.
 
 The scopes `ci`, `docs`, `release`, `repo`, `claude` and `workspace` do not
-release. The PR title becomes the squash commit on `main`, so the PR title
-decides.
+release by type or scope alone. The PR title becomes the squash commit subject
+on `main`, so the subject line decides the type and the scope.
+
+A `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer line changes this rule. This
+footer can occur anywhere in the squash commit body, not only in the subject
+line. It makes the commit release, even when the subject line uses a
+non-releasing scope.
 
 **Do not use `feat(ci)` or `fix(ci)` on a file inside a crate.** The filter
 decides only whether a crate releases. The version level comes from all commits

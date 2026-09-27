@@ -8,12 +8,13 @@ A_CRATE="paigasus-release-parity-a"
 B_CRATE="paigasus-release-parity-b"
 
 # Abort with the harness's OWN vocabulary. run.sh prints "infrastructure error
-# (rc=2)" at :67 and :81, but this module is sourced at run.sh:21 — so an exit from
-# here fires DURING the source and run.sh never reaches either line. Without this
-# string the abort would be unclassifiable, and CLAUDE.md tells readers to grep for
-# it. Deliberately duplicated in python-semantic-release.sh rather than shared: one
-# module is sourced per run, and a ci/lib/ layer was considered and rejected
-# (SMA-596 D4).
+# (rc=2)" in the verdict arms after ecosystem::extra_suite / extra_negative_control (the
+# `*)` infra arms in the case blocks that read this module's exit status), but this module
+# is sourced by run.sh's ecosystem loader — so an exit from here fires DURING the source and
+# run.sh never reaches those arms. Without this string the abort would be unclassifiable, and
+# CLAUDE.md tells readers to grep for it. Deliberately duplicated in
+# python-semantic-release.sh rather than shared: one module is sourced per run, and a ci/lib/
+# layer was considered and rejected (SMA-596 D4).
 _rp_fatal() { # line...
   echo "FATAL: release-parity ABORTED: infrastructure error (rc=2)" >&2
   printf '       %s\n' "$@" >&2
