@@ -348,9 +348,14 @@ T = 200 ms. Measured on the development Mac with `vitest run` on that one file.
 | Run | Commit | 13a: discovery under the lock | 13a: token / JWKS under the lock | 13a: discovery before the lock | 13a: lock hold (ms) | 13a: `resolveSession` (ms) | 13b: `tryAcquireLock` calls |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Before the fix | `ae418fc6` | 1 | 1 / 1 | 0 | 1235 | 1235 | 1 |
+| After the fix | this commit (Task 3) | 0 | 1 / 1 | 1 | 611 | 1224 | 0 |
 
 Before the fix, 13a failed on its first assertion (a discovery request while the lock was held), as
 § 5.4 requires.
+
+After the fix, 13a and 13b pass, and the lock hold time no longer contains the discovery delay. The
+lock hold time dropped from 1235 ms to 611 ms, a drop of 624 ms — close to the discovery delay of
+600 ms that moved outside the lock.
 
 ## 8. Out of scope
 

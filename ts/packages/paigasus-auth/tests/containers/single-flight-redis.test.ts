@@ -28,7 +28,8 @@ afterAll(async () => {
 });
 
 function deps(store: SessionStore, refresh: (rt: string) => Promise<{ accessToken: string; refreshToken?: string; expiresIn: number }>) {
-  return { store, refresh, revoke: () => Promise.resolve(), logger: noopLogger, skewMs: 30_000, lockTtlMs: 5_000, lockWaitMs: 3_000, ttlMs: 60_000 };
+  // `prepareRefresh` (SMA-704): a fake with no discovery.
+  return { store, prepareRefresh: () => Promise.resolve(), refresh, revoke: () => Promise.resolve(), logger: noopLogger, skewMs: 30_000, lockTtlMs: 5_000, lockWaitMs: 3_000, ttlMs: 60_000 };
 }
 
 // A fresh keyPrefix per test isolates it from every other test sharing the one container.

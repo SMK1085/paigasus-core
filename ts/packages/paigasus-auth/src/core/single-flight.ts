@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { isRefreshRejected, refreshFailureCode } from './errors';
+import { isRefreshRejected, refreshFailureCode, type TokenErrorCode } from './errors';
 import { newLockToken } from './ids';
 import { shouldRefresh } from './refresh-policy';
 import type { SessionRecord } from './session';
-import type { AuthLogger, StoreUnavailableStage } from '../ports/logger';
+import type { AuthLogger, RefreshFailedStage, StoreUnavailableStage } from '../ports/logger';
 import { sidTag } from '../ports/logger';
 import type { IdTokenClaims } from '../ports/principal-resolver';
 import type { SessionStore } from '../ports/session-store';
@@ -22,6 +22,13 @@ export interface RefreshedTokens {
 
 export interface ResolveDeps {
   store: SessionStore;
+  /**
+   * Called at most once per resolveSession, only when a refresh is due and the record has a refresh
+   * token, BEFORE the first tryAcquireLock (SMA-704). Production wires it to
+   * OidcClient.ensureDiscovered, so the OIDC discovery request never runs under the lock. A
+   * rejection is a transient refresh failure.
+   */
+  prepareRefresh: () => Promise<void>;
   refresh: (refreshToken: string) => Promise<RefreshedTokens>;
   /**
    * RFC 7009 revocation (SMA-681). Called only for a refresh token that no record will hold: on the
@@ -69,6 +76,42 @@ async function revokeAll(revoke: ResolveDeps['revoke'], tokens: ReadonlySet<stri
   );
 }
 
+/** SMA-704. What the transient `session.refresh_failed` line adds: the OAuth code (under the lock) or the stage (before it). */
+interface TransientRefreshDetail {
+  readonly oauthError?: TokenErrorCode | 'other';
+  readonly stage?: RefreshFailedStage;
+}
+
+/**
+ * SMA-704. The TRANSIENT outcome of a failed refresh, in one place, for the two sites that can see
+ * one: the refresh call under the lock, and `prepareRefresh` before the lock. It logs
+ * `session.refresh_failed` with `reason: 'transient'`. It returns the record with
+ * `refreshState: 'failed'` while the access token is live. Otherwise it throws `err`, and
+ * next/get-session.ts's catch handles it.
+ *
+ * `liveUntil` takes the MINIMUM of the two expiries. handleCallback sets them independently
+ * (http/routes.ts:240-241) and only a refresh write clamps accessExpiresAt to the cap, so an IdP
+ * whose `expires_in` exceeds PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS mints a first record whose access
+ * token outlives its own absolute cap.
+ *
+ * It covers ONLY the transient outcome, and it never deletes. The site under the lock handles a
+ * rejection itself. The site before the lock never classifies one: a discovery failure says nothing
+ * about the refresh token.
+ */
+function transientRefreshFailure(logger: AuthLogger, sid: string, record: SessionRecord, err: unknown, detail: TransientRefreshDetail): ResolvedSession {
+  const liveUntil = Math.min(record.accessExpiresAt, record.absoluteExpiresAt);
+  const degraded = Date.now() < liveUntil;
+  logger.event('session.refresh_failed', {
+    sid: sidTag(sid),
+    reason: 'transient',
+    degraded,
+    ...(detail.oauthError !== undefined ? { oauthError: detail.oauthError } : {}),
+    ...(detail.stage !== undefined ? { stage: detail.stage } : {}),
+  });
+  if (degraded) return { ...record, refreshState: 'failed' };
+  throw err;
+}
+
 /** Exponential with jitter. A fixed backoff synchronises every waiter onto the same wake-up. */
 const backoff = (attempt: number): number => Math.min(25 * 2 ** attempt, 250) * (0.5 + Math.random());
 
@@ -106,6 +149,11 @@ const MIN_ACCESS_TTL_BUFFER_MS = 1_000;
  *     for a LOCK HOLDER. For a WAITER the binding bound is `lockWaitMs`: if a refresh outlasts it
  *     while the token is hard-expired, the timeout branch below returns `null` and every waiter
  *     is signed out — both bounds matter, not just the holder's.
+ *     OIDC discovery is NOT one of the calls under the lock (SMA-704). `prepareRefresh` runs it
+ *     before the first `tryAcquireLock`, so runtime.ts's 2x bound counts only the token call and
+ *     the JWKS call. A waiter's `lockWaitMs` starts after `prepareRefresh`, so a waiter keeps its
+ *     full wait after discovery. The bound counts the IdP calls only. The store calls under the
+ *     lock (the post-lock `get` and the fenced `set`) are not in it (SMA-704 spec § 6).
  *
  * `now` is re-read EVERY ITERATION. Binding it once makes the deadline unreachable and the loop
  * never terminates.
@@ -126,7 +174,7 @@ const MIN_ACCESS_TTL_BUFFER_MS = 1_000;
  *     re-login is the recoverable outcome.
  */
 export async function resolveSession(deps: ResolveDeps, sid: string): Promise<ResolvedSession | null> {
-  const { store, refresh, revoke, logger, skewMs, lockTtlMs, lockWaitMs, ttlMs } = deps;
+  const { store, prepareRefresh, refresh, revoke, logger, skewMs, lockTtlMs, lockWaitMs, ttlMs } = deps;
 
   const rec = await store.get(sid);
   if (rec === null) return null;
@@ -137,7 +185,31 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
   }
   if (!shouldRefresh(Date.now(), rec.accessExpiresAt, skewMs)) return rec;
 
+  // SMA-704. Discovery BEFORE the lock. In production `prepareRefresh` is
+  // OidcClient.ensureDiscovered (next/get-session.ts's resolveDepsFor), so under the lock the
+  // discovery inside `refresh()` is a resolved promise and sends nothing. A record with no refresh
+  // token skips this step: it reaches the `no_refresh_token` delete under the lock, as before, and
+  // waits for no IdP.
+  //
+  // On a rejection this path takes no lock. It re-reads the record first, as the lock-timeout
+  // branch does: up to PAIGASUS_OIDC_HTTP_TIMEOUT_MS has passed, and another process may have
+  // refreshed or deleted the record in that time. It never classifies a rejection, so it never
+  // deletes. A record whose cap passed during the wait is not deleted here either: the helper finds
+  // it not live and throws, and the next read deletes it through the absolute-expiry check above.
+  // A store failure during the re-read propagates, as every store failure here does.
+  if (rec.refreshToken !== undefined) {
+    try {
+      await prepareRefresh();
+    } catch (err) {
+      const reread = await store.get(sid);
+      if (reread === null) return null;
+      if (!shouldRefresh(Date.now(), reread.accessExpiresAt, skewMs)) return reread; // invariant 1
+      return transientRefreshFailure(logger, sid, reread, err, { stage: 'discovery' });
+    }
+  }
+
   const lockToken = newLockToken();
+  // AFTER prepareRefresh (SMA-704): a waiter keeps its full lockWaitMs after discovery.
   const deadline = Date.now() + lockWaitMs;
 
   for (let attempt = 0; ; attempt += 1) {
@@ -193,10 +265,8 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           //
           // A transient failure with a hard-expired token has nothing left to proceed on.
           //
-          // `liveUntil` takes the MINIMUM of the two expiries. handleCallback sets them
-          // independently (http/routes.ts:240-241) and only a refresh write clamps accessExpiresAt
-          // to the cap, so an IdP whose `expires_in` exceeds PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS
-          // mints a first record whose access token outlives its own absolute cap.
+          // transientRefreshFailure (above) handles both transient outcomes. The site before the
+          // lock (`prepareRefresh`, SMA-704) uses it too.
           //
           // `reason` is REQUIRED, not decoration. With `degraded` alone, a benign single-session
           // revocation and an outage that signs users out produce the identical line — the exact
@@ -205,23 +275,18 @@ export async function resolveSession(deps: ResolveDeps, sid: string): Promise<Re
           // (next/get-session.ts), so this error was built by whichever copy of this package
           // created the runtime, while this line runs in whichever copy serves the request. See
           // hasAuthErrorCode in core/errors.ts.
-          const rejected = isRefreshRejected(err);
-          const liveUntil = Math.min(fresh.accessExpiresAt, fresh.absoluteExpiresAt);
-          const degraded = !rejected && Date.now() < liveUntil;
+          if (isRefreshRejected(err)) {
+            logger.event('session.refresh_failed', { sid: sidTag(sid), reason: 'rejected', degraded: false });
+            await store.delete(sid);
+            logger.event('session.deleted', { sid: sidTag(sid), reason: 'refresh_rejected' });
+            throw err;
+          }
           // SMA-692 D10. The OAuth code of a transient failure, from a closed set. It is never the
           // error object, its message or a URL. A failure with no OAuth code (a network error, a
           // timeout) gets no field. A rejection is always `invalid_grant`, so `reason` says it.
-          const oauthError = rejected ? undefined : refreshFailureCode(err);
-
-          logger.event('session.refresh_failed', { sid: sidTag(sid), reason: rejected ? 'rejected' : 'transient', degraded, ...(oauthError !== undefined ? { oauthError } : {}) });
-
+          const oauthError = refreshFailureCode(err);
           // The early return still runs the `finally` below, so the lock is released either way.
-          if (degraded) return { ...fresh, refreshState: 'failed' };
-          if (rejected) {
-            await store.delete(sid);
-            logger.event('session.deleted', { sid: sidTag(sid), reason: 'refresh_rejected' });
-          }
-          throw err;
+          return transientRefreshFailure(logger, sid, fresh, err, oauthError !== undefined ? { oauthError } : {});
         }
         // SMA-681 D5, D6 (spec § 4.3). A refresh response MAY carry a new ID token. OIDC Core
         // § 12.2 requires its `iss` and `sub` to equal the login token's, and nothing upstream

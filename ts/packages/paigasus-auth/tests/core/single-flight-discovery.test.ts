@@ -95,9 +95,8 @@ function depsFor(store: SessionStore, oidc: OidcClient, logger: AuthLogger) {
   };
 }
 
-// RED-FIRST (SMA-704 plan, Task 2). Both cases are `it.fails` in the commit that measured them on
-// the code before the fix: `it.fails` passes only while its test fails. The fix commit (Task 3)
-// changes them to `it` and changes nothing else in them.
+// RED-FIRST (SMA-704 plan, Task 2). Both cases were `it.fails` in the commit that measured them on
+// the code before the fix. The fix commit changed them to `it` and changed nothing else in them.
 describe('OIDC discovery and the session lock (SMA-704 test 13)', () => {
   let fixture: OidcFixture;
   let hanging: DiscoveryFailureFixture | undefined;
@@ -112,49 +111,45 @@ describe('OIDC discovery and the session lock (SMA-704 test 13)', () => {
     hanging = undefined;
   });
 
-  it.fails(
-    'SMA-704 test 13a: no discovery request reaches the IdP while the lock is held',
-    async () => {
-      fixture.setResponseDelay('discovery', DISCOVERY_DELAY_MS);
-      fixture.setResponseDelay('token', TOKEN_DELAY_MS);
-      fixture.setResponseDelay('jwks', JWKS_DELAY_MS);
-      // The refresh response carries an ID token, so the non-repudiation hook fetches JWKS. Its `iss`
-      // and `sub` equal the record's login claims, so the D5 id_token_mismatch branch does not run.
-      fixture.setNextIdToken(await fixture.mintIdToken());
-      const inner = new MemorySessionStore();
-      await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1, idTokenClaims: { iss: fixture.issuer, sub: 'user-1' } }), 60_000, null);
-      const window = newLockWindow();
-      const { logger, events } = recordingLogger();
+  it('SMA-704 test 13a: no discovery request reaches the IdP while the lock is held', async () => {
+    fixture.setResponseDelay('discovery', DISCOVERY_DELAY_MS);
+    fixture.setResponseDelay('token', TOKEN_DELAY_MS);
+    fixture.setResponseDelay('jwks', JWKS_DELAY_MS);
+    // The refresh response carries an ID token, so the non-repudiation hook fetches JWKS. Its `iss`
+    // and `sub` equal the record's login claims, so the D5 id_token_mismatch branch does not run.
+    fixture.setNextIdToken(await fixture.mintIdToken());
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1, idTokenClaims: { iss: fixture.issuer, sub: 'user-1' } }), 60_000, null);
+    const window = newLockWindow();
+    const { logger, events } = recordingLogger();
 
-      const startedAt = Date.now();
-      await resolveSession(depsFor(lockTimingStore(inner, window), coldClient(fixture.issuer, T), logger), 's');
-      const totalMs = Date.now() - startedAt;
+    const startedAt = Date.now();
+    await resolveSession(depsFor(lockTimingStore(inner, window), coldClient(fixture.issuer, T), logger), 's');
+    const totalMs = Date.now() - startedAt;
 
-      const { acquiredAt, releasedAt } = window;
-      if (acquiredAt === undefined || releasedAt === undefined) throw new Error('the lock was never taken and released');
-      const log = fixture.requests();
-      const underLock = (endpoint: FixtureEndpoint): number => log.filter((r) => r.endpoint === endpoint && r.at >= acquiredAt && r.at <= releasedAt).length;
-      const beforeLock = (endpoint: FixtureEndpoint): number => log.filter((r) => r.endpoint === endpoint && r.at < acquiredAt).length;
+    const { acquiredAt, releasedAt } = window;
+    if (acquiredAt === undefined || releasedAt === undefined) throw new Error('the lock was never taken and released');
+    const log = fixture.requests();
+    const underLock = (endpoint: FixtureEndpoint): number => log.filter((r) => r.endpoint === endpoint && r.at >= acquiredAt && r.at <= releasedAt).length;
+    const beforeLock = (endpoint: FixtureEndpoint): number => log.filter((r) => r.endpoint === endpoint && r.at < acquiredAt).length;
 
-      // Printed BEFORE the assertions, so a red run shows the numbers too. The spec's § 7 records them.
-      console.info(
-        `SMA-704 test 13a: lock hold ${String(releasedAt - acquiredAt)} ms; resolveSession ${String(totalMs)} ms; ` +
-          `under the lock: discovery ${String(underLock('discovery'))}, token ${String(underLock('token'))}, jwks ${String(underLock('jwks'))}; ` +
-          `before the lock: discovery ${String(beforeLock('discovery'))}`,
-      );
+    // Printed BEFORE the assertions, so a red run shows the numbers too. The spec's § 7 records them.
+    console.info(
+      `SMA-704 test 13a: lock hold ${String(releasedAt - acquiredAt)} ms; resolveSession ${String(totalMs)} ms; ` +
+        `under the lock: discovery ${String(underLock('discovery'))}, token ${String(underLock('token'))}, jwks ${String(underLock('jwks'))}; ` +
+        `before the lock: discovery ${String(beforeLock('discovery'))}`,
+    );
 
-      expect(underLock('discovery'), 'discovery requests while the lock is held').toBe(0);
-      expect(underLock('token'), 'token requests while the lock is held').toBe(1);
-      expect(underLock('jwks'), 'JWKS requests while the lock is held').toBe(1);
-      expect(beforeLock('discovery'), 'discovery requests before the lock is taken').toBe(1);
-      expect(events).toContainEqual(['session.refreshed', { sid: sidTag('s'), rev: 1, idTokenRotated: true }]);
-    },
-    15_000,
-  );
+    expect(underLock('discovery'), 'discovery requests while the lock is held').toBe(0);
+    expect(underLock('token'), 'token requests while the lock is held').toBe(1);
+    expect(underLock('jwks'), 'JWKS requests while the lock is held').toBe(1);
+    expect(beforeLock('discovery'), 'discovery requests before the lock is taken').toBe(1);
+    expect(events).toContainEqual(['session.refreshed', { sid: sidTag('s'), rev: 1, idTokenRotated: true }]);
+  }, 15_000);
 
   // The worst case with every call AT its timeout is a failed refresh, so this case covers the
   // timeout. Its own client uses T = 200 ms, to keep the run short.
-  it.fails('SMA-704 test 13b: a hanging discovery never reaches tryAcquireLock', async () => {
+  it('SMA-704 test 13b: a hanging discovery never reaches tryAcquireLock', async () => {
     hanging = await startDiscoveryFailureFixture('hang');
     const inner = new MemorySessionStore();
     await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
@@ -168,5 +163,24 @@ describe('OIDC discovery and the session lock (SMA-704 test 13)', () => {
     expect(isOidcDiscoveryFailed(err)).toBe(true);
     expect(hanging.requests).toBe(1);
     expect(await inner.get('s')).not.toBeNull();
+  });
+
+  // Review Focus R5. On a cold process, concurrent requests that need a refresh share ONE
+  // discovery request (the adapter's cache) and ONE token request (the lock). A GUARD: it passes
+  // before the fix too, because discovery then ran under the lock of the one holder.
+  it('SMA-704 R5: two concurrent refreshes on a cold client send one discovery and one token request', async () => {
+    fixture.setResponseDelay('discovery', 100);
+    const oidc = coldClient(fixture.issuer, T);
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const { logger } = recordingLogger();
+
+    const [first, second] = await Promise.all([resolveSession(depsFor(inner, oidc, logger), 's'), resolveSession(depsFor(inner, oidc, logger), 's')]);
+
+    const log = fixture.requests();
+    expect(log.filter((r) => r.endpoint === 'discovery')).toHaveLength(1);
+    expect(log.filter((r) => r.endpoint === 'token')).toHaveLength(1);
+    expect(first?.accessToken).toBeDefined();
+    expect(second?.accessToken).toBe(first?.accessToken);
   });
 });

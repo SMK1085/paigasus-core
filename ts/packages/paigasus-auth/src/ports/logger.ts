@@ -14,6 +14,10 @@
 // `session.refresh_failed` may carry `oauthError` (SMA-692 D10). Its value is a code of the RFC
 // 6749 § 5.2 list or 'other', never the IdP's raw string: core/errors.ts's toTokenErrorCode maps
 // it. This type admits any string key, so that function is the control, not this port.
+//
+// `session.refresh_failed` may also carry `stage` (SMA-704), from RefreshFailedStage below. It is
+// present only when the refresh failed BEFORE the session lock. The line never carries both `stage`
+// and `oauthError`: a discovery failure has no OAuth code.
 
 export type AuthEventName =
   | 'login.started'
@@ -47,6 +51,13 @@ export type StoreUnavailableStage =
  * or logout stage is a new member here, not a new event name.
  */
 export type OidcDiscoveryStage = 'login' | 'callback';
+
+/**
+ * The closed set of `stage` values for `session.refresh_failed` (SMA-704). `'discovery'` means
+ * `prepareRefresh` (OIDC discovery) failed before the session lock was taken, so no token request
+ * was sent. A failure of the token call under the lock has no `stage`.
+ */
+export type RefreshFailedStage = 'discovery';
 
 export interface AuthLogger {
   event(name: AuthEventName, fields: AuthEventFields): void;

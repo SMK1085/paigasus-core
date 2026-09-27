@@ -240,6 +240,7 @@ describe('POST /auth/logout — delete-first ordering (AC 3)', () => {
     const result = await resolveSession(
       {
         store,
+        prepareRefresh: () => Promise.reject(new Error('must not be called: the session is already deleted')),
         // Never expected to be called: the record is gone, so resolveSession returns before ever
         // needing a refresh function.
         refresh: () => Promise.reject(new Error('must not be called: the session is already deleted')),
