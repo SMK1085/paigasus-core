@@ -119,6 +119,26 @@ docs(py): document uv workspace setup
 or `workspace` for repo-wide changes). Note: a blank line is required before
 any commit footer (e.g. `Closes #12`).
 
+**Which commits release a crate (SMA-716).** release-plz opens a release for a
+crate only when one of its commits is a releasing commit (`release_commits` in
+`rs/release-plz.toml`):
+
+- `feat`, `fix` or `perf` with the scope `rs`, `py`, `ts`, `contracts` or
+  `deps`, or with no scope. A scope list such as `fix(rs,py)` releases only if
+  every scope in it releases. One space after the comma is allowed:
+  `fix(rs, py)` also releases.
+- Any type with `!`, or a `BREAKING CHANGE:` footer.
+
+The scopes `ci`, `docs`, `release`, `repo`, `claude` and `workspace` do not
+release. The PR title becomes the squash commit on `main`, so the PR title
+decides.
+
+**Do not use `feat(ci)` or `fix(ci)` on a file inside a crate.** The filter
+decides only whether a crate releases. The version level comes from all commits
+since the last release. A `feat(ci)` commit on a crate path makes the next
+release of that crate a minor bump. For a crate-file change that must not ship,
+use `chore`, `ci`, `build`, `docs`, `refactor` or `test`.
+
 **One exception (SMA-579):** the release commit that release-plz writes on its
 own release PR — `chore: release`, `chore: release v<version>`, or
 `chore(<package>): release v<version>` — is exempt, because release-plz builds
@@ -130,7 +150,8 @@ empty body; write your own commits the normal way.
 > `@paigasus/commitlint-config` (in `ts/packages/commitlint-config/index.cjs`),
 > which is the source of truth. When you change either list — or the release-plz
 > exemption above — update the config package **and** this section in the same
-> PR.
+> PR. A new scope does not release until you also add it to `release_commits`
+> in `rs/release-plz.toml`.
 
 ## Code conventions
 
