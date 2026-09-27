@@ -12,8 +12,9 @@ pub(crate) const LOG_RATE_LIMIT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Rate limit for diagnostic log lines (SMA-686 D14). One signed token can otherwise write one
 /// line per request. Keyed by (issuer, kind), so the map holds at most `issuers × kinds` entries.
-/// The validator uses it with `TokenDefect`, and `AuthenticateToken` with the JIT `defect` label
-/// (SMA-698 D2). A suppressed event is counted, and the next admitted line reports the count.
+/// The validator uses it with `TokenDefect`. `AuthenticateToken` uses it with the JIT `defect`
+/// label (SMA-698 D2), and with `()` for the JIT-disabled refusal line, one line per issuer
+/// (SMA-707). A suppressed event is counted, and the next admitted line reports the count.
 pub(crate) struct LogRateLimiter<K> {
     interval: Duration,
     last: Mutex<HashMap<(String, K), (Instant, u64)>>,
