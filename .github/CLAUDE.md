@@ -116,8 +116,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   Check 5 enforces R1. A new member: add it to the other members' lists in the same PR.
 - **A crate releases only on a releasing commit (SMA-716, `release_commits`).** Releasing:
   `feat`/`fix`/`perf` with scope `rs`, `py`, `ts`, `contracts`, `deps` or no scope (one optional
-  space after a comma in a scope list); any `!`; a `BREAKING CHANGE:` footer. Only the subject line
-  counts. Consequences: **C1** a non-releasing change to shipped code rides along with the next
+  space after a comma in a scope list); any `!`; a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer
+  line anywhere in the message. The type, scope, and `!` rules read only the subject line. The
+  `BREAKING CHANGE:` footer releases a crate even with no releasing type or scope on the subject
+  line. Consequences: **C1** a non-releasing change to shipped code rides along with the next
   releasing commit; **C2** the filter decides WHETHER, not the LEVEL, so `feat(ci)` on a crate
   path makes the next release minor; **C3** a new publishable crate first releases only after a
   releasing commit touches it; **C4** the "dependencies changed" cascade bypasses the filter;
