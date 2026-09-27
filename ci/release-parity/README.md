@@ -146,9 +146,13 @@ prepend path where P1 happened. G1: `fix(rs):` on the leader only; both reach 0.
 follower's first release section has `- *(rs)* x` under `### Fixed`. G2: `feat(rs):` on the
 follower only; both reach 0.2.0, and the leader gets a section. G3: `fix(ci):` only; both stay at
 0.1.0. G4: one `fix(rs):` commit on both crates; the line is in each new section exactly once.
-The path+version edge (`rpg-X1` depends on `rpg-X2`, the real proto → derive shape): dropped —
-release-plz 0.3.158 in `git_only` mode rejects it, with `cargo package` failing to find the
-unpublished dependency crate in the crates.io index.
+The path+version edge (`rpg-X1` depends on `rpg-X2`, the real proto → derive shape) is dropped:
+MEASURED, release-plz 0.3.158 in `git_only` mode rejects it — "error: failed to prepare local
+package for uploading; Caused by: no matching package named `rpg-a2` found; location searched:
+crates.io index; required by package `rpg-a1 v0.1.0`". Because the edge is dropped, `rpg-b1`
+(G2's leader) does not cascade to a version bump from its dependency: a negative control that
+drops `changelog_include` (NC2) sees a follower-only commit on `rpg-b2` bump only the follower,
+with `rpg-b1` staying at 0.1.0 rather than cascading to 0.1.1 — NC2 still reds.
 
 **Cost.** One filter fixture run: 46.8 s. One group fixture run: 8.2 s (development Mac).
 

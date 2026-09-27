@@ -258,12 +258,12 @@ rpf::filter_suite() { # real_toml mode(real|no-release-commits) -> 0/1/2
 # Four independent version groups in ONE repo, so one release-plz run covers G1-G4. Group X has
 # members rpg-X1 and rpg-X2. With RPG_DEP_EDGE=1, rpg-X1 depends on rpg-X2 by path AND version:
 # the real paigasus-proto -> paigasus-proto-derive shape (rs/Cargo.toml:173).
+RPG_GROUPS="a b c d"
 # 0: MEASURED (SMA-716) — release-plz 0.3.158 in git_only mode rejects the path+version edge:
 # "error: failed to prepare local package for uploading; Caused by: no matching package named
 # `rpg-a2` found; location searched: crates.io index; required by package `rpg-a1 v0.1.0`". The
 # edge is dropped. With R1 all members have the same commits, so G1-G4 do not change; NC2's
 # intermediate value for rpg-b1 changes from 0.1.1 (cascade) to 0.1.0.
-RPG_GROUPS="a b c d"
 RPG_DEP_EDGE=0
 
 # The shape of the real crates' CHANGELOG.md: release-plz's header with `## [Unreleased]`, then a
