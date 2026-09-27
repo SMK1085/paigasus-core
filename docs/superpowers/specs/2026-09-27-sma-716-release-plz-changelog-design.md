@@ -105,7 +105,7 @@ The kernel group has one processed member (`paigasus-kernel`). The three binding
 **Why symmetric.** release-plz computes the group maximum from all diffs. It applies the
 `release_commits` filter per package, later (`updater.rs:90-97`). A package that fails the
 filter goes to `packages_to_check_for_deps`. In the real graph, `paigasus-proto` depends on
-`paigasus-proto-derive` with a version requirement (`rs/crates/libs/paigasus-proto/Cargo.toml:42`).
+`paigasus-proto-derive` (`rs/crates/libs/paigasus-proto/Cargo.toml:42`, `.workspace = true`), with the version requirement in `rs/Cargo.toml:173`.
 Without R1, a `feat(rs):` commit only on proto-derive gives proto an empty diff. The filter
 skips proto, and the dependency cascade then gives proto a PATCH bump with a synthetic `chore:`
 entry (`updater.rs:155-157`, `404-436`). The result is derive 0.5.0 and proto 0.4.1: the
