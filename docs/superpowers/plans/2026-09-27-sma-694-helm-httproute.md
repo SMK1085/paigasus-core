@@ -1444,3 +1444,13 @@ needed the bash-version or pipe-size exception.
 Note: at this run `origin/main` was `1a45803f` (`chore: release (#306)`), one commit after this
 branch's base `4051df5e` (#332). The branch is not rebased onto it. The `open-pr` stage must
 rebase before the push.
+
+### Final verification after the rebase (2026-09-28)
+
+The branch was rebased onto `origin/main` `1a45803f` with no conflicts. The release commit
+changes no file under `charts/`, `ci/` or `docs/ops/`. The full `ci-targets` command then
+exited `rc=0` again: 24 actions, and the four selected tasks passed (`repo:helm-render` was a
+cache hit, `repo:input-liveness`, `repo:affected-smoke`, `repo:actionlint`). The actionlint
+preflight reported `pipe capacity 65536 bytes (floor 8192)`, so its local verdict is valid.
+`/bin/bash ci/helm-render/run.sh` ran uncached and passed. The four chart scripts also passed
+under `/opt/homebrew/bin/bash` 5.3.15 with `--set ingress.host=console.example.test`.
