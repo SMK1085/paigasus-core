@@ -549,8 +549,9 @@ mod tests {
     /// open breaker must not change that: it still propagates, just without dialling.
     ///
     /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
-    /// looks identical to a short-circuit. Here a command that actually dialled would cost
-    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    /// looks identical to a short-circuit. Here a command that actually dialled would open a
+    /// TCP connection that the blackhole counts, so `accepted() == 0` proves the breaker
+    /// short-circuited (SMA-702). The 1 s clock is only a stall backstop.
     #[tokio::test]
     async fn an_open_breaker_keeps_redis_generations_propagating_the_error() {
         let blackhole = crate::adapters::redis_conn::test_support::start().await;
@@ -568,7 +569,17 @@ mod tests {
             matches!(result, Err(AuthzError::Backend(_))),
             "SMA-476 AC3: an open breaker must still PROPAGATE as AuthzError::Backend — Generations::Redis is not fail-open, got {result:?}"
         );
-        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the read dialled instead of short-circuiting");
+        assert_eq!(
+            blackhole.accepted(),
+            0,
+            "SMA-702: the blackhole accepted a connection — the policy_gen read dialled instead of short-circuiting \
+             (or a redis-rs upgrade made new_lazy_with_config dial eagerly)"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "took {elapsed:?} — stall backstop only: the count above proved no dial, so this is \
+             probably runner load, not a breaker regression"
+        );
     }
 
     /// Steady state: an observation at or beyond everything this process has seen is

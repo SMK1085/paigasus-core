@@ -1754,7 +1754,8 @@ every Redis command:
   *does* count, by design: there the alternative is a wedge that never re-arms.
 - **`OPEN_DURATION = 2 s`.** While open, every command short-circuits with a synthetic error in
   microseconds instead of dialling — the measured ~6.46 s-for-ten-commands figure above *is* this in
-  action: commands 4–10 each cost under 100 ms once the breaker trips at command 3.
+  action: commands 4–10 each short-circuit without dialling once the breaker trips at command 3
+  (asserted by the breaker-open error).
 - **`HALF_OPEN_DEADLINE = 5 s`.** After the open window, exactly one probe is admitted; if the
   breaker has sat half-open longer than this (an abandoned probe), another is admitted regardless,
   so it cannot wedge open forever on a dropped future.
