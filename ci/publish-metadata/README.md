@@ -21,6 +21,7 @@ It does not validate category slugs, which are a crates.io concept.
 | 2b | The packaged file list ships README + LICENSE, not moon.yml | 1 |
 | 3 | A 0.0.0 crate is release-blocked | 1 |
 | 4 | The freshness job's call site still exists | 1 / 2 |
+| 5 | Rule R1: each processed member of a version group lists every other processed member in `changelog_include` | 1 / 2 |
 | P0 | The PyPI-bound set equals `EXPECTED_PYPI_PUBLISHABLE`, discovered at runtime | 1 / 2 |
 | P1 | Every PyPI-bound distribution carries the `[project]` metadata PyPI needs, pairs no SPDX expression with a `License ::` classifier, and — for sdist-shipped crates — carries Check 1c's non-denying lint table | 1 / 2 |
 | P2 | The README and LICENSE files named by those `[project]` fields exist on disk | 1 / 2 |
@@ -131,7 +132,22 @@ fully would mean an external pin — `PUBLISH_METADATA_SH_CALL_SITES` in
 `ci/affected-graph/ci_targets.py` **plus** adding `ci/publish-metadata/run.sh` to
 `repo:affected-smoke`'s `inputs` (without which the pin would serve a cached pass on exactly
 the PR that breaks it) — and that is deliberately deferred: pinning one check's call sites
-while this file's other four stay unpinned would misrepresent the coverage.
+while this file's other five stay unpinned would misrepresent the coverage.
+
+### Check 5 — Rule R1, symmetric `changelog_include` in each version group
+
+release-plz 0.3.158 appends a `changelog_include` package's own commits to the including
+package's changelog (updater.rs:241–257, READ). The include is not transitive, so each
+processed member of a version group must list every other processed member. Then all members
+see the same commits and a member with no own releasing commits still gets a CHANGELOG section
+(SMA-716).
+
+"Processed" is Cargo-publishable or `git_only=true` (updater.rs:283–302, READ). The check reads
+`rs/release-plz.toml` and the cargo metadata JSON. It determines which packages are processed.
+It asserts that each processed group member's `changelog_include` list exactly equals the other
+processed members. It rejects missing names, extra names, and unknown packages. It rejects
+duplicates, wrong type (must be a list of strings), and the key on an unprocessed member or
+a crate in no group.
 
 ## The category snapshot
 
