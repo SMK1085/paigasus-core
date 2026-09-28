@@ -872,12 +872,16 @@ def release_tags(run=subprocess.run):
     """Every `paigasus-*` git tag of the repository, one per line of plumbing output. `git tag
     --list` is porcelain and follows column.ui, so it can put several tags on one line. No tag at
     all is rc 2: a checkout with no tags, not a chart defect. `run` is a parameter only so
-    self_test() can drive this with no git."""
+    self_test() can drive this with no git. A listing over GIT_TIMEOUT_S is rc 2 (SMA-679)."""
     cmd = ["git", "-C", str(REPO_ROOT), "for-each-ref", "--format=%(refname:lstrip=2)", "refs/tags/paigasus-*"]
     try:
-        proc = run(cmd, capture_output=True, text=True, check=False)
+        proc = run(cmd, capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_S)
     except FileNotFoundError as exc:
         raise InfraError(f"git is not on PATH: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise InfraError(
+            f"git for-each-ref did not finish in {GIT_TIMEOUT_S} s (GIT_TIMEOUT_S): {' '.join(map(str, cmd))}"
+        ) from exc
     if proc.returncode != 0:
         raise InfraError(f"git for-each-ref exited {proc.returncode}: {proc.stderr.strip()}")
     tags = frozenset(line.strip() for line in proc.stdout.splitlines() if line.strip())
@@ -1541,6 +1545,21 @@ def self_test():
         got = [kw.get("timeout") for kw in seen]
         if got != [HELM_TIMEOUT_S, HELM_TIMEOUT_S]:
             failures.append(f"helm timeout: check7 passes timeout=HELM_TIMEOUT_S on both renders: got {got}")
+    exc = expect_infra_strict("git timeout: release_tags maps TimeoutExpired to InfraError", lambda: release_tags(run=timeout_run))
+    msg = str(exc) if exc is not None else ""
+    for needle in ("GIT_TIMEOUT_S", f"{GIT_TIMEOUT_S} s", "for-each-ref"):
+        if needle not in msg:
+            failures.append(f"git timeout: release_tags maps TimeoutExpired to InfraError: {needle!r} is not in {msg!r}")
+    git_seen = []
+
+    def git_recording_run(cmd, **kw):
+        git_seen.append(kw)
+        return _GitProc(0, "paigasus-iam-v0.1.0\n")
+
+    release_tags(run=git_recording_run)
+    got = [kw.get("timeout") for kw in git_seen]
+    if got != [GIT_TIMEOUT_S]:
+        failures.append(f"git timeout: release_tags passes timeout=GIT_TIMEOUT_S: got {got}")
 
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
