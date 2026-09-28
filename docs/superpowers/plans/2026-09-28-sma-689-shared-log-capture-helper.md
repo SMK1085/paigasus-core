@@ -619,7 +619,7 @@ In `rs/CLAUDE.md`, section `## Cargo, the lockfile and nextest`, add this bullet
   helper. Do not write a new `LogBuffer`. The helper supports `cargo nextest` only (SMA-689).
 ```
 
-This file does not name `ciReport.json`, so no `moon-diagnosis` marker is needed (actionlint check 12). Confirm: `git diff rs/CLAUDE.md | grep -c ciReport` prints `0`.
+The bullet does not name the Moon CI report file, so no `moon-diagnosis` marker is needed (actionlint check 12). Do not add a mention of that file to the bullet.
 
 - [ ] **Step 2: AC 1, one helper**
 
