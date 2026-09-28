@@ -805,6 +805,7 @@ pub struct CreateUserResponse {
 /// need LinkExternalIdentity, UnlinkExternalIdentity and ChangeUserEmail. Each
 /// write needs a reason, which goes into the audit record. A user is named by
 /// its full principal PRN.
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct User {
     #[prost(string, tag="1")]
@@ -821,6 +822,7 @@ pub struct User {
     #[prost(message, optional, tag="6")]
     pub audit: ::core::option::Option<super::super::common::v1::AuditMetadata>,
 }
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExternalIdentity {
     /// uuid
