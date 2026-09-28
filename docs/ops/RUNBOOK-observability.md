@@ -516,8 +516,10 @@ is also what produces the audit trail (`ReplayOutboxDeadLetter`, in `audit_log`)
 ### `IamOutboxPublishFailures` — outbox publishes are failing (warning)
 
 **Meaning.** `iam_outbox_relay_publish_failures_total` increased in each 2-minute window for the
-`for: 2m` hold. A row's `EventPublisher::publish` call failed during relay ticks. A failure spell
-of about 90 s or more fires the alert about 2 to 3 minutes after onset. One isolated failure does
+`for: 2m` hold. A row's `EventPublisher::publish` call failed during relay ticks. At the repo's
+15 s scrape interval, a failure spell of about 90 s or more fires the alert about 2 to 3 minutes
+after onset. That 90 s figure needs the 15 s cadence: at a 1 m interval, a 90 s spell can give only
+two true evaluations and not fire. One isolated failure does
 NOT fire it, on purpose: SMA-471 D9 absorbs a short broker restart with no operator action. The
 alert resolves about 2 to 3 minutes after the last failure (SMA-713).
 

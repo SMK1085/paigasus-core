@@ -145,8 +145,10 @@ Severity stays `warning`.
 # backlog age. `main` primes the counter at zero when the relay is enabled (SMA-713), and
 # relay.rs increments it by 0 on every tick, so `increase()` sees the first failure.
 #
-# SMA-713. `[2m]` with `for: 2m`: a failure spell of about 90 s or more fires this alert about
-# 2 to 3 minutes after onset. One isolated failure does NOT fire it, on purpose: SMA-471 D9
+# SMA-713. `[2m]` with `for: 2m`, at the repo's 15s scrape interval: a failure spell of about
+# 90 s or more fires this alert about 2 to 3 minutes after onset. The 90 s figure needs that
+# 15s cadence; at a 1m interval a 90 s spell can give only two true evaluations and not fire.
+# One isolated failure does NOT fire it, on purpose: SMA-471 D9
 # absorbs a short broker restart with no operator action. The old `[5m]` with `for: 5m` fired
 # only 5 to 6 minutes after onset, which is not earlier than parking.
 #
@@ -156,7 +158,7 @@ Severity stays `warning`.
   expr: increase(iam_outbox_relay_publish_failures_total[2m]) > 0
   for: 2m
   labels: { severity: warning }
-  annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
+  annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. At a 15 s scrape interval, a failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
 ```
 
 The expression stays per series. It has no `sum by`. The labels `job` and `instance` stay on the

@@ -24,7 +24,7 @@ nextest, Moon 2.5.3.
   `warning`. No `sum by`. The `job` and `instance` labels stay on the alert.
 - The `summary` stays exactly `IAM outbox publishes are failing (broker unreachable or rejecting)`.
 - The new `description` is exactly: `The publish-failure counter increased in each 2-minute
-  window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it
+  window for 2 minutes. One failure does not fire this alert. At a 15 s scrape interval, a failure spell of about 90 s or more fires it
   about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check
   iam_nats_connected. See RUNBOOK section 4.` (one line in the YAML).
 - The prime is gated on `config.outbox.relay_enabled` and sits inside `if metrics_handle.is_some()`
@@ -106,14 +106,14 @@ line) with:
           - exp_labels: { severity: warning, job: "iam", instance: "s:8080" }
             exp_annotations:
               summary: "IAM outbox publishes are failing (broker unreachable or rejecting)"
-              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
+              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. At a 15 s scrape interval, a failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
       - eval_time: 14m
         alertname: IamOutboxPublishFailures
         exp_alerts:
           - exp_labels: { severity: warning, job: "iam", instance: "s:8080" }
             exp_annotations:
               summary: "IAM outbox publishes are failing (broker unreachable or rejecting)"
-              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
+              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. At a 15 s scrape interval, a failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
       - eval_time: 15m
         alertname: IamOutboxPublishFailures
         exp_alerts: []
@@ -139,8 +139,10 @@ In `iam.rules.yml`, replace lines 20-28 (the SMA-471 comment and the rule) with:
       # backlog age. `main` primes the counter at zero when the relay is enabled (SMA-713), and
       # relay.rs increments it by 0 on every tick, so `increase()` sees the first failure.
       #
-      # SMA-713. `[2m]` with `for: 2m`: a failure spell of about 90 s or more fires this alert about
-      # 2 to 3 minutes after onset. One isolated failure does NOT fire it, on purpose: SMA-471 D9
+      # SMA-713. `[2m]` with `for: 2m`, at the repo's 15s scrape interval: a failure spell of about
+      # 90 s or more fires this alert about 2 to 3 minutes after onset. The 90 s figure needs that
+      # 15s cadence; at a 1m interval a 90 s spell can give only two true evaluations and not fire.
+      # One isolated failure does NOT fire it, on purpose: SMA-471 D9
       # absorbs a short broker restart with no operator action. The old `[5m]` with `for: 5m` fired
       # only 5 to 6 minutes after onset, which is not earlier than parking.
       #
@@ -150,7 +152,7 @@ In `iam.rules.yml`, replace lines 20-28 (the SMA-471 comment and the rule) with:
         expr: increase(iam_outbox_relay_publish_failures_total[2m]) > 0
         for: 2m
         labels: { severity: warning }
-        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
+        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)", description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. At a 15 s scrape interval, a failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4." }
 ```
 
 Do not touch the SMA-706 comment near `iam.rules.yml:319-321` ("see SMA-713"). It stays true.
@@ -495,8 +497,10 @@ stale-wording lines.
 
 ```markdown
 **Meaning.** `iam_outbox_relay_publish_failures_total` increased in each 2-minute window for the
-`for: 2m` hold. A row's `EventPublisher::publish` call failed during relay ticks. A failure spell
-of about 90 s or more fires the alert about 2 to 3 minutes after onset. One isolated failure does
+`for: 2m` hold. A row's `EventPublisher::publish` call failed during relay ticks. At the repo's
+15 s scrape interval, a failure spell of about 90 s or more fires the alert about 2 to 3 minutes
+after onset. That 90 s figure needs the 15 s cadence: at a 1 m interval, a 90 s spell can give only
+two true evaluations and not fire. One isolated failure does
 NOT fire it, on purpose: SMA-471 D9 absorbs a short broker restart with no operator action. The
 alert resolves about 2 to 3 minutes after the last failure (SMA-713).
 
