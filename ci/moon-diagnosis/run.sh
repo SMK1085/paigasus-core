@@ -265,6 +265,8 @@ run_step1_query() {
 }
 
 # Unit 6. One row per violation, nothing when clean. Rows are sorted.
+# Keep `. as $rows` on the `else` line. A line that starts with `. ` matches the source-statement
+# scan of ci/affected-graph/cargo_moon_parity.py (SOURCE_STMT_RE), and the parity gate then aborts.
 STEP1_VERDICT_JQ='
 def expected: {
   "RunTask(probe:fail3)":   {status: "failed",    exitCode: 3,    command: "exit 3"},
@@ -273,8 +275,7 @@ def expected: {
   "RunTask(probe:slow)":    {status: "timed-out", exitCode: null, command: "sleep 20"}
 };
 if length == 0 then "empty-output"
-else
-  . as $rows
+else . as $rows
   | [ ( expected | to_entries[] | .key as $l | .value as $want
         | ($rows | map(select(type == "object" and .label == $l))) as $m
         | if ($m | length) == 0 then "missing-row \($l)"
