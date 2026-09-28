@@ -305,8 +305,9 @@ mod tests {
     /// still degrades to a plain miss, a `put` is still swallowed.
     ///
     /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
-    /// looks identical to a short-circuit. Here a command that actually dialled would cost
-    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    /// looks identical to a short-circuit. Here a command that actually dialled would open a
+    /// TCP connection that the blackhole counts, so `accepted() == 0` proves the breaker
+    /// short-circuited (SMA-702). The 1 s clock is only a stall backstop.
     #[tokio::test]
     async fn an_open_breaker_keeps_the_decision_cache_failing_open() {
         let blackhole = crate::adapters::redis_conn::test_support::start().await;
@@ -320,6 +321,16 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(got.is_none(), "SMA-476 AC3: an open breaker must read as a plain MISS, never an error (fail-open, D12)");
-        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the calls dialled instead of short-circuiting");
+        assert_eq!(
+            blackhole.accepted(),
+            0,
+            "SMA-702: the blackhole accepted a connection — the get/put dialled instead of short-circuiting \
+             (or a redis-rs upgrade made new_lazy_with_config dial eagerly)"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "took {elapsed:?} — stall backstop only: the count above proved no dial, so this is \
+             probably runner load, not a breaker regression"
+        );
     }
 }
