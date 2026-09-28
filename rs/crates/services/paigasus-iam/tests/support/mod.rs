@@ -811,6 +811,60 @@ pub async fn seed_org_ref(db: &DatabaseConnection) -> TenancyNodeRef {
     TenancyNodeRef::Organization(id)
 }
 
+/// SMA-646: seeds a bare `team` row under `org` via raw SQL, with `prn = TeamId::canonical()`
+/// (the F1 invariant the stored-PRN check relies on), and returns a `TenancyNodeRef` naming it.
+/// The slug comes from the minted uuid, so repeat calls never collide.
+#[allow(dead_code)]
+pub async fn seed_team_ref(db: &DatabaseConnection, org: &TenancyNodeRef) -> TenancyNodeRef {
+    let org_uuid = org.resource_uuid();
+    let id = KernelIdGenerator.new_team_id(org_uuid);
+    let uuid = id.uuid();
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            r#"INSERT INTO "team" (id, org_id, prn, slug, name, status, created_at, updated_at)
+               VALUES ('{uuid}', '{org_uuid}', '{prn}', 'team-{slug}', 'Test Team', 'active', now(), now())"#,
+            prn = id.canonical(),
+            slug = uuid.simple(),
+        ),
+        [],
+    ))
+    .await
+    .unwrap();
+    TenancyNodeRef::Team(id)
+}
+
+/// SMA-646: splits a canonical PRN into `prn`, `pgs`, service, region, org, `type/uuid`.
+#[allow(dead_code)]
+fn prn_six_fields(prn: &str) -> Vec<&str> {
+    let fields: Vec<&str> = prn.splitn(6, ':').collect();
+    assert_eq!(fields.len(), 6, "a canonical prn has six fields: {prn}");
+    fields
+}
+
+/// SMA-646: replaces the organization slot of `prn` (a forged-slot fixture).
+#[allow(dead_code)]
+pub fn prn_with_org(prn: &str, org: &str) -> String {
+    let f = prn_six_fields(prn);
+    format!("prn:pgs:{}:{}:{}:{}", f[2], f[3], org, f[5])
+}
+
+/// SMA-646: replaces the region slot of `prn` (a forged-region fixture).
+#[allow(dead_code)]
+pub fn prn_with_region(prn: &str, region: &str) -> String {
+    let f = prn_six_fields(prn);
+    format!("prn:pgs:{}:{}:{}:{}", f[2], region, f[4], f[5])
+}
+
+/// SMA-646: upper-cases the org slot and the resource uuid of a CORRECT prn. `Prn::parse`
+/// normalises uuid case, so the answer must still carry the stored lower-case PRN.
+#[allow(dead_code)]
+pub fn prn_upper_uuids(prn: &str) -> String {
+    let f = prn_six_fields(prn);
+    let (kind, uuid) = f[5].split_once('/').expect("the last prn field is type/uuid");
+    format!("prn:pgs:{}:{}:{}:{}/{}", f[2], f[3], f[4].to_uppercase(), kind, uuid.to_uppercase())
+}
+
 /// Builds a fresh `(Principal, ServiceAccount)` pair for `PgServiceAccountRepository::create`
 /// tests — mints via the real `KernelIdGenerator`/`SystemClock` adapters (mirrors
 /// `tenancy_orgs.rs::new_org_and_default_team`'s precedent). `owner` must already exist as a

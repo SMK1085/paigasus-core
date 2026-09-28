@@ -1,14 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `ServiceAccountService`: service-account lifecycle use cases — create/get/list/archive
-//! (SMA-445 Task 16). Mirrors `RoleService`'s DI + authorize pattern (`application/roles.rs:
-//! 78-204`): every method authorizes BEFORE mutating/reading. The Cedar resource is always the
+//! (SMA-445 Task 16). Every method authorizes BEFORE mutating/reading. The Cedar resource is always the
 //! service account's OWNER tenancy node, never the service account's own principal PRN — the
 //! embedded schema only lets `CreateServiceAccount`/`GetServiceAccount`/`ListServiceAccounts`/
 //! `ArchiveServiceAccount` apply to `[Root, Organization, Team, Project]` (`authz/schema.rs`),
 //! and `TenancyNodeRef` itself has no `Root` arm (a service account's owner is always a
 //! concrete node, `ck_service_account_owner`), so [`owner_resource_prn`] only ever needs the
 //! three node arms.
+//!
+//! **SMA-646: `create` and `list` confirm the owner PRN against storage.** The caller's
+//! `owner` comes from a parsed wire PRN, and `TenancyNodeRef::from_prn` does not check the
+//! org-slot value or the region. Both methods call
+//! [`TenancyNodes::resolve_and_authorize`](crate::application::tenancy_nodes::TenancyNodes):
+//! load the owner node (unknown -> `NotFound`), authorize against its STORED PRN, refuse a
+//! differing caller PRN with `PrnMismatch` (one warning line), then use the STORED node for the
+//! write, the list filter and the answer. The F1 invariant (a node's `prn` column never changes)
+//! makes the compare sound outside the transaction. `get`/`archive` take the SA's own principal
+//! PRN and authorize against the stored owner of the SA row, so they need no such check.
 //!
 //! `archive`'s cache-eviction step (spec §9/D5, "revocation-vs-cache honesty") is the
 //! security-critical half of this file: once `set_principal_status` disables the SA, every one
@@ -64,6 +73,7 @@ use crate::adapters::api_keys::ApiKeyValidationCache;
 use crate::application::authorize::Authorize;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
+use crate::application::tenancy_nodes::TenancyNodes;
 use paigasus_iam_core::{
     Action, ApiKeyRepository, Clock, DomainEvent, EventType, IdGenerator, Outbox, Principal, PrincipalId, PrincipalKind, PrincipalStatus, ServiceAccount, ServiceAccountRecord,
     ServiceAccountRepository, TenancyNodeRef, UnitOfWork,
@@ -92,6 +102,7 @@ pub struct ServiceAccountService<R, I, C> {
     keys: Arc<dyn ApiKeyRepository>,
     cache: Arc<dyn ApiKeyValidationCache>,
     authorize: Authorize,
+    nodes: TenancyNodes,
     uow: Arc<dyn UnitOfWork>,
     outbox: Arc<dyn Outbox>,
     ids: I,
@@ -108,6 +119,8 @@ pub struct ServiceAccountServiceDeps<R, I, C> {
     pub keys: Arc<dyn ApiKeyRepository>,
     pub cache: Arc<dyn ApiKeyValidationCache>,
     pub authorize: Authorize,
+    /// SMA-646: loads the owner node for the stored-PRN check of `create`/`list`.
+    pub nodes: TenancyNodes,
     pub uow: Arc<dyn UnitOfWork>,
     pub outbox: Arc<dyn Outbox>,
     pub ids: I,
@@ -126,6 +139,7 @@ where
             keys: deps.keys,
             cache: deps.cache,
             authorize: deps.authorize,
+            nodes: deps.nodes,
             uow: deps.uow,
             outbox: deps.outbox,
             ids: deps.ids,
@@ -133,19 +147,23 @@ where
         }
     }
 
-    /// Creates a service account owned by `owner`. Authorizes `Action::CreateServiceAccount`
-    /// AT `owner` BEFORE minting anything — an unauthorized actor never causes an id to be
-    /// consumed or a row to be written. `name` validation (`ServiceAccount::new`) runs after
-    /// the authz check, mirroring `RoleService::grant`'s "check first" posture: a caller who
-    /// isn't allowed to create here shouldn't learn whether their proposed name would even be
-    /// valid. The returned record's `status` is `Active` WITHOUT a re-query — a freshly created
-    /// SA's principal is minted `Active` right above, so there's nothing a follow-up read could
-    /// tell us that we don't already know. SMA-446 Slice B Task B7 (module docs — OUTBOX-ONLY):
-    /// the principal+SA insert and its `iam.principal.created` event share ONE UoW transaction;
-    /// a duplicate-name-per-owner unique-violation inside `create_in` rolls the whole unit of
-    /// work back before the event is ever enqueued.
+    /// Creates a service account owned by `owner`. SMA-646 order: load `owner`'s node
+    /// (`NotFound` if absent), authorize `Action::CreateServiceAccount` against its STORED PRN
+    /// BEFORE minting anything, then refuse a caller PRN that differs from the stored one
+    /// (`PrnMismatch`, module docs). Authorize before compare keeps a mismatch from telling an
+    /// ungranted caller which organization owns the node. `name` validation
+    /// (`ServiceAccount::new`) runs after that, so a forged owner outranks an invalid name
+    /// (SMA-645 B2). The record carries the STORED owner. The returned `status` is `Active`
+    /// WITHOUT a re-query — a freshly created SA's principal is minted `Active` right above.
+    /// SMA-446 Slice B Task B7 (module docs — OUTBOX-ONLY): the principal+SA insert and its
+    /// `iam.principal.created` event share ONE UoW transaction; a duplicate-name-per-owner
+    /// unique-violation inside `create_in` rolls the whole unit of work back before the event is
+    /// ever enqueued.
     pub async fn create(&self, actor: &Prn, owner: TenancyNodeRef, name: &str) -> Result<ServiceAccountRecord, TenancyError> {
-        self.authorize.check(actor, Action::CreateServiceAccount, &owner_resource_prn(&owner)).await?;
+        let owner = self
+            .nodes
+            .resolve_and_authorize(&self.authorize, actor, Action::CreateServiceAccount, &owner, "CreateServiceAccount")
+            .await?;
 
         let id = self.ids.new_service_account_id();
         let now = self.clock.now();
@@ -184,11 +202,17 @@ where
     }
 
     /// Lists service accounts owned by `owner`, `ORDER BY created_at, id` (rule 9, delegated to
-    /// the repo). Authorizes `Action::ListServiceAccounts` AT `owner` directly — unlike `get`,
-    /// the resource is already known from the caller-supplied `owner`, no lookup needed first.
+    /// the repo). SMA-646: loads `owner`'s node (`NotFound` if absent), authorizes
+    /// `Action::ListServiceAccounts` against its STORED PRN, refuses a differing caller PRN
+    /// (`PrnMismatch`), and filters on the STORED node. Before SMA-646 a forged owner PRN
+    /// listed the real owner's accounts, each labelled with the forged PRN. The `Page` is built
+    /// in the transport, so `InvalidPagination` still outranks a forged owner (spec B7).
     pub async fn list(&self, actor: &Prn, owner: &TenancyNodeRef, page: Page) -> Result<Vec<ServiceAccountRecord>, TenancyError> {
-        self.authorize.check(actor, Action::ListServiceAccounts, &owner_resource_prn(owner)).await?;
-        Ok(self.repo.list_by_owner(owner, page.limit, page.offset).await?)
+        let owner = self
+            .nodes
+            .resolve_and_authorize(&self.authorize, actor, Action::ListServiceAccounts, owner, "ListServiceAccounts")
+            .await?;
+        Ok(self.repo.list_by_owner(&owner, page.limit, page.offset).await?)
     }
 
     /// Archives (disables) a service account: `NotFound` if it doesn't exist; authorizes
@@ -237,10 +261,14 @@ where
 mod tests {
     use super::*;
     use crate::adapters::api_keys::{CachedValidation, MemoryApiKeyCache};
-    use crate::application::fakes::{FakeAuthorizer, FakeOutbox, FakeUnitOfWork, FixedClock, InMemoryApiKeys, InMemoryServiceAccounts, SeqIds};
+    use crate::application::fakes::{
+        FakeAuthorizer, FakeOutbox, FakeUnitOfWork, FixedClock, InMemoryApiKeys, InMemoryServiceAccounts, SeqIds, TenancyStore, forged_variants, seed_org, seed_project, seed_team, store_with_orgs,
+        tenancy_nodes,
+    };
+    use crate::log_capture::capture_logs;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use paigasus_iam_core::{ApiKey, ApiKeyId, ApiKeyStatus, OrganizationId, RepositoryError, Transaction};
+    use paigasus_iam_core::{ApiKey, ApiKeyId, ApiKeyStatus, OrganizationId, ProjectId, RepositoryError, TeamId, Transaction};
     use uuid::Uuid;
 
     fn actor_prn(n: u128) -> Prn {
@@ -255,6 +283,19 @@ mod tests {
         PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap())
     }
 
+    /// SMA-646: seeds org 100 -> team 101 -> project 102 into `store`.
+    fn seed_chain(store: &TenancyStore) -> (OrganizationId, TeamId, ProjectId) {
+        let org = seed_org(store, 100);
+        let team = seed_team(store, &org, 101);
+        let project = seed_project(store, &team, 102);
+        (org, team, project)
+    }
+
+    /// SMA-646: the three STORED nodes of `seed_chain` as owners.
+    fn stored_owners(org: &OrganizationId, team: &TeamId, project: &ProjectId) -> [TenancyNodeRef; 3] {
+        [TenancyNodeRef::Organization(org.clone()), TenancyNodeRef::Team(team.clone()), TenancyNodeRef::Project(project.clone())]
+    }
+
     /// Bundles a `ServiceAccountService` together with the SMA-446 Slice B Task B7 fakes it was
     /// built over, so a test can assert on exactly what — and how many — events `create`/
     /// `archive` emitted (mirrors `application::roles::tests::ServiceWithFakes`).
@@ -264,6 +305,7 @@ mod tests {
         keys: Arc<InMemoryApiKeys>,
         cache: Arc<MemoryApiKeyCache>,
         outbox: FakeOutbox,
+        store: TenancyStore,
     }
 
     /// Builds a service over fresh, empty backing stores (including a fresh, unshared
@@ -273,17 +315,29 @@ mod tests {
         let keys = Arc::new(InMemoryApiKeys::default());
         let cache = Arc::new(MemoryApiKeyCache::new(30));
         let outbox = FakeOutbox::default();
+        // SMA-646: `create`/`list` now load the owner node. Every `owner_org(n)` with n in
+        // 1..=32 names a STORED organization, so the pre-SMA-646 tests keep their meaning.
+        // `owner_org(404)` stays unseeded for the not-found test.
+        let store = store_with_orgs(1..=32);
         let svc = ServiceAccountService::new(ServiceAccountServiceDeps {
             repo: repo.clone(),
             keys: keys.clone(),
             cache: cache.clone(),
             authorize: Authorize::new(Arc::new(fake)),
+            nodes: tenancy_nodes(&store),
             uow: Arc::new(FakeUnitOfWork::default()),
             outbox: Arc::new(outbox.clone()),
             ids: SeqIds::default(),
             clock: FixedClock::default(),
         });
-        ServiceWithFakes { svc, repo, keys, cache, outbox }
+        ServiceWithFakes {
+            svc,
+            repo,
+            keys,
+            cache,
+            outbox,
+            store,
+        }
     }
 
     /// Builds a service over fresh, empty backing stores. Returns the `InMemoryServiceAccounts`
@@ -418,7 +472,7 @@ mod tests {
         let fake = FakeAuthorizer::default();
         fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&owner));
         fake.allow(Action::ArchiveServiceAccount, &owner_resource_prn(&owner));
-        let ServiceWithFakes { svc, repo, keys, cache, outbox } = new_service_with_fakes(fake);
+        let ServiceWithFakes { svc, repo, keys, cache, outbox, .. } = new_service_with_fakes(fake);
         let actor = actor_prn(1);
 
         let sa = svc.create(&actor, owner.clone(), "ci-bot").await.unwrap();
@@ -496,6 +550,7 @@ mod tests {
             keys: keys.clone(),
             cache: cache.clone(),
             authorize: Authorize::new(Arc::new(fake)),
+            nodes: tenancy_nodes(&store_with_orgs([7])),
             uow: Arc::new(FakeUnitOfWork::default()),
             outbox: Arc::new(FakeOutbox::default()),
             ids: SeqIds::default(),
@@ -604,5 +659,149 @@ mod tests {
     async fn get_missing_is_not_found() {
         let (svc, ..) = new_service(FakeAuthorizer::default());
         assert_eq!(svc.get(&actor_prn(1), &missing_id(404)).await.unwrap_err(), TenancyError::NotFound);
+    }
+
+    /// SMA-646 U1 (B1, AC 1): a forged org slot or region on an EXISTING owner answers
+    /// `PrnMismatch`. Nothing is written and no event is enqueued.
+    #[tokio::test]
+    async fn create_refuses_a_forged_owner() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes { svc, repo, outbox, store, .. } = new_service_with_fakes(fake.clone());
+        let (org, team, project) = seed_chain(&store);
+        for node in stored_owners(&org, &team, &project) {
+            fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&node));
+        }
+        let actor = actor_prn(1);
+
+        for (label, forged) in forged_variants(&org, &team, &project) {
+            let err = svc.create(&actor, forged, "ci-bot").await.unwrap_err();
+            assert_eq!(err, TenancyError::PrnMismatch, "{label}");
+        }
+        assert!(repo.accounts.lock().unwrap().is_empty(), "a refused create must not persist anything");
+        assert!(outbox.0.lock().unwrap().is_empty(), "a refused create must not enqueue an event");
+    }
+
+    /// SMA-646 U2 (AC 3): the correct PRN succeeds and the record carries the STORED owner.
+    #[tokio::test]
+    async fn create_returns_the_stored_owner() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes { svc, store, .. } = new_service_with_fakes(fake.clone());
+        let (org, team, project) = seed_chain(&store);
+        let actor = actor_prn(1);
+        for (i, node) in stored_owners(&org, &team, &project).into_iter().enumerate() {
+            fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&node));
+            let record = svc.create(&actor, node.clone(), &format!("bot-{i}")).await.unwrap();
+            assert_eq!(record.account.owner.canonical(), node.canonical());
+        }
+    }
+
+    /// SMA-646 U3 (B2, AC 2): a forged owner on List answers `PrnMismatch`.
+    #[tokio::test]
+    async fn list_refuses_a_forged_owner() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes { svc, store, .. } = new_service_with_fakes(fake.clone());
+        let (org, team, project) = seed_chain(&store);
+        for node in stored_owners(&org, &team, &project) {
+            fake.allow(Action::ListServiceAccounts, &owner_resource_prn(&node));
+        }
+        let actor = actor_prn(1);
+
+        for (label, forged) in forged_variants(&org, &team, &project) {
+            let err = svc.list(&actor, &forged, Page::new(None, None).unwrap()).await.unwrap_err();
+            assert_eq!(err, TenancyError::PrnMismatch, "{label}");
+        }
+    }
+
+    /// SMA-646 U4: the correct PRN lists the owner's accounts, each with the STORED owner.
+    #[tokio::test]
+    async fn list_returns_accounts_for_the_correct_owner() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes { svc, store, .. } = new_service_with_fakes(fake.clone());
+        let (_org, team, _project) = seed_chain(&store);
+        let owner = TenancyNodeRef::Team(team.clone());
+        fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&owner));
+        fake.allow(Action::ListServiceAccounts, &owner_resource_prn(&owner));
+        let actor = actor_prn(1);
+        svc.create(&actor, owner.clone(), "one").await.unwrap();
+        svc.create(&actor, owner.clone(), "two").await.unwrap();
+
+        let listed = svc.list(&actor, &owner, Page::new(None, None).unwrap()).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        for record in &listed {
+            assert_eq!(record.account.owner.canonical(), team.canonical());
+        }
+    }
+
+    /// SMA-646 U5 (B6): with a default-deny authorizer, Create AND List answer `Forbidden` for a
+    /// forged and a correct PRN alike. This proves the ORDER (authorize before compare) only;
+    /// the "alike" property for real decisions rests on Cedar (I1).
+    #[tokio::test]
+    async fn an_ungranted_caller_cannot_tell_a_forged_owner_from_a_correct_one() {
+        let ServiceWithFakes { svc, store, .. } = new_service_with_fakes(FakeAuthorizer::default());
+        let (_org, team, _project) = seed_chain(&store);
+        let correct = TenancyNodeRef::Team(team.clone());
+        let forged = TenancyNodeRef::Team(TeamId::from_parts(Uuid::from_u128(0xF0F0), team.uuid()));
+        let actor = actor_prn(1);
+
+        for (label, node) in [("correct", correct), ("forged", forged)] {
+            assert_eq!(svc.create(&actor, node.clone(), "ci-bot").await.unwrap_err(), TenancyError::Forbidden, "create {label}");
+            assert_eq!(svc.list(&actor, &node, Page::new(None, None).unwrap()).await.unwrap_err(), TenancyError::Forbidden, "list {label}");
+        }
+    }
+
+    /// SMA-646 U6 (B3, AC 5): a forged owner outranks an invalid name. The control (correct PRN,
+    /// same name) answers the name error, so this test cannot pass vacuously.
+    #[tokio::test]
+    async fn a_forged_owner_outranks_an_invalid_name() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes { svc, store, .. } = new_service_with_fakes(fake.clone());
+        let (_org, team, _project) = seed_chain(&store);
+        let correct = TenancyNodeRef::Team(team.clone());
+        fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&correct));
+        let forged = TenancyNodeRef::Team(TeamId::from_parts(Uuid::from_u128(0xF0F0), team.uuid()));
+        let actor = actor_prn(1);
+
+        assert_eq!(svc.create(&actor, forged, "   ").await.unwrap_err(), TenancyError::PrnMismatch);
+        assert!(matches!(svc.create(&actor, correct, "   ").await.unwrap_err(), TenancyError::InvalidName(_)));
+    }
+
+    /// SMA-646 U7 (B5, AC 7): an unknown owner uuid answers `NotFound` on Create and List, also
+    /// for a default-deny authorizer (the load runs first).
+    #[tokio::test]
+    async fn an_unknown_owner_is_not_found() {
+        let (svc, ..) = new_service(FakeAuthorizer::default());
+        let actor = actor_prn(1);
+        let unknown_team = TenancyNodeRef::Team(TeamId::from_parts(Uuid::from_u128(1), Uuid::from_u128(4040)));
+
+        for node in [owner_org(404), unknown_team] {
+            assert_eq!(svc.create(&actor, node.clone(), "ci-bot").await.unwrap_err(), TenancyError::NotFound);
+            assert_eq!(svc.list(&actor, &node, Page::new(None, None).unwrap()).await.unwrap_err(), TenancyError::NotFound);
+        }
+    }
+
+    /// SMA-646 U8 (AC 8): each refused mismatch writes exactly one warning line, with the RPC,
+    /// the requested PRN and the stored PRN.
+    #[tokio::test]
+    async fn a_forged_owner_logs_one_warning() {
+        let (logs, _guard) = capture_logs();
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes { svc, store, .. } = new_service_with_fakes(fake.clone());
+        let (_org, team, _project) = seed_chain(&store);
+        let correct = TenancyNodeRef::Team(team.clone());
+        fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&correct));
+        fake.allow(Action::ListServiceAccounts, &owner_resource_prn(&correct));
+        let forged = TenancyNodeRef::Team(TeamId::from_parts(Uuid::from_u128(0xF0F0), team.uuid()));
+        let actor = actor_prn(1);
+
+        let _ = svc.create(&actor, forged.clone(), "ci-bot").await.unwrap_err();
+        let _ = svc.list(&actor, &forged, Page::new(None, None).unwrap()).await.unwrap_err();
+
+        let text = logs.text();
+        assert_eq!(text.matches("requested_prn=").count(), 2, "one warning per refused call: {text}");
+        assert_eq!(text.matches("rpc=CreateServiceAccount").count(), 1, "{text}");
+        assert_eq!(text.matches("rpc=ListServiceAccounts").count(), 1, "{text}");
+        assert!(text.contains(&format!("requested_prn={}", forged.canonical())), "{text}");
+        assert!(text.contains(&format!("stored_prn={}", correct.canonical())), "{text}");
+        assert!(text.contains("WARN"), "{text}");
     }
 }
