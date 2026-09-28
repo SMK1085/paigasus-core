@@ -6,6 +6,9 @@
 **Scope:** `paigasus-iam-core` ports, `paigasus-iam` membership service, Postgres adapter, in-memory fake, two module docs, tests.
 **Scope extended on 2026-09-27 (Q1):** `RoleService::grant` (`application/roles.rs`) also confirms the
 principal PRN against storage (§4.7), with its own tests and mutations (T6, M5, M6).
+**Scope extended on 2026-09-28 (Q6):** `RoleService::list` (`ListRoleGrants` with a principal
+filter) also confirms the principal PRN against storage (§4.8), with its own tests and mutation
+(T7, M7, AC15–AC19).
 
 ---
 
@@ -23,6 +26,12 @@ These decisions override the defaults that the draft proposed.
 - **Q4 — accepted.** `not-found` for an unknown principal uuid (B4).
 - **Q5 — accepted.** `prn-mismatch` (not `invalid-prn`) for a forged organization slot on a principal
   PRN (B2).
+- **Q6 — ADDED on 2026-09-28.** Sven answered the question "ListRoleGrants with a principal filter
+  probably has the same forged-PRN defect. What do you want?" with "Fold into SMA-649". So
+  `RoleService::list` (`application/roles.rs:373-391`) confirms the principal PRN against storage
+  too, with the same `not-found` / `prn-mismatch` semantics, tests on the service and on the gRPC and
+  HTTP transports, and compiling mutations. See §4.8, T7, M7, AC15–AC19. The Q2, Q4 and Q5 answers
+  apply to it unchanged.
 
 ---
 
@@ -282,8 +291,9 @@ steps 5 and 6.
 - **`application/roles.rs` `parse_principal_prn` doc.** It says that it "Mirrors
   `application::memberships::parse_principal_prn`". Change the doc to say that this copy checks only
   the syntax, the service and the type, and that `RoleService::grant` confirms the region and the
-  organization slot against storage (§4.7). Say also that `RoleService::list` does NOT confirm them
-  (out of scope, §5). The code change in `roles.rs` is in §4.7.
+  organization slot against storage (§4.7). Task 4 of the plan first writes that `RoleService::list`
+  does NOT confirm them; §4.8 then changes the sentence to say that `list` confirms them too. The
+  code changes in `roles.rs` are in §4.7 and §4.8.
 
 ### 4.5 Documentation
 
@@ -384,18 +394,99 @@ G3 does not add an existence oracle: today an authorized actor already tells an 
 (an internal error) from a known one (OK). G5 holds because authorization runs first.
 
 **Not changed.** `RoleService::revoke` reads the grant from storage by id, so its event carries the
-stored principal PRN. `RoleService::list` with a principal filter is out of scope (§5).
+stored principal PRN. `RoleService::list` with a principal filter is §4.8.
+
+### 4.8 Role-grant listing: `RoleService::list` (scope extended, Q6)
+
+**The defect (re-checked on the branch base, `roles.rs:373-391` and `pg_role_grants.rs`).**
+`RoleService::list` parses the principal filter with the `roles.rs` copy of `parse_principal_prn`,
+which checks only the syntax, the service and the type. Both read paths then filter on the bare
+uuid:
+
+- the principal-only path calls `RoleGrantStore::list_by_principal`, and
+  `PgRoleGrantStore::list_by_principal` filters `role_grant.principal_id = p.uuid()`;
+- every other path calls `RoleGrantQuery::find`, and `find_statement` binds
+  `g.principal_id = p.uuid()` when a principal is set.
+
+So `prn:pgs:iam:eu-west-1::principal/<real-uuid>` and `prn:pgs:iam::<any-org>:principal/<real-uuid>`
+list the real principal's grants, with and without a scope, a role key or a kind. The rows carry the
+STORED principal PRN (`model_to_grant`), so the response does not echo the forgery. It is the same
+defect as §1: the server answers for a PRN that no principal has. An unknown principal uuid answers
+an empty OK list today.
+
+**The fix: the same application-layer guard as `grant`.** `list` calls
+`self.resolve_principal(principal)` (§4.7) when the filter carries a principal, directly after the
+authorization step (D4) and before `Page::new` and any read. It is ONE call site for both read paths:
+
+```rust
+if let Some(principal) = filter.principal() {
+    self.resolve_principal(principal).await?;
+}
+```
+
+Why the application layer, and not the repository layer that §2.1 chose for `ListMemberships`:
+`resolve_principal` exists after §4.7, in the same service, and the read ports
+(`RoleGrantStore::list_by_principal`, `RoleGrantQuery::find`) live in `paigasus-iam-core::authz`.
+`RoleGrantStore::list_by_principal` also serves the policy snapshot and the authn path with
+server-resolved ids, the same trusted-caller argument as §2.1 A. One guard per use case, next to the
+scope and principal handling of the same service, is the §4.7 argument again.
+
+**The self path runs the guard too.** When the principal filter equals the actor
+(`is_self`, D4 (a)), the supplied PRN is byte-equal to the actor's server-resolved canonical PRN,
+so it cannot be a forgery. The guard still runs, for one rule with no exception. The cost is one
+primary-key read of `principal` per self listing. A caller whose own principal row is absent gets
+`not-found`. The authn layer resolves an actor from an external identity or an API key record
+(§2.1 A), and both point at a stored principal, so this is not expected for a real caller. The
+Task 7 transport tests pin the self path (L8) against Postgres.
+
+**Order after the change.** Parse (`invalid-prn`) → kind (`invalid-principal-kind`) → filter
+(`missing-required-field`) → authorize (D4, `forbidden`) → **`resolve_principal`**
+(`not-found` / `prn-mismatch`) → principal-only read, or `Page::new` (`invalid-pagination`) and
+`find`.
+
+**Behaviour changes on `ListRoleGrants` (gRPC and `GET /v1/authz/role-grants`).** Rows apply to
+both transports. "Authorized" means the caller passes D4 for that request: `ListRoleGrants` at Root
+for a principal-only request about another principal, or at the scope node when a scope is set.
+
+| # | request | today | after |
+|---|---|---|---|
+| L1 | principal-only, forged region, authorized caller | the real principal's grants | `prn-mismatch` |
+| L2 | principal-only, forged organization slot, authorized caller | the real principal's grants | `prn-mismatch` |
+| L3 | principal + scope (or + role key or kind), forged region or org slot, authorized caller | the real principal's grants at that scope | `prn-mismatch` |
+| L4 | **unknown** principal uuid, authorized caller, with or without a scope | empty OK list | `not-found` |
+| L5 | correct PRN with an upper-case uuid, authorized caller or self | the grants | the grants — **no change** |
+| L6 | caller without the D4 grant, forged, canonical or unknown PRN of another principal | `forbidden` | `forbidden` — **no change** |
+| L7 | the caller's OWN uuid with a forged region or org slot, caller without the D4 grant | `forbidden` (not self: the canonical form differs) | `forbidden` — **no change** |
+| L8 | the caller's own canonical PRN (self, D4 (a)) | the caller's grants | the caller's grants — **no change**; one extra read |
+| L9 | forged or unknown principal + scope + out-of-range `limit`, authorized caller | `invalid-pagination` | `prn-mismatch` / `not-found` — **changed order** |
+| L10 | forged principal + unknown `principal_kind`, or a missing principal and scope | `invalid-principal-kind` / `missing-required-field` | the same — **no change** |
+
+**L9 is a deliberate difference from B5/B8.** `ListMemberships` keeps `invalid-pagination` first
+because its transports validate the page before the service runs. `ListRoleGrants` validates the
+page inside the service (D6), and only on the query path. Keeping the page first would need a second
+call site of the guard (one per read path), or an unreachable branch. One call site keeps the M7
+mutation proof simple. Both answers are refusals of an invalid request; only the reason code of a
+doubly-invalid request changes.
+
+**L4 and an existence oracle.** A scope-authorized caller (for example an `org_admin` of org X,
+which holds `ListRoleGrants` and `GrantRole` at X) now tells an unknown principal uuid
+(`not-found`) from a known one (an OK list) with `principal_prn` + `scope_prn = X`. This adds no new
+capability: that caller already tells them apart through `GrantRole` at X (G3: `internal` before
+SMA-649, `not-found` after, against OK for a known principal). Principal uuids are uuid v7 values,
+so this answers "does this uuid exist", not "which uuids exist".
+
+**No log line** (Q2), the same as `grant`.
 
 ---
 
 ## 5. Out of scope
 
-- **`ListRoleGrants` with a principal filter** (`application/roles.rs::list`, lines 373-391). It
-  uses the same `parse_principal_prn` copy, and the challenger measured that its principal-only
-  path filters on the uuid (`grants.list_by_principal`). So it very probably accepts a forged
-  region or organization slot, the same as `ListMemberships` did. Sven's Q1 decision names
-  `RoleService::grant` only, so this spec does not fix `list`. The notes of this run flag it for a
-  decision.
+- **`ListRoleGrants` with a principal filter** is now IN scope (§4.8, Q6).
+- **The scope filter of `ListRoleGrants`.** `find_statement` binds `g.scope_node_prn` to the
+  canonical form of the supplied scope, so a forged scope PRN matches no row and answers an empty
+  list, and D4 authorizes against the scope's stored ancestry. That is not the defect of this
+  issue (no answer for a PRN that names another resource), and Sven's Q6 names the principal filter
+  only.
 - **`RevokeRole`.** It takes a grant id, not a principal PRN, and its event carries the stored
   principal PRN. Not affected.
 - **`GrantRole`** is now IN scope (§4.7).
@@ -506,6 +597,12 @@ anything").
 - **M6:** in `RoleService::grant`, wrap the call as `if false { self.resolve_principal(&principal).await?; }`,
   so the helper stays used and the tree compiles. T6's forged AND unknown cases must go red. This
   pins the call site (memory: "guard-the-guard: pin production call sites").
+- **M5 (extended, Q6):** the same M5 edit must also red T7's forged cases (unit and transport),
+  because `list` calls the same `resolve_principal`.
+- **M7:** in `RoleService::list`, change `if let Some(principal) = filter.principal() {` to
+  `if let Some(principal) = filter.principal().filter(|_| false) {`, so the helper call stays in
+  the tree and compiles. T7's forged AND unknown cases (unit and transport) must go red, on the
+  principal-only path and on the principal + scope path. This pins the `list` call site.
 - Restore each mutation by an Edit revert, not `git checkout --`, so the uncommitted fix survives.
 
 ### T6 — role-grant path (§4.7)
@@ -532,6 +629,32 @@ Use the same forged shapes as the top of §6.
 - Route every expected code through `TenancyError::code()` or `ErrorReason::…::as_wire_reason()`
   (§4.6).
 
+### T7 — role-grant listing (§4.8)
+
+Use the same forged shapes as the top of §6.
+
+- **Unit (`application/roles.rs`, fakes).** The harness seeds principals 1 and 2 into
+  `store.principals` (principal 3 stays unknown). With an authorizer that allows `ListRoleGrants`
+  at Root: `list_refuses_a_forged_principal_prn` — the forged region, the forged org slot (a real
+  org uuid and a random uuid), both slots, and an upper-case uuid with a region, each on the
+  principal-only path AND on the principal + Root-scope path, answer `TenancyError::PrnMismatch`
+  (L1–L3). Control in the same test: the canonical PRN lists the seeded grant on both paths.
+  `list_answers_not_found_for_an_unknown_principal` (L4, both paths).
+  `list_accepts_an_upper_case_uuid_in_a_correct_principal_prn` (L5).
+  `list_refuses_a_forged_principal_prn_before_the_page_check` (L9: principal + scope + `limit`
+  201 answers `PrnMismatch`). `list_with_a_forged_own_principal_prn_is_not_self` (L7: with an
+  authorizer that allows nothing, the actor's own uuid with a region answers `Forbidden`, and the
+  canonical own PRN lists).
+- **gRPC (`tests/grpc_authz.rs`) and HTTP (`tests/http_authz.rs`), real Postgres.** A
+  root-granted admin grants a role to a seeded member. For the principal-only path and the
+  principal + Root-scope path: forged region → `InvalidArgument` / 400 with reason `prn-mismatch`;
+  forged organization slot → the same; unknown uuid → `NotFound` / 404. Control: the canonical PRN
+  lists the member's grant. B6-style pin (L6, L7): a second, ungranted caller gets
+  `permission-denied` / 403 `forbidden` for the member's forged, canonical and unknown PRN and for
+  its OWN uuid with a forged region, and its own canonical PRN lists OK (L8).
+- Route every expected code through `TenancyError::code()` or `ErrorReason::…::as_wire_reason()`
+  in `src/` (§4.6); files under `tests/` may quote codes.
+
 ### T5 — full graph
 
 Run the full `moon ci` target list from CLAUDE.md with `--base origin/main --include-relations`.
@@ -554,7 +677,7 @@ The gates most at risk: `repo:error-code-single-site` (§4.6), `:fmt` (longer id
   unchanged; `principal_context` tests pass without edits.
 - **AC7.** The `adapters/grpc/tenancy.rs` module doc no longer names an exception to the
   PRN-confirmation rule, and no edited `src/` file contains a quoted registry code.
-- **AC8.** Mutations M1–M6 each red at least one test, and each mutated tree compiles.
+- **AC8.** Mutations M1–M7 each red at least one test, and each mutated tree compiles.
 - **AC10.** A forged or unknown NODE PRN on `list_of_kind` (kind `None` and `Some(User)`) answers
   `PrnMismatch` / `NotFound` in a Postgres test (`list_of_kind_confirms_the_node_prn`).
 - **AC11.** `GrantRole` with a principal PRN whose region or organization slot is not empty answers
@@ -566,6 +689,17 @@ The gates most at risk: `repo:error-code-single-site` (§4.6), `:fmt` (longer id
   `aggregate_prn` and into the response.
 - **AC14.** An actor without `GrantRole` at the scope still gets `permission-denied` for a forged
   principal PRN.
+- **AC15.** `ListRoleGrants` with a principal PRN whose region or organization slot is not empty
+  answers `prn-mismatch` on gRPC (`InvalidArgument`) and HTTP (400), on the principal-only path
+  and with a scope.
+- **AC16.** `ListRoleGrants` with an unknown principal uuid answers `not-found` on both transports
+  (today an empty OK list).
+- **AC17.** A canonical principal PRN, including one with an upper-case uuid, and a self listing
+  return the same grants as before.
+- **AC18.** A caller without the D4 grant still gets `permission-denied` for any principal PRN of
+  another principal, and for its own uuid with a forged slot.
+- **AC19.** `RoleGrantStore::list_by_principal`, `RoleGrantQuery::find` and the policy snapshot
+  are unchanged.
 - **AC9.** The full `moon ci` graph (CLAUDE.md target list) is green.
 
 ---
@@ -584,8 +718,9 @@ The gates most at risk: `repo:error-code-single-site` (§4.6), `:fmt` (longer id
 | `rs/crates/services/paigasus-iam/src/application/fakes.rs` | also: a `PrincipalRepository` fake over `TenancyStore` (§4.7) |
 | `rs/crates/services/paigasus-iam/src/adapters/http/mod.rs` | `RoleServiceDeps.principals` wiring (§4.7) |
 | `rs/crates/services/paigasus-iam/tests/authz_bootstrap.rs` | `RoleServiceDeps.principals` wiring (§4.7) |
-| `rs/crates/services/paigasus-iam/tests/grpc_authz.rs` | T6 gRPC |
-| `rs/crates/services/paigasus-iam/tests/http_authz.rs` | T6 HTTP |
+| `rs/crates/services/paigasus-iam/tests/grpc_authz.rs` | T6 gRPC; T7 gRPC |
+| `rs/crates/services/paigasus-iam/tests/http_authz.rs` | T6 HTTP; T7 HTTP |
+| `rs/crates/services/paigasus-iam/src/application/roles.rs` | also (§4.8): `resolve_principal` call in `list`, `list` and `parse_principal_prn` docs, T7 unit tests, harness seeds principal 1 |
 | `rs/crates/services/paigasus-iam/tests/tenancy_memberships.rs` | T2; update one existing test |
 | `rs/crates/services/paigasus-iam/tests/grpc_tenancy.rs` | T3 gRPC |
 | `rs/crates/services/paigasus-iam/tests/http_memberships.rs` | T3 HTTP |
@@ -594,8 +729,8 @@ Any other implementer of `MembershipKindQuery` found by `git grep "impl Membersh
 must change too. On `origin/main` at the time of writing there are exactly two.
 
 Estimated size: **medium to large** — about 60 lines of product code and docs for
-`ListMemberships`, about 50 more for the grant path and its fake, and about 280 + 200 lines of
-tests.
+`ListMemberships`, about 50 more for the grant path and its fake, about 15 more for the listing
+path (§4.8), and about 280 + 200 + 250 lines of tests.
 
 ---
 
@@ -606,10 +741,11 @@ tests.
   (its own `parse_principal_prn` copy checks only the service and the type), stores only the uuid,
   writes the FORGED PRN into the outbox event's `aggregate_prn` (line 271), and returns it in the
   response (`Ok(grant)`, line 308). That is the SMA-606 D2 hazard that `MembershipService::attach`
-  prevents. The principal-only path of `ListRoleGrants` (lines 374-387) filters on the uuid. Should
-  a follow-up issue be filed with this evidence before this change merges? This run did not file
-  one. The `roles.rs` doc change in §4.4 should name it once it exists. Approach D (§2.1) is a
-  candidate fix there.
+  prevents. The principal-only path of `ListRoleGrants` (lines 374-387) filters on the uuid.
+  **CLOSED on 2026-09-28 by Q6 (§0):** no follow-up issue. `ListRoleGrants` is fixed in this issue
+  with a storage compare (§4.8), not with approach D.
+- **Q6. ANSWER: fold `ListRoleGrants` into SMA-649 (Sven, 2026-09-28, §0).** See §4.8, T7, M7,
+  AC15–AC19.
 - **Q2. ANSWER: no warning log (the spec default).** Should a principal `prn-mismatch` log a warning, as the sixteen node RPCs do with
   `warn_prn_mismatch`? This spec says no, to match the node filter of the same RPC, which logs
   nothing. If the answer is yes, both membership filters should log, and that is a separate change.
@@ -697,3 +833,26 @@ Re-confirmed as correct: the five `MembershipServiceDeps` sites (`memberships.rs
 `http/mod.rs:437`, `tests/tenancy_events_pg.rs:306`); the two `MembershipKindQuery` implementers;
 the two TypeScript `listMemberships` call sites (both `nodePrn`); `http/memberships.rs:123-129`;
 the `list_by_node` test lines 325, 398, 444 and the doc comment at 419-420; `roles.rs:239, 271, 308`.
+
+## Changes after approval (2026-09-28)
+
+**Approval decision applied (§0, Q6).** Sven folded `ListRoleGrants` with a principal filter into
+this issue. New §4.8 (with the L1–L10 table), T7, M7, the M5 extension, AC15–AC19, new rows in §8,
+§5 no longer lists `ListRoleGrants`, and §9 Q1 is closed. AC8 now covers M1–M7.
+
+**Decisions taken in this extension (for review):**
+
+- The guard is `RoleService::resolve_principal` (§4.7), called once in `list`, after D4 and
+  before `Page::new` (§4.8). This changes the reason code of one doubly-invalid request (L9).
+- The self path runs the guard too (one extra read per self listing), for one rule with no
+  exception.
+- `not-found` for an unknown uuid applies also to a scope-authorized caller (L4). The existence
+  oracle this gives is already present through `GrantRole` at the same scope (G3).
+- The scope filter of `ListRoleGrants` stays out of scope (§5).
+
+**Checked on the branch base (`origin/main` 4051df5e plus commits 82f55279 and 75e57087).**
+`roles.rs:373-391` (`list`), `pg_role_grants.rs` `list_by_principal` (uuid filter) and
+`find_statement` (`g.principal_id` bind); `org_admin` holds `GrantRole` and `ListRoleGrants`
+(`paigasus-iam-core/src/authz/roles.rs`). No existing test lists role grants of a principal that
+does not exist: the `principal_prn` listings in `tests/grpc_authz.rs`, `tests/http_authz.rs` and
+`tests/authz_people_model_access.rs` use provisioned principals.

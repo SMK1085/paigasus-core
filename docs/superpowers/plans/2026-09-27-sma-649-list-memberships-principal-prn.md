@@ -1,14 +1,14 @@
-# SMA-649 — Confirm a principal PRN against storage (ListMemberships and GrantRole) Implementation Plan
+# SMA-649 — Confirm a principal PRN against storage (ListMemberships, GrantRole and ListRoleGrants) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `ListMemberships` with a principal filter, and `GrantRole`, refuse a principal PRN whose region or organization slot differs from the stored principal PRN (`prn-mismatch`), and answer `not-found` for an unknown principal uuid.
+**Goal:** `ListMemberships` with a principal filter, `GrantRole`, and `ListRoleGrants` with a principal filter refuse a principal PRN whose region or organization slot differs from the stored principal PRN (`prn-mismatch`), and answer `not-found` for an unknown principal uuid.
 
-**Architecture:** `ListMemberships` goes through ONE guarded port method for both filters: `MembershipKindQuery::list_of_kind` takes the full `PrincipalId` and an `Option<PrincipalKind>`. The Postgres adapter confirms the principal PRN in the repository (`principal_list_uuid`, the twin of `node_list_sql`). `RoleService::grant` confirms the principal PRN in the application layer (`resolve_principal`, the twin of `resolve_scope`), through a new `PrincipalRepository` dependency.
+**Architecture:** `ListMemberships` goes through ONE guarded port method for both filters: `MembershipKindQuery::list_of_kind` takes the full `PrincipalId` and an `Option<PrincipalKind>`. The Postgres adapter confirms the principal PRN in the repository (`principal_list_uuid`, the twin of `node_list_sql`). `RoleService::grant` confirms the principal PRN in the application layer (`resolve_principal`, the twin of `resolve_scope`), through a new `PrincipalRepository` dependency. `RoleService::list` calls the same `resolve_principal` for a principal filter (spec §4.8, extended on 2026-09-28).
 
 **Tech Stack:** Rust (edition 2024, rust-version 1.95), SeaORM over Postgres, tonic (gRPC), axum (HTTP), `cargo nextest`, Docker-backed Postgres tests (`tests/support`).
 
-**Spec:** `docs/superpowers/specs/2026-09-27-sma-649-list-memberships-principal-prn-design.md` (approved 2026-09-27, with changes in its §0). Read it before you start a task. Section numbers below (§2.2, §4.7, T1–T6, M1–M6, AC1–AC14) point into it.
+**Spec:** `docs/superpowers/specs/2026-09-27-sma-649-list-memberships-principal-prn-design.md` (approved 2026-09-27, with changes in its §0; extended on 2026-09-28 by Q6). Read it before you start a task. Section numbers below (§2.2, §4.7, §4.8, T1–T7, M1–M7, AC1–AC19) point into it.
 
 ## Global Constraints
 
@@ -22,20 +22,21 @@
 - No log line on a principal `prn-mismatch` (spec Q2).
 - An unknown principal uuid answers `not-found` (spec Q4, B4, G3). A forged organization slot answers `prn-mismatch`, not `invalid-prn` (spec Q5, B2).
 - Do not change `MembershipRepository::list_by_principal` or `list_by_node` behaviour, and do not remove or rename any port method (SMA-719 owns that).
-- Do not change `RoleService::list` or `RoleService::revoke` (spec §5).
+- Do not change `RoleService::revoke` (spec §5). `RoleService::list` changes only in Task 6 (spec §4.8). Do not change `RoleGrantStore::list_by_principal` or `RoleGrantQuery::find` (AC19).
 - No proto change, no CLAUDE.md change (spec §4.5).
 - Postgres tests skip silently when Docker is absent. Run every Postgres test with `CI=1` so that a missing Docker daemon fails instead of skipping. Check `docker info` first.
-- A mutation (M1–M6) must COMPILE. Use the `if false && …` / `if false { … }` shapes given in the tasks, run with `cargo nextest run --no-fail-fast`, and restore each mutation with the Edit tool (never `git checkout --`, which also reverts the uncommitted fix).
+- A mutation (M1–M7) must COMPILE. Use the `if false && …` / `if false { … }` / `.filter(|_| false)` shapes given in the tasks, run with `cargo nextest run --no-fail-fast`, and restore each mutation with the Edit tool (never `git checkout --`, which also reverts the uncommitted fix).
 
 ## Review Focus
 
-These five inputs follow from the spec, but no spec test names them. Each one has a test in the task that owns the code.
+These six inputs follow from the spec, but no spec test names them. Each one has a test in the task that owns the code.
 
 1. **Both slots forged at once** (`prn:pgs:iam:eu-west-1:<org>:principal/<real-uuid>`): expect `prn-mismatch`, not a pass because one check covers only one slot. Tests: Task 1 (`list_refuses_a_forged_principal_prn`, shape "both slots"), Task 4 (`grant_refuses_a_forged_principal_prn`, shape "both slots").
 2. **An upper-case uuid together with a forged region**: expect `prn-mismatch`. A fix that lower-cases before it compares must not also drop the region. Tests: Task 1 (shape "upper-case uuid and a region"), Task 4 (same shape).
 3. **A forged PRN with an offset past the last row**: expect `prn-mismatch`, not an empty OK list. The guard must run before paging. Test: Task 1 (`list_refuses_a_forged_principal_prn_past_the_last_page`).
 4. **A service-account principal with a forged PRN and `principal_kind = service_account`**: expect `PrnMismatch` from Postgres. The guard must not depend on the kind. Test: Task 2 (`list_of_kind_confirms_the_principal_prn`, service-account block).
 5. **A known principal with zero memberships**: expect an empty OK list, not `not-found`. The guard must tell "no principal" from "no rows". Test: Task 1 (`list_returns_an_empty_list_for_a_known_principal_without_memberships`) and Task 2 (the same case in Postgres).
+6. **The caller's own uuid with a forged region on `ListRoleGrants`** (added 2026-09-28): expect `forbidden` for an ungranted caller, not a self listing. The self check must compare canonical forms. Tests: Task 6 (`list_with_a_forged_own_principal_prn_is_not_self`), Task 7 (the "own uuid, forged region" rows).
 
 ---
 
@@ -55,8 +56,9 @@ These five inputs follow from the spec, but no spec test names them. Each one ha
 | `rs/crates/services/paigasus-iam/src/application/roles.rs` | 4 | `principals` dependency, `resolve_principal`, call in `grant`, docs, harness, T6 unit tests |
 | `rs/crates/services/paigasus-iam/src/adapters/http/mod.rs` | 4 | `RoleServiceDeps.principals` wiring |
 | `rs/crates/services/paigasus-iam/tests/authz_bootstrap.rs` | 4 | `RoleServiceDeps.principals` wiring |
-| `rs/crates/services/paigasus-iam/tests/grpc_authz.rs` | 5 | T6 gRPC test |
-| `rs/crates/services/paigasus-iam/tests/http_authz.rs` | 5 | T6 HTTP test |
+| `rs/crates/services/paigasus-iam/tests/grpc_authz.rs` | 5, 7 | T6 gRPC test; T7 gRPC test |
+| `rs/crates/services/paigasus-iam/tests/http_authz.rs` | 5, 7 | T6 HTTP test; T7 HTTP test |
+| `rs/crates/services/paigasus-iam/src/application/roles.rs` | 6 | also: `resolve_principal` call in `list`, docs, harness seeds principal 1, T7 unit tests |
 
 Before Task 1, confirm the implementer counts. Both commands must print exactly the lines shown in the spec (§8, §4.7):
 
@@ -451,7 +453,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes (Task 1): `MembershipAxis::Principal(PrincipalId)`, `list_of_kind(&axis, Option<PrincipalKind>, limit, offset)`, the existing helpers `seed_user`, `seed_chain`, `seed_service_account_principal`, `membership_at`, `stamp_of` in this file.
-- Produces: `list_of_kind_confirms_the_principal_prn`, `list_of_kind_confirms_the_node_prn` (Task 6 re-runs them in the mutation battery).
+- Produces: `list_of_kind_confirms_the_principal_prn`, `list_of_kind_confirms_the_node_prn` (Task 8 re-runs them in the mutation battery).
 
 These tests pass as soon as they compile, because Task 1 already added the guards. Their proof is the mutations in Steps 3 and 4, not a red run first.
 
@@ -1477,17 +1479,464 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Whole mutation battery and the full gate graph (T4, T5)
+### Task 6: `RoleService::list` confirms the principal PRN (§4.8)
+
+Scope extended on 2026-09-28 (spec §0 Q6). This task depends on Task 4 (`resolve_principal`, the `principals` dependency, `seed_principal`, `InMemoryTenancyPrincipals`).
+
+**Files:**
+- Modify: `rs/crates/services/paigasus-iam/src/application/roles.rs` (`parse_principal_prn` doc; `resolve_principal` doc; `list` doc and body; `new_service_with_fakes`; new tests in `mod tests`)
+
+**Interfaces:**
+- Consumes (Task 4): `async fn resolve_principal(&self, principal: &PrincipalId) -> Result<(), TenancyError>`; the test helpers `seed_principal(store, n)` and `seed_grant_target(store)`; `new_service_with_fakes` builds `principals: Arc::new(InMemoryTenancyPrincipals(store.clone()))`. Existing list helpers: `ListHarness`, `list_harness`, `seed`, `by_principal`, `org_scope`.
+- Produces (Task 7 relies on the wire behaviour): `RoleService::list` answers `TenancyError::PrnMismatch` for a forged principal filter and `TenancyError::NotFound` for an unknown principal uuid, on the principal-only path and on the query path, after the D4 authorization and before `Page::new`.
+
+- [ ] **Step 1: Seed the actor principal in the unit-test harness**
+
+`list` will look up every principal filter, the self path included. The existing `list` tests filter on `principal_prn(1)` (the actor) and `principal_prn(2)`. Task 4 seeds only `principal_prn(2)`. In `new_service_with_fakes`, directly after `seed_grant_target(&store);`, add:
+
+```rust
+        // SMA-649 §4.8: `list` confirms a principal filter against storage, also on the self
+        // path, and the list tests filter on the actor `principal_prn(1)`. `principal_prn(3)`
+        // stays unseeded for the unknown-principal tests.
+        seed_principal(&store, 1);
+```
+
+Tests that rely on this seed: `list_allows_self_without_authorization_but_denies_listing_another_principal`, `list_self_needs_no_check_even_with_a_scope`, `list_principal_only_path_ignores_limit_and_offset`. `list_refuses_an_unknown_kind_even_for_self` fails at the kind step before the lookup. Tests that list `principal_prn(2)` rely on Task 4's seed.
+
+- [ ] **Step 2: Write the failing unit tests (T7)**
+
+Append to `mod tests` in `roles.rs`:
+
+```rust
+    /// SMA-649 §4.8: a list harness whose authorizer allows `ListRoleGrants` at Root. The target
+    /// is `principal_prn(0xab)` (its uuid contains letters, for the upper-case shapes), seeded in
+    /// `store.principals`, with one Root grant (returned) and one grant at org 100.
+    fn list_guard_harness() -> (ListHarness, RoleGrant) {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::ListRoleGrants, &root_prn());
+        let store = TenancyStore::default();
+        seed_principal(&store, 0xab);
+        let grants = InMemoryRoleGrants::default();
+        let query = InMemoryRoleGrantQuery::over(&grants, &store);
+        let svc = new_service_with_fakes(fake, Arc::new(grants.clone()), Arc::new(query.clone()), store).svc;
+        let h = ListHarness { svc, grants, query };
+        let root_grant = seed(&h, 40, 0xab, "platform_admin", GrantScope::Root, PrincipalKind::User);
+        seed(&h, 41, 0xab, "gateway_user", org_scope(100), PrincipalKind::User);
+        (h, root_grant)
+    }
+
+    /// SMA-649 §4.8: the same principal filter on both read paths — principal-only (D6,
+    /// `RoleGrantStore::list_by_principal`) and principal + the Root scope (`RoleGrantQuery::find`).
+    fn on_both_paths(prn: &str) -> [(&'static str, ListRoleGrantsInput); 2] {
+        [
+            ("principal-only", by_principal(prn)),
+            (
+                "principal + Root scope",
+                ListRoleGrantsInput {
+                    scope_prn: Some(root_prn().canonical()),
+                    ..by_principal(prn)
+                },
+            ),
+        ]
+    }
+
+    /// SMA-649 L1–L3, AC15: a forged region or organization slot on the principal filter answers
+    /// `PrnMismatch` on both read paths. Control: the canonical PRN lists the seeded Root grant on
+    /// both paths, so the refusal cannot pass because `list` is broken for every input.
+    #[tokio::test]
+    async fn list_refuses_a_forged_principal_prn() {
+        let (h, root_grant) = list_guard_harness();
+        let actor = principal_prn(1);
+        for (path, input) in on_both_paths(&principal_prn(0xab).canonical()) {
+            assert!(h.svc.list(&actor, input).await.unwrap().contains(&root_grant), "control, {path}");
+        }
+        let random_org = Uuid::from_u128(0x0f49).to_string();
+        let upper_uuid = Uuid::from_u128(0xab).to_string().to_uppercase();
+        for (shape, forged) in [
+            ("non-empty region", forged_principal(0xab, "eu-west-1", "")),
+            ("org uuid 100 in the org slot", forged_principal(0xab, "", &Uuid::from_u128(100).to_string())),
+            ("random org uuid in the org slot", forged_principal(0xab, "", &random_org)),
+            ("both slots", forged_principal(0xab, "eu-west-1", &random_org)),
+            ("upper-case uuid and a region", format!("prn:pgs:iam:eu-west-1::principal/{upper_uuid}")),
+        ] {
+            for (path, input) in on_both_paths(&forged) {
+                assert_eq!(h.svc.list(&actor, input).await.unwrap_err(), TenancyError::PrnMismatch, "{shape}, {path}");
+            }
+        }
+    }
+
+    /// SMA-649 L4, AC16: an unknown principal uuid answers `NotFound` on both read paths, not an
+    /// empty OK list.
+    #[tokio::test]
+    async fn list_answers_not_found_for_an_unknown_principal() {
+        let (h, _root_grant) = list_guard_harness();
+        for (path, input) in on_both_paths(&principal_prn(3).canonical()) {
+            assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap_err(), TenancyError::NotFound, "{path}");
+        }
+    }
+
+    /// SMA-649 L5, AC17: the canonical PRN with an upper-case uuid is still correct, on both
+    /// read paths. The guard compares canonical forms, never the raw request string.
+    #[tokio::test]
+    async fn list_accepts_an_upper_case_uuid_in_a_correct_principal_prn() {
+        let (h, root_grant) = list_guard_harness();
+        let upper = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0xab).to_string().to_uppercase());
+        assert_ne!(upper, principal_prn(0xab).canonical(), "the uuid must contain letters, or the case changes nothing");
+        for (path, input) in on_both_paths(&upper) {
+            assert!(h.svc.list(&principal_prn(1), input).await.unwrap().contains(&root_grant), "{path}");
+        }
+    }
+
+    /// SMA-649 L9: the guard runs before `Page::new`. On the query path with `limit` 201, a
+    /// forged PRN answers `PrnMismatch` and an unknown uuid `NotFound`; the canonical PRN still
+    /// answers `InvalidPagination`, so the page check itself still runs.
+    #[tokio::test]
+    async fn list_refuses_a_forged_principal_prn_before_the_page_check() {
+        let (h, _root_grant) = list_guard_harness();
+        let too_big = |prn: String| ListRoleGrantsInput {
+            scope_prn: Some(root_prn().canonical()),
+            limit: Some(201),
+            ..by_principal(&prn)
+        };
+        let actor = principal_prn(1);
+        assert_eq!(h.svc.list(&actor, too_big(forged_principal(0xab, "eu-west-1", ""))).await.unwrap_err(), TenancyError::PrnMismatch);
+        assert_eq!(h.svc.list(&actor, too_big(principal_prn(3).canonical())).await.unwrap_err(), TenancyError::NotFound);
+        assert_eq!(h.svc.list(&actor, too_big(principal_prn(0xab).canonical())).await.unwrap_err(), TenancyError::InvalidPagination);
+    }
+
+    /// SMA-649 L7, L8, AC18: the actor's own uuid with a forged region is NOT a self listing (the
+    /// canonical forms differ), so an actor with no grant gets `Forbidden`, before the lookup. The
+    /// actor's canonical PRN is a self listing and still lists (empty here).
+    #[tokio::test]
+    async fn list_with_a_forged_own_principal_prn_is_not_self() {
+        let h = list_harness(FakeAuthorizer::default());
+        let actor = principal_prn(1);
+        let err = h.svc.list(&actor, by_principal(&forged_principal(1, "eu-west-1", ""))).await.unwrap_err();
+        assert_eq!(err, TenancyError::Forbidden);
+        assert!(h.svc.list(&actor, by_principal(&actor.canonical())).await.unwrap().is_empty());
+    }
+```
+
+These tests call `forged_principal(n, region, org)` from Task 4 Step 3. Do not add a second copy of it.
+
+`RoleGrant` derives `PartialEq` (existing tests compare `Vec<RoleGrant>`), so `contains` works. `TenancyError::InvalidPagination` is the variant that `Page::new` returns (existing test `list_scope_path_honours_page_bounds_and_order`).
+
+- [ ] **Step 3: Run the new tests and confirm that they fail for the right reason**
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn/rs && export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && cargo nextest run -p paigasus-iam --lib --no-fail-fast -E 'test(/roles::tests::list_/)'
+```
+
+Expected: `list_refuses_a_forged_principal_prn`, `list_answers_not_found_for_an_unknown_principal` and `list_refuses_a_forged_principal_prn_before_the_page_check` FAIL (today they get `Ok(rows)`, `Ok([])` or `InvalidPagination`). `list_accepts_an_upper_case_uuid_in_a_correct_principal_prn`, `list_with_a_forged_own_principal_prn_is_not_self` and every existing `list_` test PASS. If a new test fails in setup (a panic, a missing import), fix the test first.
+
+- [ ] **Step 4: Call `resolve_principal` in `list`**
+
+In `RoleService::list`, directly after the `if !is_self { … }` authorization block and before `if let Some(principal) = filter.principal_only() {`, add:
+
+```rust
+        // SMA-649 §4.8: confirm the principal filter against the stored principal, on both read
+        // paths and also on the self path, after D4 and before `Page::new` and any read.
+        if let Some(principal) = filter.principal() {
+            self.resolve_principal(principal).await?;
+        }
+```
+
+In the `list` doc comment, replace `Then D6: the bare principal request` with:
+
+```rust
+    /// Then SMA-649 §4.8: a principal filter is confirmed against the stored principal
+    /// ([`RoleService::resolve_principal`]: `NotFound` / `PrnMismatch`), on every read path and
+    /// also for a self listing, before the page check. Then D6: the bare principal request
+```
+
+In the `resolve_principal` doc (Task 4), after its first sentence, add: `` `list` calls it too, for a principal filter (§4.8). ``
+
+In the `parse_principal_prn` doc of `roles.rs` (Task 4 text), replace:
+
+```rust
+/// against the stored principal (SMA-649). `RoleService::list` does NOT confirm them (out of
+/// scope of SMA-649, spec §5).
+```
+
+with:
+
+```rust
+/// against the stored principal (SMA-649); [`RoleService::list`] does the same for a principal
+/// filter (SMA-649 §4.8).
+```
+
+If the Task 4 text in the file differs (for example after `cargo fmt`), keep its meaning and change only the `list` sentence.
+
+- [ ] **Step 5: Build and run the unit tests**
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn/rs && export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && cargo build --workspace --all-targets && cargo nextest run -p paigasus-iam --lib --no-fail-fast
+```
+
+Expected: the build succeeds with no warning; every `--lib` test passes, the five new `list_` tests and every existing `roles.rs` test included.
+
+- [ ] **Step 6: Mutations M7 and M5 on the unit tests**
+
+M7: with the Edit tool, in `list`, change `if let Some(principal) = filter.principal() {` to `if let Some(principal) = filter.principal().filter(|_| false) {`. Run:
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn/rs && export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && cargo nextest run -p paigasus-iam --lib --no-fail-fast -E 'test(/roles::tests::list_/)'
+```
+
+Expected: the tree compiles; `list_refuses_a_forged_principal_prn`, `list_answers_not_found_for_an_unknown_principal` and `list_refuses_a_forged_principal_prn_before_the_page_check` FAIL. Restore with the Edit tool (remove `.filter(|_| false)`).
+
+M5 (Task 4 Step 6 edit in `resolve_principal`): apply it and run the same command. Expected: the tree compiles; `list_refuses_a_forged_principal_prn` and `list_refuses_a_forged_principal_prn_before_the_page_check` FAIL (`list_answers_not_found_for_an_unknown_principal` stays green, because `ok_or(NotFound)` is not mutated). Restore with the Edit tool.
+
+After both, `git diff` must show only this task's edits (no `.filter(|_| false)`, no `if false &&`).
+
+- [ ] **Step 7: Run the Postgres suites that list role grants**
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn/rs && export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && docker info >/dev/null && CI=1 cargo nextest run -p paigasus-iam --no-fail-fast --test grpc_authz --test http_authz --test authz_people_model_access --test authz_forged_org_slot_escalation --test authz_bootstrap --test http_request_extractors
+```
+
+Expected: PASS. These suites list role grants of provisioned principals, the self path included (`authz_people_model_access.rs:140`). A failure here with `not-found` means that a test lists a principal that has no `principal` row: stop and report it, because spec §4.8 assumes that no such caller exists.
+
+- [ ] **Step 8: Format, lint, commit**
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn/rs && export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && git diff --stat && git -C .. branch --show-current && git grep -n "MUTATION M\|filter(|_| false)" -- . ; true
+```
+
+Expected: only `roles.rs` changed, the branch is `feature/sma-649-list-memberships-principal-prn`, and the `git grep` prints nothing. Then:
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn && git add rs/crates/services/paigasus-iam/src/application/roles.rs && git commit -m "fix(rs): confirm the principal PRN of ListRoleGrants against storage (SMA-649)
+
+RoleService::list filtered role grants on the bare principal uuid, so a
+forged region or organization slot listed the real principal's grants.
+It now calls resolve_principal for a principal filter: prn-mismatch for a
+forged slot, not-found for an unknown uuid.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 7: ListRoleGrants transport tests (T7 gRPC and HTTP)
+
+**Files:**
+- Modify: `rs/crates/services/paigasus-iam/tests/grpc_authz.rs` (one test)
+- Modify: `rs/crates/services/paigasus-iam/tests/http_authz.rs` (one helper, one test)
+
+**Interfaces:**
+- Consumes (Task 6): `ListRoleGrants` answers gRPC `InvalidArgument` / HTTP 400 `prn-mismatch` and gRPC `NotFound` / HTTP 404 `not-found` for a principal filter; gRPC `PermissionDenied` / HTTP 403 `forbidden` for a caller without the D4 grant. Consumes (Task 5): the `principal_with` helper and the imports that Task 5 adds to both files (`Uuid` in `grpc_authz.rs`). Existing helpers: `grpc_authz.rs` `spawn_server`, `channel`, `authed`, `reason_of`; `http_authz.rs` `self_principal_prn`, `app_with_state`, `send`, `seed_platform_admin`; `support::{provision, seed_platform_admin, start_mock_idp, test_config}`.
+- Produces: `list_role_grants_over_grpc_confirms_the_principal_prn_against_storage`, `list_role_grants_over_http_confirms_the_principal_prn_against_storage` (Task 8 re-runs them; the name ends in `confirms_the_principal_prn_against_storage`, so the Task 8 filter `test(/confirms_the_principal_prn/)` selects them).
+
+The fix is in place (Task 6), so these tests pass on the first run. Their proof is the mutation run in Step 4.
+
+- [ ] **Step 1: Write the gRPC test**
+
+Append to `rs/crates/services/paigasus-iam/tests/grpc_authz.rs`:
+
+```rust
+/// SMA-649 T7 (gRPC), AC15–AC18: `ListRoleGrants` with a principal filter confirms the PRN
+/// against the stored principal, on the principal-only path and on the principal + Root-scope
+/// path. A forged region or organization slot answers `InvalidArgument` / `prn-mismatch`, an
+/// unknown uuid `NotFound` / `not-found`. Control: the canonical PRN lists the member's grant. An
+/// ungranted caller gets `PermissionDenied` / `forbidden` for the member's PRN in every shape and
+/// for its OWN uuid with a forged region (not a self listing), and its own canonical PRN lists.
+#[tokio::test]
+async fn list_role_grants_over_grpc_confirms_the_principal_prn_against_storage() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state.clone()).await;
+    let mut authz = AuthorizationServiceClient::new(channel(addr).await);
+
+    let admin_token = idp.bearer("t7-grpc-admin", Some("t7-grpc-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision(&state, &admin_token).await;
+    support::seed_platform_admin(&state, &admin_prn).await;
+    let member_token = idp.bearer("t7-grpc-member", Some("t7-grpc-member@example.com"), "paigasus", 3600);
+    let member_prn = support::provision(&state, &member_token).await;
+    let stranger_token = idp.bearer("t7-grpc-stranger", Some("t7-grpc-stranger@example.com"), "paigasus", 3600);
+    let stranger_prn = support::provision(&state, &stranger_token).await;
+
+    authz
+        .grant_role(authed(
+            GrantRoleRequest {
+                principal_prn: member_prn.clone(),
+                role_key: "platform_admin".to_string(),
+                scope_prn: root_prn().canonical(),
+            },
+            &admin_token,
+        ))
+        .await
+        .expect("seed: the admin grants the member a Root role");
+
+    let request = |prn: &str, scoped: bool| ListRoleGrantsRequest {
+        principal_prn: prn.to_string(),
+        scope_prn: if scoped { root_prn().canonical() } else { String::new() },
+        ..Default::default()
+    };
+    let absent_org = Uuid::from_u128(0x0f49).as_hyphenated().to_string();
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a).as_hyphenated());
+    let forged_region = principal_with(&member_prn, "eu-west-1", "");
+
+    for (path, scoped) in [("principal-only", false), ("principal + Root scope", true)] {
+        for (shape, prn, code, reason) in [
+            ("forged region", forged_region.clone(), Code::InvalidArgument, "prn-mismatch"),
+            ("forged org slot", principal_with(&member_prn, "", &absent_org), Code::InvalidArgument, "prn-mismatch"),
+            ("unknown principal", unknown.clone(), Code::NotFound, "not-found"),
+        ] {
+            let err = authz.list_role_grants(authed(request(&prn, scoped), &admin_token)).await.unwrap_err();
+            assert_eq!(err.code(), code, "{path}, {shape}: {err:?}");
+            assert_eq!(reason_of(&err), reason, "{path}, {shape}");
+        }
+        let listed = authz.list_role_grants(authed(request(&member_prn, scoped), &admin_token)).await.expect("control: the canonical prn lists").into_inner().grants;
+        assert!(listed.iter().any(|g| g.principal_prn == member_prn && g.role_key == "platform_admin"), "{path}: {listed:?}");
+    }
+
+    for (label, prn) in [
+        ("member, canonical", member_prn.clone()),
+        ("member, forged region", forged_region),
+        ("unknown principal", unknown),
+        ("own uuid, forged region", principal_with(&stranger_prn, "eu-west-1", "")),
+    ] {
+        let err = authz.list_role_grants(authed(request(&prn, false), &stranger_token)).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "ungranted caller, {label}: {err:?}");
+        assert_eq!(reason_of(&err), "forbidden", "ungranted caller, {label}");
+    }
+    let own = authz.list_role_grants(authed(request(&stranger_prn, false), &stranger_token)).await.expect("self listing").into_inner().grants;
+    assert!(own.is_empty(), "the stranger holds no grant: {own:?}");
+
+    server.abort();
+}
+```
+
+If the ungranted "own uuid, forged region" row answers `Ok`, stop and report it: spec L7 assumes that the self check compares canonical forms.
+
+- [ ] **Step 2: Write the HTTP test**
+
+In `rs/crates/services/paigasus-iam/tests/http_authz.rs`, append:
+
+```rust
+/// Percent-encodes the two PRN characters that are reserved in a URL. A colon is legal in a
+/// query value, but the test must not depend on that.
+fn q(prn: &str) -> String {
+    prn.replace(':', "%3A").replace('/', "%2F")
+}
+
+/// SMA-649 T7 (HTTP), AC15–AC18: `GET /v1/authz/role-grants` with a principal filter. A forged
+/// region or organization slot answers 400 `prn-mismatch`, an unknown uuid 404 `not-found`, on
+/// the principal-only path and with `scope_prn` = Root. Control: the canonical PRN lists the
+/// member's grant. An ungranted caller gets 403 `forbidden` for the member's PRN in every shape
+/// and for its OWN uuid with a forged region, and its own canonical PRN lists.
+#[tokio::test]
+async fn list_role_grants_over_http_confirms_the_principal_prn_against_storage() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin_token = idp.bearer("t7-http-admin", Some("t7-http-admin@example.com"), "paigasus", 3600);
+    let admin_prn = self_principal_prn(&app, &state, &admin_token).await;
+    seed_platform_admin(&state, &admin_prn).await;
+    let member_token = idp.bearer("t7-http-member", Some("t7-http-member@example.com"), "paigasus", 3600);
+    let member_prn = self_principal_prn(&app, &state, &member_token).await;
+    let stranger_token = idp.bearer("t7-http-stranger", Some("t7-http-stranger@example.com"), "paigasus", 3600);
+    let stranger_prn = self_principal_prn(&app, &state, &stranger_token).await;
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/v1/authz/role-grants",
+        Some(json!({"principal_prn": member_prn, "role_key": "platform_admin", "scope_prn": root_prn().canonical()})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed: {body}");
+
+    let url = |prn: &str, scoped: bool| {
+        if scoped {
+            format!("/v1/authz/role-grants?principal_prn={}&scope_prn={}", q(prn), q(&root_prn().canonical()))
+        } else {
+            format!("/v1/authz/role-grants?principal_prn={}", q(prn))
+        }
+    };
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a));
+    let forged_region = principal_with(&member_prn, "eu-west-1", "");
+
+    for (path, scoped) in [("principal-only", false), ("principal + Root scope", true)] {
+        for (shape, prn, want, code) in [
+            ("forged region", forged_region.clone(), StatusCode::BAD_REQUEST, "prn-mismatch"),
+            ("forged org slot", principal_with(&member_prn, "", &Uuid::from_u128(0x0f49).to_string()), StatusCode::BAD_REQUEST, "prn-mismatch"),
+            ("unknown principal", unknown.clone(), StatusCode::NOT_FOUND, "not-found"),
+        ] {
+            let (got, body) = send(&app, "GET", &url(&prn, scoped), None, Some(admin_token.as_str())).await;
+            assert_eq!(got, want, "{path}, {shape}: {body}");
+            assert_eq!(body["error"]["code"], code, "{path}, {shape}");
+        }
+        let (got, listed) = send(&app, "GET", &url(&member_prn, scoped), None, Some(admin_token.as_str())).await;
+        assert_eq!(got, StatusCode::OK, "{path}, control: {listed}");
+        assert!(listed.as_array().unwrap().iter().any(|g| g["principal_prn"] == member_prn.as_str() && g["role_key"] == "platform_admin"), "{path}: {listed}");
+    }
+
+    for (label, prn) in [
+        ("member, canonical", member_prn.clone()),
+        ("member, forged region", forged_region),
+        ("unknown principal", unknown),
+        ("own uuid, forged region", principal_with(&stranger_prn, "eu-west-1", "")),
+    ] {
+        let (got, body) = send(&app, "GET", &url(&prn, false), None, Some(stranger_token.as_str())).await;
+        assert_eq!(got, StatusCode::FORBIDDEN, "ungranted caller, {label}: {body}");
+        assert_eq!(body["error"]["code"], "forbidden", "ungranted caller, {label}");
+    }
+    let (got, own) = send(&app, "GET", &url(&stranger_prn, false), None, Some(stranger_token.as_str())).await;
+    assert_eq!(got, StatusCode::OK, "self listing: {own}");
+    assert!(own.as_array().unwrap().is_empty(), "the stranger holds no grant: {own}");
+}
+```
+
+If `self_principal_prn` for a third token needs a different setup than for the first two, follow the file's existing `grant_list_revoke` test. If the HTTP error body has a different shape than `body["error"]["code"]`, use the shape that the Task 5 HTTP test uses.
+
+- [ ] **Step 3: Run the two tests**
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn/rs && export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && docker info >/dev/null && CI=1 cargo nextest run -p paigasus-iam --test grpc_authz --test http_authz --no-fail-fast -E 'test(/list_role_grants_over_.*confirms_the_principal_prn/)'
+```
+
+Expected: both PASS.
+
+- [ ] **Step 4: Mutations M7 and M5 on the transport tests**
+
+Apply M7 (Task 6 Step 6), run the command of Step 3. Expected: the tree compiles; both tests FAIL (the forged rows list, the unknown row lists an empty OK list). Restore with the Edit tool.
+
+Apply M5 (Task 4 Step 6), run the command of Step 3. Expected: the tree compiles; both tests FAIL on the forged rows. Restore with the Edit tool.
+
+- [ ] **Step 5: Format, lint, commit**
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn/rs && export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && git diff --stat && git -C .. branch --show-current && git grep -n "MUTATION M\|filter(|_| false)" -- . ; true
+```
+
+Expected: only the two test files changed, and the `git grep` prints nothing. Then:
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-649-list-memberships-principal-prn && git add rs/crates/services/paigasus-iam/tests/grpc_authz.rs rs/crates/services/paigasus-iam/tests/http_authz.rs && git commit -m "test(rs): pin the principal PRN guard of ListRoleGrants on both transports (SMA-649)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 8: Whole mutation battery and the full gate graph (T4, T5)
 
 **Files:** none changed, unless a gate reds. A fix goes in its own commit.
 
 **Interfaces:**
-- Consumes: every test and guard of Tasks 1–5.
+- Consumes: every test and guard of Tasks 1–7.
 - Produces: the evidence for AC8 and AC9 in the task report.
 
 - [ ] **Step 1: Re-run every mutation on the final tree**
 
-A later fix can make an earlier mutation inert, so re-run all six on the final tree (project memory "re-run a mutation battery whole"). For each row: apply the edit with the Edit tool, run the command, record the failing test names, restore with the Edit tool, and confirm `git diff --stat` is empty before the next row.
+A later fix can make an earlier mutation inert, so re-run all seven on the final tree (project memory "re-run a mutation battery whole"). For each row: apply the edit with the Edit tool, run the command, record the failing test names, restore with the Edit tool, and confirm `git diff --stat` is empty before the next row.
 
 | id | edit (Edit tool) | command (from `rs/`, with the PATH prefix) | must FAIL |
 |---|---|---|---|
@@ -1495,8 +1944,11 @@ A later fix can make an earlier mutation inert, so re-run all six on the final t
 | M2 | `fakes.rs` `InMemoryMemberships::list_of_kind`: `if false && stored != principal.canonical() {` | `cargo nextest run -p paigasus-iam --lib --no-fail-fast -E 'test(/memberships::tests::list_/)'` | `list_refuses_a_forged_principal_prn`, `list_refuses_a_forged_principal_prn_past_the_last_page` |
 | M3 | `memberships.rs` `list`: the M3 line of Task 1 Step 11 | `cargo nextest run -p paigasus-iam --lib --no-fail-fast -E 'test(/memberships::tests::list_/)'` then `CI=1 cargo nextest run -p paigasus-iam --no-fail-fast --test grpc_tenancy --test http_memberships -E 'test(/principal_prn/)'` | the T1 tests of the M2 row plus `list_answers_not_found_for_an_unknown_principal`; both forged-principal transport tests |
 | M4 | `pg_memberships.rs` `node_list_sql`: `if false && stored != node.canonical() {` | `CI=1 cargo nextest run -p paigasus-iam --no-fail-fast --test tenancy_memberships -E 'test(/list_of_kind_confirms_the_node_prn/)'` | `list_of_kind_confirms_the_node_prn` |
-| M5 | `roles.rs` `resolve_principal`: `if false && stored.id.canonical() != principal.canonical() {` | `cargo nextest run -p paigasus-iam --lib --no-fail-fast -E 'test(/roles::tests::grant_/)'` then `CI=1 cargo nextest run -p paigasus-iam --no-fail-fast --test grpc_authz --test http_authz -E 'test(/confirms_the_principal_prn/)'` | `grant_refuses_a_forged_principal_prn`, `grant_refuses_a_forged_principal_prn_for_an_existing_grant`, both T6 transport tests |
-| M6 | `roles.rs` `grant`: `if false { self.resolve_principal(&principal).await?; } // MUTATION M6` | the two M5 commands | the M5 unit tests plus `grant_answers_not_found_for_an_unknown_principal`; both T6 transport tests |
+| M5 | `roles.rs` `resolve_principal`: `if false && stored.id.canonical() != principal.canonical() {` | `cargo nextest run -p paigasus-iam --lib --no-fail-fast -E 'test(/roles::tests::grant_/) or test(/roles::tests::list_/)'` then `CI=1 cargo nextest run -p paigasus-iam --no-fail-fast --test grpc_authz --test http_authz -E 'test(/confirms_the_principal_prn/)'` | `grant_refuses_a_forged_principal_prn`, `grant_refuses_a_forged_principal_prn_for_an_existing_grant`, `roles::tests::list_refuses_a_forged_principal_prn`, `list_refuses_a_forged_principal_prn_before_the_page_check`, both T6 and both T7 transport tests |
+| M6 | `roles.rs` `grant`: `if false { self.resolve_principal(&principal).await?; } // MUTATION M6` | the two M5 commands | the `grant_` unit tests of the M5 row plus `grant_answers_not_found_for_an_unknown_principal`; both T6 transport tests |
+| M7 | `roles.rs` `list`: `if let Some(principal) = filter.principal().filter(\|_\| false) {` | the two M5 commands | `roles::tests::list_refuses_a_forged_principal_prn`, `roles::tests::list_answers_not_found_for_an_unknown_principal`, `list_refuses_a_forged_principal_prn_before_the_page_check`, both T7 transport tests (the `grant_` tests and both T6 tests stay green) |
+
+In the M7 row, `\|` is only the Markdown table escape: the edit is `filter.principal().filter(|_| false)`.
 
 Expected: every mutated tree compiles (a compile error proves nothing — memory "a mutation must compile"), and each row reds at least the tests named. If a row stays green, stop: the test does not pin the guard. Fix the test in the task that owns it, commit the fix, and re-run the WHOLE table.
 
@@ -1522,4 +1974,4 @@ If a task fails, follow the root `CLAUDE.md` "Diagnosing an unattributed `moon c
 
 - [ ] **Step 4: Report**
 
-Record in the task report: the M1–M6 table with the failing test names seen for each row, the AC7 output, the `moon ci` verdict (and any gate re-run directly, with the bash used), and every deviation from this plan. No commit in this task unless a fix was needed.
+Record in the task report: the M1–M7 table with the failing test names seen for each row, the AC7 output, the `moon ci` verdict (and any gate re-run directly, with the bash used), and every deviation from this plan. No commit in this task unless a fix was needed.
