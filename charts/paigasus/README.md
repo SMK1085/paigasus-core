@@ -77,8 +77,9 @@ with its own message, rather than letting a bad values file produce broken Kuber
   - a parentRef that is not a map or has no string `name`:
     `httpRoute.parentRefs[<i>] must be a map with a non-empty name`;
   - a parentRef with neither `sectionName` nor `port`:
-    `httpRoute.parentRefs[<i>] must set sectionName or port`. Such a parentRef attaches to every
-    listener, a plain HTTP one included, and the console then answers on `http://`;
+    `httpRoute.parentRefs[<i>] must set sectionName or port`. Such a parentRef can attach to every
+    compatible listener whose `allowedRoutes` admits the route, a plain HTTP one included, and the
+    console then answers on `http://`;
   - an `ingress.host` with an upper-case letter: `ingress.host must be lowercase when
     httpRoute.enabled is true`. The API server refuses such an HTTPRoute hostname;
   - `httpRoute.annotations` that is not a map, or a value that is not a string:

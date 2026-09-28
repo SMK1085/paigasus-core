@@ -134,7 +134,8 @@ httpRoute:
   enabled: false
   # REQUIRED when enabled is true. Gateway API ParentReference objects, rendered as written.
   # Each entry needs a name and a sectionName or port that selects the HTTPS listener: an entry
-  # with neither attaches to every listener, a plain HTTP one included, and is refused.
+  # with neither can attach to every compatible listener, a plain HTTP one included, and is
+  # refused. The chart does not check the listener protocol: select an HTTPS listener.
   # Example: [{name: cilium-gateway, namespace: kube-system, sectionName: https}]
   # The listener must end TLS for ingress.host and allow this release's namespace.
   parentRefs: []

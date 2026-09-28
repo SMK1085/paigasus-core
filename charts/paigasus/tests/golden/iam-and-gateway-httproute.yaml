@@ -382,8 +382,9 @@ metadata:
   # path already: a URLRewrite that strips /gateway breaks every route in this zone, and a
   # hostname rewrite breaks the Server Action origin check.
 spec:
-  # The route's parents, as the operator wrote them. Each one names the HTTPS listener
-  # (sectionName or port), so the console never answers on plain http.
+  # The route's parents, as the operator wrote them. Each one must name a listener (sectionName
+  # or port). The chart does not check the listener protocol: the operator must make sure that
+  # each selected listener is an HTTPS listener.
   parentRefs:
     - name: edge
       namespace: kube-system
@@ -415,8 +416,9 @@ metadata:
   # path already: a URLRewrite that strips /iam breaks every route in this zone, and a
   # hostname rewrite breaks the Server Action origin check.
 spec:
-  # The route's parents, as the operator wrote them. Each one names the HTTPS listener
-  # (sectionName or port), so the console never answers on plain http.
+  # The route's parents, as the operator wrote them. Each one must name a listener (sectionName
+  # or port). The chart does not check the listener protocol: the operator must make sure that
+  # each selected listener is an HTTPS listener.
   parentRefs:
     - name: edge
       namespace: kube-system
