@@ -1,0 +1,46 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "paigasus.validate" . -}}
+{{- $root := . -}}
+{{- if (include "paigasus.httpRouteEnabled" .) }}
+{{- $h := .Values.httpRoute | default dict }}
+{{- range $id, $z := .Values.zones }}
+{{- if $z.enabled }}
+{{- $name := include "paigasus.name" (list $root (printf "%s-console" $id)) }}
+{{- $timeouts := include "paigasus.httpRouteTimeouts" (list $root $z) }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+  {{- with (dig "annotations" dict $h) }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  # DO NOT add a filter here or in values. Each console compiles basePath in and serves its FULL
+  # path already: a URLRewrite that strips {{ $z.basePath }} breaks every route in this zone, and a
+  # hostname rewrite breaks the Server Action origin check.
+spec:
+  # The route's parents, as the operator wrote them. Each one must name a listener (sectionName
+  # or port). The chart does not check the listener protocol: the operator must make sure that
+  # each selected listener is an HTTPS listener.
+  parentRefs:
+    {{- toYaml (dig "parentRefs" list $h) | nindent 4 }}
+  hostnames:
+    - {{ $root.Values.ingress.host | quote }}
+  rules:
+    # This zone's own {{ $z.basePath }}/auth/* routes are in-app route handlers under its own
+    # prefix, so they need no rule of their own.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ $z.basePath }}
+      backendRefs:
+        - name: {{ $name }}
+          port: {{ include "paigasus.consoleServicePort" $root }}
+      {{- with $timeouts }}
+      timeouts:
+        {{- . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
