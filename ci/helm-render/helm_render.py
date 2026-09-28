@@ -17,6 +17,7 @@ module directly with another helm and read its verdict as the gate's.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import io
 import json
@@ -278,6 +279,58 @@ def _run_helm(cmd, label, run=subprocess.run):
         ) from exc
     except OSError as exc:
         raise InfraError(f"helm could not start for {label}: {exc}") from exc
+
+
+_SUBPROCESS_FUNCS = frozenset({"run", "Popen", "call", "check_call", "check_output"})
+# D6 (SMA-679): the only functions that may start a subprocess, each with its timeout constant.
+_BOUNDED_CALLERS = {"_run_helm": "HELM_TIMEOUT_S", "release_tags": "GIT_TIMEOUT_S"}
+
+
+def _is_subprocess_call(func):
+    """True for `run(…)` or `subprocess.<run|Popen|call|check_call|check_output>(…)`."""
+    if isinstance(func, ast.Name):
+        return func.id == "run"
+    return (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+            and func.value.id == "subprocess" and func.attr in _SUBPROCESS_FUNCS)
+
+
+def _subprocess_calls(source):
+    """(innermost enclosing function name, call) for every subprocess call in `source`. The body
+    of `self_test` is skipped: its fast_run stub calls the real subprocess.run on purpose."""
+    found = []
+
+    def visit(node, fn_name):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if child.name != "self_test":
+                    visit(child, child.name)
+                continue
+            if isinstance(child, ast.Call) and _is_subprocess_call(child.func):
+                found.append((fn_name, child))
+            visit(child, fn_name)
+
+    visit(ast.parse(source), "<module>")
+    return found
+
+
+def _subprocess_call_problems(source):
+    """D6 (SMA-679): the problems with the subprocess calls in `source`; an empty list is a pass.
+    Exactly one call in each of _BOUNDED_CALLERS, each with `timeout=<its constant>`. A call
+    through an alias (`from subprocess import run as r`, `os.system`) is not seen."""
+    calls = _subprocess_calls(source)
+    names = sorted(name for name, _call in calls)
+    problems = []
+    if names != sorted(_BOUNDED_CALLERS):
+        problems.append(f"expected exactly one subprocess call in each of {sorted(_BOUNDED_CALLERS)}, found calls in {names}. "
+                        "Route every helm call through _run_helm")
+    for name, call in calls:
+        want = _BOUNDED_CALLERS.get(name)
+        if want is None:
+            continue
+        timeout = next((k.value for k in call.keywords if k.arg == "timeout"), None)
+        if not (isinstance(timeout, ast.Name) and timeout.id == want):
+            problems.append(f"the subprocess call in {name} (line {call.lineno}) must pass timeout={want}")
+    return problems
 
 
 def helm_template(chart, enabled, extra=(), *, label, run=subprocess.run, helm=None):
@@ -1560,6 +1613,32 @@ def self_test():
     got = [kw.get("timeout") for kw in git_seen]
     if got != [GIT_TIMEOUT_S]:
         failures.append(f"git timeout: release_tags passes timeout=GIT_TIMEOUT_S: got {got}")
+    # D6: every subprocess call in the module goes through _run_helm or release_tags, each with its
+    # own constant. The synthetic sources prove that the walk bites (guard the guard); they are
+    # string constants, not Call nodes, so the walk cannot match them.
+    d6_ok = (
+        "def _run_helm(cmd, label, run=subprocess.run):\n"
+        "    return run(cmd, timeout=HELM_TIMEOUT_S)\n"
+        "def release_tags(run=subprocess.run):\n"
+        "    return run(['git'], timeout=GIT_TIMEOUT_S)\n"
+    )
+    d6_cases = (
+        ("the real module", Path(__file__).read_text(encoding="utf-8"), False),
+        ("only the two bounded calls", d6_ok, False),
+        ("a call inside self_test is exempt", d6_ok + "def self_test():\n    subprocess.run(['x'])\n", False),
+        ("a reverted helm_template", d6_ok + "def helm_template(cmd):\n    return subprocess.run(cmd)\n", True),
+        ("a reverted check7 body", d6_ok + "def check7(run):\n    def body():\n        return run(['helm'])\n    return body\n", True),
+        ("a new Popen", d6_ok + "def f():\n    subprocess.Popen(['helm'])\n", True),
+        ("a module-level check_output", d6_ok + "subprocess.check_output(['helm'])\n", True),
+        ("no timeout in _run_helm", d6_ok.replace("run(cmd, timeout=HELM_TIMEOUT_S)", "run(cmd)"), True),
+        ("a literal timeout in release_tags", d6_ok.replace("timeout=GIT_TIMEOUT_S", "timeout=30"), True),
+        ("the git constant in _run_helm", d6_ok.replace("timeout=HELM_TIMEOUT_S", "timeout=GIT_TIMEOUT_S"), True),
+    )
+    for case, source, want_problem in d6_cases:
+        got = _subprocess_call_problems(source)
+        if bool(got) != want_problem:
+            failures.append(f"helm timeout: every subprocess call goes through _run_helm or release_tags [{case}]: "
+                            + ("expected a problem, got none" if want_problem else "; ".join(got)))
 
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
