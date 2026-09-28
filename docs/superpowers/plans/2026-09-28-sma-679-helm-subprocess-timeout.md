@@ -692,7 +692,7 @@ The helm and git timeouts (SMA-679) were measured on <date>. Each mutation impor
 
 Check that the README does not name the moon report file:
 ```bash
-cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-679-helm-subprocess-timeout && grep -n "ciReport" ci/helm-render/README.md; echo "grep rc=$? (1 = not found, correct)"
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-679-helm-subprocess-timeout && grep -n 'ci[R]eport' ci/helm-render/README.md; echo "grep rc=$? (1 = not found, correct)"
 ```
 
 - [ ] **Step 8: Commit**
