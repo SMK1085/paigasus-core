@@ -46,8 +46,8 @@ use crate::application::principal_kind::PrincipalKindFilter;
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::authz::roles as authz_roles;
 use paigasus_iam_core::{
-    Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, EventType, GrantScope, IdGenerator, OrganizationRepository, Outbox, PolicyGenBumper, PrincipalId, ProjectRepository, RoleGrant,
-    RoleGrantFilter, RoleGrantQuery, RoleGrantStore, TeamRepository, TenancyNodeRef, UnitOfWork,
+    Action, AuditEntry, AuditLog, AuditOutcome, Clock, DomainEvent, EventType, GrantScope, IdGenerator, OrganizationRepository, Outbox, PolicyGenBumper, PrincipalId, PrincipalRepository,
+    ProjectRepository, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, TeamRepository, TenancyNodeRef, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::sync::Arc;
@@ -55,9 +55,12 @@ use uuid::Uuid;
 
 /// Parses a raw principal PRN string: must be syntactically valid (else `InvalidPrn` with the
 /// kernel's stable error-kind token), and must be service `"iam"`, resource type
-/// `"principal"` (else `InvalidPrn` with the PRN's canonical form). Mirrors
-/// `application::memberships::parse_principal_prn` — duplicated rather than shared across
-/// modules (a five-line pure parse, not worth a visibility change on an unrelated file).
+/// `"principal"` (else `InvalidPrn` with the PRN's canonical form). Like
+/// `application::memberships::parse_principal_prn`, it checks ONLY the syntax, the service and
+/// the type — duplicated rather than shared across modules (a five-line pure parse). For
+/// `grant`, [`RoleService::resolve_principal`] confirms the region and the organization slot
+/// against the stored principal (SMA-649). `RoleService::list` does NOT confirm them (out of
+/// scope of SMA-649, spec §5).
 fn parse_principal_prn(raw: &str) -> Result<PrincipalId, TenancyError> {
     let prn = Prn::parse(raw).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
     if prn.service() != "iam" || prn.resource_type() != "principal" {
@@ -116,10 +119,11 @@ pub struct ListRoleGrantsInput {
 /// wiring clones one `Arc` rather than standing up a second store instance. `orgs`/`teams`/
 /// `projects` are likewise `Arc<dyn ...>` trait objects (SMA-444 cross-tenant-escalation fix,
 /// module docs) — [`RoleService::resolve_scope`]'s own DB-lookup defense, independent of
-/// `grants`. `uow`/`outbox`/`audit`/`gen_bumper` are SMA-446 Slice B's Unit-of-Work reference
-/// pattern (module docs): `grant`/`revoke` drive the mutation + its outbox event + its audit
-/// entry through `uow` atomically, then run `gen_bumper`'s awaited, best-effort post-commit
-/// bump. `ids`/`clock` stay generic-DI, mirroring `MembershipService`. `query` is the
+/// `grants`. `principals` is [`RoleService::resolve_principal`]'s own lookup of the grant's
+/// target principal (SMA-649). `uow`/`outbox`/`audit`/`gen_bumper` are SMA-446 Slice B's
+/// Unit-of-Work reference pattern (module docs): `grant`/`revoke` drive the mutation + its
+/// outbox event + its audit entry through `uow` atomically, then run `gen_bumper`'s awaited,
+/// best-effort post-commit bump. `ids`/`clock` stay generic-DI, mirroring `MembershipService`. `query` is the
 /// SMA-676 read port (`RoleGrantQuery`): the list query path and `grant`'s idempotency
 /// pre-check read through it.
 #[derive(Clone)]
@@ -129,6 +133,7 @@ pub struct RoleService<I, C> {
     orgs: Arc<dyn OrganizationRepository>,
     teams: Arc<dyn TeamRepository>,
     projects: Arc<dyn ProjectRepository>,
+    principals: Arc<dyn PrincipalRepository>,
     authorize: Authorize,
     uow: Arc<dyn UnitOfWork>,
     outbox: Arc<dyn Outbox>,
@@ -149,6 +154,7 @@ pub struct RoleServiceDeps<I, C> {
     pub orgs: Arc<dyn OrganizationRepository>,
     pub teams: Arc<dyn TeamRepository>,
     pub projects: Arc<dyn ProjectRepository>,
+    pub principals: Arc<dyn PrincipalRepository>,
     pub authorize: Authorize,
     pub uow: Arc<dyn UnitOfWork>,
     pub outbox: Arc<dyn Outbox>,
@@ -170,6 +176,7 @@ where
             orgs: deps.orgs,
             teams: deps.teams,
             projects: deps.projects,
+            principals: deps.principals,
             authorize: deps.authorize,
             uow: deps.uow,
             outbox: deps.outbox,
@@ -206,6 +213,20 @@ where
         Ok(())
     }
 
+    /// SMA-649 §4.7: the principal twin of [`RoleService::resolve_scope`]. Loads the grant's
+    /// target principal by uuid and confirms that the caller-supplied PRN is the STORED one.
+    /// `NotFound` if no principal has that uuid; `PrnMismatch` if the stored PRN differs from
+    /// the canonical form of the supplied PRN (a forged region or organization slot). Without
+    /// this, `grant` wrote the caller's forged PRN into the event's `aggregate_prn` and into the
+    /// response (the SMA-606 D2 hazard). No log line, the same as `resolve_scope` (spec Q2).
+    async fn resolve_principal(&self, principal: &PrincipalId) -> Result<(), TenancyError> {
+        let stored = self.principals.find_principal(principal).await?.ok_or(TenancyError::NotFound)?;
+        if stored.id.canonical() != principal.canonical() {
+            return Err(TenancyError::PrnMismatch);
+        }
+        Ok(())
+    }
+
     /// The grant of `role_key` to `principal` at `scope`, if one exists (SMA-676 D9). An exact
     /// (principal, role, scope) filter: the duplicate key `uq_role_grant_principal_role_scope`.
     async fn existing_grant(&self, principal: &PrincipalId, role_key: &str, scope: &GrantScope) -> Result<Option<RoleGrant>, TenancyError> {
@@ -228,10 +249,13 @@ where
     /// `NotFound`/`PrnMismatch` — defense-in-depth against persisting a grant whose stored
     /// scope misrepresents its real tenancy, module docs), run only once `actor` is already
     /// authorized so the anti-escalation check above is what a forged-but-unauthorized attempt
-    /// actually trips. Only after all six succeed is the grant minted; it is then committed
-    /// atomically with its `DomainEvent`/`AuditEntry` (module docs, the UoW reference
-    /// pattern), and only once that commit succeeds does the awaited `gen_bumper.bump()` run.
-    /// SMA-676 D9: after step 6, an existing grant for the same (principal, role, scope) is
+    /// actually trips; (7) [`RoleService::resolve_principal`] confirms the target principal PRN
+    /// against the stored principal (else `NotFound`/`PrnMismatch`, SMA-649), also only once
+    /// `actor` is authorized, and BEFORE the idempotency pre-check below, so a forged PRN never
+    /// reaches the existing-grant OK path. Only after all seven succeed is the grant minted; it
+    /// is then committed atomically with its `DomainEvent`/`AuditEntry` (module docs, the UoW
+    /// reference pattern), and only once that commit succeeds does the awaited `gen_bumper.bump()` run.
+    /// SMA-676 D9: after step 7, an existing grant for the same (principal, role, scope) is
     /// returned with OK — no event, no audit row, no bump. If the insert loses a race
     /// (AuthzError::DuplicateGrant), the transaction is dropped and the winner's grant is
     /// returned.
@@ -245,6 +269,7 @@ where
 
         self.authorize.check(actor, Action::GrantRole, &scope_resource_prn(&scope)).await?;
         self.resolve_scope(&scope).await?;
+        self.resolve_principal(&principal).await?;
 
         // SMA-676 D9: idempotent. AFTER the authorization check, so a caller without
         // `GrantRole` at the scope learns nothing about existing grants (§6).
@@ -395,8 +420,8 @@ where
 mod tests {
     use super::*;
     use crate::application::fakes::{
-        FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryProjects, InMemoryRoleGrantQuery, InMemoryRoleGrants, InMemoryTeams, SeqIds,
-        TenancyStore, test_stamp,
+        FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryProjects, InMemoryRoleGrantQuery, InMemoryRoleGrants, InMemoryTeams,
+        InMemoryTenancyPrincipals, SeqIds, TenancyStore, test_stamp,
     };
     use crate::application::principal_kind::PrincipalKindFilter;
     use async_trait::async_trait;
@@ -410,6 +435,25 @@ mod tests {
 
     fn org_prn(n: u128) -> Prn {
         Prn::build("iam", "", None, "organization", Uuid::from_u128(n)).unwrap()
+    }
+
+    /// SMA-649: `grant` confirms its target principal against storage (`resolve_principal`).
+    /// Every grant test here grants to `principal_prn(2)`, so every harness seeds it into
+    /// `store.principals` with its canonical PRN. `principal_prn(3)` is never seeded: the
+    /// unknown-principal tests use it. Tests that reach the principal check and rely on this
+    /// seed: `grant_succeeds_for_an_authorized_actor`,
+    /// `grant_emits_one_event_and_one_audit_entry_sharing_a_correlation_id_and_awaits_the_bump`,
+    /// `a_store_error_mid_txn_rolls_back_and_never_emits_or_bumps_guard_d2`,
+    /// `a_second_grant_returns_the_existing_grant_and_emits_nothing` and
+    /// `a_lost_insert_race_returns_the_winner_s_grant_and_emits_nothing`.
+    fn seed_grant_target(store: &TenancyStore) {
+        seed_principal(store, 2);
+    }
+
+    /// Seeds `principal_prn(n)` into `store.principals` (uuid -> stored canonical PRN).
+    fn seed_principal(store: &TenancyStore, n: u128) {
+        let id = PrincipalId::from_prn(principal_prn(n));
+        store.principals.lock().unwrap().insert(id.uuid(), id.canonical());
     }
 
     /// Builds a `RoleService` over an EMPTY tenancy store: fine for every scenario that only
@@ -446,6 +490,7 @@ mod tests {
     /// inject one that errors mid-txn) and returning the outbox/audit/gen-bumper fakes
     /// alongside the service for direct assertion.
     fn new_service_with_fakes(fake: FakeAuthorizer, grants: Arc<dyn RoleGrantStore>, query: Arc<dyn RoleGrantQuery>, store: TenancyStore) -> ServiceWithFakes {
+        seed_grant_target(&store);
         let outbox = FakeOutbox::default();
         let audit = FakeAuditLog::default();
         let bumper = FakePolicyGenBumper::default();
@@ -454,6 +499,7 @@ mod tests {
             query,
             orgs: Arc::new(InMemoryOrgs(store.clone())),
             teams: Arc::new(InMemoryTeams(store.clone())),
+            principals: Arc::new(InMemoryTenancyPrincipals(store.clone())),
             projects: Arc::new(InMemoryProjects(store)),
             authorize: Authorize::new(Arc::new(fake)),
             uow: Arc::new(FakeUnitOfWork::default()),
@@ -1063,5 +1109,124 @@ mod tests {
         assert!(outbox.0.lock().unwrap().is_empty(), "the loser enqueues no event");
         assert!(audit.0.lock().unwrap().is_empty(), "the loser records no audit row");
         assert_eq!(bumper.calls(), 0, "the loser does not bump; the winner already did");
+    }
+
+    /// SMA-649: a principal PRN string with `region` and `org` in the two slots and
+    /// `principal_prn(n)`'s uuid. A stored principal PRN has both slots empty.
+    fn forged_principal(n: u128, region: &str, org: &str) -> String {
+        format!("prn:pgs:iam:{region}:{org}:principal/{}", Uuid::from_u128(n))
+    }
+
+    /// A harness whose authorizer allows `GrantRole` at Root, over a store with one real org
+    /// (uuid 100), with direct handles on the grant map and the emission fakes.
+    fn grant_harness() -> (ServiceWithFakes, InMemoryRoleGrants, TenancyStore) {
+        let store = TenancyStore::default();
+        let stamp = test_stamp(Utc.timestamp_opt(0, 0).unwrap(), 1);
+        let real_org = Uuid::from_u128(100);
+        store
+            .orgs
+            .lock()
+            .unwrap()
+            .insert(real_org, Organization::new(OrganizationId::from_uuid(real_org), Slug::parse("acme").unwrap(), "Acme", &stamp).unwrap());
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::GrantRole, &root_prn());
+        let grants = InMemoryRoleGrants::default();
+        let query = InMemoryRoleGrantQuery::over(&grants, &store);
+        let harness = new_service_with_fakes(fake, Arc::new(grants.clone()), Arc::new(query), store.clone());
+        (harness, grants, store)
+    }
+
+    /// Asserts that `grant` wrote nothing: no grant row, no event, no audit entry, no bump.
+    fn assert_nothing_written(h: &ServiceWithFakes, grants: &InMemoryRoleGrants, label: &str) {
+        assert!(grants.0.lock().unwrap().is_empty(), "{label}: a refused grant stores no row");
+        assert!(h.outbox.0.lock().unwrap().is_empty(), "{label}: a refused grant enqueues no event");
+        assert!(h.audit.0.lock().unwrap().is_empty(), "{label}: a refused grant records no audit entry");
+        assert_eq!(h.bumper.calls(), 0, "{label}: a refused grant never bumps policy_gen");
+    }
+
+    /// SMA-649 G1, G2, AC11, Review Focus 1 and 2: a forged region or organization slot on the
+    /// target principal answers `PrnMismatch` and writes nothing. Control: the canonical PRN
+    /// grants, and the one event carries the STORED canonical PRN (AC13).
+    #[tokio::test]
+    async fn grant_refuses_a_forged_principal_prn() {
+        let (h, grants, store) = grant_harness();
+        let actor = principal_prn(1);
+        // 0xab: a seeded principal whose uuid contains letters, for the upper-case shape.
+        seed_principal(&store, 0xab);
+        let upper_uuid = Uuid::from_u128(0xab).to_string().to_uppercase();
+        for (shape, forged) in [
+            ("non-empty region", forged_principal(2, "eu-west-1", "")),
+            ("real org uuid in the org slot", forged_principal(2, "", &Uuid::from_u128(100).to_string())),
+            ("random org uuid in the org slot", forged_principal(2, "", &Uuid::from_u128(0x0f49).to_string())),
+            ("both slots", forged_principal(2, "eu-west-1", &Uuid::from_u128(0x0f49).to_string())),
+            ("upper-case uuid and a region", format!("prn:pgs:iam:eu-west-1::principal/{upper_uuid}")),
+        ] {
+            let err = h.svc.grant(&actor, &forged, "platform_admin", &root_prn().canonical()).await.unwrap_err();
+            assert_eq!(err, TenancyError::PrnMismatch, "{shape}");
+            assert_nothing_written(&h, &grants, shape);
+        }
+
+        let grant = h.svc.grant(&actor, &principal_prn(2).canonical(), "platform_admin", &root_prn().canonical()).await.unwrap();
+        assert_eq!(grant.principal.canonical(), principal_prn(2).canonical());
+        let events = h.outbox.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].aggregate_prn, principal_prn(2).canonical());
+    }
+
+    /// SMA-649 G3, AC12: an unknown principal uuid answers `NotFound` (before SMA-649 the FK
+    /// violation surfaced as `Internal`) and writes nothing.
+    #[tokio::test]
+    async fn grant_answers_not_found_for_an_unknown_principal() {
+        let (h, grants, _store) = grant_harness();
+        let err = h
+            .svc
+            .grant(&principal_prn(1), &principal_prn(3).canonical(), "platform_admin", &root_prn().canonical())
+            .await
+            .unwrap_err();
+        assert_eq!(err, TenancyError::NotFound);
+        assert_nothing_written(&h, &grants, "unknown principal");
+        h.svc
+            .grant(&principal_prn(1), &principal_prn(2).canonical(), "platform_admin", &root_prn().canonical())
+            .await
+            .expect("control: the seeded principal grants");
+    }
+
+    /// SMA-649 G4: the canonical PRN with an upper-case uuid grants, and the event carries the
+    /// lower-case stored PRN. The uuid must contain letters, or the case changes nothing.
+    #[tokio::test]
+    async fn grant_accepts_an_upper_case_uuid() {
+        let (h, _grants, store) = grant_harness();
+        seed_principal(&store, 0xab);
+        let upper = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0xab).to_string().to_uppercase());
+        assert_ne!(upper, principal_prn(0xab).canonical());
+        let grant = h.svc.grant(&principal_prn(1), &upper, "platform_admin", &root_prn().canonical()).await.unwrap();
+        assert_eq!(grant.principal.canonical(), principal_prn(0xab).canonical());
+        assert_eq!(h.outbox.0.lock().unwrap()[0].aggregate_prn, principal_prn(0xab).canonical());
+    }
+
+    /// SMA-649 G6: a forged PRN for an EXISTING (principal, role, scope) grant answers
+    /// `PrnMismatch`, not the existing grant. The principal check runs before `existing_grant`.
+    #[tokio::test]
+    async fn grant_refuses_a_forged_principal_prn_for_an_existing_grant() {
+        let (h, _grants, _store) = grant_harness();
+        let existing = h.svc.grant(&principal_prn(1), &principal_prn(2).canonical(), "platform_admin", &root_prn().canonical()).await.unwrap();
+        let err = h
+            .svc
+            .grant(&principal_prn(1), &forged_principal(2, "eu-west-1", ""), "platform_admin", &root_prn().canonical())
+            .await
+            .unwrap_err();
+        assert_eq!(err, TenancyError::PrnMismatch, "not Ok({existing:?})");
+        assert_eq!(h.outbox.0.lock().unwrap().len(), 1, "only the first grant emitted");
+    }
+
+    /// SMA-649 G5, AC14: an actor without `GrantRole` at the scope gets `Forbidden` for a forged
+    /// and for an unknown principal PRN alike. Authorization runs before the principal lookup.
+    #[tokio::test]
+    async fn grant_with_a_forged_principal_prn_is_denied_before_the_lookup() {
+        let svc = new_service(FakeAuthorizer::default());
+        for (label, prn) in [("forged region", forged_principal(2, "eu-west-1", "")), ("unknown principal", principal_prn(3).canonical())] {
+            let err = svc.grant(&principal_prn(1), &prn, "platform_admin", &root_prn().canonical()).await.unwrap_err();
+            assert_eq!(err, TenancyError::Forbidden, "{label}");
+        }
     }
 }
