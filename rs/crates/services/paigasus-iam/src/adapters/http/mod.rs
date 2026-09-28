@@ -732,6 +732,7 @@ impl AppState {
             service_accounts: PgServiceAccountRepository::new(db.clone()),
             grants: role_grant_store.clone(),
             authorize: authorize.clone(),
+            nodes: tenancy_nodes,
             hasher: api_key_hasher,
             entropy: OsRngKeyEntropy,
             cache: api_key_cache,
