@@ -81,6 +81,16 @@ describe('guard 1: disableOfflineQueue', () => {
     expect(socket.connectTimeout).toBe(1234);
     expect(typeof socket.reconnectStrategy).toBe('function');
   });
+
+  // SMA-715 § 3.4. node-redis puts the URL, password included, into the MESSAGE of its
+  // tls-mismatch TypeError, which fires only when the caller passes socket.tls. The catch in
+  // createRedisSessionStore drops that error too; this pin states the assumption. This file mocks
+  // createClient, so these are the options BEFORE node-redis parses them.
+  it('passes no socket.tls (SMA-715)', () => {
+    const socket = captured.options?.['socket'] as Record<string, unknown> | undefined;
+    expect(socket).toBeDefined();
+    expect('tls' in (socket as Record<string, unknown>)).toBe(false);
+  });
 });
 
 // SMA-651 D1. pingInterval keeps a healthy idle socket under the idle timer; socketTimeout is the
