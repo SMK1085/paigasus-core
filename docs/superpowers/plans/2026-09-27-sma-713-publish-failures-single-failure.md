@@ -510,9 +510,11 @@ the backlog to age past 5 minutes) and before `IamOutboxEventsParked` (which nee
 primes the counter at zero when `outbox.relay_enabled` is true, and `relay.rs` increments it by 0
 on every tick. So `increase()` has a zero baseline before the first failure.
 
-**Scrape interval.** This rule **needs a scrape interval of 1 m or less**. The 2-minute window must
-hold at least 2 samples. At a longer interval `increase()` has too few samples and the alert does
-not fire. The repo scrapes every 15 s (`ops/observability/prometheus/prometheus.yml:3`).
+**Scrape interval.** This rule **needs a scrape interval of 1 m or less** for reliable detection.
+At that interval, the 2-minute window holds at least 2 samples at every evaluation. At a longer
+interval, the sample count in the window depends on the phase of the scrapes against the
+evaluations. Detection is then phase-dependent: the alert can stay silent, but it does not always
+stay silent. The repo scrapes every 15 s (`ops/observability/prometheus/prometheus.yml:3`).
 
 **One alert for each replica.** The rule is per series, so each IAM replica gives its own alert
 with its `instance` label. A broker outage gives one alert for each replica. This repo has no
@@ -522,7 +524,7 @@ notification for each replica.
 **When the alert is silent:**
 - one isolated failure, or a failure spell shorter than about 45 s (by design);
 - a failure spell of about 45 to 75 s, for some phases against the 1-minute evaluation tick;
-- a scrape interval longer than 1 minute;
+- a scrape interval longer than 1 minute, for some phases (detection is phase-dependent);
 - `outbox.relay_enabled = false` (no relay runs, and `main` does not prime the series);
 - `outbox.publisher.backend = "tracing"` (a publish almost never fails);
 - `metrics.enabled = false` (no series);

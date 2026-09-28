@@ -215,9 +215,10 @@ that this design depends on.
   2 to 3 minutes against about 5 minutes. Replace "primed at zero from boot … can fire on the
   very first failure" with: `main` primes the counter at zero when `outbox.relay_enabled` is
   true, and `relay.rs` increments it by 0 on every tick.
-- Add the requirement: the rule **needs a scrape interval of 1 m or less**. The 2 m window must
-  hold at least 2 samples. At a longer interval `increase()` has too few samples and the alert
-  does not fire. The repo scrapes every 15 s (`prometheus.yml:3`).
+- Add the requirement: the rule **needs a scrape interval of 1 m or less** for reliable
+  detection. At that interval, the 2 m window holds at least 2 samples at every evaluation. At a
+  longer interval, detection is phase-dependent: the alert can stay silent, but it does not always
+  stay silent. The repo scrapes every 15 s (`prometheus.yml:3`).
 - Add the per-replica behaviour: the rule is per series, so each IAM replica gives its own alert
   with its `instance` label. A broker outage gives one alert for each replica. The repo has no
   Alertmanager routing. If your Alertmanager does not group by `alertname` or `job`, expect one
@@ -400,7 +401,8 @@ length lets one failure resolve before it fires (see SMA-713)". That is still tr
   spell of about 45 to 75 s fires only for some phases. The operator sees these spells only in
   the counter, the relay log (`outbox event publish failed; will retry`) and
   `event_outbox.last_error`. If such a spell parks a row, `IamOutboxEventsParked` fires.
-- **The rule needs a scrape interval of 1 m or less.** At a longer interval, the alert is silent.
+- **The rule needs a scrape interval of 1 m or less.** At a longer interval, detection is
+  phase-dependent, and the alert can be silent.
   Nothing gates the scrape interval of an operator's Prometheus. The runbook states the
   requirement.
 - **A broker that is down at boot does not fire this alert.** `NatsEventPublisher::connect`
