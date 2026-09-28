@@ -23,8 +23,8 @@ nextest, Moon 2.5.3.
 - Rule: `expr: increase(iam_outbox_relay_publish_failures_total[2m]) > 0`, `for: 2m`, severity
   `warning`. No `sum by`. The `job` and `instance` labels stay on the alert.
 - The `summary` stays exactly `IAM outbox publishes are failing (broker unreachable or rejecting)`.
-- The new `description` is exactly: `The outbox relay failed to publish events for at least 2
-  minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it
+- The new `description` is exactly: `The publish-failure counter increased in each 2-minute
+  window for 2 minutes. One failure does not fire this alert. A failure spell of about 90 s or more fires it
   about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check
   iam_nats_connected. See RUNBOOK section 4.` (one line in the YAML).
 - The prime is gated on `config.outbox.relay_enabled` and sits inside `if metrics_handle.is_some()`
