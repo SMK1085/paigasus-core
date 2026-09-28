@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# ONE values block. Six projections derive from `zones` and from nothing else: the ingress path
-# rules, PAIGASUS_ZONES, PAIGASUS_SERVICES, PAIGASUS_IAM_GRPC_URL, the console Deployments and the
+# ONE values block. Six projections derive from `zones` and from nothing else: the route path
+# rules (the Ingress rules, and the HTTPRoute rules when httpRoute.enabled is true),
+# PAIGASUS_ZONES, PAIGASUS_SERVICES, PAIGASUS_IAM_GRPC_URL, the console Deployments and the
 # backend Deployments. A zone's `enabled` flag governs ALL of them together — that is what makes
 # "routable but unadvertised" unrepresentable rather than merely checked (spec D6).
+#
+# Exception (SMA-695, spec D2): with ingress.enabled false AND httpRoute.enabled false the chart
+# renders no route path rules, and the operator's own route is a projection of `zones` that the
+# operator keeps by hand.
 #
 # A zone id MUST be a member of SERVICE_SLUGS (ts/packages/paigasus-discovery/src/core/state.ts).
 # parseServiceMap THROWS on an unknown key, in BOTH consoles, at first request (spec F8).
@@ -17,7 +22,7 @@ zones:
         # Pinned to the image version in ts/apps/iam-console/package.json (SMA-688). A version
         # bump updates this tag in the same PR; repo:helm-render row 8a fails otherwise. An empty
         # tag falls back to .Chart.AppVersion, a version every image released (row 8c).
-        tag: "0.1.0"
+        tag: "0.2.0"
       replicas: 2
     backend:
       # Deployed by this chart. Kept true: the gRPC-to-IAM link from any other zone's backend has
@@ -72,8 +77,14 @@ zones:
         repository: ghcr.io/smk1085/paigasus-gateway-console
         # Pinned to the image version in ts/apps/gateway-console/package.json (SMA-688).
         # repo:helm-render row 8a fails when the two differ.
-        tag: "0.1.0"
+        tag: "0.2.0"
       replicas: 2
+      # Used only when httpRoute.enabled is true. The chat relay streams text/event-stream for
+      # longer than the 15 s default route timeout of Envoy, so this rule gets a longer request
+      # timeout. 10m still ends a hung stream. Same shape as httpRoute.timeouts; a key here wins.
+      # See docs/ops/RUNBOOK-chart.md § 11.
+      httpRouteTimeouts:
+        request: 10m
     backend:
       # NOT deployed by this chart (SMA-513 Task 11b). Measured in the tree:
       # GatewayConfig::validate hard-fails boot on an empty upstream.openai.api_key
@@ -99,13 +110,45 @@ zones:
       url: ""
 
 ingress:
-  host: ""               # REQUIRED. Feeds PAIGASUS_PUBLIC_ORIGIN as https://<host>.
+  enabled: true          # false: the chart renders no Ingress. Then set httpRoute.enabled for the
+                         # chart-owned HTTPRoute (below), or route https://<host><basePath> to each
+                         # enabled zone's console Service yourself: port name http, no rewrite,
+                         # Host forwarded unchanged, TLS ended in front of the Services.
+                         # See docs/ops/RUNBOOK-chart.md § 11. A boolean: a quoted "false" is refused.
+  host: ""               # REQUIRED, also when enabled is false. Feeds PAIGASUS_PUBLIC_ORIGIN as
+                         # https://<host>. A bare host name: no scheme, no path, no port.
   className: ""
-  tlsSecretName: ""      # REQUIRED. The ingress must terminate TLS: PAIGASUS_PUBLIC_ORIGIN is
-                         # validated as https, and __Host-pgs_sid requires Secure.
+  tlsSecretName: ""      # REQUIRED when enabled is true. The ingress must terminate TLS:
+                         # PAIGASUS_PUBLIC_ORIGIN is validated as https, and __Host-pgs_sid
+                         # requires Secure.
   annotations: {}
   # DO NOT add a rewrite annotation. Each console compiles basePath in and serves its full path
   # already; a rewrite that strips /iam breaks every route in that zone.
+
+httpRoute:
+  # NOT required. true renders one gateway.networking.k8s.io/v1 HTTPRoute for each enabled zone,
+  # from the same zones range as the Ingress (SMA-694). It must be a boolean: a quoted "false" is
+  # refused. Independent of ingress.enabled: both can be on during a cut-over. See
+  # docs/ops/RUNBOOK-chart.md § 11. The route host is always ingress.host, and ingress.host must
+  # then be lowercase.
+  enabled: false
+  # REQUIRED when enabled is true. Gateway API ParentReference objects, rendered as written.
+  # Each entry needs a name and a sectionName or port that selects the HTTPS listener: an entry
+  # with neither can attach to every compatible listener, a plain HTTP one included, and is
+  # refused. The chart does not check the listener protocol: select an HTTPS listener.
+  # Example: [{name: cilium-gateway, namespace: kube-system, sectionName: https}]
+  # The listener must end TLS for ingress.host and allow this release's namespace.
+  parentRefs: []
+  # NOT required. Annotations on each HTTPRoute, for example for external-dns. Each value must be
+  # a string. The chart does not check the text: a value that names a zone id is your own text.
+  annotations: {}
+  # NOT required. Gateway API HTTPRouteTimeouts for the rule of every enabled zone: request and
+  # backendRequest, each a duration such as 30s, 10m or 1h (form ([0-9]{1,5}(h|m|s|ms)){1,4}).
+  # 0s means no timeout. backendRequest must not be longer than request, unless request is 0s.
+  # A non-empty key in zones.<id>.console.httpRouteTimeouts wins over the same key here.
+  # Needs Gateway API v1.2.0 or later on the cluster. See docs/ops/RUNBOOK-chart.md § 11.
+  timeouts: {}
+  # DO NOT add a rewrite or any other filter. Each console serves its full basePath.
 
 oidc:
   issuer: ""             # REQUIRED

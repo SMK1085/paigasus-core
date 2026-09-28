@@ -9,6 +9,11 @@
 // Each boot gets a COMPLETE, valid environment, so a failure can only come from what a case
 // changes. The mismatch case asserts the mismatch MESSAGE in the server output, not only a 500: a
 // missing unrelated variable also answers 500, and must not pass it.
+//
+// SMA-705 T15. One more boot proves that the BUILT app serves `GET /gateway/readyz`. It uses ONE
+// zone, because createAuthRuntime refuses the memory store for two zones. Its issuer is on a port
+// that fetch refuses at once. The request does not follow a redirect, so a proxy that sends the
+// probe to the login route fails the row.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +32,9 @@ const COMPLETE_ENV: Readonly<Record<string, string>> = {
   PAIGASUS_IAM_GRPC_URL: 'http://127.0.0.1:9',
 };
 
+/** Port 1 is on the Fetch "bad port" list, so discovery fails at once with no connect (SMA-656). */
+const UNREACHABLE_ISSUER = 'https://127.0.0.1:1';
+
 async function freePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
     const srv = createServer();
@@ -43,16 +51,24 @@ async function freePort(): Promise<number> {
   });
 }
 
-type Answer = { status: number; body: string; output: string };
+type Answer = { status: number; body: string; headers: Headers; output: string };
+
+type BootOptions = {
+  /** Keep the server alive until its output holds this text, for at most 5 s. */
+  waitForOutput?: string;
+  /** Values that replace COMPLETE_ENV entries for this boot. */
+  env?: Readonly<Record<string, string>>;
+};
 
 // The child is OBSERVED, not merely polled: an early death is reported as a death, both streams are
 // drained so a chatty child cannot block, and a deadline still covers a process that starts and
 // never listens. `waitForOutput` keeps the server alive until its log contains that text, because
 // Next writes a route error to stderr around the time it sends the 500.
-async function healthzWith(zones: Record<string, string>, waitForOutput?: string): Promise<Answer> {
+async function getWith(path: string, zones: Record<string, string>, options: BootOptions = {}): Promise<Answer> {
+  const { waitForOutput } = options;
   const port = await freePort();
   const child: ChildProcess = spawn(process.execPath, [SERVER_ENTRY], {
-    env: { ...process.env, ...COMPLETE_ENV, PORT: String(port), HOSTNAME: '127.0.0.1', PAIGASUS_ZONES: JSON.stringify(zones) },
+    env: { ...process.env, ...COMPLETE_ENV, ...options.env, PORT: String(port), HOSTNAME: '127.0.0.1', PAIGASUS_ZONES: JSON.stringify(zones) },
     stdio: 'pipe',
   });
 
@@ -80,12 +96,13 @@ async function healthzWith(zones: Record<string, string>, waitForOutput?: string
       if (Date.now() > deadline) throw withOutput('standalone server did not become ready within 60s');
       let res: Response | undefined;
       try {
-        res = await fetch(`http://127.0.0.1:${String(port)}/gateway/healthz`, { signal: AbortSignal.timeout(5_000) });
+        // `redirect: 'manual'`: a redirect must reach the assertions, not be followed (SMA-705 T15).
+        res = await fetch(`http://127.0.0.1:${String(port)}${path}`, { redirect: 'manual', signal: AbortSignal.timeout(5_000) });
       } catch {
         // not listening yet, or this attempt hung and timed out
       }
       if (res !== undefined) {
-        const answer = { status: res.status, body: await res.text() };
+        const answer = { status: res.status, body: await res.text(), headers: res.headers };
         const logDeadline = Date.now() + 5_000;
         while (waitForOutput !== undefined && !output.includes(waitForOutput) && Date.now() < logDeadline) {
           await new Promise((r) => setTimeout(r, 100));
@@ -101,8 +118,8 @@ async function healthzWith(zones: Record<string, string>, waitForOutput?: string
 
 describe('the standalone server reads configuration at runtime', () => {
   it('serves different zone maps from the SAME binary', async () => {
-    const first = await healthzWith({ gateway: '/gateway', iam: '/iam' });
-    const second = await healthzWith({ gateway: '/gateway', reports: '/reports' });
+    const first = await getWith('/gateway/healthz', { gateway: '/gateway', iam: '/iam' });
+    const second = await getWith('/gateway/healthz', { gateway: '/gateway', reports: '/reports' });
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
@@ -112,8 +129,23 @@ describe('the standalone server reads configuration at runtime', () => {
 
   it('fails loudly, with the mismatch message, when the deployed prefix disagrees with the compiled one', async () => {
     const message = 'Base path mismatch for zone "gateway"';
-    const result = await healthzWith({ gateway: '/admin/gateway' }, message);
+    const result = await getWith('/gateway/healthz', { gateway: '/admin/gateway' }, { waitForOutput: message });
     expect(result.status).toBe(500);
     expect(result.output).toContain(message);
+  });
+});
+
+describe('GET /gateway/readyz on the built server (SMA-705 T15)', () => {
+  it('answers 503 unready with no redirect, and logs the discovery failure that it started', async () => {
+    const result = await getWith('/gateway/readyz', { gateway: '/gateway' }, { env: { PAIGASUS_OIDC_ISSUER: UNREACHABLE_ISSUER }, waitForOutput: '"stage":"readiness"' });
+    expect(result.status).toBe(503);
+    expect(result.body).toBe('{"status":"unready"}');
+    expect(result.headers.get('cache-control')).toBe('no-store');
+    expect(result.headers.get('location')).toBeNull();
+    const line = result.output.split('\n').find((text) => text.includes('"event":"oidc.discovery_failed"'));
+    expect(line, `no oidc.discovery_failed line\n--- server output ---\n${result.output}`).toBeDefined();
+    const logged = JSON.parse(line ?? '{}') as { fields?: unknown };
+    expect(logged.fields).toEqual({ zone: 'gateway', stage: 'readiness', reason: 'network' });
+    expect(result.output).not.toContain('readiness.runtime_failed');
   });
 });

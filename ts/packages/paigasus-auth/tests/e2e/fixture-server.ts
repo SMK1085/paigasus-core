@@ -26,11 +26,16 @@
 // calls) — and redirects on `null` exactly as `requireSession` does. This is not a weakened
 // stand-in: it is the same session-resolution logic under test, minus the Next-specific plumbing
 // that cannot run outside a Next server and that none of task 13's specs are about.
+//
+// It builds the ResolveDeps with `resolveDepsFor` (src/next/get-session.ts), the function
+// getSession itself uses, so this tier runs the production wiring and not a copy (SMA-704).
+// src/server.ts already loads that module, so this import adds no module to this server.
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { createAuthRouteHandler, getAuthRuntime } from '../../src/server.js';
 import type { ComposedConfig } from '../../src/runtime.js';
 import { resolveSession } from '../../src/core/single-flight.js';
+import { resolveDepsFor } from '../../src/next/get-session.js';
 import { validateReturnTo } from '../../src/core/return-to.js';
 import { readCookies, SESSION_COOKIE } from '../../src/http/cookies.js';
 import { FIXTURE_SERVER_ORIGIN, FIXTURE_SERVER_PORT, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET, ZONE, ZONE_BASE_PATH } from './constants.js';
@@ -148,19 +153,7 @@ async function main(): Promise<void> {
     const resolved =
       sid === undefined
         ? null
-        : await resolveSession(
-            {
-              store: runtime.store,
-              refresh: (refreshToken) => runtime.oidc.refresh(refreshToken),
-              revoke: (token) => runtime.oidc.revoke(token),
-              logger: runtime.logger,
-              skewMs: runtime.skewMs,
-              lockTtlMs: runtime.lockTtlMs,
-              lockWaitMs: runtime.lockWaitMs,
-              ttlMs: runtime.ttlMs,
-            },
-            sid,
-          ).catch((err: unknown) => {
+        : await resolveSession(resolveDepsFor(runtime), sid).catch((err: unknown) => {
             // A redacted diagnostic, never the raw error: node-redis's own connection errors
             // embed the DSN, and openid-client's can embed a URL. Without this line a store or
             // IdP failure here is indistinguishable from "no session" — the guarded page just

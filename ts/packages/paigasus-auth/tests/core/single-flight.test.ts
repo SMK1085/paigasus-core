@@ -23,8 +23,9 @@ function recordingLogger(): { logger: AuthLogger; events: Array<[AuthEventName, 
 // clock — which is why this package needs no Clock port.
 function deps(store: SessionStore, refresh: ResolveDeps['refresh']) {
   // `revoke` is called only for a refresh token that no record holds (SMA-681). A test that checks
-  // it passes its own recording function over this one.
-  return { store, refresh, revoke: () => Promise.resolve(), logger: noopLogger, skewMs: 30_000, lockTtlMs: 5_000, lockWaitMs: 3_000, ttlMs: 60_000 };
+  // it passes its own recording function over this one. `prepareRefresh` (SMA-704) is a fake with
+  // no discovery; a test that checks it passes its own.
+  return { store, prepareRefresh: () => Promise.resolve(), refresh, revoke: () => Promise.resolve(), logger: noopLogger, skewMs: 30_000, lockTtlMs: 5_000, lockWaitMs: 3_000, ttlMs: 60_000 };
 }
 
 describe('resolveSession', () => {
@@ -1057,5 +1058,241 @@ describe('the OAuth code in the refresh log (SMA-692 D10)', () => {
 
     await expect(resolveSession({ ...deps(store, () => Promise.reject(forged)), logger }, 's')).rejects.toBe(forged);
     expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: false, oauthError: 'other' }]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SMA-704. resolveSession calls `prepareRefresh` (production: OidcClient.ensureDiscovered) BEFORE it
+// takes the lock, so the OIDC discovery request never runs under the lock. The test numbers are the
+// spec's (§ 5.1); the § 5.5 mutation battery refers to them. R1-R4 are the plan's Review Focus.
+// ---------------------------------------------------------------------------------------------
+describe('prepareRefresh runs before the lock (SMA-704)', () => {
+  /** Wraps a real store. Appends `tryAcquireLock` and `delete` to `order`, in call order. */
+  function orderStore(inner: MemorySessionStore, order: string[]): SessionStore {
+    return {
+      get: (sid) => inner.get(sid),
+      set: (sid, rec, ttlMs, expectedRev) => inner.set(sid, rec, ttlMs, expectedRev),
+      delete: (sid) => {
+        order.push('delete');
+        return inner.delete(sid);
+      },
+      tryAcquireLock: (sid, token, ttlMs) => {
+        order.push('tryAcquireLock');
+        return inner.tryAcquireLock(sid, token, ttlMs);
+      },
+      releaseLock: (sid, token) => inner.releaseLock(sid, token),
+      putTransaction: (txnId, tx, ttlMs) => inner.putTransaction(txnId, tx, ttlMs),
+      takeTransaction: (txnId) => inner.takeTransaction(txnId),
+      close: () => inner.close(),
+    };
+  }
+
+  /** Resolves after a macrotask, so a missing `await` lets tryAcquireLock run first. */
+  function recordingPrepare(order: string[]): ResolveDeps['prepareRefresh'] {
+    return async () => {
+      order.push('prepareRefresh:called');
+      await new Promise((r) => setTimeout(r, 20));
+      order.push('prepareRefresh:resolved');
+    };
+  }
+
+  const refreshed = () => Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 });
+  const mustNotRefresh = () => Promise.reject(new Error('must not refresh'));
+
+  // Test 6: each failure row runs with a plain Error AND with errors that carry this package's
+  // refresh codes. The site before the lock must not classify: a RefreshRejected must not delete,
+  // and a RefreshFailed must not add `oauthError` (R1).
+  const discoveryFailures = [
+    ['a plain Error', () => new Error('oidc discovery failed: TypeError')],
+    ['an error with the RefreshRejected code', () => new RefreshRejected('invalid_grant')],
+    ['an error with the RefreshFailed code (R1)', () => new RefreshFailed('invalid_scope', 'ResponseBodyError')],
+  ] as const;
+
+  it('SMA-704 test 1: prepareRefresh resolves BEFORE the first tryAcquireLock', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const order: string[] = [];
+
+    const out = await resolveSession({ ...deps(orderStore(inner, order), refreshed), prepareRefresh: recordingPrepare(order) }, 's');
+
+    expect(out?.accessToken).toBe('AT2');
+    // Called once, resolved, and only then the lock. A missing `await` puts tryAcquireLock second.
+    expect(order).toEqual(['prepareRefresh:called', 'prepareRefresh:resolved', 'tryAcquireLock']);
+  });
+
+  it('SMA-704 test 2: a read that needs no refresh does not call prepareRefresh', async () => {
+    const store = new MemorySessionStore();
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() + 600_000 }), 60_000, null);
+    const prepareRefresh = vi.fn(() => Promise.resolve());
+
+    const out = await resolveSession({ ...deps(store, mustNotRefresh), prepareRefresh }, 's');
+
+    expect(out?.accessToken).toBe('AT');
+    expect(prepareRefresh).not.toHaveBeenCalled();
+  });
+
+  it('SMA-704 test 3: a record with no refresh token skips prepareRefresh and is deleted under the lock', async () => {
+    const inner = new MemorySessionStore();
+    const rec = makeRecord({ accessExpiresAt: Date.now() - 1 });
+    delete rec.refreshToken;
+    await inner.set('s', rec, 60_000, null);
+    const order: string[] = [];
+    const { logger, events } = recordingLogger();
+    const prepareRefresh = vi.fn(() => Promise.resolve());
+
+    expect(await resolveSession({ ...deps(orderStore(inner, order), mustNotRefresh), logger, prepareRefresh }, 's')).toBeNull();
+
+    expect(prepareRefresh).not.toHaveBeenCalled();
+    expect(order).toEqual(['tryAcquireLock', 'delete']);
+    expect(events).toContainEqual(['session.deleted', { sid: sidTag('s'), reason: 'no_refresh_token' }]);
+  });
+
+  it.each(discoveryFailures)('SMA-704 tests 4 and 6: prepareRefresh rejects with %s and the token is live: degrade, no lock, no delete', async (_label, makeError) => {
+    const inner = new MemorySessionStore();
+    // Inside deps()'s 30 s skew window, and still live.
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() + 15_000 }), 60_000, null);
+    const order: string[] = [];
+    const { logger, events } = recordingLogger();
+
+    const out = await resolveSession({ ...deps(orderStore(inner, order), mustNotRefresh), logger, prepareRefresh: () => Promise.reject(makeError()) }, 's');
+
+    expect(out?.accessToken).toBe('AT');
+    expect(out?.refreshState).toBe('failed');
+    // Exactly these fields: no `oauthError` on the discovery line (R1).
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: true, stage: 'discovery' }]);
+    expect(order).not.toContain('tryAcquireLock');
+    expect(order).not.toContain('delete');
+    expect(events.some(([name]) => name === 'session.deleted')).toBe(false);
+    expect(await inner.get('s')).not.toBeNull();
+  });
+
+  it.each(discoveryFailures)('SMA-704 tests 5 and 6: prepareRefresh rejects with %s and the token is expired: rethrow, no lock, no delete', async (_label, makeError) => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const order: string[] = [];
+    const { logger, events } = recordingLogger();
+    const error = makeError();
+
+    await expect(resolveSession({ ...deps(orderStore(inner, order), mustNotRefresh), logger, prepareRefresh: () => Promise.reject(error) }, 's')).rejects.toBe(error);
+
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: false, stage: 'discovery' }]);
+    expect(order).not.toContain('tryAcquireLock');
+    expect(order).not.toContain('delete');
+    expect(await inner.get('s')).not.toBeNull();
+  });
+
+  it('SMA-704 test 7a: prepareRefresh rejects after another writer refreshed the record: return that record', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ rev: 0, accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const order: string[] = [];
+    const prepareRefresh = async (): Promise<void> => {
+      // Another process refreshes the record while this one waits for discovery.
+      await inner.set('s', makeRecord({ rev: 1, accessToken: 'AT-OTHER', refreshToken: 'RT-OTHER', accessExpiresAt: Date.now() + 600_000 }), 60_000, 0);
+      throw new Error('oidc discovery failed: TypeError');
+    };
+
+    const out = await resolveSession({ ...deps(orderStore(inner, order), mustNotRefresh), prepareRefresh }, 's');
+
+    expect(out?.accessToken).toBe('AT-OTHER');
+    expect(out).not.toHaveProperty('refreshState');
+    expect(order).not.toContain('tryAcquireLock');
+  });
+
+  it('SMA-704 test 7b: prepareRefresh rejects after another writer deleted the record: return null', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const order: string[] = [];
+    const prepareRefresh = async (): Promise<void> => {
+      await inner.delete('s'); // a logout in another tab
+      throw new Error('oidc discovery failed: TypeError');
+    };
+
+    expect(await resolveSession({ ...deps(orderStore(inner, order), mustNotRefresh), prepareRefresh }, 's')).toBeNull();
+    expect(order).not.toContain('tryAcquireLock');
+  });
+
+  it('SMA-704 test 8: the lockWaitMs deadline starts after prepareRefresh resolves', async () => {
+    const store = new MemorySessionStore();
+    // Inside the skew window and live, so the timeout branch returns 'pending', not null.
+    await store.set('s', makeRecord({ accessExpiresAt: Date.now() + 15_000 }), 60_000, null);
+    await store.tryAcquireLock('s', 'someone-else', 60_000); // another holder, for the whole test
+    const original = store.tryAcquireLock.bind(store);
+    let attempts = 0;
+    store.tryAcquireLock = (sid, token, ttlMs) => {
+      attempts += 1;
+      return original(sid, token, ttlMs);
+    };
+    const lockWaitMs = 120;
+    const marks: { preparedAt: number | undefined } = { preparedAt: undefined };
+    const prepareRefresh = async (): Promise<void> => {
+      await new Promise((r) => setTimeout(r, 300)); // longer than lockWaitMs
+      marks.preparedAt = Date.now();
+    };
+
+    const out = await resolveSession({ ...deps(store, mustNotRefresh), lockWaitMs, prepareRefresh }, 's');
+    const returnedAt = Date.now();
+
+    expect(out?.refreshState).toBe('pending');
+    if (marks.preparedAt === undefined) throw new Error('prepareRefresh never resolved');
+    // Date.now() is the clock resolveSession reads. With the deadline set before prepareRefresh,
+    // the waiter makes exactly one attempt and returns at once.
+    expect(returnedAt - marks.preparedAt).toBeGreaterThanOrEqual(lockWaitMs);
+    expect(attempts).toBeGreaterThan(1);
+  });
+
+  it('SMA-704 R2: the absolute cap passes during the discovery wait: throw, and do not delete', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() + 15_000 }), 60_000, null);
+    const order: string[] = [];
+    const store = orderStore(inner, order);
+    const originalGet = store.get.bind(store);
+    let getCalls = 0;
+    store.get = async (sid) => {
+      getCalls += 1;
+      const rec = await originalGet(sid);
+      // Call 2 is the re-read after prepareRefresh rejected. Its cap is already past; its access
+      // token is still live, so only Math.min stops a degrade.
+      return getCalls === 2 && rec !== null ? { ...rec, absoluteExpiresAt: Date.now() - 1 } : rec;
+    };
+    const { logger, events } = recordingLogger();
+    const error = new Error('oidc discovery failed: TimeoutError');
+
+    await expect(resolveSession({ ...deps(store, mustNotRefresh), logger, prepareRefresh: () => Promise.reject(error) }, 's')).rejects.toBe(error);
+
+    expect(getCalls).toBe(2);
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: false, stage: 'discovery' }]);
+    // Not deleted on this path (spec § 3.2): the next read deletes it through the outer check.
+    expect(order).not.toContain('delete');
+    expect(order).not.toContain('tryAcquireLock');
+  });
+
+  it('SMA-704 R3: prepareRefresh resolves after another writer refreshed the record: no refresh call', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ rev: 0, accessExpiresAt: Date.now() - 1 }), 60_000, null);
+    const prepareRefresh = async (): Promise<void> => {
+      await inner.set('s', makeRecord({ rev: 1, accessToken: 'AT-OTHER', refreshToken: 'RT-OTHER', accessExpiresAt: Date.now() + 600_000 }), 60_000, 0);
+    };
+    const refresh = vi.fn(mustNotRefresh);
+
+    const out = await resolveSession({ ...deps(inner, refresh), prepareRefresh }, 's');
+
+    expect(out?.accessToken).toBe('AT-OTHER');
+    expect(refresh).not.toHaveBeenCalled(); // invariant 1 still holds after the wait
+  });
+
+  it('SMA-704 R4: a prepareRefresh that throws synchronously takes the same transient path', async () => {
+    const inner = new MemorySessionStore();
+    await inner.set('s', makeRecord({ accessExpiresAt: Date.now() + 15_000 }), 60_000, null);
+    const order: string[] = [];
+    const { logger, events } = recordingLogger();
+    const prepareRefresh = (): Promise<void> => {
+      throw new Error('oidc discovery failed: TypeError');
+    };
+
+    const out = await resolveSession({ ...deps(orderStore(inner, order), mustNotRefresh), logger, prepareRefresh }, 's');
+
+    expect(out?.refreshState).toBe('failed');
+    expect(events).toContainEqual(['session.refresh_failed', { sid: sidTag('s'), reason: 'transient', degraded: true, stage: 'discovery' }]);
+    expect(order).not.toContain('tryAcquireLock');
   });
 });

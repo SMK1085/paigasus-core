@@ -19,10 +19,16 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `zones.iam.backend.bootstrapAdmins` | no | A list of `{issuer, subject}`. IAM grants `platform_admin` at Root to each identity after its first login. Default `[]`: no user can do anything (§ 9) |
 | `zones.iam.backend.extraEnv` | no | More env entries (Kubernetes `EnvVar`) for the IAM container, for example `RUST_LOG`. Default `[]` (§ 9) |
 | `zones.gateway.backend.url` | when `gateway` is on | The base URL of an existing gateway backend. The chart does not deploy it |
-| `ingress.host` | yes | The one public host. `PAIGASUS_PUBLIC_ORIGIN` is `https://<host>` |
-| `ingress.className` | no | The IngressClass of your controller |
-| `ingress.tlsSecretName` | yes | The TLS Secret for `ingress.host`. The ingress must end TLS |
-| `ingress.annotations` | no | Extra annotations. Do not add a rewrite annotation (§ 3) |
+| `ingress.enabled` | no | Default `true`. `false`: the chart renders no Ingress. Then set `httpRoute.enabled`, or route the traffic yourself (§ 11). It must be a boolean |
+| `ingress.host` | yes, also when `ingress.enabled` is false | The one public host. `PAIGASUS_PUBLIC_ORIGIN` is `https://<host>`. A bare host name: no scheme, no path, no port |
+| `ingress.className` | no | The IngressClass of your controller. Ignored when `ingress.enabled` is false |
+| `ingress.tlsSecretName` | when `ingress.enabled` is true | The TLS Secret for `ingress.host`. The ingress must end TLS |
+| `ingress.annotations` | no | Extra annotations. Do not add a rewrite annotation (§ 3). Ignored when `ingress.enabled` is false |
+| `httpRoute.enabled` | no | Default `false`. `true`: the chart renders one Gateway API HTTPRoute for each enabled zone (§ 11). Independent of `ingress.enabled`. It must be a boolean. `ingress.host` must then be lowercase |
+| `httpRoute.parentRefs` | when `httpRoute.enabled` is true | A non-empty list of Gateway API `ParentReference` objects, rendered as written. Each entry needs a `name`, and a `sectionName` or `port` that selects the HTTPS listener |
+| `httpRoute.timeouts` | no | `request` and `backendRequest` (durations such as `30s`, `10m`, `1h`) for the rule of every enabled zone. Default `{}` (§ 11, "Route timeouts") |
+| `httpRoute.annotations` | no | Annotations on each HTTPRoute, for example for external-dns. String values only. Default `{}` |
+| `zones.<id>.console.httpRouteTimeouts` | no | The same shape as `httpRoute.timeouts`, for one zone. A key here wins. The gateway zone default is `request: 10m` |
 | `oidc.issuer` | yes | The IdP issuer URL. It must be `https` |
 | `oidc.clientId` | yes | The console's OIDC client. By default IAM also uses it as the access-token audience. Then an ID token passes IAM's audience check, and the chart shows a warning (§ 6) |
 | `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Recommended: a dedicated API audience. Follow the migration order in § 6 |
@@ -39,15 +45,19 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 
 ## 2. Refused combinations
 
-`paigasus.validate` in `templates/_helpers.tpl` stops the render with its own message. The last
-two items in this list are in `templates/_audience.tpl` instead. `templates/console-env-configmap.yaml`
-calls them, and that file renders on every install. The chart refuses:
+`paigasus.validate` in `templates/_helpers.tpl` stops the render with its own message. Two other
+files hold refusals: the two `oidc.authorizationAudience` items are in `templates/_audience.tpl`,
+and the `httpRoute` items are in `templates/_httproute.tpl` (`paigasus.validateHttpRoute`, which
+`paigasus.validate` calls). `templates/console-env-configmap.yaml` calls the `_audience.tpl`
+checks, and that file renders on every install. The chart refuses:
 
 - no enabled zone;
 - the `gateway` zone without the `iam` zone;
 - a zone id that is not a known service slug;
 - a `basePath` that is empty, has no leading `/`, ends with `/`, or is used by two zones;
 - an empty value for each required key in § 1;
+- `ingress.enabled` set to a value that is not a boolean (a quoted `"false"` is a string);
+- `ingress.host` with a scheme, a path or a port;
 - `zones.iam.backend.deploy: false` (an external IAM is not supported);
 - `zones.gateway.backend.deploy: true` (the chart cannot run the gateway backend);
 - `zones.<id>.backend.url` empty when the chart does not deploy that backend;
@@ -63,7 +73,17 @@ calls them, and that file renders on every install. The chart refuses:
 - a `zones.iam.backend.extraEnv` value that is not a list, an entry without a string `name`, or
   two entries with one name;
 - an `extraEnv` name that the chart sets itself, or a name that starts with such a name and `__`
-  (§ 9).
+  (§ 9);
+- `httpRoute` that is not a map, or `httpRoute.enabled` that is not a boolean;
+- with `httpRoute.enabled: true`: an absent, null, empty or non-list `httpRoute.parentRefs`; a
+  parentRef without a string `name`; a parentRef with neither `sectionName` nor `port`; an
+  `ingress.host` with an upper-case letter;
+- with `httpRoute.enabled: true`: `httpRoute.annotations` that is not a map, or a value that is
+  not a string;
+- with `httpRoute.enabled: true`: a timeouts map (`httpRoute.timeouts`, or the
+  `httpRouteTimeouts` of an enabled zone) that is not a map, has a key other than `request` and
+  `backendRequest`, or has a value that is not a duration; and a merged `backendRequest` longer
+  than the merged `request` when `request` is not `0s`.
 
 ## 3. No rewrite annotation
 
@@ -79,6 +99,17 @@ shown, or shown but not routed. This is decision D6.
 
 **The limit of D6.** The chart cannot express "the gateway zone is shown but not routed", or the
 reverse. That is on purpose.
+
+**D6 and `ingress.enabled: false` (SMA-695).** With the Ingress off and `httpRoute.enabled: false`,
+the chart renders no routing. Your own route then takes the place of the ingress rule, and you keep
+it by hand. Change the route in the same change as any `zones.<id>.enabled` edit. A route to a
+disabled zone points to a deleted Service. An enabled zone with no route gives a 404 for its link.
+
+**D6 and `httpRoute.enabled: true` (SMA-694).** The chart renders one HTTPRoute for each enabled
+zone, so D6 holds. Note the difference from the Ingress: the Ingress is one object, and a zone
+change modifies it. A disabled zone's HTTPRoute is a whole object that the change DELETES. Without
+Argo CD prune, the old route stays, and the zone stays routed while `PAIGASUS_ZONES` drops it. That
+is the state D6 forbids. Enable prune, or delete the route by hand.
 
 **Upgrade order for a zone-map change.** One `helm upgrade` changes the Ingress, the zone-map
 ConfigMap and the Deployments at the same time. Helm does not order them. The consoles restart
@@ -417,7 +448,9 @@ the IAM pod. The consoles get `NODE_EXTRA_CA_CERTS`. IAM gets `IAM_AUTHN__EXTRA_
 ingress controller, because the Kubernetes project retired ingress-nginx (announced on 2025-11-11;
 the repository was archived on 2026-03-24). The chart renders a plain `networking.k8s.io/v1`
 Ingress with no controller annotation, so it works with any controller that serves that API.
-Set `ingress.className` to your controller's class.
+Set `ingress.className` to your controller's class. Gateway API through `httpRoute.enabled` is the
+other supported path (§ 11). The kind job does not test it: the proof for it is a manual check on
+the target cluster (SMA-694 spec § 5.4).
 
 To run the job by hand on a branch: `gh workflow run chart.yml --ref <branch>`. To run it locally,
 see `ci/kind/README.md`. The job maps the two host names with a CoreDNS `hosts` block. That is a
@@ -485,3 +518,128 @@ starts with one of these names and `__`. Set those values through their chart va
 `paigasus.iamReservedEnv` in `templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it
 equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
 `IAM_AUTHZ__ENFORCE_TENANCY`. The chart does not check those values; IAM checks them at boot.
+
+## 10. Console pods stay NotReady (SMA-705)
+
+A console pod is ready only after its auth runtime is built and one OIDC discovery succeeded. Its
+readiness probe is `<basePath>/readyz`. So when a console cannot reach the IdP, or cannot build
+its runtime, the pod stays `0/1 Ready` and `helm install --wait` does not finish. The probe body
+does not say why. Read the pod log:
+
+- `oidc.discovery_failed` with `"stage":"readiness"`: discovery failed. The `reason` field names
+  the class of the fault. `ts/packages/paigasus-auth/README.md` has the table of reasons. A `tls`
+  reason usually means a missing or wrong `oidc.caBundle` (§ 7). A `dns` reason means that the pod
+  cannot resolve the issuer host.
+- `readiness.runtime_failed`: the runtime build failed. The `error` field holds only the error's
+  name. Check the console env (`PAIGASUS_*`), and check `PAIGASUS_SESSION_REDIS_URL` for a
+  malformed URL. A cross-field rule logs `AuthConfigError`.
+
+A pod that was ready one time stays ready for the life of the process. An IdP outage after that
+does not make it not ready. Readiness does not check Redis (SMA-705 D1).
+
+## 11. Running without an Ingress controller (`ingress.enabled: false`)
+
+Use this when the cluster has no Ingress controller, for example a K3s cluster with Cilium
+Gateway API. Without a controller, the Ingress never gets a load-balancer status, and Argo CD
+reports the Application as Progressing forever.
+
+**The chart-owned HTTPRoute (SMA-694).** Set `httpRoute.enabled: true` and give
+`httpRoute.parentRefs`, for example
+`[{name: cilium-gateway, namespace: kube-system, sectionName: https}]`. The chart renders one
+HTTPRoute for each enabled zone, with the same name as that zone's console Service, and meets the
+routing contract below. Before you turn it on, make sure that:
+
+1. the Gateway API CRDs are installed, standard channel, with `HTTPRoute` served at `v1`
+   (v1.2.0 or later for `timeouts`);
+2. the listener that each parentRef names is HTTPS and ends TLS for `ingress.host`;
+3. the listener allows the release namespace in `allowedRoutes`. The chart cannot see this;
+4. each plain HTTP listener of the Gateway has an HTTP-to-HTTPS `RequestRedirect` route;
+5. the deployer can create `gateway.networking.k8s.io/httproutes`, and the Argo CD AppProject
+   allows the `HTTPRoute` kind.
+
+Verify each route after the sync. First, this command must show `Accepted=True` and
+`ResolvedRefs=True` for each route:
+
+```bash
+kubectl -n <ns> get httproute -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.parents[*].conditions[*]}{.type}={.status}{" "}{end}{"\n"}{end}'
+```
+
+Then send a request through the Gateway address:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' --resolve <host>:443:<gateway-ip> https://<host>/iam/
+```
+
+A status alone does not prove that the route carries traffic.
+
+**Route timeouts.** Envoy, which Cilium's Gateway API uses, ends a request after 15 s by default.
+The gateway console relays chat as `text/event-stream`, and a chat stream can take longer. So the
+gateway zone's rule has `request: 10m` by default (`zones.gateway.console.httpRouteTimeouts`). The
+iam zone has no default. `httpRoute.timeouts` sets `request` and `backendRequest` for every zone.
+A non-empty key in a zone's `httpRouteTimeouts` wins over the same key, key by key. `0s` means "no
+timeout". Do not use it: a hung upstream connection then stays open with no limit. The chart
+refuses a `backendRequest` longer than `request`, unless `request` is `0s`. `timeouts` is an
+"Extended" Gateway API feature. An implementation that does not support it can refuse the route
+(`Accepted: False`). Nobody measured the Cilium version on the target cluster for this. After you
+turn on the route, send a gateway console chat that streams for more than 15 seconds, and make sure
+that it completes.
+
+**Annotations.** `httpRoute.annotations` goes on each HTTPRoute. The chart does not check the
+text. A value that names a zone id is your own text, and it can name a disabled zone.
+
+**Argo CD health of an HTTPRoute (residual).** The Argo CD version on the target cluster is not
+known. Some Argo CD versions have no health check for HTTPRoute. Argo CD then shows each HTTPRoute
+as Healthy at once, and a route that the Gateway refuses does not show as Degraded. Versions with a
+check can show a route that no Gateway reports on (for example, a wrong parentRef) as Progressing
+forever. In both cases, check `status.parents` by hand, as above.
+
+**The routing contract.** Your route must:
+
+1. Send each enabled zone's `basePath` prefix on `ingress.host` to that zone's console Service,
+   port name `http` (port 3000). Take the Service name from the rendered manifest
+   (`helm template` or `kubectl get svc`). The chart shortens the base of a long release name, so
+   `<release>-paigasus-<zone>-console` is not always the name.
+2. Not rewrite the path. Each console serves its full `basePath` (§ 3).
+3. Forward the `Host` header (or `X-Forwarded-Host`) unchanged. Next's Server Action origin check
+   fails otherwise. An HTTPRoute `URLRewrite` hostname filter breaks it.
+4. End TLS for `ingress.host` at the Gateway or proxy in front of the chart's Services.
+5. Send traffic only to the console Services. Never expose a `*-backend` Service.
+6. Change together with `zones.<id>.enabled` (§ 4).
+
+**Cut-over on a release that has a live Ingress.**
+
+1. Set `httpRoute.enabled: true` (and `httpRoute.parentRefs`), sync, and verify the route with
+   `status.parents` and a `curl --resolve` request through the Gateway address (see above). If the Ingress gets its certificate from a cert-manager
+   annotation in `ingress.annotations` (for example `cert-manager.io/cluster-issuer`),
+   cert-manager owns that `Certificate` through the Ingress. Step 3 deletes the Ingress, and
+   the `Certificate` goes with it. By default the Secret stays, so TLS works at first, but
+   nothing renews the certificate. If the cert-manager controller runs with
+   `--enable-certificate-owner-ref`, the Secret goes too, and TLS stops at once. So before
+   step 3, create a standalone `Certificate` (or a Gateway-annotated one) for `ingress.host`,
+   wait until it is `Ready`, and make sure that the Gateway uses its Secret.
+2. Set `ingress.enabled: false` and sync.
+3. Remove the old Ingress. `helm upgrade` deletes it. Argo CD marks it "requires pruning" and
+   keeps it, unless the sync prunes. Sync with prune, or delete the Ingress by hand. A kept Ingress
+   can keep the Application Progressing.
+
+**Migration from a hand-written route to the chart route.**
+
+1. Look for a hand-written HTTPRoute with the name of a console Service
+   (`kubectl -n <ns> get httproute`). The chart route uses that name. Otherwise `helm upgrade`
+   fails with "invalid ownership metadata". Kubernetes cannot rename an object. If a route with
+   that name exists, do not delete it yet: that stops the traffic for the zone. First apply a
+   copy of it under a different name (for example `<name>-handover`), and wait until the copy
+   shows `Accepted` and `ResolvedRefs` in `status.parents`. Then delete the route with the
+   console Service name. The copy is now the oldest route with its host and `PathPrefix`, so it
+   carries the traffic. Verify that with a `curl --resolve` request through the Gateway address.
+2. Set `httpRoute.enabled: true` and `httpRoute.parentRefs`, and sync.
+3. Delete the remaining hand-written routes (the copy from step 1 included). Gateway API
+   first compares the match specificity of the rules: the hostname, the path, the method, the
+   headers and the query parameters. Creation time decides only between rules with equal
+   specificity, and then the OLDEST route gets the request. For a copy with the same host and
+   the same `PathPrefix` as the chart route, the chart route shows `Accepted` but carries no
+   traffic while the copy exists. If a hand-written route has more-specific matches (for
+   example a header or a method match), it keeps the requests that match it, and the chart
+   route gets the remaining requests, until you delete that route.
+4. Verify with a request through the Gateway address (`curl --resolve`), not only with
+   `status.parents`.

@@ -136,18 +136,22 @@ async fn who_am_i_provisions_a_new_identity() {
 }
 
 /// Bearer enforcement is necessary but not sufficient. `AuthenticateToken::resolve` still checks
-/// the issuer's JIT flag under `Provisioning::Enabled` (`authenticate_token.rs:107-109`), so an
-/// issuer with JIT off gets the same `identity-not-provisioned` Introspect gives — the console
-/// keeps a branch for it.
+/// the issuer's JIT flag under `Provisioning::Enabled` (the `!self.jit.allows` branch of
+/// `AuthenticateToken::resolve`, which calls `jit_disabled`), so an issuer with JIT off gets the
+/// same `identity-not-provisioned` Introspect gives — the console keeps a branch for it. SMA-707
+/// T2: the refusal also writes one `info` line that names the issuer, and not the subject or the
+/// email. The capture sees the spawned server, as
+/// `who_am_i_with_a_token_without_email_logs_the_provisioning_failure` proves.
 #[tokio::test]
 async fn who_am_i_obeys_the_jit_policy() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
+    let (logs, _logs_guard) = support::capture_logs();
     let idp = support::start_mock_idp().await;
     let cfg = support::test_config_with(&[(&idp, false)], 30);
     let state = AppState::new(db, &cfg).await.unwrap();
-    let token = idp.bearer("grpc-whoami-no-jit", Some("grpc-whoami-no-jit@example.com"), "paigasus", 3600);
+    let token = idp.bearer("t2-jd-subject-9c1e", Some("t2-jd-mail-9c1e@example.com"), "paigasus", 3600);
     let (addr, server) = spawn_server(state).await;
     let ch = channel(addr).await;
     let mut client = AuthnServiceClient::new(ch);
@@ -155,6 +159,15 @@ async fn who_am_i_obeys_the_jit_policy() {
     let err = client.who_am_i(authed(WhoAmIRequest {}, &token)).await.unwrap_err();
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
     assert_eq!(reason_of(&err), "identity-not-provisioned", "{err:?}");
+
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(support::JIT_DISABLED_LINE)).collect();
+    assert_eq!(lines.len(), 1, "exactly one JIT-disabled line expected:\n{text}");
+    let line = lines[0];
+    assert!(line.contains("INFO"), "the line is at info: {line}");
+    assert!(line.contains(&format!("issuer=\"{}\"", idp.issuer)), "the line names the issuer: {line}");
+    assert!(!text.contains("t2-jd-subject-9c1e"), "the log must not contain the subject:\n{text}");
+    assert!(!text.contains("t2-jd-mail-9c1e"), "the log must not contain the email:\n{text}");
 
     server.abort();
 }
@@ -365,6 +378,41 @@ async fn who_am_i_with_a_token_without_email_logs_the_provisioning_failure() {
     assert!(line.contains("missing_email"), "the line names the defect: {line}");
     assert!(line.contains(&idp.issuer), "the line names the issuer: {line}");
     assert!(!text.contains("t2-no-email-subject"), "the log must not contain the subject:\n{text}");
+
+    server.abort();
+}
+
+/// SMA-707 T4 (Review Focus R3): production serves HTTP and gRPC from ONE `AppState`, so the two
+/// transports share one limiter. A refusal on HTTP and then one on gRPC, for the same
+/// JIT-disabled issuer inside the 10 s window, write one line together.
+#[tokio::test]
+async fn jit_disabled_refusals_on_http_and_grpc_share_one_line() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (logs, _logs_guard) = support::capture_logs();
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config_with(&[(&idp, false)], 30)).await.unwrap();
+    let token = idp.bearer("t4-jd-subject-3a7f", Some("t4-jd-mail-3a7f@example.com"), "paigasus", 3600);
+    let http = http_router(state.clone());
+    let (addr, server) = spawn_server(state).await;
+    let mut client = AuthnServiceClient::new(channel(addr).await);
+
+    let (status, body) = support::send(&http, "GET", "/v1/organizations", None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "identity-not-provisioned");
+    let err = client.who_am_i(authed(WhoAmIRequest {}, &token)).await.unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+    assert_eq!(reason_of(&err), "identity-not-provisioned", "{err:?}");
+
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(support::JIT_DISABLED_LINE)).collect();
+    assert_eq!(lines.len(), 1, "both transports share one limiter:\n{text}");
+    let line = lines[0];
+    assert!(line.contains("INFO"), "the line is at info: {line}");
+    assert!(line.contains(&format!("issuer=\"{}\"", idp.issuer)), "the line names the issuer: {line}");
+    assert!(!text.contains("t4-jd-subject-3a7f"), "the log must not contain the subject:\n{text}");
+    assert!(!text.contains("t4-jd-mail-3a7f"), "the log must not contain the email:\n{text}");
 
     server.abort();
 }

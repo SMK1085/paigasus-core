@@ -11,7 +11,8 @@ that built it.
 zone's `enabled` flag governs six things together, all derived from `zones` and from nothing
 else, so a zone cannot be routable but unadvertised or advertised but unrouted:
 
-- the ingress path rule for that zone (`templates/ingress.yaml`)
+- the route path rule for that zone: the Ingress rule (`templates/ingress.yaml`), and the
+  HTTPRoute (`templates/httproute.yaml`) when `httpRoute.enabled` is true
 - its entry in `PAIGASUS_ZONES` (`paigasus.zoneMapJson`, `templates/_helpers.tpl`)
 - its entry in `PAIGASUS_SERVICES` (`paigasus.serviceMapJson`, `templates/_helpers.tpl`)
 - `PAIGASUS_IAM_GRPC_URL` (`templates/console-env-configmap.yaml`), which every enabled zone's
@@ -22,7 +23,13 @@ else, so a zone cannot be routable but unadvertised or advertised but unrouted:
   (`templates/backend-deployment.yaml`, `templates/backend-service.yaml`)
 
 A disabled zone leaves no trace in any of the six — no path, no map entry, no Deployment, no
-Service. `tests/ingress.sh` and `tests/maps.sh` assert this directly.
+Service. `tests/ingress.sh` (also for the HTTPRoute) and `tests/maps.sh` assert this directly.
+
+**Exception: `ingress.enabled: false` and `httpRoute.enabled: false` (SMA-695).** The chart then
+renders no route, so the first projection is gone. The operator's own route is a projection of
+`zones` that the operator keeps by hand. A route to a disabled zone points to a deleted Service.
+An enabled zone with no route gives a 404 for its `PAIGASUS_ZONES` link. With
+`httpRoute.enabled: true` (SMA-694) the chart renders the route again, and D6 holds.
 
 ## The refusals
 
@@ -40,19 +47,56 @@ with its own message, rather than letting a bad values file produce broken Kuber
   `_helpers.tpl` must be kept equal to it by hand.
 - **A backend the chart does not deploy, with no `backend.url`.** See the next section.
 - **Every value `values.yaml` marks REQUIRED, when it is empty.** `ingress.host`,
-  `ingress.tlsSecretName`, `oidc.issuer`, `oidc.clientId`, `oidc.existingSecret`,
-  `postgres.existingSecret` and `zones.iam.backend.apiKeysPepperSecret` each fail with their own
-  named message the moment they are unset. Before SMA-513 Task 14, `paigasus.validate` refused
+  `ingress.tlsSecretName` (only when `ingress.enabled` is true), `oidc.issuer`, `oidc.clientId`,
+  `oidc.existingSecret`, `postgres.existingSecret` and `zones.iam.backend.apiKeysPepperSecret` each
+  fail with their own named message the moment they are unset. Before SMA-513 Task 14, `paigasus.validate` refused
   only `ingress.host`; the other seven were required by comment alone, and a default
   `helm install` rendered a Deployment with an empty `secretKeyRef.name` for the pepper secret —
   a manifest the Kubernetes API server refuses. This is what stops that: every REQUIRED value is
   now refused at render time, so a values file missing one never reaches the API server at all.
+
+- **A non-boolean `ingress.enabled`, and an `ingress.host` with a scheme, path or port
+  (SMA-695).** A quoted `"false"` is a string, and a string is true in a template `if`, so the
+  Ingress would stay. A host such as `https://console.example.com` renders
+  `PAIGASUS_PUBLIC_ORIGIN=https://https://console.example.com`. With the Ingress on, the API server
+  refuses such a host. With it off, only this refusal does.
 
 - **A bad bootstrap admin or `extraEnv` entry (SMA-697).** `paigasus.validateIamBackend` in
   `templates/_iam-backend.tpl` refuses a bootstrap admin that IAM would refuse at boot (an empty
   subject, an issuer that is not `https`), a subject that is not a string, and an issuer that is
   not `oidc.issuer`, which IAM never matches. It refuses an `extraEnv` name that the chart sets
   itself. See `docs/ops/RUNBOOK-chart.md` § 9.
+
+- **A bad `httpRoute` block (SMA-694).** `paigasus.validateHttpRoute` in
+  `templates/_httproute.tpl` refuses:
+  - `httpRoute` that is not a map: `httpRoute must be a map`;
+  - `httpRoute.enabled` that is not a boolean: `httpRoute.enabled must be true or false`;
+  - in route mode, an absent, null, empty or non-list `parentRefs`:
+    `httpRoute.parentRefs is required when httpRoute.enabled is true`. An absent key counts as
+    empty, so a `--reuse-values` upgrade that turns the route on without it fails;
+  - a parentRef that is not a map or has no string `name`:
+    `httpRoute.parentRefs[<i>] must be a map with a non-empty name`;
+  - a parentRef with neither `sectionName` nor `port`:
+    `httpRoute.parentRefs[<i>] must set sectionName or port`. Such a parentRef can attach to every
+    compatible listener whose `allowedRoutes` admits the route, a plain HTTP one included, and the
+    console then answers on `http://`;
+  - an `ingress.host` with an upper-case letter: `ingress.host must be lowercase when
+    httpRoute.enabled is true`. The API server refuses such an HTTPRoute hostname;
+  - `httpRoute.annotations` that is not a map, or a value that is not a string:
+    `httpRoute.annotations must be a map`, `httpRoute.annotations.<key> must be a string`;
+  - a timeouts map (`httpRoute.timeouts` or an enabled zone's
+    `zones.<id>.console.httpRouteTimeouts`) that is not a map, has a key other than `request`
+    and `backendRequest`, or has a value that is not a Gateway API duration:
+    `<path> must be a map`, `<path> has the unknown key <key>`, `<path>.<key> must be a
+    duration`;
+  - a merged `backendRequest` longer than the merged `request`, when `request` is not `0s`:
+    `zones.<id>: the HTTPRoute backendRequest timeout <b> is longer than the request timeout <r>`.
+
+  The HTTPRoute CRD and the API server refuse some of these values too (an upper-case hostname,
+  a bad duration, a `backendRequest` longer than `request`, a non-string annotation), but only at
+  apply time. In Argo CD that is a sync error that is easy to miss. The CRD accepts the others:
+  an absent `parentRefs` gives a route that attaches to no Gateway, and a parentRef without
+  `sectionName` or `port` attaches to every listener. Only the chart refuses those two.
 
 `tests/refusals.sh` renders each refusal case and asserts it fails with its own message, not an
 incidental template error from somewhere else — otherwise the chart could refuse by accident and
@@ -74,6 +118,43 @@ rewrite annotation of its own. Do not add one. Each console compiles its `basePa
 its full path already; a rewrite that strips a prefix such as `/iam` breaks every route in that
 zone. This is the change an operator is most likely to add by reflex, so it is called out in both
 `values.yaml` and `templates/ingress.yaml` as well as here.
+
+## Running without an Ingress controller
+
+Set `ingress.enabled: false` when the cluster has no Ingress controller, for example a cluster
+that uses Gateway API. The chart then renders no Ingress, and `ingress.tlsSecretName` is not
+required. `ingress.host` stays required, because it feeds `PAIGASUS_PUBLIC_ORIGIN` and the OIDC
+redirect URIs. `ingress.className` and `ingress.annotations` then do nothing.
+
+`templates/ingress.yaml` wraps its body in `paigasus.ingressEnabled` (`templates/_helpers.tpl`).
+`tests/ingress.sh` and `tests/refusals.sh` hold the SMA-695 rows.
+
+**Gateway API: the chart-owned HTTPRoute (SMA-694).** Set `httpRoute.enabled: true` and
+`httpRoute.parentRefs`. The chart then renders one `gateway.networking.k8s.io/v1` HTTPRoute for
+each enabled zone, with the same name as the zone's console Service. Each route has one rule: a
+`PathPrefix` match on the zone's `basePath`, sent to the console Service on port 3000, with no
+filter. Its `hostnames` is `[<ingress.host>]`. The two switches are independent: both can be on
+during a cut-over. The prerequisites:
+
+- the Gateway API CRDs, standard channel, with `HTTPRoute` served at `v1`. `timeouts` needs
+  Gateway API v1.2.0 or later;
+- a Gateway with an HTTPS listener that ends TLS for `ingress.host` and allows the release
+  namespace in `allowedRoutes`. Each parentRef names that listener with `sectionName` or `port`;
+- an HTTP-to-HTTPS `RequestRedirect` route on any plain HTTP listener of that Gateway;
+- create permission for the deployer on `gateway.networking.k8s.io/httproutes`. The standard
+  Gateway API install adds no aggregated rules to the `admin` and `edit` ClusterRoles;
+- an Argo CD AppProject resource whitelist that allows the `HTTPRoute` kind.
+
+`httpRoute.timeouts` sets `request` and `backendRequest` on the rule of every enabled zone.
+`zones.<id>.console.httpRouteTimeouts` sets them for one zone, and a key there wins. The gateway
+zone has the default `request: 10m`, because its chat relay streams for longer than the 15 s
+default route timeout of Envoy. `httpRoute.annotations` goes on each HTTPRoute, for example for
+external-dns. `tests/ingress.sh` (rows H1-H8), `tests/refusals.sh`, `tests/names.sh` and the
+third golden hold the SMA-694 rows. The chart does not check that the cluster has the CRDs: a
+`.Capabilities` gate would fail `helm template` in CI and in the Argo CD repo server.
+
+You can also keep both switches off and write the route yourself. The routing contract is in
+`docs/ops/RUNBOOK-chart.md` § 11.
 
 ## A zone may supply its backend address instead of having it deployed
 
@@ -212,14 +293,15 @@ merge, because the release runs only after the merge. So split it into two pull 
 ## The golden files
 
 `tests/golden/iam-only.yaml` and `tests/golden/iam-and-gateway.yaml` are a byte-exact pin of
-`helm template` for the two valid zone subsets, rendered with a fixed `--kube-version` and a
+`helm template` for the two valid zone subsets, and `tests/golden/iam-and-gateway-httproute.yaml`
+pins the HTTPRoute mode (SMA-694), rendered with a fixed `--kube-version` and a
 fixed set of required values (`tests/render.sh`'s `FIXED` array) so the files do not move with
 the local Helm binary's default Kubernetes version. They are pinned to **Helm v3.22.0+g144ca65**
 (`docs/superpowers/specs/2026-09-19-sma-513-measurements.md`, M2) — a Helm upgrade may change
 unrelated rendering details (indentation, key order) and would need a deliberate re-baseline, not
 a silent regeneration.
 
-`tests/render.sh --update` re-baselines both files from the current chart. This is a deliberate
+`tests/render.sh --update` re-baselines all three files from the current chart. This is a deliberate
 act, done by a human reviewing the resulting diff, never a mechanical step to clear a red. A
 golden-file change is the reviewable artifact of a chart change: read the diff before committing
 it.

@@ -137,6 +137,13 @@ export function oidcDiscoveryReason(err: unknown): OidcDiscoveryFailureReason {
 /** Configuration is internally inconsistent. Thrown by createAuthRuntime at first request. */
 export class AuthConfigError extends AuthError {
   readonly code = 'auth_config_invalid';
+
+  constructor(message: string) {
+    super(message);
+    // SMA-705: readiness.runtime_failed logs only the name. Set it explicitly, because a
+    // production bundle can mangle `constructor.name` (the SessionStoreTimeout reason).
+    this.name = 'AuthConfigError';
+  }
 }
 
 /**

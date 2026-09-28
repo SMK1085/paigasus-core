@@ -56,11 +56,38 @@ function cookieJar(sid?: string): { get(name: string): { name: string; value: st
   };
 }
 
-/** Every method throws: getSession never needs to call the OIDC client or the resolver in this
- * suite (the test records are never near their skew window), so a call here is a defect. */
+/** SMA-704. Wraps a real store and appends each `tryAcquireLock` call to `order`. */
+function lockOrderStore(inner: SessionStore, order: string[]): SessionStore {
+  return {
+    get: (sid) => inner.get(sid),
+    set: (sid, rec, ttlMs, expectedRev) => inner.set(sid, rec, ttlMs, expectedRev),
+    delete: (sid) => inner.delete(sid),
+    tryAcquireLock: (sid, token, ttlMs) => {
+      order.push('tryAcquireLock');
+      return inner.tryAcquireLock(sid, token, ttlMs);
+    },
+    releaseLock: (sid, token) => inner.releaseLock(sid, token),
+    putTransaction: (txnId, tx, ttlMs) => inner.putTransaction(txnId, tx, ttlMs),
+    takeTransaction: (txnId) => inner.takeTransaction(txnId),
+    close: () => inner.close(),
+  };
+}
+
+/** Every method but `ensureDiscovered` throws: getSession never needs to call the OIDC client or
+ * the resolver in this suite (the test records are never near their skew window), so a call here
+ * is a defect. `ensureDiscovered` resolves, so a test that overrides `refresh` keeps its path
+ * (SMA-704). */
 function unusedOidc(): AuthRuntime['oidc'] {
   const fail = () => Promise.reject(new Error('unexpectedly called'));
-  return { buildAuthorizationUrl: fail, authorizationCodeGrant: fail, refresh: fail, revoke: fail, buildEndSessionUrl: fail };
+  return {
+    ensureDiscovered: () => Promise.resolve(),
+    buildAuthorizationUrl: fail,
+    authorizationCodeGrant: fail,
+    refresh: fail,
+    revoke: fail,
+    buildEndSessionUrl: fail,
+    discoveryStatus: () => 'discovered',
+  };
 }
 
 function baseRuntime(store: SessionStore): AuthRuntime {
@@ -186,6 +213,34 @@ describe('getSession', () => {
 
     expect(revoked).toEqual(['RT-new', 'RT-old']);
     expect(await store.get('sid-mismatch')).toBeNull();
+  });
+
+  // SMA-704 test 9. The guard on the PRODUCTION line in resolveDepsFor: getSession must wire
+  // `prepareRefresh` to runtime.oidc.ensureDiscovered, and resolveSession must await it before the
+  // lock. `ensureDiscovered` resolves after a macrotask, so a missing `await` fails too.
+  it('SMA-704 test 9: runtime.oidc.ensureDiscovered resolves before the first tryAcquireLock', async () => {
+    cookiesMock.mockResolvedValue(cookieJar('sid-cold'));
+    const inner = new MemorySessionStore();
+    await inner.set('sid-cold', { ...liveRecord(), accessExpiresAt: Date.now() - 1, refreshToken: 'RT' }, 999_000, null);
+    const order: string[] = [];
+    const runtime = {
+      ...baseRuntime(lockOrderStore(inner, order)),
+      oidc: {
+        ...unusedOidc(),
+        ensureDiscovered: async (): Promise<void> => {
+          await new Promise((r) => setTimeout(r, 20));
+          order.push('ensureDiscovered:resolved');
+        },
+        refresh: () => {
+          order.push('refresh');
+          return Promise.resolve({ accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 300 });
+        },
+      },
+    };
+
+    await expect(getSession(runtime)).resolves.toMatchObject({ accessToken: 'AT2' });
+
+    expect(order).toEqual(['ensureDiscovered:resolved', 'tryAcquireLock', 'refresh']);
   });
 });
 

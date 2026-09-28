@@ -1009,3 +1009,8 @@ pub fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
 /// turns it on.
 #[allow(dead_code)]
 pub const JIT_FAILURE_LINE: &str = "just-in-time provisioning failed";
+
+/// The fixed prefix of the SMA-707 JIT-disabled refusal line. Count only lines that contain it,
+/// for the same reason as `JIT_FAILURE_LINE`.
+#[allow(dead_code)]
+pub const JIT_DISABLED_LINE: &str = "request refused: the identity is not provisioned";

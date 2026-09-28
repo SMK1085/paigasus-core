@@ -262,27 +262,36 @@ pub trait MembershipRepository: Send + Sync {
     /// columns, so these records are the only place the cascaded PRNs exist; each becomes one
     /// audit entry and one event, all sharing the call's single correlation id.
     async fn detach_in(&self, tx: &dyn Transaction, id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError>;
+    /// Filters on a bare uuid and does NOT confirm a PRN. For callers that hold a
+    /// server-resolved `PrincipalId` only (authn introspection,
+    /// `principal_context::load_all_memberships`). A PRN from the wire goes through
+    /// [`MembershipKindQuery::list_of_kind`], which confirms it against storage (SMA-649).
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
     /// Resolves node by uuid; PrnMismatch if the supplied ref's canonical != stored prn; NotFound if absent.
     async fn list_by_node(&self, node: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
 }
 
-/// Which axis a membership listing reads: one principal's memberships, or one node's.
+/// Which axis a membership listing reads: one principal's memberships, or one node's. The
+/// principal arm carries the full `PrincipalId`, not a bare uuid, so the repository can
+/// confirm the supplied PRN against the stored one (SMA-649).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MembershipAxis {
-    Principal(Uuid),
+    Principal(PrincipalId),
     Node(TenancyNodeRef),
 }
 
-/// Read port: a membership listing narrowed to one principal kind (SMA-676 D8). A separate
-/// port, not a new [`MembershipRepository`] method: that trait has six implementations, five
-/// of them test fakes (the rule `authz::ports::SystemPolicyReconciler` records).
+/// Read port: the wire membership listing (SMA-676 D8, SMA-649). A separate port, not a new
+/// [`MembershipRepository`] method: that trait has six implementations, five of them test
+/// fakes (the rule `authz::ports::SystemPolicyReconciler` records).
 #[async_trait]
 pub trait MembershipKindQuery: Send + Sync {
-    /// The same order (`created_at, id`), paging and node guards (`NotFound`, `PrnMismatch`)
-    /// as [`MembershipRepository::list_by_principal`] and [`MembershipRepository::list_by_node`],
-    /// but only memberships whose principal is of `kind`.
-    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
+    /// The listing that both transports use for every `ListMemberships` request. Order
+    /// `created_at, id`, with `limit`/`offset` paging. Both axes confirm the supplied PRN
+    /// against storage before any row is read: an absent principal or node answers
+    /// `NotFound`, and a stored PRN that differs from the canonical form of the supplied PRN
+    /// answers `PrnMismatch`. `kind = None` keeps every kind; `Some(kind)` keeps only
+    /// memberships whose principal is of that kind.
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: Option<PrincipalKind>, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
 }
 
 /// Mints new identities (UUIDv7 + PRN). Impure (clock + entropy) — hence a port.

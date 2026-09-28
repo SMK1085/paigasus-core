@@ -13,8 +13,8 @@ use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
     DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, EntityGenBumper, IdGenerator, KeyEntropy, Membership, MembershipAxis, MembershipKindQuery, MembershipRecord, MembershipRepository,
     Mutated, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalKind,
-    PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount,
-    ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
+    PrincipalRepository, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher,
+    ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork, User,
 };
 use paigasus_iam_core::{Email, EmailChange, ExternalIdentity, IdentityLinkStore, Issuer, User, UserWithIdentities};
 use paigasus_kernel::Prn;
@@ -642,16 +642,63 @@ impl MembershipRepository for InMemoryMemberships {
     }
 }
 
+/// SMA-649: faithful to the port doc. The principal arm runs the same guard `attach_in`
+/// applies in this fake (`store.principals`: absent -> `NotFound`, stored PRN differs from the
+/// supplied canonical PRN -> `PrnMismatch`); the node arm reuses `list_by_node`'s guard.
+/// `kind = None` keeps every row, also for a principal that has no `principal_kinds` entry.
 #[async_trait]
 impl MembershipKindQuery for InMemoryMemberships {
-    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: Option<PrincipalKind>, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
         let all = match axis {
-            MembershipAxis::Principal(principal) => self.list_by_principal(*principal, u64::MAX, 0).await?,
+            MembershipAxis::Principal(principal) => {
+                let stored = { self.0.principals.lock().unwrap().get(&principal.uuid()).cloned() }.ok_or(RepositoryError::NotFound)?;
+                if stored != principal.canonical() {
+                    return Err(RepositoryError::PrnMismatch);
+                }
+                self.list_by_principal(principal.uuid(), u64::MAX, 0).await?
+            }
             MembershipAxis::Node(node) => self.list_by_node(node, u64::MAX, 0).await?,
+        };
+        let Some(kind) = kind else {
+            return Ok(all.into_iter().skip(offset as usize).take(limit as usize).collect());
         };
         let kinds = self.0.principal_kinds.lock().unwrap().clone();
         let of_kind = |r: &MembershipRecord| Prn::parse(&r.principal_prn).ok().map(|p| PrincipalId::from_prn(p).uuid()).and_then(|u| kinds.get(&u).copied()) == Some(kind);
         Ok(all.into_iter().filter(of_kind).skip(offset as usize).take(limit as usize).collect())
+    }
+}
+
+/// In-memory `PrincipalRepository` over the shared `TenancyStore` (SMA-649 §4.7), for
+/// `RoleService::resolve_principal`. `find_principal` reads `store.principals` (uuid -> stored
+/// canonical PRN) and builds the `Principal` FROM THE STORED PRN, exactly as
+/// `PgPrincipalRepository::find_principal` does (`map_principal_row`). The kind comes from
+/// `store.principal_kinds` (else `User`); the status is `Active`. `RoleService` calls no other
+/// method, so the other three panic.
+#[derive(Clone, Default)]
+pub struct InMemoryTenancyPrincipals(pub TenancyStore);
+
+#[async_trait]
+impl PrincipalRepository for InMemoryTenancyPrincipals {
+    async fn create_user(&self, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+        unimplemented!("InMemoryTenancyPrincipals only exercises find_principal")
+    }
+
+    async fn create_user_in(&self, _tx: &dyn Transaction, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+        unimplemented!("InMemoryTenancyPrincipals only exercises find_principal")
+    }
+
+    async fn find_user(&self, _id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {
+        unimplemented!("InMemoryTenancyPrincipals only exercises find_principal")
+    }
+
+    async fn find_principal(&self, id: &PrincipalId) -> Result<Option<Principal>, RepositoryError> {
+        let Some(stored) = self.0.principals.lock().unwrap().get(&id.uuid()).cloned() else {
+            return Ok(None);
+        };
+        let prn = Prn::parse(&stored).map_err(|e| RepositoryError::Backend(Box::new(std::io::Error::other(e.to_string()))))?;
+        let kind = self.0.principal_kinds.lock().unwrap().get(&id.uuid()).copied().unwrap_or(PrincipalKind::User);
+        let epoch = DateTime::<Utc>::UNIX_EPOCH;
+        Ok(Some(Principal::new(PrincipalId::from_prn(prn), kind, PrincipalStatus::Active, epoch, epoch)))
     }
 }
 

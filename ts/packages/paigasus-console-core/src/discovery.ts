@@ -309,17 +309,32 @@ export function withOperationDeadline(inner: DescriptorCache, client: ReadySourc
   };
 }
 
+/** SMA-715. The same fixed message as @paigasus/auth's session store. It holds no part of the URL. */
+const INVALID_REDIS_URL = 'PAIGASUS_SESSION_REDIS_URL is not a valid Redis URL';
+
 function redisDescriptorCache(url: string, timeoutMs: number, log: ConsoleLogger): DescriptorCache {
-  const client: RedisClientType = createClient({
-    url,
-    disableOfflineQueue: true,
-    commandOptions: { timeout: timeoutMs },
-    // D2: a PING every timeout keeps a healthy idle socket under the idle timer (file header).
-    pingInterval: timeoutMs,
-    // D1: the idle timer stays; it is the only bound on a hung command. D3: the strategy reopens
-    // the socket after the timer fires on a real hang.
-    socket: { socketTimeout: timeoutMs * 2, connectTimeout: timeoutMs, reconnectStrategy: descriptorCacheReconnectStrategy },
-  });
+  // SMA-715 D5: node-redis skips ALL parsing for an empty URL and connects to localhost:6379. The
+  // URL that goes to createClient is not trimmed: `new URL()` strips outer whitespace itself.
+  if (url.trim() === '') throw new Error(INVALID_REDIS_URL);
+  let client: RedisClientType;
+  try {
+    client = createClient({
+      url,
+      disableOfflineQueue: true,
+      commandOptions: { timeout: timeoutMs },
+      // D2: a PING every timeout keeps a healthy idle socket under the idle timer (file header).
+      pingInterval: timeoutMs,
+      // D1: the idle timer stays; it is the only bound on a hung command. D3: the strategy reopens
+      // the socket after the timer fires on a real hang.
+      socket: { socketTimeout: timeoutMs * 2, connectTimeout: timeoutMs, reconnectStrategy: descriptorCacheReconnectStrategy },
+    });
+  } catch {
+    // SMA-715: node-redis parses the URL here with `new URL()`. Its ERR_INVALID_URL TypeError holds
+    // the whole DSN, password included, in `input`. Rethrow a fixed message with no cause. No catch
+    // binding: the original error is never read. Nothing below ran, so state() is untouched and the
+    // next call tries again (G3).
+    throw new Error(INVALID_REDIS_URL);
+  }
   // Registers the error listener createRedisDescriptorCache requires. It never logs the error's message.
   watchConnectionLoss(client, log);
   state().redisClient = client;

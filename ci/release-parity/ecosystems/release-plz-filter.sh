@@ -1,0 +1,460 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# SMA-716: release-plz-only suites for `release_commits` and `changelog_include`.
+#
+# Sourced by ecosystems/release-plz.sh only. run.sh reaches this code through the hooks
+# ecosystem::extra_suite and ecosystem::extra_negative_control. The python-semantic-release and
+# semantic-release modules define neither hook, so repo:release-parity-py and -ts skip it.
+# Not in cases.tsv: that file is the cross-tool parity contract, and the two other tools have no
+# release_commits equivalent (spec section 4.3).
+#
+# Return codes of every rpf:: suite and check: 0 pass, 1 an assertion failed, 2 infrastructure.
+# run.sh calls the hooks as `hook || rc=$?`. Bash turns errexit OFF inside a function that is
+# called that way, so each step below checks its own status. Do not rely on `set -e` here.
+#
+# Uses ecosystem::_derive_config and ecosystem::run_update from release-plz.sh. Do not add a
+# second release-plz call site in this file: repo:affected-smoke A10 waives only the one in
+# ecosystem::run_update, by its exact text.
+set -euo pipefail
+
+# --- shared helpers -------------------------------------------------------------------------
+
+# F3 for the new key: copy `release_commits` VERBATIM from the real config. A missing or a
+# duplicated key is rc 2, so the suite cannot test a stale regex. The mutation modes still
+# read the key first, so a control cannot pass because the real key is gone.
+rpf::_release_commits_line() { # real_toml -> the key line on stdout
+  local real="$1" n line
+  n="$(grep -cE '^[[:space:]]*release_commits[[:space:]]*=' "$real" || true)"
+  if [ "$n" != 1 ]; then
+    echo "FATAL: rs/release-plz.toml has ${n:-0} release_commits lines, expected 1 (SMA-716 F3)" >&2
+    return 2
+  fi
+  line="$(grep -E '^[[:space:]]*release_commits[[:space:]]*=' "$real")" || return 2
+  printf '%s\n' "${line#"${line%%[![:space:]]*}"}"
+}
+
+rpf::_write_config() { # real_toml out_toml with_release_commits(0|1)
+  local real="$1" out="$2" with_rc="$3" rc_line
+  ecosystem::_derive_config "$real" "$out" || return 2
+  rc_line="$(rpf::_release_commits_line "$real")" || return 2
+  if [ "$with_rc" = 1 ]; then
+    printf '%s\n' "$rc_line" >>"$out" || return 2
+  fi
+}
+
+rpf::_git_init() { # dir
+  ( cd "$1" &&
+    git init -q &&
+    git config maintenance.auto false &&   # SMA-708: no background maintenance in a fixture
+    git config gc.auto 0 &&
+    git config user.email "parity@example.com" &&
+    git config user.name "parity" &&
+    git config commit.gpgsign false &&
+    git config tag.gpgsign false ) || return 2
+}
+
+rpf::_write_workspace() { # dir
+  printf '[workspace]\nresolver = "3"\nmembers = ["crates/*"]\n' >"$1/Cargo.toml" || return 2
+}
+
+rpf::_write_crate() { # dir name [dependency line]
+  local cdir="$1/crates/$2"
+  mkdir -p "$cdir/src" || return 2
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2024"\npublish = false\n' "$2" \
+    >"$cdir/Cargo.toml" || return 2
+  if [ -n "${3-}" ]; then
+    printf '\n[dependencies]\n%s\n' "$3" >>"$cdir/Cargo.toml" || return 2
+  fi
+  printf '// seed\n' >"$cdir/src/lib.rs" || return 2
+}
+
+rpf::_seed_and_tag() { # dir crate...
+  local dir="$1" c
+  shift
+  ( cd "$dir" && git add -A && git commit -qm "chore: seed fixture" ) || return 2
+  for c in "$@"; do
+    ( cd "$dir" && git tag "$c-v0.1.0" ) || return 2
+  done
+}
+
+# kind src: append a comment to src/lib.rs. kind toml: append a comment to Cargo.toml (the P2
+# shape: a comment-only manifest edit, spec section 1).
+rpf::_commit() { # dir crate kind subject [body]
+  local dir="$1" crate="$2" kind="$3" subject="$4" body="${5-}"
+  case "$kind" in
+    src) printf '// change for: %s\n' "$subject" >>"$dir/crates/$crate/src/lib.rs" || return 2 ;;
+    toml) printf '# comment-only edit for: %s\n' "$subject" >>"$dir/crates/$crate/Cargo.toml" || return 2 ;;
+    *) echo "FATAL: rpf::_commit: bad kind $kind" >&2; return 2 ;;
+  esac
+  ( cd "$dir" && git add -A ) || return 2
+  if [ -n "$body" ]; then
+    ( cd "$dir" && git commit -qm "$subject" -m "$body" ) || return 2
+  else
+    ( cd "$dir" && git commit -qm "$subject" ) || return 2
+  fi
+}
+
+rpf::_version() { # Cargo.toml -> the first `version =` value
+  awk -F'"' '/^version[[:space:]]*=/ && v == "" { v = $2 } END { print v }' "$1"
+}
+
+# The first RELEASE section: from the first `## [<digit>` heading up to the next `## [`.
+# `## [Unreleased]` is skipped. release-plz's last_changes() reads the same section for the
+# release PR body (next_ver.rs:432-437, READ). A missing file gives an empty section.
+rpf::_first_release_section() { # changelog out_file
+  if [ ! -f "$1" ]; then
+    : >"$2"
+    return 0
+  fi
+  awk '/^## \[/ { if (started) done = 1; else if ($0 ~ /^## \[[0-9]/) started = 1 }
+       started && !done { print }' "$1" >"$2"
+}
+
+rpf::_heading_of() { # section_file line -> the last `### ` heading above the first exact match
+  awk -v want="$2" '/^### / { h = $0 } $0 == want && !seen { seen = 1; found = h } END { print found }' "$1"
+}
+
+rpf::_check_versions() { # id dir want crate...
+  local id="$1" dir="$2" want="$3" c got bad="" all=""
+  shift 3
+  for c in "$@"; do
+    got="$(rpf::_version "$dir/crates/$c/Cargo.toml")" || return 2
+    all="$all $c=$got"
+    if [ "$got" != "$want" ]; then bad=1; fi
+  done
+  if [ -z "$bad" ]; then
+    printf 'PASS  %-14s%s\n' "$id" "$all"
+    return 0
+  fi
+  printf 'FAIL  %-14s exp=%s got:%s\n' "$id" "$want" "$all" >&2
+  return 1
+}
+
+# HEADING `-` means: the line only has to be in the section.
+rpf::_check_section() { # id dir crate version heading line...
+  local id="$1" dir="$2" crate="$3" ver="$4" heading="$5" sec first line n under
+  shift 5
+  sec="$dir/.rpf-section-$crate"
+  rpf::_first_release_section "$dir/crates/$crate/CHANGELOG.md" "$sec" || return 2
+  first="$(sed -n 1p "$sec")"
+  case "$first" in
+    "## [$ver]"*) ;;
+    *) printf 'FAIL  %-14s %s: first release heading is %s, expected ## [%s]\n' \
+         "$id" "$crate" "${first:-<none>}" "$ver" >&2
+       return 1 ;;
+  esac
+  for line in "$@"; do
+    n="$(grep -cxF -- "$line" "$sec" || true)"
+    if [ "${n:-0}" = 0 ]; then
+      printf 'FAIL  %-14s %s: "%s" is not in ## [%s]\n' "$id" "$crate" "$line" "$ver" >&2
+      return 1
+    fi
+    if [ "$heading" != "-" ]; then
+      under="$(rpf::_heading_of "$sec" "$line")"
+      if [ "$under" != "$heading" ]; then
+        printf 'FAIL  %-14s %s: "%s" is under %s, expected %s\n' \
+          "$id" "$crate" "$line" "${under:-<no heading>}" "$heading" >&2
+        return 1
+      fi
+    fi
+  done
+  printf 'PASS  %-14s %s: ## [%s] has %s line(s)\n' "$id" "$crate" "$ver" "$#"
+}
+
+# --- the filter fixture (spec section 4.2 table, one crate per row) -------------------------
+
+# Rows r01-r23 are the spec's classification table. r24-r26 are the plan's Review Focus rows.
+RPF_ROWS="r01 r02 r03 r04 r05 r06 r07 r08 r09 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26"
+
+rpf::_row_expected() { # id -> version from the 0.1.0 baseline
+  case "$1" in
+    r01|r02|r04|r05|r06|r20|r23|r26) echo 0.1.1 ;;
+    r03|r18|r19|r21|r25) echo 0.2.0 ;;
+    r07|r08|r09|r10|r11|r12|r13|r14|r15|r16|r17|r22|r24) echo 0.1.0 ;;
+    *) echo "FATAL: no expected version for row $1" >&2; return 2 ;;
+  esac
+}
+
+rpf::_apply_row() { # dir id
+  local d="$1" c="rpf-$2"
+  case "$2" in
+    r01) rpf::_commit "$d" "$c" src 'fix: x' ;;
+    r02) rpf::_commit "$d" "$c" src 'fix(rs): x' ;;
+    r03) rpf::_commit "$d" "$c" src 'feat(contracts): x' ;;
+    r04) rpf::_commit "$d" "$c" src 'perf(rs): x' ;;
+    r05) rpf::_commit "$d" "$c" src 'fix(deps): x' ;;
+    r06) rpf::_commit "$d" "$c" src 'fix(py,ts): x' ;;
+    r07) rpf::_commit "$d" "$c" src 'fix(ci): x' ;;
+    r08) rpf::_commit "$d" "$c" src 'feat(ci): x' ;;
+    r09) rpf::_commit "$d" "$c" src 'perf(ci): x' ;;
+    r10) rpf::_commit "$d" "$c" src 'fix(repo): x' ;;
+    r11) rpf::_commit "$d" "$c" src 'fix(workspace): x' ;;
+    r12) rpf::_commit "$d" "$c" src 'fix(rs,ci): x' ;;
+    r13) rpf::_commit "$d" "$c" src 'fix(cid): x' ;;
+    r14) rpf::_commit "$d" "$c" src 'chore(rs): x' ;;
+    r15) rpf::_commit "$d" "$c" src 'build(deps): x' ;;
+    r16) rpf::_commit "$d" "$c" src 'refactor(rs): x' ;;
+    r17) rpf::_commit "$d" "$c" src 'Revert "feat(rs): x (#1)"' ;;
+    r18) rpf::_commit "$d" "$c" src 'fix(ci)!: x' ;;
+    r19) rpf::_commit "$d" "$c" src 'chore(rs): x' 'BREAKING CHANGE: y' ;;
+    r20) rpf::_commit "$d" "$c" src 'refactor(rs): x' && rpf::_commit "$d" "$c" src 'fix(rs): y' ;;
+    r21) rpf::_commit "$d" "$c" src 'feat(ci): x' && rpf::_commit "$d" "$c" src 'fix(rs): y' ;;
+    r22) rpf::_commit "$d" "$c" toml 'fix(ci): x' ;;
+    r23) rpf::_commit "$d" "$c" toml 'fix(rs): x' ;;
+    r24) rpf::_commit "$d" "$c" src 'fix(ci): x' 'fix(rs): y' ;;
+    r25) rpf::_commit "$d" "$c" src 'chore(rs): x' 'BREAKING-CHANGE: y' ;;
+    r26) rpf::_commit "$d" "$c" src 'fix(rs, py): x' ;;
+    *) echo "FATAL: no commits for row $2" >&2; return 2 ;;
+  esac
+}
+
+rpf::_build_filter_fixture() { # dir real_toml with_release_commits
+  local dir="$1" real="$2" with_rc="$3" id crates="rpf-b"
+  rpf::_write_workspace "$dir" || return 2
+  rpf::_write_crate "$dir" rpf-b || return 2
+  for id in $RPF_ROWS; do
+    rpf::_write_crate "$dir" "rpf-$id" || return 2
+    crates="$crates rpf-$id"
+  done
+  rpf::_write_config "$real" "$dir/release-plz.toml" "$with_rc" || return 2
+  rpf::_git_init "$dir" || return 2
+  # shellcheck disable=SC2086  # the crate list splits into one argument per crate
+  rpf::_seed_and_tag "$dir" $crates || return 2
+}
+
+rpf::filter_suite() { # real_toml mode(real|no-release-commits) -> 0/1/2
+  local real="$1" mode="$2" with_rc dir id want fails=0 infra=0 crc
+  case "$mode" in
+    real) with_rc=1 ;;
+    no-release-commits) with_rc=0 ;;
+    *) echo "FATAL: rpf::filter_suite: bad mode $mode" >&2; return 2 ;;
+  esac
+  dir="$(mktemp -d)" || return 2
+  if ! rpf::_build_filter_fixture "$dir" "$real" "$with_rc"; then
+    echo "FATAL: filter fixture build failed" >&2; rm -rf "$dir"; return 2
+  fi
+  for id in $RPF_ROWS; do
+    if ! rpf::_apply_row "$dir" "$id"; then
+      echo "FATAL [$id]: commit failed" >&2; rm -rf "$dir"; return 2
+    fi
+  done
+  if ! ecosystem::run_update "$dir"; then
+    echo "FATAL: release-plz update failed on the filter fixture" >&2; rm -rf "$dir"; return 2
+  fi
+  # SMA-716 (controller ruling): fold each check's rc into $infra when it is 2, so a helper's
+  # own infrastructure fault is not indistinguishable from an assertion failure at this suite's
+  # own return code — a `_check_*` that returns 2 must make the whole suite return 2, not 1.
+  for id in $RPF_ROWS; do
+    if ! want="$(rpf::_row_expected "$id")"; then rm -rf "$dir"; return 2; fi
+    crc=0; rpf::_check_versions "$id" "$dir" "$want" "rpf-$id" || crc=$?
+    case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  done
+  crc=0; rpf::_check_versions b "$dir" 0.1.0 rpf-b || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  # Row 20, C1: a non-releasing commit is carried into the next release and its section.
+  crc=0
+  rpf::_check_section r20-changelog "$dir" rpf-r20 0.1.1 - '- *(rs)* x' '- *(rs)* y' || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  rm -rf "$dir"
+  if [ "$infra" != 0 ]; then return 2; fi
+  if [ "$fails" != 0 ]; then return 1; fi
+}
+
+# --- the group fixture (spec section 4.3, G1-G4) --------------------------------------------
+
+# Four independent version groups in ONE repo, so one release-plz run covers G1-G4. Group X has
+# members rpg-X1 and rpg-X2. With RPG_DEP_EDGE=1, rpg-X1 depends on rpg-X2 by path AND version:
+# the real paigasus-proto -> paigasus-proto-derive shape (rs/Cargo.toml:173).
+RPG_GROUPS="a b c d"
+# 0: MEASURED (SMA-716) — release-plz 0.3.158 in git_only mode rejects the path+version edge:
+# "error: failed to prepare local package for uploading; Caused by: no matching package named
+# `rpg-a2` found; location searched: crates.io index; required by package `rpg-a1 v0.1.0`". The
+# edge is dropped. With R1 all members have the same commits, so G1-G4 do not change; NC2's
+# intermediate value for rpg-b1 changes from 0.1.1 (cascade) to 0.1.0.
+RPG_DEP_EDGE=0
+
+# The shape of the real crates' CHANGELOG.md: release-plz's header with `## [Unreleased]`, then a
+# release section. So release-plz takes the PREPEND path, where P1 happened
+# (updater.rs:1026-1029, changelog.rs:67-89, READ).
+rpf::_seed_changelog() { # crate_dir
+  printf '%s\n' \
+    '# Changelog' '' \
+    'All notable changes to this project will be documented in this file.' '' \
+    'The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),' \
+    'and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).' '' \
+    '## [Unreleased]' '' \
+    '## [0.1.0] - 2026-01-01' '' \
+    '### Other' '' \
+    '- seed the fixture' >"$1/CHANGELOG.md" || return 2
+}
+
+rpf::_group_package() { # toml name group other with_include(0|1)
+  printf '\n[[package]]\nname = "%s"\nversion_group = "%s"\n' "$2" "$3" >>"$1" || return 2
+  if [ "$5" = 1 ]; then
+    printf 'changelog_include = ["%s"]\n' "$4" >>"$1" || return 2
+  fi
+}
+
+rpf::_commit_pair() { # dir crate1 crate2 subject  (one commit that touches both crates)
+  printf '// change for: %s\n' "$4" >>"$1/crates/$2/src/lib.rs" || return 2
+  printf '// change for: %s\n' "$4" >>"$1/crates/$3/src/lib.rs" || return 2
+  ( cd "$1" && git add -A && git commit -qm "$4" ) || return 2
+}
+
+rpf::_build_group_fixture() { # dir real_toml with_release_commits with_include
+  local dir="$1" real="$2" with_rc="$3" with_inc="$4" g dep crates=""
+  rpf::_write_workspace "$dir" || return 2
+  for g in $RPG_GROUPS; do
+    dep=""
+    if [ "$RPG_DEP_EDGE" = 1 ]; then
+      dep="rpg-${g}2 = { path = \"../rpg-${g}2\", version = \"0.1.0\" }"
+    fi
+    rpf::_write_crate "$dir" "rpg-${g}1" "$dep" || return 2
+    rpf::_write_crate "$dir" "rpg-${g}2" || return 2
+    rpf::_seed_changelog "$dir/crates/rpg-${g}1" || return 2
+    rpf::_seed_changelog "$dir/crates/rpg-${g}2" || return 2
+    crates="$crates rpg-${g}1 rpg-${g}2"
+  done
+  rpf::_write_config "$real" "$dir/release-plz.toml" "$with_rc" || return 2
+  for g in $RPG_GROUPS; do
+    rpf::_group_package "$dir/release-plz.toml" "rpg-${g}1" "g$g" "rpg-${g}2" "$with_inc" || return 2
+    rpf::_group_package "$dir/release-plz.toml" "rpg-${g}2" "g$g" "rpg-${g}1" "$with_inc" || return 2
+  done
+  rpf::_git_init "$dir" || return 2
+  # shellcheck disable=SC2086  # the crate list splits into one argument per crate
+  rpf::_seed_and_tag "$dir" $crates || return 2
+}
+
+rpf::_check_once() { # id dir line crate...  (the line is in each crate's first section once)
+  local id="$1" dir="$2" line="$3" c sec n all=""
+  shift 3
+  for c in "$@"; do
+    sec="$dir/.rpf-section-$c"
+    rpf::_first_release_section "$dir/crates/$c/CHANGELOG.md" "$sec" || return 2
+    n="$(grep -cxF -- "$line" "$sec" || true)"
+    all="$all $c=${n:-0}"
+    if [ "${n:-0}" != 1 ]; then
+      printf 'FAIL  %-14s "%s" count per first section:%s, expected 1 each\n' "$id" "$line" "$all" >&2
+      return 1
+    fi
+  done
+  printf 'PASS  %-14s "%s" once in each first section:%s\n' "$id" "$line" "$all"
+}
+
+rpf::group_suite() { # real_toml mode(real|no-include|no-include-no-filter) -> 0/1/2
+  local real="$1" mode="$2" with_rc with_inc dir fails=0 infra=0 crc
+  case "$mode" in
+    real) with_rc=1; with_inc=1 ;;
+    no-include) with_rc=1; with_inc=0 ;;
+    no-include-no-filter) with_rc=0; with_inc=0 ;;
+    *) echo "FATAL: rpf::group_suite: bad mode $mode" >&2; return 2 ;;
+  esac
+  dir="$(mktemp -d)" || return 2
+  if ! rpf::_build_group_fixture "$dir" "$real" "$with_rc" "$with_inc"; then
+    echo "FATAL: group fixture build failed" >&2; rm -rf "$dir"; return 2
+  fi
+  if ! { rpf::_commit "$dir" rpg-a1 src 'fix(rs): x' &&       # G1: leader only
+         rpf::_commit "$dir" rpg-b2 src 'feat(rs): x' &&      # G2: follower only
+         rpf::_commit "$dir" rpg-c1 src 'fix(ci): x' &&       # G3: non-releasing
+         rpf::_commit_pair "$dir" rpg-d1 rpg-d2 'fix(rs): x'; }; then  # G4: both crates
+    echo "FATAL: group fixture commits failed" >&2; rm -rf "$dir"; return 2
+  fi
+  if ! ecosystem::run_update "$dir"; then
+    echo "FATAL: release-plz update failed on the group fixture" >&2; rm -rf "$dir"; return 2
+  fi
+  # SMA-716 (controller ruling): same infra/assertion fold as filter_suite above — a `_check_*`
+  # that returns 2 must make the whole suite return 2, not fold into the flat assertion count.
+  crc=0; rpf::_check_versions G1-version "$dir" 0.1.1 rpg-a1 rpg-a2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_section G1-changelog "$dir" rpg-a2 0.1.1 '### Fixed' '- *(rs)* x' || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_versions G2-version "$dir" 0.2.0 rpg-b1 rpg-b2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_section G2-changelog "$dir" rpg-b1 0.2.0 '### Added' '- *(rs)* x' || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_versions G3-version "$dir" 0.1.0 rpg-c1 rpg-c2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_versions G4-version "$dir" 0.1.1 rpg-d1 rpg-d2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  crc=0; rpf::_check_once G4-changelog "$dir" '- *(rs)* x' rpg-d1 rpg-d2 || crc=$?
+  case "$crc" in 0) ;; 2) infra=1 ;; *) fails=$((fails + 1)) ;; esac
+  rm -rf "$dir"
+  if [ "$infra" != 0 ]; then return 2; fi
+  if [ "$fails" != 0 ]; then return 1; fi
+}
+
+# --- negative controls (spec section 4.3) ---------------------------------------------------
+
+# One control: run a suite on a mutated config. It must return rc 1, the FAIL line of $must
+# must be there. If $mustnot is given, its FAIL line must be absent from stderr AND its PASS
+# line must be present in the suite's captured STDOUT (a temp file, not a here-string — SMA-716
+# controller ruling): the mere absence of a FAIL line is not proof $mustnot is green, because a
+# `_check_*` helper's own infrastructure fault also emits no FAIL line for that id, yet the
+# suite call below still folds to a flat rc 1 whenever ANOTHER check on the same run failed a
+# pure assertion (only an ALL-infra run returns rc 2). rc 0 means the suite accepted the
+# mutation; rc 2 is INCONCLUSIVE, and both fail the control.
+rpf::_one_control() { # label suite mode must mustnot real_toml -> 0/1/2
+  local label="$1" suite="$2" mode="$3" must="$4" mustnot="$5" real="$6" errf outf rc=0
+  errf="$(mktemp)" || return 2
+  outf="$(mktemp)" || { rm -f "$errf"; return 2; }
+  "$suite" "$real" "$mode" >"$outf" 2>"$errf" || rc=$?
+  case "$rc" in
+    1) ;;
+    0) echo "negative-control FAILED: $label: the suite passed on a mutated config" >&2
+       rm -f "$errf" "$outf"; return 1 ;;
+    *) echo "negative-control INCONCLUSIVE: $label: infrastructure error (rc=$rc)" >&2
+       cat "$errf" >&2; rm -f "$errf" "$outf"; return 2 ;;
+  esac
+  if ! grep -qE "^FAIL  $must " "$errf"; then
+    echo "negative-control FAILED: $label: the suite went red, but not on $must" >&2
+    cat "$errf" >&2; rm -f "$errf" "$outf"; return 1
+  fi
+  if [ -n "$mustnot" ]; then
+    if grep -qE "^FAIL  $mustnot " "$errf"; then
+      echo "negative-control FAILED: $label: $mustnot went red too; this control needs it green" >&2
+      cat "$errf" >&2; rm -f "$errf" "$outf"; return 1
+    fi
+    if ! grep -qE "^PASS  $mustnot " "$outf"; then
+      echo "negative-control FAILED: $label: $mustnot did not report PASS (no FAIL line is not" \
+        "proof it's green — it may have hit an infrastructure fault instead)" >&2
+      cat "$errf" >&2; rm -f "$errf" "$outf"; return 1
+    fi
+  fi
+  rm -f "$errf" "$outf"
+  echo "negative-control OK: $label reported red on $must"
+}
+
+rpf::negative_controls() { # real_toml -> 0/1/2
+  local real="$1" nc rc worst=0
+  for nc in 1 2 3; do
+    rc=0
+    case "$nc" in
+      # NC1: no release_commits. Row 7 (`fix(ci): x`) then bumps to 0.1.1.
+      1) rpf::_one_control "NC1 (no release_commits)" rpf::filter_suite no-release-commits \
+           r07 "" "$real" || rc=$? ;;
+      # NC2: no changelog_include, release_commits kept. G2's lockstep breaks.
+      2) rpf::_one_control "NC2 (no changelog_include)" rpf::group_suite no-include \
+           G2-version "" "$real" || rc=$? ;;
+      # NC3: neither key: P1 exactly. G1's versions pass, and the follower's first section
+      # stays 0.1.0. The CHANGELOG half must red while the version half passes.
+      3) rpf::_one_control "NC3 (no changelog_include, no release_commits)" rpf::group_suite \
+           no-include-no-filter G1-changelog G1-version "$real" || rc=$? ;;
+    esac
+    if [ "$rc" = 2 ]; then return 2; fi
+    if [ "$rc" != 0 ]; then worst=1; fi
+  done
+  return "$worst"
+}
+
+# --- entry points for the hooks in release-plz.sh -------------------------------------------
+
+rpf::suites() { # real_toml -> 0/1/2
+  local real="$1" rc worst=0
+  rc=0; rpf::filter_suite "$real" real || rc=$?
+  if [ "$rc" = 2 ]; then return 2; fi
+  if [ "$rc" != 0 ]; then worst=1; fi
+  rc=0; rpf::group_suite "$real" real || rc=$?
+  if [ "$rc" = 2 ]; then return 2; fi
+  if [ "$rc" != 0 ]; then worst=1; fi
+  return "$worst"
+}

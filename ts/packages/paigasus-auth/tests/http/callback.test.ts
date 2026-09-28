@@ -57,6 +57,7 @@ function recordingLogger(): AuthLogger {
  */
 function countingOidc(inner: OidcClient): OidcClient {
   return {
+    ensureDiscovered: () => inner.ensureDiscovered(),
     buildAuthorizationUrl: (params) => inner.buildAuthorizationUrl(params),
     authorizationCodeGrant: (params) => {
       grantCalls += 1;
@@ -66,6 +67,7 @@ function countingOidc(inner: OidcClient): OidcClient {
     refresh: (token) => inner.refresh(token),
     revoke: (token) => inner.revoke(token),
     buildEndSessionUrl: (params) => inner.buildEndSessionUrl(params),
+    discoveryStatus: () => inner.discoveryStatus(),
   };
 }
 

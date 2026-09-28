@@ -39,6 +39,21 @@ Distinct suffixes therefore always yield distinct names, whatever the release is
 {{- printf "%s-%s" $base $suffix -}}
 {{- end -}}
 
+{{/*
+paigasus.ingressEnabled (SMA-695) yields "true" or "". Read through `dig` with the default true: a
+release made before ingress.enabled existed has no such key under `helm upgrade --reuse-values`,
+and a plain .Values.ingress.enabled would read nil and delete the live Ingress with no warning. A
+nil value also counts as "not set": Helm keeps a null when no chart default shadows it.
+paigasus.validate refuses a non-boolean value, so a quoted "false" never reaches this `if`.
+The nil branch (`kindIs "invalid"`) is untested by design: with the chart default present, `helm
+template` cannot produce a nil value, so it was measured on a prototype without the default
+(spec § 4.2).
+*/}}
+{{- define "paigasus.ingressEnabled" -}}
+{{- $v := dig "enabled" true .Values.ingress -}}
+{{- if or $v (kindIs "invalid" $v) -}}true{{- end -}}
+{{- end -}}
+
 {{- define "paigasus.enabledZones" -}}
 {{- $out := list -}}
 {{- range $id, $z := .Values.zones -}}
@@ -60,8 +75,12 @@ template would fire only when that template happens to render first.
 {{- fail (printf "zones.%s: \"%s\" is not a known service slug (expected one of %s). parseServiceMap would throw in BOTH consoles at first request." $id $id (join ", " $slugs)) -}}
 {{- end -}}
 {{- end -}}
-{{- if not .Values.ingress.tlsSecretName -}}
-{{- fail "ingress.tlsSecretName is required; PAIGASUS_PUBLIC_ORIGIN is validated as https and __Host-pgs_sid requires Secure, so the ingress must terminate TLS" -}}
+{{- $ingressEnabled := dig "enabled" true .Values.ingress -}}
+{{- if not (or (kindIs "bool" $ingressEnabled) (kindIs "invalid" $ingressEnabled)) -}}
+{{- fail (printf "ingress.enabled must be true or false (a boolean), got %s %q; a quoted \"false\" is a string and would keep the Ingress" (kindOf $ingressEnabled) (toString $ingressEnabled)) -}}
+{{- end -}}
+{{- if and (include "paigasus.ingressEnabled" .) (not .Values.ingress.tlsSecretName) -}}
+{{- fail "ingress.tlsSecretName is required; PAIGASUS_PUBLIC_ORIGIN is validated as https and __Host-pgs_sid requires Secure, so the ingress must terminate TLS. Or set ingress.enabled: false when TLS ends in front of the chart's Services" -}}
 {{- end -}}
 {{- if not .Values.oidc.issuer -}}
 {{- fail "oidc.issuer is required" -}}
@@ -119,12 +138,17 @@ in BOTH consoles. The TypeScript already rejects it; the chart should never rend
 {{- end -}}
 {{- end -}}
 {{- if not .Values.ingress.host -}}
-{{- fail "ingress.host is required; it is the single origin every zone's cookie is scoped to" -}}
+{{- fail "ingress.host is required; it is the single origin every zone's cookie is scoped to, and it feeds PAIGASUS_PUBLIC_ORIGIN, so it is required also when ingress.enabled is false" -}}
+{{- end -}}
+{{- $host := .Values.ingress.host | toString -}}
+{{- if or (contains "/" $host) (contains ":" $host) -}}
+{{- fail (printf "ingress.host must be a bare host name with no scheme, path or port, got %q; PAIGASUS_PUBLIC_ORIGIN is https://<ingress.host>" $host) -}}
 {{- end -}}
 {{- if and (include "paigasus.idpCaConfigMap" .) (not (include "paigasus.idpCaKey" .)) -}}
 {{- fail "oidc.caBundle.key is empty while oidc.caBundle.existingConfigMap is set: every pod mounts ONE key of that ConfigMap, so the key must name it (the default is ca.crt)" -}}
 {{- end -}}
 {{- include "paigasus.validateIamBackend" . -}}
+{{- include "paigasus.validateHttpRoute" . -}}
 {{- end -}}
 
 {{- define "paigasus.zoneMapJson" -}}

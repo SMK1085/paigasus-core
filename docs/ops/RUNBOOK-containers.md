@@ -38,6 +38,9 @@ requests that touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust
 `ts/apps/*/next.config.ts`, `ts/apps/*/package.json`, `ts/packages/paigasus-kernel/package.json`,
 `rs/crates/bindings/paigasus-node-bindings/index.js`,
 `rs/crates/bindings/paigasus-node-bindings/index.d.ts`,
+`ts/packages/paigasus-auth/src/core/session.ts`, `ts/apps/*/app/*console*/layout.tsx`,
+`ts/apps/iam-console/app/*console*/orgs/page.tsx`,
+`ts/apps/gateway-console/app/*console*/overview/page.tsx`,
 `ci/images/**`,
 `.github/workflows/images.yml`, `.prototools`, `.proto/plugins/crane.toml`,
 `.proto/plugins/syft.toml`). **The workflow is not a required check**, so a broken image build
@@ -61,6 +64,19 @@ are `inputs` of the console `build`/`test` tasks (`ts/apps/*/moon.yml`,
 `index.d.ts`, are NOT inputs anywhere — the kernel build task's own `napi build` step regenerates
 them fresh every run, so their committed content can drift without reding the ordinary build — and
 `ts/Dockerfile` copies both by name, so they are on the filter.
+
+A second clause covers the image SMOKE (SMA-675). A file is also on the filter when the console
+smoke depends on it at runtime, so that a change to it can red the smoke while the ordinary build
+stays green. Four files are on the filter for this reason:
+`ts/packages/paigasus-auth/src/core/session.ts` (the smoke seeds a literal `SessionRecord`, which
+`isSessionRecord` must accept), the two `ts/apps/*/app/(console)/layout.tsx` files (they put the
+seeded session's nonce into the page), and the two probe pages
+`ts/apps/iam-console/app/(console)/orgs/page.tsx` and
+`ts/apps/gateway-console/app/(console)/overview/page.tsx`. A new probe path in
+`console_probe_path_for` must add its page to the filter. Nothing checks this. The route group
+directory is `(console)`, but the filter patterns use `*console*`: `repo:actionlint` does not pass
+`(` or `)` to git. The `*` form matches the same files, and the gate still reds a pattern that
+matches no file.
 
 That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` or
 `ts/Dockerfile` — already triggers the workflow automatically via its `pull_request` path filter;
@@ -344,6 +360,12 @@ image has the same shape as the Rust service images:
   `ARG` or `ENV`, so neither instruction can use `${APP}`. The files are `.mjs`, not `.js`, because
   every console `package.json` sets `"type": "module"`. Next copies that `package.json` into the
   standalone tree, so a CJS `require()` shim would need `require(esm)` interop and would fail.
+- **The consoles have two probe routes (SMA-705).** `<BASE_PATH>/healthz` parses the
+  configuration and touches no dependency. The image `HEALTHCHECK`, `ci/images/run.sh` and the
+  test harnesses use it. `<BASE_PATH>/readyz` answers 200 `{"status":"ready"}` only after the
+  auth runtime is built and one OIDC discovery succeeded, and 503 `{"status":"unready"}` before
+  that. It does not check Redis. The Helm chart's `readinessProbe` uses `/readyz`, and its liveness
+  probe is a TCP check. See `ts/packages/paigasus-auth/README.md`, "The readiness route".
 - **The healthcheck file fetches `<BASE_PATH>/healthz` on `127.0.0.1:$PORT`, with a 2500 ms
   signal.** The `fetch` call passes `signal: AbortSignal.timeout(2500)`. Docker kills the probe
   after `--timeout=3s`. Without the signal, a server that accepts the connection and never answers
@@ -430,6 +452,34 @@ image has the same shape as the Rust service images:
   (SMA-513 spec D4): each zone emits its asset URLs under its own basePath and serves them there.
   Kind row R2 (`ts/apps/iam-console/tests/cluster/phase-a/cross-zone.spec.ts`) proves the
   one-origin half: both zones hydrate through one Traefik ingress.
+- **The kernel rows of `smoke_consoles` prove that the image loads the kernel (SMA-675).**
+  - The kernel route row seeds a session record in Redis and sends its cookie to the zone's
+    `(console)` route (`/iam/orgs`, `/gateway/overview`). The `(console)` layout imports the
+    kernel at module scope. The row passes only on 200 with a per-run nonce from the seeded
+    record in the body. The brand label is not a marker: every page holds it in `<title>`.
+  - The kernel control row starts a second container from the same image and the same arguments,
+    with every `*paigasus_wasm_bg*.wasm` chunk corrupted. It passes only when the same request
+    answers 5xx and the container log holds the kernel compile error. So a 200 from the route row
+    cannot come from a path that skips the kernel.
+  - The rows do NOT prove that IAM calls work (the smoke has no IAM), that a real login works (the
+    kind e2e tier covers that), or that a kernel function returns correct values (the kernel tests
+    cover that).
+  - The cookie-less row proves only that the proxy redirects a request with no session cookie. It
+    loads no kernel code.
+  - The smoke starts one Redis container from a pinned digest, on a per-run Docker network. The
+    discovery descriptor cache of the consoles uses that Redis too.
+  - The console release chain in `release.yml` now pulls `redis:7.4-alpine` from Docker Hub, on
+    amd64 and arm64. A Docker Hub outage or rate limit can red a console release.
+  - The control row runs only on the `images.yml` paths. `release.yml` sets
+    `PAIGASUS_SMOKE_KERNEL_CONTROL: 'off'` on "Smoke this service". Unset or `on` runs the
+    control; any other value is a usage error. The smoke removes the control container as soon as
+    its row finishes.
+  - The Redis digest has two copies: `CONSOLE_SMOKE_REDIS_IMAGE` in `ci/images/run.sh` and
+    `ci/kind/manifests/redis.yaml`. Each names the other. No check compares them.
+  - A killed run can leave the Redis container and the network behind. Both carry the label
+    `paigasus.smoke=console`. Remove them with
+    `docker rm -f $(docker ps -aq --filter label=paigasus.smoke=console)`, then
+    `docker network prune --filter label=paigasus.smoke=console`.
 
 Two more facts about the staged-tree parity check are important:
 

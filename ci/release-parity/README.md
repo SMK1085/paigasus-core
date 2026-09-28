@@ -120,6 +120,50 @@ loudly if either adds a `releaseRules` clamp (the documented divergence would no
 longer hold) or if the two disagree. Both configs are task inputs, so editing
 either re-runs this check.
 
+## The release-plz-only suites (SMA-716)
+
+`ecosystems/release-plz-filter.sh` tests two release-plz keys that the other two tools do not
+have: `release_commits` and `changelog_include`. Its cases are NOT in `cases.tsv`, because
+`cases.tsv` is the cross-tool parity contract. `run.sh` calls the hook
+`ecosystem::extra_suite` after the `cases.tsv` loop, only if the module defines it. Only
+`ecosystems/release-plz.sh` defines it, so `repo:release-parity-py` and `-ts` skip the suite.
+For the `release-plz` ecosystem, `run.sh` exits 2 if the hook is missing.
+
+**Config (F3).** The fixture config takes `release_commits` verbatim from `rs/release-plz.toml`,
+after the keys `ecosystem::_derive_config` copies. A missing or duplicated key is rc 2.
+
+**Filter fixture.** One fixture repo with one crate per row of the spec's classification table
+(`rpf-r01` … `rpf-r23`), three Review Focus rows (`rpf-r24` squash body, `rpf-r25`
+`BREAKING-CHANGE:` footer, `rpf-r26` space after the comma), and `rpf-b`, which no commit
+touches. One `release-plz update` run covers all rows. Row 20 also asserts that the first
+release section lists both commits (consequence C1).
+
+**Group fixture.** A second fixture repo with four independent version groups (`rpg-a*` …
+`rpg-d*`), so one `release-plz update` run covers G1–G4. Each group has two members with R1's
+symmetric `changelog_include`. Each member has a seeded `CHANGELOG.md` in the real crates' shape
+(release-plz's header, `## [Unreleased]`, a `## [0.1.0]` section), so release-plz takes the
+prepend path where P1 happened. G1: `fix(rs):` on the leader only; both reach 0.1.1, and the
+follower's first release section has `- *(rs)* x` under `### Fixed`. G2: `feat(rs):` on the
+follower only; both reach 0.2.0, and the leader gets a section. G3: `fix(ci):` only; both stay at
+0.1.0. G4: one `fix(rs):` commit on both crates; the line is in each new section exactly once.
+The path+version edge (`rpg-X1` depends on `rpg-X2`, the real proto → derive shape) is dropped:
+MEASURED, release-plz 0.3.158 in `git_only` mode rejects it — "error: failed to prepare local
+package for uploading; Caused by: no matching package named `rpg-a2` found; location searched:
+crates.io index; required by package `rpg-a1 v0.1.0`". Because the edge is dropped, `rpg-b1`
+(G2's leader) does not cascade to a version bump from its dependency: a negative control that
+drops `changelog_include` (NC2) sees a follower-only commit on `rpg-b2` bump only the follower,
+with `rpg-b1` staying at 0.1.0 rather than cascading to 0.1.1 — NC2 still reds.
+
+**Negative controls.** `run.sh --negative-control` calls the hook
+`ecosystem::extra_negative_control` BEFORE the base control, because the base control exits on
+its own verdict. Each control mutates the fixture config and must make one named assertion fail
+with rc 1; rc 2 is INCONCLUSIVE and fails the control. NC1: no `release_commits`, so row 7
+bumps (`r07`). NC2: no `changelog_include`, so G2's lockstep breaks (`G2-version`). NC3: neither
+key, which is P1 exactly: `G1-changelog` must red while `G1-version` stays green.
+
+**Cost.** One filter fixture run: 46.8 s. One group fixture run: 8.2 s (development Mac). The
+three controls add one filter run and two group runs: 41.3 s in all.
+
 ## Tool resolution policy (SMA-596)
 
 Both `release-plz.sh` and `python-semantic-release.sh` resolve their tool binary once, at
@@ -189,7 +233,13 @@ inside `run.sh` itself
 (`RELEASE_PARITY_SH_CALL_SITES`: the flag parse `--negative-control) NEGATIVE=1; shift ;;`,
 the `if [ "$NEGATIVE" = 1 ]; then` guard, the assertion body `check_case "neg-fix-bang" …`,
 and both report arms — the `exit 0` on "reported red as expected" and the `exit 1` on
-"accepted a wrong expectation"), from inside `repo:affected-smoke` — a separately scheduled
+"accepted a wrong expectation"), SMA-716 adds eleven more whole lines: for each of the two
+hooks, the guard that fails the release-plz run when the module lost the hook, the call, and
+the verdict arm(s) — two (fail, and the suite hook's OWN `*)` infra arm, added in the final
+whole-branch review) for the suite hook, three (pass, fail, and the control-hook's OWN `*)`
+infra arm) for the control hook, so an infra fault inside either hook's own verdict block
+is pinned too and cannot silently report as a pass — from inside
+`repo:affected-smoke` — a separately scheduled
 gate, so neither judges its own wiring. Five discrete lines, not one span, because pinning
 the block as a unit left two MEASURED bypasses with different failure shapes: neutering the
 flag parse (dropping `NEGATIVE=1`) leaves `NEGATIVE` at its initialized 0, so the control
@@ -250,3 +300,10 @@ reachable.
   fragile and out of scope (spec decision). The narrower fail-safe available if this ever bites:
   a count assertion such as `release_parity_sh_text.count("NEGATIVE=") == 2`, which can only
   false-red, never silently pass a bypass — not implemented here, just recorded as the option.
+- **L6 — the SMA-716 hook bodies are not pinned.** `RELEASE_PARITY_SH_CALL_SITES` reads only
+  `run.sh`. The hook bodies in `ecosystems/release-plz.sh` and all of
+  `ecosystems/release-plz-filter.sh` are in no haystack. A hook body replaced with `return 0`
+  passes every pin, and the suite or the controls then assert nothing. The guard lines in
+  `run.sh` stop only the DELETION of a hook. A second haystack parameter for
+  `check_self_invocation` would close this; it was not added because that function has 65 call
+  sites in `ci_targets.py`.

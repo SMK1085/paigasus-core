@@ -3,13 +3,27 @@
 Project memory for the Helm chart. Claude Code loads this file only when it reads a file here.
 Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/paigasus/README.md`.
 
-- **The ingress has no rewrite annotation, on purpose.** Each console has its `basePath` compiled
-  in. A rewrite that removes `/iam` breaks every route in that zone. Do not add one to
-  `templates/ingress.yaml` or to `values.yaml`.
+- **The ingress and the HTTPRoute have no rewrite, on purpose.** Each console has its `basePath`
+  compiled in. A rewrite that removes `/iam` breaks every route in that zone. Do not add one to
+  `templates/ingress.yaml`, `templates/httproute.yaml` or `values.yaml`. The HTTPRoute has no
+  `filters` at all: a hostname rewrite breaks Next's Server Action origin check.
 - **One values block renders three projections that must agree:** `PAIGASUS_ZONES`,
-  `PAIGASUS_SERVICES` and the ingress rules. All three come from `zones.<id>.enabled` through one
-  `range`. Do not write a zone literally in a template: `repo:helm-render` check 1 and check 2
-  fail on it.
+  `PAIGASUS_SERVICES` and the route rules (the Ingress rules, and the HTTPRoute rules when
+  `httpRoute.enabled` is true). All three come from `zones.<id>.enabled` through one `range`. Do
+  not write a zone literally in a template. For the Ingress, `repo:helm-render` check 1 and
+  check 2 fail on it. `repo:helm-render` renders with `httpRoute` off and sees no HTTPRoute
+  (SMA-694 D10): for `templates/httproute.yaml`, `tests/ingress.sh` rows H1 and H2 fail on it
+  instead. With `ingress.enabled: false` and `httpRoute.enabled: false` (SMA-695) the chart
+  renders no route rules, so only two projections remain, and the operator keeps the route by
+  hand.
+- **Read `ingress.enabled` only through `paigasus.ingressEnabled`.** It reads the value with `dig`
+  and a default of `true`, and counts nil as not set. A plain `.Values.ingress.enabled` reads nil
+  under `--reuse-values` on a release from before the value, and deletes the live Ingress.
+- **Read `httpRoute.enabled` only through `paigasus.httpRouteEnabled`** (`templates/_httproute.tpl`).
+  A release made before SMA-694 has no `httpRoute` map under `--reuse-values`, and a plain
+  `.Values.httpRoute.enabled` is then a nil-pointer error. No comment in `httproute.yaml` may
+  contain the word "gateway": the H2 row greps the iam-only render for it (after it removes the
+  `apiVersion: gateway.networking.k8s.io/v1` lines).
 - **Check 1a couples the chart to `contracts/proto/paigasus/common/v1/service_info.proto`.**
   `paigasus.serviceSlugs` in `_helpers.tpl` must EQUAL the slugs of `enum Capability`. A PR that adds
   a capability for a new service must also edit `_helpers.tpl`.
@@ -24,7 +38,8 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
   `zones-omits-enabled`. `templates/console-deployment.yaml` holds two: `security-context` and
   `template-only-diff`. `templates/console-env-configmap.yaml` holds one: `leaked-value`.
   `templates/ingress.yaml` holds one: `literal-ingress`. `Chart.yaml` holds one:
-  `app-version-unreleased`. An edit to one of these live files must re-sync its copies in the same
+  `app-version-unreleased`. `templates/_httproute.tpl` has no copy: a fixture chart gets it from
+  the live chart. An edit to one of these live files must re-sync its copies in the same
   commit. Keep each mutation when you re-sync. A stale `_helpers.tpl` fixture has none of the new
   helpers. Its renders then fail. The control reports INCONCLUSIVE.
 - **A YAML comment in a template renders into the manifest,** so it is part of the golden files.

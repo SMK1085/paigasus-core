@@ -21,7 +21,8 @@ use crate::application::log_rate_limit::{LOG_RATE_LIMIT_INTERVAL, LogRateLimiter
 /// Whether `resolve` may just-in-time provision an unknown `(issuer, subject)` identity.
 /// The middleware calls `resolve(.., Enabled)`; `Introspect` always calls `resolve(..,
 /// Disabled)` (D10) — an unauthenticated, middleware-exempt endpoint must not have a
-/// user-creation side effect.
+/// user-creation side effect. Only `Enabled` writes the SMA-707 `info` line for an unknown
+/// identity of an issuer with JIT disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provisioning {
     Enabled,
@@ -147,6 +148,10 @@ pub struct AuthenticateToken<A, E, P, M, I, C> {
     /// `AppState` clones this use case for each request, and a plain field would reset on each
     /// clone. Keyed by the `defect` label, because `ProvisioningDefect` does not implement `Hash`.
     provisioning_log: Arc<LogRateLimiter<&'static str>>,
+    /// SMA-707: at most one JIT-disabled refusal line per issuer in 10 s. An `Arc`, for the same
+    /// reason as `provisioning_log`. A separate instance keyed by `()`, because `provisioning_log`
+    /// is keyed by the SMA-698 `defect` label, and `jit_disabled` is not a defect (SMA-707 D4).
+    not_provisioned_log: Arc<LogRateLimiter<()>>,
 }
 
 impl<A, E, P, M, I, C> AuthenticateToken<A, E, P, M, I, C>
@@ -170,6 +175,7 @@ where
             clock,
             jit,
             provisioning_log: Arc::new(LogRateLimiter::new(LOG_RATE_LIMIT_INTERVAL)),
+            not_provisioned_log: Arc::new(LogRateLimiter::new(LOG_RATE_LIMIT_INTERVAL)),
         }
     }
 
@@ -177,7 +183,8 @@ where
     /// controls whether an unknown `(issuer, subject)` gets just-in-time provisioned
     /// (`Enabled`, the authenticated-request path) or rejected (`Disabled`, `Introspect`'s
     /// D10 read-only guarantee). JIT additionally requires the issuer's `JitPolicy` flag —
-    /// an issuer with JIT disabled never provisions even under `Enabled`.
+    /// an issuer with JIT disabled never provisions even under `Enabled`. That refusal writes one
+    /// rate-limited `info` line through `jit_disabled` (SMA-707); the `Disabled` refusal writes none.
     pub async fn resolve(&self, token: &str, provisioning: Provisioning) -> Result<AuthnPrincipal, AuthnError> {
         let claims = self.authenticator.authenticate(token).await?;
 
@@ -187,7 +194,7 @@ where
                 Provisioning::Disabled => return Err(AuthnError::IdentityNotProvisioned),
                 Provisioning::Enabled => {
                     if !self.jit.allows(&claims.issuer) {
-                        return Err(AuthnError::IdentityNotProvisioned);
+                        return Err(self.jit_disabled(&claims.issuer));
                     }
                     self.jit_provision(&claims).await?
                 }
@@ -343,6 +350,23 @@ where
             }
         }
         AuthnError::ProvisioningFailed(defect)
+    }
+
+    /// The only way the JIT-disabled branch of `resolve` builds its error (SMA-707 spec 4.2). It
+    /// asks the rate limiter, writes one `info` line when admitted, and returns
+    /// `IdentityNotProvisioned`. It receives only the issuer, so the line cannot carry the
+    /// subject, a claim or the token. `info`, not `warn`: JIT off closes the user set of the
+    /// issuer, so this refusal is the intended result of the operator's setting (SMA-707 D2).
+    fn jit_disabled(&self, issuer: &Issuer) -> AuthnError {
+        if let Some(suppressed) = self.not_provisioned_log.admit_at(issuer.as_str(), (), Instant::now()) {
+            tracing::info!(
+                issuer = issuer.as_str(),
+                reason = "jit_disabled",
+                suppressed,
+                "request refused: the identity is not provisioned, and just-in-time provisioning is disabled for this issuer; IAM creates an identity only by just-in-time provisioning, so set jit_provisioning = true for the issuer to let new users of this issuer sign in"
+            );
+        }
+        AuthnError::IdentityNotProvisioned
     }
 }
 
@@ -1600,37 +1624,6 @@ mod tests {
         assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0);
     }
 
-    /// U8: a JIT-disabled issuer, and `introspect` for an unknown identity. Both return
-    /// `IdentityNotProvisioned` before `jit_provision` runs: no helper line, no series.
-    #[tokio::test]
-    async fn identity_not_provisioned_writes_no_line_and_no_series() {
-        let (logs, _logs_guard) = capture_logs();
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
-        let store = AuthnStore::default();
-        let disabled = AuthenticateToken::new(
-            FakeAuthenticator::ok(claims(ISSUER, "sub-u8-a", None, None)),
-            InMemoryIdentities(store.clone()),
-            InMemoryPrincipals(store.clone()),
-            InMemoryMemberships::default(),
-            Arc::new(InMemoryRoleGrants::default()),
-            SeqIds::default(),
-            FixedClock::default(),
-            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), false)]),
-        );
-        let introspecting = jit_use_case(FakeAuthenticator::ok(claims(ISSUER, "sub-u8-b", None, None)), &store);
-
-        let err = disabled.resolve("token", Provisioning::Enabled).await.unwrap_err();
-        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
-        let err = introspecting.introspect("token").await.unwrap_err();
-        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
-
-        let text = logs.text();
-        assert!(jit_lines(&text).is_empty(), "IdentityNotProvisioned writes no helper line:\n{text}");
-        assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0);
-    }
-
     /// U9 (spec S1, D2): three `missing_email` failures for one issuer in one window. One line,
     /// three counts: the rate limit does not apply to the counter.
     #[tokio::test]
@@ -1811,5 +1804,275 @@ mod tests {
         let text = logs.text();
         assert!(jit_lines(&text).is_empty(), "a lost race writes no helper line:\n{text}");
         assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0, "a lost race is not counted");
+    }
+
+    // ---- SMA-707: the JIT-disabled refusal line ----------------------------------------------
+
+    /// The fixed prefix of the SMA-707 line. Tests select the line with it.
+    const JIT_DISABLED_LINE: &str = "request refused: the identity is not provisioned";
+    /// The whole fixed SMA-707 message (spec 4.3).
+    const JIT_DISABLED_TEXT: &str = "request refused: the identity is not provisioned, and just-in-time provisioning is disabled for this issuer; IAM creates an identity only by just-in-time provisioning, so set jit_provisioning = true for the issuer to let new users of this issuer sign in";
+
+    /// The SMA-707 lines only.
+    fn jit_disabled_lines(text: &str) -> Vec<&str> {
+        text.lines().filter(|line| line.contains(JIT_DISABLED_LINE)).collect()
+    }
+
+    /// A use case over `store`, with JIT OFF for `ISSUER`.
+    fn jit_disabled_use_case<A: Authenticator>(authenticator: A, store: &AuthnStore) -> AuthenticateToken<A, InMemoryIdentities, InMemoryPrincipals, InMemoryMemberships, SeqIds, FixedClock> {
+        AuthenticateToken::new(
+            authenticator,
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), false)]),
+        )
+    }
+
+    /// SMA-707 U1: `resolve(.., Enabled)`, a JIT-disabled issuer and an unknown identity. One
+    /// `info` line with the issuer, `reason` and `suppressed = 0`. The whole capture holds no
+    /// claim value and no token. No line matches the SMA-698 selector, and there is no JIT
+    /// failure series (the checks of the old U8).
+    #[tokio::test]
+    async fn jit_disabled_unknown_identity_writes_one_info_line_without_claims() {
+        let (logs, _logs_guard) = capture_logs();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let store = AuthnStore::default();
+        let uc = jit_disabled_use_case(
+            FakeAuthenticator::ok(claims_with_profile(
+                ISSUER,
+                "sub-jd-u1-distinct",
+                Some("vera.jd-distinct@example.com"),
+                Some("Vera Jdname"),
+                Some("jd-XQ-locale"),
+                Some("Jd/Distinct_Zone"),
+            )),
+            &store,
+        );
+
+        let err = uc.resolve("bearer-jd-u1-secret", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        let text = logs.text();
+        let lines = jit_disabled_lines(&text);
+        assert_eq!(lines.len(), 1, "exactly one JIT-disabled line expected:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("INFO"), "the line is at info: {line}");
+        assert!(line.contains(JIT_DISABLED_TEXT), "the fixed message: {line}");
+        assert!(has_field(line, "issuer", ISSUER), "names the issuer: {line}");
+        assert!(has_field(line, "reason", "jit_disabled"), "names the reason: {line}");
+        assert!(has_field(line, "suppressed", "0"), "the first line suppressed nothing: {line}");
+        assert_no_secrets(
+            &text,
+            &[
+                "sub-jd-u1-distinct",
+                "vera.jd-distinct@example.com",
+                "vera.jd-distinct",
+                "Vera Jdname",
+                "jd-XQ-locale",
+                "Jd/Distinct_Zone",
+                "bearer-jd-u1-secret",
+            ],
+        );
+        assert!(jit_lines(&text).is_empty(), "the line must not match the SMA-698 selector:\n{text}");
+        assert!(store.identities.lock().unwrap().is_empty(), "JIT off never provisions");
+        assert_eq!(jit_series(&snapshotter.snapshot().into_vec()), 0, "no JIT failure series");
+    }
+
+    /// SMA-707 U2: `introspect` for an unknown identity of the SAME JIT-disabled issuer writes no
+    /// line. With a JIT-enabled issuer, a misplaced line would not appear either, so the issuer
+    /// must be JIT-disabled. Control: the same token on `resolve(.., Enabled)` then writes one
+    /// line, so the capture can see the line on every run.
+    #[tokio::test]
+    async fn jit_disabled_introspect_writes_no_line() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = jit_disabled_use_case(QueueAuthenticator::new(vec![claims(ISSUER, "sub-jd-u2", None, None), claims(ISSUER, "sub-jd-u2", None, None)]), &store);
+
+        let err = uc.introspect("bearer-jd-u2").await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        let text = logs.text();
+        assert!(jit_disabled_lines(&text).is_empty(), "introspect must not write the line:\n{text}");
+
+        let err = uc.resolve("bearer-jd-u2", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        let text = logs.text();
+        assert_eq!(jit_disabled_lines(&text).len(), 1, "control: the protected path writes one line:\n{text}");
+    }
+
+    /// SMA-707 U3: `resolve(.., Disabled)` with a JIT-disabled issuer writes no line. The same
+    /// guard as U2, one level down, with the same control.
+    #[tokio::test]
+    async fn jit_disabled_resolve_disabled_writes_no_line() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = jit_disabled_use_case(QueueAuthenticator::new(vec![claims(ISSUER, "sub-jd-u3", None, None), claims(ISSUER, "sub-jd-u3", None, None)]), &store);
+
+        let err = uc.resolve("bearer-jd-u3", Provisioning::Disabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        let text = logs.text();
+        assert!(jit_disabled_lines(&text).is_empty(), "resolve(.., Disabled) must not write the line:\n{text}");
+
+        let err = uc.resolve("bearer-jd-u3", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        let text = logs.text();
+        assert_eq!(jit_disabled_lines(&text).len(), 1, "control: the protected path writes one line:\n{text}");
+    }
+
+    /// SMA-707 U4: a KNOWN identity of a JIT-disabled issuer resolves and writes no line. Control:
+    /// an UNKNOWN subject of the same issuer, resolved next in the same capture, then writes
+    /// exactly one line — proving the capture would have caught a line had the known-identity
+    /// path wrongly written one.
+    #[tokio::test]
+    async fn jit_disabled_known_identity_resolves_and_writes_no_line() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse(ISSUER).unwrap();
+        let pid = seeded_principal(&store, &issuer, "sub-jd-u4");
+        let uc = jit_disabled_use_case(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-jd-u4", None, None), claims(ISSUER, "sub-jd-u4-unknown", None, None)]),
+            &store,
+        );
+
+        let resolved = uc.resolve("token", Provisioning::Enabled).await.unwrap();
+
+        assert_eq!(resolved.principal_id, pid);
+        let text = logs.text();
+        assert!(jit_disabled_lines(&text).is_empty(), "a known identity writes no line:\n{text}");
+
+        let err = uc.resolve("token2", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        let text = logs.text();
+        assert_eq!(jit_disabled_lines(&text).len(), 1, "control: an unknown subject writes one line:\n{text}");
+    }
+
+    /// SMA-707 U5a (and Review Focus R2): two refusals for one issuer in one window write one line.
+    /// The two subjects differ, so a limiter keyed by the subject would write two lines.
+    #[tokio::test]
+    async fn jit_disabled_refusals_for_one_issuer_log_once() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = jit_disabled_use_case(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-jd-u5a-first", None, None), claims(ISSUER, "sub-jd-u5a-second", None, None)]),
+            &store,
+        );
+
+        for _ in 0..2 {
+            let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+            assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        }
+
+        let text = logs.text();
+        let lines = jit_disabled_lines(&text);
+        assert_eq!(lines.len(), 1, "one line per issuer in the window:\n{text}");
+        assert!(has_field(lines[0], "suppressed", "0"), "the first line suppressed nothing: {}", lines[0]);
+        assert_no_secrets(&text, &["sub-jd-u5a-first", "sub-jd-u5a-second"]);
+    }
+
+    /// SMA-707 U5b: the next admitted line carries the limiter's `suppressed` count. The test
+    /// module can reach the private `not_provisioned_log`, so it injects two earlier refusals in
+    /// an old window instead of waiting 10 s.
+    #[tokio::test]
+    async fn jit_disabled_next_admitted_line_carries_the_suppressed_count() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = jit_disabled_use_case(FakeAuthenticator::ok(claims(ISSUER, "sub-jd-u5b", None, None)), &store);
+        let old = Instant::now().checked_sub(std::time::Duration::from_secs(30)).expect("the monotonic clock is older than 30 s");
+        assert_eq!(uc.not_provisioned_log.admit_at(ISSUER, (), old), Some(0));
+        assert_eq!(uc.not_provisioned_log.admit_at(ISSUER, (), old + std::time::Duration::from_secs(1)), None);
+
+        uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        let text = logs.text();
+        let lines = jit_disabled_lines(&text);
+        assert_eq!(lines.len(), 1, "the window is over, so the line is admitted:\n{text}");
+        assert!(has_field(lines[0], "suppressed", "1"), "the line reports the one suppressed refusal: {}", lines[0]);
+        assert_no_secrets(&text, &["sub-jd-u5b"]);
+    }
+
+    /// SMA-707 U6: the limiter key holds the issuer. A refusal for a second JIT-disabled issuer,
+    /// just after one for the first issuer, writes its own line, and each line names its issuer.
+    #[tokio::test]
+    async fn jit_disabled_refusals_from_two_issuers_log_one_line_each() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = AuthenticateToken::new(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-jd-u6-a", None, None), claims(OTHER_ISSUER, "sub-jd-u6-b", None, None)]),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), false), (Issuer::parse(OTHER_ISSUER).unwrap(), false)]),
+        );
+
+        uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+        uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        let text = logs.text();
+        let lines = jit_disabled_lines(&text);
+        assert_eq!(lines.len(), 2, "one line for each issuer:\n{text}");
+        assert!(has_field(lines[0], "issuer", ISSUER), "the first line names the first issuer: {}", lines[0]);
+        assert!(has_field(lines[1], "issuer", OTHER_ISSUER), "the second line names the second issuer: {}", lines[1]);
+        assert_no_secrets(&text, &["sub-jd-u6-a", "sub-jd-u6-b"]);
+    }
+
+    /// SMA-707 U7 (spec 4.4): `AppState` clones the use case for each request. The clone shares
+    /// the limiter through its `Arc`, so a refusal on the clone inside the window is suppressed.
+    /// `KernelIdGenerator` is the only `Clone` id generator in the crate.
+    #[tokio::test]
+    async fn jit_disabled_cloned_use_case_shares_the_rate_limiter() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = AuthenticateToken::new(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-jd-u7-a", None, None), claims(ISSUER, "sub-jd-u7-b", None, None)]),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            KernelIdGenerator,
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(Issuer::parse(ISSUER).unwrap(), false)]),
+        );
+        let twin = uc.clone();
+
+        uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+        twin.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        let text = logs.text();
+        assert_eq!(jit_disabled_lines(&text).len(), 1, "the clone must share the limiter:\n{text}");
+        assert_no_secrets(&text, &["sub-jd-u7-a", "sub-jd-u7-b"]);
+    }
+
+    /// SMA-707 U8 (Review Focus R1): a JIT-ENABLED issuer never writes the line, for a JIT
+    /// success and for a JIT failure. Control: the JIT failure writes the SMA-698 line, so the
+    /// capture works.
+    #[tokio::test]
+    async fn jit_disabled_line_is_absent_for_a_jit_enabled_issuer() {
+        let (logs, _logs_guard) = capture_logs();
+        let store = AuthnStore::default();
+        let uc = jit_use_case(
+            QueueAuthenticator::new(vec![claims(ISSUER, "sub-jd-u8-ok", Some("jd-u8@example.com"), None), claims(ISSUER, "sub-jd-u8-no-email", None, None)]),
+            &store,
+        );
+
+        uc.resolve("token", Provisioning::Enabled).await.unwrap();
+        let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)), "got {err:?}");
+        let text = logs.text();
+        assert!(jit_disabled_lines(&text).is_empty(), "a JIT-enabled issuer never writes the line:\n{text}");
+        assert_eq!(jit_lines(&text).len(), 1, "control: the SMA-698 line appears:\n{text}");
     }
 }

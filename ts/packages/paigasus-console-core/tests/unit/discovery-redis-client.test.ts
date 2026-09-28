@@ -3,6 +3,7 @@
 // SMA-648 § 5.2, the default tier (no Docker): the reconnect strategy, the connection-loss logger
 // against a fake emitter, and a pin on the client options descriptorCacheFor passes to node-redis.
 import { EventEmitter } from 'node:events';
+import { inspect } from 'node:util';
 import { SocketClosedUnexpectedlyError, SocketTimeoutDuringMaintenanceError, SocketTimeoutError } from 'redis';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ConsoleCoreConfig } from '../../src/config-shape';
@@ -150,5 +151,82 @@ describe('the client options descriptorCacheFor passes to node-redis (D2, D3)', 
     expect(pingInterval as number).toBeGreaterThan(0);
     expect(pingInterval as number).toBeLessThanOrEqual((socketTimeout as number) / 2);
     expect(options?.socket?.reconnectStrategy).toBe(descriptorCacheReconnectStrategy);
+  });
+});
+
+// SMA-715 (spec § 6.2). A local copy of the auth helper: the packages share no test support.
+const SENTINEL = 'SMA715SENTINELPW';
+const MESSAGE = 'PAIGASUS_SESSION_REDIS_URL is not a valid Redis URL';
+
+/** Every throw path of node-redis 6.2.1's parseURL (spec § 1.1). Each error class MEASURED 2026-09-27. */
+const MALFORMED: ReadonlyArray<readonly [label: string, url: string]> = [
+  ['no scheme colon (ERR_INVALID_URL, the password is in `input`)', `redis//u:${SENTINEL}@h`],
+  ['a port above 65535 (ERR_INVALID_URL, the password is in `input`)', `redis://u:${SENTINEL}@h:99999`],
+  ['a scheme other than redis:, rediss: or unix: (Invalid protocol)', `http://u:${SENTINEL}@h`],
+  ['a database path that is not a number (Invalid pathname)', `redis://u:${SENTINEL}@h/abc`],
+  ['a bad percent escape in the password (URIError)', `redis://u:%zz${SENTINEL}@h`],
+  ['a unix URL with a host (Invalid unix URL)', `unix://u:${SENTINEL}@/`],
+  ['a unix URL with a db parameter that is not a number (Invalid db query parameter)', `unix://u:${SENTINEL}@/tmp/s?db=x`],
+  ['a unix URL with a bad escape in the path (URIError)', `unix://u:${SENTINEL}@/tmp/%zz`],
+];
+
+const BLANK: ReadonlyArray<readonly [label: string, url: string]> = [
+  ['empty', ''],
+  ['spaces only', '   '],
+  ['tab and newline', '\t\n'],
+];
+
+/** AC3: every own property name and value, enumerable or not, walked recursively (so each `cause`). */
+function walkText(value: unknown, seen: Set<object> = new Set()): string[] {
+  if (typeof value !== 'object' || value === null) return [String(value)];
+  if (seen.has(value)) return [];
+  seen.add(value);
+  const out: string[] = [];
+  for (const name of Object.getOwnPropertyNames(value)) {
+    out.push(name);
+    out.push(...walkText((value as Record<string, unknown>)[name], seen));
+  }
+  return out;
+}
+
+function expectFixedError(err: unknown): void {
+  expect(err).toBeInstanceOf(Error);
+  // A PLAIN Error, the same class as the missing-URL throw of descriptorCacheFor.
+  expect(Object.getPrototypeOf(err)).toBe(Error.prototype);
+  expect((err as Error).message).toBe(MESSAGE);
+  expect((err as Error).cause).toBeUndefined();
+  const texts = [...walkText(err), String(err), inspect(err, { showHidden: true, depth: Infinity })];
+  for (const text of texts) expect(text).not.toContain(SENTINEL);
+}
+
+describe('descriptorCacheFor with a malformed or blank PAIGASUS_SESSION_REDIS_URL (SMA-715)', () => {
+  const quiet = createJsonLogger(() => undefined);
+  const configFor = (url: string): ConsoleCoreConfig => ({ PAIGASUS_SESSION_STORE: 'redis', PAIGASUS_SESSION_REDIS_URL: url, PAIGASUS_SESSION_REDIS_TIMEOUT_MS: 500 }) as ConsoleCoreConfig;
+  /** What descriptorCacheFor threw, or `undefined`. afterEach's resetDiscoveryForTest destroys any client. */
+  const thrownBy = (url: string): unknown => {
+    try {
+      descriptorCacheFor(configFor(url), quiet);
+      return undefined;
+    } catch (err) {
+      return err;
+    }
+  };
+
+  it.each(MALFORMED)('%s -> the fixed Error, no client in state, and a valid URL then works (AC2, G3)', (_label, url) => {
+    expectFixedError(thrownBy(url));
+    expect(redisClientFromState()).toBeUndefined();
+    // Port 1 refuses the connection. The client is made at once; the connect runs in the background.
+    expect(thrownBy('redis://127.0.0.1:1')).toBeUndefined();
+    expect(redisClientFromState()).toBeDefined();
+  });
+
+  it.each(BLANK)('%s -> the fixed Error and no client in state (AC8, D5)', (_label, url) => {
+    expectFixedError(thrownBy(url));
+    expect(redisClientFromState()).toBeUndefined();
+  });
+
+  it('a valid URL with outer whitespace is NOT refused and puts a client in state (control)', () => {
+    expect(thrownBy(' redis://127.0.0.1:1 ')).toBeUndefined();
+    expect(redisClientFromState()).toBeDefined();
   });
 });

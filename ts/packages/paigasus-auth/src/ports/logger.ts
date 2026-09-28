@@ -14,6 +14,15 @@
 // `session.refresh_failed` may carry `oauthError` (SMA-692 D10). Its value is a code of the RFC
 // 6749 § 5.2 list or 'other', never the IdP's raw string: core/errors.ts's toTokenErrorCode maps
 // it. This type admits any string key, so that function is the control, not this port.
+//
+// `readiness.runtime_failed` carries `error`, the caught error's `name` only (SMA-705 D10), and
+// `code` only when the error is an AuthError of this package (SMA-715 D4). Never its message, its
+// `input` or a foreign error's `code`: node-redis parses the Redis URL with `new URL()`, and that
+// TypeError holds the URL, password included, and carries its own `code`.
+//
+// `session.refresh_failed` may also carry `stage` (SMA-704), from RefreshFailedStage below. It is
+// present only when the refresh failed BEFORE the session lock. The line never carries both `stage`
+// and `oauthError`: a discovery failure has no OAuth code.
 
 export type AuthEventName =
   | 'login.started'
@@ -29,7 +38,8 @@ export type AuthEventName =
   | 'logout.completed'
   | 'store.unavailable'
   | 'store.operation_timeout'
-  | 'oidc.discovery_failed';
+  | 'oidc.discovery_failed'
+  | 'readiness.runtime_failed';
 
 export type AuthEventFields = Readonly<Record<string, string | number | boolean>>;
 
@@ -41,12 +51,19 @@ export type StoreUnavailableStage =
   'get_session' | 'release_lock' | 'login_put_transaction' | 'login_delete' | 'callback_take_transaction' | 'callback_delete' | 'callback_set' | 'logout_get' | 'logout_delete';
 
 /**
- * The closed set of `stage` values for `oidc.discovery_failed` (SMA-656 D7): the route that needed
- * the discovered configuration. `AuthEventFields` is a free record, so the one emitter,
- * http/routes.ts's `discoveryFailedResponse`, takes this type as a typed parameter. A later refresh
- * or logout stage is a new member here, not a new event name.
+ * The closed set of `stage` values for `oidc.discovery_failed` (SMA-656 D7, SMA-705 D8): the route
+ * that needed the discovered configuration. `AuthEventFields` is a free record, so the one emitter,
+ * http/discovery-log.ts's `logDiscoveryFailed`, takes this type as a typed parameter. A later
+ * refresh or logout stage is a new member here, not a new event name.
  */
-export type OidcDiscoveryStage = 'login' | 'callback';
+export type OidcDiscoveryStage = 'login' | 'callback' | 'readiness';
+
+/**
+ * The closed set of `stage` values for `session.refresh_failed` (SMA-704). `'discovery'` means
+ * `prepareRefresh` (OIDC discovery) failed before the session lock was taken, so no token request
+ * was sent. A failure of the token call under the lock has no `stage`.
+ */
+export type RefreshFailedStage = 'discovery';
 
 export interface AuthLogger {
   event(name: AuthEventName, fields: AuthEventFields): void;
