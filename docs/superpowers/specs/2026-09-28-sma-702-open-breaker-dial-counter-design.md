@@ -396,3 +396,8 @@ Changed in this revision:
 - § 5.2 now says that the filter `test(an_open_breaker)` also selects two tests outside S1 to
   S7.
 - Q1 to Q4 carry Sven's answers (§ 10), and D2, D3 and A7 name them.
+
+<!-- moon-diagnosis:ok -->
+<!-- This file names ciReport.json only as a place to check that a CI task was not a cache hit.
+     It does not restate or supersede CLAUDE.md's moon-diagnosis procedure.
+     `ci/actionlint/run.sh` check 12 requires this marker on any file that names ciReport.json. -->
