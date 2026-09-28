@@ -429,7 +429,10 @@ does not exist yet. This window exists for every console version bump under SMA-
 - A change to `/healthz`.
 - A rate limit on `/readyz` (§ 6).
 - The Redis DSN leak on the user request path (D10). SMA-715 tracks it: `redis-store.ts`
-  must catch the `createClient` URL error and rethrow a redacted error.
+  must catch the `createClient` URL error and rethrow a redacted error. Closed by SMA-715
+  (`docs/superpowers/specs/2026-09-27-sma-715-redis-url-parse-redaction-design.md`): both
+  `createClient` sites rethrow a fixed error, and `readiness.runtime_failed` now also logs the
+  `code` of an `AuthError`.
 
 ## 11. Challenge changelog
 

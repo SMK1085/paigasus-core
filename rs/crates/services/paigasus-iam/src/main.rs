@@ -106,6 +106,12 @@ async fn serve() -> anyhow::Result<()> {
         if config.outbox.wake_on_commit {
             metrics::counter!(names::IAM_OUTBOX_NOTIFYING_ENQUEUES_TOTAL).increment(0);
         }
+        // SMA-713: the relay's first counter increment happens only after the migration. Prime the
+        // series at zero before the listener binds, so Prometheus has a zero baseline and
+        // `increase()` sees the first publish failure. Gated like the relay itself.
+        if config.outbox.relay_enabled {
+            metrics::counter!(names::IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL).increment(0);
+        }
     }
 
     let db = Database::connect(config.database_url.as_str()).await?;

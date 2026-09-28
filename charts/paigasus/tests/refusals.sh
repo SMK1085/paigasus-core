@@ -198,6 +198,74 @@ expect_render "bootstrap admin and extraEnv" \
   --set "$ADMIN.issuer=$OK_ISSUER" --set-string "$ADMIN.subject=392488538992280259" \
   --set "zones.iam.backend.extraEnv[0].name=RUST_LOG" --set "zones.iam.backend.extraEnv[0].value=info"
 
+# SMA-694 (spec § 4.4). The HTTPRoute block. ROUTE is a valid route-mode flag set, so a row
+# below fails only for the value it names. Each needle carries its key path, so it cannot match
+# another refusal.
+ROUTE=(--set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw'
+  --set 'httpRoute.parentRefs[0].sectionName=https')
+# R1. A quoted "false" is a string, and a non-empty string is true in a template `if`.
+expect_fail "httpRoute.enabled a string" "httpRoute.enabled must be true or false" \
+  --set-string httpRoute.enabled=false
+# R2, R2b, R2c. An absent, null or non-list parentRefs attaches the route to nothing. R2b is the
+# `helm upgrade --reuse-values` shape of a release made before the value (AC5). For R2c, helm
+# 3.22.0 keeps the map over the default list with a coalesce warning (measured 2026-09-28).
+expect_fail "httpRoute without parentRefs" "httpRoute.parentRefs is required" \
+  --set httpRoute.enabled=true
+expect_fail "httpRoute parentRefs null" "httpRoute.parentRefs is required" \
+  --set httpRoute.enabled=true --set httpRoute.parentRefs=null
+expect_fail "httpRoute parentRefs a map" "httpRoute.parentRefs is required" \
+  --set httpRoute.enabled=true --set httpRoute.parentRefs.name=gw
+# R3, R4. Each entry names a parent and selects one listener (D11).
+expect_fail "httpRoute parentRef without name" "httpRoute.parentRefs[0] must be a map with a non-empty name" \
+  --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].sectionName=https'
+expect_fail "httpRoute parentRef without listener" "httpRoute.parentRefs[0] must set sectionName or port" \
+  --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw'
+# R5. `dig` needs a map.
+expect_fail "httpRoute not a map" "httpRoute must be a map" \
+  --set httpRoute=true
+# R6. The API server refuses an HTTPRoute hostname with an upper-case letter.
+expect_fail "httpRoute host not lowercase" "ingress.host must be lowercase when httpRoute.enabled" \
+  "${ROUTE[@]}" --set ingress.host=Console.Example.test
+# Review Focus 4. The lowercase rule is for route mode only. The Ingress path is unchanged.
+expect_render "upper-case host, httpRoute off" \
+  --set ingress.host=Console.Example.test
+# R7. A port selects the listener too.
+expect_render "httpRoute parentRef with port" \
+  --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw' \
+  --set 'httpRoute.parentRefs[0].port=443'
+# R8, R9 (D14). The API server needs string annotation values; --set gives a boolean for "true".
+expect_fail "httpRoute annotations not a map" "httpRoute.annotations must be a map" \
+  "${ROUTE[@]}" --set httpRoute.annotations=x
+expect_fail "httpRoute annotation not a string" "httpRoute.annotations.owner must be a string" \
+  "${ROUTE[@]}" --set httpRoute.annotations.owner=true
+# R10-R16 (D13). The chart refuses what the HTTPRoute v1 CRD refuses, before Argo CD sync time.
+GW=(--set zones.gateway.enabled=true --set zones.gateway.backend.url=http://gw.example.test:8088)
+expect_fail "httpRoute timeouts not a map" "httpRoute.timeouts must be a map" \
+  "${ROUTE[@]}" --set httpRoute.timeouts=10s
+expect_fail "httpRoute timeouts unknown key" "httpRoute.timeouts has the unknown key requestTimeout" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.requestTimeout=10s
+expect_fail "httpRoute timeout bad form" "httpRoute.timeouts.request must be a duration" \
+  "${ROUTE[@]}" --set-string httpRoute.timeouts.request=10
+expect_fail "httpRoute timeout a number" "httpRoute.timeouts.request must be a duration" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=10
+expect_fail "zone timeout bad form" "zones.gateway.console.httpRouteTimeouts.request must be a duration" \
+  "${ROUTE[@]}" "${GW[@]}" --set zones.gateway.console.httpRouteTimeouts.request=ten
+expect_fail "httpRoute backendRequest longer than request" "zones.iam: the HTTPRoute backendRequest timeout 1m" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=10s --set httpRoute.timeouts.backendRequest=1m
+expect_render "httpRoute request 0s with backendRequest" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=0s --set httpRoute.timeouts.backendRequest=1m
+expect_render "zone timeout on a disabled zone is not checked" \
+  "${ROUTE[@]}" --set zones.gateway.enabled=false --set zones.gateway.console.httpRouteTimeouts.request=ten
+# Review Focus 1. "ms" is not "m": 1s is longer than 900ms, and 59s999ms is shorter than 1m.
+expect_fail "httpRoute backendRequest 1s over request 900ms" "zones.iam: the HTTPRoute backendRequest timeout 1s" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=900ms --set httpRoute.timeouts.backendRequest=1s
+expect_render "httpRoute backendRequest 59s999ms under request 1m" \
+  "${ROUTE[@]}" --set httpRoute.timeouts.request=1m --set httpRoute.timeouts.backendRequest=59s999ms
+# Review Focus 2. The gateway zone's 10m default is its merged request, so a chart-wide
+# backendRequest of 20m is refused for that zone only.
+expect_fail "chart backendRequest over the zone default" "zones.gateway: the HTTPRoute backendRequest timeout 20m" \
+  "${ROUTE[@]}" "${GW[@]}" --set httpRoute.timeouts.backendRequest=20m
+
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088

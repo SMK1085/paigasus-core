@@ -19,10 +19,13 @@
 // that includes the Redis connect.
 //
 // THE LOG (D8, D10). A discovery attempt that this route started and that fails logs one
-// `oidc.discovery_failed { zone, stage: 'readiness', reason }` through logDiscoveryFailed. A runtime
-// build that fails logs `readiness.runtime_failed { error }`, where `error` is the error's `name`
-// only. It never logs the error object, its message or its `input`: node-redis parses the Redis URL
-// with `new URL()`, and that TypeError holds the URL, password included (measured, spec D10).
+// `oidc.discovery_failed { zone, stage: 'readiness', reason }` through logDiscoveryFailed.
+// A runtime build that fails logs `readiness.runtime_failed { error, code }`. `error` is the error's
+// `name` only. `code` is present only for an AuthError of this package (SMA-715 D4), for example
+// `auth_config_invalid`; a foreign error's `code` is never logged. It never logs the error object,
+// its message or its `input`: node-redis parses the Redis URL with `new URL()`, and that TypeError
+// holds the URL, password included (measured, SMA-705 spec D10). Since SMA-715 the Redis store
+// rethrows that TypeError as a fixed AuthConfigError before it reaches this route.
 //
 // NO THROW OUT OF A DETACHED PROMISE (D11). The `.catch` of the started attempt wraps its log call
 // in try/catch. A logger that throws would otherwise make a new unhandled rejection.
@@ -30,6 +33,7 @@
 // A LOGGER THAT THROWS NEVER CHANGES THE RESPONSE (D7). The runtime-failure log call is also
 // wrapped in try/catch. A throwing logger must not turn the 503 answer into a rejected promise.
 import type { AuthLogger } from '../ports/logger';
+import { AuthError } from '../core/errors';
 import type { AuthRuntime } from '../runtime';
 import { logDiscoveryFailed } from './discovery-log';
 
@@ -49,6 +53,18 @@ function errorName(err: unknown): string {
 }
 
 /**
+ * The event fields of a runtime-build failure (SMA-715 D4): the error's `name`, plus its `code` ONLY
+ * when it is one of this package's own errors (an AuthError, a closed literal such as
+ * 'auth_config_invalid'). A foreign error's `code` is text this package does not control; the
+ * node-redis URL TypeError carries `code: 'ERR_INVALID_URL'`, and it is never logged.
+ */
+function runtimeFailureFields(err: unknown): Record<string, string> {
+  const fields: Record<string, string> = { error: errorName(err) };
+  if (err instanceof AuthError) fields['code'] = err.code;
+  return fields;
+}
+
+/**
  * The readiness answer (SMA-705). `getRuntime` is the app's runtime getter (for example
  * `authRuntime`). It can throw synchronously or reject. `logger` is for the runtime-failure path
  * only, where no runtime exists: pass the logger that the app gives getAuthRuntime.
@@ -60,7 +76,7 @@ export async function readinessResponse(getRuntime: () => Promise<AuthRuntime>, 
     runtime = await getRuntime();
   } catch (err) {
     try {
-      logger.event('readiness.runtime_failed', { error: errorName(err) });
+      logger.event('readiness.runtime_failed', runtimeFailureFields(err));
     } catch {
       // D7. A logger that throws must not replace the readiness response.
     }
