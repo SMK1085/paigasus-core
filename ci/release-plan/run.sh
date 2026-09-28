@@ -446,10 +446,10 @@ negative_control() {
   # pointing at the wrong thing while `cmp -s` passed.
   #
   # It asserts on STDERR as well as rc. rc 3 alone is satisfiable by the arity floor in
-  # self_test(): delete two rows from COLLECTION_ROWS and the floor fires, self_test() returns 3
-  # FOR THE FLOOR, and an rc-only assertion goes green while the neutered check went undetected —
-  # the two controls covering for each other's absence. Rows 3/4 grep for a specific verdict line
-  # for the same reason.
+  # self_test(): delete rows from COLLECTION_ROWS until it falls below its floor, and the floor
+  # fires, self_test() returns 3 FOR THE FLOOR, and an rc-only assertion goes green while the
+  # neutered check went undetected — the two controls covering for each other's absence. Rows 3/4
+  # grep for a specific verdict line for the same reason.
   local mut8_dir mut8_rc=0 mut8_out
   mut8_dir="$tmp/shape-mutant"
   mkdir -p "$mut8_dir"

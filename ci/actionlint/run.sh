@@ -4640,18 +4640,20 @@ release_plan_self_test() {
     || infra "check 11: release_plan.py --fixture-count failed"
   case "$n" in ''|*[!0-9]*) infra "check 11: --fixture-count printed '$n', expected an integer" ;; esac
   # Floor, not a count: it exists to catch an EMPTIED table, and one row of headroom keeps a
-  # legitimate row removal from aborting the gate as infra. Check 10's own floor is equally
-  # loose (150 against 155 actual — that citation read 20 against 84 until the SMA-658 PR 2
-  # review; the table has grown with every V8/V9 round since).
+  # legitimate row removal from aborting the gate as infra. Check 10's own floor has a looser
+  # re-baseline rule: set it just under the current count, never far below it.
   [ "$n" -ge 8 ] || infra "check 11: release_plan.py reports $n fixtures, expected at least 8"
 
   # The COLLECTION_ROWS twin. Separate flag, not a widened --fixture-count: that flag's consumer
   # above validates a single integer, and one number cannot floor two tables.
+  # The floor tracks the table (SMA-709): one below the current `--collection-count`. When the
+  # row count changes, in either direction, re-set this floor and its twin in
+  # ci/release-plan/release_plan.py self_test() in the same commit.
   c="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 \
     ci/release-plan/release_plan.py --collection-count)" \
     || infra "check 11: release_plan.py --collection-count failed"
   case "$c" in ''|*[!0-9]*) infra "check 11: --collection-count printed '$c', expected an integer" ;; esac
-  [ "$c" -ge 14 ] || infra "check 11: release_plan.py reports $c collection rows, expected at least 14"
+  [ "$c" -ge 37 ] || infra "check 11: release_plan.py reports $c collection rows, expected at least 37; if the removal is intended, lower both floors in the same commit (SMA-709)"
 
   release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken
       verdict. The release-plan decision is not deciding what it is documented to decide."; rc=1; }
