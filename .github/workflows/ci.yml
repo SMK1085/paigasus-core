@@ -21,7 +21,9 @@ jobs:
   ci:
     name: moon ci
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 45, not 30 (SMA-718). The heavy-integration mutex runs paigasus-iam-rs:test and the two
+    # console test-e2e tasks one after another, and a run that selects all three passed 30 minutes.
+    timeout-minutes: 45
     # cedar-policy + its crypto/parser tree (SMA-444) balloons the debug `target/` past even
     # the reclaimed headroom below → `rustc-LLVM ERROR: ... No space left on device` mid-link
     # of the paigasus-iam test binaries. Trim debug info to line tables (panic line numbers are
