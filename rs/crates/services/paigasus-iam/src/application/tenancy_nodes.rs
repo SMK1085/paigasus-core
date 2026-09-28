@@ -66,8 +66,6 @@ impl TenancyNodes {
     /// Loads `claimed`'s node, authorizes `action` for `actor` against the STORED PRN, refuses a
     /// caller PRN whose canonical form differs from the stored one, and returns the STORED node.
     /// `operation` is the RPC name for the warning line. Module docs give the order and why.
-    // SMA-646 Task 1: no service calls this yet. Task 2 removes this attribute.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn resolve_and_authorize(&self, authorize: &Authorize, actor: &Prn, action: Action, claimed: &TenancyNodeRef, operation: &'static str) -> Result<TenancyNodeRef, TenancyError> {
         let stored = match claimed {
             TenancyNodeRef::Organization(id) => TenancyNodeRef::Organization(self.orgs.find(id.uuid()).await?.ok_or(TenancyError::NotFound)?.node.id),

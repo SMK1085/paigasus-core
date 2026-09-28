@@ -85,6 +85,7 @@ use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
 use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
 use crate::application::teams::{TeamService, TeamServiceDeps};
+use crate::application::tenancy_nodes::TenancyNodes;
 use crate::config::{ApiKeyCacheBackend, AuthnConfig, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
 use paigasus_iam_core::{
     ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntityGenBumper, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore,
@@ -516,14 +517,20 @@ impl AppState {
         // counter `authz`'s `PolicySnapshot::reload_if_stale` polls (AC1).
         let authorize = Authorize::new(authz.clone() as Arc<dyn Authorizer>);
 
-        // SMA-444 cross-tenant-escalation fix (FIX 2): `RoleService::resolve_scope`'s own
-        // DB-lookup defense needs read access to the tenancy repos, independent of
-        // `orgs`/`teams`/`projects` above (those are wrapped in `OrganizationService`/etc.,
-        // not exposed as bare repos) — cheap fresh instances, `DatabaseConnection` clones an
-        // `Arc`-backed pool handle.
-        let role_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
-        let role_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
-        let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
+        // Read access to the tenancy repos, independent of `orgs`/`teams`/`projects` above
+        // (those are wrapped in `OrganizationService`/etc., not exposed as bare repos) — cheap
+        // fresh instances, `DatabaseConnection` clones an `Arc`-backed pool handle. Three users:
+        // `RoleService::resolve_scope` (SMA-444 FIX 2), and, through ONE shared `TenancyNodes`,
+        // the stored-PRN check of `ServiceAccountService::create`/`list` and
+        // `ApiKeyService::issue` (SMA-646).
+        let tenancy_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
+        let tenancy_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
+        let tenancy_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
+        let tenancy_nodes = TenancyNodes {
+            orgs: tenancy_orgs.clone(),
+            teams: tenancy_teams.clone(),
+            projects: tenancy_projects.clone(),
+        };
         // SMA-446 Task B4 (the UoW reference pattern B5-B7 copy): `roles` drives its
         // grant/revoke mutation + outbox event + audit entry through ONE `SeaOrmUnitOfWork`
         // transaction (`role_uow`), then an awaited, best-effort `GenerationsPolicyGenBumper`
@@ -539,9 +546,9 @@ impl AppState {
             // pre-check. A second `PgRoleGrantStore` value over the same `db` and `gens`
             // handles — the struct is not what must be shared (the SMA-477 policy-store note).
             query: Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone())),
-            orgs: role_orgs,
-            teams: role_teams,
-            projects: role_projects,
+            orgs: tenancy_orgs,
+            teams: tenancy_teams,
+            projects: tenancy_projects,
             // SMA-649: `RoleService::resolve_principal` confirms a grant's target principal PRN
             // against the stored row. A fresh handle over the same `db` (a cheap pool clone).
             principals: Arc::new(PgPrincipalRepository::new(db.clone())),
@@ -704,6 +711,7 @@ impl AppState {
             keys: Arc::new(PgApiKeyRepository::new(db.clone())) as Arc<dyn ApiKeyRepository>,
             cache: api_key_cache.clone(),
             authorize: authorize.clone(),
+            nodes: tenancy_nodes.clone(),
             uow: service_account_uow,
             outbox: service_account_outbox,
             ids: KernelIdGenerator,
