@@ -1484,22 +1484,38 @@ causes are:
         A `409 email-conflict` means that another user has the email. The match is exact and
         case-sensitive, the same as JIT.
    5. **Reverse a wrong link.** Unlink it with the C3 call. Then read the audit log for the user
-      to see the time of the link:
+      to see the time of the link.
+
+      Always set `from` and `to` in these queries. The audit query applies a time window:
+
+      - When you set neither `from` nor `to`, the query reads only the last
+        `audit.query_default_window_days` days (default 90). An older link does not show.
+      - When you set only one of them, or both, the span is at most
+        `audit.query_max_window_days` days (default 366). The query moves a `from` that is
+        older than that limit forward, and it does not tell you.
+
+      So for a link that can be older than the window, read the history in steps. Query one
+      span, then move `from` and `to` back by one span, and query again.
 
       ```bash
       curl -sS -G "$IAM/v1/audit" -H "Authorization: Bearer $TOKEN" \
-        --data-urlencode "resource=prn:pgs:iam:::principal/<principal-uuid>"
+        --data-urlencode "resource=prn:pgs:iam:::principal/<principal-uuid>" \
+        --data-urlencode "from=<span start, RFC 3339>" \
+        --data-urlencode "to=<span end, RFC 3339>"
       ```
 
       After the link, both people act as one principal. No row shows which person made a
       change. The audit log holds only committed writes and denials. It does not hold reads.
 
-      To see what the principal did after the link, query by actor and start time:
+      To see what the principal did after the link, query by actor. Set `from` to the time of
+      the link and `to` to a time at most `audit.query_max_window_days` days later. Then move the
+      span forward until `to` is the current time:
 
       ```bash
       curl -sS -G "$IAM/v1/audit" -H "Authorization: Bearer $TOKEN" \
         --data-urlencode "actor=prn:pgs:iam:::principal/<principal-uuid>" \
-        --data-urlencode "from=<link occurred_at>"
+        --data-urlencode "from=<link occurred_at>" \
+        --data-urlencode "to=<span end, RFC 3339>"
       ```
 
    `CreateUser` plus a link is also the way to add a user on an issuer that has JIT disabled.
