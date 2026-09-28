@@ -147,7 +147,7 @@ async fn who_am_i_obeys_the_jit_policy() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (logs, _logs_guard) = support::capture_logs();
+    let (logs, _logs_guard) = paigasus_logging::test_support::capture_logs();
     let idp = support::start_mock_idp().await;
     let cfg = support::test_config_with(&[(&idp, false)], 30);
     let state = AppState::new(db, &cfg).await.unwrap();
@@ -359,7 +359,7 @@ async fn who_am_i_with_a_token_without_email_logs_the_provisioning_failure() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (logs, _logs_guard) = support::capture_logs();
+    let (logs, _logs_guard) = paigasus_logging::test_support::capture_logs();
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
     let token = idp.bearer("t2-no-email-subject", None, "paigasus", 3600);
@@ -390,7 +390,7 @@ async fn jit_disabled_refusals_on_http_and_grpc_share_one_line() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (logs, _logs_guard) = support::capture_logs();
+    let (logs, _logs_guard) = paigasus_logging::test_support::capture_logs();
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config_with(&[(&idp, false)], 30)).await.unwrap();
     let token = idp.bearer("t4-jd-subject-3a7f", Some("t4-jd-mail-3a7f@example.com"), "paigasus", 3600);
