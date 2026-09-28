@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,17 @@ KUBE_VERSION = "1.31.0"
 RELEASE = "paigasus"
 SENTINEL_URL = "http://gateway-sentinel.example.test:8088"
 SENTINEL_HOST = "gateway-sentinel.example.test"
+
+# SMA-679: the limit for ONE helm subprocess, in seconds. A render takes well under a second
+# (measured 0.02-0.03 s). The task starts the module 8 times (7 negative-control fixtures + the real
+# run), and each module run can time out once, so the worst case is 8 * HELM_TIMEOUT_S. That sum
+# must stay far below the 30-minute CI job limit, which the whole moon ci graph shares. A call
+# over the limit is an infrastructure error (rc 2), never a row failure.
+HELM_TIMEOUT_S = 30
+# SMA-679: the limit for the one git subprocess (release_tags), in seconds. It reads local refs
+# only. It shares the HELM_TIMEOUT_S sizing rule: one module run can time out at most once, of
+# either kind, because the first InfraError ends the run.
+GIT_TIMEOUT_S = 30
 
 # Row 7 (SMA-513 PR 3 spec § 5.5): the kind job's values files. The kind job is not a required
 # check; this row is, so a chart change that breaks those values reds before merge.
@@ -247,6 +259,25 @@ def _service_port(service, name):
 
 
 # --------------------------------------------------------------------------- render
+
+
+def _run_helm(cmd, label, run=subprocess.run):
+    """Run one helm command with HELM_TIMEOUT_S (SMA-679). A timeout, or an OSError when helm
+    starts, is InfraError (rc 2); the message names the render (label), the limit and the command.
+    Returns the CompletedProcess; the caller reads returncode. `run` is a parameter only so
+    self_test() can drive this with no helm; production never passes it."""
+    try:
+        return run(cmd, capture_output=True, text=True, check=False, timeout=HELM_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        # On POSIX, subprocess.run gives the partial output as bytes even with text=True.
+        tail = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        tail = tail.strip()[-500:]
+        raise InfraError(
+            f"helm did not finish in {HELM_TIMEOUT_S} s (HELM_TIMEOUT_S) for {label}: "
+            f"{' '.join(map(str, cmd))}" + (f"; partial stderr: {tail}" if tail else "")
+        ) from exc
+    except OSError as exc:
+        raise InfraError(f"helm could not start for {label}: {exc}") from exc
 
 
 def helm_template(chart, enabled, extra=()):
@@ -1118,6 +1149,19 @@ def self_test():
             return
         failures.append(f"{label}: expected an infrastructure error (rc 2), got none")
 
+    def expect_infra_strict(label, fn):
+        """Like expect_infra, but any other exception is a named failure, not a traceback that
+        stops every later row (SMA-679). Returns the InfraError, or None."""
+        try:
+            fn()
+        except InfraError as exc:
+            return exc
+        except Exception as exc:
+            failures.append(f"{label}: expected InfraError, got {type(exc).__name__}: {exc}")
+            return None
+        failures.append(f"{label}: expected InfraError, got none")
+        return None
+
     both, iam_only = ("gateway", "iam"), ("iam",)
 
     # ---- the synthetic render: every later row builds on it
@@ -1418,6 +1462,47 @@ def self_test():
         )
         (Path(tmp) / "b.yaml").unlink()
         expect_infra("check7 a missing b.yaml raises InfraError", lambda: check7(Path(tmp), run=ok_run, helm="helm-stub", values_dir=tmp))
+
+    # ---- SMA-679: every helm subprocess is bounded by HELM_TIMEOUT_S, the git one by
+    # GIT_TIMEOUT_S. A timeout, or an OSError when helm starts, is rc 2, never a failed row.
+    def timeout_run(cmd, **_kw):
+        raise subprocess.TimeoutExpired(cmd, HELM_TIMEOUT_S, stderr=b"partial")
+
+    def timeout_run_no_stderr(cmd, **_kw):
+        raise subprocess.TimeoutExpired(cmd, HELM_TIMEOUT_S)
+
+    def oserror_run(cmd, **_kw):
+        raise PermissionError("stub")
+
+    def fast_run(cmd, **kw):
+        # The real kill-and-reap path of subprocess.run, with a short limit. D6 exempts self_test.
+        kw["timeout"] = 0.5
+        return subprocess.run(cmd, **kw)
+
+    helm_cmd = ["helm-stub", "template", "x"]
+    expect_infra_strict("helm timeout: _run_helm maps TimeoutExpired to InfraError",
+                        lambda: _run_helm(helm_cmd, "render-label-x", run=timeout_run))
+    exc = expect_infra_strict("helm timeout: the InfraError names the render, the command, the limit and the stderr",
+                              lambda: _run_helm(helm_cmd, "render-label-x", run=timeout_run))
+    msg = str(exc) if exc is not None else ""
+    for needle in ("for render-label-x:", "helm-stub template x", "HELM_TIMEOUT_S", f"{HELM_TIMEOUT_S} s", "partial stderr: partial"):
+        if needle not in msg:
+            failures.append(f"helm timeout: the InfraError names the render, the command, the limit and the stderr: {needle!r} is not in {msg!r}")
+    exc = expect_infra_strict("helm timeout: a TimeoutExpired with no stderr still gives InfraError",
+                              lambda: _run_helm(helm_cmd, "render-label-x", run=timeout_run_no_stderr))
+    if exc is not None and "partial stderr" in str(exc):
+        failures.append(f"helm timeout: a TimeoutExpired with no stderr must not print a partial stderr, got {exc}")
+    expect_infra_strict("helm timeout: _run_helm maps OSError to InfraError",
+                        lambda: _run_helm(helm_cmd, "render-label-x", run=oserror_run))
+    started = time.monotonic()
+    expect_infra_strict("helm timeout: a real subprocess over the limit is killed and gives InfraError",
+                        lambda: _run_helm([sys.executable, "-c", "import time; time.sleep(30)"], "sleep", run=fast_run))
+    elapsed = time.monotonic() - started
+    if elapsed >= 10:
+        failures.append(f"helm timeout: a real subprocess over the limit is killed and gives InfraError: took {elapsed:.1f} s, want < 10 s")
+    if not (HELM_TIMEOUT_S > 0 and GIT_TIMEOUT_S > 0 and max(HELM_TIMEOUT_S, GIT_TIMEOUT_S) * 8 <= 5 * 60):
+        failures.append(f"helm timeout: 8 module runs fit far inside the job limit: HELM_TIMEOUT_S={HELM_TIMEOUT_S}, "
+                        f"GIT_TIMEOUT_S={GIT_TIMEOUT_S}; 8 * max must be <= 300 s (spec D1). A larger value needs a new decision")
 
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
