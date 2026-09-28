@@ -102,9 +102,11 @@ tempfile = "3"
 # listener (SMA-558 D6).
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
-# Captures log lines in the auth and chat tests (SMA-635): one `paigasus-org ignored` warning, and
-# the `auth`/`scope` fields of `chat completion proxied`.
-tracing-subscriber = { workspace = true }
+# The shared log-capture helper for the auth and chat tests (SMA-689, spec D3). Listed a second
+# time, here, so that the `test-support` feature reaches test builds only, never the shipped
+# binary. `version = "0.0.0"` is REQUIRED, not redundant: `rs/deny.toml` sets
+# `wildcards = "deny"`, and a path dependency with no version counts as a wildcard.
+paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0", features = ["test-support"] }
 
 [lints]
 workspace = true
