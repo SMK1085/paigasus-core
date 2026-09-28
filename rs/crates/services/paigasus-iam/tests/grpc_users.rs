@@ -613,3 +613,54 @@ async fn identity_rpcs_ignore_enforce_tenancy_and_authorize_before_validation() 
 
     server.abort();
 }
+
+/// Fix round 1 (review finding 2): the handler must forward the CALLER's real credential to the
+/// service's own-identity guard, not a placeholder. The admin's bearer JIT-links an identity
+/// (issuer `idp.issuer`, subject `grpc-id-own-guard-admin`, mirroring
+/// `identity_rpcs_need_a_bearer_and_their_action_and_work_for_platform_admin`'s setup) as a side
+/// effect of `support::provision_platform_admin`. Unlinking THAT identity, authenticated by the
+/// SAME bearer, must be refused: `FailedPrecondition` with the `cannot-unlink-own-identity`
+/// reason. A handler that passed an `ApiKey`/placeholder credential instead of `ctx.credential`
+/// would never trip this guard and this test would see `Ok` or `NotFound` instead.
+#[tokio::test]
+async fn unlink_refuses_the_identity_that_authenticated_the_caller() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let admin_token = idp.bearer("grpc-id-own-guard-admin", Some("grpc-id-own-guard-admin@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &admin_token).await;
+    let (addr, server) = spawn_server(state).await;
+    let mut client = UserServiceClient::new(channel(addr).await);
+
+    let admin = client
+        .find_user_by_email(authed(
+            FindUserByEmailRequest {
+                email: "grpc-id-own-guard-admin@example.com".to_string(),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .user
+        .expect("user");
+    let own_identity = admin.external_identities.first().expect("JIT provisioning links the bearer's own identity").id.clone();
+
+    let err = client
+        .unlink_external_identity(authed(
+            UnlinkExternalIdentityRequest {
+                user_prn: admin.prn.clone(),
+                external_identity_id: own_identity,
+                reason: "INC-4: attempted self-unlink".to_string(),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    assert_eq!(reason_of(&err), "cannot-unlink-own-identity");
+
+    server.abort();
+}

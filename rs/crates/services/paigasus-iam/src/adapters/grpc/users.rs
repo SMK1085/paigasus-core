@@ -84,12 +84,28 @@ pub(crate) fn opt_string(raw: String) -> Option<String> {
 
 /// Parses a wire `user_prn` into the [`PrincipalId`] it names (SMA-712). It must be an `iam`
 /// `principal` PRN. The service then answers 404 when that principal is not a user.
+///
+/// **Fix round 1 (review finding 1).** The result is always the CANONICAL principal PRN —
+/// `Prn::build`'s fixed, always-valid `service`/`region`/`org`/`resource_type` (mirrors
+/// `http::service_accounts::service_account_id`'s identical `.expect`) — never the caller's own
+/// parsed PRN. A wire `user_prn` may carry a region or an organization slot that the service
+/// itself ignores (it looks the principal up by uuid), but the STORED/AUDITED PRN
+/// (`user_identities.rs` audits `user.canonical()`) and the wire PRN this handler returns must
+/// be the identical string every other transport and every later PRN-equality audit query sees
+/// — never a second, non-canonical spelling of the same principal.
 fn user_id(raw: &str) -> Result<PrincipalId, TenancyError> {
     let parsed = Prn::parse(raw).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
     if parsed.service() != "iam" || parsed.resource_type() != "principal" {
         return Err(TenancyError::InvalidPrn(parsed.canonical()));
     }
-    Ok(PrincipalId::from_prn(parsed))
+    Ok(canonical_principal_id(parsed.resource_id()))
+}
+
+/// Builds the canonical `PrincipalId` for a uuid — the fixed, always-valid literal
+/// `service`/`region`/`org`/`resource_type` used here can never fail (mirrors
+/// `http::service_accounts::service_account_id`'s identical `.expect`).
+fn canonical_principal_id(uuid: Uuid) -> PrincipalId {
+    PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).expect("static principal prn parts are valid"))
 }
 
 /// Parses a wire `external_identity_id` (SMA-712).
@@ -232,6 +248,24 @@ mod tests {
         assert!(matches!(user_id("not a prn"), Err(TenancyError::InvalidPrn(_))));
         let org = paigasus_iam_core::OrganizationId::from_uuid(uuid);
         assert!(matches!(user_id(&org.canonical()), Err(TenancyError::InvalidPrn(_))));
+    }
+
+    /// Fix round 1 (review finding 1): a `user_prn` carrying a region or an organization slot
+    /// must still resolve to the CANONICAL principal PRN — the same `PrincipalId` the bare-uuid
+    /// form produces — not the caller's own (possibly non-canonical) PRN. The service looks the
+    /// user up by uuid regardless, but the audit row and the returned wire PRN must agree with
+    /// every other transport and with any later PRN-equality audit query.
+    #[test]
+    fn a_user_prn_with_a_region_or_an_org_slot_still_resolves_to_the_canonical_principal_id() {
+        let uuid = uuid::Uuid::from_u128(7);
+        let canonical = user_id(&format!("prn:pgs:iam:::principal/{uuid}")).unwrap();
+
+        let with_region = format!("prn:pgs:iam:eu-west-1::principal/{uuid}");
+        assert_eq!(user_id(&with_region).unwrap(), canonical, "a region segment must not survive into the stored/audited PRN");
+
+        let org_uuid = uuid::Uuid::from_u128(99);
+        let with_org = Prn::build("iam", "", Some(org_uuid), "principal", uuid).unwrap().canonical();
+        assert_eq!(user_id(&with_org).unwrap(), canonical, "an organization slot must not survive into the stored/audited PRN");
     }
 
     #[test]
