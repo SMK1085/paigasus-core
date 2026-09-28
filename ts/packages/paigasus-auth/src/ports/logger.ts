@@ -15,9 +15,10 @@
 // 6749 § 5.2 list or 'other', never the IdP's raw string: core/errors.ts's toTokenErrorCode maps
 // it. This type admits any string key, so that function is the control, not this port.
 //
-// `readiness.runtime_failed` carries `error`, the caught error's `name` only (SMA-705 D10). Never
-// its message or its `input`: node-redis parses the Redis URL with `new URL()`, and that TypeError
-// holds the URL, password included.
+// `readiness.runtime_failed` carries `error`, the caught error's `name` only (SMA-705 D10), and
+// `code` only when the error is an AuthError of this package (SMA-715 D4). Never its message, its
+// `input` or a foreign error's `code`: node-redis parses the Redis URL with `new URL()`, and that
+// TypeError holds the URL, password included, and carries its own `code`.
 //
 // `session.refresh_failed` may also carry `stage` (SMA-704), from RefreshFailedStage below. It is
 // present only when the refresh failed BEFORE the session lock. The line never carries both `stage`

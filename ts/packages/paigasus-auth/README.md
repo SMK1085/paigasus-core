@@ -157,6 +157,18 @@ holds even for an unhandled adapter error: this package never logs a caught node
 `openid-client` error object directly (both can embed a URL or a DSN in their own error text) —
 only a fixed name and message are extracted for logging.
 
+A malformed, empty or whitespace-only `PAIGASUS_SESSION_REDIS_URL` fails with an `AuthConfigError`
+with the fixed message `PAIGASUS_SESSION_REDIS_URL is not a valid Redis URL` (SMA-715). The
+node-redis parse error is dropped: its `input` property holds the whole URL, password included. The
+message gives no detail, so check the value for these usual causes:
+
+- an empty or whitespace-only value, for example an empty `session-redis-url` Secret key (without
+  this check, node-redis would connect to `localhost:6379`);
+- a password that holds `@`, `:`, `/`, `?`, `#` or `%` and is not percent-encoded;
+- a port above 65535;
+- a scheme other than `redis:`, `rediss:` or `unix:`;
+- a database path or a `db` parameter that is not a number.
+
 `session.refresh_failed` can carry `oauthError` (SMA-692). It is the OAuth error code of a
 transient refresh failure: one code of the RFC 6749 § 5.2 list, or `other` for any other value.
 It shows, for example, an `invalid_scope` after a scope change. A failure with no OAuth code, such
@@ -283,11 +295,13 @@ the route is public. Read the log.
   timeout. The kubelet then counts one failure, and the next probe finds the runtime.
 - **Readiness does not check Redis.** Every console pod shares one Redis, so a Redis fault would
   take every pod out of rotation. The store 503 above answers a store fault.
-- **`readiness.runtime_failed { error }`.** The runtime build failed: a configuration parse error,
-  a cross-field rule, or the Redis client build. `error` is the error's `name` only, for example
-  `TypeError`. A cross-field rule logs `AuthConfigError`. A malformed Redis URL puts the password
-  into the `input` property of the `TypeError` from `new URL()`. The event never holds the message
-  or the `input`. Each probe tries the build again.
+- **`readiness.runtime_failed { error, code }`.** The runtime build failed: a configuration parse
+  error, a cross-field rule, or the Redis client build. `error` is the error's `name` only, for
+  example `TypeError`. `code` is present only when the error is one of this package's own errors
+  (an `AuthError`). A cross-field rule and a malformed, empty or whitespace-only
+  `PAIGASUS_SESSION_REDIS_URL` both log `error: 'AuthConfigError', code: 'auth_config_invalid'`
+  (SMA-715; see "Redaction"). The event never holds the error message, its other properties, or
+  the `code` of an error from another library. Each probe tries the build again.
 
 **Known limits.**
 
@@ -295,7 +309,8 @@ the route is public. Read the log.
   then answers 503 for every console page, also for a signed-in user. A rolling update keeps the
   old ready pods.
 - A configuration defect (a wrong issuer, a wrong CA, a malformed Redis URL) keeps the pod not
-  ready for ever. The log shows the `reason` or the error name.
+  ready for ever. The log shows the `reason`, or the error name and, for a configuration refusal,
+  the `code` `auth_config_invalid`.
 - A failing pod logs about one `oidc.discovery_failed` line each 10 s: each probe after a settled
   failure starts a new attempt. A login, a callback or a refresh that joins the attempt adds its
   own event.
