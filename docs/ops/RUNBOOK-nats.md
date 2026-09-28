@@ -32,8 +32,8 @@ of that expiry by hand — nothing in this stack alerts on it.
 ## 1. A denied publish looks like a timeout, not an error
 
 **Symptom.** `event_outbox` rows fail to publish and retry across relay ticks;
-`IamOutboxPublishFailures` (`RUNBOOK-observability.md` §4) eventually fires once a tick actually
-errors, and before that, `iam_nats_publish_duration_seconds`'s p99 (§2.2 of the same doc) creeps up
+`IamOutboxPublishFailures` (`RUNBOOK-observability.md` §4) fires when publishes keep failing for
+about 90 s or more, and before that, `iam_nats_publish_duration_seconds`'s p99 (§2.2 of the same doc) creeps up
 toward `[outbox.publisher].publish_timeout_secs` (default `2`). Nothing on the HTTP/gRPC surface
 looks unhealthy — `/healthz`/`/readyz` do not gate on NATS after boot.
 
