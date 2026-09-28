@@ -28,7 +28,7 @@ mod support;
 
 use axum::http::StatusCode;
 use serde_json::json;
-use support::{app_with_state, provision, provision_platform_admin, seed_org_ref, send, send_raw};
+use support::{app_with_state, prn_upper_uuids, prn_with_org, prn_with_region, provision, provision_platform_admin, seed_org_ref, seed_team_ref, send, send_raw};
 
 #[tokio::test]
 async fn issue_then_list_hides_secret() {
@@ -354,4 +354,103 @@ async fn a_refused_body_answers_in_the_error_envelope() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// SMA-646 I2 (spec §4.2, AC 1-3): `POST /v1/service-accounts` and `GET /v1/service-accounts`
+/// refuse a forged owner PRN. Before SMA-646 the GET answered 200 with the forged PRN on each
+/// row (B2); this is the only test that reproduces that relabelling over HTTP.
+#[tokio::test]
+async fn http_forged_owner_prn_is_refused() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("i2-admin", Some("i2-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+    let org = seed_org_ref(&state.db).await;
+    let team = seed_team_ref(&state.db, &org).await;
+
+    // A real account under the team, so a relabelling List would have a row to relabel.
+    let (status, real) = send(
+        &app,
+        "POST",
+        "/v1/service-accounts",
+        Some(json!({ "owner_prn": team.canonical(), "name": "i2-real" })),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{real}");
+
+    let absent_org = "00000000-0000-0000-0000-000000000f50";
+    for (label, forged) in [("org slot", prn_with_org(&team.canonical(), absent_org)), ("region", prn_with_region(&team.canonical(), "eu-west-1"))] {
+        let (status, err) = send(&app, "POST", "/v1/service-accounts", Some(json!({ "owner_prn": forged, "name": "i2-forged" })), Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "create {label}: {err}");
+        assert_eq!(err["error"]["code"], "prn-mismatch", "create {label}");
+
+        let (status, err) = send(&app, "GET", &format!("/v1/service-accounts?owner_prn={forged}"), None, Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "list {label}: {err}");
+        assert_eq!(err["error"]["code"], "prn-mismatch", "list {label}");
+    }
+
+    // Review Focus 2: the correct PRN with upper-cased uuids succeeds over HTTP too, and the
+    // answer carries the STORED lower-case PRN.
+    let (status, ok) = send(
+        &app,
+        "POST",
+        "/v1/service-accounts",
+        Some(json!({ "owner_prn": prn_upper_uuids(&team.canonical()), "name": "i2-ok" })),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{ok}");
+    assert_eq!(ok["owner_prn"], team.canonical());
+
+    let (status, listed) = send(&app, "GET", &format!("/v1/service-accounts?owner_prn={}", team.canonical()), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let items = listed.as_array().expect("list is a json array");
+    assert_eq!(items.len(), 2, "i2-real and i2-ok only: {listed}");
+    assert!(items.iter().all(|sa| sa["owner_prn"] == team.canonical()), "{listed}");
+}
+
+/// SMA-646 I4 (spec §4.2, AC 11): `POST /v1/service-accounts/{id}/api-keys` refuses a forged
+/// scope PRN, and no key is listed afterwards.
+#[tokio::test]
+async fn http_forged_scope_prn_is_refused() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("i4-admin", Some("i4-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+    let org = seed_org_ref(&state.db).await;
+    let team = seed_team_ref(&state.db, &org).await;
+
+    let (status, created) = send(
+        &app,
+        "POST",
+        "/v1/service-accounts",
+        Some(json!({ "owner_prn": team.canonical(), "name": "i4-bot" })),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let sa_id = created["prn"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+
+    let absent_org = "00000000-0000-0000-0000-000000000f51";
+    for (label, forged) in [("org slot", prn_with_org(&team.canonical(), absent_org)), ("region", prn_with_region(&team.canonical(), "eu-west-1"))] {
+        let (status, err) = send(
+            &app,
+            "POST",
+            &format!("/v1/service-accounts/{sa_id}/api-keys"),
+            Some(json!({ "scope_prn": forged })),
+            Some(token.as_str()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {err}");
+        assert_eq!(err["error"]["code"], "prn-mismatch", "{label}");
+    }
+
+    let (status, listed) = send(&app, "GET", &format!("/v1/service-accounts/{sa_id}/api-keys"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed.as_array().expect("list is a json array").is_empty(), "a refused issue must leave no key: {listed}");
 }

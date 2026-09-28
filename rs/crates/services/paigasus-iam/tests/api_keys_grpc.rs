@@ -29,16 +29,21 @@ use std::time::Duration;
 
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::AppState;
+use paigasus_iam::adapters::persistence::entities::{api_key, audit_log, event_outbox, service_account};
+use paigasus_iam_core::{EventType, TeamId};
+use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::authn_service_client::AuthnServiceClient;
 use paigasus_proto::paigasus::iam::v1::service_account_service_client::ServiceAccountServiceClient;
 use paigasus_proto::paigasus::iam::v1::{
     ArchiveServiceAccountRequest, CreateServiceAccountRequest, GetServiceAccountRequest, IntrospectApiKeyRequest, IssueApiKeyRequest, ListApiKeysRequest, ListServiceAccountsRequest,
     RevokeApiKeyRequest,
 };
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tonic::Code;
 use tonic::transport::Channel;
+use uuid::Uuid;
 
 /// Spawns the full `grpc::router` (health + tenancy + authn + authz + service-accounts, all
 /// wrapped by the bearer layer) on an ephemeral port; `abort()` the returned handle when done.
@@ -62,6 +67,60 @@ fn authed<T>(msg: T, token: &str) -> tonic::Request<T> {
     let mut req = tonic::Request::new(msg);
     support::grpc_bearer(&mut req, token);
     req
+}
+
+/// Reads `ErrorInfo.reason` off a `tonic::Status`. Every IAM status carries one (SMA-504).
+fn reason(err: &tonic::Status) -> String {
+    let details = tonic_types::StatusExt::get_error_details(err);
+    details.error_info().expect("every IAM status carries ErrorInfo").reason.clone()
+}
+
+/// SMA-646: `iam.principal.created` outbox rows whose payload names `name`. Filtered by type and
+/// payload, never a total (spec §4.2).
+async fn created_events(db: &DatabaseConnection, name: &str) -> usize {
+    event_outbox::Entity::find()
+        .filter(event_outbox::Column::EventType.eq(EventType::PrincipalCreated.as_wire()))
+        .all(db)
+        .await
+        .expect("read event_outbox")
+        .into_iter()
+        .filter(|row| serde_json::from_str::<serde_json::Value>(&row.payload).expect("payload is json")["name"] == name)
+        .count()
+}
+
+/// SMA-646: `service_account` rows with this name.
+async fn accounts_named(db: &DatabaseConnection, name: &str) -> u64 {
+    service_account::Entity::find()
+        .filter(service_account::Column::Name.eq(name))
+        .count(db)
+        .await
+        .expect("count service_account")
+}
+
+/// SMA-646: `iam.api_key.issued` outbox rows for one service account.
+async fn issued_events(db: &DatabaseConnection, sa_prn: &str) -> u64 {
+    event_outbox::Entity::find()
+        .filter(event_outbox::Column::EventType.eq(EventType::ApiKeyIssued.as_wire()))
+        .filter(event_outbox::Column::AggregatePrn.eq(sa_prn))
+        .count(db)
+        .await
+        .expect("count event_outbox")
+}
+
+/// SMA-646: `IssueApiKey` audit rows. Their `resource_prn` is the SA's stored owner.
+async fn issue_audits(db: &DatabaseConnection, owner_prn: &str) -> u64 {
+    audit_log::Entity::find()
+        .filter(audit_log::Column::Action.eq("IssueApiKey"))
+        .filter(audit_log::Column::ResourcePrn.eq(owner_prn))
+        .count(db)
+        .await
+        .expect("count audit_log")
+}
+
+/// SMA-646: `api_key` rows of one service account.
+async fn keys_of(db: &DatabaseConnection, sa_prn: &str) -> u64 {
+    let sa_uuid = Prn::parse(sa_prn).expect("sa prn").resource_id();
+    api_key::Entity::find().filter(api_key::Column::ServiceAccountId.eq(sa_uuid)).count(db).await.expect("count api_key")
 }
 
 #[tokio::test]
@@ -365,6 +424,189 @@ async fn service_account_and_api_key_lifecycle_over_grpc() {
         .service_accounts;
     assert_eq!(listed_after.len(), 1);
     assert_eq!(listed_after[0].status, "disabled", "{listed_after:?}");
+
+    server.abort();
+}
+
+/// SMA-646 I1 (spec §4.2, AC 1-4, 7): `CreateServiceAccount`/`ListServiceAccounts` confirm the
+/// owner PRN against storage, against real Postgres and real Cedar.
+#[tokio::test]
+async fn a_forged_owner_prn_never_creates_a_service_account() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db.clone(), &support::test_config(&idp)).await.unwrap();
+    let admin = idp.bearer("i1-admin", Some("i1-admin@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &admin).await;
+    let stranger = idp.bearer("i1-stranger", Some("i1-stranger@example.com"), "paigasus", 3600);
+    support::provision(&state, &stranger).await;
+    let org = support::seed_org_ref(&state.db).await;
+    let team = support::seed_team_ref(&state.db, &org).await;
+    let (addr, server) = spawn_server(state).await;
+    let mut client = ServiceAccountServiceClient::new(channel(addr).await);
+
+    let absent_org = Uuid::from_u128(0x0f46).as_hyphenated().to_string();
+    let forged_slot = support::prn_with_org(&team.canonical(), &absent_org);
+    let forged_region = support::prn_with_region(&team.canonical(), "eu-west-1");
+    let create = |owner_prn: String, name: &str| CreateServiceAccountRequest { owner_prn, name: name.to_string() };
+    let list = |owner_prn: String| ListServiceAccountsRequest { owner_prn, limit: 0, offset: 0 };
+
+    // B1: a forged org slot and a forged region answer prn-mismatch; nothing is written.
+    for (label, forged) in [("org slot", forged_slot.clone()), ("region", forged_region.clone())] {
+        let err = client.create_service_account(authed(create(forged.clone(), "i1-forged"), &admin)).await.unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument, "create {label}: {err:?}");
+        assert_eq!(reason(&err), "prn-mismatch", "create {label}");
+        // B2: List with the forged PRN answers the same.
+        let err = client.list_service_accounts(authed(list(forged), &admin)).await.unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument, "list {label}: {err:?}");
+        assert_eq!(reason(&err), "prn-mismatch", "list {label}");
+    }
+    assert_eq!(accounts_named(&db, "i1-forged").await, 0, "a refused create must write no service_account row");
+    assert_eq!(created_events(&db, "i1-forged").await, 0, "a refused create must enqueue no iam.principal.created event");
+    let listed = client.list_service_accounts(authed(list(team.canonical()), &admin)).await.unwrap().into_inner().service_accounts;
+    assert!(listed.iter().all(|sa| sa.name != "i1-forged"), "{listed:?}");
+
+    // B5: an unknown team uuid answers not-found.
+    let unknown = TeamId::from_parts(org.resource_uuid(), Uuid::from_u128(0x0f47)).canonical();
+    let err = client.create_service_account(authed(create(unknown, "i1-unknown"), &admin)).await.unwrap_err();
+    assert_eq!(err.code(), Code::NotFound, "{err:?}");
+
+    // B6 / AC 4: an ungranted caller gets permission-denied for the forged and the correct PRN
+    // alike, on Create and List (real Cedar).
+    for (label, prn) in [("correct", team.canonical()), ("forged", forged_slot.clone())] {
+        let err = client.create_service_account(authed(create(prn.clone(), "i1-stranger"), &stranger)).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "create {label}: {err:?}");
+        assert_eq!(reason(&err), "forbidden", "create {label}");
+        let err = client.list_service_accounts(authed(list(prn), &stranger)).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "list {label}: {err:?}");
+        assert_eq!(reason(&err), "forbidden", "list {label}");
+    }
+
+    // Positive control (AC 3): the correct PRN with upper-cased uuids creates the account, the
+    // filtered outbox count moves by one, and Create, Get and List agree on the STORED owner.
+    let created = client
+        .create_service_account(authed(create(support::prn_upper_uuids(&team.canonical()), "i1-ok"), &admin))
+        .await
+        .unwrap()
+        .into_inner()
+        .service_account
+        .expect("service_account");
+    assert_eq!(created.owner_prn, team.canonical());
+    assert_eq!(created_events(&db, "i1-ok").await, 1, "the positive control must be visible to the filtered count");
+    let got = client
+        .get_service_account(authed(GetServiceAccountRequest { prn: created.prn.clone() }, &admin))
+        .await
+        .unwrap()
+        .into_inner()
+        .service_account
+        .expect("service_account");
+    assert_eq!(got.owner_prn, created.owner_prn);
+    let listed = client.list_service_accounts(authed(list(team.canonical()), &admin)).await.unwrap().into_inner().service_accounts;
+    let entry = listed.iter().find(|sa| sa.prn == created.prn).expect("the created account is listed");
+    assert_eq!(entry.owner_prn, created.owner_prn);
+
+    server.abort();
+}
+
+/// SMA-646 I3 (spec §4.2, AC 11-14): `IssueApiKey` confirms the scope PRN against storage, and
+/// authorizes `IssueApiKey` at the stored scope (K4), against real Postgres and real Cedar.
+#[tokio::test]
+async fn a_forged_scope_prn_never_issues_an_api_key() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db.clone(), &support::test_config(&idp)).await.unwrap();
+    let admin = idp.bearer("i3-admin", Some("i3-admin@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &admin).await;
+    let org_a = support::seed_org_ref(&state.db).await;
+    let team_a = support::seed_team_ref(&state.db, &org_a).await;
+    let org_b = support::seed_org_ref(&state.db).await;
+    let team_b = support::seed_team_ref(&state.db, &org_b).await;
+    // The actor holds org_admin at organization A only.
+    let actor = idp.bearer("i3-actor", Some("i3-actor@example.com"), "paigasus", 3600);
+    let actor_prn = support::provision(&state, &actor).await;
+    support::seed_org_admin(&state, &actor_prn, &org_a.canonical()).await;
+    let (addr, server) = spawn_server(state).await;
+    let mut client = ServiceAccountServiceClient::new(channel(addr).await);
+
+    // The SA is owned by team A (created by the admin with the correct PRN). It has no grants,
+    // so D15 is empty and the only checks are the owner check and the new scope check.
+    let sa = client
+        .create_service_account(authed(
+            CreateServiceAccountRequest {
+                owner_prn: team_a.canonical(),
+                name: "i3-bot".to_string(),
+            },
+            &admin,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .service_account
+        .expect("service_account");
+    let issue = |scope_prn: String| IssueApiKeyRequest {
+        service_account_prn: sa.prn.clone(),
+        scope_prn,
+        expires_at: None,
+        scope_actions: Vec::new(),
+        scope_roles: Vec::new(),
+    };
+    let events_before = issued_events(&db, &sa.prn).await;
+    let audits_before = issue_audits(&db, &team_a.canonical()).await;
+
+    // K1: a forged org slot and a forged region answer prn-mismatch; nothing is written.
+    let absent_org = Uuid::from_u128(0x0f48).as_hyphenated().to_string();
+    for (label, forged) in [
+        ("org slot", support::prn_with_org(&team_a.canonical(), &absent_org)),
+        ("region", support::prn_with_region(&team_a.canonical(), "eu-west-1")),
+    ] {
+        let err = client.issue_api_key(authed(issue(forged), &actor)).await.unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument, "{label}: {err:?}");
+        assert_eq!(reason(&err), "prn-mismatch", "{label}");
+    }
+    assert_eq!(keys_of(&db, &sa.prn).await, 0, "a refused issue must write no api_key row");
+    assert_eq!(issued_events(&db, &sa.prn).await, events_before, "a refused issue must enqueue no iam.api_key.issued event");
+    assert_eq!(issue_audits(&db, &team_a.canonical()).await, audits_before, "a refused issue must write no IssueApiKey audit row");
+
+    // K3: an unknown team uuid as scope answers not-found.
+    let unknown = TeamId::from_parts(org_a.resource_uuid(), Uuid::from_u128(0x0f49)).canonical();
+    let err = client.issue_api_key(authed(issue(unknown), &actor)).await.unwrap_err();
+    assert_eq!(err.code(), Code::NotFound, "{err:?}");
+
+    // K4: a scope node in organization B, where the actor has no IssueApiKey, answers
+    // permission-denied for the correct and the forged PRN alike.
+    let org_a_slot = org_a.resource_uuid().as_hyphenated().to_string();
+    for (label, scope) in [("correct", team_b.canonical()), ("forged", support::prn_with_org(&team_b.canonical(), &org_a_slot))] {
+        let err = client.issue_api_key(authed(issue(scope), &actor)).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "{label}: {err:?}");
+        assert_eq!(reason(&err), "forbidden", "{label}");
+    }
+    assert_eq!(keys_of(&db, &sa.prn).await, 0);
+
+    // Positive control (AC 12, Review Focus 3): the actor's org-level grant covers team A as a
+    // scope (Cedar `resource in`). Upper-cased uuids still succeed, the answer carries the
+    // STORED scope, the filtered outbox count moves by one, and ListApiKeys agrees.
+    let issued = client.issue_api_key(authed(issue(support::prn_upper_uuids(&team_a.canonical())), &actor)).await.unwrap().into_inner();
+    let key = issued.api_key.expect("api_key");
+    assert_eq!(key.scope_prn, team_a.canonical());
+    assert_eq!(issued_events(&db, &sa.prn).await, events_before + 1, "the positive control must be visible to the filtered count");
+    let listed = client
+        .list_api_keys(authed(
+            ListApiKeysRequest {
+                service_account_prn: sa.prn.clone(),
+                limit: 0,
+                offset: 0,
+            },
+            &actor,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .api_keys;
+    let entry = listed.iter().find(|k| k.id == key.id).expect("the issued key is listed");
+    assert_eq!(entry.scope_prn, key.scope_prn);
 
     server.abort();
 }
