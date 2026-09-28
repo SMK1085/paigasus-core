@@ -28,6 +28,11 @@ done
 # shellcheck source=ci/release-parity/ecosystems/release-plz.sh
 source "$HERE/ecosystems/$ECOSYSTEM.sh"
 
+# SMA-716: the release-plz module MUST define its extra-suite hook. Without this line, a deleted
+# hook in ecosystems/release-plz.sh would skip the whole release-plz-only suite in silence.
+[ "$ECOSYSTEM" != release-plz ] || declare -F ecosystem::extra_suite >/dev/null || { echo "FATAL: release-parity ABORTED: infrastructure error (rc=2): ecosystems/release-plz.sh defines no ecosystem::extra_suite (SMA-716)" >&2; exit 2; }
+[ "$ECOSYSTEM" != release-plz ] || declare -F ecosystem::extra_negative_control >/dev/null || { echo "FATAL: release-parity ABORTED: infrastructure error (rc=2): ecosystems/release-plz.sh defines no ecosystem::extra_negative_control (SMA-716)" >&2; exit 2; }
+
 # Default: the canonical 0.x expectation (expected_0x). An ecosystem MAY define
 # `ecosystem::expected` to assert a documented, intentional divergence (e.g.
 # semantic-release's strict-semver breaking->major). release-plz / PSR do NOT
@@ -66,6 +71,16 @@ check_case() { # id subject footer expected
 }
 
 if [ "$NEGATIVE" = 1 ]; then
+  # SMA-716: the release-plz-only controls NC1-NC3 run FIRST, because the base control below
+  # exits on its own verdict. A control that does not go red is rc 1; rc 2 is INCONCLUSIVE.
+  if declare -F ecosystem::extra_negative_control >/dev/null; then
+    xnc=0; ecosystem::extra_negative_control "$REAL_TOML" || xnc=$?
+    case "$xnc" in
+      0) echo "negative-control OK: every extra control reported red as expected" ;;
+      1) echo "negative-control FAILED: an extra control did not report red" >&2; exit 1 ;;
+      *) echo "negative-control INCONCLUSIVE: extra control infrastructure error (rc=$xnc)" >&2; exit 2 ;;
+    esac
+  fi
   echo "== negative control: feeding a deliberately wrong expectation =="
   # fix! in 0.x bumps to 0.2.0 (minor), so 0.1.1 (patch) is deliberately wrong.
   ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?
@@ -89,6 +104,18 @@ while IFS=$'\t' read -r -u 3 id subject footer expected_0x _expected_1x _discr |
     *) echo "== parity ABORTED: infrastructure error on case $id ==" >&2; exit 2 ;;
   esac
 done 3<"$CASES"
+
+# SMA-716: the release-plz-only suites (ecosystems/release-plz-filter.sh). They are not in
+# cases.tsv, because cases.tsv is the cross-tool parity contract. `|| xec=$?` turns errexit off
+# inside the hook, so the hook checks each step itself.
+if declare -F ecosystem::extra_suite >/dev/null; then
+  xec=0; ecosystem::extra_suite "$REAL_TOML" || xec=$?
+  case "$xec" in
+    0) ;;
+    1) echo "== extra suite FAILURES (see above) ==" >&2; rc=1 ;;
+    *) echo "== parity ABORTED: infrastructure error in the extra suite (rc=$xec) ==" >&2; exit 2 ;;
+  esac
+fi
 
 if [ "$rc" = 0 ]; then echo "== all parity cases passed =="; else echo "== parity FAILURES (see above) ==" >&2; fi
 exit "$rc"

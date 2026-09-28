@@ -69,10 +69,14 @@ print("|".join(problems) if problems else f"OK {len(names)} objects, longest {lo
 # 53 is Helm's own ceiling: a longer release name is refused outright with
 # "the length must not be longer than 53" (measured 2026-09-20 on helm 3.22.0), so it is the
 # worst case this chart can actually be installed under.
-check "short release"   paigasus                                              --set zones.gateway.enabled=true
-check "40-char release" my-very-long-release-name-for-console-xy              --set zones.gateway.enabled=true
-check "52-char release" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  --set zones.gateway.enabled=true
-check "53-char release" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set zones.gateway.enabled=true
+# SMA-694. The route flags are on every row: an HTTPRoute has the same name as its console Service,
+# and the names must stay unique per kind at every release length.
+ROUTE=(--set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw'
+  --set 'httpRoute.parentRefs[0].sectionName=https')
+check "short release"   paigasus                                              --set zones.gateway.enabled=true "${ROUTE[@]}"
+check "40-char release" my-very-long-release-name-for-console-xy              --set zones.gateway.enabled=true "${ROUTE[@]}"
+check "52-char release" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  --set zones.gateway.enabled=true "${ROUTE[@]}"
+check "53-char release" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set zones.gateway.enabled=true "${ROUTE[@]}"
 
 if [ "$ec" -eq 0 ]; then echo "== chart names OK =="; fi
 exit "$ec"

@@ -307,8 +307,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   (`ACTIONLINT_SH_CALL_SITES`, whole-line-matched, column 0 — SMA-542/SMA-572, now nine
   entries); and
   `ci/release-parity/run.sh`'s own `--negative-control` logic — the flag parse, the guard,
-  the assertion and the two report arms (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched
-  — SMA-530); **C6** (SMA-592) `contracts:generate`'s authored `inputs` still equal
+  the assertion and the two report arms, plus the SMA-716 hook guards, calls and verdict arms
+  (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched — SMA-530, SMA-716); **C6** (SMA-592)
+  `contracts:generate`'s authored `inputs` still equal
   `CONTRACTS_GENERATE_INPUTS` exactly — strict equality, both moon input buckets, the injected
   `.moon/*` glob filtered first. That task is not a `repo:*` task, so C1 and C2 never look at it,
   but `ci.yml`'s codegen-drift step delegates its freshness to that task's cache key: the step
