@@ -20,9 +20,12 @@ mod support;
 use axum::Router;
 use axum::http::StatusCode;
 use paigasus_iam::adapters::http::AppState;
-use paigasus_iam_core::OrganizationId;
+use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox};
 use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
 use paigasus_iam_core::authz::model::root_prn;
+use paigasus_iam_core::{OrganizationId, PrincipalId};
+use paigasus_kernel::Prn;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 use serde_json::json;
 use support::{app_with_state, provision_platform_admin, seed_platform_admin, send};
 use uuid::Uuid;
@@ -310,4 +313,162 @@ async fn a_refused_body_answers_in_the_error_envelope() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// Replaces the region and the organization slot of a canonical principal PRN.
+fn principal_with(prn: &str, region: &str, org: &str) -> String {
+    let uuid = prn.rsplit('/').next().expect("a principal prn ends in /<uuid>");
+    format!("prn:pgs:iam:{region}:{org}:principal/{uuid}")
+}
+
+/// SMA-649 T6 (HTTP), AC11–AC13: `POST /v1/authz/role-grants` with a forged region or
+/// organization slot answers 400 `prn-mismatch`, with an unknown uuid 404 `not-found`, and no
+/// refusal writes a grant, an event or a `GrantRole` audit row. Control: the canonical PRN
+/// grants, and the body carries the stored canonical PRN.
+#[tokio::test]
+async fn grant_role_over_http_confirms_the_principal_prn_against_storage() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db.clone()).await;
+    let admin_token = idp.bearer("t6-http-admin", Some("t6-http-admin@example.com"), "paigasus", 3600);
+    let admin_prn = self_principal_prn(&app, &state, &admin_token).await;
+    seed_platform_admin(&state, &admin_prn).await;
+    let member_token = idp.bearer("t6-http-member", Some("t6-http-member@example.com"), "paigasus", 3600);
+    let member_prn = self_principal_prn(&app, &state, &member_token).await;
+    let member = PrincipalId::from_prn(Prn::parse(&member_prn).unwrap());
+
+    let outbox_before = event_outbox::Entity::find().count(&db).await.unwrap();
+    let audit_before = audit_log::Entity::find().filter(audit_log::Column::Action.eq("GrantRole")).count(&db).await.unwrap();
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a));
+
+    for (label, prn, status, code) in [
+        ("forged region", principal_with(&member_prn, "eu-west-1", ""), StatusCode::BAD_REQUEST, "prn-mismatch"),
+        (
+            "forged org slot",
+            principal_with(&member_prn, "", &Uuid::from_u128(0x0f49).to_string()),
+            StatusCode::BAD_REQUEST,
+            "prn-mismatch",
+        ),
+        ("unknown principal", unknown, StatusCode::NOT_FOUND, "not-found"),
+    ] {
+        let (got, body) = send(
+            &app,
+            "POST",
+            "/v1/authz/role-grants",
+            Some(json!({"principal_prn": prn, "role_key": "platform_admin", "scope_prn": root_prn().canonical()})),
+            Some(admin_token.as_str()),
+        )
+        .await;
+        assert_eq!(got, status, "{label}: {body}");
+        assert_eq!(body["error"]["code"], code, "{label}");
+        assert!(
+            state.role_grant_store.list_by_principal(&member).await.unwrap().is_empty(),
+            "{label}: no grant row for the real principal"
+        );
+    }
+    assert_eq!(event_outbox::Entity::find().count(&db).await.unwrap(), outbox_before, "a refused grant enqueues no event");
+    assert_eq!(
+        audit_log::Entity::find().filter(audit_log::Column::Action.eq("GrantRole")).count(&db).await.unwrap(),
+        audit_before,
+        "a refused grant records no GrantRole audit row"
+    );
+
+    let (got, granted) = send(
+        &app,
+        "POST",
+        "/v1/authz/role-grants",
+        Some(json!({"principal_prn": member_prn, "role_key": "platform_admin", "scope_prn": root_prn().canonical()})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(got, StatusCode::CREATED, "{granted}");
+    assert_eq!(granted["principal_prn"], member_prn);
+}
+
+/// Percent-encodes the two PRN characters that are reserved in a URL. A colon is legal in a
+/// query value, but the test must not depend on that.
+fn q(prn: &str) -> String {
+    prn.replace(':', "%3A").replace('/', "%2F")
+}
+
+/// SMA-649 T7 (HTTP), AC15–AC18: `GET /v1/authz/role-grants` with a principal filter. A forged
+/// region or organization slot answers 400 `prn-mismatch`, an unknown uuid 404 `not-found`, on
+/// the principal-only path and with `scope_prn` = Root. Control: the canonical PRN lists the
+/// member's grant. An ungranted caller gets 403 `forbidden` for the member's PRN in every shape
+/// and for its OWN uuid with a forged region, and its own canonical PRN lists.
+#[tokio::test]
+async fn list_role_grants_over_http_confirms_the_principal_prn_against_storage() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin_token = idp.bearer("t7-http-admin", Some("t7-http-admin@example.com"), "paigasus", 3600);
+    let admin_prn = self_principal_prn(&app, &state, &admin_token).await;
+    seed_platform_admin(&state, &admin_prn).await;
+    let member_token = idp.bearer("t7-http-member", Some("t7-http-member@example.com"), "paigasus", 3600);
+    let member_prn = self_principal_prn(&app, &state, &member_token).await;
+    let stranger_token = idp.bearer("t7-http-stranger", Some("t7-http-stranger@example.com"), "paigasus", 3600);
+    let stranger_prn = self_principal_prn(&app, &state, &stranger_token).await;
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/v1/authz/role-grants",
+        Some(json!({"principal_prn": member_prn, "role_key": "platform_admin", "scope_prn": root_prn().canonical()})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed: {body}");
+
+    let url = |prn: &str, scoped: bool| {
+        if scoped {
+            format!("/v1/authz/role-grants?principal_prn={}&scope_prn={}", q(prn), q(&root_prn().canonical()))
+        } else {
+            format!("/v1/authz/role-grants?principal_prn={}", q(prn))
+        }
+    };
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a));
+    let forged_region = principal_with(&member_prn, "eu-west-1", "");
+
+    for (path, scoped) in [("principal-only", false), ("principal + Root scope", true)] {
+        for (shape, prn, want, code) in [
+            ("forged region", forged_region.clone(), StatusCode::BAD_REQUEST, "prn-mismatch"),
+            (
+                "forged org slot",
+                principal_with(&member_prn, "", &Uuid::from_u128(0x0f49).to_string()),
+                StatusCode::BAD_REQUEST,
+                "prn-mismatch",
+            ),
+            ("unknown principal", unknown.clone(), StatusCode::NOT_FOUND, "not-found"),
+        ] {
+            let (got, body) = send(&app, "GET", &url(&prn, scoped), None, Some(admin_token.as_str())).await;
+            assert_eq!(got, want, "{path}, {shape}: {body}");
+            assert_eq!(body["error"]["code"], code, "{path}, {shape}");
+        }
+        let (got, listed) = send(&app, "GET", &url(&member_prn, scoped), None, Some(admin_token.as_str())).await;
+        assert_eq!(got, StatusCode::OK, "{path}, control: {listed}");
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["principal_prn"] == member_prn.as_str() && g["role_key"] == "platform_admin"),
+            "{path}: {listed}"
+        );
+    }
+
+    for (label, prn) in [
+        ("member, canonical", member_prn.clone()),
+        ("member, forged region", forged_region),
+        ("unknown principal", unknown),
+        ("own uuid, forged region", principal_with(&stranger_prn, "eu-west-1", "")),
+    ] {
+        let (got, body) = send(&app, "GET", &url(&prn, false), None, Some(stranger_token.as_str())).await;
+        assert_eq!(got, StatusCode::FORBIDDEN, "ungranted caller, {label}: {body}");
+        assert_eq!(body["error"]["code"], "forbidden", "ungranted caller, {label}");
+    }
+    let (got, own) = send(&app, "GET", &url(&stranger_prn, false), None, Some(stranger_token.as_str())).await;
+    assert_eq!(got, StatusCode::OK, "self listing: {own}");
+    assert!(own.as_array().unwrap().is_empty(), "the stranger holds no grant: {own}");
 }

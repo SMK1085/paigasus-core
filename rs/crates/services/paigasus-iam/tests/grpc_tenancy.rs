@@ -2011,3 +2011,159 @@ async fn a_forged_parent_outranks_a_later_error() {
     off_server.abort();
     assert!(failures.is_empty(), "parent-precedence cases failed:\n{}", failures.join("\n"));
 }
+
+/// SMA-649 T3 (gRPC): `ListMemberships` with a PRINCIPAL filter confirms the PRN against the
+/// stored principal, under both `enforce_tenancy` settings, with `principal_kind` unset and
+/// `USER`. A forged region or organization slot answers `prn-mismatch`; an unknown uuid answers
+/// `not-found`; an unknown uuid with an out-of-range `limit` still answers
+/// `invalid-pagination` (B8, `to_page` runs before the service). Controls: the canonical PRN
+/// and its upper-case-uuid form list the seeded membership (B3).
+#[tokio::test]
+async fn a_forged_principal_prn_never_lists_memberships() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let (enforced, unenforced) = two_states(&db, &idp).await;
+    let token = idp.bearer("forged-lm", Some("forged-lm@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&enforced, &token).await;
+    let alice = enforced
+        .users
+        .execute(NewUser {
+            email: "lm-alice@example.com".to_string(),
+            display_name: "Alice".to_string(),
+            locale: None,
+            timezone: None,
+        })
+        .await
+        .unwrap()
+        .canonical();
+    let (on_addr, on_server) = spawn_tenancy_server(enforced).await;
+    let (off_addr, off_server) = spawn_tenancy_server(unenforced).await;
+    let mut on = connect(on_addr).await;
+    let mut off = connect(off_addr).await;
+
+    let org = create_org(&mut on, &token, "lm-org", "List Memberships").await;
+    on.attach_membership(authed(
+        AttachMembershipRequest {
+            principal_prn: alice.clone(),
+            node_prn: org.prn.clone(),
+        },
+        &token,
+    ))
+    .await
+    .expect("attach alice to the org");
+
+    let real_org = org.prn.rsplit('/').next().expect("org prn ends in /<uuid>").to_string();
+    let absent_org = Uuid::from_u128(0x0f49).as_hyphenated().to_string();
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a).as_hyphenated());
+    let mut failures: Vec<String> = Vec::new();
+
+    for (setting, client) in [("enforce=on", &mut on), ("enforce=off", &mut off)] {
+        for (kind_label, kind) in [("kind unset", ProtoPrincipalKind::Unspecified as i32), ("kind USER", ProtoPrincipalKind::User as i32)] {
+            let list = |prn: String, limit: u32| {
+                authed(
+                    ListMembershipsRequest {
+                        filter: Some(list_memberships_request::Filter::PrincipalPrn(prn)),
+                        principal_kind: kind,
+                        limit,
+                        offset: 0,
+                    },
+                    &token,
+                )
+            };
+            for (shape, forged) in [
+                ("non-empty region", with_region(&alice, "eu-west-1")),
+                ("real org uuid in the org slot", with_org(&alice, &real_org)),
+                ("absent org uuid in the org slot", with_org(&alice, &absent_org)),
+            ] {
+                let label = format!("{setting} {kind_label} {shape}");
+                match client.list_memberships(list(forged, 0)).await {
+                    Ok(resp) => failures.push(format!("{label}: listed {:?}", resp.into_inner().memberships)),
+                    Err(err) => {
+                        check(&mut failures, &label, err.code() == Code::InvalidArgument, format!("code was {:?}", err.code()));
+                        check(&mut failures, &label, reason(&err) == "prn-mismatch", format!("reason was {}", reason(&err)));
+                    }
+                }
+            }
+
+            let label = format!("{setting} {kind_label} unknown principal");
+            match client.list_memberships(list(unknown.clone(), 0)).await {
+                Ok(resp) => failures.push(format!("{label}: listed {:?}", resp.into_inner().memberships)),
+                Err(err) => {
+                    check(&mut failures, &label, err.code() == Code::NotFound, format!("code was {:?}", err.code()));
+                    check(&mut failures, &label, reason(&err) == "not-found", format!("reason was {}", reason(&err)));
+                }
+            }
+
+            let label = format!("{setting} {kind_label} unknown principal + limit 500 (B8)");
+            match client.list_memberships(list(unknown.clone(), 500)).await {
+                Ok(_) => failures.push(format!("{label}: listed")),
+                Err(err) => check(&mut failures, &label, reason(&err) == "invalid-pagination", format!("reason was {}", reason(&err))),
+            }
+
+            for (shape, prn) in [("canonical", alice.clone()), ("upper-case uuid", upper_uuid(&alice))] {
+                let label = format!("{setting} {kind_label} control {shape}");
+                match client.list_memberships(list(prn, 0)).await {
+                    Ok(resp) => {
+                        let rows = resp.into_inner().memberships;
+                        check(&mut failures, &label, rows.iter().any(|m| m.node_prn == org.prn), format!("the seeded membership is missing: {rows:?}"));
+                    }
+                    Err(err) => failures.push(format!("{label}: {err:?}")),
+                }
+            }
+        }
+    }
+
+    on_server.abort();
+    off_server.abort();
+    assert!(failures.is_empty(), "forged principal ListMemberships cases failed:\n{}", failures.join("\n"));
+}
+
+/// SMA-649 T3, B6 / AC5 (gRPC): with `enforce_tenancy` on, a caller without a root grant gets
+/// `forbidden` for a forged, a canonical and an unknown principal PRN alike. The handler
+/// authorizes at `root_prn()` before the service runs, so the new `prn-mismatch` and
+/// `not-found` answers are not reachable by an unauthorized caller.
+#[tokio::test]
+async fn an_ungranted_caller_cannot_list_memberships_by_any_principal_prn() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db.clone(), &support::test_config(&idp)).await.unwrap();
+    let admin = idp.bearer("b6-admin", Some("b6-admin@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &admin).await;
+    let stranger = idp.bearer("b6-stranger", Some("b6-stranger@example.com"), "paigasus", 3600);
+    let stranger_prn = support::provision(&state, &stranger).await;
+    let (addr, server) = spawn_tenancy_server(state).await;
+    let mut client = connect(addr).await;
+
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a).as_hyphenated());
+    let mut failures: Vec<String> = Vec::new();
+    for (label, prn) in [
+        ("canonical", stranger_prn.clone()),
+        ("forged region", with_region(&stranger_prn, "eu-west-1")),
+        ("forged org slot", with_org(&stranger_prn, &Uuid::from_u128(0x0f49).as_hyphenated().to_string())),
+        ("unknown", unknown),
+    ] {
+        match client
+            .list_memberships(authed(
+                ListMembershipsRequest {
+                    filter: Some(list_memberships_request::Filter::PrincipalPrn(prn)),
+                    ..Default::default()
+                },
+                &stranger,
+            ))
+            .await
+        {
+            Ok(_) => failures.push(format!("{label}: listed")),
+            Err(err) => {
+                check(&mut failures, label, err.code() == Code::PermissionDenied, format!("code was {:?}", err.code()));
+                check(&mut failures, label, reason(&err) == "forbidden", format!("reason was {}", reason(&err)));
+            }
+        }
+    }
+
+    server.abort();
+    assert!(failures.is_empty(), "ungranted principal ListMemberships cases failed:\n{}", failures.join("\n"));
+}
