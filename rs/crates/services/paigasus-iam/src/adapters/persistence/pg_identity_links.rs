@@ -4,8 +4,8 @@
 //! caller's own transaction, recovered through `uow::recover_txn`. Every read that decides an
 //! audit value or a no-op runs inside that transaction, under a row lock:
 //!
-//! - `lock_user_in` locks the `"user"` row FOR SHARE, so a concurrent email change cannot remove
-//!   the user under a link or an unlink.
+//! - `lock_user_in` locks the `"user"` row FOR SHARE. This makes a link or an unlink run in
+//!   series with a concurrent `change_email_in` (FOR UPDATE) of the same user.
 //! - `unlink_in` locks the identity row FOR UPDATE, then deletes it. The returned row is the
 //!   deleted row, so the audit names what was removed, not what the request said.
 //! - `change_email_in` locks the `"user"` row FOR UPDATE before it compares, so two changes to

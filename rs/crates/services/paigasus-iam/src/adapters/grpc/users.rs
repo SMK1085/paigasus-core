@@ -85,14 +85,11 @@ pub(crate) fn opt_string(raw: String) -> Option<String> {
 /// Parses a wire `user_prn` into the [`PrincipalId`] it names (SMA-712). It must be an `iam`
 /// `principal` PRN. The service then answers 404 when that principal is not a user.
 ///
-/// **Fix round 1 (review finding 1).** The result is always the CANONICAL principal PRN —
-/// `Prn::build`'s fixed, always-valid `service`/`region`/`org`/`resource_type` (mirrors
-/// `http::service_accounts::service_account_id`'s identical `.expect`) — never the caller's own
-/// parsed PRN. A wire `user_prn` may carry a region or an organization slot that the service
-/// itself ignores (it looks the principal up by uuid), but the STORED/AUDITED PRN
-/// (`user_identities.rs` audits `user.canonical()`) and the wire PRN this handler returns must
-/// be the identical string every other transport and every later PRN-equality audit query sees
-/// — never a second, non-canonical spelling of the same principal.
+/// The function rebuilds the canonical principal PRN from the uuid. It never returns the
+/// caller's own parsed PRN. A wire `user_prn` can carry a region or an organization slot. The
+/// service ignores that slot: it looks the principal up by uuid. `user_identities.rs` audits
+/// `user.canonical()`. This function must return the same canonical string. Then an audit row
+/// always holds the canonical PRN, and an exact-match audit query finds it.
 fn user_id(raw: &str) -> Result<PrincipalId, TenancyError> {
     let parsed = Prn::parse(raw).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
     if parsed.service() != "iam" || parsed.resource_type() != "principal" {

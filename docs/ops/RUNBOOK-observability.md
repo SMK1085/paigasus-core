@@ -1395,18 +1395,18 @@ causes are:
       `authn.issuers[].issuer` of the identity provider that the person used. It must be exactly
       equal to it, or the call gives `400 unknown-issuer`. For Keycloak, the `subject` is the
       user ID on the user's page in the admin console. For another identity provider, read its
-      documentation for where the `sub` claim value is shown. If the identity provider uses a
-      pairwise `sub` and does not show it, the person can read the `sub` claim from a token
-      that the identity provider issued to them. Never guess a value.
+      documentation for where the `sub` claim value is shown. The identity provider might use a
+      pairwise `sub` and not show it. Then the person can read the `sub` claim from a token that
+      the identity provider issued to them. Never guess a value.
    3. **Decide the case.** Compare the person at the identity provider with the IAM user from
       step 4.1:
       - C1. The IAM user has no identities, and the person is the one for whom `CreateUser` made
         the user.
       - C2. The IAM user has an identity at another issuer, and both identity-provider accounts
         belong to the same person.
-      - C3. The IAM user has an identity at the same issuer with a different `sub`, and the
-        identity provider confirms that the old account was deleted or imported again for the
-        same person.
+      - C3. The IAM user has an identity at the same issuer with a different `sub`. The identity
+        provider confirms that the old account was deleted, or imported again for the same
+        person.
       - C4. The identity provider confirms that the email now belongs to a different person than
         the IAM user.
       - If you cannot confirm one of these, stop. Do not make a link.
@@ -1442,17 +1442,28 @@ causes are:
         ```bash
         curl -sS -X POST "$IAM/v1/users/<principal-uuid>/email" \
           -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-          --data '{"email": "<principal-uuid>@example.invalid", "reason": "INC-1234: the IdP moved the email to another person"}'
+          --data '{"email": "<principal-uuid>@example.invalid", "reason": "INC-1234: the identity provider moved the email to another person"}'
         ```
 
         A `409 email-conflict` means that another user has the email. The match is exact and
         case-sensitive, the same as JIT.
    5. **Reverse a wrong link.** Unlink it with the C3 call. Then read the audit log for the user
-      to see the time of the link, and what the linked identity did after it:
+      to see the time of the link:
 
       ```bash
       curl -sS -G "$IAM/v1/audit" -H "Authorization: Bearer $TOKEN" \
         --data-urlencode "resource=prn:pgs:iam:::principal/<principal-uuid>"
+      ```
+
+      After the link, both people act as one principal. No row shows which person made a
+      change. The audit log holds only committed writes and denials. It does not hold reads.
+
+      To see what the principal did after the link, query by actor and start time:
+
+      ```bash
+      curl -sS -G "$IAM/v1/audit" -H "Authorization: Bearer $TOKEN" \
+        --data-urlencode "actor=prn:pgs:iam:::principal/<principal-uuid>" \
+        --data-urlencode "from=<link occurred_at>"
       ```
 
    `CreateUser` plus a link is also the way to add a user on an issuer that has JIT disabled.
