@@ -425,6 +425,11 @@ async fn every_protected_v1_route_requires_bearer() {
         ("DELETE", format!("/v1/memberships/{id}")),
         // users.rs
         ("POST", "/v1/users".to_string()),
+        // users.rs (SMA-712)
+        ("POST", "/v1/users/find-by-email".to_string()),
+        ("POST", format!("/v1/users/{id}/external-identities")),
+        ("POST", format!("/v1/users/{id}/external-identities/{id}/unlink")),
+        ("POST", format!("/v1/users/{id}/email")),
         // authz.rs
         ("POST", "/v1/authz/is-authorized".to_string()),
         ("POST", "/v1/authz/policies".to_string()),

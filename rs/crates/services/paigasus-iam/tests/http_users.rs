@@ -15,7 +15,8 @@ use paigasus_iam::adapters::persistence::entities::principal;
 use paigasus_kernel::Prn;
 use sea_orm::{EntityTrait, PaginatorTrait};
 use serde_json::json;
-use support::{app_with_config, app_with_state, provision, provision_platform_admin, send, test_config};
+use support::{app_with_config, app_with_state, principal_uuid, provision, provision_platform_admin, send, test_config};
+use uuid::Uuid;
 
 /// The three-outcome pin for `POST /v1/users` (SMA-584 AC-1/AC-2). A mutation that removes the
 /// `Action::CreateUser` guard from `adapters::http::users` fails the middle row; a mutation
@@ -185,4 +186,227 @@ async fn a_refused_body_answers_in_the_error_envelope() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+// --- SMA-712: the operator identity routes --------------------------------------------------
+
+/// The four identity routes as `(action, uri, body)`, aimed at a principal that does not exist.
+/// A caller that passes the check gets 404. A caller that fails it gets 403.
+fn identity_calls(issuer: &str) -> Vec<(&'static str, String, serde_json::Value)> {
+    let missing = Uuid::from_u128(0xdead);
+    let identity = Uuid::from_u128(0xbeef);
+    vec![
+        ("GetUser", "/v1/users/find-by-email".to_string(), json!({"email": "nobody-http@example.com"})),
+        (
+            "LinkExternalIdentity",
+            format!("/v1/users/{missing}/external-identities"),
+            json!({"issuer": issuer, "subject": "matrix-sub", "reason": "matrix"}),
+        ),
+        (
+            "UnlinkExternalIdentity",
+            format!("/v1/users/{missing}/external-identities/{identity}/unlink"),
+            json!({"reason": "matrix"}),
+        ),
+        ("ChangeUserEmail", format!("/v1/users/{missing}/email"), json!({"email": "matrix-http@example.com", "reason": "matrix"})),
+    ]
+}
+
+/// SMA-712 spec 11: 401 without a token, 403 without the action, and the full platform_admin
+/// cycle: find, link (201, then 200 on a retry), change the email, unlink (204, then 404), and
+/// the own-identity refusal (409).
+#[tokio::test]
+async fn identity_routes_need_a_bearer_and_their_action_and_work_for_platform_admin() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let plain = idp.bearer("http-id-plain", Some("http-id-plain@example.com"), "paigasus", 3600);
+    provision(&state, &plain).await;
+    let admin = idp.bearer("http-id-admin", Some("http-id-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    for (action, uri, body) in identity_calls(&idp.issuer) {
+        let (status, err) = send(&app, "POST", &uri, Some(body.clone()), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{action} without a bearer: {err}");
+        let (status, err) = send(&app, "POST", &uri, Some(body), Some(plain.as_str())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{action} without the action: {err}");
+        assert_eq!(err["error"]["code"], "forbidden");
+    }
+
+    let (status, created) = send(
+        &app,
+        "POST",
+        "/v1/users",
+        Some(json!({"email": "http-id-target@example.com", "display_name": "Target"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let target_prn = created["principal_prn"].as_str().unwrap().to_string();
+    let target = principal_uuid(&target_prn);
+
+    let (status, user) = send(&app, "POST", "/v1/users/find-by-email", Some(json!({"email": "http-id-target@example.com"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{user}");
+    assert_eq!(user["prn"], target_prn);
+    assert_eq!(user["status"], "active");
+    assert_eq!(user["external_identities"], json!([]));
+
+    let link_body = json!({"issuer": idp.issuer, "subject": "http-linked-sub", "reason": "INC-1: same person"});
+    let (status, linked) = send(&app, "POST", &format!("/v1/users/{target}/external-identities"), Some(link_body.clone()), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{linked}");
+    assert_eq!(linked["subject"], "http-linked-sub");
+    let (status, again) = send(&app, "POST", &format!("/v1/users/{target}/external-identities"), Some(link_body), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "a same-user link answers 200: {again}");
+    assert_eq!(again["id"], linked["id"]);
+
+    let (status, moved) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{target}/email"),
+        Some(json!({"email": "http-id-moved@example.com", "reason": "INC-2: moved"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["email"], "http-id-moved@example.com");
+    assert_eq!(moved["external_identities"].as_array().unwrap().len(), 1);
+
+    let identity_id = linked["id"].as_str().unwrap();
+    let unlink_uri = format!("/v1/users/{target}/external-identities/{identity_id}/unlink");
+    let (status, body) = send(&app, "POST", &unlink_uri, Some(json!({"reason": "INC-3: undo"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, err) = send(&app, "POST", &unlink_uri, Some(json!({"reason": "INC-3: undo"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a repeated unlink is not found: {err}");
+    assert_eq!(err["error"]["code"], "not-found");
+
+    let (status, me) = send(&app, "POST", "/v1/users/find-by-email", Some(json!({"email": "http-id-admin@example.com"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    let my_user = principal_uuid(me["prn"].as_str().unwrap());
+    let my_identity = me["external_identities"][0]["id"].as_str().unwrap();
+    let (status, err) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{my_user}/external-identities/{my_identity}/unlink"),
+        Some(json!({"reason": "lock myself out"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], "cannot-unlink-own-identity");
+}
+
+/// SMA-712 spec 11, action identity end to end, the HTTP half of
+/// `tests/grpc_users.rs::each_identity_rpc_checks_its_own_action`.
+#[tokio::test]
+async fn each_identity_route_checks_its_own_action() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = test_config(&idp);
+    cfg.authz.policy_cache_ttl_secs = 1;
+    let (app, state) = app_with_config(db, &cfg).await;
+    let admin = idp.bearer("http-matrix-admin", Some("http-matrix-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    let calls = identity_calls(&idp.issuer);
+    let mut tokens = Vec::new();
+    for (index, (action, _, _)) in calls.iter().enumerate() {
+        let token = idp.bearer(&format!("http-matrix-{index}"), Some(format!("http-matrix-{index}@example.com").as_str()), "paigasus", 3600);
+        let uuid = principal_uuid(&provision(&state, &token).await);
+        let policy = json!({
+            "policy_id": format!("sma-712-http-matrix-{index}"),
+            "kind": "static",
+            "source": format!(r#"permit(principal == Pgs::Iam::Principal::"{uuid}", action == Pgs::Iam::Action::"{action}", resource);"#),
+            "description": format!("SMA-712 action-identity pin: {action} only"),
+        });
+        let (status, put) = send(&app, "POST", "/v1/authz/policies", Some(policy), Some(admin.as_str())).await;
+        assert_eq!(status, StatusCode::OK, "{put}");
+        tokens.push(token);
+    }
+
+    for (holder, token) in tokens.iter().enumerate() {
+        for (called, (action, uri, body)) in calls.iter().enumerate() {
+            let (status, err) = send(&app, "POST", uri, Some(body.clone()), Some(token.as_str())).await;
+            let want = if holder == called { StatusCode::NOT_FOUND } else { StatusCode::FORBIDDEN };
+            assert_eq!(status, want, "a subject that holds only {} calls {action}: {err}", calls[holder].0);
+        }
+    }
+}
+
+/// SMA-712 spec 5.1 and 11: a denied caller with a well-formed body of bad values gets 403, not
+/// 400, so the routes are not a validation oracle.
+#[tokio::test]
+async fn a_denied_caller_with_bad_values_gets_403_not_400() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let plain = idp.bearer("http-bad-plain", Some("http-bad-plain@example.com"), "paigasus", 3600);
+    provision(&state, &plain).await;
+    let target = Uuid::from_u128(0xdead);
+    for (uri, body) in [
+        ("/v1/users/find-by-email".to_string(), json!({"email": "not-an-email"})),
+        (
+            format!("/v1/users/{target}/external-identities"),
+            json!({"issuer": "https://unknown.example.com/", "subject": " padded", "reason": ""}),
+        ),
+        (format!("/v1/users/{target}/external-identities/{}/unlink", Uuid::from_u128(1)), json!({"reason": "   "})),
+        (format!("/v1/users/{target}/email"), json!({"email": "@", "reason": ""})),
+    ] {
+        let (status, err) = send(&app, "POST", &uri, Some(body), Some(plain.as_str())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {err}");
+        assert_eq!(err["error"]["code"], "forbidden");
+    }
+}
+
+/// SMA-712 spec 4.3: every DTO field is optional with a default, so a missing field reaches the
+/// service as an empty value and gets the same code as an empty gRPC field. A body of the wrong
+/// type still gets the extractor's 422, and a bad path uuid gets `invalid-uuid`.
+#[tokio::test]
+async fn a_missing_body_field_gets_the_same_code_as_an_empty_grpc_field() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("http-empty-admin", Some("http-empty-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+    let (status, created) = send(
+        &app,
+        "POST",
+        "/v1/users",
+        Some(json!({"email": "http-empty-target@example.com", "display_name": "T"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let target = principal_uuid(created["principal_prn"].as_str().unwrap());
+
+    for (uri, code) in [
+        ("/v1/users/find-by-email".to_string(), "invalid-email"),
+        (format!("/v1/users/{target}/external-identities"), "unknown-issuer"),
+        (format!("/v1/users/{target}/external-identities/{}/unlink", Uuid::from_u128(1)), "invalid-reason"),
+        (format!("/v1/users/{target}/email"), "invalid-email"),
+    ] {
+        let (status, err) = send(&app, "POST", &uri, Some(json!({})), Some(admin.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {err}");
+        assert_eq!(err["error"]["code"], code, "{uri}");
+    }
+
+    let (status, err) = support::send_bytes(
+        &app,
+        "POST",
+        &format!("/v1/users/{target}/external-identities"),
+        Some("application/json"),
+        br#"{"reason": 5}"#,
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-request-schema");
+
+    let (status, err) = send(&app, "POST", "/v1/users/not-a-uuid/email", Some(json!({"email": "a@example.com", "reason": "r"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-uuid");
+    assert_eq!(err["error"]["message"], "user_id must be a uuid");
 }
