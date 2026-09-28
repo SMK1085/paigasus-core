@@ -20,6 +20,8 @@ spec:
     spec:
       containers:
         - name: redis
+          # SMA-675 Q3: ci/images/run.sh CONSOLE_SMOKE_REDIS_IMAGE holds a second copy of this digest.
+          # No check compares the two copies. Refresh the two together.
           image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
           ports:
             - name: redis

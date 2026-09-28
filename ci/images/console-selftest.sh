@@ -33,7 +33,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe kernel_control_flag"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -416,12 +416,23 @@ stub_docker_main() {
   printf '%s\n' "--" >> "$STUB_ARGV"
   case "${1:-}" in
     run)
+      # SMA-675: `docker run -d` starts the Redis sidecar.
+      if [ "${2:-}" = "-d" ]; then exit "$STUB_RUND_RC"; fi
       for a in "$@"; do
         if [ "$a" = "--version" ]; then
           if [ -n "$STUB_VERSION_ERR" ]; then printf '%s\n' "$STUB_VERSION_ERR" >&2; fi
           if [ -n "$STUB_VERSION_OUT" ]; then printf '%s\n' "$STUB_VERSION_OUT"; fi
           exit "$STUB_VERSION_RC"
         fi
+      done
+      # SMA-675: the kernel control row's walk for the wasm chunks.
+      for a in "$@"; do
+        case "$a" in
+          */.next/server/chunks)
+            if [ -n "$STUB_CHUNKS_OUT" ]; then printf '%s\n' "$STUB_CHUNKS_OUT"; fi
+            exit "$STUB_CHUNKS_RC"
+            ;;
+        esac
       done
       if [ -n "$STUB_WALK_OUT" ]; then printf '%s\n' "$STUB_WALK_OUT"; fi
       exit "$STUB_WALK_RC"
@@ -431,9 +442,37 @@ stub_docker_main() {
       exit "$STUB_ENV_RC"
       ;;
     exec)
+      # SMA-675: `docker exec <redis> redis-cli <command> …`.
+      if [ "${3:-}" = "redis-cli" ]; then
+        case "${4:-}" in
+          PING) printf '%s\n' "$STUB_PING_OUT"; exit 0 ;;
+          TIME)
+            if [ -n "$STUB_TIME_OUT" ]; then printf '%s\n' "$STUB_TIME_OUT"; fi
+            exit "$STUB_TIME_RC"
+            ;;
+          SET) printf '%s\n' "$STUB_SET_OUT"; exit "$STUB_SET_RC" ;;
+        esac
+      fi
       if [ "$STUB_EXEC_SLEEP" -gt 0 ]; then exec sleep "$STUB_EXEC_SLEEP"; fi
       exit "$STUB_EXEC_RC"
       ;;
+    network) exit "$STUB_NET_RC" ;;
+    create)
+      # SMA-675 D4: X11 records the cleanup registry that the caller exported at create time.
+      if [ -n "${STUB_NAMES_FILE:-}" ]; then
+        printf '%s\n' "${CONSOLE_SMOKE_NAMES-<unset>}" > "$STUB_NAMES_FILE"
+      fi
+      if [ "$STUB_CREATE_RC" -eq 0 ]; then echo "stub-container-id"; fi
+      exit "$STUB_CREATE_RC"
+      ;;
+    start) exit "$STUB_START_RC" ;;
+    cp) exit "$STUB_CP_RC" ;;
+    port) printf '%s\n' "$STUB_PORT_OUT"; exit 0 ;;
+    logs)
+      if [ -n "$STUB_LOGS_OUT" ]; then printf '%s\n' "$STUB_LOGS_OUT"; fi
+      exit 0
+      ;;
+    rm) exit "$STUB_RM_RC" ;;
   esac
   echo "stub docker: unexpected argv: $*" >&2
   exit 99
@@ -449,14 +488,132 @@ mkdir -p "$T/stub"
 } > "$T/stub/docker"
 chmod +x "$T/stub/docker"
 
+# SMA-675: the stub curl. Call <n> (counted in $STUB_CURL_DIR/count) answers from
+# $STUB_CURL_DIR/<n>.w (printed as the -w output), <n>.body (written to the -o file) and <n>.rc
+# (its exit code). A call with no files of its own answers like the last call that has them. It
+# records its argv in $STUB_CURL_DIR/argv in the stub docker's format.
+stub_curl_main() {
+  local n=0 a o="" prev="" k
+  if [ -s "$STUB_CURL_DIR/count" ]; then n="$(cat "$STUB_CURL_DIR/count")"; fi
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$STUB_CURL_DIR/count"
+  for a in "$@"; do
+    if [ "$prev" = "-o" ]; then o="$a"; fi
+    prev="$a"
+    printf '%s\n' "$a" >> "$STUB_CURL_DIR/argv"
+  done
+  printf '%s\n' "--" >> "$STUB_CURL_DIR/argv"
+  k="$n"
+  while [ "$k" -gt 1 ] && [ ! -e "$STUB_CURL_DIR/$k.w" ]; do k=$((k - 1)); done
+  if [ -n "$o" ] && [ "$o" != "/dev/null" ]; then
+    : > "$o"
+    if [ -e "$STUB_CURL_DIR/$k.body" ]; then cat "$STUB_CURL_DIR/$k.body" > "$o"; fi
+  fi
+  if [ -e "$STUB_CURL_DIR/$k.w" ]; then printf '%s' "$(cat "$STUB_CURL_DIR/$k.w")"; fi
+  if [ -e "$STUB_CURL_DIR/$k.rc" ]; then exit "$(cat "$STUB_CURL_DIR/$k.rc")"; fi
+  exit 0
+}
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  declare -f stub_curl_main
+  # shellcheck disable=SC2016 # the line is written into the stub file literally
+  printf '%s\n' 'stub_curl_main "$@"'
+} > "$T/stub/curl"
+chmod +x "$T/stub/curl"
+
+# curl_reset <name> — a new, empty answer directory for the stub curl.
+curl_reset() {
+  STUB_CURL_DIR="$T/curl-$1"
+  rm -rf "$STUB_CURL_DIR"
+  mkdir -p "$STUB_CURL_DIR"
+}
+
+# curl_resp <n> <w-output> <body> <rc> — the answer of stub curl call <n>.
+curl_resp() {
+  printf '%s' "$2" > "$STUB_CURL_DIR/$1.w"
+  printf '%s' "$3" > "$STUB_CURL_DIR/$1.body"
+  printf '%s\n' "$4" > "$STUB_CURL_DIR/$1.rc"
+}
+
+# curl_count_is <row> <n> — a PASS row <row>-count when the stub curl was called exactly <n> times.
+curl_count_is() {
+  local got=0
+  if [ -s "$STUB_CURL_DIR/count" ]; then got="$(cat "$STUB_CURL_DIR/count")"; fi
+  if [ "$got" -eq "$2" ]; then
+    say_pass "$1-count"
+  else
+    say_fail "$1-count" "the stub curl was called ${got} times, expected $2" "$STUB_CURL_DIR/argv"
+  fi
+}
+
+# argv_calls <argv-file> — one line per stub call, its arguments joined by one space.
+argv_calls() {
+  awk '$0 == "--" { print line; line = ""; next } { line = (line == "" ? $0 : line " " $0) }' "$1"
+}
+
+# expect_call <row> <substring> — a PASS row <row>-argv when one stub docker call of the last
+# run_fn holds <substring>. expect_no_call is the reverse.
+expect_call() {
+  local calls=""
+  if [ -e "$T/argv" ]; then calls="$(argv_calls "$T/argv")"; fi
+  case "$calls" in
+    *"$2"*) say_pass "$1-argv" ;;
+    *) say_fail "$1-argv" "no stub docker call holds '$2'" "$T/argv" ;;
+  esac
+}
+expect_no_call() {
+  local calls=""
+  if [ -e "$T/argv" ]; then calls="$(argv_calls "$T/argv")"; fi
+  case "$calls" in
+    *"$2"*) say_fail "$1-argv" "a stub docker call holds '$2', and none may" "$T/argv" ;;
+    *) say_pass "$1-argv" ;;
+  esac
+}
+
+# count_calls <prefix> — the number of stub docker calls of the last run_fn that start with
+# <prefix>.
+count_calls() {
+  if [ ! -e "$T/argv" ]; then echo 0; return 0; fi
+  argv_calls "$T/argv" | awk -v p="$1" 'index($0, p) == 1 { n++ } END { print n + 0 }'
+}
+
+# expect_in <row> <file> <substring> / expect_not_in — a PASS row when <file> holds (or does not
+# hold) <substring>. `case`, not grep: no regex and no early-exit reader.
+expect_in() {
+  local text=""
+  if [ -e "$2" ]; then text="$(cat "$2")"; fi
+  case "$text" in
+    *"$3"*) say_pass "$1" ;;
+    *) say_fail "$1" "${2##*/} does not hold '$3'" "$2" ;;
+  esac
+}
+expect_not_in() {
+  local text=""
+  if [ -e "$2" ]; then text="$(cat "$2")"; fi
+  case "$text" in
+    *"$3"*) say_fail "$1" "${2##*/} holds '$3', which it must not" "$2" ;;
+    *) say_pass "$1" ;;
+  esac
+}
+
 stub_reset() {
   STUB_VERSION_OUT="v24.16.0"; STUB_VERSION_RC=0; STUB_VERSION_ERR=""
   STUB_ENV_OUT="PATH=/usr/bin"; STUB_ENV_RC=0
   STUB_WALK_OUT="walked=1300"; STUB_WALK_RC=0
   STUB_EXEC_SLEEP=0; STUB_EXEC_RC=0
+  # SMA-675 defaults: every new docker command succeeds.
+  STUB_RUND_RC=0
+  STUB_CHUNKS_OUT="/app/apps/iam-console/.next/server/chunks/ssr/x_paigasus_wasm_bg_1.wasm"; STUB_CHUNKS_RC=0
+  STUB_PING_OUT="PONG"
+  STUB_TIME_OUT="$(printf '%s\n' 1790000000 123456)"; STUB_TIME_RC=0
+  STUB_SET_OUT="OK"; STUB_SET_RC=0
+  STUB_NET_RC=0; STUB_CREATE_RC=0; STUB_START_RC=0; STUB_CP_RC=0; STUB_RM_RC=0
+  STUB_PORT_OUT="0.0.0.0:32768"
+  STUB_LOGS_OUT="CompileError: WebAssembly.Module(): expected magic word 00 61 73 6d"
+  curl_reset default
   FX_ROOT="$T/fx-node"
-  # A row-scoped extra PATH entry, prepended ahead of the docker stub, empty by default. E6 (the
-  # grep-rc-2 row) is the only row that sets it.
+  # A row-scoped extra PATH entry, prepended ahead of the docker stub, empty by default. E6 and K7
+  # (the grep-rc-2 rows) set it.
   STUB_PATH_EXTRA=""
 }
 
@@ -474,7 +631,7 @@ T_IMAGE="paigasus-iam-console:dev"
 # The argv that console_node_version_row must hand to docker.
 printf '%s\n' run --rm --entrypoint /nodejs/bin/node "$T_IMAGE" --version -- > "$T/argv-node"
 
-# run_fn <row> <want_rc> <present> <absent> <want-argv-file|none> <fn> [<arg>...] — the
+# run_fn <row> <want_rc> <present> <absent> <want-argv-file|none|any> <fn> [<arg>...] — the
 # production shape: `fn … || rc=$?`, so errexit is off inside the function.
 run_fn() {
   local row="$1" want_rc="$2" present="$3" absent="$4" want_argv="$5" rc=0 o e
@@ -486,13 +643,17 @@ run_fn() {
     PATH="${STUB_PATH_EXTRA:+$STUB_PATH_EXTRA:}$T/stub:$PATH"
     STUB_ARGV="$T/argv"
     export PATH STUB_ARGV STUB_VERSION_OUT STUB_VERSION_RC STUB_VERSION_ERR STUB_ENV_OUT STUB_ENV_RC \
-      STUB_WALK_OUT STUB_WALK_RC STUB_EXEC_SLEEP STUB_EXEC_RC
+      STUB_WALK_OUT STUB_WALK_RC STUB_EXEC_SLEEP STUB_EXEC_RC STUB_RUND_RC STUB_CHUNKS_OUT \
+      STUB_CHUNKS_RC STUB_PING_OUT STUB_TIME_OUT STUB_TIME_RC STUB_SET_OUT STUB_SET_RC STUB_NET_RC \
+      STUB_CREATE_RC STUB_START_RC STUB_CP_RC STUB_RM_RC STUB_PORT_OUT STUB_LOGS_OUT STUB_CURL_DIR
     # shellcheck disable=SC2034 # ROOT is read by the function under test.
     ROOT="$FX_ROOT"
     set -uo pipefail
     "$@"
   ) >"$o" 2>"$e" || rc=$?
-  if [ "$want_argv" = "none" ]; then
+  if [ "$want_argv" = "any" ]; then
+    :
+  elif [ "$want_argv" = "none" ]; then
     if [ -e "$T/argv" ]; then
       say_fail "$row" "the stub docker was called, and it must not be" "$T/argv" "$o" "$e"
       return 0
@@ -621,6 +782,332 @@ run_fn H6 1 "positive integer" "" none console_healthcheck_row smoke-selftest ia
 pin_rows P1c "$T/fn-smoke_consoles.sh" 'console_healthcheck_row "$name" "$app" "$base_path" "$CONSOLE_HC_DEADLINE" || ec=1'
 # shellcheck disable=SC2016 # the pinned call lines are literal text
 pin_rows P2 "$T/fn-console_healthcheck_row.sh" 'with_deadline "$deadline" docker exec "$name" /nodejs/bin/node /app/healthcheck.mjs >"$out" 2>&1 || hc_rc=$?'
+
+# --- SMA-675: console_new_sid and console_container_args (SID, A rows) ------------------------
+stub_reset
+run_fn SID0 0 "" "::error::" none console_new_sid
+SID0_OUT="$(cat "$T/SID0.out")"
+case "$SID0_OUT" in
+  *[!0-9a-f]*|'') say_fail SID0-shape "the sid is not lowercase hex: '${SID0_OUT}'" ;;
+  *) if [ "${#SID0_OUT}" -eq 64 ]; then say_pass SID0-shape; else say_fail SID0-shape "the sid has ${#SID0_OUT} characters, expected 64"; fi ;;
+esac
+
+printf '%s\n' -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com" > "$T/a-env"
+A_ZONES='{"iam":"/iam","gateway":"/gateway"}'
+printf '%s\n' -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com" -e "PAIGASUS_ZONE=iam" \
+  -e "PAIGASUS_ZONES=${A_ZONES}" --network smoke-net-1 -e "PAIGASUS_SESSION_STORE=redis" \
+  -e "PAIGASUS_SESSION_REDIS_URL=redis://smoke-redis-1:6379" --add-host iam:127.0.0.1 \
+  --add-host gateway:127.0.0.1 -p 0:3000 > "$T/a-want-net"
+printf '%s\n' -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com" -e "PAIGASUS_ZONE=iam" \
+  -e "PAIGASUS_ZONES=${A_ZONES}" -e "PAIGASUS_SESSION_STORE=memory" -p 0:3000 > "$T/a-want-mem"
+
+# a_cmp <row> <want-file> — a PASS row <row>-list when the row's stdout is exactly <want-file>.
+a_cmp() {
+  if cmp -s "$2" "$T/$1.out"; then
+    say_pass "$1-list"
+  else
+    diff "$2" "$T/$1.out" > "$T/$1.list-diff" 2>&1 || true
+    say_fail "$1-list" "a different argument list (< expected, > got)" "$T/$1.list-diff"
+  fi
+}
+
+stub_reset
+run_fn A0 0 "" "::error::" none console_container_args iam-console iam "$A_ZONES" smoke-net-1 "redis://smoke-redis-1:6379" "$T/a-env"
+a_cmp A0 "$T/a-want-net"
+stub_reset
+run_fn A1 0 "" "::error::" none console_container_args iam-console iam "$A_ZONES" "" "" "$T/a-env"
+a_cmp A1 "$T/a-want-mem"
+stub_reset
+run_fn A2 1 "with no Redis URL" "" none console_container_args iam-console iam "$A_ZONES" smoke-net-1 "" "$T/a-env"
+stub_reset
+run_fn A3 1 "is not readable" "" none console_container_args iam-console iam "$A_ZONES" "" "" "$T/a-env-missing"
+
+# --- SMA-675: Redis sidecar, seeded session and cleanup (R, S, C rows) ------------------------
+stub_reset
+run_fn R0 0 "" "::error::" any console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub 2
+expect_call R0 "network create --label paigasus.smoke=console smoke-net-1"
+expect_call R0 "run -d --name smoke-redis-1 --network smoke-net-1 --label paigasus.smoke=console redis:stub"
+stub_reset; STUB_NET_RC=1
+run_fn R1 1 "the per-run network smoke-net-1 was not created" "" any console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub 2
+expect_no_call R1 "run -d"
+stub_reset; STUB_RUND_RC=125
+run_fn R2 1 "the Redis sidecar smoke-redis-1 did not start" "" any console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub 2
+stub_reset; STUB_PING_OUT="LOADING"
+run_fn R3 1 "did not answer PONG within 2 tries" "" any console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub 2
+stub_reset
+run_fn R4 1 "is not a positive integer" "" none console_smoke_redis_start smoke-net-1 smoke-redis-1 redis:stub x
+
+# The seeded record. TIME 1790000000 s + 123456 us = 1790000000123 ms; + 600000 = 1790000600123.
+S_SID="$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+stub_reset
+run_fn S0 0 "" "::error::" any console_seed_session smoke-redis-1 "$S_SID"
+expect_call S0 "exec smoke-redis-1 redis-cli SET pgs:sess:${S_SID} "
+expect_call S0 '"email":"smoke-0123456789ab@example.com"'
+expect_call S0 '"version":2,"rev":1,'
+expect_call S0 '"accessExpiresAt":1790000600123,"absoluteExpiresAt":1790000600123,'
+expect_call S0 '"principalPrn":null,'
+expect_call S0 " PX 600000"
+expect_no_call S0 "refreshToken"
+stub_reset; STUB_SET_OUT="ERR wrong number of arguments"
+run_fn S1 1 "replied 'ERR wrong number of arguments', not OK" "" any console_seed_session smoke-redis-1 "$S_SID"
+stub_reset; STUB_TIME_OUT=""; STUB_TIME_RC=1
+run_fn S2 1 "'redis-cli TIME' on smoke-redis-1 exited 1" "" any console_seed_session smoke-redis-1 "$S_SID"
+expect_no_call S2 " SET "
+# Review Focus 2: a microsecond value with a leading zero is decimal, not octal.
+# 012345 us = 12 ms, so 1790000000012 + 600000 = 1790000600012.
+stub_reset; STUB_TIME_OUT="$(printf '%s\n' 1790000000 012345)"
+run_fn S3 0 "" "::error::" any console_seed_session smoke-redis-1 "$S_SID"
+expect_call S3 '"accessExpiresAt":1790000600012,'
+stub_reset; STUB_TIME_OUT="$(printf '%s\n' 1790000000 089123)"
+run_fn S4 0 "" "::error::" any console_seed_session smoke-redis-1 "$S_SID"
+expect_call S4 '"accessExpiresAt":1790000600089,'
+
+# cleanup_case <names> <network> — sets the two cleanup globals, then runs the cleanup.
+cleanup_case() {
+  # shellcheck disable=SC2034 # console_smoke_cleanup reads the two globals.
+  CONSOLE_SMOKE_NAMES="$1"
+  # shellcheck disable=SC2034 # console_smoke_cleanup reads the two globals.
+  CONSOLE_SMOKE_NETWORK="$2"
+  console_smoke_cleanup
+}
+printf '%s\n' rm -f smoke-a -- rm -f smoke-b -- network rm smoke-net-1 -- > "$T/argv-cleanup"
+stub_reset
+run_fn C0 0 "" "" "$T/argv-cleanup" cleanup_case " smoke-a smoke-b" smoke-net-1
+printf '%s\n' rm -f smoke-a -- > "$T/argv-cleanup-nonet"
+stub_reset
+run_fn C1 0 "" "" "$T/argv-cleanup-nonet" cleanup_case " smoke-a" ""
+
+# --- SMA-675: console_kernel_route_row (K rows) -----------------------------------------------
+K_SID="$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+K_NONCE="smoke-0123456789ab@example.com"
+K_BODY_OK="<html><title>Paigasus IAM</title><script>self.__next_f.push([1,\"{\\\"email\\\":\\\"${K_NONCE}\\\"}\"])</script></html>"
+K_BODY_BRAND="<html><title>Paigasus IAM</title></html>"
+K_PROXY="302 http://127.0.0.1:32768/iam/auth/login?returnTo=%2Fiam%2Forgs"
+K_SESSION="307 http://127.0.0.1:32768/iam/auth/login?returnTo=%2Fiam%2F"
+# k_row <row> <want_rc> <present> <absent> [<tries>] — the route row against the stub curl.
+k_row() {
+  run_fn "$1" "$2" "$3" "$4" any console_kernel_route_row http://127.0.0.1:32768 /iam /orgs "$K_SID" smoke-iam-console-1 "${5:-3}"
+}
+
+stub_reset; curl_reset K0; curl_resp 1 "200 " "$K_BODY_OK" 0
+k_row K0 0 "" "::error::"
+curl_count_is K0 1
+expect_in K0-cookie "$STUB_CURL_DIR/argv" "Cookie: __Host-pgs_sid=${K_SID}"
+expect_not_in K0-nofollow "$STUB_CURL_DIR/argv" "-L"
+# Review Focus 1: the proxy value is tested first and is never retried.
+stub_reset; curl_reset K1; curl_resp 1 "$K_PROXY" "" 0
+k_row K1 1 "the proxy did not see the session cookie" "requireSession"
+curl_count_is K1 1
+stub_reset; curl_reset K2; curl_resp 1 "$K_SESSION" "" 0
+k_row K2 1 "requireSession found no session after 3 requests" "the proxy did not see"
+curl_count_is K2 3
+stub_reset; curl_reset K3; curl_resp 1 "302 http://elsewhere.example/x" "" 0
+k_row K3 1 "redirected (302) to 'http://elsewhere.example/x'" ""
+curl_count_is K3 1
+stub_reset; curl_reset K4; curl_resp 1 "404 " "" 0
+k_row K4 1 "answered 404" ""
+stub_reset; curl_reset K5; curl_resp 1 "500 " "" 0
+k_row K5 1 "answered 500" ""
+stub_reset; curl_reset K6; curl_resp 1 "000 " "" 7
+k_row K6 1 "curl exited 7" ""
+stub_reset; curl_reset K7; curl_resp 1 "200 " "$K_BODY_OK" 0; STUB_PATH_EXTRA="$T/stub-grep"
+k_row K7 1 "grep exited 2" "holds no"
+stub_reset; curl_reset K8; curl_resp 1 "200 " "$K_BODY_BRAND" 0
+k_row K8 1 "the body holds no ${K_NONCE}" ""
+stub_reset; curl_reset K9; curl_resp 1 "$K_SESSION" "" 0; curl_resp 2 "200 " "$K_BODY_OK" 0
+k_row K9 0 "" "::error::"
+curl_count_is K9 2
+stub_reset; curl_reset K10
+k_row K10 1 "is not a positive integer" "" abc
+curl_count_is K10 0
+
+# --- SMA-675: console_kernel_control_row (X rows) ---------------------------------------------
+# Every X row asserts that the row removes its control container before it returns (SMA-675 Q2).
+X_CTL="smoke-iam-console-nokernel-$$"
+X_LINE="CompileError"
+printf '%s\n' -e "PAIGASUS_ZONE=iam" --network smoke-net-1 -p 0:3000 > "$T/x-args"
+X_CHUNK_A="/app/apps/iam-console/.next/server/chunks/ssr/a_paigasus_wasm_bg_1.wasm"
+X_CHUNK_B="/app/apps/iam-console/.next/server/chunks/ssr/b_paigasus_wasm_bg_2.wasm"
+# x_row <row> <want_rc> <present> <absent> [<kernel-line>] — the control row against the stubs.
+x_row() {
+  run_fn "$1" "$2" "$3" "$4" any console_kernel_control_row iam-console paigasus-iam-console:dev /iam /orgs smoke-redis-1 "$T/x-args" "${5-$X_LINE}"
+  expect_call "$1-rm" "rm -f ${X_CTL}"
+}
+
+stub_reset; curl_reset X0; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
+x_row X0 0 "" "::error::"
+expect_call X0-create "create --name ${X_CTL} -e PAIGASUS_ZONE=iam --network smoke-net-1 -p 0:3000 paigasus-iam-console:dev"
+expect_call X0-cp "cp "
+expect_call X0-cp-target "${X_CTL}:${STUB_CHUNKS_OUT}"
+expect_call X0-seed "exec smoke-redis-1 redis-cli SET pgs:sess:"
+expect_in X0-healthz "$STUB_CURL_DIR/argv" "http://127.0.0.1:32768/iam/healthz"
+expect_in X0-probe "$STUB_CURL_DIR/argv" "http://127.0.0.1:32768/iam/orgs"
+stub_reset; STUB_CHUNKS_OUT=""; curl_reset X1
+x_row X1 1 "found 0 *paigasus_wasm_bg*.wasm files" ""
+expect_no_call X1 "create "
+stub_reset; STUB_CHUNKS_OUT="$(printf '%s\n' "$X_CHUNK_A" "$X_CHUNK_B")"; curl_reset X2; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
+x_row X2 0 "" "::error::"
+X2_CP="$(count_calls "cp ")"
+if [ "$X2_CP" -eq 2 ]; then say_pass X2-cp-count; else say_fail X2-cp-count "${X2_CP} docker cp calls, expected 2" "$T/argv"; fi
+stub_reset; STUB_CP_RC=1; curl_reset X3
+x_row X3 1 "docker cp exited 1" ""
+expect_no_call X3 "start "
+stub_reset; curl_reset X4; curl_resp 1 "200" "" 0; curl_resp 2 "200" "" 0
+x_row X4 1 "answered 200 with every wasm chunk corrupted" ""
+stub_reset; curl_reset X5; curl_resp 1 "200" "" 0; curl_resp 2 "302" "" 0
+x_row X5 1 "answered '302'" ""
+stub_reset; STUB_LOGS_OUT="AuthConfigError: PAIGASUS_SESSION_REDIS_URL is required"; curl_reset X6; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
+x_row X6 1 "for a reason that is not the kernel" ""
+stub_reset; curl_reset X7
+x_row X7 1 "the kernel line is empty" "" ""
+stub_reset; curl_reset X8; curl_resp 1 "503" "" 0
+x_row X8 1 "never answered 200 on /iam/healthz" ""
+stub_reset; STUB_CREATE_RC=125; curl_reset X9
+x_row X9 1 "was not created from paigasus-iam-console:dev" ""
+stub_reset; STUB_RM_RC=1; curl_reset X10; curl_resp 1 "200" "" 0; curl_resp 2 "500" "" 0
+x_row X10 0 "::warning::iam-console: the kernel control container ${X_CTL} was not removed" "::error::"
+
+# X11: spec D4 registers the control container in CONSOLE_SMOKE_NAMES BEFORE docker create, so
+# the EXIT trap removes it after an abort. run_fn runs the row in a subshell, so the case exports
+# the registry and the stub docker writes it to a file at `docker create`. docker create fails
+# here (the abort path), and the name must still be registered, after the name already there.
+x_reg_case() {
+  CONSOLE_SMOKE_NAMES=" smoke-earlier"
+  STUB_NAMES_FILE="$T/x11-names"
+  export CONSOLE_SMOKE_NAMES STUB_NAMES_FILE
+  console_kernel_control_row "$@"
+}
+stub_reset; STUB_CREATE_RC=125; curl_reset X11; rm -f "$T/x11-names"
+run_fn X11 1 "was not created from paigasus-iam-console:dev" "" any x_reg_case iam-console paigasus-iam-console:dev /iam /orgs smoke-redis-1 "$T/x-args" "$X_LINE"
+X11_NAMES="$(cat "$T/x11-names" 2>/dev/null || echo "<no docker create call>")"
+if [ "$X11_NAMES" = " smoke-earlier ${X_CTL}" ]; then
+  say_pass X11-registered
+else
+  say_fail X11-registered "CONSOLE_SMOKE_NAMES at docker create was '${X11_NAMES}', expected ' smoke-earlier ${X_CTL}'"
+fi
+# shellcheck disable=SC2016 # the pinned line is literal text
+pin_rows X11-pin "$T/fn-console_kernel_control_row.sh" 'CONSOLE_SMOKE_NAMES="${CONSOLE_SMOKE_NAMES:-} ${ctl}"'
+
+# --- SMA-675: the Q5 switch (KC, Z, D1 rows) --------------------------------------------------
+# shellcheck disable=SC2034 # kernel_control_flag reads the variable.
+kc_set() { PAIGASUS_SMOKE_KERNEL_CONTROL="$1"; kernel_control_flag; }
+kc_unset() { unset PAIGASUS_SMOKE_KERNEL_CONTROL; kernel_control_flag; }
+stub_reset
+run_fn KC0 0 "" "::error::" none kc_unset
+expect_in KC0-out "$T/KC0.out" "--kernel-control=on"
+stub_reset
+run_fn KC1 0 "" "::error::" none kc_set off
+expect_in KC1-out "$T/KC1.out" "--kernel-control=off"
+stub_reset
+run_fn KC2 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" none kc_set bogus
+# Review Focus 3: an empty value is a usage error, not a silent default.
+stub_reset
+run_fn KC3 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" none kc_set ""
+
+# smoke_case <args...> — smoke_consoles with its globals set to dummy values and every row that
+# needs a real image replaced, so only the zone loop's wiring runs. Z_CALLS records which kernel
+# rows smoke_consoles called. Z_REDIS_RC is what the Redis start returns.
+Z_CALLS="$T/z-calls"
+Z_REDIS_RC=0
+# shellcheck disable=SC2034 # smoke_consoles reads the globals that the case sets.
+smoke_case() {
+  CONSOLE_SMOKE_ENV=(-e "PAIGASUS_OIDC_ISSUER=https://idp.example.com")
+  CONSOLE_HC_DEADLINE=5
+  RUN_ID="z"
+  CONSOLE_SMOKE_NAMES=""
+  CONSOLE_SMOKE_NETWORK=""
+  CONSOLE_SMOKE_REDIS_IMAGE="redis:stub"
+  CONSOLE_KERNEL_LINE="CompileError"
+  CONSOLE_STAGED_TREE_JS=""
+  assert_fresh() { return 0; }
+  console_node_version_row() { return 0; }
+  console_image_config_row() { return 0; }
+  console_healthcheck_row() { return 0; }
+  console_smoke_redis_start() { return "$Z_REDIS_RC"; }
+  console_seed_session() { return 0; }
+  console_kernel_route_row() { echo "route $2$3" >> "$Z_CALLS"; }
+  console_kernel_control_row() { echo "control $1" >> "$Z_CALLS"; }
+  smoke_consoles "$@"
+}
+# The stub curl answers the zone loop's three requests per zone in order: the page status (200),
+# the cookie-less row (302), and the page body (no chunk URL, so the chunk rows red; Z rows do not
+# read the rc).
+z_curl() {
+  curl_reset "$1"
+  curl_resp 1 "200" "" 0; curl_resp 2 "302" "" 0; curl_resp 3 "<html></html>" "" 0
+  curl_resp 4 "200" "" 0; curl_resp 5 "302" "" 0; curl_resp 6 "<html></html>" "" 0
+}
+
+stub_reset; z_curl Z1; rm -f "$Z_CALLS"; Z_REDIS_RC=0
+run_fn Z1 1 "" "" any smoke_case --kernel-control=off iam=img:dev gateway=img:dev
+expect_in Z1-skip-iam "$T/Z1.out" "iam-console: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off, the release path; SMA-675 Q5)"
+expect_in Z1-skip-gw "$T/Z1.out" "gateway-console: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off"
+expect_in Z1-route-iam "$Z_CALLS" "route /iam/orgs"
+expect_in Z1-route-gw "$Z_CALLS" "route /gateway/overview"
+expect_not_in Z1-nocontrol "$Z_CALLS" "control"
+expect_no_call Z1 "-nokernel-"
+expect_call Z1-net "--network smoke-net-z"
+expect_call Z1-redis "PAIGASUS_SESSION_REDIS_URL=redis://smoke-redis-z:6379"
+expect_no_call Z1-nomem "PAIGASUS_SESSION_STORE=memory"
+stub_reset; z_curl Z2; rm -f "$Z_CALLS"; Z_REDIS_RC=0
+run_fn Z2 1 "" "" any smoke_case --kernel-control=on iam=img:dev gateway=img:dev
+expect_in Z2-control-iam "$Z_CALLS" "control iam-console"
+expect_in Z2-control-gw "$Z_CALLS" "control gateway-console"
+expect_not_in Z2-noskip "$T/Z2.out" "kernel control row skipped"
+stub_reset
+run_fn Z3 1 "the first argument must be --kernel-control=on or --kernel-control=off, not 'iam=img:dev'" "" none smoke_case iam=img:dev
+stub_reset
+run_fn Z4 1 "not '--kernel-control=maybe'" "" none smoke_case --kernel-control=maybe iam=img:dev
+# D6: with no Redis, the kernel rows do not run and the containers get the memory store.
+stub_reset; z_curl Z5; rm -f "$Z_CALLS"; Z_REDIS_RC=1
+run_fn Z5 1 "iam-console: kernel rows NOT run" "" any smoke_case --kernel-control=on iam=img:dev gateway=img:dev
+expect_not_in Z5-norows "$Z_CALLS" "route"
+expect_call Z5-mem "PAIGASUS_SESSION_STORE=memory"
+expect_no_call Z5 "--network"
+Z_REDIS_RC=0
+
+# AC 3: CONSOLE_SMOKE_ENV sets no session store any more; console_container_args owns it.
+awk '/^CONSOLE_SMOKE_ENV=\($/ { on = 1 } on { print } on && /^\)$/ { on = 0 }' "$RUN_SH" > "$T/env-block"
+if [ -s "$T/env-block" ]; then say_pass ENV0-found; else say_fail ENV0-found "no CONSOLE_SMOKE_ENV=( block in run.sh"; fi
+expect_not_in ENV0 "$T/env-block" "PAIGASUS_SESSION_STORE"
+
+# D1: the dispatch arm, through the REAL script. It must stop before any docker call.
+rm -f "$T/argv"
+D1_RC=0
+( PATH="$T/stub:$PATH"; STUB_ARGV="$T/argv"; export PATH STUB_ARGV
+  PAIGASUS_SMOKE_KERNEL_CONTROL=bogus "$BASH" "$RUN_SH" all-consoles ) >"$T/D1.out" 2>"$T/D1.err" || D1_RC=$?
+check_row D1 "$D1_RC" 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" "$T/D1.out" "$T/D1.err"
+if [ -e "$T/argv" ]; then say_fail D1-nodocker "the stub docker was called" "$T/argv"; else say_pass D1-nodocker; fi
+
+# --- SMA-675 call-site pins (P3 to P16) --------------------------------------------------------
+# shellcheck disable=SC2016 # the pinned lines are literal text
+pin_rows P3 "$T/fn-smoke_consoles.sh" 'if console_smoke_redis_start "$CONSOLE_SMOKE_NETWORK" "$redis_name" "$CONSOLE_SMOKE_REDIS_IMAGE" 20; then kernel_ok=1; else ec=1; fi'
+# shellcheck disable=SC2016
+pin_rows P4 "$T/fn-smoke_consoles.sh" 'console_container_args "$app" "$service" "$zones_json" "$net" "$redis_url" "$work/env" > "$args_file" || args_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P5 "$T/fn-smoke_consoles.sh" 'run_out="$(docker create --name "$name" "${cargs[@]}" "$image" 2>&1)" || run_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P6 "$T/fn-smoke_consoles.sh" 'elif console_seed_session "$redis_name" "$sid"; then'
+# shellcheck disable=SC2016
+pin_rows P7 "$T/fn-smoke_consoles.sh" 'console_kernel_route_row "$origin" "$base_path" "$console_path" "$sid" "$name" 3 || ec=1'
+# shellcheck disable=SC2016
+pin_rows P8 "$T/fn-smoke_consoles.sh" 'console_kernel_control_row "$app" "$image" "$base_path" "$console_path" "$redis_name" "$args_file" "$CONSOLE_KERNEL_LINE" || ec=1'
+# shellcheck disable=SC2016
+pin_rows P9 "$T/fn-console_kernel_control_row.sh" 'rm_out="$(docker rm -f "$ctl" 2>&1)" || rm_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P10 "$T/fn-console_kernel_control_row.sh" 'console_kernel_control_probe "$ctl" "$tmp" "$@" || rc=$?'
+# shellcheck disable=SC2016
+pin_rows P11 "$T/fn-console_kernel_route_row.sh" 'grep -F -q -- "$nonce" "$body" || g_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P12 "$T/fn-console_kernel_control_probe.sh" 'grep -F -q -- "$kernel_line" "$tmp/ctl.log" || g_rc=$?'
+# shellcheck disable=SC2016
+pin_rows P13 "$T/fn-console_kernel_control_probe.sh" 'out="$(docker create --name "$ctl" "${cargs[@]}" "$image" 2>&1)" || rc=$?'
+# shellcheck disable=SC2016
+pin_rows P14 "$T/fn-console_kernel_control_probe.sh" 'if ! console_seed_session "$redis" "$sid"; then'
+# shellcheck disable=SC2016
+pin_rows P15 "$T/fn-console_smoke_redis_start.sh" 'out="$(docker network create --label paigasus.smoke=console "$network" 2>&1)" || rc=$?'
+# shellcheck disable=SC2016
+pin_rows P16 "$T/fn-console_smoke_cleanup.sh" 'docker network rm "$CONSOLE_SMOKE_NETWORK" >/dev/null 2>&1 || true'
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
