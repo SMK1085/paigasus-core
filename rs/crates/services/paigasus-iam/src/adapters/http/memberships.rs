@@ -21,6 +21,10 @@
 //! - `ListMemberships` authorizes against the queried node for a node-filtered query;
 //!   `Root` for a principal-filtered query (there is no single "target node" for "every node
 //!   a principal belongs to" — mirrofs `ListOrganizations`' platform-only posture, D4).
+//!   A principal filter's PRN is then confirmed against the stored principal in the
+//!   repository (`MembershipKindQuery::list_of_kind`, SMA-649): a forged region or organization
+//!   slot answers [`TenancyError::PrnMismatch`], and an unknown principal answers
+//!   [`TenancyError::NotFound`].
 
 use axum::extract::State;
 use axum::http::StatusCode;

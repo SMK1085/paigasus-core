@@ -27,16 +27,15 @@
 //! `parent-archived` or `invalid-pagination`. `convert::to_page` runs after the check for that
 //! reason.
 //!
-//! **The rule, and its one exception.** Every tenancy-NODE PRN this module accepts is confirmed
-//! against the stored node before it is acted on: in the handler for the sixteen node RPCs — the
-//! thirteen that route through `load_{org,team,project}_checked`, plus `GetOrganization`/`GetTeam`/
-//! `GetProject`, which compare inline after their read — and
-//! in the REPOSITORY for the two membership RPCs that take a node PRN (`pg_memberships`'s
-//! `list_by_node` and `attach_in` both compare the stored `prn` column and answer
-//! [`TenancyError::PrnMismatch`]). The exception is `ListMemberships` with a PRINCIPAL filter:
-//! `parse_principal_prn` checks only the service and the resource type, and `list_by_principal`
-//! then filters on a bare uuid, so a forged region or organization slot on a principal PRN is
-//! accepted. That is SMA-649, not a property of this design.
+//! **The rule.** Every tenancy-NODE PRN this module accepts is confirmed against the stored node
+//! before it is acted on: in the handler for the sixteen node RPCs — the thirteen that route
+//! through `load_{org,team,project}_checked`, plus `GetOrganization`/`GetTeam`/`GetProject`,
+//! which compare inline after their read — and in the REPOSITORY for the two membership RPCs
+//! that take a node PRN (`pg_memberships`'s `attach_in` and `MembershipKindQuery::list_of_kind`
+//! both compare the stored `prn` column and answer [`TenancyError::PrnMismatch`]).
+//! `ListMemberships` with a PRINCIPAL filter is confirmed in the repository too:
+//! `MembershipKindQuery::list_of_kind` loads the principal by uuid and answers
+//! [`TenancyError::PrnMismatch`] on a difference (SMA-649).
 //!
 //! **SMA-444 Task 20/21 enforcement:** every RPC authorizes the bearer-resolved actor
 //! ([`actor_context`]) before performing its operation, gated by

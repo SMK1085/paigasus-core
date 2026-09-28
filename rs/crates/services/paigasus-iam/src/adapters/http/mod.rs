@@ -542,6 +542,9 @@ impl AppState {
             orgs: role_orgs,
             teams: role_teams,
             projects: role_projects,
+            // SMA-649: `RoleService::resolve_principal` confirms a grant's target principal PRN
+            // against the stored row. A fresh handle over the same `db` (a cheap pool clone).
+            principals: Arc::new(PgPrincipalRepository::new(db.clone())),
             authorize: authorize.clone(),
             uow: role_uow.clone(),
             outbox: role_outbox.clone(),
