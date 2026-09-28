@@ -93,8 +93,9 @@ mod tests {
     /// it just arrives instantly instead of after ~2.1 s (SMA-476 D9).
     ///
     /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
-    /// looks identical to a short-circuit. Here a command that actually dialled would cost
-    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    /// looks identical to a short-circuit. Here a command that actually dialled would open a
+    /// TCP connection that the blackhole counts, so `accepted() == 0` proves the breaker
+    /// short-circuited (SMA-702). The 1 s clock is only a stall backstop.
     #[tokio::test]
     async fn an_open_breaker_keeps_the_jwks_cache_failing_closed() {
         let blackhole = crate::adapters::redis_conn::test_support::start().await;
@@ -110,6 +111,16 @@ mod tests {
             matches!(got, Err(AuthnError::Unavailable)),
             "SMA-476 AC3: the JWKS cache must stay fail-CLOSED under an open breaker, got {got:?}"
         );
-        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the get dialled instead of short-circuiting");
+        assert_eq!(
+            blackhole.accepted(),
+            0,
+            "SMA-702: the blackhole accepted a connection — the JWKS get dialled instead of short-circuiting \
+             (or a redis-rs upgrade made new_lazy_with_config dial eagerly)"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "took {elapsed:?} — stall backstop only: the count above proved no dial, so this is \
+             probably runner load, not a breaker regression"
+        );
     }
 }

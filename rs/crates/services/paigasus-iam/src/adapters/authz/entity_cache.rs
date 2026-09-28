@@ -294,8 +294,9 @@ mod tests {
     /// SMA-476 AC3, D11's half: an open breaker must fall through to the inner loader, not fail.
     ///
     /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
-    /// looks identical to a short-circuit. Here a command that actually dialled would cost
-    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    /// looks identical to a short-circuit. Here a command that actually dialled would open a
+    /// TCP connection that the blackhole counts, so `accepted() == 0` proves the breaker
+    /// short-circuited (SMA-702). The 1 s clock is only a stall backstop.
     #[tokio::test]
     async fn an_open_breaker_falls_through_to_the_inner_slice_loader() {
         let blackhole = crate::adapters::redis_conn::test_support::start().await;
@@ -312,6 +313,16 @@ mod tests {
 
         assert_eq!(inner.loads(), 1, "SMA-476 AC3: the inner (Postgres) loader must be reached");
         assert!(!slice.entities.is_empty(), "the inner loader's slice must be returned verbatim");
-        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the cache dialled instead of short-circuiting");
+        assert_eq!(
+            blackhole.accepted(),
+            0,
+            "SMA-702: the blackhole accepted a connection — the slice cache load dialled instead of short-circuiting \
+             (or a redis-rs upgrade made new_lazy_with_config dial eagerly)"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "took {elapsed:?} — stall backstop only: the count above proved no dial, so this is \
+             probably runner load, not a breaker regression"
+        );
     }
 }
