@@ -59,8 +59,8 @@ use uuid::Uuid;
 /// `application::memberships::parse_principal_prn`, it checks ONLY the syntax, the service and
 /// the type — duplicated rather than shared across modules (a five-line pure parse). For
 /// `grant`, [`RoleService::resolve_principal`] confirms the region and the organization slot
-/// against the stored principal (SMA-649). `RoleService::list` does NOT confirm them (out of
-/// scope of SMA-649, spec §5).
+/// against the stored principal (SMA-649); [`RoleService::list`] does the same for a principal
+/// filter (SMA-649 §4.8).
 fn parse_principal_prn(raw: &str) -> Result<PrincipalId, TenancyError> {
     let prn = Prn::parse(raw).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
     if prn.service() != "iam" || prn.resource_type() != "principal" {
@@ -215,7 +215,7 @@ where
 
     /// SMA-649 §4.7: the principal twin of [`RoleService::resolve_scope`]. Loads the grant's
     /// target principal by uuid and confirms that the caller-supplied PRN is the STORED one.
-    /// `NotFound` if no principal has that uuid; `PrnMismatch` if the stored PRN differs from
+    /// `list` calls it too, for a principal filter (§4.8). `NotFound` if no principal has that uuid; `PrnMismatch` if the stored PRN differs from
     /// the canonical form of the supplied PRN (a forged region or organization slot). Without
     /// this, `grant` wrote the caller's forged PRN into the event's `aggregate_prn` and into the
     /// response (the SMA-606 D2 hazard). No log line, the same as `resolve_scope` (spec Q2).
@@ -391,10 +391,13 @@ where
     /// the scope node (`scope_resource_prn`; under Cedar's `resource in ?resource`, an
     /// `org_admin` passes at its own org only, and a forged team PRN is decided against the
     /// team's STORED ancestry); (c) else → `ListRoleGrants` at Root (only `platform_admin`).
-    /// Then D6: the bare principal request — the only shape callers sent before SMA-676 —
-    /// returns every row through `list_by_principal` and ignores `limit`/`offset`; every other
-    /// request reads `RoleGrantQuery::find` with `Page::new` (1..=200, default 50), ordered by
-    /// `principal_id`, then `id`.
+    /// Then SMA-649 §4.8: a principal filter is confirmed against the stored principal
+    /// ([`RoleService::resolve_principal`]: `NotFound` / `PrnMismatch`), on every read path and
+    /// also for a self listing, before the page check. Then D6: the bare principal request —
+    /// the only shape callers sent before SMA-676 — returns every row through
+    /// `list_by_principal` and ignores `limit`/`offset`; every other request reads
+    /// `RoleGrantQuery::find` with `Page::new` (1..=200, default 50), ordered by `principal_id`,
+    /// then `id`.
     pub async fn list(&self, actor: &Prn, input: ListRoleGrantsInput) -> Result<Vec<RoleGrant>, TenancyError> {
         let principal = non_blank(input.principal_prn).map(|raw| parse_principal_prn(&raw)).transpose()?;
         let scope = non_blank(input.scope_prn).map(|raw| parse_grant_scope(&raw)).transpose()?;
@@ -406,6 +409,12 @@ where
         if !is_self {
             let resource = filter.scope().map_or_else(root_prn, scope_resource_prn);
             self.authorize.check(actor, Action::ListRoleGrants, &resource).await?;
+        }
+
+        // SMA-649 §4.8: confirm the principal filter against the stored principal, on both read
+        // paths and also on the self path, after D4 and before `Page::new` and any read.
+        if let Some(principal) = filter.principal() {
+            self.resolve_principal(principal).await?;
         }
 
         if let Some(principal) = filter.principal_only() {
@@ -491,6 +500,10 @@ mod tests {
     /// alongside the service for direct assertion.
     fn new_service_with_fakes(fake: FakeAuthorizer, grants: Arc<dyn RoleGrantStore>, query: Arc<dyn RoleGrantQuery>, store: TenancyStore) -> ServiceWithFakes {
         seed_grant_target(&store);
+        // SMA-649 §4.8: `list` confirms a principal filter against storage, also on the self
+        // path, and the list tests filter on the actor `principal_prn(1)`. `principal_prn(3)`
+        // stays unseeded for the unknown-principal tests.
+        seed_principal(&store, 1);
         let outbox = FakeOutbox::default();
         let audit = FakeAuditLog::default();
         let bumper = FakePolicyGenBumper::default();
@@ -1228,5 +1241,113 @@ mod tests {
             let err = svc.grant(&principal_prn(1), &prn, "platform_admin", &root_prn().canonical()).await.unwrap_err();
             assert_eq!(err, TenancyError::Forbidden, "{label}");
         }
+    }
+
+    /// SMA-649 §4.8: a list harness whose authorizer allows `ListRoleGrants` at Root. The target
+    /// is `principal_prn(0xab)` (its uuid contains letters, for the upper-case shapes), seeded in
+    /// `store.principals`, with one Root grant (returned) and one grant at org 100.
+    fn list_guard_harness() -> (ListHarness, RoleGrant) {
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::ListRoleGrants, &root_prn());
+        let store = TenancyStore::default();
+        seed_principal(&store, 0xab);
+        let grants = InMemoryRoleGrants::default();
+        let query = InMemoryRoleGrantQuery::over(&grants, &store);
+        let svc = new_service_with_fakes(fake, Arc::new(grants.clone()), Arc::new(query.clone()), store).svc;
+        let h = ListHarness { svc, grants, query };
+        let root_grant = seed(&h, 40, 0xab, "platform_admin", GrantScope::Root, PrincipalKind::User);
+        seed(&h, 41, 0xab, "gateway_user", org_scope(100), PrincipalKind::User);
+        (h, root_grant)
+    }
+
+    /// SMA-649 §4.8: the same principal filter on both read paths — principal-only (D6,
+    /// `RoleGrantStore::list_by_principal`) and principal + the Root scope (`RoleGrantQuery::find`).
+    fn on_both_paths(prn: &str) -> [(&'static str, ListRoleGrantsInput); 2] {
+        [
+            ("principal-only", by_principal(prn)),
+            (
+                "principal + Root scope",
+                ListRoleGrantsInput {
+                    scope_prn: Some(root_prn().canonical()),
+                    ..by_principal(prn)
+                },
+            ),
+        ]
+    }
+
+    /// SMA-649 L1–L3, AC15: a forged region or organization slot on the principal filter answers
+    /// `PrnMismatch` on both read paths. Control: the canonical PRN lists the seeded Root grant on
+    /// both paths, so the refusal cannot pass because `list` is broken for every input.
+    #[tokio::test]
+    async fn list_refuses_a_forged_principal_prn() {
+        let (h, root_grant) = list_guard_harness();
+        let actor = principal_prn(1);
+        for (path, input) in on_both_paths(&principal_prn(0xab).canonical()) {
+            assert!(h.svc.list(&actor, input).await.unwrap().contains(&root_grant), "control, {path}");
+        }
+        let random_org = Uuid::from_u128(0x0f49).to_string();
+        let upper_uuid = Uuid::from_u128(0xab).to_string().to_uppercase();
+        for (shape, forged) in [
+            ("non-empty region", forged_principal(0xab, "eu-west-1", "")),
+            ("org uuid 100 in the org slot", forged_principal(0xab, "", &Uuid::from_u128(100).to_string())),
+            ("random org uuid in the org slot", forged_principal(0xab, "", &random_org)),
+            ("both slots", forged_principal(0xab, "eu-west-1", &random_org)),
+            ("upper-case uuid and a region", format!("prn:pgs:iam:eu-west-1::principal/{upper_uuid}")),
+        ] {
+            for (path, input) in on_both_paths(&forged) {
+                assert_eq!(h.svc.list(&actor, input).await.unwrap_err(), TenancyError::PrnMismatch, "{shape}, {path}");
+            }
+        }
+    }
+
+    /// SMA-649 L4, AC16: an unknown principal uuid answers `NotFound` on both read paths, not an
+    /// empty OK list.
+    #[tokio::test]
+    async fn list_answers_not_found_for_an_unknown_principal() {
+        let (h, _root_grant) = list_guard_harness();
+        for (path, input) in on_both_paths(&principal_prn(3).canonical()) {
+            assert_eq!(h.svc.list(&principal_prn(1), input).await.unwrap_err(), TenancyError::NotFound, "{path}");
+        }
+    }
+
+    /// SMA-649 L5, AC17: the canonical PRN with an upper-case uuid is still correct, on both
+    /// read paths. The guard compares canonical forms, never the raw request string.
+    #[tokio::test]
+    async fn list_accepts_an_upper_case_uuid_in_a_correct_principal_prn() {
+        let (h, root_grant) = list_guard_harness();
+        let upper = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0xab).to_string().to_uppercase());
+        assert_ne!(upper, principal_prn(0xab).canonical(), "the uuid must contain letters, or the case changes nothing");
+        for (path, input) in on_both_paths(&upper) {
+            assert!(h.svc.list(&principal_prn(1), input).await.unwrap().contains(&root_grant), "{path}");
+        }
+    }
+
+    /// SMA-649 L9: the guard runs before `Page::new`. On the query path with `limit` 201, a
+    /// forged PRN answers `PrnMismatch` and an unknown uuid `NotFound`; the canonical PRN still
+    /// answers `InvalidPagination`, so the page check itself still runs.
+    #[tokio::test]
+    async fn list_refuses_a_forged_principal_prn_before_the_page_check() {
+        let (h, _root_grant) = list_guard_harness();
+        let too_big = |prn: String| ListRoleGrantsInput {
+            scope_prn: Some(root_prn().canonical()),
+            limit: Some(201),
+            ..by_principal(&prn)
+        };
+        let actor = principal_prn(1);
+        assert_eq!(h.svc.list(&actor, too_big(forged_principal(0xab, "eu-west-1", ""))).await.unwrap_err(), TenancyError::PrnMismatch);
+        assert_eq!(h.svc.list(&actor, too_big(principal_prn(3).canonical())).await.unwrap_err(), TenancyError::NotFound);
+        assert_eq!(h.svc.list(&actor, too_big(principal_prn(0xab).canonical())).await.unwrap_err(), TenancyError::InvalidPagination);
+    }
+
+    /// SMA-649 L7, L8, AC18: the actor's own uuid with a forged region is NOT a self listing (the
+    /// canonical forms differ), so an actor with no grant gets `Forbidden`, before the lookup. The
+    /// actor's canonical PRN is a self listing and still lists (empty here).
+    #[tokio::test]
+    async fn list_with_a_forged_own_principal_prn_is_not_self() {
+        let h = list_harness(FakeAuthorizer::default());
+        let actor = principal_prn(1);
+        let err = h.svc.list(&actor, by_principal(&forged_principal(1, "eu-west-1", ""))).await.unwrap_err();
+        assert_eq!(err, TenancyError::Forbidden);
+        assert!(h.svc.list(&actor, by_principal(&actor.canonical())).await.unwrap().is_empty());
     }
 }
