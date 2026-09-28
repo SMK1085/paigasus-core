@@ -549,3 +549,88 @@ async fn grant_role_over_grpc_confirms_the_principal_prn_against_storage() {
 
     server.abort();
 }
+
+/// SMA-649 T7 (gRPC), AC15–AC18: `ListRoleGrants` with a principal filter confirms the PRN
+/// against the stored principal, on the principal-only path and on the principal + Root-scope
+/// path. A forged region or organization slot answers `InvalidArgument` / `prn-mismatch`, an
+/// unknown uuid `NotFound` / `not-found`. Control: the canonical PRN lists the member's grant. An
+/// ungranted caller gets `PermissionDenied` / `forbidden` for the member's PRN in every shape and
+/// for its OWN uuid with a forged region (not a self listing), and its own canonical PRN lists.
+#[tokio::test]
+async fn list_role_grants_over_grpc_confirms_the_principal_prn_against_storage() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state.clone()).await;
+    let mut authz = AuthorizationServiceClient::new(channel(addr).await);
+
+    let admin_token = idp.bearer("t7-grpc-admin", Some("t7-grpc-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision(&state, &admin_token).await;
+    support::seed_platform_admin(&state, &admin_prn).await;
+    let member_token = idp.bearer("t7-grpc-member", Some("t7-grpc-member@example.com"), "paigasus", 3600);
+    let member_prn = support::provision(&state, &member_token).await;
+    let stranger_token = idp.bearer("t7-grpc-stranger", Some("t7-grpc-stranger@example.com"), "paigasus", 3600);
+    let stranger_prn = support::provision(&state, &stranger_token).await;
+
+    authz
+        .grant_role(authed(
+            GrantRoleRequest {
+                principal_prn: member_prn.clone(),
+                role_key: "platform_admin".to_string(),
+                scope_prn: root_prn().canonical(),
+            },
+            &admin_token,
+        ))
+        .await
+        .expect("seed: the admin grants the member a Root role");
+
+    let request = |prn: &str, scoped: bool| ListRoleGrantsRequest {
+        principal_prn: prn.to_string(),
+        scope_prn: if scoped { root_prn().canonical() } else { String::new() },
+        ..Default::default()
+    };
+    let absent_org = Uuid::from_u128(0x0f49).as_hyphenated().to_string();
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a).as_hyphenated());
+    let forged_region = principal_with(&member_prn, "eu-west-1", "");
+
+    for (path, scoped) in [("principal-only", false), ("principal + Root scope", true)] {
+        for (shape, prn, code, reason) in [
+            ("forged region", forged_region.clone(), Code::InvalidArgument, "prn-mismatch"),
+            ("forged org slot", principal_with(&member_prn, "", &absent_org), Code::InvalidArgument, "prn-mismatch"),
+            ("unknown principal", unknown.clone(), Code::NotFound, "not-found"),
+        ] {
+            let err = authz.list_role_grants(authed(request(&prn, scoped), &admin_token)).await.unwrap_err();
+            assert_eq!(err.code(), code, "{path}, {shape}: {err:?}");
+            assert_eq!(reason_of(&err), reason, "{path}, {shape}");
+        }
+        let listed = authz
+            .list_role_grants(authed(request(&member_prn, scoped), &admin_token))
+            .await
+            .expect("control: the canonical prn lists")
+            .into_inner()
+            .grants;
+        assert!(listed.iter().any(|g| g.principal_prn == member_prn && g.role_key == "platform_admin"), "{path}: {listed:?}");
+    }
+
+    for (label, prn) in [
+        ("member, canonical", member_prn.clone()),
+        ("member, forged region", forged_region),
+        ("unknown principal", unknown),
+        ("own uuid, forged region", principal_with(&stranger_prn, "eu-west-1", "")),
+    ] {
+        let err = authz.list_role_grants(authed(request(&prn, false), &stranger_token)).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "ungranted caller, {label}: {err:?}");
+        assert_eq!(reason_of(&err), "forbidden", "ungranted caller, {label}");
+    }
+    let own = authz
+        .list_role_grants(authed(request(&stranger_prn, false), &stranger_token))
+        .await
+        .expect("self listing")
+        .into_inner()
+        .grants;
+    assert!(own.is_empty(), "the stranger holds no grant: {own:?}");
+
+    server.abort();
+}
