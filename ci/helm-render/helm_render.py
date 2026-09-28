@@ -17,6 +17,7 @@ module directly with another helm and read its verdict as the gate's.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import io
 import json
@@ -25,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +51,17 @@ KUBE_VERSION = "1.31.0"
 RELEASE = "paigasus"
 SENTINEL_URL = "http://gateway-sentinel.example.test:8088"
 SENTINEL_HOST = "gateway-sentinel.example.test"
+
+# SMA-679: the limit for ONE helm subprocess, in seconds. A render takes well under a second
+# (measured 0.02-0.03 s). The task starts the module 8 times (7 negative-control fixtures + the real
+# run), and each module run can time out once, so the worst case is 8 * HELM_TIMEOUT_S. That sum
+# must stay far below the 30-minute CI job limit, which the whole moon ci graph shares. A call
+# over the limit is an infrastructure error (rc 2), never a row failure.
+HELM_TIMEOUT_S = 30
+# SMA-679: the limit for the one git subprocess (release_tags), in seconds. It reads local refs
+# only. It shares the HELM_TIMEOUT_S sizing rule: one module run can time out at most once, of
+# either kind, because the first InfraError ends the run.
+GIT_TIMEOUT_S = 30
 
 # Row 7 (SMA-513 PR 3 spec § 5.5): the kind job's values files. The kind job is not a required
 # check; this row is, so a chart change that breaks those values reds before merge.
@@ -249,9 +262,83 @@ def _service_port(service, name):
 # --------------------------------------------------------------------------- render
 
 
-def helm_template(chart, enabled, extra=()):
-    """One `helm template` of `chart` with exactly the zones in `enabled` switched on."""
-    helm = shutil.which("helm")
+def _run_helm(cmd, label, run=subprocess.run):
+    """Run one helm command with HELM_TIMEOUT_S (SMA-679). A timeout, or an OSError when helm
+    starts, is InfraError (rc 2); the message names the render (label), the limit and the command.
+    Returns the CompletedProcess; the caller reads returncode. `run` is a parameter only so
+    self_test() can drive this with no helm; production never passes it."""
+    try:
+        return run(cmd, capture_output=True, text=True, check=False, timeout=HELM_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        # On POSIX, subprocess.run gives the partial output as bytes even with text=True.
+        tail = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        tail = tail.strip()[-500:]
+        raise InfraError(
+            f"helm did not finish in {HELM_TIMEOUT_S} s (HELM_TIMEOUT_S) for {label}: "
+            f"{' '.join(map(str, cmd))}" + (f"; partial stderr: {tail}" if tail else "")
+        ) from exc
+    except OSError as exc:
+        raise InfraError(f"helm could not start for {label}: {exc}") from exc
+
+
+_SUBPROCESS_FUNCS = frozenset({"run", "Popen", "call", "check_call", "check_output"})
+# D6 (SMA-679): the only functions that may start a subprocess, each with its timeout constant.
+_BOUNDED_CALLERS = {"_run_helm": "HELM_TIMEOUT_S", "release_tags": "GIT_TIMEOUT_S"}
+
+
+def _is_subprocess_call(func):
+    """True for `run(…)` or `subprocess.<run|Popen|call|check_call|check_output>(…)`."""
+    if isinstance(func, ast.Name):
+        return func.id == "run"
+    return (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+            and func.value.id == "subprocess" and func.attr in _SUBPROCESS_FUNCS)
+
+
+def _subprocess_calls(source):
+    """(innermost enclosing function name, call) for every subprocess call in `source`. The body
+    of `self_test` is skipped: its fast_run stub calls the real subprocess.run on purpose."""
+    found = []
+
+    def visit(node, fn_name):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if child.name != "self_test":
+                    visit(child, child.name)
+                continue
+            if isinstance(child, ast.Call) and _is_subprocess_call(child.func):
+                found.append((fn_name, child))
+            visit(child, fn_name)
+
+    visit(ast.parse(source), "<module>")
+    return found
+
+
+def _subprocess_call_problems(source):
+    """D6 (SMA-679): the problems with the subprocess calls in `source`; an empty list is a pass.
+    Exactly one call in each of _BOUNDED_CALLERS, each with `timeout=<its constant>`. A call
+    through an alias (`from subprocess import run as r`, `os.system`) is not seen."""
+    calls = _subprocess_calls(source)
+    names = sorted(name for name, _call in calls)
+    problems = []
+    if names != sorted(_BOUNDED_CALLERS):
+        problems.append(f"expected exactly one subprocess call in each of {sorted(_BOUNDED_CALLERS)}, found calls in {names}. "
+                        "Route every helm call through _run_helm")
+    for name, call in calls:
+        want = _BOUNDED_CALLERS.get(name)
+        if want is None:
+            continue
+        timeout = next((k.value for k in call.keywords if k.arg == "timeout"), None)
+        if not (isinstance(timeout, ast.Name) and timeout.id == want):
+            problems.append(f"the subprocess call in {name} (line {call.lineno}) must pass timeout={want}")
+    return problems
+
+
+def helm_template(chart, enabled, extra=(), *, label, run=subprocess.run, helm=None):
+    """One `helm template` of `chart` with exactly the zones in `enabled` switched on. `label`
+    names the render in a timeout message (SMA-679): three pairs of renders have byte-identical
+    commands. `run` and `helm` are parameters only so self_test() can drive this with no helm;
+    production never passes them."""
+    helm = helm or shutil.which("helm")
     if helm is None:
         raise InfraError("helm is not on PATH; run this module through ci/helm-render/run.sh")
     values = _chart_values(chart)
@@ -261,7 +348,7 @@ def helm_template(chart, enabled, extra=()):
     for zone in sorted(values["zones"]):
         cmd += ["--set", f"zones.{zone}.enabled={'true' if zone in enabled else 'false'}"]
     cmd += list(extra)
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = _run_helm(cmd, label, run=run)
     if proc.returncode != 0:
         raise InfraError(f"helm template failed (rc={proc.returncode}) for {chart} {' '.join(extra)}: {proc.stderr.strip()}")
     return proc.stdout
@@ -474,20 +561,20 @@ def _bumped_app_version(chart, dest):
 def check3(chart):
     """Rows 3a, 3a-prime, 3b and 3c; EXPECTED_ROW_LABELS is the inventory that floors this set."""
     both = ("gateway", "iam")
-    base = parse_docs(helm_template(chart, both))
+    base = parse_docs(helm_template(chart, both, label="3 base"))
     rows = []
     for row, key in (("3a", "zones.iam.console.image.tag"), ("3a-prime", "zones.gateway.console.image.tag")):
-        before = parse_docs(helm_template(chart, both, ("--set", f"{key}=t1")))
-        after = parse_docs(helm_template(chart, both, ("--set", f"{key}=t2")))
+        before = parse_docs(helm_template(chart, both, ("--set", f"{key}=t1"), label=f"{row} t1"))
+        after = parse_docs(helm_template(chart, both, ("--set", f"{key}=t2"), label=f"{row} t2"))
         rows.append(compare_templates(row, before, after))
     # Case b edits Chart.yaml in a temp COPY only. run.sh exports TMPDIR, so the copy lands under
     # the gate's own mktemp directory. SMA-688: both sides render with every tag cleared, so the
     # row still proves the appVersion fallback now that values.yaml pins each tag.
     with tempfile.TemporaryDirectory(prefix="helm-render-3b-") as tmp:
         bumped = _bumped_app_version(chart, Path(tmp) / "chart")
-        before = parse_docs(helm_template(chart, both, CLEARED_TAGS))
-        rows.append(compare_templates("3b", before, parse_docs(helm_template(bumped, both, CLEARED_TAGS))))
-    rows.append(compare_templates("3c", base, parse_docs(helm_template(chart, ("iam",)))))
+        before = parse_docs(helm_template(chart, both, CLEARED_TAGS, label="3b before"))
+        rows.append(compare_templates("3b", before, parse_docs(helm_template(bumped, both, CLEARED_TAGS, label="3b after"))))
+    rows.append(compare_templates("3c", base, parse_docs(helm_template(chart, ("iam",), label="3c iam only"))))
     return rows
 
 
@@ -624,7 +711,8 @@ def check7(chart, run=subprocess.run, helm=None, values_dir=KIND_VALUES):
     """Row 7: ci/kind/values/a.yaml, and a.yaml plus b.yaml, render against `chart` with rc 0.
 
     A render that fails is an ASSERTION (the row fails, rc 3): the chart and the kind values
-    disagree, which is exactly what this row exists to catch. A missing values file is rc 2.
+    disagree, which is exactly what this row exists to catch. A missing values file is rc 2, and
+    so is a render that runs longer than HELM_TIMEOUT_S (SMA-679): a hung helm is a tool fault.
     `run`, `helm` and `values_dir` are parameters only so self_test() can drive the row without
     helm; production never passes them.
     """
@@ -642,7 +730,7 @@ def check7(chart, run=subprocess.run, helm=None, values_dir=KIND_VALUES):
             cmd = [helm, "template", RELEASE, str(chart), "--kube-version", KUBE_VERSION]
             for f in files:
                 cmd += ["-f", str(f)]
-            proc = run(cmd, capture_output=True, text=True, check=False)
+            proc = _run_helm(cmd, f"7 {label}", run=run)
             if proc.returncode != 0:
                 problems.append(f"{label}: helm template exited {proc.returncode}: {proc.stderr.strip()}")
         return problems
@@ -837,12 +925,16 @@ def release_tags(run=subprocess.run):
     """Every `paigasus-*` git tag of the repository, one per line of plumbing output. `git tag
     --list` is porcelain and follows column.ui, so it can put several tags on one line. No tag at
     all is rc 2: a checkout with no tags, not a chart defect. `run` is a parameter only so
-    self_test() can drive this with no git."""
+    self_test() can drive this with no git. A listing over GIT_TIMEOUT_S is rc 2 (SMA-679)."""
     cmd = ["git", "-C", str(REPO_ROOT), "for-each-ref", "--format=%(refname:lstrip=2)", "refs/tags/paigasus-*"]
     try:
-        proc = run(cmd, capture_output=True, text=True, check=False)
+        proc = run(cmd, capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_S)
     except FileNotFoundError as exc:
         raise InfraError(f"git is not on PATH: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise InfraError(
+            f"git for-each-ref did not finish in {GIT_TIMEOUT_S} s (GIT_TIMEOUT_S): {' '.join(map(str, cmd))}"
+        ) from exc
     if proc.returncode != 0:
         raise InfraError(f"git for-each-ref exited {proc.returncode}: {proc.stderr.strip()}")
     tags = frozenset(line.strip() for line in proc.stdout.splitlines() if line.strip())
@@ -934,7 +1026,7 @@ def run_checks(chart):
     rows = [check1a(chart_slugs(helpers), slugs, state_ts, capability_ts)]
     both_docs = None
     for label, enabled in SUBSETS:
-        raw = helm_template(chart, enabled)
+        raw = helm_template(chart, enabled, label=f"subset {label}")
         docs = parse_docs(raw)
         rows += check1(label, docs, enabled, paths, slugs)
         if enabled == ("iam",):
@@ -951,7 +1043,7 @@ def run_checks(chart):
     registry = chain_registry()
     rows.append(check8a(values, registry, {key: chain_version(entry) for key, entry in registry.items()}))
     rows.append(check8b(values, both_docs))
-    fallback_docs = parse_docs(helm_template(chart, ("gateway", "iam"), CLEARED_TAGS))
+    fallback_docs = parse_docs(helm_template(chart, ("gateway", "iam"), CLEARED_TAGS, label="8c fallback"))
     rows.append(check8c(app_version, registry, tags, fallback_docs))
     _check_row_inventory([r.row for r in rows])
     return rows
@@ -1117,6 +1209,19 @@ def self_test():
         except InfraError:
             return
         failures.append(f"{label}: expected an infrastructure error (rc 2), got none")
+
+    def expect_infra_strict(label, fn):
+        """Like expect_infra, but any other exception is a named failure, not a traceback that
+        stops every later row (SMA-679). Returns the InfraError, or None."""
+        try:
+            fn()
+        except InfraError as exc:
+            return exc
+        except Exception as exc:
+            failures.append(f"{label}: expected InfraError, got {type(exc).__name__}: {exc}")
+            return None
+        failures.append(f"{label}: expected InfraError, got none")
+        return None
 
     both, iam_only = ("gateway", "iam"), ("iam",)
 
@@ -1418,6 +1523,122 @@ def self_test():
         )
         (Path(tmp) / "b.yaml").unlink()
         expect_infra("check7 a missing b.yaml raises InfraError", lambda: check7(Path(tmp), run=ok_run, helm="helm-stub", values_dir=tmp))
+
+    # ---- SMA-679: every helm subprocess is bounded by HELM_TIMEOUT_S, the git one by
+    # GIT_TIMEOUT_S. A timeout, or an OSError when helm starts, is rc 2, never a failed row.
+    def timeout_run(cmd, **_kw):
+        raise subprocess.TimeoutExpired(cmd, HELM_TIMEOUT_S, stderr=b"partial")
+
+    def timeout_run_no_stderr(cmd, **_kw):
+        raise subprocess.TimeoutExpired(cmd, HELM_TIMEOUT_S)
+
+    def oserror_run(cmd, **_kw):
+        raise PermissionError("stub")
+
+    def fast_run(cmd, **kw):
+        # The real kill-and-reap path of subprocess.run, with a short limit. D6 exempts self_test.
+        kw["timeout"] = 0.5
+        return subprocess.run(cmd, **kw)
+
+    helm_cmd = ["helm-stub", "template", "x"]
+    expect_infra_strict("helm timeout: _run_helm maps TimeoutExpired to InfraError",
+                        lambda: _run_helm(helm_cmd, "render-label-x", run=timeout_run))
+    exc = expect_infra_strict("helm timeout: the InfraError names the render, the command, the limit and the stderr",
+                              lambda: _run_helm(helm_cmd, "render-label-x", run=timeout_run))
+    msg = str(exc) if exc is not None else ""
+    for needle in ("for render-label-x:", "helm-stub template x", "HELM_TIMEOUT_S", f"{HELM_TIMEOUT_S} s", "partial stderr: partial"):
+        if needle not in msg:
+            failures.append(f"helm timeout: the InfraError names the render, the command, the limit and the stderr: {needle!r} is not in {msg!r}")
+    exc = expect_infra_strict("helm timeout: a TimeoutExpired with no stderr still gives InfraError",
+                              lambda: _run_helm(helm_cmd, "render-label-x", run=timeout_run_no_stderr))
+    if exc is not None and "partial stderr" in str(exc):
+        failures.append(f"helm timeout: a TimeoutExpired with no stderr must not print a partial stderr, got {exc}")
+    expect_infra_strict("helm timeout: _run_helm maps OSError to InfraError",
+                        lambda: _run_helm(helm_cmd, "render-label-x", run=oserror_run))
+    started = time.monotonic()
+    expect_infra_strict("helm timeout: a real subprocess over the limit is killed and gives InfraError",
+                        lambda: _run_helm([sys.executable, "-c", "import time; time.sleep(30)"], "sleep", run=fast_run))
+    elapsed = time.monotonic() - started
+    if elapsed >= 10:
+        failures.append(f"helm timeout: a real subprocess over the limit is killed and gives InfraError: took {elapsed:.1f} s, want < 10 s")
+    if not (HELM_TIMEOUT_S > 0 and GIT_TIMEOUT_S > 0 and max(HELM_TIMEOUT_S, GIT_TIMEOUT_S) * 8 <= 5 * 60):
+        failures.append(f"helm timeout: 8 module runs fit far inside the job limit: HELM_TIMEOUT_S={HELM_TIMEOUT_S}, "
+                        f"GIT_TIMEOUT_S={GIT_TIMEOUT_S}; 8 * max must be <= 300 s (spec D1). A larger value needs a new decision")
+
+    class _RecProc:
+        def __init__(self):
+            self.returncode, self.stdout, self.stderr = 0, "", ""
+
+    with tempfile.TemporaryDirectory(prefix="helm-render-679-") as tmp:
+        tmp_chart = Path(tmp) / "chart"
+        tmp_chart.mkdir()
+        (tmp_chart / "values.yaml").write_text("zones:\n  iam: {}\n  gateway: {}\n")
+        (Path(tmp) / "a.yaml").write_text("{}\n")
+        (Path(tmp) / "b.yaml").write_text("{}\n")
+        expect_infra_strict("helm timeout: helm_template raises InfraError",
+                            lambda: helm_template(tmp_chart, ("iam",), label="t", run=timeout_run, helm="helm-stub"))
+        expect_infra_strict("helm timeout: check7 raises InfraError, not a failed row",
+                            lambda: check7(tmp_chart, run=timeout_run, helm="helm-stub", values_dir=tmp))
+        seen = []
+
+        def recording_run(cmd, **kw):
+            seen.append(kw)
+            return _RecProc()
+
+        expect_no_error = []
+        try:
+            helm_template(tmp_chart, ("iam",), label="t", run=recording_run, helm="helm-stub")
+        except Exception as exc:
+            expect_no_error.append(f"{type(exc).__name__}: {exc}")
+        got = [kw.get("timeout") for kw in seen]
+        if expect_no_error or got != [HELM_TIMEOUT_S]:
+            failures.append(f"helm timeout: helm_template passes timeout=HELM_TIMEOUT_S: timeouts {got}, errors {expect_no_error}")
+        seen.clear()
+        check7(tmp_chart, run=recording_run, helm="helm-stub", values_dir=tmp)
+        got = [kw.get("timeout") for kw in seen]
+        if got != [HELM_TIMEOUT_S, HELM_TIMEOUT_S]:
+            failures.append(f"helm timeout: check7 passes timeout=HELM_TIMEOUT_S on both renders: got {got}")
+    exc = expect_infra_strict("git timeout: release_tags maps TimeoutExpired to InfraError", lambda: release_tags(run=timeout_run))
+    msg = str(exc) if exc is not None else ""
+    for needle in ("GIT_TIMEOUT_S", f"{GIT_TIMEOUT_S} s", "for-each-ref"):
+        if needle not in msg:
+            failures.append(f"git timeout: release_tags maps TimeoutExpired to InfraError: {needle!r} is not in {msg!r}")
+    git_seen = []
+
+    def git_recording_run(cmd, **kw):
+        git_seen.append(kw)
+        return _GitProc(0, "paigasus-iam-v0.1.0\n")
+
+    release_tags(run=git_recording_run)
+    got = [kw.get("timeout") for kw in git_seen]
+    if got != [GIT_TIMEOUT_S]:
+        failures.append(f"git timeout: release_tags passes timeout=GIT_TIMEOUT_S: got {got}")
+    # D6: every subprocess call in the module goes through _run_helm or release_tags, each with its
+    # own constant. The synthetic sources prove that the walk bites (guard the guard); they are
+    # string constants, not Call nodes, so the walk cannot match them.
+    d6_ok = (
+        "def _run_helm(cmd, label, run=subprocess.run):\n"
+        "    return run(cmd, timeout=HELM_TIMEOUT_S)\n"
+        "def release_tags(run=subprocess.run):\n"
+        "    return run(['git'], timeout=GIT_TIMEOUT_S)\n"
+    )
+    d6_cases = (
+        ("the real module", Path(__file__).read_text(encoding="utf-8"), False),
+        ("only the two bounded calls", d6_ok, False),
+        ("a call inside self_test is exempt", d6_ok + "def self_test():\n    subprocess.run(['x'])\n", False),
+        ("a reverted helm_template", d6_ok + "def helm_template(cmd):\n    return subprocess.run(cmd)\n", True),
+        ("a reverted check7 body", d6_ok + "def check7(run):\n    def body():\n        return run(['helm'])\n    return body\n", True),
+        ("a new Popen", d6_ok + "def f():\n    subprocess.Popen(['helm'])\n", True),
+        ("a module-level check_output", d6_ok + "subprocess.check_output(['helm'])\n", True),
+        ("no timeout in _run_helm", d6_ok.replace("run(cmd, timeout=HELM_TIMEOUT_S)", "run(cmd)"), True),
+        ("a literal timeout in release_tags", d6_ok.replace("timeout=GIT_TIMEOUT_S", "timeout=30"), True),
+        ("the git constant in _run_helm", d6_ok.replace("timeout=HELM_TIMEOUT_S", "timeout=GIT_TIMEOUT_S"), True),
+    )
+    for case, source, want_problem in d6_cases:
+        got = _subprocess_call_problems(source)
+        if bool(got) != want_problem:
+            failures.append(f"helm timeout: every subprocess call goes through _run_helm or release_tags [{case}]: "
+                            + ("expected a problem, got none" if want_problem else "; ".join(got)))
 
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
