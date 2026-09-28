@@ -210,6 +210,11 @@ REQUIRED_REPO_TASKS = (
     # dropped from `T` and made CI-ineligible in the same edit — so without a floor entry the whole
     # gate, control included, could be switched off with every check green.
     "helm-render",
+    # SMA-714. Same reasoning as the entries above: repo:moon-diagnosis-exec carries a
+    # --negative-control, and check_forward's `want`/`got` shrink CONSISTENTLY when a task is
+    # dropped from `T` and made CI-ineligible in the same edit — so without a floor entry the whole
+    # gate, control included, could be switched off with every check green.
+    "moon-diagnosis-exec",
 )
 
 # SMA-553 D13 — repo:input-liveness's `inputs: ['**/*']` is load-bearing, and asserting it ONLY
@@ -403,6 +408,14 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ts/apps/iam-console/package.json",
         "ts/packages/paigasus-discovery/src/core/state.ts",
         "ts/packages/paigasus-proto/src/capability.ts",
+    ),
+    # SMA-714. CLAUDE.md holds the procedure the gate runs, and .prototools holds the moon pin,
+    # the event most likely to move a report field. Drop either and the gate serves a cached
+    # PASS on the exact edit it exists to catch.
+    "moon-diagnosis-exec": (
+        "ci/moon-diagnosis/**/*",
+        ".prototools",
+        "CLAUDE.md",
     ),
 }
 
@@ -673,6 +686,14 @@ SELF_SCHEDULED_GATES = {
         "bash ci/helm-render/run.sh --self-test",
         "bash ci/helm-render/run.sh --negative-control",
         "bash ci/helm-render/run.sh",
+    ),
+    # SMA-714. Four lines, like the other self-scheduled gates. Whole-line matched:
+    # `bash ci/moon-diagnosis/run.sh` is a strict PREFIX of both flagged lines.
+    "moon-diagnosis-exec": (
+        "set -euo pipefail",
+        "bash ci/moon-diagnosis/run.sh --self-test",
+        "bash ci/moon-diagnosis/run.sh --negative-control",
+        "bash ci/moon-diagnosis/run.sh",
     ),
 }
 
@@ -1448,6 +1469,87 @@ HELM_RENDER_SH_CALL_SITES = (
     '"$BASH" "$1" --set ingress.host=console.example.test || raw=$?',
 )
 
+# SMA-714 — ci/moon-diagnosis/run.sh's load-bearing lines. REACHABILITY IS NOT AUTOMATIC: this
+# check only runs when repo:affected-smoke is scheduled, so moon.yml lists `ci/moon-diagnosis/**/*`
+# among its inputs and ci/actionlint/run.sh's T_AFFECTED_SMOKE_REQUIRED_INPUTS floors that entry.
+#
+# Matched as stripped WHOLE LINES, like the helm-render haystack and for both of its reasons: the
+# real lines are indented inside functions and `case` arms, and a COMMENTED-OUT copy must not
+# satisfy a pin. Every entry occurs EXACTLY ONCE in run.sh. No entry holds the token that check 12
+# of repo:actionlint scans for, so this file needs no check-12 marker.
+#
+# The spec (§6.5) pins every call that carries a check AND its rc guard: the workflow-credentials
+# measurement showed that pins on report lines alone let a control assert nothing.
+MOON_DIAGNOSIS_SH_CALL_SITES = (
+    # The flag parse (both modes and the hidden --claude-md argument) and the three dispatch arms.
+    '--self-test)        SELFTEST=1; shift ;;',
+    '--negative-control) NEGATIVE=1; shift ;;',
+    '--claude-md)        [ $# -ge 2 ] || die_infra "--claude-md needs a path"; CLAUDE_MD="$2"; shift 2 ;;',
+    'if [ "$SELFTEST" = 1 ]; then',
+    'st_rc=0; self_test || st_rc=$?',
+    'exit "$st_rc"',
+    'if [ "$NEGATIVE" = 1 ]; then',
+    'nc_rc=0; negative_control || nc_rc=$?',
+    'exit "$nc_rc"',
+    'real_rc=0; real_run || real_rc=$?',
+    'exit "$real_rc"',
+    # The self-test case count, its assertion and the failure guard.
+    'SELF_TEST_CASES=37',
+    'local n="$ST_N"',
+    'st_expect "self-test case count" "$SELF_TEST_CASES" "$n"',
+    'if [ "$ST_FAIL" -ne 0 ]; then',
+    # The real path: each unit call and its rc guard, and the row report.
+    'v="$(extract_step1_query "$CLAUDE_MD" "$TMP/query")" || die_infra "extract_step1_query crashed"',
+    'if [ "$v" != "ok" ]; then emit "extract $v"; return 1; fi',
+    'v="$(query_shape_verdict "$TMP/query" "$TMP/prog")" || die_infra "query_shape_verdict crashed"',
+    'if [ "$v" != "ok" ]; then emit "$v"; return 1; fi',
+    'run_nested_moon "$fx" "$base" "$pin"',
+    'run_step1_query "$TMP/prog" "$TMP/prog.flags" "$fx" "$TMP/step1.out" > "$TMP/step1-query.rows" || die_infra "run_step1_query crashed"',
+    'emit_file "$TMP/step1-query.rows"',
+    'if [ "$ROWS" -eq 0 ]; then',
+    'step1_verdict "$TMP/step1.out" > "$TMP/step1.rows" || die_infra "step1_verdict crashed"',
+    'emit_file "$TMP/step1.rows"',
+    'step2_verdict "$fx" > "$TMP/step2.rows" || die_infra "step2_verdict crashed"',
+    'emit_file "$TMP/step2.rows"',
+    'if [ "$ROWS" -ne 0 ]; then',
+    # Unit 4: the moon --version check, the env -i allowlist lines, the outer report hash compare,
+    # the nested rc guard, the report validity check, the --base check and the fixture-run check.
+    'got="$(cd "$dir" && env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C}" PROTO_HOME="${PROTO_HOME:-$HOME/.proto}" PROTO_REPORTER=text MOON_WORKSPACE_ROOT="$dir" moon --version 2>&1)" \\',
+    '[ "$got" = "moon $pin" ] || die_infra "the fixture moon is \'$got\', expected \'moon $pin\'"',
+    'h_before="$(outer_report_hash)"',
+    'nm_rc=0; (cd "$dir" && env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C}" PROTO_HOME="${PROTO_HOME:-$HOME/.proto}" PROTO_REPORTER=text MOON_WORKSPACE_ROOT="$dir" moon ci probe:fail3 probe:multi probe:missing probe:slow probe:ok --base "$base") >"$TMP/nested.out" 2>"$TMP/nested.err" || nm_rc=$?',
+    'h_after="$(outer_report_hash)"',
+    '[ "$h_before" = "$h_after" ] || die_infra "the nested run wrote to the real workspace report ($REPO_ROOT/$REPORT_REL)"',
+    '[ "$nm_rc" -ne 0 ] || die_infra "the nested moon ci exited 0; the fixture did not fail, so the report proves nothing"',
+    'if ! jq -e . "$dir/$REPORT_REL" >/dev/null 2>&1; then',
+    'grep -qF -- "Base revision: $base" "$TMP/nested.out" || die_infra "the nested moon ci did not use --base $base (CI or GITHUB_* variables leaked?)"',
+    'fx_rc=0; jq -e "$FIXTURE_RUN_CHECK" "$dir/$REPORT_REL" >/dev/null || fx_rc=$?',
+    '[ "$fx_rc" -eq 0 ] || die_infra "the fixture did not run as designed (fixture-run check rc=$fx_rc); see $dir/$REPORT_REL"',
+    # Units 5, 6 and 7: the query rc guard, each verdict tool's rc route, and the Step 2a bound.
+    'q_rc=0; (cd "$dir" && jq ${flags[@]+"${flags[@]}"} "$(cat "$pf")" "$REPORT_REL") >"$out" 2>"$out.err" || q_rc=$?',
+    '[ "$q_rc" -eq 0 ] || echo "query-error rc=$q_rc"',
+    'v_rc=0; jq -r -s "$STEP1_VERDICT_JQ" "$out" >"$TMP/step1-verdict.rows" 2>"$TMP/step1-verdict.err" || v_rc=$?',
+    'if [ "$v_rc" -ne 0 ]; then echo "verdict-error step1 rc=$v_rc"; return 0; fi',
+    'p_rc=0; python3 -c "$STEP2A_PY" "$dir" "$REPORT_REL" $FAILED_TASKS >"$TMP/step2a.rows" 2>"$TMP/step2a.err" || p_rc=$?',
+    'if [ "$p_rc" -ne 0 ]; then echo "verdict-error step2 rc=$p_rc"; return 0; fi',
+    'if not 0 <= diff_us <= 1000000:',
+    # The negative control: the swap, the child call, the row capture, the rc map, the exact
+    # row-set compare and the four expected rows.
+    'v="$(swap_step1_body "$CLAUDE_MD" "$TMP/old-query" "$ctl_md")"',
+    '[ "$v" = "ok" ] || die_infra "negative control: cannot find the Step 1 fence in $CLAUDE_MD ($v)"',
+    'nc_rc=0; "$BASH" "$HERE/run.sh" --claude-md "$ctl_md" >"$ctl_out" 2>&1 || nc_rc=$?',
+    'sed -n \'s/^ROW //p\' "$ctl_out" | LC_ALL=C sort > "$TMP/ctl.rows"',
+    'printf \'%s\\n\' "${NEGATIVE_WANT_ROWS[@]}" | LC_ALL=C sort > "$TMP/ctl.want"',
+    "0) printf 'moon-diagnosis-exec negative control: FAILED, the gate passed the pre-SMA-711 query\\n' >&2; return 1 ;;",
+    '1) ;;',
+    '*) printf \'moon-diagnosis-exec negative control: infrastructure error (rc=2): the child exited %s\\n\' "$nc_rc" >&2; cat "$ctl_out" >&2; return 2 ;;',
+    'if ! cmp -s "$TMP/ctl.rows" "$TMP/ctl.want"; then',
+    '"bad-exec RunTask(probe:fail3) object"',
+    '"bad-exec RunTask(probe:missing) object"',
+    '"bad-exec RunTask(probe:multi) object"',
+    '"bad-exec RunTask(probe:slow) object"',
+)
+
 
 def read_input(path, label):
     """One of the gate's file inputs, with a MISSING file routed to rc 1 rather than rc 2.
@@ -1819,12 +1921,13 @@ def _scripts(projects):
 def check_self_invocation(
     run_sh_text, scripts, actionlint_sh_text, release_parity_sh_text,
     workflow_credentials_sh_text, release_plan_sh_text, ruff_sh_text,
-    next_public_free_sh_text, helm_render_sh_text,
+    next_public_free_sh_text, helm_render_sh_text, moon_diagnosis_sh_text,
 ):
     """Call sites of the affected-graph, actionlint, release-parity, workflow-credentials,
-    release-plan, ruff, next-public-free and helm-render gates missing from where they must appear.
+    release-plan, ruff, next-public-free, helm-render and moon-diagnosis-exec gates missing from
+    where they must appear.
 
-    Nine haystacks, matched THREE different ways. run.sh sites are substrings, because they are
+    Ten haystacks, matched THREE different ways. run.sh sites are substrings, because they are
     indented and one is a mid-line fragment, and their `|| RC=1` suffixes already make them
     unambiguous. Everything else is matched as a whole LINE — membership is checked against the
     set of a line's OWN full text, not "does this substring appear anywhere in the file" — and
@@ -1851,11 +1954,12 @@ def check_self_invocation(
     release-plan, ruff, next-public-free and helm-render are stripped for the same reason — their real lines
     are indented inside
     `case` arms and `if` bodies.
-    The nine texts are checked SEPARATELY rather than against one concatenated haystack, so a
+    The ten texts are checked SEPARATELY rather than against one concatenated haystack, so a
     call site living in the wrong file cannot satisfy another's requirement.
 
     `actionlint_sh_text`, `release_parity_sh_text`, `workflow_credentials_sh_text`,
-    `release_plan_sh_text`, `ruff_sh_text`, `next_public_free_sh_text` and `helm_render_sh_text` are REQUIRED positional parameters, deliberately. An optional one defaulting to "" would make every existing
+    `release_plan_sh_text`, `ruff_sh_text`, `next_public_free_sh_text`, `helm_render_sh_text` and `moon_diagnosis_sh_text` are REQUIRED
+    positional parameters, deliberately. An optional one defaulting to "" would make every existing
     caller pass vacuously — re-creating the class of hole this check exists to close.
     """
     missing = [site for site in RUN_SH_CALL_SITES if site not in run_sh_text]
@@ -1932,6 +2036,13 @@ def check_self_invocation(
         f"ci/helm-render/run.sh: {site}"
         for site in HELM_RENDER_SH_CALL_SITES
         if site not in helm_render_lines
+    )
+    # SMA-714 — stripped whole lines, like the helm-render haystack and for the same two reasons.
+    moon_diagnosis_lines = {line.strip() for line in moon_diagnosis_sh_text.splitlines()}
+    missing.extend(
+        f"ci/moon-diagnosis/run.sh: {site}"
+        for site in MOON_DIAGNOSIS_SH_CALL_SITES
+        if site not in moon_diagnosis_lines
     )
     return missing
 
@@ -2304,12 +2415,15 @@ def self_test():
                  # SMA-502 — a floor member too, for the same reason.
                  "next-public-free": True,
                  # SMA-513 PR 2b — a floor member too, for the same reason.
-                 "helm-render": True},
+                 "helm-render": True,
+                 # SMA-714 — a floor member too, for the same reason.
+                 "moon-diagnosis-exec": True},
         "some-crate-rs": {"build": True, "test": True, "build-release": True},
     }
     aligned_t = ["build", "test", "deny", "promtool", "affected-smoke", "publish-metadata",
                  "release-parity", "release-parity-py", "release-parity-ts",
-                 "workflow-credentials", "ruff-ci", "next-public-free", "helm-render"]
+                 "workflow-credentials", "ruff-ci", "next-public-free", "helm-render",
+                 "moon-diagnosis-exec"]
 
     def forward(label, tasks, t, exempt, want_missing, want_unexpected, want_bad_exempt=(),
                 want_stale_exempt=()):
@@ -2771,19 +2885,23 @@ def self_test():
     wired_helm_render = "".join(
         f"    {site}\n" for site in HELM_RENDER_SH_CALL_SITES
     )
-    if check_self_invocation(wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    # SMA-714 — the same shape for ci/moon-diagnosis/run.sh, derived from the registry.
+    wired_moon_diagnosis = "".join(
+        f"    {site}\n" for site in MOON_DIAGNOSIS_SH_CALL_SITES
+    )
+    if check_self_invocation(wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: fired on a wired tree: "
-            f"{check_self_invocation(wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render)}"
+            f"{check_self_invocation(wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis)}"
         )
     no_call = wired.replace("  assert_ci_targets || SUITE_RC=1\n", "")
-    if not check_self_invocation(no_call, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(no_call, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: missed a deleted run_suite call")
     no_selftest = wired.replace('  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n', "")
-    if not check_self_invocation(no_selftest, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(no_selftest, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: missed a deleted --self-test call")
     silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
-    if not check_self_invocation(silenced, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(silenced, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
     # SMA-638. The two call sites above are reachable ONLY if the flag parse and the branch guard
     # survive. Deleting the flag parse leaves NEGATIVE at its initialised 0, so the whole
@@ -2793,10 +2911,10 @@ def self_test():
     no_flag_parse = wired.replace(
         '[ "${1-}" = "--negative-control" ] && NEGATIVE=1\n', ""
     )
-    if not check_self_invocation(no_flag_parse, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(no_flag_parse, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: missed a deleted --negative-control flag parse")
     no_negative_guard = wired.replace('if [ "$NEGATIVE" = 1 ]; then\n', "")
-    if not check_self_invocation(no_negative_guard, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(no_negative_guard, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: missed a deleted NEGATIVE branch guard")
     # SMA-553 D10 + review finding 1, generalised (SMA-530). These three named fixtures used
     # to be spelled out for input-liveness only: the deleted REAL RUN (a strict PREFIX of the
@@ -2811,13 +2929,13 @@ def self_test():
         for _line in _lines:
             if not check_self_invocation(
                 wired, wired_scripts(**{_task: broken_script(_task, _line)}), wired_actionlint,
-                wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render,
+                wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
             ):
                 failures.append(
                     f"check_self_invocation: missed {_line!r} deleted from repo:{_task}'s script"
                 )
     if not check_self_invocation(
-        wired, wired_scripts(**{"input-liveness": ""}), wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render
+        wired, wired_scripts(**{"input-liveness": ""}), wired_actionlint, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis
     ):
         failures.append("check_self_invocation: missed an absent input-liveness script entirely")
     # SMA-576, generalised. A registered gate whose script is missing from the payload
@@ -2828,7 +2946,7 @@ def self_test():
     for _task in sorted(SELF_SCHEDULED_GATES):
         if not check_self_invocation(
             wired, {k: v for k, v in wired_scripts().items() if k != _task}, wired_actionlint,
-            wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render,
+            wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
         ):
             failures.append(
                 f"check_self_invocation: missed an absent repo:{_task} script entirely"
@@ -2837,14 +2955,14 @@ def self_test():
     # other's requirement, which a concatenated haystack would allow.
     if not check_self_invocation(
         wired_script, wired_scripts(**{"input-liveness": wired}), wired_actionlint,
-        wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append("check_self_invocation: accepted the two texts swapped")
     # ...and the reverse direction, which the swap fixture above does not reach: script text must
     # not satisfy a run.sh requirement either.
     if not check_self_invocation(
         no_call, wired_scripts(**{"input-liveness": wired + wired_script}), wired_actionlint,
-        wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append("check_self_invocation: a run.sh call site was satisfied by script text")
     # The "fired on a wired tree" positive control above already covers all four haystacks
@@ -2852,10 +2970,10 @@ def self_test():
     # would only ever fire alongside that one and add no coverage (SMA-542 review, smaller
     # correction 2).
     no_actionlint_call = wired_actionlint.replace("\nrun_self_tests\n", "\n")
-    if not check_self_invocation(wired, scripts, no_actionlint_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_actionlint_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: missed a deleted run_self_tests call")
     no_battery = wired_actionlint.replace("selftest_mutation_battery\n", "")
-    if not check_self_invocation(wired, scripts, no_battery, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_battery, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: missed a deleted mutation-battery call")
     # SMA-542 fix-wave I1 — the reviewer deleted this exact block from run.sh and measured: full
     # gate rc 0, this gate PASS, with check 8's T floor/swallowed/continue-on-error verdicts
@@ -2863,7 +2981,7 @@ def self_test():
     no_floor_call = wired_actionlint.replace(
         "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n", ""
     )
-    if not check_self_invocation(wired, scripts, no_floor_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_floor_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: missed a deleted check-8 production call site (fix-wave I1)"
         )
@@ -2874,7 +2992,7 @@ def self_test():
     no_check8b_call = wired_actionlint.replace(
         'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n', ""
     )
-    if not check_self_invocation(wired, scripts, no_check8b_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_check8b_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: missed a deleted check-8b production call site "
             "(CodeRabbit round 4, finding C1)"
@@ -2885,7 +3003,7 @@ def self_test():
     no_check8c_call = wired_actionlint.replace(
         "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n", ""
     )
-    if not check_self_invocation(wired, scripts, no_check8c_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_check8c_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: missed a deleted check-8c production call site "
             "(SMA-542 residual closure)"
@@ -2896,7 +3014,7 @@ def self_test():
     no_check8d_call = wired_actionlint.replace(
         "done < <(block_execution_verdict .github/workflows/ci.yml)\n", ""
     )
-    if not check_self_invocation(wired, scripts, no_check8d_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_check8d_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: missed a deleted check-8d production call site "
             "(SMA-542 residual closure, README L12)"
@@ -2906,12 +3024,12 @@ def self_test():
     no_rg_production_call = wired_actionlint.replace(
         'release_guard_py .github/workflows/release.yml > "$RG_OUT"\n', ""
     )
-    if not check_self_invocation(wired, scripts, no_rg_production_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_rg_production_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: missed a deleted check-10 production call site"
         )
     no_rg_rc_check = wired_actionlint.replace('if [ "$rg_rc" -eq 2 ]; then\n', "")
-    if not check_self_invocation(wired, scripts, no_rg_rc_check, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_rg_rc_check, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: missed a deleted check-10 fail-closed exit-2 routing "
             "(the done < <(...) swallow class, run.sh:2050)"
@@ -2921,14 +3039,14 @@ def self_test():
         'expected at least 162"\n',
         "",
     )
-    if not check_self_invocation(wired, scripts, no_rg_arity_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_rg_arity_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: missed a deleted check-10 fixture arity floor")
     no_rg_selftest_call = wired_actionlint.replace(
         '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test '
         "reported a broken\n",
         "",
     )
-    if not check_self_invocation(wired, scripts, no_rg_selftest_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, no_rg_selftest_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: missed a deleted check-10 --self-test invocation"
         )
@@ -2942,14 +3060,14 @@ def self_test():
     # wired tree" assertion above already proves the real, column-0 tree keeps passing under this
     # tighter rule.
     indented_run_self_tests = wired_actionlint.replace("run_self_tests\n", "  run_self_tests\n", 1)
-    if not check_self_invocation(wired, scripts, indented_run_self_tests, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_run_self_tests, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED run_self_tests call satisfied the column-0 pin"
         )
     indented_battery = wired_actionlint.replace(
         "selftest_mutation_battery\n", "  selftest_mutation_battery\n"
     )
-    if not check_self_invocation(wired, scripts, indented_battery, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_battery, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED selftest_mutation_battery call satisfied the "
             "column-0 pin"
@@ -2958,7 +3076,7 @@ def self_test():
         "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n",
         "  done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n",
     )
-    if not check_self_invocation(wired, scripts, indented_floor_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_floor_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED check-8 call site satisfied the column-0 pin"
         )
@@ -2966,7 +3084,7 @@ def self_test():
         'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n',
         '  done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n',
     )
-    if not check_self_invocation(wired, scripts, indented_check8b_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_check8b_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED check-8b call site satisfied the column-0 pin"
         )
@@ -2974,7 +3092,7 @@ def self_test():
         "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n",
         "  done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n",
     )
-    if not check_self_invocation(wired, scripts, indented_check8c_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_check8c_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED check-8c call site satisfied the column-0 pin"
         )
@@ -2982,7 +3100,7 @@ def self_test():
         "done < <(block_execution_verdict .github/workflows/ci.yml)\n",
         "  done < <(block_execution_verdict .github/workflows/ci.yml)\n",
     )
-    if not check_self_invocation(wired, scripts, indented_check8d_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_check8d_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED check-8d call site satisfied the column-0 pin"
         )
@@ -2991,7 +3109,7 @@ def self_test():
         'release_guard_py .github/workflows/release.yml > "$RG_OUT"\n',
         '  release_guard_py .github/workflows/release.yml > "$RG_OUT"\n',
     )
-    if not check_self_invocation(wired, scripts, indented_rg_production_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_rg_production_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED check-10 production call site satisfied the "
             "column-0 pin"
@@ -2999,7 +3117,7 @@ def self_test():
     indented_rg_rc_check = wired_actionlint.replace(
         'if [ "$rg_rc" -eq 2 ]; then\n', '  if [ "$rg_rc" -eq 2 ]; then\n'
     )
-    if not check_self_invocation(wired, scripts, indented_rg_rc_check, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_rg_rc_check, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED check-10 exit-2 routing satisfied the column-0 pin"
         )
@@ -3019,7 +3137,7 @@ def self_test():
             failures.append(
                 f"check_self_invocation: wired_actionlint lacks the check-13 line {_ee_site!r}"
             )
-        elif not check_self_invocation(wired, scripts, _ee_broken, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+        elif not check_self_invocation(wired, scripts, _ee_broken, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
             failures.append(
                 f"check_self_invocation: missed a deleted check-13 line {_ee_site!r}"
             )
@@ -3027,7 +3145,7 @@ def self_test():
         'done < <(early_exit_reader_verdict "$EE_LIST")\n',
         '  done < <(early_exit_reader_verdict "$EE_LIST")\n',
     )
-    if not check_self_invocation(wired, scripts, indented_check13_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, indented_check13_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: an INDENTED check-13 call site satisfied the column-0 pin"
         )
@@ -3049,13 +3167,13 @@ def self_test():
             failures.append(
                 f"check_self_invocation: wired_actionlint lacks the SMA-612 line {_pc_line!r}"
             )
-        elif not check_self_invocation(wired, scripts, _pc_broken, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+        elif not check_self_invocation(wired, scripts, _pc_broken, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
             failures.append(
                 f"check_self_invocation: missed a deleted SMA-612 line {_pc_line!r}"
             )
     for _pc_site in PIPE_CAPACITY_CALL_SITES:
         indented_pc_call = wired_actionlint.replace(f"{_pc_site}\n", f"  {_pc_site}\n")
-        if not check_self_invocation(wired, scripts, indented_pc_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+        if not check_self_invocation(wired, scripts, indented_pc_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
             failures.append(
                 "check_self_invocation: an INDENTED SMA-612 preflight call satisfied the "
                 "column-0 pin"
@@ -3072,15 +3190,15 @@ def self_test():
     # the task-script pairing is a DISTINCT haystack combination neither of them exercises, so a
     # check that concatenated task-script and actionlint text would have survived undetected.
     if not check_self_invocation(
-        wired + wired_actionlint, scripts, no_actionlint_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render
+        wired + wired_actionlint, scripts, no_actionlint_call, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis
     ):
         failures.append("check_self_invocation: an actionlint site was satisfied by run.sh text")
-    if not check_self_invocation(no_call, scripts, wired_actionlint + wired, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(no_call, scripts, wired_actionlint + wired, wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append("check_self_invocation: a run.sh site was satisfied by actionlint text")
     if not check_self_invocation(
         wired, wired_scripts(**{"input-liveness": wired_script + wired_actionlint}),
         no_actionlint_call, wired_release_parity, wired_workflow_credentials, wired_release_plan,
-        wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: an actionlint site was satisfied by task-script text"
@@ -3095,7 +3213,7 @@ def self_test():
     for _param_name in (
         "actionlint_sh_text", "release_parity_sh_text", "workflow_credentials_sh_text",
         "release_plan_sh_text", "ruff_sh_text", "next_public_free_sh_text",
-        "helm_render_sh_text",
+        "helm_render_sh_text", "moon_diagnosis_sh_text",
     ):
         _default = inspect.signature(check_self_invocation).parameters[_param_name].default
         if _default is not inspect.Parameter.empty:
@@ -3110,7 +3228,7 @@ def self_test():
     )
     if check_self_invocation(
         wired, wired_scripts(**{"input-liveness": indented_task_script}), wired_actionlint,
-        wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_release_parity, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append("check_self_invocation: an indented but fully wired script was reported missing")
 
@@ -3121,7 +3239,7 @@ def self_test():
             line for line in wired_release_parity.splitlines(keepends=True)
             if line.strip() != _site
         )
-        if not check_self_invocation(wired, scripts, wired_actionlint, _broken, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+        if not check_self_invocation(wired, scripts, wired_actionlint, _broken, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
             failures.append(
                 f"check_self_invocation: missed {_site!r} deleted from ci/release-parity/run.sh"
             )
@@ -3130,7 +3248,7 @@ def self_test():
         wired + wired_release_parity, scripts, wired_actionlint,
         "".join(line for line in wired_release_parity.splitlines(keepends=True)
                 if line.strip() != RELEASE_PARITY_SH_CALL_SITES[0]), wired_workflow_credentials, wired_release_plan,
-        wired_ruff, wired_next_public_free, wired_helm_render
+        wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis
     ):
         failures.append(
             "check_self_invocation: a release-parity site was satisfied by run.sh text"
@@ -3146,7 +3264,7 @@ def self_test():
     commented_out = wired_release_parity.replace(
         'if [ "$NEGATIVE" = 1 ]; then\n', '# if [ "$NEGATIVE" = 1 ]; then\n'
     )
-    if not check_self_invocation(wired, scripts, wired_actionlint, commented_out, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render):
+    if not check_self_invocation(wired, scripts, wired_actionlint, commented_out, wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis):
         failures.append(
             "check_self_invocation: a COMMENTED-OUT release-parity line satisfied the pin "
             "(widened to substring matching)"
@@ -3162,7 +3280,7 @@ def self_test():
         )
         if not check_self_invocation(
             wired, scripts, wired_actionlint, wired_release_parity, _wc_broken, wired_release_plan,
-            wired_ruff, wired_next_public_free, wired_helm_render,
+            wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
         ):
             failures.append(
                 f"check_self_invocation: missed {_wc_site!r} deleted from "
@@ -3176,7 +3294,7 @@ def self_test():
         wired + wired_workflow_credentials, scripts, wired_actionlint, wired_release_parity,
         "".join(line for line in wired_workflow_credentials.splitlines(keepends=True)
                 if line.strip() != WORKFLOW_CREDENTIALS_SH_CALL_SITES[0]), wired_release_plan,
-        wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a workflow-credentials site was satisfied by run.sh text"
@@ -3186,7 +3304,7 @@ def self_test():
         "".join(line for line in wired_release_parity.splitlines(keepends=True)
                 if line.strip() != RELEASE_PARITY_SH_CALL_SITES[0]),
         wired_workflow_credentials + wired_release_parity, wired_release_plan,
-        wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a release-parity site was satisfied by "
@@ -3198,7 +3316,7 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, _wc_commented, wired_release_plan,
-        wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a COMMENTED-OUT workflow-credentials line satisfied the pin "
@@ -3215,7 +3333,7 @@ def self_test():
         )
         if not check_self_invocation(
             wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-            _rp_broken, wired_ruff, wired_next_public_free, wired_helm_render,
+            _rp_broken, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
         ):
             failures.append(
                 f"check_self_invocation: missed {_rp_site!r} deleted from ci/release-plan/run.sh"
@@ -3228,7 +3346,7 @@ def self_test():
         wired_workflow_credentials,
         "".join(line for line in wired_release_plan.splitlines(keepends=True)
                 if line.strip() != RELEASE_PLAN_SH_CALL_SITES[0]),
-        wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a release-plan site was satisfied by run.sh text"
@@ -3238,7 +3356,7 @@ def self_test():
         "".join(line for line in wired_workflow_credentials.splitlines(keepends=True)
                 if line.strip() != WORKFLOW_CREDENTIALS_SH_CALL_SITES[0]),
         wired_release_plan + wired_workflow_credentials,
-        wired_ruff, wired_next_public_free, wired_helm_render,
+        wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a workflow-credentials site was satisfied by release-plan text"
@@ -3249,7 +3367,7 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-        _rp_commented, wired_ruff, wired_next_public_free, wired_helm_render,
+        _rp_commented, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a COMMENTED-OUT release-plan line satisfied the pin "
@@ -3263,7 +3381,7 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-        _rp_c1_rearmed, wired_ruff, wired_next_public_free, wired_helm_render,
+        _rp_c1_rearmed, wired_ruff, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: re-arming the C1 trap (require_uv on the --github-output "
@@ -3280,7 +3398,7 @@ def self_test():
         )
         if not check_self_invocation(
             wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-            wired_release_plan, _ruff_broken, wired_next_public_free, wired_helm_render,
+            wired_release_plan, _ruff_broken, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
         ):
             failures.append(
                 f"check_self_invocation: missed {_ruff_site!r} deleted from ci/ruff/run.sh"
@@ -3290,7 +3408,7 @@ def self_test():
         wired + wired_ruff, scripts, wired_actionlint, wired_release_parity,
         wired_workflow_credentials, wired_release_plan,
         "".join(line for line in wired_ruff.splitlines(keepends=True)
-                if line.strip() != RUFF_SH_CALL_SITES[0]), wired_next_public_free, wired_helm_render,
+                if line.strip() != RUFF_SH_CALL_SITES[0]), wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a ruff site was satisfied by run.sh text"
@@ -3301,7 +3419,7 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-        wired_release_plan, _ruff_commented, wired_next_public_free, wired_helm_render,
+        wired_release_plan, _ruff_commented, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a COMMENTED-OUT ruff line satisfied the pin "
@@ -3319,7 +3437,7 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-        wired_release_plan, _ruff_guard_neutered, wired_next_public_free, wired_helm_render,
+        wired_release_plan, _ruff_guard_neutered, wired_next_public_free, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a NEUTERED comparison (always-false guard) satisfied the pin"
@@ -3333,7 +3451,7 @@ def self_test():
         )
         if not check_self_invocation(
             wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-            wired_release_plan, wired_ruff, _npf_broken, wired_helm_render,
+            wired_release_plan, wired_ruff, _npf_broken, wired_helm_render, wired_moon_diagnosis,
         ):
             failures.append(
                 f"check_self_invocation: missed {_npf_site!r} deleted from ci/next-public/run.sh"
@@ -3343,7 +3461,7 @@ def self_test():
         wired + wired_next_public_free, scripts, wired_actionlint, wired_release_parity,
         wired_workflow_credentials, wired_release_plan, wired_ruff,
         "".join(line for line in wired_next_public_free.splitlines(keepends=True)
-                if line.strip() != NEXT_PUBLIC_FREE_SH_CALL_SITES[0]), wired_helm_render,
+                if line.strip() != NEXT_PUBLIC_FREE_SH_CALL_SITES[0]), wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a next-public-free site was satisfied by run.sh text"
@@ -3354,7 +3472,7 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-        wired_release_plan, wired_ruff, _npf_commented, wired_helm_render,
+        wired_release_plan, wired_ruff, _npf_commented, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a COMMENTED-OUT next-public-free line satisfied the pin "
@@ -3368,7 +3486,7 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-        wired_release_plan, wired_ruff, _npf_guard_neutered, wired_helm_render,
+        wired_release_plan, wired_ruff, _npf_guard_neutered, wired_helm_render, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a NEUTERED comparison (always-false guard) satisfied the pin"
@@ -3384,7 +3502,7 @@ def self_test():
         )
         if not check_self_invocation(
             wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-            wired_release_plan, wired_ruff, wired_next_public_free, _hr_broken,
+            wired_release_plan, wired_ruff, wired_next_public_free, _hr_broken, wired_moon_diagnosis,
         ):
             failures.append(
                 f"check_self_invocation: missed {_hr_site!r} deleted from ci/helm-render/run.sh"
@@ -3394,7 +3512,7 @@ def self_test():
         wired + wired_helm_render, scripts, wired_actionlint, wired_release_parity,
         wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free,
         "".join(line for line in wired_helm_render.splitlines(keepends=True)
-                if line.strip() != HELM_RENDER_SH_CALL_SITES[0]),
+                if line.strip() != HELM_RENDER_SH_CALL_SITES[0]), wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a helm-render site was satisfied by run.sh text"
@@ -3405,7 +3523,7 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-        wired_release_plan, wired_ruff, wired_next_public_free, _hr_commented,
+        wired_release_plan, wired_ruff, wired_next_public_free, _hr_commented, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a COMMENTED-OUT helm-render line satisfied the pin "
@@ -3419,10 +3537,64 @@ def self_test():
     )
     if not check_self_invocation(
         wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
-        wired_release_plan, wired_ruff, wired_next_public_free, _hr_guard_neutered,
+        wired_release_plan, wired_ruff, wired_next_public_free, _hr_guard_neutered, wired_moon_diagnosis,
     ):
         failures.append(
             "check_self_invocation: a NEUTERED helm-render comparison (always-false guard) "
+            "satisfied the pin"
+        )
+
+    # SMA-714 — the helm-render battery above, repeated for the moon-diagnosis haystack: a deletion
+    # row per pinned line, a contamination row, a commented-out row and a disabled-guard row.
+    for _md_site in MOON_DIAGNOSIS_SH_CALL_SITES:
+        _md_broken = "".join(
+            line for line in wired_moon_diagnosis.splitlines(keepends=True)
+            if line.strip() != _md_site
+        )
+        if not check_self_invocation(
+            wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
+            wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, _md_broken,
+        ):
+            failures.append(
+                f"check_self_invocation: missed {_md_site!r} deleted from ci/moon-diagnosis/run.sh"
+            )
+    # Contamination: a moon-diagnosis site must not be satisfiable from another haystack.
+    if not check_self_invocation(
+        wired + wired_moon_diagnosis, scripts, wired_actionlint, wired_release_parity,
+        wired_workflow_credentials, wired_release_plan, wired_ruff, wired_next_public_free,
+        wired_helm_render,
+        "".join(line for line in wired_moon_diagnosis.splitlines(keepends=True)
+                if line.strip() != MOON_DIAGNOSIS_SH_CALL_SITES[0]),
+    ):
+        failures.append(
+            "check_self_invocation: a moon-diagnosis site was satisfied by run.sh text"
+        )
+    # Whole-LINE, not substring: a commented-out copy of a pinned line must report missing.
+    _md_commented = wired_moon_diagnosis.replace(
+        'if [ "$NEGATIVE" = 1 ]; then\n', '# if [ "$NEGATIVE" = 1 ]; then\n'
+    )
+    if not check_self_invocation(
+        wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
+        wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render, _md_commented,
+    ):
+        failures.append(
+            "check_self_invocation: a COMMENTED-OUT moon-diagnosis line satisfied the pin "
+            "(widened to substring matching)"
+        )
+    # The disabled guard. The negative control's exact row-set compare is what makes it prove
+    # anything; comparing the got-rows file with ITSELF leaves every other pinned line
+    # byte-identical, so the control would pass whatever rows the old query produced.
+    _md_guard_neutered = wired_moon_diagnosis.replace(
+        'if ! cmp -s "$TMP/ctl.rows" "$TMP/ctl.want"; then\n',
+        'if ! cmp -s "$TMP/ctl.rows" "$TMP/ctl.rows"; then\n',
+    )
+    if not check_self_invocation(
+        wired, scripts, wired_actionlint, wired_release_parity, wired_workflow_credentials,
+        wired_release_plan, wired_ruff, wired_next_public_free, wired_helm_render,
+        _md_guard_neutered,
+    ):
+        failures.append(
+            "check_self_invocation: a NEUTERED moon-diagnosis comparison (always-false guard) "
             "satisfied the pin"
         )
 
@@ -3844,11 +4016,11 @@ EXPECTED_FINDING_KEYS = (
     "pairing-orphan-globs", "tw-unregistered", "tw-missing-lines", "tw-stale", "tw-no-project",
 )
 
-# The eight shell sources check_self_invocation reads, keyed so collect_findings' signature does
+# The nine shell sources check_self_invocation reads, keyed so collect_findings' signature does
 # not grow eight positional parameters that a caller could silently transpose.
 _CALL_SITE_SOURCE_KEYS = (
     "run", "actionlint", "release_parity", "workflow_credentials", "release_plan", "ruff",
-    "next_public_free", "helm_render",
+    "next_public_free", "helm_render", "moon_diagnosis",
 )
 
 
@@ -3878,6 +4050,7 @@ def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, 
     missing_sites = check_self_invocation(
         sh["run"], scripts, sh["actionlint"], sh["release_parity"],
         sh["workflow_credentials"], sh["release_plan"], sh["ruff"], sh["next_public_free"], sh["helm_render"],
+        sh["moon_diagnosis"],
     )
     bad_invocation = check_invocation(ci_yml)
     unregistered_self_scheduled, bad_coverage_exempt, stale_coverage_exempt = (
@@ -3939,7 +4112,7 @@ def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, 
          "    Fix: restore the exact line; see RUN_SH_CALL_SITES, SELF_SCHEDULED_GATES,\n"
          "    ACTIONLINT_SH_CALL_SITES, RELEASE_PARITY_SH_CALL_SITES,\n"
          "    WORKFLOW_CREDENTIALS_SH_CALL_SITES, RELEASE_PLAN_SH_CALL_SITES and\n"
-         "    RUFF_SH_CALL_SITES and HELM_RENDER_SH_CALL_SITES in\n"
+         "    RUFF_SH_CALL_SITES, HELM_RENDER_SH_CALL_SITES and MOON_DIAGNOSIS_SH_CALL_SITES in\n"
          "    ci/affected-graph/ci_targets.py.\n"
          "    A row prefixed `ci/actionlint/run.sh:` means repo:actionlint would run its checks\n"
          "    while asserting nothing — its self-tests or its mutation battery are no longer\n"
@@ -4118,6 +4291,9 @@ def main():
         helm_render_sh = read_input(
             root / "ci" / "helm-render" / "run.sh", "ci/helm-render/run.sh"
         )
+        moon_diagnosis_sh = read_input(
+            root / "ci" / "moon-diagnosis" / "run.sh", "ci/moon-diagnosis/run.sh"
+        )
         # Fix-wave finding C: a `moon.yml` test filtered out any ts/apps/* directory that lacked
         # one, so such a directory never reached `unregistered` — the exact silent skip this
         # whole branch exists to remove. `package.json` is the test ci/next-env/run.sh:113
@@ -4143,6 +4319,7 @@ def main():
                 "release_plan": release_plan_sh, "ruff": ruff_sh,
                 "next_public_free": next_public_free_sh,
                 "helm_render": helm_render_sh,
+                "moon_diagnosis": moon_diagnosis_sh,
             },
         )
     except GateAssertionError as exc:
