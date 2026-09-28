@@ -280,9 +280,12 @@ def _run_helm(cmd, label, run=subprocess.run):
         raise InfraError(f"helm could not start for {label}: {exc}") from exc
 
 
-def helm_template(chart, enabled, extra=()):
-    """One `helm template` of `chart` with exactly the zones in `enabled` switched on."""
-    helm = shutil.which("helm")
+def helm_template(chart, enabled, extra=(), *, label, run=subprocess.run, helm=None):
+    """One `helm template` of `chart` with exactly the zones in `enabled` switched on. `label`
+    names the render in a timeout message (SMA-679): three pairs of renders have byte-identical
+    commands. `run` and `helm` are parameters only so self_test() can drive this with no helm;
+    production never passes them."""
+    helm = helm or shutil.which("helm")
     if helm is None:
         raise InfraError("helm is not on PATH; run this module through ci/helm-render/run.sh")
     values = _chart_values(chart)
@@ -292,7 +295,7 @@ def helm_template(chart, enabled, extra=()):
     for zone in sorted(values["zones"]):
         cmd += ["--set", f"zones.{zone}.enabled={'true' if zone in enabled else 'false'}"]
     cmd += list(extra)
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = _run_helm(cmd, label, run=run)
     if proc.returncode != 0:
         raise InfraError(f"helm template failed (rc={proc.returncode}) for {chart} {' '.join(extra)}: {proc.stderr.strip()}")
     return proc.stdout
@@ -505,20 +508,20 @@ def _bumped_app_version(chart, dest):
 def check3(chart):
     """Rows 3a, 3a-prime, 3b and 3c; EXPECTED_ROW_LABELS is the inventory that floors this set."""
     both = ("gateway", "iam")
-    base = parse_docs(helm_template(chart, both))
+    base = parse_docs(helm_template(chart, both, label="3 base"))
     rows = []
     for row, key in (("3a", "zones.iam.console.image.tag"), ("3a-prime", "zones.gateway.console.image.tag")):
-        before = parse_docs(helm_template(chart, both, ("--set", f"{key}=t1")))
-        after = parse_docs(helm_template(chart, both, ("--set", f"{key}=t2")))
+        before = parse_docs(helm_template(chart, both, ("--set", f"{key}=t1"), label=f"{row} t1"))
+        after = parse_docs(helm_template(chart, both, ("--set", f"{key}=t2"), label=f"{row} t2"))
         rows.append(compare_templates(row, before, after))
     # Case b edits Chart.yaml in a temp COPY only. run.sh exports TMPDIR, so the copy lands under
     # the gate's own mktemp directory. SMA-688: both sides render with every tag cleared, so the
     # row still proves the appVersion fallback now that values.yaml pins each tag.
     with tempfile.TemporaryDirectory(prefix="helm-render-3b-") as tmp:
         bumped = _bumped_app_version(chart, Path(tmp) / "chart")
-        before = parse_docs(helm_template(chart, both, CLEARED_TAGS))
-        rows.append(compare_templates("3b", before, parse_docs(helm_template(bumped, both, CLEARED_TAGS))))
-    rows.append(compare_templates("3c", base, parse_docs(helm_template(chart, ("iam",)))))
+        before = parse_docs(helm_template(chart, both, CLEARED_TAGS, label="3b before"))
+        rows.append(compare_templates("3b", before, parse_docs(helm_template(bumped, both, CLEARED_TAGS, label="3b after"))))
+    rows.append(compare_templates("3c", base, parse_docs(helm_template(chart, ("iam",), label="3c iam only"))))
     return rows
 
 
@@ -655,7 +658,8 @@ def check7(chart, run=subprocess.run, helm=None, values_dir=KIND_VALUES):
     """Row 7: ci/kind/values/a.yaml, and a.yaml plus b.yaml, render against `chart` with rc 0.
 
     A render that fails is an ASSERTION (the row fails, rc 3): the chart and the kind values
-    disagree, which is exactly what this row exists to catch. A missing values file is rc 2.
+    disagree, which is exactly what this row exists to catch. A missing values file is rc 2, and
+    so is a render that runs longer than HELM_TIMEOUT_S (SMA-679): a hung helm is a tool fault.
     `run`, `helm` and `values_dir` are parameters only so self_test() can drive the row without
     helm; production never passes them.
     """
@@ -673,7 +677,7 @@ def check7(chart, run=subprocess.run, helm=None, values_dir=KIND_VALUES):
             cmd = [helm, "template", RELEASE, str(chart), "--kube-version", KUBE_VERSION]
             for f in files:
                 cmd += ["-f", str(f)]
-            proc = run(cmd, capture_output=True, text=True, check=False)
+            proc = _run_helm(cmd, f"7 {label}", run=run)
             if proc.returncode != 0:
                 problems.append(f"{label}: helm template exited {proc.returncode}: {proc.stderr.strip()}")
         return problems
@@ -965,7 +969,7 @@ def run_checks(chart):
     rows = [check1a(chart_slugs(helpers), slugs, state_ts, capability_ts)]
     both_docs = None
     for label, enabled in SUBSETS:
-        raw = helm_template(chart, enabled)
+        raw = helm_template(chart, enabled, label=f"subset {label}")
         docs = parse_docs(raw)
         rows += check1(label, docs, enabled, paths, slugs)
         if enabled == ("iam",):
@@ -982,7 +986,7 @@ def run_checks(chart):
     registry = chain_registry()
     rows.append(check8a(values, registry, {key: chain_version(entry) for key, entry in registry.items()}))
     rows.append(check8b(values, both_docs))
-    fallback_docs = parse_docs(helm_template(chart, ("gateway", "iam"), CLEARED_TAGS))
+    fallback_docs = parse_docs(helm_template(chart, ("gateway", "iam"), CLEARED_TAGS, label="8c fallback"))
     rows.append(check8c(app_version, registry, tags, fallback_docs))
     _check_row_inventory([r.row for r in rows])
     return rows
@@ -1503,6 +1507,40 @@ def self_test():
     if not (HELM_TIMEOUT_S > 0 and GIT_TIMEOUT_S > 0 and max(HELM_TIMEOUT_S, GIT_TIMEOUT_S) * 8 <= 5 * 60):
         failures.append(f"helm timeout: 8 module runs fit far inside the job limit: HELM_TIMEOUT_S={HELM_TIMEOUT_S}, "
                         f"GIT_TIMEOUT_S={GIT_TIMEOUT_S}; 8 * max must be <= 300 s (spec D1). A larger value needs a new decision")
+
+    class _RecProc:
+        def __init__(self):
+            self.returncode, self.stdout, self.stderr = 0, "", ""
+
+    with tempfile.TemporaryDirectory(prefix="helm-render-679-") as tmp:
+        tmp_chart = Path(tmp) / "chart"
+        tmp_chart.mkdir()
+        (tmp_chart / "values.yaml").write_text("zones:\n  iam: {}\n  gateway: {}\n")
+        (Path(tmp) / "a.yaml").write_text("{}\n")
+        (Path(tmp) / "b.yaml").write_text("{}\n")
+        expect_infra_strict("helm timeout: helm_template raises InfraError",
+                            lambda: helm_template(tmp_chart, ("iam",), label="t", run=timeout_run, helm="helm-stub"))
+        expect_infra_strict("helm timeout: check7 raises InfraError, not a failed row",
+                            lambda: check7(tmp_chart, run=timeout_run, helm="helm-stub", values_dir=tmp))
+        seen = []
+
+        def recording_run(cmd, **kw):
+            seen.append(kw)
+            return _RecProc()
+
+        expect_no_error = []
+        try:
+            helm_template(tmp_chart, ("iam",), label="t", run=recording_run, helm="helm-stub")
+        except Exception as exc:
+            expect_no_error.append(f"{type(exc).__name__}: {exc}")
+        got = [kw.get("timeout") for kw in seen]
+        if expect_no_error or got != [HELM_TIMEOUT_S]:
+            failures.append(f"helm timeout: helm_template passes timeout=HELM_TIMEOUT_S: timeouts {got}, errors {expect_no_error}")
+        seen.clear()
+        check7(tmp_chart, run=recording_run, helm="helm-stub", values_dir=tmp)
+        got = [kw.get("timeout") for kw in seen]
+        if got != [HELM_TIMEOUT_S, HELM_TIMEOUT_S]:
+            failures.append(f"helm timeout: check7 passes timeout=HELM_TIMEOUT_S on both renders: got {got}")
 
     # ---- row inventory floor (F1): EXPECTED_ROW_LABELS' own arity and content, plus
     # _check_row_inventory's behaviour on a missing, an extra and a reordered row.
