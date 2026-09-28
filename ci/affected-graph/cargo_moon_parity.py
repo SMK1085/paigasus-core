@@ -1095,8 +1095,13 @@ HERE_IDIOM_ASSIGN_RE = re.compile(r"""(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)="?\$\(cd 
 REQUIRED_SOURCED_SCRIPTS = {
     "ci/release-parity/run.sh": (
         "ci/release-parity/ecosystems/python-semantic-release.sh",
+        "ci/release-parity/ecosystems/release-plz-filter.sh",
         "ci/release-parity/ecosystems/release-plz.sh",
         "ci/release-parity/ecosystems/semantic-release.sh",
+    ),
+    # SMA-716: the release-plz module sources the release-plz-only suites.
+    "ci/release-parity/ecosystems/release-plz.sh": (
+        "ci/release-parity/ecosystems/release-plz-filter.sh",
     ),
 }
 
