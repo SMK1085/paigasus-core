@@ -31,6 +31,8 @@ export interface SessionRecord {
    * That refresh token stays valid at the IdP until its idle timeout. Under the default scope
    * (`offline_access`, config.ts) it is an offline token. No deployment existed on 2026-09-25
    * (spec § 4.1).
+   * The console image smoke seeds a literal record of this version (`ci/images/run.sh`,
+   * `console_seed_session`); change it too.
    */
   version: 2;
   /**

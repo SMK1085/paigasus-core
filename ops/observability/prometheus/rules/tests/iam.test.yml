@@ -47,24 +47,46 @@ tests:
           - exp_labels: { severity: warning }
             exp_annotations: { summary: "IAM outbox parked a poison event" }
 
-  # IamOutboxPublishFailures: increase(...[5m]) > 0 for 5m.
-  # The flat control series is what makes this test discriminating: a rule written `>= 0` would
-  # fire on it, and the negative expectation below would fail.
-  - interval: 1m
+  # IamOutboxPublishFailures (SMA-713): increase(...[2m]) > 0 for 2m.
+  # interval 15s is the repo scrape interval (prometheus.yml:3); evaluation_interval 1m (above)
+  # is the Prometheus default. The zero seed is faithful: main primes the counter at zero when
+  # the relay is enabled, and relay.rs increments it by 0 on every tick.
+  #   control:8080  flat at 0. A `>= 0` rule fires on it.
+  #   a:8080        exactly one step 0 -> 1 at 10m00s, then flat. It must NEVER fire.
+  #   s:8080        12 steps from 10m00s to 12m45s, then flat. It fires 12m-14m.
+  # The block pins the window to exactly [2m] and the hold to exactly for: 2m (spec 5.2).
+  - interval: 15s
     input_series:
-      - series: 'iam_outbox_relay_publish_failures_total{job="iam", instance="a"}'
-        values: '0 1 2 3 4 5 6 7 8 9 10 11'
-      - series: 'iam_outbox_relay_publish_failures_total{job="iam", instance="control"}'
-        values: '0+0x11'
+      - series: 'iam_outbox_relay_publish_failures_total{job="iam", instance="control:8080"}'
+        values: '0x200'
+      - series: 'iam_outbox_relay_publish_failures_total{job="iam", instance="a:8080"}'
+        values: '0x39 1x160'
+      - series: 'iam_outbox_relay_publish_failures_total{job="iam", instance="s:8080"}'
+        values: '0x39 1+1x11 12x150'
     alert_rule_test:
-      - eval_time: 2m
-        alertname: IamOutboxPublishFailures
-        exp_alerts: []
       - eval_time: 10m
         alertname: IamOutboxPublishFailures
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: IamOutboxPublishFailures
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: IamOutboxPublishFailures
         exp_alerts:
-          - exp_labels: { severity: warning, job: "iam", instance: "a" }
-            exp_annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)" }
+          - exp_labels: { severity: warning, job: "iam", instance: "s:8080" }
+            exp_annotations:
+              summary: "IAM outbox publishes are failing (broker unreachable or rejecting)"
+              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. At a 15 s scrape interval, a failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
+      - eval_time: 14m
+        alertname: IamOutboxPublishFailures
+        exp_alerts:
+          - exp_labels: { severity: warning, job: "iam", instance: "s:8080" }
+            exp_annotations:
+              summary: "IAM outbox publishes are failing (broker unreachable or rejecting)"
+              description: "The publish-failure counter increased in each 2-minute window for 2 minutes. One failure does not fire this alert. At a 15 s scrape interval, a failure spell of about 90 s or more fires it about 2 to 3 minutes after onset. Each IAM replica gives its own alert. Check iam_nats_connected. See RUNBOOK section 4."
+      - eval_time: 15m
+        alertname: IamOutboxPublishFailures
+        exp_alerts: []
 
   # IamOutboxRelayStalled: rate(...[10m]) == 0, for: 10m — the ticks counter is flat (not ticking).
   - interval: 1m
