@@ -107,6 +107,31 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `releases`, field `package_name`. This is **not** `release-pr`'s `prs`/`package` shape. A
   package with Cargo `publish = false` never appears in `releases`, which is why any version
   assertion in `release.yml` binds to `paigasus-kernel` (SMA-579).
+- **Rule R1 (SMA-716): every processed member of a version group sets `changelog_include` to
+  exactly the other processed members.** "Processed" is Cargo-publishable or `git_only`. Without
+  it, a member that moves only because of the group gets NO CHANGELOG section, and the release PR
+  body quotes its old section (P1, release PR #306). The include is not transitive (READ,
+  updater.rs:241-257), so name every member. Consequence (Q4): each member's section, and the
+  `paigasus-proto` GitHub Release body, lists the whole group's commits. `repo:publish-metadata`
+  Check 5 enforces R1. A new member: add it to the other members' lists in the same PR.
+- **A crate releases only on a releasing commit (SMA-716, `release_commits`).** Releasing:
+  `feat`/`fix`/`perf` with scope `rs`, `py`, `ts`, `contracts`, `deps` or no scope (one optional
+  space after a comma in a scope list); any `!`; a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer
+  line anywhere in the message. The type, scope, and `!` rules read only the subject line. The
+  `BREAKING CHANGE:` footer releases a crate even with no releasing type or scope on the subject
+  line. Consequences: **C1** a non-releasing change to shipped code rides along with the next
+  releasing commit; **C2** the filter decides WHETHER, not the LEVEL, so `feat(ci)` on a crate
+  path makes the next release minor; **C3** a new publishable crate first releases only after a
+  releasing commit touches it; **C4** the "dependencies changed" cascade bypasses the filter;
+  **C5** dependabot's `build(deps)` does not release, so a floor change needs a `fix(deps)`
+  commit. The filter runs in `update` and `release-pr`, not in `release`.
+- **A stale release PR can stay open (SMA-716, READ).** When no package needs an update,
+  release-plz returns before it reads open PRs (`release_pr/mod.rs:152-175`). Close such a PR by
+  hand; never merge it. Rollout check for SMA-716: after the merge, the next release PR must not
+  list a crate whose only new commits are non-releasing. (#306 merged before SMA-716, so it
+  still shipped kernel 0.1.1 for a comment-only change.) Rollback: remove the two keys.
+- The fixture proof for both keys is `ci/release-parity/ecosystems/release-plz-filter.sh`
+  (`repo:release-parity`); see the SMA-716 section of `ci/release-parity/README.md`.
 
 ## Publishing, wheels and version lockstep
 

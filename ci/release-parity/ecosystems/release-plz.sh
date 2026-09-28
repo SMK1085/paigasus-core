@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # release-plz ecosystem module for the SMA-398 parity harness.
-# Interface: ecosystem::build_fixture / apply_commit / run_update / version
+# Interface: ecosystem::build_fixture / apply_commit / run_update / version (+ ecosystem::extra_suite, SMA-716)
 set -euo pipefail
 
 A_CRATE="paigasus-release-parity-a"
 B_CRATE="paigasus-release-parity-b"
 
 # Abort with the harness's OWN vocabulary. run.sh prints "infrastructure error
-# (rc=2)" at :67 and :81, but this module is sourced at run.sh:21 — so an exit from
-# here fires DURING the source and run.sh never reaches either line. Without this
-# string the abort would be unclassifiable, and CLAUDE.md tells readers to grep for
-# it. Deliberately duplicated in python-semantic-release.sh rather than shared: one
-# module is sourced per run, and a ci/lib/ layer was considered and rejected
-# (SMA-596 D4).
+# (rc=2)" in the verdict arms after ecosystem::extra_suite / extra_negative_control (the
+# `*)` infra arms in the case blocks that read this module's exit status), but this module
+# is sourced by run.sh's ecosystem loader — so an exit from here fires DURING the source and
+# run.sh never reaches those arms. Without this string the abort would be unclassifiable, and
+# CLAUDE.md tells readers to grep for it. Deliberately duplicated in
+# python-semantic-release.sh rather than shared: one module is sourced per run, and a ci/lib/
+# layer was considered and rejected (SMA-596 D4).
 _rp_fatal() { # line...
   echo "FATAL: release-parity ABORTED: infrastructure error (rc=2)" >&2
   printf '       %s\n' "$@" >&2
@@ -163,4 +164,21 @@ ecosystem::version() { # dir slot -> version string
   local cdir
   cdir="$(ecosystem::_crate_dir "$1" "$2")"
   grep -m1 -E '^version[[:space:]]*=' "$cdir/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/'
+}
+
+# --- SMA-716: the release-plz-only suites ---------------------------------------------------
+# run.sh calls ecosystem::extra_suite (and, from the negative control, a second hook) only when
+# the module defines it. Only this module does. The suites live in release-plz-filter.sh.
+# _RP_DIR uses the BASH_SOURCE idiom on purpose: repo:affected-smoke's source resolver
+# (ci/affected-graph/cargo_moon_parity.py, HERE_IDIOM_ASSIGN_RE) follows it to the new file.
+_RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/release-parity/ecosystems/release-plz-filter.sh
+source "$_RP_DIR/release-plz-filter.sh"
+
+ecosystem::extra_suite() { # real_toml -> 0/1/2
+  rpf::suites "$1"
+}
+
+ecosystem::extra_negative_control() { # real_toml -> 0/1/2
+  rpf::negative_controls "$1"
 }
