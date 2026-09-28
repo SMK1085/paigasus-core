@@ -257,6 +257,9 @@ the gate exits 1. This closes the fail-open path in which a crashed verdict prin
    - `empty-output` when `OUT` holds no JSON value.
    - `missing-row <label>` for each expected label in the table above with no object whose
      `label` equals it.
+   - `duplicate-row <label> <n>` when more than one object has that `label` (`n` is the count).
+     The verdict does not check `exec` for such a label: two identical valid rows must not pass,
+     because the documented query emits exactly one row per failed action.
    - `bad-exec <label> <type>` when the object's `exec` is not an array (an object, `null`, or
      absent). The pre-SMA-711 query makes `exec` an object
      (`docs/superpowers/specs/2026-09-03-sma-597-moon-failure-diagnosis-design.md:311-314`).

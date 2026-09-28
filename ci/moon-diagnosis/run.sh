@@ -27,7 +27,7 @@ export PROTO_REPORTER=text
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$REPO_ROOT/ci/moon-diagnosis"
 REPORT_REL=".moon/cache/ciReport.json"
-SELF_TEST_CASES=37
+SELF_TEST_CASES=38
 FAILED_TASKS="fail3 multi missing slow"
 
 die_infra() { printf 'moon-diagnosis-exec: infrastructure error (rc=2): %s\n' "$*" >&2; exit 2; }
@@ -279,6 +279,7 @@ else . as $rows
   | [ ( expected | to_entries[] | .key as $l | .value as $want
         | ($rows | map(select(type == "object" and .label == $l))) as $m
         | if ($m | length) == 0 then "missing-row \($l)"
+          elif ($m | length) > 1 then "duplicate-row \($l) \($m | length)"
           else $m[]
             | (.exec | type) as $t
             | if $t != "array" then "bad-exec \($l) \(if has("exec") then $t else "absent" end)"
@@ -469,6 +470,9 @@ self_test() {
   grep -vF 'probe:multi' "$o.good" > "$o"
   step1_verdict "$o" > "$r"
   st_expect "u6 one row missing" "missing-row RunTask(probe:multi)" "$(rows_of "$r")"
+  { cat "$o.good"; grep -F 'probe:multi' "$o.good"; } > "$o"
+  step1_verdict "$o" > "$r"
+  st_expect "u6 duplicate row" "duplicate-row RunTask(probe:multi) 2" "$(rows_of "$r")"
   { grep -vF 'probe:slow' "$o.good"; printf '%s\n' '{"label":"RunTask(probe:slow)","exec":null}'; } > "$o"
   step1_verdict "$o" > "$r"
   st_expect "u6 exec null" "bad-exec RunTask(probe:slow) null" "$(rows_of "$r")"

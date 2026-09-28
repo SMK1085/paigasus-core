@@ -1494,7 +1494,7 @@ MOON_DIAGNOSIS_SH_CALL_SITES = (
     'real_rc=0; real_run || real_rc=$?',
     'exit "$real_rc"',
     # The self-test case count, its assertion and the failure guard.
-    'SELF_TEST_CASES=37',
+    'SELF_TEST_CASES=38',
     'local n="$ST_N"',
     'st_expect "self-test case count" "$SELF_TEST_CASES" "$n"',
     'if [ "$ST_FAIL" -ne 0 ]; then',
