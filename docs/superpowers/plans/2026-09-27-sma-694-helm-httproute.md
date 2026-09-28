@@ -1334,7 +1334,7 @@ Check first: `$P && git status --short` prints nothing. For each row, make the m
 | M27 | Delete the `backendRequest` order check | refusals.sh | R14, Review Focus 1 and 2 |
 | M28 | Remove `(ne $r 0)` from the order check | refusals.sh | R15 |
 | M29 | Check and merge every zone, not only enabled zones (drop `if $z.enabled` in the validator) | refusals.sh | R16 |
-| M30 | In `paigasus.durationMs`, write the alternation as `(h|m|s|ms)` | refusals.sh | Review Focus 1 |
+| M30 | In `paigasus.durationMs`, write the alternation as `(h\|m\|s\|ms)` | refusals.sh | Review Focus 1 |
 
 Each mutation must also leave `iam-only` and `iam-and-gateway` in render.sh green, except M2.
 

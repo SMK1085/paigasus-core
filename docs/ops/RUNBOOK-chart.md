@@ -633,8 +633,13 @@ forever. In both cases, check `status.parents` by hand, as above.
    console Service name. The copy is now the oldest route with its host and `PathPrefix`, so it
    carries the traffic. Verify that with a `curl --resolve` request through the Gateway address.
 2. Set `httpRoute.enabled: true` and `httpRoute.parentRefs`, and sync.
-3. Delete the remaining hand-written routes (the copy from step 1 included). Two routes with the
-   same host and the same `PathPrefix` tie, and Gateway API gives the tie to the OLDEST route.
-   While an old route exists, the chart route shows `Accepted` but carries no traffic.
+3. Delete the remaining hand-written routes (the copy from step 1 included). Gateway API
+   first compares the match specificity of the rules: the hostname, the path, the method, the
+   headers and the query parameters. Creation time decides only between rules with equal
+   specificity, and then the OLDEST route gets the request. For a copy with the same host and
+   the same `PathPrefix` as the chart route, the chart route shows `Accepted` but carries no
+   traffic while the copy exists. If a hand-written route has more-specific matches (for
+   example a header or a method match), it keeps the requests that match it, and the chart
+   route gets the remaining requests, until you delete that route.
 4. Verify with a request through the Gateway address (`curl --resolve`), not only with
    `status.parents`.
