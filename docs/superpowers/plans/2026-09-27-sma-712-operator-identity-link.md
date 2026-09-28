@@ -4293,6 +4293,7 @@ only"): no single local bash runs every gate. `repo:affected-smoke` needs `/bin/
 8192 bytes. Re-run a gate that failed only for its bash with `<bash-binary> ci/<gate>/run.sh`
 and read that result instead. For an unattributed failure, follow the root `CLAUDE.md`
 diagnosis procedure; capture `.moon/cache/ciReport.json` first.
+<!-- moon-diagnosis:ok -->
 
 - [ ] **Step 8: Check the codegen drift like CI.** CI runs an unconditional drift step
   (`contracts/CLAUDE.md`). Run `moon run contracts:generate --force` and then

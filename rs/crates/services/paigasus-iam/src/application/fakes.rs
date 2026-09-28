@@ -16,7 +16,7 @@ use paigasus_iam_core::{
     PrincipalRepository, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher,
     ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork, User,
 };
-use paigasus_iam_core::{Email, EmailChange, ExternalIdentity, IdentityLinkStore, Issuer, User, UserWithIdentities};
+use paigasus_iam_core::{Email, EmailChange, ExternalIdentity, IdentityLinkStore, Issuer, UserWithIdentities};
 use paigasus_kernel::Prn;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
