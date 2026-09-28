@@ -21,8 +21,8 @@ use paigasus_iam::application::authorize::Authorize;
 use paigasus_iam::application::error::TenancyError;
 use paigasus_iam::application::user_identities::{UserIdentityDeps, UserIdentityService};
 use paigasus_iam_core::{
-    AccessRequest, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, Credential, Decision, Effect, Email, ExternalIdentityRepository, IdentityLinkStore, Issuer, Principal, PrincipalId,
-    PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, Transaction, UnitOfWork, User,
+    AccessRequest, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, Credential, Decision, Effect, Email, ExternalIdentity, ExternalIdentityRepository, IdentityLinkStore, Issuer, Principal,
+    PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, Transaction, UnitOfWork, User,
 };
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, Set, Statement, TransactionTrait};
@@ -476,4 +476,112 @@ async fn two_email_changes_to_one_user_serialize_and_the_second_reads_the_first(
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].detail["old_email"], "b@example.com", "the second change must read the first change's value from the locked row");
     assert_eq!(rows[0].detail["new_email"], "c@example.com");
+}
+
+/// Code review F1 and F13: SMA-649's stored-PRN rule over the real store. A user PRN with a
+/// region or an organization slot names a stored user by uuid, but it differs from the stored
+/// `principal.prn`, so each write answers `PrnMismatch` and changes nothing. Control: the
+/// canonical PRN works, and its audit row names the stored canonical PRN.
+#[tokio::test]
+async fn a_user_prn_with_a_region_or_an_org_slot_is_a_prn_mismatch_in_postgres() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let svc = service(&db, Arc::new(PgAuditLog::new(db.clone())));
+    let user = seed_user(&db, 10, "forged@example.com").await;
+    let held = svc.link(&actor(), &user, ISSUER, "forged-held", "setup").await.unwrap().value;
+    let regional = PrincipalId::from_prn(Prn::build("iam", "eu-west-1", None, "principal", user.uuid()).unwrap());
+    let org_slot = PrincipalId::from_prn(Prn::build("iam", "", Some(Uuid::from_u128(99)), "principal", user.uuid()).unwrap());
+
+    for forged in [&regional, &org_slot] {
+        assert_eq!(svc.link(&actor(), forged, ISSUER, "forged-new", "r").await.unwrap_err(), TenancyError::PrnMismatch, "{forged:?}");
+        assert_eq!(svc.unlink(&actor(), &operator(), forged, held.id, "r").await.unwrap_err(), TenancyError::PrnMismatch, "{forged:?}");
+        assert_eq!(
+            svc.change_email(&actor(), forged, "forged-2@example.com", "r").await.unwrap_err(),
+            TenancyError::PrnMismatch,
+            "{forged:?}"
+        );
+    }
+    let identities = PgExternalIdentityRepository::new(db.clone());
+    let issuer = Issuer::parse(ISSUER).unwrap();
+    assert!(identities.find_by_issuer_subject(&issuer, "forged-new").await.unwrap().is_none(), "no forged link");
+    assert!(identities.find_by_issuer_subject(&issuer, "forged-held").await.unwrap().is_some(), "no forged unlink");
+    assert_eq!(email_of(&db, &user).await, "forged@example.com", "no forged email change");
+    assert_eq!(audit_rows(&db, "LinkExternalIdentity", &user).await.len(), 1, "only the setup link is audited");
+    assert!(audit_rows(&db, "UnlinkExternalIdentity", &user).await.is_empty());
+    assert!(audit_rows(&db, "ChangeUserEmail", &user).await.is_empty());
+
+    let view = svc.change_email(&actor(), &user, "forged-3@example.com", "control").await.unwrap();
+    assert_eq!(view.user.principal_id.canonical(), user.canonical());
+    let rows = audit_rows(&db, "ChangeUserEmail", &user).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].resource_prn.as_deref(), Some(user.canonical().as_str()), "the audit names the stored canonical PRN");
+}
+
+/// Code review F2: two links of one pair to the SAME user race. The peer inserts the pair for
+/// the target and holds its transaction open. The racer reads nothing, blocks on the unique
+/// index, and gets the unique violation when the peer commits. The unique violation aborts the
+/// racer's transaction, so the service reads the pair again in a new one. The same user holds
+/// it, so the racer answers `changed: false` with the stored identity and writes no audit row.
+#[tokio::test]
+async fn a_same_user_link_that_loses_the_race_is_an_unchanged_retry() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let svc = service(&db, Arc::new(PgAuditLog::new(db.clone())));
+    let target = seed_user(&db, 10, "same-race@example.com").await;
+
+    let store = PgIdentityLinkStore::new(db.clone());
+    let peer = SeaOrmUnitOfWork::new(db.clone()).begin().await.unwrap();
+    let now = Utc::now().trunc_subsecs(6);
+    let held = ExternalIdentity {
+        id: Uuid::from_u128(0x7272),
+        principal_id: target.clone(),
+        issuer: Issuer::parse(ISSUER).unwrap(),
+        subject: "same-race-sub".to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.link_in(&*peer, &held).await.unwrap();
+    let peer_pid = support::race::backend_pid(recover_txn(&*peer).unwrap()).await;
+
+    let racer_svc = svc.clone();
+    let racer_target = target.clone();
+    let mut racer = tokio::spawn(async move { racer_svc.link(&actor(), &racer_target, ISSUER, "same-race-sub", "race").await });
+    support::race::expect_racer_blocked(&db, peer_pid, &mut racer, "insert into \"external_identity\"%", |r| format!("{r:?}")).await;
+    peer.commit().await.unwrap();
+
+    let out = racer.await.unwrap().expect("a same-user race is a safe retry, not a 409");
+    assert!(!out.changed);
+    assert_eq!(out.value, held);
+    assert!(audit_rows(&db, "LinkExternalIdentity", &target).await.is_empty(), "the retry writes no audit row");
+}
+
+/// Code review F6: a stored email that `Email::parse` refuses (a hand-edited row) must not block
+/// the repair. A link locks the row without a parse, and `change_email` accepts the bad old
+/// value and records it as it is in the audit `old_email`.
+#[tokio::test]
+async fn an_unparseable_stored_email_can_be_repaired() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let svc = service(&db, Arc::new(PgAuditLog::new(db.clone())));
+    let user = seed_user(&db, 10, "bad-row@example.com").await;
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"UPDATE "user" SET email = $1 WHERE principal_id = $2"#,
+        ["not-an-email".into(), user.uuid().into()],
+    ))
+    .await
+    .unwrap();
+
+    let linked = svc.link(&actor(), &user, ISSUER, "bad-row-sub", "INC-5: link").await.unwrap();
+    assert!(linked.changed, "the link lock must not parse the stored email");
+
+    let view = svc.change_email(&actor(), &user, "repaired@example.com", "INC-5: repair").await.unwrap();
+    assert_eq!(view.user.email.as_str(), "repaired@example.com");
+    let rows = audit_rows(&db, "ChangeUserEmail", &user).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].detail["old_email"], "not-an-email", "the audit keeps the raw stored value");
+    assert_eq!(rows[0].detail["new_email"], "repaired@example.com");
 }

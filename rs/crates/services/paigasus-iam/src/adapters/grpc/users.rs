@@ -26,7 +26,17 @@
 //! `enforce_tenancy` gate (spec 5.1). This adapter only parses the wire values and forwards the
 //! bearer-resolved actor and credential. A malformed `user_prn` or `external_identity_id` is
 //! refused here, before the service runs, the same way the HTTP path extractor refuses a
-//! malformed uuid before its handler runs.
+//! malformed uuid before its handler runs (plan deviation 5). So this parse runs BEFORE the
+//! authorization check: a denied caller with a malformed id gets `invalid-prn` or `invalid-uuid`,
+//! not `forbidden`. That reveals only the syntax of the id. It never reveals whether a row
+//! exists (code review F4; `tests/grpc_users.rs` pins the order).
+//!
+//! **The stored-PRN rule (SMA-649, code review F1).** This adapter keeps the caller's parsed
+//! `user_prn`. It checks only the service and the resource type here (`invalid-prn`). The store
+//! then compares that PRN byte for byte with the stored `principal.prn`: a region or an
+//! organization slot answers `prn-mismatch`, the same as `ListMemberships`, `GrantRole` and
+//! `ListRoleGrants`. HTTP builds the canonical PRN from the path uuid, which always equals the
+//! stored PRN, so HTTP never sees `prn-mismatch` here.
 
 use std::time::Instant;
 
@@ -83,26 +93,19 @@ pub(crate) fn opt_string(raw: String) -> Option<String> {
 }
 
 /// Parses a wire `user_prn` into the [`PrincipalId`] it names (SMA-712). It must be an `iam`
-/// `principal` PRN. The service then answers 404 when that principal is not a user.
+/// `principal` PRN, else `invalid-prn`. The service then answers 404 when that principal is not
+/// a user.
 ///
-/// The function rebuilds the canonical principal PRN from the uuid. It never returns the
-/// caller's own parsed PRN. A wire `user_prn` can carry a region or an organization slot. The
-/// service ignores that slot: it looks the principal up by uuid. `user_identities.rs` audits
-/// `user.canonical()`. This function must return the same canonical string. Then an audit row
-/// always holds the canonical PRN, and an exact-match audit query finds it.
+/// The function returns the caller's own parsed PRN, with any region or organization slot. It
+/// does not rewrite it to the canonical form: the store compares it with the stored
+/// `principal.prn` and answers `prn-mismatch` on a difference (SMA-649, code review F1). The
+/// audit row names the stored PRN that the store returns, so it is always canonical.
 fn user_id(raw: &str) -> Result<PrincipalId, TenancyError> {
     let parsed = Prn::parse(raw).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
     if parsed.service() != "iam" || parsed.resource_type() != "principal" {
         return Err(TenancyError::InvalidPrn(parsed.canonical()));
     }
-    Ok(canonical_principal_id(parsed.resource_id()))
-}
-
-/// Builds the canonical `PrincipalId` for a uuid — the fixed, always-valid literal
-/// `service`/`region`/`org`/`resource_type` used here can never fail (mirrors
-/// `http::service_accounts::service_account_id`'s identical `.expect`).
-fn canonical_principal_id(uuid: Uuid) -> PrincipalId {
-    PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).expect("static principal prn parts are valid"))
+    Ok(PrincipalId::from_prn(parsed))
 }
 
 /// Parses a wire `external_identity_id` (SMA-712).
@@ -247,22 +250,25 @@ mod tests {
         assert!(matches!(user_id(&org.canonical()), Err(TenancyError::InvalidPrn(_))));
     }
 
-    /// Fix round 1 (review finding 1): a `user_prn` carrying a region or an organization slot
-    /// must still resolve to the CANONICAL principal PRN — the same `PrincipalId` the bare-uuid
-    /// form produces — not the caller's own (possibly non-canonical) PRN. The service looks the
-    /// user up by uuid regardless, but the audit row and the returned wire PRN must agree with
-    /// every other transport and with any later PRN-equality audit query.
+    /// Code review F1 (SMA-649's rule): a `user_prn` with a region or an organization slot keeps
+    /// that slot, so the store can compare it with the stored PRN and answer `prn-mismatch`. The
+    /// old rewrite to the canonical PRN accepted a forged slot silently.
+    /// `tests/grpc_users.rs` proves the `prn-mismatch` answer end to end.
     #[test]
-    fn a_user_prn_with_a_region_or_an_org_slot_still_resolves_to_the_canonical_principal_id() {
+    fn a_user_prn_with_a_region_or_an_org_slot_keeps_the_callers_prn() {
         let uuid = uuid::Uuid::from_u128(7);
         let canonical = user_id(&format!("prn:pgs:iam:::principal/{uuid}")).unwrap();
+        assert_eq!(canonical, PrincipalId::from_uuid(uuid));
 
         let with_region = format!("prn:pgs:iam:eu-west-1::principal/{uuid}");
-        assert_eq!(user_id(&with_region).unwrap(), canonical, "a region segment must not survive into the stored/audited PRN");
+        let regional = user_id(&with_region).unwrap();
+        assert_eq!(regional.canonical(), with_region, "the region must reach the store's comparison");
+        assert_ne!(regional, canonical);
 
-        let org_uuid = uuid::Uuid::from_u128(99);
-        let with_org = Prn::build("iam", "", Some(org_uuid), "principal", uuid).unwrap().canonical();
-        assert_eq!(user_id(&with_org).unwrap(), canonical, "an organization slot must not survive into the stored/audited PRN");
+        let with_org = Prn::build("iam", "", Some(uuid::Uuid::from_u128(99)), "principal", uuid).unwrap().canonical();
+        let org_slot = user_id(&with_org).unwrap();
+        assert_eq!(org_slot.canonical(), with_org, "the organization slot must reach the store's comparison");
+        assert_ne!(org_slot, canonical);
     }
 
     #[test]

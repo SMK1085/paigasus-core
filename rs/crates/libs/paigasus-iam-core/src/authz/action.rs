@@ -60,8 +60,9 @@ pub enum Action {
     /// narrower resource to scope against. Checked in `adapters::http::users` and
     /// `adapters::grpc::users`.
     CreateUser,
-    /// Read one user with its external identities (SMA-712, `FindUserByEmail`). Authorized at
-    /// `Root` only, in `UserIdentityService`, not in the Cedar schema.
+    /// Read one user with its external identities (SMA-712, `FindUserByEmail`). The action is in
+    /// the Cedar schema (`SCHEMA_SRC`). It is Root-only because `UserIdentityService` passes
+    /// `root_prn()` as the resource, not because of the schema.
     GetUser,
     /// Link an external `(issuer, subject)` to a user (SMA-712). Equal to `platform_admin` in
     /// power: a holder can attach an identity that it controls to any user.

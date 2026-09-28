@@ -38,7 +38,8 @@ impl Email {
     pub fn parse(raw: &str) -> Result<Self, DomainError> {
         let s = raw.trim();
         let bad = |r: &str| DomainError::InvalidEmail(r.to_string());
-        if s.is_empty() {
+        // SMA-712 F3: Postgres `text` refuses U+0000, so a NUL must fail here as a 400.
+        if s.is_empty() || s.contains('\0') {
             return Err(bad(raw));
         }
         let (local, domain) = s.split_once('@').ok_or_else(|| bad(raw))?;
@@ -61,7 +62,8 @@ pub const AUDIT_REASON_MAX_CHARS: usize = 500;
 pub const EXTERNAL_SUBJECT_MAX_CHARS: usize = 255;
 
 /// The operator's reason for an identity-link write (SMA-712). The value is trimmed. After the
-/// trim it has 1 to [`AUDIT_REASON_MAX_CHARS`] characters. It goes into the audit record.
+/// trim it has 1 to [`AUDIT_REASON_MAX_CHARS`] characters and no NUL (U+0000). It goes into the
+/// audit record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditReason(String);
 
@@ -69,7 +71,9 @@ impl AuditReason {
     pub fn parse(raw: &str) -> Result<Self, DomainError> {
         let trimmed = raw.trim();
         let chars = trimmed.chars().count();
-        if chars == 0 || chars > AUDIT_REASON_MAX_CHARS {
+        // SMA-712 F3: the reason goes into JSON, where a NUL is storable, but the rule matches
+        // the subject and the email for consistency.
+        if chars == 0 || chars > AUDIT_REASON_MAX_CHARS || trimmed.contains('\0') {
             return Err(DomainError::InvalidReason);
         }
         Ok(AuditReason(trimmed.to_string()))
@@ -83,14 +87,16 @@ impl AuditReason {
 
 /// An OIDC `sub` value that an operator links to a user (SMA-712). It is NOT trimmed: JIT stores
 /// the `sub` claim with no change, and a changed value would never match a token. It has 1 to
-/// [`EXTERNAL_SUBJECT_MAX_CHARS`] characters, and it does not start or end with whitespace.
+/// [`EXTERNAL_SUBJECT_MAX_CHARS`] characters, it does not start or end with whitespace, and it
+/// holds no NUL (U+0000).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalSubject(String);
 
 impl ExternalSubject {
     pub fn parse(raw: &str) -> Result<Self, DomainError> {
         let chars = raw.chars().count();
-        if chars == 0 || chars > EXTERNAL_SUBJECT_MAX_CHARS || raw.starts_with(char::is_whitespace) || raw.ends_with(char::is_whitespace) {
+        // SMA-712 F3: Postgres `text` refuses U+0000, so a NUL must fail here as a 400.
+        if chars == 0 || chars > EXTERNAL_SUBJECT_MAX_CHARS || raw.starts_with(char::is_whitespace) || raw.ends_with(char::is_whitespace) || raw.contains('\0') {
             return Err(DomainError::InvalidSubject);
         }
         Ok(ExternalSubject(raw.to_string()))
@@ -116,6 +122,14 @@ impl PrincipalId {
     #[must_use]
     pub fn from_prn(prn: Prn) -> Self {
         PrincipalId(prn)
+    }
+
+    /// The canonical principal PRN for a uuid: `prn:pgs:iam:::principal/<uuid>`, with no region
+    /// and no organization slot. This is the PRN that every principal row stores. The fixed
+    /// parts are always valid, so the build cannot fail (mirrors `OrganizationId::from_uuid`).
+    #[must_use]
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        PrincipalId(Prn::build("iam", "", None, "principal", uuid).expect("static principal prn parts are valid"))
     }
 
     #[must_use]
@@ -226,5 +240,30 @@ mod tests {
         for bad in ["", " ", " abc", "abc ", "\u{00A0}abc", "abc\n", "\tabc"] {
             assert_eq!(ExternalSubject::parse(bad), Err(DomainError::InvalidSubject), "{bad:?}");
         }
+    }
+
+    /// SMA-712 code review F3: a Postgres `text` column refuses U+0000. A NUL that passed
+    /// validation became a 500 at the insert. Each parser must refuse it as a 400 instead.
+    #[test]
+    fn a_nul_character_is_refused_by_email_subject_and_reason() {
+        for bad in ["a\u{0}b@example.com", "a@exa\u{0}mple.com", "a@example.com\u{0}"] {
+            assert!(matches!(Email::parse(bad), Err(DomainError::InvalidEmail(_))), "{bad:?}");
+        }
+        for bad in ["sub\u{0}ject", "\u{0}", "subject\u{0}x"] {
+            assert_eq!(ExternalSubject::parse(bad), Err(DomainError::InvalidSubject), "{bad:?}");
+        }
+        for bad in ["INC-1\u{0}: reason", "\u{0}"] {
+            assert_eq!(AuditReason::parse(bad), Err(DomainError::InvalidReason), "{bad:?}");
+        }
+    }
+
+    /// SMA-712 code review F8: the one place that builds a canonical principal PRN from a uuid.
+    #[test]
+    fn principal_id_from_uuid_builds_the_canonical_principal_prn() {
+        let uuid = Uuid::parse_str("0192f1c0-0000-7000-8000-000000000000").unwrap();
+        let id = PrincipalId::from_uuid(uuid);
+        assert_eq!(id.uuid(), uuid);
+        assert_eq!(id.canonical(), format!("prn:pgs:iam:::principal/{uuid}"));
+        assert_eq!(id, PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).unwrap()));
     }
 }

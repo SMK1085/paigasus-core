@@ -125,9 +125,13 @@ pub struct UserWithIdentities {
 
 /// The two emails of one email change (SMA-712). `old` comes from the row that the transaction
 /// locked, never from an earlier read, so each audit record names the correct old email.
+///
+/// `old` is the raw stored string, not an [`Email`]. A hand-edited row can hold a value that
+/// `Email::parse` refuses, and `ChangeUserEmail` is the call that repairs such a row. So the
+/// change must accept that value and record it as it is (SMA-712 code review F6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailChange {
-    pub old: Email,
+    pub old: String,
     pub new: Email,
 }
 
@@ -135,13 +139,21 @@ pub struct EmailChange {
 /// [`ExternalIdentityRepository`], which stays read-and-provision only on the authentication
 /// path. Every read that decides an audit value or a no-op happens inside the caller's
 /// transaction.
+///
+/// **The stored-PRN rule (SMA-649, SMA-712 code review F1).** A method that takes a user
+/// `PrincipalId` from the caller loads the principal by uuid and compares the stored
+/// `principal.prn` byte for byte with `id.canonical()`. An absent principal is `None` (the
+/// service answers `not-found`). A different PRN, for example one with a region or an
+/// organization slot, is `Err(PrnMismatch)`. Every `PrincipalId` that a method RETURNS is built
+/// from the stored `principal.prn`, never from the caller's value or from a bare uuid.
 #[async_trait]
 pub trait IdentityLinkStore: Send + Sync {
     /// The user with this exact email, or `None` when no USER has it.
     async fn find_user_by_email(&self, email: &Email) -> Result<Option<UserWithIdentities>, RepositoryError>;
-    /// Locks the `"user"` row FOR SHARE. `None` when the principal is not a user (unknown id, or
-    /// a service account).
-    async fn lock_user_in(&self, tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<User>, RepositoryError>;
+    /// Applies the stored-PRN rule, then locks the `"user"` row FOR SHARE, and returns the stored
+    /// `PrincipalId`. `None` when the principal is not a user (unknown id, or a service account).
+    /// It does not read the email, so a stored email that does not parse does not block it.
+    async fn lock_user_in(&self, tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<PrincipalId>, RepositoryError>;
     /// The identity with this `(issuer, subject)`, or `None`.
     async fn find_identity_in(&self, tx: &dyn Transaction, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError>;
     /// Inserts the link. `Conflict(ExternalIdentityExists)` on the unique constraint.
@@ -149,9 +161,10 @@ pub trait IdentityLinkStore: Send + Sync {
     /// Deletes the identity only when it belongs to `user`, and returns the deleted row. `None`
     /// when no row matched.
     async fn unlink_in(&self, tx: &dyn Transaction, user: &PrincipalId, identity_id: Uuid) -> Result<Option<ExternalIdentity>, RepositoryError>;
-    /// Locks the `"user"` row FOR UPDATE, then updates the email and `updated_at` when the email
-    /// differs. `changed == false` is the no-op. `None` when the principal is not a user.
-    /// `Conflict(EmailTaken)` when another user has the email.
+    /// Applies the stored-PRN rule, locks the `"user"` row FOR UPDATE, then updates the email and
+    /// `updated_at` when the email differs. `changed == false` is the no-op. `None` when the
+    /// principal is not a user. `Conflict(EmailTaken)` when another user has the email. The old
+    /// stored value need not parse as an [`Email`] (see [`EmailChange`]).
     async fn change_email_in(&self, tx: &dyn Transaction, user: &PrincipalId, email: &Email, now: DateTime<Utc>) -> Result<Option<Mutated<EmailChange>>, RepositoryError>;
     /// The user as the transaction sees it now, for the `ChangeUserEmail` response.
     async fn user_view_in(&self, tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<UserWithIdentities>, RepositoryError>;

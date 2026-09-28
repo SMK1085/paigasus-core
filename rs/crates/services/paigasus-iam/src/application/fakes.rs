@@ -1558,12 +1558,16 @@ impl EntityGenBumper for BumpSnapshotBumper {
 /// write that the service later abandons is NOT rolled back here. `tests/user_identities_pg.rs`
 /// proves the rollback against Postgres. `calls()` counts every port call, so a test can prove
 /// that a denied caller never reached the store.
+///
+/// It applies the port's stored-PRN rule: `lock_user_in` and `change_email_in` answer
+/// `PrnMismatch` when the seeded user's PRN differs from the caller's canonical PRN.
 #[derive(Clone, Default)]
 pub struct InMemoryIdentityLinks {
     users: Arc<Mutex<Vec<User>>>,
     identities: Arc<Mutex<Vec<ExternalIdentity>>>,
     calls: Arc<AtomicUsize>,
     fail_next_link: Arc<AtomicBool>,
+    race_next_link: Arc<Mutex<Option<ExternalIdentity>>>,
 }
 
 impl InMemoryIdentityLinks {
@@ -1583,6 +1587,25 @@ impl InMemoryIdentityLinks {
     /// inserts the same `(issuer, subject)` between the service's read and its insert.
     pub fn fail_next_link_with_conflict(&self) {
         self.fail_next_link.store(true, Ordering::SeqCst);
+    }
+
+    /// The next `link_in` loses a race to a concurrent writer: the fake stores `winner` (as if
+    /// that writer committed it) and then fails with `Conflict(ExternalIdentityExists)`, as the
+    /// unique constraint does in Postgres. The code review F2 retry path then reads `winner`.
+    pub fn race_next_link_with(&self, winner: ExternalIdentity) {
+        *self.race_next_link.lock().unwrap() = Some(winner);
+    }
+
+    /// The stored-PRN rule of the port: `Ok(None)` for an unknown uuid, `Err(PrnMismatch)` for a
+    /// different PRN, else the index of the user.
+    fn confirm_user(users: &[User], id: &PrincipalId) -> Result<Option<usize>, RepositoryError> {
+        let Some(index) = users.iter().position(|u| u.principal_id.uuid() == id.uuid()) else {
+            return Ok(None);
+        };
+        if users[index].principal_id.canonical() != id.canonical() {
+            return Err(RepositoryError::PrnMismatch);
+        }
+        Ok(Some(index))
     }
 
     pub fn identities(&self) -> Vec<ExternalIdentity> {
@@ -1617,9 +1640,10 @@ impl IdentityLinkStore for InMemoryIdentityLinks {
         Ok(id.and_then(|id| self.view(&id)))
     }
 
-    async fn lock_user_in(&self, _tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<User>, RepositoryError> {
+    async fn lock_user_in(&self, _tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<PrincipalId>, RepositoryError> {
         self.touch();
-        Ok(self.user(id))
+        let users = self.users.lock().unwrap();
+        Ok(Self::confirm_user(&users, id)?.map(|index| users[index].principal_id.clone()))
     }
 
     async fn find_identity_in(&self, _tx: &dyn Transaction, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError> {
@@ -1630,6 +1654,10 @@ impl IdentityLinkStore for InMemoryIdentityLinks {
     async fn link_in(&self, _tx: &dyn Transaction, identity: &ExternalIdentity) -> Result<(), RepositoryError> {
         self.touch();
         let mut identities = self.identities.lock().unwrap();
+        if let Some(winner) = self.race_next_link.lock().unwrap().take() {
+            identities.push(winner);
+            return Err(RepositoryError::Conflict(ConflictKind::ExternalIdentityExists));
+        }
         let taken = identities.iter().any(|i| i.issuer == identity.issuer && i.subject == identity.subject);
         if self.fail_next_link.swap(false, Ordering::SeqCst) || taken {
             return Err(RepositoryError::Conflict(ConflictKind::ExternalIdentityExists));
@@ -1649,13 +1677,13 @@ impl IdentityLinkStore for InMemoryIdentityLinks {
         self.touch();
         let mut users = self.users.lock().unwrap();
         // Postgres locks the row first, so an unknown user is `None` before any conflict.
-        let Some(index) = users.iter().position(|u| u.principal_id.uuid() == user.uuid()) else {
+        let Some(index) = Self::confirm_user(&users, user)? else {
             return Ok(None);
         };
-        let old = users[index].email.clone();
-        if old == *email {
+        let old = users[index].email.as_str().to_string();
+        if old == email.as_str() {
             return Ok(Some(Mutated {
-                value: EmailChange { old: old.clone(), new: old },
+                value: EmailChange { old, new: email.clone() },
                 changed: false,
             }));
         }

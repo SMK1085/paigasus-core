@@ -611,6 +611,84 @@ async fn identity_rpcs_ignore_enforce_tenancy_and_authorize_before_validation() 
         .unwrap_err();
     assert_eq!(err.code(), Code::PermissionDenied);
 
+    // Code review F4: the ONE value that is checked before the authorization is the syntax of
+    // the id (plan deviation 5, the twin of the HTTP path extractor). A denied caller with a
+    // malformed `user_prn` gets `invalid-prn`, not PermissionDenied. It learns only the syntax.
+    // If a later change moves the parse behind the check, this assertion shows it.
+    let err = client
+        .change_user_email(authed(
+            ChangeUserEmailRequest {
+                user_prn: "not a prn".to_string(),
+                email: "ok@example.com".to_string(),
+                reason: "r".to_string(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+    assert_eq!(reason_of(&err), "invalid-prn");
+
+    server.abort();
+}
+
+/// Code review F1: SMA-649's stored-PRN rule on the three write RPCs. A `user_prn` with a
+/// region or an organization slot names the real user by uuid, but it differs from the stored
+/// `principal.prn`, so each call answers `InvalidArgument` / `prn-mismatch` and changes
+/// nothing. A wrong resource type stays `invalid-prn`. Control: the canonical PRN works.
+#[tokio::test]
+async fn a_user_prn_with_a_region_or_an_org_slot_is_a_prn_mismatch() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db.clone(), &support::test_config(&idp)).await.unwrap();
+    let admin_token = idp.bearer("grpc-id-forged-admin", Some("grpc-id-forged-admin@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &admin_token).await;
+    let (addr, server) = spawn_server(state).await;
+    let mut client = UserServiceClient::new(channel(addr).await);
+
+    let target = client
+        .create_user(authed(create_user_request("grpc-id-forged@example.com"), &admin_token))
+        .await
+        .unwrap()
+        .into_inner()
+        .principal_prn;
+    let uuid = Prn::parse(&target).unwrap().resource_id();
+    let regional = format!("prn:pgs:iam:eu-west-1::principal/{uuid}");
+    let org_slot = Prn::build("iam", "", Some(Uuid::from_u128(99)), "principal", uuid).unwrap().canonical();
+
+    for forged in [&regional, &org_slot] {
+        // Skip op 0 (`FindUserByEmail`): it takes no user PRN.
+        for (op, name) in OPS.iter().enumerate().skip(1) {
+            let err = call_op(&mut client, op, Some(admin_token.as_str()), forged, &idp.issuer).await.unwrap_err();
+            assert_eq!(err.code(), Code::InvalidArgument, "{name} with {forged}: {err:?}");
+            assert_eq!(reason_of(&err), "prn-mismatch", "{name} with {forged}");
+        }
+    }
+    let wrong_type = format!("prn:pgs:iam:::organization/{uuid}");
+    let err = call_op(&mut client, 1, Some(admin_token.as_str()), &wrong_type, &idp.issuer).await.unwrap_err();
+    assert_eq!(reason_of(&err), "invalid-prn", "a wrong resource type is still a malformed user PRN");
+
+    assert_eq!(
+        principal::Entity::find_by_id(uuid).one(&db).await.unwrap().expect("principal row").prn,
+        target,
+        "the stored PRN is canonical"
+    );
+    assert_eq!(
+        user::Entity::find_by_id(uuid).one(&db).await.unwrap().unwrap().email,
+        "grpc-id-forged@example.com",
+        "no forged email change"
+    );
+    assert_eq!(
+        paigasus_iam::adapters::persistence::entities::external_identity::Entity::find().count(&db).await.unwrap(),
+        1,
+        "only the admin's own JIT identity exists: no forged link"
+    );
+
+    call_op(&mut client, 3, Some(admin_token.as_str()), &target, &idp.issuer)
+        .await
+        .expect("the canonical PRN is the control");
     server.abort();
 }
 

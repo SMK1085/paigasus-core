@@ -218,42 +218,36 @@ pub struct CreateUserResponse {
 
 // --- SMA-712: the operator identity routes -----------------------------------------------------
 //
-// Every body field is `Option<String>` with `#[serde(default)]`. A missing field reaches the
-// service as an empty value, so both transports answer with the same code (for example
+// Every body field is `Option<String>`. serde reads a missing `Option` field as `None` with no
+// attribute, and the handler turns `None` into an empty value. So a missing field reaches the
+// service as an empty value, and both transports answer with the same code (for example
 // `invalid-reason`). A body of the wrong type still gets the extractor's 422.
 
 /// Body of `POST /v1/users/find-by-email`. The email is in the body, not the URL, so no request
 /// line or access log records it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FindUserByEmailBody {
-    #[serde(default)]
     pub email: Option<String>,
 }
 
 /// Body of `POST /v1/users/{id}/external-identities`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LinkExternalIdentityBody {
-    #[serde(default)]
     pub issuer: Option<String>,
-    #[serde(default)]
     pub subject: Option<String>,
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
 /// Body of `POST /v1/users/{id}/external-identities/{identity_id}/unlink`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UnlinkExternalIdentityBody {
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
 /// Body of `POST /v1/users/{id}/email`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChangeUserEmailBody {
-    #[serde(default)]
     pub email: Option<String>,
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -1043,5 +1037,19 @@ mod tests {
         assert_eq!(dto.issuer, "https://idp.example.com");
         assert_eq!(dto.subject, "subject-51");
         assert_eq!(dto.expires_at, Some(expiry));
+    }
+
+    /// SMA-712 code review F12: the four identity bodies carry no `#[serde(default)]`. serde still
+    /// reads a missing `Option` field as `None`, so an empty body gives four all-`None` values.
+    #[test]
+    fn a_missing_identity_body_field_deserializes_as_none() {
+        let find: FindUserByEmailBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(find.email, None);
+        let link: LinkExternalIdentityBody = serde_json::from_str("{}").unwrap();
+        assert_eq!((link.issuer, link.subject, link.reason), (None, None, None));
+        let unlink: UnlinkExternalIdentityBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(unlink.reason, None);
+        let change: ChangeUserEmailBody = serde_json::from_str("{}").unwrap();
+        assert_eq!((change.email, change.reason), (None, None));
     }
 }

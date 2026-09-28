@@ -7,10 +7,22 @@
 //! `self.authorize.check(actor, Action::X, &root_prn())`. There is no `enforce_tenancy` gate:
 //! with that toggle off, an adapter-level check would not run, and any authenticated principal
 //! could link its own identity to a `platform_admin` user (spec 5.1). The check runs before any
-//! validation and before any row read, so a denied caller learns nothing.
+//! validation of a body value and before any row read. So a denied caller learns nothing about
+//! the rows: not whether a user, an identity or an email exists.
+//!
+//! One exception is syntax only (code review F4). The transports parse the id that names the
+//! user or the identity BEFORE they call this service: the HTTP path extractor parses the
+//! `{id}` uuid, and the gRPC adapter parses `user_prn` and `external_identity_id` (plan
+//! deviation 5). So a denied caller with a malformed id gets `invalid-uuid` or `invalid-prn`,
+//! not `forbidden`. This tells the caller only that the id is malformed. It never tells whether
+//! a row exists.
 //!
 //! Root-only-ness comes from the resource (`root_prn()`), not from the Cedar schema, exactly
 //! like `DeadLetterService`.
+//!
+//! **The stored PRN (SMA-649, code review F1).** The store compares the caller's user PRN with
+//! the stored `principal.prn`: absent is `not-found`, different is `prn-mismatch`. The audit
+//! `resource_prn` is the STORED PRN that the store returns, never the caller's value.
 //!
 //! Each write runs in ONE unit of work: the change, then its audit entry only when the change
 //! did something, then the commit. A failed audit write rolls the change back. There is no
@@ -23,8 +35,8 @@ use std::sync::Arc;
 
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::{
-    Action, AuditEntry, AuditLog, AuditOutcome, AuditReason, Clock, Credential, Email, ExternalIdentity, ExternalSubject, IdGenerator, IdentityLinkStore, Issuer, Mutated, PrincipalId, UnitOfWork,
-    UserWithIdentities,
+    Action, AuditEntry, AuditLog, AuditOutcome, AuditReason, Clock, ConflictKind, Credential, Email, ExternalIdentity, ExternalSubject, IdGenerator, IdentityLinkStore, Issuer, Mutated, PrincipalId,
+    RepositoryError, UnitOfWork, UserWithIdentities,
 };
 use paigasus_kernel::Prn;
 use uuid::Uuid;
@@ -113,38 +125,62 @@ impl UserIdentityService {
         let reason = AuditReason::parse(reason)?;
 
         let tx = self.uow.begin().await?;
-        if self.links.lock_user_in(&*tx, user).await?.is_none() {
+        let Some(stored) = self.links.lock_user_in(&*tx, user).await? else {
             return Err(TenancyError::NotFound);
-        }
+        };
         if let Some(existing) = self.links.find_identity_in(&*tx, &issuer, subject.as_str()).await? {
-            if existing.principal_id.uuid() == user.uuid() {
-                // Dropping `tx` releases the share lock. Nothing was written.
-                return Ok(Mutated { value: existing, changed: false });
-            }
-            return Err(TenancyError::ExternalIdentityConflict);
+            // Dropping `tx` releases the share lock. Nothing was written.
+            return Self::held_by(existing, &stored);
         }
         let now = self.clock.now();
         let identity = ExternalIdentity {
             id: self.ids.new_external_identity_id(),
-            principal_id: user.clone(),
+            principal_id: stored.clone(),
             issuer,
             subject: subject.into_string(),
             created_at: now,
             updated_at: now,
         };
-        // A JIT login can insert the same pair after the read above. The unique constraint then
-        // raises `Conflict(ExternalIdentityExists)`, which `?` maps to 409.
-        self.links.link_in(&*tx, &identity).await?;
+        // A concurrent writer (a JIT login, or a second link of the same pair) can insert the
+        // pair after the read above. The unique constraint then raises
+        // `Conflict(ExternalIdentityExists)`.
+        match self.links.link_in(&*tx, &identity).await {
+            Ok(()) => {}
+            Err(RepositoryError::Conflict(ConflictKind::ExternalIdentityExists)) => {
+                // Code review F2. The unique violation aborted the Postgres transaction, so no
+                // read can run in it. Drop it (a rollback), then read the pair again in a new
+                // transaction. The same user: the safe retry. Another user, or no row: 409.
+                drop(tx);
+                let read = self.uow.begin().await?;
+                let winner = self.links.find_identity_in(&*read, &identity.issuer, &identity.subject).await?;
+                drop(read);
+                return match winner {
+                    Some(existing) => Self::held_by(existing, &stored),
+                    None => Err(TenancyError::ExternalIdentityConflict),
+                };
+            }
+            Err(e) => return Err(e.into()),
+        }
         let detail = serde_json::json!({
             "reason": reason.as_str(),
             "identity_id": identity.id.to_string(),
             "issuer": identity.issuer.as_str(),
             "subject": identity.subject,
         });
-        let entry = self.audit_entry(actor, Action::LinkExternalIdentity, user, detail);
+        let entry = self.audit_entry(actor, Action::LinkExternalIdentity, &stored, detail);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(Mutated { value: identity, changed: true })
+    }
+
+    /// The answer for a pair that a stored identity already holds: the safe retry when `user`
+    /// holds it (`changed: false`, no audit), else 409. Both PRNs come from storage.
+    fn held_by(existing: ExternalIdentity, user: &PrincipalId) -> Result<Mutated<ExternalIdentity>, TenancyError> {
+        if existing.principal_id == *user {
+            Ok(Mutated { value: existing, changed: false })
+        } else {
+            Err(TenancyError::ExternalIdentityConflict)
+        }
     }
 
     /// `UnlinkExternalIdentity`. `caller` is the credential that authenticated this request. The
@@ -155,19 +191,21 @@ impl UserIdentityService {
         let reason = AuditReason::parse(reason)?;
 
         let tx = self.uow.begin().await?;
-        if self.links.lock_user_in(&*tx, user).await?.is_none() {
-            return Err(TenancyError::NotFound);
-        }
-        let Some(removed) = self.links.unlink_in(&*tx, user, identity_id).await? else {
+        let Some(stored) = self.links.lock_user_in(&*tx, user).await? else {
             return Err(TenancyError::NotFound);
         };
+        // Code review F5: the guard runs BEFORE any delete, so a refusal writes nothing. The
+        // identity row is immutable, so the id read here is the row that `unlink_in` would delete.
         if let Credential::Oidc { issuer, subject, .. } = caller
-            && removed.issuer == *issuer
-            && removed.subject == *subject
+            && let Some(own) = self.links.find_identity_in(&*tx, issuer, subject).await?
+            && own.id == identity_id
+            && own.principal_id == stored
         {
-            // Dropping `tx` without a commit rolls the delete back.
             return Err(TenancyError::CannotUnlinkOwnIdentity);
         }
+        let Some(removed) = self.links.unlink_in(&*tx, &stored, identity_id).await? else {
+            return Err(TenancyError::NotFound);
+        };
         // `issuer` and `subject` come from the deleted row, not from the request (spec 6.4).
         let detail = serde_json::json!({
             "reason": reason.as_str(),
@@ -175,7 +213,7 @@ impl UserIdentityService {
             "issuer": removed.issuer.as_str(),
             "subject": removed.subject,
         });
-        let entry = self.audit_entry(actor, Action::UnlinkExternalIdentity, user, detail);
+        let entry = self.audit_entry(actor, Action::UnlinkExternalIdentity, &stored, detail);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(())
@@ -189,20 +227,24 @@ impl UserIdentityService {
         let reason = AuditReason::parse(reason)?;
 
         let tx = self.uow.begin().await?;
+        // The store applies the stored-PRN rule before it locks (`PrnMismatch`).
         let Some(change) = self.links.change_email_in(&*tx, user, &email, self.clock.now()).await? else {
             return Err(TenancyError::NotFound);
         };
+        // The row is locked, so it cannot vanish between the change and this read. The view
+        // carries the stored PRN, which the audit entry below names.
+        let view = self.links.user_view_in(&*tx, user).await?.ok_or(TenancyError::Internal)?;
         if change.changed {
+            // `old_email` is the raw stored value. It can be a value that does not parse, when
+            // this call repairs a hand-edited row (code review F6).
             let detail = serde_json::json!({
                 "reason": reason.as_str(),
-                "old_email": change.value.old.as_str(),
+                "old_email": change.value.old,
                 "new_email": change.value.new.as_str(),
             });
-            let entry = self.audit_entry(actor, Action::ChangeUserEmail, user, detail);
+            let entry = self.audit_entry(actor, Action::ChangeUserEmail, &view.user.principal_id, detail);
             self.audit.record(&*tx, &entry).await?;
         }
-        // The row is locked, so it cannot vanish between the change and this read.
-        let view = self.links.user_view_in(&*tx, user).await?.ok_or(TenancyError::Internal)?;
         tx.commit().await?;
         Ok(view)
     }
@@ -469,6 +511,34 @@ mod tests {
         assert_eq!(f.uow.commits(), 0);
     }
 
+    /// Code review F2: a concurrent link of the same pair to the SAME user commits first. The
+    /// insert then fails on the unique constraint. The service reads the pair again, finds this
+    /// user, and answers the safe retry: the stored identity, `changed: false`, no audit.
+    #[tokio::test]
+    async fn a_unique_violation_from_a_same_user_link_is_an_unchanged_retry() {
+        let f = fixture(&[Action::LinkExternalIdentity]);
+        f.links.seed_user(user(10, "u@example.com"));
+        let winner = identity(20, 10, ISSUER, "sub-1", 1_700_000_100);
+        f.links.race_next_link_with(winner.clone());
+        let out = f.svc.link(&actor(), &pid(10), ISSUER, "sub-1", "r").await.unwrap();
+        assert!(!out.changed);
+        assert_eq!(out.value, winner);
+        assert!(f.audit.0.lock().unwrap().is_empty());
+        assert_eq!(f.uow.commits(), 0);
+    }
+
+    /// Code review F2, the other half: when ANOTHER user won the race, the answer stays 409.
+    #[tokio::test]
+    async fn a_unique_violation_from_another_users_link_stays_a_conflict() {
+        let f = fixture(&[Action::LinkExternalIdentity]);
+        f.links.seed_user(user(10, "u@example.com"));
+        f.links.seed_user(user(11, "v@example.com"));
+        f.links.race_next_link_with(identity(20, 11, ISSUER, "sub-1", 1_700_000_100));
+        assert_eq!(f.svc.link(&actor(), &pid(10), ISSUER, "sub-1", "r").await.unwrap_err(), TenancyError::ExternalIdentityConflict);
+        assert!(f.audit.0.lock().unwrap().is_empty());
+        assert_eq!(f.uow.commits(), 0);
+    }
+
     #[tokio::test]
     async fn link_to_an_unknown_principal_is_not_found() {
         let f = fixture(&[Action::LinkExternalIdentity]);
@@ -543,6 +613,48 @@ mod tests {
         assert_eq!(err, TenancyError::CannotUnlinkOwnIdentity);
         assert!(f.audit.0.lock().unwrap().is_empty());
         assert_eq!(f.uow.commits(), 0, "the refused delete must not commit");
+        // Code review F5: the guard runs BEFORE any delete. The fake does not roll back, so a
+        // delete that ran before the guard would leave the identity gone here.
+        assert_eq!(f.links.identities(), vec![identity(20, 10, ISSUER, "me", 1_700_000_100)], "the guard must refuse before any delete");
+    }
+
+    /// Code review F5: the guard refuses only the caller's own identity OF THIS USER. When the
+    /// caller's identity belongs to another user, the unlink of this user finds no such row.
+    #[tokio::test]
+    async fn the_own_identity_guard_does_not_hide_a_not_found() {
+        let f = fixture(&[Action::UnlinkExternalIdentity]);
+        f.links.seed_user(user(10, "u@example.com"));
+        f.links.seed_user(user(11, "v@example.com"));
+        f.links.seed_identity(identity(20, 11, ISSUER, "me", 1_700_000_100));
+        let err = f.svc.unlink(&actor(), &oidc(ISSUER, "me"), &pid(10), Uuid::from_u128(20), "r").await.unwrap_err();
+        assert_eq!(err, TenancyError::NotFound);
+        assert_eq!(f.links.identities().len(), 1);
+    }
+
+    /// Code review F1: SMA-649's stored-PRN rule. A `PrincipalId` whose PRN carries a region or an
+    /// organization slot names a stored principal by uuid, but its PRN differs from the stored
+    /// one. Each write answers `PrnMismatch` and changes nothing.
+    #[tokio::test]
+    async fn a_user_prn_that_differs_from_the_stored_prn_is_a_prn_mismatch() {
+        let uuid = Uuid::from_u128(10);
+        let regional = PrincipalId::from_prn(Prn::build("iam", "eu-west-1", None, "principal", uuid).unwrap());
+        let org_slot = PrincipalId::from_prn(Prn::build("iam", "", Some(Uuid::from_u128(99)), "principal", uuid).unwrap());
+        for forged in [regional, org_slot] {
+            let f = fixture(&ALL_FOUR);
+            f.links.seed_user(user(10, "u@example.com"));
+            f.links.seed_identity(identity(20, 10, ISSUER, "held", 1_700_000_100));
+            assert_eq!(f.svc.link(&actor(), &forged, ISSUER, "new-sub", "r").await.unwrap_err(), TenancyError::PrnMismatch, "{forged:?}");
+            assert_eq!(
+                f.svc.unlink(&actor(), &api_key(), &forged, Uuid::from_u128(20), "r").await.unwrap_err(),
+                TenancyError::PrnMismatch,
+                "{forged:?}"
+            );
+            assert_eq!(f.svc.change_email(&actor(), &forged, "v@example.com", "r").await.unwrap_err(), TenancyError::PrnMismatch, "{forged:?}");
+            assert_eq!(f.links.identities(), vec![identity(20, 10, ISSUER, "held", 1_700_000_100)]);
+            assert_eq!(f.links.user(&pid(10)).unwrap().email.as_str(), "u@example.com");
+            assert!(f.audit.0.lock().unwrap().is_empty());
+            assert_eq!(f.uow.commits(), 0);
+        }
     }
 
     /// Review focus 5: the guard compares issuer AND subject, and an API key has no identity.

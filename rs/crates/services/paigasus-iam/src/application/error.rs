@@ -165,16 +165,18 @@ pub enum TenancyError {
     /// whose catalog still defines the id re-seeds it unconditionally.
     #[error("the fleet has not converged past this binary's starter policy revision")]
     FleetNotConverged,
-    /// SMA-712. The audit `reason` of an identity-link write is empty after trim, or it is
-    /// longer than 500 characters. A unit variant, so the caller's text never reaches a body.
-    #[error("reason must have 1 to 500 characters after trim")]
+    /// SMA-712. The audit `reason` of an identity-link write is empty after trim, it is longer
+    /// than [`paigasus_iam_core::AUDIT_REASON_MAX_CHARS`] characters, or it holds a NUL. A unit
+    /// variant, so the caller's text never reaches a body.
+    #[error("reason must have 1 to {max} characters after trim", max = paigasus_iam_core::AUDIT_REASON_MAX_CHARS)]
     InvalidReason,
     /// SMA-712. The `issuer` of a link call is not one of the configured `authn.issuers`.
     #[error("issuer is not a configured issuer")]
     UnknownIssuer,
-    /// SMA-712. The `subject` of a link call is empty, is longer than 255 characters, or starts
-    /// or ends with whitespace.
-    #[error("subject must have 1 to 255 characters and no leading or trailing whitespace")]
+    /// SMA-712. The `subject` of a link call is empty, is longer than
+    /// [`paigasus_iam_core::EXTERNAL_SUBJECT_MAX_CHARS`] characters, starts or ends with
+    /// whitespace, or holds a NUL.
+    #[error("subject must have 1 to {max} characters and no leading or trailing whitespace", max = paigasus_iam_core::EXTERNAL_SUBJECT_MAX_CHARS)]
     InvalidSubject,
     /// SMA-712. The unlink would remove the identity that authenticated this request.
     #[error("cannot unlink the identity that authenticated this request")]
@@ -636,5 +638,22 @@ mod tests {
     fn the_identity_link_domain_errors_map_to_their_own_codes() {
         assert_eq!(TenancyError::from(DomainError::InvalidReason), TenancyError::InvalidReason);
         assert_eq!(TenancyError::from(DomainError::InvalidSubject), TenancyError::InvalidSubject);
+    }
+
+    /// SMA-712 code review F11: the two limits in the messages come from the core constants, so a
+    /// change of a limit cannot leave a stale number in the error body.
+    #[test]
+    fn the_identity_link_messages_name_the_core_limits() {
+        assert_eq!(
+            TenancyError::InvalidReason.to_string(),
+            format!("reason must have 1 to {} characters after trim", paigasus_iam_core::AUDIT_REASON_MAX_CHARS)
+        );
+        assert_eq!(
+            TenancyError::InvalidSubject.to_string(),
+            format!(
+                "subject must have 1 to {} characters and no leading or trailing whitespace",
+                paigasus_iam_core::EXTERNAL_SUBJECT_MAX_CHARS
+            )
+        );
     }
 }

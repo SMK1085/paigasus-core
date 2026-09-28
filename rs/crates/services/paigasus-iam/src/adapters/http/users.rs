@@ -31,8 +31,6 @@ use axum::routing::post;
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::{Action, PrincipalId};
-use paigasus_kernel::Prn;
-use uuid::Uuid;
 
 use super::AppState;
 use super::dto::{ChangeUserEmailBody, CreateUserBody, CreateUserResponse, ExternalIdentityDto, FindUserByEmailBody, LinkExternalIdentityBody, UnlinkExternalIdentityBody, UserDto};
@@ -81,11 +79,6 @@ async fn create_user(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
     Ok((StatusCode::CREATED, Json(CreateUserResponse { principal_prn: id.canonical() })))
 }
 
-/// The `PrincipalId` a `{id}` segment names. `Prn::build` with these fixed parts cannot fail.
-fn user_id(uuid: Uuid) -> PrincipalId {
-    PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).expect("static principal prn parts are valid"))
-}
-
 /// `POST /v1/users/find-by-email` (SMA-712): 200 with the user, or 404.
 async fn find_by_email(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(b): EnvelopeJson<FindUserByEmailBody>) -> Result<Json<UserDto>, ApiError> {
     let view = s.user_identities.find_by_email(&actor_prn(&ctx), b.email.as_deref().unwrap_or_default()).await?;
@@ -104,7 +97,7 @@ async fn link_identity(
         .user_identities
         .link(
             &actor_prn(&ctx),
-            &user_id(path.id),
+            &PrincipalId::from_uuid(path.id),
             b.issuer.as_deref().unwrap_or_default(),
             b.subject.as_deref().unwrap_or_default(),
             b.reason.as_deref().unwrap_or_default(),
@@ -123,7 +116,13 @@ async fn unlink_identity(
     EnvelopeJson(b): EnvelopeJson<UnlinkExternalIdentityBody>,
 ) -> Result<StatusCode, ApiError> {
     s.user_identities
-        .unlink(&actor_prn(&ctx), &ctx.credential, &user_id(path.first), path.second, b.reason.as_deref().unwrap_or_default())
+        .unlink(
+            &actor_prn(&ctx),
+            &ctx.credential,
+            &PrincipalId::from_uuid(path.first),
+            path.second,
+            b.reason.as_deref().unwrap_or_default(),
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -137,7 +136,12 @@ async fn change_email(
 ) -> Result<Json<UserDto>, ApiError> {
     let view = s
         .user_identities
-        .change_email(&actor_prn(&ctx), &user_id(path.id), b.email.as_deref().unwrap_or_default(), b.reason.as_deref().unwrap_or_default())
+        .change_email(
+            &actor_prn(&ctx),
+            &PrincipalId::from_uuid(path.id),
+            b.email.as_deref().unwrap_or_default(),
+            b.reason.as_deref().unwrap_or_default(),
+        )
         .await?;
     Ok(Json(view.into()))
 }
