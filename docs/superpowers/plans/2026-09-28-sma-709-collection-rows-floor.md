@@ -32,8 +32,8 @@ committed) runs the mutation proofs T1 to T4 and T7 against copies, never agains
   the substring `reports $c collection rows, expected at least 37` (T7 asserts it).
 - Mutations run on COPIES in a scratch directory only. Never edit a tracked file to prove a
   mutation. Remove rows BY LABEL (an `ast` parse), never by line number.
-- No SPDX header or other text changes. No new `ciReport.json` mention in any doc (actionlint
-  check 12 needs a `moon-diagnosis` marker for it).
+- No SPDX header or other text changes. No new mention of moon's CI report file in any doc
+  (actionlint check 12 needs a `moon-diagnosis` marker for it).
 - Conventional commits with the `ci` scope. End every commit message with
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never use `--amend`, `git reset`,
   `--no-verify` or `--no-gpg-sign`.
