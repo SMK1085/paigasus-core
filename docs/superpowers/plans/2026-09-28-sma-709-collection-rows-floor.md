@@ -432,7 +432,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Re-check the row count against the current origin/main**
 
-Run: `cd <worktree> && git fetch -q origin main && git log --oneline HEAD..origin/main -- ci/release-plan ci/actionlint/run.sh`
+Run: `cd <worktree> && git fetch -q origin +refs/heads/main:refs/remotes/origin/main && git log --oneline HEAD..origin/main -- ci/release-plan ci/actionlint/run.sh`
 Expected: no output. If there is output, rebase onto `origin/main`
 (`git rebase origin/main`), then re-run the harness. If `INFO count=` is not 38, set both floors
 to the new count minus one in one new `fix(ci)` commit and re-run the harness until `ALL PASS`.
