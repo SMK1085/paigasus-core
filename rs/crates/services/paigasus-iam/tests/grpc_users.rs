@@ -19,13 +19,15 @@ use paigasus_iam::adapters::http::AppState;
 use paigasus_iam::adapters::persistence::entities::{principal, user};
 use paigasus_iam_core::PrincipalId;
 use paigasus_kernel::Prn;
-use paigasus_proto::paigasus::iam::v1::CreateUserRequest;
+use paigasus_proto::paigasus::common::v1::ErrorReason;
 use paigasus_proto::paigasus::iam::v1::user_service_client::UserServiceClient;
+use paigasus_proto::paigasus::iam::v1::{ChangeUserEmailRequest, CreateUserRequest, FindUserByEmailRequest, LinkExternalIdentityRequest, UnlinkExternalIdentityRequest};
 use sea_orm::{EntityTrait, PaginatorTrait};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tonic::Code;
 use tonic::transport::Channel;
+use uuid::Uuid;
 
 /// Spawns the full `grpc::router` (health, tenancy, authn, authz, service-account, service-info,
 /// users, outbox — all wrapped by the bearer layer) on an ephemeral port; `abort()` the
@@ -303,6 +305,311 @@ async fn enforce_tenancy_false_lets_an_ungranted_principal_create_a_user_over_gr
         .expect("enforce_tenancy = false must bypass the CreateUser gate over gRPC")
         .into_inner();
     Prn::parse(&resp.principal_prn).unwrap_or_else(|e| panic!("unexpected principal prn {}: {e}", resp.principal_prn));
+
+    server.abort();
+}
+
+// --- SMA-712: the operator identity RPCs ----------------------------------------------------
+
+/// The four identity RPCs, by index, with the Cedar action each one checks.
+const OPS: [&str; 4] = ["GetUser", "LinkExternalIdentity", "UnlinkExternalIdentity", "ChangeUserEmail"];
+
+fn maybe_authed<T>(msg: T, token: Option<&str>) -> tonic::Request<T> {
+    let mut req = tonic::Request::new(msg);
+    if let Some(token) = token {
+        support::grpc_bearer(&mut req, token);
+    }
+    req
+}
+
+fn reason_of(err: &tonic::Status) -> String {
+    let details = tonic_types::StatusExt::get_error_details(err);
+    details.error_info().expect("every IAM status carries ErrorInfo").reason.clone()
+}
+
+fn missing_user_prn() -> String {
+    format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0xdead))
+}
+
+/// Calls identity op `op` (an index into `OPS`) with well-formed values against `user_prn`.
+async fn call_op(client: &mut UserServiceClient<Channel>, op: usize, token: Option<&str>, user_prn: &str, issuer: &str) -> Result<(), tonic::Status> {
+    let user_prn = user_prn.to_string();
+    match op {
+        0 => client
+            .find_user_by_email(maybe_authed(
+                FindUserByEmailRequest {
+                    email: "nobody-grpc@example.com".to_string(),
+                },
+                token,
+            ))
+            .await
+            .map(|_| ()),
+        1 => client
+            .link_external_identity(maybe_authed(
+                LinkExternalIdentityRequest {
+                    user_prn,
+                    issuer: issuer.to_string(),
+                    subject: "matrix-sub".to_string(),
+                    reason: "matrix".to_string(),
+                },
+                token,
+            ))
+            .await
+            .map(|_| ()),
+        2 => client
+            .unlink_external_identity(maybe_authed(
+                UnlinkExternalIdentityRequest {
+                    user_prn,
+                    external_identity_id: Uuid::from_u128(0xbeef).to_string(),
+                    reason: "matrix".to_string(),
+                },
+                token,
+            ))
+            .await
+            .map(|_| ()),
+        3 => client
+            .change_user_email(maybe_authed(
+                ChangeUserEmailRequest {
+                    user_prn,
+                    email: "matrix-grpc@example.com".to_string(),
+                    reason: "matrix".to_string(),
+                },
+                token,
+            ))
+            .await
+            .map(|_| ()),
+        other => panic!("no identity op {other}"),
+    }
+}
+
+/// SMA-712 spec 11: for each RPC, Unauthenticated without a bearer, PermissionDenied without
+/// the action, and success for platform_admin, through a full link, change and unlink cycle.
+#[tokio::test]
+async fn identity_rpcs_need_a_bearer_and_their_action_and_work_for_platform_admin() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let plain_token = idp.bearer("grpc-id-plain", Some("grpc-id-plain@example.com"), "paigasus", 3600);
+    support::provision(&state, &plain_token).await;
+    let admin_token = idp.bearer("grpc-id-admin", Some("grpc-id-admin@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &admin_token).await;
+    let (addr, server) = spawn_server(state).await;
+    let mut client = UserServiceClient::new(channel(addr).await);
+
+    let target = client
+        .create_user(authed(create_user_request("grpc-id-target@example.com"), &admin_token))
+        .await
+        .unwrap()
+        .into_inner()
+        .principal_prn;
+
+    for (op, name) in OPS.iter().enumerate() {
+        let err = call_op(&mut client, op, None, &target, &idp.issuer).await.unwrap_err();
+        assert_eq!(err.code(), Code::Unauthenticated, "{name} without a bearer");
+        let err = call_op(&mut client, op, Some(plain_token.as_str()), &target, &idp.issuer).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "{name} without the action");
+    }
+
+    let found = client
+        .find_user_by_email(authed(
+            FindUserByEmailRequest {
+                email: "grpc-id-target@example.com".to_string(),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .user
+        .expect("user");
+    assert_eq!(found.prn, target);
+    assert_eq!(found.status, "active");
+    assert!(found.external_identities.is_empty());
+
+    let link = |subject: &str| LinkExternalIdentityRequest {
+        user_prn: target.clone(),
+        issuer: idp.issuer.clone(),
+        subject: subject.to_string(),
+        reason: "INC-1: same person".to_string(),
+    };
+    let linked = client
+        .link_external_identity(authed(link("grpc-linked-sub"), &admin_token))
+        .await
+        .unwrap()
+        .into_inner()
+        .external_identity
+        .expect("identity");
+    assert_eq!(linked.subject, "grpc-linked-sub");
+    assert_eq!(linked.issuer, idp.issuer);
+    let again = client
+        .link_external_identity(authed(link("grpc-linked-sub"), &admin_token))
+        .await
+        .unwrap()
+        .into_inner()
+        .external_identity
+        .expect("identity");
+    assert_eq!(again.id, linked.id, "a same-user link returns the stored identity");
+
+    let err = client
+        .link_external_identity(authed(
+            LinkExternalIdentityRequest {
+                user_prn: target.clone(),
+                issuer: String::new(),
+                subject: "x".to_string(),
+                reason: "r".to_string(),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(
+        reason_of(&err),
+        ErrorReason::UnknownIssuer.as_wire_reason().unwrap(),
+        "an empty issuer answers like a missing HTTP field"
+    );
+
+    let changed = client
+        .change_user_email(authed(
+            ChangeUserEmailRequest {
+                user_prn: target.clone(),
+                email: "grpc-id-moved@example.com".to_string(),
+                reason: "INC-2: moved".to_string(),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .user
+        .expect("user");
+    assert_eq!(changed.email, "grpc-id-moved@example.com");
+    assert_eq!(changed.external_identities.len(), 1);
+
+    let unlink = || UnlinkExternalIdentityRequest {
+        user_prn: target.clone(),
+        external_identity_id: linked.id.clone(),
+        reason: "INC-3: undo".to_string(),
+    };
+    client.unlink_external_identity(authed(unlink(), &admin_token)).await.unwrap();
+    let err = client.unlink_external_identity(authed(unlink(), &admin_token)).await.unwrap_err();
+    assert_eq!(err.code(), Code::NotFound, "a repeated unlink is not found");
+
+    server.abort();
+}
+
+/// SMA-712 spec 11, action identity end to end: each subject holds a static policy that permits
+/// exactly ONE of the four actions. It passes the check on that RPC (NotFound on a missing user)
+/// and fails it on the other three (PermissionDenied). A role grant cannot show this, because
+/// `platform_admin` permits all four.
+#[tokio::test]
+async fn each_identity_rpc_checks_its_own_action() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = support::test_config(&idp);
+    cfg.authz.policy_cache_ttl_secs = 1;
+    let state = AppState::new(db, &cfg).await.unwrap();
+    let admin_token = idp.bearer("grpc-matrix-admin", Some("grpc-matrix-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision_platform_admin(&state, &admin_token).await;
+    let admin = Prn::parse(&admin_prn).unwrap();
+
+    let mut tokens = Vec::new();
+    for (index, action) in OPS.iter().enumerate() {
+        let token = idp.bearer(&format!("grpc-matrix-{index}"), Some(format!("grpc-matrix-{index}@example.com").as_str()), "paigasus", 3600);
+        let prn = support::provision(&state, &token).await;
+        let uuid = Prn::parse(&prn).unwrap().resource_id();
+        let doc = paigasus_iam_core::PolicyDocument {
+            policy_id: format!("sma-712-grpc-matrix-{index}"),
+            kind: paigasus_iam_core::authz::model::PolicyKind::Static,
+            source: format!(r#"permit(principal == Pgs::Iam::Principal::"{uuid}", action == Pgs::Iam::Action::"{action}", resource);"#),
+            description: format!("SMA-712 action-identity pin: {action} only"),
+            system: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.policies.put(&admin, doc).await.expect("platform_admin may PutPolicy at Root");
+        tokens.push(token);
+    }
+
+    let (addr, server) = spawn_server(state).await;
+    let mut client = UserServiceClient::new(channel(addr).await);
+    for (holder, token) in tokens.iter().enumerate() {
+        for (op, name) in OPS.iter().enumerate() {
+            let err = call_op(&mut client, op, Some(token.as_str()), &missing_user_prn(), &idp.issuer).await.unwrap_err();
+            let want = if holder == op { Code::NotFound } else { Code::PermissionDenied };
+            assert_eq!(err.code(), want, "a subject that holds only {} calls {name}", OPS[holder]);
+        }
+    }
+    server.abort();
+}
+
+/// SMA-712 spec 5.1 and 11: the check runs before validation, and `enforce_tenancy = false`
+/// does not open the calls. A denied caller with bad values gets PermissionDenied.
+#[tokio::test]
+async fn identity_rpcs_ignore_enforce_tenancy_and_authorize_before_validation() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = support::test_config(&idp);
+    cfg.authz.enforce_tenancy = false;
+    let state = AppState::new(db, &cfg).await.unwrap();
+    let token = idp.bearer("grpc-toggle-id", Some("grpc-toggle-id@example.com"), "paigasus", 3600);
+    support::provision(&state, &token).await;
+    let (addr, server) = spawn_server(state).await;
+    let mut client = UserServiceClient::new(channel(addr).await);
+
+    for (op, name) in OPS.iter().enumerate() {
+        let err = call_op(&mut client, op, Some(token.as_str()), &missing_user_prn(), &idp.issuer).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "{name} must stay closed with enforce_tenancy = false");
+    }
+
+    let err = client
+        .find_user_by_email(authed(FindUserByEmailRequest { email: "not-an-email".to_string() }, &token))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    let err = client
+        .link_external_identity(authed(
+            LinkExternalIdentityRequest {
+                user_prn: missing_user_prn(),
+                issuer: "https://unknown.example.com/".to_string(),
+                subject: " padded".to_string(),
+                reason: String::new(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    let err = client
+        .unlink_external_identity(authed(
+            UnlinkExternalIdentityRequest {
+                user_prn: missing_user_prn(),
+                external_identity_id: Uuid::from_u128(1).to_string(),
+                reason: "   ".to_string(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    let err = client
+        .change_user_email(authed(
+            ChangeUserEmailRequest {
+                user_prn: missing_user_prn(),
+                email: "@".to_string(),
+                reason: String::new(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
 
     server.abort();
 }

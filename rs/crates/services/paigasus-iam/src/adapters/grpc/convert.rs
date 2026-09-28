@@ -16,17 +16,18 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::authz::reconcile::policy_kind_str;
 use paigasus_iam_core::{
-    ApiKey, ApiKeyStatus, AuthnError, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, PrincipalId, Project,
-    RetireOutcome, RoleGrant, RoleGrantRef, ServiceAccountRecord, Team,
+    ApiKey, ApiKeyStatus, AuthnError, Credential, ExternalIdentity, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, PrincipalId,
+    Project, RetireOutcome, RoleGrant, RoleGrantRef, ServiceAccountRecord, Team, UserWithIdentities,
 };
 use paigasus_kernel::Prn;
 use paigasus_observability::{Retryable, current_ids};
 use paigasus_proto::error::IAM_DOMAIN;
 use paigasus_proto::paigasus::common::v1::{Actor, AuditMetadata, ErrorReason};
 use paigasus_proto::paigasus::iam::v1::{
-    ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, DeadLetterEntry as ProtoDeadLetterEntry, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership,
-    NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RetireSystemPolicyResponse, RetiredPolicy, RetirementBlocked,
-    RetirementNeedsAcknowledgement, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount, SurvivingGrant, Team as ProtoTeam, WhoAmIResponse,
+    ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, DeadLetterEntry as ProtoDeadLetterEntry, ExternalIdentity as ProtoExternalIdentity, IntrospectApiKeyResponse, IntrospectResponse,
+    IssueApiKeyResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RetireSystemPolicyResponse, RetiredPolicy,
+    RetirementBlocked, RetirementNeedsAcknowledgement, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount, SurvivingGrant, Team as ProtoTeam,
+    User as ProtoUser, WhoAmIResponse,
 };
 use tonic::{Code, Status};
 use tonic_types::{ErrorDetails, StatusExt};
@@ -483,6 +484,41 @@ pub fn to_proto_service_account(record: &ServiceAccountRecord) -> ProtoServiceAc
         audit: Some(audit(AuditFields {
             created: sa.created_at,
             modified: sa.updated_at,
+            creator: None,
+            modifier: None,
+        })),
+    }
+}
+
+/// Projects one external identity into its wire message (SMA-712). An identity is immutable, so
+/// `audit.modified_at == created_at` (proto doc). The identity row has no actor columns.
+pub fn to_proto_external_identity(identity: &ExternalIdentity) -> ProtoExternalIdentity {
+    ProtoExternalIdentity {
+        id: identity.id.to_string(),
+        issuer: identity.issuer.as_str().to_string(),
+        subject: identity.subject.clone(),
+        audit: Some(audit(AuditFields {
+            created: identity.created_at,
+            modified: identity.created_at,
+            creator: None,
+            modifier: None,
+        })),
+    }
+}
+
+/// Projects a user with its identities into its wire message (SMA-712). `status` is the
+/// principal status string (`active`/`disabled`), the house convention. `modified_at` is
+/// `"user".updated_at`. The `"user"` row has no actor columns.
+pub fn to_proto_user(view: &UserWithIdentities) -> ProtoUser {
+    ProtoUser {
+        prn: view.user.principal_id.canonical(),
+        email: view.user.email.as_str().to_string(),
+        display_name: view.user.display_name.clone(),
+        status: view.status.as_str().to_string(),
+        external_identities: view.identities.iter().map(to_proto_external_identity).collect(),
+        audit: Some(audit(AuditFields {
+            created: view.user.created_at,
+            modified: view.user.updated_at,
             creator: None,
             modifier: None,
         })),
@@ -1648,5 +1684,39 @@ mod tests {
         assert_eq!(principal_kind_filter(2), PrincipalKindFilter::Only(paigasus_iam_core::PrincipalKind::ServiceAccount));
         assert_eq!(principal_kind_filter(3), PrincipalKindFilter::Unknown);
         assert_eq!(principal_kind_filter(-1), PrincipalKindFilter::Unknown);
+    }
+
+    /// SMA-712 spec 4.2: identities keep their `(created_at, id)` order, an identity is
+    /// immutable (`modified_at == created_at`), and a user's `modified_at` is `updated_at`.
+    #[test]
+    fn a_user_projects_its_identities_in_order_and_each_identity_audit_is_immutable() {
+        use paigasus_iam_core::{Email, Issuer, PrincipalStatus, User};
+        let at = |secs: i64| DateTime::from_timestamp(secs, 0).unwrap();
+        let pid = principal(5);
+        let identity = |n: u128, subject: &str, secs: i64| ExternalIdentity {
+            id: Uuid::from_u128(n),
+            principal_id: pid.clone(),
+            issuer: Issuer::parse("https://idp.example.com").unwrap(),
+            subject: subject.to_string(),
+            created_at: at(secs),
+            updated_at: at(secs + 60),
+        };
+        let view = UserWithIdentities {
+            user: User::new(pid.clone(), Email::parse("u@example.com").unwrap(), "U".to_string(), None, None, at(100), at(200)),
+            status: PrincipalStatus::Active,
+            identities: vec![identity(1, "first", 300), identity(2, "second", 400)],
+        };
+        let proto = to_proto_user(&view);
+        assert_eq!(proto.prn, pid.canonical());
+        assert_eq!(proto.email, "u@example.com");
+        assert_eq!(proto.display_name, "U");
+        assert_eq!(proto.status, "active");
+        let subjects: Vec<&str> = proto.external_identities.iter().map(|i| i.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["first", "second"]);
+        assert_eq!(proto.external_identities[0].id, Uuid::from_u128(1).to_string());
+        let identity_audit = proto.external_identities[0].audit.as_ref().unwrap();
+        assert_eq!(identity_audit.created_at, identity_audit.modified_at, "an identity is immutable");
+        let user_audit = proto.audit.as_ref().unwrap();
+        assert_eq!(user_audit.modified_at, Some(ts(at(200))));
     }
 }
