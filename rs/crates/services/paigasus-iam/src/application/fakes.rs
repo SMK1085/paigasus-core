@@ -7,6 +7,7 @@
 //! archived via the org fake to compute effective status (D10), and `InMemoryOrgs::create`
 //! populates the shared team map with the auto-provisioned default team (ADR-0014).
 
+use crate::application::tenancy_nodes::TenancyNodes;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
@@ -489,6 +490,77 @@ fn parent_org_uuid(node: &TenancyNodeRef) -> Option<Uuid> {
         TenancyNodeRef::Team(id) => Some(id.org_uuid()),
         TenancyNodeRef::Project(id) => Some(id.org_uuid()),
     }
+}
+
+// ---- SMA-646: stored tenancy nodes for the stored-PRN tests ------------------------------
+
+/// SMA-646: inserts an ACTIVE organization with uuid `n` into `store` and returns its id. The
+/// stored canonical PRN is `OrganizationId::from_uuid(n).canonical()`, which is the F1
+/// invariant of the real `prn` column (spec §2.4).
+pub fn seed_org(store: &TenancyStore, n: u128) -> OrganizationId {
+    let id = OrganizationId::from_uuid(Uuid::from_u128(n));
+    let stamp = test_stamp(DateTime::<Utc>::UNIX_EPOCH, 1);
+    let org = Organization::new(id.clone(), Slug::parse(&format!("org-{n}")).unwrap(), "Org", &stamp).unwrap();
+    store.orgs.lock().unwrap().insert(id.uuid(), org);
+    id
+}
+
+/// SMA-646: inserts an ACTIVE team with uuid `n` under `org` and returns its id.
+pub fn seed_team(store: &TenancyStore, org: &OrganizationId, n: u128) -> TeamId {
+    let id = TeamId::from_parts(org.uuid(), Uuid::from_u128(n));
+    let stamp = test_stamp(DateTime::<Utc>::UNIX_EPOCH, 1);
+    let team = Team::new(id.clone(), Slug::parse(&format!("team-{n}")).unwrap(), "Team", &stamp).unwrap();
+    store.teams.lock().unwrap().insert(id.uuid(), team);
+    id
+}
+
+/// SMA-646: inserts an ACTIVE project with uuid `n` under `team` and returns its id.
+pub fn seed_project(store: &TenancyStore, team: &TeamId, n: u128) -> ProjectId {
+    let id = ProjectId::from_parts(team.org_uuid(), Uuid::from_u128(n));
+    let stamp = test_stamp(DateTime::<Utc>::UNIX_EPOCH, 1);
+    let project = Project::new(id.clone(), team.clone(), Slug::parse(&format!("project-{n}")).unwrap(), "Project", &stamp).unwrap();
+    store.projects.lock().unwrap().insert(id.uuid(), project);
+    id
+}
+
+/// SMA-646: a fresh store that holds one organization per uuid in `ns`.
+pub fn store_with_orgs(ns: impl IntoIterator<Item = u128>) -> TenancyStore {
+    let store = TenancyStore::default();
+    for n in ns {
+        seed_org(&store, n);
+    }
+    store
+}
+
+/// SMA-646: the `TenancyNodes` value the services take, over the three in-memory fakes of
+/// ONE shared store.
+pub fn tenancy_nodes(store: &TenancyStore) -> TenancyNodes {
+    TenancyNodes {
+        orgs: Arc::new(InMemoryOrgs(store.clone())),
+        teams: Arc::new(InMemoryTeams(store.clone())),
+        projects: Arc::new(InMemoryProjects(store.clone())),
+    }
+}
+
+/// SMA-646: a syntactically valid region. `Prn::parse` accepts it; the stored PRN has none.
+pub const FORGED_REGION: &str = "eu-west-1";
+
+/// SMA-646: the four forged shapes of spec §4.1 U1. Each names a REAL node's uuid with a slot
+/// that the stored PRN does not have. The uuid case is not forgeable (`Prn` stores uuids).
+pub fn forged_variants(org: &OrganizationId, team: &TeamId, project: &ProjectId) -> Vec<(&'static str, TenancyNodeRef)> {
+    let wrong_org = Uuid::from_u128(0xF0F0);
+    vec![
+        ("team, wrong org slot", TenancyNodeRef::Team(TeamId::from_parts(wrong_org, team.uuid()))),
+        ("project, wrong org slot", TenancyNodeRef::Project(ProjectId::from_parts(wrong_org, project.uuid()))),
+        (
+            "organization, forged region",
+            TenancyNodeRef::Organization(OrganizationId::from_prn(Prn::build("iam", FORGED_REGION, None, "organization", org.uuid()).unwrap()).unwrap()),
+        ),
+        (
+            "team, forged region",
+            TenancyNodeRef::Team(TeamId::from_prn(Prn::build("iam", FORGED_REGION, Some(team.org_uuid()), "team", team.uuid()).unwrap()).unwrap()),
+        ),
+    ]
 }
 
 /// Resolves a node ref against the store: `None` if the node doesn't exist, else its
