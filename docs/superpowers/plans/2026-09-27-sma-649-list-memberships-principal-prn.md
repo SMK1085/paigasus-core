@@ -1972,6 +1972,11 @@ Expected: green. The gates most at risk are `repo:error-code-single-site`, `paig
 
 If a task fails, follow the root `CLAUDE.md` "Diagnosing an unattributed `moon ci` failure" procedure (Step 0 first: copy `.moon/cache/ciReport.json` and the task's `.moon/cache/states/<project>/<task>/` outside the repo before any re-run). Read a failure of `repo:affected-smoke`, `repo:ruff-ci`, `repo:next-public-free`, `repo:publish-metadata`, `repo:version-lockstep`, `repo:nats-permissions` or `repo:actionlint` against the "This development Mac only" bash rules before you treat it as a finding: re-run that gate directly with the bash it needs (`/bin/bash ci/<gate>/run.sh` or `/opt/homebrew/bin/bash ci/<gate>/run.sh`). This change touches no gate script, so a red in one of those gates that reproduces on `origin/main` is a host artifact: record it, do not fix it here. A red `paigasus-iam-rs:test` in a Docker-gated suite that this change does not touch (for example `authz_policy_store.rs`) can be a known flake: re-run that one target once and record both results.
 
+<!-- moon-diagnosis:ok -->
+<!-- This file names ciReport.json only to point at CLAUDE.md's procedure. It does not restate
+     or supersede that procedure. Check 12 of `ci/actionlint/run.sh` requires this marker on any
+     file that names ciReport.json. -->
+
 - [ ] **Step 4: Report**
 
 Record in the task report: the M1–M7 table with the failing test names seen for each row, the AC7 output, the `moon ci` verdict (and any gate re-run directly, with the bash used), and every deviation from this plan. No commit in this task unless a fix was needed.
