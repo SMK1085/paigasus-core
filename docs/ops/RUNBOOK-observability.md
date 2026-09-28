@@ -1370,21 +1370,127 @@ causes are:
      identity provider, one `subject` value can name a different person. Then the statement
      gives that person the old account. In that case, do not run it. Use step 4 for each user.
 3. If the email is wrong at the identity provider, correct it there.
-4. Otherwise a manual Postgres change is necessary. IAM has no API to update a user, change an email or link an
-   identity (SMA-712 tracks one). The only write call is `POST /v1/users` / `CreateUser`. Pick the
-   right case:
-   - (a) Same person: a second issuer, a new `sub`, or a user made with `CreateUser`. After the
-     same-person check in the Warning below, insert an `external_identity` row for the existing
-     `principal_id`:
-     `INSERT INTO external_identity (id, principal_id, issuer, subject, created_at, updated_at)
-     VALUES (gen_random_uuid(), '<principal_id>', '<issuer>', '<subject>', now(), now());`
-   - (b) The email now belongs to a different person. Change the old user's `"user".email`. JIT
-     then makes a new user for the new person at the next login.
+4. Otherwise use the IAM identity-link API (SMA-712). Each call needs `platform_admin`, or an
+   explicit grant of its Cedar action: `GetUser` for the find, `LinkExternalIdentity`,
+   `UnlinkExternalIdentity` and `ChangeUserEmail` for the writes. Each write needs a `reason`.
+   Write a ticket number and what you confirmed. The examples use these variables:
 
-**Warning.** A manual change can bring back the account-takeover risk that rule D5 prevents.
-For case (a), confirm that the new identity is the same person before you insert the row. For
-case (b), confirm at the identity provider that the email now belongs to the new person. For
-both cases, also confirm that the identity provider verifies emails.
+   ```bash
+   IAM=https://iam.example.com        # the IAM HTTP base URL
+   TOKEN=<an access token of a platform_admin>
+   ```
+
+   1. **Find the IAM user.** The call gives the principal and its linked identities. The email
+      goes in the body, not the URL.
+
+      ```bash
+      curl -sS -X POST "$IAM/v1/users/find-by-email" \
+        -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        --data '{"email": "person@example.com"}'
+      ```
+
+      `prn` is `prn:pgs:iam:::principal/<principal-uuid>`. The routes below use the
+      `<principal-uuid>` part. A `404 not-found` means that no user has the email.
+   2. **Get the new `(issuer, subject)`.** The `issuer` is the configured
+      `authn.issuers[].issuer` of the identity provider that the person used. It must be exactly
+      equal to it, or the call gives `400 unknown-issuer`. For Keycloak, the `subject` is the
+      user ID on the user's page in the admin console. For another identity provider, read its
+      documentation for where the `sub` claim value is shown. If the identity provider uses a
+      pairwise `sub` and does not show it, the person can read the `sub` claim from a token
+      that the identity provider issued to them. Never guess a value.
+   3. **Decide the case.** Compare the person at the identity provider with the IAM user from
+      step 4.1:
+      - C1. The IAM user has no identities, and the person is the one for whom `CreateUser` made
+        the user.
+      - C2. The IAM user has an identity at another issuer, and both identity-provider accounts
+        belong to the same person.
+      - C3. The IAM user has an identity at the same issuer with a different `sub`, and the
+        identity provider confirms that the old account was deleted or imported again for the
+        same person.
+      - C4. The identity provider confirms that the email now belongs to a different person than
+        the IAM user.
+      - If you cannot confirm one of these, stop. Do not make a link.
+   4. **Act.**
+      - C1, C2: link the identity. A `201` is a new link. A `200` means that the user already
+        had this identity (a safe retry).
+
+        ```bash
+        curl -sS -X POST "$IAM/v1/users/<principal-uuid>/external-identities" \
+          -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+          --data '{"issuer": "https://idp.example.com/realms/main", "subject": "<sub>", "reason": "INC-1234: second issuer, confirmed by phone"}'
+        ```
+
+        A `409 external-identity-exists` means that another user holds the identity. There is
+        no implicit move: unlink it from that user first, which gives two audit records.
+      - C3: link the new `sub` with the call above. Then unlink the old `sub`. The old `sub`
+        would give `email_conflict` again if the identity provider ever issued it.
+
+        ```bash
+        curl -sS -X POST "$IAM/v1/users/<principal-uuid>/external-identities/<identity-id>/unlink" \
+          -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+          --data '{"reason": "INC-1234: realm import gave a new sub, old sub is dead"}'
+        ```
+
+        `<identity-id>` is the `id` of the old identity in the step 4.1 result. The call gives
+        `204`. A repeated unlink gives `404 not-found`, also when the first call succeeded and
+        only its response was lost. You cannot unlink the identity that you used to sign in:
+        that gives `409 cannot-unlink-own-identity`.
+      - C4: change the email of the old user. If the old person has no new email, use a unique
+        address that can never be delivered: `<principal-uuid>@example.invalid`. JIT then makes
+        a new user for the new person at the next login. The old user keeps its identities.
+
+        ```bash
+        curl -sS -X POST "$IAM/v1/users/<principal-uuid>/email" \
+          -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+          --data '{"email": "<principal-uuid>@example.invalid", "reason": "INC-1234: the IdP moved the email to another person"}'
+        ```
+
+        A `409 email-conflict` means that another user has the email. The match is exact and
+        case-sensitive, the same as JIT.
+   5. **Reverse a wrong link.** Unlink it with the C3 call. Then read the audit log for the user
+      to see the time of the link, and what the linked identity did after it:
+
+      ```bash
+      curl -sS -G "$IAM/v1/audit" -H "Authorization: Bearer $TOKEN" \
+        --data-urlencode "resource=prn:pgs:iam:::principal/<principal-uuid>"
+      ```
+
+   `CreateUser` plus a link is also the way to add a user on an issuer that has JIT disabled.
+
+   The issuer URL change case (step 2) keeps its guarded SQL statement. SMA-712 does not cover
+   it.
+
+**Warning.** A link can bring back the account-takeover risk that rule D5 prevents. JIT never
+links by email. Only an operator call makes a link. For C1 to C3, confirm that the identity is
+the same person before you link it. For C4, confirm at the identity provider that the email now
+belongs to the new person. For every case, also confirm that the identity provider verifies
+emails. Also know these facts:
+
+- `LinkExternalIdentity` is equal to `platform_admin` in power. A holder can link an identity
+  that it controls to any `platform_admin` user, or link a `zones.iam.backend.bootstrapAdmins`
+  key to itself. Either way it becomes `platform_admin`. Do not grant the action to anyone who
+  must not hold `platform_admin`.
+- `UnlinkExternalIdentity` alone can lock out any user. An unlink of the last identity of a user
+  locks that user out until a new link exists. A repeated unlink gives `404`.
+- An unlink of a `bootstrapAdmins` key does not revoke the `platform_admin` grant that the key
+  seeded. A new link of that key gives a second user the grant.
+- A caller that signed in with an API key has no identity, so the own-identity guard does not
+  apply to it. It can unlink the identity of the last human admin. Recovery then needs SQL.
+- The audit log holds the `reason`, the email and the subject of each change. These are
+  personal data. `ListAuditLog` restricts who can read them.
+- **Orphan user.** When JIT wins a race with a link, or when a second issuer sent a different
+  email, JIT makes a duplicate orphan user. No API removes or disables it. It holds its email,
+  so that email cannot go to another user until SQL changes it.
+- To disable the three write calls without a binary revert, add a static Cedar `forbid`
+  policy. It overrides the `platform_admin` permit:
+
+  ```bash
+  curl -sS -X POST "$IAM/v1/authz/policies" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    --data '{"policy_id": "disable-identity-link-writes", "kind": "static", "source": "forbid(principal, action in [Pgs::Iam::Action::\"LinkExternalIdentity\", Pgs::Iam::Action::\"UnlinkExternalIdentity\", Pgs::Iam::Action::\"ChangeUserEmail\"], resource);", "description": "SMA-712: identity-link writes are disabled"}'
+  ```
+
+  To enable them again, delete it: `curl -sS -X DELETE "$IAM/v1/authz/policies/disable-identity-link-writes" -H "Authorization: Bearer $TOKEN"`.
 
 **When the alert is silent:**
 - **The first refusal of a new series.** IAM primes both series at zero before it serves. But
