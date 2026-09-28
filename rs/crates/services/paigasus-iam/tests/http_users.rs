@@ -410,3 +410,170 @@ async fn a_missing_body_field_gets_the_same_code_as_an_empty_grpc_field() {
     assert_eq!(err["error"]["code"], "invalid-uuid");
     assert_eq!(err["error"]["message"], "user_id must be a uuid");
 }
+
+// --- SMA-712: the four cases of spec 1, end to end through the mock IdP ----------------------
+
+type Login = Result<String, (StatusCode, String)>;
+
+/// Logs in with `token` through `POST /v1/authn/whoami`, which JIT-provisions an unknown
+/// identity. `Ok(principal_prn)` on 200; the status and error code otherwise.
+async fn login(app: &axum::Router, token: &str) -> Login {
+    let (status, body) = send(app, "POST", "/v1/authn/whoami", None, Some(token)).await;
+    if status == StatusCode::OK {
+        Ok(body["principal_prn"].as_str().expect("principal_prn").to_string())
+    } else {
+        Err((status, body["error"]["code"].as_str().unwrap_or_default().to_string()))
+    }
+}
+
+/// A JIT login that IAM refused. With an email claim present, the defect is `email_conflict`.
+fn refused() -> Login {
+    Err((StatusCode::FORBIDDEN, "provisioning-failed".to_string()))
+}
+
+/// C1: `CreateUser` makes a user with no identity. Its first login fails with `email_conflict`.
+/// The operator links `(issuer, subject)`. The next login resolves to the same principal.
+#[tokio::test]
+async fn c1_a_create_user_user_logs_in_after_the_operator_links_its_identity() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("c1-admin", Some("c1-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+    let (status, created) = send(&app, "POST", "/v1/users", Some(json!({"email": "c1-person@example.com", "display_name": "C1"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let prn = created["principal_prn"].as_str().unwrap().to_string();
+
+    let person = idp.bearer("c1-person-sub", Some("c1-person@example.com"), "paigasus", 3600);
+    assert_eq!(login(&app, &person).await, refused(), "the first login of a CreateUser user fails");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{}/external-identities", principal_uuid(&prn)),
+        Some(json!({"issuer": idp.issuer, "subject": "c1-person-sub", "reason": "C1: confirmed by phone"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(login(&app, &person).await, Ok(prn));
+}
+
+/// C2: the same person signs in through a second issuer. The operator links the second
+/// issuer's identity. Both logins resolve to one principal.
+#[tokio::test]
+async fn c2_a_second_issuer_resolves_to_the_same_principal_after_a_link() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp_a = support::start_mock_idp().await;
+    let idp_b = support::start_mock_idp().await;
+    let cfg = support::test_config_with(&[(&idp_a, true), (&idp_b, true)], 30);
+    let (app, state) = app_with_config(db, &cfg).await;
+    let admin = idp_a.bearer("c2-admin", Some("c2-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    let via_a = idp_a.bearer("c2-sub-a", Some("c2@example.com"), "paigasus", 3600);
+    let prn = login(&app, &via_a).await.expect("JIT makes the user at the first issuer");
+    let via_b = idp_b.bearer("c2-sub-b", Some("c2@example.com"), "paigasus", 3600);
+    assert_eq!(login(&app, &via_b).await, refused(), "the second issuer's first login fails");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{}/external-identities", principal_uuid(&prn)),
+        Some(json!({"issuer": idp_b.issuer, "subject": "c2-sub-b", "reason": "C2: same person, second issuer"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(login(&app, &via_b).await, Ok(prn.clone()));
+    assert_eq!(login(&app, &via_a).await, Ok(prn));
+}
+
+/// C3: the IdP gave the person a new `sub`. The operator links the new `sub`, then unlinks the
+/// old one. The new `sub` resolves to the same principal. The old `sub` now fails with
+/// `email_conflict`, because the email still belongs to the user.
+#[tokio::test]
+async fn c3_a_new_sub_is_linked_and_the_old_sub_is_unlinked() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("c3-admin", Some("c3-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    let old = idp.bearer("c3-old-sub", Some("c3@example.com"), "paigasus", 3600);
+    let prn = login(&app, &old).await.expect("JIT makes the user with the old sub");
+    let new = idp.bearer("c3-new-sub", Some("c3@example.com"), "paigasus", 3600);
+    assert_eq!(login(&app, &new).await, refused());
+
+    let user = principal_uuid(&prn);
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{user}/external-identities"),
+        Some(json!({"issuer": idp.issuer, "subject": "c3-new-sub", "reason": "C3: realm import gave a new sub"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(login(&app, &new).await, Ok(prn.clone()));
+
+    let (status, found) = send(&app, "POST", "/v1/users/find-by-email", Some(json!({"email": "c3@example.com"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let old_id = found["external_identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["subject"] == "c3-old-sub")
+        .expect("the old identity is listed")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{user}/external-identities/{old_id}/unlink"),
+        Some(json!({"reason": "C3: the old sub is dead"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    assert_eq!(login(&app, &new).await, Ok(prn));
+    assert_eq!(login(&app, &old).await, refused(), "the old sub now gets email_conflict");
+}
+
+/// C4: the email moved to another person at the IdP. The operator changes the old user's email
+/// to an address that can never be delivered. The new person's login makes a different
+/// principal. The old `sub` still resolves to the old principal.
+#[tokio::test]
+async fn c4_an_email_that_moved_to_another_person_makes_a_new_user() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("c4-admin", Some("c4-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    let old_person = idp.bearer("c4-old-sub", Some("c4@example.com"), "paigasus", 3600);
+    let old_prn = login(&app, &old_person).await.expect("JIT makes the old person's user");
+    let old_user = principal_uuid(&old_prn);
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{old_user}/email"),
+        Some(json!({"email": format!("{old_user}@example.invalid"), "reason": "C4: the IdP moved the email to another person"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let new_person = idp.bearer("c4-new-sub", Some("c4@example.com"), "paigasus", 3600);
+    let new_prn = login(&app, &new_person).await.expect("JIT makes a new user for the new person");
+    assert_ne!(new_prn, old_prn);
+    assert_eq!(login(&app, &old_person).await, Ok(old_prn));
+}
