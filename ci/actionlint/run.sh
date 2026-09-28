@@ -2161,6 +2161,10 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   # PR editing ci/helm-render/** does not schedule repo:affected-smoke, and neither the
   # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
   'ci/helm-render/**/*'
+  # SMA-714 — floors the input that makes MOON_DIAGNOSIS_SH_CALL_SITES reachable. Without it, a
+  # PR editing ci/moon-diagnosis/** does not schedule repo:affected-smoke, and neither the
+  # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
+  'ci/moon-diagnosis/**/*'
   'CLAUDE.md'
   '.prototools'
 )
