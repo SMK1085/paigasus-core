@@ -334,3 +334,25 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   one of the commands above to such a fixture, add the two keys in the same edit.
 - Do not hide the race with `ignore_errors=True`, a retry, or `|| true`.
 - Spec: `docs/superpowers/specs/2026-09-27-sma-708-git-maintenance-fixtures-design.md`.
+
+## A nested `moon` call that targets a fixture workspace (SMA-714)
+
+- A gate that runs `moon` against a DIFFERENT workspace (a throwaway fixture) runs it with an
+  allowlist environment: `env -i HOME="$HOME" PATH="$PATH" TMPDIR=… LANG=… PROTO_HOME=…
+  PROTO_REPORTER=text MOON_WORKSPACE_ROOT="<fixture>"`. `ci/moon-diagnosis/run.sh` is the worked
+  example.
+- Why: moon passes its own `MOON_*` and `PROTO_*` variables to a task. An inherited
+  `MOON_WORKSPACE_ROOT` moves the nested run to the real workspace (MEASURED: it failed with
+  `app::missing_config` when the variable pointed to another directory). An inherited
+  `PROTO_MOON_VERSION` overrides the fixture's `.prototools` pin, because proto reads
+  `PROTO_<TOOL>_VERSION` first. One probe also printed `Base revision: N/A` under inherited `CI`
+  and `GITHUB_*` variables. A second probe on 2026-09-28 with the same variable names did not
+  show it, so that cause is not confirmed. `repo:moon-diagnosis-exec` asserts
+  `Base revision: <sha>` on every run.
+- Use an allowlist, not a denylist such as `unset MOON_*`. A new variable passes a denylist, and
+  `env` output can hold multi-line values.
+- This rule does NOT apply to a nested call that must target the REAL workspace, for example the
+  nested `moon query` in `repo:affected-smoke`. That call needs the inherited environment.
+- A fixture that commits also sets `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` on every
+  `git` call and local `commit.gpgsign false` and `tag.gpgsign false`. The development Mac signs
+  every commit through 1Password, and a locked vault makes an unguarded fixture commit hang or fail.
