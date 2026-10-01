@@ -20,11 +20,14 @@ Subcommands. Each one prints `key=value` lines on stdout, in a fixed order:
       move=true|false, minor_tag=, major_tag= (empty while the major version is 0).
       FILE holds bare tag names or `git ls-remote --tags` lines.
   sbom-summary SPDX_JSON
-      packages=, libc6=true|false, cargo=, npm=, next=true|false (a measurement, spec M8).
-  sbom-floor --service KEY SPDX_JSON
+      packages=, libc6=true|false, cargo=, npm=, next=true|false, deb= (a measurement, spec M8).
+  sbom-floor --service KEY --arch ARCH [--chisel-dir DIR] SPDX_JSON
       SMA-688 D5: the sbom-summary lines, then kind= and floor=pass. One floor for each image
-      kind, read from ci/images/chains.toml. A failed floor or an unknown key prints floor=fail
-      and exits 3.
+      kind, read from ci/images/chains.toml. SMA-665 D5: a cargo key also reads
+      DIR/chisel-manifest-KEY-ARCH.txt (DIR is the working directory by default), and its SBOM's
+      Debian entries must be the same set of (name, version, arch) as that chisel fetch list.
+      An npm key reads no list and ignores --arch. A missing, empty or unparsable list is
+      exit 2. A failed floor or an unknown key prints floor=fail and exits 3.
 
 Exit codes: 0 decided | 2 usage or unreadable input | 3 a conflict, or a failed self-test row.
 It never exits 1: `uv` exits 1 on its own failures, so 1 would be ambiguous.
@@ -35,15 +38,18 @@ Standard library only, so it runs with `uv run --no-project --python '>=3.12' py
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import io
 import json
 import re
 import sys
 import tarfile
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -60,6 +66,18 @@ IMAGE_MANIFEST_TYPES = frozenset(
 )
 
 Version = tuple[int, int, int]
+
+# SMA-665. One Debian package: (name, version, arch). The arch is "" when a purl has no arch
+# qualifier.
+Deb = tuple[str, str, str]
+
+# SMA-665 D3/D5. A line of chisel-manifest-<key>-<arch>.txt, as extract_chisel_manifest in
+# ci/images/run.sh writes it. MEASURED (spec M4, chisel v1.4.2):
+#   Fetching pool/main/g/glibc/libc6_2.39-0ubuntu8.9_arm64.deb
+# A pool file name carries no epoch, and `~` and `+` stay literal in it.
+CHISEL_FETCH_RE = re.compile(r"Fetching pool/[^/\s]+/[^/\s]+/[^/\s]+/(?P<name>[^/_\s]+)_(?P<version>[^/_\s]+)_(?P<arch>[^/_.\s]+)\.deb")
+ARCH_RE = re.compile(r"[a-z0-9]+")
+EPOCH_RE = re.compile(r"^\d+:")
 
 
 class UsageError(Exception):
@@ -240,44 +258,126 @@ def labels(path: Path) -> dict[str, str]:
         raise UsageError(f"cannot read {path}: {exc}") from exc
 
 
+def _sbom_packages(doc: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """(name, its referenceLocator strings) for each SPDX package. A wrong shape is exit 2."""
+    # A missing "packages" key defaults to []; a present key must be a list (even if falsey).
+    packages_value = doc.get("packages")
+    packages = [] if packages_value is None else _require_list(packages_value, "packages")
+    entries: list[tuple[str, list[str]]] = []
+    for p in packages:
+        if not isinstance(p, dict):
+            raise UsageError(f"packages must be a list of objects, not {type(p).__name__!r}")
+        # A missing "externalRefs" key defaults to []; a present key must be a list (even if falsey).
+        refs_value = p.get("externalRefs")
+        refs = [] if refs_value is None else _require_list(refs_value, "a package's externalRefs")
+        locators: list[str] = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                raise UsageError(f"an externalRefs entry must be a JSON object, not {type(ref).__name__!r}")
+            locators.append(str(ref.get("referenceLocator", "")))
+        entries.append((str(p.get("name", "")), locators))
+    return entries
+
+
 def sbom_summary(doc: dict[str, Any]) -> dict[str, str]:
     """Spec M8 (SMA-658): does the SBOM see the OS packages and the Rust crates at all?
 
     SMA-688 adds the npm count and whether `next` is there. A console image has no Rust crates,
-    and its floor reads those two instead."""
-    # A missing "packages" key defaults to []; a present key must be a list (even if falsey).
-    packages_value = doc.get("packages")
-    packages = [] if packages_value is None else _require_list(packages_value, "packages")
-    names = set()
-    cargo = 0
-    npm = 0
-    has_next = False
-    for p in packages:
-        if not isinstance(p, dict):
-            raise UsageError(f"packages must be a list of objects, not {type(p).__name__!r}")
-        names.add(str(p.get("name", "")))
-        # A missing "externalRefs" key defaults to []; a present key must be a list (even if falsey).
-        refs_value = p.get("externalRefs")
-        refs = [] if refs_value is None else _require_list(refs_value, "a package's externalRefs")
-        for ref in refs:
-            if not isinstance(ref, dict):
-                raise UsageError(f"an externalRefs entry must be a JSON object, not {type(ref).__name__!r}")
-            locator = str(ref.get("referenceLocator", ""))
-            if locator.startswith("pkg:cargo/"):
-                cargo += 1
-            elif locator.startswith("pkg:npm/"):
-                npm += 1
-                # The purl of `next` itself. A scoped `@next/env` is pkg:npm/%40next/env@…,
-                # so it does not match.
-                if locator.startswith("pkg:npm/next@"):
-                    has_next = True
+    and its floor reads those two instead. SMA-665 adds `deb`, the count of pkg:deb purls."""
+    entries = _sbom_packages(doc)
+    names = {name for name, _locators in entries}
+    locators = [locator for _name, refs in entries for locator in refs]
     return {
-        "packages": str(len(packages)),
+        "packages": str(len(entries)),
         "libc6": "true" if "libc6" in names else "false",
-        "cargo": str(cargo),
-        "npm": str(npm),
-        "next": "true" if has_next else "false",
+        "cargo": str(sum(1 for locator in locators if locator.startswith("pkg:cargo/"))),
+        "npm": str(sum(1 for locator in locators if locator.startswith("pkg:npm/"))),
+        # The purl of `next` itself. A scoped `@next/env` is pkg:npm/%40next/env@…, so it does
+        # not match.
+        "next": "true" if any(locator.startswith("pkg:npm/next@") for locator in locators) else "false",
+        "deb": str(sum(1 for locator in locators if locator.startswith("pkg:deb/"))),
     }
+
+
+def parse_deb_purl(locator: str) -> Deb:
+    """SMA-665 D5: (name, version, arch) of a pkg:deb purl. The name, the version and the arch
+    are percent-decoded. The namespace, the other qualifiers and a subpath are ignored. A leading
+    `N:` epoch is dropped, because a pool file name has none. A purl with no arch qualifier gives
+    arch "": that is a floor failure (exit 3), not a parse failure.
+
+    MEASURED (spec M2, syft 1.52.0): syft writes `~` raw, `+` as %2B and the epoch colon as %3A,
+    for example pkg:deb/ubuntu/zz-epoch@1%3A2.3%2Bdfsg-1~x?arch=arm64&distro=ubuntu-24.04. A
+    purl writer may also leave `+` raw or write `~` as %7E; both decode to the same version."""
+    if not locator.startswith("pkg:deb/"):
+        raise UsageError(f"not a pkg:deb purl: {locator!r}")
+    body = locator.removeprefix("pkg:deb/").partition("#")[0]
+    body, _sep, query = body.partition("?")
+    path, at, version_text = body.rpartition("@")
+    segments = path.split("/")
+    if not at or not version_text or not 1 <= len(segments) <= 2 or not all(segments):
+        raise UsageError(f"a pkg:deb purl that does not parse: {locator!r}")
+    arch = ""
+    for pair in query.split("&") if query else []:
+        key, eq, value = pair.partition("=")
+        if not eq or not key:
+            raise UsageError(f"a pkg:deb purl qualifier that does not parse: {locator!r}")
+        if key == "arch":
+            arch = unquote(value)
+    name = unquote(segments[-1])
+    version = EPOCH_RE.sub("", unquote(version_text), count=1)
+    if not name or not version:
+        raise UsageError(f"a pkg:deb purl with an empty name or version: {locator!r}")
+    return (name, version, arch)
+
+
+def sbom_debs(doc: dict[str, Any]) -> list[Deb]:
+    """SMA-665 D5: (name, version, arch) for each pkg:deb purl in the SBOM, in document order.
+    A pkg:deb purl that does not parse is exit 2."""
+    return [parse_deb_purl(locator) for _name, refs in _sbom_packages(doc) for locator in refs if locator.startswith("pkg:deb/")]
+
+
+def parse_chisel_list(text: str) -> list[Deb]:
+    """SMA-665 D5: (name, version, arch) for each line of a chisel fetch list. An empty list, a
+    line that does not parse, and one name on two lines are exit 2."""
+    entries: list[Deb] = []
+    seen: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        match = CHISEL_FETCH_RE.fullmatch(line.strip())
+        if match is None:
+            raise UsageError(f"a chisel fetch line that does not parse: {line!r}")
+        name, version, arch = match["name"], match["version"], match["arch"]
+        if name in seen:
+            raise UsageError(f"the chisel fetch list names {name} twice ({seen[name]} and {version})")
+        seen[name] = version
+        entries.append((name, version, arch))
+    if not entries:
+        raise UsageError("the chisel fetch list is empty")
+    return entries
+
+
+def _chisel_reasons(debs: list[Deb], chisel: list[Deb], arch: str) -> list[str]:
+    """SMA-665 D5: the SBOM's Debian entries and the chisel fetch list must be the same set of
+    (name, version, arch). Each list entry matches exactly one SBOM entry (forward), and the two
+    counts are equal (reverse). Together the two rules are set equality."""
+    reasons: list[str] = []
+    for name, version, list_arch in chisel:
+        if list_arch not in (arch, "all"):
+            reasons.append(f"the chisel fetch list names {name} {version} for {list_arch}, not for {arch}")
+    for name, version, deb_arch in debs:
+        if not deb_arch:
+            reasons.append(f"the SBOM lists {name} {version} with no arch qualifier")
+    # Forward: each list entry is in the SBOM exactly once.
+    for entry in chisel:
+        found = debs.count(entry)
+        if found != 1:
+            reasons.append(f"the SBOM lists {' '.join(entry)} {found} times; expected exactly once")
+    # Reverse: no Debian entry in the SBOM is outside the list.
+    if len(debs) != len(chisel):
+        extra = sorted(set(debs) - set(chisel))
+        reasons.append(f"the SBOM has {len(debs)} Debian entries and the chisel fetch list has {len(chisel)}; not in the list: {extra}")
+    return reasons
 
 
 def chain_kinds(text: str) -> dict[str, str]:
@@ -296,19 +396,27 @@ def chain_kinds(text: str) -> dict[str, str]:
     return kinds
 
 
-def sbom_floor(key: str, kinds: dict[str, str], summary: dict[str, str]) -> str:
+def sbom_floor(key: str, kinds: dict[str, str], summary: dict[str, str], *, debs: list[Deb], chisel: list[Deb] | None, arch: str) -> str:
     """SMA-688 D5. The kind of `key` when its SBOM reaches that kind's floor. Else FloorError.
 
-    cargo: at least one Rust crate (the binary was built with cargo auditable; the SMA-658 rule).
+    cargo: at least one Rust crate (the binary was built with cargo auditable; the SMA-658 rule),
+           libc6, and (SMA-665 D5) the SBOM's Debian entries `debs` equal the chisel fetch list
+           `chisel` as a set of (name, version, arch). `chisel` must not be None for this kind.
     npm:   at least one npm package, libc6 (the distroless base's dpkg data, spec M3) and `next`.
+           `debs`, `chisel` and `arch` are not read.
     """
     if key not in kinds:
         raise FloorError(f"{key!r} names no chain in ci/images/chains.toml (known: {sorted(kinds)})")
     kind = kinds[key]
     reasons: list[str] = []
     if kind == "cargo":
+        if chisel is None:
+            raise UsageError(f"the cargo floor for {key!r} needs the chisel fetch list")
         if int(summary["cargo"]) < 1:
             reasons.append("the SBOM lists no Rust crates; the binary was not built with cargo auditable")
+        if summary["libc6"] != "true":
+            reasons.append("the SBOM does not list libc6; the chisel cut's generated dpkg status data is missing")
+        reasons += _chisel_reasons(debs, chisel, arch)
     elif kind == "npm":
         if int(summary["npm"]) < 1:
             reasons.append("the SBOM lists no npm packages")
@@ -407,10 +515,81 @@ FLOOR_KINDS = {"iam": "cargo", "iam-console": "npm"}
 
 def _summary(**values: str) -> dict[str, str]:
     """An sbom_summary() result with every count at zero, then `values` on top."""
-    return {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false", **values}
+    return {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false", "deb": "0", **values}
+
+
+# SMA-665. A chisel fetch list of three packages, and the SBOM entries that match it. The texts
+# are MEASURED (spec M2, M4) on the arm64 cut of 2026-10-01, with the arch set to amd64.
+BASE_FILES: Deb = ("base-files", "13ubuntu10.5", "amd64")
+CA_CERTS: Deb = ("ca-certificates", "20260601~24.04.1", "all")
+LIBC6: Deb = ("libc6", "2.39-0ubuntu8.9", "amd64")
+CHISEL = [BASE_FILES, CA_CERTS, LIBC6]
+CHISEL_TEXT = (
+    "Fetching pool/main/b/base-files/base-files_13ubuntu10.5_amd64.deb\n"
+    "Fetching pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb\n"
+    "Fetching pool/main/g/glibc/libc6_2.39-0ubuntu8.9_amd64.deb\n"
+)
+
+
+def _cargo_floor(debs: list[Deb], chisel: list[Deb] | None = CHISEL, arch: str = "amd64", **values: str) -> object:
+    """The cargo floor of `iam` with one crate and libc6, unless `values` says otherwise."""
+    return sbom_floor("iam", FLOOR_KINDS, _summary(**{"cargo": "1", "libc6": "true", **values}), debs=debs, chisel=chisel, arch=arch)
+
+
+def _deb_doc(*locators: str) -> dict[str, Any]:
+    """An SPDX document with one package for each purl."""
+    return {"packages": [{"name": "p", "externalRefs": [{"referenceLocator": locator}]} for locator in locators]}
+
+
+def _main_rc(argv: list[str]) -> int:
+    """main()'s exit code, with its output kept off the self-test's own output."""
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return main(argv)
+
+
+def _cli_rows(tmp: Path) -> list[tuple[str, Callable[[], object], object]]:
+    """SMA-665: the sbom-floor CLI. The cargo key reads its list file; the npm key reads none."""
+    cargo_sbom = tmp / "cargo.spdx.json"
+    cargo_sbom.write_text(json.dumps({"packages": [
+        {"name": "serde", "externalRefs": [{"referenceLocator": "pkg:cargo/serde@1.0.228"}]},
+        {"name": "base-files", "externalRefs": [{"referenceLocator": "pkg:deb/ubuntu/base-files@13ubuntu10.5?arch=amd64&distro=ubuntu-24.04"}]},
+        {"name": "ca-certificates", "externalRefs": [{"referenceLocator": "pkg:deb/ubuntu/ca-certificates@20260601~24.04.1?arch=all&distro=ubuntu-24.04"}]},
+        {"name": "libc6", "externalRefs": [{"referenceLocator": "pkg:deb/ubuntu/libc6@2.39-0ubuntu8.9?arch=amd64&distro=ubuntu-24.04&upstream=glibc"}]},
+    ]}))
+    npm_sbom = tmp / "npm.spdx.json"
+    npm_sbom.write_text(json.dumps({"packages": [
+        {"name": "libc6", "externalRefs": [{"referenceLocator": "pkg:deb/debian/libc6@2.36-9+deb12u10?arch=amd64&distro=debian-12"}]},
+        {"name": "next", "externalRefs": [{"referenceLocator": "pkg:npm/next@16.3.5"}]},
+    ]}))
+    with_list = tmp / "with-list"
+    with_list.mkdir()
+    (with_list / "chisel-manifest-iam-amd64.txt").write_text(CHISEL_TEXT)
+    empty_list = tmp / "empty-list"
+    empty_list.mkdir()
+    (empty_list / "chisel-manifest-iam-amd64.txt").write_text("")
+    no_list = tmp / "no-list"
+    no_list.mkdir()
+
+    def floor(*args: str) -> Callable[[], object]:
+        return lambda: _main_rc(["sbom-floor", *args])
+
+    return [
+        ("cli: cargo with its chisel list passes", floor("--service", "iam", "--arch", "amd64", "--chisel-dir", str(with_list), str(cargo_sbom)), 0),
+        ("cli: cargo with no list file is exit 2", floor("--service", "iam", "--arch", "amd64", "--chisel-dir", str(no_list), str(cargo_sbom)), 2),
+        ("cli: cargo with an empty list file is exit 2", floor("--service", "iam", "--arch", "amd64", "--chisel-dir", str(empty_list), str(cargo_sbom)), 2),
+        ("cli: cargo with the list of another arch is exit 2", floor("--service", "iam", "--arch", "arm64", "--chisel-dir", str(with_list), str(cargo_sbom)), 2),
+        ("cli: no --arch is exit 2", floor("--service", "iam", "--chisel-dir", str(with_list), str(cargo_sbom)), 2),
+        ("cli: an --arch that is not an architecture is exit 2", floor("--service", "iam", "--arch", "../amd64", "--chisel-dir", str(with_list), str(cargo_sbom)), 2),
+        ("cli: npm with the cargo arguments and no list file passes", floor("--service", "iam-console", "--arch", "amd64", "--chisel-dir", str(no_list), str(npm_sbom)), 0),
+    ]
 
 
 def self_test() -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        return _self_test(Path(tmp))
+
+
+def _self_test(tmp: Path) -> int:
     tar, manifest, config = _fixture_archive()
     gw = "gateway"
     rows: list[tuple[str, Callable[[], object], object]] = [
@@ -489,9 +668,9 @@ def self_test() -> int:
         (
             "sbom: counts libc6 and cargo packages",
             lambda: sbom_summary({"packages": [{"name": "libc6"}, {"name": "serde", "externalRefs": [{"referenceLocator": "pkg:cargo/serde@1.0.228"}]}]}),
-            {"packages": "2", "libc6": "true", "cargo": "1", "npm": "0", "next": "false"},
+            {"packages": "2", "libc6": "true", "cargo": "1", "npm": "0", "next": "false", "deb": "0"},
         ),
-        ("sbom: an empty document", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false"}),
+        ("sbom: an empty document", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false", "deb": "0"}),
         ("sbom: packages is not a list", lambda: sbom_summary({"packages": "oops"}), "UsageError"),
         ("sbom: packages list has non-dict elements", lambda: sbom_summary({"packages": [{"name": "libc6"}, "oops", 5]}), "UsageError"),
         (
@@ -508,7 +687,7 @@ def self_test() -> int:
         ("sbom: packages is false (present but falsey)", lambda: sbom_summary({"packages": False}), "UsageError"),
         ("sbom: packages is 0 (present but falsey)", lambda: sbom_summary({"packages": 0}), "UsageError"),
         ("sbom: externalRefs is '' (present but falsey)", lambda: sbom_summary({"packages": [{"name": "test", "externalRefs": ""}]}), "UsageError"),
-        ("sbom: missing packages key gives empty list (no error)", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false"}),
+        ("sbom: missing packages key gives empty list (no error)", lambda: sbom_summary({}), {"packages": "0", "libc6": "false", "cargo": "0", "npm": "0", "next": "false", "deb": "0"}),
         # SMA-688: the console SBOM (spec M1: 67 npm, 10 deb, next 16.3.5).
         (
             "sbom: counts npm packages and sees next",
@@ -517,7 +696,7 @@ def self_test() -> int:
                 {"name": "next", "externalRefs": [{"referenceLocator": "pkg:npm/next@16.3.5"}]},
                 {"name": "react", "externalRefs": [{"referenceLocator": "pkg:npm/react@19.3.0"}]},
             ]}),
-            {"packages": "3", "libc6": "true", "cargo": "0", "npm": "2", "next": "true"},
+            {"packages": "3", "libc6": "true", "cargo": "0", "npm": "2", "next": "true", "deb": "0"},
         ),
         # `@next/env` is a DIFFERENT package. Its purl is pkg:npm/%40next/env@…, so it must not
         # read as `next`. Mutation: test `"next" in locator`, and this row reds.
@@ -539,21 +718,78 @@ def self_test() -> int:
         # with no `$`, and this row reds.
         ("floating: iam ignores iam-console tags", lambda: floating("iam", "0.1.0", ["paigasus-iam-console-v0.9.0"])["move"], "true"),
         # sbom-floor (SMA-688 D5): a pass and a fail for each kind, an unknown key, an unknown kind.
-        ("floor: cargo with one crate", lambda: sbom_floor("iam", FLOOR_KINDS, _summary(cargo="1")), "cargo"),
-        ("floor: cargo with no crate", lambda: sbom_floor("iam", FLOOR_KINDS, _summary()), "FloorError"),
-        ("floor: npm with npm, libc6 and next", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", libc6="true", next="true")), "npm"),
-        ("floor: npm with no npm package", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(libc6="true", next="true")), "FloorError"),
-        ("floor: npm without libc6", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", next="true")), "FloorError"),
-        ("floor: npm without next", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", libc6="true")), "FloorError"),
+        ("floor: cargo with crates, libc6 and the chisel list", lambda: _cargo_floor(CHISEL), "cargo"),
+        ("floor: cargo with no crate", lambda: _cargo_floor(CHISEL, cargo="0"), "FloorError"),
+        ("floor: npm with npm, libc6 and next", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", libc6="true", next="true"), debs=[], chisel=None, arch="amd64"), "npm"),
+        ("floor: npm with no npm package", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(libc6="true", next="true"), debs=[], chisel=None, arch="amd64"), "FloorError"),
+        ("floor: npm without libc6", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", next="true"), debs=[], chisel=None, arch="amd64"), "FloorError"),
+        ("floor: npm without next", lambda: sbom_floor("iam-console", FLOOR_KINDS, _summary(npm="67", libc6="true"), debs=[], chisel=None, arch="amd64"), "FloorError"),
         # A cargo floor must not accept an npm image: crates are the cargo rule, npm is not.
-        ("floor: a cargo key with only npm packages", lambda: sbom_floor("iam", FLOOR_KINDS, _summary(npm="67", libc6="true", next="true")), "FloorError"),
-        ("floor: an unknown key", lambda: sbom_floor("billing", FLOOR_KINDS, _summary(cargo="1")), "FloorError"),
-        ("floor: an unknown kind", lambda: sbom_floor("x", {"x": "pip"}, _summary(cargo="1")), "FloorError"),
+        ("floor: a cargo key with only npm packages", lambda: _cargo_floor(CHISEL, cargo="0", npm="67", next="true"), "FloorError"),
+        ("floor: an unknown key", lambda: sbom_floor("billing", FLOOR_KINDS, _summary(cargo="1"), debs=[], chisel=None, arch="amd64"), "FloorError"),
+        ("floor: an unknown kind", lambda: sbom_floor("x", {"x": "pip"}, _summary(cargo="1"), debs=[], chisel=None, arch="amd64"), "FloorError"),
+        # SMA-665 D5: the cargo floor's OS rule. Mutation: drop `reasons += _chisel_reasons(…)`,
+        # and every FloorError row below reds. Mutation: drop the reverse (count) block in
+        # _chisel_reasons, and "an SBOM entry not in the list" reds.
+        ("floor: cargo without libc6", lambda: _cargo_floor(CHISEL, libc6="false"), "FloorError"),
+        ("floor: a list entry the SBOM does not have", lambda: _cargo_floor([BASE_FILES, CA_CERTS]), "FloorError"),
+        ("floor: a list entry the SBOM has twice", lambda: _cargo_floor([*CHISEL, LIBC6]), "FloorError"),
+        ("floor: an SBOM entry not in the list", lambda: _cargo_floor([*CHISEL, ("openssl", "3.0.13-0ubuntu3.16", "amd64")]), "FloorError"),
+        ("floor: a version mismatch", lambda: _cargo_floor([BASE_FILES, CA_CERTS, ("libc6", "2.39-0ubuntu8.8", "amd64")]), "FloorError"),
+        ("floor: an arch mismatch", lambda: _cargo_floor([BASE_FILES, CA_CERTS, ("libc6", "2.39-0ubuntu8.9", "arm64")]), "FloorError"),
+        ("floor: an SBOM entry with no arch qualifier", lambda: _cargo_floor([*CHISEL, ("gcc-14", "14.2.0-4ubuntu2~24.04.1", "")]), "FloorError"),
+        ("floor: a list of another arch", lambda: _cargo_floor(CHISEL, arch="arm64"), "FloorError"),
+        ("floor: cargo with no chisel list is exit 2", lambda: _cargo_floor(CHISEL, chisel=None), "UsageError"),
+        # SMA-665: sbom-summary counts pkg:deb purls.
+        ("sbom: counts deb purls", lambda: sbom_summary(_deb_doc("pkg:deb/ubuntu/libc6@2.39-0ubuntu8.9?arch=amd64", "pkg:cargo/serde@1.0.228"))["deb"], "1"),
+        # SMA-665 D5: sbom_debs parses each pkg:deb purl. The first, fourth, sixth and eighth
+        # texts are MEASURED syft 1.52.0 output (spec M2).
+        (
+            "debs: a plain purl",
+            lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/libc6@2.39-0ubuntu8.9?arch=arm64&distro=ubuntu-24.04&upstream=glibc")),
+            [("libc6", "2.39-0ubuntu8.9", "arm64")],
+        ),
+        ("debs: %2B decodes to +", lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/zz@2.3%2Bdfsg-1?arch=arm64")), [("zz", "2.3+dfsg-1", "arm64")]),
+        ("debs: a raw + stays +", lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/zz@2.3+dfsg-1?arch=arm64")), [("zz", "2.3+dfsg-1", "arm64")]),
+        (
+            "debs: a raw ~ stays ~",
+            lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/ca-certificates@20260601~24.04.1?arch=all&distro=ubuntu-24.04")),
+            [CA_CERTS],
+        ),
+        ("debs: %7E decodes to ~", lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/ca-certificates@20260601%7E24.04.1?arch=all")), [CA_CERTS]),
+        (
+            "debs: a 1%3A epoch is dropped",
+            lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/zz-epoch@1%3A2.3%2Bdfsg-1~x?arch=arm64&distro=ubuntu-24.04")),
+            [("zz-epoch", "2.3+dfsg-1~x", "arm64")],
+        ),
+        ("debs: a raw 1: epoch is dropped", lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/zz@1:2.3?arch=arm64")), [("zz", "2.3", "arm64")]),
+        (
+            "debs: no arch qualifier gives an empty arch",
+            lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/gcc-14@14.2.0-4ubuntu2~24.04.1?distro=ubuntu")),
+            [("gcc-14", "14.2.0-4ubuntu2~24.04.1", "")],
+        ),
+        ("debs: no namespace", lambda: sbom_debs(_deb_doc("pkg:deb/libc6@2.39?arch=amd64")), [("libc6", "2.39", "amd64")]),
+        ("debs: other purl types are ignored", lambda: sbom_debs(_deb_doc("pkg:cargo/serde@1.0.228", "pkg:npm/next@16.3.5")), []),
+        ("debs: no version", lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/libc6?arch=amd64")), "UsageError"),
+        ("debs: too many path segments", lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/x/libc6@2.39?arch=amd64")), "UsageError"),
+        ("debs: a qualifier with no =", lambda: sbom_debs(_deb_doc("pkg:deb/ubuntu/libc6@2.39?arch")), "UsageError"),
+        # SMA-665 D5: parse_chisel_list reads the fetch list. The text is MEASURED (spec M4).
+        ("chisel: a real fetch list", lambda: parse_chisel_list(CHISEL_TEXT), CHISEL),
+        ("chisel: an empty list", lambda: parse_chisel_list(""), "UsageError"),
+        ("chisel: only blank lines", lambda: parse_chisel_list("\n\n"), "UsageError"),
+        ("chisel: a line that does not parse", lambda: parse_chisel_list("Fetching pool/main/glibc/libc6_2.39_amd64.deb\n"), "UsageError"),
+        ("chisel: the raw log form with ... does not parse", lambda: parse_chisel_list("Fetching pool/main/g/glibc/libc6_2.39_amd64.deb...\n"), "UsageError"),
+        (
+            "chisel: one name with two versions",
+            lambda: parse_chisel_list("Fetching pool/main/g/glibc/libc6_2.39-1_amd64.deb\nFetching pool/main/g/glibc/libc6_2.39-2_amd64.deb\n"),
+            "UsageError",
+        ),
         # chain_kinds reads the registry text; a wrong shape is exit 2, not 3.
         ("kinds: a registry", lambda: chain_kinds('[chain.iam]\nkind = "cargo"\n[chain.iam-console]\nkind = "npm"\n'), {"iam": "cargo", "iam-console": "npm"}),
         ("kinds: no chain table", lambda: chain_kinds("[other]\nx = 1\n"), "UsageError"),
         ("kinds: an entry with no kind", lambda: chain_kinds("[chain.iam]\nversion_file = 'x'\n"), "UsageError"),
         ("kinds: not TOML", lambda: chain_kinds("[chain.iam\n"), "UsageError"),
+        *_cli_rows(tmp),
     ]
     failed = 0
     for label, fn, want in rows:
@@ -614,6 +850,8 @@ def main(argv: list[str]) -> int:
     p_sbom.add_argument("sbom", type=Path)
     p_floor = sub.add_parser("sbom-floor")
     p_floor.add_argument("--service", required=True)
+    p_floor.add_argument("--arch", required=True)
+    p_floor.add_argument("--chisel-dir", type=Path, default=Path())
     p_floor.add_argument("sbom", type=Path)
     try:
         args = parser.parse_args(argv)
@@ -641,9 +879,20 @@ def main(argv: list[str]) -> int:
         elif args.command == "sbom-summary":
             _emit(sbom_summary(_read_sbom(args.sbom)))
         elif args.command == "sbom-floor":
-            summary = sbom_summary(_read_sbom(args.sbom))
+            if ARCH_RE.fullmatch(args.arch) is None:
+                raise UsageError(f"not an architecture: {args.arch!r}")
+            doc = _read_sbom(args.sbom)
+            summary = sbom_summary(doc)
             _emit(summary)
-            kind = sbom_floor(args.service, chain_kinds(_read_text(CHAINS_TOML)), summary)
+            kinds = chain_kinds(_read_text(CHAINS_TOML))
+            # SMA-665 D5: the KIND decides whether a chisel list is read, never whether a file
+            # exists. A missing list for a cargo key is exit 2 (fail closed).
+            debs: list[Deb] = []
+            chisel: list[Deb] | None = None
+            if kinds.get(args.service) == "cargo":
+                chisel = parse_chisel_list(_read_text(args.chisel_dir / f"chisel-manifest-{args.service}-{args.arch}.txt"))
+                debs = sbom_debs(doc)
+            kind = sbom_floor(args.service, kinds, summary, debs=debs, chisel=chisel, arch=args.arch)
             _emit({"kind": kind, "floor": "pass"})
         else:
             parser.print_usage(sys.stderr)
