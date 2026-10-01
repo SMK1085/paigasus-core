@@ -143,7 +143,7 @@ a gate. Do not copy it here.
   :http-extractor-envelope :input-liveness :promtool :observability-drift
   :nats-permissions :release-parity :release-parity-py :release-parity-ts
   :publish-metadata :version-lockstep :workflow-credentials :pyo3-stub-drift :ruff-ci
-  :next-public-free :helm-render :test-e2e
+  :next-public-free :helm-render :moon-diagnosis-exec :test-e2e
   --base origin/main
   --include-relations`
   <!-- ci-targets:end -->
@@ -186,8 +186,8 @@ a gate. Do not copy it here.
   which is why this file has a reputation for being empty. It is not: the real exit code and the
   command are in `operations[]`. They are the `command` and `exitCode` fields of the `.meta`
   object of the entry whose `meta.type` is `task-execution`. Until SMA-711 this query read the
-  two fields from the entry itself, so it printed `null`. No gate runs this query
-  (limitation L29 in `ci/actionlint/README.md`, SMA-714).
+  two fields from the entry itself, so it printed `null`. `repo:moon-diagnosis-exec` runs this
+  query, and checks Steps 2 and 2a, against a real failed report in a fixture workspace (SMA-714).
 
   `exec: []` means that the action failed before a task ran. Read `error` and the other
   operations of that action. A `null` exit code with the `status` `timed-out` means that moon
@@ -200,7 +200,10 @@ a gate. Do not copy it here.
   leaves `stdout.log` empty and `stderr.log` holding `command not found` (exit 127).
 
   **Step 2a — prove the logs belong to this run. Mandatory.** Compare the report action's
-  `finishedAt` against `lastRun.json`'s `lastRunTime`. **If they disagree, stop** — the logs are
+  `finishedAt` against `lastRun.json`'s `lastRunTime`. `finishedAt` is a UTC time with no zone
+  suffix. `lastRunTime` is epoch milliseconds. Moon reads `lastRunTime` first, up to about 16 ms
+  before `finishedAt` (measured on macOS and Linux, SMA-714). So a difference from 0 to 1000 ms
+  is the same run. **If the difference is negative or more than 1000 ms, stop** — the logs are
   from a different run and pairing them with step 1's command yields a confident wrong answer.
   Two measured causes: `moon run` writes `runReport.json` and does NOT touch `ciReport.json`, so a
   `moon run` re-run desynchronises them; and a cache HIT rewrites neither, so a log can be

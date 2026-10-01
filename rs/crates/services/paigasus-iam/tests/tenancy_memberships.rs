@@ -417,7 +417,8 @@ async fn seed_service_account_principal(db: &DatabaseConnection, uuid: Uuid) -> 
 }
 
 /// SMA-676 D8 against Postgres: `list_of_kind` keeps only members of that kind, on the node
-/// axis and on the principal axis, and still applies the node guard.
+/// axis and on the principal axis. The guards of both axes are pinned by
+/// `list_of_kind_confirms_the_node_prn` and `list_of_kind_confirms_the_principal_prn`.
 #[tokio::test]
 async fn list_of_kind_keeps_only_members_of_that_kind_on_both_axes() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -435,14 +436,107 @@ async fn list_of_kind_keeps_only_members_of_that_kind_on_both_axes() {
     }
     let at_org = MembershipAxis::Node(TenancyNodeRef::Organization(org.id.clone()));
 
-    let users = repo.list_of_kind(&at_org, PrincipalKind::User, 200, 0).await.unwrap();
+    let users = repo.list_of_kind(&at_org, Some(PrincipalKind::User), 200, 0).await.unwrap();
     assert_eq!(users.iter().map(|r| r.principal_prn.clone()).collect::<Vec<_>>(), vec![person.canonical()]);
-    let bots = repo.list_of_kind(&at_org, PrincipalKind::ServiceAccount, 200, 0).await.unwrap();
+    let bots = repo.list_of_kind(&at_org, Some(PrincipalKind::ServiceAccount), 200, 0).await.unwrap();
     assert_eq!(bots.iter().map(|r| r.principal_prn.clone()).collect::<Vec<_>>(), vec![bot.canonical()]);
-    assert!(repo.list_of_kind(&MembershipAxis::Principal(bot.uuid()), PrincipalKind::User, 200, 0).await.unwrap().is_empty());
+    assert!(repo.list_of_kind(&MembershipAxis::Principal(bot.clone()), Some(PrincipalKind::User), 200, 0).await.unwrap().is_empty());
     assert_eq!(
         repo.list_by_node(&TenancyNodeRef::Organization(org.id.clone()), 200, 0).await.unwrap().len(),
         2,
         "the unfiltered path is unchanged"
     );
+}
+
+/// A principal id with `region` and `org` in the two slots and `principal`'s uuid. A stored
+/// principal PRN has both slots empty (`prn:pgs:iam:::principal/<uuid>`).
+fn forged_principal(principal: &PrincipalId, region: &str, org: &str) -> PrincipalId {
+    PrincipalId::from_prn(Prn::parse(&format!("prn:pgs:iam:{region}:{org}:principal/{}", principal.uuid())).unwrap())
+}
+
+/// SMA-649 T2: `list_of_kind` confirms a principal PRN against the stored `principal` row, for
+/// `kind = None` and `kind = Some(_)`. The unit tests prove only the fake; this proves the SQL
+/// helper `principal_list_uuid`. Also Review Focus 4 (a service account, filtered by its own
+/// kind) and Review Focus 5 (a known principal with no membership lists an empty OK list).
+#[tokio::test]
+async fn list_of_kind_confirms_the_principal_prn() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let (org, _team, _project) = seed_chain(&db).await;
+    let person = seed_user(&db, 81).await;
+    let bot = seed_service_account_principal(&db, mint_uuid7(1_700_000_000_600, [82u8; 10])).await;
+    let lonely = seed_user(&db, 83).await;
+    let repo = PgMembershipRepository::new(db.clone());
+    for p in [&person, &bot] {
+        let m = membership_at(&ids, p, TenancyNodeRef::Organization(org.id.clone()), clock.now());
+        repo.attach(&m, &stamp_of(&m)).await.unwrap();
+    }
+    let random_org = Uuid::from_u128(0x0f49).to_string();
+    let real_org = org.id.uuid().to_string();
+
+    for (who, principal, kind) in [
+        ("user, kind None", &person, None),
+        ("user, kind User", &person, Some(PrincipalKind::User)),
+        ("service account, kind ServiceAccount", &bot, Some(PrincipalKind::ServiceAccount)),
+    ] {
+        for (shape, forged) in [
+            ("non-empty region", forged_principal(principal, "eu-west-1", "")),
+            ("real org uuid in the org slot", forged_principal(principal, "", &real_org)),
+            ("random org uuid in the org slot", forged_principal(principal, "", &random_org)),
+        ] {
+            let err = repo.list_of_kind(&MembershipAxis::Principal(forged), kind, 200, 0).await.unwrap_err();
+            assert!(matches!(err, RepositoryError::PrnMismatch), "{who} {shape}: got {err:?}");
+        }
+        let rows = repo.list_of_kind(&MembershipAxis::Principal(principal.clone()), kind, 200, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "{who}: the canonical prn must list the one seeded membership");
+        assert_eq!(rows[0].node_prn, org.id.canonical(), "{who}");
+    }
+
+    let unknown = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(0x0f4a)).unwrap());
+    for kind in [None, Some(PrincipalKind::User)] {
+        let err = repo.list_of_kind(&MembershipAxis::Principal(unknown.clone()), kind, 200, 0).await.unwrap_err();
+        assert!(matches!(err, RepositoryError::NotFound), "unknown principal, {kind:?}: got {err:?}");
+        let rows = repo.list_of_kind(&MembershipAxis::Principal(lonely.clone()), kind, 200, 0).await.unwrap();
+        assert!(rows.is_empty(), "a known principal with no membership lists an empty OK list, {kind:?}");
+    }
+}
+
+/// SMA-649 T2 / AC10: the node guard of `list_of_kind`. No test pinned it before, and since
+/// SMA-649 it carries every node-filtered `ListMemberships` (kind set or not). Under
+/// `enforce_tenancy = true` the handler authorizes against the REAL node, found by uuid, so
+/// this compare is the only defense against a forged node org slot.
+#[tokio::test]
+async fn list_of_kind_confirms_the_node_prn() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let (org, team, _project) = seed_chain(&db).await;
+    let person = seed_user(&db, 84).await;
+    let repo = PgMembershipRepository::new(db.clone());
+    for node in [TenancyNodeRef::Organization(org.id.clone()), TenancyNodeRef::Team(team.id.clone())] {
+        let m = membership_at(&ids, &person, node, clock.now());
+        repo.attach(&m, &stamp_of(&m)).await.unwrap();
+    }
+    let random_org = Uuid::from_u128(0x0f4b);
+    let forged_team = TenancyNodeRef::Team(TeamId::from_parts(random_org, team.id.uuid()));
+    let forged_org = TenancyNodeRef::Organization(paigasus_iam_core::OrganizationId::from_prn(Prn::parse(&format!("prn:pgs:iam:eu-west-1::organization/{}", org.id.uuid())).unwrap()).unwrap());
+    let unknown_team = TenancyNodeRef::Team(TeamId::from_parts(org.id.uuid(), Uuid::from_u128(0x0f4c)));
+
+    for kind in [None, Some(PrincipalKind::User)] {
+        for (shape, node) in [("team with a forged org slot", &forged_team), ("organization with a forged region", &forged_org)] {
+            let err = repo.list_of_kind(&MembershipAxis::Node(node.clone()), kind, 200, 0).await.unwrap_err();
+            assert!(matches!(err, RepositoryError::PrnMismatch), "{shape}, {kind:?}: got {err:?}");
+        }
+        let err = repo.list_of_kind(&MembershipAxis::Node(unknown_team.clone()), kind, 200, 0).await.unwrap_err();
+        assert!(matches!(err, RepositoryError::NotFound), "unknown team, {kind:?}: got {err:?}");
+        for node in [TenancyNodeRef::Organization(org.id.clone()), TenancyNodeRef::Team(team.id.clone())] {
+            let rows = repo.list_of_kind(&MembershipAxis::Node(node.clone()), kind, 200, 0).await.unwrap();
+            assert_eq!(rows.len(), 1, "the canonical {node:?} must list the seeded membership, {kind:?}");
+        }
+    }
 }

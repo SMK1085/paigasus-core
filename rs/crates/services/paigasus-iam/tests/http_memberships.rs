@@ -12,7 +12,7 @@ mod support;
 use axum::Router;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use support::{app_with_state, provision_platform_admin, send};
+use support::{app_with_config, app_with_state, provision, provision_platform_admin, send, test_config};
 use uuid::Uuid;
 
 /// Creates a user via `POST /v1/users` and returns its `principal_prn`.
@@ -253,4 +253,114 @@ async fn a_refused_body_answers_in_the_error_envelope() {
     let org_prn = org_body["organization"]["prn"].as_str().unwrap().to_string();
     let (status, body) = send(&app, "POST", "/v1/memberships", Some(json!({"principal_prn": user_prn, "node_prn": org_prn})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// Percent-encodes the two PRN characters that are reserved in a URL. A colon is legal in a
+/// query value, but the test must not depend on that (spec T3).
+fn q(prn: &str) -> String {
+    prn.replace(':', "%3A").replace('/', "%2F")
+}
+
+/// Replaces the region and the organization slot of a canonical principal PRN.
+fn principal_with(prn: &str, region: &str, org: &str) -> String {
+    let uuid = prn.rsplit('/').next().expect("a principal prn ends in /<uuid>");
+    format!("prn:pgs:iam:{region}:{org}:principal/{uuid}")
+}
+
+/// SMA-649 T3 (HTTP): `GET /v1/memberships?principal=…` confirms the principal PRN against the
+/// stored principal, under both `enforce_tenancy` settings, with `principal_kind` unset and
+/// `user`. Forged region or org slot -> 400 `prn-mismatch`; unknown uuid -> 404 `not-found`;
+/// unknown uuid + `limit=500` -> 400 `invalid-pagination` (B8). Controls: the canonical PRN
+/// and its upper-case-uuid form list the seeded membership.
+#[tokio::test]
+async fn a_forged_principal_prn_never_lists_memberships_over_http() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (on_app, on_state, idp) = app_with_state(db.clone()).await;
+    let mut cfg = test_config(&idp);
+    cfg.authz.enforce_tenancy = false;
+    let (off_app, _off_state) = app_with_config(db.clone(), &cfg).await;
+    let token = idp.bearer("forged-lm-http", Some("forged-lm-http@example.com"), "paigasus", 3600);
+    provision_platform_admin(&on_state, &token).await;
+
+    let alice = create_user(&on_app, &token, "lm-http-alice@example.com").await;
+    let (status, org_body) = send(&on_app, "POST", "/v1/organizations", Some(json!({"slug": "lm-http", "name": "LM HTTP"})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{org_body}");
+    let org_prn = org_body["organization"]["prn"].as_str().unwrap().to_string();
+    let real_org = org_prn.rsplit('/').next().unwrap().to_string();
+    let (status, body) = send(&on_app, "POST", "/v1/memberships", Some(json!({"principal_prn": alice, "node_prn": org_prn})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let absent_org = Uuid::from_u128(0x0f49).to_string();
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a));
+    let upper = principal_with(&alice, "", "").replace(alice.rsplit('/').next().unwrap(), &alice.rsplit('/').next().unwrap().to_uppercase());
+    let mut failures: Vec<String> = Vec::new();
+
+    for (setting, app) in [("enforce=on", &on_app), ("enforce=off", &off_app)] {
+        for kind in ["", "&principal_kind=user"] {
+            let expect = |failures: &mut Vec<String>, label: String, got: (StatusCode, Value), status: StatusCode, code: &str| {
+                if got.0 != status || got.1["error"]["code"] != code {
+                    failures.push(format!("{label}: expected {status} {code}, got {} {}", got.0, got.1));
+                }
+            };
+            for (shape, forged) in [
+                ("non-empty region", principal_with(&alice, "eu-west-1", "")),
+                ("real org uuid in the org slot", principal_with(&alice, "", &real_org)),
+                ("absent org uuid in the org slot", principal_with(&alice, "", &absent_org)),
+            ] {
+                let got = send(app, "GET", &format!("/v1/memberships?principal={}{kind}", q(&forged)), None, Some(token.as_str())).await;
+                expect(&mut failures, format!("{setting} [{kind}] {shape}"), got, StatusCode::BAD_REQUEST, "prn-mismatch");
+            }
+            let got = send(app, "GET", &format!("/v1/memberships?principal={}{kind}", q(&unknown)), None, Some(token.as_str())).await;
+            expect(&mut failures, format!("{setting} [{kind}] unknown principal"), got, StatusCode::NOT_FOUND, "not-found");
+            let got = send(app, "GET", &format!("/v1/memberships?principal={}{kind}&limit=500", q(&unknown)), None, Some(token.as_str())).await;
+            expect(
+                &mut failures,
+                format!("{setting} [{kind}] unknown principal + limit 500 (B8)"),
+                got,
+                StatusCode::BAD_REQUEST,
+                "invalid-pagination",
+            );
+
+            for (shape, prn) in [("canonical", alice.clone()), ("upper-case uuid", upper.clone())] {
+                let (status, body) = send(app, "GET", &format!("/v1/memberships?principal={}{kind}", q(&prn)), None, Some(token.as_str())).await;
+                let listed = body.as_array().map(|rows| rows.iter().any(|r| r["node_prn"] == org_prn)).unwrap_or(false);
+                if status != StatusCode::OK || !listed {
+                    failures.push(format!("{setting} [{kind}] control {shape}: {status} {body}"));
+                }
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "forged principal ListMemberships HTTP cases failed:\n{}", failures.join("\n"));
+}
+
+/// SMA-649 T3, B6 / AC5 (HTTP): with `enforce_tenancy` on, a caller without a root grant gets
+/// 403 `forbidden` for a forged, a canonical and an unknown principal PRN alike. The handler
+/// authorizes at `root_prn()` before `list` (`adapters/http/memberships.rs`); only this test
+/// pins that order on HTTP.
+#[tokio::test]
+async fn an_ungranted_caller_cannot_list_memberships_by_any_principal_prn_over_http() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("b6-http-admin", Some("b6-http-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+    let alice = create_user(&app, &admin, "b6-http-alice@example.com").await;
+    let stranger = idp.bearer("b6-http-stranger", Some("b6-http-stranger@example.com"), "paigasus", 3600);
+    provision(&state, &stranger).await;
+
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a));
+    for (label, prn) in [
+        ("canonical", alice.clone()),
+        ("forged region", principal_with(&alice, "eu-west-1", "")),
+        ("forged org slot", principal_with(&alice, "", &Uuid::from_u128(0x0f49).to_string())),
+        ("unknown", unknown),
+    ] {
+        let (status, body) = send(&app, "GET", &format!("/v1/memberships?principal={}", q(&prn)), None, Some(stranger.as_str())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
+        assert_eq!(body["error"]["code"], "forbidden", "{label}");
+    }
 }

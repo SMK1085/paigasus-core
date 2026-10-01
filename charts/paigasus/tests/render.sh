@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Golden render of the two valid subsets. --kube-version is pinned because helm's default moves
-# with the binary, and these files are a byte pin. Re-baseline deliberately with --update; a
-# golden change is a reviewable event, never a mechanical edit to clear a red.
+# Golden render of the two valid subsets, and of the HTTPRoute mode (SMA-694). --kube-version is
+# pinned because helm's default moves with the binary, and these files are a byte pin.
+# Re-baseline deliberately with --update; a golden change is a reviewable event, never a
+# mechanical edit to clear a red.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
@@ -63,6 +64,14 @@ else
 fi
 render_one "iam-only"        --set zones.gateway.enabled=false
 render_one "iam-and-gateway" --set zones.gateway.enabled=true
+# SMA-694. A byte pin of the HTTPRoute shape: the Ingress off, one parentRef with a namespace, a
+# chart-wide backendRequest merged with the gateway zone's 10m request default, one annotation.
+render_one "iam-and-gateway-httproute" --set zones.gateway.enabled=true \
+  --set ingress.enabled=false --set httpRoute.enabled=true \
+  --set 'httpRoute.parentRefs[0].name=edge' --set 'httpRoute.parentRefs[0].namespace=kube-system' \
+  --set 'httpRoute.parentRefs[0].sectionName=https' \
+  --set httpRoute.timeouts.backendRequest=30s \
+  --set 'httpRoute.annotations.example\.test/owner=platform'
 
 if [ "$ec" -eq 0 ]; then echo "== chart render OK =="; fi
 exit "$ec"

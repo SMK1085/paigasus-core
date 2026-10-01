@@ -545,10 +545,13 @@ are already fatal by construction rather than silently ignored. Neither rule is 
 configuration; both are simply unreachable given how actionlint constructs the script it hands to
 shellcheck.
 
-**L29 (SMA-597).** Check 12 gates the PRESENCE of the procedure's five load-bearing literals,
-not its correctness. Editing the `jq` inside CLAUDE.md's block into something subtly wrong stays
-green. Closing this needs a gate that EXECUTES the procedure against a deliberately failed task;
-that is a follow-up issue, not scope here.
+**L29 (SMA-597, narrowed by SMA-714).** Check 12 gates the PRESENCE of the procedure's five
+load-bearing literals, not its correctness. Since SMA-714, `repo:moon-diagnosis-exec`
+(`ci/moon-diagnosis/`) runs the Step 1 query and checks Steps 2 and 2a against a real failed
+`moon ci` report, so a subtly wrong `jq` in CLAUDE.md's block now reds that gate. These parts stay
+open: Step 0 and Step 3 (prose and commands that change state, which no gate runs), the "What
+cannot work" paragraph, and the CI note. That gate runs only when `CLAUDE.md`, `.prototools` or
+`ci/moon-diagnosis/**` changes.
 
 **L30 (SMA-597).** Check 12 is structurally blind to the token in its own two files
 (`ci/actionlint/run.sh`, `ci/actionlint/README.md`), both allowlisted because run.sh must contain
@@ -565,8 +568,10 @@ for CLAUDE.md's own procedure, generalised to every file the corpus covers. The 
 more likely, escape is the inverse: writing that same broken advice while paraphrasing around the
 literal token — describing a `ciReport` field, a captured task output, or a moon failure diagnosis
 step without ever spelling the four characters — passes the corpus scan cleanly, since Assertion A
-never reads for meaning, only for the token's presence. Closing either needs the same
-procedure-execution gate L29 defers to a follow-up issue, not a bigger token list.
+never reads for meaning, only for the token's presence. `repo:moon-diagnosis-exec` (SMA-714)
+runs only the root `CLAUDE.md` block. It reads no other file of the corpus, so this gap stays
+open for every other file. Closing it needs a check that reads for meaning, not a bigger token
+list.
 
 **L33 (SMA-647).** Check 13 knows four readers only: `grep` with a `q`/`m` flag or the matching long
 flags, `head`, and `awk` with `exit`. Other readers that stop early (`sed` with `q`, `read`,

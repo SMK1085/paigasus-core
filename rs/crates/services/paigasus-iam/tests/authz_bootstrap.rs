@@ -38,7 +38,7 @@ use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::entities::role;
 use paigasus_iam::adapters::persistence::{
-    PgAuditLog, PgEntitySliceLoader, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgProjectRepository, PgRoleGrantStore, PgTeamRepository, SeaOrmUnitOfWork,
+    PgAuditLog, PgEntitySliceLoader, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgTeamRepository, SeaOrmUnitOfWork,
 };
 use paigasus_iam::application::authorize::Authorize;
 use paigasus_iam::application::bootstrap::{ReconcileStarterDeps, reconcile_starter};
@@ -210,6 +210,7 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
         orgs: role_orgs,
         teams: role_teams,
         projects: role_projects,
+        principals: Arc::new(PgPrincipalRepository::new(db.clone())),
         authorize: Authorize::new(authz.clone()),
         uow: role_uow,
         outbox: role_outbox,

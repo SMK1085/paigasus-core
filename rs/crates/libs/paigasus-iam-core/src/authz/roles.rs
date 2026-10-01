@@ -59,7 +59,11 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 /// it (`entity Root;` declares no attributes, so `resource has effective_status` is
 /// unsatisfiable at `Root`), but the action list is *derived*, not hand-written, so the
 /// content moves and every deployed database now holds an older set.
-pub const STARTER_POLICY_REVISION: u32 = 3;
+///
+/// `4`: SMA-712 added `LinkExternalIdentity`, `UnlinkExternalIdentity` and `ChangeUserEmail`.
+/// They are non-restore writes, so they join the generated forbid list. `GetUser` is a read and
+/// does not change the content.
+pub const STARTER_POLICY_REVISION: u32 = 4;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
 /// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
@@ -87,7 +91,7 @@ pub fn is_starter_policy_id(id: &str) -> bool {
 
 /// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
 #[cfg(test)]
-const EXPECTED_STARTER_CONTENT_HASH: &str = "b116dc14f23bf3dc658b333d17e1a79e6da800859d8d3ec7dab28b2de0f84cd5";
+const EXPECTED_STARTER_CONTENT_HASH: &str = "19717fa746b33fe8baceb832b798b11e8d78b415e2878a168bdf4da906f3c2f7";
 
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
@@ -672,6 +676,43 @@ mod tests {
                 resource: root_prn(),
                 expect: Effect::Deny,
             },
+            // -- SMA-712: platform_admin's template has no action list, so it permits the four
+            // identity actions with no change. No other starter role carries them.
+            Case {
+                name: "platform_admin at Root allows GetUser at Root (SMA-712)",
+                grants: vec![grant(110, &uni.principal, "platform_admin", GrantScope::Root)],
+                action: Action::GetUser,
+                resource: root_prn(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "platform_admin at Root allows LinkExternalIdentity at Root (SMA-712)",
+                grants: vec![grant(111, &uni.principal, "platform_admin", GrantScope::Root)],
+                action: Action::LinkExternalIdentity,
+                resource: root_prn(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "platform_admin at Root allows UnlinkExternalIdentity at Root (SMA-712)",
+                grants: vec![grant(112, &uni.principal, "platform_admin", GrantScope::Root)],
+                action: Action::UnlinkExternalIdentity,
+                resource: root_prn(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "platform_admin at Root allows ChangeUserEmail at Root (SMA-712)",
+                grants: vec![grant(113, &uni.principal, "platform_admin", GrantScope::Root)],
+                action: Action::ChangeUserEmail,
+                resource: root_prn(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "org_admin denies LinkExternalIdentity at Root (SMA-712)",
+                grants: vec![grant(114, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::LinkExternalIdentity,
+                resource: root_prn(),
+                expect: Effect::Deny,
+            },
             // -- SMA-635 D4 and D10. The gateway authorizes a user's InvokeModel against the ORG
             // PRN, and org_admin does not carry InvokeModel: a person needs a gateway_user grant,
             // made out of band with GrantRole. Pinned so a change to either role becomes a
@@ -830,5 +871,19 @@ mod tests {
             forbid_archived_writes_source().contains(r#"Pgs::Iam::Action::"CreateUser""#),
             "CreateUser is a write action, so it must appear in forbid-archived-writes"
         );
+    }
+
+    /// SMA-712: the three identity writes reach the generated forbid list, which is the reason
+    /// `STARTER_POLICY_REVISION` moves to 4. `GetUser` is a read and must not be there.
+    #[test]
+    fn the_user_identity_writes_are_in_the_generated_forbid_source_and_get_user_is_not() {
+        let src = forbid_archived_writes_source();
+        for name in ["LinkExternalIdentity", "UnlinkExternalIdentity", "ChangeUserEmail"] {
+            assert!(
+                src.contains(&format!(r#"Pgs::Iam::Action::"{name}""#)),
+                "{name} is a write, so it must appear in forbid-archived-writes"
+            );
+        }
+        assert!(!src.contains(r#"Pgs::Iam::Action::"GetUser""#), "GetUser is a read and must not appear in forbid-archived-writes");
     }
 }

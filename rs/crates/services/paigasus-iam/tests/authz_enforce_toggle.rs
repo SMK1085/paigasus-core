@@ -69,3 +69,34 @@ async fn enforce_tenancy_false_lets_an_otherwise_ungranted_principal_create_a_us
     .await;
     assert_eq!(status, StatusCode::CREATED, "enforce_tenancy = false must bypass the CreateUser gate: {body}");
 }
+
+/// SMA-712 spec 5.1 (the spec challenge BLOCKER): the identity routes authorize in the
+/// application service, NOT behind `enforce_tenancy`. With the toggle off, a principal without
+/// the actions still gets 403 on every route. If the check moved into an
+/// `if state.enforce_tenancy` block, any principal could link its own identity to an admin.
+#[tokio::test]
+async fn enforce_tenancy_false_does_not_open_the_identity_routes() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = test_config(&idp);
+    cfg.authz.enforce_tenancy = false;
+    let (app, state) = app_with_config(db, &cfg).await;
+    let token = idp.bearer("no-grants-identity", Some("no-grants-identity@example.com"), "paigasus", 3600);
+    provision(&state, &token).await;
+
+    let missing = uuid::Uuid::from_u128(0xdead);
+    for (uri, body) in [
+        ("/v1/users/find-by-email".to_string(), json!({"email": "someone@example.com"})),
+        (
+            format!("/v1/users/{missing}/external-identities"),
+            json!({"issuer": idp.issuer, "subject": "attacker-sub", "reason": "takeover"}),
+        ),
+        (format!("/v1/users/{missing}/external-identities/{}/unlink", uuid::Uuid::from_u128(1)), json!({"reason": "lockout"})),
+        (format!("/v1/users/{missing}/email"), json!({"email": "attacker@example.com", "reason": "takeover"})),
+    ] {
+        let (status, body) = send(&app, "POST", &uri, Some(body), Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri} must stay closed with enforce_tenancy = false: {body}");
+    }
+}
