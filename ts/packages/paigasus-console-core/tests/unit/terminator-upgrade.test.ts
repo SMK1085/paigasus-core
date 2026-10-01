@@ -211,6 +211,11 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
     closers.push(() => terminator.close());
 
     const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr', '', 'Upgrade, X-Foo', ['x-foo: 1', 'x-kept: 1']);
+    // Destroy the upgraded socket even when an assertion below fails, so afterEach cannot hang.
+    closers.push(() => {
+      socket.destroy();
+      return Promise.resolve();
+    });
     expect(head).toContain('101');
     expect(back.requests).toHaveLength(1);
     const seen = back.requests[0] ?? {};
@@ -218,7 +223,6 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
     expect(seen['x-kept']).toBe('1');
     expect(seen.connection).toBe('Upgrade');
     expect(seen.upgrade).toBe('websocket');
-    socket.destroy();
   });
 
   // SMA-640 spec § 6.2: the hand-written 101 removes a nominated field, and still carries
@@ -229,13 +233,17 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
     closers.push(() => terminator.close());
 
     const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr');
+    // Destroy the upgraded socket even when an assertion below fails, so afterEach cannot hang.
+    closers.push(() => {
+      socket.destroy();
+      return Promise.resolve();
+    });
     const lines = head.split('\r\n\r\n')[0]?.toLowerCase().split('\r\n') ?? [];
     expect(lines[0]).toContain('101');
     expect(lines.some((line) => line.startsWith('x-up:'))).toBe(false);
     expect(lines).toContain('connection: upgrade');
     expect(lines).toContain('upgrade: websocket');
     expect(lines).toContain('sec-websocket-accept: test-accept');
-    socket.destroy();
   });
 
   // Review Focus 3. Firefox sends `Connection: keep-alive, Upgrade`. Both tokens are in the fixed
@@ -246,11 +254,15 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
     closers.push(() => terminator.close());
 
     const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr', '', 'keep-alive, Upgrade');
+    // Destroy the upgraded socket even when an assertion below fails, so afterEach cannot hang.
+    closers.push(() => {
+      socket.destroy();
+      return Promise.resolve();
+    });
     expect(head).toContain('101 Switching Protocols');
     expect(back.requests[0]?.connection).toBe('Upgrade');
     const echoed = new Promise<string>((resolve) => socket.once('data', (chunk: Buffer) => resolve(chunk.toString('utf8'))));
     socket.write('ping');
     await expect(echoed).resolves.toEqual('echo:ping');
-    socket.destroy();
   });
 });
