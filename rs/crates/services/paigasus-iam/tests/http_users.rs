@@ -15,7 +15,8 @@ use paigasus_iam::adapters::persistence::entities::principal;
 use paigasus_kernel::Prn;
 use sea_orm::{EntityTrait, PaginatorTrait};
 use serde_json::json;
-use support::{app_with_config, app_with_state, provision, provision_platform_admin, send, test_config};
+use support::{app_with_config, app_with_state, principal_uuid, provision, provision_platform_admin, send, test_config};
+use uuid::Uuid;
 
 /// The three-outcome pin for `POST /v1/users` (SMA-584 AC-1/AC-2). A mutation that removes the
 /// `Action::CreateUser` guard from `adapters::http::users` fails the middle row; a mutation
@@ -185,4 +186,394 @@ async fn a_refused_body_answers_in_the_error_envelope() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+// --- SMA-712: the operator identity routes --------------------------------------------------
+
+/// The four identity routes as `(action, uri, body)`, aimed at a principal that does not exist.
+/// A caller that passes the check gets 404. A caller that fails it gets 403.
+fn identity_calls(issuer: &str) -> Vec<(&'static str, String, serde_json::Value)> {
+    let missing = Uuid::from_u128(0xdead);
+    let identity = Uuid::from_u128(0xbeef);
+    vec![
+        ("GetUser", "/v1/users/find-by-email".to_string(), json!({"email": "nobody-http@example.com"})),
+        (
+            "LinkExternalIdentity",
+            format!("/v1/users/{missing}/external-identities"),
+            json!({"issuer": issuer, "subject": "matrix-sub", "reason": "matrix"}),
+        ),
+        (
+            "UnlinkExternalIdentity",
+            format!("/v1/users/{missing}/external-identities/{identity}/unlink"),
+            json!({"reason": "matrix"}),
+        ),
+        ("ChangeUserEmail", format!("/v1/users/{missing}/email"), json!({"email": "matrix-http@example.com", "reason": "matrix"})),
+    ]
+}
+
+/// SMA-712 spec 11: 401 without a token, 403 without the action, and the full platform_admin
+/// cycle: find, link (201, then 200 on a retry), change the email, unlink (204, then 404), and
+/// the own-identity refusal (409).
+#[tokio::test]
+async fn identity_routes_need_a_bearer_and_their_action_and_work_for_platform_admin() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let plain = idp.bearer("http-id-plain", Some("http-id-plain@example.com"), "paigasus", 3600);
+    provision(&state, &plain).await;
+    let admin = idp.bearer("http-id-admin", Some("http-id-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    for (action, uri, body) in identity_calls(&idp.issuer) {
+        let (status, err) = send(&app, "POST", &uri, Some(body.clone()), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{action} without a bearer: {err}");
+        let (status, err) = send(&app, "POST", &uri, Some(body), Some(plain.as_str())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{action} without the action: {err}");
+        assert_eq!(err["error"]["code"], "forbidden");
+    }
+
+    let (status, created) = send(
+        &app,
+        "POST",
+        "/v1/users",
+        Some(json!({"email": "http-id-target@example.com", "display_name": "Target"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let target_prn = created["principal_prn"].as_str().unwrap().to_string();
+    let target = principal_uuid(&target_prn);
+
+    let (status, user) = send(&app, "POST", "/v1/users/find-by-email", Some(json!({"email": "http-id-target@example.com"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{user}");
+    assert_eq!(user["prn"], target_prn);
+    assert_eq!(user["status"], "active");
+    assert_eq!(user["external_identities"], json!([]));
+
+    let link_body = json!({"issuer": idp.issuer, "subject": "http-linked-sub", "reason": "INC-1: same person"});
+    let (status, linked) = send(&app, "POST", &format!("/v1/users/{target}/external-identities"), Some(link_body.clone()), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{linked}");
+    assert_eq!(linked["subject"], "http-linked-sub");
+    let (status, again) = send(&app, "POST", &format!("/v1/users/{target}/external-identities"), Some(link_body), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "a same-user link answers 200: {again}");
+    assert_eq!(again["id"], linked["id"]);
+
+    let (status, moved) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{target}/email"),
+        Some(json!({"email": "http-id-moved@example.com", "reason": "INC-2: moved"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["email"], "http-id-moved@example.com");
+    assert_eq!(moved["external_identities"].as_array().unwrap().len(), 1);
+
+    let identity_id = linked["id"].as_str().unwrap();
+    let unlink_uri = format!("/v1/users/{target}/external-identities/{identity_id}/unlink");
+    let (status, body) = send(&app, "POST", &unlink_uri, Some(json!({"reason": "INC-3: undo"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, err) = send(&app, "POST", &unlink_uri, Some(json!({"reason": "INC-3: undo"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a repeated unlink is not found: {err}");
+    assert_eq!(err["error"]["code"], "not-found");
+
+    let (status, me) = send(&app, "POST", "/v1/users/find-by-email", Some(json!({"email": "http-id-admin@example.com"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    let my_user = principal_uuid(me["prn"].as_str().unwrap());
+    let my_identity = me["external_identities"][0]["id"].as_str().unwrap();
+    let (status, err) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{my_user}/external-identities/{my_identity}/unlink"),
+        Some(json!({"reason": "lock myself out"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], "cannot-unlink-own-identity");
+}
+
+/// SMA-712 spec 11, action identity end to end, the HTTP half of
+/// `tests/grpc_users.rs::each_identity_rpc_checks_its_own_action`.
+#[tokio::test]
+async fn each_identity_route_checks_its_own_action() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = test_config(&idp);
+    cfg.authz.policy_cache_ttl_secs = 1;
+    let (app, state) = app_with_config(db, &cfg).await;
+    let admin = idp.bearer("http-matrix-admin", Some("http-matrix-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    let calls = identity_calls(&idp.issuer);
+    let mut tokens = Vec::new();
+    for (index, (action, _, _)) in calls.iter().enumerate() {
+        let token = idp.bearer(&format!("http-matrix-{index}"), Some(format!("http-matrix-{index}@example.com").as_str()), "paigasus", 3600);
+        let uuid = principal_uuid(&provision(&state, &token).await);
+        let policy = json!({
+            "policy_id": format!("sma-712-http-matrix-{index}"),
+            "kind": "static",
+            "source": format!(r#"permit(principal == Pgs::Iam::Principal::"{uuid}", action == Pgs::Iam::Action::"{action}", resource);"#),
+            "description": format!("SMA-712 action-identity pin: {action} only"),
+        });
+        let (status, put) = send(&app, "POST", "/v1/authz/policies", Some(policy), Some(admin.as_str())).await;
+        assert_eq!(status, StatusCode::OK, "{put}");
+        tokens.push(token);
+    }
+
+    for (holder, token) in tokens.iter().enumerate() {
+        for (called, (action, uri, body)) in calls.iter().enumerate() {
+            let (status, err) = send(&app, "POST", uri, Some(body.clone()), Some(token.as_str())).await;
+            let want = if holder == called { StatusCode::NOT_FOUND } else { StatusCode::FORBIDDEN };
+            assert_eq!(status, want, "a subject that holds only {} calls {action}: {err}", calls[holder].0);
+        }
+    }
+}
+
+/// SMA-712 spec 5.1 and 11: a denied caller with a well-formed body of bad values gets 403, not
+/// 400, so the routes are not a validation oracle.
+#[tokio::test]
+async fn a_denied_caller_with_bad_values_gets_403_not_400() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let plain = idp.bearer("http-bad-plain", Some("http-bad-plain@example.com"), "paigasus", 3600);
+    provision(&state, &plain).await;
+    let target = Uuid::from_u128(0xdead);
+    for (uri, body) in [
+        ("/v1/users/find-by-email".to_string(), json!({"email": "not-an-email"})),
+        (
+            format!("/v1/users/{target}/external-identities"),
+            json!({"issuer": "https://unknown.example.com/", "subject": " padded", "reason": ""}),
+        ),
+        (format!("/v1/users/{target}/external-identities/{}/unlink", Uuid::from_u128(1)), json!({"reason": "   "})),
+        (format!("/v1/users/{target}/email"), json!({"email": "@", "reason": ""})),
+    ] {
+        let (status, err) = send(&app, "POST", &uri, Some(body), Some(plain.as_str())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {err}");
+        assert_eq!(err["error"]["code"], "forbidden");
+    }
+}
+
+/// SMA-712 spec 4.3: every DTO field is optional with a default, so a missing field reaches the
+/// service as an empty value and gets the same code as an empty gRPC field. A body of the wrong
+/// type still gets the extractor's 422, and a bad path uuid gets `invalid-uuid`.
+#[tokio::test]
+async fn a_missing_body_field_gets_the_same_code_as_an_empty_grpc_field() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("http-empty-admin", Some("http-empty-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+    let (status, created) = send(
+        &app,
+        "POST",
+        "/v1/users",
+        Some(json!({"email": "http-empty-target@example.com", "display_name": "T"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let target = principal_uuid(created["principal_prn"].as_str().unwrap());
+
+    for (uri, code) in [
+        ("/v1/users/find-by-email".to_string(), "invalid-email"),
+        (format!("/v1/users/{target}/external-identities"), "unknown-issuer"),
+        (format!("/v1/users/{target}/external-identities/{}/unlink", Uuid::from_u128(1)), "invalid-reason"),
+        (format!("/v1/users/{target}/email"), "invalid-email"),
+    ] {
+        let (status, err) = send(&app, "POST", &uri, Some(json!({})), Some(admin.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {err}");
+        assert_eq!(err["error"]["code"], code, "{uri}");
+    }
+
+    let (status, err) = support::send_bytes(
+        &app,
+        "POST",
+        &format!("/v1/users/{target}/external-identities"),
+        Some("application/json"),
+        br#"{"reason": 5}"#,
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-request-schema");
+
+    let (status, err) = send(&app, "POST", "/v1/users/not-a-uuid/email", Some(json!({"email": "a@example.com", "reason": "r"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-uuid");
+    assert_eq!(err["error"]["message"], "user_id must be a uuid");
+}
+
+// --- SMA-712: the four cases of spec 1, end to end through the mock IdP ----------------------
+
+type Login = Result<String, (StatusCode, String)>;
+
+/// Logs in with `token` through `POST /v1/authn/whoami`, which JIT-provisions an unknown
+/// identity. `Ok(principal_prn)` on 200; the status and error code otherwise.
+async fn login(app: &axum::Router, token: &str) -> Login {
+    let (status, body) = send(app, "POST", "/v1/authn/whoami", None, Some(token)).await;
+    if status == StatusCode::OK {
+        Ok(body["principal_prn"].as_str().expect("principal_prn").to_string())
+    } else {
+        Err((status, body["error"]["code"].as_str().unwrap_or_default().to_string()))
+    }
+}
+
+/// A JIT login that IAM refused. With an email claim present, the defect is `email_conflict`.
+fn refused() -> Login {
+    Err((StatusCode::FORBIDDEN, "provisioning-failed".to_string()))
+}
+
+/// C1: `CreateUser` makes a user with no identity. Its first login fails with `email_conflict`.
+/// The operator links `(issuer, subject)`. The next login resolves to the same principal.
+#[tokio::test]
+async fn c1_a_create_user_user_logs_in_after_the_operator_links_its_identity() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("c1-admin", Some("c1-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+    let (status, created) = send(&app, "POST", "/v1/users", Some(json!({"email": "c1-person@example.com", "display_name": "C1"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let prn = created["principal_prn"].as_str().unwrap().to_string();
+
+    let person = idp.bearer("c1-person-sub", Some("c1-person@example.com"), "paigasus", 3600);
+    assert_eq!(login(&app, &person).await, refused(), "the first login of a CreateUser user fails");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{}/external-identities", principal_uuid(&prn)),
+        Some(json!({"issuer": idp.issuer, "subject": "c1-person-sub", "reason": "C1: confirmed by phone"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(login(&app, &person).await, Ok(prn));
+}
+
+/// C2: the same person signs in through a second issuer. The operator links the second
+/// issuer's identity. Both logins resolve to one principal.
+#[tokio::test]
+async fn c2_a_second_issuer_resolves_to_the_same_principal_after_a_link() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp_a = support::start_mock_idp().await;
+    let idp_b = support::start_mock_idp().await;
+    let cfg = support::test_config_with(&[(&idp_a, true), (&idp_b, true)], 30);
+    let (app, state) = app_with_config(db, &cfg).await;
+    let admin = idp_a.bearer("c2-admin", Some("c2-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    let via_a = idp_a.bearer("c2-sub-a", Some("c2@example.com"), "paigasus", 3600);
+    let prn = login(&app, &via_a).await.expect("JIT makes the user at the first issuer");
+    let via_b = idp_b.bearer("c2-sub-b", Some("c2@example.com"), "paigasus", 3600);
+    assert_eq!(login(&app, &via_b).await, refused(), "the second issuer's first login fails");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{}/external-identities", principal_uuid(&prn)),
+        Some(json!({"issuer": idp_b.issuer, "subject": "c2-sub-b", "reason": "C2: same person, second issuer"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(login(&app, &via_b).await, Ok(prn.clone()));
+    assert_eq!(login(&app, &via_a).await, Ok(prn));
+}
+
+/// C3: the IdP gave the person a new `sub`. The operator links the new `sub`, then unlinks the
+/// old one. The new `sub` resolves to the same principal. The old `sub` now fails with
+/// `email_conflict`, because the email still belongs to the user.
+#[tokio::test]
+async fn c3_a_new_sub_is_linked_and_the_old_sub_is_unlinked() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("c3-admin", Some("c3-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    let old = idp.bearer("c3-old-sub", Some("c3@example.com"), "paigasus", 3600);
+    let prn = login(&app, &old).await.expect("JIT makes the user with the old sub");
+    let new = idp.bearer("c3-new-sub", Some("c3@example.com"), "paigasus", 3600);
+    assert_eq!(login(&app, &new).await, refused());
+
+    let user = principal_uuid(&prn);
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{user}/external-identities"),
+        Some(json!({"issuer": idp.issuer, "subject": "c3-new-sub", "reason": "C3: realm import gave a new sub"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(login(&app, &new).await, Ok(prn.clone()));
+
+    let (status, found) = send(&app, "POST", "/v1/users/find-by-email", Some(json!({"email": "c3@example.com"})), Some(admin.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let old_id = found["external_identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["subject"] == "c3-old-sub")
+        .expect("the old identity is listed")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{user}/external-identities/{old_id}/unlink"),
+        Some(json!({"reason": "C3: the old sub is dead"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    assert_eq!(login(&app, &new).await, Ok(prn));
+    assert_eq!(login(&app, &old).await, refused(), "the old sub now gets email_conflict");
+}
+
+/// C4: the email moved to another person at the IdP. The operator changes the old user's email
+/// to an address that can never be delivered. The new person's login makes a different
+/// principal. The old `sub` still resolves to the old principal.
+#[tokio::test]
+async fn c4_an_email_that_moved_to_another_person_makes_a_new_user() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let admin = idp.bearer("c4-admin", Some("c4-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin).await;
+
+    let old_person = idp.bearer("c4-old-sub", Some("c4@example.com"), "paigasus", 3600);
+    let old_prn = login(&app, &old_person).await.expect("JIT makes the old person's user");
+    let old_user = principal_uuid(&old_prn);
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/users/{old_user}/email"),
+        Some(json!({"email": format!("{old_user}@example.invalid"), "reason": "C4: the IdP moved the email to another person"})),
+        Some(admin.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let new_person = idp.bearer("c4-new-sub", Some("c4@example.com"), "paigasus", 3600);
+    let new_prn = login(&app, &new_person).await.expect("JIT makes a new user for the new person");
+    assert_ne!(new_prn, old_prn);
+    assert_eq!(login(&app, &old_person).await, Ok(old_prn));
 }

@@ -3209,7 +3209,6 @@ pub mod service_account_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    ///
     #[derive(Debug, Clone)]
     pub struct ServiceAccountServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -3290,7 +3289,6 @@ pub mod service_account_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        ///
         pub async fn create_service_account(
             &mut self,
             request: impl tonic::IntoRequest<super::CreateServiceAccountRequest>,
@@ -3320,7 +3318,6 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn get_service_account(
             &mut self,
             request: impl tonic::IntoRequest<super::GetServiceAccountRequest>,
@@ -3510,7 +3507,6 @@ pub mod service_account_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with ServiceAccountServiceServer.
     #[async_trait]
     pub trait ServiceAccountService: std::marker::Send + std::marker::Sync + 'static {
-        ///
         async fn create_service_account(
             &self,
             request: tonic::Request<super::CreateServiceAccountRequest>,
@@ -3518,7 +3514,6 @@ pub mod service_account_service_server {
             tonic::Response<super::CreateServiceAccountResponse>,
             tonic::Status,
         >;
-        ///
         async fn get_service_account(
             &self,
             request: tonic::Request<super::GetServiceAccountRequest>,
@@ -3562,7 +3557,6 @@ pub mod service_account_service_server {
             tonic::Status,
         >;
     }
-    ///
     #[derive(Debug)]
     pub struct ServiceAccountServiceServer<T> {
         inner: Arc<T>,
@@ -4436,6 +4430,116 @@ pub mod user_service_client {
                 .insert(GrpcMethod::new("paigasus.iam.v1.UserService", "CreateUser"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn find_user_by_email(
+            &mut self,
+            request: impl tonic::IntoRequest<super::FindUserByEmailRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::FindUserByEmailResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.UserService/FindUserByEmail",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("paigasus.iam.v1.UserService", "FindUserByEmail"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn link_external_identity(
+            &mut self,
+            request: impl tonic::IntoRequest<super::LinkExternalIdentityRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LinkExternalIdentityResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.UserService/LinkExternalIdentity",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.UserService",
+                        "LinkExternalIdentity",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn unlink_external_identity(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UnlinkExternalIdentityRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UnlinkExternalIdentityResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.UserService/UnlinkExternalIdentity",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.UserService",
+                        "UnlinkExternalIdentity",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn change_user_email(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ChangeUserEmailRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ChangeUserEmailResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.UserService/ChangeUserEmail",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("paigasus.iam.v1.UserService", "ChangeUserEmail"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -4456,6 +4560,34 @@ pub mod user_service_server {
             request: tonic::Request<super::CreateUserRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CreateUserResponse>,
+            tonic::Status,
+        >;
+        async fn find_user_by_email(
+            &self,
+            request: tonic::Request<super::FindUserByEmailRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::FindUserByEmailResponse>,
+            tonic::Status,
+        >;
+        async fn link_external_identity(
+            &self,
+            request: tonic::Request<super::LinkExternalIdentityRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LinkExternalIdentityResponse>,
+            tonic::Status,
+        >;
+        async fn unlink_external_identity(
+            &self,
+            request: tonic::Request<super::UnlinkExternalIdentityRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UnlinkExternalIdentityResponse>,
+            tonic::Status,
+        >;
+        async fn change_user_email(
+            &self,
+            request: tonic::Request<super::ChangeUserEmailRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ChangeUserEmailResponse>,
             tonic::Status,
         >;
     }
@@ -4565,6 +4697,192 @@ pub mod user_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CreateUserSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.UserService/FindUserByEmail" => {
+                    #[allow(non_camel_case_types)]
+                    struct FindUserByEmailSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::FindUserByEmailRequest>
+                    for FindUserByEmailSvc<T> {
+                        type Response = super::FindUserByEmailResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::FindUserByEmailRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::find_user_by_email(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = FindUserByEmailSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.UserService/LinkExternalIdentity" => {
+                    #[allow(non_camel_case_types)]
+                    struct LinkExternalIdentitySvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::LinkExternalIdentityRequest>
+                    for LinkExternalIdentitySvc<T> {
+                        type Response = super::LinkExternalIdentityResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::LinkExternalIdentityRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::link_external_identity(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = LinkExternalIdentitySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.UserService/UnlinkExternalIdentity" => {
+                    #[allow(non_camel_case_types)]
+                    struct UnlinkExternalIdentitySvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::UnlinkExternalIdentityRequest>
+                    for UnlinkExternalIdentitySvc<T> {
+                        type Response = super::UnlinkExternalIdentityResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UnlinkExternalIdentityRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::unlink_external_identity(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UnlinkExternalIdentitySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.UserService/ChangeUserEmail" => {
+                    #[allow(non_camel_case_types)]
+                    struct ChangeUserEmailSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::ChangeUserEmailRequest>
+                    for ChangeUserEmailSvc<T> {
+                        type Response = super::ChangeUserEmailResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ChangeUserEmailRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::change_user_email(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ChangeUserEmailSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
