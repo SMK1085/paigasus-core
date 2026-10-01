@@ -1623,16 +1623,51 @@ CONSOLE_SMOKE_REDIS_IMAGE="redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b
 # searches the FULL log, because Next preloads route modules at start.
 CONSOLE_KERNEL_LINE="CompileError"
 
-# Walks the image's staged tree with the image's OWN node — the runtime base is distroless and has
-# no shell, so there is no `find` in there to call. Prints `public=0|1` on line 1 and one staged
-# .next/static path per line after it, with the BUILD_ID directory rewritten to the literal
-# <BUILD_ID>. MEASURED (SMA-513): Next generates BUILD_ID as a random nanoid — no next.config.ts in
-# this repo sets generateBuildId — so the host build and the image build never share one, and an
-# un-normalised comparison of the two trees can NEVER pass. Sorting is left to the caller, which
-# puts both sides through the same `LC_ALL=C sort`: also MEASURED, node's Array.sort and the host's
-# `sort` disagreed on `chunks/3_j6cf7txpq_5.js` vs `chunks/3h4osm35n9wui.js`, which would have
-# reported drift between two byte-identical trees.
-CONSOLE_STAGED_TREE_JS='
+# --- SMA-670 smoke rows ----------------------------------------------------------------------------
+# smoke_consoles calls each function in this section as `<fn> … || ec=1`. Because of the `||`,
+# errexit is OFF inside them: each one checks the rc of every command itself and must not depend on
+# `set -e`. Each one keeps its JS program in a `local`, so it needs no global except ROOT (and
+# with_deadline, for the HEALTHCHECK row). ci/images/console-selftest.sh copies them out of this
+# file with awk and calls them in this same `|| rc=$?` shape against a stub `docker`.
+# SMA-688: each image row takes `<app> <image>`. The image is the one smoke_consoles tests:
+# `<app>:dev` from build-console, or `paigasus-<key>:dev` from load-oci. A row never builds an
+# image name from `<app>` itself, or it would test a different image than the smoke run.
+
+# Spec § 5.5 assertion 4 (SMA-513) — staged-tree parity, a row of its own since SMA-671.
+# console_staged_parity_row <app> <image> <required|optional>. ts/Dockerfile's staging of
+# .next/static and public/ and ts/apps/<app>/moon.yml's `build` script are a SECOND staging site
+# each, created deliberately; this is what keeps the two from drifting apart.
+#
+# It compares the staged TREES, not the two scripts' text, so the two divergences the Task 2
+# review recorded are tolerated by construction: moon.yml's `rm -rf .next/static` before
+# `next build` (the Dockerfile needs no counterpart — `**/.next` in ts/.dockerignore makes every
+# builder start cold) and moon.yml's app-name prefix on its two error messages both leave the
+# staged tree identical.
+#
+# The third argument says whether a host build must exist. smoke_consoles passes it from its
+# --parity= word, which parity_required_flag derives from CONSOLE_PARITY_REQUIRED at dispatch
+# level; this row never reads the variable (the SMA-675 rule). images.yml makes a host build and
+# asks for `required`. release.yml has no host build and gets `optional`.
+console_staged_parity_row() {
+  local app="${1:-}" image="${2:-}" parity="${3:-}" rc=0 tree_js
+  local host_std host_static host_id host_public host_list img_rc img_out img_public img_list img_dirs host_dirs
+  case "$parity" in
+    required|optional) ;;
+    *)
+      echo "::error::${app}: console_staged_parity_row: the third argument must be required or optional, not '${parity}'." >&2
+      return 1
+      ;;
+  esac
+  # Walks the image's staged tree with the image's OWN node — the runtime base is distroless and
+  # has no shell, so there is no `find` in there to call. Prints `public=0|1` on line 1 and one
+  # staged .next/static path per line after it, with the BUILD_ID directory rewritten to the
+  # literal <BUILD_ID>. MEASURED (SMA-513): Next generates BUILD_ID as a random nanoid — no
+  # next.config.ts in this repo sets generateBuildId — so the host build and the image build never
+  # share one, and an un-normalised comparison of the two trees can NEVER pass. Sorting is left to
+  # the caller, which puts both sides through the same `LC_ALL=C sort`: also MEASURED, node's
+  # Array.sort and the host's `sort` disagreed on `chunks/3_j6cf7txpq_5.js` vs
+  # `chunks/3h4osm35n9wui.js`, which would have reported drift between two byte-identical trees.
+  tree_js='
 const fs = require("fs");
 const root = process.argv[1];
 const id = fs.readFileSync(root + "/.next/BUILD_ID", "utf8").trim();
@@ -1643,16 +1678,91 @@ const rel = walk(root + "/.next/static")
   .map((f) => (id !== "" && f.indexOf(id + "/") === 0 ? "<BUILD_ID>/" + f.slice(id.length + 1) : f));
 console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(rel).join("\n"));
 '
-
-# --- SMA-670 smoke rows ----------------------------------------------------------------------------
-# smoke_consoles calls each function in this section as `<fn> … || ec=1`. Because of the `||`,
-# errexit is OFF inside them: each one checks the rc of every command itself and must not depend on
-# `set -e`. Each one keeps its JS program in a `local`, so it needs no global except ROOT (and
-# with_deadline, for the HEALTHCHECK row). ci/images/console-selftest.sh copies them out of this
-# file with awk and calls them in this same `|| rc=$?` shape against a stub `docker`.
-# SMA-688: each image row takes `<app> <image>`. The image is the one smoke_consoles tests:
-# `<app>:dev` from build-console, or `paigasus-<key>:dev` from load-oci. A row never builds an
-# image name from `<app>` itself, or it would test a different image than the smoke run.
+  host_std="$ROOT/ts/apps/${app}/.next/standalone/apps/${app}"
+  host_static="$host_std/.next/static"
+  if [ ! -d "$host_static" ]; then
+    if [ "$parity" = required ]; then
+      echo "::error::${app}: no host build at ${host_static}, and parity is required (CONSOLE_PARITY_REQUIRED=1) — staged-tree parity was required but NOT checked. Run 'moon run ${app}-ts:build --upstream none' before the smoke." >&2
+      return 1
+    fi
+    # Not required: it says so out loud rather than passing silently, because a check that quietly
+    # skips is the failure mode this repository has paid for repeatedly. The absence of a host
+    # build is not a defect here: release.yml and a plain local run have none. images.yml makes
+    # one and asks for `required`, so there this arm is the error above.
+    echo "  ${app}: no host build at ${host_static}; staged-tree parity NOT CHECKED this run (images.yml makes a host build and sets CONSOLE_PARITY_REQUIRED=1; this run did not — run 'moon run ${app}-ts:build' first to check it)"
+    return 0
+  fi
+  # Two causes, two messages, and the rc separates them. node's own uncaught ENOENT on
+  # .next/static (or on .next/BUILD_ID) exits 1, and only THAT says the staging copy did not run.
+  # docker refusing the image exits 125/126/127 before node starts, which proves nothing about
+  # staging at all. stderr is captured rather than discarded: the tool's own message names the
+  # cause.
+  img_rc=0
+  img_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" \
+    -e "$tree_js" "/app/apps/${app}" 2>&1)" || img_rc=$?
+  if [ "$img_rc" -eq 1 ]; then
+    echo "::error::${app}: /app/apps/${app}/.next/static is absent or unreadable inside the image — the staging copy in ts/Dockerfile did not run. node's message follows." >&2
+    printf '%s\n' "$img_out" >&2
+    return 1
+  elif [ "$img_rc" -ne 0 ]; then
+    echo "::error::${app}: staged-tree parity NOT checked — docker exited ${img_rc} on ${image} before node ran, so the image is missing or unreadable and nothing was proved about staging. Its message follows." >&2
+    printf '%s\n' "$img_out" >&2
+    return 1
+  elif [ -z "$img_out" ]; then
+    echo "::error::${app}: the staged-tree walk exited 0 but printed nothing — that is neither a staging failure nor a docker failure; inspect ${image} by hand." >&2
+    return 1
+  fi
+  # Line 1 is the public= marker, the rest is the tree. `sed -n 1p` / `sed -n '2,$p'` read their
+  # whole input; neither is an early-exit reader.
+  img_public="$(printf '%s\n' "$img_out" | sed -n 1p)"
+  img_list="$(printf '%s\n' "$img_out" | sed -n '2,$p' | LC_ALL=C sort)"
+  host_public="public=0"
+  if [ -d "$host_std/public" ]; then host_public="public=1"; fi
+  host_id="$(cat "$host_std/.next/BUILD_ID" 2>/dev/null)" || host_id=""
+  if [ -z "$host_id" ]; then
+    echo "::error::${app}: the host build at ${host_std} has no .next/BUILD_ID — that build is broken or half-written; re-run 'moon run ${app}-ts:build'." >&2
+    return 1
+  fi
+  host_list="$(cd "$host_static" && find . -type f | sed 's#^\./##' \
+    | sed "s#^${host_id}/#<BUILD_ID>/#" | LC_ALL=C sort)" || host_list=""
+  if [ "$img_public" != "$host_public" ]; then
+    echo "::error::${app}: the image staged ${img_public} but the host build staged ${host_public} — ts/Dockerfile and ts/apps/${app}/moon.yml disagree on staging public/." >&2
+    rc=1
+  fi
+  if [ "$img_list" != "$host_list" ]; then
+    # Two distinct causes produce a difference here, and they send a reader to different places,
+    # so they get different messages. A missing or partial staging copy changes which TOP-LEVEL
+    # directories exist under .next/static; two builds of different source keep the same
+    # directories and change only the content-hashed file names inside them.
+    #
+    # ASSUMPTION, recorded deliberately: a host build and an image build of the SAME source
+    # produce the same chunk file names. Measured true here — Turbopack derives them from content —
+    # but nothing enforces it. Four things would break it, and all four are toolchain events rather
+    # than code changes: a Next or Turbopack bump that changes chunk hashing; a compile-time
+    # variable that differs between the host build and the builder stage; the platform split
+    # (macOS host against a linux builder; it does not apply in images.yml, where both builds run
+    # on the same runner); and the Dockerfile's filtered `pnpm install` resolving a different
+    # optional platform dependency. When it breaks it breaks on EVERY run, loudly, into the branch
+    # below whose message already says this is not a Dockerfile-vs-moon.yml drift. That is an
+    # acceptable failure shape, so there is no shape-only fallback here on purpose.
+    img_dirs="$(printf '%s\n' "$img_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
+    host_dirs="$(printf '%s\n' "$host_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
+    if [ "$img_dirs" != "$host_dirs" ]; then
+      echo "::error::${app}: the image's staged .next/static holds different top-level directories from the host build's — ts/Dockerfile and ts/apps/${app}/moon.yml have drifted. Diff (< host, > image) follows." >&2
+    elif [ "$parity" = required ]; then
+      # images.yml: the host build is fresh and from the same commit as the image, so "re-run the
+      # host build" is wrong advice here.
+      echo "::error::${app}: the image's staged .next/static holds the same directories as the host build's but different files. Both builds come from the same commit in this run (CONSOLE_PARITY_REQUIRED=1), so this is most probably the chunk-name assumption failing (docs/ops/RUNBOOK-containers.md section 6), not a ts/Dockerfile vs ts/apps/${app}/moon.yml drift. Do NOT delete .next to silence it; the RUNBOOK names the rollback. Diff (< host, > image) follows." >&2
+    else
+      echo "::error::${app}: the image's staged .next/static holds the same directories as the host build's but different files, so the two were built from DIFFERENT sources. Re-run 'moon run ${app}-ts:build' so this parity claim compares like with like; on its own this is NOT a ts/Dockerfile vs ts/apps/${app}/moon.yml drift. If a FRESH build does not clear this, that is a finding — report it; do NOT delete .next to silence it, because that only moves this check into its 'not checked' arm. Diff (< host, > image) follows." >&2
+    fi
+    diff <(printf '%s\n' "$host_list") <(printf '%s\n' "$img_list") >&2 || true
+    rc=1
+  elif [ "$rc" -eq 0 ]; then
+    echo "  ${app}: staged tree matches the host build ($(printf '%s\n' "$img_list" | grep -c . || true) files, ${img_public})"
+  fi
+  return "$rc"
+}
 
 # R-NODE (SMA-670 gap 1). The runtime base pins only the Node MAJOR (distroless publishes no
 # patch-level tags), so nothing else records which Node the image runs. This row prints it. A
@@ -1831,8 +1941,8 @@ console_healthcheck_row() {
 # function return 1 on its own.
 smoke_consoles() {
   local spec image service app base_path console_path other name port origin status html chunk bytes code uid console_status
-  local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
-  local host_std host_static host_id run_rc sh_rc img_rc cstate
+  local run_out
+  local run_rc sh_rc cstate
   local kernel_control kernel_ok parity redis_name work zones_json net redis_url args_file args_rc line sid cargs
   local ec=0 bad started
   # SMA-675 Q5: the first word says whether the kernel control row runs. It is an argument, not a
@@ -2190,97 +2300,9 @@ smoke_consoles() {
     console_node_version_row "$app" "$image" || ec=1
     console_image_config_row "$app" "$image" || ec=1
 
-    # Spec § 5.5 assertion 4 — staged-tree parity. ts/Dockerfile's staging of .next/static and
-    # public/ and ts/apps/<app>/moon.yml's `build` script are a SECOND staging site each, created
-    # deliberately; this is what keeps the two from drifting apart.
-    #
-    # It compares the staged TREES, not the two scripts' text, so the two divergences the Task 2
-    # review recorded are tolerated by construction: moon.yml's `rm -rf .next/static` before
-    # `next build` (the Dockerfile needs no counterpart — `**/.next` in ts/.dockerignore makes every
-    # builder start cold) and moon.yml's app-name prefix on its two error messages both leave the
-    # staged tree identical.
-    host_std="$ROOT/ts/apps/${app}/.next/standalone/apps/${app}"
-    host_static="$host_std/.next/static"
-    if [ -d "$host_static" ]; then
-      # Two causes, two messages, and the rc separates them. node's own uncaught ENOENT on
-      # .next/static (or on .next/BUILD_ID) exits 1, and only THAT says the staging copy did not
-      # run. docker refusing the image exits 125/126/127 before node starts, which proves nothing
-      # about staging at all. stderr is captured rather than discarded, for the same reason as the
-      # `docker create` above: the tool's own message names the cause.
-      img_rc=0
-      img_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" \
-        -e "$CONSOLE_STAGED_TREE_JS" "/app/apps/${app}" 2>&1)" || img_rc=$?
-      if [ "$img_rc" -eq 1 ]; then
-        echo "::error::${app}: /app/apps/${app}/.next/static is absent or unreadable inside the image — the staging copy in ts/Dockerfile did not run. node's message follows." >&2
-        printf '%s\n' "$img_out" >&2
-        ec=1
-      elif [ "$img_rc" -ne 0 ]; then
-        echo "::error::${app}: staged-tree parity NOT checked — docker exited ${img_rc} on ${image} before node ran, so the image is missing or unreadable and nothing was proved about staging. Its message follows." >&2
-        printf '%s\n' "$img_out" >&2
-        ec=1
-      elif [ -z "$img_out" ]; then
-        echo "::error::${app}: the staged-tree walk exited 0 but printed nothing — that is neither a staging failure nor a docker failure; inspect ${image} by hand." >&2
-        ec=1
-      else
-        # Line 1 is the public= marker, the rest is the tree. `sed -n 1p` / `sed -n '2,$p'` read
-        # their whole input; neither is an early-exit reader.
-        img_public="$(printf '%s\n' "$img_out" | sed -n 1p)"
-        img_list="$(printf '%s\n' "$img_out" | sed -n '2,$p' | LC_ALL=C sort)"
-        host_public="public=0"
-        if [ -d "$host_std/public" ]; then host_public="public=1"; fi
-        host_id="$(cat "$host_std/.next/BUILD_ID" 2>/dev/null)" || host_id=""
-        if [ -z "$host_id" ]; then
-          echo "::error::${app}: the host build at ${host_std} has no .next/BUILD_ID — that build is broken or half-written; re-run 'moon run ${app}-ts:build'." >&2
-          ec=1
-        else
-          host_list="$(cd "$host_static" && find . -type f | sed 's#^\./##' \
-            | sed "s#^${host_id}/#<BUILD_ID>/#" | LC_ALL=C sort)" || host_list=""
-          if [ "$img_public" != "$host_public" ]; then
-            echo "::error::${app}: the image staged ${img_public} but the host build staged ${host_public} — ts/Dockerfile and ts/apps/${app}/moon.yml disagree on staging public/." >&2
-            ec=1
-          fi
-          if [ "$img_list" != "$host_list" ]; then
-            # Two distinct causes produce a difference here, and they send a reader to different
-            # places, so they get different messages. A missing or partial staging copy changes
-            # which TOP-LEVEL directories exist under .next/static; two builds of different source
-            # keep the same directories and change only the content-hashed file names inside them.
-            #
-            # ASSUMPTION, recorded deliberately: a host build and an image build of the SAME source
-            # produce the same chunk file names. Measured true here — Turbopack derives them from
-            # content — but nothing enforces it. Four things would break it, and all four are
-            # toolchain events rather than code changes: a Next or Turbopack bump that changes
-            # chunk hashing; a compile-time variable that differs between the host build and the
-            # builder stage; the platform split (macOS host against a linux builder); and the
-            # Dockerfile's filtered `pnpm install` resolving a different optional platform
-            # dependency. When it breaks it breaks on EVERY run, loudly, into the branch below
-            # whose message already says this is not a Dockerfile-vs-moon.yml drift. That is an
-            # acceptable failure shape, so there is no shape-only fallback here on purpose.
-            img_dirs="$(printf '%s\n' "$img_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
-            host_dirs="$(printf '%s\n' "$host_list" | sed 's#/.*##' | LC_ALL=C sort -u)"
-            if [ "$img_dirs" != "$host_dirs" ]; then
-              echo "::error::${app}: the image's staged .next/static holds different top-level directories from the host build's — ts/Dockerfile and ts/apps/${app}/moon.yml have drifted. Diff (< host, > image) follows." >&2
-            else
-              echo "::error::${app}: the image's staged .next/static holds the same directories as the host build's but different files, so the two were built from DIFFERENT sources. Re-run 'moon run ${app}-ts:build' so this parity claim compares like with like; on its own this is NOT a ts/Dockerfile vs ts/apps/${app}/moon.yml drift. If a FRESH build does not clear this, that is a finding — report it; do NOT delete .next to silence it, because that only moves this check into its 'not checked' arm. Diff (< host, > image) follows." >&2
-            fi
-            diff <(printf '%s\n' "$host_list") <(printf '%s\n' "$img_list") >&2 || true
-            ec=1
-          else
-            echo "  ${app}: staged tree matches the host build ($(printf '%s\n' "$img_list" | grep -c . || true) files, ${img_public})"
-          fi
-        fi
-      fi
-    else
-      # Deliberate, and it says so out loud rather than passing silently: a check that quietly
-      # skips is the failure mode this repository has paid for repeatedly. Nothing here sets ec —
-      # the absence of a host build is not a defect.
-      #
-      # LOCAL ONLY, and the message says so. .github/workflows/images.yml runs no host build, so
-      # CI ALWAYS takes this arm and the staged-tree parity check gates NOTHING there. Making it
-      # gate would mean adding a TypeScript toolchain and a second Next build to that job. That is
-      # a follow-up, recorded in the PR description and in docs/ops/RUNBOOK-containers.md — until
-      # it lands, do not read a green CI `all-consoles` as parity coverage.
-      echo "  ${app}: no host build at ${host_static}; staged-tree parity NOT CHECKED this run (CI never runs a host build, so a green CI run is NOT parity coverage — run 'moon run ${app}-ts:build' locally to check it)"
-    fi
+    # Spec § 5.5 assertion 4 — staged-tree parity (console_staged_parity_row, SMA-671). The mode
+    # comes from this function's --parity= word.
+    console_staged_parity_row "$app" "$image" "$parity" || ec=1
   done
 
   rm -rf "$work"
