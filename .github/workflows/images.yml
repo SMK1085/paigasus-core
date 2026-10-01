@@ -35,6 +35,9 @@ on:
       - 'rs/rust-toolchain.toml'
       - 'rs/Dockerfile'
       - 'rs/.dockerignore'
+      # SMA-665 D9: the chisel dpkg status generator, its self-test and its fixtures.
+      # rs/Dockerfile COPYs them, and only the image build reads them.
+      - 'rs/docker/**'
       - 'ts/Dockerfile'
       - 'ts/.dockerignore'
       - 'ts/pnpm-lock.yaml'
@@ -134,6 +137,12 @@ jobs:
 
       - name: Decision script self-test
         run: uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py --self-test
+
+      # SMA-665 T2 (spec D10): the self-test of rs/docker/chisel-dpkg-status.sh. The target is the
+      # chisel-dpkg-status-test stage of rs/Dockerfile, so BuildKit builds the rootfs stage and the
+      # test, not the Rust builder. --no-cache-filter makes the test RUN on every build.
+      - name: Chisel dpkg status generator self-test
+        run: docker buildx build --progress=plain --no-cache-filter=chisel-dpkg-status-test --target chisel-dpkg-status-test -f rs/Dockerfile rs/
 
       - name: Build both images as OCI archives
         run: |
