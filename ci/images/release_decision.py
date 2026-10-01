@@ -579,7 +579,9 @@ def _cli_rows(tmp: Path) -> list[tuple[str, Callable[[], object], object]]:
         ("cli: cargo with an empty list file is exit 2", floor("--service", "iam", "--arch", "amd64", "--chisel-dir", str(empty_list), str(cargo_sbom)), 2),
         ("cli: cargo with the list of another arch is exit 2", floor("--service", "iam", "--arch", "arm64", "--chisel-dir", str(with_list), str(cargo_sbom)), 2),
         ("cli: no --arch is exit 2", floor("--service", "iam", "--chisel-dir", str(with_list), str(cargo_sbom)), 2),
-        ("cli: an --arch that is not an architecture is exit 2", floor("--service", "iam", "--arch", "../amd64", "--chisel-dir", str(with_list), str(cargo_sbom)), 2),
+        # The npm key reads no list file, so only the ARCH_RE guard can give exit 2 here. A cargo
+        # key with "../amd64" gives exit 2 from the missing list file even without the guard.
+        ("cli: an --arch that is not an architecture is exit 2", floor("--service", "iam-console", "--arch", "../amd64", "--chisel-dir", str(no_list), str(npm_sbom)), 2),
         ("cli: npm with the cargo arguments and no list file passes", floor("--service", "iam-console", "--arch", "amd64", "--chisel-dir", str(no_list), str(npm_sbom)), 0),
     ]
 
