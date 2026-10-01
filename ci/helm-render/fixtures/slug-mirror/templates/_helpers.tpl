@@ -148,6 +148,7 @@ in BOTH consoles. The TypeScript already rejects it; the chart should never rend
 {{- fail "oidc.caBundle.key is empty while oidc.caBundle.existingConfigMap is set: every pod mounts ONE key of that ConfigMap, so the key must name it (the default is ca.crt)" -}}
 {{- end -}}
 {{- include "paigasus.validateIamBackend" . -}}
+{{- include "paigasus.validateHttpRoute" . -}}
 {{- end -}}
 
 {{- define "paigasus.zoneMapJson" -}}

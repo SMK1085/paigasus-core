@@ -22,6 +22,8 @@ __all__ = (
     "AuthorizationServiceStub",
     "BulkReplayDeadLettersRequest",
     "BulkReplayDeadLettersResponse",
+    "ChangeUserEmailRequest",
+    "ChangeUserEmailResponse",
     "CreateOrganizationRequest",
     "CreateOrganizationResponse",
     "CreateProjectRequest",
@@ -39,6 +41,9 @@ __all__ = (
     "DetachMembershipResponse",
     "DiscardDeadLetterRequest",
     "DiscardDeadLetterResponse",
+    "ExternalIdentity",
+    "FindUserByEmailRequest",
+    "FindUserByEmailResponse",
     "GetOrganizationRequest",
     "GetOrganizationResponse",
     "GetProjectRequest",
@@ -57,6 +62,8 @@ __all__ = (
     "IsAuthorizedResponse",
     "IssueApiKeyRequest",
     "IssueApiKeyResponse",
+    "LinkExternalIdentityRequest",
+    "LinkExternalIdentityResponse",
     "ListApiKeysRequest",
     "ListApiKeysResponse",
     "ListAuditEntriesRequest",
@@ -117,6 +124,9 @@ __all__ = (
     "SurvivingGrant",
     "Team",
     "TenancyServiceStub",
+    "UnlinkExternalIdentityRequest",
+    "UnlinkExternalIdentityResponse",
+    "User",
     "UserServiceStub",
     "WhoAmIRequest",
     "WhoAmIResponse",
@@ -486,6 +496,32 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class ChangeUserEmailRequest(betterproto2.Message):
+    user_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    email: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    reason: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ChangeUserEmailRequest", ChangeUserEmailRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ChangeUserEmailResponse(betterproto2.Message):
+    user: "User | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ChangeUserEmailResponse", ChangeUserEmailResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class CreateOrganizationRequest(betterproto2.Message):
     slug: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -768,6 +804,52 @@ class DiscardDeadLetterResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "DiscardDeadLetterResponse", DiscardDeadLetterResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ExternalIdentity(betterproto2.Message):
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+    """
+    uuid
+    """
+
+    issuer: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    subject: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    audit: "__common__v1__.AuditMetadata | None" = betterproto2.field(
+        4, betterproto2.TYPE_MESSAGE, optional=True
+    )
+    """
+    modified_at == created_at (immutable)
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ExternalIdentity", ExternalIdentity
+)
+
+
+@dataclass(eq=False, repr=False)
+class FindUserByEmailRequest(betterproto2.Message):
+    email: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "FindUserByEmailRequest", FindUserByEmailRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class FindUserByEmailResponse(betterproto2.Message):
+    user: "User | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "FindUserByEmailResponse", FindUserByEmailResponse
 )
 
 
@@ -1064,6 +1146,34 @@ class IssueApiKeyResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "IssueApiKeyResponse", IssueApiKeyResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class LinkExternalIdentityRequest(betterproto2.Message):
+    user_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    issuer: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    subject: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    reason: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "LinkExternalIdentityRequest", LinkExternalIdentityRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class LinkExternalIdentityResponse(betterproto2.Message):
+    external_identity: "ExternalIdentity | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "LinkExternalIdentityResponse", LinkExternalIdentityResponse
 )
 
 
@@ -2016,6 +2126,64 @@ default_message_pool.register_message("paigasus.iam.v1", "Team", Team)
 
 
 @dataclass(eq=False, repr=False)
+class UnlinkExternalIdentityRequest(betterproto2.Message):
+    user_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    external_identity_id: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    reason: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "UnlinkExternalIdentityRequest", UnlinkExternalIdentityRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class UnlinkExternalIdentityResponse(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "UnlinkExternalIdentityResponse", UnlinkExternalIdentityResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class User(betterproto2.Message):
+    """
+    Operator identity links (SMA-712). Each RPC authorizes its own Cedar action
+    at the hierarchy root inside the application service, with no
+    enforce_tenancy gate: FindUserByEmail needs GetUser, and the three writes
+    need LinkExternalIdentity, UnlinkExternalIdentity and ChangeUserEmail. Each
+    write needs a reason, which goes into the audit record. A user is named by
+    its full principal PRN.
+    """
+
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    email: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    display_name: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    status: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+    """
+    principal status
+    """
+
+    external_identities: "list[ExternalIdentity]" = betterproto2.field(
+        5, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    audit: "__common__v1__.AuditMetadata | None" = betterproto2.field(
+        6, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "User", User)
+
+
+@dataclass(eq=False, repr=False)
 class WhoAmIRequest(betterproto2.Message):
     pass
 
@@ -2927,6 +3095,78 @@ class UserServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.UserService/CreateUser",
             message,
             CreateUserResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def find_user_by_email(
+        self,
+        message: "FindUserByEmailRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "FindUserByEmailResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.UserService/FindUserByEmail",
+            message,
+            FindUserByEmailResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def link_external_identity(
+        self,
+        message: "LinkExternalIdentityRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "LinkExternalIdentityResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.UserService/LinkExternalIdentity",
+            message,
+            LinkExternalIdentityResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def unlink_external_identity(
+        self,
+        message: "UnlinkExternalIdentityRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "UnlinkExternalIdentityResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.UserService/UnlinkExternalIdentity",
+            message,
+            UnlinkExternalIdentityResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def change_user_email(
+        self,
+        message: "ChangeUserEmailRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ChangeUserEmailResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.UserService/ChangeUserEmail",
+            message,
+            ChangeUserEmailResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,

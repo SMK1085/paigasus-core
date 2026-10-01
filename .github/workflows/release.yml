@@ -1243,6 +1243,12 @@ jobs:
           printf '%s\n' "$manifest" > "out/digest-${SERVICE}-${ARCH}.txt"
 
       - name: Smoke this service
+        # SMA-675 Q5: the kernel control row (a second container with a corrupted wasm chunk)
+        # runs only in images.yml. It tests the probe, not the release candidate. The kernel route
+        # row and the Redis sidecar still run here, on amd64 and arm64. A cargo service smoke
+        # ignores the variable. The value is quoted: YAML 1.1 reads a bare off as a boolean.
+        env:
+          PAIGASUS_SMOKE_KERNEL_CONTROL: 'off'
         run: ci/images/run.sh smoke "${SERVICE}"
 
       - name: SBOM for this platform

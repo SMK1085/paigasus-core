@@ -255,6 +255,12 @@ tasks:
       # 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to keep
       # narrow globs rather than collapse them into the broad one.
       - 'ci/helm-render/**/*'
+      # SMA-714 — this task pins load-bearing lines inside ci/moon-diagnosis/run.sh
+      # (MOON_DIAGNOSIS_SH_CALL_SITES), so a change under ci/moon-diagnosis/ MUST re-key it. The
+      # broad 'ci/**/*' entry already covers it for SCHEDULING; the narrow entry is kept because
+      # check 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to
+      # keep narrow globs rather than collapse them into the broad one.
+      - 'ci/moon-diagnosis/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -1023,3 +1029,28 @@ tasks:
       - 'ts/apps/iam-console/package.json'
       - 'ts/packages/paigasus-discovery/src/core/state.ts'
       - 'ts/packages/paigasus-proto/src/capability.ts'
+
+  moon-diagnosis-exec:
+    description: 'Run the CLAUDE.md moon-diagnosis Step 1 query against a real failed moon ci report (SMA-714).'
+    # WHY THIS EXISTS — check 12 of repo:actionlint gates only the PRESENCE of five literals in the
+    # root CLAUDE.md moon-diagnosis block. SMA-597 shipped a Step 1 query that printed null for
+    # every value, and every gate stayed green until SMA-711 fixed it. This task runs the
+    # documented query, and checks Steps 2 and 2a, against a real failed `moon ci` in a fixture
+    # workspace (spec 2026-09-28-sma-714-moon-diagnosis-exec-gate-design.md).
+    #
+    # INPUTS. CLAUDE.md holds the procedure. .prototools holds the moon pin: a moon bump is the
+    # event most likely to move a report field. SELF_TASK_EXPECTED_GLOBS pins these three.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
+    # is REQUIRED: Moon takes a `script:` block's status from its LAST command, so without it a
+    # failing control is masked by the passing real run. SELF_SCHEDULED_GATES pins these four lines.
+    script: |
+      set -euo pipefail
+      bash ci/moon-diagnosis/run.sh --self-test
+      bash ci/moon-diagnosis/run.sh --negative-control
+      bash ci/moon-diagnosis/run.sh
+    toolchain: 'system'
+    inputs:
+      - 'CLAUDE.md'
+      - '.prototools'
+      - 'ci/moon-diagnosis/**/*'

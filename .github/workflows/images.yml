@@ -55,6 +55,17 @@ on:
       # on a bad edit to it.)
       - 'rs/crates/bindings/paigasus-node-bindings/index.js'
       - 'rs/crates/bindings/paigasus-node-bindings/index.d.ts'
+      # SMA-675: the console smoke's kernel route row depends on these four files at RUNTIME,
+      # not at build time. It seeds a literal SessionRecord, which isSessionRecord in session.ts
+      # must accept. It expects the seeded session's nonce from the (console) layout on each
+      # zone's probe page (console_probe_path_for in ci/images/run.sh). A change here can red the
+      # smoke while the ordinary build stays green. The route group directory is '(console)', but
+      # repo:actionlint does not pass '(' or ')' to git, so the patterns use '*console*'. That form
+      # matches the same four files today, and the gate still reds it if it matches no file.
+      - 'ts/packages/paigasus-auth/src/core/session.ts'
+      - 'ts/apps/*/app/*console*/layout.tsx'
+      - 'ts/apps/iam-console/app/*console*/orgs/page.tsx'
+      - 'ts/apps/gateway-console/app/*console*/overview/page.tsx'
       - 'ci/images/**'
       - '.github/workflows/images.yml'
       - '.prototools'

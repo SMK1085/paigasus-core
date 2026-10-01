@@ -64,8 +64,8 @@ use crate::adapters::oidc::jwks::{HttpJwksFetcher, IdpTls, InMemoryJwksCache, Jw
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
-    PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
-    PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, SeaOrmUnitOfWork,
+    PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgIdentityLinkStore, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore,
+    PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, SeaOrmUnitOfWork,
 };
 use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
@@ -85,6 +85,8 @@ use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
 use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
 use crate::application::teams::{TeamService, TeamServiceDeps};
+use crate::application::tenancy_nodes::TenancyNodes;
+use crate::application::user_identities::{UserIdentityDeps, UserIdentityService};
 use crate::config::{ApiKeyCacheBackend, AuthnConfig, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
 use paigasus_iam_core::{
     ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntityGenBumper, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore,
@@ -253,6 +255,11 @@ pub struct AppState {
     /// The dead-letter operator use case (SMA-469) — `GET/POST /v1/outbox/dead-letters*`
     /// read through this. Root-only, enforced inside the service itself.
     pub dead_letters: DeadLetterService,
+    /// The operator identity-link use case (SMA-712) — `/v1/users/find-by-email`,
+    /// `/v1/users/{id}/external-identities*`, `/v1/users/{id}/email` and the four matching
+    /// `UserService` RPCs call through this. It authorizes each call itself, at Root, with no
+    /// `enforce_tenancy` gate.
+    pub user_identities: UserIdentityService,
     /// Retirement of orphaned system-owned rows (SMA-481) — the `/v1/authz/system-policies/
     /// {id}/retire` route calls through this. Deliberately its own service rather than a
     /// `PolicySvc` method: it drives the privileged `SystemRowRetirer` port, which bypasses
@@ -516,14 +523,20 @@ impl AppState {
         // counter `authz`'s `PolicySnapshot::reload_if_stale` polls (AC1).
         let authorize = Authorize::new(authz.clone() as Arc<dyn Authorizer>);
 
-        // SMA-444 cross-tenant-escalation fix (FIX 2): `RoleService::resolve_scope`'s own
-        // DB-lookup defense needs read access to the tenancy repos, independent of
-        // `orgs`/`teams`/`projects` above (those are wrapped in `OrganizationService`/etc.,
-        // not exposed as bare repos) — cheap fresh instances, `DatabaseConnection` clones an
-        // `Arc`-backed pool handle.
-        let role_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
-        let role_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
-        let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
+        // Read access to the tenancy repos, independent of `orgs`/`teams`/`projects` above
+        // (those are wrapped in `OrganizationService`/etc., not exposed as bare repos) — cheap
+        // fresh instances, `DatabaseConnection` clones an `Arc`-backed pool handle. Three users:
+        // `RoleService::resolve_scope` (SMA-444 FIX 2), and, through ONE shared `TenancyNodes`,
+        // the stored-PRN check of `ServiceAccountService::create`/`list` and
+        // `ApiKeyService::issue` (SMA-646).
+        let tenancy_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
+        let tenancy_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
+        let tenancy_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
+        let tenancy_nodes = TenancyNodes {
+            orgs: tenancy_orgs.clone(),
+            teams: tenancy_teams.clone(),
+            projects: tenancy_projects.clone(),
+        };
         // SMA-446 Task B4 (the UoW reference pattern B5-B7 copy): `roles` drives its
         // grant/revoke mutation + outbox event + audit entry through ONE `SeaOrmUnitOfWork`
         // transaction (`role_uow`), then an awaited, best-effort `GenerationsPolicyGenBumper`
@@ -539,9 +552,12 @@ impl AppState {
             // pre-check. A second `PgRoleGrantStore` value over the same `db` and `gens`
             // handles — the struct is not what must be shared (the SMA-477 policy-store note).
             query: Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone())),
-            orgs: role_orgs,
-            teams: role_teams,
-            projects: role_projects,
+            orgs: tenancy_orgs,
+            teams: tenancy_teams,
+            projects: tenancy_projects,
+            // SMA-649: `RoleService::resolve_principal` confirms a grant's target principal PRN
+            // against the stored row. A fresh handle over the same `db` (a cheap pool clone).
+            principals: Arc::new(PgPrincipalRepository::new(db.clone())),
             authorize: authorize.clone(),
             uow: role_uow.clone(),
             outbox: role_outbox.clone(),
@@ -701,6 +717,7 @@ impl AppState {
             keys: Arc::new(PgApiKeyRepository::new(db.clone())) as Arc<dyn ApiKeyRepository>,
             cache: api_key_cache.clone(),
             authorize: authorize.clone(),
+            nodes: tenancy_nodes.clone(),
             uow: service_account_uow,
             outbox: service_account_outbox,
             ids: KernelIdGenerator,
@@ -721,6 +738,7 @@ impl AppState {
             service_accounts: PgServiceAccountRepository::new(db.clone()),
             grants: role_grant_store.clone(),
             authorize: authorize.clone(),
+            nodes: tenancy_nodes,
             hasher: api_key_hasher,
             entropy: OsRngKeyEntropy,
             cache: api_key_cache,
@@ -785,9 +803,23 @@ impl AppState {
             JitPolicy::from_issuers(&jit_flags),
         );
 
+        // SMA-712: the operator identity-link calls. The issuer set is the one `jit_flags`
+        // parsed from `authn.issuers` above, so a link can only name an issuer that IAM accepts
+        // a token from. Its own `SeaOrmUnitOfWork`, like `dead_letter_uow`: each write and its
+        // audit entry commit on one transaction, on the shared `audit_log` handle.
+        let user_identities = UserIdentityService::new(UserIdentityDeps {
+            authorize: authorize.clone(),
+            links: Arc::new(PgIdentityLinkStore::new(db.clone())),
+            uow: Arc::new(SeaOrmUnitOfWork::new(db.clone())),
+            audit: audit_log.clone(),
+            issuers: jit_flags.iter().map(|(issuer, _)| issuer.clone()).collect(),
+            ids: Arc::new(KernelIdGenerator),
+            clock: Arc::new(SystemClock),
+        });
+
         if !authz_cfg.enforce_tenancy {
             tracing::warn!(
-                "enforce_tenancy is disabled: the tenancy-adapter authorization guards are bypassed — org/team/project/membership CRUD, and Action::CreateUser on POST /v1/users and UserService.CreateUser. Application-layer authorization (policies, role grants, service accounts, API keys, audit, outbox dead letters, system retirement) still applies. Test-only configuration, never use in production"
+                "enforce_tenancy is disabled: the tenancy-adapter authorization guards are bypassed — org/team/project/membership CRUD, and Action::CreateUser on POST /v1/users and UserService.CreateUser. Application-layer authorization (policies, role grants, service accounts, API keys, audit, outbox dead letters, system retirement, user identity links) still applies. Test-only configuration, never use in production"
             );
         }
 
@@ -815,6 +847,7 @@ impl AppState {
             api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
             audit_query,
             dead_letters,
+            user_identities,
             retirement,
             capabilities: crate::service_info::Capabilities::from_config(cfg),
             audit_log,

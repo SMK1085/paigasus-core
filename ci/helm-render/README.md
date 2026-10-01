@@ -37,7 +37,7 @@ exception: it renders against the kind job's own values files, not `STUB_VALUES`
 | `4 iam-grpc <subset>` | Ports agree | The IAM `grpc` containerPort, `IAM_GRPC_ADDR`, the Service's `grpc` port and target, and `PAIGASUS_IAM_GRPC_URL` disagree |
 | `4 console-port <subset>` | Ports agree | A console's containerPort, `PORT` and its Service's resolved target port disagree |
 | `4 security-context <subset>` | Security context | A pod lacks `runAsUser: 65532`, `runAsGroup: 65532`, `runAsNonRoot: true`; a container lacks `allowPrivilegeEscalation: false` or sets an identity key to another value; either level carries `readOnlyRootFilesystem` |
-| `7 kind-values` | The kind job's values render (SMA-513 PR 3) | `helm template` with `ci/kind/values/a.yaml`, or with `a.yaml` plus `b.yaml`, exits non-zero. A missing values file is rc 2 |
+| `7 kind-values` | The kind job's values render (SMA-513 PR 3) | `helm template` with `ci/kind/values/a.yaml`, or with `a.yaml` plus `b.yaml`, exits non-zero. A missing values file is rc 2. A render that runs longer than `HELM_TIMEOUT_S` is rc 2, not a failed row (SMA-679) |
 | `8a default-image-tags` | The default tags track the image versions (SMA-688) | For a chain of `ci/images/chains.toml`, `values.yaml` does not hold exactly one `image` block with its `ghcr` repository, or that block's `tag` is empty or differs from the version in the chain's version file, or that version is `0.0.0`; or an `image` block names a repository that no chain names |
 | `8b default-image-render` | The rendered images use those tags (SMA-688) | `STUB_VALUES` sets an `image` key, or the `iam+gateway` render does not hold exactly three images, each equal to `<repository>:<tag>` of its `values.yaml` block |
 | `8c chart-app-version` | The empty-tag fallback names a released image (SMA-696) | `Chart.yaml` `appVersion` is not a non-empty string; or a chain of `ci/images/chains.toml` that is not in `UNRELEASED_CHAINS` has no git tag `paigasus-<key>-v<appVersion>`; or an `UNRELEASED_CHAINS` key has a release tag or is no chain; or a Deployment image in the render with every `image.tag` cleared does not carry the tag `appVersion` |
@@ -57,7 +57,7 @@ section together.
 | -- | -- |
 | 0 | pass |
 | 1 | an assertion failed (the module's 3, or a chart script's 1) |
-| 2 | infrastructure error (a failed render, an unparseable source, a missing tool, a chart script's 127 or 141, fewer than seven chart scripts) |
+| 2 | infrastructure error (a failed render, an unparseable source, a missing tool, a chart script's 127 or 141, fewer than seven chart scripts; a `helm` call inside `helm_render.py` that runs longer than `HELM_TIMEOUT_S` (30 s) or cannot start (`OSError`); the `git for-each-ref` tag listing when it runs longer than `GIT_TIMEOUT_S` (30 s)) |
 
 `helm_render.py` exits 3, not 1, for an assertion, because a Python traceback exits 1. Do not
 "normalize" it. Every row runs after a failure; the gate's rc is the worst one seen.
@@ -127,6 +127,30 @@ FAILED: the module passed a mutated chart (rc=0)` and exits `rc=1`. This happens
 _of_kind(fallback_docs, "Deployment"):` loop body's `problems.append(...)` line with `pass`,
 alone, makes `--self-test` exit `rc=1`. The row `check8c the rendered fallback differs` goes red.
 
+The helm and git timeouts (SMA-679) were measured on 2026-09-28. Each mutation imports, and makes
+`helm_render.py --self-test` exit `rc=3` and `bash ci/helm-render/run.sh --self-test` exit
+`rc=1`, with no traceback. All rows below are `helm timeout: …` or `git timeout: …` rows. M1 (no
+`timeout=` in `_run_helm`): `helm_template passes timeout=HELM_TIMEOUT_S`, `check7 passes
+timeout=HELM_TIMEOUT_S on both renders` and `every subprocess call goes through _run_helm or
+release_tags [the real module]`. The real-subprocess row stays green, because its stub sets its
+own timeout. M2 (`_run_helm` catches `CalledProcessError`, not `TimeoutExpired`): each with
+`expected InfraError, got TimeoutExpired`, `_run_helm maps TimeoutExpired to InfraError`, `the
+InfraError names the render, the command, the limit and the stderr` (and its five needle rows), `a
+TimeoutExpired with no stderr still gives InfraError`, `a real subprocess over the limit is killed
+and gives InfraError`, `helm_template raises InfraError` and `check7 raises InfraError, not a
+failed row`. M3 (`helm_template` calls `run` directly): `helm_template raises InfraError` (got
+`TimeoutExpired`), `helm_template passes timeout=HELM_TIMEOUT_S` and the `[the real module]` row,
+which names `helm_template`. M4 (`check7` calls `run` directly): `check7 raises InfraError, not a
+failed row` (got `TimeoutExpired`), `check7 passes timeout=HELM_TIMEOUT_S on both renders` and
+the `[the real module]` row, which names `body`. M5 (`HELM_TIMEOUT_S = 120`): `8 module runs fit
+far inside the job limit`. M6 (no `timeout=` in `release_tags`): `release_tags passes
+timeout=GIT_TIMEOUT_S` and the `[the real module]` row. M7 (`release_tags` catches
+`CalledProcessError`): `release_tags maps TimeoutExpired to InfraError` (got `TimeoutExpired`), and
+its three needle rows. A stub `helm` that sleeps, with `HELM_TIMEOUT_S = 1` set in the process,
+made `main(["--chart", "charts/paigasus"])` return 2 after about 1 s with `INFRA  helm-render:
+helm did not finish in 1 s (HELM_TIMEOUT_S) for subset iam: <stub dir>/helm template paigasus
+<repo>/charts/paigasus --kube-version 1.31.0 --set ingress.host=console.example.test --set …`.
+
 ## Tool resolution
 
 - `helm` resolves once through `proto --reporter text bin helm` from the repo root, and must be
@@ -161,6 +185,19 @@ Nothing in the repository enforces this rule; review does.
    host whose new pipe holds 512 bytes, its `printf` can get SIGPIPE (141), which this gate
    reports as rc 2. A Linux runner's 64 KiB pipe holds the whole render. Not measured. This PR
    does not change the chart scripts.
+6. Only the helm and git calls inside `helm_render.py` have a timeout (SMA-679). `run.sh`'s
+   `resolve_helm` (`helm version --short`) and the helm calls in the seven chart scripts have
+   none, and a systemic helm hang hangs there first. SMA-722 owns them and proposes a moon
+   `options.timeout` on `repo:helm-render`.
+7. The task starts the module 8 times (7 negative-control fixtures and the real run). Each module
+   run can lose at most one timeout, so a hang in every render costs 8 × 30 s = 240 s of the
+   30-minute CI job. The self-test pins `8 × max(HELM_TIMEOUT_S, GIT_TIMEOUT_S) <= 300 s`.
+8. `subprocess.run` kills only the direct child, not a process group. `helm template` starts no
+   child process with no plugin loaded (`run.sh` sets `HELM_DATA_HOME` to an empty directory).
+9. The self-test's `ast` walk does not see a subprocess call through an alias
+   (`from subprocess import run as r`) or through `os.system`, and it skips `self_test` itself.
+10. 30 s is a judgment, not a measurement on a CI runner. A render took 0.02-0.03 s on the
+    development Mac (helm 3.22.0, 2026-09-28).
 
 ## Running it locally
 

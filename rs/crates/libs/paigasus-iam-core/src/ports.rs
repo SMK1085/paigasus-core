@@ -12,7 +12,7 @@ use crate::principal::{Principal, PrincipalKind, PrincipalStatus};
 use crate::service_account::{ServiceAccount, ServiceAccountRecord};
 use crate::tenancy::{Membership, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef};
 use crate::user::User;
-use crate::value::{PrincipalId, Stamp};
+use crate::value::{Email, PrincipalId, Stamp};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -112,6 +112,62 @@ pub trait ExternalIdentityRepository: Send + Sync {
     async fn find_by_issuer_subject(&self, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError>;
     /// One transaction spanning principal + user + external_identity (D9).
     async fn provision(&self, principal: &Principal, user: &User, identity: &ExternalIdentity) -> Result<(), RepositoryError>;
+}
+
+/// A user with its principal status and its external identities, in `(created_at, id)` order
+/// (SMA-712). The read model of the operator identity-link calls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserWithIdentities {
+    pub user: User,
+    pub status: PrincipalStatus,
+    pub identities: Vec<ExternalIdentity>,
+}
+
+/// The two emails of one email change (SMA-712). `old` comes from the row that the transaction
+/// locked, never from an earlier read, so each audit record names the correct old email.
+///
+/// `old` is the raw stored string, not an [`Email`]. A hand-edited row can hold a value that
+/// `Email::parse` refuses, and `ChangeUserEmail` is the call that repairs such a row. So the
+/// change must accept that value and record it as it is (SMA-712 code review F6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailChange {
+    pub old: String,
+    pub new: Email,
+}
+
+/// The narrow port of the operator identity-link calls (SMA-712 spec 6.2). It is separate from
+/// [`ExternalIdentityRepository`], which stays read-and-provision only on the authentication
+/// path. Every read that decides an audit value or a no-op happens inside the caller's
+/// transaction.
+///
+/// **The stored-PRN rule (SMA-649, SMA-712 code review F1).** A method that takes a user
+/// `PrincipalId` from the caller loads the principal by uuid and compares the stored
+/// `principal.prn` byte for byte with `id.canonical()`. An absent principal is `None` (the
+/// service answers `not-found`). A different PRN, for example one with a region or an
+/// organization slot, is `Err(PrnMismatch)`. Every `PrincipalId` that a method RETURNS is built
+/// from the stored `principal.prn`, never from the caller's value or from a bare uuid.
+#[async_trait]
+pub trait IdentityLinkStore: Send + Sync {
+    /// The user with this exact email, or `None` when no USER has it.
+    async fn find_user_by_email(&self, email: &Email) -> Result<Option<UserWithIdentities>, RepositoryError>;
+    /// Applies the stored-PRN rule, then locks the `"user"` row FOR SHARE, and returns the stored
+    /// `PrincipalId`. `None` when the principal is not a user (unknown id, or a service account).
+    /// It does not read the email, so a stored email that does not parse does not block it.
+    async fn lock_user_in(&self, tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<PrincipalId>, RepositoryError>;
+    /// The identity with this `(issuer, subject)`, or `None`.
+    async fn find_identity_in(&self, tx: &dyn Transaction, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError>;
+    /// Inserts the link. `Conflict(ExternalIdentityExists)` on the unique constraint.
+    async fn link_in(&self, tx: &dyn Transaction, identity: &ExternalIdentity) -> Result<(), RepositoryError>;
+    /// Deletes the identity only when it belongs to `user`, and returns the deleted row. `None`
+    /// when no row matched.
+    async fn unlink_in(&self, tx: &dyn Transaction, user: &PrincipalId, identity_id: Uuid) -> Result<Option<ExternalIdentity>, RepositoryError>;
+    /// Applies the stored-PRN rule, locks the `"user"` row FOR UPDATE, then updates the email and
+    /// `updated_at` when the email differs. `changed == false` is the no-op. `None` when the
+    /// principal is not a user. `Conflict(EmailTaken)` when another user has the email. The old
+    /// stored value need not parse as an [`Email`] (see [`EmailChange`]).
+    async fn change_email_in(&self, tx: &dyn Transaction, user: &PrincipalId, email: &Email, now: DateTime<Utc>) -> Result<Option<Mutated<EmailChange>>, RepositoryError>;
+    /// The user as the transaction sees it now, for the `ChangeUserEmail` response.
+    async fn user_view_in(&self, tx: &dyn Transaction, id: &PrincipalId) -> Result<Option<UserWithIdentities>, RepositoryError>;
 }
 
 /// Persistence port for organizations.
@@ -219,27 +275,36 @@ pub trait MembershipRepository: Send + Sync {
     /// columns, so these records are the only place the cascaded PRNs exist; each becomes one
     /// audit entry and one event, all sharing the call's single correlation id.
     async fn detach_in(&self, tx: &dyn Transaction, id: Uuid) -> Result<Vec<MembershipRecord>, RepositoryError>;
+    /// Filters on a bare uuid and does NOT confirm a PRN. For callers that hold a
+    /// server-resolved `PrincipalId` only (authn introspection,
+    /// `principal_context::load_all_memberships`). A PRN from the wire goes through
+    /// [`MembershipKindQuery::list_of_kind`], which confirms it against storage (SMA-649).
     async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
     /// Resolves node by uuid; PrnMismatch if the supplied ref's canonical != stored prn; NotFound if absent.
     async fn list_by_node(&self, node: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
 }
 
-/// Which axis a membership listing reads: one principal's memberships, or one node's.
+/// Which axis a membership listing reads: one principal's memberships, or one node's. The
+/// principal arm carries the full `PrincipalId`, not a bare uuid, so the repository can
+/// confirm the supplied PRN against the stored one (SMA-649).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MembershipAxis {
-    Principal(Uuid),
+    Principal(PrincipalId),
     Node(TenancyNodeRef),
 }
 
-/// Read port: a membership listing narrowed to one principal kind (SMA-676 D8). A separate
-/// port, not a new [`MembershipRepository`] method: that trait has six implementations, five
-/// of them test fakes (the rule `authz::ports::SystemPolicyReconciler` records).
+/// Read port: the wire membership listing (SMA-676 D8, SMA-649). A separate port, not a new
+/// [`MembershipRepository`] method: that trait has six implementations, five of them test
+/// fakes (the rule `authz::ports::SystemPolicyReconciler` records).
 #[async_trait]
 pub trait MembershipKindQuery: Send + Sync {
-    /// The same order (`created_at, id`), paging and node guards (`NotFound`, `PrnMismatch`)
-    /// as [`MembershipRepository::list_by_principal`] and [`MembershipRepository::list_by_node`],
-    /// but only memberships whose principal is of `kind`.
-    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
+    /// The listing that both transports use for every `ListMemberships` request. Order
+    /// `created_at, id`, with `limit`/`offset` paging. Both axes confirm the supplied PRN
+    /// against storage before any row is read: an absent principal or node answers
+    /// `NotFound`, and a stored PRN that differs from the canonical form of the supplied PRN
+    /// answers `PrnMismatch`. `kind = None` keeps every kind; `Some(kind)` keeps only
+    /// memberships whose principal is of that kind.
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: Option<PrincipalKind>, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
 }
 
 /// Mints new identities (UUIDv7 + PRN). Impure (clock + entropy) — hence a port.
@@ -515,6 +580,11 @@ mod tests {
     // Compile-time proof the audit port is object-safe (injected as a trait object).
     #[allow(dead_code)]
     fn audit_log_is_object_safe(_: &dyn AuditLog) {}
+
+    // Compile-time proof the SMA-712 identity-link port is object-safe (injected as a trait
+    // object into `UserIdentityService`).
+    #[allow(dead_code)]
+    fn identity_link_store_is_object_safe(_: &dyn IdentityLinkStore) {}
 
     // Compile-time proof the new UoW/outbox/event-publisher/gen-bumper ports are object-safe
     // (SMA-446, Slice B).

@@ -113,6 +113,34 @@ async fn http_status(port: u16, path: &str) -> Option<(u16, String)> {
     Some((status, resp.text().await.ok()?))
 }
 
+/// The value of the UNLABELLED sample `name` in a Prometheus text exposition, or `None`.
+///
+/// Reads sample lines only. A `# HELP`/`# TYPE` line is skipped: `describe_iam_metrics()` can
+/// write those with no series, so a `contains(name)` would pass with the SMA-713 prime deleted.
+/// The name must match exactly, so `<name>_created` or a labelled `<name>{…}` does not count.
+fn sample_value<'a>(exposition: &'a str, name: &str) -> Option<&'a str> {
+    exposition.lines().filter(|line| !line.starts_with('#')).find_map(|line| {
+        let (metric, value) = line.split_once(' ')?;
+        (metric == name).then(|| value.trim())
+    })
+}
+
+#[test]
+fn sample_value_reads_only_the_exact_unlabelled_sample() {
+    let body = "# HELP iam_outbox_relay_publish_failures_total Outbox rows.\n\
+                # TYPE iam_outbox_relay_publish_failures_total counter\n\
+                iam_outbox_relay_publish_failures_total_created 17\n\
+                iam_outbox_relay_publish_failures_total 0\n";
+    assert_eq!(sample_value(body, "iam_outbox_relay_publish_failures_total"), Some("0"));
+
+    let header_only = "# HELP iam_outbox_relay_publish_failures_total Outbox rows.\n\
+                       # TYPE iam_outbox_relay_publish_failures_total counter\n";
+    assert_eq!(sample_value(header_only, "iam_outbox_relay_publish_failures_total"), None);
+
+    let other = "iam_outbox_relay_publish_failures_total_created 0\n";
+    assert_eq!(sample_value(other, "iam_outbox_relay_publish_failures_total"), None);
+}
+
 /// Dials the gRPC port, retrying briefly. The HTTP and gRPC listeners are bound back-to-back in
 /// `main.rs` but not atomically, so a caller that has only confirmed `/healthz` might still beat
 /// the gRPC `bind` by a few microseconds.
@@ -130,7 +158,24 @@ async fn connect_grpc(port: u16) -> tonic::transport::Channel {
     panic!("gRPC port {port} never accepted a connection: {last_err:?}");
 }
 
+/// Polls `/healthz` until the listener answers 200. Panics with the child log otherwise.
+async fn wait_for_healthz(port: u16, child: &Child) {
+    for _ in 0..100 {
+        if let Some((200, _)) = http_status(port, "/healthz").await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the listener must bind while the migration lock is held; log:\n{}", child.tail());
+}
+
 fn spawn_iam(db_url: &str, http_port: u16, grpc_port: u16) -> Child {
+    spawn_iam_with(db_url, http_port, grpc_port, &[])
+}
+
+/// [`spawn_iam`] with extra `IAM_*` environment entries, for example
+/// `("IAM_OUTBOX__RELAY_ENABLED", "false")` (`Env::prefixed("IAM_").split("__")`, config.rs:998).
+fn spawn_iam_with(db_url: &str, http_port: u16, grpc_port: u16, extra_env: &[(&str, &str)]) -> Child {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_paigasus-iam"));
     cmd.env("IAM_DATABASE_URL", db_url)
         .env("IAM_HTTP_ADDR", format!("127.0.0.1:{http_port}"))
@@ -138,6 +183,7 @@ fn spawn_iam(db_url: &str, http_port: u16, grpc_port: u16) -> Child {
         .env("IAM_AUTHN__ISSUERS", r#"[{issuer="https://idp.example.com",audiences=["paigasus"]}]"#)
         .env("IAM_API_KEYS__PEPPER", "cGFpZ2FzdXMtc21va2UtcGVwcGVyLW5vdC1hLXJlYWwtc2VjcmV0LTAwMA==")
         .env("IAM_MIGRATION__LOCK_WAIT_SECS", "60")
+        .envs(extra_env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn paigasus-iam");
@@ -213,6 +259,17 @@ async fn a_lock_blocked_replica_is_bound_and_reports_migrating() {
     let (status, body) = http_status(http_port, "/readyz").await.expect("readyz");
     assert_eq!(status, 503, "AC 1: /readyz is 503 while migrating");
     assert!(body.contains("migrating"), "AC 1: the body distinguishes migrating from a failed ping, got {body}");
+
+    // SMA-713 T1: the publish-failure counter is primed at zero BEFORE the migration. The lock is
+    // held, so no relay tick has run and only the prime in `serve()` can make this sample.
+    // `/metrics` is on the HTTP port because `metrics.addr` is unset (the default).
+    let (status, metrics) = http_status(http_port, "/metrics").await.expect("metrics while migrating");
+    assert_eq!(status, 200, "SMA-713: /metrics answers while migrating");
+    assert_eq!(
+        sample_value(&metrics, "iam_outbox_relay_publish_failures_total"),
+        Some("0"),
+        "SMA-713 T1: main must prime the publish-failure counter at zero when the relay is enabled; /metrics:\n{metrics}"
+    );
 
     // An APP route, through the real binary. `/readyz` above keeps its `{"status":…}` body — it
     // is a probe, outside CorrelationLayer, and its three values ARE AC 1 — but `/v1/*` is the
@@ -294,6 +351,46 @@ async fn a_lock_blocked_replica_is_bound_and_reports_migrating() {
         err.code(),
         Code::Unauthenticated,
         "the UNAVAILABLE -> UNAUTHENTICATED transition IS the proof that the real, AuthLayer-wrapped router took over"
+    );
+}
+
+/// SMA-713 T2: the prime is gated like the relay. With `outbox.relay_enabled = false` no relay
+/// runs, so `main` must not make the publish-failure series. The lock is held, as in T1, so the
+/// assertion reads the state before any migration.
+#[tokio::test]
+async fn a_relay_disabled_replica_does_not_prime_the_publish_failure_counter() {
+    let Some((node, _pinned)) = support::start_raw_postgres().await else {
+        eprintln!("skipping boot lifecycle test: Docker unavailable");
+        return;
+    };
+    let url = support::connection_url(&node).await;
+    let holder = connect_pinned(&url).await;
+    assert!(
+        scalar_bool(&holder, &format!("SELECT pg_try_advisory_lock({MIGRATION_LOCK_KEY}) AS v")).await,
+        "the holder must actually acquire the lock"
+    );
+
+    let (http_port, grpc_port) = (free_port(), free_port());
+    let child = spawn_iam_with(&url, http_port, grpc_port, &[("IAM_OUTBOX__RELAY_ENABLED", "false")]);
+    wait_for_healthz(http_port, &child).await;
+
+    let (status, metrics) = http_status(http_port, "/metrics").await.expect("metrics while migrating");
+    assert_eq!(status, 200, "SMA-713: /metrics answers while migrating");
+    // A control in the same body: the JIT defect series is primed unconditionally
+    // (`prime_jit_provisioning_failures`), so an empty or wrong body cannot pass this test.
+    assert!(
+        metrics.lines().any(|l| !l.starts_with('#') && l.starts_with("iam_jit_provisioning_failures_total{")),
+        "control: the unconditional JIT prime must be visible; /metrics:\n{metrics}"
+    );
+    assert_eq!(
+        sample_value(&metrics, "iam_outbox_relay_publish_failures_total"),
+        None,
+        "SMA-713 T2: with the relay disabled, main must not prime the publish-failure counter; /metrics:\n{metrics}"
+    );
+
+    assert!(
+        scalar_bool(&holder, &format!("SELECT pg_advisory_unlock({MIGRATION_LOCK_KEY}) AS v")).await,
+        "the holder must actually release the lock"
     );
 }
 

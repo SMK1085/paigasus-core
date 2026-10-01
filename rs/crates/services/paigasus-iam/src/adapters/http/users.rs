@@ -17,23 +17,36 @@
 //! `grpc::users`'s `UserGrpc::create_user` mirrors this exactly; the two transports are ONE
 //! decision, not two, and `tests/http_users.rs` + `tests/grpc_users.rs` are written so that
 //! changing either transport alone reds CI.
+//!
+//! **The identity routes (SMA-712)** — `POST /v1/users/find-by-email`,
+//! `/v1/users/{id}/external-identities`, `/v1/users/{id}/external-identities/{identity_id}/unlink`
+//! and `/v1/users/{id}/email` — authorize INSIDE `UserIdentityService`, with no
+//! `enforce_tenancy` gate (spec 5.1). `{id}` is the user's principal uuid, the convention of
+//! `/v1/service-accounts/{sa}`. Unlink is a `POST`, not a `DELETE`, because it carries a
+//! `reason` body.
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Extension, Json, Router};
-use paigasus_iam_core::Action;
 use paigasus_iam_core::authz::model::root_prn;
+use paigasus_iam_core::{Action, PrincipalId};
 
 use super::AppState;
-use super::dto::{CreateUserBody, CreateUserResponse};
+use super::dto::{ChangeUserEmailBody, CreateUserBody, CreateUserResponse, ExternalIdentityDto, FindUserByEmailBody, LinkExternalIdentityBody, UnlinkExternalIdentityBody, UserDto};
 use super::error::ApiError;
 use super::json::EnvelopeJson;
+use super::path::{ExternalIdentityId, UserId, UuidPath, UuidPathPair};
 use crate::adapters::auth::AuthContext;
 use crate::application::create_user::NewUser;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/v1/users", post(create_user))
+    Router::new()
+        .route("/v1/users", post(create_user))
+        .route("/v1/users/find-by-email", post(find_by_email))
+        .route("/v1/users/{id}/external-identities", post(link_identity))
+        .route("/v1/users/{id}/external-identities/{identity_id}/unlink", post(unlink_identity))
+        .route("/v1/users/{id}/email", post(change_email))
 }
 
 /// The acting principal's canonical `Prn`, from the bearer-resolved `AuthContext` — mirrors
@@ -64,6 +77,73 @@ async fn create_user(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
     let cmd = to_command(b);
     let id = s.users.execute(cmd).await?;
     Ok((StatusCode::CREATED, Json(CreateUserResponse { principal_prn: id.canonical() })))
+}
+
+/// `POST /v1/users/find-by-email` (SMA-712): 200 with the user, or 404.
+async fn find_by_email(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(b): EnvelopeJson<FindUserByEmailBody>) -> Result<Json<UserDto>, ApiError> {
+    let view = s.user_identities.find_by_email(&actor_prn(&ctx), b.email.as_deref().unwrap_or_default()).await?;
+    Ok(Json(view.into()))
+}
+
+/// `POST /v1/users/{id}/external-identities` (SMA-712): 201 with the new identity, or 200 with
+/// the stored identity when the same user already holds the pair (a safe retry).
+async fn link_identity(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<UserId>,
+    EnvelopeJson(b): EnvelopeJson<LinkExternalIdentityBody>,
+) -> Result<(StatusCode, Json<ExternalIdentityDto>), ApiError> {
+    let out = s
+        .user_identities
+        .link(
+            &actor_prn(&ctx),
+            &PrincipalId::from_uuid(path.id),
+            b.issuer.as_deref().unwrap_or_default(),
+            b.subject.as_deref().unwrap_or_default(),
+            b.reason.as_deref().unwrap_or_default(),
+        )
+        .await?;
+    let status = if out.changed { StatusCode::CREATED } else { StatusCode::OK };
+    Ok((status, Json(out.value.into())))
+}
+
+/// `POST /v1/users/{id}/external-identities/{identity_id}/unlink` (SMA-712): 204. A repeated
+/// unlink gives 404. The caller's own credential goes to the service for the self-lockout guard.
+async fn unlink_identity(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPathPair<UserId, ExternalIdentityId>,
+    EnvelopeJson(b): EnvelopeJson<UnlinkExternalIdentityBody>,
+) -> Result<StatusCode, ApiError> {
+    s.user_identities
+        .unlink(
+            &actor_prn(&ctx),
+            &ctx.credential,
+            &PrincipalId::from_uuid(path.first),
+            path.second,
+            b.reason.as_deref().unwrap_or_default(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/users/{id}/email` (SMA-712): 200 with the user.
+async fn change_email(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<UserId>,
+    EnvelopeJson(b): EnvelopeJson<ChangeUserEmailBody>,
+) -> Result<Json<UserDto>, ApiError> {
+    let view = s
+        .user_identities
+        .change_email(
+            &actor_prn(&ctx),
+            &PrincipalId::from_uuid(path.id),
+            b.email.as_deref().unwrap_or_default(),
+            b.reason.as_deref().unwrap_or_default(),
+        )
+        .await?;
+    Ok(Json(view.into()))
 }
 
 #[cfg(test)]

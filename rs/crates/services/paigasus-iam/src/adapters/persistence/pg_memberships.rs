@@ -6,6 +6,12 @@
 //! transaction with row locks (D8, port doc contract), so a concurrent archive/detach can
 //! never race past them. `detach` cascades an org membership's removal onto the same
 //! principal's team/project memberships in that org (rule 5), also in one transaction.
+//!
+//! **Listing guards (SMA-649).** `MembershipKindQuery::list_of_kind` is the wire listing. It
+//! confirms the supplied PRN against the stored row on both axes before any row is read:
+//! `node_list_sql` for a node, `principal_list_uuid` for a principal (`NotFound` if absent,
+//! `PrnMismatch` on a difference). `MembershipRepository::list_by_principal` filters on a bare
+//! uuid and is for server-resolved ids only (authn introspection).
 
 use super::entities::{membership, organization, principal, project, team};
 use super::map_err;
@@ -402,6 +408,19 @@ impl PgMembershipRepository {
         Ok((sql, uuid))
     }
 
+    /// SMA-649: the principal twin of [`Self::node_list_sql`]. Loads the principal by uuid with
+    /// no lock (a plain listing, not a guarded mutation), answers `NotFound` when it is absent
+    /// and `PrnMismatch` when the stored `prn` differs from the canonical form of the supplied
+    /// PRN (a forged region or organization slot). Returns the uuid to bind as `$1`. No log
+    /// line, the same as the node guard (spec Q2).
+    async fn principal_list_uuid(&self, principal: &PrincipalId) -> Result<Uuid, RepositoryError> {
+        let stored = principal::Entity::find_by_id(principal.uuid()).one(&self.db).await.map_err(map_err)?.ok_or(RepositoryError::NotFound)?;
+        if stored.prn != principal.canonical() {
+            return Err(RepositoryError::PrnMismatch);
+        }
+        Ok(stored.id)
+    }
+
     /// Runs one of the four list SQLs. `kind` binds `$4`; `None` = any kind.
     async fn list_rows(&self, sql: &str, id: Uuid, kind: Option<PrincipalKind>, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
         let kind: Option<String> = kind.map(|k| k.as_str().to_owned());
@@ -411,15 +430,20 @@ impl PgMembershipRepository {
     }
 }
 
-/// SMA-676 D8: the same four statements, with `$4` bound to the kind.
+/// SMA-676 D8, SMA-649: the same four statements, with `$4` bound to the kind (NULL = any
+/// kind). Both arms run their guard first: `principal_list_uuid` for a principal,
+/// `node_list_sql` for a node.
 #[async_trait]
 impl MembershipKindQuery for PgMembershipRepository {
-    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: Option<PrincipalKind>, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
         match axis {
-            MembershipAxis::Principal(principal) => self.list_rows(LIST_BY_PRINCIPAL_SQL, *principal, Some(kind), limit, offset).await,
+            MembershipAxis::Principal(principal) => {
+                let principal_uuid = self.principal_list_uuid(principal).await?;
+                self.list_rows(LIST_BY_PRINCIPAL_SQL, principal_uuid, kind, limit, offset).await
+            }
             MembershipAxis::Node(node) => {
                 let (sql, node_uuid) = self.node_list_sql(node).await?;
-                self.list_rows(sql, node_uuid, Some(kind), limit, offset).await
+                self.list_rows(sql, node_uuid, kind, limit, offset).await
             }
         }
     }

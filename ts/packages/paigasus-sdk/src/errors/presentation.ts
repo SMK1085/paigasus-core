@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 61 keys rather than 60.
+// demanding an entry for it would make the table 66 keys rather than 65.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -58,6 +58,13 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.MISSING_REQUIRED_FIELD]: 'from-transport',
   [ErrorReason.MUTUALLY_EXCLUSIVE_FIELDS]: 'from-transport',
   [ErrorReason.SERVICE_MIGRATING]: 'from-transport',
+  // SMA-712. The operator identity-link calls. The transport status table already presents
+  // 400 as invalid input and 409 as a conflict.
+  [ErrorReason.INVALID_REASON]: 'from-transport',
+  [ErrorReason.UNKNOWN_ISSUER]: 'from-transport',
+  [ErrorReason.INVALID_SUBJECT]: 'from-transport',
+  [ErrorReason.CANNOT_UNLINK_OWN_IDENTITY]: 'from-transport',
+  [ErrorReason.EXTERNAL_IDENTITY_EXISTS]: 'from-transport',
   [ErrorReason.MISSING_AUTHORIZATION]: 'from-transport',
   [ErrorReason.INVALID_API_KEY]: 'from-transport',
   [ErrorReason.INSUFFICIENT_PERMISSIONS]: 'from-transport',

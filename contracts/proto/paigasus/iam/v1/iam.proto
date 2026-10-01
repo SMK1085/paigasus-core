@@ -586,8 +586,67 @@ message CreateUserResponse {
   string principal_prn = 1;
 }
 
+// Operator identity links (SMA-712). Each RPC authorizes its own Cedar action
+// at the hierarchy root inside the application service, with no
+// enforce_tenancy gate: FindUserByEmail needs GetUser, and the three writes
+// need LinkExternalIdentity, UnlinkExternalIdentity and ChangeUserEmail. Each
+// write needs a reason, which goes into the audit record. A user is named by
+// its full principal PRN.
+message User {
+  string prn = 1;
+  string email = 2;
+  string display_name = 3;
+  string status = 4; // principal status
+  repeated ExternalIdentity external_identities = 5;
+  paigasus.common.v1.AuditMetadata audit = 6;
+}
+
+message ExternalIdentity {
+  string id = 1; // uuid
+  string issuer = 2;
+  string subject = 3;
+  paigasus.common.v1.AuditMetadata audit = 4; // modified_at == created_at (immutable)
+}
+
+message FindUserByEmailRequest {
+  string email = 1;
+}
+message FindUserByEmailResponse {
+  User user = 1;
+}
+
+message LinkExternalIdentityRequest {
+  string user_prn = 1;
+  string issuer = 2;
+  string subject = 3;
+  string reason = 4;
+}
+message LinkExternalIdentityResponse {
+  ExternalIdentity external_identity = 1;
+}
+
+message UnlinkExternalIdentityRequest {
+  string user_prn = 1;
+  string external_identity_id = 2;
+  string reason = 3;
+}
+message UnlinkExternalIdentityResponse {}
+
+message ChangeUserEmailRequest {
+  string user_prn = 1;
+  string email = 2;
+  string reason = 3;
+}
+message ChangeUserEmailResponse {
+  User user = 1;
+}
+
 service UserService {
   rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc FindUserByEmail(FindUserByEmailRequest) returns (FindUserByEmailResponse);
+  rpc LinkExternalIdentity(LinkExternalIdentityRequest) returns (LinkExternalIdentityResponse);
+  rpc UnlinkExternalIdentity(UnlinkExternalIdentityRequest) returns (UnlinkExternalIdentityResponse);
+  rpc ChangeUserEmail(ChangeUserEmailRequest) returns (ChangeUserEmailResponse);
 }
 
 // ─────────────────────────────────────────────────────────────────────────

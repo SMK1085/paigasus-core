@@ -150,8 +150,8 @@ refuses to guess and builds instead.
   `cmp -s` that the mutation actually changed the file (so a renamed check cannot make the row
   vacuous), asserts the mutant's `--self-test` exits 3, and then greps the mutant's stderr for the
   specific `"a non-table [workspace] is inconclusive"` fixture label. The stderr assertion exists
-  because rc 3 alone is not sufficient: `self_test()`'s own arity floor also returns 3 if
-  `COLLECTION_ROWS` is short two or more rows, so an rc-only check would go green whether the
+  because rc 3 alone is not sufficient: `self_test()`'s own arity floor also returns 3 when
+  `COLLECTION_ROWS` falls below its floor, so an rc-only check would go green whether the
   shape check fired or the floor did — the two controls covering for each other's absence.
   **Row 9** replaces the checker in a copy of this directory with a stub that names four keys and
   prints one of them, and asserts the fail-safe branch writes all nine outputs. **Rows 10 to 13**

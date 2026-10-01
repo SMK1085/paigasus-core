@@ -4,8 +4,8 @@
 //! IAM `TenancyService` (task-16 brief, SMA-442), the `AuthnService` + bearer-enforcement
 //! layer (SMA-443 Task 12), the `AuthorizationService` (SMA-444 Task 19), the
 //! `ServiceAccountService` (SMA-445 Task 21), the `ServiceInfoService` (SMA-505, always
-//! mounted), the `UserService` (SMA-501, always mounted — its one RPC authorizes
-//! `Action::CreateUser` at `Root`, SMA-584, see `users` module doc), the `OutboxService`
+//! mounted — every RPC authorizes at `Root`: `CreateUser` since SMA-584, the four identity
+//! RPCs since SMA-712, see `users` module doc), the `OutboxService`
 //! (SMA-501, ALWAYS mounted — see `dead_letters` module doc for why this break-glass
 //! surface is not capability-gated,
 //! unlike its `AuditService` neighbour), and — when `iam.audit` is enabled — the
@@ -89,8 +89,8 @@ pub async fn routes(state: AppState) -> tonic::service::Routes {
         // SMA-505: always served — the descriptor is how a client learns what the rest of this
         // server offers, so it can never itself be capability-gated.
         .add_service(ServiceInfoServiceServer::new(ServiceInfoGrpc::new(state.clone())))
-        // SMA-501: always served, mirroring HTTP's unconditional `/v1/users` mount — its one
-        // RPC authorizes `Action::CreateUser` at `Root` (SMA-584, see `users` module doc).
+        // SMA-501: always served, mirroring HTTP's unconditional `/v1/users` mount — every RPC
+        // authorizes at `Root` (SMA-584, SMA-712, see `users` module doc).
         .add_service(UserServiceServer::new(UserGrpc::new(state.clone())))
         // SMA-501: always served, UNCONDITIONALLY — deliberately unlike `AuditService` below,
         // which is dropped entirely when `iam.audit` is off. `iam.audit` gates a READ-ONLY
