@@ -147,7 +147,11 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
     });
     upstream.on('upgrade', (upstreamRes, upstreamSocket: Duplex, upstreamHead: Buffer) => {
       const lines = [`HTTP/1.1 ${String(upstreamRes.statusCode ?? 101)} ${upstreamRes.statusMessage ?? 'Switching Protocols'}`];
-      for (const [name, value] of Object.entries(upstreamRes.headers)) {
+      // The same rule as the request above (SMA-640): filter, then put Connection and Upgrade
+      // back, because the handshake response needs both. Sec-WebSocket-Accept and the other
+      // handshake fields are not hop-by-hop, so they still reach the browser.
+      const responseHeaders = { ...forwardableHeaders(upstreamRes.headers), connection: 'Upgrade', upgrade: upstreamRes.headers.upgrade ?? 'websocket' };
+      for (const [name, value] of Object.entries(responseHeaders)) {
         if (value === undefined) continue;
         for (const one of Array.isArray(value) ? value : [value]) lines.push(`${name}: ${one}`);
       }
