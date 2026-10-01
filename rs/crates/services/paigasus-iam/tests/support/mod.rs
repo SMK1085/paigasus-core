@@ -689,6 +689,13 @@ pub async fn provision_platform_admin(state: &AppState, token: &str) -> String {
     principal_prn
 }
 
+/// The bare uuid inside a canonical principal PRN — the `{id}` segment of the SMA-712
+/// `/v1/users/{id}/*` routes.
+#[allow(dead_code)]
+pub fn principal_uuid(prn: &str) -> uuid::Uuid {
+    Prn::parse(prn).expect("valid principal prn").resource_id()
+}
+
 // --- SMA-444 Task 20b: direct-`PgOrganizationRepository`-driven owner-grant helpers --------
 //
 // `PgOrganizationRepository::create` now takes a third `owner_grant: &RoleGrant` argument

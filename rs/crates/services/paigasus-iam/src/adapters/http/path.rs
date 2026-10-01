@@ -76,6 +76,10 @@ path_field!(/// `{id}` on a dead-letter route.
 path_field!(/// `{policy_id}` on a policy route, and `{id}` on the system-policy retire route —
     /// both name the same wire field.
     PolicyId => "policy_id");
+path_field!(/// `{id}` on a user route (SMA-712) — the user's principal uuid.
+    UserId => "user_id");
+path_field!(/// `{identity_id}` on the unlink route (SMA-712) — an external identity's uuid.
+    ExternalIdentityId => "external_identity_id");
 
 /// The `{field} must be a uuid` envelope response — the one construction point both extractors
 /// below use, so they cannot drift apart on status, code or shape.
@@ -361,5 +365,7 @@ mod tests {
         assert_eq!(RoleGrantId::NAME, "role_grant_id");
         assert_eq!(DeadLetterId::NAME, "dead_letter_id");
         assert_eq!(PolicyId::NAME, "policy_id");
+        assert_eq!(UserId::NAME, "user_id");
+        assert_eq!(ExternalIdentityId::NAME, "external_identity_id");
     }
 }

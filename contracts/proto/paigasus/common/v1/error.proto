@@ -188,6 +188,25 @@ enum ErrorReason {
   // of which transport it used.
   ERROR_REASON_SERVICE_MIGRATING = 39;
 
+  // ---- IAM: identity links (1-299) -----------------------------------------
+  // SMA-712. Emitted by the operator identity-link calls on UserService and
+  // on /v1/users/*. Both transports carry every one of them.
+
+  // "invalid-reason" — the audit reason is empty after trim, or it is longer
+  // than 500 characters.
+  ERROR_REASON_INVALID_REASON = 41;
+  // "unknown-issuer" — the issuer is not one of the configured authn issuers.
+  ERROR_REASON_UNKNOWN_ISSUER = 42;
+  // "invalid-subject" — the subject is empty, it is longer than 255
+  // characters, or it starts or ends with whitespace.
+  ERROR_REASON_INVALID_SUBJECT = 43;
+  // "cannot-unlink-own-identity" — the call would unlink the identity that
+  // authenticated the request.
+  ERROR_REASON_CANNOT_UNLINK_OWN_IDENTITY = 44;
+  // "external-identity-exists" — another user already holds this
+  // (issuer, subject) pair.
+  ERROR_REASON_EXTERNAL_IDENTITY_EXISTS = 45;
+
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
   // keeps its OpenAI semantics.

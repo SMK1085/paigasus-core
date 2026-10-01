@@ -64,8 +64,8 @@ use crate::adapters::oidc::jwks::{HttpJwksFetcher, IdpTls, InMemoryJwksCache, Jw
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
-    PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
-    PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, SeaOrmUnitOfWork,
+    PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgIdentityLinkStore, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore,
+    PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, SeaOrmUnitOfWork,
 };
 use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
@@ -86,6 +86,7 @@ use crate::application::service_accounts::{ServiceAccountService, ServiceAccount
 use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
 use crate::application::teams::{TeamService, TeamServiceDeps};
 use crate::application::tenancy_nodes::TenancyNodes;
+use crate::application::user_identities::{UserIdentityDeps, UserIdentityService};
 use crate::config::{ApiKeyCacheBackend, AuthnConfig, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
 use paigasus_iam_core::{
     ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntityGenBumper, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore,
@@ -254,6 +255,11 @@ pub struct AppState {
     /// The dead-letter operator use case (SMA-469) — `GET/POST /v1/outbox/dead-letters*`
     /// read through this. Root-only, enforced inside the service itself.
     pub dead_letters: DeadLetterService,
+    /// The operator identity-link use case (SMA-712) — `/v1/users/find-by-email`,
+    /// `/v1/users/{id}/external-identities*`, `/v1/users/{id}/email` and the four matching
+    /// `UserService` RPCs call through this. It authorizes each call itself, at Root, with no
+    /// `enforce_tenancy` gate.
+    pub user_identities: UserIdentityService,
     /// Retirement of orphaned system-owned rows (SMA-481) — the `/v1/authz/system-policies/
     /// {id}/retire` route calls through this. Deliberately its own service rather than a
     /// `PolicySvc` method: it drives the privileged `SystemRowRetirer` port, which bypasses
@@ -797,9 +803,23 @@ impl AppState {
             JitPolicy::from_issuers(&jit_flags),
         );
 
+        // SMA-712: the operator identity-link calls. The issuer set is the one `jit_flags`
+        // parsed from `authn.issuers` above, so a link can only name an issuer that IAM accepts
+        // a token from. Its own `SeaOrmUnitOfWork`, like `dead_letter_uow`: each write and its
+        // audit entry commit on one transaction, on the shared `audit_log` handle.
+        let user_identities = UserIdentityService::new(UserIdentityDeps {
+            authorize: authorize.clone(),
+            links: Arc::new(PgIdentityLinkStore::new(db.clone())),
+            uow: Arc::new(SeaOrmUnitOfWork::new(db.clone())),
+            audit: audit_log.clone(),
+            issuers: jit_flags.iter().map(|(issuer, _)| issuer.clone()).collect(),
+            ids: Arc::new(KernelIdGenerator),
+            clock: Arc::new(SystemClock),
+        });
+
         if !authz_cfg.enforce_tenancy {
             tracing::warn!(
-                "enforce_tenancy is disabled: the tenancy-adapter authorization guards are bypassed — org/team/project/membership CRUD, and Action::CreateUser on POST /v1/users and UserService.CreateUser. Application-layer authorization (policies, role grants, service accounts, API keys, audit, outbox dead letters, system retirement) still applies. Test-only configuration, never use in production"
+                "enforce_tenancy is disabled: the tenancy-adapter authorization guards are bypassed — org/team/project/membership CRUD, and Action::CreateUser on POST /v1/users and UserService.CreateUser. Application-layer authorization (policies, role grants, service accounts, API keys, audit, outbox dead letters, system retirement, user identity links) still applies. Test-only configuration, never use in production"
             );
         }
 
@@ -827,6 +847,7 @@ impl AppState {
             api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
             audit_query,
             dead_letters,
+            user_identities,
             retirement,
             capabilities: crate::service_info::Capabilities::from_config(cfg),
             audit_log,
