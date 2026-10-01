@@ -10,27 +10,16 @@
 // It keeps `Host` UNCHANGED and adds `X-Forwarded-Proto: https` and `X-Forwarded-Host`. That is
 // the deployment contract of spec § 10: Next's Server Action origin check compares `Origin` with
 // the forwarded host, and the auth routes build absolute URLs from the public origin.
-import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import type { TlsMaterial } from './tls';
+import { forwardableHeaders } from './hop-by-hop';
 
-/**
- * Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them.
- *
- * `ts/tooling/dev-stack.ts` (SMA-641) keeps its own copy of this set and of `forwardable()` below,
- * for its second in-process proxy, and says so. Widening this set means widening that copy too.
- */
-const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
-
-function forwardable(headers: IncomingHttpHeaders): IncomingHttpHeaders {
-  const out: IncomingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (!HOP_BY_HOP.has(name) && value !== undefined) out[name] = value;
-  }
-  return out;
-}
+// Hop-by-hop filtering, in both directions and on the upgrade path, is `forwardableHeaders()` in
+// ./hop-by-hop.ts. It is the one copy of the rule: gateway-console's counting forwarder and
+// ts/tooling/dev-stack.ts import the same function from `@paigasus/console-core/testing` (SMA-640).
 
 /** One upstream, selected when its request path starts with `prefix`. */
 export type TerminatorRoute = { readonly prefix: string; readonly target: string };
@@ -100,10 +89,10 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
         // The ORIGINAL req.url, query string and all — only the ROUTING decision above uses the
         // stripped pathname; the upstream still needs `_rsc=1` and every other query parameter.
         path: req.url,
-        headers: { ...forwardable(req.headers), host, 'x-forwarded-proto': 'https', 'x-forwarded-host': host, 'x-forwarded-port': host.split(':')[1] ?? '443' },
+        headers: { ...forwardableHeaders(req.headers), host, 'x-forwarded-proto': 'https', 'x-forwarded-host': host, 'x-forwarded-port': host.split(':')[1] ?? '443' },
       },
       (upstreamRes) => {
-        res.writeHead(upstreamRes.statusCode ?? 502, forwardable(upstreamRes.headers));
+        res.writeHead(upstreamRes.statusCode ?? 502, forwardableHeaders(upstreamRes.headers));
         upstreamRes.pipe(res);
       },
     );
@@ -145,9 +134,9 @@ export async function startTlsTerminator(opts: { tls: TlsMaterial; target?: stri
       method: req.method,
       path: req.url,
       headers: {
-        ...forwardable(req.headers),
+        ...forwardableHeaders(req.headers),
         host,
-        // forwardable() strips these two as hop-by-hop, which is correct for a normal request and
+        // forwardableHeaders() strips these two as hop-by-hop, which is correct for a normal request and
         // wrong for the handshake that establishes the tunnel. Put them back.
         connection: 'Upgrade',
         upgrade: req.headers.upgrade ?? 'websocket',
