@@ -231,7 +231,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 ## Container images
 
 - Container images (SMA-500) live behind
-  `ci/images/run.sh {build,smoke,all,build-oci,load-oci,rehearse}` and
+  `ci/images/run.sh {build,smoke,all,build-oci,load-oci,rehearse,context-check}` and
   `.github/workflows/images.yml`, **not** Moon — a `repo:*` task would have to join `ci.yml`'s
   `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry.
   The console images (SMA-513) use the same script: `build-console [iam|gateway]` and
@@ -245,8 +245,12 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `ts/apps/*/next.config.ts`, `ts/apps/*/package.json`,
   `ts/packages/paigasus-kernel/package.json`,
   `rs/crates/bindings/paigasus-node-bindings/index.js` and
-  `rs/crates/bindings/paigasus-node-bindings/index.d.ts`. It also lists `ci/images/**`, the
-  workflow, `.prototools` and the two `.proto/plugins/*.toml` files. A PR that changes one of these
+  `rs/crates/bindings/paigasus-node-bindings/index.d.ts`. It also lists four smoke-runtime files
+  (SMA-675, the second clause of RUNBOOK-containers.md section 1):
+  `ts/packages/paigasus-auth/src/core/session.ts`, `ts/apps/*/app/*console*/layout.tsx`,
+  `ts/apps/iam-console/app/*console*/orgs/page.tsx` and
+  `ts/apps/gateway-console/app/*console*/overview/page.tsx`. It also lists `ci/images/**`, the
+  workflow, `.prototools`, `.proto/plugins/crane.toml` and `.proto/plugins/syft.toml`. A PR that changes one of these
   runs the workflow automatically. The rule for a `ts/` entry is in RUNBOOK-containers.md section 1.
   A file that is already a Moon task `input` stays off this filter, even if `ts/Dockerfile` reads
   it too, because a bad edit there already reds the ordinary `moon ci` build — this is why the
@@ -254,10 +258,18 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `paigasus-node-bindings/package.json` are absent, but the napi crate's `index.js`/`index.d.ts`
   are present: those two are Docker-copied by name yet are not Moon `inputs` anywhere, since the
   kernel build task's own `napi build` step regenerates them fresh every run.
+  `@paigasus/next-config` is off the filter too (SMA-671): it is a Moon input, the unit tests and
+  `standalone-runtime.test.ts` pin both base paths, and `chart.yml` is the second control.
 - The filter does not list `rs/**` or `ts/**`. A PR that changes `rs/**` or `ts/**` but no
   listed input can still break an image build. Start the workflow manually for such a PR with
   `workflow_dispatch`. (`gh workflow run images.yml --ref <branch>` returns 404 until `images.yml`
   is on `main`.)
+- Staged-tree parity of the console images gates in `images.yml` only (SMA-671). The job makes a
+  host build of both consoles on each leg and sets `CONSOLE_PARITY_REQUIRED: '1'` on its two
+  console smoke steps; unset means "not required", so `release.yml` needs no host build. It gates
+  amd64 on a filtered PR and both legs on `main`. A PR that changes only `ts/apps/*/moon.yml` does
+  not run it, so a `moon.yml`-side staging drift shows first on `main`. Row W1 of
+  `ci/images/console-selftest.sh` pins the two `env` lines and the step order.
 - The runtime base is a `chisel cut` of Ubuntu 24.04 into `FROM scratch`. Four traps, all
   measured: `libgcc-s1_libs` is REQUIRED (Rust panic unwinding links `libgcc_s.so.1`) and its
   absence fails at container START, not build; `ca-certificates_data` is the right variant
