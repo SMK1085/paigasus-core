@@ -557,8 +557,10 @@ Since SMA-665, the image itself also carries a record of the cut: `/var/lib/chis
 This is the answerable half of a real limit. `chisel cut` uses the **live** Ubuntu archive (see
 § 2.6 of the design document). So two builds one month apart produce different, patched base
 layers. The image is **not** bit-reproducible from `rs/Dockerfile` alone. The manifest artifact
-for one build is the only record of which packages that build used. Without it, you cannot answer
-"which libc is in the image I am running" after the fact.
+is the only CI artifact that records which packages one build used. The image records of SMA-665
+give the same answer from the image itself. If you have neither the manifest artifact nor an
+image that carries these records, you cannot answer "which libc is in the image I am running"
+after the fact. An image built before SMA-665 has no such records.
 
 ### Which Ubuntu packages does the image SBOM list?
 
