@@ -1,3 +1,6 @@
+<!-- moon-diagnosis:ok -->
+<!-- The marker above is for check 12 of repo:actionlint. This plan names the ciReport token only in
+     a negative check (Task 4 Step 5), which proves that the new docs do not name the file. -->
 # SMA-665 Chisel dpkg Status SBOM Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
