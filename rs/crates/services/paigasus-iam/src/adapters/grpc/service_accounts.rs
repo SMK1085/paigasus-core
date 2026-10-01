@@ -74,7 +74,7 @@ fn parse_node_prn(raw: &str) -> Result<TenancyNodeRef, TenancyError> {
 }
 
 /// Parses a wire `principal` PRN into the [`PrincipalId`] a service account's own identity
-/// uses — the gRPC analog of `adapters::http::service_accounts::service_account_id`, but from
+/// uses — the gRPC analog of the HTTP `{sa}` path's `PrincipalId::from_uuid`, but from
 /// a wire PRN string (the `prn`/`service_account_prn` request fields) rather than a path uuid.
 /// Unlike `convert::node_uuid`'s tenancy-node parsing, a service account has no "stored
 /// canonical" recheck of its own (its PRN IS its whole identity, not a parent-embedding one,

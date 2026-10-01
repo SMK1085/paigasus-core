@@ -24,7 +24,6 @@ use axum::routing::{delete, post};
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::{Action, ApiKeyId, PrincipalId, TenancyNodeRef};
 use paigasus_kernel::Prn;
-use uuid::Uuid;
 
 use super::AppState;
 use super::authn::AuthnApiError;
@@ -66,12 +65,6 @@ fn parse_node_prn(raw: &str) -> Result<TenancyNodeRef, TenancyError> {
     TenancyNodeRef::from_prn(prn).map_err(TenancyError::from)
 }
 
-/// Builds the `PrincipalId` a `{sa}` path segment names — duplicated from
-/// `service_accounts.rs`'s identical helper for the same reason as [`parse_node_prn`].
-fn service_account_id(uuid: Uuid) -> PrincipalId {
-    PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).expect("static principal prn parts are valid"))
-}
-
 /// `POST /v1/service-accounts/{sa}/api-keys`: issues a new key, `201` with the one-time
 /// plaintext `token` (spec §10.2's `IssueApiKeyResponse`, shown-once, D2). `scope_actions`
 /// entries that don't name a known `Action` fail `400 invalid-action` (mirrors
@@ -84,7 +77,7 @@ async fn issue(
     EnvelopeJson(body): EnvelopeJson<IssueApiKeyBody>,
 ) -> Result<(StatusCode, Json<IssueApiKeyResponseDto>), ApiError> {
     let actor = actor_prn(&ctx);
-    let sa_id = service_account_id(path.id);
+    let sa_id = PrincipalId::from_uuid(path.id);
     let scope_prn = body.scope_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("scope_prn"))?;
     let scope = parse_node_prn(&scope_prn)?;
     let scope_actions = body
@@ -105,7 +98,7 @@ async fn list(
     EnvelopeQuery(q): EnvelopeQuery<PageQuery>,
 ) -> Result<Json<Vec<ApiKeyDto>>, ApiError> {
     let actor = actor_prn(&ctx);
-    let sa_id = service_account_id(path.id);
+    let sa_id = PrincipalId::from_uuid(path.id);
     let page = Page::new(q.limit, q.offset)?;
     let keys = s.api_keys.list(&actor, &sa_id, page).await?;
     Ok(Json(keys.into_iter().map(ApiKeyDto::from).collect()))

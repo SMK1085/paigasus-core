@@ -27,3 +27,4 @@ pub mod service_accounts;
 pub mod system_retirement;
 pub mod teams;
 pub mod tenancy_nodes;
+pub mod user_identities;
