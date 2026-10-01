@@ -150,8 +150,11 @@ Add `negative_control`. It runs two rows. Each row runs the whole gate as a chil
   Then run
   `GIT_INDEX_FILE="$idx_drift" "$BASH" "$SELF" >"$out_drift" 2>&1 || rc_drift=$?`.
   The row passes only when `rc_drift` is exactly 1 AND `$out_drift` contains, for every app,
-  both the literal `+// SMA-637 negative control` and the literal
+  both the literal `-// SMA-637 negative control` and the literal
   `the committed <app>/next-env.d.ts does not match what Next generates`.
+  The diff line starts with `-`, not `+`. `git diff` compares the index (the old side) with
+  the work tree (the new side). The planted line is only in the index copy, so `git diff`
+  prints it as a removed line. This was measured on 2026-10-01 (plan, correction 1).
 - **N2 untracked.** Make a second copy `$idx_untracked`. For every app, remove the path with
   `GIT_INDEX_FILE="$idx_untracked" git update-index --force-remove -- <path>`. Then run the child
   with `GIT_INDEX_FILE="$idx_untracked"`. The row passes only when the rc is exactly 2 AND the
