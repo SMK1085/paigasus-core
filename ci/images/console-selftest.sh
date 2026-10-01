@@ -1295,6 +1295,192 @@ pin_rows P15 "$T/fn-console_smoke_redis_start.sh" 'out="$(docker network create 
 # shellcheck disable=SC2016
 pin_rows P16 "$T/fn-console_smoke_cleanup.sh" 'docker network rm "$CONSOLE_SMOKE_NETWORK" >/dev/null 2>&1 || true'
 
+# --- SMA-671: the workflow pin (W1 rows) ------------------------------------------------------
+# W1 keeps the production switch in place (guard-the-guard). It reads images.yml with awk (no YAML
+# library) and fails unless each CONSOLE smoke step sets CONSOLE_PARITY_REQUIRED: '1' in its own
+# step env, nothing else sets the variable, and the host-build step comes first. A console smoke
+# step is a step whose run: calls `ci/images/run.sh all-consoles`, or `ci/images/run.sh smoke`
+# with a first argument other than the cargo keys iam and gateway.
+W1_WF="$REPO/.github/workflows/images.yml"
+
+# w1_scan <workflow> — one line per step of the steps: list, in file order:
+# <index> TAB <console|host|other> TAB <value of CONSOLE_PARITY_REQUIRED in the step env, or -> TAB <name>
+# and a last line `stray TAB <n>`: the CONSOLE_PARITY_REQUIRED key lines outside a step env.
+w1_scan() {
+  awk -v q="'" '
+    function flush() {
+      if (n > 0) printf "%d\t%s\t%s\t%s\n", n, (console ? "console" : (host ? "host" : "other")), par, name
+    }
+    {
+      line = $0
+      if (match(line, /[^ ]/)) { ind = RSTART - 1; body = substr(line, RSTART) } else { ind = -1; body = "" }
+      comment = (substr(body, 1, 1) == "#")
+    }
+    line == "    steps:" { insteps = 1; next }
+    insteps && ind == 6 && substr(body, 1, 2) == "- " {
+      flush(); n++; console = 0; host = 0; par = "-"; inenv = 0; name = ""
+      if (substr(body, 1, 8) == "- name: ") name = substr(body, 9)
+      next
+    }
+    inenv && ind >= 0 && ind < 10 { inenv = 0 }
+    n > 0 && ind == 8 && name == "" && substr(body, 1, 6) == "name: " { name = substr(body, 7) }
+    n > 0 && ind == 8 && body == "env:" { inenv = 1; next }
+    !comment && substr(body, 1, 24) == "CONSOLE_PARITY_REQUIRED:" {
+      if (inenv) { v = substr(body, 25); sub(/^ +/, "", v); sub(/ +$/, "", v); par = v } else stray++
+      next
+    }
+    n > 0 && !comment {
+      if (index(line, "ci/images/run.sh all-consoles")) console = 1
+      if (index(line, "moon run iam-console-ts:build")) host = 1
+      p = index(line, "ci/images/run.sh smoke")
+      if (p) {
+        rest = substr(line, p + 22)
+        if (rest == "" || substr(rest, 1, 1) == " ") {
+          sub(/^ +/, "", rest); w = rest; sub(/ .*/, "", w); gsub("[\"" q "]", "", w)
+          if (w != "" && w != "iam" && w != "gateway") console = 1
+        }
+      }
+    }
+    END { flush(); printf "stray\t%d\t-\t-\n", stray + 0 }
+  ' "$1"
+}
+
+# w1_check <workflow> — rc 0 when the rules above hold; one `W1:` line on stderr per defect.
+w1_check() {
+  local wf="$1" rc=0 idx kind par name first_idx="" first_name="" host_idx="" host_name="" n_console=0 tab
+  tab="$(printf '\t')"
+  w1_scan "$wf" > "$T/w1-scan" || { echo "W1: awk could not read ${wf}" >&2; return 1; }
+  while IFS="$tab" read -r idx kind par name; do
+    if [ "$idx" = stray ]; then
+      if [ "$kind" -ne 0 ]; then
+        echo "W1: ${kind} CONSOLE_PARITY_REQUIRED line(s) outside a step env (a job or workflow env, or a run body); the Console image self-test step must not inherit the variable." >&2
+        rc=1
+      fi
+      continue
+    fi
+    if [ "$kind" = console ]; then
+      n_console=$((n_console + 1))
+      if [ -z "$first_idx" ]; then first_idx="$idx"; first_name="$name"; fi
+      if [ "$par" = "-" ]; then
+        echo "W1: step '${name}' runs a console smoke, but its own step env has no CONSOLE_PARITY_REQUIRED line." >&2
+        rc=1
+      elif [ "$par" != "'1'" ]; then
+        echo "W1: step '${name}' sets CONSOLE_PARITY_REQUIRED: ${par}; the only accepted line is CONSOLE_PARITY_REQUIRED: '1'." >&2
+        rc=1
+      fi
+    else
+      if [ "$kind" = host ] && [ -z "$host_idx" ]; then host_idx="$idx"; host_name="$name"; fi
+      if [ "$par" != "-" ]; then
+        echo "W1: step '${name}' sets CONSOLE_PARITY_REQUIRED, but it runs no console smoke." >&2
+        rc=1
+      fi
+    fi
+  done < "$T/w1-scan"
+  if [ "$n_console" -eq 0 ]; then
+    echo "W1: found no console smoke step in ${wf##*/} (a step that runs 'ci/images/run.sh all-consoles' or 'ci/images/run.sh smoke <console-key>')." >&2
+    return 1
+  fi
+  if [ -z "$host_idx" ]; then
+    echo "W1: no host-build step in ${wf##*/} (no step holds 'moon run iam-console-ts:build')." >&2
+    rc=1
+  elif [ "$host_idx" -gt "$first_idx" ]; then
+    echo "W1: the host-build step '${host_name}' comes after the console smoke step '${first_name}'." >&2
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    echo "W1: ${n_console} console smoke step(s) set CONSOLE_PARITY_REQUIRED: '1', after the host-build step '${host_name}'."
+  fi
+  return "$rc"
+}
+
+# w1_mut <row> <awk-program> — images.yml through the program, into $T/<row>.yml. The program sees
+# `step` (the name of the current step) and q (a single quote). A copy equal to the original is a
+# FAIL row: the mutation did not apply.
+w1_mut() {
+  awk -v q="'" '/^      - name: / { step = substr($0, 15) } '"$2" "$W1_WF" > "$T/$1.yml" \
+    || infra "awk could not mutate images.yml for $1"
+  if cmp -s "$W1_WF" "$T/$1.yml"; then say_fail "$1-applied" "the mutation did not apply"; else say_pass "$1-applied"; fi
+}
+
+stub_reset
+run_fn W1 0 "" "W1:" none w1_check "$W1_WF"
+expect_in W1-out "$T/W1.out" "W1: 2 console smoke step(s) set CONSOLE_PARITY_REQUIRED: '1'"
+# m1: the env line deleted.
+w1_mut W1-m1 '{ l = $0; sub(/^ +/, "", l) } step == "Console release sequence" && l == "CONSOLE_PARITY_REQUIRED: " q "1" q { next } { print }'
+stub_reset
+run_fn W1-m1 1 "step 'Console release sequence' runs a console smoke, but its own step env has no CONSOLE_PARITY_REQUIRED line" "" none w1_check "$T/W1-m1.yml"
+# m2: the env line moved to the cargo smoke step.
+w1_mut W1-m2 '{ l = $0; sub(/^ +/, "", l) } step == "Build + smoke both consoles" && l == "CONSOLE_PARITY_REQUIRED: " q "1" q { next } { print } $0 == "      - name: Smoke each service on its own" { print "        env:"; print "          CONSOLE_PARITY_REQUIRED: " q "1" q }'
+stub_reset
+run_fn W1-m2 1 "step 'Build + smoke both consoles' runs a console smoke, but its own step env has no|step 'Smoke each service on its own' sets CONSOLE_PARITY_REQUIRED, but it runs no console smoke" "" none w1_check "$T/W1-m2.yml"
+# m3: '1' changed to true.
+w1_mut W1-m3 '{ l = $0; sub(/^ +/, "", l) } step == "Console release sequence" && l == "CONSOLE_PARITY_REQUIRED: " q "1" q { sub(q "1" q, "true") } { print }'
+stub_reset
+run_fn W1-m3 1 "step 'Console release sequence' sets CONSOLE_PARITY_REQUIRED: true; the only accepted line" "" none w1_check "$T/W1-m3.yml"
+# m4: the host-build step moved after the release sequence.
+w1_mut W1-m4 '/^      [-#]/ { if (inrel && hold != "") { printf "%s", hold; hold = "" } inrel = 0; inhost = 0 } /^      - name: Host build of both consoles/ { inhost = 1 } inhost { hold = hold $0 "\n"; next } { print } /^      - name: Console release sequence$/ { inrel = 1 }'
+stub_reset
+run_fn W1-m4 1 "the host-build step 'Host build of both consoles (staged-tree parity reference)' comes after the console smoke step 'Console release sequence'" "" none w1_check "$T/W1-m4.yml"
+# m5: the cargo smoke step turned into a console smoke step.
+w1_mut W1-m5 '/ci\/images\/run\.sh smoke iam$/ { sub(/smoke iam$/, "smoke iam-console") } { print }'
+stub_reset
+run_fn W1-m5 1 "step 'Smoke each service on its own' runs a console smoke, but its own step env has no" "" none w1_check "$T/W1-m5.yml"
+# m6 (Review Focus 4): the variable at job level, where the self-test step would inherit it.
+w1_mut W1-m6 '{ print } $0 == "      PROTO_REPORTER: text" { print "      CONSOLE_PARITY_REQUIRED: " q "1" q }'
+stub_reset
+run_fn W1-m6 1 "1 CONSOLE_PARITY_REQUIRED line(s) outside a step env" "" none w1_check "$T/W1-m6.yml"
+# m7 (Review Focus 4): the env line turned into a comment.
+w1_mut W1-m7 '{ l = $0; sub(/^ +/, "", l) } step == "Console release sequence" && l == "CONSOLE_PARITY_REQUIRED: " q "1" q { print "          # CONSOLE_PARITY_REQUIRED: " q "1" q; next } { print }'
+stub_reset
+run_fn W1-m7 1 "step 'Console release sequence' runs a console smoke, but its own step env has no CONSOLE_PARITY_REQUIRED line" "" none w1_check "$T/W1-m7.yml"
+# m8: the host-build step deleted.
+w1_mut W1-m8 '/^      [-#]/ { inhost = 0 } /^      - name: Host build of both consoles/ { inhost = 1 } inhost { next } { print }'
+stub_reset
+run_fn W1-m8 1 "W1: no host-build step in W1-m8.yml" "" none w1_check "$T/W1-m8.yml"
+# m9: no console smoke step at all must not read as a pass.
+printf '%s\n' 'jobs:' > "$T/W1-m9.yml"
+stub_reset
+run_fn W1-m9 1 "W1: found no console smoke step in W1-m9.yml" "" none w1_check "$T/W1-m9.yml"
+
+# --- SMA-671: the "Console release sequence" loop (RS rows, Review Focus 2) -------------------
+# The step's real run: body, copied out of images.yml, runs under GitHub's own shell flags against
+# a stub ci/images/run.sh, syft and uv. A failure on iam-console must still run gateway-console,
+# stop the rest of iam-console, and fail the step.
+awk 'index($0, "      - name: Console release sequence") == 1 { on = 1; next }
+     on && /^        run: \|/ { body = 1; next }
+     on && body && /^          / { print substr($0, 11); next }
+     on && body && /^ *$/ { print ""; next }
+     on && body { exit }
+     on && /^      [-#]/ { exit }' "$W1_WF" > "$T/rs-body.sh" || infra "awk could not read images.yml"
+[ -s "$T/rs-body.sh" ] || infra "no run: body for 'Console release sequence' in images.yml"
+mkdir -p "$T/rs-work/ci/images" "$T/rs-bin"
+# shellcheck disable=SC2016 # the stub lines are written literally
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$RS_LOG"' \
+  'if [ "${1:-}" = "$RS_FAIL_CMD" ] && [ "${2:-}" = "$RS_FAIL_KEY" ]; then exit 1; fi' 'exit 0' \
+  > "$T/rs-work/ci/images/run.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$T/rs-bin/syft"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "packages=1"' 'exit 0' > "$T/rs-bin/uv"
+chmod +x "$T/rs-work/ci/images/run.sh" "$T/rs-bin/syft" "$T/rs-bin/uv"
+# rs_case <fail-cmd> <fail-key> <log-name> — the body, with run.sh failing on that one call.
+rs_case() {
+  RS_FAIL_CMD="$1"; RS_FAIL_KEY="$2"; RS_LOG="$T/rs-log-$3"
+  rm -f "$RS_LOG"
+  export RS_FAIL_CMD RS_FAIL_KEY RS_LOG
+  ( cd "$T/rs-work" && PATH="$T/rs-bin:$PATH" ARCH=amd64 "$BASH" --noprofile --norc -eo pipefail "$T/rs-body.sh" )
+}
+stub_reset
+run_fn RS1 1 "Console release sequence: iam-console failed (rc 1)" "" any rs_case build-oci iam-console RS1
+expect_in RS1-gw-build "$T/rs-log-RS1" "build-oci gateway-console out"
+expect_in RS1-gw-smoke "$T/rs-log-RS1" "smoke gateway-console"
+expect_not_in RS1-iam-stopped "$T/rs-log-RS1" "smoke iam-console"
+stub_reset
+run_fn RS2 0 "" "::error::" any rs_case none none RS2
+expect_in RS2-iam "$T/rs-log-RS2" "smoke iam-console"
+expect_in RS2-gw "$T/rs-log-RS2" "smoke gateway-console"
+stub_reset
+run_fn RS3 1 "Console release sequence: iam-console failed (rc 1)" "" any rs_case smoke iam-console RS3
+expect_in RS3-gw "$T/rs-log-RS3" "smoke gateway-console"
+
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
 if [ "$N_FAIL" -ne 0 ]; then
