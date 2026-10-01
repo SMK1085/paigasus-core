@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `ApiKeyService`: API-key lifecycle use cases — issue/revoke/list (SMA-445 Task 17). Mirrors
-//! `RoleService`/`ServiceAccountService`'s DI + authorize pattern (`application/roles.rs:78-204`,
-//! `application/service_accounts.rs:63-143`): every method authorizes BEFORE mutating/reading.
+//! `RoleService`/`ServiceAccountService`'s DI + authorize pattern: every method authorizes
+//! BEFORE mutating/reading.
 //!
 //! **D15 anti-escalation (THE security-critical invariant of this file, spec D15):** an API key
 //! is a bearer credential for its service account's ENTIRE current grant set — whoever holds the
@@ -20,6 +20,18 @@
 //! own scope. A single denied grant anywhere in the SA's grant set fails the WHOLE issuance,
 //! `Forbidden`, before any id is minted or secret generated — an actor who could not grant even
 //! ONE of the SA's roles to a third party must not be able to mint a key that wields all of them.
+//!
+//! **SMA-646: `issue` confirms the key's scope PRN against storage (step 4).** The caller's
+//! `scope` comes from a parsed wire PRN with an unchecked org slot and region. After the owner
+//! check and D15, `issue` calls
+//! [`TenancyNodes::resolve_and_authorize`](crate::application::tenancy_nodes::TenancyNodes):
+//! load the scope node (unknown -> `NotFound`), authorize `Action::IssueApiKey` against its
+//! STORED PRN, refuse a differing caller PRN with `PrnMismatch` (one warning line), and build the
+//! key and the `iam.api_key.issued` payload from the STORED node. The authorization at the scope
+//! is NEW in SMA-646 (spec K4, §8 Q5): without it, a caller who may issue keys for SOME service
+//! account could label a key with a node outside their authority, and could read a mismatch
+//! against success as an answer to "which organization owns this node". A caller granted at an
+//! organization passes for a team or project inside it (Cedar `resource in ?resource`).
 //!
 //! **Deliberately not gated on status (mirrors Task 16's own `entity_gen` deferral):**
 //! `issue`/`revoke`/`list` all look up the service account via `ServiceAccountRepository::find`,
@@ -69,6 +81,7 @@ use crate::adapters::api_keys::ApiKeyValidationCache;
 use crate::application::authorize::Authorize;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
+use crate::application::tenancy_nodes::TenancyNodes;
 use crate::config::ApiKeyConfig;
 use chrono::{DateTime, Duration, Utc};
 use paigasus_iam_core::authz::model::root_prn;
@@ -129,6 +142,7 @@ pub struct ApiKeyService<K, S, I, C, H, E> {
     service_accounts: S,
     grants: Arc<dyn RoleGrantStore>,
     authorize: Authorize,
+    nodes: TenancyNodes,
     hasher: H,
     entropy: E,
     cache: Arc<dyn ApiKeyValidationCache>,
@@ -150,6 +164,8 @@ pub struct ApiKeyServiceDeps<K, S, I, C, H, E> {
     pub service_accounts: S,
     pub grants: Arc<dyn RoleGrantStore>,
     pub authorize: Authorize,
+    /// SMA-646: loads the key's scope node for the stored-PRN check of `issue`.
+    pub nodes: TenancyNodes,
     pub hasher: H,
     pub entropy: E,
     pub cache: Arc<dyn ApiKeyValidationCache>,
@@ -176,6 +192,7 @@ where
             service_accounts: deps.service_accounts,
             grants: deps.grants,
             authorize: deps.authorize,
+            nodes: deps.nodes,
             hasher: deps.hasher,
             entropy: deps.entropy,
             cache: deps.cache,
@@ -196,8 +213,13 @@ where
     /// 3. For EVERY `RoleGrant` the SA currently holds (`grants.list_by_principal`), `actor`
     ///    must ALSO be authorized for `Action::GrantRole` AT that grant's own scope — any single
     ///    denial fails the whole call, `Forbidden`, before anything is minted.
+    /// 4. SMA-646: the key's `scope` must name an existing node (`NotFound`), `actor` must be
+    ///    authorized for `Action::IssueApiKey` AT that node's STORED PRN (`Forbidden`), and the
+    ///    caller's scope PRN must equal the stored one (`PrnMismatch`). The key carries the
+    ///    STORED scope. This runs after steps 2 and 3, so a caller who fails them still gets
+    ///    `Forbidden` for a forged scope (spec K5).
     ///
-    /// Only once both authorization checks fully pass does this mint an id, generate a secret
+    /// Only once all four checks pass does this mint an id, generate a secret
     /// (`entropy.new_secret()`), hash it (`hasher.hash`), and persist the `ApiKey` row together
     /// with the hash — never the plaintext, which is returned to the caller exactly ONCE inside
     /// the result's `plaintext` field and never re-derivable afterward.
@@ -218,6 +240,11 @@ where
         for grant in &sa_grants {
             self.authorize.check(actor, Action::GrantRole, &grant_scope_resource_prn(&grant.scope)).await?;
         }
+
+        // SMA-646 step 4 (module docs): load the scope node, authorize `IssueApiKey` against its
+        // STORED PRN, refuse a forged scope PRN, and use the STORED node from here on — before
+        // any id is minted or secret generated.
+        let scope = self.nodes.resolve_and_authorize(&self.authorize, actor, Action::IssueApiKey, &scope, "IssueApiKey").await?;
 
         let id = self.ids.new_api_key_id();
         let secret = self.entropy.new_secret();
@@ -371,10 +398,12 @@ mod tests {
     use super::*;
     use crate::adapters::api_keys::{CachedValidation, MemoryApiKeyCache};
     use crate::application::fakes::{
-        FakeAuditLog, FakeAuthorizer, FakeOutbox, FakeSecretHasher, FakeUnitOfWork, FixedClock, InMemoryApiKeys, InMemoryRoleGrants, InMemoryServiceAccounts, SeqIds, SeqKeyEntropy,
+        FakeAuditLog, FakeAuthorizer, FakeOutbox, FakeSecretHasher, FakeUnitOfWork, FixedClock, InMemoryApiKeys, InMemoryRoleGrants, InMemoryServiceAccounts, SeqIds, SeqKeyEntropy, TenancyStore,
+        forged_variants, seed_org, seed_project, seed_team, store_with_orgs, tenancy_nodes,
     };
+    use crate::log_capture::capture_logs;
     use async_trait::async_trait;
-    use paigasus_iam_core::{OrganizationId, PrincipalStatus, RepositoryError, RoleGrant, ServiceAccount, Transaction, parse_token};
+    use paigasus_iam_core::{OrganizationId, PrincipalStatus, ProjectId, RepositoryError, RoleGrant, ServiceAccount, TeamId, Transaction, parse_token};
     use uuid::Uuid;
 
     fn actor_prn(n: u128) -> Prn {
@@ -398,6 +427,7 @@ mod tests {
         cache: Arc<MemoryApiKeyCache>,
         outbox: FakeOutbox,
         audit: FakeAuditLog,
+        store: TenancyStore,
     }
 
     fn new_service_with_fakes(fake: FakeAuthorizer) -> ServiceWithFakes {
@@ -407,11 +437,16 @@ mod tests {
         let cache = Arc::new(MemoryApiKeyCache::new(30));
         let outbox = FakeOutbox::default();
         let audit = FakeAuditLog::default();
+        // SMA-646: `issue` now loads the key's scope node. Every `owner_org(n)` with n in
+        // 1..=32 names a STORED organization, so the pre-SMA-646 tests, which scope each key to
+        // the SA's owner `owner_org(1)` and allow `IssueApiKey` there, keep their meaning.
+        let store = store_with_orgs(1..=32);
         let svc = ApiKeyService::new(ApiKeyServiceDeps {
             keys: keys.clone(),
             service_accounts: service_accounts.clone(),
             grants: grants.clone(),
             authorize: Authorize::new(Arc::new(fake)),
+            nodes: tenancy_nodes(&store),
             hasher: FakeSecretHasher,
             entropy: SeqKeyEntropy::default(),
             cache: cache.clone(),
@@ -430,6 +465,7 @@ mod tests {
             cache,
             outbox,
             audit,
+            store,
         }
     }
 
@@ -517,6 +553,14 @@ mod tests {
             created_at: Utc::now(),
         };
         store.0.lock().unwrap().insert(id, grant);
+    }
+
+    /// SMA-646: seeds org 100 -> team 101 -> project 102 into `store`.
+    fn seed_chain(store: &TenancyStore) -> (OrganizationId, TeamId, ProjectId) {
+        let org = seed_org(store, 100);
+        let team = seed_team(store, &org, 101);
+        let project = seed_project(store, &team, 102);
+        (org, team, project)
     }
 
     #[tokio::test]
@@ -795,6 +839,7 @@ mod tests {
             service_accounts,
             grants: Arc::new(InMemoryRoleGrants::default()),
             authorize: Authorize::new(Arc::new(fake)),
+            nodes: tenancy_nodes(&store_with_orgs([1])),
             hasher: FakeSecretHasher,
             entropy: SeqKeyEntropy::default(),
             cache: cache.clone(),
@@ -930,5 +975,153 @@ mod tests {
         let actor = actor_prn(1);
         let err = svc.list(&actor, &missing, Page::new(None, None).unwrap()).await.unwrap_err();
         assert_eq!(err, TenancyError::NotFound);
+    }
+
+    /// SMA-646 U9 (K1, AC 11): a forged scope on an EXISTING node answers `PrnMismatch`. No key,
+    /// no outbox event and no audit entry is written.
+    #[tokio::test]
+    async fn issue_refuses_a_forged_scope() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes {
+            svc,
+            keys,
+            service_accounts,
+            outbox,
+            audit,
+            store,
+            ..
+        } = new_service_with_fakes(fake.clone());
+        let (org, team, project) = seed_chain(&store);
+        let owner = TenancyNodeRef::Organization(org.clone());
+        for node in [owner.clone(), TenancyNodeRef::Team(team.clone()), TenancyNodeRef::Project(project.clone())] {
+            fake.allow(Action::IssueApiKey, &node_resource_prn(&node));
+        }
+        let sa_id = seed_service_account(&service_accounts, owner, 1000);
+        let actor = actor_prn(1);
+
+        for (label, forged) in forged_variants(&org, &team, &project) {
+            let err = svc.issue(&actor, &sa_id, forged, None, Vec::new(), Vec::new()).await.unwrap_err();
+            assert_eq!(err, TenancyError::PrnMismatch, "{label}");
+        }
+        assert!(keys.0.lock().unwrap().is_empty(), "a refused issue must not persist a key");
+        assert!(outbox.0.lock().unwrap().is_empty(), "a refused issue must not enqueue an event");
+        assert!(audit.0.lock().unwrap().is_empty(), "a refused issue must not record an audit entry");
+    }
+
+    /// SMA-646 U10 (K2, AC 12): the correct scope succeeds, and the key and the event payload
+    /// carry the STORED scope.
+    #[tokio::test]
+    async fn issue_returns_the_stored_scope() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes {
+            svc, service_accounts, outbox, store, ..
+        } = new_service_with_fakes(fake.clone());
+        let (org, team, _project) = seed_chain(&store);
+        let owner = TenancyNodeRef::Organization(org);
+        let scope = TenancyNodeRef::Team(team.clone());
+        fake.allow(Action::IssueApiKey, &node_resource_prn(&owner));
+        fake.allow(Action::IssueApiKey, &node_resource_prn(&scope));
+        let sa_id = seed_service_account(&service_accounts, owner, 1001);
+
+        let new_key = svc.issue(&actor_prn(1), &sa_id, scope, None, Vec::new(), Vec::new()).await.unwrap();
+        assert_eq!(new_key.key.scope.canonical(), team.canonical());
+        let events = outbox.0.lock().unwrap();
+        assert_eq!(events[0].payload["scope"], serde_json::json!(team.canonical()));
+    }
+
+    /// SMA-646 U11 (K4, AC 14): the caller may issue at the SA owner but has no `IssueApiKey` at
+    /// the scope node. Issue answers `Forbidden` for a forged and a correct scope alike.
+    #[tokio::test]
+    async fn a_caller_without_issue_at_the_scope_cannot_tell_a_forged_scope_from_a_correct_one() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes {
+            svc, keys, service_accounts, store, ..
+        } = new_service_with_fakes(fake.clone());
+        let (org, team, _project) = seed_chain(&store);
+        let owner = TenancyNodeRef::Organization(org);
+        fake.allow(Action::IssueApiKey, &node_resource_prn(&owner));
+        // Deliberately NOT allowed: `IssueApiKey` at `team`.
+        let sa_id = seed_service_account(&service_accounts, owner, 1002);
+        let correct = TenancyNodeRef::Team(team.clone());
+        let forged = TenancyNodeRef::Team(TeamId::from_parts(Uuid::from_u128(0xF0F0), team.uuid()));
+
+        for (label, scope) in [("correct", correct), ("forged", forged)] {
+            let err = svc.issue(&actor_prn(1), &sa_id, scope, None, Vec::new(), Vec::new()).await.unwrap_err();
+            assert_eq!(err, TenancyError::Forbidden, "{label}");
+        }
+        assert!(keys.0.lock().unwrap().is_empty());
+    }
+
+    /// SMA-646 U12 (K3, AC 13): an unknown scope uuid answers `NotFound`, and no key is written.
+    #[tokio::test]
+    async fn issue_with_an_unknown_scope_is_not_found() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes {
+            svc, keys, service_accounts, store, ..
+        } = new_service_with_fakes(fake.clone());
+        let (org, _team, _project) = seed_chain(&store);
+        let owner = TenancyNodeRef::Organization(org.clone());
+        fake.allow(Action::IssueApiKey, &node_resource_prn(&owner));
+        let sa_id = seed_service_account(&service_accounts, owner, 1003);
+        let unknown = TenancyNodeRef::Team(TeamId::from_parts(org.uuid(), Uuid::from_u128(4040)));
+
+        let err = svc.issue(&actor_prn(1), &sa_id, unknown, None, Vec::new(), Vec::new()).await.unwrap_err();
+        assert_eq!(err, TenancyError::NotFound);
+        assert!(keys.0.lock().unwrap().is_empty(), "no key may be written for an unknown scope");
+    }
+
+    /// SMA-646 U13 (AC 8): one forged Issue writes exactly one warning line.
+    #[tokio::test]
+    async fn a_forged_scope_logs_one_warning() {
+        let (logs, _guard) = capture_logs();
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes { svc, service_accounts, store, .. } = new_service_with_fakes(fake.clone());
+        let (org, team, _project) = seed_chain(&store);
+        let owner = TenancyNodeRef::Organization(org);
+        let correct = TenancyNodeRef::Team(team.clone());
+        fake.allow(Action::IssueApiKey, &node_resource_prn(&owner));
+        fake.allow(Action::IssueApiKey, &node_resource_prn(&correct));
+        let sa_id = seed_service_account(&service_accounts, owner, 1004);
+        let forged = TenancyNodeRef::Team(TeamId::from_parts(Uuid::from_u128(0xF0F0), team.uuid()));
+
+        let _ = svc.issue(&actor_prn(1), &sa_id, forged.clone(), None, Vec::new(), Vec::new()).await.unwrap_err();
+
+        let text = logs.text();
+        assert_eq!(text.matches("requested_prn=").count(), 1, "{text}");
+        assert_eq!(text.matches("rpc=IssueApiKey").count(), 1, "{text}");
+        assert!(text.contains(&format!("requested_prn={}", forged.canonical())), "{text}");
+        assert!(text.contains(&format!("stored_prn={}", correct.canonical())), "{text}");
+    }
+
+    /// SMA-646 U14 (K5, AC 15, Review Focus 4): the scope check runs AFTER the owner check and
+    /// D15. A caller who fails either one gets `Forbidden` for a forged scope, never a mismatch.
+    #[tokio::test]
+    async fn a_forged_scope_never_outranks_the_owner_or_d15_checks() {
+        let fake = FakeAuthorizer::default();
+        let ServiceWithFakes {
+            svc, service_accounts, grants, store, ..
+        } = new_service_with_fakes(fake.clone());
+        let (org, team, _project) = seed_chain(&store);
+        let owner = TenancyNodeRef::Organization(org);
+        let correct = TenancyNodeRef::Team(team.clone());
+        let forged = TenancyNodeRef::Team(TeamId::from_parts(Uuid::from_u128(0xF0F0), team.uuid()));
+        // Allowed at the scope only, NOT at the SA owner.
+        fake.allow(Action::IssueApiKey, &node_resource_prn(&correct));
+        let sa_owner_denied = seed_service_account(&service_accounts, owner.clone(), 1005);
+        assert_eq!(
+            svc.issue(&actor_prn(1), &sa_owner_denied, forged.clone(), None, Vec::new(), Vec::new()).await.unwrap_err(),
+            TenancyError::Forbidden,
+            "owner check first"
+        );
+
+        // Now allowed at the owner too, but the SA holds a grant the caller cannot grant (D15).
+        fake.allow(Action::IssueApiKey, &node_resource_prn(&owner));
+        let sa_d15_denied = seed_service_account(&service_accounts, owner, 1006);
+        seed_role_grant(&grants, 1906, &sa_d15_denied, "org_admin", GrantScope::Node(owner_org(2)));
+        assert_eq!(
+            svc.issue(&actor_prn(1), &sa_d15_denied, forged, None, Vec::new(), Vec::new()).await.unwrap_err(),
+            TenancyError::Forbidden,
+            "D15 second"
+        );
     }
 }

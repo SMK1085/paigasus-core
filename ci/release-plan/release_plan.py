@@ -1780,9 +1780,13 @@ def self_test() -> int:
     # FIXTURES only. Floored below the actual count so a legitimate row removal does not abort
     # the gate as infra. Twinned by check 11's --collection-count floor in ci/actionlint/run.sh,
     # in a separately scheduled file, so one edit cannot remove both.
-    if len(COLLECTION_ROWS) < 14:
-        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 14 — "
-              "something emptied or gutted the collection-layer table", file=sys.stderr)
+    # The floor tracks the table (SMA-709). When the row count changes, in either direction, set
+    # the floor to one below `--collection-count`. Change the twin in ci/actionlint/run.sh
+    # check 11 in the same commit.
+    if len(COLLECTION_ROWS) < 37:
+        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 37 — "
+              "something emptied or gutted the collection-layer table; if the removal is "
+              "intended, lower both floors in the same commit (SMA-709)", file=sys.stderr)
         rc = 3
     for label, fn in COLLECTION_ROWS:
         try:
