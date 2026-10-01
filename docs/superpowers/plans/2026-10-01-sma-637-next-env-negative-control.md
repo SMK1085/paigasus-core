@@ -1058,7 +1058,9 @@ For each row: apply the edit with the Edit tool, run `python3 ci/affected-graph/
 | 7d | `moon.yml`: delete `      - 'ts/pnpm-lock.yaml'` from the `next-env-drift` inputs | rc 1, `gate-inputs` row for `next-env-drift` |
 | 7e | `ci/next-env/run.sh`: delete each line of `NEXT_ENV_SH_CALL_SITES` in turn (23 runs) | rc 1 each, `call-sites` row `ci/next-env/run.sh: <that line>` |
 | 7f | `ci_targets.py`: delete the `"next-env-drift": (…),` entry of `SELF_TASK_EXPECTED_GLOBS` (with its comment) | rc 1, `pairing-unpinned` row `next-env-drift` |
-| 7g | delete `:next-env-drift ` from `T=(…)` in `.github/workflows/ci.yml` AND from the `ci-targets` block in `CLAUDE.md` (keep the markers), and add `    options:` / `      runInCI: false` to the `next-env-drift` task in `moon.yml` | rc 1, `floor` row `next-env-drift` |
+| 7g | delete `:next-env-drift ` from `T=(…)` in `.github/workflows/ci.yml` AND from the `ci-targets` block in `CLAUDE.md` (keep the markers), add `    options:` / `      runInCI: false` to the `next-env-drift` task in `moon.yml`, AND delete the four `- 'repo:next-env-drift'` `deps` lines in `ts/apps/{iam,gateway}-console/moon.yml` (`test` and `test-e2e`) | rc 1, `floor` row `next-env-drift` |
+
+CORRECTED during Task 4 (2026-10-01): without the four `deps` deletions, 7g gives rc 2, not rc 1. Moon 2.5.3 refuses the graph (`task_builder::dependency::run_in_ci_mismatch`: `gateway-console-ts:test` cannot depend on a task with `runInCI` disabled), so `moon query tasks` fails and `ci_targets.py` exits `FATAL` before any check runs. With the deletions, 7g gives rc 1 and only the `floor` row.
 
 For 7e, the 23 deletions can run from a script against scratch copies, so that no repo file changes: copy `ci/next-env/run.sh` to `$TMPDIR/sma637-7e/run.sh`, delete one pinned line in the copy, and call `check_self_invocation` directly. Save as `$TMPDIR/sma637-7e.py`:
 ```python
