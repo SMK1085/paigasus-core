@@ -37,7 +37,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe kernel_control_flag parity_required_flag console_staged_parity_row"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe kernel_control_flag parity_required_flag console_staged_parity_row docker_context_leaks"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -825,6 +825,69 @@ run_fn SP5d 1 "has no .next/BUILD_ID" "" "$T/argv-parity" console_staged_parity_
 
 # shellcheck disable=SC2016 # the pinned call line is literal text
 pin_rows P1d "$T/fn-smoke_consoles.sh" 'console_staged_parity_row "$app" "$image" "$parity" || ec=1'
+
+# --- SMA-671: docker_context_leaks (CX rows) ---------------------------------------------------
+# A fixture git repository with one commit. It commits, so it follows ci/CLAUDE.md (SMA-708,
+# SMA-714): no maintenance, no gc, no signing, no global or system config.
+cx_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$FX_ROOT" "$@"; }
+# cx_fx <name> [<dockerignore-file>] — the fixture, with ts/.dockerignore copied from the real one
+# (or from <dockerignore-file>), a root .gitignore like the repo's, two tracked files under
+# ts/apps/a and one under rs/crates/bindings/b. Call it AFTER stub_reset; FX_ROOT points at it.
+cx_fx() {
+  FX_ROOT="$T/fx-cx-$1"
+  rm -rf "$FX_ROOT"
+  mkdir -p "$FX_ROOT/ts/apps/a" "$FX_ROOT/rs/crates/bindings/b"
+  cp "${2:-$REPO/ts/.dockerignore}" "$FX_ROOT/ts/.dockerignore"
+  printf '%s\n' 'node_modules/' '.next/' '*.tsbuildinfo' > "$FX_ROOT/.gitignore"
+  printf '%s\n' 'export {};' > "$FX_ROOT/ts/apps/a/page.ts"
+  printf '%s\n' '/// <reference types="next" />' > "$FX_ROOT/ts/apps/a/next-env.d.ts"
+  printf '%s\n' 'module.exports = {};' > "$FX_ROOT/rs/crates/bindings/b/index.js"
+  cx_git init -q || infra "git init failed for the CX fixture"
+  cx_git config maintenance.auto false
+  cx_git config gc.auto 0
+  cx_git config commit.gpgsign false
+  cx_git config tag.gpgsign false
+  cx_git add -A || infra "git add failed for the CX fixture"
+  cx_git -c user.name=selftest -c user.email=selftest@example.invalid commit -q -m fixture \
+    || infra "the CX fixture commit failed"
+}
+# What a host build leaves that ts/.dockerignore DOES exclude.
+cx_excluded() {
+  mkdir -p "$FX_ROOT/ts/node_modules/p" "$FX_ROOT/ts/apps/a/node_modules/q" "$FX_ROOT/ts/apps/a/.next/static"
+  : > "$FX_ROOT/ts/node_modules/p/index.js"
+  : > "$FX_ROOT/ts/apps/a/node_modules/q/index.js"
+  : > "$FX_ROOT/ts/apps/a/.next/static/x.js"
+  : > "$FX_ROOT/ts/apps/a/.env.local"
+}
+
+stub_reset; cx_fx 0; cx_excluded
+run_fn CX0 0 "" "::error::" none docker_context_leaks
+expect_in CX0-out "$T/CX0.out" "docker context: no host artifact"
+stub_reset; cx_fx 1; cx_excluded; : > "$FX_ROOT/ts/apps/a/tsconfig.tsbuildinfo"
+run_fn CX1 1 "docker context: 'ts/apps/a/tsconfig.tsbuildinfo' (git status '!!')" "node_modules" none docker_context_leaks
+stub_reset; cx_fx 2; : > "$FX_ROOT/ts/apps/a/new.txt"
+run_fn CX2 1 "docker context: 'ts/apps/a/new.txt' (git status '??')" "" none docker_context_leaks
+# Review Focus 3: a tracked file that the build rewrites is a leak too.
+stub_reset; cx_fx 3; printf '%s\n' '// changed' >> "$FX_ROOT/ts/apps/a/next-env.d.ts"
+run_fn CX3 1 "docker context: 'ts/apps/a/next-env.d.ts' (git status ' M')" "" none docker_context_leaks
+stub_reset; cx_fx 4; : > "$FX_ROOT/rs/crates/bindings/b/x.node"
+run_fn CX4 1 "docker context: 'rs/crates/bindings/b/x.node'" "" none docker_context_leaks
+printf '%s\n' '**/node_modules' '!keep' > "$T/cx5-ignore"
+stub_reset; cx_fx 5 "$T/cx5-ignore"
+run_fn CX5 1 "cannot read the pattern '!keep'" "" none docker_context_leaks
+printf '%s\n' '**/node_modules' 'apps/a/x' > "$T/cx5b-ignore"
+stub_reset; cx_fx 5b "$T/cx5b-ignore"
+run_fn CX5b 1 "cannot read the pattern 'apps/a/x'" "" none docker_context_leaks
+# A pattern without **/ excludes the top level only, as in Docker.
+printf '%s\n' 'node_modules' '**/.next' > "$T/cx6-ignore"
+stub_reset; cx_fx 6 "$T/cx6-ignore"; cx_excluded
+run_fn CX6 1 "docker context: 'ts/apps/a/node_modules/'" "'ts/node_modules/'" none docker_context_leaks
+# Review Focus 3: a path with a space is named whole (-z output, no quoting).
+stub_reset; cx_fx 7; : > "$FX_ROOT/ts/apps/a/my file.txt"
+run_fn CX7 1 "docker context: 'ts/apps/a/my file.txt'" "" none docker_context_leaks
+cx_nogit() { export GIT_CEILING_DIRECTORIES="$T"; docker_context_leaks; }
+stub_reset; FX_ROOT="$T/fx-cx-nogit"; mkdir -p "$FX_ROOT/ts"; cp "$REPO/ts/.dockerignore" "$FX_ROOT/ts/.dockerignore"
+run_fn CX8 1 "docker context NOT checked — git status exited" "" none cx_nogit
 
 # --- console_healthcheck_row (H rows) ----------------------------------------------------------
 # The argv that console_healthcheck_row must hand to docker (through with_deadline).

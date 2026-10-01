@@ -17,6 +17,7 @@
 #        ci/images/run.sh rehearse <archive.oci.tar>...      # SMA-658: publish steps vs two local registries
 #        ci/images/run.sh build-console [iam|gateway]   # SMA-513: console image; [iam|gateway] scopes the build
 #        ci/images/run.sh all-consoles                    # SMA-513: build both consoles + smoke; takes no service arg
+#        ci/images/run.sh context-check                   # SMA-671: fail on a host artifact in a Docker build context
 # <key> is a chain key of ci/images/chains.toml: iam, gateway, iam-console or gateway-console.
 # Two switches of the console smoke (`smoke <console-key>` and `all-consoles`):
 #   PAIGASUS_SMOKE_KERNEL_CONTROL  unset or `on` runs the kernel control row; `off` skips it
@@ -1764,6 +1765,96 @@ console.log(["public=" + (fs.existsSync(root + "/public") ? "1" : "0")].concat(r
   return "$rc"
 }
 
+# SMA-671 (spec § 4.2, AC 9): the host build of images.yml runs in the checkout that the later image
+# builds use as their Docker context. .dockerignore filters a context, .gitignore does not, and
+# release.yml builds from a clean checkout. So a host artifact that ts/.dockerignore does not
+# exclude, a tracked file that the build rewrote, and any new file under rs/crates/bindings (the
+# named context `bindings`, which has no .dockerignore) would give the two workflows different
+# image inputs. This prints one ::error:: per such path and returns 1. It understands only the two
+# pattern forms that ts/.dockerignore uses: `<name>` (the top level of ts/) and `**/<name>` (any
+# depth), where <name> holds no `/` and may hold a glob. It refuses any other form (a `!`
+# exception, a `/` inside the name), fail closed. `git status --ignored=matching` lists an ignored
+# directory once, not each file in it; `-z` keeps a path with a space whole.
+docker_context_leaks() {
+  local ignore="$ROOT/ts/.dockerignore" line name n=0 i st st_rc=0 rec xy path rel rest comp first excluded leaks=0
+  local -a pat_any pat_name
+  if [ ! -r "$ignore" ]; then
+    echo "::error::docker context NOT checked — ${ignore} is not readable." >&2
+    return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    case "$line" in
+      '**/'*) name="${line#\*\*/}"; pat_any[n]=1 ;;
+      *) name="$line"; pat_any[n]=0 ;;
+    esac
+    case "$name" in
+      ''|'!'*|*/*|*' '*)
+        echo "::error::docker context NOT checked — cannot read the pattern '${line}' in ts/.dockerignore. docker_context_leaks in ci/images/run.sh knows only '<name>' and '**/<name>', where <name> holds no '/'. Extend it for the new form." >&2
+        return 1
+        ;;
+    esac
+    pat_name[n]="$name"
+    n=$((n + 1))
+  done < "$ignore"
+  st="$(mktemp "${TMPDIR:-/tmp}/paigasus-context.XXXXXX")" || st=""
+  if [ -z "$st" ]; then
+    echo "::error::docker context NOT checked — mktemp failed." >&2
+    return 1
+  fi
+  git -C "$ROOT" status --porcelain=v1 -z --ignored=matching --untracked-files=normal \
+    -- ts rs/crates/bindings > "$st" 2> "$st.err" || st_rc=$?
+  if [ "$st_rc" -ne 0 ]; then
+    echo "::error::docker context NOT checked — git status exited ${st_rc} in ${ROOT}. Its message follows." >&2
+    cat "$st.err" >&2 || true
+    rm -f "$st" "$st.err"
+    return 1
+  fi
+  while IFS= read -r -d '' rec; do
+    xy="${rec:0:2}"
+    path="${rec:3}"
+    case "$xy" in
+      # A rename or a copy has its source path as the next record.
+      R*|C*) IFS= read -r -d '' rest || true ;;
+    esac
+    excluded=0
+    case "$path" in
+      ts/*)
+        rel="${path#ts/}"
+        rel="${rel%/}"
+        rest="$rel"
+        first=1
+        while [ -n "$rest" ] && [ "$excluded" -eq 0 ]; do
+          comp="${rest%%/*}"
+          i=0
+          while [ "$i" -lt "$n" ]; do
+            if [ "${pat_any[$i]}" -eq 1 ] || [ "$first" -eq 1 ]; then
+              # shellcheck disable=SC2254 # a glob on purpose, as in .dockerignore
+              case "$comp" in ${pat_name[$i]}) excluded=1 ;; esac
+            fi
+            i=$((i + 1))
+          done
+          if [ "$comp" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+          first=0
+        done
+        ;;
+    esac
+    if [ "$excluded" -eq 0 ]; then
+      echo "::error::docker context: '${path}' (git status '${xy}') is in the image build context of images.yml, but not of release.yml, which builds from a clean checkout." >&2
+      leaks=$((leaks + 1))
+    fi
+  done < "$st"
+  rm -f "$st" "$st.err"
+  if [ "$leaks" -ne 0 ]; then
+    echo "::error::docker context: ${leaks} path(s) above. ts/.dockerignore does not exclude them, or they are under rs/crates/bindings (the named context 'bindings', which has no .dockerignore). Add the pattern to ts/.dockerignore, or stop the host build from writing the file." >&2
+    return 1
+  fi
+  echo "  docker context: no host artifact outside ts/.dockerignore under ts/, and no new or changed file under rs/crates/bindings"
+  return 0
+}
+
 # R-NODE (SMA-670 gap 1). The runtime base pins only the Node MAJOR (distroless publishes no
 # patch-level tags), so nothing else records which Node the image runs. This row prints it. A
 # different major, an unparseable version or an unreadable .prototools pin is an error. A different
@@ -2495,7 +2586,7 @@ rehearse() {
 
 # One usage string for both the missing-command case and the unknown-command case below, so the
 # two never drift apart. Lists every command the case block accepts, in the order it accepts them.
-USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway|iam-console|gateway-console> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh smoke <iam-console|gateway-console>... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles"
+USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway|iam-console|gateway-console> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh smoke <iam-console|gateway-console>... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles | ci/images/run.sh context-check"
 cmd="${1:?$USAGE}"
 target="${2:-}"
 services=("iam" "gateway")
@@ -2585,6 +2676,14 @@ case "$cmd" in
       set -- "$@" "${s}=${s_app}:dev"
     done
     smoke_consoles "$kc_flag" "$pr_flag" "$@"
+    ;;
+  context-check)
+    # SMA-671: images.yml runs this after the host build of both consoles.
+    if [ -n "$target" ]; then
+      echo "usage: ci/images/run.sh context-check takes no argument" >&2
+      exit 1
+    fi
+    docker_context_leaks
     ;;
   *)
     echo "unknown command: $cmd" >&2
