@@ -586,9 +586,13 @@ base_path_for() {
   esac
 }
 
-# A route INSIDE that zone's `(console)` route group, relative to its basePath (SMA-634). It is the
-# one runtime proof that the image loads the kernel: the `(console)` layout imports
-# @paigasus/console-core, which evaluates the kernel's wasm at module scope.
+# A route INSIDE that zone's `(console)` route group, relative to its basePath (SMA-634). Two rows
+# of smoke_consoles use it. The cookie-less row proves only that proxy.ts gates the zone: the
+# proxy redirects a request with no session cookie before Next routes it, so that row loads no
+# kernel code. The kernel route row (console_kernel_route_row, SMA-675) sends a seeded session.
+# Then the `(console)` layout runs, and it imports @paigasus/console-core, which evaluates the
+# kernel's wasm at module scope. The kernel control row proves that the route row reds when the
+# wasm cannot load.
 #
 # PER ZONE, and not `/orgs` for both. gateway-console has no `/orgs` page at all — its zone overview
 # is `(console)/overview/page.tsx`, and its only `orgs` routes are parameterised
@@ -1145,6 +1149,9 @@ smoke() {
 # NOT fire when `set -e` aborts a function from inside, which is exactly the path that would leak a
 # container.
 CONSOLE_SMOKE_NAMES=""
+# SMA-675 D6: the per-run Docker network of the console smoke. Script-global for the same reason
+# as CONSOLE_SMOKE_NAMES: the EXIT trap reads it after smoke_consoles has returned.
+CONSOLE_SMOKE_NETWORK=""
 
 console_smoke_cleanup() {
   local n
@@ -1152,6 +1159,403 @@ console_smoke_cleanup() {
     docker rm -f "$n" >/dev/null 2>&1 || true
   done
   CONSOLE_SMOKE_NAMES=""
+  # SMA-675 D6: the network goes AFTER the containers. Docker refuses to remove a network that
+  # still has endpoints.
+  if [ -n "$CONSOLE_SMOKE_NETWORK" ]; then
+    docker network rm "$CONSOLE_SMOKE_NETWORK" >/dev/null 2>&1 || true
+  fi
+  CONSOLE_SMOKE_NETWORK=""
+}
+
+# SMA-675 D2: a session id of 64 lowercase hex characters from /dev/urandom. It prints nothing and
+# returns 1 when the read does not give exactly 64 hex characters.
+console_new_sid() {
+  local sid
+  sid="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \t\n')" || sid=""
+  case "$sid" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  if [ "${#sid}" -ne 64 ]; then return 1; fi
+  printf '%s\n' "$sid"
+}
+
+# SMA-675 D4 step 2 and spec 6.1: the ONE argument list for `docker create` of a console
+# container, the main container and the kernel control container. So the control cannot miss an
+# argument that the main container has (for example PAIGASUS_SESSION_REDIS_URL, F17). One
+# argument per line on stdout. <env_file> holds the fixed CONSOLE_SMOKE_ENV words, one per line.
+# An empty <network> is the D6 fallback: the old memory store and no network flags. The two
+# --add-host flags make the IAM and gateway calls fail at once with "connection refused". This
+# function reads no global.
+console_container_args() {
+  local app="$1" zone="$2" zones_json="$3" network="$4" redis_url="$5" env_file="$6" line
+  if [ ! -r "$env_file" ]; then
+    echo "::error::${app}: the container arguments were NOT built — the fixed env file '${env_file}' is not readable." >&2
+    return 1
+  fi
+  if [ -n "$network" ] && [ -z "$redis_url" ]; then
+    echo "::error::${app}: the container arguments were NOT built — the network '${network}' was given with no Redis URL." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+  done < "$env_file"
+  printf '%s\n' -e "PAIGASUS_ZONE=${zone}" -e "PAIGASUS_ZONES=${zones_json}"
+  if [ -n "$network" ]; then
+    printf '%s\n' --network "$network" \
+      -e "PAIGASUS_SESSION_STORE=redis" -e "PAIGASUS_SESSION_REDIS_URL=${redis_url}" \
+      --add-host iam:127.0.0.1 --add-host gateway:127.0.0.1
+  else
+    printf '%s\n' -e "PAIGASUS_SESSION_STORE=memory"
+  fi
+  printf '%s\n' -p 0:3000
+}
+
+# SMA-675 D6: the per-run network and the Redis sidecar, one for both zones (D7). Both carry the
+# label paigasus.smoke=console, so the leftovers of a killed run can be pruned (RUNBOOK). No Redis
+# port is published. Readiness is a bounded `redis-cli PING` loop, one second apart; the smoke
+# passes 20 tries, the self-test 2. The caller registers <name> in CONSOLE_SMOKE_NAMES and
+# <network> in CONSOLE_SMOKE_NETWORK BEFORE this call, so the EXIT trap removes them after an abort.
+console_smoke_redis_start() {
+  local network="$1" name="$2" image="$3" tries="$4" out rc=0 i=0 pong
+  case "$tries" in
+    ''|*[!0-9]*|????*) tries="" ;;
+  esac
+  if [ -z "$tries" ] || [ "$tries" -lt 1 ]; then
+    echo "::error::smoke_consoles: the Redis sidecar was NOT started — the try count '$4' is not a positive integer of at most 3 digits." >&2
+    return 1
+  fi
+  out="$(docker network create --label paigasus.smoke=console "$network" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::smoke_consoles: the per-run network ${network} was not created — docker exited ${rc}; its own message follows. The kernel rows are skipped for every zone, and the other rows run on the memory store." >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  out="$(docker run -d --name "$name" --network "$network" --label paigasus.smoke=console "$image" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::smoke_consoles: the Redis sidecar ${name} did not start from ${image} — docker exited ${rc}; its own message follows. The kernel rows are skipped for every zone, and the other rows run on the memory store." >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  while [ "$i" -lt "$tries" ]; do
+    pong="$(docker exec "$name" redis-cli PING 2>/dev/null)" || pong=""
+    if [ "$pong" = "PONG" ]; then
+      echo "  Redis sidecar ${name} answers PONG on network ${network}"
+      return 0
+    fi
+    i=$((i + 1))
+    if [ "$i" -lt "$tries" ]; then sleep 1; fi
+  done
+  echo "::error::smoke_consoles: the Redis sidecar ${name} did not answer PONG within ${tries} tries — the kernel rows are skipped for every zone. Its last log lines follow." >&2
+  docker logs "$name" 2>&1 | tail -30 >&2 || true
+  return 1
+}
+
+# SMA-675 D2: one literal SessionRecord (version 2) under pgs:sess:<sid>, valid for 10 minutes,
+# with the per-run nonce smoke-<first 12 sid chars>@example.com in the email claim. `now` comes
+# from the SIDECAR's clock (redis-cli TIME), not from the host: after a development Mac sleeps,
+# the Docker VM clock can differ from the host clock, and the consoles read the VM clock. Ten
+# minutes is far above the 30 s refresh skew (F7), and there is no refreshToken field, so no
+# refresh and no IdP call can start. `10#` because a microsecond value can have a leading zero,
+# and bash reads a leading zero as octal.
+# WARNING, INTENTIONAL COUPLING: this literal must pass isSessionRecord in
+# ts/packages/paigasus-auth/src/core/session.ts. If the record shape changes, the store deletes
+# this record, and the kernel route row reds with its requireSession message. Change the literal
+# here too. There is deliberately no second copy of isSessionRecord in bash.
+console_seed_session() {
+  local redis="$1" sid="$2" t t_rc=0 secs usecs now exp nonce rec reply reply_rc=0
+  t="$(docker exec "$redis" redis-cli TIME)" || t_rc=$?
+  secs="$(printf '%s\n' "$t" | sed -n 1p)" || secs=""
+  usecs="$(printf '%s\n' "$t" | sed -n 2p)" || usecs=""
+  case "$secs" in ''|*[!0-9]*) secs="" ;; esac
+  case "$usecs" in ''|*[!0-9]*) usecs="" ;; esac
+  if [ "$t_rc" -ne 0 ] || [ -z "$secs" ] || [ -z "$usecs" ]; then
+    echo "::error::smoke_consoles: the session was NOT seeded — 'redis-cli TIME' on ${redis} exited ${t_rc} and did not give two integers. Its output follows." >&2
+    printf '%s\n' "$t" >&2
+    return 1
+  fi
+  now=$((10#$secs * 1000 + 10#$usecs / 1000))
+  exp=$((now + 600000))
+  nonce="smoke-${sid:0:12}@example.com"
+  rec="{\"version\":2,\"rev\":1,\"accessToken\":\"smoke-access-token\",\"accessExpiresAt\":${exp},\"absoluteExpiresAt\":${exp},\"idToken\":\"smoke.id.token\",\"idTokenClaims\":{\"iss\":\"https://idp.example.com\",\"sub\":\"smoke-user\",\"email\":\"${nonce}\"},\"principal\":{\"principalPrn\":null,\"issuer\":\"https://idp.example.com\",\"subject\":\"smoke-user\",\"memberships\":[],\"roleGrants\":[],\"grantsAvailable\":false}}"
+  reply="$(docker exec "$redis" redis-cli SET "pgs:sess:${sid}" "$rec" PX 600000)" || reply_rc=$?
+  if [ "$reply_rc" -ne 0 ] || [ "$reply" != "OK" ]; then
+    echo "::error::smoke_consoles: the session was NOT seeded — 'redis-cli SET' on ${redis} exited ${reply_rc} and replied '${reply}', not OK." >&2
+    return 1
+  fi
+}
+
+# SMA-675 D3: the kernel route row. ONE request with the seeded session cookie to the zone's
+# (console) route, so the status, the Location and the body come from the same request. It passes
+# only on 200 with the per-run nonce in the body. The nonce reaches the HTML only through
+# toSessionView(session) in the (console) layout (F13), and that layout imports
+# @paigasus/console-core, which evaluates the kernel's wasm at module scope (F1 to F4). The brand
+# label is NOT a marker: the root layout puts it in the <title> of every page (F12).
+# Deliberately no -L: the redirect is part of the verdict.
+# The two 3xx causes have different Location values (F14). proxy.ts writes
+# returnTo=<basePath><probePath>; requireSession writes returnTo=<basePath>/. The second one is a
+# PREFIX of the first, so the proxy value is tested first, and the requireSession value only as
+# the END of the Location. Only the requireSession 3xx is retried (<tries> requests, 1 s apart):
+# a slow first Redis connect makes the store read fail (F15), and curl --retry does not retry a
+# 3xx.
+console_kernel_route_row() {
+  local origin="$1" base_path="$2" probe_path="$3" sid="$4" name="$5" tries="$6"
+  local url label nonce body w status loc curl_rc=0 g_rc retry rc=1 i=0 p proxy_rt session_rt
+  label="${base_path}${probe_path}"
+  url="${origin}${label}"
+  nonce="smoke-${sid:0:12}@example.com"
+  p="${base_path}${probe_path}"
+  proxy_rt="returnTo=${p//\//%2F}"
+  p="${base_path}/"
+  session_rt="returnTo=${p//\//%2F}"
+  case "$tries" in
+    ''|*[!0-9]*|????*) tries="" ;;
+  esac
+  if [ -z "$tries" ] || [ "$tries" -lt 1 ]; then
+    echo "::error::kernel row ${label}: NOT run — the try count '$6' is not a positive integer of at most 3 digits." >&2
+    return 1
+  fi
+  body="$(mktemp "${TMPDIR:-/tmp}/paigasus-console-kernel.XXXXXX")" || body=""
+  if [ -z "$body" ]; then
+    echo "::error::kernel row ${label}: NOT run — mktemp failed." >&2
+    return 1
+  fi
+  while :; do
+    i=$((i + 1))
+    curl_rc=0
+    w="$(curl -sS -o "$body" -w '%{http_code} %{redirect_url}' --max-time 30 \
+      -H "Cookie: __Host-pgs_sid=${sid}" "$url")" || curl_rc=$?
+    status="${w%% *}"
+    loc="${w#* }"
+    retry=0
+    if [ "$curl_rc" -eq 0 ] && [ "$i" -lt "$tries" ]; then
+      case "$status" in
+        3??)
+          case "$loc" in
+            *"$proxy_rt"*) ;;
+            *"$session_rt") retry=1 ;;
+          esac
+          ;;
+      esac
+    fi
+    if [ "$retry" -eq 0 ]; then break; fi
+    sleep 1
+  done
+  if [ "$curl_rc" -ne 0 ]; then
+    echo "::error::kernel row ${label}: the request failed — curl exited ${curl_rc} (connection failure or timeout), so nothing was proved about the kernel." >&2
+  else
+    case "$status" in
+      200)
+        g_rc=0
+        grep -F -q -- "$nonce" "$body" || g_rc=$?
+        if [ "$g_rc" -eq 0 ]; then
+          echo "  kernel row ${label}: 200 with the seeded session's nonce — the (console) layout ran, and it loads the kernel"
+          rc=0
+        elif [ "$g_rc" -eq 1 ]; then
+          echo "::error::kernel row ${label}: answered 200, but the body holds no ${nonce}. So the (console) layout did not render this session: the probe route is not in (console) any more, or a Suspense boundary streams a 200 around a redirect. The brand label is not proof, because every page holds it." >&2
+        else
+          echo "::error::kernel row ${label}: NOT checked — grep exited ${g_rc} on the response body." >&2
+        fi
+        ;;
+      3??)
+        case "$loc" in
+          *"$proxy_rt"*)
+            echo "::error::kernel row ${label}: redirected (${status}) to '${loc}' — the proxy did not see the session cookie. Check the Cookie header of this request; the session store is not the cause." >&2
+            ;;
+          *"$session_rt")
+            echo "::error::kernel row ${label}: requireSession found no session after ${i} requests (${status} to '${loc}'). Three causes: the seeded record no longer passes isSessionRecord (ts/packages/paigasus-auth/src/core/session.ts; change console_seed_session), the store wiring (PAIGASUS_SESSION_REDIS_URL in console_container_args), or a slow first Redis connect." >&2
+            ;;
+          *)
+            echo "::error::kernel row ${label}: redirected (${status}) to '${loc}', which is neither the proxy login redirect nor the requireSession redirect." >&2
+            ;;
+        esac
+        ;;
+      404)
+        echo "::error::kernel row ${label}: answered 404 — the route is gone. Next answers from the ROOT not-found, and the (console) layout never runs. Add the zone's route to console_probe_path_for." >&2
+        ;;
+      5??)
+        echo "::error::kernel row ${label}: answered ${status} — the kernel's wasm did not load, or the runtime configuration is wrong. The last log lines of ${name} follow." >&2
+        docker logs "$name" 2>&1 | tail -30 >&2 || true
+        ;;
+      *)
+        echo "::error::kernel row ${label}: answered '${status}', not 200." >&2
+        ;;
+    esac
+  fi
+  rm -f "$body"
+  return "$rc"
+}
+
+# SMA-675 D4: the kernel control row. It proves that the kernel route row can see a kernel
+# failure. It runs on every images.yml smoke run, so the control cannot go stale. The work is in
+# console_kernel_control_probe; this function owns the control container's life. It registers the
+# name BEFORE docker create, so the EXIT trap removes the container after an abort, and it keeps
+# the name registered (a `docker rm -f` of a removed container is harmless). SMA-675 Q2: it
+# removes the container as soon as the row finishes, on every path, to limit the disk use of the
+# images.yml job. A failed remove is a warning only; the EXIT-trap cleanup removes it again.
+# This is the one row function that writes a global (the cleanup registry), because D4 requires
+# the registration before docker create.
+console_kernel_control_row() {
+  local app="$1" ctl rc=0 rm_out rm_rc=0 tmp
+  ctl="smoke-${app}-nokernel-$$"
+  CONSOLE_SMOKE_NAMES="${CONSOLE_SMOKE_NAMES:-} ${ctl}"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-control.XXXXXX")" || tmp=""
+  if [ -z "$tmp" ]; then
+    echo "::error::${app}: kernel control row NOT run — mktemp failed." >&2
+    return 1
+  fi
+  console_kernel_control_probe "$ctl" "$tmp" "$@" || rc=$?
+  rm_out="$(docker rm -f "$ctl" 2>&1)" || rm_rc=$?
+  if [ "$rm_rc" -ne 0 ]; then
+    echo "::warning::${app}: the kernel control container ${ctl} was not removed (docker exited ${rm_rc}); the EXIT-trap cleanup removes it again." >&2
+    printf '%s\n' "$rm_out" >&2
+  fi
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+# SMA-675 D4 steps 1 to 5, called only by console_kernel_control_row.
+# 1. The image's OWN node (the runtime base has no shell) walks the server chunks and prints every
+#    file whose name matches *paigasus_wasm_bg*.wasm (the glob of ts/Dockerfile and moon.yml). At
+#    least one is required, and EVERY match is corrupted, so a build that writes one file per
+#    layer cannot give a false control.
+# 2. docker create from the SAME argument list as the main container (console_container_args).
+# 3. docker cp of an 8-byte file (the wasm magic and a wrong version) over each chunk. The file is
+#    0644: docker cp makes it root-owned, and a 0600 file then fails with EACCES, not with a
+#    compile error.
+# 4. docker start, wait for <basePath>/healthz (the public route loads no kernel; /readyz answers
+#    503 here, F18), seed a new sid, and send the kernel row's request.
+# 5. Pass only on a 5xx AND the kernel line in the FULL log: Next preloads route modules at start,
+#    so the compile error can come before the request.
+console_kernel_control_probe() {
+  local ctl="$1" tmp="$2" app="$3" image="$4" base_path="$5" probe_path="$6" redis="$7" args_file="$8" kernel_line="$9"
+  local out rc=0 n path line port origin status sid code logs_rc=0 g_rc=0 cargs
+  cargs=()
+  local chunk_js='
+const fs = require("fs");
+const out = [];
+const walk = (d) => {
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    const p = d + "/" + e.name;
+    if (e.isDirectory()) { walk(p); } else if (/paigasus_wasm_bg.*\.wasm$/.test(e.name)) { out.push(p); }
+  }
+};
+walk(process.argv[1]);
+console.log(out.join("\n"));
+'
+  if [ -z "$kernel_line" ]; then
+    echo "::error::${app}: kernel control row NOT run — the kernel line is empty; set CONSOLE_KERNEL_LINE to the M4 literal." >&2
+    return 1
+  fi
+  out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" -e "$chunk_js" "/app/apps/${app}/.next/server/chunks")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::${app}: kernel control row NOT run — the chunk walk exited ${rc} on ${image}." >&2
+    return 1
+  fi
+  printf '%s\n' "$out" | sed '/^$/d' > "$tmp/chunks"
+  n="$(wc -l < "$tmp/chunks" | tr -d ' ')" || n=""
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -lt 1 ]; then
+    echo "::error::${app}: kernel control row NOT run — found 0 *paigasus_wasm_bg*.wasm files under /app/apps/${app}/.next/server/chunks in ${image}; at least 1 is required. A bundler that inlines the wasm into a JS chunk also gives 0." >&2
+    return 1
+  fi
+  printf '\000asm\377\000\000\000' > "$tmp/bad.wasm"
+  chmod 0644 "$tmp/bad.wasm"
+  while IFS= read -r line; do
+    cargs[${#cargs[@]}]="$line"
+  done < "$args_file"
+  out="$(docker create --name "$ctl" "${cargs[@]}" "$image" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::${app}: the kernel control container ${ctl} was not created from ${image} — docker exited ${rc}; its own message follows." >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  while IFS= read -r path; do
+    out="$(docker cp "$tmp/bad.wasm" "${ctl}:${path}" 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "::error::${app}: kernel control row NOT run — docker cp exited ${rc} on ${path}; its own message follows." >&2
+      printf '%s\n' "$out" >&2
+      return 1
+    fi
+  done < "$tmp/chunks"
+  out="$(docker start "$ctl" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::${app}: the kernel control container ${ctl} did not start — docker exited ${rc}; its own message follows." >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  port="$(docker port "$ctl" 3000/tcp | sed -n 1p)" || port=""
+  port="${port##*:}"
+  case "$port" in
+    ''|*[!0-9]*)
+      echo "::error::${app}: kernel control row NOT run — no host port for ${ctl} ('${port}'). Its last log lines follow." >&2
+      docker logs "$ctl" 2>&1 | tail -30 >&2 || true
+      return 1
+      ;;
+  esac
+  origin="http://127.0.0.1:${port}"
+  status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --retry 20 --retry-delay 1 \
+    --retry-all-errors "${origin}${base_path}/healthz")" || status=""
+  if [ "$status" != "200" ]; then
+    echo "::error::${app}: the kernel control container never answered 200 on ${base_path}/healthz (HTTP ${status:-no response}), so it cannot tell 'started' from 'broken'. Its last log lines follow." >&2
+    docker logs "$ctl" 2>&1 | tail -30 >&2 || true
+    return 1
+  fi
+  sid="$(console_new_sid)" || sid=""
+  if [ -z "$sid" ]; then
+    echo "::error::${app}: kernel control row NOT run — no session id could be read from /dev/urandom." >&2
+    return 1
+  fi
+  if ! console_seed_session "$redis" "$sid"; then
+    return 1
+  fi
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+    -H "Cookie: __Host-pgs_sid=${sid}" "${origin}${base_path}${probe_path}")" || code=""
+  docker logs "$ctl" > "$tmp/ctl.log" 2>&1 || logs_rc=$?
+  if [ "$logs_rc" -ne 0 ]; then
+    echo "::error::${app}: kernel control row NOT checked — docker logs exited ${logs_rc} on ${ctl}." >&2
+    return 1
+  fi
+  grep -F -q -- "$kernel_line" "$tmp/ctl.log" || g_rc=$?
+  case "$code" in
+    5??)
+      if [ "$g_rc" -eq 0 ]; then
+        echo "  ${app}: kernel control: ${base_path}${probe_path} answers ${code} with ${n} corrupted wasm chunk(s), and the log holds '${kernel_line}' — the kernel route row can see a kernel failure"
+        return 0
+      fi
+      if [ "$g_rc" -eq 1 ]; then
+        echo "::error::${app}: the kernel control answered ${code} for a reason that is not the kernel — its full log holds no '${kernel_line}'. Check that the control container gets the same arguments as the main one (console_container_args). Its last log lines follow." >&2
+      else
+        echo "::error::${app}: kernel control row NOT checked — grep exited ${g_rc} on the control log." >&2
+      fi
+      tail -30 "$tmp/ctl.log" >&2 || true
+      return 1
+      ;;
+    200)
+      echo "::error::${app}: the kernel control answered 200 with every wasm chunk corrupted — the kernel route row cannot see a kernel failure. This is the defect SMA-675 closes." >&2
+      return 1
+      ;;
+    *)
+      echo "::error::${app}: the kernel control answered '${code:-no response}', not a 5xx. Its last log lines follow." >&2
+      tail -30 "$tmp/ctl.log" >&2 || true
+      return 1
+      ;;
+  esac
+}
+
+# SMA-675 Q5: the kernel control row runs only on the images.yml paths. release.yml's "Smoke this
+# service" step sets PAIGASUS_SMOKE_KERNEL_CONTROL to off. An UNSET variable means on, so a
+# missing setting runs more checks, not fewer. Any other value, the empty string included, is a
+# usage error. It prints the first argument of smoke_consoles. The dispatch arms call it; no row
+# function reads the variable.
+kernel_control_flag() {
+  case "${PAIGASUS_SMOKE_KERNEL_CONTROL-on}" in
+    on) echo "--kernel-control=on" ;;
+    off) echo "--kernel-control=off" ;;
+    *)
+      echo "::error::PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off' (unset means on), not '${PAIGASUS_SMOKE_KERNEL_CONTROL-}'." >&2
+      return 1
+      ;;
+  esac
 }
 
 # A FULL, schema-valid dummy runtime configuration, not just PAIGASUS_ZONE and PAIGASUS_ZONES. Both
@@ -1169,12 +1573,13 @@ console_smoke_cleanup() {
 # WARNING, INTENTIONAL COUPLING: a new required key added to a console's lib/config.ts schema makes
 # this array stale and turns every 200 here into a 500. That is supposed to fail LOUDLY — add the
 # key here; do NOT add a fallback in the app or relax the assertions below.
+# SMA-675: the array holds only the values that do not depend on the run. The session store env
+# (redis and its URL, or the memory store in the D6 fallback) comes from console_container_args.
 CONSOLE_SMOKE_ENV=(
   -e "PAIGASUS_OIDC_ISSUER=https://idp.example.com"
   -e "PAIGASUS_OIDC_CLIENT_ID=dummy-client"
   -e "PAIGASUS_OIDC_CLIENT_SECRET=dummy-secret"
   -e "PAIGASUS_PUBLIC_ORIGIN=https://console.example.com"
-  -e "PAIGASUS_SESSION_STORE=memory"
   -e "PAIGASUS_SERVICES={\"iam\":\"http://iam:8080\",\"gateway\":\"http://gateway:8080\"}"
   -e "PAIGASUS_IAM_GRPC_URL=http://iam:9090"
 )
@@ -1183,6 +1588,16 @@ CONSOLE_SMOKE_ENV=(
 # HEALTHCHECK program with `docker exec`. The program's own fetch signal (2500 ms, ts/Dockerfile)
 # ends a hang first; this bound is for a hang that the signal does not end.
 CONSOLE_HC_DEADLINE=20
+
+# SMA-675 D1: the session store of the console smoke. This is the SAME digest as the kind tier's
+# Redis. The other copy is ci/kind/manifests/redis.yaml. No check compares the two copies (SMA-675
+# Q3). Refresh the two together.
+CONSOLE_SMOKE_REDIS_IMAGE="redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
+
+# SMA-675 D4 step 5: the line that the kernel control container must log when its wasm chunk is
+# corrupt. MEASURED in M4 (the PR description records the full line and when it appears). The row
+# searches the FULL log, because Next preloads route modules at start.
+CONSOLE_KERNEL_LINE="CompileError"
 
 # Walks the image's staged tree with the image's OWN node — the runtime base is distroless and has
 # no shell, so there is no `find` in there to call. Prints `public=0|1` on line 1 and one staged
@@ -1394,7 +1809,20 @@ smoke_consoles() {
   local spec image service app base_path console_path other name port origin status html chunk bytes code uid console_status
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
   local host_std host_static host_id run_rc sh_rc img_rc cstate
+  local kernel_control kernel_ok redis_name work zones_json net redis_url args_file args_rc line sid cargs
   local ec=0 bad started
+  # SMA-675 Q5: the first word says whether the kernel control row runs. It is an argument, not a
+  # global (the SMA-670 rule); the dispatch arms derive it with kernel_control_flag. It is read
+  # before the trap, so a usage error makes no docker call.
+  case "${1:-}" in
+    --kernel-control=on) kernel_control="on" ;;
+    --kernel-control=off) kernel_control="off" ;;
+    *)
+      echo "::error::smoke_consoles: the first argument must be --kernel-control=on or --kernel-control=off, not '${1:-<none>}'." >&2
+      return 1
+      ;;
+  esac
+  shift
   # This REPLACES the script-global `trap load_oci_cleanup EXIT` at the top of the load-oci
   # section, exactly as `smoke()` and `rehearse` already do — harmless today because no dispatch
   # arm reaches `load_oci` and `smoke_consoles` in one process. A future arm that chains them
@@ -1411,6 +1839,27 @@ smoke_consoles() {
     echo "::error::smoke_consoles: called with no zones — nothing was smoked, and an empty run must not report OK." >&2
     return 1
   fi
+
+  # SMA-675: the fixed env words go to a file, so console_container_args reads no global. The
+  # PAIGASUS_ZONES JSON is the same hardcoded two-zone assumption that the `other` prefix below
+  # names.
+  work="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-smoke.XXXXXX")" || work=""
+  if [ -z "$work" ]; then
+    echo "::error::smoke_consoles: mktemp failed — nothing was smoked." >&2
+    return 1
+  fi
+  printf '%s\n' "${CONSOLE_SMOKE_ENV[@]}" > "$work/env"
+  zones_json='{"iam":"/iam","gateway":"/gateway"}'
+
+  # SMA-675 D6 and D7: one network and one Redis sidecar per run, shared by both zones, as in
+  # production. Both names are registered BEFORE they are created, so the EXIT trap removes them
+  # after an abort. A failure skips only the kernel rows: the containers then start on the old
+  # memory store with no network, and every other row still runs and reports.
+  redis_name="smoke-redis-${RUN_ID}"
+  CONSOLE_SMOKE_NAMES="$CONSOLE_SMOKE_NAMES $redis_name"
+  CONSOLE_SMOKE_NETWORK="smoke-net-${RUN_ID}"
+  kernel_ok=0
+  if console_smoke_redis_start "$CONSOLE_SMOKE_NETWORK" "$redis_name" "$CONSOLE_SMOKE_REDIS_IMAGE" 20; then kernel_ok=1; else ec=1; fi
 
   for spec in "$@"; do
     service="${spec%%=*}"
@@ -1440,9 +1889,9 @@ smoke_consoles() {
     fi
     # BINARY, not a list. With a third zone C this picks ONE other prefix, so C's chunk would be
     # probed against /iam alone, with nothing saying so. (That step-4 row proves only that a
-    # basePath is in effect — see its comment — not that zones do not collide.) The
-    # PAIGASUS_ZONES JSON literal in the `docker run` below is a third hardcoded copy of the same
-    # two-zone assumption. A third zone needs both rewritten, not extended.
+    # basePath is in effect — see its comment — not that zones do not collide.) The zones_json
+    # literal above is a third hardcoded copy of the same two-zone assumption. A third zone needs
+    # both rewritten, not extended.
     if [ "$service" = "iam" ]; then other="/gateway"; else other="/iam"; fi
     name="smoke-${app}-${RUN_ID}"
     # Registered BEFORE the container is created, so a `docker run` that fails part-way still has
@@ -1453,26 +1902,41 @@ smoke_consoles() {
     echo "== smoke ${app} =="
     bad=0
     started=0
-    # -p 0:3000 asks the daemon for a free ephemeral port. GUARDED: without it a name collision or
-    # an image that will not start aborts the script on docker's own message and the gateway
-    # console is never checked.
-    # The rc is captured, not folded into an empty string: docker's own message names the real
-    # reason (no such image, name already in use, port already allocated, daemon unreachable) and
-    # discarding it leaves the reader with a guess. It is printed on its own lines rather than
-    # inside the annotation, because a `::error::` line that carries an embedded newline stops
-    # being one annotation.
-    run_rc=0
-    run_out="$(docker run -d --name "$name" -p 0:3000 \
-      -e PAIGASUS_ZONE="$service" \
-      -e PAIGASUS_ZONES="{\"iam\":\"/iam\",\"gateway\":\"/gateway\"}" \
-      "${CONSOLE_SMOKE_ENV[@]}" \
-      "$image" 2>&1)" || run_rc=$?
-    if [ "$run_rc" -ne 0 ]; then
-      echo "::error::${app}: the container did not start from ${image} — docker exited ${run_rc}; its own message follows. If the image is missing, build it first: 'ci/images/run.sh build-console ${service}', or 'build-oci' and 'load-oci' for the release archive." >&2
-      printf '%s\n' "$run_out" >&2
+    # SMA-675 D4 step 2: the main container gets its arguments from console_container_args, the
+    # same function as the kernel control container. `docker create` + `docker start`, not
+    # `docker run -d`, so the two containers are made the same way. -p 0:3000 (in the list) asks
+    # the daemon for a free ephemeral port. GUARDED, and docker's own message is printed on its
+    # own lines, because a `::error::` line with an embedded newline stops being one annotation.
+    if [ "$kernel_ok" -eq 1 ]; then
+      net="$CONSOLE_SMOKE_NETWORK"
+      redis_url="redis://${redis_name}:6379"
+    else
+      net=""
+      redis_url=""
+      echo "::error::${app}: kernel rows NOT run — the Redis sidecar is not available this run (see the error above); this container uses the memory store." >&2
+    fi
+    args_file="$work/args-${service}"
+    args_rc=0
+    console_container_args "$app" "$service" "$zones_json" "$net" "$redis_url" "$work/env" > "$args_file" || args_rc=$?
+    if [ "$args_rc" -ne 0 ]; then
       ec=1; bad=1
     else
-      started=1
+      cargs=()
+      while IFS= read -r line; do
+        cargs[${#cargs[@]}]="$line"
+      done < "$args_file"
+      run_rc=0
+      run_out="$(docker create --name "$name" "${cargs[@]}" "$image" 2>&1)" || run_rc=$?
+      if [ "$run_rc" -eq 0 ]; then
+        run_out="$(docker start "$name" 2>&1)" || run_rc=$?
+      fi
+      if [ "$run_rc" -ne 0 ]; then
+        echo "::error::${app}: the container did not start from ${image} — docker exited ${run_rc}; its own message follows. If the image is missing, build it first: 'ci/images/run.sh build-console ${service}', or 'build-oci' and 'load-oci' for the release archive." >&2
+        printf '%s\n' "$run_out" >&2
+        ec=1; bad=1
+      else
+        started=1
+      fi
     fi
 
     if [ "$bad" -eq 0 ]; then
@@ -1539,48 +2003,47 @@ smoke_consoles() {
       console_healthcheck_row "$name" "$app" "$base_path" "$CONSOLE_HC_DEADLINE" || ec=1
     fi
 
-    # SMA-634. A (console) route, which imports @paigasus/console-core and so evaluates the kernel's
-    # wasm. A wasm that cannot load 500s every `(console)` page while the public page above stays
-    # 200. This is the only runtime proof this suite has that a console image loads the kernel.
-    #
-    # ONLY A 3xx PASSES. The earlier rule — any non-5xx — accepted a 404, and a 404 is exactly the
-    # answer this probe must not trust: when the route is renamed or removed, Next answers from the
-    # ROOT not-found, the `(console)` layout never evaluates, and the probe reports success on a run
-    # that proved nothing. Deliberately no `-L`: the redirect is the assertion, and following it
-    # would reach the IdP and lose it.
-    #
-    # The route is PER ZONE, and it did not used to be. Both zones were probed at a hardcoded
-    # `/orgs`; gateway-console has no such page — its zone overview is `(console)/overview` and its
-    # only `orgs` routes are parameterised — so `/gateway/orgs` answered from the root not-found on
-    # every run, and that half of this check asserted nothing at all. See console_probe_path_for.
-    #
-    # RESIDUAL, MEASURED on this host, stated so a green here is not read as more than it is. The
-    # 3xx comes from proxy.ts's middleware, not from the route: proxy.ts gates the whole zone on
-    # cookie PRESENCE (ADR-0017 decision 7) and deliberately imports no @paigasus/console-core, so a
-    # cookie-less request is turned back before Next routes it and before any kernel code runs. A
-    # path that does NOT exist answers 307 here too (measured with `/gateway/orgs`). So this probe
-    # rejects a plain 404 and a 500, but it still does not prove the `(console)` layout evaluated.
-    #
-    # The obvious fix does not work in THIS suite, and here is the measurement, so the next person
-    # does not spend the run finding out again. Sending a forged `__Host-pgs_sid` cookie does carry
-    # the request past the middleware — the absent-path control answered 404, the real route did
-    # not — but every `(console)` route then answered 500, from
-    # `AuthConfigError: PAIGASUS_SESSION_STORE cannot be "memory" when PAIGASUS_ZONES declares more
-    # than one zone`, thrown in `authRuntime` before the page renders. A wasm failure 500s the same
-    # way, so the two are not distinguishable by status. Closing this residual means giving the
-    # smoke containers a session store they can actually use, which is a change to CONSOLE_SMOKE_ENV
-    # and to what this suite deploys, not a change to this probe.
+    # SMA-634, corrected by SMA-675 D5. The cookie-less row: a request with NO session cookie to
+    # the zone's (console) route. proxy.ts answers it with a 3xx on cookie PRESENCE alone
+    # (ADR-0017 decision 7), before Next routes it. So this row proves only that the proxy gate is
+    # in effect. It loads no kernel code: a path that does not exist answers 307 too (measured,
+    # SMA-634). The kernel proof is the kernel route row and its control, directly below.
+    # Deliberately no `-L`: the redirect is the assertion, and following it would reach the IdP.
     if [ "$bad" -eq 0 ]; then
       console_status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 --retry 5 --retry-delay 1 \
         --retry-all-errors "${origin}${base_path}${console_path}")" || console_status=""
       case "$console_status" in
-        3??) echo "  ${app}: ${base_path}${console_path} redirects (${console_status}) — the route exists and nothing 500s" ;;
+        3??) echo "  ${app}: ${base_path}${console_path} redirects (${console_status}) with no session cookie — the proxy gate is in effect (the kernel rows below prove the kernel load)" ;;
         *)
-          echo "::error::${app}: ${base_path}${console_path} answered '${console_status:-no response}' — a (console) route must redirect an unauthenticated request (3xx). A 5xx is usually the kernel's wasm chunk failing to load, which 500s every (console) page. A 404 means the route is gone: Next then answers from the ROOT not-found, the (console) layout never evaluates, and nothing here proves the kernel loads — add the zone's route to console_probe_path_for. Read 'docker logs ${name}'." >&2
+          echo "::error::${app}: ${base_path}${console_path} answered '${console_status:-no response}' to a request with no session cookie — proxy.ts must redirect it (3xx), so the proxy gate is not in effect. Read 'docker logs ${name}'." >&2
           docker logs "$name" 2>&1 | tail -30 >&2 || true
           ec=1; bad=1
           ;;
       esac
+    fi
+
+    # SMA-675 D3 and D4: the kernel rows. The route row sends a seeded session (a new sid per
+    # container, D7) to the same route, and passes only on 200 with the session's nonce. The
+    # control row starts a second container from the same image and the same argument list, with
+    # every wasm chunk corrupted, and passes only on a 5xx with the kernel line in its log. It runs
+    # only on the images.yml paths (Q5).
+    if [ "$kernel_ok" -eq 1 ] && [ "$bad" -eq 0 ]; then
+      sid="$(console_new_sid)" || sid=""
+      if [ -z "$sid" ]; then
+        echo "::error::${app}: kernel route row NOT run — no session id could be read from /dev/urandom." >&2
+        ec=1
+      elif console_seed_session "$redis_name" "$sid"; then
+        console_kernel_route_row "$origin" "$base_path" "$console_path" "$sid" "$name" 3 || ec=1
+      else
+        ec=1
+      fi
+    fi
+    if [ "$kernel_ok" -eq 1 ] && [ "$args_rc" -eq 0 ]; then
+      if [ "$kernel_control" = "on" ]; then
+        console_kernel_control_row "$app" "$image" "$base_path" "$console_path" "$redis_name" "$args_file" "$CONSOLE_KERNEL_LINE" || ec=1
+      else
+        echo "  ${app}: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off, the release path; SMA-675 Q5)"
+      fi
     fi
 
     html=""
@@ -1707,7 +2170,7 @@ smoke_consoles() {
       # .next/static (or on .next/BUILD_ID) exits 1, and only THAT says the staging copy did not
       # run. docker refusing the image exits 125/126/127 before node starts, which proves nothing
       # about staging at all. stderr is captured rather than discarded, for the same reason as the
-      # `docker run -d` above: the tool's own message names the cause.
+      # `docker create` above: the tool's own message names the cause.
       img_rc=0
       img_out="$(docker run --rm --entrypoint /nodejs/bin/node "$image" \
         -e "$CONSOLE_STAGED_TREE_JS" "/app/apps/${app}" 2>&1)" || img_rc=$?
@@ -1784,6 +2247,7 @@ smoke_consoles() {
     fi
   done
 
+  rm -rf "$work"
   console_smoke_cleanup
   if [ "$ec" -ne 0 ]; then return 1; fi
   echo "== CONSOLE SMOKE OK =="
@@ -2001,13 +2465,15 @@ case "$cmd" in
       fi
     done
     if [ "$smoke_kind" = cargo ]; then smoke "$@"; exit 0; fi
+    # SMA-675 Q5: only the console branch reads the switch; a cargo smoke ignores it.
+    kc_flag="$(kernel_control_flag)" || exit 1
     smoke_keys=("$@")
     set --
     for k in "${smoke_keys[@]}"; do
       k_zone="$(zone_for_key "$k")"
       set -- "$@" "${k_zone}=paigasus-${k}:dev"
     done
-    smoke_consoles "$@"
+    smoke_consoles "$kc_flag" "$@"
     ;;
   all)
     if [ -n "$target" ]; then
@@ -2046,6 +2512,8 @@ case "$cmd" in
       echo "usage: ci/images/run.sh all-consoles takes no service argument — use 'build-console [iam|gateway]' to build one" >&2
       exit 1
     fi
+    # SMA-675 Q5: read first, so a bad value stops before the build.
+    kc_flag="$(kernel_control_flag)" || exit 1
     assert_console_pins
     for s in "${console_services[@]}"; do build_console_one "$s"; done
     # The zone list is passed, not restated inside smoke_consoles, so the build loop and the smoke
@@ -2056,7 +2524,7 @@ case "$cmd" in
       s_app="$(app_for "$s")"
       set -- "$@" "${s}=${s_app}:dev"
     done
-    smoke_consoles "$@"
+    smoke_consoles "$kc_flag" "$@"
     ;;
   *)
     echo "unknown command: $cmd" >&2

@@ -68,6 +68,11 @@ pub(crate) fn connection_manager_config() -> ConnectionManagerConfig {
 /// consumes an already-resolved `Err` (two windows) depends on dial duration vs the open window.
 /// See [`OPEN_DURATION`]'s doc for both regimes; either way the bound stays ≤ 2 open windows plus
 /// one connect budget.
+///
+/// A second coupling (SMA-702): the open-breaker tests assert that the test blackhole accepted
+/// 0 connections. That holds only because `ConnectionManager::new_lazy_with_config` (redis
+/// 1.7.0) stores an un-polled lazy connect future and does not start the dial. If an upgrade
+/// makes it dial eagerly, those `accepted() == 0` assertions red with no breaker regression.
 #[derive(Clone, Debug)]
 pub struct RedisHandle {
     conn: ConnectionManager,
@@ -884,23 +889,31 @@ mod tests {
     /// SMA-476 D1. Every one of the eleven call sites does `self.conn.clone()` per command, so a
     /// `#[derive(Clone)]` over a non-`Arc` breaker field would compile and silently give every
     /// call its own breaker — which would never open. This is that guard.
+    ///
+    /// Pointed at a BLACKHOLE, not the closed port `127.0.0.1:1`: a dial to a closed port costs
+    /// only about 100-200 ms, which no reasonable clock bound can tell from a short-circuit. The
+    /// proof of "no dial" is `accepted() == 0` (SMA-702). There is no clock bound.
     #[tokio::test]
     async fn cloning_a_handle_shares_one_breaker() {
         use redis::AsyncCommands;
 
-        let handle = with_open_breaker_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed url");
+        let blackhole = test_support::start().await;
+        let handle = with_open_breaker_for_tests(&blackhole.url, RedisRole::Authz).expect("well-formed url");
         let mut clone = handle.clone();
 
-        let started = std::time::Instant::now();
         let result: redis::RedisResult<Option<Vec<u8>>> = clone.get("sma476:probe").await;
-        let elapsed = started.elapsed();
 
         let err = result.expect_err("an open breaker must short-circuit with an error");
         assert!(
             err.to_string().contains(BREAKER_OPEN_MESSAGE),
             "a CLONE dialled instead of short-circuiting — the breaker is not Arc-shared: {err:?}"
         );
-        assert!(elapsed < Duration::from_millis(100), "short-circuit took {elapsed:?}");
+        assert_eq!(
+            blackhole.accepted(),
+            0,
+            "SMA-702: the blackhole accepted a connection — the CLONE dialled instead of short-circuiting \
+             (or a redis-rs upgrade made new_lazy_with_config dial eagerly)"
+        );
     }
 
     /// The interception itself: an `AsyncCommands` call on a `RedisHandle` must route through the
@@ -928,6 +941,13 @@ mod tests {
     /// `a_command_against_an_unreachable_backend_fails_fast`'s 2 s. A contended CI runner adds
     /// scheduler jitter, and these assertions only have to discriminate between "dialled"
     /// (~2.1 s) and "short-circuited" (~0), not to pin exact timings.
+    ///
+    /// For commands #4 to #10 the proof of "no dial" is the `BREAKER_OPEN_MESSAGE` check. The
+    /// 1 s clock only catches a stall (SMA-702). It cannot prove "no dial" alone: a command that
+    /// joins an in-flight reconnect pays only the rest of that dial. No connection count is
+    /// possible here, because the reconnect that `reconnect()` spawns after command #3 can be
+    /// accepted while commands #4 to #10 run. Command #1 does assert the count, to prove that
+    /// the counter counts (SMA-702 A4).
     #[tokio::test]
     async fn a_blackholed_backend_costs_seconds_per_command_until_the_breaker_opens() {
         use redis::AsyncCommands;
@@ -957,6 +977,15 @@ mod tests {
             "a blackholed command took {first_elapsed:?}, well past the expected ~2.1s (2 x connection_timeout + one jittered min_delay)"
         );
 
+        // SMA-702 A4: command #1 was a real dial, so the counter must have seen it. Without
+        // this, a broken counter would let every `accepted() == 0` assertion pass vacuously.
+        let accepted_after_first = blackhole.accepted();
+        assert!(
+            accepted_after_first >= 1,
+            "SMA-702 A4: command #1 really dialled the blackhole, but accepted() is {accepted_after_first} — \
+             the counter does not count, so the `accepted() == 0` assertions in the open-breaker tests are vacuous"
+        );
+
         // --- Commands #2, #3: still Closed, still real dials. These trip the breaker. ---
         let _: redis::RedisResult<Option<Vec<u8>>> = conn.get("sma476:probe").await;
         let _: redis::RedisResult<Option<Vec<u8>>> = conn.get("sma476:probe").await;
@@ -972,8 +1001,9 @@ mod tests {
                 "command #{i} dialled instead of short-circuiting — the breaker never opened"
             );
             assert!(
-                elapsed < Duration::from_millis(100),
-                "command #{i} took {elapsed:?}; an open breaker must return without touching the network"
+                elapsed < Duration::from_secs(1),
+                "command #{i} took {elapsed:?} — stall backstop only: the BREAKER_OPEN_MESSAGE check above \
+                 proved no dial, so this is probably runner load, not a breaker regression"
             );
         }
 
@@ -1092,7 +1122,7 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex as AsyncMutex;
 
@@ -1116,10 +1146,16 @@ pub(crate) mod test_support {
     /// to `Ok` without I/O (`aio/mod.rs:110-112`), which would move the hang to `response_timeout`
     /// (500 ms) instead. A plain `redis://host:port` URL (RESP2, no auth, db 0) keeps it non-empty
     /// — do not add credentials or a db index to these tests' URLs.
+    ///
+    /// It also counts the connections it accepts ([`Blackhole::accepted`]). The open-breaker
+    /// posture tests assert that this count stays 0 to prove "no dial". That count replaces a
+    /// 100 ms wall-clock bound that failed on a loaded CI runner (SMA-702).
     pub(crate) struct Blackhole {
         pub(crate) url: String,
         // Written only by `start_responding`, below; read by the accept loop in `start`.
         responding: Arc<AtomicBool>,
+        // Incremented by the accept loop in `start` for every accepted connection, in both modes.
+        accepted: Arc<AtomicUsize>,
         _held: Arc<AsyncMutex<Vec<tokio::net::TcpStream>>>,
         _accept: tokio::task::JoinHandle<()>,
     }
@@ -1130,6 +1166,16 @@ pub(crate) mod test_support {
         pub(crate) fn start_responding(&self) {
             self.responding.store(true, Ordering::SeqCst);
         }
+
+        /// TCP connections this listener has accepted so far, in either mode. A redis-rs dial
+        /// always opens one, so a test that expects NO dial asserts this stays 0 (SMA-702).
+        ///
+        /// This counts application-level `accept()`, not the kernel handshake. It is exact only
+        /// because a real dial suspends the calling test for about 1 s or more, which lets the
+        /// runtime poll the accept task before the test asserts.
+        pub(crate) fn accepted(&self) -> usize {
+            self.accepted.load(Ordering::SeqCst)
+        }
     }
 
     pub(crate) async fn start() -> Blackhole {
@@ -1138,11 +1184,17 @@ pub(crate) mod test_support {
         let responding = Arc::new(AtomicBool::new(false));
         let held: Arc<AsyncMutex<Vec<tokio::net::TcpStream>>> = Arc::new(AsyncMutex::new(Vec::new()));
 
+        let accepted = Arc::new(AtomicUsize::new(0));
+
         let accept_responding = Arc::clone(&responding);
         let accept_held = Arc::clone(&held);
+        let accept_count = Arc::clone(&accepted);
         let accept = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { return };
+                // `continue`, not `return`: a dead loop drops the listener, and then every
+                // "no dial" count reads 0 as a false green (SMA-702).
+                let Ok((stream, _)) = listener.accept().await else { continue };
+                accept_count.fetch_add(1, Ordering::SeqCst);
                 if accept_responding.load(Ordering::SeqCst) {
                     tokio::spawn(serve_minimal_resp(stream));
                 } else {
@@ -1155,6 +1207,7 @@ pub(crate) mod test_support {
         Blackhole {
             url: format!("redis://127.0.0.1:{port}"),
             responding,
+            accepted,
             _held: held,
             _accept: accept,
         }

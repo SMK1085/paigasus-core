@@ -7,14 +7,15 @@
 //! archived via the org fake to compute effective status (D10), and `InMemoryOrgs::create`
 //! populates the shared team map with the auto-provisioned default team (ADR-0014).
 
+use crate::application::tenancy_nodes::TenancyNodes;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
     DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, EntityGenBumper, IdGenerator, KeyEntropy, Membership, MembershipAxis, MembershipKindQuery, MembershipRecord, MembershipRepository,
     Mutated, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalKind,
-    PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount,
-    ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
+    PrincipalRepository, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantFilter, RoleGrantQuery, RoleGrantStore, Savepoint, SecretHasher,
+    ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Stamp, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork, User,
 };
 use paigasus_kernel::Prn;
 use std::any::Any;
@@ -491,6 +492,77 @@ fn parent_org_uuid(node: &TenancyNodeRef) -> Option<Uuid> {
     }
 }
 
+// ---- SMA-646: stored tenancy nodes for the stored-PRN tests ------------------------------
+
+/// SMA-646: inserts an ACTIVE organization with uuid `n` into `store` and returns its id. The
+/// stored canonical PRN is `OrganizationId::from_uuid(n).canonical()`, which is the F1
+/// invariant of the real `prn` column (spec §2.4).
+pub fn seed_org(store: &TenancyStore, n: u128) -> OrganizationId {
+    let id = OrganizationId::from_uuid(Uuid::from_u128(n));
+    let stamp = test_stamp(DateTime::<Utc>::UNIX_EPOCH, 1);
+    let org = Organization::new(id.clone(), Slug::parse(&format!("org-{n}")).unwrap(), "Org", &stamp).unwrap();
+    store.orgs.lock().unwrap().insert(id.uuid(), org);
+    id
+}
+
+/// SMA-646: inserts an ACTIVE team with uuid `n` under `org` and returns its id.
+pub fn seed_team(store: &TenancyStore, org: &OrganizationId, n: u128) -> TeamId {
+    let id = TeamId::from_parts(org.uuid(), Uuid::from_u128(n));
+    let stamp = test_stamp(DateTime::<Utc>::UNIX_EPOCH, 1);
+    let team = Team::new(id.clone(), Slug::parse(&format!("team-{n}")).unwrap(), "Team", &stamp).unwrap();
+    store.teams.lock().unwrap().insert(id.uuid(), team);
+    id
+}
+
+/// SMA-646: inserts an ACTIVE project with uuid `n` under `team` and returns its id.
+pub fn seed_project(store: &TenancyStore, team: &TeamId, n: u128) -> ProjectId {
+    let id = ProjectId::from_parts(team.org_uuid(), Uuid::from_u128(n));
+    let stamp = test_stamp(DateTime::<Utc>::UNIX_EPOCH, 1);
+    let project = Project::new(id.clone(), team.clone(), Slug::parse(&format!("project-{n}")).unwrap(), "Project", &stamp).unwrap();
+    store.projects.lock().unwrap().insert(id.uuid(), project);
+    id
+}
+
+/// SMA-646: a fresh store that holds one organization per uuid in `ns`.
+pub fn store_with_orgs(ns: impl IntoIterator<Item = u128>) -> TenancyStore {
+    let store = TenancyStore::default();
+    for n in ns {
+        seed_org(&store, n);
+    }
+    store
+}
+
+/// SMA-646: the `TenancyNodes` value the services take, over the three in-memory fakes of
+/// ONE shared store.
+pub fn tenancy_nodes(store: &TenancyStore) -> TenancyNodes {
+    TenancyNodes {
+        orgs: Arc::new(InMemoryOrgs(store.clone())),
+        teams: Arc::new(InMemoryTeams(store.clone())),
+        projects: Arc::new(InMemoryProjects(store.clone())),
+    }
+}
+
+/// SMA-646: a syntactically valid region. `Prn::parse` accepts it; the stored PRN has none.
+pub const FORGED_REGION: &str = "eu-west-1";
+
+/// SMA-646: the four forged shapes of spec §4.1 U1. Each names a REAL node's uuid with a slot
+/// that the stored PRN does not have. The uuid case is not forgeable (`Prn` stores uuids).
+pub fn forged_variants(org: &OrganizationId, team: &TeamId, project: &ProjectId) -> Vec<(&'static str, TenancyNodeRef)> {
+    let wrong_org = Uuid::from_u128(0xF0F0);
+    vec![
+        ("team, wrong org slot", TenancyNodeRef::Team(TeamId::from_parts(wrong_org, team.uuid()))),
+        ("project, wrong org slot", TenancyNodeRef::Project(ProjectId::from_parts(wrong_org, project.uuid()))),
+        (
+            "organization, forged region",
+            TenancyNodeRef::Organization(OrganizationId::from_prn(Prn::build("iam", FORGED_REGION, None, "organization", org.uuid()).unwrap()).unwrap()),
+        ),
+        (
+            "team, forged region",
+            TenancyNodeRef::Team(TeamId::from_prn(Prn::build("iam", FORGED_REGION, Some(team.org_uuid()), "team", team.uuid()).unwrap()).unwrap()),
+        ),
+    ]
+}
+
 /// Resolves a node ref against the store: `None` if the node doesn't exist, else its
 /// stored canonical prn (to detect a forged/stale caller prn), own status, and ancestor
 /// statuses (D10's `NodeStatus::effective`).
@@ -640,16 +712,63 @@ impl MembershipRepository for InMemoryMemberships {
     }
 }
 
+/// SMA-649: faithful to the port doc. The principal arm runs the same guard `attach_in`
+/// applies in this fake (`store.principals`: absent -> `NotFound`, stored PRN differs from the
+/// supplied canonical PRN -> `PrnMismatch`); the node arm reuses `list_by_node`'s guard.
+/// `kind = None` keeps every row, also for a principal that has no `principal_kinds` entry.
 #[async_trait]
 impl MembershipKindQuery for InMemoryMemberships {
-    async fn list_of_kind(&self, axis: &MembershipAxis, kind: PrincipalKind, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+    async fn list_of_kind(&self, axis: &MembershipAxis, kind: Option<PrincipalKind>, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
         let all = match axis {
-            MembershipAxis::Principal(principal) => self.list_by_principal(*principal, u64::MAX, 0).await?,
+            MembershipAxis::Principal(principal) => {
+                let stored = { self.0.principals.lock().unwrap().get(&principal.uuid()).cloned() }.ok_or(RepositoryError::NotFound)?;
+                if stored != principal.canonical() {
+                    return Err(RepositoryError::PrnMismatch);
+                }
+                self.list_by_principal(principal.uuid(), u64::MAX, 0).await?
+            }
             MembershipAxis::Node(node) => self.list_by_node(node, u64::MAX, 0).await?,
+        };
+        let Some(kind) = kind else {
+            return Ok(all.into_iter().skip(offset as usize).take(limit as usize).collect());
         };
         let kinds = self.0.principal_kinds.lock().unwrap().clone();
         let of_kind = |r: &MembershipRecord| Prn::parse(&r.principal_prn).ok().map(|p| PrincipalId::from_prn(p).uuid()).and_then(|u| kinds.get(&u).copied()) == Some(kind);
         Ok(all.into_iter().filter(of_kind).skip(offset as usize).take(limit as usize).collect())
+    }
+}
+
+/// In-memory `PrincipalRepository` over the shared `TenancyStore` (SMA-649 §4.7), for
+/// `RoleService::resolve_principal`. `find_principal` reads `store.principals` (uuid -> stored
+/// canonical PRN) and builds the `Principal` FROM THE STORED PRN, exactly as
+/// `PgPrincipalRepository::find_principal` does (`map_principal_row`). The kind comes from
+/// `store.principal_kinds` (else `User`); the status is `Active`. `RoleService` calls no other
+/// method, so the other three panic.
+#[derive(Clone, Default)]
+pub struct InMemoryTenancyPrincipals(pub TenancyStore);
+
+#[async_trait]
+impl PrincipalRepository for InMemoryTenancyPrincipals {
+    async fn create_user(&self, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+        unimplemented!("InMemoryTenancyPrincipals only exercises find_principal")
+    }
+
+    async fn create_user_in(&self, _tx: &dyn Transaction, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+        unimplemented!("InMemoryTenancyPrincipals only exercises find_principal")
+    }
+
+    async fn find_user(&self, _id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {
+        unimplemented!("InMemoryTenancyPrincipals only exercises find_principal")
+    }
+
+    async fn find_principal(&self, id: &PrincipalId) -> Result<Option<Principal>, RepositoryError> {
+        let Some(stored) = self.0.principals.lock().unwrap().get(&id.uuid()).cloned() else {
+            return Ok(None);
+        };
+        let prn = Prn::parse(&stored).map_err(|e| RepositoryError::Backend(Box::new(std::io::Error::other(e.to_string()))))?;
+        let kind = self.0.principal_kinds.lock().unwrap().get(&id.uuid()).copied().unwrap_or(PrincipalKind::User);
+        let epoch = DateTime::<Utc>::UNIX_EPOCH;
+        Ok(Some(Principal::new(PrincipalId::from_prn(prn), kind, PrincipalStatus::Active, epoch, epoch)))
     }
 }
 

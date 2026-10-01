@@ -40,7 +40,10 @@ pub enum MembershipFilter {
 
 /// Parses a raw principal PRN string: must be syntactically valid (else `InvalidPrn` with
 /// the kernel's stable error-kind token), and must be service `"iam"`, resource type
-/// `"principal"` (else `InvalidPrn` with the PRN's canonical form).
+/// `"principal"` (else `InvalidPrn` with the PRN's canonical form). It checks ONLY the syntax,
+/// the service and the type. The region and the organization slot are confirmed against the
+/// stored principal by the repository (`attach_in`, `MembershipKindQuery::list_of_kind`,
+/// SMA-649).
 fn parse_principal_prn(raw: &str) -> Result<PrincipalId, TenancyError> {
     let prn = Prn::parse(raw).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
     if prn.service() != "iam" || prn.resource_type() != "principal" {
@@ -244,18 +247,16 @@ where
 
     /// Lists memberships by principal or node, `ORDER BY created_at, id` (design doc §5.1
     /// rule 9). SMA-676 D8: `kind` AND-s with the filter; an unknown kind is refused first
-    /// (D7). `Any` keeps the pre-SMA-676 repository path.
+    /// (D7). SMA-649: both axes go through the one guarded port,
+    /// `MembershipKindQuery::list_of_kind`, which confirms the supplied principal or node PRN
+    /// against storage (`NotFound`, `PrnMismatch`) before it reads a row.
     pub async fn list(&self, filter: MembershipFilter, kind: PrincipalKindFilter, page: Page) -> Result<Vec<MembershipRecord>, TenancyError> {
         let kind = kind.resolve()?;
         let axis = match filter {
-            MembershipFilter::Principal(raw) => MembershipAxis::Principal(parse_principal_prn(&raw)?.uuid()),
+            MembershipFilter::Principal(raw) => MembershipAxis::Principal(parse_principal_prn(&raw)?),
             MembershipFilter::Node(raw) => MembershipAxis::Node(parse_node_prn(&raw)?),
         };
-        Ok(match (axis, kind) {
-            (MembershipAxis::Principal(principal), None) => self.repo.list_by_principal(principal, page.limit, page.offset).await?,
-            (MembershipAxis::Node(node), None) => self.repo.list_by_node(&node, page.limit, page.offset).await?,
-            (axis, Some(kind)) => self.kinds.list_of_kind(&axis, kind, page.limit, page.offset).await?,
-        })
+        Ok(self.kinds.list_of_kind(&axis, kind, page.limit, page.offset).await?)
     }
 }
 
@@ -710,5 +711,107 @@ mod tests {
             TenancyError::InvalidPrincipalKind("principal_kind"),
             "not NotFound: the node does not exist, and the kind is checked first"
         );
+    }
+
+    /// SMA-649: a principal PRN with `region` and `org` in the two slots, and `principal`'s uuid.
+    /// A stored principal PRN has both slots empty, so any non-empty slot is a forgery.
+    fn forged_principal(principal: &PrincipalId, region: &str, org: &str) -> String {
+        format!("prn:pgs:iam:{region}:{org}:principal/{}", principal.uuid())
+    }
+
+    /// Seeds one `User` principal with one org membership, and returns the service, the
+    /// principal and the org uuid. `principal_kinds` is set, so the kind-set path
+    /// (`Only(User)`) keeps the row: without it the control list of that path is empty and
+    /// proves nothing (spec T1).
+    async fn one_member(principal_n: u128, org_n: u128) -> (MembershipService<InMemoryMemberships, SeqIds, FixedClock>, PrincipalId, Uuid) {
+        let store = TenancyStore::default();
+        let now = Utc.timestamp_opt(0, 0).unwrap();
+        let person = seed_principal(&store, principal_n);
+        store.principal_kinds.lock().unwrap().insert(person.uuid(), PrincipalKind::User);
+        let (org, _team) = seed_org_and_team(&store, org_n, org_n + 1, now);
+        let svc = new_service(store);
+        svc.attach(&person.canonical(), &OrganizationId::from_uuid(org).canonical(), &actor(999)).await.unwrap();
+        (svc, person, org)
+    }
+
+    /// SMA-649 T1 (B1, B2, Review Focus 1 and 2): a forged region or organization slot on the
+    /// principal filter answers `PrnMismatch`, with and without a kind. The control in the same
+    /// test lists the seeded row, so the refusal cannot pass because `list` is broken for every
+    /// input.
+    #[tokio::test]
+    async fn list_refuses_a_forged_principal_prn() {
+        // 0xabc0: the uuid must contain letters, or the upper-case shape changes nothing.
+        let (svc, person, org) = one_member(0xabc0, 500).await;
+        let page = Page::new(None, None).unwrap();
+        let random_org = Uuid::from_u128(0x0f49).to_string();
+        let upper_uuid = person.uuid().to_string().to_uppercase();
+        let shapes = [
+            ("non-empty region", forged_principal(&person, "eu-west-1", "")),
+            ("real org uuid in the org slot", forged_principal(&person, "", &org.to_string())),
+            ("random org uuid in the org slot", forged_principal(&person, "", &random_org)),
+            ("both slots", forged_principal(&person, "eu-west-1", &random_org)),
+            ("upper-case uuid and a region", format!("prn:pgs:iam:eu-west-1::principal/{upper_uuid}")),
+        ];
+        for kind in [PrincipalKindFilter::Any, PrincipalKindFilter::Only(PrincipalKind::User)] {
+            let control = svc.list(MembershipFilter::Principal(person.canonical()), kind, page).await.unwrap();
+            assert_eq!(control.len(), 1, "{kind:?}: the canonical prn must list the seeded membership");
+            for (shape, prn) in &shapes {
+                let err = svc.list(MembershipFilter::Principal(prn.clone()), kind, page).await.unwrap_err();
+                assert_eq!(err, TenancyError::PrnMismatch, "{kind:?} {shape}");
+            }
+        }
+    }
+
+    /// SMA-649 T1 (B4): a canonical principal PRN whose uuid no principal has answers
+    /// `NotFound`, with and without a kind — not an empty OK list.
+    #[tokio::test]
+    async fn list_answers_not_found_for_an_unknown_principal() {
+        let (svc, _person, _org) = one_member(51, 510).await;
+        let page = Page::new(None, None).unwrap();
+        let unknown = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(0x0f4a)).unwrap()).canonical();
+        for kind in [PrincipalKindFilter::Any, PrincipalKindFilter::Only(PrincipalKind::User)] {
+            let err = svc.list(MembershipFilter::Principal(unknown.clone()), kind, page).await.unwrap_err();
+            assert_eq!(err, TenancyError::NotFound, "{kind:?}");
+        }
+    }
+
+    /// SMA-649 T1 (B3): the canonical PRN with an upper-case uuid is still correct. The guard
+    /// compares canonical forms, never the raw request string.
+    #[tokio::test]
+    async fn list_accepts_an_upper_case_uuid_in_a_correct_principal_prn() {
+        let (svc, person, _org) = one_member(0xab, 520).await;
+        let page = Page::new(None, None).unwrap();
+        let upper = format!("prn:pgs:iam:::principal/{}", person.uuid().to_string().to_uppercase());
+        assert_ne!(upper, person.canonical(), "the test uuid must contain letters, or the case changes nothing");
+        for kind in [PrincipalKindFilter::Any, PrincipalKindFilter::Only(PrincipalKind::User)] {
+            assert_eq!(svc.list(MembershipFilter::Principal(upper.clone()), kind, page).await.unwrap().len(), 1, "{kind:?}");
+        }
+    }
+
+    /// SMA-649 Review Focus 3: the guard runs before paging. A forged PRN with an offset past
+    /// the last row answers `PrnMismatch`, not an empty OK list.
+    #[tokio::test]
+    async fn list_refuses_a_forged_principal_prn_past_the_last_page() {
+        let (svc, person, _org) = one_member(53, 530).await;
+        let past_the_end = Page::new(Some(10), Some(1_000)).unwrap();
+        let forged = forged_principal(&person, "eu-west-1", "");
+        for kind in [PrincipalKindFilter::Any, PrincipalKindFilter::Only(PrincipalKind::User)] {
+            let err = svc.list(MembershipFilter::Principal(forged.clone()), kind, past_the_end).await.unwrap_err();
+            assert_eq!(err, TenancyError::PrnMismatch, "{kind:?}");
+        }
+    }
+
+    /// SMA-649 Review Focus 5: a known principal with no membership lists an empty OK list.
+    /// The guard tells "no principal" (`NotFound`) from "no rows".
+    #[tokio::test]
+    async fn list_returns_an_empty_list_for_a_known_principal_without_memberships() {
+        let store = TenancyStore::default();
+        let lonely = seed_principal(&store, 54);
+        store.principal_kinds.lock().unwrap().insert(lonely.uuid(), PrincipalKind::User);
+        let svc = new_service(store);
+        let page = Page::new(None, None).unwrap();
+        for kind in [PrincipalKindFilter::Any, PrincipalKindFilter::Only(PrincipalKind::User)] {
+            assert!(svc.list(MembershipFilter::Principal(lonely.canonical()), kind, page).await.unwrap().is_empty(), "{kind:?}");
+        }
     }
 }

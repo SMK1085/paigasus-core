@@ -27,17 +27,22 @@ use std::time::Duration;
 
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::AppState;
+use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox};
+use paigasus_iam_core::PrincipalId;
 use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::authz::roles::FORBID_ARCHIVED_WRITES_ID;
+use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::authorization_service_client::AuthorizationServiceClient;
 use paigasus_proto::paigasus::iam::v1::{
     DeletePolicyRequest, GrantRoleRequest, IsAuthorizedRequest, ListPoliciesRequest, ListRoleGrantsRequest, Policy, PrincipalKind as ProtoPrincipalKind, PutPolicyRequest, RevokeRoleRequest,
 };
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tonic::Code;
 use tonic::transport::Channel;
+use uuid::Uuid;
 
 /// Spawns the full `grpc::router` (health + tenancy + authn + authorization, all wrapped by
 /// the bearer layer) on an ephemeral port; `abort()` the returned handle when the test
@@ -459,6 +464,173 @@ async fn list_role_grants_over_grpc_applies_the_scope_path_rules() {
     };
     let listed = authz.list_role_grants(authed(users_at_root, &admin_token)).await.unwrap().into_inner().grants;
     assert!(listed.iter().any(|g| g.principal_prn == admin_prn && g.role_key == "platform_admin"), "{listed:?}");
+
+    server.abort();
+}
+
+/// Replaces the region and the organization slot of a canonical principal PRN.
+fn principal_with(prn: &str, region: &str, org: &str) -> String {
+    let uuid = prn.rsplit('/').next().expect("a principal prn ends in /<uuid>");
+    format!("prn:pgs:iam:{region}:{org}:principal/{uuid}")
+}
+
+/// SMA-649 T6 (gRPC), AC11–AC13: a root-granted actor grants a role to a real principal. A
+/// forged region or organization slot answers `InvalidArgument` / `prn-mismatch`, an unknown
+/// uuid answers `NotFound` / `not-found`, and no refusal writes a `role_grant` row, an
+/// `event_outbox` row or a `GrantRole` audit row. Control: the canonical PRN grants, and the
+/// response carries the stored canonical PRN.
+#[tokio::test]
+async fn grant_role_over_grpc_confirms_the_principal_prn_against_storage() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db.clone(), &support::test_config(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state.clone()).await;
+    let mut authz = AuthorizationServiceClient::new(channel(addr).await);
+
+    let admin_token = idp.bearer("t6-grpc-admin", Some("t6-grpc-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision(&state, &admin_token).await;
+    support::seed_platform_admin(&state, &admin_prn).await;
+    let member_token = idp.bearer("t6-grpc-member", Some("t6-grpc-member@example.com"), "paigasus", 3600);
+    let member_prn = support::provision(&state, &member_token).await;
+    let member = PrincipalId::from_prn(Prn::parse(&member_prn).unwrap());
+
+    let outbox_before = event_outbox::Entity::find().count(&db).await.unwrap();
+    let audit_before = audit_log::Entity::find().filter(audit_log::Column::Action.eq("GrantRole")).count(&db).await.unwrap();
+    let absent_org = Uuid::from_u128(0x0f49).as_hyphenated().to_string();
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a).as_hyphenated());
+
+    for (label, prn, code, reason) in [
+        ("forged region", principal_with(&member_prn, "eu-west-1", ""), Code::InvalidArgument, "prn-mismatch"),
+        ("forged org slot", principal_with(&member_prn, "", &absent_org), Code::InvalidArgument, "prn-mismatch"),
+        ("unknown principal", unknown, Code::NotFound, "not-found"),
+    ] {
+        let err = authz
+            .grant_role(authed(
+                GrantRoleRequest {
+                    principal_prn: prn,
+                    role_key: "platform_admin".to_string(),
+                    scope_prn: root_prn().canonical(),
+                },
+                &admin_token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), code, "{label}: {err:?}");
+        assert_eq!(reason_of(&err), reason, "{label}");
+        assert!(
+            state.role_grant_store.list_by_principal(&member).await.unwrap().is_empty(),
+            "{label}: no grant row for the real principal"
+        );
+    }
+    assert_eq!(event_outbox::Entity::find().count(&db).await.unwrap(), outbox_before, "a refused grant enqueues no event");
+    assert_eq!(
+        audit_log::Entity::find().filter(audit_log::Column::Action.eq("GrantRole")).count(&db).await.unwrap(),
+        audit_before,
+        "a refused grant records no GrantRole audit row"
+    );
+
+    let granted = authz
+        .grant_role(authed(
+            GrantRoleRequest {
+                principal_prn: member_prn.clone(),
+                role_key: "platform_admin".to_string(),
+                scope_prn: root_prn().canonical(),
+            },
+            &admin_token,
+        ))
+        .await
+        .expect("control: the canonical prn grants")
+        .into_inner()
+        .grant
+        .expect("grant");
+    assert_eq!(granted.principal_prn, member_prn, "the response carries the stored canonical prn");
+
+    server.abort();
+}
+
+/// SMA-649 T7 (gRPC), AC15–AC18: `ListRoleGrants` with a principal filter confirms the PRN
+/// against the stored principal, on the principal-only path and on the principal + Root-scope
+/// path. A forged region or organization slot answers `InvalidArgument` / `prn-mismatch`, an
+/// unknown uuid `NotFound` / `not-found`. Control: the canonical PRN lists the member's grant. An
+/// ungranted caller gets `PermissionDenied` / `forbidden` for the member's PRN in every shape and
+/// for its OWN uuid with a forged region (not a self listing), and its own canonical PRN lists.
+#[tokio::test]
+async fn list_role_grants_over_grpc_confirms_the_principal_prn_against_storage() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state.clone()).await;
+    let mut authz = AuthorizationServiceClient::new(channel(addr).await);
+
+    let admin_token = idp.bearer("t7-grpc-admin", Some("t7-grpc-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision(&state, &admin_token).await;
+    support::seed_platform_admin(&state, &admin_prn).await;
+    let member_token = idp.bearer("t7-grpc-member", Some("t7-grpc-member@example.com"), "paigasus", 3600);
+    let member_prn = support::provision(&state, &member_token).await;
+    let stranger_token = idp.bearer("t7-grpc-stranger", Some("t7-grpc-stranger@example.com"), "paigasus", 3600);
+    let stranger_prn = support::provision(&state, &stranger_token).await;
+
+    authz
+        .grant_role(authed(
+            GrantRoleRequest {
+                principal_prn: member_prn.clone(),
+                role_key: "platform_admin".to_string(),
+                scope_prn: root_prn().canonical(),
+            },
+            &admin_token,
+        ))
+        .await
+        .expect("seed: the admin grants the member a Root role");
+
+    let request = |prn: &str, scoped: bool| ListRoleGrantsRequest {
+        principal_prn: prn.to_string(),
+        scope_prn: if scoped { root_prn().canonical() } else { String::new() },
+        ..Default::default()
+    };
+    let absent_org = Uuid::from_u128(0x0f49).as_hyphenated().to_string();
+    let unknown = format!("prn:pgs:iam:::principal/{}", Uuid::from_u128(0x0f4a).as_hyphenated());
+    let forged_region = principal_with(&member_prn, "eu-west-1", "");
+
+    for (path, scoped) in [("principal-only", false), ("principal + Root scope", true)] {
+        for (shape, prn, code, reason) in [
+            ("forged region", forged_region.clone(), Code::InvalidArgument, "prn-mismatch"),
+            ("forged org slot", principal_with(&member_prn, "", &absent_org), Code::InvalidArgument, "prn-mismatch"),
+            ("unknown principal", unknown.clone(), Code::NotFound, "not-found"),
+        ] {
+            let err = authz.list_role_grants(authed(request(&prn, scoped), &admin_token)).await.unwrap_err();
+            assert_eq!(err.code(), code, "{path}, {shape}: {err:?}");
+            assert_eq!(reason_of(&err), reason, "{path}, {shape}");
+        }
+        let listed = authz
+            .list_role_grants(authed(request(&member_prn, scoped), &admin_token))
+            .await
+            .expect("control: the canonical prn lists")
+            .into_inner()
+            .grants;
+        assert!(listed.iter().any(|g| g.principal_prn == member_prn && g.role_key == "platform_admin"), "{path}: {listed:?}");
+    }
+
+    for (label, prn) in [
+        ("member, canonical", member_prn.clone()),
+        ("member, forged region", forged_region),
+        ("unknown principal", unknown),
+        ("own uuid, forged region", principal_with(&stranger_prn, "eu-west-1", "")),
+    ] {
+        let err = authz.list_role_grants(authed(request(&prn, false), &stranger_token)).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "ungranted caller, {label}: {err:?}");
+        assert_eq!(reason_of(&err), "forbidden", "ungranted caller, {label}");
+    }
+    let own = authz
+        .list_role_grants(authed(request(&stranger_prn, false), &stranger_token))
+        .await
+        .expect("self listing")
+        .into_inner()
+        .grants;
+    assert!(own.is_empty(), "the stranger holds no grant: {own:?}");
 
     server.abort();
 }
