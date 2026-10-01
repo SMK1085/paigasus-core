@@ -551,11 +551,61 @@ It adds the architecture, because a per-arch build can run on two different runn
 workflow. `.github/workflows/images.yml` runs `build-oci` and uploads these files as a CI
 artifact named `chisel-manifests-<arch>`, with 90-day retention.
 
+Since SMA-665, the image itself also carries a record of the cut: `/var/lib/chisel/manifest.wall`
+(chisel's own manifest) and `/var/lib/dpkg/status.d/libc6` (see the next subsection).
+
 This is the answerable half of a real limit. `chisel cut` uses the **live** Ubuntu archive (see
 § 2.6 of the design document). So two builds one month apart produce different, patched base
 layers. The image is **not** bit-reproducible from `rs/Dockerfile` alone. The manifest artifact
 for one build is the only record of which packages that build used. Without it, you cannot answer
 "which libc is in the image I am running" after the fact.
+
+### Which Ubuntu packages does the image SBOM list?
+
+Since SMA-665, the SBOM of `paigasus-iam` and `paigasus-gateway` lists one Debian entry for each
+Ubuntu package of the chisel cut. Two kinds of file in the image give that data:
+
+- `/var/lib/chisel/manifest.wall` is chisel's own record of the cut, from the `base-files_chisel`
+  slice. It is a zstd-compressed jsonwall file. syft 1.52.0 cannot read it.
+- `/var/lib/dpkg/status.d/<package>` holds one dpkg status stanza for each package.
+  `/var/lib/dpkg/status.d/<package>.md5sums` lists the files of that package that the cut
+  installed. `rs/docker/chisel-dpkg-status.sh` writes both in the `rootfs` stage of
+  `rs/Dockerfile`, from the manifest and from the `Fetching pool/…` lines of the cut. This is the
+  layout of the distroless images, and syft's `dpkg-db-cataloger` reads it. The `.md5sums` files
+  are necessary: without them, syft also lists `libgcc_s.so.1` as a second package, `gcc-14`.
+
+To read the data of an image:
+
+```bash
+docker create --name sbom-probe <image>
+docker cp sbom-probe:/var/lib/dpkg/status.d - | tar -tv
+docker cp sbom-probe:/var/lib/dpkg/status.d/libc6 - | tar -xO
+docker rm sbom-probe
+```
+
+The release checks this data. `ci/images/release_decision.py sbom-floor` compares the Debian
+entries of the SBOM with `chisel-manifest-<service>-<arch>.txt` of the same build. Each package
+of that list must be in the SBOM exactly once, with the same version and architecture. The SBOM
+must have no other Debian entry. A failure stops the release before the upload.
+
+Know these limits before you use the SBOM for a vulnerability scan:
+
+- **The image has no `dpkg`.** The `status.d` data is a package list only. No tool in the image
+  reads it.
+- **The packages are partial.** Each stanza says `Status: install ok installed`, but the cut
+  installs only some slices of the package. A scanner can report a CVE for a file that is not in
+  the image. These are false positives, not false negatives. Sven accepted them (SMA-665 Q6).
+  Before you act on a finding, find the file of the finding in the `.md5sums` file of the
+  package, or in `manifest.wall`.
+- **The `Source:` line has no source version.** A scanner that needs the source version uses the
+  binary version.
+- **A syft bump can stop the release.** A later syft can get a chisel cataloger
+  (anchore/syft#5091). It then lists each package twice: once from `status.d` and once from
+  `manifest.wall`. The floor then fails with "expected exactly once". This is intended. In the
+  PR that bumps syft, remove `rs/docker/chisel-dpkg-status.sh` and its `RUN` line in
+  `rs/Dockerfile`, then make the floor pass again. `images.yml` shows the failure on that PR, but
+  it is not a required check, so the PR can merge red, and the next release then stops at the
+  floor.
 
 ## Release tooling (SMA-658, PR 1)
 
@@ -695,7 +745,9 @@ Both registries hold the same index digest. GHCR stores three attestations and a
 The build-provenance attestation has the INDEX digest as its subject, which is the digest the two
 commands above use. The two SBOM attestations have a PER-PLATFORM digest as their subject, one for
 amd64 and one for arm64, because each architecture has its own SBOM. So an SBOM query against the
-index digest finds nothing. Get the two per-platform digests from the index itself:
+index digest finds nothing. Each service SBOM lists the Rust crates and the Ubuntu packages of the
+chisel cut (see "Which Ubuntu packages does the image SBOM list?" in § 7). Get the two
+per-platform digests from the index itself:
 
 ```bash
 crane manifest ghcr.io/smk1085/paigasus-<svc>@<digest> \
