@@ -1089,7 +1089,7 @@ Expected (one target per `tasks[project][task]`; never grep `"target"`): the lis
 - [ ] **Step 6: The three Docker-backed e2e tiers**
 
 Run: `cd <worktree> && export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH" && docker info >/dev/null && moon run paigasus-console-core-ts:test-e2e iam-console-ts:test-e2e gateway-console-ts:test-e2e`
-Expected: all green with no test change (spec §7: browsers send only `keep-alive` or `Upgrade` tokens, and the Next upstreams nominate no other fields). Run it in the foreground with a timeout of 600000 ms; if it needs longer, run the three targets one at a time. Known flakes that pass on a re-run (memory): `ERR_NETWORK_CHANGED`, `Port 24678 is already in use`, R2 `discovery.probe_failed`, and "React never hydrated" under IAM load. Before any re-run, capture `.moon/cache/ciReport.json` and the task's `.moon/cache/states/<project>/test-e2e/` to the scratchpad (root `CLAUDE.md` Step 0).
+Expected: all green with no test change (spec §7: browsers send only `keep-alive` or `Upgrade` tokens, and the Next upstreams nominate no other fields). Run it in the foreground with a timeout of 600000 ms; if it needs longer, run the three targets one at a time. Known flakes that pass on a re-run (memory): `ERR_NETWORK_CHANGED`, `Port 24678 is already in use`, R2 `discovery.probe_failed`, and "React never hydrated" under IAM load. Before any re-run, capture `.moon/cache/ciReport.json` and the task's `.moon/cache/states/<project>/test-e2e/` to the scratchpad (root `CLAUDE.md` Step 0). <!-- moon-diagnosis:ok -->
 
 - [ ] **Step 7: The full `ci-targets` command**
 
