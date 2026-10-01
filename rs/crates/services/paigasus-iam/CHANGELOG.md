@@ -54,8 +54,9 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   `POST /v1/users/{id}/external-identities`,
   `POST /v1/users/{id}/external-identities/{identity_id}/unlink` and
   `POST /v1/users/{id}/email`. `{id}` is the user's principal uuid (SMA-712).
-- Each of the four calls checks its own Cedar action at Root: `GetUser`, `LinkExternalIdentity`,
-  `UnlinkExternalIdentity` and `ChangeUserEmail`. The `platform_admin` role holds them. The
+- Each of the four calls checks a Cedar action at Root. The three writes have new actions:
+  `LinkExternalIdentity`, `UnlinkExternalIdentity` and `ChangeUserEmail`. `FindUserByEmail` uses
+  `GetUser`. The `platform_admin` role holds all four. The
   `enforce_tenancy` setting does not switch the check off. The three write actions join the
   `forbid-archived-writes` policy, so the starter policy revision is now 4 (SMA-712).
 - `LinkExternalIdentity`, `UnlinkExternalIdentity` and `ChangeUserEmail` need a `reason` of 1 to
@@ -83,10 +84,10 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   second login failed on the email and got `403 provisioning-failed` (SMA-698).
 - IAM confirms the owner PRN of `CreateServiceAccount` and `ListServiceAccounts` against
   storage. IAM also confirms the scope PRN of `IssueApiKey`. Before, IAM did not check the
-  organization slot or the region of these PRNs, and a forged slot was accepted. Now IAM refuses
+  organization slot or the region of these PRNs. IAM accepted a forged value. Now IAM refuses
   a PRN that differs from the stored PRN with `prn-mismatch` (HTTP 400), and an unknown node
   with `not-found`. IAM writes and returns the stored PRN. `IssueApiKey` now also authorizes
-  `IssueApiKey` at the scope node. A refused attempt logs one warning line (SMA-646).
+  `IssueApiKey` at the scope node. A refused PRN mismatch writes one warning line (SMA-646).
 - IAM confirms the principal PRN of `ListMemberships` with a principal filter, of `GrantRole`
   and of `ListRoleGrants` with a principal filter against storage. Before, IAM used only the
   uuid. A forged region or organization slot listed the real principal's data. For `GrantRole`,
