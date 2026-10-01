@@ -197,6 +197,12 @@ mod tests {
         "invalid-principal-kind",
         // IAM: lifecycle (SMA-571)
         "service-migrating",
+        // IAM: identity links (SMA-712)
+        "invalid-reason",
+        "unknown-issuer",
+        "invalid-subject",
+        "cannot-unlink-own-identity",
+        "external-identity-exists",
         // Gateway
         "missing-authorization",
         "invalid-api-key",
@@ -230,7 +236,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 60, "the registry should hold 60 reasons");
+        assert_eq!(actual.len(), 65, "the registry should hold 65 reasons");
     }
 
     #[test]
@@ -373,5 +379,21 @@ mod tests {
     fn the_service_migrating_reason_resolves_both_ways() {
         assert_eq!(ErrorReason::ServiceMigrating.as_wire_reason().as_deref(), Some("service-migrating"));
         assert_eq!(ErrorReason::from_wire_reason("service-migrating"), Some(ErrorReason::ServiceMigrating));
+    }
+
+    /// SMA-712: the five identity-link reasons, asserted by wire string so that a rename that
+    /// changes the kebab spelling fails here.
+    #[test]
+    fn the_identity_link_reasons_resolve_both_ways() {
+        for (variant, wire) in [
+            (ErrorReason::InvalidReason, "invalid-reason"),
+            (ErrorReason::UnknownIssuer, "unknown-issuer"),
+            (ErrorReason::InvalidSubject, "invalid-subject"),
+            (ErrorReason::CannotUnlinkOwnIdentity, "cannot-unlink-own-identity"),
+            (ErrorReason::ExternalIdentityExists, "external-identity-exists"),
+        ] {
+            assert_eq!(variant.as_wire_reason().as_deref(), Some(wire));
+            assert_eq!(ErrorReason::from_wire_reason(wire), Some(variant));
+        }
     }
 }

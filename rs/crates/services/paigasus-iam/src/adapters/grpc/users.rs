@@ -20,16 +20,39 @@
 //!
 //! **Bearer enforcement still applies:** `UserService` is NOT on `AuthLayer`'s `:path`
 //! exemption list (`grpc::authn::is_exempt`), so an unauthenticated call never reaches here.
+//!
+//! **The four identity RPCs (SMA-712)** — `FindUserByEmail`, `LinkExternalIdentity`,
+//! `UnlinkExternalIdentity`, `ChangeUserEmail` — authorize INSIDE `UserIdentityService`, with no
+//! `enforce_tenancy` gate (spec 5.1). This adapter only parses the wire values and forwards the
+//! bearer-resolved actor and credential. A malformed `user_prn` or `external_identity_id` is
+//! refused here, before the service runs, the same way the HTTP path extractor refuses a
+//! malformed uuid before its handler runs (plan deviation 5). So this parse runs BEFORE the
+//! authorization check: a denied caller with a malformed id gets `invalid-prn` or `invalid-uuid`,
+//! not `forbidden`. That reveals only the syntax of the id. It never reveals whether a row
+//! exists (code review F4; `tests/grpc_users.rs` pins the order).
+//!
+//! **The stored-PRN rule (SMA-649, code review F1).** This adapter keeps the caller's parsed
+//! `user_prn`. It checks only the service and the resource type here (`invalid-prn`). The store
+//! then compares that PRN byte for byte with the stored `principal.prn`: a region or an
+//! organization slot answers `prn-mismatch`, the same as `ListMemberships`, `GrantRole` and
+//! `ListRoleGrants`. HTTP builds the canonical PRN from the path uuid, which always equals the
+//! stored PRN, so HTTP never sees `prn-mismatch` here.
 
 use std::time::Instant;
 
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::user_service_server::UserService;
-use paigasus_proto::paigasus::iam::v1::{CreateUserRequest, CreateUserResponse};
+use paigasus_proto::paigasus::iam::v1::{
+    ChangeUserEmailRequest, ChangeUserEmailResponse, CreateUserRequest, CreateUserResponse, FindUserByEmailRequest, FindUserByEmailResponse, LinkExternalIdentityRequest, LinkExternalIdentityResponse,
+    UnlinkExternalIdentityRequest, UnlinkExternalIdentityResponse,
+};
 use tonic::{Request, Response, Status};
 
 use paigasus_iam_core::Action;
+use paigasus_iam_core::PrincipalId;
 use paigasus_iam_core::authz::model::root_prn;
+use paigasus_kernel::Prn;
+use uuid::Uuid;
 
 use super::convert;
 use crate::adapters::auth::AuthContext;
@@ -69,6 +92,27 @@ pub(crate) fn opt_string(raw: String) -> Option<String> {
     if raw.is_empty() { None } else { Some(raw) }
 }
 
+/// Parses a wire `user_prn` into the [`PrincipalId`] it names (SMA-712). It must be an `iam`
+/// `principal` PRN, else `invalid-prn`. The service then answers 404 when that principal is not
+/// a user.
+///
+/// The function returns the caller's own parsed PRN, with any region or organization slot. It
+/// does not rewrite it to the canonical form: the store compares it with the stored
+/// `principal.prn` and answers `prn-mismatch` on a difference (SMA-649, code review F1). The
+/// audit row names the stored PRN that the store returns, so it is always canonical.
+fn user_id(raw: &str) -> Result<PrincipalId, TenancyError> {
+    let parsed = Prn::parse(raw).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
+    if parsed.service() != "iam" || parsed.resource_type() != "principal" {
+        return Err(TenancyError::InvalidPrn(parsed.canonical()));
+    }
+    Ok(PrincipalId::from_prn(parsed))
+}
+
+/// Parses a wire `external_identity_id` (SMA-712).
+fn external_identity_id(raw: &str) -> Result<Uuid, TenancyError> {
+    Uuid::parse_str(raw).map_err(|_| TenancyError::InvalidUuid("external_identity_id"))
+}
+
 #[tonic::async_trait]
 impl UserService for UserGrpc {
     /// `CreateUser`: bearer-required AND authorized (`Action::CreateUser`@`Root`) — see this
@@ -99,6 +143,83 @@ impl UserService for UserGrpc {
         record_grpc("User", "CreateUser", started, &result);
         result
     }
+
+    /// `FindUserByEmail` (SMA-712): `GetUser` at Root, checked in `UserIdentityService`.
+    async fn find_user_by_email(&self, request: Request<FindUserByEmailRequest>) -> Result<Response<FindUserByEmailResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<FindUserByEmailResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let view = self.state.user_identities.find_by_email(&actor, &req.email).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(FindUserByEmailResponse {
+                user: Some(convert::to_proto_user(&view)),
+            }))
+        }
+        .await;
+        record_grpc("User", "FindUserByEmail", started, &result);
+        result
+    }
+
+    /// `LinkExternalIdentity` (SMA-712). A same-user retry returns the stored identity.
+    async fn link_external_identity(&self, request: Request<LinkExternalIdentityRequest>) -> Result<Response<LinkExternalIdentityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<LinkExternalIdentityResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let user = user_id(&req.user_prn).map_err(convert::status_to_grpc)?;
+            let out = self
+                .state
+                .user_identities
+                .link(&actor, &user, &req.issuer, &req.subject, &req.reason)
+                .await
+                .map_err(convert::status_to_grpc)?;
+            Ok(Response::new(LinkExternalIdentityResponse {
+                external_identity: Some(convert::to_proto_external_identity(&out.value)),
+            }))
+        }
+        .await;
+        record_grpc("User", "LinkExternalIdentity", started, &result);
+        result
+    }
+
+    /// `UnlinkExternalIdentity` (SMA-712). The caller's own credential goes to the service, which
+    /// refuses to unlink the identity that authenticated this request.
+    async fn unlink_external_identity(&self, request: Request<UnlinkExternalIdentityRequest>) -> Result<Response<UnlinkExternalIdentityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<UnlinkExternalIdentityResponse>, Status> = async {
+            let ctx = actor_context(&request)?;
+            let actor = ctx.principal_id.prn().clone();
+            let req = request.into_inner();
+            let user = user_id(&req.user_prn).map_err(convert::status_to_grpc)?;
+            let identity = external_identity_id(&req.external_identity_id).map_err(convert::status_to_grpc)?;
+            self.state
+                .user_identities
+                .unlink(&actor, &ctx.credential, &user, identity, &req.reason)
+                .await
+                .map_err(convert::status_to_grpc)?;
+            Ok(Response::new(UnlinkExternalIdentityResponse {}))
+        }
+        .await;
+        record_grpc("User", "UnlinkExternalIdentity", started, &result);
+        result
+    }
+
+    /// `ChangeUserEmail` (SMA-712).
+    async fn change_user_email(&self, request: Request<ChangeUserEmailRequest>) -> Result<Response<ChangeUserEmailResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<ChangeUserEmailResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let user = user_id(&req.user_prn).map_err(convert::status_to_grpc)?;
+            let view = self.state.user_identities.change_email(&actor, &user, &req.email, &req.reason).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(ChangeUserEmailResponse {
+                user: Some(convert::to_proto_user(&view)),
+            }))
+        }
+        .await;
+        record_grpc("User", "ChangeUserEmail", started, &result);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -116,4 +237,44 @@ mod tests {
     // module cannot name `http::users::to_command` to run the real HTTP-side projection. This
     // module is `pub`, so the twin test reaches `opt_string` (above) from the other side instead
     // — see `http::users` for the assertion.
+
+    /// SMA-712 spec 4.1: gRPC names a user by its full principal PRN. Anything else is
+    /// `invalid-prn` (the recorded transport divergence: HTTP answers `invalid-uuid`).
+    #[test]
+    fn a_user_prn_must_name_an_iam_principal() {
+        let uuid = uuid::Uuid::from_u128(7);
+        assert_eq!(user_id(&format!("prn:pgs:iam:::principal/{uuid}")).unwrap().uuid(), uuid);
+        assert!(matches!(user_id(""), Err(TenancyError::InvalidPrn(_))));
+        assert!(matches!(user_id("not a prn"), Err(TenancyError::InvalidPrn(_))));
+        let org = paigasus_iam_core::OrganizationId::from_uuid(uuid);
+        assert!(matches!(user_id(&org.canonical()), Err(TenancyError::InvalidPrn(_))));
+    }
+
+    /// Code review F1 (SMA-649's rule): a `user_prn` with a region or an organization slot keeps
+    /// that slot, so the store can compare it with the stored PRN and answer `prn-mismatch`. The
+    /// old rewrite to the canonical PRN accepted a forged slot silently.
+    /// `tests/grpc_users.rs` proves the `prn-mismatch` answer end to end.
+    #[test]
+    fn a_user_prn_with_a_region_or_an_org_slot_keeps_the_callers_prn() {
+        let uuid = uuid::Uuid::from_u128(7);
+        let canonical = user_id(&format!("prn:pgs:iam:::principal/{uuid}")).unwrap();
+        assert_eq!(canonical, PrincipalId::from_uuid(uuid));
+
+        let with_region = format!("prn:pgs:iam:eu-west-1::principal/{uuid}");
+        let regional = user_id(&with_region).unwrap();
+        assert_eq!(regional.canonical(), with_region, "the region must reach the store's comparison");
+        assert_ne!(regional, canonical);
+
+        let with_org = Prn::build("iam", "", Some(uuid::Uuid::from_u128(99)), "principal", uuid).unwrap().canonical();
+        let org_slot = user_id(&with_org).unwrap();
+        assert_eq!(org_slot.canonical(), with_org, "the organization slot must reach the store's comparison");
+        assert_ne!(org_slot, canonical);
+    }
+
+    #[test]
+    fn an_external_identity_id_must_be_a_uuid() {
+        let id = uuid::Uuid::from_u128(3);
+        assert_eq!(external_identity_id(&id.to_string()).unwrap(), id);
+        assert_eq!(external_identity_id("x").unwrap_err(), TenancyError::InvalidUuid("external_identity_id"));
+    }
 }
