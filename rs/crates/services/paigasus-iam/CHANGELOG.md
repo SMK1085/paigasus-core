@@ -10,7 +10,7 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-27
+## [0.2.0] - 2026-10-01
 
 ### Added
 
@@ -48,16 +48,51 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   another claim or the token. Each IAM replica writes at most one line for each issuer in
   10 seconds. `Introspect` writes no line. Before, IAM answered `403 identity-not-provisioned`
   (gRPC `PermissionDenied`) and logged nothing (SMA-707).
+- `UserService` has four new operator calls: `FindUserByEmail`, `LinkExternalIdentity`,
+  `UnlinkExternalIdentity` and `ChangeUserEmail`. They repair a user who cannot sign in because
+  of `email_conflict`. Over HTTP they are `POST /v1/users/find-by-email`,
+  `POST /v1/users/{id}/external-identities`,
+  `POST /v1/users/{id}/external-identities/{identity_id}/unlink` and
+  `POST /v1/users/{id}/email`. `{id}` is the user's principal uuid (SMA-712).
+- Each of the four calls checks its own Cedar action at Root: `GetUser`, `LinkExternalIdentity`,
+  `UnlinkExternalIdentity` and `ChangeUserEmail`. The `platform_admin` role holds them. The
+  `enforce_tenancy` setting does not switch the check off. The three write actions join the
+  `forbid-archived-writes` policy, so the starter policy revision is now 4 (SMA-712).
+- `LinkExternalIdentity`, `UnlinkExternalIdentity` and `ChangeUserEmail` need a `reason` of 1 to
+  500 characters. Each write and its audit entry commit in one transaction. The audit entry
+  names the actor, the user and the reason. A link that the user already holds, and an email that
+  does not change, write nothing and return the current state (SMA-712).
+- The four calls add these error reasons: `invalid-reason`, `unknown-issuer` and
+  `invalid-subject` (HTTP 400), `external-identity-exists` (HTTP 409) and
+  `cannot-unlink-own-identity` (HTTP 409). `unknown-issuer` means
+  that the issuer is not one of the configured `authn.issuers`. `external-identity-exists` means
+  that another user holds the issuer and subject pair. `cannot-unlink-own-identity` means that
+  the caller tried to remove the identity of its own OIDC login (SMA-712).
 
 ### Changed
 
 - Over HTTP, IAM refuses a non-numeric `limit` or `offset` on the `ListRoleGrants`
   principal-only path with 400 `invalid-query-parameter`. Before, IAM ignored it (SMA-676).
+- When the outbox relay is on, IAM sets the counter `iam_outbox_relay_publish_failures_total`
+  to zero at startup, before the listener binds. Before, the series did not exist until the
+  first publish failure. Prometheus `increase()` now sees that first failure (SMA-713).
 
 ### Fixed
 
 - Two first logins of the same identity at the same time both succeed. Before, in Postgres the
   second login failed on the email and got `403 provisioning-failed` (SMA-698).
+- IAM confirms the owner PRN of `CreateServiceAccount` and `ListServiceAccounts` against
+  storage. IAM also confirms the scope PRN of `IssueApiKey`. Before, IAM did not check the
+  organization slot or the region of these PRNs, and a forged slot was accepted. Now IAM refuses
+  a PRN that differs from the stored PRN with `prn-mismatch` (HTTP 400), and an unknown node
+  with `not-found`. IAM writes and returns the stored PRN. `IssueApiKey` now also authorizes
+  `IssueApiKey` at the scope node. A refused attempt logs one warning line (SMA-646).
+- IAM confirms the principal PRN of `ListMemberships` with a principal filter, of `GrantRole`
+  and of `ListRoleGrants` with a principal filter against storage. Before, IAM used only the
+  uuid. A forged region or organization slot listed the real principal's data. For `GrantRole`,
+  IAM wrote the forged PRN into the outbox event and the response. Now IAM refuses a PRN that
+  differs from the stored PRN with `prn-mismatch` (HTTP 400). IAM answers `not-found` for an
+  unknown principal uuid (SMA-649).
 - A bootstrap-admin seed that loses a concurrent race is now a success. IAM no longer
   increments `iam_bootstrap_admin_seed_failures_total{stage="txn"}` for it. IAM no longer logs
   the lockout warning for it either (SMA-676).

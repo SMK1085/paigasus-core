@@ -10,7 +10,7 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-27
+## [0.2.0] - 2026-10-01
 
 ### Added
 
