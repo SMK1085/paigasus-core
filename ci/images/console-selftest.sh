@@ -27,13 +27,16 @@
 # false annotation. Exit 1 on any FAIL, 2 on an infrastructure error in the loader.
 set -euo pipefail
 export PROTO_REPORTER=text
+# SMA-671: no row reads the parity mode from the environment. A developer's shell or a future
+# job-level env must not change a row; the PF rows set the variable inside their own wrapper.
+unset CONSOLE_PARITY_REQUIRED
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe kernel_control_flag"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe kernel_control_flag parity_required_flag"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -1004,6 +1007,35 @@ run_fn KC2 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" none kc_se
 stub_reset
 run_fn KC3 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" none kc_set ""
 
+# --- SMA-671: the parity switch (PF rows) -----------------------------------------------------
+# shellcheck disable=SC2034 # parity_required_flag reads the variable.
+pf_set() { CONSOLE_PARITY_REQUIRED="$1"; parity_required_flag; }
+pf_unset() { unset CONSOLE_PARITY_REQUIRED; parity_required_flag; }
+stub_reset
+run_fn PF0 0 "" "::error::" none pf_unset
+expect_in PF0-out "$T/PF0.out" "--parity=optional"
+stub_reset
+run_fn PF0b 0 "" "::error::" none pf_set ""
+expect_in PF0b-out "$T/PF0b.out" "--parity=optional"
+stub_reset
+run_fn PF0c 0 "" "::error::" none pf_set 0
+expect_in PF0c-out "$T/PF0c.out" "--parity=optional"
+stub_reset
+run_fn PF1 0 "" "::error::" none pf_set 1
+expect_in PF1-out "$T/PF1.out" "--parity=required"
+stub_reset
+run_fn PF2 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1' (unset or empty means 0), not 'true'." "" none pf_set true
+# Review Focus 1: a near miss is a usage error, never a silent optional.
+stub_reset
+run_fn PF3 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" none pf_set " 1"
+expect_not_in PF3-out "$T/PF3.out" "--parity="
+stub_reset
+run_fn PF3b 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" none pf_set 01
+expect_not_in PF3b-out "$T/PF3b.out" "--parity="
+stub_reset
+run_fn PF3c 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" none pf_set yes
+expect_not_in PF3c-out "$T/PF3c.out" "--parity="
+
 # smoke_case <args...> — smoke_consoles with its globals set to dummy values and every row that
 # needs a real image replaced, so only the zone loop's wiring runs. Z_CALLS records which kernel
 # rows smoke_consoles called. Z_REDIS_RC is what the Redis start returns.
@@ -1039,7 +1071,7 @@ z_curl() {
 }
 
 stub_reset; z_curl Z1; rm -f "$Z_CALLS"; Z_REDIS_RC=0
-run_fn Z1 1 "" "" any smoke_case --kernel-control=off iam=img:dev gateway=img:dev
+run_fn Z1 1 "" "" any smoke_case --kernel-control=off --parity=optional iam=img:dev gateway=img:dev
 expect_in Z1-skip-iam "$T/Z1.out" "iam-console: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off, the release path; SMA-675 Q5)"
 expect_in Z1-skip-gw "$T/Z1.out" "gateway-console: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off"
 expect_in Z1-route-iam "$Z_CALLS" "route /iam/orgs"
@@ -1050,7 +1082,7 @@ expect_call Z1-net "--network smoke-net-z"
 expect_call Z1-redis "PAIGASUS_SESSION_REDIS_URL=redis://smoke-redis-z:6379"
 expect_no_call Z1-nomem "PAIGASUS_SESSION_STORE=memory"
 stub_reset; z_curl Z2; rm -f "$Z_CALLS"; Z_REDIS_RC=0
-run_fn Z2 1 "" "" any smoke_case --kernel-control=on iam=img:dev gateway=img:dev
+run_fn Z2 1 "" "" any smoke_case --kernel-control=on --parity=required iam=img:dev gateway=img:dev
 expect_in Z2-control-iam "$Z_CALLS" "control iam-console"
 expect_in Z2-control-gw "$Z_CALLS" "control gateway-console"
 expect_not_in Z2-noskip "$T/Z2.out" "kernel control row skipped"
@@ -1060,11 +1092,16 @@ stub_reset
 run_fn Z4 1 "not '--kernel-control=maybe'" "" none smoke_case --kernel-control=maybe iam=img:dev
 # D6: with no Redis, the kernel rows do not run and the containers get the memory store.
 stub_reset; z_curl Z5; rm -f "$Z_CALLS"; Z_REDIS_RC=1
-run_fn Z5 1 "iam-console: kernel rows NOT run" "" any smoke_case --kernel-control=on iam=img:dev gateway=img:dev
+run_fn Z5 1 "iam-console: kernel rows NOT run" "" any smoke_case --kernel-control=on --parity=optional iam=img:dev gateway=img:dev
 expect_not_in Z5-norows "$Z_CALLS" "route"
 expect_call Z5-mem "PAIGASUS_SESSION_STORE=memory"
 expect_no_call Z5 "--network"
 Z_REDIS_RC=0
+# SMA-671: the second word is the parity mode. A bad or missing one stops before any docker call.
+stub_reset
+run_fn Z6 1 "the second argument must be --parity=required or --parity=optional, not '--parity=maybe'" "" none smoke_case --kernel-control=on --parity=maybe iam=img:dev
+stub_reset
+run_fn Z6b 1 "the second argument must be --parity=required or --parity=optional, not 'iam=img:dev'" "" none smoke_case --kernel-control=on iam=img:dev
 
 # AC 3: CONSOLE_SMOKE_ENV sets no session store any more; console_container_args owns it.
 awk '/^CONSOLE_SMOKE_ENV=\($/ { on = 1 } on { print } on && /^\)$/ { on = 0 }' "$RUN_SH" > "$T/env-block"
@@ -1078,6 +1115,20 @@ D1_RC=0
   PAIGASUS_SMOKE_KERNEL_CONTROL=bogus "$BASH" "$RUN_SH" all-consoles ) >"$T/D1.out" 2>"$T/D1.err" || D1_RC=$?
 check_row D1 "$D1_RC" 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" "$T/D1.out" "$T/D1.err"
 if [ -e "$T/argv" ]; then say_fail D1-nodocker "the stub docker was called" "$T/argv"; else say_pass D1-nodocker; fi
+# SMA-671 D2 and D3: the two console dispatch arms, through the REAL script. A bad parity value
+# stops each one before any docker call (the build of all-consoles included).
+rm -f "$T/argv"
+D2_RC=0
+( PATH="$T/stub:$PATH"; STUB_ARGV="$T/argv"; export PATH STUB_ARGV
+  CONSOLE_PARITY_REQUIRED=bogus "$BASH" "$RUN_SH" all-consoles ) >"$T/D2.out" 2>"$T/D2.err" || D2_RC=$?
+check_row D2 "$D2_RC" 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" "$T/D2.out" "$T/D2.err"
+if [ -e "$T/argv" ]; then say_fail D2-nodocker "the stub docker was called" "$T/argv"; else say_pass D2-nodocker; fi
+rm -f "$T/argv"
+D3_RC=0
+( PATH="$T/stub:$PATH"; STUB_ARGV="$T/argv"; export PATH STUB_ARGV
+  CONSOLE_PARITY_REQUIRED=bogus "$BASH" "$RUN_SH" smoke iam-console ) >"$T/D3.out" 2>"$T/D3.err" || D3_RC=$?
+check_row D3 "$D3_RC" 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" "$T/D3.out" "$T/D3.err"
+if [ -e "$T/argv" ]; then say_fail D3-nodocker "the stub docker was called" "$T/argv"; else say_pass D3-nodocker; fi
 
 # --- SMA-675 call-site pins (P3 to P16) --------------------------------------------------------
 # shellcheck disable=SC2016 # the pinned lines are literal text

@@ -18,6 +18,12 @@
 #        ci/images/run.sh build-console [iam|gateway]   # SMA-513: console image; [iam|gateway] scopes the build
 #        ci/images/run.sh all-consoles                    # SMA-513: build both consoles + smoke; takes no service arg
 # <key> is a chain key of ci/images/chains.toml: iam, gateway, iam-console or gateway-console.
+# Two switches of the console smoke (`smoke <console-key>` and `all-consoles`):
+#   PAIGASUS_SMOKE_KERNEL_CONTROL  unset or `on` runs the kernel control row; `off` skips it
+#                                  (release.yml). Any other value is a usage error.
+#   CONSOLE_PARITY_REQUIRED        `1` makes a missing host build an error (images.yml, SMA-671);
+#                                  unset, empty or `0` prints "NOT CHECKED" (release.yml, a local
+#                                  run). Any other value is a usage error.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1558,6 +1564,24 @@ kernel_control_flag() {
   esac
 }
 
+# SMA-671: whether the staged-tree parity row must find a host build. images.yml makes a host build
+# and sets CONSOLE_PARITY_REQUIRED to 1 on its two console smoke steps. release.yml has no host
+# build and does not set it, so an UNSET value must mean "not required": a release must not red for
+# want of a host build. That is the OPPOSITE polarity of PAIGASUS_SMOKE_KERNEL_CONTROL, on purpose.
+# Unset, empty or 0 means not required, and 1 means required. Any other value (true, yes, ' 1') is a
+# usage error, so a typo cannot turn the gate off silently. It prints the second argument of
+# smoke_consoles. The dispatch arms call it; no row function reads the variable (the SMA-675 rule).
+parity_required_flag() {
+  case "${CONSOLE_PARITY_REQUIRED-}" in
+    ''|0) echo "--parity=optional" ;;
+    1) echo "--parity=required" ;;
+    *)
+      echo "::error::CONSOLE_PARITY_REQUIRED must be '0' or '1' (unset or empty means 0), not '${CONSOLE_PARITY_REQUIRED-}'." >&2
+      return 1
+      ;;
+  esac
+}
+
 # A FULL, schema-valid dummy runtime configuration, not just PAIGASUS_ZONE and PAIGASUS_ZONES. Both
 # consoles validate their ENTIRE runtime config (@paigasus/auth's OIDC/session shape,
 # @paigasus/discovery's PAIGASUS_SERVICES, and PAIGASUS_IAM_GRPC_URL — see ts/apps/<app>/lib/
@@ -1809,7 +1833,7 @@ smoke_consoles() {
   local spec image service app base_path console_path other name port origin status html chunk bytes code uid console_status
   local run_out img_out img_public img_list host_public host_list img_dirs host_dirs
   local host_std host_static host_id run_rc sh_rc img_rc cstate
-  local kernel_control kernel_ok redis_name work zones_json net redis_url args_file args_rc line sid cargs
+  local kernel_control kernel_ok parity redis_name work zones_json net redis_url args_file args_rc line sid cargs
   local ec=0 bad started
   # SMA-675 Q5: the first word says whether the kernel control row runs. It is an argument, not a
   # global (the SMA-670 rule); the dispatch arms derive it with kernel_control_flag. It is read
@@ -1819,6 +1843,18 @@ smoke_consoles() {
     --kernel-control=off) kernel_control="off" ;;
     *)
       echo "::error::smoke_consoles: the first argument must be --kernel-control=on or --kernel-control=off, not '${1:-<none>}'." >&2
+      return 1
+      ;;
+  esac
+  shift
+  # SMA-671: the second word says whether the staged-tree parity row must find a host build. It is
+  # an argument, not a global (the SMA-675 rule); the dispatch arms derive it with
+  # parity_required_flag. It is read before the trap, so a usage error makes no docker call.
+  case "${1:-}" in
+    --parity=required) parity="required" ;;
+    --parity=optional) parity="optional" ;;
+    *)
+      echo "::error::smoke_consoles: the second argument must be --parity=required or --parity=optional, not '${1:-<none>}'." >&2
       return 1
       ;;
   esac
@@ -2465,15 +2501,16 @@ case "$cmd" in
       fi
     done
     if [ "$smoke_kind" = cargo ]; then smoke "$@"; exit 0; fi
-    # SMA-675 Q5: only the console branch reads the switch; a cargo smoke ignores it.
+    # SMA-675 Q5 and SMA-671: only the console branch reads the two switches; a cargo smoke ignores them.
     kc_flag="$(kernel_control_flag)" || exit 1
+    pr_flag="$(parity_required_flag)" || exit 1
     smoke_keys=("$@")
     set --
     for k in "${smoke_keys[@]}"; do
       k_zone="$(zone_for_key "$k")"
       set -- "$@" "${k_zone}=paigasus-${k}:dev"
     done
-    smoke_consoles "$kc_flag" "$@"
+    smoke_consoles "$kc_flag" "$pr_flag" "$@"
     ;;
   all)
     if [ -n "$target" ]; then
@@ -2512,8 +2549,9 @@ case "$cmd" in
       echo "usage: ci/images/run.sh all-consoles takes no service argument — use 'build-console [iam|gateway]' to build one" >&2
       exit 1
     fi
-    # SMA-675 Q5: read first, so a bad value stops before the build.
+    # SMA-675 Q5 and SMA-671: read first, so a bad value stops before the build.
     kc_flag="$(kernel_control_flag)" || exit 1
+    pr_flag="$(parity_required_flag)" || exit 1
     assert_console_pins
     for s in "${console_services[@]}"; do build_console_one "$s"; done
     # The zone list is passed, not restated inside smoke_consoles, so the build loop and the smoke
@@ -2524,7 +2562,7 @@ case "$cmd" in
       s_app="$(app_for "$s")"
       set -- "$@" "${s}=${s_app}:dev"
     done
-    smoke_consoles "$kc_flag" "$@"
+    smoke_consoles "$kc_flag" "$pr_flag" "$@"
     ;;
   *)
     echo "unknown command: $cmd" >&2
