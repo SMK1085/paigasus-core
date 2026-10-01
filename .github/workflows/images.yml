@@ -128,12 +128,16 @@ jobs:
         with:
           cache: false
 
-      # Narrow installs, not a bare `proto install`: this job needs only these three.
-      - name: Install crane, syft and uv
+      # Narrow installs, not a bare `proto install`: this job needs only these six. SMA-671: moon,
+      # node and pnpm are for the host build of both consoles (the staged-tree parity reference).
+      - name: Install crane, syft, uv, moon, node and pnpm
         run: |
           proto install crane
           proto install syft
           proto install uv
+          proto install moon
+          proto install node
+          proto install pnpm
 
       - name: Decision script self-test
         run: uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py --self-test
@@ -190,6 +194,28 @@ jobs:
       # With CI=true a skipped row is a failure.
       - name: Console image self-test
         run: ci/images/console-selftest.sh
+
+      # SMA-671: the reference build for the staged-tree parity row of the console smoke
+      # (console_staged_parity_row in ci/images/run.sh). It builds both consoles on THIS runner,
+      # so the host build and the image's builder stage run on the same OS and architecture.
+      # `--upstream none` skips contracts:generate: the build compiles the COMMITTED generated
+      # tree and the committed wasm, as the Docker build does, and needs no buf and no BSR. moon
+      # does not install node_modules in this repo (ci.yml), so pnpm installs first. No `if:`: it
+      # runs on each leg (SMA-671 Q3), rs-only PRs included (Q-a).
+      - name: Host build of both consoles (staged-tree parity reference)
+        timeout-minutes: 20
+        run: |
+          df -h /
+          SECONDS=0
+          pnpm --dir ts install --frozen-lockfile
+          echo "host-build: pnpm install took ${SECONDS}s"
+          SECONDS=0
+          rc=0
+          moon run iam-console-ts:build gateway-console-ts:build --upstream none || rc=$?
+          echo "host-build: moon run took ${SECONDS}s (rc ${rc})"
+          df -h /
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          git status --porcelain=v1 --ignored=matching --untracked-files=normal -- ts rs/crates/bindings
 
       # SMA-688 (spec section 5.3). This step runs the console RELEASE sequence. It matches the
       # sequence that release.yml runs for each images-build-<key> job. The sequence has six
