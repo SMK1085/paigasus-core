@@ -1,3 +1,4 @@
+<!-- moon-diagnosis:ok -->
 # SMA-671 Images Console Coverage Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -1653,7 +1654,9 @@ other `0` is a gap: fix the doc.
 - [ ] **Step 8: Check the moon-diagnosis marker rule**
 
 Run: `cd <worktree> && grep -n 'ciReport' docs/ops/RUNBOOK-containers.md rs/CLAUDE.md || echo "none"`
-Expected: `none` (no doc here names the moon CI report file, so no marker is needed).
+Expected: `none` (no doc here names the moon CI report file, so no marker is needed). This plan
+names the file in the command above, so `repo:actionlint` check 12 needs the
+`moon-diagnosis:ok` marker on line 1 of this plan. Keep it there.
 
 - [ ] **Step 9: Commit**
 
