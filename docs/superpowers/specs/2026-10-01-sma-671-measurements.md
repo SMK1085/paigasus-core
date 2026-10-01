@@ -83,3 +83,44 @@ F10, re-checked on 2026-10-01 against the Dependabot PR list of the repository:
 No `rust` or `node` digest-refresh PR exists. Item 4 stays open.
 
 Linear comment: posted on SMA-671 on 2026-10-01 (comment `d1d2963f-29d5-4488-b83a-e3053cbb1c3a`).
+
+## Mutation proof (SMA-671 AC 4)
+
+Measured on 2026-10-01 in the SMA-671 worktree, under system `/bin/bash` 3.2.57, with
+`/bin/bash ci/images/console-selftest.sh`. The baseline before the battery and the run after the
+last restore both gave rc 0 with `289 passed, 0 failed, 0 skipped`. Each mutation was one Edit-tool
+edit. `bash -n ci/images/run.sh` passed after each edit. Each restore was the reverse Edit-tool
+edit. `git diff --stat` was empty after each restore. No mutation was committed.
+
+| ID | Mutation | Row(s) that went red | Restored, `git diff` empty |
+|---|---|---|---|
+| MU1 | `console_staged_parity_row`, no-host-build arm: `if [ "$parity" = required ]; then` → `if false; then` | SP2 (rc 1, 288 passed) | yes |
+| MU2 | `parity_required_flag`, `*)` arm body → `echo "--parity=optional"` | PF2, PF3, PF3-out, PF3b, PF3b-out, PF3c, PF3c-out, D2, D2-nodocker, D3, D3-nodocker (rc 1, 278 passed) | yes |
+| MU3 | `smoke_consoles`, second-word `case`, `*)` arm body → `parity="optional"` | Z6, Z6b (rc 1, 287 passed) | yes |
+| MU4 | `smoke_consoles`: delete `console_staged_parity_row "$app" "$image" "$parity" \|\| ec=1` | P1d, P1d-mut, Z1-parity-iam, Z1-parity-gw, Z2-parity-iam, Z2-parity-gw (rc 1, 283 passed) | yes |
+| MU5 | `console_staged_parity_row`, third-argument `*)` arm body → `parity=optional` | SP2b (rc 1, 288 passed) | yes |
+| MU6 | `console_staged_parity_row`, same-directories arm: `elif [ "$parity" = required ]; then` → `elif false; then` | SP4b (rc 1, 288 passed) | yes |
+| MU7 | `docker_context_leaks`: `leaks=$((leaks + 1))` → `leaks=$((leaks + 0))` | CX1, CX2, CX3, CX4, CX6, CX7 (rc 1, 283 passed) | yes |
+| MU8 | `all-consoles)` arm: delete `pr_flag="$(parity_required_flag)" \|\| exit 1` | D2, D2-nodocker (rc 1, 287 passed) | yes |
+| MU9 | `smoke)` arm: delete `pr_flag="$(parity_required_flag)" \|\| exit 1` | D3 (rc 1, 288 passed). D3-nodocker stayed green | yes |
+| MU10 | `images.yml`, "Console release sequence": delete `CONSOLE_PARITY_REQUIRED: '1'` | W1, W1-out, W1-m1-applied, W1-m3-applied, W1-m3, W1-m7-applied (rc 1, 283 passed) | yes |
+| MU11 | `images.yml`, "Console release sequence": delete `set +e` | RS1, RS1-gw-build, RS1-gw-smoke, RS3, RS3-gw (rc 1, 284 passed) | yes |
+| MU12 | `images.yml`: move the whole "Host build of both consoles" step after "Build + smoke both consoles" | W1, W1-out, W1-m4 (rc 1, 286 passed) | yes |
+
+Every mutation reddened its expected row, so Step 3 (fix and re-run the whole battery) did not
+apply. Notes on the rows:
+
+- MU9: only D3 went red, with "rc 0, expected 1". D3-nodocker stayed green. With the line
+  deleted, the `smoke)` arm stops at `run.sh` line 2625 with `pr_flag: unbound variable` (from
+  `set -u`). That is before `smoke_consoles` and before any docker call, so the plan's "D3 (or
+  D3-nodocker)" holds through D3. The rc 0 is a bash 3.2 behaviour, measured with a three-line
+  script: under `set -euo pipefail` with an EXIT trap whose last command returns 0, an
+  unbound-variable stop exits 0 under `/bin/bash` 3.2.57 and 1 under Homebrew bash 5.3.15. The
+  top-level `trap load_oci_cleanup EXIT` (`run.sh` line 810) is such a trap. D3 also checks
+  stderr for the `CONSOLE_PARITY_REQUIRED must be '0' or '1'` text, which this mutation does not
+  print, so D3 goes red under bash 5 (CI) too. Not changed here: the bash 3.2 rc 0 on an
+  unbound-variable stop is a local-only fail-open of `run.sh`, outside the SMA-671 scope.
+- MU10: the in-harness W1 mutations m1, m3 and m7 also report "the mutation did not apply". They
+  edit the line that MU10 deleted, so this is expected.
+- The in-harness W1 mutations W1-m1 to W1-m9 passed on the baseline and on the run after the last
+  restore. Those PASS rows are the proof for those targets.
