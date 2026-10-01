@@ -477,3 +477,7 @@ tasks:
       # `cache: false`, add `- '!/ts/apps/iam-console/tsconfig.tsbuildinfo'` in the same edit, or
       # every local `tsc` run becomes a cache miss here. Nothing gates that pairing.
       cache: false
+      # This task and paigasus-iam-rs:test share one CI runner. That Rust task runs about 520 s of
+      # Docker-backed nextest suites, Keycloak e2e included. Overlap starves the browser, so React
+      # never hydrates here (SMA-718). The mutex stops the two tasks from running at the same time.
+      mutex: 'heavy-integration'

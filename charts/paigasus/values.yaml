@@ -33,7 +33,7 @@ zones:
         repository: ghcr.io/smk1085/paigasus-iam
         # Pinned to the image version in rs/crates/services/paigasus-iam/Cargo.toml (SMA-688).
         # repo:helm-render row 8a fails when the two differ.
-        tag: "0.1.0"
+        tag: "0.2.0"
       # replicas and maxSurge are pinned; see the comment in templates/backend-deployment.yaml.
       httpPort: 8080
       grpcPort: 9090
@@ -99,7 +99,7 @@ zones:
         # (SMA-688). This chart does not render it today; the pin stops a later chart that
         # deploys it from falling back to an older appVersion.
         # repo:helm-render row 8a fails when the two differ.
-        tag: "0.1.0"
+        tag: "0.2.0"
       httpPort: 8088
       # Genuinely missing from the original schema (SMA-513 Task 11) — the gateway backend is
       # stateless and horizontally scalable, unlike IAM's SMA-559-pinned single replica, so it
