@@ -131,7 +131,7 @@ spec:
       terminationGracePeriodSeconds: 45
       containers:
         - name: backend
-          image: "ghcr.io/smk1085/paigasus-iam:0.1.0"
+          image: "ghcr.io/smk1085/paigasus-iam:0.2.0"
           securityContext:
             allowPrivilegeEscalation: false
             # NO readOnlyRootFilesystem. RUNBOOK-containers.md § 7: that posture is untested for

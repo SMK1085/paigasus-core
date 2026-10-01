@@ -448,3 +448,7 @@ tasks:
     options:
       # A real build and a real Chromium. A cached PASS would replay a green that tested nothing.
       cache: false
+      # This task and paigasus-iam-rs:test share one CI runner. That Rust task runs about 520 s of
+      # Docker-backed nextest suites, Keycloak e2e included. Overlap starves the browser, so React
+      # never hydrates here (SMA-718). The mutex stops the two tasks from running at the same time.
+      mutex: 'heavy-integration'
