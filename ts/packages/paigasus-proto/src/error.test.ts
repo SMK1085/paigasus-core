@@ -54,10 +54,10 @@ describe('the reason codec round-trips the whole registry', () => {
   it('covers every non-sentinel value declared in error.proto', () => {
     const values = ErrorReasonSchema.values.filter((v) => v.name !== 'ERROR_REASON_UNSPECIFIED');
 
-    // Cardinality guard. The Rust mirror asserts 60 at
-    // rs/crates/libs/paigasus-proto/src/error.rs:233; the two must agree,
+    // Cardinality guard. The Rust mirror asserts 65 at
+    // rs/crates/libs/paigasus-proto/src/error.rs:239; the two must agree,
     // because both derive from the same proto.
-    expect(values).toHaveLength(60);
+    expect(values).toHaveLength(65);
 
     for (const value of values) {
       const reason = value.number;

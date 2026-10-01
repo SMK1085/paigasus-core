@@ -22,7 +22,6 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::{PrincipalId, TenancyNodeRef};
 use paigasus_kernel::Prn;
-use uuid::Uuid;
 
 use super::AppState;
 use super::dto::{CreateServiceAccountBody, ServiceAccountDto, ServiceAccountQuery};
@@ -55,13 +54,6 @@ fn parse_node_prn(raw: &str) -> Result<TenancyNodeRef, TenancyError> {
     TenancyNodeRef::from_prn(prn).map_err(TenancyError::from)
 }
 
-/// Builds the `PrincipalId` a `{sa}` path segment names. `Prn::build` with the fixed, always-
-/// valid literal `service`/`resource_type` strings used here can never fail (mirrors
-/// `OrganizationId::from_uuid`'s identical `.expect`).
-fn service_account_id(uuid: Uuid) -> PrincipalId {
-    PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).expect("static principal prn parts are valid"))
-}
-
 async fn create(
     State(s): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -84,7 +76,7 @@ async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>,
 
 async fn get_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ServiceAccountId>) -> Result<Json<ServiceAccountDto>, ApiError> {
     let actor = actor_prn(&ctx);
-    let id = service_account_id(path.id);
+    let id = PrincipalId::from_uuid(path.id);
     let account = s.service_accounts.get(&actor, &id).await?;
     Ok(Json(account.into()))
 }
@@ -95,7 +87,7 @@ async fn get_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContex
 /// `adapters::http::authz::revoke_role_grant`'s shape.
 async fn archive(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ServiceAccountId>) -> Result<StatusCode, ApiError> {
     let actor = actor_prn(&ctx);
-    let id = service_account_id(path.id);
+    let id = PrincipalId::from_uuid(path.id);
     s.service_accounts.archive(&actor, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

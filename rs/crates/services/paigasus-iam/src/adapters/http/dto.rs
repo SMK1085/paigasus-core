@@ -11,6 +11,7 @@ use paigasus_iam_core::{
     ApiKey, AuditEntry, Credential, DeadLetterEntry, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, PrincipalId, Project,
     RoleGrant, RoleGrantRef, ServiceAccountRecord, Team,
 };
+use paigasus_iam_core::{ExternalIdentity, UserWithIdentities};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -213,6 +214,89 @@ pub struct CreateUserBody {
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateUserResponse {
     pub principal_prn: String,
+}
+
+// --- SMA-712: the operator identity routes -----------------------------------------------------
+//
+// Every body field is `Option<String>`. serde reads a missing `Option` field as `None` with no
+// attribute, and the handler turns `None` into an empty value. So a missing field reaches the
+// service as an empty value, and both transports answer with the same code (for example
+// `invalid-reason`). A body of the wrong type still gets the extractor's 422.
+
+/// Body of `POST /v1/users/find-by-email`. The email is in the body, not the URL, so no request
+/// line or access log records it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FindUserByEmailBody {
+    pub email: Option<String>,
+}
+
+/// Body of `POST /v1/users/{id}/external-identities`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LinkExternalIdentityBody {
+    pub issuer: Option<String>,
+    pub subject: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// Body of `POST /v1/users/{id}/external-identities/{identity_id}/unlink`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnlinkExternalIdentityBody {
+    pub reason: Option<String>,
+}
+
+/// Body of `POST /v1/users/{id}/email`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChangeUserEmailBody {
+    pub email: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// An external identity over HTTP, the twin of proto `ExternalIdentity`. It flattens the audit
+/// times like every other HTTP DTO (SMA-440 D7). An identity is immutable, so it has no
+/// `updated_at`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalIdentityDto {
+    pub id: Uuid,
+    pub issuer: String,
+    pub subject: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<ExternalIdentity> for ExternalIdentityDto {
+    fn from(identity: ExternalIdentity) -> Self {
+        ExternalIdentityDto {
+            id: identity.id,
+            issuer: identity.issuer.as_str().to_string(),
+            subject: identity.subject,
+            created_at: identity.created_at,
+        }
+    }
+}
+
+/// A user over HTTP, the twin of proto `User`. `status` is the principal status string.
+#[derive(Debug, Clone, Serialize)]
+pub struct UserDto {
+    pub prn: String,
+    pub email: String,
+    pub display_name: String,
+    pub status: String,
+    pub external_identities: Vec<ExternalIdentityDto>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<UserWithIdentities> for UserDto {
+    fn from(view: UserWithIdentities) -> Self {
+        UserDto {
+            prn: view.user.principal_id.canonical(),
+            email: view.user.email.as_str().to_string(),
+            display_name: view.user.display_name,
+            status: view.status.as_str().to_string(),
+            external_identities: view.identities.into_iter().map(ExternalIdentityDto::from).collect(),
+            created_at: view.user.created_at,
+            updated_at: view.user.updated_at,
+        }
+    }
 }
 
 /// Body for `POST /v1/authn/introspect` — mirrors proto `IntrospectRequest` (spec §7.2).
@@ -953,5 +1037,19 @@ mod tests {
         assert_eq!(dto.issuer, "https://idp.example.com");
         assert_eq!(dto.subject, "subject-51");
         assert_eq!(dto.expires_at, Some(expiry));
+    }
+
+    /// SMA-712 code review F12: the four identity bodies carry no `#[serde(default)]`. serde still
+    /// reads a missing `Option` field as `None`, so an empty body gives four all-`None` values.
+    #[test]
+    fn a_missing_identity_body_field_deserializes_as_none() {
+        let find: FindUserByEmailBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(find.email, None);
+        let link: LinkExternalIdentityBody = serde_json::from_str("{}").unwrap();
+        assert_eq!((link.issuer, link.subject, link.reason), (None, None, None));
+        let unlink: UnlinkExternalIdentityBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(unlink.reason, None);
+        let change: ChangeUserEmailBody = serde_json::from_str("{}").unwrap();
+        assert_eq!((change.email, change.reason), (None, None));
     }
 }

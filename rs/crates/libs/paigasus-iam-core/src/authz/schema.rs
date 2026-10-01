@@ -24,7 +24,7 @@ namespace Pgs::Iam {
          CreateServiceAccount, GetServiceAccount, ListServiceAccounts, ArchiveServiceAccount,
          IssueApiKey, RevokeApiKey, ListApiKeys, ListAuditLog, ListOutboxDeadLetters,
          ReplayOutboxDeadLetter, DiscardOutboxDeadLetter, RetireSystemPolicy, InvokeModel,
-         CreateUser
+         CreateUser, GetUser, LinkExternalIdentity, UnlinkExternalIdentity, ChangeUserEmail
     appliesTo { principal: [Principal], resource: [Root, Organization, Team, Project] };
 }
 "#;
@@ -73,5 +73,15 @@ mod tests {
     #[test]
     fn the_create_user_action_validates_against_the_embedded_schema() {
         assert!(validate_policy(r#"permit(principal, action == Pgs::Iam::Action::"CreateUser", resource);"#).is_ok());
+    }
+    /// SMA-712: the twin of the two tests above for the four identity actions. A name present
+    /// in `Action::ALL` but missing from `SCHEMA_SRC` makes the generated forbid source fail
+    /// validation at boot.
+    #[test]
+    fn the_user_identity_actions_validate_against_the_embedded_schema() {
+        for name in ["GetUser", "LinkExternalIdentity", "UnlinkExternalIdentity", "ChangeUserEmail"] {
+            let src = format!(r#"permit(principal, action == Pgs::Iam::Action::"{name}", resource);"#);
+            assert!(validate_policy(&src).is_ok(), "{name} must be declared in SCHEMA_SRC");
+        }
     }
 }
