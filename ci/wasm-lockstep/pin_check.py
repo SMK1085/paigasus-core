@@ -2,7 +2,7 @@
 """The pin check of .github/workflows/wasm-lockstep.yml (SMA-693 spec 5.4).
 
 A PyYAML parse, never a text scan: SMA-593 measured fourteen bypasses of a text scan, a YAML
-alias among them. The rules (P0-P21) are the trust model of spec 5.1 and 5.2 in checkable form.
+alias among them. The rules (P0-P24) are the trust model of spec 5.1 and 5.2 in checkable form.
 ci/wasm-lockstep/README.md lists each rule and what it does not prove.
 
   pin_check.py <workflow.yml>                       the rules on one workflow
@@ -56,6 +56,13 @@ IF_PATH = re.compile(r"\$\.jobs\.[^.\[]+(?:\.steps\[\d+\])?\.if")
 EXEC_ENV_KEYS = frozenset({"BASH_ENV", "ENV"})
 CHECKER_SUBS = frozenset({"artifact", "status"})
 GH_BODY_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
+# P19: this variable turns the deprecated ::set-env:: and ::add-path:: commands back on.
+UNSECURE_KEY = "ACTIONS_ALLOW_UNSECURE_COMMANDS"
+# P22: the only gh commands propose may run. P23: every list and close names the bot branch.
+GH_ALLOWED = (["api"], ["pr", "list"], ["pr", "create"], ["pr", "edit"], ["pr", "close"])
+BOT_HEAD = ["--head", "deps/wasm-bindgen-lockstep"]
+# P24: the step ids of the container runs in build. Their outputs hold data of the untrusted build.
+CONTAINER_STEP_OUTPUTS = re.compile(r"\bsteps\b\s*(?:\.\s*|\[\s*['\"])(?:update|build)\b", re.IGNORECASE)
 
 EXPECTED_JOBS = frozenset({"build", "propose"})
 EXPECTED_TRIGGERS = frozenset({"schedule", "workflow_dispatch"})
@@ -381,14 +388,21 @@ def command_violations(job: str, script: str, where: str) -> list[str]:
     if RUNNER_FILES.search(script):
         out.append(f"P19 {where}: a run script names GITHUB_ENV or GITHUB_PATH, which change the later steps of the job")
     allowed = JOB_WORDS[job]
+    lists_bot = any(c[1:3] == ["pr", "list"] and any(c[i:i + 2] == BOT_HEAD for i in range(3, len(c))) for c in found)
+    if not lists_bot and any(c[0] == "gh" and c[1:3] in (["pr", "close"], ["pr", "edit"]) for c in found):
+        out.append(f"P23 {where}: a step that closes or edits a pull request must list with --head deps/wasm-bindgen-lockstep")
     for cmd in found:
         word = cmd[0]
         if word != "docker" and IMAGE_TOKEN[1:] in cmd[1:]:
             out.append(f"P4 {where}: {word!r} names LOCKSTEP_IMAGE as an argument, so it can set the variable")
         if word == "git" and any(a == "-c" or a.startswith("-c") or a.startswith("--config-env") for a in cmd[1:]):
             out.append(f"P20 {where}: git must not take -c or --config-env, which set a config value for one call")
+        if word == "gh" and not any(cmd[1:1 + len(ok)] == ok for ok in GH_ALLOWED):
+            out.append(f"P22 {where}: gh may run api, pr list, pr create, pr edit and pr close only, not {cmd[1:3]!r}")
         if word == "gh" and cmd[1:3] == ["pr", "list"]:
             out += [f"P21 {where}: {p}" for p in _gh_pr_list(cmd[3:])]
+            if not any(cmd[i:i + 2] == BOT_HEAD for i in range(3, len(cmd))):
+                out.append(f"P23 {where}: gh pr list must pass --head deps/wasm-bindgen-lockstep")
         if word == "gh" and cmd[1:2] == ["api"]:
             out += [f"P20 {where}: {p}" for p in _gh_api(cmd[2:])]
         if word not in allowed:
@@ -417,6 +431,8 @@ def _env_violations(env, where: str, image_ok: bool = False) -> list[str]:
             out.append(f"P4 {where}: env sets LOCKSTEP_IMAGE below the workflow level")
         if key in EXEC_ENV_KEYS:
             out.append(f"P19 {where}: env sets {key}, which makes bash run a file before a step")
+        if key == UNSECURE_KEY:
+            out.append(f"P19 {where}: env sets {key}, which turns on the set-env and add-path workflow commands")
     return out
 
 
@@ -508,6 +524,11 @@ def violations(doc: dict) -> list[str]:
     if isinstance(propose, dict):
         out += _propose_violations(propose)
     out += _push_violations(jobs)
+    # Raw spans: _reads strips string literals, which would hide steps['build'].
+    out += [f"P24 {where} reads the output of a container-run step of build"
+            for where, _key, text in _strings(doc)
+            if any(CONTAINER_STEP_OUTPUTS.search(span) for span in EXPR_SPAN.findall(text))
+            or (_key == "if" and CONTAINER_STEP_OUTPUTS.search(text))]
     return out
 
 
@@ -793,6 +814,23 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("docker run without --security-opt=no-new-privileges", ((DOCKER_LINE, DOCKER_LINE.replace(" --security-opt=no-new-privileges", "")),), "P4"),
     ("docker run with --cap-drop=NET_RAW only", ((DOCKER_LINE, DOCKER_LINE.replace("--cap-drop=ALL", "--cap-drop=NET_RAW")),), "P4"),
     ("needs in an env key named if in propose", ((PROPOSE_RUN, PROPOSE_RUN + "        env:\n          if: ${{ needs.build.outputs.changed }}\n"),), "P9"),
+    ("ACTIONS_ALLOW_UNSECURE_COMMANDS in the workflow env", (("env:\n", "env:\n  ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
+    ("ACTIONS_ALLOW_UNSECURE_COMMANDS in the build job env", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
+    ("ACTIONS_ALLOW_UNSECURE_COMMANDS in a step env", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
+    ("gh pr merge in propose", ((PROPOSE_RUN, '        run: gh pr merge "$number" --squash --auto\n'),), "P22"),
+    ("gh workflow run in propose", ((PROPOSE_RUN, "        run: gh workflow run x.yml\n"),), "P22"),
+    ("gh repo delete in propose", ((PROPOSE_RUN, "        run: gh repo delete x\n"),), "P22"),
+    ("gh secret set in propose", ((PROPOSE_RUN, "        run: gh secret set X\n"),), "P22"),
+    ("gh pr list without --head", ((PR_LIST, PR_LIST.replace(" --head deps/wasm-bindgen-lockstep", "")),), "P23"),
+    ("gh pr list --head of another branch", ((PR_LIST, PR_LIST.replace("deps/wasm-bindgen-lockstep", "main")),), "P23"),
+    ("a close step without a --head list", (("      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n",
+                                              "      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          gh pr close 1\n"),), "P23"),
+    ("a close step that lists with --head", (("      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n",
+                                               "      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n          gh pr close 1\n"),), "PASS"),
+    ("steps.build.outputs in a host step of propose", ((PROPOSE_RUN, '        run: echo "${{ steps.build.outputs.v }}"\n'),), "P24"),
+    ("steps.update.outputs in an env of propose", ((PROPOSE_RUN, PROPOSE_RUN + "        env:\n          V: ${{ steps.update.outputs.v }}\n"),), "P24"),
+    ("STEPS.Update.Outputs in another case in propose", ((PROPOSE_RUN, '        run: echo "${{ STEPS.Update.Outputs.v }}"\n'),), "P24"),
+    ("steps['build'].outputs in a with: of propose", (("          persist-credentials: false\n      - id: download", "          persist-credentials: false\n          ref: ${{ steps['build'].outputs.v }}\n      - id: download"),), "P24"),
     ("continue-on-error: true on the build job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n"),), "P14"),
     ('continue-on-error: "true" on the propose job', (("    environment: release-pr\n", "    environment: release-pr\n    continue-on-error: \"true\"\n"),), "P14"),
 )
@@ -880,7 +918,7 @@ def main(argv: list[str]) -> int:
         print(f"pin_check: {line}", file=sys.stderr)
     if found:
         return RC_ASSERT
-    print(f"pin_check: {argv[0]} satisfies P0-P21")
+    print(f"pin_check: {argv[0]} satisfies P0-P24")
     return RC_OK
 
 
