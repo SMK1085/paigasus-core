@@ -51,6 +51,11 @@ EOF
     git add -A
     git commit -q -m "wasm-lockstep work copy"
 
+    # The image sets RUSTUP_HOME=/usr/local/rustup and CARGO_HOME=/usr/local/cargo. proto and Moon
+    # look for the Rust toolchain under HOME (~/.rustup, as on a runner), so point both there.
+    # cargo update (run 1) needs neither and keeps the image values.
+    export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"
+
     proto_version="$(sed -n 's/^proto = "\([0-9][0-9.]*\)"$/\1/p' .prototools)"
     case "$proto_version" in
       ''|*[!0-9.]*) echo "container.sh: no proto pin in .prototools (got '${proto_version}')" >&2; exit 2 ;;
