@@ -5,7 +5,7 @@
 // that both read as snapshots a caller can subtract, that headers/method/body reach the upstream
 // unchanged, and that a streamed response is piped through rather than buffered whole.
 import { Agent, createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { connect as netConnect, type AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startCountingForwarder, type CountingForwarder } from '../../e2e/support/counting-forwarder';
 
@@ -205,5 +205,72 @@ describe('the counting forwarder', () => {
     const followUp = await get(`${forwarder.url}/x`);
     expect(followUp.status).toBe(200);
     expect(JSON.parse(followUp.body)).toMatchObject({ method: 'GET', url: '/x' });
+  });
+
+  // SMA-640 spec § 6.3. Mixed case on purpose: a fixture in lower case only inherits the
+  // implementer's assumption.
+  it('removes Connection-nominated fields and proxy-authorization from the request', async () => {
+    upstream = await startEcho();
+    forwarder = await startCountingForwarder({ target: upstream.url });
+
+    const res = await get(`${forwarder.url}/x`, { headers: { connection: 'X-Internal, keep-alive', 'x-internal': '1', 'x-kept': '1', 'proxy-authorization': 'Basic eA==' } });
+    const body = JSON.parse(res.body) as { headers: Record<string, string> };
+    expect(body.headers['x-kept']).toBe('1');
+    expect(body.headers).not.toHaveProperty('x-internal');
+    expect(body.headers).not.toHaveProperty('proxy-authorization');
+  });
+
+  it('removes Connection-nominated fields and proxy-authenticate from the response', async () => {
+    upstream = await startEcho((_req, res) => {
+      res.writeHead(200, { connection: 'X-Resp', 'x-resp': '1', 'x-resp-kept': '1', 'proxy-authenticate': 'Basic realm="x"', 'content-type': 'text/plain' });
+      res.end('ok');
+    });
+    forwarder = await startCountingForwarder({ target: upstream.url });
+
+    const res = await get(`${forwarder.url}/x`);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-resp-kept']).toBe('1');
+    expect(res.headers).not.toHaveProperty('x-resp');
+    expect(res.headers).not.toHaveProperty('proxy-authenticate');
+  });
+
+  // Review Focus 1, decision D6, at the call site. A GET is not chunked by default, so a removed
+  // content-length makes Node write the body with no framing; the upstream then reads an empty GET
+  // and a garbage second request (measured, spec § 6.5). The fixture sets content-length itself:
+  // Node 24's client sends a GET body from `end('abc')` with NO content-length (measured), so
+  // without it the body has no framing before it even reaches the forwarder.
+  it('keeps a nominated content-length, so a GET body keeps its framing', async () => {
+    upstream = await startEcho();
+    forwarder = await startCountingForwarder({ target: upstream.url });
+
+    const res = await get(`${forwarder.url}/x`, { method: 'GET', headers: { connection: 'Content-Length', 'content-length': '3' }, body: 'abc' });
+    const body = JSON.parse(res.body) as { method: string; body: string };
+    expect(body.method).toBe('GET');
+    expect(body.body).toBe('abc');
+  });
+
+  // Review Focus 2. Only a raw socket sends two separate Connection lines; Node joins them with
+  // ", " (spec § 6.6), and the helper must read every token of the joined value.
+  it('removes the fields that two separate Connection lines nominate', async () => {
+    upstream = await startEcho();
+    forwarder = await startCountingForwarder({ target: upstream.url });
+    const { hostname, port } = new URL(forwarder.url);
+
+    const raw = await new Promise<string>((resolve, reject) => {
+      const socket = netConnect({ host: hostname, port: Number(port) }, () => {
+        socket.write(`GET /x HTTP/1.1\r\nhost: ${hostname}:${port}\r\nConnection: x-a\r\nConnection: X-B , close\r\nx-a: 1\r\nx-b: 2\r\nx-kept: 3\r\n\r\n`);
+      });
+      const chunks: Buffer[] = [];
+      socket.on('data', (chunk: Buffer) => chunks.push(chunk));
+      // `close` in the request makes the forwarder end the connection after the response.
+      socket.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      socket.on('error', reject);
+    });
+    // The forwarder answers this `close` request with a chunked body, so take the one JSON object
+    // between the first `{` and the last `}` rather than everything after the header block.
+    const body = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) as { headers: Record<string, string> };
+    expect(body.headers['x-kept']).toBe('3');
+    expect(body.headers).not.toHaveProperty('x-a');
+    expect(body.headers).not.toHaveProperty('x-b');
   });
 });
