@@ -289,8 +289,18 @@ expect_fail "markers item with a quote" "oidc.idTokenMarkerClaims[0] is \"a\\\"b
 # A name that is not ASCII. The source of this script stays ASCII, so the needle is a prefix.
 expect_fail "markers item not ASCII" "oidc.idTokenMarkerClaims[0] is \"azp" \
   --set-string "$MARKERS[0]=$(printf 'azp\303\251')"
-expect_fail "markers reserved name" "oidc.idTokenMarkerClaims[1] is \"sub\": every access token carries" \
-  --set "$MARKERS={azp,sub}"
+# A backslash. --set-string cannot carry one (Helm reads it as an escape), so a values file does.
+# The file holds a YAML single-quoted string with one backslash. Go's %q doubles it in the message.
+MARKERS_BS="$(mktemp)"
+printf 'oidc:\n  idTokenMarkerClaims: ['"'"'a\\b'"'"']\n' >"$MARKERS_BS"
+expect_fail "markers item with a backslash" "oidc.idTokenMarkerClaims[0] is \"a\\\\b\"" \
+  -f "$MARKERS_BS"
+rm -f "$MARKERS_BS"
+# One row for each reserved name. The name goes at index 1, after a valid name.
+for reserved in iss sub aud exp; do
+  expect_fail "markers reserved name $reserved" "oidc.idTokenMarkerClaims[1] is \"$reserved\": every access token carries" \
+    --set "$MARKERS={azp,$reserved}"
+done
 expect_fail "markers duplicate" "oidc.idTokenMarkerClaims[2] \"at_hash\" is already in oidc.idTokenMarkerClaims[0]" \
   --set "$MARKERS={at_hash,azp,at_hash}"
 expect_render "markers Zitadel recipe" \
