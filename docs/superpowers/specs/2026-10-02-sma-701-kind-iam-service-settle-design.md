@@ -3,8 +3,8 @@
 - **Linear:** [SMA-701](https://linear.app/smaschek/issue/SMA-701)
 - **Branch:** `feature/sma-701-kind-iam-settle`
 - **Related:** SMA-514 (the kind job, the summed step timeouts), PR 316 (the failing run)
-- **Status:** DRAFT, waiting for approval (Gate 1). Sven approved the design in chat on
-  2026-10-02 (§0). The spec-challenger reviewed it on 2026-10-02 (APPROVE WITH CHANGES, no
+- **Status:** APPROVED by Sven on 2026-10-02 (Gate 1). He approved the design in chat on the
+  same day (§0). The spec-challenger reviewed it on 2026-10-02 (APPROVE WITH CHANGES, no
   BLOCKER); §10 lists what changed. An earlier draft from 2026-09-27 is lost. Only its Linear
   comment remains. This spec replaces it and agrees with that comment.
 
