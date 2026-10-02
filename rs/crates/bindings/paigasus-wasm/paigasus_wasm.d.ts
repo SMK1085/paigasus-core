@@ -38,6 +38,13 @@ export function prnErrorKind(s: string): string;
 export function prnOrg(s: string): string;
 
 /**
+ * Parse `s` ONCE and return `[errorKind, service, region, org, resourceType, resourceId]`: always
+ * six strings, never a throw. A valid PRN has `errorKind === ""`; an invalid one has the
+ * `kind()` token and five empty fields. Use `prnParse` from `@paigasus/kernel`, not this raw form.
+ */
+export function prnParseFields(s: string): string[];
+
+/**
  * Parse `s` and return its region field, or throw `kind()`.
  */
 export function prnRegion(s: string): string;

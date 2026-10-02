@@ -36,12 +36,22 @@ export interface PrnFieldsCase {
   resource_type: string;
   resource_id: string;
 }
+export interface PrnParseCase {
+  input: string;
+  error_kind: string;
+  service: string;
+  region: string;
+  org: string;
+  resource_type: string;
+  resource_id: string;
+}
 
 export const sumCases = load<SumCase>('sum');
 export const uuid7Cases = load<Uuid7Case>('uuid7');
 export const prnCanonicalCases = load<PrnCanonicalCase>('prn_canonical');
 export const prnCedarCases = load<PrnCedarCase>('prn_cedar');
 export const prnFieldsCases = load<PrnFieldsCase>('prn_fields');
+export const prnParseCases = load<PrnParseCase>('prn_parse');
 
 // Back-compat for the existing sum replays.
 export type ParityCase = SumCase;

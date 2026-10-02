@@ -28,6 +28,7 @@ const _prnResourceId: Exact<NapiApi['prnResourceId'], WasmApi['prnResourceId']> 
 const _mintUuid7: Exact<NapiApi['mintUuid7'], WasmApi['mintUuid7']> = true;
 const _prnCedarEntityType: Exact<NapiApi['prnCedarEntityType'], WasmApi['prnCedarEntityType']> = true;
 const _prnCedarEntityId: Exact<NapiApi['prnCedarEntityId'], WasmApi['prnCedarEntityId']> = true;
+const _prnParseFields: Exact<NapiApi['prnParseFields'], WasmApi['prnParseFields']> = true;
 
 void _sum;
 void _prnCanonicalize;
@@ -41,3 +42,4 @@ void _prnResourceId;
 void _mintUuid7;
 void _prnCedarEntityType;
 void _prnCedarEntityId;
+void _prnParseFields;

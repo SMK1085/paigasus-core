@@ -6,7 +6,7 @@
 //   1. the committed glue equals the glue of the fresh build this task already makes;
 //   2. the committed binary has the same import and export lists as the fresh one, and that list is
 //      the REAL kernel interface, not an empty pair of lists;
-//   3. the committed glue and binary instantiate together and replay all five parity corpora.
+//   3. the committed glue and binary instantiate together and replay all six parity corpora.
 //
 // Check 4 (the pnpm-installed copy) is NOT here: Moon's hasher ignores node_modules, so a cached
 // pass would replay while the installed copy is another branch's. It lives in the setupFiles of the
@@ -29,10 +29,14 @@ const GLUE = ['paigasus_wasm.js', 'paigasus_wasm_bg.js', 'paigasus_wasm.d.ts', '
 // lists and exits 0, and an equality between two empty lists is a vacuous pass. These literals are
 // what makes check 2 bite.
 //
-// Twelve of the exports are the kernel's own API; the rest are wasm-bindgen's runtime surface. The
-// two imports are the glue functions the binary calls back into.
+// Thirteen of the exports are the kernel's own API; the rest are wasm-bindgen's runtime surface.
+// `__externref_drop_slice` came with `prnParseFields` (SMA-673): the glue calls it to free the
+// slice of a returned `Vec<String>`. The three imports are the glue functions the binary calls
+// back into. `__wbindgen_generic_<16 hex>` also came with `prnParseFields`: it is the cast
+// intrinsic that makes a JS string from each returned Rust string.
 const EXPECTED_EXPORTS = [
   '__abort_handler:global',
+  '__externref_drop_slice:function',
   '__externref_table_dealloc:function',
   '__instance_terminated:global',
   '__wbindgen_externrefs:table',
@@ -48,6 +52,7 @@ const EXPECTED_EXPORTS = [
   'prnCedarEntityType:function',
   'prnErrorKind:function',
   'prnOrg:function',
+  'prnParseFields:function',
   'prnRegion:function',
   'prnResourceId:function',
   'prnResourceType:function',
@@ -55,12 +60,17 @@ const EXPECTED_EXPORTS = [
   'sum:function',
 ];
 
-// The import names carry ONE field that is not a name: wasm-bindgen suffixes its `Error` shim with a
-// 16-hex content hash (`__wbg_Error_408e67f47ca7b58b` at the time of writing). A literal there would
-// red this gate on a wasm-bindgen bump that changed the hash and nothing else — a failure that
-// `generate-wasm` cannot repair, so the gate would lie. Every other segment is literal, the count is
-// literal, and the hash itself is held to its shape.
-const EXPECTED_IMPORTS = [/^\.\/paigasus_wasm_bg\.js\.__wbg_Error_[0-9a-f]{16}:function$/, /^\.\/paigasus_wasm_bg\.js\.__wbindgen_init_externref_table:function$/];
+// The import names carry TWO fields that are not names: wasm-bindgen suffixes its `Error` shim with a
+// 16-hex content hash (`__wbg_Error_408e67f47ca7b58b` at the time of writing), and its generic cast
+// intrinsic with a 16-hex sequence number (`__wbindgen_generic_0000000000000001`, measured for
+// SMA-673). A literal there would red this gate on a wasm-bindgen bump that changed the suffix and
+// nothing else — a failure that `generate-wasm` cannot repair, so the gate would lie. Every other
+// segment is literal, the count is literal, and each suffix is held to its shape.
+const EXPECTED_IMPORTS = [
+  /^\.\/paigasus_wasm_bg\.js\.__wbg_Error_[0-9a-f]{16}:function$/,
+  /^\.\/paigasus_wasm_bg\.js\.__wbindgen_generic_[0-9a-f]{16}:function$/,
+  /^\.\/paigasus_wasm_bg\.js\.__wbindgen_init_externref_table:function$/,
+];
 
 const REGENERATE =
   'Run `moon run paigasus-kernel-ts:generate-wasm` and commit all five files under rs/crates/bindings/paigasus-wasm/ (paigasus_wasm_bg.wasm and the four glue files). If wasm-bindgen moved, follow the wasm-bindgen runbook in rs/CLAUDE.md ("The wasm-bindgen family does not move through dependabot").';
@@ -116,8 +126,8 @@ describe('the committed wasm artifacts agree with the Rust source', () => {
       ['fresh', FRESH],
     ] as [string, URL][]) {
       const actual = probe('--interfaces', dir) as Interfaces;
-      expect(actual.exports, `the ${label} binary does not export the kernel's 21 names. ${SURFACE_CHANGED}`).toEqual(EXPECTED_EXPORTS);
-      expect(actual.imports, `the ${label} binary does not import the glue's 2 callbacks. ${SURFACE_CHANGED}`).toHaveLength(EXPECTED_IMPORTS.length);
+      expect(actual.exports, `the ${label} binary does not export the kernel's ${EXPECTED_EXPORTS.length} names. ${SURFACE_CHANGED}`).toEqual(EXPECTED_EXPORTS);
+      expect(actual.imports, `the ${label} binary does not import the glue's ${EXPECTED_IMPORTS.length} callbacks. ${SURFACE_CHANGED}`).toHaveLength(EXPECTED_IMPORTS.length);
       EXPECTED_IMPORTS.forEach((pattern, index) => {
         expect(actual.imports[index], `the ${label} binary's import ${index} does not match ${String(pattern)}. ${SURFACE_CHANGED}`).toMatch(pattern);
       });
@@ -128,7 +138,7 @@ describe('the committed wasm artifacts agree with the Rust source', () => {
     const result = probe('--corpus', CRATE) as { checked: Record<string, number> };
     // The counts guard against a vacuous pass: an empty corpus file would otherwise replay nothing.
     // wasm-probe.mjs also rejects an empty corpus, so this is the second control on the same thing.
-    expect(Object.keys(result.checked).sort()).toEqual(['prn_canonical', 'prn_cedar', 'prn_fields', 'sum', 'uuid7']);
+    expect(Object.keys(result.checked).sort()).toEqual(['prn_canonical', 'prn_cedar', 'prn_fields', 'prn_parse', 'sum', 'uuid7']);
     for (const [name, count] of Object.entries(result.checked)) expect(count, `the ${name} corpus is empty`).toBeGreaterThan(0);
   });
 });

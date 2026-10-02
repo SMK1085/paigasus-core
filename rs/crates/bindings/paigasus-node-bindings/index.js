@@ -785,6 +785,7 @@ module.exports.prnCedarEntityId = nativeBinding.prnCedarEntityId
 module.exports.prnCedarEntityType = nativeBinding.prnCedarEntityType
 module.exports.prnErrorKind = nativeBinding.prnErrorKind
 module.exports.prnOrg = nativeBinding.prnOrg
+module.exports.prnParseFields = nativeBinding.prnParseFields
 module.exports.prnRegion = nativeBinding.prnRegion
 module.exports.prnResourceId = nativeBinding.prnResourceId
 module.exports.prnResourceType = nativeBinding.prnResourceType
