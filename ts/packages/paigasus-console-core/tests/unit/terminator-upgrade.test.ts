@@ -2,7 +2,7 @@
 //
 // A raw upgrade through the terminator. `node:http`'s own 'upgrade' event is the whole protocol
 // here: no WebSocket library is involved, so the test asserts the bytes the tunnel must move.
-import { createServer } from 'node:http';
+import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { connect as tlsConnect } from 'node:tls';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
@@ -21,13 +21,15 @@ afterEach(async () => {
  * an `echo:` prefix. `trailer` is written together with the 101, which is the upstream `head`
  * buffer the tunnel must replay.
  */
-async function upgradeUpstream(opts: { trailer?: string } = {}): Promise<{ url: string; seen: string[] }> {
+async function upgradeUpstream(opts: { trailer?: string; connection?: string; extraLines?: readonly string[] } = {}): Promise<{ url: string; seen: string[]; requests: IncomingHttpHeaders[] }> {
   const seen: string[] = [];
+  const requests: IncomingHttpHeaders[] = [];
   const server = createServer((_req, res) => {
     res.writeHead(426);
     res.end('upgrade required');
   });
   server.on('upgrade', (req, socket: Duplex, head: Buffer) => {
+    requests.push(req.headers);
     // MEASURED: an upgraded socket's `allowHalfOpen` is `true` on the server side, and
     // `server.closeAllConnections()` does not reach a socket once it has been handed over via
     // 'upgrade' — the server stops tracking it. So when the peer closes its end (the tunnel test
@@ -37,7 +39,8 @@ async function upgradeUpstream(opts: { trailer?: string } = {}): Promise<{ url: 
     // see. Destroying on 'end' is this fixture's own cleanup responsibility, not the terminator's.
     socket.on('end', () => socket.destroy());
     if (head.length > 0) seen.push(head.toString('utf8'));
-    socket.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: test-accept\r\n\r\n${opts.trailer ?? ''}`);
+    const extra = (opts.extraLines ?? []).map((line) => `${line}\r\n`).join('');
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: ${opts.connection ?? 'Upgrade'}\r\n${extra}sec-websocket-accept: test-accept\r\n\r\n${opts.trailer ?? ''}`);
     socket.on('data', (chunk: Buffer) => {
       seen.push(chunk.toString('utf8'));
       socket.write(`echo:${chunk.toString('utf8')}`);
@@ -52,7 +55,7 @@ async function upgradeUpstream(opts: { trailer?: string } = {}): Promise<{ url: 
         server.close(() => resolve());
       }),
   );
-  return { url: `http://127.0.0.1:${String(port)}`, seen };
+  return { url: `http://127.0.0.1:${String(port)}`, seen, requests };
 }
 
 /**
@@ -100,12 +103,17 @@ async function refusingUpstream(): Promise<{ url: string; closed: () => boolean 
  * When no route matches, the terminator DESTROYS the socket, which can close cleanly without
  * emitting 'data' or 'error' — settling neither would hang the test until the vitest timeout. A
  * dedicated 'close' handler rejects with a named error so that case fails fast and legibly.
+ *
+ * `connection` and `extraLines` let a test send a nominating Connection value (SMA-640).
  */
-function handshake(origin: string, path: string, body = ''): Promise<{ head: string; socket: Duplex }> {
+function handshake(origin: string, path: string, body = '', connection = 'Upgrade', extraLines: readonly string[] = []): Promise<{ head: string; socket: Duplex }> {
   const url = new URL(origin);
   return new Promise((resolve, reject) => {
     const socket = tlsConnect({ host: url.hostname, port: Number(url.port), ca: tls.cert, servername: '127.0.0.1' }, () => {
-      socket.write(`GET ${path} HTTP/1.1\r\nhost: ${url.host}\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n${body}`);
+      const extra = extraLines.map((line) => `${line}\r\n`).join('');
+      socket.write(
+        `GET ${path} HTTP/1.1\r\nhost: ${url.host}\r\nconnection: ${connection}\r\nupgrade: websocket\r\n${extra}sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n${body}`,
+      );
     });
     socket.setTimeout(5_000, () => reject(new Error('the handshake timed out')));
     socket.once('error', reject);
@@ -193,5 +201,68 @@ describe('the terminator tunnels a WebSocket upgrade', () => {
     // Proves the upstream ClientRequest was destroyed too, not only the client socket: without
     // that, this keep-alive connection would stay open for the life of the process.
     await expect.poll(() => back.closed()).toBe(true);
+  });
+
+  // SMA-640 spec § 6.2: the handshake request removes a nominated field, and still carries
+  // Connection: Upgrade to the upstream.
+  it('removes a field that the handshake Connection nominates', async () => {
+    const back = await upgradeUpstream();
+    const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
+    closers.push(() => terminator.close());
+
+    const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr', '', 'Upgrade, X-Foo', ['x-foo: 1', 'x-kept: 1']);
+    // Destroy the upgraded socket even when an assertion below fails, so afterEach cannot hang.
+    closers.push(() => {
+      socket.destroy();
+      return Promise.resolve();
+    });
+    expect(head).toContain('101');
+    expect(back.requests).toHaveLength(1);
+    const seen = back.requests[0] ?? {};
+    expect(seen).not.toHaveProperty('x-foo');
+    expect(seen['x-kept']).toBe('1');
+    expect(seen.connection).toBe('Upgrade');
+    expect(seen.upgrade).toBe('websocket');
+  });
+
+  // SMA-640 spec § 6.2: the hand-written 101 removes a nominated field, and still carries
+  // Connection: Upgrade, Upgrade and Sec-WebSocket-Accept to the client.
+  it('removes a field that the upstream 101 Connection nominates', async () => {
+    const back = await upgradeUpstream({ connection: 'Upgrade, X-Up', extraLines: ['x-up: 1'] });
+    const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
+    closers.push(() => terminator.close());
+
+    const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr');
+    // Destroy the upgraded socket even when an assertion below fails, so afterEach cannot hang.
+    closers.push(() => {
+      socket.destroy();
+      return Promise.resolve();
+    });
+    const lines = head.split('\r\n\r\n')[0]?.toLowerCase().split('\r\n') ?? [];
+    expect(lines[0]).toContain('101');
+    expect(lines.some((line) => line.startsWith('x-up:'))).toBe(false);
+    expect(lines).toContain('connection: upgrade');
+    expect(lines).toContain('upgrade: websocket');
+    expect(lines).toContain('sec-websocket-accept: test-accept');
+  });
+
+  // Review Focus 3. Firefox sends `Connection: keep-alive, Upgrade`. Both tokens are in the fixed
+  // set, and tunnel() puts Connection and Upgrade back, so the tunnel still opens.
+  it('still tunnels a handshake whose Connection is keep-alive, Upgrade', async () => {
+    const back = await upgradeUpstream();
+    const terminator = await startTlsTerminator({ tls, routes: [{ prefix: '/iam', target: back.url }] });
+    closers.push(() => terminator.close());
+
+    const { head, socket } = await handshake(terminator.origin, '/iam/_next/hmr', '', 'keep-alive, Upgrade');
+    // Destroy the upgraded socket even when an assertion below fails, so afterEach cannot hang.
+    closers.push(() => {
+      socket.destroy();
+      return Promise.resolve();
+    });
+    expect(head).toContain('101 Switching Protocols');
+    expect(back.requests[0]?.connection).toBe('Upgrade');
+    const echoed = new Promise<string>((resolve) => socket.once('data', (chunk: Buffer) => resolve(chunk.toString('utf8'))));
+    socket.write('ping');
+    await expect(echoed).resolves.toEqual('echo:ping');
   });
 });

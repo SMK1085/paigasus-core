@@ -20,19 +20,13 @@
 // connection count. Both are SNAPSHOTS — plain numbers, not a live object — so a caller stores one,
 // does work, then subtracts. The stack is worker-scoped and Playwright restarts the worker after a
 // failed test, so an absolute count is a sum over every earlier test in that worker.
-import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { forwardableHeaders } from '@paigasus/console-core/testing';
 
-/** Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them. */
-const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
-
-function forwardable(headers: IncomingHttpHeaders): IncomingHttpHeaders {
-  const out: IncomingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (!HOP_BY_HOP.has(name) && value !== undefined) out[name] = value;
-  }
-  return out;
-}
+// Hop-by-hop filtering in both directions is `forwardableHeaders()`, the one copy of the rule that
+// the TLS terminator and ts/tooling/dev-stack.ts also use (SMA-640). It removes the fixed fields
+// and every field that the `Connection` header names.
 
 export type CountingForwarder = {
   readonly url: string;
@@ -48,7 +42,7 @@ export function startCountingForwarder(opts: { target: string }): Promise<Counti
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     requestCount += 1;
-    const upstream = httpRequest({ hostname: target.hostname, port: target.port, method: req.method, path: req.url, headers: forwardable(req.headers) }, (upstreamRes) => {
+    const upstream = httpRequest({ hostname: target.hostname, port: target.port, method: req.method, path: req.url, headers: forwardableHeaders(req.headers) }, (upstreamRes) => {
       // The response callback is an event callback with no handler above it: an uncaught throw
       // here would kill the whole process, the class of failure that crashed the TLS terminator
       // earlier in this pull request. Two guards, for two different triggers.
@@ -63,7 +57,7 @@ export function startCountingForwarder(opts: { target: string }): Promise<Counti
       // from a real upstream response was not worth the time. Defence in depth against the same
       // uncaught-throw-in-an-event-callback class; the realistic trigger is the guard just above.
       try {
-        res.writeHead(upstreamRes.statusCode ?? 502, forwardable(upstreamRes.headers));
+        res.writeHead(upstreamRes.statusCode ?? 502, forwardableHeaders(upstreamRes.headers));
         upstreamRes.pipe(res);
       } catch {
         if (!res.headersSent) res.destroy();
