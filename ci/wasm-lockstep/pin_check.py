@@ -90,7 +90,9 @@ JOB_WORDS = {
     "build": COMMON_WORDS | {"df", "sudo", "rm", "git", "tar", "mkdir", "cp", "chmod", "python3", "docker"},
     "propose": COMMON_WORDS | {"python3", "git", "gh", "cp", "grep"},
 }
-SUDO_WORDS = frozenset({"rm", "docker"})
+SUDO_WORDS = frozenset({"rm", "docker", "chown"})
+# The one chown form that is allowed: it gives the work copy to the container's user (nobody).
+SUDO_CHOWN = ["chown", "-R", "65534:65534", "$RUNNER_TEMP/work"]
 STARTS_COMMAND = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{"})
 SEPARATOR_CHARS = frozenset(";&|()")
 # set -e ignores the status of a command negated with `!`, so `! test -L f` never stops a step.
@@ -393,8 +395,9 @@ def command_violations(job: str, script: str, where: str) -> list[str]:
             out.append(f"P5 {where}: the command word {word!r} is not on the {job} allowlist")
         elif word == "python3" and cmd[1:2] != [CHECKER]:
             out.append(f"P5 {where}: python3 may run {CHECKER} only, not {cmd[1:2]!r}")
-        elif word == "sudo" and (cmd[1:2] == [] or cmd[1] not in SUDO_WORDS or (cmd[1] == "docker" and cmd[2:3] != ["image"])):
-            out.append(f"P5 {where}: sudo may run rm and `docker image` only, not {cmd[1:3]!r}")
+        elif word == "sudo" and (cmd[1:2] == [] or cmd[1] not in SUDO_WORDS or (cmd[1] == "docker" and cmd[2:3] != ["image"])
+                                 or (cmd[1] == "chown" and cmd[1:] != SUDO_CHOWN)):
+            out.append(f"P5 {where}: sudo may run rm, `docker image` and `chown -R 65534:65534 $RUNNER_TEMP/work` only, not {cmd[1:3]!r}")
         elif word == "docker":
             if cmd[1:2] != ["run"]:
                 out.append(f"P4 {where}: docker may run `docker run` only, not {cmd[1:2]!r}")
@@ -778,6 +781,11 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("git -c before the subcommand in propose", ((PROPOSE_RUN, "        run: git -c core.fsmonitor=x status\n"),), "P20"),
     ("git -ckey=value in propose", ((PROPOSE_RUN, "        run: git -ccore.pager=x log\n"),), "P20"),
     ("git -c in build", ((BUILD_RUN, BUILD_RUN + "          git -c core.x=y archive HEAD\n"),), "P20"),
+    ("sudo chown of the work copy to nobody in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 65534:65534 "$RUNNER_TEMP/work"\n'),), "PASS"),
+    ("sudo chown of another path in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 65534:65534 /etc\n'),), "P5"),
+    ("sudo chown to root in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 0:0 "$RUNNER_TEMP/work"\n'),), "P5"),
+    ("sudo bash in build", ((BUILD_RUN, BUILD_RUN + '          sudo bash x.sh\n'),), "P5"),
+    ("sudo chown in propose", ((PROPOSE_RUN, '        run: sudo chown -R 65534:65534 "$RUNNER_TEMP/work"\n'),), "P5"),
     ("gh pr list --head without the cross-repo filter", ((PR_LIST, "gh pr list --head deps/wasm-bindgen-lockstep --state open --json number --jq '.[].number'"),), "P21"),
     ("gh pr list with --json but a jq that does not select", ((PR_LIST, PR_LIST.replace("select(.isCrossRepository | not) | ", "")),), "P21"),
     ("gh pr list that selects the fork pull requests", ((PR_LIST, PR_LIST.replace("| not)", ")")),), "P21"),

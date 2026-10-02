@@ -90,6 +90,11 @@ jobs:
           git archive HEAD | tar -x -C "$RUNNER_TEMP/work"
           git show HEAD:rs/Cargo.lock > "$RUNNER_TEMP/old.lock"
           chmod -R a+rwX "$RUNNER_TEMP/work"
+          # The container runs as nobody (65534) with no capabilities. generate-wasm --pre calls
+          # utimes with an explicit time, which needs the file owner or CAP_FOWNER. tar made the
+          # files owned by the runner uid, so give the copy to nobody. The chmod above is
+          # redundant for the container now, and it keeps the files readable for the stage step.
+          sudo chown -R 65534:65534 "$RUNNER_TEMP/work"
 
       # Container run 1: cargo resolves the index and runs no build script.
       - name: Update the four family roots in the container
