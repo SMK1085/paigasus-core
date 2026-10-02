@@ -744,7 +744,7 @@ git show 27df30c6:ts/pnpm-lock.yaml | grep -A1 "'@napi-rs/cli':" | head -4
 
 Record both. If they are equal, the `#334` Linux stamp is a Linux-versus-macOS measurement of identical glue.
 
-- [ ] **Step 2: The full gate graph.** Run the `moon ci` command from the root `CLAUDE.md` `ci-targets` block, with the bash rules of the root `CLAUDE.md` ("No single local bash runs every gate"). Re-run the bash-4+ gates directly with `/opt/homebrew/bin/bash ci/<gate>/run.sh` and read those results instead. Before any re-run of a failure, capture `.moon/cache/ciReport.json` and the task's `.moon/cache/states/<project>/<task>/` folder (Step 0 of the diagnosis procedure).
+- [ ] **Step 2: The full gate graph.** Run the `moon ci` command from the root `CLAUDE.md` `ci-targets` block, with the bash rules of the root `CLAUDE.md` ("No single local bash runs every gate"). Re-run the bash-4+ gates directly with `/opt/homebrew/bin/bash ci/<gate>/run.sh` and read those results instead. Before any re-run of a failure, capture `.moon/cache/ciReport.json` and the task's `.moon/cache/states/<project>/<task>/` folder (Step 0 of the diagnosis procedure). <!-- moon-diagnosis:ok -->
 
 - [ ] **Step 3: Tree check.** `git status --short` is empty after the full run.
 
