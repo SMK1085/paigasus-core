@@ -266,6 +266,36 @@ expect_render "httpRoute backendRequest 59s999ms under request 1m" \
 expect_fail "chart backendRequest over the zone default" "zones.gateway: the HTTPRoute backendRequest timeout 20m" \
   "${ROUTE[@]}" "${GW[@]}" --set httpRoute.timeouts.backendRequest=20m
 
+# SMA-703 (spec D5). oidc.idTokenMarkerClaims copies the IamConfig::validate rules, because a boot
+# failure stops the one IAM replica. Each needle carries the key path and the index.
+MARKERS=oidc.idTokenMarkerClaims
+expect_fail "markers not a list" "oidc.idTokenMarkerClaims must be a list" \
+  --set "$MARKERS=at_hash"
+expect_fail "markers item a number" "oidc.idTokenMarkerClaims[0] must be a string" \
+  --set "$MARKERS={123}"
+# Review Focus 1. `--set x={}` does not clear a list: helm 3.22.0 makes it [""].
+expect_fail "markers set to {}" "oidc.idTokenMarkerClaims[0] is empty" \
+  --set "$MARKERS={}"
+# A space after the comma in --set gives the item " azp".
+expect_fail "markers item with a space" "oidc.idTokenMarkerClaims[1] is \" azp\"" \
+  --set "$MARKERS={at_hash, azp}"
+expect_fail "markers item with a tab" "oidc.idTokenMarkerClaims[0] is \"at_hash\\t\"" \
+  --set-string "$MARKERS[0]=$(printf 'at_hash\t')"
+# A control character: Go's %q writes \x01, which figment cannot read.
+expect_fail "markers item with a control character" "oidc.idTokenMarkerClaims[0] is \"a\\x01b\"" \
+  --set-string "$MARKERS[0]=$(printf 'a\001b')"
+expect_fail "markers item with a quote" "oidc.idTokenMarkerClaims[0] is \"a\\\"b\"" \
+  --set-string "$MARKERS[0]=a\"b"
+# A name that is not ASCII. The source of this script stays ASCII, so the needle is a prefix.
+expect_fail "markers item not ASCII" "oidc.idTokenMarkerClaims[0] is \"azp" \
+  --set-string "$MARKERS[0]=$(printf 'azp\303\251')"
+expect_fail "markers reserved name" "oidc.idTokenMarkerClaims[1] is \"sub\": every access token carries" \
+  --set "$MARKERS={azp,sub}"
+expect_fail "markers duplicate" "oidc.idTokenMarkerClaims[2] \"at_hash\" is already in oidc.idTokenMarkerClaims[0]" \
+  --set "$MARKERS={at_hash,azp,at_hash}"
+expect_render "markers Zitadel recipe" \
+  --set "$MARKERS={at_hash,azp}"
+
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088

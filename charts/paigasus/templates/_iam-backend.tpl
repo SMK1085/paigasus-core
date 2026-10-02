@@ -38,7 +38,8 @@ trim a subject, and the match is exact.
 {{- end -}}
 
 {{/*
-paigasus.validateIamBackend: the refusals for the two values. paigasus.validate calls it.
+paigasus.validateIamBackend: the refusals for the two values, and for oidc.idTokenMarkerClaims
+(SMA-703, paigasus.validateIdTokenMarkerClaims below). paigasus.validate calls it.
 
 bootstrapAdmins mirrors IamConfig::validate (config.rs, the bootstrap_admins loop): an https
 issuer and a subject that is not empty. It adds one rule that IAM does not have: the issuer must
@@ -99,5 +100,63 @@ Issuer::parse trims.
 {{- fail (printf "zones.iam.backend.extraEnv[%d].name %q is already used by extraEnv[%d]" $i $e.name (index $seen $e.name)) -}}
 {{- end -}}
 {{- $_ := set $seen $e.name $i -}}
+{{- end -}}
+{{- include "paigasus.validateIdTokenMarkerClaims" . -}}
+{{- end -}}
+
+{{/*
+paigasus.iamIdTokenMarkerClaims: the suffix ,id_token_marker_claims=[...] for the one issuer entry
+of IAM_AUTHN__ISSUERS (SMA-703), or "" when oidc.idTokenMarkerClaims is empty, absent or nil. An
+absent key comes from `helm upgrade --reuse-values` on a release made before the key; dig then
+gives the default. Each name is quoted with %q, like the audience. figment reads the inline form
+(the test issuers_env_in_the_chart_form_parses_id_token_marker_claims in
+rs/crates/services/paigasus-iam/src/config.rs). paigasus.validateIdTokenMarkerClaims has already
+refused every name that %q would escape.
+*/}}
+{{- define "paigasus.iamIdTokenMarkerClaims" -}}
+{{- $names := dig "idTokenMarkerClaims" list .Values.oidc -}}
+{{- if and (kindIs "slice" $names) $names -}}
+{{- $quoted := list -}}
+{{- range $names -}}
+{{- $quoted = append $quoted (printf "%q" .) -}}
+{{- end -}}
+{{- printf ",id_token_marker_claims=[%s]" (join "," $quoted) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+paigasus.validateIdTokenMarkerClaims: the refusals for oidc.idTokenMarkerClaims (SMA-703 D5). A
+bad name stops IAM at boot (IamConfig::validate), and the IAM Deployment has one replica with
+maxSurge 0, so the old pod stops before the new pod fails. So the chart copies the boot rules and
+fails the render instead. The character rule is stricter than IAM: printable ASCII only, with no
+space, no " and no \. Go's %q writes other characters as escapes (\t, \x01) that figment does not
+read. The rule also refuses leading and trailing whitespace. A nil value counts as an empty list.
+*/}}
+{{- define "paigasus.validateIdTokenMarkerClaims" -}}
+{{- $names := dig "idTokenMarkerClaims" list .Values.oidc -}}
+{{- if kindIs "invalid" $names -}}
+{{- $names = list -}}
+{{- end -}}
+{{- if not (kindIs "slice" $names) -}}
+{{- fail "oidc.idTokenMarkerClaims must be a list of claim names, for example [\"at_hash\", \"azp\"]" -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $i, $n := $names -}}
+{{- if not (kindIs "string" $n) -}}
+{{- fail (printf "oidc.idTokenMarkerClaims[%d] must be a string. Quote the name in a values file, or use --set-string" $i) -}}
+{{- end -}}
+{{- if not $n -}}
+{{- fail (printf "oidc.idTokenMarkerClaims[%d] is empty. IamConfig::validate refuses an empty name, and IAM does not boot. To remove the value, use [] in a values file or --set oidc.idTokenMarkerClaims=null, not {}" $i) -}}
+{{- end -}}
+{{- if not (regexMatch `^[!#-\[\]-~]+$` $n) -}}
+{{- fail (printf "oidc.idTokenMarkerClaims[%d] is %q: use printable ASCII only, with no space, no \" and no \\. IAM cannot read another character from IAM_AUTHN__ISSUERS" $i $n) -}}
+{{- end -}}
+{{- if has $n (list "iss" "sub" "aud" "exp") -}}
+{{- fail (printf "oidc.idTokenMarkerClaims[%d] is %q: every access token carries this claim, so IAM would refuse every token. IamConfig::validate refuses it, and IAM does not boot" $i $n) -}}
+{{- end -}}
+{{- if hasKey $seen $n -}}
+{{- fail (printf "oidc.idTokenMarkerClaims[%d] %q is already in oidc.idTokenMarkerClaims[%d]. IamConfig::validate refuses a duplicate, and IAM does not boot" $i $n (index $seen $n)) -}}
+{{- end -}}
+{{- $_ := set $seen $n $i -}}
 {{- end -}}
 {{- end -}}

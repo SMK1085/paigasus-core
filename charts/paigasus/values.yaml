@@ -169,6 +169,15 @@ oidc:
                                     # oidc.clientId. It does not change what IAM accepts. A
                                     # change of oidc.clientId shows the warning again. Quote the
                                     # value in a values file. See RUNBOOK-chart.md § 6.
+  idTokenMarkerClaims: []   # NOT required. Claim names that the IdP puts into its ID token and
+                            # never into its access token (SMA-703). IAM refuses a token that
+                            # carries one of them, with any value except null. Empty: no such
+                            # check. Zitadel: ["at_hash", "azp"]. Do not name a claim that your
+                            # IdP's access token carries: IAM then refuses every token. Each name
+                            # is printable ASCII with no space, " or \, and not iss, sub, aud or
+                            # exp. A change restarts IAM. To remove it, use [] in a values file
+                            # or --set oidc.idTokenMarkerClaims=null, not {}. See
+                            # RUNBOOK-chart.md § 6.
   scopes: ""             # NOT required. The scopes that both consoles request (SMA-692). Empty:
                          # the console default, openid profile email offline_access. Entra ID
                          # needs it: add exactly one scope of the API app registration, for
