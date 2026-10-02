@@ -3214,6 +3214,7 @@ dependencies = [
  "paigasus-proto",
  "paigasus-redis",
  "paigasus-service-info",
+ "paigasus-test-docker",
  "prost-types",
  "rand 0.10.3",
  "rcgen",
@@ -3361,6 +3362,15 @@ dependencies = [
  "paigasus-proto",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "paigasus-test-docker"
+version = "0.0.0"
+dependencies = [
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
 ]
 
 [[package]]

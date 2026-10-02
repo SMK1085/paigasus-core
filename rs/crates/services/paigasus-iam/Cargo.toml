@@ -185,6 +185,9 @@ paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0", fe
 # The test-only constructors and the blackhole listener of `paigasus-redis` (SMA-726). Listed a
 # second time, here, so that `test-support` reaches test builds only, never the shipped binary.
 paigasus-redis = { workspace = true, features = ["test-support"] }
+# The one Docker-skip policy (SMA-538), moved out of `tests/support/docker.rs` by SMA-726 D22.
+# That file now only re-exports it. Dev-only.
+paigasus-test-docker = { workspace = true }
 
 [lints]
 workspace = true

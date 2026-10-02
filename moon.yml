@@ -380,6 +380,7 @@ tasks:
       - 'rs/crates/services/paigasus-iam/tests/nats_permissions.rs'
       - 'rs/crates/services/paigasus-iam/tests/docker_preflight.rs'
       - 'rs/crates/services/paigasus-iam/tests/support/docker.rs'
+      - 'rs/crates/libs/paigasus-test-docker/src/**/*'
       - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
       - 'rs/crates/services/paigasus-iam/src/config.rs'
       - 'rs/crates/services/paigasus-iam/Cargo.toml'
@@ -507,9 +508,9 @@ tasks:
       - 'rs/crates/services/paigasus-gateway/tests/**/*'
 
   iam-docker-policy-single-site:
-    description: 'Assert the Docker-unavailable decision exists exactly once, in tests/support/docker.rs, so a new container-backed suite cannot hand-roll copy #12 (SMA-538).'
-    # WHAT IS GATED — two independent tells, both under this crate's tests/, both expected to
-    # appear ONLY in the one file that owns the policy:
+    description: 'Assert the Docker-unavailable decision exists exactly once, in the paigasus-test-docker crate, so a new container-backed suite in IAM or the gateway cannot hand-roll copy #12 (SMA-538, SMA-726). The id still says iam: ci.yml and the root CLAUDE.md gate the target list byte for byte.'
+    # WHAT IS GATED — two independent tells, in IAM's and the gateway's tests/, both expected to
+    # appear ONLY in rs/crates/libs/paigasus-test-docker/src/, which owns the policy (SMA-726 D22):
     #
     #   1. Reading the `CI` environment variable. Every one of the 11 copies SMA-538 removed was
     #      `if std::env::var_os("CI").is_some() { panic!(..) }` followed by an `eprintln!` and a
@@ -548,26 +549,40 @@ tasks:
     # lines by CONTENT (`:[0-9]+:[[:space:]]*//`) so prose may still name the variable or the API
     # (e.g. `nats_publisher.rs`'s two `AsyncRunner::start` doc-comment mentions).
     #
+    # SCOPE (SMA-726): the crate's src/ (the one allowed site), IAM's tests/ and the gateway's
+    # tests/. IAM's tests/support/docker.rs is now a one-line re-export, so it holds no hit. The
+    # crate's own tests/ is not scanned: it tests the policy, it does not consume it. Every scan
+    # directory must exist; the loop below exits 2 if one is missing, because `grep -r` on a
+    # missing directory only prints to stderr and `|| true` would hide it.
+    #
     # The control — `expected` must be non-empty — is what catches a pattern typo or a rename:
     # without it all greps could go empty and the gate would pass while guarding nothing.
     script: |
-      cd rs/crates/services/paigasus-iam
-      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::.*AsyncRunner' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
-      expected="$(printf '%s\n' "$hits" | grep -E '^tests/support/docker\.rs:' || true)"
-      offenders="$(printf '%s\n' "$hits" | grep -vE '^tests/support/docker\.rs:' | grep -v '^$' || true)"
+      cd rs/crates
+      for d in libs/paigasus-test-docker/src services/paigasus-iam/tests services/paigasus-gateway/tests; do
+        if [ ! -d "$d" ]; then
+          echo "scan directory rs/crates/$d is missing — the guard would scan less without saying so (moved? renamed?)" >&2
+          exit 2
+        fi
+      done
+      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::.*AsyncRunner' libs/paigasus-test-docker/src services/paigasus-iam/tests services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      expected="$(printf '%s\n' "$hits" | grep -E '^libs/paigasus-test-docker/src/' || true)"
+      offenders="$(printf '%s\n' "$hits" | grep -vE '^libs/paigasus-test-docker/src/' | grep -v '^$' || true)"
       if [ -z "$expected" ]; then
-        echo "no CI check or AsyncRunner import found in tests/support/docker.rs — the guard is not guarding anything (moved? renamed?)" >&2
+        echo "no CI check or AsyncRunner import found in rs/crates/libs/paigasus-test-docker/src/ — the guard is not guarding anything (moved? renamed?)" >&2
         exit 2
       fi
       if [ -n "$offenders" ]; then
-        echo "Docker-skip policy hand-rolled outside tests/support/docker.rs (SMA-538 — call start_or_skip):" >&2
+        echo "Docker-skip policy hand-rolled outside rs/crates/libs/paigasus-test-docker/src/ (SMA-538 — call paigasus_test_docker::start_or_skip):" >&2
         printf '%s\n' "$offenders" >&2
         exit 1
       fi
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     inputs:
+      - 'rs/crates/libs/paigasus-test-docker/src/**/*'
       - 'rs/crates/services/paigasus-iam/tests/**/*'
+      - 'rs/crates/services/paigasus-gateway/tests/**/*'
 
   input-liveness:
     description: 'Assert every repo:* task input still matches a tracked file, so a wired gate cannot silently stop firing (SMA-553).'
