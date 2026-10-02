@@ -238,7 +238,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `all-consoles`. The workflow is **not a required check**. So a broken image build makes
   `main` red, not the PR.
 - The `pull_request` filter of `images.yml` lists the image build inputs. For `rs/` these are
-  `rs/Dockerfile`, `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml` and `rs/.dockerignore`. For
+  `rs/Dockerfile`, `rs/docker/**` (the chisel dpkg status generator, its self-test and its
+  fixtures, SMA-665), `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml` and `rs/.dockerignore`. For
   `ts/` these are `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
   `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
   `ts/apps/*/next.config.ts`, `ts/apps/*/package.json`,
@@ -278,6 +279,19 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `argv[0]`.
 - `rs/Dockerfile` builds the services with **`cargo auditable`**, which is what makes the image
   SBOM list the Rust crates. MEASURED (SMA-658, 2026-09-20): a plain `cargo build` gives `cargo=0`.
-  The OS-package half of the SBOM is still empty and is tracked as SMA-665: syft 1.52.0 reads only
-  `/var/lib/dpkg/status` or `.deb` files, and a chisel cut writes neither. The `base-files_chisel`
-  slice does NOT help — it writes a chisel-specific manifest that syft cannot read.
+  The OS-package half comes from SMA-665. syft 1.52.0 reads Debian packages only from
+  `/var/lib/dpkg/status`, `/var/lib/dpkg/status.d/*` or `.deb` files, and it cannot read the
+  chisel manifest. So the cut adds the `base-files_chisel` slice (it writes
+  `/var/lib/chisel/manifest.wall`, which stays in the image), and `rs/docker/chisel-dpkg-status.sh`
+  turns that manifest into `status.d` data: one stanza and one `.md5sums` file for each package.
+  The `.md5sums` files are NOT optional. MEASURED (SMA-665 M2): without them, syft also lists
+  `libgcc_s.so.1` as a package `gcc-14` with a `pkg:deb` purl and no arch, and the cargo SBOM floor
+  fails. That floor compares the SBOM's `pkg:deb` entries with `chisel-manifest-<key>-<arch>.txt`
+  of the same build. A syft bump that adds a chisel cataloger (anchore/syft#5091) reds that floor
+  ON PURPOSE, because each package then appears twice: remove the generator in the same PR
+  (SMA-665 D6).
+- The generator self-test is the `chisel-dpkg-status-test` stage of `rs/Dockerfile`. `images.yml`
+  builds it with `--target`. Keep it ABOVE the final `FROM scratch`: a build with no `--target`
+  builds the last stage, and `assert_pins` reads the last `FROM` as the final stage. Its fixtures
+  are in `rs/docker/fixtures/`, because the build context is `rs/`. The generator runs under dash:
+  no pipe, no bash syntax.

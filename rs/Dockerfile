@@ -18,7 +18,9 @@ ENV RUSTUP_TOOLCHAIN=1.95.0
 ARG BIN
 WORKDIR /src
 # `cargo auditable` embeds the crate list in the binary, which is what makes the image SBOM list
-# the Rust dependencies. MEASURED on 2026-09-20 (spec § 4.5): a plain `cargo build` gives
+# the Rust dependencies. The OS half of the SBOM comes from the `rootfs` stage below: the
+# `base-files_chisel` slice and docker/chisel-dpkg-status.sh (SMA-665).
+# MEASURED on 2026-09-20 (spec § 4.5): a plain `cargo build` gives
 # `cargo=0` in the SBOM, and `cargo auditable build` gives real purls. syft's
 # cargo-auditable-binary-cataloger is in its default set, so no syft flag changes.
 # Version-pinned: cargo-auditable has no proto plugin, so this is the only pin it can carry.
@@ -42,6 +44,13 @@ ARG CHISEL_VERSION=v1.4.2
 # sha384 per arch, so a single checksum would either break arm64 or silently drop the check.
 ARG CHISEL_SHA384_amd64=8e5e8df4dc783dcfa827ca9990ba871af350738de67c51706b3c06bfd4725ab0edbddd9ad4110d1047ecfdc586f7dac6
 ARG CHISEL_SHA384_arm64=216f10d4cc461411558fa4ac03fc24e104589126f87657457877389ae8015e1eac4299fcd8557c0dfea3d33342aa3297
+# SMA-665. The `base-files_chisel` slice writes /var/lib/chisel/manifest.wall, chisel's own record
+# of the cut. The image keeps it on purpose: this reverses SMA-500 § 4.5 (SMA-665 spec D1, Q4,
+# Q5). syft 1.52.0 cannot read that file, so docker/chisel-dpkg-status.sh below turns it into
+# dpkg status.d data, which syft reads. jq and zstd are for that script. They stay in this stage
+# and never reach the final image. The cut writes its output to a file, not into a pipe (dash has
+# no pipefail), and then prints it: extract_chisel_manifest in ci/images/run.sh reads the
+# `Fetching pool/...` lines from the build log, and the script reads them from /tmp/cut.log.
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -50,15 +59,28 @@ RUN set -eux; \
       *) echo "no pinned chisel checksum for architecture ${arch}" >&2; exit 1 ;; \
     esac; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl; \
+    apt-get install -y --no-install-recommends ca-certificates curl jq zstd; \
     curl -sSLf -o /tmp/chisel.tar.gz \
       "https://github.com/canonical/chisel/releases/download/${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${arch}.tar.gz"; \
     echo "${sha}  /tmp/chisel.tar.gz" | sha384sum -c -; \
     tar -xzf /tmp/chisel.tar.gz -C /usr/local/bin; \
     mkdir -p /rootfs; \
     chisel cut --release ubuntu-24.04 --root /rootfs \
-      base-files_base base-files_release-info \
-      libc6_libs libgcc-s1_libs ca-certificates_data
+      base-files_base base-files_release-info base-files_chisel \
+      libc6_libs libgcc-s1_libs ca-certificates_data \
+      >/tmp/cut.log 2>&1 || { cat /tmp/cut.log; exit 1; }; \
+    cat /tmp/cut.log
+COPY --chmod=0755 docker/chisel-dpkg-status.sh /usr/local/bin/chisel-dpkg-status.sh
+RUN chisel-dpkg-status.sh /rootfs /tmp/cut.log
+
+# SMA-665 T2 (spec D10): the self-test of docker/chisel-dpkg-status.sh. images.yml builds it with
+# `--target chisel-dpkg-status-test`, and BuildKit then skips the Rust builder. A normal build
+# never builds it. This stage MUST stay above the final FROM scratch: a build with no --target
+# builds the LAST stage, and assert_pins in ci/images/run.sh reads the last FROM as the final stage.
+FROM rootfs AS chisel-dpkg-status-test
+COPY docker/fixtures/ /fixtures/
+COPY --chmod=0755 docker/chisel-dpkg-status-test.sh /usr/local/bin/chisel-dpkg-status-test.sh
+RUN chisel-dpkg-status-test.sh /usr/local/bin/chisel-dpkg-status.sh /fixtures
 
 FROM scratch
 ARG BIN

@@ -1261,9 +1261,12 @@ jobs:
           summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "$sbom")"
           echo "M8 image=paigasus-${SERVICE} arch=${ARCH} ${summary}"
           # One floor for each image kind, read from ci/images/chains.toml. A cargo image needs
-          # Rust crates (cargo auditable); a console image needs npm packages, libc6 and next.
-          # A failed floor exits 3 and names what is missing.
-          uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "${SERVICE}" "$sbom"
+          # Rust crates (cargo auditable), libc6, and exactly one Debian entry for each package of
+          # its chisel fetch list (SMA-665: chisel-manifest-<key>-<arch>.txt, which build-oci
+          # wrote at the repo root in this job). A console image needs npm packages, libc6 and
+          # next, and reads no list. Every kind takes --arch. A failed floor exits 3 and names
+          # what is missing. A missing list for a cargo image exits 2.
+          uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "${SERVICE}" --arch "${ARCH}" "$sbom"
 
       - name: Upload the archive and its SBOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
