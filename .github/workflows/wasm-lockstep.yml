@@ -298,7 +298,7 @@ jobs:
             # guards against a mistake (a person pushed to the bot branch), not against an attacker
             # with push access.
             if [ "$author" != "paigasusbot[bot]" ]; then
-              echo "::error::A person pushed to the bot branch (head ${lease} by '${author}'). Merge or close that pull request first."
+              echo "::error::A person pushed to the bot branch (head ${lease} by '${author}'). Merge or close that pull request, or delete the branch deps/wasm-bindgen-lockstep, first."
               exit 1
             fi
           elif grep -qF '"status":"404"' "$RUNNER_TEMP/branch-sha.txt"; then

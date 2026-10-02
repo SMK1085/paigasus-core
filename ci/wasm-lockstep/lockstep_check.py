@@ -306,6 +306,7 @@ def body_for(changes: list[tuple[str, str, str]]) -> str:
         "- [ ] Confirm that `CI` is green, `committed-wasm.test.ts` included.",
         "- [ ] Expect a binary diff in `paigasus_wasm_bg.wasm`: a Linux build makes different bytes than a macOS build (SMA-634 F12).",
         "- [ ] Do not push to this branch. The next run refuses a branch that a person changed.",
+        "- [ ] To bring this PR up to date with main, run the workflow again (workflow_dispatch on main). Do not push to this branch or update it with a merge; the next run then refuses.",
         "",
         f"A refusal of a later run points to the manual runbook in {RUNBOOK}.",
     ]

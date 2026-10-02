@@ -182,9 +182,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   regenerates the five artifacts on Linux in a build container, and opens or updates ONE pull
   request on the bot branch `deps/wasm-bindgen-lockstep`. Read the `rs/Cargo.lock` diff of that
   pull request before the merge: nothing enforces this review. Do not push to the bot branch;
-  the next run refuses a branch that a person changed. To start a run now:
-  `gh workflow run wasm-lockstep.yml --ref main`. `ci/wasm-lockstep/README.md` holds the trust
-  model and the refusal codes.
+  the next run refuses a branch that a person changed. To bring the pull request up to date with
+  `main`, run the workflow again. Do not use "Update branch" on it: a merge into the bot branch
+  makes the next run refuse. If a run refuses, close the pull request or delete the branch. To
+  start a run now: `gh workflow run wasm-lockstep.yml --ref main`. `ci/wasm-lockstep/README.md`
+  holds the trust model and the refusal codes.
   Use the manual runbook below only when the workflow cannot help: it refuses the lock change (a
   new transitive dependency, or a newer `syn`), its build fails because the pinned `wasm-pack`
   does not support the new 0.2.z, or the `reqwest` case below. Use a normal
@@ -208,9 +210,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   PR regenerates the artifacts. A family bump from the `wasm-lockstep` workflow regenerates on
   Linux inside its build container; a kernel or binding edit regenerates on the author's host.
   So the binary changes host between PRs (SMA-634 F12). `CI` never regenerates; it only
-  compares. If the pinned `wasm-pack` does not support the new
-  0.2.z, bump it in `.prototools` in the same PR (the invariant above `wasm-bindgen` in
-  `rs/Cargo.toml`). Record its error text here when a bump first shows it. It is not measured.
+  compares. If the pinned `wasm-pack` does not support the new 0.2.z, bump it in `.prototools`
+  in the same PR (the invariant above `wasm-bindgen` in `rs/Cargo.toml`). Record its error text
+  here when a bump first shows it. It is not measured.
   **The `reqwest` case (INFERRED).** A new `reqwest` can need newer wasm crates. Then a cargo PR
   (usually `cargo-minor-patch`) moves `wasm-bindgen` and fails `committed-wasm.test.ts`. Follow
   these steps in order:
