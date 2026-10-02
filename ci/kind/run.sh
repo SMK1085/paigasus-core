@@ -106,7 +106,26 @@ read_state() {
   printf '%s' "$v"
 }
 
-# The name the chart gives a resource: charts/paigasus/templates/_helpers.tpl "paigasus.name".
+# Runs an EXTERNAL command ($4 onward) with stdin from /dev/null, stdout into the file $2 and
+# stderr into the file $3. A watchdog sends SIGTERM to it after $1 seconds, so a stalled command
+# cannot hold the caller (macOS has no timeout(1)). Returns the command's exit status: 143 when
+# the watchdog stopped it. Pass a binary, not a shell function: a function runs in a subshell, and
+# SIGTERM would stop only that subshell. The watchdog's stdio is /dev/null, so its sleep never
+# holds the caller's stdout open (SMA-701).
+run_bounded() {  # $1 = seconds, $2 = stdout file, $3 = stderr file, then the command
+  local secs="$1" out="$2" err="$3" pid wd rc=0
+  shift 3
+  "$@" </dev/null >"$out" 2>"$err" &
+  pid=$!
+  ( sleep "$secs"; kill "$pid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+  wd=$!
+  wait "$pid" 2>/dev/null || rc=$?
+  kill "$wd" 2>/dev/null || true
+  wait "$wd" 2>/dev/null || true
+  return "$rc"
+}
+
+# The name the chart gives a resource:charts/paigasus/templates/_helpers.tpl "paigasus.name".
 # The base "<release>-<chart>" is cut to the room the suffix leaves (63 - len(suffix) - 1), ONE
 # trailing "-" is trimmed (Sprig trimSuffix), then "-<suffix>" is appended.
 chart_resource_name() {  # $1 = suffix, e.g. gateway-console
