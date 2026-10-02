@@ -195,6 +195,20 @@ jobs:
       - name: Console image self-test
         run: ci/images/console-selftest.sh
 
+      # SMA-671: on a pull_request event, moon reads GITHUB_BASE_REF and resolves the `main`
+      # revision for its changed-files query, even for `moon run` of explicit targets. The
+      # checkout above is shallow and has no `main` ref, so `moon run` failed at once with
+      # `fatal: ambiguous argument 'main'` (git exit 128). `--force` does not skip that query.
+      # A one-commit fetch of main is enough: moon then warns about the shallow checkout and
+      # falls back to an empty changed-files list. Same token-for-one-fetch pattern as ci.yml.
+      - name: Materialize main ref (for moon's pull_request base)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+            "+refs/heads/main:refs/heads/main"
+
       # SMA-671: the reference build for the staged-tree parity row of the console smoke
       # (console_staged_parity_row in ci/images/run.sh). It builds both consoles on THIS runner,
       # so the host build and the image's builder stage run on the same OS and architecture.
