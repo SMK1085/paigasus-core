@@ -1,7 +1,7 @@
 # SMA-703: IAM refuses a Zitadel ID token by a configured claim name
 
 - Linear: SMA-703 (follows SMA-686 and SMA-691)
-- Status: revised after the spec challenge (2026-10-02). The challenge is in § 11.
+- Status: approved by Sven (2026-10-02), after the spec challenge in § 11.
 - Path: architectural (a change to what IAM accepts from the IdP, and a new chart value).
 - Measurement: `2026-10-02-sma-703-zitadel-measurements.md` (Zitadel v4.15.3, real tokens).
 
@@ -150,8 +150,11 @@ field it ignores. So both obvious methods let `{"at_hash":"x","at_hash":null}` p
   `Deserialize`. Its map visitor returns an error on a repeated top-level key.
 - When the issuer's list is NOT empty, the validator calls `decode::<StrictPayload>` with the same
   `Validation`. The signature is checked once. A duplicate top-level key fails serde, and
-  `map_jwt_error` maps that to `Malformed`. Then `serde_json::from_value::<WireClaims>` reads the
-  claims from the map. The configured names are looked up in the map.
+  `map_jwt_error` maps that to `Malformed`. `WireClaims` is read from the map INSIDE
+  `StrictPayload::deserialize`, not after `decode` returns: `jsonwebtoken` 11.1.0 deserializes the
+  caller's type before it validates `exp` and `aud` (`src/decoding.rs:287-288`), so this keeps the
+  current defect order (a wrong-shaped claim stays `Malformed` ahead of `Expired`). The configured
+  names are looked up in the map.
 - When the list IS empty, the validator calls `decode::<WireClaims>` as today. So G2 keeps the
   current code path exactly.
 
@@ -304,7 +307,7 @@ Chart rows:
   message that names `oidc.idTokenMarkerClaims`.
 - T20. A render with the key absent from `oidc` (the `--reuse-values` case) succeeds.
 
-Existing `IssuerConfig { … }` literals (`config.rs`, `validator.rs`, `tests/support/mod.rs`,
+Existing `IssuerConfig { … }` literals (`validator.rs`, `tests/support/mod.rs`,
 `tests/keycloak_e2e.rs`, `tests/authn_private_ca.rs`) get the new field. The Keycloak e2e test does
 not change its behaviour.
 
@@ -333,9 +336,18 @@ not change its behaviour.
 ## 8. Rollout
 
 No migration. The default is empty. An operator turns the check on with one chart value. The change
-restarts IAM once. A rollback is the removal of that value, with one more restart.
+restarts IAM once. A rollback is the removal of that value, with one more restart. Use
+`--set oidc.idTokenMarkerClaims=null`, or `[]` in a values file. `--set oidc.idTokenMarkerClaims={}`
+does NOT clear the list: Helm 3.22.0 makes it `[""]`, and the chart refuses that (measured during
+planning).
+
+The boot line of D2 is written in `OidcAuthenticator::new`, not in `IamConfig::validate`, because
+`validate` runs before the logger starts (`main.rs:63-64`).
 
 ## 9. Open questions for Sven
+
+Sven approved the spec on 2026-10-02 with no answer to Q1-Q3. So Q1 and Q2 take their defaults
+(two names; no Notion ADR). Q3 stays open and does not block this issue.
 
 - Q1. The Zitadel recipe: `["at_hash", "azp"]` (default), or all four measured names with `amr`
   and `auth_time` too? Four names also cover an ID token from an unmeasured flow that has no
