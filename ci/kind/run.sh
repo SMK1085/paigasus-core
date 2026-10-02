@@ -9,14 +9,15 @@
 #                          block, Postgres, Redis, Keycloak, the three chart Secrets, the gateway
 #                          stub at 0 replicas, the preflight
 #   run.sh images          build paigasus-iam, iam-console and gateway-console; load them into kind
-#   run.sh install a       helm install with values/a.yaml (both zones), then the NOTES check
+#   run.sh install a       helm install with values/a.yaml (both zones), then the IAM settle (the
+#                          IAM rollout, then IAM /readyz from each console pod) and the NOTES check
 #   run.sh specs a         Playwright project phase-a (R1, R1-control, R2, R3-control)
 #   run.sh stub up         scale the gateway stub to 1 and check /v1/service-info in-cluster (SMA-514)
 #   run.sh specs journeys  Playwright project journeys (SMA-514's two scenarios) with its guards:
 #                          the skip scan, the step-title check, exactly 2 tests, the JSON report
 #   run.sh stub down       scale the gateway stub to 0 (local re-runs only; README order rule)
-#   run.sh upgrade b       helm upgrade with a.yaml + b.yaml (gateway zone off), then settle and
-#                          the NOTES check
+#   run.sh upgrade b       helm upgrade with a.yaml + b.yaml (gateway zone off), then settle, the
+#                          IAM settle and the NOTES check
 #   run.sh specs b         Playwright project phase-b (R3), then R3's Deployment check
 #   run.sh diagnose        evidence into <state>/diagnose (never a Secret, never the realm ConfigMap)
 #   run.sh down            delete the cluster
