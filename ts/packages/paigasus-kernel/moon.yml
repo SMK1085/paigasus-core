@@ -254,3 +254,47 @@ tasks:
     options:
       runInCI: false
       cache: false
+
+  # SMA-667. The sanctioned local writer of the two committed napi glue files
+  # (rs/crates/bindings/paigasus-node-bindings/index.js and index.d.ts). `version-lockstep --write`
+  # is the only other writer; it stamps the version guards in index.js during a release.
+  #
+  # Run it after a Rust change to the napi binding or the kernel, or after a `@napi-rs/cli` change
+  # in ts/pnpm-lock.yaml. Then commit both files. tests/committed-napi-glue.test.ts reds until the
+  # committed files agree with the generator. Run it as its OWN command, not in the same `moon run`
+  # as `test`: the two tasks have no order, and `test` can hash its inputs before this task writes.
+  #
+  # It builds into the scratch files, like `build` and `test`, and then `cp`s them over the
+  # committed files. `napi build` writes by rename, which replaces the inode and breaks the pnpm
+  # hard link of the `file:` dependency @paigasus/node-bindings, so `tsc` would read a stale
+  # index.d.ts through ts/node_modules. `cp` writes into the existing inode.
+  #
+  # The literal `napi build` stays HERE, not behind a wrapper: cargo_moon_parity.py finds an FFI
+  # task by its resolved command (FFI_MARKERS). runInCI: false — CI never regenerates; it only
+  # compares. cache: false — the task writes tracked files, and a cached replay writes nothing.
+  generate-napi-glue:
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts && cp ../../../rs/crates/bindings/paigasus-node-bindings/index.fresh.js ../../../rs/crates/bindings/paigasus-node-bindings/index.js && cp ../../../rs/crates/bindings/paigasus-node-bindings/index.fresh.d.ts ../../../rs/crates/bindings/paigasus-node-bindings/index.d.ts'
+    deps: ['^:build']
+    # A5 and A7 read the declaration, so the inputs are declared although the task is
+    # `cache: false`: the napi crate's sources, manifests and build.rs, the kernel, the wasm crate
+    # (the dependsOn closure) and the five workspace files.
+    inputs:
+      - 'package.json'
+      - '/ts/pnpm-lock.yaml'
+      - '/rs/crates/libs/paigasus-kernel/src/**/*'
+      - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-node-bindings/build.rs'
+      - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
+      - '/rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/src/**/*'
+      - '/rs/crates/bindings/paigasus-wasm/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
+      - '/rs/Cargo.lock'
+      - '/rs/Cargo.toml'
+      - '/rs/rust-toolchain.toml'
+      - '/.prototools'
+      - '/rs/.cargo/config.toml'
+    options:
+      runInCI: false
+      cache: false
