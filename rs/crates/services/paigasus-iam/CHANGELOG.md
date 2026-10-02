@@ -10,6 +10,23 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+### Added
+
+- Each `[[authn.issuers]]` entry has a new setting, `id_token_marker_claims`. It is a list of
+  claim names that the IdP puts into its ID token and never into its access token. For Zitadel,
+  use `["at_hash", "azp"]`. The default is an empty list, and then IAM adds no new check. IAM
+  refuses an empty name, a name with leading or trailing whitespace, a repeated name, and the
+  names `iss`, `sub`, `aud` and `exp`. IAM does not boot with such a list (SMA-703).
+- IAM refuses a verified token that has a configured claim with any value except `null`. The
+  refusal is `NotAnAccessToken`, the same as for the SMA-686 `typ` check. IAM logs it at `info`
+  with the issuer and the marker `claim <name>`. The line does not show the claim value. IAM
+  writes at most one line for each issuer and defect in 10 seconds (SMA-703).
+- At boot, IAM writes one `info` line for each issuer that has configured marker claims. The line
+  names the issuer and the claim names (SMA-703).
+- The Helm chart has a new value, `oidc.idTokenMarkerClaims`. It renders the list into
+  `IAM_AUTHN__ISSUERS`. The default is `[]`, and the render does not change. A change of the value
+  restarts the IAM pod (SMA-703).
+
 ## [0.2.0] - 2026-10-01
 
 ### Added
