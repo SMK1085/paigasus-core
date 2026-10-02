@@ -52,5 +52,5 @@ Operator detail is in `docs/ops/RUNBOOK-chart.md`; developer detail in `charts/p
 - **Each default image tag is pinned to its image version.** `repo:helm-render` row 8a compares
   every `image.tag` in `values.yaml` with the version file that `ci/images/chains.toml` names
   (SMA-688). A version bump updates the tag in the same PR. An empty tag falls back to
-  `appVersion` (`0.1.0`). Row 8c requires a git tag `paigasus-<key>-v<appVersion>` for every chain
+  `appVersion` (`0.2.0`). Row 8c requires a git tag `paigasus-<key>-v<appVersion>` for every chain
   (SMA-696). Move `appVersion` in a later PR, after every chain released that version.
