@@ -25,6 +25,9 @@ tasks:
   # rs/.cargo/config.toml (spike S1); the .node lands in the crate dir, not here. The glue goes to
   # the scratch files index.fresh.js and index.fresh.d.ts beside it (SMA-667): the committed
   # index.js and index.d.ts have two writers only, generate-napi-glue and version-lockstep --write.
+  # `--no-dts-cache` gives each run its own type-def folder. Without it, `build` and `test` share
+  # one folder, and napi-derive rewrites its files there during each compile. A run that reads
+  # the folder at that time can read a partial file.
   #
   # `touch` the kernel + binding sources first: cargo/`napi build` incrementality is mtime-based, so
   # after a git op that leaves a Rust source OLDER than an existing rs/target/ artifact (warm cache +
@@ -40,7 +43,7 @@ tasks:
   # sources and manifests, and `tsc` reads the committed paigasus_wasm.d.ts through
   # src/binding-parity.types.ts.
   build:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts --no-dts-cache && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -139,11 +142,13 @@ tasks:
   # unlocked cargo call BEFORE that build and repairs an inconsistent lock there first — so this
   # task cannot guarantee a locked resolution (measured, SMA-601).
   test:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-test-out --out-name paigasus_wasm -- --locked ) && pnpm exec vitest run'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts --no-dts-cache && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-test-out --out-name paigasus_wasm -- --locked ) && pnpm exec vitest run'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
       - 'tests/**/*'
+      # Check 3 of tests/committed-napi-glue.test.ts reads this file.
+      - 'moon.yml'
       - 'vitest.config.ts'
       - 'package.json'
       - '/ts/pnpm-lock.yaml'
@@ -263,10 +268,12 @@ tasks:
 
   # SMA-667. The sanctioned local writer of the two committed napi glue files
   # (rs/crates/bindings/paigasus-node-bindings/index.js and index.d.ts). `version-lockstep --write`
-  # is the only other writer; it stamps the version guards in index.js during a release.
+  # is the only other writer. In a release it runs a full `napi build --platform` in place. That
+  # build stamps the version guards and rewrites both files by rename.
   #
-  # Run it after a Rust change to the napi binding or the kernel, or after a `@napi-rs/cli` change
-  # in ts/pnpm-lock.yaml. Then commit both files. tests/committed-napi-glue.test.ts reds until the
+  # Run it after a Rust change to the napi binding or the kernel. Run it also after a `@napi-rs/cli`
+  # change in ts/pnpm-lock.yaml, or after a `napi` or `napi-derive` change in rs/Cargo.lock. The
+  # `napi-rs` crates and `@napi-rs/cli` each have their own Dependabot group. Then commit both files. tests/committed-napi-glue.test.ts reds until the
   # committed files agree with the generator. Run it as its OWN command, not in the same `moon run`
   # as `test`: the two tasks have no order, and `test` can hash its inputs before this task writes.
   #
@@ -279,7 +286,7 @@ tasks:
   # task by its resolved command (FFI_MARKERS). runInCI: false — CI never regenerates; it only
   # compares. cache: false — the task writes tracked files, and a cached replay writes nothing.
   generate-napi-glue:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts && cp ../../../rs/crates/bindings/paigasus-node-bindings/index.fresh.js ../../../rs/crates/bindings/paigasus-node-bindings/index.js && cp ../../../rs/crates/bindings/paigasus-node-bindings/index.fresh.d.ts ../../../rs/crates/bindings/paigasus-node-bindings/index.d.ts'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts --no-dts-cache && cp ../../../rs/crates/bindings/paigasus-node-bindings/index.fresh.js ../../../rs/crates/bindings/paigasus-node-bindings/index.js && cp ../../../rs/crates/bindings/paigasus-node-bindings/index.fresh.d.ts ../../../rs/crates/bindings/paigasus-node-bindings/index.d.ts'
     deps: ['^:build']
     # A5 and A7 read the declaration, so the inputs are declared although the task is
     # `cache: false`: the napi crate's sources, manifests and build.rs, the kernel, the wasm crate
