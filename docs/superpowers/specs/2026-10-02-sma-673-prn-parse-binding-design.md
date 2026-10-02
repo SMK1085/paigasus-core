@@ -471,7 +471,8 @@ Folded:
   are lower-cased; `prn_canonical` already has an upper-case UUID row). A region-ful valid row is
   added (confirmed missing from both corpora).
 - MINOR, untracked-file gap in `repo:parity-corpus-drift`: the gate script gets a
-  `git status --porcelain` check (4.4).
+  `git ls-files --others --exclude-standard` check (4.4). It does not use `git status --porcelain`,
+  because that command also lists a staged file.
 - MINOR, oracle independence: the corpus uses the typed accessors, and `replay.rs` cross-checks
   `prn_parse` rows against `prn_fields` rows (4.4).
 - MINOR, silenced defect detector: the `catch` logs a redacted event (D5, Q6). The adapter no longer

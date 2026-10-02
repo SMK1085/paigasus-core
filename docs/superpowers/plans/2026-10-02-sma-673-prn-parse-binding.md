@@ -501,7 +501,7 @@ In `moon.yml` line 280, replace the `script:` line of `parity-corpus-drift` with
     script: '( cd rs && cargo run --locked -p paigasus-kernel-parity --bin gen-parity-vectors ) && git diff --exit-code rs/crates/libs/paigasus-kernel-parity/vectors/ && test -z "$(git ls-files --others --exclude-standard -- rs/crates/libs/paigasus-kernel-parity/vectors/)"'
 ```
 
-Deviation from the spec text, on purpose: the spec writes `git status --porcelain`, and also says the gate is green "after `git add`". `git status --porcelain` lists a STAGED file too (`A  …/prn_parse.json`), so with it the gate stays red after `git add` until the commit. `git ls-files --others --exclude-standard` lists untracked files only, which is the gap the spec names, and it makes the spec's own proof (red untracked, green after `git add`) true. Record this deviation in the PR-notes file.
+Deviation from an earlier spec text, on purpose (the spec's section 4.4 now agrees; only its old section 11 changelog entry named the other command, and that entry is corrected): the earlier spec wrote `git status --porcelain`, and also says the gate is green "after `git add`". `git status --porcelain` lists a STAGED file too (`A  …/prn_parse.json`), so with it the gate stays red after `git add` until the commit. `git ls-files --others --exclude-standard` lists untracked files only, which is the gap the spec names, and it makes the spec's own proof (red untracked, green after `git add`) true. Record this deviation in the PR-notes file.
 
 - [ ] **Step 7: Prove the drift check (Review Focus 5)**
 
