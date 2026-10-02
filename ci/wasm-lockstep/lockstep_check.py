@@ -188,6 +188,14 @@ def lock_verdict(old: dict, new: dict) -> list[tuple[str, str, str]]:
     for name in sorted(set(new_names)):
         if new_names.count(name) > 1:
             raise RefusalError("R-DUPLICATE", f"the new lock holds two versions of {name} side by side")
+    if "wasm-bindgen" not in new_names:
+        raise RefusalError("R-ABSENT", "the new lock holds no wasm-bindgen entry")
+    held = set(new_names)
+    for entry in new_pkgs:
+        for ref in entry.get("dependencies", []):
+            ref_name = ref.split(" ", 1)[0]
+            if ref_name in FAMILY and ref_name not in held:
+                raise RefusalError("R-DANGLING", f"{entry['name']} still refers to {ref_name}, but the new lock does not hold it")
     for k in added:
         added_entry = new_by_key[k]
         if added_entry.get("source") != CRATES_IO:
@@ -240,25 +248,28 @@ def artifact_tree(root: str) -> None:
     pending = [""]
     while pending:
         rel_dir = pending.pop()
-        with os.scandir(os.path.join(root, rel_dir) if rel_dir else root) as it:
-            entries = sorted(it, key=lambda e: e.name)
+        try:
+            with os.scandir(os.path.join(root, rel_dir) if rel_dir else root) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError as exc:
+            raise InfraError(f"cannot read the artifact directory {rel_dir or root!r}: {exc}") from exc
         for entry in entries:
             rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
             info = entry.stat(follow_symlinks=False)
             if stat.S_ISLNK(info.st_mode):
-                raise RefusalError("R-SYMLINK", f"{rel} is a symlink")
+                raise RefusalError("R-SYMLINK", f"{rel!r} is a symlink")
             if stat.S_ISDIR(info.st_mode):
                 if rel not in ALLOWED_DIRS:
-                    raise RefusalError("R-LAYOUT", f"{rel}/ is not an allowed directory")
+                    raise RefusalError("R-LAYOUT", f"{rel!r} is not an allowed directory")
                 pending.append(rel)
             elif stat.S_ISREG(info.st_mode):
                 if rel not in ALLOWED_FILES:
-                    raise RefusalError("R-LAYOUT", f"{rel} is not one of the six allowed files")
+                    raise RefusalError("R-LAYOUT", f"{rel!r} is not one of the six allowed files")
                 if info.st_size > SIZE_CAP:
                     raise RefusalError("R-SIZE", f"{rel} is {info.st_size} bytes, over the {SIZE_CAP}-byte cap")
                 seen_files.add(rel)
             else:
-                raise RefusalError("R-LAYOUT", f"{rel} is not a regular file or a directory")
+                raise RefusalError("R-LAYOUT", f"{rel!r} is not a regular file or a directory")
     if LOCK_PATH not in seen_files:
         raise RefusalError("R-LAYOUT", f"the artifact has no {LOCK_PATH}")
 
@@ -411,6 +422,17 @@ def _write_tree(root: str, files: dict[str, bytes], links: dict[str, str] | None
         os.symlink(target, path)
 
 
+def _unreadable(root: str, old_path: str) -> None:
+    target = os.path.join(root, "rs", "crates")
+    os.chmod(target, 0)
+    try:
+        if os.access(target, os.R_OK):  # running as root: chmod does not bite, so force the outcome
+            raise InfraError("the directory stayed readable (root); row skipped")
+        run_artifact(root, old_path, None, None)
+    finally:
+        os.chmod(target, 0o755)
+
+
 def _artifact_rows(tmp: str) -> list[tuple[str, object, str]]:
     old_path = os.path.join(tmp, "old.lock")
     write_file(old_path, _lock())
@@ -439,6 +461,9 @@ def _artifact_rows(tmp: str) -> list[tuple[str, object, str]]:
     big = os.path.join(tmp, "big")
     _write_tree(big, {LOCK_PATH: good[LOCK_PATH], f"{ARTIFACT_DIR}/paigasus_wasm_bg.wasm": b""})
     os.truncate(os.path.join(big, ARTIFACT_DIR, "paigasus_wasm_bg.wasm"), SIZE_CAP + 1)
+    locked = os.path.join(tmp, "locked")
+    _write_tree(locked, good)
+    rows.append(("an unreadable artifact directory", lambda: _unreadable(locked, old_path), "INFRA"))
     rows.append(("an oversize artifact file", lambda: run_artifact(big, old_path, None, None), "R-SIZE"))
     return rows
 
@@ -481,6 +506,9 @@ def self_test() -> int:
     rows: list[tuple[str, object, str]] = [
         ("the M0 bump of all seven", _verdict(_lock(), _lock(NEW_FAMILY)), "PASS"),
         ("a bump that drops one family package", _verdict(_lock(), _lock(dropped)), "PASS"),
+        ("a new lock without wasm-bindgen", _verdict(_lock(), _lock(tuple(p for p in NEW_FAMILY if p[0] != "wasm-bindgen"), rest=REST)), "R-ABSENT"),
+        ("a new lock with no family package at all", _verdict(_lock(), _lock((), rest=REST)), "R-ABSENT"),
+        ("a dropped family package still referenced", _verdict(_lock(rest=REST + _pkg("consumer", "1.0.0", deps=("wasm-bindgen-macro-support 0.2.128",))), _lock(dropped, rest=REST + _pkg("consumer", "1.0.0", deps=("wasm-bindgen-macro-support 0.2.128",)))), "R-DANGLING"),
         ("an eighth package added", _verdict(_lock(), _lock(NEW_FAMILY, rest=eighth)), "R-NONFAMILY"),
         ("a non-family package changed", _verdict(_lock(), _lock(NEW_FAMILY, rest=changed_rest)), "R-NONFAMILY"),
         ("a git source on a family entry", _verdict(_lock(), _lock(git_source, rest=REST + git_web_sys)), "R-SOURCE"),
@@ -529,7 +557,7 @@ def negative_control(lock_path: str) -> int:
     try:
         with open(lock_path, encoding="utf-8") as handle:
             text = handle.read()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise InfraError(f"cannot read {lock_path}: {exc}") from exc
     real = parse_lock_text(text, lock_path)
     family = current_verdict(real)
@@ -545,7 +573,9 @@ def negative_control(lock_path: str) -> int:
             failures += 1
 
     expect("HEAD's lock against itself", lambda: lock_verdict(real, real), "NOCHANGE")
-    first = next(p for p in packages(real, "lock") if p["name"] not in FAMILY and "source" in p)
+    first = next((p for p in packages(real, "lock") if p["name"] not in FAMILY and "source" in p), None)
+    if first is None:
+        raise InfraError(f"{lock_path} holds no non-family package with a source to mutate")
     mutated = parse_lock_text(text, lock_path)
     for entry in mutated["package"]:
         if key_of(entry) == key_of(first):
