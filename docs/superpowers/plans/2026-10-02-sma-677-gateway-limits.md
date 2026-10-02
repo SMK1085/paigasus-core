@@ -4865,6 +4865,8 @@ paigasus-redis = { workspace = true, features = ["test-support"] }
     "paigasus-redis-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
 ```
 
+`rs/crates/libs/paigasus-redis/src/lib.rs` (SMA-726 final review, Minor 3): the copied docs and test messages name IAM-only facts that become false when the gateway call site lands. Read each line that contains "eleven command call sites", "five adapters" or `AppState::new` (about `:276`, `:508`, `:630`, `:877-885`, `:913`, `:1156` at SMA-726's head). Rewrite each one so that it is service-neutral, for example "every command call site of the caller" or "each caller's adapters". Do not change code. Run `cargo doc -p paigasus-redis --no-deps` and expect 0 warnings. Add the file to this task's `git add`.
+
 In `ci/affected-graph/README.md`, change the **redis lib edit** bullet to `→ paigasus-redis-rs + paigasus-iam-rs + paigasus-gateway-rs + gateway-console-ts (SMA-726, SMA-677).` Measure the case before you trust the list: run `/bin/bash ci/affected-graph/run.sh` (system bash 3.2; Homebrew bash 5 deadlocks on this host) and read the `redis->services` row. If the measured set differs from the list above, write the measured set and record the difference in the commit body. Add both files to this task's `git add`.
 
 ```bash
@@ -5387,6 +5389,8 @@ paigasus-test-docker = { workspace = true }
 # (the single-site gate bans a second Rust Redis client in tests). Already in Cargo.lock via IAM.
 testcontainers-modules = { version = "0.15", features = ["redis"] }
 ```
+
+`ci/affected-graph/run.sh`: SMA-726 added a `test-docker->services` case with the expected set `"paigasus-test-docker-rs,paigasus-iam-rs"`. After this task's edges, an edit of `paigasus-test-docker/src/lib.rs` also selects `paigasus-gateway-rs`. Add it to the case's expected set and its comment, and to the matching bullet in `ci/affected-graph/README.md`. Measure with `/bin/bash ci/affected-graph/run.sh` (system bash 3.2), and use the measured set. Add both files to this task's `git add`.
 
 `rs/crates/services/paigasus-gateway/moon.yml`: add `- 'paigasus-test-docker-rs'` to `dependsOn`, and to `fileGroups.upstreams` after the `paigasus-service-info/` lines:
 
