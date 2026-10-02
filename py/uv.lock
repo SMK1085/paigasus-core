@@ -580,7 +580,7 @@ wheels = [
 
 [[package]]
 name = "paigasus-kernel"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "packages/paigasus-kernel" }
 dependencies = [
     { name = "paigasus-py-bindings" },
@@ -607,7 +607,7 @@ requires-dist = [{ name = "betterproto2", extras = ["grpclib"], specifier = ">=0
 
 [[package]]
 name = "paigasus-py-bindings"
-version = "0.1.1"
+version = "0.2.0"
 source = { directory = "../rs/crates/bindings/paigasus-py-bindings" }
 
 [[package]]
