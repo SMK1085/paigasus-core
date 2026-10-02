@@ -1641,9 +1641,9 @@ It also lists four smoke-runtime files
 ```bash
 cd <worktree>
 awk '/^  pull_request:/,/^# Build-and-verify/' .github/workflows/images.yml | grep -o "'[^']*'" | tr -d "'" | sort > /private/tmp/claude-501/sma-671/f-yml.txt
-for p in $(cat /private/tmp/claude-501/sma-671/f-yml.txt); do
+while IFS= read -r p; do
   printf '%s runbook=%s claude=%s\n' "$p" "$(grep -c -F -- "$p" docs/ops/RUNBOOK-containers.md)" "$(grep -c -F -- "$p" rs/CLAUDE.md)"
-done
+done < /private/tmp/claude-501/sma-671/f-yml.txt
 ```
 
 Expected: `main` is not in the list (the `branches:` entry has no quotes). Each listed pattern has
