@@ -335,7 +335,7 @@ async fn jit_disabled_unknown_identity_is_403() {
     };
     // Installed before `AppState::new`, which writes its own `accept_invalid_tls` warn line; the
     // filter on `JIT_DISABLED_LINE` below skips it.
-    let (logs, _logs_guard) = support::capture_logs();
+    let (logs, _logs_guard) = paigasus_logging::test_support::capture_logs();
     let jit_enabled = start_mock_idp().await;
     let jit_disabled = start_mock_idp().await;
     // Two configured issuers; the second has jit_provisioning = false.
@@ -494,7 +494,7 @@ async fn protected_route_with_a_token_without_email_logs_the_provisioning_failur
     };
     // Installed before `AppState::new`, which writes its own `accept_invalid_tls` warn line; the
     // filter on `JIT_FAILURE_LINE` below skips it.
-    let (logs, _logs_guard) = support::capture_logs();
+    let (logs, _logs_guard) = paigasus_logging::test_support::capture_logs();
     let (app, idp) = support::app(db).await;
     let token = idp.bearer("t1-no-email-subject", None, "paigasus", 3600);
 
@@ -522,7 +522,7 @@ async fn introspect_on_a_jit_disabled_issuer_writes_no_jit_disabled_line() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (logs, _logs_guard) = support::capture_logs();
+    let (logs, _logs_guard) = paigasus_logging::test_support::capture_logs();
     let idp = start_mock_idp().await;
     let state = AppState::new(db, &test_config_with(&[(&idp, false)], 30)).await.expect("AppState::new");
     let app = router(state);

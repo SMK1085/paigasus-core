@@ -169,7 +169,7 @@ async fn lost_first_login_race_on_the_email_resolves_to_the_winner() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (logs, _logs_guard) = support::capture_logs();
+    let (logs, _logs_guard) = paigasus_logging::test_support::capture_logs();
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db.clone(), &support::test_config(&idp)).await.expect("AppState::new");
     let email = "t3-racer@example.com";
