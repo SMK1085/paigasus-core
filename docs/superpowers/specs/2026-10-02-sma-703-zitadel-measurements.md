@@ -12,7 +12,7 @@ All values below are MEASURED from real tokens unless marked INFERRED. Signature
 
 ## Reproduction
 
-Files in this directory: `up.sh` (network, Postgres 17, Zitadel, first-instance machine user with PAT), `measure.py` (setup by API plus Playwright login plus token calls, runs in the Playwright container with `--network container:sma703-zitadel` so `localhost:8080` is the issuer), `run_measure.sh`, `down.sh`, `measure.sh` (does all four in order).
+This is a summary of a run. The scripts of the run are NOT committed: they were run stage by stage, not end to end. The run used `up.sh` (network, Postgres 17, Zitadel, first-instance machine user with PAT), `measure.py` (setup by API plus Playwright login plus token calls, run in the Playwright container with `--network container:sma703-zitadel` so `localhost:8080` is the issuer), `m5.py` (the M5 `openid` re-run), `run_measure.sh` and `down.sh`. The excerpt below leaves out some env values (`...`).
 
 ```
 # up.sh (secrets are test values)
@@ -520,7 +520,7 @@ Result: the refresh response returns an ID token and an access token. `client_id
 
 ## M5. Client credentials, machine user, JWT access token
 
-First attempt with scope `openid` returned HTTP 400 `Errors.User.Machine.Secret.NotExisting` (the secret was used less than a second after it was created; the next two calls succeeded). `measure.py` now retries. The `openid` call was repeated separately with a fresh secret (`m5.py`) and gave:
+First attempt with scope `openid` returned HTTP 400 `Errors.User.Machine.Secret.NotExisting` (the secret was used less than a second after it was created; the next two calls succeeded). `measure.py` now retries. The `openid` call was repeated separately with a fresh secret (`m5.py`) and gave the block below. This block is ABBREVIATED by hand: the times and some values are replaced with placeholders, and the ID token header shows no `kid`. Use M5b and M5c for the full machine-flow token shapes.
 
 ```json
 {
