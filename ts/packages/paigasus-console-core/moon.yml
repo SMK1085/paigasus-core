@@ -94,6 +94,11 @@ tasks:
       # cannot carry it instead: it has no /rs/** input, and adding one would rebuild the console on
       # every dead_letter.rs edit, because that task depends on `~:build`.
       - '/rs/crates/libs/paigasus-iam-core/src/dead_letter.rs'
+      # SMA-640 spec § 6.4. tests/unit/dev-stack-hop-by-hop-wiring.test.ts reads ts/tooling/dev-stack.ts
+      # as TEXT, to pin its default-zone proxy's two forwardableHeaders() calls. Without this input,
+      # an edit to dev-stack.ts selects no paigasus-console-core-ts task, and Moon serves a cached
+      # PASS on exactly the commit that reverts a call site to unfiltered headers.
+      - '/ts/tooling/dev-stack.ts'
       # SMA-634 fix wave. tests/unit/wasm-gate-wiring.test.ts reads these files as TEXT, to pin the
       # wiring of the four-check wasm drift gate: the kernel vitest config's `include` entry that
       # selects checks 1-3, and each console vitest config's `setupFiles` entry plus the setup
