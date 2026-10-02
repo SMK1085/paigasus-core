@@ -2,7 +2,7 @@
 """The pin check of .github/workflows/wasm-lockstep.yml (SMA-693 spec 5.4).
 
 A PyYAML parse, never a text scan: SMA-593 measured fourteen bypasses of a text scan, a YAML
-alias among them. The rules (P0-P17) are the trust model of spec 5.1 and 5.2 in checkable form.
+alias among them. The rules (P0-P20) are the trust model of spec 5.1 and 5.2 in checkable form.
 ci/wasm-lockstep/README.md lists each rule and what it does not prove.
 
   pin_check.py <workflow.yml>                       the rules on one workflow
@@ -50,6 +50,12 @@ NEEDS_CTX = re.compile(r"(?<![\w.-])needs(?![\w-])", re.IGNORECASE)
 STATUS_FN = re.compile(r"(?<![\w.-])(always|failure|cancelled)\s*\(", re.IGNORECASE)
 SHA_PIN = re.compile(r"[0-9a-f]{40}")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
+IMAGE_ASSIGN = re.compile(r"\bLOCKSTEP_IMAGE(?:[:+])?=")
+RUNNER_FILES = re.compile(r"GITHUB_(?:ENV|PATH)\b")
+IF_PATH = re.compile(r"\$\.jobs\.[^.\[]+(?:\.steps\[\d+\])?\.if")
+EXEC_ENV_KEYS = frozenset({"BASH_ENV", "ENV"})
+CHECKER_SUBS = frozenset({"artifact", "status"})
+GH_BODY_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
 
 EXPECTED_JOBS = frozenset({"build", "propose"})
 EXPECTED_TRIGGERS = frozenset({"schedule", "workflow_dispatch"})
@@ -158,10 +164,11 @@ def _reads(node, context: re.Pattern, path: str = "$", skip_if: bool = False) ->
     """Paths whose string reads `context` in an expression span, or in a bare `if:` value."""
     out = []
     for where, key, text in _strings(node, path):
-        if skip_if and key == "if":
+        is_if = key == "if" and IF_PATH.fullmatch(where) is not None
+        if skip_if and is_if:
             continue
         spans = [STRING_LITERAL.sub("", s) for s in EXPR_SPAN.findall(text)]
-        if key == "if":
+        if is_if:
             spans.append(STRING_LITERAL.sub("", EXPR_SPAN.sub("", text)))
         if any(context.search(span) for span in spans):
             out.append(where)
@@ -215,6 +222,8 @@ def _substitutions(text: str) -> tuple[str, list[str], list[str]]:
             out.append(SUBST)
             i = j
             continue
+        if text.startswith("<(", i) or text.startswith(">(", i):
+            problems.append("a process substitution, which hides a command from this reader")
         if text[i] == "`":
             problems.append("a backtick command substitution")
         if text.startswith("<<", i):
@@ -297,13 +306,72 @@ def _docker_run(args: list[str]) -> list[str]:
     return out
 
 
+def _gh_api(args: list[str]) -> list[str]:
+    out = []
+    if args[:1] == ["graphql"]:
+        out.append("gh api graphql is a POST")
+    for i, arg in enumerate(args):
+        name, eq, value = arg.partition("=")
+        method = None
+        if name in ("--method", "-X") and not eq:
+            method = args[i + 1] if i + 1 < len(args) else ""
+        elif name == "--method" or (arg.startswith("-X") and len(arg) > 2):
+            method = value if name == "--method" else arg[2:]
+        if method is not None and method.upper() != "GET":
+            out.append(f"gh api --method {method!r}: propose may read with GET only")
+        if name in GH_BODY_FLAGS or (arg.startswith(("-f", "-F")) and not arg.startswith("--")):
+            out.append(f"gh api {arg!r} makes the call a POST")
+    return out
+
+
+def _tokens(line: str) -> list[str] | None:
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _checker_tail(script: str, where: str) -> list[str]:
+    """A `lockstep_check.py artifact|status` command must be the LAST command of its step, whole,
+    with no `||`, `&&`, `;`, `|` or `&` joined to it and no open if/for/while around it. Else a
+    refusal (exit 3) can be ignored: `... || true`, `... || rc=$?`, `if false; then ...; fi`."""
+    found, _problems = commands(script)
+    hits = [c for c in found if c[:2] == ["python3", CHECKER] and c[2:3] and c[2] in CHECKER_SUBS]
+    if not hits:
+        return []
+    msg = [f"P18 {where}: the checker command must be the last whole command of its step, with nothing joined to it"]
+    outer = _substitutions(script.replace("\\\n", " "))[0]
+    lines = [ln for ln in outer.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    tokens = _tokens(lines[-1]) if lines else None
+    if len(hits) != 1 or tokens is None or tokens[:3] != hits[0][:3]:
+        return msg
+    if any(tok and set(tok) <= SEPARATOR_CHARS for tok in tokens[3:]):
+        return msg
+    depth = 0
+    for cmd in found[:-1]:
+        depth += (cmd[0] in ("if", "for", "while", "until", "{")) - (cmd[0] in ("fi", "done", "}"))
+    return msg if depth != 0 or found[-1] != hits[0] else []
+
+
 def command_violations(job: str, script: str, where: str) -> list[str]:
     out = []
     found, problems = commands(script)
     out += [f"P5 {where}: {p}" for p in problems]
+    if IMAGE_ASSIGN.search(script):
+        out.append(f"P4 {where}: a run script assigns LOCKSTEP_IMAGE, which would replace the pinned image")
+    if RUNNER_FILES.search(script):
+        out.append(f"P19 {where}: a run script names GITHUB_ENV or GITHUB_PATH, which change the later steps of the job")
     allowed = JOB_WORDS[job]
     for cmd in found:
         word = cmd[0]
+        if word != "docker" and IMAGE_TOKEN[1:] in cmd[1:]:
+            out.append(f"P4 {where}: {word!r} names LOCKSTEP_IMAGE as an argument, so it can set the variable")
+        if word == "git" and any(a == "-c" or a.startswith("-c") or a.startswith("--config-env") for a in cmd[1:]):
+            out.append(f"P20 {where}: git must not take -c or --config-env, which set a config value for one call")
+        if word == "gh" and cmd[1:2] == ["api"]:
+            out += [f"P20 {where}: {p}" for p in _gh_api(cmd[2:])]
         if word not in allowed:
             out.append(f"P5 {where}: the command word {word!r} is not on the {job} allowlist")
         elif word == "python3" and cmd[1:2] != [CHECKER]:
@@ -315,6 +383,20 @@ def command_violations(job: str, script: str, where: str) -> list[str]:
                 out.append(f"P4 {where}: docker may run `docker run` only, not {cmd[1:2]!r}")
             else:
                 out += [f"P4 {where}: {p}" for p in _docker_run(cmd[2:])]
+    return out
+
+
+def _env_violations(env, where: str, image_ok: bool = False) -> list[str]:
+    if env is None:
+        return []
+    if not isinstance(env, dict):
+        return [f"P19 {where}: env must be a mapping, not {type(env).__name__}"]
+    out = []
+    for key in env:
+        if key == "LOCKSTEP_IMAGE" and not image_ok:
+            out.append(f"P4 {where}: env sets LOCKSTEP_IMAGE below the workflow level")
+        if key in EXEC_ENV_KEYS:
+            out.append(f"P19 {where}: env sets {key}, which makes bash run a file before a step")
     return out
 
 
@@ -348,6 +430,11 @@ def step_violations(job: str, steps: list[dict]) -> list[str]:
                     out.append(f"P17 {where}: a checkout must set persist-credentials: false")
         if "run" in step:
             out += command_violations(job, str(step["run"]), where)
+            if job == "propose":
+                out += _checker_tail(str(step["run"]), where)
+        if "working-directory" in step:
+            out.append(f"P19 {where}: working-directory moves a step into the work copy or a runner path")
+        out += _env_violations(step.get("env"), where)
         if step.get("shell", "bash") != "bash":
             out.append(f"P13 {where}: shell must be bash, not {step.get('shell')!r}")
         if step.get("continue-on-error", False) not in (False, "false"):
@@ -367,6 +454,7 @@ def violations(doc: dict) -> list[str]:
         out.append("P13 a workflow-level defaults: block can change the shell of every run step")
     top = {k: v for k, v in doc.items() if k != "jobs"}
     out += [f"P3 {w} reads the secrets context outside the jobs" for w in _reads(top, SECRETS_CTX)]
+    out += _env_violations(doc.get("env"), "the workflow", image_ok=True)
     env = doc.get("env") if isinstance(doc.get("env"), dict) else {}
     if not IMAGE_PIN.fullmatch(str(env.get("LOCKSTEP_IMAGE", ""))):
         out.append("P4 env.LOCKSTEP_IMAGE must be docker.io/library/rust:<version>-bookworm@sha256:<64 hex>")
@@ -386,6 +474,9 @@ def violations(doc: dict) -> list[str]:
         for key in ("container", "services", "uses", "secrets", "defaults"):
             if key in job:
                 out.append(f"P12 job {name} declares {key}:")
+        out += _env_violations(job.get("env"), f"jobs.{name}")
+        if job.get("continue-on-error", False) not in (False, "false"):
+            out.append(f"P14 job {name}: continue-on-error must be absent or false")
         out += step_violations(name, _steps(job, name))
     build, propose = jobs.get("build"), jobs.get("propose")
     if isinstance(build, dict):
@@ -557,6 +648,7 @@ TOKEN_STEP = "      - id: token\n        uses: actions/create-github-app-token@"
           permission-contents: write
           permission-pull-requests: write
 """
+VERIFY_RUN = "        run: python3 ci/wasm-lockstep/lockstep_check.py artifact --dir d --old rs/Cargo.lock\n"
 VERIFY_STEP = """      - id: verify
         if: needs.build.outputs.changed == 'true'
         run: python3 ci/wasm-lockstep/lockstep_check.py artifact --dir d --old rs/Cargo.lock
@@ -630,6 +722,44 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("an action pinned to a tag", (("actions/download-artifact@" + "3" * 40, "actions/download-artifact@v8"),), "P6"),
     ("a merge key", (("    outputs:\n", "    <<: {timeout-minutes: 5}\n    outputs:\n"),), "P0"),
     ("a duplicate key", (("    environment: release-pr\n", "    environment: release-pr\n    environment: other\n"),), "P0"),
+    # ---- fix round 1: bypasses that passed the first rule set ----
+    ("verify joined with || true", ((VERIFY_RUN, VERIFY_RUN[:-1] + " || true\n"),), "P18"),
+    ("verify joined with || rc=$?", ((VERIFY_RUN, VERIFY_RUN[:-1] + " || rc=$?\n"),), "P18"),
+    ("verify followed by ; true", ((VERIFY_RUN, VERIFY_RUN[:-1] + " ; true\n"),), "P18"),
+    ("verify piped into cat", ((VERIFY_RUN, VERIFY_RUN[:-1] + " | cat\n"),), "P18"),
+    ("verify behind an && guard", ((VERIFY_RUN, "        run: test -f x && " + VERIFY_RUN.split("run: ", 1)[1]),), "P18"),
+    ("verify inside a skipped if", ((VERIFY_RUN, "        run: |\n          if false; then\n            " + VERIFY_RUN.split("run: ", 1)[1].rstrip("\n") + "\n          fi\n"),), "P18"),
+    ("verify followed by exit 0", ((VERIFY_RUN, "        run: |\n          " + VERIFY_RUN.split("run: ", 1)[1].rstrip("\n") + "\n          exit 0\n"),), "P18"),
+    ("status joined with || true", ((PROPOSE_RUN, "        run: python3 ci/wasm-lockstep/lockstep_check.py status --file s || true\n"),), "P18"),
+    ("status as a whole last command", ((PROPOSE_RUN, "        run: |\n          set -euo pipefail\n          git status > s\n          python3 ci/wasm-lockstep/lockstep_check.py status --file s\n"),), "PASS"),
+    ("LOCKSTEP_IMAGE assigned in front of docker run", ((DOCKER_LINE, "LOCKSTEP_IMAGE=docker.io/evil/x:latest " + DOCKER_LINE),), "P4"),
+    ("LOCKSTEP_IMAGE in a step env of build", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          LOCKSTEP_IMAGE: docker.io/evil/x:latest\n"),), "P4"),
+    ("LOCKSTEP_IMAGE in a job env of build", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      LOCKSTEP_IMAGE: docker.io/evil/x:latest\n"),), "P4"),
+    ("LOCKSTEP_IMAGE set with read", ((BUILD_RUN, BUILD_RUN + "          read -r LOCKSTEP_IMAGE < x\n"),), "P4"),
+    ("a process substitution in propose: cat <(...)", ((PROPOSE_RUN, "        run: cat <(cargo build)\n"),), "P5"),
+    ("a process substitution in propose: > >(...)", ((PROPOSE_RUN, "        run: echo x > >(cargo build)\n"),), "P5"),
+    ("working-directory on a build step", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        working-directory: /tmp\n"),), "P19"),
+    ("working-directory on a propose step", ((PROPOSE_RUN, PROPOSE_RUN + "        working-directory: /tmp\n"),), "P19"),
+    ("defaults.run.working-directory on a job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        working-directory: /tmp\n"),), "P12"),
+    ("defaults.run.working-directory on the workflow", (("permissions:\n  contents: read\nenv:", "permissions:\n  contents: read\ndefaults:\n  run:\n    working-directory: /tmp\nenv:"),), "P13"),
+    ("BASH_ENV in a step env", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          BASH_ENV: /x\n"),), "P19"),
+    ("ENV in a job env", (("  propose:\n", "  propose:\n    env:\n      ENV: /x\n"),), "P19"),
+    ("BASH_ENV in the workflow env", (("env:\n", "env:\n  BASH_ENV: /x\n"),), "P19"),
+    ("a write to GITHUB_ENV", ((BUILD_RUN, BUILD_RUN + '          echo "BASH_ENV=x" >> "$GITHUB_ENV"\n'),), "P19"),
+    ("a write to GITHUB_PATH in brace form", ((BUILD_RUN, BUILD_RUN + "          echo /x >>${GITHUB_PATH}\n"),), "P19"),
+    ("a write to GITHUB_ENV, unquoted", ((BUILD_RUN, BUILD_RUN + "          echo x > $GITHUB_ENV\n"),), "P19"),
+    ("gh api -X POST in propose", ((PROPOSE_RUN, "        run: gh api repos/x/y -X POST\n"),), "P20"),
+    ("gh api --method=DELETE in propose", ((PROPOSE_RUN, "        run: gh api repos/x/y --method=DELETE\n"),), "P20"),
+    ("gh api -XPUT in propose", ((PROPOSE_RUN, "        run: gh api repos/x/y -XPUT\n"),), "P20"),
+    ("gh api -f in propose (an implicit POST)", ((PROPOSE_RUN, "        run: gh api repos/x/y -f a=b\n"),), "P20"),
+    ("gh api graphql in propose", ((PROPOSE_RUN, "        run: gh api graphql\n"),), "P20"),
+    ("gh api --method GET in propose", ((PROPOSE_RUN, "        run: gh api repos/x/y --method GET\n"),), "PASS"),
+    ("git -c before the subcommand in propose", ((PROPOSE_RUN, "        run: git -c core.fsmonitor=x status\n"),), "P20"),
+    ("git -ckey=value in propose", ((PROPOSE_RUN, "        run: git -ccore.pager=x log\n"),), "P20"),
+    ("git -c in build", ((BUILD_RUN, BUILD_RUN + "          git -c core.x=y archive HEAD\n"),), "P20"),
+    ("needs in an env key named if in propose", ((PROPOSE_RUN, PROPOSE_RUN + "        env:\n          if: ${{ needs.build.outputs.changed }}\n"),), "P9"),
+    ("continue-on-error: true on the build job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n"),), "P14"),
+    ('continue-on-error: "true" on the propose job', (("    environment: release-pr\n", "    environment: release-pr\n    continue-on-error: \"true\"\n"),), "P14"),
 )
 
 
@@ -715,7 +845,7 @@ def main(argv: list[str]) -> int:
         print(f"pin_check: {line}", file=sys.stderr)
     if found:
         return RC_ASSERT
-    print(f"pin_check: {argv[0]} satisfies P0-P17")
+    print(f"pin_check: {argv[0]} satisfies P0-P20")
     return RC_OK
 
 
