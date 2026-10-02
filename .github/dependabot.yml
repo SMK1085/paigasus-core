@@ -122,6 +122,27 @@ updates:
           - minor
           - patch
 
+  # ---- Python: standalone uv project for repo:wasm-lockstep (SMA-693) ----
+  # A FOURTH uv entry, for the same reason as the /ci/workflow-credentials entry above: this
+  # gate's project sits outside the py/ workspace on purpose, so without this entry its pinned
+  # pyyaml is in a lockfile that nothing watches. Settings mirror that block exactly.
+  - package-ecosystem: uv
+    directory: /ci/wasm-lockstep
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      uv-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
   # ---- GitHub Actions: workflows at repo root ----
   - package-ecosystem: github-actions
     directory: /

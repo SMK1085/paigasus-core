@@ -50,6 +50,9 @@ tasks:
       # SMA-513 PR 2b — the same for repo:helm-render's own uv project; it is in
       # ci/osv/run.sh's LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
       - 'ci/helm-render/uv.lock'
+      # SMA-693 — the same for repo:wasm-lockstep's own uv project; it is in ci/osv/run.sh's
+      # LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
+      - 'ci/wasm-lockstep/uv.lock'
       - '.prototools'
       - '.proto/plugins/osv-scanner.toml'
 
