@@ -173,8 +173,11 @@ tempfile = "3"
 # variant, which safe Rust cannot do without a derive. Dev-only: the derive is gated behind
 # cfg(test) so strum_macros never enters the shipped binary (SMA-498).
 strum = { version = "0.28", features = ["derive"] }
-# SMA-686: captures the validator's refusal log line in a unit test.
-tracing-subscriber = { workspace = true }
+# The shared log-capture helper for the unit and integration tests (SMA-689, spec D3). Listed a
+# second time, here, so that the `test-support` feature reaches test builds only, never the
+# shipped binary. `version = "0.0.0"` is REQUIRED, not redundant: `rs/deny.toml` sets
+# `wildcards = "deny"`, and a path dependency with no version counts as a wildcard.
+paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0", features = ["test-support"] }
 
 [lints]
 workspace = true

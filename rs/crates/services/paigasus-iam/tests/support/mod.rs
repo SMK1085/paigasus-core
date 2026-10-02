@@ -1014,49 +1014,10 @@ pub fn sample_key(sa: &PrincipalId, scope: TenancyNodeRef) -> (ApiKey, Vec<u8>) 
     (key, hash)
 }
 
-// --- SMA-698: log capture for the JIT provisioning-failure line ------------------------------
+// --- SMA-698 / SMA-707: the fixed prefixes of the JIT log lines ------------------------------
 //
-// The same helper as `src/log_capture.rs`. An integration test cannot import a `#[cfg(test)]`
-// item of the library, so this is the one copy for the test binaries.
-
-/// A `tracing` writer that keeps every formatted line in memory.
-#[allow(dead_code)]
-#[derive(Clone, Default)]
-pub struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogBuffer {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
-    type Writer = LogBuffer;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-#[allow(dead_code)]
-impl LogBuffer {
-    /// Everything written so far, as text.
-    pub fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-/// Installs a thread-local subscriber at TRACE. It sees every task of a current-thread
-/// `#[tokio::test]`, spawned tasks included. Bind the guard to a named variable, never to `_`.
-#[allow(dead_code)]
-pub fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
-    let buffer = LogBuffer::default();
-    let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).with_max_level(tracing::Level::TRACE).finish();
-    (buffer, tracing::subscriber::set_default(subscriber))
-}
+// The tests capture log lines with `paigasus_logging::test_support::capture_logs` (SMA-689) and
+// count only the lines that contain one of these prefixes.
 
 /// The fixed prefix of both SMA-698 JIT failure messages. Count only lines that contain it:
 /// `AppState::new` writes its own `warn` line when `accept_invalid_tls` is on, and `test_config`
