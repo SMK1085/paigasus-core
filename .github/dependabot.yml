@@ -47,8 +47,21 @@ updates:
       prefix: "build(deps)"
       prefix-development: "build(deps)"
     groups:
+      # SMA-667: a `@napi-rs/cli` bump can change the committed napi glue, and then
+      # paigasus-kernel-ts:test reds until someone runs generate-napi-glue and pushes the result.
+      # Its own group keeps that work off the shared npm-minor-patch PR, so a glue change does not
+      # block the other JS updates.
+      napi-cli:
+        applies-to: version-updates
+        patterns:
+          - "@napi-rs/cli"
+        update-types:
+          - minor
+          - patch
       npm-minor-patch:
         applies-to: version-updates
+        exclude-patterns:
+          - "@napi-rs/cli"
         update-types:
           - minor
           - patch
