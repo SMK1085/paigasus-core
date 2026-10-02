@@ -161,7 +161,30 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 
 ### M2 — the local container pre-check
 
-Not measured yet.
+M2 ran container runs 1 and 2 on a Mac in the pinned image, with the workflow's flags (`--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--user 65534:65534`). M2 is a pre-check. M0 is the proof.
+
+| Item | Result |
+|---|---|
+| Date | 2026-10-02 |
+| Platform | amd64 (emulated on an arm64 host) |
+| Container run 1 | exit 0 |
+| Lock verdict | `lock=0`, seven `family-moved` lines: `wasm-bindgen`, `-macro`, `-macro-support`, `-shared` 0.2.128 to 0.2.129; `js-sys` and `web-sys` 0.3.105 to 0.3.106; `wasm-bindgen-futures` 0.4.78 to 0.4.79 |
+| Container run 2 | exit 0, 163 s (emulated, cold) |
+| `--post` result | `generate-wasm: wrote 5 files into rs/crates/bindings/paigasus-wasm/` |
+| `getent passwd 1001` | exit 2 (no entry) |
+| `getent passwd 65534` | exit 0 (`nobody`) |
+| Container environment names | `CARGO_HOME`, `HOME`, `HOSTNAME`, `PATH`, `PWD`, `RUSTUP_HOME`, `RUST_VERSION` (no `CI`, no `GITHUB_*`, no `ACTIONS_*`) |
+| Artifact check | `artifact=0`, title `build(deps): move wasm-bindgen to 0.2.129 and regenerate the wasm glue` |
+| Glue files that differ | `paigasus_wasm_bg.js` and `paigasus_wasm_bg.wasm` |
+| Glue files that are the same | `paigasus_wasm.js`, `paigasus_wasm.d.ts`, `paigasus_wasm_bg.wasm.d.ts` |
+| `paigasus_wasm_bg.wasm` size | 50902 bytes |
+
+Two findings changed the setup:
+
+- A native arm64 container cannot run `proto install`. The vendored `cargo-machete` plugin has no Linux arm64 target, so the download failed. The runner is amd64, so M2 used `--platform linux/amd64`.
+- The image sets `RUSTUP_HOME` and `CARGO_HOME` under `/usr/local`. Moon looks for the toolchain under `HOME`. `container.sh build` now sets both to `$HOME`. Without this change, run 2 failed with `proto::locate::missing_executable`.
+
+The build log also holds the line `error: rustup is not installed at '/tmp/lockstep-home/.cargo'`. The build still finished with exit 0.
 
 ### M0 — the scratch-branch run on a GitHub runner
 
