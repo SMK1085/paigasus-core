@@ -265,10 +265,10 @@ mod tests {
         FakeAuthorizer, FakeOutbox, FakeUnitOfWork, FixedClock, InMemoryApiKeys, InMemoryServiceAccounts, SeqIds, TenancyStore, forged_variants, seed_org, seed_project, seed_team, store_with_orgs,
         tenancy_nodes,
     };
-    use crate::log_capture::capture_logs;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use paigasus_iam_core::{ApiKey, ApiKeyId, ApiKeyStatus, OrganizationId, ProjectId, RepositoryError, TeamId, Transaction};
+    use paigasus_logging::test_support::capture_logs;
     use uuid::Uuid;
 
     fn actor_prn(n: u128) -> Prn {

@@ -24,19 +24,30 @@
 // NOTHING TYPECHECKS THIS FILE EITHER (final whole-branch review, minor 5). `ts/tooling` has no
 // `package.json`, so the root `typecheck` script (`pnpm -r --if-present run typecheck`) never
 // reaches `tooling/tsconfig.json`, and Moon's `ts:typecheck` is routed to the library/application
-// layers, never the root project (`ts/moon.yml:28-30`). Typed ESLint rules report lint problems,
+// layers, never the root project (`ts/moon.yml:31-33`). Typed ESLint rules report lint problems,
 // not type errors. So a type error introduced here reds nothing in CI — a local
 // `pnpm --dir ts exec tsc -p tooling/tsconfig.json --noEmit` is the only way to catch one.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createConnection, type AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { GenericContainer } from 'testcontainers';
-import { buildDevEnv, DEV_GATEWAY_DESCRIPTOR, DEV_IAM_DESCRIPTOR, devWorld, startFakeGateway, startFakeIam, startFakeIdp, startTlsTerminator, testTls } from '@paigasus/console-core/testing';
+import {
+  buildDevEnv,
+  DEV_GATEWAY_DESCRIPTOR,
+  DEV_IAM_DESCRIPTOR,
+  devWorld,
+  forwardableHeaders,
+  startFakeGateway,
+  startFakeIam,
+  startFakeIdp,
+  startTlsTerminator,
+  testTls,
+} from '@paigasus/console-core/testing';
 
 /** Browser-facing, so FIXED: a browser stores a certificate exception per origin, and a random
  * port would force a new exception on every restart. */
@@ -69,23 +80,6 @@ const ZONE_PORT: Record<Zone, number> = { iam: IAM_PORT, gateway: GATEWAY_PORT }
 
 function log(message: string): void {
   console.log(`[dev-stack] ${message}`);
-}
-
-/**
- * Hop-by-hop headers (RFC 9110 § 7.6.1). A proxy must not forward them. Copied from
- * tls-terminator.ts's own `HOP_BY_HOP` / `forwardable` rather than imported — that module's
- * `./testing` export map exposes only what the e2e harness needs, and this file is the only other
- * caller, the same call this repo already made for fake-idp.ts's JWKS helper ("copied rather than
- * imported") (SMA-641 dev-stack review round 1, finding 2).
- */
-const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
-
-function forwardable(headers: IncomingHttpHeaders): IncomingHttpHeaders {
-  const out: IncomingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (!HOP_BY_HOP.has(name) && value !== undefined) out[name] = value;
-  }
-  return out;
 }
 
 /**
@@ -135,8 +129,10 @@ async function startDefaultZone(): Promise<{ url: string; close: () => Promise<v
       res.end();
       return;
     }
-    const upstream = httpRequest({ hostname: '127.0.0.1', port: IAM_PORT, method: req.method, path: req.url, headers: forwardable(req.headers) }, (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode ?? 502, forwardable(upstreamRes.headers));
+    // Hop-by-hop filtering in both directions is the shared rule in @paigasus/console-core/testing
+    // (SMA-640). tests/unit/dev-stack-hop-by-hop-wiring.test.ts in that package pins these two calls.
+    const upstream = httpRequest({ hostname: '127.0.0.1', port: IAM_PORT, method: req.method, path: req.url, headers: forwardableHeaders(req.headers) }, (upstreamRes) => {
+      res.writeHead(upstreamRes.statusCode ?? 502, forwardableHeaders(upstreamRes.headers));
       upstreamRes.pipe(res);
     });
     upstream.on('error', () => {

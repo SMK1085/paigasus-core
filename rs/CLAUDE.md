@@ -7,6 +7,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 ## Cargo, the lockfile and nextest
 
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
+- Tests that assert on a log line use `paigasus_logging::test_support` (`capture_logs` at TRACE,
+  `capture_logs_at(level)`). Turn on its `test-support` feature from `[dev-dependencies]` only,
+  never from `[dependencies]`, so that the production binary does not contain it. This is the
+  first `[features]` table in a workspace crate; follow the same pattern for a new test-only
+  helper. Do not write a new `LogBuffer`. The helper supports `cargo nextest` only (SMA-689).
 - `paigasus-iam`'s Docker-backed suites get their retry budget and container-concurrency cap from
   `rs/.config/nextest.toml` (`profile.default`), so **Moon, `moon run …:test`, and a bare
   `cargo nextest` all pick it up** — but `cargo test` does NOT, since nextest config is

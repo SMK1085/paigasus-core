@@ -19,7 +19,20 @@
 # if a future Next stops emitting next-env.d.ts, a naive `typegen && git diff` would pass
 # forever while guarding nothing. Removing it first makes the gate self-proving — an absent
 # file is a loud failure, not a silent pass.
+#
+# THE NEGATIVE CONTROL (SMA-637) — `--negative-control` proves that this gate can still go red.
+# It copies the real git index to a temporary file and changes the copy for every app: row N1
+# appends one line to each staged next-env.d.ts, and row N2 removes each one from the copy. Then
+# it runs this whole script in check mode as a CHILD PROCESS, with GIT_INDEX_FILE set to the
+# copy. N1 must exit 1 and N2 must exit 2. A temporary index, because the control must not
+# change the real index, the work tree or a commit. A child process, because a call of
+# check_app alone would not prove the aggregation loop and the final `exit` in real_run.
+# Exit codes: 0 every row as expected, 1 a row failed, 2 an infrastructure error.
 set -euo pipefail
+
+# Resolve this script's own absolute path BEFORE the cd below. The negative control runs this
+# same file again as a child process.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -103,71 +116,238 @@ check_app() {
 # future third zone impossible to miss. It is a SUBSET assertion, not set-equality: every
 # `ts/apps/*` directory that has a `package.json` must be in the discovered set.
 #
-# NOTE: this gate has no --self-test and no --negative-control, deliberately. Adding them costs a
-# SELF_SCHEDULED_GATES entry plus a SELF_TASK_EXPECTED_GLOBS or SELF_TASK_GLOBS_EXEMPT entry in
-# ci/affected-graph/ci_targets.py. The loop and the subset assertion are the control.
-shopt -s nullglob
-apps=()
-# EXACT filenames, never a trailing wildcard. `next.config.[tjmc][sj]*` matched
-# `next.config.ts.bak` (the `*` swallows any suffix) and MISSED `next.config.mts` (`t` is not in
-# `[sj]`) — both measured. A stray backup file would have added a phantom entry, and an `.mts` app
-# would have been invisible here.
-#
-# An app directory is only a workspace member if it has a `package.json` — the same test the
-# liveness assertion below applies, and the one pnpm's own `apps/*` glob uses. Without this filter
-# a config-bearing directory that is NOT a workspace member reaches check_app, which then runs
-# `pnpm --dir` against a non-member and fails confusingly.
-for cfg in ts/apps/*/next.config.{js,mjs,cjs,ts,mts,cts}; do
-  candidate="$(dirname "$cfg")"
-  [ -f "$candidate/package.json" ] && apps+=("$candidate")
-done
-shopt -u nullglob
-
-if [ "${#apps[@]}" -eq 0 ]; then
-  echo "next-env gate: no ts/apps/*/next.config.* found — this gate is guarding nothing." >&2
-  exit 2
-fi
-
-# LIVENESS. A Next app directory with no discoverable config would otherwise be skipped without a
-# word, which is the exact defect this rewrite exists to remove. Only a directory with its own
-# package.json counts as a workspace member — the same test pnpm's own `apps/*` glob applies —
-# so a stale leftover directory (an old node_modules/.next from a rename, say) is not mistaken
-# for a missing app.
-dirs=()
-for d in ts/apps/*/; do
-  [ -f "${d}package.json" ] && dirs+=("${d%/}")
-done
-missing=()
-# `"${dirs[@]:-}"` iterates ONCE with an empty `d` when `dirs` is empty, which printed a blank
-# row under the heading below. Unreachable today — `apps` needs a package.json AND a config, and
-# the exit above fires when `apps` is empty, so reaching here proves `dirs` is non-empty too —
-# but the `:-` idiom is wrong regardless, and a future reordering of the two blocks would make it
-# live. The length guard is the bash-3.2-safe form under `set -u`; lines 126 and 148 use it too.
-if [ "${#dirs[@]}" -gt 0 ]; then
-  for d in "${dirs[@]}"; do
-    found=0
-    for a in "${apps[@]}"; do
-      [ "$a" = "$d" ] && found=1
-    done
-    [ "$found" -eq 1 ] || missing+=("$d")
+# SMA-637: the --negative-control mode below proves that this gate can still go red.
+discover_apps() {
+  shopt -s nullglob
+  apps=()
+  # EXACT filenames, never a trailing wildcard. `next.config.[tjmc][sj]*` matched
+  # `next.config.ts.bak` (the `*` swallows any suffix) and MISSED `next.config.mts` (`t` is not in
+  # `[sj]`) — both measured. A stray backup file would have added a phantom entry, and an `.mts` app
+  # would have been invisible here.
+  #
+  # An app directory is only a workspace member if it has a `package.json` — the same test the
+  # liveness assertion below applies, and the one pnpm's own `apps/*` glob uses. Without this filter
+  # a config-bearing directory that is NOT a workspace member reaches check_app, which then runs
+  # `pnpm --dir` against a non-member and fails confusingly.
+  for cfg in ts/apps/*/next.config.{js,mjs,cjs,ts,mts,cts}; do
+    candidate="$(dirname "$cfg")"
+    [ -f "$candidate/package.json" ] && apps+=("$candidate")
   done
-fi
-if [ "${#missing[@]}" -gt 0 ]; then
-  echo "next-env gate: these ts/apps/* directories have no discoverable next.config.*:" >&2
-  printf '  %s\n' "${missing[@]}" >&2
-  echo "  Each would be skipped by this gate in silence. Add a config, or remove the directory." >&2
-  exit 2
-fi
+  shopt -u nullglob
+
+  if [ "${#apps[@]}" -eq 0 ]; then
+    echo "next-env gate: no ts/apps/*/next.config.* found — this gate is guarding nothing." >&2
+    exit 2
+  fi
+
+  # LIVENESS. A Next app directory with no discoverable config would otherwise be skipped without a
+  # word, which is the exact defect this rewrite exists to remove. Only a directory with its own
+  # package.json counts as a workspace member — the same test pnpm's own `apps/*` glob applies —
+  # so a stale leftover directory (an old node_modules/.next from a rename, say) is not mistaken
+  # for a missing app.
+  dirs=()
+  for d in ts/apps/*/; do
+    [ -f "${d}package.json" ] && dirs+=("${d%/}")
+  done
+  missing=()
+  # `"${dirs[@]:-}"` iterates ONCE with an empty `d` when `dirs` is empty, which printed a blank
+  # row under the heading below. Unreachable today — `apps` needs a package.json AND a config, and
+  # the exit above fires when `apps` is empty, so reaching here proves `dirs` is non-empty too —
+  # but the `:-` idiom is wrong regardless, and a future reordering of the two blocks would make it
+  # live. The length guard is the bash-3.2-safe form under `set -u`; the `apps` check above uses it
+  # too.
+  if [ "${#dirs[@]}" -gt 0 ]; then
+    for d in "${dirs[@]}"; do
+      found=0
+      for a in "${apps[@]}"; do
+        [ "$a" = "$d" ] && found=1
+      done
+      [ "$found" -eq 1 ] || missing+=("$d")
+    done
+  fi
+  if [ "${#missing[@]}" -gt 0 ]; then
+    echo "next-env gate: these ts/apps/* directories have no discoverable next.config.*:" >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    echo "  Each would be skipped by this gate in silence. Add a config, or remove the directory." >&2
+    exit 2
+  fi
+}
 
 # Preserve the HIGHEST severity seen across apps: rc 2 (infrastructure failure — a missing or
 # untracked file, or a broken typegen) outranks rc 1 (content drift), because an infrastructure
 # failure must never be reported as if it were mere drift needing a commit.
-rc=0
-for APP in "${apps[@]}"; do
-  ec=0
-  check_app "$APP" || ec=$?
-  if [ "$ec" -gt "$rc" ]; then
-    rc="$ec"
+real_run() {
+  rc=0
+  for APP in "${apps[@]}"; do
+    ec=0
+    check_app "$APP" || ec=$?
+    if [ "$ec" -gt "$rc" ]; then
+      rc="$ec"
+    fi
+  done
+  exit "$rc"
+}
+
+# ---- The negative control (SMA-637) ------------------------------------------------------------
+NEGCTL_TMP=""
+
+# One EXIT handler in negctl mode: it removes the temporary files, then does what the check-mode
+# handler does. It REPLACES `trap restore_if_absent EXIT`, so it must call restore_if_absent itself.
+negctl_cleanup() {
+  if [ -n "$NEGCTL_TMP" ]; then
+    rm -rf "$NEGCTL_TMP"
   fi
+  restore_if_absent
+}
+
+negctl_infra() {
+  echo "next-env negative control: INFRA: $*" >&2
+  exit 2
+}
+
+# The REAL index entries (mode, blob, stage, path) of every app's next-env.d.ts.
+real_index_entries() {
+  local a
+  for a in "${apps[@]}"; do
+    git ls-files -s -- "$a/next-env.d.ts" || negctl_infra "git ls-files -s failed for $a/next-env.d.ts"
+  done
+}
+
+# The child has its own EXIT trap, which restores its backups. Prove that it did.
+assert_no_backup() {
+  local a
+  for a in "${apps[@]}"; do
+    if [ -e "$a/next-env.d.ts.next-env-bak" ]; then
+      negctl_infra "[$1] the child left $a/next-env.d.ts.next-env-bak behind"
+    fi
+  done
+}
+
+negative_control() {
+  local real_index idx_drift idx_untracked out_drift out_untracked
+  local a f blob staged rc_drift rc_untracked n_marker fails fails_row
+
+  # Refuse a caller's index (Sven, 2026-10-01): `git rev-parse --git-path index` would return
+  # it, and the control would plant its rows in a copy of an index that is not the real one.
+  if [ "${GIT_INDEX_FILE+set}" = set ]; then
+    negctl_infra "GIT_INDEX_FILE is set ('${GIT_INDEX_FILE}'). The control copies the real index only. Unset GIT_INDEX_FILE and run again."
+  fi
+
+  NEGCTL_TMP="$(mktemp -d "${TMPDIR:-/tmp}/next-env-negctl.XXXXXX")" || negctl_infra "mktemp -d failed"
+  trap negctl_cleanup EXIT
+  # GIT_INDEX_FILE must be an absolute path: the child runs git from the top level, and a
+  # relative TMPDIR would otherwise give a relative index path.
+  NEGCTL_TMP="$(cd "$NEGCTL_TMP" && pwd -P)" || negctl_infra "cannot resolve the temporary directory"
+  case "$NEGCTL_TMP" in
+    /*) ;;
+    *) negctl_infra "the temporary directory '$NEGCTL_TMP' is not an absolute path" ;;
+  esac
+
+  real_index="$(git rev-parse --git-path index)" || negctl_infra "git rev-parse --git-path index failed"
+  [ -f "$real_index" ] || negctl_infra "the real index '$real_index' does not exist"
+  real_index_entries > "$NEGCTL_TMP/index-before"
+  fails=0
+
+  # ---- N1 drift: the staged blob of every app gets one extra last line. ----
+  idx_drift="$NEGCTL_TMP/index-drift"
+  out_drift="$NEGCTL_TMP/out-drift"
+  cp "$real_index" "$idx_drift" || negctl_infra "[N1] cannot copy the index to $idx_drift"
+  for a in "${apps[@]}"; do
+    f="$a/next-env.d.ts"
+    git cat-file blob ":$f" > "$NEGCTL_TMP/planted" || negctl_infra "[N1] git cat-file blob :$f failed"
+    printf '%s\n' '// SMA-637 negative control' >> "$NEGCTL_TMP/planted"
+    blob="$(git hash-object -w --no-filters -- "$NEGCTL_TMP/planted")" || negctl_infra "[N1] git hash-object -w failed for $f"
+    git cat-file -e "$blob" || negctl_infra "[N1] the planted blob $blob for $f is not in the object store"
+    staged="$(git rev-parse ":$f")" || negctl_infra "[N1] git rev-parse :$f failed"
+    [ "$blob" != "$staged" ] || negctl_infra "[N1] the planted blob for $f equals the index blob, so N1 would prove nothing"
+    GIT_INDEX_FILE="$idx_drift" git update-index --cacheinfo "100644,$blob,$f" || negctl_infra "[N1] git update-index --cacheinfo failed for $f"
+  done
+  rc_drift=0
+  GIT_INDEX_FILE="$idx_drift" "$BASH" "$SELF" >"$out_drift" 2>&1 || rc_drift=$?
+  assert_no_backup N1
+  # An infrastructure failure must never be reported as drift (see real_run).
+  if [ "$rc_drift" -eq 2 ]; then
+    echo "INFRA [N1] child exited 2 (infrastructure), expected 1" >&2
+    cat "$out_drift" >&2
+    exit 2
+  fi
+  fails_row="$fails"
+  if [ "$rc_drift" -ne 1 ]; then
+    echo "FAIL [N1] expected rc 1, got $rc_drift" >&2
+    fails=$((fails + 1))
+  fi
+  # The marker is the same for every app, so count it: one removed line per app.
+  n_marker="$(grep -cF -- '-// SMA-637 negative control' "$out_drift" || true)"
+  if [ "$n_marker" != "${#apps[@]}" ]; then
+    echo "FAIL [N1] expected ${#apps[@]} diff lines '-// SMA-637 negative control', got $n_marker" >&2
+    fails=$((fails + 1))
+  fi
+  for a in "${apps[@]}"; do
+    if ! grep -qF -- "the committed $a/next-env.d.ts does not match what Next generates" "$out_drift"; then
+      echo "FAIL [N1 $a] missing 'the committed $a/next-env.d.ts does not match what Next generates'" >&2
+      fails=$((fails + 1))
+    fi
+  done
+  if [ "$fails" -eq "$fails_row" ]; then
+    echo "next-env negative control: PASS [N1] planted drift gave rc 1 and named every app"
+  else
+    cat "$out_drift" >&2
+  fi
+
+  # ---- N2 untracked: every app's file is removed from the index copy. ----
+  idx_untracked="$NEGCTL_TMP/index-untracked"
+  out_untracked="$NEGCTL_TMP/out-untracked"
+  cp "$real_index" "$idx_untracked" || negctl_infra "[N2] cannot copy the index to $idx_untracked"
+  for a in "${apps[@]}"; do
+    f="$a/next-env.d.ts"
+    GIT_INDEX_FILE="$idx_untracked" git update-index --force-remove -- "$f" || negctl_infra "[N2] git update-index --force-remove failed for $f"
+    if GIT_INDEX_FILE="$idx_untracked" git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+      negctl_infra "[N2] $f is still listed in the index copy"
+    fi
+  done
+  rc_untracked=0
+  GIT_INDEX_FILE="$idx_untracked" "$BASH" "$SELF" >"$out_untracked" 2>&1 || rc_untracked=$?
+  assert_no_backup N2
+  fails_row="$fails"
+  if [ "$rc_untracked" -ne 2 ]; then
+    echo "FAIL [N2] expected rc 2, got $rc_untracked" >&2
+    fails=$((fails + 1))
+  fi
+  for a in "${apps[@]}"; do
+    if ! grep -qF -- "'$a/next-env.d.ts' exists but is NOT tracked by git" "$out_untracked"; then
+      echo "FAIL [N2 $a] missing ''$a/next-env.d.ts' exists but is NOT tracked by git'" >&2
+      fails=$((fails + 1))
+    fi
+  done
+  if [ "$fails" -eq "$fails_row" ]; then
+    echo "next-env negative control: PASS [N2] an untracked file gave rc 2 and named every app"
+  else
+    cat "$out_untracked" >&2
+  fi
+
+  # Post-condition: the real index entries did not change.
+  real_index_entries > "$NEGCTL_TMP/index-after"
+  cmp -s "$NEGCTL_TMP/index-before" "$NEGCTL_TMP/index-after" || negctl_infra "the real index entries for next-env.d.ts changed during the control"
+
+  if [ "$fails" -ne 0 ]; then
+    echo "next-env-drift negative control: $fails check(s) failed" >&2
+    exit 1
+  fi
+  echo "== next-env-drift negative control passed =="
+  exit 0
+}
+
+MODE=check
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --negative-control) MODE=negctl; shift ;;
+    *) echo "next-env gate: unknown flag: $1" >&2; exit 2 ;;
+  esac
 done
-exit "$rc"
+
+discover_apps
+case "$MODE" in
+  check)  real_run ;;
+  negctl) negative_control ;;
+  *) echo "next-env gate: unknown mode '$MODE'" >&2; exit 2 ;;
+esac
