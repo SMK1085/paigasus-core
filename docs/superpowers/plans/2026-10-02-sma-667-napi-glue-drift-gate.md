@@ -1,5 +1,10 @@
 # SMA-667 napi glue drift gate Implementation Plan
 
+> **Historical record.** This is the plan as it was executed. A local review after the PR opened
+> changed the code: every `napi build` now passes `--no-dts-cache`, `generate-napi-glue` no longer
+> touches the wasm crate, and check 2 and check 3 are stricter. The spec and
+> `ts/packages/paigasus-kernel/moon.yml` describe the current state. Do not execute this plan again.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the committed napi glue (`index.js`, `index.d.ts`) have two sanctioned writers and a drift gate in `paigasus-kernel-ts:test`, so builds never dirty the tree and stale glue never ships.
