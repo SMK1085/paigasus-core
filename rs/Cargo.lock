@@ -3344,6 +3344,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "paigasus-redis"
+version = "0.0.0"
+dependencies = [
+ "metrics",
+ "metrics-util",
+ "redis",
+ "tokio",
+]
+
+[[package]]
 name = "paigasus-service-info"
 version = "0.0.0"
 dependencies = [

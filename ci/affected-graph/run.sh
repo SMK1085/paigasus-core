@@ -388,13 +388,13 @@ run_suite() {
   # coverage.
   # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case "lockfile->all-lint" "rs/Cargo.lock" \
-    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-redis-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
   # CI-traversal twin of lockfile->all-lint. A Cargo.lock touch reaches every crate through `lint`'s
   # workspace inputs (SMA-534) and the three FFI tasks through theirs (SMA-546) — through INPUTS,
   # not dependsOn — so this set is expected to equal the deep one.
   # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case_ci "lockfile->all-lint-ci" "rs/Cargo.lock" \
-    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-redis-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
   # SMA-528 — a kernel SOURCE edit must select every consumer's build/test/lint under the traversal
   # `moon ci` uses. This is the case the issue exists for: before SMA-528 a kernel behavioural
   # change ran the kernel's own tests and NOT ONE consumer's, including paigasus-kernel-parity-rs,
