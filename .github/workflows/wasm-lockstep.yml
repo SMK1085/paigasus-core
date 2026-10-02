@@ -96,7 +96,7 @@ jobs:
         id: update
         run: |
           set -euo pipefail
-          docker run --rm --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh update
+          docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh update
 
       # The early exit, in the runbook's order: a refusal stops the job before any compile. This
       # is not the control: propose runs the same checker again on the downloaded bytes. The host
@@ -130,7 +130,7 @@ jobs:
         if: steps.lock.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          docker run --rm --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh build
+          docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh build
 
       # Copy only. The host executes no file of the work copy. Every path component is checked for
       # a symlink, so a symlinked file or parent directory cannot make cp read a host file.
@@ -289,6 +289,9 @@ jobs:
           if [ "$rc" -eq 0 ]; then
             lease="$(cat "$RUNNER_TEMP/branch-sha.txt")"
             author="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${lease}" --jq .author.login)"
+            # .author.login comes from the commit's author EMAIL, which a pusher can set. This check
+            # guards against a mistake (a person pushed to the bot branch), not against an attacker
+            # with push access.
             if [ "$author" != "paigasusbot[bot]" ]; then
               echo "::error::A person pushed to the bot branch (head ${lease} by '${author}'). Merge or close that pull request first."
               exit 1
@@ -303,7 +306,9 @@ jobs:
           git push --force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}" "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/deps/wasm-bindgen-lockstep
 
       # The App token opens the pull request, so its CI runs (a GITHUB_TOKEN event starts no
-      # workflow).
+      # workflow). `--head` matches the branch NAME only, so the list keeps same-repository pull
+      # requests (isCrossRepository false): a fork pull request from a branch with this name must
+      # not be edited or closed (P21).
       - name: Open or update the pull request
         id: pr
         if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'
@@ -311,7 +316,7 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          gh pr list --repo "$GITHUB_REPOSITORY" --head deps/wasm-bindgen-lockstep --state open --json number --jq '.[].number' > "$RUNNER_TEMP/open-prs.txt"
+          gh pr list --repo "$GITHUB_REPOSITORY" --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number' > "$RUNNER_TEMP/open-prs.txt"
           number="$(sed -n 1p "$RUNNER_TEMP/open-prs.txt")"
           if [ -z "$number" ]; then
             gh pr create --repo "$GITHUB_REPOSITORY" --base main --head deps/wasm-bindgen-lockstep --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body-file "$RUNNER_TEMP/pr-body.md"
@@ -326,7 +331,7 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          gh pr list --repo "$GITHUB_REPOSITORY" --head deps/wasm-bindgen-lockstep --state open --json number --jq '.[].number' > "$RUNNER_TEMP/open-prs.txt"
+          gh pr list --repo "$GITHUB_REPOSITORY" --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number' > "$RUNNER_TEMP/open-prs.txt"
           while read -r number; do
             gh pr close "$number" --repo "$GITHUB_REPOSITORY" --comment "The wasm-bindgen family is current on main. This proposal is obsolete."
           done < "$RUNNER_TEMP/open-prs.txt"

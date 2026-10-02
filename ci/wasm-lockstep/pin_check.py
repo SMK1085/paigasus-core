@@ -2,7 +2,7 @@
 """The pin check of .github/workflows/wasm-lockstep.yml (SMA-693 spec 5.4).
 
 A PyYAML parse, never a text scan: SMA-593 measured fourteen bypasses of a text scan, a YAML
-alias among them. The rules (P0-P20) are the trust model of spec 5.1 and 5.2 in checkable form.
+alias among them. The rules (P0-P21) are the trust model of spec 5.1 and 5.2 in checkable form.
 ci/wasm-lockstep/README.md lists each rule and what it does not prove.
 
   pin_check.py <workflow.yml>                       the rules on one workflow
@@ -80,7 +80,7 @@ CONTAINER_SCRIPT = "ci/wasm-lockstep/container.sh"
 IMAGE_TOKEN = "$LOCKSTEP_IMAGE"
 IMAGE_PIN = re.compile(r"docker\.io/library/rust:[0-9][0-9.]*-bookworm@sha256:[0-9a-f]{64}")
 DOCKER_FLAGS = frozenset({"--rm"})
-DOCKER_VALUES = {"--user": "65534:65534", "--volume": "$RUNNER_TEMP/work:/work", "--workdir": "/work"}
+DOCKER_VALUES = {"--cap-drop": "ALL", "--security-opt": "no-new-privileges", "--user": "65534:65534", "--volume": "$RUNNER_TEMP/work:/work", "--workdir": "/work"}
 
 # Command words. A word is the first word of a simple command, after a separator, a keyword
 # that starts a command, or `sudo`. `case` is NOT allowed: its patterns read as command words.
@@ -324,6 +324,21 @@ def _gh_api(args: list[str]) -> list[str]:
     return out
 
 
+def _gh_pr_list(args: list[str]) -> list[str]:
+    """`gh pr list --head <branch>` filters by branch NAME only, so a fork PR from a branch of the
+    same name matches. This repo is public: the App token must never edit or close such a PR. The
+    list must request isCrossRepository and select on it (P21)."""
+    out = []
+    for flag in ("--json", "--jq"):
+        values = [args[i + 1] for i, a in enumerate(args[:-1]) if a == flag]
+        if not any("isCrossRepository" in v for v in values):
+            out.append(f"gh pr list must pass {flag} naming isCrossRepository, so a fork pull request is not selected")
+    jq = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--jq"]
+    if jq and not any(re.search(r"select\(\s*\.isCrossRepository\s*\|\s*not\s*\)", v) for v in jq):
+        out.append("gh pr list --jq must select(.isCrossRepository | not)")
+    return out
+
+
 def _tokens(line: str) -> list[str] | None:
     lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -370,6 +385,8 @@ def command_violations(job: str, script: str, where: str) -> list[str]:
             out.append(f"P4 {where}: {word!r} names LOCKSTEP_IMAGE as an argument, so it can set the variable")
         if word == "git" and any(a == "-c" or a.startswith("-c") or a.startswith("--config-env") for a in cmd[1:]):
             out.append(f"P20 {where}: git must not take -c or --config-env, which set a config value for one call")
+        if word == "gh" and cmd[1:3] == ["pr", "list"]:
+            out += [f"P21 {where}: {p}" for p in _gh_pr_list(cmd[3:])]
         if word == "gh" and cmd[1:2] == ["api"]:
             out += [f"P20 {where}: {p}" for p in _gh_api(cmd[2:])]
         if word not in allowed:
@@ -575,7 +592,7 @@ jobs:
           persist-credentials: false
       - id: update
         run: |
-          docker run --rm --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh update
+          docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh update
       - id: lock
         run: |
           rc=0
@@ -633,14 +650,17 @@ jobs:
           git push --force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}" "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/deps/wasm-bindgen-lockstep
       - id: pr
         if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'
-        run: gh pr create --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body "run cargo update"
+        run: |
+          gh pr list --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'
+          gh pr create --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body "run cargo update"
       - id: close
         if: needs.build.outputs.changed == 'false'
-        run: echo "cargo update is not needed"
+        run: |
+          gh pr list --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'
 """
 
 PUSH_LINE = 'git push --force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}" "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/deps/wasm-bindgen-lockstep'
-DOCKER_LINE = 'docker run --rm --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE"'
+DOCKER_LINE = 'docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE"'
 TOKEN_STEP = "      - id: token\n        uses: actions/create-github-app-token@" + "4" * 40 + """
         with:
           client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
@@ -653,6 +673,7 @@ VERIFY_STEP = """      - id: verify
         if: needs.build.outputs.changed == 'true'
         run: python3 ci/wasm-lockstep/lockstep_check.py artifact --dir d --old rs/Cargo.lock
 """
+PR_LIST = "gh pr list --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'"
 BUILD_STEP_ANCHOR = "      - id: update\n"
 PROPOSE_RUN = "        run: cp a b\n"
 BUILD_RUN = "          rc=0\n"
@@ -757,6 +778,12 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("git -c before the subcommand in propose", ((PROPOSE_RUN, "        run: git -c core.fsmonitor=x status\n"),), "P20"),
     ("git -ckey=value in propose", ((PROPOSE_RUN, "        run: git -ccore.pager=x log\n"),), "P20"),
     ("git -c in build", ((BUILD_RUN, BUILD_RUN + "          git -c core.x=y archive HEAD\n"),), "P20"),
+    ("gh pr list --head without the cross-repo filter", ((PR_LIST, "gh pr list --head deps/wasm-bindgen-lockstep --state open --json number --jq '.[].number'"),), "P21"),
+    ("gh pr list with --json but a jq that does not select", ((PR_LIST, PR_LIST.replace("select(.isCrossRepository | not) | ", "")),), "P21"),
+    ("gh pr list that selects the fork pull requests", ((PR_LIST, PR_LIST.replace("| not)", ")")),), "P21"),
+    ("docker run without --cap-drop=ALL", ((DOCKER_LINE, DOCKER_LINE.replace(" --cap-drop=ALL", "")),), "P4"),
+    ("docker run without --security-opt=no-new-privileges", ((DOCKER_LINE, DOCKER_LINE.replace(" --security-opt=no-new-privileges", "")),), "P4"),
+    ("docker run with --cap-drop=NET_RAW only", ((DOCKER_LINE, DOCKER_LINE.replace("--cap-drop=ALL", "--cap-drop=NET_RAW")),), "P4"),
     ("needs in an env key named if in propose", ((PROPOSE_RUN, PROPOSE_RUN + "        env:\n          if: ${{ needs.build.outputs.changed }}\n"),), "P9"),
     ("continue-on-error: true on the build job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n"),), "P14"),
     ('continue-on-error: "true" on the propose job', (("    environment: release-pr\n", "    environment: release-pr\n    continue-on-error: \"true\"\n"),), "P14"),
@@ -845,7 +872,7 @@ def main(argv: list[str]) -> int:
         print(f"pin_check: {line}", file=sys.stderr)
     if found:
         return RC_ASSERT
-    print(f"pin_check: {argv[0]} satisfies P0-P20")
+    print(f"pin_check: {argv[0]} satisfies P0-P21")
     return RC_OK
 
 
