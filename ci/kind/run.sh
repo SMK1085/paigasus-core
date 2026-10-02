@@ -125,7 +125,7 @@ run_bounded() {  # $1 = seconds, $2 = stdout file, $3 = stderr file, then the co
   return "$rc"
 }
 
-# The name the chart gives a resource:charts/paigasus/templates/_helpers.tpl "paigasus.name".
+# The name the chart gives a resource: charts/paigasus/templates/_helpers.tpl "paigasus.name".
 # The base "<release>-<chart>" is cut to the room the suffix leaves (63 - len(suffix) - 1), ONE
 # trailing "-" is trimmed (Sprig trimSuffix), then "-<suffix>" is appended.
 chart_resource_name() {  # $1 = suffix, e.g. gateway-console
