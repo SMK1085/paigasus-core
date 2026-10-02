@@ -375,12 +375,12 @@ mod tests {
     use super::*;
     use crate::adapters::id::KernelIdGenerator;
     use crate::application::fakes::{FixedClock, InMemoryMembershipRepository, InMemoryRoleGrants, SeqIds};
-    use crate::log_capture::capture_logs;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use paigasus_iam_core::{ApiKeyId, GrantScope, Membership, MembershipRecord, RoleGrant, Stamp, TenancyNodeRef, TokenDefect, Transaction};
     use paigasus_kernel::Prn;
+    use paigasus_logging::test_support::capture_logs;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};

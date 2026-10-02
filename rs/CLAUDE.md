@@ -7,6 +7,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 ## Cargo, the lockfile and nextest
 
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
+- Tests that assert on a log line use `paigasus_logging::test_support` (`capture_logs` at TRACE,
+  `capture_logs_at(level)`). Turn on its `test-support` feature from `[dev-dependencies]` only,
+  never from `[dependencies]`, so that the production binary does not contain it. This is the
+  first `[features]` table in a workspace crate; follow the same pattern for a new test-only
+  helper. Do not write a new `LogBuffer`. The helper supports `cargo nextest` only (SMA-689).
 - `paigasus-iam`'s Docker-backed suites get their retry budget and container-concurrency cap from
   `rs/.config/nextest.toml` (`profile.default`), so **Moon, `moon run …:test`, and a bare
   `cargo nextest` all pick it up** — but `cargo test` does NOT, since nextest config is
@@ -226,21 +231,26 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 ## Container images
 
 - Container images (SMA-500) live behind
-  `ci/images/run.sh {build,smoke,all,build-oci,load-oci,rehearse}` and
+  `ci/images/run.sh {build,smoke,all,build-oci,load-oci,rehearse,context-check}` and
   `.github/workflows/images.yml`, **not** Moon — a `repo:*` task would have to join `ci.yml`'s
   `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry.
   The console images (SMA-513) use the same script: `build-console [iam|gateway]` and
   `all-consoles`. The workflow is **not a required check**. So a broken image build makes
   `main` red, not the PR.
 - The `pull_request` filter of `images.yml` lists the image build inputs. For `rs/` these are
-  `rs/Dockerfile`, `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml` and `rs/.dockerignore`. For
+  `rs/Dockerfile`, `rs/docker/**` (the chisel dpkg status generator, its self-test and its
+  fixtures, SMA-665), `rs/Cargo.{lock,toml}`, `rs/rust-toolchain.toml` and `rs/.dockerignore`. For
   `ts/` these are `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
   `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
   `ts/apps/*/next.config.ts`, `ts/apps/*/package.json`,
   `ts/packages/paigasus-kernel/package.json`,
   `rs/crates/bindings/paigasus-node-bindings/index.js` and
-  `rs/crates/bindings/paigasus-node-bindings/index.d.ts`. It also lists `ci/images/**`, the
-  workflow, `.prototools` and the two `.proto/plugins/*.toml` files. A PR that changes one of these
+  `rs/crates/bindings/paigasus-node-bindings/index.d.ts`. It also lists four smoke-runtime files
+  (SMA-675, the second clause of RUNBOOK-containers.md section 1):
+  `ts/packages/paigasus-auth/src/core/session.ts`, `ts/apps/*/app/*console*/layout.tsx`,
+  `ts/apps/iam-console/app/*console*/orgs/page.tsx` and
+  `ts/apps/gateway-console/app/*console*/overview/page.tsx`. It also lists `ci/images/**`, the
+  workflow, `.prototools`, `.proto/plugins/crane.toml` and `.proto/plugins/syft.toml`. A PR that changes one of these
   runs the workflow automatically. The rule for a `ts/` entry is in RUNBOOK-containers.md section 1.
   A file that is already a Moon task `input` stays off this filter, even if `ts/Dockerfile` reads
   it too, because a bad edit there already reds the ordinary `moon ci` build — this is why the
@@ -248,10 +258,18 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `paigasus-node-bindings/package.json` are absent, but the napi crate's `index.js`/`index.d.ts`
   are present: those two are Docker-copied by name yet are not Moon `inputs` anywhere, since the
   kernel build task's own `napi build` step regenerates them fresh every run.
+  `@paigasus/next-config` is off the filter too (SMA-671): it is a Moon input, the unit tests and
+  `standalone-runtime.test.ts` pin both base paths, and `chart.yml` is the second control.
 - The filter does not list `rs/**` or `ts/**`. A PR that changes `rs/**` or `ts/**` but no
   listed input can still break an image build. Start the workflow manually for such a PR with
   `workflow_dispatch`. (`gh workflow run images.yml --ref <branch>` returns 404 until `images.yml`
   is on `main`.)
+- Staged-tree parity of the console images gates in `images.yml` only (SMA-671). The job makes a
+  host build of both consoles on each leg and sets `CONSOLE_PARITY_REQUIRED: '1'` on its two
+  console smoke steps; unset means "not required", so `release.yml` needs no host build. It gates
+  amd64 on a filtered PR and both legs on `main`. A PR that changes only `ts/apps/*/moon.yml` does
+  not run it, so a `moon.yml`-side staging drift shows first on `main`. Row W1 of
+  `ci/images/console-selftest.sh` pins the two `env` lines and the step order.
 - The runtime base is a `chisel cut` of Ubuntu 24.04 into `FROM scratch`. Four traps, all
   measured: `libgcc-s1_libs` is REQUIRED (Rust panic unwinding links `libgcc_s.so.1`) and its
   absence fails at container START, not build; `ca-certificates_data` is the right variant
@@ -273,6 +291,19 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `argv[0]`.
 - `rs/Dockerfile` builds the services with **`cargo auditable`**, which is what makes the image
   SBOM list the Rust crates. MEASURED (SMA-658, 2026-09-20): a plain `cargo build` gives `cargo=0`.
-  The OS-package half of the SBOM is still empty and is tracked as SMA-665: syft 1.52.0 reads only
-  `/var/lib/dpkg/status` or `.deb` files, and a chisel cut writes neither. The `base-files_chisel`
-  slice does NOT help — it writes a chisel-specific manifest that syft cannot read.
+  The OS-package half comes from SMA-665. syft 1.52.0 reads Debian packages only from
+  `/var/lib/dpkg/status`, `/var/lib/dpkg/status.d/*` or `.deb` files, and it cannot read the
+  chisel manifest. So the cut adds the `base-files_chisel` slice (it writes
+  `/var/lib/chisel/manifest.wall`, which stays in the image), and `rs/docker/chisel-dpkg-status.sh`
+  turns that manifest into `status.d` data: one stanza and one `.md5sums` file for each package.
+  The `.md5sums` files are NOT optional. MEASURED (SMA-665 M2): without them, syft also lists
+  `libgcc_s.so.1` as a package `gcc-14` with a `pkg:deb` purl and no arch, and the cargo SBOM floor
+  fails. That floor compares the SBOM's `pkg:deb` entries with `chisel-manifest-<key>-<arch>.txt`
+  of the same build. A syft bump that adds a chisel cataloger (anchore/syft#5091) reds that floor
+  ON PURPOSE, because each package then appears twice: remove the generator in the same PR
+  (SMA-665 D6).
+- The generator self-test is the `chisel-dpkg-status-test` stage of `rs/Dockerfile`. `images.yml`
+  builds it with `--target`. Keep it ABOVE the final `FROM scratch`: a build with no `--target`
+  builds the last stage, and `assert_pins` reads the last `FROM` as the final stage. Its fixtures
+  are in `rs/docker/fixtures/`, because the build context is `rs/`. The generator runs under dash:
+  no pipe, no bash syntax.

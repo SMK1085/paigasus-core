@@ -57,7 +57,7 @@ pub fn serialize<T: Serialize>(cases: &[T]) -> String {
     out
 }
 
-/// Absolute path to a committed corpus by stem (`sum`, `uuid7`, `prn_canonical`, `prn_cedar`).
+/// Absolute path to a committed corpus by stem (`sum`, `uuid7`, `prn_canonical`, `prn_cedar`, `prn_fields`, `prn_parse`).
 #[must_use]
 pub fn corpus_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("vectors/{name}.json"))
@@ -192,6 +192,29 @@ pub struct PrnFieldsCase {
     pub resource_id: String,
 }
 
+/// The five canonical fields of a parsed PRN, marshalled the way every binding marshals them: `org`
+/// is `""` when the PRN has no org, and the UUIDs are lower-case and hyphenated. The `prn_fields`
+/// and `prn_parse` corpora share it, so they cannot marshal differently. It is deliberately NOT
+/// `paigasus_kernel::wire::prn_parse_fields`: the `prn_parse` corpus is the oracle for that
+/// function, so it must not be computed by it (SMA-673).
+struct Fields {
+    service: String,
+    region: String,
+    org: String,
+    resource_type: String,
+    resource_id: String,
+}
+
+fn fields_of(p: &paigasus_kernel::Prn) -> Fields {
+    Fields {
+        service: p.service().to_string(),
+        region: p.region().to_string(),
+        org: p.org().map(|u| u.as_hyphenated().to_string()).unwrap_or_default(),
+        resource_type: p.resource_type().to_string(),
+        resource_id: p.resource_id().as_hyphenated().to_string(),
+    }
+}
+
 /// Deterministic PRN field/build corpus: org-scoped and empty-tenant-slot (organization/user) PRNs.
 #[must_use]
 pub fn build_prn_fields_corpus() -> Vec<PrnFieldsCase> {
@@ -206,14 +229,78 @@ pub fn build_prn_fields_corpus() -> Vec<PrnFieldsCase> {
     PRNS.iter()
         .map(|s| {
             let p = paigasus_kernel::Prn::parse(s).expect("prn_fields corpus PRN parses");
+            let f = fields_of(&p);
             PrnFieldsCase {
                 prn: (*s).to_string(),
-                service: p.service().to_string(),
-                region: p.region().to_string(),
-                org: p.org().map(|u| u.as_hyphenated().to_string()).unwrap_or_default(),
-                resource_type: p.resource_type().to_string(),
-                resource_id: p.resource_id().as_hyphenated().to_string(),
+                service: f.service,
+                region: f.region,
+                org: f.org,
+                resource_type: f.resource_type,
+                resource_id: f.resource_id,
             }
+        })
+        .collect()
+}
+
+/// One case of the one-call PRN parse (SMA-673): the input and the six values of the binding wire
+/// form `[error_kind, service, region, org, resource_type, resource_id]`. A valid input has
+/// `error_kind == ""`. An invalid input has the kind token and five empty fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrnParseCase {
+    pub input: String,
+    pub error_kind: String,
+    pub service: String,
+    pub region: String,
+    pub org: String,
+    pub resource_type: String,
+    pub resource_id: String,
+}
+
+/// A valid PRN WITH a region. Neither older corpus holds one, and the console branches on region.
+/// Its region and org are both non-empty and different, so a swap of those two positions is
+/// visible (SMA-673 M2).
+const REGIONFUL_PRN: &str = "prn:pgs:iam:eu-central-1:0190a100-0000-7000-8000-0000000000aa:team/0190a1b2-0000-7000-8000-000000000001";
+
+/// Deterministic one-call parse corpus: the `prn_canonical` inputs (valid rows, an upper-case UUID
+/// row and one row per `PrnError` kind), then the `prn_fields` PRNs, then [`REGIONFUL_PRN`], in that
+/// order, with duplicates removed (first occurrence wins).
+#[must_use]
+pub fn build_prn_parse_corpus() -> Vec<PrnParseCase> {
+    let candidates = build_prn_canonical_corpus()
+        .into_iter()
+        .map(|c| c.input)
+        .chain(build_prn_fields_corpus().into_iter().map(|c| c.prn))
+        .chain(std::iter::once(REGIONFUL_PRN.to_string()));
+    let mut inputs: Vec<String> = Vec::new();
+    for input in candidates {
+        if !inputs.contains(&input) {
+            inputs.push(input);
+        }
+    }
+    inputs
+        .into_iter()
+        .map(|input| match paigasus_kernel::Prn::parse(&input) {
+            Ok(p) => {
+                let f = fields_of(&p);
+                PrnParseCase {
+                    input,
+                    error_kind: String::new(),
+                    service: f.service,
+                    region: f.region,
+                    org: f.org,
+                    resource_type: f.resource_type,
+                    resource_id: f.resource_id,
+                }
+            }
+            Err(e) => PrnParseCase {
+                input,
+                error_kind: e.kind().to_string(),
+                service: String::new(),
+                region: String::new(),
+                org: String::new(),
+                resource_type: String::new(),
+                resource_id: String::new(),
+            },
         })
         .collect()
 }
@@ -272,5 +359,27 @@ mod tests {
         assert_eq!(text.matches('\n').count(), cases.len() + 2, "expect one line per case + brackets");
         let parsed: Vec<Case> = serde_json::from_str(&text).expect("round-trips");
         assert_eq!(parsed, cases);
+    }
+
+    #[test]
+    fn prn_parse_corpus_covers_every_branch_the_console_takes() {
+        let cases = build_prn_parse_corpus();
+        let mut kinds: Vec<&str> = cases.iter().map(|c| c.error_kind.as_str()).filter(|k| !k.is_empty()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        // One row per PrnError kind (there are 11).
+        assert_eq!(kinds.len(), 11, "error kinds in the corpus: {kinds:?}");
+        assert!(cases.iter().any(|c| c.error_kind.is_empty() && c.org.is_empty()), "no valid row without an org");
+        assert!(cases.iter().any(|c| c.error_kind.is_empty() && !c.org.is_empty()), "no valid row with an org");
+        assert!(
+            cases.iter().any(|c| c.error_kind.is_empty() && !c.region.is_empty() && !c.org.is_empty() && c.region != c.org),
+            "no valid row with a region and an org"
+        );
+        assert!(cases.iter().any(|c| c.error_kind.is_empty() && c.service != "iam"), "no valid row of another service");
+        let mut inputs: Vec<&str> = cases.iter().map(|c| c.input.as_str()).collect();
+        inputs.sort_unstable();
+        let before = inputs.len();
+        inputs.dedup();
+        assert_eq!(inputs.len(), before, "duplicate input rows");
     }
 }

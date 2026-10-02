@@ -35,6 +35,9 @@ on:
       - 'rs/rust-toolchain.toml'
       - 'rs/Dockerfile'
       - 'rs/.dockerignore'
+      # SMA-665 D9: the chisel dpkg status generator, its self-test and its fixtures.
+      # rs/Dockerfile COPYs them, and only the image build reads them.
+      - 'rs/docker/**'
       - 'ts/Dockerfile'
       - 'ts/.dockerignore'
       - 'ts/pnpm-lock.yaml'
@@ -125,15 +128,25 @@ jobs:
         with:
           cache: false
 
-      # Narrow installs, not a bare `proto install`: this job needs only these three.
-      - name: Install crane, syft and uv
+      # Narrow installs, not a bare `proto install`: this job needs only these six. SMA-671: moon,
+      # node and pnpm are for the host build of both consoles (the staged-tree parity reference).
+      - name: Install crane, syft, uv, moon, node and pnpm
         run: |
           proto install crane
           proto install syft
           proto install uv
+          proto install moon
+          proto install node
+          proto install pnpm
 
       - name: Decision script self-test
         run: uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py --self-test
+
+      # SMA-665 T2 (spec D10): the self-test of rs/docker/chisel-dpkg-status.sh. The target is the
+      # chisel-dpkg-status-test stage of rs/Dockerfile, so BuildKit builds the rootfs stage and the
+      # test, not the Rust builder. --no-cache-filter makes the test RUN on every build.
+      - name: Chisel dpkg status generator self-test
+        run: docker buildx build --progress=plain --no-cache-filter=chisel-dpkg-status-test --target chisel-dpkg-status-test -f rs/Dockerfile rs/
 
       - name: Build both images as OCI archives
         run: |
@@ -161,7 +174,9 @@ jobs:
 
       # This step is a MEASUREMENT for spec M8. It checks that syft finds libc6 and the Rust
       # crates. SMA-688: the step now also checks the cargo SBOM floor. Each pull request
-      # proves the floor that release.yml uses.
+      # proves the floor that release.yml uses. SMA-665: the cargo floor also needs one Debian
+      # entry for each package of chisel-manifest-<key>-<arch>.txt, which build-oci wrote above
+      # in this job. So the floor takes --arch.
       - name: SBOM for each archive
         run: |
           for key in iam gateway; do
@@ -169,7 +184,7 @@ jobs:
             syft "oci-archive:out/${crate}-${ARCH}.oci.tar" -o "spdx-json=sbom-${crate}-${ARCH}.spdx.json"
             summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-${crate}-${ARCH}.spdx.json")"
             echo "M8 image=${crate} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
-            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" "sbom-${crate}-${ARCH}.spdx.json"
+            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" --arch "${ARCH}" "sbom-${crate}-${ARCH}.spdx.json"
           done
 
       # SMA-670: the self-test of the console image checks in ci/images/run.sh. Each static check
@@ -179,6 +194,44 @@ jobs:
       # With CI=true a skipped row is a failure.
       - name: Console image self-test
         run: ci/images/console-selftest.sh
+
+      # SMA-671: on a pull_request event, moon reads GITHUB_BASE_REF and resolves the `main`
+      # revision for its changed-files query, even for `moon run` of explicit targets. The
+      # checkout above is shallow and has no `main` ref, so `moon run` failed at once with
+      # `fatal: ambiguous argument 'main'` (git exit 128). `--force` does not skip that query.
+      # A one-commit fetch of main is enough: moon then warns about the shallow checkout and
+      # falls back to an empty changed-files list. Same token-for-one-fetch pattern as ci.yml.
+      - name: Materialize main ref (for moon's pull_request base)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+            "+refs/heads/main:refs/heads/main"
+
+      # SMA-671: the reference build for the staged-tree parity row of the console smoke
+      # (console_staged_parity_row in ci/images/run.sh). It builds both consoles on THIS runner,
+      # so the host build and the image's builder stage run on the same OS and architecture.
+      # `--upstream none` skips contracts:generate: the build compiles the COMMITTED generated
+      # tree and the committed wasm, as the Docker build does, and needs no buf and no BSR. moon
+      # does not install node_modules in this repo (ci.yml), so pnpm installs first. No `if:`: it
+      # runs on each leg (SMA-671 Q3), rs-only PRs included (Q-a).
+      # Row W1 in ci/images/console-selftest.sh fails when this step moves after a console smoke step.
+      - name: Host build of both consoles (staged-tree parity reference)
+        timeout-minutes: 20
+        run: |
+          df -h /
+          SECONDS=0
+          pnpm --dir ts install --frozen-lockfile
+          echo "host-build: pnpm install took ${SECONDS}s"
+          SECONDS=0
+          rc=0
+          moon run iam-console-ts:build gateway-console-ts:build --upstream none || rc=$?
+          echo "host-build: moon run took ${SECONDS}s (rc ${rc})"
+          df -h /
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          # AC 9: no host artifact may enter a Docker build context of the image builds below.
+          ci/images/run.sh context-check
 
       # SMA-688 (spec section 5.3). This step runs the console RELEASE sequence. It matches the
       # sequence that release.yml runs for each images-build-<key> job. The sequence has six
@@ -191,22 +244,42 @@ jobs:
       # get the arm64 leg (spec R1).
       #
       # The "Build + smoke both consoles" step below still runs. It smokes the build-console path
-      # only.
+      # only. SMA-671: both console smoke steps set CONSOLE_PARITY_REQUIRED, so the staged-tree
+      # parity row fails when the host build above is missing or differs from the image.
       - name: Console release sequence
+        # SMA-671: the parity row needs the host build above. Step env, not job env: the self-test
+        # step must not inherit it. Row W1 pins this line. Quoted, as release.yml quotes 'off'.
+        env:
+          CONSOLE_PARITY_REQUIRED: '1'
         run: |
-          set -euo pipefail
           df -h /
+          rc=0
           for key in iam-console gateway-console; do
-            ci/images/run.sh build-oci "$key" out
-            archive="out/paigasus-${key}-${ARCH}.oci.tar"
-            ci/images/run.sh load-oci "$archive" "paigasus-${key}:dev"
-            ci/images/run.sh smoke "$key"
-            syft "oci-archive:${archive}" -o "spdx-json=sbom-paigasus-${key}-${ARCH}.spdx.json"
-            summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-paigasus-${key}-${ARCH}.spdx.json")"
-            echo "M8 image=paigasus-${key} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
-            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" "sbom-paigasus-${key}-${ARCH}.spdx.json"
+            # One subshell per key under errexit, OUTSIDE any `||` list: bash ignores `set -e` in a
+            # subshell on the left of `||`, so `( set -e; … ) || rc=$?` would run every command of
+            # a failed key. `set +e` around it keeps this shell alive instead, so a failure on
+            # iam-console still runs gateway-console (SMA-671 AC 10; rows RS1-RS3).
+            set +e
+            (
+              set -euo pipefail
+              ci/images/run.sh build-oci "$key" out
+              archive="out/paigasus-${key}-${ARCH}.oci.tar"
+              ci/images/run.sh load-oci "$archive" "paigasus-${key}:dev"
+              ci/images/run.sh smoke "$key"
+              syft "oci-archive:${archive}" -o "spdx-json=sbom-paigasus-${key}-${ARCH}.spdx.json"
+              summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-paigasus-${key}-${ARCH}.spdx.json")"
+              echo "M8 image=paigasus-${key} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
+              uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" --arch "${ARCH}" "sbom-paigasus-${key}-${ARCH}.spdx.json"
+            )
+            key_rc=$?
+            set -e
+            if [ "$key_rc" -ne 0 ]; then
+              echo "::error::Console release sequence: ${key} failed (rc ${key_rc}); the next key still runs." >&2
+              rc=1
+            fi
           done
           df -h /
+          exit "$rc"
 
       # Placed AFTER the rs release-path evidence (build, load, smoke, rehearse, SBOM) and BEFORE
       # the `if: always()` upload steps: a console failure here stops the job, but only once every
@@ -216,6 +289,9 @@ jobs:
       # overflowed once, and the job's only other reading is at job start, before the rs builds.
       # The rc is kept and re-raised, so the second reading is printed on a failure too.
       - name: Build + smoke both consoles
+        # SMA-671: see "Console release sequence". Row W1 pins this line.
+        env:
+          CONSOLE_PARITY_REQUIRED: '1'
         run: |
           df -h /
           rc=0

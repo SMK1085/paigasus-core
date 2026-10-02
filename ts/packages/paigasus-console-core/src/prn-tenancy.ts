@@ -9,9 +9,11 @@
 // organization has NO org field (its org id is its own id); a team and a project have one.
 //
 // tests/unit/prn-tenancy.test.ts replays the kernel parity corpus through this file, and
-// tests/unit/prn-tenancy-delegation.test.ts proves that the kernel, not this file, reads the PRN.
+// tests/unit/prn-tenancy-delegation.test.ts proves that the kernel, not this file, reads the PRN,
+// and that it reads it with ONE kernel call (SMA-673).
 import 'server-only';
-import { prnBuild, prnErrorKind, prnOrg, prnRegion, prnResourceId, prnResourceType, prnService } from '@paigasus/kernel';
+import { prnBuild, prnParse } from '@paigasus/kernel';
+import { logger } from './logger';
 
 export type TenancyKind = 'organization' | 'team' | 'project';
 export type TenancyRef = { kind: TenancyKind; orgId: string; id: string };
@@ -49,24 +51,28 @@ type KernelFields = { resourceType: string; resourceId: string; org: string };
 
 /**
  * The kernel's view of `prn`, or null when the kernel rejects it, when it names another service,
- * when it carries a region, OR WHEN A KERNEL CALL FAILS.
+ * when it carries a region, OR WHEN THE KERNEL CALL FAILS.
  *
- * That last case is why the try is here. `parseTenancyPrn` returns `TenancyRef | null`, so it must
- * be TOTAL — a Next server component calls it on a URL segment, and a throw there is a 500 where a
- * 404 belongs, on input an attacker controls. An empty `prnErrorKind` happens to imply the other
- * five accessors succeed today, because all six call the same `Prn::parse`, but NOTHING pins that:
- * a wasm runtime failure, or an accessor that one day validates more than `parse` does, would break
- * the invariant. The catch covers the kernel calls ONLY. IAM's tenancy rule stays outside it, in
- * the caller below, so a programming error of ours is never swallowed as "not a tenancy PRN".
+ * ONE kernel call reads every field (SMA-673), so there is no cross-call invariant to trust. The try
+ * is still here because `parseTenancyPrn` returns `TenancyRef | null` and must be TOTAL: a Next
+ * server component calls it on a URL segment, and a throw there is a 500 where a 404 belongs, on
+ * input an attacker controls. The call can still throw: a wasm runtime failure, or the TypeError
+ * that `prnParse` raises on a glue defect. The catch logs that failure, because the log line is the
+ * only runtime signal of such a defect. It logs the error's NAME only, never the PRN or the message:
+ * redaction is the caller's contract (logger.ts). The catch covers the kernel call ONLY. IAM's
+ * tenancy rule stays outside it, in the callers below, so a programming error of ours is never
+ * swallowed as "not a tenancy PRN".
  */
 function readKernelFields(prn: string): KernelFields | null {
   try {
-    // The kernel is the grammar: a non-empty kind is any malformed PRN.
-    if (prnErrorKind(prn) !== '') return null;
-    if (prnService(prn) !== 'iam' || prnRegion(prn) !== '') return null;
-    // prnOrg returns '' for an ABSENT org field; a malformed one is already an error kind above.
-    return { resourceType: prnResourceType(prn), resourceId: prnResourceId(prn), org: prnOrg(prn) };
-  } catch {
+    // The kernel is the grammar: `ok: false` is any malformed PRN.
+    const parsed = prnParse(prn);
+    if (!parsed.ok) return null;
+    if (parsed.service !== 'iam' || parsed.region !== '') return null;
+    // `org` is '' for an ABSENT org field; a malformed one is already `ok: false` above.
+    return { resourceType: parsed.resourceType, resourceId: parsed.resourceId, org: parsed.org };
+  } catch (error) {
+    logger.appEvent('prn.kernel_call_failed', { error: error instanceof Error ? error.name : 'unknown' });
     return null;
   }
 }
@@ -109,7 +115,7 @@ export function projectPrn(orgId: string, projectId: string): string {
  * IAM's principal PRN (a user or a service account): `resourceType === 'principal'`, no org field
  * — the same shape rule as `organization`. NOT a tenancy node: a principal is an actor, not a place
  * in the org/team/project tree, so it is not a `TenancyKind` and `parseTenancyPrn` never returns
- * one. Kept here because it reads the same kernel calls as the tenancy readers above.
+ * one. Kept here because it reads the same kernel call as the tenancy readers above.
  */
 export type PrincipalRef = { readonly id: string };
 

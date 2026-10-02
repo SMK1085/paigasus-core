@@ -1,0 +1,4 @@
+Package: ca-certificates
+Status: install ok installed
+Architecture: all
+Version: 20260601~24.04.1

@@ -85,6 +85,14 @@ pub fn prn_resource_id(s: String) -> napi::Result<String> {
     Prn::parse(&s).map(|p| p.resource_id().as_hyphenated().to_string()).map_err(to_napi)
 }
 
+/// Parse `s` ONCE and return `[errorKind, service, region, org, resourceType, resourceId]`: always
+/// six strings, never a throw. A valid PRN has `errorKind === ""`; an invalid one has the
+/// `kind()` token and five empty fields. Use `prnParse` from `@paigasus/kernel`, not this raw form.
+#[napi(js_name = "prnParseFields")]
+pub fn prn_parse_fields(s: String) -> Vec<String> {
+    paigasus_kernel::wire::prn_parse_fields(&s)
+}
+
 /// Validate a millisecond timestamp before the `as u64` cast, or return `napi::Error("bad-unix-ms")`
 /// (a bare cast would silently coerce NaN→0, +Inf→`u64::MAX`, negative→0, fractional→truncated, and
 /// any finite value ≥ `u64::MAX` saturated to `u64::MAX`).

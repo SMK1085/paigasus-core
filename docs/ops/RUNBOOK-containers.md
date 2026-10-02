@@ -78,6 +78,16 @@ directory is `(console)`, but the filter patterns use `*console*`: `repo:actionl
 `(` or `)` to git. The `*` form matches the same files, and the gate still reds a pattern that
 matches no file.
 
+`@paigasus/next-config` (`ts/packages/paigasus-next-config/**`) is NOT on the filter (SMA-671).
+Its `canonicalBasePath` sets the compiled `basePath`, and `ts/Dockerfile` fails the build when that
+value is different from the `BASE_PATH` build argument. But the package is a Moon `input` of the
+console `build`, `typecheck`, `test` and `test-e2e` tasks, so the rule above excludes it. The
+primary control is the ordinary build: `base-path.test.ts` and `next-config.test.ts` pin `/iam`,
+the iam-console e2e specs use literal `/iam/...` paths, and the `standalone-runtime.test.ts` of
+gateway-console starts the built server and requests `/gateway/healthz`. The second control is
+`chart.yml`. It runs `ts/Dockerfile`, with the `basePath` check, on each PR that changes the
+package. It reports a failed console build as an infrastructure error (rc 2).
+
 That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` or
 `ts/Dockerfile` — already triggers the workflow automatically via its `pull_request` path filter;
 no manual step is needed there. Run `gh workflow run images.yml --ref <branch>` instead on a PR
@@ -474,6 +484,9 @@ image has the same shape as the Rust service images:
     `PAIGASUS_SMOKE_KERNEL_CONTROL: 'off'` on "Smoke this service". Unset or `on` runs the
     control; any other value is a usage error. The smoke removes the control container as soon as
     its row finishes.
+  - `CONSOLE_PARITY_REQUIRED` is the second switch of the console smoke (SMA-671). It has the
+    opposite polarity: unset, empty or `0` means "not required", `1` means "required", and any
+    other value is a usage error. Only the two console smoke steps of `images.yml` set it.
   - The Redis digest has two copies: `CONSOLE_SMOKE_REDIS_IMAGE` in `ci/images/run.sh` and
     `ci/kind/manifests/redis.yaml`. Each names the other. No check compares them.
   - A killed run can leave the Redis container and the network behind. Both carry the label
@@ -483,22 +496,44 @@ image has the same shape as the Rust service images:
 
 Two more facts about the staged-tree parity check are important:
 
-- **The check runs locally only.** It compares the staged `.next/static` of the image with a host
-  build at `ts/apps/<app>/.next/standalone/apps/<app>/.next/static`. It runs only when that host
-  build exists. The `images` job in `.github/workflows/images.yml` (`ci/images/run.sh
-  all-consoles`) does not make a host build. So in CI the check always takes its "not checked"
-  path and gates nothing. Use it as a local aid, not as a CI guarantee. A green CI `all-consoles`
-  run does not give parity coverage; run `moon run <app>-ts:build` locally before you use it.
+- **The check gates in `images.yml` (SMA-671).** It compares the staged `.next/static` of the
+  image with a host build at `ts/apps/<app>/.next/standalone/apps/<app>/.next/static`. The
+  `images` job makes that host build on each leg, before the console smoke:
+  `moon run iam-console-ts:build gateway-console-ts:build --upstream none`. It sets
+  `CONSOLE_PARITY_REQUIRED: '1'` on its two console smoke steps. With that value, a missing host
+  build is an error, not a "NOT CHECKED" line. So the check gates on amd64 on each PR that the
+  `images.yml` filter selects, and on amd64 and arm64 on `main` and on a manual dispatch.
+- **The limit.** The check does NOT gate a PR that changes only `ts/apps/*/moon.yml`. That file is
+  not on the `images.yml` filter (SMA-671 Q5), and `chart.yml`, which covers `ts/apps/*/**`, runs no
+  host build and no smoke. So a staging drift on the `moon.yml` side shows first on the `main` push
+  after the merge. `tests/standalone-staging.test.ts` catches only the coarse case (the staging
+  removed). Do not read the check as "parity gates every PR".
+- `release.yml` does not set the variable, so the release smoke prints "NOT CHECKED" on purpose:
+  it has no host build. Locally, run `moon run <app>-ts:build` before the smoke, or the check
+  prints "NOT CHECKED".
+- Row W1 of `ci/images/console-selftest.sh` fails when a console smoke step of `images.yml` loses
+  the `CONSOLE_PARITY_REQUIRED: '1'` line, gets another value, or runs before the host-build step.
+- After the host build, the same step runs `ci/images/run.sh context-check`. It fails when the
+  host build leaves a file under `ts/` that `ts/.dockerignore` does not exclude, changes a tracked
+  file there, or adds any file under `rs/crates/bindings` (the named context `bindings`, which has
+  no `.dockerignore`). Such a file would enter the image build context of `images.yml` but not of
+  `release.yml`, which builds from a clean checkout.
 - **Parity depends on an assumption: the host build and the image build give the same chunk
   names.** This was true in every measurement, but nothing makes sure of it. Four things can make
   it false. The first is a Next or Turbopack bump that changes how chunk names are hashed. The
   second is a compile-time variable that is different between the two builds. The third is the
   platform difference between a developer's machine and the builder image. The fourth is that the
   filtered `pnpm install` resolves a different optional platform dependency than a full install.
-  When the assumption fails, it fails on every run. The failure goes to the parity error that
-  already states that the mismatch is not a drift between `ts/Dockerfile` and `moon.yml`.
+  In `images.yml` both builds run on the same linux runner, so the third cause does not apply
+  there. When the assumption fails, it fails on every run. In `images.yml` the error then says
+  that both builds come from the same commit and names "the chunk-name assumption failing". Read it
+  as that, not as a drift between `ts/Dockerfile` and `moon.yml`. Do not delete `.next` to silence
+  it. The rollback is a reviewed PR that removes the two `CONSOLE_PARITY_REQUIRED` lines from
+  `images.yml` AND changes row W1 in the same PR.
 
-`ci/images/console-selftest.sh` proves the checks of this section. For each check it applies one
+`ci/images/console-selftest.sh` proves the checks of this section. Since SMA-671 it also holds
+the parity rows (SP, PF), the Docker-context rows (CX), the workflow pin (W1) and the
+release-sequence rows (RS). For each check it applies one
 mutation and requires the check's own error text, and the unchanged files must stay green. It runs
 the rendered healthcheck file in the pinned runtime image against a server that never answers:
 with the signal the file exits 1 with a `TimeoutError`, and without it the file hangs until a
@@ -551,11 +586,63 @@ It adds the architecture, because a per-arch build can run on two different runn
 workflow. `.github/workflows/images.yml` runs `build-oci` and uploads these files as a CI
 artifact named `chisel-manifests-<arch>`, with 90-day retention.
 
+Since SMA-665, the image itself also carries a record of the cut: `/var/lib/chisel/manifest.wall`
+(chisel's own manifest) and `/var/lib/dpkg/status.d/libc6` (see the next subsection).
+
 This is the answerable half of a real limit. `chisel cut` uses the **live** Ubuntu archive (see
 § 2.6 of the design document). So two builds one month apart produce different, patched base
 layers. The image is **not** bit-reproducible from `rs/Dockerfile` alone. The manifest artifact
-for one build is the only record of which packages that build used. Without it, you cannot answer
-"which libc is in the image I am running" after the fact.
+is the only CI artifact that records which packages one build used. The image records of SMA-665
+give the same answer from the image itself. If you have neither the manifest artifact nor an
+image that carries these records, you cannot answer "which libc is in the image I am running"
+after the fact. An image built before SMA-665 has no such records.
+
+### Which Ubuntu packages does the image SBOM list?
+
+Since SMA-665, the SBOM of `paigasus-iam` and `paigasus-gateway` lists one Debian entry for each
+Ubuntu package of the chisel cut. Two kinds of file in the image give that data:
+
+- `/var/lib/chisel/manifest.wall` is chisel's own record of the cut, from the `base-files_chisel`
+  slice. It is a zstd-compressed jsonwall file. syft 1.52.0 cannot read it.
+- `/var/lib/dpkg/status.d/<package>` holds one dpkg status stanza for each package.
+  `/var/lib/dpkg/status.d/<package>.md5sums` lists the files of that package that the cut
+  installed. `rs/docker/chisel-dpkg-status.sh` writes both in the `rootfs` stage of
+  `rs/Dockerfile`, from the manifest and from the `Fetching pool/…` lines of the cut. This is the
+  layout of the distroless images, and syft's `dpkg-db-cataloger` reads it. The `.md5sums` files
+  are necessary: without them, syft also lists `libgcc_s.so.1` as a second package, `gcc-14`.
+
+To read the data of an image:
+
+```bash
+docker create --name sbom-probe <image>
+docker cp sbom-probe:/var/lib/dpkg/status.d - | tar -tv
+docker cp sbom-probe:/var/lib/dpkg/status.d/libc6 - | tar -xO
+docker rm sbom-probe
+```
+
+The release checks this data. `ci/images/release_decision.py sbom-floor` compares the Debian
+entries of the SBOM with `chisel-manifest-<service>-<arch>.txt` of the same build. Each package
+of that list must be in the SBOM exactly once, with the same version and architecture. The SBOM
+must have no other Debian entry. A failure stops the release before the upload.
+
+Know these limits before you use the SBOM for a vulnerability scan:
+
+- **The image has no `dpkg`.** The `status.d` data is a package list only. No tool in the image
+  reads it.
+- **The packages are partial.** Each stanza says `Status: install ok installed`, but the cut
+  installs only some slices of the package. A scanner can report a CVE for a file that is not in
+  the image. These are false positives, not false negatives. Sven accepted them (SMA-665 Q6).
+  Before you act on a finding, find the file of the finding in the `.md5sums` file of the
+  package, or in `manifest.wall`.
+- **The `Source:` line has no source version.** A scanner that needs the source version uses the
+  binary version.
+- **A syft bump can stop the release.** A later syft can get a chisel cataloger
+  (anchore/syft#5091). It then lists each package twice: once from `status.d` and once from
+  `manifest.wall`. The floor then fails with "expected exactly once". This is intended. In the
+  PR that bumps syft, remove `rs/docker/chisel-dpkg-status.sh` and its `RUN` line in
+  `rs/Dockerfile`, then make the floor pass again. `images.yml` shows the failure on that PR, but
+  it is not a required check, so the PR can merge red, and the next release then stops at the
+  floor.
 
 ## Release tooling (SMA-658, PR 1)
 
@@ -695,7 +782,9 @@ Both registries hold the same index digest. GHCR stores three attestations and a
 The build-provenance attestation has the INDEX digest as its subject, which is the digest the two
 commands above use. The two SBOM attestations have a PER-PLATFORM digest as their subject, one for
 amd64 and one for arm64, because each architecture has its own SBOM. So an SBOM query against the
-index digest finds nothing. Get the two per-platform digests from the index itself:
+index digest finds nothing. Each service SBOM lists the Rust crates and the Ubuntu packages of the
+chisel cut (see "Which Ubuntu packages does the image SBOM list?" in § 7). Get the two
+per-platform digests from the index itself:
 
 ```bash
 crane manifest ghcr.io/smk1085/paigasus-<svc>@<digest> \

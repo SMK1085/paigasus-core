@@ -62,6 +62,16 @@ class PrnFieldsCase(TypedDict):
     resource_id: str
 
 
+class PrnParseCase(TypedDict):
+    input: str
+    error_kind: str
+    service: str
+    region: str
+    org: str
+    resource_type: str
+    resource_id: str
+
+
 def _read(name: str) -> object:
     return cast("object", json.loads((VECTORS / f"{name}.json").read_text()))
 
@@ -71,6 +81,7 @@ UUID7_CASES = cast("list[Uuid7Case]", _read("uuid7"))
 PRN_CANONICAL_CASES = cast("list[PrnCanonicalCase]", _read("prn_canonical"))
 PRN_CEDAR_CASES = cast("list[PrnCedarCase]", _read("prn_cedar"))
 PRN_FIELDS_CASES = cast("list[PrnFieldsCase]", _read("prn_fields"))
+PRN_PARSE_CASES = cast("list[PrnParseCase]", _read("prn_parse"))
 
 
 def test_corpora_present_and_non_empty() -> None:
@@ -82,6 +93,7 @@ def test_corpora_present_and_non_empty() -> None:
         ("prn_canonical", len(PRN_CANONICAL_CASES)),
         ("prn_cedar", len(PRN_CEDAR_CASES)),
         ("prn_fields", len(PRN_FIELDS_CASES)),
+        ("prn_parse", len(PRN_PARSE_CASES)),
     ]
     for name, count in corpora:
         assert count > 0, f"{name} corpus is empty"
@@ -127,3 +139,18 @@ def test_prn_fields_matches_corpus(case: PrnFieldsCase) -> None:
         )
         == case["prn"]
     )
+
+
+@pytest.mark.parametrize("case", PRN_PARSE_CASES, ids=[c["input"][:80] or "<empty>" for c in PRN_PARSE_CASES])
+def test_prn_parse_matches_corpus(case: PrnParseCase) -> None:
+    # Python has NO one-call binding (SMA-673 D3, Q1). It replays the one-call corpus through its six
+    # single-field accessors, so the Python view of every row agrees with the wire form.
+    assert prn_error_kind(case["input"]) == case["error_kind"]
+    if case["error_kind"] == "":
+        assert prn_service(case["input"]) == case["service"]
+        assert prn_region(case["input"]) == case["region"]
+        assert prn_org(case["input"]) == case["org"]
+        assert prn_resource_type(case["input"]) == case["resource_type"]
+        assert prn_resource_id(case["input"]) == case["resource_id"]
+    else:
+        assert (case["service"], case["region"], case["org"], case["resource_type"], case["resource_id"]) == ("", "", "", "", "")

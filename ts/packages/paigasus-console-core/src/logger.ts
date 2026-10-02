@@ -21,7 +21,10 @@ export type AppEventName =
   | 'discovery.redis_operation_timeout'
   | 'iam.call_failed'
   // SMA-636 § 5.2: CreateServiceAccount succeeded, and the gateway_user grant after it failed.
-  | 'gateway.sa.grant_failed';
+  | 'gateway.sa.grant_failed'
+  // SMA-673 D5: the one kernel call in prn-tenancy.ts threw (a wasm runtime failure or a glue
+  // defect). Fields: `error`, the thrown value's name only. Never the PRN, never the message.
+  | 'prn.kernel_call_failed';
 
 export type AppEventFields = Readonly<Record<string, string | number | boolean | null>>;
 

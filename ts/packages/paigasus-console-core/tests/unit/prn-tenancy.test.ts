@@ -208,4 +208,16 @@ describe('the module holds no PRN grammar of its own', () => {
   it.each(['.split(', '.indexOf(', '.slice('])('does not call %s', (call) => {
     expect(source).not.toContain(call);
   });
+
+  // SMA-673 5.3: IAM's tenancy rule stays OUTSIDE the try in readKernelFields, so a programming
+  // error in the rule is never swallowed as "not a tenancy PRN". Same source-text method as above.
+  it("keeps IAM's tenancy rule outside the try in readKernelFields", () => {
+    const fn = source.split('function readKernelFields(')[1] ?? '';
+    const tryBody = fn.split('try {')[1]?.split('} catch')[0] ?? '';
+    // The anchor: without it, a renamed function or a missing try would make the two checks below
+    // pass on an empty string.
+    expect(tryBody).toContain('prnParse(');
+    expect(tryBody).not.toContain('TENANCY_KINDS');
+    expect(tryBody).not.toContain("'principal'");
+  });
 });

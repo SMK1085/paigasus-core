@@ -11,8 +11,9 @@
 # How it loads the code under test: awk copies each function named in FUNCS out of run.sh, from
 # its `<name>() {` line to the next line that is exactly `}`. The copy goes through `bash -n`, is
 # sourced, and each name must then be a defined function. run.sh itself is never sourced: its
-# dispatch code at the end exits before any function could run. ROOT is the only global that a
-# copied function reads, and the harness sets it inside each row's subshell.
+# dispatch code at the end exits before any function could run. A copied ROW function reads no
+# global except ROOT, which run_fn sets to FX_ROOT inside each row's subshell. smoke_consoles reads
+# more globals; smoke_case sets them and stubs every row that needs a real image.
 #
 # How it calls the code under test: in its production shape. assert_console_pins runs as a plain
 # command under `set -euo pipefail`, as the run.sh dispatch runs it. A smoke-row function runs as
@@ -27,13 +28,16 @@
 # false annotation. Exit 1 on any FAIL, 2 on an infrastructure error in the loader.
 set -euo pipefail
 export PROTO_REPORTER=text
+# SMA-671: no row reads the parity mode from the environment. A developer's shell or a future
+# job-level env must not change a row; the PF rows set the variable inside their own wrapper.
+unset CONSOLE_PARITY_REQUIRED
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 RUN_SH="$HERE/run.sh"
 
 # The functions copied out of run.sh. A task that adds a function to run.sh adds its name here.
-FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe kernel_control_flag"
+FUNCS="assert_console_pins with_deadline console_node_version_row smoke_consoles console_image_config_row console_healthcheck_row console_smoke_cleanup app_for base_path_for console_probe_path_for console_new_sid console_container_args console_smoke_redis_start console_seed_session console_kernel_route_row console_kernel_control_row console_kernel_control_probe kernel_control_flag parity_required_flag console_staged_parity_row docker_context_leaks"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/paigasus-console-selftest.XXXXXX")"
 HC_CTR="selftest-hc-$$"
@@ -755,6 +759,136 @@ run_fn E6 1 ".env scan NOT checked — grep exited 2" "" "$T/argv-config" consol
 # shellcheck disable=SC2016 # the pinned call line is literal text
 pin_rows P1b "$T/fn-smoke_consoles.sh" 'console_image_config_row "$app" "$image" || ec=1'
 
+# --- SMA-671: console_staged_parity_row (SP rows) --------------------------------------------
+# The argv that the row must hand to docker: the staged-tree walk of the IMAGE, never of a name
+# that the row builds from <app> (the SMA-688 rule).
+printf '%s\n' run --rm --entrypoint /nodejs/bin/node "$T_IMAGE" -e '<multi-line>' /app/apps/iam-console -- > "$T/argv-parity"
+
+# sp_fx <name> <build-id> <file>... — a fake host build of iam-console under $T/fx-sp-<name>, and
+# FX_ROOT points at it (call it AFTER stub_reset, which resets FX_ROOT). .next/BUILD_ID holds
+# <build-id>; there is no BUILD_ID file when <build-id> is empty. Each <file> is made under
+# .next/static, and a leading <BUILD_ID>/ becomes <build-id>/.
+sp_fx() {
+  local name="$1" id="$2" std f
+  shift 2
+  FX_ROOT="$T/fx-sp-$name"
+  std="$FX_ROOT/ts/apps/iam-console/.next/standalone/apps/iam-console"
+  rm -rf "$FX_ROOT"
+  mkdir -p "$std/.next/static"
+  if [ -n "$id" ]; then printf '%s\n' "$id" > "$std/.next/BUILD_ID"; fi
+  for f in "$@"; do
+    case "$f" in "<BUILD_ID>/"*) f="$id/${f#<BUILD_ID>/}" ;; esac
+    mkdir -p "$std/.next/static/$(dirname "$f")"
+    : > "$std/.next/static/$f"
+  done
+}
+SP_ID="spBuildId0123"
+# What the image walk prints for a tree equal to `sp_fx … chunks/a.js '<BUILD_ID>/_buildManifest.js'`.
+SP_WALK_OK="$(printf '%s\n' public=0 'chunks/a.js' '<BUILD_ID>/_buildManifest.js')"
+
+stub_reset; FX_ROOT="$T/fx-sp-none"; mkdir -p "$FX_ROOT"
+run_fn SP1 0 "" "::error::" none console_staged_parity_row iam-console "$T_IMAGE" optional
+expect_in SP1-out "$T/SP1.out" "staged-tree parity NOT CHECKED"
+stub_reset; FX_ROOT="$T/fx-sp-none"
+run_fn SP2 1 "parity was required but NOT checked" "" none console_staged_parity_row iam-console "$T_IMAGE" required
+stub_reset; FX_ROOT="$T/fx-sp-none"
+run_fn SP2b 1 "the third argument must be required or optional, not 'maybe'" "" none console_staged_parity_row iam-console "$T_IMAGE" maybe
+stub_reset; sp_fx ok "$SP_ID" chunks/a.js '<BUILD_ID>/_buildManifest.js'; STUB_WALK_OUT="$SP_WALK_OK"
+run_fn SP3 0 "" "::error::" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+expect_in SP3-out "$T/SP3.out" "staged tree matches the host build (2 files, public=0)"
+stub_reset; sp_fx ok "$SP_ID" chunks/a.js '<BUILD_ID>/_buildManifest.js'; STUB_WALK_OUT="$SP_WALK_OK"
+run_fn SP3b 0 "" "::error::" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" optional
+expect_in SP3b-out "$T/SP3b.out" "staged tree matches the host build (2 files, public=0)"
+stub_reset; sp_fx pub "$SP_ID" chunks/a.js '<BUILD_ID>/_buildManifest.js'
+mkdir -p "$FX_ROOT/ts/apps/iam-console/.next/standalone/apps/iam-console/public"
+STUB_WALK_OUT="$(printf '%s\n' public=1 'chunks/a.js' '<BUILD_ID>/_buildManifest.js')"
+run_fn SP3c 0 "" "::error::" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+expect_in SP3c-out "$T/SP3c.out" "staged tree matches the host build (2 files, public=1)"
+stub_reset; sp_fx dirs "$SP_ID" media/f.woff '<BUILD_ID>/_buildManifest.js'; STUB_WALK_OUT="$SP_WALK_OK"
+run_fn SP4 1 "different top-level directories" "" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+stub_reset; sp_fx files "$SP_ID" chunks/b.js '<BUILD_ID>/_buildManifest.js'; STUB_WALK_OUT="$SP_WALK_OK"
+run_fn SP4b 1 "the chunk-name assumption failing" "Re-run 'moon run" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+stub_reset; sp_fx files "$SP_ID" chunks/b.js '<BUILD_ID>/_buildManifest.js'; STUB_WALK_OUT="$SP_WALK_OK"
+run_fn SP4c 1 "DIFFERENT sources" "the chunk-name assumption failing" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" optional
+stub_reset; sp_fx ok "$SP_ID" chunks/a.js '<BUILD_ID>/_buildManifest.js'
+STUB_WALK_OUT="$(printf '%s\n' public=1 'chunks/a.js' '<BUILD_ID>/_buildManifest.js')"
+run_fn SP4d 1 "disagree on staging public/" "" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+stub_reset; sp_fx ok "$SP_ID" chunks/a.js; STUB_WALK_OUT="Error: ENOENT: no such file or directory, scandir '/app/apps/iam-console/.next/static'"; STUB_WALK_RC=1
+run_fn SP5 1 "the staging copy in ts/Dockerfile did not run" "" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+stub_reset; sp_fx ok "$SP_ID" chunks/a.js; STUB_WALK_OUT=""; STUB_WALK_RC=125
+run_fn SP5b 1 "NOT checked — docker exited 125" "" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+# Review Focus 5: an empty walk and a missing BUILD_ID are named errors, never a pass.
+stub_reset; sp_fx ok "$SP_ID" chunks/a.js; STUB_WALK_OUT=""; STUB_WALK_RC=0
+run_fn SP5c 1 "printed nothing" "" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+stub_reset; sp_fx noid "" chunks/a.js; STUB_WALK_OUT="$SP_WALK_OK"
+run_fn SP5d 1 "has no .next/BUILD_ID" "" "$T/argv-parity" console_staged_parity_row iam-console "$T_IMAGE" required
+
+# shellcheck disable=SC2016 # the pinned call line is literal text
+pin_rows P1d "$T/fn-smoke_consoles.sh" 'console_staged_parity_row "$app" "$image" "$parity" || ec=1'
+
+# --- SMA-671: docker_context_leaks (CX rows) ---------------------------------------------------
+# A fixture git repository with one commit. It commits, so it follows ci/CLAUDE.md (SMA-708,
+# SMA-714): no maintenance, no gc, no signing, no global or system config.
+cx_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$FX_ROOT" "$@"; }
+# cx_fx <name> [<dockerignore-file>] — the fixture, with ts/.dockerignore copied from the real one
+# (or from <dockerignore-file>), a root .gitignore like the repo's, two tracked files under
+# ts/apps/a and one under rs/crates/bindings/b. Call it AFTER stub_reset; FX_ROOT points at it.
+cx_fx() {
+  FX_ROOT="$T/fx-cx-$1"
+  rm -rf "$FX_ROOT"
+  mkdir -p "$FX_ROOT/ts/apps/a" "$FX_ROOT/rs/crates/bindings/b"
+  cp "${2:-$REPO/ts/.dockerignore}" "$FX_ROOT/ts/.dockerignore"
+  printf '%s\n' 'node_modules/' '.next/' '*.tsbuildinfo' > "$FX_ROOT/.gitignore"
+  printf '%s\n' 'export {};' > "$FX_ROOT/ts/apps/a/page.ts"
+  printf '%s\n' '/// <reference types="next" />' > "$FX_ROOT/ts/apps/a/next-env.d.ts"
+  printf '%s\n' 'module.exports = {};' > "$FX_ROOT/rs/crates/bindings/b/index.js"
+  cx_git init -q || infra "git init failed for the CX fixture"
+  cx_git config maintenance.auto false
+  cx_git config gc.auto 0
+  cx_git config commit.gpgsign false
+  cx_git config tag.gpgsign false
+  cx_git add -A || infra "git add failed for the CX fixture"
+  cx_git -c user.name=selftest -c user.email=selftest@example.invalid commit -q -m fixture \
+    || infra "the CX fixture commit failed"
+}
+# What a host build leaves that ts/.dockerignore DOES exclude.
+cx_excluded() {
+  mkdir -p "$FX_ROOT/ts/node_modules/p" "$FX_ROOT/ts/apps/a/node_modules/q" "$FX_ROOT/ts/apps/a/.next/static"
+  : > "$FX_ROOT/ts/node_modules/p/index.js"
+  : > "$FX_ROOT/ts/apps/a/node_modules/q/index.js"
+  : > "$FX_ROOT/ts/apps/a/.next/static/x.js"
+  : > "$FX_ROOT/ts/apps/a/.env.local"
+}
+
+stub_reset; cx_fx 0; cx_excluded
+run_fn CX0 0 "" "::error::" none docker_context_leaks
+expect_in CX0-out "$T/CX0.out" "docker context: no host artifact"
+stub_reset; cx_fx 1; cx_excluded; : > "$FX_ROOT/ts/apps/a/tsconfig.tsbuildinfo"
+run_fn CX1 1 "docker context: 'ts/apps/a/tsconfig.tsbuildinfo' (git status '!!')" "node_modules" none docker_context_leaks
+stub_reset; cx_fx 2; : > "$FX_ROOT/ts/apps/a/new.txt"
+run_fn CX2 1 "docker context: 'ts/apps/a/new.txt' (git status '??')" "" none docker_context_leaks
+# Review Focus 3: a tracked file that the build rewrites is a leak too.
+stub_reset; cx_fx 3; printf '%s\n' '// changed' >> "$FX_ROOT/ts/apps/a/next-env.d.ts"
+run_fn CX3 1 "docker context: 'ts/apps/a/next-env.d.ts' (git status ' M')" "" none docker_context_leaks
+stub_reset; cx_fx 4; : > "$FX_ROOT/rs/crates/bindings/b/x.node"
+run_fn CX4 1 "docker context: 'rs/crates/bindings/b/x.node'" "" none docker_context_leaks
+printf '%s\n' '**/node_modules' '!keep' > "$T/cx5-ignore"
+stub_reset; cx_fx 5 "$T/cx5-ignore"
+run_fn CX5 1 "cannot read the pattern '!keep'" "" none docker_context_leaks
+printf '%s\n' '**/node_modules' 'apps/a/x' > "$T/cx5b-ignore"
+stub_reset; cx_fx 5b "$T/cx5b-ignore"
+run_fn CX5b 1 "cannot read the pattern 'apps/a/x'" "" none docker_context_leaks
+# A pattern without **/ excludes the top level only, as in Docker.
+printf '%s\n' 'node_modules' '**/.next' > "$T/cx6-ignore"
+stub_reset; cx_fx 6 "$T/cx6-ignore"; cx_excluded
+run_fn CX6 1 "docker context: 'ts/apps/a/node_modules/'" "'ts/node_modules/'" none docker_context_leaks
+# Review Focus 3: a path with a space is named whole (-z output, no quoting).
+stub_reset; cx_fx 7; : > "$FX_ROOT/ts/apps/a/my file.txt"
+run_fn CX7 1 "docker context: 'ts/apps/a/my file.txt'" "" none docker_context_leaks
+cx_nogit() { export GIT_CEILING_DIRECTORIES="$T"; docker_context_leaks; }
+stub_reset; FX_ROOT="$T/fx-cx-nogit"; mkdir -p "$FX_ROOT/ts"; cp "$REPO/ts/.dockerignore" "$FX_ROOT/ts/.dockerignore"
+run_fn CX8 1 "docker context NOT checked — git status exited" "" none cx_nogit
+
 # --- console_healthcheck_row (H rows) ----------------------------------------------------------
 # The argv that console_healthcheck_row must hand to docker (through with_deadline).
 printf '%s\n' exec smoke-selftest /nodejs/bin/node /app/healthcheck.mjs -- > "$T/argv-health"
@@ -1004,6 +1138,35 @@ run_fn KC2 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" none kc_se
 stub_reset
 run_fn KC3 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" none kc_set ""
 
+# --- SMA-671: the parity switch (PF rows) -----------------------------------------------------
+# shellcheck disable=SC2034 # parity_required_flag reads the variable.
+pf_set() { CONSOLE_PARITY_REQUIRED="$1"; parity_required_flag; }
+pf_unset() { unset CONSOLE_PARITY_REQUIRED; parity_required_flag; }
+stub_reset
+run_fn PF0 0 "" "::error::" none pf_unset
+expect_in PF0-out "$T/PF0.out" "--parity=optional"
+stub_reset
+run_fn PF0b 0 "" "::error::" none pf_set ""
+expect_in PF0b-out "$T/PF0b.out" "--parity=optional"
+stub_reset
+run_fn PF0c 0 "" "::error::" none pf_set 0
+expect_in PF0c-out "$T/PF0c.out" "--parity=optional"
+stub_reset
+run_fn PF1 0 "" "::error::" none pf_set 1
+expect_in PF1-out "$T/PF1.out" "--parity=required"
+stub_reset
+run_fn PF2 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1' (unset or empty means 0), not 'true'." "" none pf_set true
+# Review Focus 1: a near miss is a usage error, never a silent optional.
+stub_reset
+run_fn PF3 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" none pf_set " 1"
+expect_not_in PF3-out "$T/PF3.out" "--parity="
+stub_reset
+run_fn PF3b 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" none pf_set 01
+expect_not_in PF3b-out "$T/PF3b.out" "--parity="
+stub_reset
+run_fn PF3c 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" none pf_set yes
+expect_not_in PF3c-out "$T/PF3c.out" "--parity="
+
 # smoke_case <args...> — smoke_consoles with its globals set to dummy values and every row that
 # needs a real image replaced, so only the zone loop's wiring runs. Z_CALLS records which kernel
 # rows smoke_consoles called. Z_REDIS_RC is what the Redis start returns.
@@ -1018,7 +1181,6 @@ smoke_case() {
   CONSOLE_SMOKE_NETWORK=""
   CONSOLE_SMOKE_REDIS_IMAGE="redis:stub"
   CONSOLE_KERNEL_LINE="CompileError"
-  CONSOLE_STAGED_TREE_JS=""
   assert_fresh() { return 0; }
   console_node_version_row() { return 0; }
   console_image_config_row() { return 0; }
@@ -1027,6 +1189,7 @@ smoke_case() {
   console_seed_session() { return 0; }
   console_kernel_route_row() { echo "route $2$3" >> "$Z_CALLS"; }
   console_kernel_control_row() { echo "control $1" >> "$Z_CALLS"; }
+  console_staged_parity_row() { echo "parity $1 $3" >> "$Z_CALLS"; }
   smoke_consoles "$@"
 }
 # The stub curl answers the zone loop's three requests per zone in order: the page status (200),
@@ -1039,7 +1202,7 @@ z_curl() {
 }
 
 stub_reset; z_curl Z1; rm -f "$Z_CALLS"; Z_REDIS_RC=0
-run_fn Z1 1 "" "" any smoke_case --kernel-control=off iam=img:dev gateway=img:dev
+run_fn Z1 1 "" "" any smoke_case --kernel-control=off --parity=optional iam=img:dev gateway=img:dev
 expect_in Z1-skip-iam "$T/Z1.out" "iam-console: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off, the release path; SMA-675 Q5)"
 expect_in Z1-skip-gw "$T/Z1.out" "gateway-console: kernel control row skipped (PAIGASUS_SMOKE_KERNEL_CONTROL=off"
 expect_in Z1-route-iam "$Z_CALLS" "route /iam/orgs"
@@ -1049,22 +1212,31 @@ expect_no_call Z1 "-nokernel-"
 expect_call Z1-net "--network smoke-net-z"
 expect_call Z1-redis "PAIGASUS_SESSION_REDIS_URL=redis://smoke-redis-z:6379"
 expect_no_call Z1-nomem "PAIGASUS_SESSION_STORE=memory"
+expect_in Z1-parity-iam "$Z_CALLS" "parity iam-console optional"
+expect_in Z1-parity-gw "$Z_CALLS" "parity gateway-console optional"
 stub_reset; z_curl Z2; rm -f "$Z_CALLS"; Z_REDIS_RC=0
-run_fn Z2 1 "" "" any smoke_case --kernel-control=on iam=img:dev gateway=img:dev
+run_fn Z2 1 "" "" any smoke_case --kernel-control=on --parity=required iam=img:dev gateway=img:dev
 expect_in Z2-control-iam "$Z_CALLS" "control iam-console"
 expect_in Z2-control-gw "$Z_CALLS" "control gateway-console"
 expect_not_in Z2-noskip "$T/Z2.out" "kernel control row skipped"
+expect_in Z2-parity-iam "$Z_CALLS" "parity iam-console required"
+expect_in Z2-parity-gw "$Z_CALLS" "parity gateway-console required"
 stub_reset
 run_fn Z3 1 "the first argument must be --kernel-control=on or --kernel-control=off, not 'iam=img:dev'" "" none smoke_case iam=img:dev
 stub_reset
 run_fn Z4 1 "not '--kernel-control=maybe'" "" none smoke_case --kernel-control=maybe iam=img:dev
 # D6: with no Redis, the kernel rows do not run and the containers get the memory store.
 stub_reset; z_curl Z5; rm -f "$Z_CALLS"; Z_REDIS_RC=1
-run_fn Z5 1 "iam-console: kernel rows NOT run" "" any smoke_case --kernel-control=on iam=img:dev gateway=img:dev
+run_fn Z5 1 "iam-console: kernel rows NOT run" "" any smoke_case --kernel-control=on --parity=optional iam=img:dev gateway=img:dev
 expect_not_in Z5-norows "$Z_CALLS" "route"
 expect_call Z5-mem "PAIGASUS_SESSION_STORE=memory"
 expect_no_call Z5 "--network"
 Z_REDIS_RC=0
+# SMA-671: the second word is the parity mode. A bad or missing one stops before any docker call.
+stub_reset
+run_fn Z6 1 "the second argument must be --parity=required or --parity=optional, not '--parity=maybe'" "" none smoke_case --kernel-control=on --parity=maybe iam=img:dev
+stub_reset
+run_fn Z6b 1 "the second argument must be --parity=required or --parity=optional, not 'iam=img:dev'" "" none smoke_case --kernel-control=on iam=img:dev
 
 # AC 3: CONSOLE_SMOKE_ENV sets no session store any more; console_container_args owns it.
 awk '/^CONSOLE_SMOKE_ENV=\($/ { on = 1 } on { print } on && /^\)$/ { on = 0 }' "$RUN_SH" > "$T/env-block"
@@ -1078,6 +1250,20 @@ D1_RC=0
   PAIGASUS_SMOKE_KERNEL_CONTROL=bogus "$BASH" "$RUN_SH" all-consoles ) >"$T/D1.out" 2>"$T/D1.err" || D1_RC=$?
 check_row D1 "$D1_RC" 1 "PAIGASUS_SMOKE_KERNEL_CONTROL must be 'on' or 'off'" "" "$T/D1.out" "$T/D1.err"
 if [ -e "$T/argv" ]; then say_fail D1-nodocker "the stub docker was called" "$T/argv"; else say_pass D1-nodocker; fi
+# SMA-671 D2 and D3: the two console dispatch arms, through the REAL script. A bad parity value
+# stops each one before any docker call (the build of all-consoles included).
+rm -f "$T/argv"
+D2_RC=0
+( PATH="$T/stub:$PATH"; STUB_ARGV="$T/argv"; export PATH STUB_ARGV
+  CONSOLE_PARITY_REQUIRED=bogus "$BASH" "$RUN_SH" all-consoles ) >"$T/D2.out" 2>"$T/D2.err" || D2_RC=$?
+check_row D2 "$D2_RC" 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" "$T/D2.out" "$T/D2.err"
+if [ -e "$T/argv" ]; then say_fail D2-nodocker "the stub docker was called" "$T/argv"; else say_pass D2-nodocker; fi
+rm -f "$T/argv"
+D3_RC=0
+( PATH="$T/stub:$PATH"; STUB_ARGV="$T/argv"; export PATH STUB_ARGV
+  CONSOLE_PARITY_REQUIRED=bogus "$BASH" "$RUN_SH" smoke iam-console ) >"$T/D3.out" 2>"$T/D3.err" || D3_RC=$?
+check_row D3 "$D3_RC" 1 "CONSOLE_PARITY_REQUIRED must be '0' or '1'" "" "$T/D3.out" "$T/D3.err"
+if [ -e "$T/argv" ]; then say_fail D3-nodocker "the stub docker was called" "$T/argv"; else say_pass D3-nodocker; fi
 
 # --- SMA-675 call-site pins (P3 to P16) --------------------------------------------------------
 # shellcheck disable=SC2016 # the pinned lines are literal text
@@ -1108,6 +1294,192 @@ pin_rows P14 "$T/fn-console_kernel_control_probe.sh" 'if ! console_seed_session 
 pin_rows P15 "$T/fn-console_smoke_redis_start.sh" 'out="$(docker network create --label paigasus.smoke=console "$network" 2>&1)" || rc=$?'
 # shellcheck disable=SC2016
 pin_rows P16 "$T/fn-console_smoke_cleanup.sh" 'docker network rm "$CONSOLE_SMOKE_NETWORK" >/dev/null 2>&1 || true'
+
+# --- SMA-671: the workflow pin (W1 rows) ------------------------------------------------------
+# W1 keeps the production switch in place (guard-the-guard). It reads images.yml with awk (no YAML
+# library) and fails unless each CONSOLE smoke step sets CONSOLE_PARITY_REQUIRED: '1' in its own
+# step env, nothing else sets the variable, and the host-build step comes first. A console smoke
+# step is a step whose run: calls `ci/images/run.sh all-consoles`, or `ci/images/run.sh smoke`
+# with a first argument other than the cargo keys iam and gateway.
+W1_WF="$REPO/.github/workflows/images.yml"
+
+# w1_scan <workflow> — one line per step of the steps: list, in file order:
+# <index> TAB <console|host|other> TAB <value of CONSOLE_PARITY_REQUIRED in the step env, or -> TAB <name>
+# and a last line `stray TAB <n>`: the CONSOLE_PARITY_REQUIRED key lines outside a step env.
+w1_scan() {
+  awk -v q="'" '
+    function flush() {
+      if (n > 0) printf "%d\t%s\t%s\t%s\n", n, (console ? "console" : (host ? "host" : "other")), par, name
+    }
+    {
+      line = $0
+      if (match(line, /[^ ]/)) { ind = RSTART - 1; body = substr(line, RSTART) } else { ind = -1; body = "" }
+      comment = (substr(body, 1, 1) == "#")
+    }
+    line == "    steps:" { insteps = 1; next }
+    insteps && ind == 6 && substr(body, 1, 2) == "- " {
+      flush(); n++; console = 0; host = 0; par = "-"; inenv = 0; name = ""
+      if (substr(body, 1, 8) == "- name: ") name = substr(body, 9)
+      next
+    }
+    inenv && ind >= 0 && ind < 10 { inenv = 0 }
+    n > 0 && ind == 8 && name == "" && substr(body, 1, 6) == "name: " { name = substr(body, 7) }
+    n > 0 && ind == 8 && body == "env:" { inenv = 1; next }
+    !comment && substr(body, 1, 24) == "CONSOLE_PARITY_REQUIRED:" {
+      if (inenv) { v = substr(body, 25); sub(/^ +/, "", v); sub(/ +$/, "", v); par = v } else stray++
+      next
+    }
+    n > 0 && !comment {
+      if (index(line, "ci/images/run.sh all-consoles")) console = 1
+      if (index(line, "moon run iam-console-ts:build")) host = 1
+      p = index(line, "ci/images/run.sh smoke")
+      if (p) {
+        rest = substr(line, p + 22)
+        if (rest == "" || substr(rest, 1, 1) == " ") {
+          sub(/^ +/, "", rest); w = rest; sub(/ .*/, "", w); gsub("[\"" q "]", "", w)
+          if (w != "" && w != "iam" && w != "gateway") console = 1
+        }
+      }
+    }
+    END { flush(); printf "stray\t%d\t-\t-\n", stray + 0 }
+  ' "$1"
+}
+
+# w1_check <workflow> — rc 0 when the rules above hold; one `W1:` line on stderr per defect.
+w1_check() {
+  local wf="$1" rc=0 idx kind par name first_idx="" first_name="" host_idx="" host_name="" n_console=0 tab
+  tab="$(printf '\t')"
+  w1_scan "$wf" > "$T/w1-scan" || { echo "W1: awk could not read ${wf}" >&2; return 1; }
+  while IFS="$tab" read -r idx kind par name; do
+    if [ "$idx" = stray ]; then
+      if [ "$kind" -ne 0 ]; then
+        echo "W1: ${kind} CONSOLE_PARITY_REQUIRED line(s) outside a step env (a job or workflow env, or a run body); the Console image self-test step must not inherit the variable." >&2
+        rc=1
+      fi
+      continue
+    fi
+    if [ "$kind" = console ]; then
+      n_console=$((n_console + 1))
+      if [ -z "$first_idx" ]; then first_idx="$idx"; first_name="$name"; fi
+      if [ "$par" = "-" ]; then
+        echo "W1: step '${name}' runs a console smoke, but its own step env has no CONSOLE_PARITY_REQUIRED line." >&2
+        rc=1
+      elif [ "$par" != "'1'" ]; then
+        echo "W1: step '${name}' sets CONSOLE_PARITY_REQUIRED: ${par}; the only accepted line is CONSOLE_PARITY_REQUIRED: '1'." >&2
+        rc=1
+      fi
+    else
+      if [ "$kind" = host ] && [ -z "$host_idx" ]; then host_idx="$idx"; host_name="$name"; fi
+      if [ "$par" != "-" ]; then
+        echo "W1: step '${name}' sets CONSOLE_PARITY_REQUIRED, but it runs no console smoke." >&2
+        rc=1
+      fi
+    fi
+  done < "$T/w1-scan"
+  if [ "$n_console" -eq 0 ]; then
+    echo "W1: found no console smoke step in ${wf##*/} (a step that runs 'ci/images/run.sh all-consoles' or 'ci/images/run.sh smoke <console-key>')." >&2
+    return 1
+  fi
+  if [ -z "$host_idx" ]; then
+    echo "W1: no host-build step in ${wf##*/} (no step holds 'moon run iam-console-ts:build')." >&2
+    rc=1
+  elif [ "$host_idx" -gt "$first_idx" ]; then
+    echo "W1: the host-build step '${host_name}' comes after the console smoke step '${first_name}'." >&2
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    echo "W1: ${n_console} console smoke step(s) set CONSOLE_PARITY_REQUIRED: '1', after the host-build step '${host_name}'."
+  fi
+  return "$rc"
+}
+
+# w1_mut <row> <awk-program> — images.yml through the program, into $T/<row>.yml. The program sees
+# `step` (the name of the current step) and q (a single quote). A copy equal to the original is a
+# FAIL row: the mutation did not apply.
+w1_mut() {
+  awk -v q="'" '/^      - name: / { step = substr($0, 15) } '"$2" "$W1_WF" > "$T/$1.yml" \
+    || infra "awk could not mutate images.yml for $1"
+  if cmp -s "$W1_WF" "$T/$1.yml"; then say_fail "$1-applied" "the mutation did not apply"; else say_pass "$1-applied"; fi
+}
+
+stub_reset
+run_fn W1 0 "" "W1:" none w1_check "$W1_WF"
+expect_in W1-out "$T/W1.out" "W1: 2 console smoke step(s) set CONSOLE_PARITY_REQUIRED: '1'"
+# m1: the env line deleted.
+w1_mut W1-m1 '{ l = $0; sub(/^ +/, "", l) } step == "Console release sequence" && l == "CONSOLE_PARITY_REQUIRED: " q "1" q { next } { print }'
+stub_reset
+run_fn W1-m1 1 "step 'Console release sequence' runs a console smoke, but its own step env has no CONSOLE_PARITY_REQUIRED line" "" none w1_check "$T/W1-m1.yml"
+# m2: the env line moved to the cargo smoke step.
+w1_mut W1-m2 '{ l = $0; sub(/^ +/, "", l) } step == "Build + smoke both consoles" && l == "CONSOLE_PARITY_REQUIRED: " q "1" q { next } { print } $0 == "      - name: Smoke each service on its own" { print "        env:"; print "          CONSOLE_PARITY_REQUIRED: " q "1" q }'
+stub_reset
+run_fn W1-m2 1 "step 'Build + smoke both consoles' runs a console smoke, but its own step env has no|step 'Smoke each service on its own' sets CONSOLE_PARITY_REQUIRED, but it runs no console smoke" "" none w1_check "$T/W1-m2.yml"
+# m3: '1' changed to true.
+w1_mut W1-m3 '{ l = $0; sub(/^ +/, "", l) } step == "Console release sequence" && l == "CONSOLE_PARITY_REQUIRED: " q "1" q { sub(q "1" q, "true") } { print }'
+stub_reset
+run_fn W1-m3 1 "step 'Console release sequence' sets CONSOLE_PARITY_REQUIRED: true; the only accepted line" "" none w1_check "$T/W1-m3.yml"
+# m4: the host-build step moved after the release sequence.
+w1_mut W1-m4 '/^      [-#]/ { if (inrel && hold != "") { printf "%s", hold; hold = "" } inrel = 0; inhost = 0 } /^      - name: Host build of both consoles/ { inhost = 1 } inhost { hold = hold $0 "\n"; next } { print } /^      - name: Console release sequence$/ { inrel = 1 }'
+stub_reset
+run_fn W1-m4 1 "the host-build step 'Host build of both consoles (staged-tree parity reference)' comes after the console smoke step 'Console release sequence'" "" none w1_check "$T/W1-m4.yml"
+# m5: the cargo smoke step turned into a console smoke step.
+w1_mut W1-m5 '/ci\/images\/run\.sh smoke iam$/ { sub(/smoke iam$/, "smoke iam-console") } { print }'
+stub_reset
+run_fn W1-m5 1 "step 'Smoke each service on its own' runs a console smoke, but its own step env has no" "" none w1_check "$T/W1-m5.yml"
+# m6 (Review Focus 4): the variable at job level, where the self-test step would inherit it.
+w1_mut W1-m6 '{ print } $0 == "      PROTO_REPORTER: text" { print "      CONSOLE_PARITY_REQUIRED: " q "1" q }'
+stub_reset
+run_fn W1-m6 1 "1 CONSOLE_PARITY_REQUIRED line(s) outside a step env" "" none w1_check "$T/W1-m6.yml"
+# m7 (Review Focus 4): the env line turned into a comment.
+w1_mut W1-m7 '{ l = $0; sub(/^ +/, "", l) } step == "Console release sequence" && l == "CONSOLE_PARITY_REQUIRED: " q "1" q { print "          # CONSOLE_PARITY_REQUIRED: " q "1" q; next } { print }'
+stub_reset
+run_fn W1-m7 1 "step 'Console release sequence' runs a console smoke, but its own step env has no CONSOLE_PARITY_REQUIRED line" "" none w1_check "$T/W1-m7.yml"
+# m8: the host-build step deleted.
+w1_mut W1-m8 '/^      [-#]/ { inhost = 0 } /^      - name: Host build of both consoles/ { inhost = 1 } inhost { next } { print }'
+stub_reset
+run_fn W1-m8 1 "W1: no host-build step in W1-m8.yml" "" none w1_check "$T/W1-m8.yml"
+# m9: no console smoke step at all must not read as a pass.
+printf '%s\n' 'jobs:' > "$T/W1-m9.yml"
+stub_reset
+run_fn W1-m9 1 "W1: found no console smoke step in W1-m9.yml" "" none w1_check "$T/W1-m9.yml"
+
+# --- SMA-671: the "Console release sequence" loop (RS rows, Review Focus 2) -------------------
+# The step's real run: body, copied out of images.yml, runs under GitHub's own shell flags against
+# a stub ci/images/run.sh, syft and uv. A failure on iam-console must still run gateway-console,
+# stop the rest of iam-console, and fail the step.
+awk 'index($0, "      - name: Console release sequence") == 1 { on = 1; next }
+     on && /^        run: \|/ { body = 1; next }
+     on && body && /^          / { print substr($0, 11); next }
+     on && body && /^ *$/ { print ""; next }
+     on && body { exit }
+     on && /^      [-#]/ { exit }' "$W1_WF" > "$T/rs-body.sh" || infra "awk could not read images.yml"
+[ -s "$T/rs-body.sh" ] || infra "no run: body for 'Console release sequence' in images.yml"
+mkdir -p "$T/rs-work/ci/images" "$T/rs-bin"
+# shellcheck disable=SC2016 # the stub lines are written literally
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$RS_LOG"' \
+  'if [ "${1:-}" = "$RS_FAIL_CMD" ] && [ "${2:-}" = "$RS_FAIL_KEY" ]; then exit 1; fi' 'exit 0' \
+  > "$T/rs-work/ci/images/run.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$T/rs-bin/syft"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "packages=1"' 'exit 0' > "$T/rs-bin/uv"
+chmod +x "$T/rs-work/ci/images/run.sh" "$T/rs-bin/syft" "$T/rs-bin/uv"
+# rs_case <fail-cmd> <fail-key> <log-name> — the body, with run.sh failing on that one call.
+rs_case() {
+  RS_FAIL_CMD="$1"; RS_FAIL_KEY="$2"; RS_LOG="$T/rs-log-$3"
+  rm -f "$RS_LOG"
+  export RS_FAIL_CMD RS_FAIL_KEY RS_LOG
+  ( cd "$T/rs-work" && PATH="$T/rs-bin:$PATH" ARCH=amd64 "$BASH" --noprofile --norc -eo pipefail "$T/rs-body.sh" )
+}
+stub_reset
+run_fn RS1 1 "Console release sequence: iam-console failed (rc 1)" "" any rs_case build-oci iam-console RS1
+expect_in RS1-gw-build "$T/rs-log-RS1" "build-oci gateway-console out"
+expect_in RS1-gw-smoke "$T/rs-log-RS1" "smoke gateway-console"
+expect_not_in RS1-iam-stopped "$T/rs-log-RS1" "smoke iam-console"
+stub_reset
+run_fn RS2 0 "" "::error::" any rs_case none none RS2
+expect_in RS2-iam "$T/rs-log-RS2" "smoke iam-console"
+expect_in RS2-gw "$T/rs-log-RS2" "smoke gateway-console"
+stub_reset
+run_fn RS3 1 "Console release sequence: iam-console failed (rc 1)" "" any rs_case smoke iam-console RS3
+expect_in RS3-gw "$T/rs-log-RS3" "smoke gateway-console"
 
 # --- summary -----------------------------------------------------------------------------------
 echo "console-selftest: ${N_PASS} passed, ${N_FAIL} failed, ${N_SKIP} skipped"
