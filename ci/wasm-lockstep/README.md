@@ -72,7 +72,7 @@ not on the next Tuesday.
 | P0 | The file is one YAML mapping, with no duplicate key and no merge key (`<<:`). GitHub Actions does not merge a merge key. A YAML parse error is also a P0 refusal. |
 | P1 | The jobs are exactly `build` and `propose`. |
 | P2 | The triggers are exactly `schedule` and `workflow_dispatch` (a bare `on:` parses as `True`; both keys are read). |
-| P3 | `build` declares no environment and reads no `secrets` context. The workflow level reads none. `propose` reads it only in the `with:` of the step `token`. |
+| P3 | `build` declares no environment and reads no `secrets` context. The workflow level reads none. `propose` reads it only in the step `token` (its `env:` and `if:` are not checked). |
 | P4 | Every `docker run` uses exactly `--rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE"` and runs `bash ci/wasm-lockstep/container.sh update` or `build`. `LOCKSTEP_IMAGE` is a rust image pinned by a sha256 digest. No script and no `env:` key below the workflow level can set `LOCKSTEP_IMAGE`. |
 | P5 | Every command word of a `run:` script is on the job's allowlist. `python3` runs `lockstep_check.py` only. A `$(...)` is read too. A backtick, a here-document, an arithmetic expansion, a process substitution, `case` and a bare `!` negation are refused. |
 | P6 | Every `uses:` is an allowlisted action, pinned to a full 40-hex commit SHA. |
@@ -88,9 +88,12 @@ not on the next Tuesday.
 | P16 | The token step uses `actions/create-github-app-token` with exactly `client-id`, `private-key`, `permission-contents: write` and `permission-pull-requests: write`. |
 | P17 | Every checkout sets `persist-credentials: false`. |
 | P18 | The `verify` and `status` commands of `lockstep_check.py` are whole commands: the last command of the step, with no `||`, `;`, pipe, `&&` guard, `if` or later `exit` joined to them. A refusal then fails the step. |
-| P19 | No step sets `working-directory`. No `env:` key at any level is `BASH_ENV` or `ENV`. No script names `GITHUB_ENV` or `GITHUB_PATH`. |
+| P19 | No step sets `working-directory`. No `env:` key at any level (workflow, job or step) is `BASH_ENV`, `ENV` or `ACTIONS_ALLOW_UNSECURE_COMMANDS`. No script names `GITHUB_ENV` or `GITHUB_PATH`. |
 | P20 | `propose` makes no `gh api` call other than GET: no `-X` or `--method` with another verb, no `-f`, `-F`, `--field`, `--raw-field` or `--input`, and no `graphql`. No `git` call takes `-c` or `--config-env`. |
 | P21 | The `gh pr list --head` call passes `--json` and `--jq` that name `isCrossRepository`, and the jq selects `select(.isCrossRepository \| not)`. The App token then never edits a pull request from a fork. |
+| P22 | `propose` runs only these `gh` commands: `api`, `pr list`, `pr create`, `pr edit` and `pr close`. Any other one (`gh pr merge`, `gh workflow run`, `gh repo`, `gh secret`) is refused. |
+| P23 | Every `gh pr list` passes `--head deps/wasm-bindgen-lockstep`. A step that runs `gh pr close` or `gh pr edit` must also run such a list. The check does not follow the number from the list to the close. It requires the list in the same step. |
+| P24 | No expression in the workflow reads the outputs of the build steps `update` or `build` (the container runs), in any case or index form. |
 
 The P6 rule pins the action NAME and a full SHA, not one specific SHA, so a dependabot action bump
 does not turn this gate red. A new action, or a tag in place of a SHA, does.
@@ -144,6 +147,12 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
   container, and `propose` checks the output again.
 - The branch-owner check uses `.author.login`. GitHub takes that value from the author email. The
   check guards against a mistake. It does not stop an attacker with push access.
+- `pin_check.py` does not detect the removal of the per-component symlink loop of the stage step.
+  It does not detect an upload of `$RUNNER_TEMP/work/` in place of the stage directory. The
+  `propose` re-check of the layout (`R-LAYOUT`, `R-SYMLINK`) catches a wrong layout, not the
+  removal of the loop.
+- `propose` runs for the first time at M3. It cannot run on a scratch branch, because of the
+  `release-pr` environment (main-only branch policy).
 - A refusal stays red every week until a person runs the manual runbook in `rs/CLAUDE.md`
   ("The wasm-bindgen family does not move through dependabot"). Sven watches the runs (Q10).
 
@@ -226,3 +235,9 @@ Run 2 passed. These are its values.
 ### M3 — the first `workflow_dispatch` run on `main`
 
 Not measured yet. This happens after the merge.
+
+M3 creates the bot branch. So M3 does not answer Q11: whether a force-push across `main` commits that edit `.github/workflows/*` needs the `workflows` permission of the App. Only a later run can answer Q11, because only then does the bot branch exist and differ from `main` in those files.
+
+### M4 — a second run with an open bot PR
+
+Not measured yet. This run starts while the bot PR from M3 is open and `main` has moved. It shows whether the force-push, the branch-owner check and the PR update work on an existing bot branch (Q11).

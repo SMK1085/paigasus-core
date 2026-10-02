@@ -585,3 +585,12 @@ Rejected:
 - The critique says "add `repo:ruff-ci` to the T-list". `repo:ruff-ci` is already in `T`
   (root `CLAUDE.md` marker block). The spec reads this as "the new Python files must pass it" and
   added that to T6.
+
+Implementation notes (2026-10-02):
+
+- The build container runs as `nobody` (65534), not as the runner uid. Node `os.userInfo()` needs
+  a passwd entry, and the image has none for the runner uid.
+- The host gives the work copy to 65534 with `sudo chown -R`. M0 run 1 failed with EPERM on a
+  `utimes` call with an explicit time, because the runner uid owned the copy.
+- The container runs with `--cap-drop=ALL --security-opt=no-new-privileges`.
+- The build downloads rustup and Rust 1.95.0 at run time, through proto.

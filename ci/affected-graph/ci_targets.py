@@ -2084,7 +2084,7 @@ def check_self_invocation(
     — `task_inputs.py` of `task_inputs.py --self-test`, and `run_self_tests` of
     `run_self_tests() {` — so a substring-over-the-whole-text match would be satisfied by the
     wrong occurrence. Release-parity, workflow-credentials, release-plan, ruff,
-    next-public-free and helm-render have no such
+    next-public-free, helm-render, moon-diagnosis, next-env and wasm-lockstep have no such
     prefix hazard; there,
     whole-line matching is what makes a COMMENTED-OUT copy of a pinned line
     (e.g. `# if [ "$NEGATIVE" = 1 ]; then`) report missing rather than silently satisfy the pin —
@@ -2099,8 +2099,8 @@ def check_self_invocation(
     whitespace that a column-0 rule would reject outright. Splitting it into its own tuple, rather
     than loosening the column-0 haystack wholesale, is what keeps the stronger guarantee intact
     for the entries that can hold it. Task-script, release-parity, workflow-credentials,
-    release-plan, ruff, next-public-free and helm-render are stripped for the same reason — their real lines
-    are indented inside
+    release-plan, ruff, next-public-free, helm-render, moon-diagnosis, next-env and wasm-lockstep
+    are stripped for the same reason — their real lines are indented inside
     `case` arms and `if` bodies.
     The eleven texts are checked SEPARATELY rather than against one concatenated haystack, so a
     call site living in the wrong file cannot satisfy another's requirement.
@@ -4301,7 +4301,9 @@ EXPECTED_FINDING_KEYS = (
     "pairing-orphan-globs", "tw-unregistered", "tw-missing-lines", "tw-stale", "tw-no-project",
 )
 
-# The eleven shell sources check_self_invocation reads, keyed so collect_findings' signature does
+# The eleven shell sources check_self_invocation reads (the last one is wasm-lockstep, whose pins
+# are whole lines for the same reason as the other non-run.sh sources: a commented-out copy of a
+# pinned line must report missing), keyed so collect_findings' signature does
 # not grow positional parameters that a caller could silently transpose.
 _CALL_SITE_SOURCE_KEYS = (
     "run", "actionlint", "release_parity", "workflow_credentials", "release_plan", "ruff",

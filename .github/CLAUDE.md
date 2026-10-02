@@ -272,8 +272,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   broken token path is invisible in CI: the only proof is a real run on `main`.
 - The `release-pr` environment has TWO consumers since SMA-693: the `release-pr` job of
   `release.yml` and the `propose` job of `wasm-lockstep.yml`. Both read `PAIGASUS_BOT_*` from it,
-  and both rely on its main-only deployment branch policy as the credential boundary. A change to
-  that policy or to those secrets changes both workflows. `release_guard.py` does not check
+  and both rely on its main-only deployment branch policy as the credential boundary. Both workflows
+  use that policy and those secrets. `release_guard.py` does not check
   `wasm-lockstep.yml`; `repo:wasm-lockstep` (`ci/wasm-lockstep/pin_check.py`) does.
 - `release_guard.py`'s `UNGATED_JOBS` exempts a job from the GATING rule (V1) and from nothing
   else. V7 applies the publish detector to every member, because the exemption's premise is that
