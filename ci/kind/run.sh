@@ -473,7 +473,8 @@ settle_gateway_404() {
 # PROBE_JS runs in a console pod with `node -e`: CommonJS and a promise chain, no top-level await.
 # It reads the IAM URL from PAIGASUS_SERVICES, the variable the console reads, so it holds no copy
 # of the Service name or the port. It prints the HTTP status of GET <iam>/readyz, or 000 on any
-# error, and always exits 0, so a failed fetch never reads as a failed exec. It holds no single
+# error, and always exits 0, so a failed fetch never reads as a failed exec. On an error it first
+# writes one line "probe: <reason>" to stderr, which the rc 2 message shows. It holds no single
 # quote: it is one single-quoted bash string.
 PROBE_JS='Promise.resolve().then(function () {
   var iam = JSON.parse(process.env.PAIGASUS_SERVICES).iam;
@@ -484,8 +485,12 @@ PROBE_JS='Promise.resolve().then(function () {
   return Promise.resolve(done).then(function () { return String(res.status); });
 }).then(function (code) {
   process.stdout.write(code + "\n", function () { process.exit(0); });
-}, function () {
-  process.stdout.write("000\n", function () { process.exit(0); });
+}, function (e) {
+  var why = String(e && e.name) + ": " + String(e && e.message);
+  if (e && e.cause) { why += " (cause " + String(e.cause.code || e.cause.message || e.cause) + ")"; }
+  process.stderr.write("probe: " + why + "\n", function () {
+    process.stdout.write("000\n", function () { process.exit(0); });
+  });
 });'
 
 settle_iam_service() {
@@ -553,6 +558,10 @@ settle_iam_service() {
     rest="${e#*/}"
     del="${rest#*/}"
     [ -z "$del" ] || continue
+    # Only the pods of the console Deployments in $expected: in phase B a gateway pod that GC has
+    # not yet marked can still be listed.
+    pname="${rest%%/*}"
+    case " $expected " in *" $pname "*) ;; *) continue ;; esac
     pstart="$(date +%s)"
     deadline=$(( pstart + 60 ))
     while :; do
