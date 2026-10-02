@@ -124,3 +124,50 @@ apply. Notes on the rows:
   edit the line that MU10 deleted, so this is expected.
 - The in-harness W1 mutations W1-m1 to W1-m9 passed on the baseline and on the run after the last
   restore. Those PASS rows are the proof for those targets.
+
+## Integration run (SMA-671 AC 1, 5, 9, 10)
+
+Run: [36966245680](https://github.com/SMK1085/paigasus-core/actions/runs/36966245680),
+`workflow_dispatch` on `feature/sma-671-images-console-coverage` at
+`69d2ff4e3e61fff03581ff46731275f59d8a5f33`, 2026-10-02 (04:49:44 UTC). Both jobs concluded
+`success`: amd64 job `110710533682`, arm64 job `110710533758`. A second dispatch at the same commit
+(run 36966351878) waited in the same concurrency group behind this run. It was cancelled before
+it started a job, so it gave no figures.
+
+| What | amd64 | arm64 |
+|---|---|---|
+| `df -h /` before / after the host build (Size, Used, Avail) | 145G, 41G, 104G / 145G, 43G, 102G | 145G, 35G, 110G / 145G, 37G, 109G |
+| `pnpm install` time | 12 s | 10 s |
+| `moon run` time | 57 s (rc 0) | 45 s (rc 0) |
+| Host-build step duration | 1 min 10 s | 56 s |
+| "Console release sequence" / "Build + smoke both consoles" | 2 min 10 s / 12 s | 1 min 59 s / 10 s |
+| Job duration | 14 min 29 s | 11 min 37 s |
+| `df -h /` after "Build + smoke both consoles" (Avail) | 97G | 104G |
+| "staged tree matches the host build" lines (AC 1, expect 4) | 4 | 4 |
+| "NOT CHECKED" lines (AC 1, expect 0) | 0 | 0 |
+| Context-check line (AC 9) | 1 | 1 |
+
+The four "matches" lines, the same on both legs:
+
+```text
+Console release sequence      iam-console: staged tree matches the host build (22 files, public=0)
+Console release sequence      gateway-console: staged tree matches the host build (22 files, public=0)
+Build + smoke both consoles   iam-console: staged tree matches the host build (22 files, public=0)
+Build + smoke both consoles   gateway-console: staged tree matches the host build (22 files, public=0)
+```
+
+The context-check line, in the "Host build of both consoles" step, the same on both legs:
+
+```text
+docker context: no host artifact outside ts/.dockerignore under ts/, and no new or changed file under rs/crates/bindings
+```
+
+AC 10: the "Console image self-test" step printed `PASS` for RS1, RS1-gw-build, RS1-gw-smoke,
+RS1-iam-stopped, RS2, RS2-iam, RS2-gw, RS3 and RS3-gw on both legs. Its summary line was
+`console-selftest: 289 passed, 0 failed, 0 skipped` on both legs.
+
+AC 5: both jobs passed. The amd64 job took 1 min 14 s more than in the Task 1 run (13 min 15 s),
+and the arm64 job 31 s more (11 min 6 s). After the disk reclaim, the smallest Avail on a leg was 97G,
+after "Console release sequence" on amd64.
+
+Linear comment: posted on SMA-671 on 2026-10-02 (comment `f11a4418-dea6-46b6-ae0d-0a140f2dcf03`).
