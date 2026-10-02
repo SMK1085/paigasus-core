@@ -6,7 +6,10 @@
 //! consistency -> signature + claims validation (issuer/audience/expiry) -> payload `typ`
 //! check -> sender-constraint check -> `ValidatedClaims`. The token-type check (SMA-686) refuses
 //! an ID token or a logout token: a Keycloak payload `typ` (`ID`, `Logout`) or a standard
-//! back-channel logout marker (header `typ: logout+jwt`, the `events` member). The
+//! back-channel logout marker (header `typ: logout+jwt`, the `events` member). After those
+//! markers, it refuses a token that carries a claim the operator named for the issuer in
+//! `id_token_marker_claims` (SMA-703); for such an issuer the payload is also decoded as a map
+//! that refuses a repeated top-level member (`StrictPayload`). The
 //! sender-constraint check (SMA-690) refuses a token bound to a key (a `cnf` claim, or a Keycloak
 //! payload `typ: DPoP`), because IAM cannot check the binding. Three refusals are logged,
 //! rate-limited (`log_refusal`). Never logs token or claim material (`TokenDefect` itself carries
@@ -62,6 +65,9 @@ enum RefusalDetail<'a> {
     Accepted(&'a [String]),
     /// The static marker that shows a verified token is bound to a key (SMA-690 D8).
     Binding(&'static str),
+    /// The CONFIGURED claim name that shows a verified token is not an access token (SMA-703
+    /// D4). Logged as the marker `claim <name>`.
+    Claim(&'a str),
 }
 
 /// One configured issuer, parsed once at construction — replacing the per-request
@@ -70,6 +76,8 @@ enum RefusalDetail<'a> {
 struct ConfiguredIssuer {
     issuer: Issuer,
     audiences: Vec<String>,
+    /// SMA-703 D1: the configured claim names. Empty keeps the SMA-686 decode path unchanged.
+    id_token_marker_claims: Vec<String>,
 }
 
 /// The `Authenticator` v1 implementation: validates a presented bearer token against a
@@ -89,12 +97,27 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
     /// Parses every configured issuer once, up front. Fails when one doesn't parse —
     /// `IamConfig::validate` already rejects that at boot, so an `Err` here is a wiring
     /// defect, mirroring the `redis_url` guard in `AppState::new`.
+    ///
+    /// Writes one `info` line for each issuer with configured `id_token_marker_claims` (SMA-703
+    /// D2). `AppState::new` calls this once at boot, after `paigasus_logging::init`;
+    /// `IamConfig::validate` runs before the logger exists, so the line cannot live there.
     pub fn new(issuers: Vec<IssuerConfig>, provider: JwksProvider<F, K, C>, leeway_secs: u64, max_token_bytes: usize) -> Result<Self, AuthnError> {
         let issuers = issuers
             .into_iter()
             .map(|cfg| {
                 let issuer = Issuer::parse(&cfg.issuer).map_err(|e| AuthnError::Backend(e.to_string().into()))?;
-                Ok(ConfiguredIssuer { issuer, audiences: cfg.audiences })
+                if !cfg.id_token_marker_claims.is_empty() {
+                    tracing::info!(
+                        issuer = issuer.as_str(),
+                        id_token_marker_claims = ?cfg.id_token_marker_claims,
+                        "IAM refuses a verified token of this issuer that carries one of the configured ID-token marker claims"
+                    );
+                }
+                Ok(ConfiguredIssuer {
+                    issuer,
+                    audiences: cfg.audiences,
+                    id_token_marker_claims: cfg.id_token_marker_claims,
+                })
             })
             .collect::<Result<Vec<_>, AuthnError>>()?;
         Ok(Self {
@@ -141,6 +164,16 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
                     marker,
                     suppressed,
                     "refused a bearer token: it is bound to a key, and IAM cannot check the binding"
+                );
+            }
+            RefusalDetail::Claim(name) => {
+                // The same message as `Marker`: an operator greps one text for SMA-686 and SMA-703.
+                let marker = format!("claim {name}");
+                tracing::info!(
+                    issuer = issuer.as_str(),
+                    marker = marker.as_str(),
+                    suppressed,
+                    "refused a bearer token: a verified marker shows it is not an access token"
                 );
             }
         }
@@ -220,6 +253,60 @@ struct WireClaims {
     typ: Option<serde_json::Value>,
     events: Option<serde_json::Value>,
     cnf: Option<serde_json::Value>,
+}
+
+/// The verified payload for an issuer with configured marker claims (SMA-703 D3): every top-level
+/// member, plus the same `WireClaims` the plain path reads. A plain `serde_json::Map` keeps the
+/// LAST value of a repeated key with no error, and a derived struct does not check a repeated
+/// member it ignores, so `{"at_hash":"x","at_hash":null}` would pass both. This `Deserialize`
+/// refuses a repeated top-level member name; `jsonwebtoken` reports that serde error as
+/// `ErrorKind::Json`, and `map_jwt_error` maps it to `Malformed`.
+///
+/// `claims` is read INSIDE `deserialize`, not after `decode` returns. `jsonwebtoken::decode`
+/// deserializes the caller's type before it validates `exp`/`aud`/`iss`, so a wrong-shaped claim
+/// stays `Malformed` ahead of an expiry or audience defect, exactly as on the plain path.
+struct StrictPayload {
+    members: serde_json::Map<String, serde_json::Value>,
+    claims: WireClaims,
+}
+
+impl<'de> Deserialize<'de> for StrictPayload {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct UniqueMembers;
+
+        impl<'de> serde::de::Visitor<'de> for UniqueMembers {
+            type Value = serde_json::Map<String, serde_json::Value>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object with unique member names")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let mut members = serde_json::Map::new();
+                while let Some(name) = access.next_key::<String>()? {
+                    // The error text names no member: the payload is token material (SMA-686 D8).
+                    if members.contains_key(&name) {
+                        return Err(serde::de::Error::custom("a top-level member name occurs twice"));
+                    }
+                    let value = access.next_value::<serde_json::Value>()?;
+                    members.insert(name, value);
+                }
+                Ok(members)
+            }
+        }
+
+        let members = deserializer.deserialize_map(UniqueMembers)?;
+        let claims = WireClaims::deserialize(serde_json::Value::Object(members.clone())).map_err(serde::de::Error::custom)?;
+        Ok(StrictPayload { members, claims })
+    }
+}
+
+/// The first configured claim name that the verified payload carries with a value other than
+/// JSON `null`, or `None` (SMA-703 D3). Any other value is a marker: a string, a number, an
+/// object, an array, an empty string (the SMA-690 rule for `cnf`). Names compare exactly, because
+/// JSON member names are case-sensitive. The list order decides which name a log line shows.
+fn configured_marker<'a>(members: &serde_json::Map<String, serde_json::Value>, names: &'a [String]) -> Option<&'a str> {
+    names.iter().find(|name| members.get(name.as_str()).is_some_and(|value| !value.is_null())).map(String::as_str)
 }
 
 /// Maps a `jsonwebtoken` decode/validation failure to a `TokenDefect` (spec §4.1). Every
@@ -319,42 +406,58 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
         validation.leeway = self.leeway_secs;
         validation.validate_nbf = true;
 
-        let token_data = decode::<WireClaims>(token, &decoding_key, &validation).map_err(|err| {
+        let on_decode_error = |err: jsonwebtoken::errors::Error| {
             let err = map_jwt_error(err);
             if matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)) {
                 self.log_refusal(&issuer, TokenDefect::AudienceMismatch, RefusalDetail::Accepted(&issuer_config.audiences));
             }
             err
-        })?;
+        };
+        // SMA-703 D3: an issuer with no marker claims keeps the SMA-686 decode exactly (G2). One
+        // with marker claims decodes the same verified bytes as a `StrictPayload`; the signature
+        // is checked once either way.
+        let (verified_header, claims, claim_marker) = if issuer_config.id_token_marker_claims.is_empty() {
+            let token_data = decode::<WireClaims>(token, &decoding_key, &validation).map_err(on_decode_error)?;
+            (token_data.header, token_data.claims, None)
+        } else {
+            let token_data = decode::<StrictPayload>(token, &decoding_key, &validation).map_err(on_decode_error)?;
+            let marker = configured_marker(&token_data.claims.members, &issuer_config.id_token_marker_claims);
+            (token_data.header, token_data.claims.claims, marker)
+        };
 
         // 6. Token-type check on the verified token (SMA-686): an ID token or a logout token.
-        if let Some(marker) = non_access_token_marker(token_data.header.typ.as_deref(), &token_data.claims) {
+        if let Some(marker) = non_access_token_marker(verified_header.typ.as_deref(), &claims) {
             self.log_refusal(&issuer, TokenDefect::NotAnAccessToken, RefusalDetail::Marker(marker));
+            return Err(invalid(TokenDefect::NotAnAccessToken));
+        }
+        // 6b. A configured marker claim (SMA-703 D3), after the SMA-686 markers.
+        if let Some(name) = claim_marker {
+            self.log_refusal(&issuer, TokenDefect::NotAnAccessToken, RefusalDetail::Claim(name));
             return Err(invalid(TokenDefect::NotAnAccessToken));
         }
 
         // 7. Sender-constraint check on the verified token (SMA-690): IAM cannot check a binding.
-        if let Some(marker) = sender_constraint_marker(&token_data.claims) {
+        if let Some(marker) = sender_constraint_marker(&claims) {
             self.log_refusal(&issuer, TokenDefect::SenderConstrained, RefusalDetail::Binding(marker));
             return Err(invalid(TokenDefect::SenderConstrained));
         }
 
-        let expires_at = i64::try_from(token_data.claims.exp)
+        let expires_at = i64::try_from(claims.exp)
             .ok()
             .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
             .ok_or_else(|| invalid(TokenDefect::Malformed))?;
 
         Ok(ValidatedClaims {
             issuer,
-            subject: token_data.claims.sub,
+            subject: claims.sub,
             // A second guard: `validate` already refuses a missing `aud` (D13); if that ever
             // regresses, the token is still refused, as Malformed.
-            audiences: token_data.claims.aud.map(WireAudience::into_vec).ok_or_else(|| invalid(TokenDefect::Malformed))?,
+            audiences: claims.aud.map(WireAudience::into_vec).ok_or_else(|| invalid(TokenDefect::Malformed))?,
             expires_at,
-            email: token_data.claims.email,
-            name: token_data.claims.name,
-            locale: token_data.claims.locale,
-            zoneinfo: token_data.claims.zoneinfo,
+            email: claims.email,
+            name: claims.name,
+            locale: claims.locale,
+            zoneinfo: claims.zoneinfo,
         })
     }
 }
@@ -1103,5 +1206,404 @@ mod tests {
         }
         let text = logs.text();
         assert_eq!(text.lines().filter(|line| line.contains(BINDING_REFUSAL)).count(), 1, "binding lines:\n{text}");
+    }
+
+    // ---- SMA-703: configured ID-token marker claims ----------------------------------------
+    //
+    // The Zitadel fixtures copy the claim NAMES and value shapes of the measured tokens
+    // (docs/superpowers/specs/2026-10-02-sma-703-zitadel-measurements.md, M1, M4a, M5b). The
+    // times are relative to `Utc::now()`, because the measured `exp` values end on 2026-10-03.
+    // `iss` is the test issuer. `aud` stays an array, so `WireAudience::Multiple` runs.
+
+    /// The runbook recipe for Zitadel (spec D6).
+    const ZITADEL_MARKERS: [&str; 2] = ["at_hash", "azp"];
+    /// Measured ids: project P, the extra `aud` id (INFERRED: the app id of A), the client id of
+    /// web app A, the human subject, the machine client id and the machine subject.
+    const ZITADEL_PROJECT_ID: &str = "393381921683406851";
+    const ZITADEL_APP_ID: &str = "393381921700315139";
+    const ZITADEL_CLIENT_ID: &str = "393381921750515715";
+    const ZITADEL_HUMAN_SUB: &str = "393381921784070147";
+    const ZITADEL_MACHINE_CLIENT_ID: &str = "sma703-svc";
+    const ZITADEL_MACHINE_SUB: &str = "393381990419660803";
+    /// A second configured issuer, for the per-issuer test (T14).
+    const SECOND_ISSUER: &str = "https://idp2.example.com";
+    /// The SMA-686 refusal message, shared by the configured-claim refusal (spec D4).
+    const NOT_ACCESS_TOKEN_REFUSAL: &str = "a verified marker shows it is not an access token";
+    /// The SMA-703 boot line (spec D2).
+    const MARKER_BOOT_LINE: &str = "carries one of the configured ID-token marker claims";
+
+    /// The human-flow access token of M1 (and of the M4a refresh, with its own `jti`).
+    fn zitadel_human_access_token(jti: &str) -> serde_json::Value {
+        let now = Utc::now().timestamp();
+        serde_json::json!({
+            "iss": ISSUER,
+            "sub": ZITADEL_HUMAN_SUB,
+            "aud": [ZITADEL_APP_ID, ZITADEL_CLIENT_ID, ZITADEL_PROJECT_ID],
+            "exp": now + 3600,
+            "iat": now,
+            "nbf": now,
+            "client_id": ZITADEL_CLIENT_ID,
+            "jti": jti,
+        })
+    }
+
+    /// The human-flow ID token of M1 (and of the M4a refresh, with its own `at_hash`).
+    fn zitadel_human_id_token(at_hash: &str) -> serde_json::Value {
+        let now = Utc::now().timestamp();
+        serde_json::json!({
+            "iss": ISSUER,
+            "sub": ZITADEL_HUMAN_SUB,
+            "aud": [ZITADEL_APP_ID, ZITADEL_CLIENT_ID, ZITADEL_PROJECT_ID],
+            "exp": now + 3600,
+            "iat": now,
+            "auth_time": now - 4,
+            "nonce": "58e866bad23abebb",
+            "amr": ["pwd"],
+            "azp": ZITADEL_CLIENT_ID,
+            "client_id": ZITADEL_CLIENT_ID,
+            "at_hash": at_hash,
+            "sid": "V1_393381929921019907",
+        })
+    }
+
+    fn zitadel_m1_access_token() -> serde_json::Value {
+        zitadel_human_access_token("V2_393381935289729027-at_393381935289794563")
+    }
+
+    fn zitadel_m1_id_token() -> serde_json::Value {
+        zitadel_human_id_token("FFPzlMOE6pZPHZWKKJOObg")
+    }
+
+    fn zitadel_m4_access_token() -> serde_json::Value {
+        zitadel_human_access_token("V2_393381935289729027-at_393381935306571779")
+    }
+
+    fn zitadel_m4_id_token() -> serde_json::Value {
+        zitadel_human_id_token("9yO4kdn1jViUdIJ1kQrkjw")
+    }
+
+    /// The machine (client-credentials) access token of M5b: scope `openid` plus the P aud scope.
+    fn zitadel_m5b_access_token() -> serde_json::Value {
+        let now = Utc::now().timestamp();
+        serde_json::json!({
+            "iss": ISSUER,
+            "sub": ZITADEL_MACHINE_SUB,
+            "aud": [ZITADEL_PROJECT_ID],
+            "exp": now + 3600,
+            "iat": now,
+            "nbf": now,
+            "client_id": ZITADEL_MACHINE_CLIENT_ID,
+            "jti": "V2_393381990436569091-at_393381990436634627",
+        })
+    }
+
+    /// The machine ID token of M5b. No `nonce` and no `sid`: the client sent no nonce (F7).
+    fn zitadel_m5b_id_token() -> serde_json::Value {
+        let now = Utc::now().timestamp();
+        serde_json::json!({
+            "iss": ISSUER,
+            "sub": ZITADEL_MACHINE_SUB,
+            "aud": [ZITADEL_PROJECT_ID, ZITADEL_MACHINE_CLIENT_ID],
+            "exp": now + 3600,
+            "iat": now,
+            "auth_time": now,
+            "amr": ["pwd"],
+            "azp": ZITADEL_MACHINE_CLIENT_ID,
+            "client_id": ZITADEL_MACHINE_CLIENT_ID,
+            "at_hash": "kYHj1WCq97WeD6uAjPviug",
+        })
+    }
+
+    /// `base` with the members of `extra` added or replaced.
+    fn merged(mut base: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+        let extra = extra.as_object().expect("extra claims are a JSON object").clone();
+        base.as_object_mut().expect("claims are a JSON object").extend(extra);
+        base
+    }
+
+    /// `base` without the member `name`.
+    fn without(mut base: serde_json::Value, name: &str) -> serde_json::Value {
+        base.as_object_mut().expect("claims are a JSON object").remove(name);
+        base
+    }
+
+    fn issuer_with_markers(issuer: &str, audiences: &[&str], markers: &[&str]) -> IssuerConfig {
+        IssuerConfig {
+            id_token_marker_claims: markers.iter().map(|marker| (*marker).to_string()).collect(),
+            ..issuer_config(issuer, audiences)
+        }
+    }
+
+    /// Signs `claims` with a fresh key and authenticates it against `ISSUER`, configured with the
+    /// audience `ZITADEL_PROJECT_ID` (runbook option 1) and the marker claims `markers`.
+    async fn authenticate_zitadel(markers: &[&str], claims: &serde_json::Value) -> Result<ValidatedClaims, AuthnError> {
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let token = sign(&encoding_key, Some(&kid), claims);
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_with_markers(ISSUER, &[ZITADEL_PROJECT_ID], markers)], 60, 16_384);
+        authenticator.authenticate(&token).await
+    }
+
+    fn assert_not_an_access_token(result: Result<ValidatedClaims, AuthnError>, name: &str) {
+        match result {
+            Err(AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)) => {}
+            other => panic!("{name}: must be refused as NotAnAccessToken, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_zitadel_human_id_token() {
+        // Spec § 5 T1.
+        assert_not_an_access_token(authenticate_zitadel(&ZITADEL_MARKERS, &zitadel_m1_id_token()).await, "M1 ID token");
+    }
+
+    #[tokio::test]
+    async fn refuses_zitadel_machine_id_token() {
+        // Spec § 5 T2. The machine ID token has no nonce, so only the configured names refuse it.
+        let claims = zitadel_m5b_id_token();
+        assert!(claims.get("nonce").is_none(), "the M5b fixture has no nonce");
+        assert_not_an_access_token(authenticate_zitadel(&ZITADEL_MARKERS, &claims).await, "M5b ID token");
+    }
+
+    #[tokio::test]
+    async fn accepts_zitadel_access_tokens() {
+        // Spec § 5 T3.
+        let human = authenticate_zitadel(&ZITADEL_MARKERS, &zitadel_m1_access_token()).await.expect("the M1 access token must be accepted");
+        assert_eq!(human.subject, ZITADEL_HUMAN_SUB);
+        assert_eq!(human.audiences, vec![ZITADEL_APP_ID.to_string(), ZITADEL_CLIENT_ID.to_string(), ZITADEL_PROJECT_ID.to_string()]);
+        let machine = authenticate_zitadel(&ZITADEL_MARKERS, &zitadel_m5b_access_token())
+            .await
+            .expect("the M5b access token must be accepted");
+        assert_eq!(machine.subject, ZITADEL_MACHINE_SUB);
+        assert_eq!(machine.audiences, vec![ZITADEL_PROJECT_ID.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn refresh_grant_tokens_keep_their_kind() {
+        // Spec § 5 T4: the M4a refresh returns a new ID token and a new access token.
+        assert_not_an_access_token(authenticate_zitadel(&ZITADEL_MARKERS, &zitadel_m4_id_token()).await, "M4 ID token");
+        authenticate_zitadel(&ZITADEL_MARKERS, &zitadel_m4_access_token()).await.expect("the M4 access token must be accepted");
+    }
+
+    #[tokio::test]
+    async fn empty_marker_list_keeps_the_sma_686_behaviour() {
+        // Spec § 5 T5 and T6 (G2): with no configured names, a Zitadel ID token is accepted (the
+        // open state that the setting closes), and so is the Dex shape.
+        authenticate_zitadel(&[], &zitadel_m1_id_token())
+            .await
+            .expect("with an empty list the M1 ID token is accepted (open state)");
+        let dex = merged(zitadel_m1_access_token(), serde_json::json!({ "at_hash": "x", "c_hash": "y", "nonce": "abc123" }));
+        authenticate_zitadel(&[], &dex).await.expect("with an empty list the Dex shape is accepted");
+    }
+
+    #[tokio::test]
+    async fn null_value_is_not_a_marker_and_any_other_value_is() {
+        // Spec § 5 T7: the SMA-690 `cnf` rule.
+        let null = merged(zitadel_m1_access_token(), serde_json::json!({ "at_hash": null }));
+        authenticate_zitadel(&["at_hash"], &null).await.expect("at_hash: null is not a marker");
+        for value in [serde_json::json!(""), serde_json::json!(0), serde_json::json!({}), serde_json::json!([]), serde_json::json!(false)] {
+            let claims = merged(zitadel_m1_access_token(), serde_json::json!({ "at_hash": value.clone() }));
+            assert_not_an_access_token(authenticate_zitadel(&["at_hash"], &claims).await, &format!("at_hash: {value}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn only_configured_names_count() {
+        // Spec § 5 T8: `azp` is present, but only `at_hash` is configured.
+        let claims = without(zitadel_m1_id_token(), "at_hash");
+        assert!(claims.get("azp").is_some(), "the fixture keeps azp");
+        authenticate_zitadel(&["at_hash"], &claims).await.expect("an unconfigured name is not a marker");
+    }
+
+    #[tokio::test]
+    async fn signature_and_claims_defects_come_first() {
+        // Spec § 5 T9 (D3): `decode` validates before the marker check.
+        let expired = merged(zitadel_m1_id_token(), serde_json::json!({ "exp": Utc::now().timestamp() - 120 }));
+        let err = authenticate_zitadel(&ZITADEL_MARKERS, &expired).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)), "got {err:?}");
+        let wrong_aud = merged(zitadel_m1_id_token(), serde_json::json!({ "aud": ["other-project"] }));
+        let err = authenticate_zitadel(&ZITADEL_MARKERS, &wrong_aud).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn keycloak_typ_marker_runs_before_the_configured_claims() {
+        // Spec § 5 T10: the SMA-686 marker wins, and the log names `ID`, not `claim at_hash`.
+        let (logs, _guard) = capture_logs();
+        let claims = merged(zitadel_m1_access_token(), serde_json::json!({ "typ": "ID", "at_hash": "x" }));
+        assert_not_an_access_token(authenticate_zitadel(&ZITADEL_MARKERS, &claims).await, "typ ID with at_hash");
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(NOT_ACCESS_TOKEN_REFUSAL)).collect();
+        assert_eq!(lines.len(), 1, "exactly one refusal line expected, got:\n{text}");
+        assert!(lines[0].contains("\"ID\"") || lines[0].contains("=ID"), "the marker is ID: {}", lines[0]);
+        assert!(!text.contains("claim at_hash"), "the configured claim must not be the logged marker:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn configured_claim_refusal_logs_issuer_and_claim_name_only() {
+        // Spec § 5 T11 (D4): issuer and `claim at_hash`; no claim value, subject or email; one
+        // line for three refusals (the SMA-686 D14 rate limit).
+        let (logs, _guard) = capture_logs();
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_with_markers(ISSUER, &[ZITADEL_PROJECT_ID], &ZITADEL_MARKERS)], 60, 16_384);
+        let claims = merged(zitadel_m1_id_token(), serde_json::json!({ "email": "alice@example.com" }));
+        for _ in 0..3 {
+            let token = sign(&encoding_key, Some(&kid), &claims);
+            assert_not_an_access_token(authenticator.authenticate(&token).await, "M1 ID token");
+        }
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(NOT_ACCESS_TOKEN_REFUSAL)).collect();
+        assert_eq!(lines.len(), 1, "exactly one refusal line expected, got:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("INFO"), "the refusal logs at info: {line}");
+        assert!(line.contains(ISSUER), "the refusal names the issuer: {line}");
+        assert!(line.contains("claim at_hash"), "the refusal names the first configured claim: {line}");
+        for secret in ["FFPzlMOE6pZPHZWKKJOObg", ZITADEL_HUMAN_SUB, ZITADEL_CLIENT_ID, "58e866bad23abebb", "alice@example.com"] {
+            assert!(!text.contains(secret), "the log must not contain {secret:?}:\n{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_recipe_fails_closed_and_names_the_claim() {
+        // Review Focus 4 (spec § 6): the Zitadel recipe on an IdP whose access token carries `azp`
+        // (a Keycloak access token: `typ: Bearer`, `azp`, no `at_hash`) refuses that access token.
+        // The log names `claim azp`, so the operator sees which name is wrong.
+        let (logs, _guard) = capture_logs();
+        let keycloak_access = merged(zitadel_m1_access_token(), serde_json::json!({ "typ": "Bearer", "azp": "paigasus-console" }));
+        assert_not_an_access_token(authenticate_zitadel(&ZITADEL_MARKERS, &keycloak_access).await, "Keycloak access token");
+        let text = logs.text();
+        assert!(text.contains("claim azp"), "the log names the matched claim:\n{text}");
+        assert!(!text.contains("paigasus-console"), "the log must not contain the azp value:\n{text}");
+    }
+
+    /// Signs a raw payload JSON string by hand, so a test can repeat a member name (neither
+    /// `json!` nor `jsonwebtoken::encode` can emit a repeated key).
+    fn sign_raw_payload(encoding_key: &EncodingKey, kid: &str, payload_json: &str) -> String {
+        let header_json = format!(r#"{{"alg":"ES256","typ":"JWT","kid":"{kid}"}}"#);
+        let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let message = format!("{header_b64}.{payload_b64}");
+        let signature = jsonwebtoken::crypto::sign(message.as_bytes(), encoding_key, Algorithm::ES256).expect("signing a test token");
+        format!("{message}.{signature}")
+    }
+
+    /// Authenticates the raw `payload` JSON string against `ISSUER`, configured with the audience
+    /// `aud` and the marker claims `markers`.
+    async fn authenticate_raw_payload(markers: &[&str], payload: &str) -> Result<ValidatedClaims, AuthnError> {
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let token = sign_raw_payload(&encoding_key, &kid, payload);
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_with_markers(ISSUER, &["aud"], markers)], 60, 16_384);
+        authenticator.authenticate(&token).await
+    }
+
+    /// Authenticates a payload of the usual test fields (`ISSUER`, aud `aud`, one hour) followed
+    /// by `members` verbatim, against `ISSUER` configured with `markers`.
+    async fn authenticate_raw(markers: &[&str], members: &str) -> Result<ValidatedClaims, AuthnError> {
+        let exp = Utc::now().timestamp() + 3600;
+        let payload = format!(r#"{{"iss":"{ISSUER}","sub":"sub-1","aud":"aud","exp":{exp},"email":"alice@example.com",{members}}}"#);
+        authenticate_raw_payload(markers, &payload).await
+    }
+
+    #[tokio::test]
+    async fn duplicate_member_is_malformed_on_the_strict_path() {
+        // Spec § 5 T12 (D3). A plain map would keep the last value, so `null` last would hide
+        // the marker. Both orders are Malformed. A duplicate `cnf` is Malformed on both paths.
+        for (name, markers, members) in [
+            ("at_hash string then null", &ZITADEL_MARKERS[..], r#""at_hash":"x","at_hash":null"#),
+            ("at_hash null then string", &ZITADEL_MARKERS[..], r#""at_hash":null,"at_hash":"x""#),
+            ("cnf twice, list set", &ZITADEL_MARKERS[..], r#""cnf":{"jkt":"abc"},"cnf":null"#),
+            ("cnf twice, list empty", &[][..], r#""cnf":{"jkt":"abc"},"cnf":null"#),
+            ("sub twice, list set", &ZITADEL_MARKERS[..], r#""sub":"sub-2""#),
+        ] {
+            let err = authenticate_raw(markers, members).await.unwrap_err();
+            assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Malformed)), "{name}: got {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_unknown_member_is_unchanged_on_the_plain_path() {
+        // Spec § 7 / G2: with an empty list the SMA-686 decode runs unchanged, and that decode
+        // ignores a repeated member it does not read. This pins that the new code did not move
+        // an issuer without marker claims onto the strict path.
+        authenticate_raw(&[], r#""at_hash":"x","at_hash":null"#).await.expect("the plain path is unchanged");
+    }
+
+    #[tokio::test]
+    async fn strict_path_keeps_the_defect_order() {
+        // Review Focus 3: `StrictPayload` reads `WireClaims` inside its own `Deserialize`, so a
+        // wrong-shaped claim is Malformed BEFORE `jsonwebtoken` validates `exp` and `aud`, on both
+        // paths. A parse after `decode` would turn `aud: 7` into AudienceMismatch (and log it),
+        // and an expired token without `sub` into Expired.
+        let future = Utc::now().timestamp() + 3600;
+        let past = Utc::now().timestamp() - 120;
+        let cases = [
+            ("aud a number", format!(r#"{{"iss":"{ISSUER}","sub":"sub-1","aud":7,"exp":{future}}}"#), TokenDefect::Malformed),
+            ("expired and no sub", format!(r#"{{"iss":"{ISSUER}","aud":"aud","exp":{past}}}"#), TokenDefect::Malformed),
+            (
+                "name a number",
+                format!(r#"{{"iss":"{ISSUER}","sub":"sub-1","aud":"aud","exp":{future},"name":7}}"#),
+                TokenDefect::Malformed,
+            ),
+            ("aud null", format!(r#"{{"iss":"{ISSUER}","sub":"sub-1","aud":null,"exp":{future}}}"#), TokenDefect::AudienceMismatch),
+            ("expired", format!(r#"{{"iss":"{ISSUER}","sub":"sub-1","aud":"aud","exp":{past}}}"#), TokenDefect::Expired),
+        ];
+        for markers in [&ZITADEL_MARKERS[..], &[][..]] {
+            for (name, payload, want) in &cases {
+                let err = authenticate_raw_payload(markers, payload).await.unwrap_err();
+                assert!(
+                    matches!(&err, AuthnError::InvalidToken(defect) if defect == want),
+                    "{name}, markers {markers:?}: want {want:?}, got {err:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn marker_names_are_case_sensitive() {
+        // Spec § 5 T13 (D2).
+        let claims = merged(zitadel_m1_access_token(), serde_json::json!({ "AT_HASH": "x" }));
+        authenticate_zitadel(&["at_hash"], &claims).await.expect("AT_HASH is not at_hash");
+    }
+
+    #[tokio::test]
+    async fn marker_list_is_per_issuer() {
+        // Spec § 5 T14: one issuer with `["at_hash"]`, one with an empty list, one key for both.
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(
+            StubFetcher::new(jwk),
+            vec![issuer_with_markers(ISSUER, &[ZITADEL_PROJECT_ID], &["at_hash"]), issuer_config(SECOND_ISSUER, &[ZITADEL_PROJECT_ID])],
+            60,
+            16_384,
+        );
+        let first = sign(&encoding_key, Some(&kid), &zitadel_m1_id_token());
+        assert_not_an_access_token(authenticator.authenticate(&first).await, "ID token of the first issuer");
+        let second = sign(&encoding_key, Some(&kid), &merged(zitadel_m1_id_token(), serde_json::json!({ "iss": SECOND_ISSUER })));
+        let validated = authenticator.authenticate(&second).await.expect("the second issuer has no marker claims");
+        assert_eq!(validated.issuer.as_str(), SECOND_ISSUER);
+    }
+
+    #[test]
+    fn boot_line_names_the_issuer_and_the_marker_claims() {
+        // Spec § 5 T15 (D2): one info line for an issuer with marker claims; none for an empty
+        // list. `capture_logs` installs a thread-local subscriber; `new` is synchronous.
+        let (logs, _guard) = capture_logs();
+        let (_encoding_key, jwk, _kid) = es256_keypair();
+        let _with = make_authenticator(
+            StubFetcher::new(jwk.clone()),
+            vec![issuer_with_markers(ISSUER, &["aud"], &ZITADEL_MARKERS), issuer_config(SECOND_ISSUER, &["aud"])],
+            60,
+            16_384,
+        );
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(MARKER_BOOT_LINE)).collect();
+        assert_eq!(lines.len(), 1, "exactly one boot line expected, got:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("INFO"), "the boot line logs at info: {line}");
+        assert!(line.contains(ISSUER), "the boot line names the issuer: {line}");
+        assert!(line.contains("at_hash") && line.contains("azp"), "the boot line names the claims: {line}");
+        assert!(!line.contains(SECOND_ISSUER), "the boot line names only the issuer with claims: {line}");
+
+        let (logs, _guard) = capture_logs();
+        let _without = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+        assert!(!logs.text().contains(MARKER_BOOT_LINE), "no boot line for an empty list:\n{}", logs.text());
     }
 }
