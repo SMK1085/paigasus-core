@@ -382,8 +382,10 @@ them. The Zitadel item is measured, except where it says otherwise.
   - `oidc.idTokenMarkerClaims: ["c_hash"]` refuses a Dex ID token from the code flow only.
   - A refreshed Dex ID token has no claim that the access token does not also have.
   - So SMA-686 residual R1 stays open for Dex (SMA-686 § 2).
-- **Zitadel. Measured, Zitadel v4.15.3 with Login v1, 2026-10-02 (SMA-703). The measurement used a
-  public PKCE web app. A confidential app is not measured.**
+- **Zitadel. Measured, Zitadel v4.15.3 with Login v1, 2026-10-02 (SMA-703). The Docker measurement
+  used a public PKCE web app. One decoded session from the reference install, a confidential web
+  app (HTTP Basic client authentication, Login v2), showed the same split: `at_hash` and `azp` on
+  the ID token, neither on the access token (SMA-703 issue, 2026-09-26).**
   - In the human flow, the ID token and the access token have the same `aud`. In the machine flow
     (client credentials), the ID token `aud` contains the access token `aud`. Both tokens have
     `client_id`. No `urn:zitadel:iam:org:project:id:<id>:aud` scope puts an audience into the
@@ -391,9 +393,29 @@ them. The Zitadel item is measured, except where it says otherwise.
   - Set the access token type to JWT on the app, and on each machine user. IAM cannot validate
     an opaque access token. An app that you make without a token type gets the opaque type
     (inferred, not measured).
-  - IAM needs `email` in the access token (item 2). Zitadel does not put it there, also with
-    "User Info inside ID Token" on. Add it with a Zitadel Action. Not measured. Never send the
-    ID token instead.
+  - IAM needs `email` in the access token (item 2). Zitadel v4.15 does not put it there, also with
+    the scope `email`. Add it with a Zitadel Action. Never send the ID token instead. Used on the
+    reference install (SMA-703 issue, 2026-09-26):
+    - Make a v1 Action with the name `addEmailClaim`. Zitadel calls the function whose name is
+      equal to the Action name.
+    - Bind it to the flow "Complement Token" and the trigger "Pre access token creation". Set the
+      timeout to 10 s. Set "allowed to fail" to off.
+    - Use this script:
+
+      ```js
+      function addEmailClaim(ctx, api) {
+        var user = ctx.v1.getUser();
+        if (user.human === undefined || !user.human.email) {
+          return;
+        }
+        // human.email is the Go type domain.EmailAddress. goja gives a named Go type
+        // to JavaScript as an object, not as a primitive string, so convert it.
+        api.v1.claims.setClaim('email', String(user.human.email));
+      }
+      ```
+
+    - The call to `String(...)` is necessary for the reason in the comment.
+    - A machine user has no `email`. The Action adds nothing to a machine token.
   - Set `oidc.idTokenMarkerClaims: ["at_hash", "azp"]`. Every measured Zitadel ID token has both
     claims. No measured Zitadel access token has one of them.
   - The audience. Option 1, for an install with machine clients: set `oidc.audience` to the
@@ -405,9 +427,9 @@ them. The Zitadel item is measured, except where it says otherwise.
     `oidc.acknowledgeClientIdAudience`.
   - Before the switch: decode one access token for each grant type in use (authorization code,
     refresh token, client credentials). No access token can have `at_hash` or `azp`. Decode one
-    ID token. It must have both claims. This check is required. The paigasus console is a
-    confidential client, and the measurement used a public PKCE web app. So the client type of the
-    console was not measured.
+    ID token. It must have both claims. This check stays required. The paigasus console is
+    a confidential client. The reference install gave one confidential sample only. One sample is
+    not proof for every install.
   - After the switch: send an ID token to IAM. Expect a `401` and the IAM log line with
     `claim at_hash`.
   - A change of the value restarts IAM (§ 5).
