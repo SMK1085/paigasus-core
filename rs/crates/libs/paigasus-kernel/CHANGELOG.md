@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-kernel-v0.1.1...paigasus-kernel-v0.2.0) - 2026-10-02
+
+### Added
+
+- *(ts)* read a PRN with one prnParse kernel call (SMA-673) ([#360](https://github.com/SMK1085/paigasus-core/pull/360))
+
 ## [0.1.1](https://github.com/SMK1085/paigasus-core/compare/paigasus-kernel-v0.1.0...paigasus-kernel-v0.1.1) - 2026-09-27
 
 ### Fixed
