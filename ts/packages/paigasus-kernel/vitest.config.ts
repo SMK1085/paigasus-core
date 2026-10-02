@@ -37,6 +37,7 @@ export default defineConfig({
             'tests/prn-parse-adapter.test.ts',
             'tests/prn-parse.test.ts',
             'tests/committed-wasm.test.ts',
+            'tests/committed-napi-glue.test.ts',
           ],
           server: { deps: { external: [/\.node$/] } },
         },

@@ -1,2 +1,7 @@
 # Platform-specific napi addon — rebuilt by `napi build` per host/CI; never committed.
 *.node
+# SMA-667: the napi build's scratch glue. paigasus-kernel-ts:build, :test and :generate-napi-glue
+# write these. tests/committed-napi-glue.test.ts compares them with the committed index.js and
+# index.d.ts.
+index.fresh.js
+index.fresh.d.ts
