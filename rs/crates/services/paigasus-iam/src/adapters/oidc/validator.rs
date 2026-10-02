@@ -296,7 +296,13 @@ impl<'de> Deserialize<'de> for StrictPayload {
         }
 
         let members = deserializer.deserialize_map(UniqueMembers)?;
-        let claims = WireClaims::deserialize(serde_json::Value::Object(members.clone())).map_err(serde::de::Error::custom)?;
+        // `&Value` is a `Deserializer`, so the map is not copied: it goes into the `Value`, and
+        // comes out again after `WireClaims` has read it.
+        let value = serde_json::Value::Object(members);
+        let claims = WireClaims::deserialize(&value).map_err(serde::de::Error::custom)?;
+        let serde_json::Value::Object(members) = value else {
+            unreachable!("the value was built as an object above");
+        };
         Ok(StrictPayload { members, claims })
     }
 }
@@ -1436,6 +1442,20 @@ mod tests {
         assert_eq!(lines.len(), 1, "exactly one refusal line expected, got:\n{text}");
         assert!(lines[0].contains("\"ID\"") || lines[0].contains("=ID"), "the marker is ID: {}", lines[0]);
         assert!(!text.contains("claim at_hash"), "the configured claim must not be the logged marker:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn configured_marker_runs_before_the_sender_constraint_check() {
+        // Step 6b runs before step 7: a token with `at_hash` and `cnf` is refused as
+        // NotAnAccessToken, and the log names `claim at_hash`, not the binding.
+        let (logs, _guard) = capture_logs();
+        let claims = merged(zitadel_m1_access_token(), serde_json::json!({ "at_hash": "x", "cnf": { "jkt": "x" } }));
+        assert_not_an_access_token(authenticate_zitadel(&ZITADEL_MARKERS, &claims).await, "at_hash with cnf");
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(NOT_ACCESS_TOKEN_REFUSAL)).collect();
+        assert_eq!(lines.len(), 1, "exactly one refusal line expected, got:\n{text}");
+        assert!(text.contains("claim at_hash"), "the configured claim is the logged marker:\n{text}");
+        assert!(!text.contains(BINDING_REFUSAL), "the binding refusal must not run:\n{text}");
     }
 
     #[tokio::test]
