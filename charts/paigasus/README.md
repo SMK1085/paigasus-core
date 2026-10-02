@@ -243,7 +243,9 @@ list into the one issuer entry of `IAM_AUTHN__ISSUERS` in `templates/backend-dep
 
 - **Empty or absent (the default).** The chart adds nothing. The render is byte-identical to a
   chart without the value. Under `helm upgrade --reuse-values` from an older release, the key is
-  absent. The template then reads nil. The result is the same.
+  absent. The template then reads the default. The result is the same. If that release also gets
+  `--set oidc.idTokenMarkerClaims=null`, Helm keeps a nil value, and the template counts it as
+  an empty list.
 - **Set.** The entry gets `,id_token_marker_claims=["at_hash","azp"]` after `audiences`. Each name
   is quoted with `%q`. One more YAML comment line renders above `IAM_AUTHN__ISSUERS`:
   `# oidc.idTokenMarkerClaims is set: IAM refuses a token that carries one of these claims.`
@@ -255,14 +257,16 @@ list into the one issuer entry of `IAM_AUTHN__ISSUERS` in `templates/backend-dep
   readable for IAM. The checks
   are in `paigasus.validateIdTokenMarkerClaims` in `templates/_iam-backend.tpl`. They are not in
   `_helpers.tpl`, so its fixture copies do not change.
-- **To remove the value,** use `[]` in a values file, or `--set oidc.idTokenMarkerClaims=null`.
-  Do not use `--set oidc.idTokenMarkerClaims={}`: Helm makes it a list with one empty name, and
-  the render fails.
+- **To remove the value,** set `[]` in a values file, or use
+  `--set-json 'oidc.idTokenMarkerClaims=[]'`. With `helm upgrade --reuse-values`, deleting the key
+  from a values file does not remove the old list. Do not use
+  `--set oidc.idTokenMarkerClaims={}`: Helm makes it a list with one empty name, and the render
+  fails.
 - A change of the value restarts the IAM pod and no console pod.
 
 `tests/env.sh` holds the rows `M1 default`, `M2 reuse-values-no-key`, `M3 set`,
-`M4 empty-list-in-file`, `M5 with-audience` and `M6 restart-scope`. A fifth row counter checks
-them. `tests/refusals.sh` holds one row for each refusal and one valid render. See
+`M4 empty-list-in-file`, `M5 with-audience`, `M6 restart-scope`, `M7 empty-list-set-json` and
+`M8 reuse-values-nil-guard`. A sixth row counter checks them. `tests/refusals.sh` holds one row for each refusal and one valid render. See
 `docs/ops/RUNBOOK-chart.md` § 6 for the IdP setup.
 
 ## The console authorization request (`oidc.scopes`, `oidc.authorizationAudience`)

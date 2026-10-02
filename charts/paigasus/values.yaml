@@ -175,9 +175,10 @@ oidc:
                             # check. Zitadel: ["at_hash", "azp"]. Do not name a claim that your
                             # IdP's access token carries: IAM then refuses every token. Each name
                             # is printable ASCII with no space, " or \, and not iss, sub, aud or
-                            # exp. A change restarts IAM. To remove it, use [] in a values file
-                            # or --set oidc.idTokenMarkerClaims=null, not {}. See
-                            # RUNBOOK-chart.md § 6.
+                            # exp. A change restarts IAM. To remove it, set [] in a values file
+                            # or use --set-json 'oidc.idTokenMarkerClaims=[]', not {}. With
+                            # --reuse-values, deleting the key from a values file does not
+                            # remove the old list. See RUNBOOK-chart.md § 6.
   scopes: ""             # NOT required. The scopes that both consoles request (SMA-692). Empty:
                          # the console default, openid profile email offline_access. Entra ID
                          # needs it: add exactly one scope of the API app registration, for

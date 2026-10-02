@@ -131,6 +131,8 @@ maxSurge 0, so the old pod stops before the new pod fails. So the chart copies t
 fails the render instead. The character rule is stricter than IAM: printable ASCII only, with no
 space, no " and no \. Go's %q writes other characters as escapes (\t, \x01) that figment does not
 read. The rule also refuses leading and trailing whitespace. A nil value counts as an empty list.
+The nil case happens when a release from before SMA-703 has no key and the user passes
+--set oidc.idTokenMarkerClaims=null. Then Helm keeps a nil value in the user values.
 */}}
 {{- define "paigasus.validateIdTokenMarkerClaims" -}}
 {{- $names := dig "idTokenMarkerClaims" list .Values.oidc -}}
@@ -146,11 +148,12 @@ read. The rule also refuses leading and trailing whitespace. A nil value counts 
 {{- fail (printf "oidc.idTokenMarkerClaims[%d] must be a string. Quote the name in a values file, or use --set-string" $i) -}}
 {{- end -}}
 {{- if not $n -}}
-{{- fail (printf "oidc.idTokenMarkerClaims[%d] is empty. IamConfig::validate refuses an empty name, and IAM does not boot. To remove the value, use [] in a values file or --set oidc.idTokenMarkerClaims=null, not {}" $i) -}}
+{{- fail (printf "oidc.idTokenMarkerClaims[%d] is empty. IamConfig::validate refuses an empty name, and IAM does not boot. To remove the value, use [] in a values file or --set-json 'oidc.idTokenMarkerClaims=[]', not --set oidc.idTokenMarkerClaims={}" $i) -}}
 {{- end -}}
 {{- if not (regexMatch `^[!#-\[\]-~]+$` $n) -}}
 {{- fail (printf "oidc.idTokenMarkerClaims[%d] is %q: use printable ASCII only, with no space, no \" and no \\. IAM cannot read another character from IAM_AUTHN__ISSUERS" $i $n) -}}
 {{- end -}}
+{{- /* Keep this list equal to RESERVED_MARKER_CLAIMS in rs/crates/services/paigasus-iam/src/config.rs. */ -}}
 {{- if has $n (list "iss" "sub" "aud" "exp") -}}
 {{- fail (printf "oidc.idTokenMarkerClaims[%d] is %q: every access token carries this claim, so IAM would refuse every token. IamConfig::validate refuses it, and IAM does not boot" $i $n) -}}
 {{- end -}}

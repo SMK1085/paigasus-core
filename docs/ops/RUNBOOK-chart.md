@@ -218,9 +218,11 @@ these claims, with any value except `null`. The default is `[]`, and IAM then do
 - The chart refuses a name that is empty, a name with a character outside printable ASCII, a
   space, `"` or `\`, the names `iss`, `sub`, `aud` and `exp`, and a name that occurs two times.
 - A change of the value restarts IAM (§ 5).
-- To remove the setting, delete the key from your values file, set it to `[]` in a values file,
-  or use `--set oidc.idTokenMarkerClaims=null`. Do not use `--set oidc.idTokenMarkerClaims={}`:
-  Helm makes it a list with one empty name, and the chart refuses it.
+- To remove the setting, set it to `[]` in a values file, or use
+  `--set-json 'oidc.idTokenMarkerClaims=[]'`. With `helm upgrade --reuse-values`, deleting the
+  key from a values file does not remove the old list: Helm gives the old value back. Do not use
+  `--set oidc.idTokenMarkerClaims={}`: Helm makes it a list with one empty name, and the chart
+  refuses it.
 
 **IAM refuses a sender-constrained token (SMA-690).** IAM refuses an access token that has one
 of these markers:
