@@ -6,8 +6,14 @@
 //! (falling back to the caller-supplied default level, e.g. a service's own
 //! config). Kept tiny and dependency-light so every service shares one log
 //! shape (ADR-0005-adjacent; the first consumer is `paigasus-iam`).
+//!
+//! The `test-support` feature adds the `test_support` module, a log-capture helper for tests
+//! that assert on a log line. Turn it on from `[dev-dependencies]` only (SMA-689).
 
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 /// The env-filter for logging: `RUST_LOG` if set, else `default_directive`. Pure so it is
 /// unit-testable without touching the process-global subscriber.

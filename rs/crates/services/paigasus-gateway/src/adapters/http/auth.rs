@@ -459,6 +459,9 @@ mod tests {
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::middleware::from_fn_with_state;
     use axum::routing::get;
+    // TRACE (the default of `capture_logs`), not INFO: row 9 asserts that the `paigasus-org`
+    // header value is never logged, and only TRACE makes that check see every level.
+    use paigasus_logging::test_support::capture_logs;
     use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse, Membership, RoleGrantRef};
     use std::sync::Mutex;
     use tower::ServiceExt; // for `oneshot`
@@ -787,44 +790,6 @@ mod tests {
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
-    }
-
-    // ---- log capture ------------------------------------------------------------------------
-
-    /// A second copy of this helper exists in `tests/chat_proxy.rs` (SMA-635 Task 4). This copy
-    /// stays on `Level::TRACE` (below), not `INFO`: row 9 asserts the `paigasus-org` header value
-    /// is never logged, and TRACE is what makes that assertion see every level, not only the
-    /// `warn!` line it targets.
-    #[derive(Clone, Default)]
-    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogBuffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
-        type Writer = LogBuffer;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    impl LogBuffer {
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-        }
-    }
-
-    fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
-        let buffer = LogBuffer::default();
-        let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).with_max_level(tracing::Level::TRACE).finish();
-        (buffer, tracing::subscriber::set_default(subscriber))
     }
 
     // ---- `iam_result` bounded-label mapping --------------------------------------------------

@@ -401,9 +401,9 @@ mod tests {
         FakeAuditLog, FakeAuthorizer, FakeOutbox, FakeSecretHasher, FakeUnitOfWork, FixedClock, InMemoryApiKeys, InMemoryRoleGrants, InMemoryServiceAccounts, SeqIds, SeqKeyEntropy, TenancyStore,
         forged_variants, seed_org, seed_project, seed_team, store_with_orgs, tenancy_nodes,
     };
-    use crate::log_capture::capture_logs;
     use async_trait::async_trait;
     use paigasus_iam_core::{OrganizationId, PrincipalStatus, ProjectId, RepositoryError, RoleGrant, ServiceAccount, TeamId, Transaction, parse_token};
+    use paigasus_logging::test_support::capture_logs;
     use uuid::Uuid;
 
     fn actor_prn(n: u128) -> Prn {

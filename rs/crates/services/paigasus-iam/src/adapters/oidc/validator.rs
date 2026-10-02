@@ -364,12 +364,12 @@ mod tests {
     use super::*;
     use crate::adapters::clock::SystemClock;
     use crate::adapters::oidc::jwks::{CachedJwks, InMemoryJwksCache};
-    use crate::log_capture::capture_logs;
     use jsonwebtoken::EncodingKey;
     use jsonwebtoken::jwk::{CommonParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType, JwkSet, KeyAlgorithm};
     use p256::elliptic_curve::Generate;
     use p256::elliptic_curve::sec1::ToSec1Point;
     use p256::pkcs8::{EncodePrivateKey, LineEnding};
+    use paigasus_logging::test_support::capture_logs;
     use serde::Serialize;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
