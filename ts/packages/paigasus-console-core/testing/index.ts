@@ -3,6 +3,8 @@
 // The testing surface. OUTSIDE src/ and deliberately NOT server-only guarded: vitest and Playwright
 // harnesses import it outside a Next server, and so does `ts/tooling/dev-stack.ts` (SMA-641), a
 // developer-facing command rather than a test — `dev-env.ts` and `dev-world.ts` exist only for it.
+// It also holds `hop-by-hop.ts`, the one hop-by-hop rule that every in-process proxy in ts/ shares:
+// the TLS terminator here, gateway-console's counting forwarder, and dev-stack.ts (SMA-640).
 // The src/ rule — every file imports 'server-only' — has
 // ONE exception: src/global.d.ts declares a type only and imports nothing, so it carries no
 // 'server-only' import either, harmlessly, since a .d.ts emits no runtime code. What actually keeps
@@ -26,6 +28,7 @@ export {
   type ServiceDescriptorBody,
 } from './fake-iam';
 export { startFakeIdp, type FakeIdp } from './fake-idp';
+export { forwardableHeaders } from './hop-by-hop';
 export { assertInstalledWasmMatchesCommitted } from './installed-wasm';
 export { testTls, type TlsMaterial } from './tls';
 export { startTlsTerminator, type TerminatorRoute } from './tls-terminator';
