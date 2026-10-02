@@ -820,7 +820,7 @@ diagnose() {
   k -n "$NS" get pods -l "app.kubernetes.io/name=$STUB" -o wide >>"$d/gateway-stub.txt" 2>&1 || true
   k -n "$NS" get endpoints "$STUB" -o wide >>"$d/gateway-stub.txt" 2>&1 || true
   # SMA-701: `get all` lists no EndpointSlice. An IAM settle rc 2 ("cannot reach IAM") needs them.
-  k -n "$NS" get endpointslices -o wide >"$d/endpointslices.txt" 2>&1 || true
+  k -n "$NS" get endpointslices -o yaml >"$d/endpointslices.txt" 2>&1 || true
   if [ -n "${HELM_BIN:-}" ] || resolve_helm_quiet; then
     # The chart renders no Secret: it only refers to existing ones by name.
     h -n "$NS" get manifest "$RELEASE" >"$d/helm-manifest.yaml" 2>&1 || true
