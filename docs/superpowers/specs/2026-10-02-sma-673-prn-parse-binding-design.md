@@ -234,9 +234,11 @@ does not need a rate limit. Sven accepted this event on 2026-10-02 (Q6).
   `paigasus_kernel::wire::prn_parse_fields`, and a cross-check: for each PRN that is in both
   `prn_parse.json` and `prn_fields.json`, the two rows agree field by field.
 - `moon.yml` `parity-corpus-drift`: `git diff --exit-code` ignores untracked files, so an
-  uncommitted `prn_parse.json` passes the gate today. Append
-  `&& test -z "$(git status --porcelain -- rs/crates/libs/paigasus-kernel-parity/vectors/)"` to the
-  script. Prove it: with `prn_parse.json` untracked, the gate reds; after `git add`, it is green.
+  untracked `prn_parse.json` passes the gate today. Append
+  `&& test -z "$(git ls-files --others --exclude-standard -- rs/crates/libs/paigasus-kernel-parity/vectors/)"`
+  to the script. Do not use `git status --porcelain`: it also lists a STAGED file, so the gate
+  would stay red after `git add`. Prove it: with `prn_parse.json` untracked, the gate reds; after
+  `git add`, it is green.
 - Update each doc that says "five" corpora to "six": `ts/CLAUDE.md:127`, the headers of
   `tests/wasm-probe.mjs:10` and `tests/committed-wasm.test.ts:9`, the `corpus_path` doc in the
   parity crate, and the parity `README.md` corpus list.
