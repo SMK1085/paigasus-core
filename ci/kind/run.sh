@@ -414,6 +414,7 @@ install_a() {
   [ "$gw" = "deployment.apps/$gw_name" ] \
     || die_assert "phase A has no Deployment $gw_name: the name R3 checks does not match the chart's paigasus.name"
   echo "  phase A: $gw exists"
+  settle_iam_service
   assert_notes_marker "install a"
   echo "== install a: done =="
 }
@@ -461,6 +462,129 @@ settle_gateway_404() {
   echo "  settled: /gateway/overview answers Traefik's 404"
 }
 
+# SMA-701: the IAM settle. Helm 3.22.0's --wait counts a Deployment as ready when readyReplicas >=
+# replicas - maxUnavailable. The IAM backend has replicas 1 and maxUnavailable 1 on purpose, so
+# `helm install --wait` can return while IAM has no Ready pod and its Service has no endpoint.
+# `kubectl wait --for=condition=Available` has the same floor; `rollout status` does not
+# (ci/kind/README.md, "The IAM settle"). Part A waits for the rollout. Part B asks IAM /readyz
+# through its Service from each console pod, because the discovery probe runs in that pod.
+#
+# PROBE_JS runs in a console pod with `node -e`: CommonJS and a promise chain, no top-level await.
+# It reads the IAM URL from PAIGASUS_SERVICES, the variable the console reads, so it holds no copy
+# of the Service name or the port. It prints the HTTP status of GET <iam>/readyz, or 000 on any
+# error, and always exits 0, so a failed fetch never reads as a failed exec. It holds no single
+# quote: it is one single-quoted bash string.
+PROBE_JS='Promise.resolve().then(function () {
+  var iam = JSON.parse(process.env.PAIGASUS_SERVICES).iam;
+  if (typeof iam !== "string" || iam === "") { throw new Error("PAIGASUS_SERVICES has no iam URL"); }
+  return fetch(iam + "/readyz", { signal: AbortSignal.timeout(5000) });
+}).then(function (res) {
+  var done = res.body ? res.body.cancel().catch(function () {}) : null;
+  return Promise.resolve(done).then(function () { return String(res.status); });
+}).then(function (code) {
+  process.stdout.write(code + "\n", function () { process.exit(0); });
+}, function () {
+  process.stdout.write("000\n", function () { process.exit(0); });
+});'
+
+settle_iam_service() {
+  local start iam_deploy ready deps d dname dinst expected pods e pod rest pname del found deadline pstart xrc code now
+  start="$(date +%s)"
+  # Entry: the names, and the line that shows whether Helm returned before IAM was Ready.
+  iam_deploy="$(chart_resource_name iam-backend)" \
+    || die_infra "cannot find the IAM backend Deployment: cannot derive its name from charts/paigasus/Chart.yaml"
+  k -n "$NS" get deployment "$iam_deploy" -o name >/dev/null \
+    || die_infra "cannot find the IAM backend Deployment $iam_deploy in $NS"
+  ready="$(k -n "$NS" get deployment "$iam_deploy" -o jsonpath='{.status.readyReplicas}')" \
+    || die_infra "cannot read the readyReplicas of $iam_deploy"
+  echo "  iam settle: start $(date -u +%H:%M:%S) UTC, IAM readyReplicas=${ready:-0}"
+
+  # Part A: the IAM pod is Ready. rollout status has no maxUnavailable floor. 240 s: the startup
+  # probe (60 s), the migration lock wait (120 s by default), the migration, one readiness period.
+  k -n "$NS" rollout status "deployment/$iam_deploy" --timeout=240s \
+    || die_assert "the IAM backend Deployment did not become Ready in 240 s"
+  echo "  settled: IAM Ready after $(( $(date +%s) - start )) s"
+
+  # Part B, step 1: the console Deployments of this release that exist now. By the POD TEMPLATE
+  # labels: the chart's Deployment metadata has no labels (console-deployment.yaml), so a
+  # `get deployment -l` finds nothing.
+  deps="$(k -n "$NS" get deployments \
+    -o jsonpath='{range .items[*]}{.spec.template.metadata.labels.app\.kubernetes\.io/name}{"/"}{.spec.template.metadata.labels.app\.kubernetes\.io/instance}{" "}{end}')" \
+    || die_infra "cannot list the Deployments in $NS"
+  expected=""
+  for d in $deps; do
+    dname="${d%%/*}"
+    dinst="${d#*/}"
+    case "$dname" in
+      *-console) if [ "$dinst" = "$RELEASE" ]; then expected="$expected $dname"; fi ;;
+    esac
+  done
+  # A jsonpath that matches nothing must not skip Part B in silence: iam-console exists in phase A
+  # and in phase B.
+  case "$expected " in
+    *" iam-console "*) ;;
+    *) die_infra "no iam-console Deployment of release $RELEASE in $NS (found:${expected:- none}), so Part B has nothing to check" ;;
+  esac
+  echo "  iam settle: console Deployments:$expected"
+
+  # Step 2: the Running console pods. A pod with a deletionTimestamp is shutting down (phase B:
+  # the gateway console pods after the upgrade removed their Deployment), so it is not checked and
+  # it does not count for coverage. Each console Deployment needs one pod to check.
+  pods="$(k -n "$NS" get pods \
+    -l "app.kubernetes.io/name in (gateway-console,iam-console),app.kubernetes.io/instance=$RELEASE" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"/"}{.metadata.labels.app\.kubernetes\.io/name}{"/"}{.metadata.deletionTimestamp}{" "}{end}')" \
+    || die_infra "cannot list the console pods in $NS"
+  for dname in $expected; do
+    found=0
+    for e in $pods; do
+      rest="${e#*/}"
+      pname="${rest%%/*}"
+      del="${rest#*/}"
+      if [ "$pname" = "$dname" ] && [ -z "$del" ]; then found=1; fi
+    done
+    [ "$found" = 1 ] || die_infra "no Running $dname pod to check the IAM data path from"
+  done
+
+  # Step 3: poll each pod until IAM answers 200, with a 60 s deadline per pod.
+  for e in $pods; do
+    pod="${e%%/*}"
+    rest="${e#*/}"
+    del="${rest#*/}"
+    [ -z "$del" ] || continue
+    pstart="$(date +%s)"
+    deadline=$(( pstart + 60 ))
+    while :; do
+      # A stale answer from an earlier iteration must not read as this one's.
+      rm -f "$STATE/settle-iam.out" "$STATE/settle-iam.err"
+      xrc=0
+      # The kubectl binary, not k(): run_bounded must signal the command itself, not a subshell.
+      run_bounded 20 "$STATE/settle-iam.out" "$STATE/settle-iam.err" \
+        kubectl --context "$CONTEXT" -n "$NS" exec -c console "$pod" -- /nodejs/bin/node -e "$PROBE_JS" || xrc=$?
+      code="$(cat "$STATE/settle-iam.out" 2>/dev/null || true)"
+      [ "$code" != 200 ] || break
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        case "$code" in
+          ''|000)
+            ready="$(k -n "$NS" get deployment "$iam_deploy" -o jsonpath='{.status.readyReplicas}')" \
+              || die_infra "cannot read the readyReplicas of $iam_deploy"
+            if [ "${ready:-0}" = 0 ]; then
+              die_assert "IAM became NotReady after the rollout: $iam_deploy has readyReplicas=0, and $pod had no answer from IAM /readyz for 60 s"
+            fi
+            die_infra "$pod cannot reach IAM /readyz through its Service in 60 s (last kubectl exec rc $xrc; 143 is the 20 s exec bound): $(cat "$STATE/settle-iam.err" 2>/dev/null || true)" ;;
+          [1-5][0-9][0-9])
+            die_assert "$pod reaches IAM, but it answers HTTP $code on /readyz 60 s after the IAM rollout; want 200" ;;
+          *)
+            die_infra "the IAM probe in $pod printed '$code', not an HTTP status (last kubectl exec rc $xrc): $(cat "$STATE/settle-iam.err" 2>/dev/null || true)" ;;
+        esac
+      fi
+      sleep 2
+    done
+    now="$(date +%s)"
+    echo "  settled: $pod reaches IAM /readyz (HTTP 200) after $(( now - start )) s ($(( now - pstart )) s for this pod)"
+  done
+}
+
 upgrade_b() {
   local old new left deadline h1 h2 all_old
   need kubectl; need curl; resolve_helm
@@ -496,6 +620,7 @@ upgrade_b() {
   done
   echo "  iam-console pod-template-hash: old [${old% }] -> new [${new% }]"
   settle_gateway_404
+  settle_iam_service
   assert_notes_marker "upgrade b"
   echo "== upgrade b: done =="
 }
@@ -684,6 +809,8 @@ diagnose() {
   k -n "$NS" get deployment "$STUB" -o wide >"$d/gateway-stub.txt" 2>&1 || true
   k -n "$NS" get pods -l "app.kubernetes.io/name=$STUB" -o wide >>"$d/gateway-stub.txt" 2>&1 || true
   k -n "$NS" get endpoints "$STUB" -o wide >>"$d/gateway-stub.txt" 2>&1 || true
+  # SMA-701: `get all` lists no EndpointSlice. An IAM settle rc 2 ("cannot reach IAM") needs them.
+  k -n "$NS" get endpointslices -o wide >"$d/endpointslices.txt" 2>&1 || true
   if [ -n "${HELM_BIN:-}" ] || resolve_helm_quiet; then
     # The chart renders no Secret: it only refers to existing ones by name.
     h -n "$NS" get manifest "$RELEASE" >"$d/helm-manifest.yaml" 2>&1 || true
