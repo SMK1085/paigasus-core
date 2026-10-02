@@ -9,7 +9,8 @@
 //!
 //! No I/O, no FFI, and no adapter dependencies live here. The Python, Node and browser
 //! bindings under `rs/crates/bindings/` call into this crate rather than reimplementing
-//! it (ADR-0005).
+//! it (ADR-0005). The hidden [`wire`] module fixes the shape of a multi-value FFI return in one
+//! place for those bindings (SMA-673). It has no FFI dependency, and only the bindings use it.
 
 pub mod cedar;
 // The PRN value type lives in `resource_name`, NOT `prn`: `prn` (PRN) is a Windows reserved device
@@ -17,6 +18,10 @@ pub mod cedar;
 // rename this back to `prn`. The public type is still `Prn` (re-exported below).
 pub mod resource_name;
 pub mod uuid7;
+// Binding-only wire forms (SMA-673, Sven accepted it on 2026-10-02 as Q7). Hidden from the docs,
+// and NOT re-exported at the crate root: a consumer uses `Prn`.
+#[doc(hidden)]
+pub mod wire;
 
 pub use cedar::{CedarUid, to_cedar_uid};
 pub use resource_name::{Prn, PrnError};

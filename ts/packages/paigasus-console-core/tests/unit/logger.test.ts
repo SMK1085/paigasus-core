@@ -70,4 +70,9 @@ describe('createJsonLogger', () => {
     // logger writes any name it is given.
     expectTypeOf<'gateway.sa.grant_failed'>().toMatchTypeOf<AppEventName>();
   });
+
+  it('holds prn.kernel_call_failed in AppEventName at the TYPE level (SMA-673)', () => {
+    // Enforced by `tsc --noEmit` in the typecheck task, not by `vitest run` (see the case above).
+    expectTypeOf<'prn.kernel_call_failed'>().toMatchTypeOf<AppEventName>();
+  });
 });

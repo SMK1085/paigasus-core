@@ -126,7 +126,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   paigasus-kernel-ts:generate-wasm` is their only writer: run it after a Rust kernel or wasm-binding
   edit, and commit all five. `paigasus-kernel-ts:test` holds them to the source with four checks —
   the committed glue equals a fresh build, the binary's import and export lists equal a fresh
-  build's, the committed pair replays all five parity corpora, and (in the console vitest
+  build's, the committed pair replays all six parity corpora, and (in the console vitest
   `setupFiles`) the pnpm-installed copy equals the committed files. **No check compares the binary
   bytes**: they differ on macOS, Linux arm64 and Linux amd64, while the glue and the interface do
   not. After a `git checkout`, a rebase or a branch switch that replaces those files, run `rm -rf

@@ -7,7 +7,7 @@
 // tests/committed-wasm.test.ts spawns it.
 //
 //   node tests/wasm-probe.mjs --interfaces <dir>   the module's import and export lists, as JSON
-//   node tests/wasm-probe.mjs --corpus <dir>       replay all five parity corpora through <dir>
+//   node tests/wasm-probe.mjs --corpus <dir>       replay all six parity corpora through <dir>
 //
 // <dir> holds paigasus_wasm.js, paigasus_wasm_bg.js and paigasus_wasm_bg.wasm. The glue imports
 // its binary through a RELATIVE specifier, so the pair must be co-located: a mixed pair is only
@@ -84,6 +84,13 @@ async function corpus(dir) {
     same(`prnBuild(${row.prn})`, api.prnBuild(row.service, row.region, row.org, row.resource_type, row.resource_id), row.prn);
   }
 
+  // SMA-673: the one-call parse. Compared as JSON, because the binding returns an array.
+  const parse = vectors('prn_parse');
+  for (const row of parse) {
+    const expected = [row.error_kind, row.service, row.region, row.org, row.resource_type, row.resource_id];
+    same(`prnParseFields(${row.input})`, JSON.stringify(api.prnParseFields(row.input)), JSON.stringify(expected));
+  }
+
   if (failures.length > 0) {
     const error = new Error(`${failures.length} corpus failures`);
     error.failures = failures;
@@ -96,6 +103,7 @@ async function corpus(dir) {
       prn_canonical: canonical.length,
       prn_cedar: cedar.length,
       prn_fields: fields.length,
+      prn_parse: parse.length,
     },
   };
 }
