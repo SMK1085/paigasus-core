@@ -28,6 +28,8 @@ runs is the `*_ci` task cases' job.
   (SMA-524). One-directional w.r.t. `paigasus-proto`.
 - **redis lib edit** → `paigasus-redis-rs` + `paigasus-iam-rs` (SMA-726). The gateway joins this
   set when it starts to use the lib (SMA-677).
+- **test-docker lib edit** → `paigasus-test-docker-rs` + `paigasus-iam-rs` (SMA-726). The gateway
+  joins this set in SMA-677 PR 2.
 - **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-node-bindings-rs`
   + `paigasus-wasm-rs` + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts`
   + `paigasus-kernel-parity-rs` (both language wrappers wrap their bindings, SMA-419/420/427)

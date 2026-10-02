@@ -5,7 +5,7 @@
 //! Moved out of `paigasus-iam`'s `adapters::redis_conn` by SMA-726 (D15), so that IAM and the
 //! gateway share one tuned connection and one circuit breaker. The caller names the breaker's
 //! metrics with [`BreakerMetrics`]; this crate does not depend on `paigasus-observability`.
-//! The `test-support` feature adds the test-only constructors and the [`test_support`] blackhole
+//! The `test-support` feature adds the test-only constructors and the `test_support` blackhole
 //! listener. Turn it on from `[dev-dependencies]` only.
 //!
 //! **Why this module exists.** `ConnectionManager::new` applies a stock
@@ -89,7 +89,7 @@ pub fn connection_manager_config() -> ConnectionManagerConfig {
 /// connect future the instant a command fails (`redis-1.3.0/src/aio/connection_manager.rs:649`),
 /// not on the next probe, so whether a probe joins that still-in-flight dial (one window) or
 /// consumes an already-resolved `Err` (two windows) depends on dial duration vs the open window.
-/// See [`OPEN_DURATION`]'s doc for both regimes; either way the bound stays ≤ 2 open windows plus
+/// See `OPEN_DURATION`'s doc for both regimes; either way the bound stays ≤ 2 open windows plus
 /// one connect budget.
 ///
 /// A second coupling (SMA-702): the open-breaker tests assert that the test blackhole accepted
@@ -160,12 +160,12 @@ pub async fn connect(redis_url: &str, metrics: impl Into<BreakerMetrics>) -> red
     })
 }
 
-/// A lazily-connecting handle with a CLOSED breaker, using [`Breaker::new`]'s PRODUCTION
+/// A lazily-connecting handle with a CLOSED breaker, using `Breaker::new`'s PRODUCTION
 /// durations (2s open / 5s half-open probe budget) — NOT short test durations, despite the name.
 ///
 /// Required wherever a test must actually dial: the production [`connect`] is eager, so against a
 /// dead or blackholed backend it fails before any command can be issued. A test that needs a
-/// short window instead must hand-roll a [`RedisHandle`] with [`Breaker::with_durations`] (see
+/// short window instead must hand-roll a [`RedisHandle`] with `Breaker::with_durations` (see
 /// `the_breaker_recloses_once_the_backend_answers_again`).
 ///
 /// Call it inside a Tokio runtime (`#[tokio::test]`): `new_lazy_with_config` spawns on the
@@ -1046,7 +1046,7 @@ mod tests {
     /// SMA-476 D7. The breaker must re-close once the backend answers again.
     ///
     /// Asserts a BOUND, not an exact window count, on purpose. How many windows recovery costs is
-    /// regime-dependent (see [`OPEN_DURATION`]'s doc): `ConnectionManager::reconnect()` spawns the
+    /// regime-dependent (see `OPEN_DURATION`'s doc): `ConnectionManager::reconnect()` spawns the
     /// replacement connect future the instant a command fails (`connection_manager.rs:649`), not
     /// on the next probe, so a probe either joins that still-in-flight dial (one window — this
     /// test's regime, a 50 ms window against a blackholed backend's ~2.1 s dial) or consumes an

@@ -381,6 +381,7 @@ tasks:
       - 'rs/crates/services/paigasus-iam/tests/docker_preflight.rs'
       - 'rs/crates/services/paigasus-iam/tests/support/docker.rs'
       - 'rs/crates/libs/paigasus-test-docker/src/**/*'
+      - '/rs/crates/libs/paigasus-test-docker/Cargo.toml'
       - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
       - 'rs/crates/services/paigasus-iam/src/config.rs'
       - 'rs/crates/services/paigasus-iam/Cargo.toml'

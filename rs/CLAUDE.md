@@ -31,8 +31,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   lives once, in the dev-only crate `paigasus-test-docker` (SMA-726; IAM's
   `tests/support/docker.rs` only re-exports it), and `repo:iam-docker-policy-single-site` fails
   if a suite in IAM or the gateway hand-rolls its own copy. Two env vars, both parsing
-  `1`/`true`/`yes` (anything else,
-  including `0`, is off — unlike `CI`, which is presence-based):
+  `1`/`true`/`yes` (anything else, including `0`, is off — unlike `CI`, which is
+  presence-based):
   `PAIGASUS_REQUIRE_DOCKER=1` turns every suite's skip into a panic, which is what a FILTERED run
   (`--test relay_pg`, `-E 'test(foo)'`) needs, since the canary is not in that filter.
   `PAIGASUS_SKIP_DOCKER=1` restores skipping everywhere including the canary — it is a
