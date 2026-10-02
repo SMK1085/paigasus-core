@@ -256,15 +256,22 @@ Moon runs `build` and `test` at the same time: neither has an edge to the other 
 - `postBuild` holds a cross-process lock on the crate folder (`cli.js:10470-10471`, `:1106-1158`);
 - both runs write the same bytes.
 
-Two residual risks stay:
+A shared type-def folder was a third risk, and a local review after the PR opened removed it.
+napi keeps its type-def cache in one folder in `rs/target`. Our `touch` forces a recompile on every
+run, and each recompile deletes and rewrites the type-def file in that folder. So one run could read
+a partial file while the other run compiled. All three tasks now pass `--no-dts-cache`, and each run
+then uses its own `mkdtemp` folder (`cli.js:10434-10436`). Check 3 requires the flag in each task.
 
-- One napi can read a partial type-def file while another `cargo` recompiles. Check 2 detects the
-  empty case. The probability of a partial, non-empty read is low.
+One residual risk stays:
+
 - `generate-napi-glue` and `test` in one `moon run` have no order. `test` can hash its inputs before
   `generate-napi-glue` writes them, and cache a result under the old hash. So the documentation says:
   run `generate-napi-glue` as its own command, then run `test`.
 
 ### 5.5 Dependabot (goal 5)
+
+The local review after the PR opened extended this to cargo. The Rust crates `napi`, `napi-derive`
+and `napi-build` render the glue too, so they get their own cargo group with the same reason.
 
 `.github/dependabot.yml` gets a separate group for `@napi-rs/cli` in the npm ecosystem, and the
 `npm-minor-patch` group excludes it. Then a CLI bump arrives in its own PR. If the bump changes the
