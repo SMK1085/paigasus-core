@@ -507,6 +507,7 @@ mod tests {
             issuer: issuer.to_string(),
             audiences: audiences.iter().map(|a| (*a).to_string()).collect(),
             jit_provisioning: true,
+            id_token_marker_claims: Vec::new(),
         }
     }
 

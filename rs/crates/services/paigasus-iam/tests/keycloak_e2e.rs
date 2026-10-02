@@ -309,6 +309,7 @@ fn keycloak_config(issuer: &str) -> IamConfig {
                 // aud. Both are accepted so the ID token reaches the SMA-686 `typ` check.
                 audiences: vec!["paigasus".to_string(), "paigasus-cli".to_string()],
                 jit_provisioning: true,
+                id_token_marker_claims: Vec::new(),
             }],
         },
         authz: AuthzConfig::default(),
