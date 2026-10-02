@@ -176,9 +176,18 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - **The wasm-bindgen family does not move through dependabot (SMA-683).** `js-sys`, `web-sys`
   and `wasm-bindgen-futures` pin `wasm-bindgen` with `=`. Dependabot updates one package at a
   time. `cargo update -p wasm-bindgen` then locks 0 packages (MEASURED, spec M0). Since SMA-680
-  the release PR does not move it either. So `wasm-bindgen` stays frozen until a person moves
-  the whole family. Do that at a `rust-toolchain.toml` or `wasm-pack` bump, at a `repo:deny`
-  advisory for the family, or when a newer `wasm-bindgen` is needed. Use a normal
+  the release PR does not move it either.
+  **The normal path is `.github/workflows/wasm-lockstep.yml` (SMA-693).** Every Tuesday at
+  06:17 UTC it runs the four-package `cargo update -p` on `main`. When the lock changes, it
+  regenerates the five artifacts on Linux in a build container, and opens or updates ONE pull
+  request on the bot branch `deps/wasm-bindgen-lockstep`. Read the `rs/Cargo.lock` diff of that
+  pull request before the merge: nothing enforces this review. Do not push to the bot branch;
+  the next run refuses a branch that a person changed. To start a run now:
+  `gh workflow run wasm-lockstep.yml --ref main`. `ci/wasm-lockstep/README.md` holds the trust
+  model and the refusal codes.
+  Use the manual runbook below only when the workflow cannot help: it refuses the lock change (a
+  new transitive dependency, or a newer `syn`), its build fails because the pinned `wasm-pack`
+  does not support the new 0.2.z, or the `reqwest` case below. Use a normal
   `feature/sma-NNN-<slug>` PR.
   Before you start:
   - Put the proto shims on `PATH`.
@@ -195,8 +204,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   ```
   Push the branch, then open the PR.
   Read the `git diff` BEFORE `generate-wasm`. That task compiles the new proc-macro and build
-  scripts on your machine, where your `gh` token and signing agent are available. Run
-  `generate-wasm` on ONE host (SMA-634 F12). If the pinned `wasm-pack` does not support the new
+  scripts on your machine, where your `gh` token and signing agent are available. ONE host per
+  PR regenerates the artifacts. A family bump from the `wasm-lockstep` workflow regenerates on
+  Linux inside its build container; a kernel or binding edit regenerates on the author's host.
+  So the binary changes host between PRs (SMA-634 F12). `CI` never regenerates; it only
+  compares. If the pinned `wasm-pack` does not support the new
   0.2.z, bump it in `.prototools` in the same PR (the invariant above `wasm-bindgen` in
   `rs/Cargo.toml`). Record its error text here when a bump first shows it. It is not measured.
   **The `reqwest` case (INFERRED).** A new `reqwest` can need newer wasm crates. Then a cargo PR
