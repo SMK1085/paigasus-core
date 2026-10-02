@@ -278,6 +278,12 @@ tasks:
       # 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to
       # keep narrow globs rather than collapse them into the broad one.
       - 'ci/next-env/**/*'
+      # SMA-693 — this task pins load-bearing lines inside ci/wasm-lockstep/run.sh
+      # (WASM_LOCKSTEP_SH_CALL_SITES), so a change under ci/wasm-lockstep/ MUST re-key it. The
+      # broad 'ci/**/*' entry already covers it for SCHEDULING; the narrow entry is kept because
+      # check 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to
+      # keep narrow globs rather than collapse them into the broad one.
+      - 'ci/wasm-lockstep/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
