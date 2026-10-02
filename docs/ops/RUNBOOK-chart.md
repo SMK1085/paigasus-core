@@ -33,6 +33,7 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `oidc.clientId` | yes | The console's OIDC client. By default IAM also uses it as the access-token audience. Then an ID token passes IAM's audience check, and the chart shows a warning (§ 6) |
 | `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Recommended: a dedicated API audience. Follow the migration order in § 6 |
 | `oidc.acknowledgeClientIdAudience` | no | Set it to the value of `oidc.clientId` to remove the audience warning (§ 6). It does not change what IAM accepts |
+| `oidc.idTokenMarkerClaims` | no | Claim names that the IdP puts into its ID token and never into its access token. IAM refuses a token that carries one of them. Default `[]`: no such check. Zitadel: `["at_hash", "azp"]` (§ 6) |
 | `oidc.scopes` | no | The scopes that both consoles request. Empty: `openid profile email offline_access`. The list must contain `openid`, or the render fails. Keep `offline_access`, or the IdP issues no refresh token. When set, the consoles also send it on each refresh. Entra ID needs it (§ 6) |
 | `oidc.authorizationAudience` | no | The `audience` parameter that both consoles send in the authorization request. Empty: no `audience` parameter. It must equal `oidc.audience`, or the render fails. Auth0 needs it (§ 6) |
 | `oidc.existingSecret` | yes | A Secret with keys `oidc-client-secret` and `session-redis-url` |
@@ -134,6 +135,7 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). IAM is not available during the restart. |
 | `zones.iam.backend.bootstrapAdmins` or `zones.iam.backend.extraEnv` | the IAM pod, not the consoles | it changes the env in the IAM pod template (`tests/env.sh` rows B7a and B7b). IAM is not available during the restart, as for `oidc.audience` |
 | `oidc.acknowledgeClientIdAudience` | nothing | it changes only the IAM Deployment's `metadata` annotation and the NOTES, not a pod template (`tests/env.sh` row W14) |
+| `oidc.idTokenMarkerClaims` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template (`tests/env.sh` row M6). IAM is not available during the restart, as for `oidc.audience` |
 | `oidc.scopes` or `oidc.authorizationAudience` | both consoles, not IAM | it changes the `console-env` ConfigMap and so `checksum/console-env` (`tests/env.sh` rows O5 and O6) |
 
 A change of `oidc.caBundle.version` restarts every pod that mounts the bundle: both consoles and
@@ -191,10 +193,32 @@ number of refusals that IAM did not log.
 This adds no requirement on the IdP. No Keycloak or Dex access token measured for SMA-686 has
 one of these markers. Do not add a mapper that sets `typ` on the access token.
 
-The check does not protect an IdP whose ID token has no `typ` claim. For such an IdP, a
-dedicated API audience is the only protection. This works only when the IdP can put a different
-audience into the access token than into the ID token. Dex cannot: both tokens have the same
-`aud`, so IAM accepts a Dex ID token as a bearer token. See "Dex" below.
+The check does not protect an IdP whose ID token has no `typ` claim. For such an IdP, two
+protections are possible. A dedicated API audience works only when the IdP can put a different
+audience into the access token than into the ID token. Dex and Zitadel cannot: see "Dex" and
+"Zitadel" below. The second protection is `oidc.idTokenMarkerClaims`. It works only for an IdP
+whose ID token has a claim that its access token never has.
+
+**IAM refuses a token by a claim name that you configure (SMA-703).** Set
+`oidc.idTokenMarkerClaims` to a list of claim names. IAM then refuses a token that carries one of
+these claims, with any value except `null`. The default is `[]`, and IAM then does no such check.
+
+- Use a name only when the IdP puts it into its ID token and never into its access token. If the
+  access token also has the claim, IAM refuses every token of the IdP. Dex puts `at_hash` and
+  `nonce` into its access token. Keycloak puts `azp` into its access token.
+- Before you set the value, decode one access token for each grant type in use. No access token
+  can have a configured claim. Decode one ID token. It must have the claims.
+- At start, IAM writes one `info` line with the issuer and the configured names. If this line is
+  not in the IAM log, IAM does not use the setting. A wrong key in a raw `iam.toml` gives no other
+  sign.
+- The IAM log shows a refusal at `info`, with the issuer and the marker `claim <name>`, for
+  example `claim at_hash`. The line does not show the claim value. The rate limit above applies.
+- The chart refuses a name that is empty, a name with a character outside printable ASCII, a
+  space, `"` or `\`, the names `iss`, `sub`, `aud` and `exp`, and a name that occurs two times.
+- A change of the value restarts IAM (§ 5).
+- To remove the setting, delete the key from your values file, set it to `[]` in a values file,
+  or use `--set oidc.idTokenMarkerClaims=null`. Do not use `--set oidc.idTokenMarkerClaims={}`:
+  Helm makes it a list with one empty name, and the chart refuses it.
 
 **IAM refuses a sender-constrained token (SMA-690).** IAM refuses an access token that has one
 of these markers:
@@ -298,8 +322,7 @@ sync does not fail because of it.
 
 **The acknowledgement.** If your IdP cannot give the API its own audience, set
 `oidc.acknowledgeClientIdAudience` to the value of `oidc.clientId`. The warning then does not
-show. The acknowledgement does not change what IAM accepts. IAM still accepts an ID token as a
-bearer token, except a Keycloak ID token (SMA-686).
+show. The acknowledgement does not change what IAM accepts. IAM still accepts an ID token as a bearer token, except a Keycloak ID token (SMA-686) or a token with a claim named in `oidc.idTokenMarkerClaims` (SMA-703).
 
 - The value must equal the client id exactly, with the same letter case. `true` does not work.
 - When you change `oidc.clientId`, the warning shows again.
@@ -312,7 +335,7 @@ passes IAM's audience check, and nothing warns. Decode a real ID token. Its `aud
 contain the value of `oidc.audience`.
 
 **Per IdP. Not measured.** These lines state what each IdP offers. This chart did not measure
-them.
+them. The Zitadel item is the one exception: it is measured.
 
 - **Keycloak.** Add an "Audience" protocol mapper to the console client, or to a client scope of
   that client. Set "Included Custom Audience" to the API audience. Set "Add to access token" on
@@ -347,9 +370,35 @@ them.
     token has that value as its `aud`.
   - Add `email` as an optional claim of the access token. Not measured.
   - Before the switch, decode a real access token and check its `aud`, `iss` and `email`.
-- **Dex.** Dex gives the ID token and the access token the same `aud`. No audience setting helps.
-  Set `oidc.acknowledgeClientIdAudience` to remove the warning. IAM still accepts a Dex ID token
-  as a bearer token. SMA-686 residual R1 stays open for Dex.
+- **Dex.** Dex gives the ID token and the access token the same `aud`. No audience setting helps. Set `oidc.acknowledgeClientIdAudience` to remove the warning. IAM still accepts a Dex ID token as a bearer token. `oidc.idTokenMarkerClaims: ["c_hash"]` refuses a Dex ID token from the code flow only. A refreshed Dex ID token has no claim that the access token does not also have. So SMA-686 residual R1 stays open for Dex (SMA-686 § 2).
+- **Zitadel. Measured, Zitadel v4.15.3 with Login v1, 2026-10-02 (SMA-703).**
+  - In the human flow, the ID token and the access token have the same `aud`. In the machine flow
+    (client credentials), the ID token `aud` contains the access token `aud`. Both tokens have
+    `client_id`. No `urn:zitadel:iam:org:project:id:<id>:aud` scope puts an audience into the
+    access token only. So `oidc.audience` alone does not refuse a Zitadel ID token.
+  - Set the access token type to JWT on the app, and on each machine user. IAM cannot validate
+    an opaque access token. An app that you make without a token type gets the opaque type
+    (inferred, not measured).
+  - IAM needs `email` in the access token (item 2). Zitadel does not put it there, also with
+    "User Info inside ID Token" on. Add it with a Zitadel Action. Not measured. Never send the
+    ID token instead.
+  - Set `oidc.idTokenMarkerClaims: ["at_hash", "azp"]`. Every measured Zitadel ID token has both
+    claims. No measured Zitadel access token has one of them.
+  - The audience. Option 1, for an install with machine clients: set `oidc.audience` to the
+    project id. Each machine client must request the scope
+    `urn:zitadel:iam:org:project:id:<project id>:aud`. Without this scope, a machine token has
+    only its own client id as `aud`, and IAM refuses it as an audience mismatch. Option 2, for an
+    install with the console only: keep the client id as the audience, and set
+    `oidc.acknowledgeClientIdAudience`.
+  - Before the switch: decode one access token for each grant type in use (authorization code,
+    refresh token, client credentials). No access token can have `at_hash` or `azp`. Decode one
+    ID token. It must have both claims.
+  - After the switch: send an ID token to IAM. Expect a `401` and the IAM log line with
+    `claim at_hash`.
+  - A change of the value restarts IAM (§ 5).
+  - After each Zitadel upgrade, decode the tokens again. If a new version puts `azp` or `at_hash`
+    into the access token, IAM refuses every token, and the log line names the claim. If a new
+    version removes both claims from the ID token, the protection stops, and nothing warns.
 
 **Keycloak example 1: the kind job's setup. This setup shows the warning.** Keycloak does not put
 the client id into the access token's `aud` by default. The kind job adds an audience mapper to
