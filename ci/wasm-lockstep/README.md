@@ -188,11 +188,40 @@ Two findings changed the setup:
 
 After this change the build container does not use the Rust toolchain of the image. It downloads rustup and the Rust 1.95.0 toolchain at run time, through proto. `.moon/toolchains.yml` (`rust.version: 1.95.0`) and `rs/rust-toolchain.toml` (`channel = "1.95.0"`) pin the version. Whether proto verifies the rustup download is not verified: M2 did not check it, and the build log was not kept.
 
-The build log also holds the line `error: rustup is not installed at '/tmp/lockstep-home/.cargo'`. The build still finished with exit 0. The cause of this line is not confirmed, because the build log was not kept. M0 checks it.
+The build log also holds the line `error: rustup is not installed at '/tmp/lockstep-home/.cargo'`. The build still finished with exit 0. M0 found where the line comes from. It appears directly after proto sets the default toolchain, inside the Rust setup of proto. The build continues and succeeds, so the line is not fatal. The cause inside the proto Rust plugin is not traced further.
 
 ### M0 — the scratch-branch run on a GitHub runner
 
-Not measured yet.
+Date: 2026-10-02. The runs used the scratch branch `feature/sma-693-m0-scratch`. The pre-push hook allows only `feature/*` branches, so this name replaces `scratch/sma-693-m0`. The branch never merges.
+
+Run 1 failed. The step "Regenerate the wasm artifacts in the container" stopped with `EPERM: operation not permitted, utime '/work/rs/crates/libs/paigasus-kernel/src/lib.rs'`. The `--pre` step of `generate-wasm.mjs` made this call. The cause: `git archive | tar -x` gives the work copy to the runner uid. The container runs as uid 65534 with `--cap-drop=ALL`. A `utimes` call with an explicit time needs the file owner or CAP_FOWNER. M2 did not see the error, because Docker Desktop on macOS does not keep the owner of a bind mount. Commit 8e79ad0f fixed it. The work-copy step now runs `sudo chown -R 65534:65534 "$RUNNER_TEMP/work"` before the first `docker run`, and `pin_check` allows exactly that form.
+
+Run 2 passed. These are its values.
+
+| Item | Value |
+|---|---|
+| Run 1 (failed) | https://github.com/SMK1085/paigasus-core/actions/runs/37066309139 (head 1d550ddf) |
+| Run 2 (passed) | https://github.com/SMK1085/paigasus-core/actions/runs/37067214900 (head 96b21680) |
+| Job `build` | success, 21:30:18Z to 21:34:09Z (3 min 51 s) |
+| Job `host-reference` | success, 21:30:18Z to 21:31:56Z (1 min 38 s) |
+| Job `inspect` | success, 21:34:13Z to 21:34:19Z |
+| Container options (both runs) | `--cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534`, same image |
+| Container env names | `CARGO_HOME`, `HOME=/nonexistent`, `HOSTNAME`, `PATH`, `RUSTUP_HOME`, `RUST_VERSION=1.95.0`, `SHLVL`, `_`, and one line that the runner log masks as `***`. The masked line sorts between `PATH` and `RUSTUP_HOME`. It is most likely `PWD=/work`. No `CI`, no `GITHUB_*`, no `ACTIONS_*`. |
+| Runtime token in env | `runtime token in env: absent` |
+| Process view | 4 numeric pids in `/proc`. This is the pid namespace of the container. Pid 1 is the probe's own bash. |
+| `getent passwd 1001` | no entry |
+| `getent passwd 65534` | `nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin` |
+| Lock verdict (host, rc 0) | `family-moved` js-sys 0.3.105 to 0.3.106; wasm-bindgen 0.2.128 to 0.2.129; wasm-bindgen-futures 0.4.78 to 0.4.79; wasm-bindgen-macro 0.2.128 to 0.2.129; wasm-bindgen-macro-support 0.2.128 to 0.2.129; wasm-bindgen-shared 0.2.128 to 0.2.129; web-sys 0.3.105 to 0.3.106 |
+| Compile container setup | Moon installed proto 0.60.2, rust 1.95.0 and `unstable_python` 3.12.13. Rustup downloaded `1.95.0-x86_64-unknown-linux-gnu` with 6 components and set it as the default. |
+| Moon tasks | `rustup-component-add`, `rustup-target-add`, then `paigasus-kernel-rs:build` (4.3 s), `paigasus-wasm-rs:build` (6.8 s), `paigasus-node-bindings-rs:build` (15.8 s), `paigasus-kernel-ts:generate-wasm` (12.9 s) |
+| `generate-wasm` lines | `generate-wasm: wasm-pack 0.15.0, sources touched` and `generate-wasm: wrote 5 files into rs/crates/bindings/paigasus-wasm/` |
+| Downloaded tree | `<dir>/rs/Cargo.lock` (156952 bytes) and `<dir>/rs/crates/bindings/paigasus-wasm/` with `paigasus_wasm.d.ts` (2465), `paigasus_wasm.js` (415), `paigasus_wasm_bg.js` (14016), `paigasus_wasm_bg.wasm` (50902), `paigasus_wasm_bg.wasm.d.ts` (1703). There is no extra `rs/` level and no `stage/` level. Files are mode 644 and directories are mode 755. |
+| Artifact verdict | `lockstep_check.py artifact` passed with the seven `family-moved` lines. Title: `build(deps): move wasm-bindgen to 0.2.129 and regenerate the wasm glue` |
+| Artifact size | `wasm-lockstep`, 60577 bytes (zip) |
+| `host-reference`, with `CI=true` and `GITHUB_ACTIONS=true` | rc 1. This confirms spec F2: Moon fails the `runInCI: false` task. |
+| `host-reference`, with `env -u CI -u GITHUB_ACTIONS` | rc 0. It wrote 5 files. `git status --porcelain` showed only ` M rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm`. The binary differs between hosts (F10). |
+| `host-reference`, with `CI=false` | rc 1 |
+| `timeout-minutes` of `build` | The build took 3 min 51 s, under 30 minutes. The value stays 60. |
 
 ### M3 — the first `workflow_dispatch` run on `main`
 

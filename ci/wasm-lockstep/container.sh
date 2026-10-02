@@ -33,7 +33,7 @@ case "${1:-}" in
   build)
     # Moon's vcs client is git, and the work copy has no .git (spec 5.1: the host made the copy
     # with git archive). The repository is made HERE, inside the container, so the host never
-    # runs git on the work copy. safe.directory: /work belongs to the runner's uid, not to nobody.
+    # runs git on the work copy. safe.directory: /work belongs to nobody (uid 65534) after the chown.
     cat > "$HOME/.gitconfig" <<'EOF'
 [safe]
 	directory = /work
