@@ -1073,3 +1073,31 @@ tasks:
       - 'CLAUDE.md'
       - '.prototools'
       - 'ci/moon-diagnosis/**/*'
+
+  wasm-lockstep:
+    description: 'Check the wasm-lockstep workflow against its trust model, and the family invariant on HEAD rs/Cargo.lock (SMA-693).'
+    # WHY THIS EXISTS — .github/workflows/wasm-lockstep.yml runs third-party build code in one job
+    # and holds the App key in the other. pin_check.py asserts the rules that keep the two apart
+    # (no secret in build, the docker form, the command-word allowlists, the step order, the push
+    # refspec, the output rule). lockstep_check.py is the checker both jobs run; its self-test and
+    # control run here, and its `current` verdict on HEAD's lock reds a PR that breaks the family
+    # invariant before the next scheduled run does (ci/wasm-lockstep/README.md).
+    #
+    # INPUTS. The workflow is what pin_check.py reads. rs/Cargo.lock is what the real run reads
+    # through `git show HEAD:` (spec F15: never the working tree). .prototools pins the `uv` the
+    # gate shells out to. SELF_TASK_EXPECTED_GLOBS pins these four.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
+    # is REQUIRED: Moon takes a `script:` block's status from its LAST command, so without it a
+    # failing control is masked by the passing real run. SELF_SCHEDULED_GATES pins these four lines.
+    script: |
+      set -euo pipefail
+      bash ci/wasm-lockstep/run.sh --self-test
+      bash ci/wasm-lockstep/run.sh --negative-control
+      bash ci/wasm-lockstep/run.sh
+    toolchain: 'system'
+    inputs:
+      - 'ci/wasm-lockstep/**/*'
+      - '.github/workflows/wasm-lockstep.yml'
+      - 'rs/Cargo.lock'
+      - '.prototools'
