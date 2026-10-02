@@ -755,11 +755,10 @@ print("|".join(problems) if problems else "OK")' "$TMP/markers.yaml" 2>&1)"; the
 }
 
 # check_markers_restart <label>: the value changes the IAM pod template only. It reuses
-# check_boot_restart, and moves the row from the B counter to the M counter.
+# check_boot_restart. The row counts in both counters, because that function counts it as a B row.
 check_markers_restart() {
   local label="$1"
   MARKER_ROWS=$((MARKER_ROWS + 1))
-  BOOT_ROWS=$((BOOT_ROWS - 1))
   check_boot_restart "$label" --set 'oidc.idTokenMarkerClaims={at_hash,azp}'
 }
 

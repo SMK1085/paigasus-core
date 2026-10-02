@@ -322,7 +322,9 @@ sync does not fail because of it.
 
 **The acknowledgement.** If your IdP cannot give the API its own audience, set
 `oidc.acknowledgeClientIdAudience` to the value of `oidc.clientId`. The warning then does not
-show. The acknowledgement does not change what IAM accepts. IAM still accepts an ID token as a bearer token, except a Keycloak ID token (SMA-686) or a token with a claim named in `oidc.idTokenMarkerClaims` (SMA-703).
+show. The acknowledgement does not change what IAM accepts. IAM still accepts an ID token as a
+bearer token, except a Keycloak ID token (SMA-686) or a token with a claim named in
+`oidc.idTokenMarkerClaims` (SMA-703).
 
 - The value must equal the client id exactly, with the same letter case. `true` does not work.
 - When you change `oidc.clientId`, the warning shows again.
@@ -335,7 +337,7 @@ passes IAM's audience check, and nothing warns. Decode a real ID token. Its `aud
 contain the value of `oidc.audience`.
 
 **Per IdP. Not measured.** These lines state what each IdP offers. This chart did not measure
-them. The Zitadel item is the one exception: it is measured.
+them. The Zitadel item is measured, except where it says otherwise.
 
 - **Keycloak.** Add an "Audience" protocol mapper to the console client, or to a client scope of
   that client. Set "Included Custom Audience" to the API audience. Set "Add to access token" on
@@ -370,8 +372,14 @@ them. The Zitadel item is the one exception: it is measured.
     token has that value as its `aud`.
   - Add `email` as an optional claim of the access token. Not measured.
   - Before the switch, decode a real access token and check its `aud`, `iss` and `email`.
-- **Dex.** Dex gives the ID token and the access token the same `aud`. No audience setting helps. Set `oidc.acknowledgeClientIdAudience` to remove the warning. IAM still accepts a Dex ID token as a bearer token. `oidc.idTokenMarkerClaims: ["c_hash"]` refuses a Dex ID token from the code flow only. A refreshed Dex ID token has no claim that the access token does not also have. So SMA-686 residual R1 stays open for Dex (SMA-686 § 2).
-- **Zitadel. Measured, Zitadel v4.15.3 with Login v1, 2026-10-02 (SMA-703).**
+- **Dex.** Dex gives the ID token and the access token the same `aud`. No audience setting helps.
+  Set `oidc.acknowledgeClientIdAudience` to remove the warning. IAM still accepts a Dex ID token
+  as a bearer token.
+  - `oidc.idTokenMarkerClaims: ["c_hash"]` refuses a Dex ID token from the code flow only.
+  - A refreshed Dex ID token has no claim that the access token does not also have.
+  - So SMA-686 residual R1 stays open for Dex (SMA-686 § 2).
+- **Zitadel. Measured, Zitadel v4.15.3 with Login v1, 2026-10-02 (SMA-703). The measurement used a
+  public PKCE web app. A confidential app is not measured.**
   - In the human flow, the ID token and the access token have the same `aud`. In the machine flow
     (client credentials), the ID token `aud` contains the access token `aud`. Both tokens have
     `client_id`. No `urn:zitadel:iam:org:project:id:<id>:aud` scope puts an audience into the
@@ -387,12 +395,15 @@ them. The Zitadel item is the one exception: it is measured.
   - The audience. Option 1, for an install with machine clients: set `oidc.audience` to the
     project id. Each machine client must request the scope
     `urn:zitadel:iam:org:project:id:<project id>:aud`. Without this scope, a machine token has
-    only its own client id as `aud`, and IAM refuses it as an audience mismatch. Option 2, for an
+    only its own client id as `aud` (measured with scope `openid` only), and IAM refuses it with the
+    reason `AudienceMismatch`. Option 2, for an
     install with the console only: keep the client id as the audience, and set
     `oidc.acknowledgeClientIdAudience`.
   - Before the switch: decode one access token for each grant type in use (authorization code,
     refresh token, client credentials). No access token can have `at_hash` or `azp`. Decode one
-    ID token. It must have both claims.
+    ID token. It must have both claims. This check is required. The paigasus console is a
+    confidential client, and the measurement used a public PKCE web app. So the client type of the
+    console was not measured.
   - After the switch: send an ID token to IAM. Expect a `401` and the IAM log line with
     `claim at_hash`.
   - A change of the value restarts IAM (§ 5).
