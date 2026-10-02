@@ -208,9 +208,11 @@ these claims, with any value except `null`. The default is `[]`, and IAM then do
   `nonce` into its access token. Keycloak puts `azp` into its access token.
 - Before you set the value, decode one access token for each grant type in use. No access token
   can have a configured claim. Decode one ID token. It must have the claims.
-- At start, IAM writes one `info` line with the issuer and the configured names. If this line is
-  not in the IAM log, IAM does not use the setting. A wrong key in a raw `iam.toml` gives no other
-  sign.
+- At start, IAM writes one `info` line with the issuer and the configured names. This line, and
+  the refusal line below, show only when the log level includes `info`. `RUST_LOG` sets the level.
+  When the level includes `info` and the line is not in the IAM log, IAM does not use the setting.
+  A wrong key in a raw `iam.toml` gives no other sign. When the level hides `info`, a missing line
+  proves nothing.
 - The IAM log shows a refusal at `info`, with the issuer and the marker `claim <name>`, for
   example `claim at_hash`. The line does not show the claim value. The rate limit above applies.
 - The chart refuses a name that is empty, a name with a character outside printable ASCII, a

@@ -249,8 +249,10 @@ list into the one issuer entry of `IAM_AUTHN__ISSUERS` in `templates/backend-dep
   `# oidc.idTokenMarkerClaims is set: IAM refuses a token that carries one of these claims.`
 - **The render fails** when the value is not a list, when a name is not a string or is empty,
   when a name has a character outside printable ASCII, a space, `"` or `\`, when a name is `iss`,
-  `sub`, `aud` or `exp`, and when a name occurs twice. IAM refuses these values at boot, and the
-  IAM Deployment has one replica with `maxSurge: 0`, so the chart refuses them first. The checks
+  `sub`, `aud` or `exp`, and when a name occurs twice. IAM refuses an empty, padded, reserved or
+  repeated name at boot, and the IAM Deployment has one replica with `maxSurge: 0`, so the chart
+  refuses these first. The character rule is a chart rule only: it keeps the rendered env value
+  readable for IAM. The checks
   are in `paigasus.validateIdTokenMarkerClaims` in `templates/_iam-backend.tpl`. They are not in
   `_helpers.tpl`, so its fixture copies do not change.
 - **To remove the value,** use `[]` in a values file, or `--set oidc.idTokenMarkerClaims=null`.
