@@ -10,6 +10,7 @@ dependsOn:
   - 'paigasus-observability-rs'
   - 'paigasus-kernel-rs'
   - 'paigasus-proto-rs'
+  - 'paigasus-redis-rs'
   - 'paigasus-service-info-rs'
 
 # SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
@@ -30,6 +31,8 @@ fileGroups:
     - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto/src/**/*'
     - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+    - '/rs/crates/libs/paigasus-redis/src/**/*'
+    - '/rs/crates/libs/paigasus-redis/Cargo.toml'
     - '/rs/crates/libs/paigasus-service-info/src/**/*'
     - '/rs/crates/libs/paigasus-service-info/Cargo.toml'
 

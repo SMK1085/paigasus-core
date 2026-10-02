@@ -418,10 +418,10 @@ tasks:
       # apple-darwin rustflags in that file cannot change what it prints.
 
   redis-connect-single-site:
-    description: 'Assert the redis `ConnectionManager` type name, and the known unnamed-connection constructors, never appear outside `adapters::redis_conn`, so no known call site can bypass the circuit breaker (SMA-473, SMA-476).'
+    description: 'Assert the redis `ConnectionManager` type name, and the known unnamed-connection constructors, never appear outside the `paigasus-redis` lib crate, in IAM or the gateway, so no known call site can bypass the circuit breaker (SMA-473, SMA-476, SMA-726).'
     # WHAT IS GATED: the `ConnectionManager` TYPE NAME, plus a maintained allowlist of
     # `redis::Client` methods that hand back an ALTERNATIVE `ConnectionLike` without ever naming a
-    # gated type — anywhere outside redis_conn.rs.
+    # gated type — anywhere outside rs/crates/libs/paigasus-redis/src/ (SMA-726 moved IAM's redis_conn.rs there).
     #
     # SMA-473 gated only the constructors (`::new(`, `::new_with_config(`,
     # `ConnectionManagerConfig`, `.get_connection_manager`), because adapters legitimately HELD a
@@ -455,12 +455,15 @@ tasks:
     # excluded from THIS term. It stays fully in scope for `ConnectionManager` and the other two
     # terms, none of which collide with anything SeaORM exposes.
     #
-    # SCOPE is `src/` AND `tests/`: a Docker-gated integration test is just as able to construct a
-    # stock manager as production code.
+    # SCOPE (SMA-726 § 4.11): the lib's src/ (the one allowed site), and src/ AND tests/ of both
+    # services that open Redis — paigasus-iam and paigasus-gateway. A Docker-gated integration test
+    # is just as able to construct a stock manager as production code. Every scan directory must
+    # exist: `grep -r` on a missing one only prints to stderr, and `|| true` would hide that the
+    # gate scans less. The loop below exits 2 instead.
     #
     # Comment lines are excluded so prose may still name the API — several module docs do. NOTE
     # the filter anchors on `//` only, so a `/* ... */` BLOCK comment naming ConnectionManager
-    # WILL trip this gate. Use `//` in this crate when writing about the type.
+    # WILL trip this gate. Use `//` in these crates when writing about the type.
     #
     # Two portability notes, both learned the hard way:
     #   - Do NOT anchor paths on `^\./`. GNU grep (CI, Linux) emits the `./` prefix; ugrep
@@ -473,26 +476,35 @@ tasks:
     # The control (`expected` must be non-empty) is what catches a pattern typo or an upstream
     # rename: without it, BOTH greps could go empty and the gate would pass while guarding nothing.
     script: |
-      cd rs/crates/services/paigasus-iam
-      named_hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager|\.get_multiplexed_async_connection' src tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
-      bare_get_connection_hits="$(grep -rnE '\.get_connection\b' src tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -v '/persistence/migration/' || true)"
+      cd rs/crates
+      for d in libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests; do
+        if [ ! -d "$d" ]; then
+          echo "scan directory rs/crates/$d is missing — the guard would scan less without saying so (moved? renamed?)" >&2
+          exit 2
+        fi
+      done
+      named_hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager|\.get_multiplexed_async_connection' libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      bare_get_connection_hits="$(grep -rnE '\.get_connection\b' libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -v '/persistence/migration/' || true)"
       hits="$(printf '%s\n%s\n' "$named_hits" "$bare_get_connection_hits" | grep -v '^$' || true)"
-      expected="$(printf '%s\n' "$hits" | grep -E 'adapters/redis_conn\.rs:' || true)"
-      offenders="$(printf '%s\n' "$hits" | grep -vE 'adapters/redis_conn\.rs:' || true)"
+      expected="$(printf '%s\n' "$hits" | grep -E '^libs/paigasus-redis/src/' || true)"
+      offenders="$(printf '%s\n' "$hits" | grep -vE '^libs/paigasus-redis/src/' || true)"
       if [ -z "$expected" ]; then
-        echo "no redis connection-config construction found in adapters/redis_conn.rs — the guard is not guarding anything (renamed file? changed API?)" >&2
+        echo "no redis connection-config construction found in rs/crates/libs/paigasus-redis/src/ — the guard is not guarding anything (renamed file? changed API?)" >&2
         exit 2
       fi
       if [ -n "$offenders" ]; then
-        echo "redis connection config built outside adapters/redis_conn.rs (SMA-473 — use redis_conn::connect):" >&2
+        echo "redis connection config built outside rs/crates/libs/paigasus-redis/src/ (SMA-473 — use paigasus_redis::connect):" >&2
         printf '%s\n' "$offenders" >&2
         exit 1
       fi
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     inputs:
+      - 'rs/crates/libs/paigasus-redis/src/**/*'
       - 'rs/crates/services/paigasus-iam/src/**/*'
       - 'rs/crates/services/paigasus-iam/tests/**/*'
+      - 'rs/crates/services/paigasus-gateway/src/**/*'
+      - 'rs/crates/services/paigasus-gateway/tests/**/*'
 
   iam-docker-policy-single-site:
     description: 'Assert the Docker-unavailable decision exists exactly once, in tests/support/docker.rs, so a new container-backed suite cannot hand-roll copy #12 (SMA-538).'

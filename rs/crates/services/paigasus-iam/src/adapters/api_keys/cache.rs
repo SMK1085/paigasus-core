@@ -43,7 +43,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::adapters::redis_conn::{RedisHandle, RedisRole};
+use crate::adapters::redis_role::RedisRole;
+use paigasus_redis::RedisHandle;
 
 /// Redis/in-proc key prefix (spec §9): `iam:apikey:<keyid>`.
 const KEY_PREFIX: &str = "iam:apikey:";
@@ -207,7 +208,7 @@ impl RedisApiKeyCache {
     /// disappearing after `ttl_secs` (or on eviction) never surfaces as anything other than a
     /// subsequent miss.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, redis::RedisError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::ApiKeys).await?;
+        let conn = paigasus_redis::connect(redis_url, RedisRole::ApiKeys).await?;
         Ok(Self { conn, ttl_secs })
     }
 
@@ -219,9 +220,9 @@ impl RedisApiKeyCache {
     /// one textually (SMA-485 D1); otherwise this cache is handed its own connection, dialled
     /// with `RedisRole::ApiKeys`. `connect` above stays the standalone-caller/test entry point.
     ///
-    /// `pub(crate)`, not `pub` (SMA-476 D13): `adapters::redis_conn` is a `pub(crate)` module, so
-    /// a `pub fn` taking a `RedisHandle` would be a private-type-in-public-interface and
-    /// `cargo clippy -- -D warnings` would fail the build. Every caller is in-crate.
+    /// `pub(crate)`, not `pub` (SMA-476 D13): every caller is in-crate. (Since SMA-726
+    /// `RedisHandle` is a public type of `paigasus-redis`, so `pub` would compile, but nothing
+    /// outside this crate needs it.)
     #[must_use]
     pub(crate) fn from_connection(conn: RedisHandle, ttl_secs: u64) -> Self {
         Self { conn, ttl_secs }
@@ -382,12 +383,12 @@ mod tests {
 
     /// D5's fail-open contract, exercised without any live Redis: a `get` against an
     /// unreachable backend degrades to `None`, and `put`/`evict` never panic. Uses the
-    /// production `redis_conn::connection_manager_config()` — with a stock config this test
+    /// production `paigasus_redis::connection_manager_config()` — with a stock config this test
     /// took a measured **28.4 s** (three commands × a full ~9.5 s reconnect-retry cycle),
     /// which is the cost SMA-473 removed.
     #[tokio::test]
     async fn redis_cache_fails_open_when_the_backend_is_unreachable() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::ApiKeys).expect("well-formed redis URL, never actually reachable");
+        let conn = paigasus_redis::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::ApiKeys).expect("well-formed redis URL, never actually reachable");
         let cache = RedisApiKeyCache::from_connection(conn, 30);
         let id = ApiKeyId::from_uuid(Uuid::from_u128(12));
 
@@ -404,8 +405,8 @@ mod tests {
     /// short-circuited (SMA-702). The 1 s clock is only a stall backstop.
     #[tokio::test]
     async fn an_open_breaker_keeps_the_api_key_cache_failing_open() {
-        let blackhole = crate::adapters::redis_conn::test_support::start().await;
-        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, RedisRole::ApiKeys).expect("well-formed redis URL");
+        let blackhole = paigasus_redis::test_support::start().await;
+        let conn = paigasus_redis::with_open_breaker_for_tests(&blackhole.url, RedisRole::ApiKeys).expect("well-formed redis URL");
         let cache = RedisApiKeyCache::from_connection(conn, 30);
         let key_id = ApiKeyId::from_uuid(Uuid::from_u128(1));
 

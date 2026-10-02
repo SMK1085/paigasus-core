@@ -38,7 +38,8 @@ use paigasus_kernel::Prn;
 use redis::AsyncCommands;
 use std::sync::Arc;
 
-use crate::adapters::redis_conn::{RedisHandle, RedisRole};
+use crate::adapters::redis_role::RedisRole;
+use paigasus_redis::RedisHandle;
 
 /// Redis key prefix (spec §7): `iam:authz:slice:<entity_gen>:<resource-prn>:<principal-prn>`.
 const KEY_PREFIX: &str = "iam:authz:slice:";
@@ -64,7 +65,7 @@ impl SliceCache {
     /// `RedisJwksCache::connect`/`RedisDecisionCache::connect`). `ttl_secs` is applied to
     /// every cache write as Redis's own `EX` expiry.
     pub async fn connect(inner: Arc<dyn EntitySliceLoader>, redis_url: &str, ttl_secs: u64) -> Result<Self, AuthzError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Authz).await.map_err(redis_connect_err)?;
+        let conn = paigasus_redis::connect(redis_url, RedisRole::Authz).await.map_err(redis_connect_err)?;
         Ok(Self { inner, conn, ttl_secs })
     }
 
@@ -252,7 +253,7 @@ mod tests {
     /// server / Docker.
     #[tokio::test]
     async fn load_fails_open_to_the_inner_loader_when_entity_gen_errors() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", crate::adapters::redis_conn::RedisRole::Authz).expect("well-formed redis URL, never actually reachable");
+        let conn = paigasus_redis::new_lazy_for_tests("redis://127.0.0.1:1", crate::adapters::redis_role::RedisRole::Authz).expect("well-formed redis URL, never actually reachable");
 
         let cache = SliceCache::from_connection(Arc::new(FailingGenLoader), conn, 60);
         let resource = prn("project", 1);
@@ -299,8 +300,8 @@ mod tests {
     /// short-circuited (SMA-702). The 1 s clock is only a stall backstop.
     #[tokio::test]
     async fn an_open_breaker_falls_through_to_the_inner_slice_loader() {
-        let blackhole = crate::adapters::redis_conn::test_support::start().await;
-        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, crate::adapters::redis_conn::RedisRole::Authz).expect("well-formed redis URL");
+        let blackhole = paigasus_redis::test_support::start().await;
+        let conn = paigasus_redis::with_open_breaker_for_tests(&blackhole.url, crate::adapters::redis_role::RedisRole::Authz).expect("well-formed redis URL");
         let inner = Arc::new(CountingLoader::default());
         let cache = SliceCache::from_connection(inner.clone(), conn, 60);
 

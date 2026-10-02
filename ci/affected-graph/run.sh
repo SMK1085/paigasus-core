@@ -315,6 +315,11 @@ run_suite() {
   # runs the real binary), so it is a legitimate PROJECT-level dependent here too.
   run_case "service-info->services" "rs/crates/libs/paigasus-service-info/src/lib.rs" \
     "paigasus-service-info-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
+  # paigasus-redis edit -> the lib + every service that opens Redis through it (SMA-726). Only IAM
+  # today; SMA-677 PR 2 adds paigasus-gateway-rs and gateway-console-ts (whose playground project
+  # runs the real gateway binary). One-directional: the lib has no in-tree dependency.
+  run_case "redis->services" "rs/crates/libs/paigasus-redis/src/lib.rs" \
+    "paigasus-redis-rs,paigasus-iam-rs"
   # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427)
   # + the IAM crates that consume the kernel's PRN/UUIDv7 (paigasus-iam-core-rs & the paigasus-iam-rs
   # service, SMA-441). paigasus-logging-rs is deliberately ABSENT — it has no kernel edge.

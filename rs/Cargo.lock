@@ -3212,6 +3212,7 @@ dependencies = [
  "paigasus-logging",
  "paigasus-observability",
  "paigasus-proto",
+ "paigasus-redis",
  "paigasus-service-info",
  "prost-types",
  "rand 0.10.3",

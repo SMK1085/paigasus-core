@@ -11,7 +11,7 @@
 //! the API-key Redis would mean opening a Redis client here to inspect the `iam:apikey:*` keys —
 //! and `repo:redis-connect-single-site` bans the unnamed-connection constructors in `tests/` just
 //! as in `src/` (moon.yml). The breaker gauge is the sanctioned observation channel: it is set at
-//! construction (`redis_conn::connect` -> `Breaker::new(role)`), so the presence or absence of
+//! construction (`paigasus_redis::connect` -> `Breaker::new(metrics)`), so the presence or absence of
 //! `iam_redis_breaker_state{role="api_keys"}` is exactly "was a second connection opened".
 //! Accepted residual: this proves the connection was opened from the configured URL, not that
 //! traffic flows through it. The unit test `shares_one_connection_is_trimmed_textual_equality`
@@ -117,17 +117,17 @@ async fn api_key_cache_shares_the_authz_connection_only_on_matching_urls() {
     assert!(out.contains(API_KEYS_SERIES), "phase b: distinct URLs must open a second connection with role=api_keys:\n{out}");
 
     // --- Phase (c): the api-key URL is actually dialled (AC1/AC3) ----------------------------
-    // The regression proof: `redis_conn::connect` is eager, so before SMA-485 this config boots
+    // The regression proof: `paigasus_redis::connect` is eager, so before SMA-485 this config boots
     // happily (the URL is never read) and after it refuses to start. `127.0.0.1:1` follows the
-    // crate's own precedent (`adapters/redis_conn.rs`): unbindable by an unprivileged process,
+    // crate's own precedent (`paigasus-redis/src/lib.rs`): unbindable by an unprivileged process,
     // so deterministically refused, and not racy against testcontainers' port mapping the way
     // bind-ephemeral-then-drop would be.
     //
     // Safe to run after (b): `connect` propagates the dial failure with `?` BEFORE
-    // `Breaker::new(role)`, so a failed dial registers no gauge and cannot invalidate (a).
+    // `Breaker::new(metrics)`, so a failed dial registers no gauge and cannot invalidate (a).
     //
     // `AppState` is not `Debug` (it derives `Clone` only), so `unwrap_err`/`expect_err` will not
-    // compile — assert on `is_err()` instead. Same trap SMA-476 documented in `redis_conn.rs`.
+    // compile — assert on `is_err()` instead. Same trap SMA-476 documented in `paigasus-redis`.
     let cfg = split_config(&base, &redis_url, Some("redis://127.0.0.1:1"));
     let err = AppState::new(db.clone(), &cfg).await.err();
     let err = error_chain(err.as_ref().expect("phase c: an unreachable api_keys redis_url must fail boot — it is dialled now"));
