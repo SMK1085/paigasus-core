@@ -35,6 +35,9 @@ on:
       - 'rs/rust-toolchain.toml'
       - 'rs/Dockerfile'
       - 'rs/.dockerignore'
+      # SMA-665 D9: the chisel dpkg status generator, its self-test and its fixtures.
+      # rs/Dockerfile COPYs them, and only the image build reads them.
+      - 'rs/docker/**'
       - 'ts/Dockerfile'
       - 'ts/.dockerignore'
       - 'ts/pnpm-lock.yaml'
@@ -135,6 +138,12 @@ jobs:
       - name: Decision script self-test
         run: uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py --self-test
 
+      # SMA-665 T2 (spec D10): the self-test of rs/docker/chisel-dpkg-status.sh. The target is the
+      # chisel-dpkg-status-test stage of rs/Dockerfile, so BuildKit builds the rootfs stage and the
+      # test, not the Rust builder. --no-cache-filter makes the test RUN on every build.
+      - name: Chisel dpkg status generator self-test
+        run: docker buildx build --progress=plain --no-cache-filter=chisel-dpkg-status-test --target chisel-dpkg-status-test -f rs/Dockerfile rs/
+
       - name: Build both images as OCI archives
         run: |
           ci/images/run.sh build-oci iam out
@@ -161,7 +170,9 @@ jobs:
 
       # This step is a MEASUREMENT for spec M8. It checks that syft finds libc6 and the Rust
       # crates. SMA-688: the step now also checks the cargo SBOM floor. Each pull request
-      # proves the floor that release.yml uses.
+      # proves the floor that release.yml uses. SMA-665: the cargo floor also needs one Debian
+      # entry for each package of chisel-manifest-<key>-<arch>.txt, which build-oci wrote above
+      # in this job. So the floor takes --arch.
       - name: SBOM for each archive
         run: |
           for key in iam gateway; do
@@ -169,7 +180,7 @@ jobs:
             syft "oci-archive:out/${crate}-${ARCH}.oci.tar" -o "spdx-json=sbom-${crate}-${ARCH}.spdx.json"
             summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-${crate}-${ARCH}.spdx.json")"
             echo "M8 image=${crate} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
-            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" "sbom-${crate}-${ARCH}.spdx.json"
+            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" --arch "${ARCH}" "sbom-${crate}-${ARCH}.spdx.json"
           done
 
       # SMA-670: the self-test of the console image checks in ci/images/run.sh. Each static check
@@ -204,7 +215,7 @@ jobs:
             syft "oci-archive:${archive}" -o "spdx-json=sbom-paigasus-${key}-${ARCH}.spdx.json"
             summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-paigasus-${key}-${ARCH}.spdx.json")"
             echo "M8 image=paigasus-${key} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
-            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" "sbom-paigasus-${key}-${ARCH}.spdx.json"
+            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" --arch "${ARCH}" "sbom-paigasus-${key}-${ARCH}.spdx.json"
           done
           df -h /
 
