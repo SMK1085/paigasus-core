@@ -191,6 +191,8 @@ fn default_jit_provisioning() -> bool {
 
 /// Claim names that every token IAM accepts carries (SMA-703 D2). A marker list that names one
 /// would make IAM refuse every token of that issuer, so `IamConfig::validate` refuses it.
+/// Keep this list equal to the reserved names in `paigasus.validateIdTokenMarkerClaims` in
+/// `charts/paigasus/templates/_iam-backend.tpl`.
 const RESERVED_MARKER_CLAIMS: [&str; 4] = ["iss", "sub", "aud", "exp"];
 
 /// Cedar authorization config (SMA-444 Task 21, spec §7/§11) — mirrors `AuthnConfig`'s

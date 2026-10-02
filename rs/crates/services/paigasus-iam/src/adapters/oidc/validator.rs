@@ -148,12 +148,7 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
         };
         match detail {
             RefusalDetail::Marker(marker) => {
-                tracing::info!(
-                    issuer = issuer.as_str(),
-                    marker,
-                    suppressed,
-                    "refused a bearer token: a verified marker shows it is not an access token"
-                );
+                tracing::info!(issuer = issuer.as_str(), marker, suppressed, "{}", NOT_AN_ACCESS_TOKEN_MESSAGE);
             }
             RefusalDetail::Accepted(accepted) => {
                 tracing::info!(issuer = issuer.as_str(), accepted = ?accepted, suppressed, "refused a bearer token: its aud claim holds none of the accepted audiences");
@@ -167,18 +162,18 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
                 );
             }
             RefusalDetail::Claim(name) => {
-                // The same message as `Marker`: an operator greps one text for SMA-686 and SMA-703.
+                // The same message as `Marker`, from one constant: an operator greps one text for
+                // SMA-686 and SMA-703.
                 let marker = format!("claim {name}");
-                tracing::info!(
-                    issuer = issuer.as_str(),
-                    marker = marker.as_str(),
-                    suppressed,
-                    "refused a bearer token: a verified marker shows it is not an access token"
-                );
+                tracing::info!(issuer = issuer.as_str(), marker = marker.as_str(), suppressed, "{}", NOT_AN_ACCESS_TOKEN_MESSAGE);
             }
         }
     }
 }
+
+/// The log message of a `NotAnAccessToken` refusal. The `Marker` and `Claim` arms of
+/// `log_refusal` both use it, so an operator greps one text.
+const NOT_AN_ACCESS_TOKEN_MESSAGE: &str = "refused a bearer token: a verified marker shows it is not an access token";
 
 /// Manual, not derived: a `#[derive(Debug)]` here would require `F`/`K`/`C` (and in turn
 /// `JwksProvider`) to implement `Debug` too. This exists solely so
@@ -296,13 +291,8 @@ impl<'de> Deserialize<'de> for StrictPayload {
         }
 
         let members = deserializer.deserialize_map(UniqueMembers)?;
-        // `&Value` is a `Deserializer`, so the map is not copied: it goes into the `Value`, and
-        // comes out again after `WireClaims` has read it.
-        let value = serde_json::Value::Object(members);
-        let claims = WireClaims::deserialize(&value).map_err(serde::de::Error::custom)?;
-        let serde_json::Value::Object(members) = value else {
-            unreachable!("the value was built as an object above");
-        };
+        // `&Map<String, Value>` is a `Deserializer`, so `WireClaims` reads the map without a copy.
+        let claims = WireClaims::deserialize(&members).map_err(serde::de::Error::custom)?;
         Ok(StrictPayload { members, claims })
     }
 }
@@ -854,16 +844,14 @@ mod tests {
     /// A token that passes every other check (issuer, audience `aud`, one hour of life),
     /// plus the claims in `extra`. So only the extra claims differ from an accepted token.
     fn claims_with(extra: serde_json::Value) -> serde_json::Value {
-        let mut claims = serde_json::json!({
+        let claims = serde_json::json!({
             "iss": ISSUER,
             "sub": "sub-1",
             "aud": "aud",
             "exp": Utc::now().timestamp() + 3600,
             "email": "alice@example.com",
         });
-        let extra = extra.as_object().expect("extra claims are a JSON object").clone();
-        claims.as_object_mut().expect("claims are a JSON object").extend(extra);
-        claims
+        merged(claims, extra)
     }
 
     /// Signs `claims` with a fresh ES256 key and runs the full validator pipeline on it.
@@ -966,14 +954,9 @@ mod tests {
     /// `jsonwebtoken::crypto::sign` directly, since `jsonwebtoken::encode` takes a typed struct
     /// and so cannot emit a duplicate key either.
     fn token_with_duplicate_cnf(encoding_key: &EncodingKey, kid: &str, cnf_fields: &str) -> String {
-        let header_json = format!(r#"{{"alg":"ES256","typ":"JWT","kid":"{kid}"}}"#);
         let exp = Utc::now().timestamp() + 3600;
         let payload_json = format!(r#"{{"iss":"{ISSUER}","sub":"sub-1","aud":"aud","exp":{exp},"email":"alice@example.com",{cnf_fields}}}"#);
-        let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
-        let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
-        let message = format!("{header_b64}.{payload_b64}");
-        let signature = jsonwebtoken::crypto::sign(message.as_bytes(), encoding_key, Algorithm::ES256).expect("signing a test token");
-        format!("{message}.{signature}")
+        sign_raw_payload(encoding_key, kid, &payload_json)
     }
 
     #[tokio::test]
