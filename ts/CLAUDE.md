@@ -74,7 +74,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `repo:next-env-drift` and the Next ESLint blocks are app-agnostic too: the first discovers
   `ts/apps/*/next.config.*` and asserts every `ts/apps/*` directory that has a `package.json` is in
   the discovered set, and `ts/eslint.config.js` derives one block per app directory. The next-env
-  gate still has **no negative control**. Its `deps` names one build per app by hand and nothing
+  gate has a negative control since SMA-637: it plants a change in a temporary copy of the git
+  index and runs the whole gate as a child process, which must exit 1 (drift) and 2 (untracked).
+  Its `deps` names one build per app by hand and nothing
   asserts the list is complete, so a new app must add its own `<app>-ts:build` edge or `next
   typegen` races that app's `.next`.
 - `repo:next-public-free`'s `APP_CONFIG_FLOOR` is **2** since the second console zone landed,
