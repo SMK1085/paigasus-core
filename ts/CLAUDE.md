@@ -134,6 +134,18 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   broken link, not even with `--force`. Only ONE host regenerates the artifacts; a second host makes
   different bytes and a diff that says nothing. A conflict in the five files is resolved by taking
   either side and running `generate-wasm` again.
+  The napi glue `rs/crates/bindings/paigasus-node-bindings/index.js` and `index.d.ts` is committed
+  too, and it is what npm publishes and `ts/Dockerfile` copies (SMA-667). `paigasus-kernel-ts:build`
+  and `:test` write only the scratch files `index.fresh.js` and `index.fresh.d.ts`.
+  `moon run paigasus-kernel-ts:generate-napi-glue` is the local writer, and `version-lockstep
+  --write` stamps the version guards in a release. Run `generate-napi-glue` after a napi binding
+  or kernel export change, or after a `@napi-rs/cli` change in `ts/pnpm-lock.yaml`, and commit both
+  files. Run it as its own command, not in the same `moon run` as `test`.
+  `tests/committed-napi-glue.test.ts` reds until the committed files equal the scratch build.
+  `@napi-rs/cli` has its own Dependabot group: on that PR, run `generate-napi-glue` and push the
+  result to the PR branch. A Dependabot rebase or recreate deletes that commit, so push it again.
+  Two changes would make the glue depend on the host and red this check in CI: a WASI target in
+  `napi.targets`, and a `#[cfg]`-gated `#[napi]` item.
   `@paigasus/console-core`'s `src/prn-tenancy.ts` is now an IAM tenancy adapter over the kernel, not
   an ADR-0005 exception: it keeps IAM's tenancy rule, the UUID guard for a URL segment and a length
   limit for the FFI boundary. `tests/unit/prn-tenancy-delegation.test.ts` mocks the kernel and fails
