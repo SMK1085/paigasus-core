@@ -54,6 +54,8 @@ EOF
     # The image sets RUSTUP_HOME=/usr/local/rustup and CARGO_HOME=/usr/local/cargo. proto and Moon
     # look for the Rust toolchain under HOME (~/.rustup, as on a runner), so point both there.
     # cargo update (run 1) needs neither and keeps the image values.
+    # Result: this run downloads rustup and the Rust toolchain (pinned by .moon/toolchains.yml) at
+    # run time. It does not use the toolchain of the image. Not verified: proto's check of rustup.
     export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"
 
     proto_version="$(sed -n 's/^proto = "\([0-9][0-9.]*\)"$/\1/p' .prototools)"

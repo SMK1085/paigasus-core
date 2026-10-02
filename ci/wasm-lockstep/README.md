@@ -138,6 +138,8 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
 - P19 does not see an indirect form, such as `${!f}`.
 - A bundled short flag, such as `gh api -iXPOST`, passes P20.
 - P21 matches the jq `select` with a regular expression. It does not parse the jq.
+- The build container downloads rustup and the Rust 1.95.0 toolchain at run time through proto.
+  Nobody verified that proto checks the rustup download (M2 notes).
 - `container.sh` fetches `proto.sh` with `curl` and no checksum. This happens inside the
   container, and `propose` checks the output again.
 - The branch-owner check uses `.author.login`. GitHub takes that value from the author email. The
@@ -184,7 +186,9 @@ Two findings changed the setup:
 - A native arm64 container cannot run `proto install`. The vendored `cargo-machete` plugin has no Linux arm64 target, so the download failed. The runner is amd64, so M2 used `--platform linux/amd64`.
 - The image sets `RUSTUP_HOME` and `CARGO_HOME` under `/usr/local`. Moon looks for the toolchain under `HOME`. `container.sh build` now sets both to `$HOME`. Without this change, run 2 failed with `proto::locate::missing_executable`.
 
-The build log also holds the line `error: rustup is not installed at '/tmp/lockstep-home/.cargo'`. The build still finished with exit 0.
+After this change the build container does not use the Rust toolchain of the image. It downloads rustup and the Rust 1.95.0 toolchain at run time, through proto. `.moon/toolchains.yml` (`rust.version: 1.95.0`) and `rs/rust-toolchain.toml` (`channel = "1.95.0"`) pin the version. Whether proto verifies the rustup download is not verified: M2 did not check it, and the build log was not kept.
+
+The build log also holds the line `error: rustup is not installed at '/tmp/lockstep-home/.cargo'`. The build still finished with exit 0. The cause of this line is not confirmed, because the build log was not kept. M0 checks it.
 
 ### M0 — the scratch-branch run on a GitHub runner
 
