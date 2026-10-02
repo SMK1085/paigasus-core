@@ -1,5 +1,5 @@
 # Dependabot version updates. Each ecosystem gets ONE grouped PR per week covering
-# minor+patch bumps; major bumps intentionally arrive as separate individual PRs so a
+# minor+patch bumps. The npm ecosystem gets a second grouped PR for `@napi-rs/cli` (SMA-667); major bumps intentionally arrive as separate individual PRs so a
 # breaking change is reviewed on its own (not hidden in a green group).
 version: 2
 updates:

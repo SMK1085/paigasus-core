@@ -40,9 +40,10 @@ export function jsExportNames(source: string): string[] {
   return captures(source, /^module\.exports\.([A-Za-z_$][\w$]*)\s*=/gm);
 }
 
-// `export declare function|const|class <name>` lines.
+// `export declare function|const|class|enum|const enum <name>` lines. napi writes a `#[napi]` enum
+// as `const enum` or `enum`. `const enum` stays before `const`, so the capture is the name.
 export function dtsExportNames(source: string): string[] {
-  return captures(source, /^export declare (?:function|const|class) ([A-Za-z_$][\w$]*)/gm);
+  return captures(source, /^export declare (?:const enum|enum|function|const|class) ([A-Za-z_$][\w$]*)/gm);
 }
 
 // Returns a list of problems. An empty list means the pair is not vacuous.
@@ -91,6 +92,13 @@ describe('the gate helpers can fail', () => {
     const js = 'module.exports = b\nmodule.exports.sum = b.sum\nmodule.exports.prnOrg = b.prnOrg\n';
     const dts = 'export declare function sum(a: number, b: number): number\nexport declare function prnOrg(s: string): string\n';
     expect(vacuityProblems(js, dts)).toEqual([]);
+  });
+
+  it('accepts a napi enum declaration', () => {
+    const js = 'module.exports.sum = b.sum\nmodule.exports.Color = b.Color\n';
+    const dts = 'export declare function sum(a: number, b: number): number\nexport declare const enum Color {\n  Red = 0,\n}\n';
+    expect(vacuityProblems(js, dts)).toEqual([]);
+    expect(dtsExportNames('export declare enum Mode {\n  A = 0,\n}\n')).toEqual(['Mode']);
   });
 
   it('finds a task script and misses an absent task', () => {

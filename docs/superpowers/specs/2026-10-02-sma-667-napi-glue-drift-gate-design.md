@@ -2,7 +2,7 @@
 
 - **Issue:** [SMA-667](https://linear.app/smaschek/issue/SMA-667)
 - **Date:** 2026-10-02
-- **Status:** challenged once (verdict APPROVE WITH CHANGES), changes folded in; waits for approval
+- **Status:** approved by Sven 2026-10-02; implemented on this branch
 - **Related:** SMA-663 (found the drift), SMA-634 (the wasm drift gate this design copies),
   SMA-693 (in flight, can touch the same `moon.yml`)
 
