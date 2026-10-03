@@ -52,6 +52,14 @@ pub async fn build_limits(config: Option<&LimitsConfig>) -> anyhow::Result<Limit
         tracing::info!(backend = ?config.backend, "[limits] is set, but no limit is configured: no store is built and no limit applies");
         return Ok(LimitsWiring::default());
     }
+    tracing::info!(
+        backend = ?config.backend,
+        principal_rate = rules.principal_requests_per_minute.is_some(),
+        org_rate = rules.org_requests_per_minute.is_some(),
+        org_overrides = rules.overrides.len(),
+        budget = rules.tokens_per_period.map(|_| format!("{:?}", rules.budget_period)),
+        "limits enabled"
+    );
     let clock = Arc::new(SystemClock);
     match config.backend {
         LimitsBackend::Memory => Ok(LimitsWiring {
@@ -98,6 +106,24 @@ mod tests {
         };
         let wiring = build_limits(Some(&config)).await.expect("memory never fails");
         assert!(wiring.limits.is_some() && wiring.charge_tasks.is_none());
+    }
+
+    /// The one `info` line names the backend and the set dimensions, and never the Redis URL.
+    #[tokio::test]
+    async fn a_built_store_logs_one_info_line_without_the_url() {
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::INFO);
+        let config = LimitsConfig {
+            principal_requests_per_minute: Some(5),
+            tokens_per_period: Some(100),
+            redis_url: Some(SecretString::from("redis://:hunter2@10.0.0.9:6379/2".to_owned())),
+            ..LimitsConfig::default()
+        };
+        build_limits(Some(&config)).await.expect("memory never fails");
+        let text = logs.text();
+        assert_eq!(text.matches("limits enabled").count(), 1, "{text}");
+        assert!(text.contains("Memory") && text.contains("principal_rate=true") && text.contains("org_rate=false"), "{text}");
+        assert!(text.contains("budget") && text.contains("Monthly"), "{text}");
+        assert!(!text.contains("hunter2") && !text.contains("10.0.0.9") && !text.contains("redis://"), "{text}");
     }
 
     /// D17/Q14: a Redis that is down at boot fails the boot, and the error never shows the URL.

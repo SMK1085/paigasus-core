@@ -2,10 +2,11 @@
 # Precedence: built-in defaults < gateway.toml < GATEWAY_* environment.
 #
 # LIMITS NOTE (SMA-677): with no [limits] table (the default) there is no rate limit and no spend
-# limit on the OpenAI upstream. The [limits] table below adds a per-principal and a per-org request
-# rate and a per-org token budget. Keep a hard OpenAI spend cap even then: the budget counts tokens,
-# not money; requests in flight when it runs out still complete and are charged; and with
-# backend = "redis" no limit applies while Redis is unavailable (fail-open).
+# limit on the OpenAI upstream. The [limits] table below adds a per-principal request rate, a
+# per-org request rate and a per-org token budget. Keep a hard OpenAI spend cap even then.
+# The budget counts tokens, not money. Requests in flight when the budget runs out still
+# complete, and the gateway charges them. With backend = "redis", Redis can be unavailable.
+# Then the gateway is fail-open: it admits requests with no limit.
 
 # http_addr = "0.0.0.0:8088"          # axum HTTP (chat + health) — default shown
 # log_level = "info"                  # RUST_LOG-style filter — default shown
@@ -74,24 +75,29 @@
 
 # --- Limits (SMA-677): request rate and token budget on POST /v1/chat/completions ---
 #
-# Off unless this table exists. An unset key means no limit on that dimension; 0 is rejected.
-# A misspelt key fails the boot. Refusals: 429 "rate-limited" (Retry-After, retryable) and
-# 429 "budget-exhausted" (type "insufficient_quota", x-should-retry: false).
+# Off unless this table exists. An unset key means no limit on that dimension. The value 0 is
+# rejected. A misspelt key fails the boot. A table with no limit value set builds no store and
+# opens no Redis connection, and the gateway logs one info line. Refusals: 429 "rate-limited"
+# (Retry-After, retryable) and 429 "budget-exhausted" (type "insufficient_quota",
+# x-should-retry: false).
 #
 # [limits]
 # backend = "memory"                     # "memory" (default) | "redis"
-#   # memory: one process only. With N replicas the limits are about N times the values below,
-#   # and a restart sets every budget to zero. Use "redis" for more than one replica.
-# # redis_url: set GATEWAY_LIMITS__REDIS_URL, never this file (it can carry a password).
-# # Required for backend = "redis"; rejected for "memory". Use rediss:// outside a private
-# # network. Requirements: Redis 6.2 or later; a URL that always reaches the primary (no replica,
-# # no Redis Cluster); a dedicated instance, or at least a dedicated logical database, for limits;
-# # maxmemory-policy noeviction (or enough headroom that eviction never runs: an evicted budget
-# # key silently resets that org's budget); appendonly yes if budgets must survive a Redis
-# # restart. Redis must be reachable at boot: a gateway with backend = "redis" does not start
-# # while Redis is down. After boot, a Redis outage is fail-open: no limit applies and no
-# # tokens are charged until it recovers (see RUNBOOK-observability.md, "Gateway limits:
-# # fail-open and Redis requirements").
+#   # memory: one process only. With N replicas the limits are about N times the values below.
+#   # A restart sets every budget to zero. Use "redis" for more than one replica.
+# # redis_url: set GATEWAY_LIMITS__REDIS_URL, never this file. The URL can carry a password.
+# # Required for backend = "redis". Rejected for "memory". Use rediss:// outside a private network.
+# # Redis requirements:
+# #   - Redis 6.2 or later.
+# #   - A URL that always reaches the primary. Do not use a replica or Redis Cluster.
+# #   - A dedicated instance for limits, or at least a dedicated logical database.
+# #   - maxmemory-policy noeviction, or enough headroom that eviction never runs.
+# #     An evicted budget key silently resets the budget of that org.
+# #   - appendonly yes, if budgets must survive a Redis restart.
+# # Redis must be reachable at boot. A gateway with backend = "redis" does not start while
+# # Redis is down. After boot, fail-open applies: when Redis is unavailable, the gateway
+# # admits requests with no limit and charges no tokens until Redis recovers. See
+# # RUNBOOK-observability.md, "Gateway limits: fail-open and Redis requirements".
 # principal_requests_per_minute = 60     # unset: no principal rate limit; max 1000000000
 # org_requests_per_minute       = 600    # unset: no org rate limit (summed over the org's principals); max 1000000000
 # tokens_per_period             = 5000000 # unset: no token budget; max 1000000000000

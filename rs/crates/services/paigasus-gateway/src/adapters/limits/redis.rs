@@ -304,6 +304,7 @@ impl LimitStore for RedisLimitStore {
         );
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
