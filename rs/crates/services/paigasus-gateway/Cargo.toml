@@ -81,6 +81,9 @@ paigasus-kernel = { workspace = true }
 # `domain::resolve_org` reads the `paigasus-org` header as a UUID (SMA-635). Moved from
 # [dev-dependencies]; the correlation test in `adapters::iam::client` still uses it.
 uuid = { workspace = true }
+# SMA-677 D6: the UTC budget periods (`iso_week()` for the ISO week-year) and the RFC 3339 reset
+# instant in the budget refusal message. Already a workspace dependency.
+chrono = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a

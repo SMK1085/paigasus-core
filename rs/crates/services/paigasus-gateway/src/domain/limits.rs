@@ -6,8 +6,13 @@
 //! adapters compute every decision with the functions in this file, so they agree to the request
 //! (D3). No function here reads a clock: every instant is a parameter.
 
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use chrono::{DateTime, Datelike, Days, Months, NaiveDate, NaiveTime, Utc, Weekday};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// The D3 rate window, in milliseconds.
 pub const RATE_WINDOW_MS: u64 = 60_000;
@@ -153,6 +158,373 @@ impl SlidingWindow {
             self.window = at.index;
         }
         self.current = self.current.saturating_add(1);
+    }
+}
+
+/// D7/D18: a budget period accepts a late charge for one day after it ends.
+pub const LATE_CHARGE_GRACE_SECS: i64 = 86_400;
+
+/// D6: the UTC calendar period of a token budget.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BudgetPeriod {
+    Daily,
+    Weekly,
+    #[default]
+    Monthly,
+}
+
+/// One concrete budget period. Carried as `Copy` values; formatted only for the Redis key and the
+/// refusal message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeriodKey {
+    Day(NaiveDate),
+    /// The ISO 8601 week-year and week (`iso_week()`), not the calendar year.
+    Week {
+        year: i32,
+        week: u32,
+    },
+    Month {
+        year: i32,
+        month: u32,
+    },
+}
+
+impl BudgetPeriod {
+    /// The period that holds `now`. Every replica derives the same key from the instant alone.
+    pub fn key_at(self, now: SystemTime) -> PeriodKey {
+        let date = DateTime::<Utc>::from(now).date_naive();
+        match self {
+            BudgetPeriod::Daily => PeriodKey::Day(date),
+            BudgetPeriod::Weekly => {
+                let week = date.iso_week();
+                PeriodKey::Week { year: week.year(), week: week.week() }
+            }
+            BudgetPeriod::Monthly => PeriodKey::Month {
+                year: date.year(),
+                month: date.month(),
+            },
+        }
+    }
+
+    /// D18: the relative TTL of the budget key for a charge at `now`: `period_end + 86400 − now`
+    /// in whole seconds. `None` when that is below 1 s: the charge arrives more than one day after
+    /// its period ended, and is dropped and counted (`period_expired`).
+    pub fn charge_ttl(key: PeriodKey, now: SystemTime) -> Option<u32> {
+        let now_secs = i64::try_from(now.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()).unwrap_or(i64::MAX);
+        let ttl = key.resets_at_unix().saturating_add(LATE_CHARGE_GRACE_SECS).saturating_sub(now_secs);
+        if ttl < 1 { None } else { u32::try_from(ttl).ok() }
+    }
+
+    /// D8: the label of the period that resets at `resets_at_unix`, from the instant one second
+    /// before the reset ("2026-10", "2026-W40", "2026-10-02").
+    pub fn label_at_reset(self, resets_at_unix: i64) -> String {
+        let secs = u64::try_from(resets_at_unix.saturating_sub(1)).unwrap_or(0);
+        self.key_at(UNIX_EPOCH + Duration::from_secs(secs)).label()
+    }
+}
+
+impl PeriodKey {
+    fn start_date(self) -> NaiveDate {
+        match self {
+            PeriodKey::Day(date) => Some(date),
+            PeriodKey::Week { year, week } => NaiveDate::from_isoywd_opt(year, week, Weekday::Mon),
+            PeriodKey::Month { year, month } => NaiveDate::from_ymd_opt(year, month, 1),
+        }
+        .unwrap_or(NaiveDate::MIN)
+    }
+
+    fn end_date(self) -> NaiveDate {
+        let start = self.start_date();
+        match self {
+            PeriodKey::Day(_) => start.checked_add_days(Days::new(1)),
+            PeriodKey::Week { .. } => start.checked_add_days(Days::new(7)),
+            PeriodKey::Month { .. } => start.checked_add_months(Months::new(1)),
+        }
+        .unwrap_or(NaiveDate::MAX)
+    }
+
+    pub fn start(self) -> DateTime<Utc> {
+        self.start_date().and_time(NaiveTime::MIN).and_utc()
+    }
+
+    /// The reset instant: the first instant of the next period (exclusive end).
+    pub fn end(self) -> DateTime<Utc> {
+        self.end_date().and_time(NaiveTime::MIN).and_utc()
+    }
+
+    pub fn resets_at_unix(self) -> i64 {
+        self.end().timestamp()
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            PeriodKey::Day(date) => date.format("%Y-%m-%d").to_string(),
+            PeriodKey::Week { year, week } => format!("{year:04}-W{week:02}"),
+            PeriodKey::Month { year, month } => format!("{year:04}-{month:02}"),
+        }
+    }
+}
+
+/// An org's token budget for one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub tokens: NonZeroU64,
+    pub period: BudgetPeriod,
+}
+
+/// The resolved limits of one request. `None` on a dimension means no limit on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LimitPolicy {
+    pub principal_requests_per_minute: Option<NonZeroU64>,
+    pub org_requests_per_minute: Option<NonZeroU64>,
+    pub budget: Option<Budget>,
+}
+
+impl LimitPolicy {
+    /// D11: an empty policy skips the store.
+    pub fn is_empty(&self) -> bool {
+        self.principal_requests_per_minute.is_none() && !self.has_org_dimension()
+    }
+
+    /// D2: an org rate or a budget applies.
+    pub fn has_org_dimension(&self) -> bool {
+        self.org_requests_per_minute.is_some() || self.budget.is_some()
+    }
+}
+
+/// One `[[limits.org]]` entry (D12). A field that is `None` keeps the table default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OrgOverride {
+    pub org_requests_per_minute: Option<NonZeroU64>,
+    pub tokens_per_period: Option<NonZeroU64>,
+    /// D11: no org rate and no budget for this org; the principal rate still applies.
+    pub exempt: bool,
+}
+
+/// The table defaults and the per-org overrides, read once at boot. Domain-owned, so the config
+/// type stays out of the domain (`LimitsConfig::rules` converts).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LimitRules {
+    pub principal_requests_per_minute: Option<NonZeroU64>,
+    pub org_requests_per_minute: Option<NonZeroU64>,
+    pub tokens_per_period: Option<NonZeroU64>,
+    pub budget_period: BudgetPeriod,
+    pub overrides: HashMap<Uuid, OrgOverride>,
+}
+
+impl LimitRules {
+    pub fn policy_for(&self, org: Option<Uuid>) -> LimitPolicy {
+        let entry = org.and_then(|id| self.overrides.get(&id)).copied().unwrap_or_default();
+        if entry.exempt {
+            return LimitPolicy {
+                principal_requests_per_minute: self.principal_requests_per_minute,
+                ..LimitPolicy::default()
+            };
+        }
+        LimitPolicy {
+            principal_requests_per_minute: self.principal_requests_per_minute,
+            org_requests_per_minute: entry.org_requests_per_minute.or(self.org_requests_per_minute),
+            budget: entry.tokens_per_period.or(self.tokens_per_period).map(|tokens| Budget { tokens, period: self.budget_period }),
+        }
+    }
+
+    /// D11: true when no table default is set and no override sets a value, so no request can
+    /// ever have a non-empty policy. `main.rs` then builds no store.
+    pub fn every_policy_is_empty(&self) -> bool {
+        self.principal_requests_per_minute.is_none()
+            && self.org_requests_per_minute.is_none()
+            && self.tokens_per_period.is_none()
+            && self.overrides.values().all(|entry| entry.org_requests_per_minute.is_none() && entry.tokens_per_period.is_none())
+    }
+}
+
+/// One check that refused a request. A refusal carries every failed check (D8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedCheck {
+    PrincipalRate(RateCounts),
+    OrgRate(RateCounts),
+    Budget { period: BudgetPeriod, resets_at_unix: i64 },
+}
+
+/// The failed budget check for `budget` in the period `key`.
+pub fn budget_refusal(budget: Budget, key: PeriodKey) -> FailedCheck {
+    FailedCheck::Budget {
+        period: budget.period,
+        resets_at_unix: key.resets_at_unix(),
+    }
+}
+
+/// The right to charge one admitted request. It exists only when a budget applies, names the
+/// period the request started in (D7), and is not `Clone`: the charge guard gives it back to
+/// `LimitStore::charge` exactly once.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LimitTicket {
+    pub org: Uuid,
+    pub period: PeriodKey,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LimitDecision {
+    Admit(Option<LimitTicket>),
+    Refused(Vec<FailedCheck>),
+}
+
+/// The `reason` label of `gateway_limit_refusals_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReason {
+    PrincipalRate,
+    OrgRate,
+    OrgBudget,
+}
+
+impl RefusalReason {
+    pub const ALL: [RefusalReason; 3] = [RefusalReason::PrincipalRate, RefusalReason::OrgRate, RefusalReason::OrgBudget];
+
+    pub fn as_label(self) -> &'static str {
+        match self {
+            RefusalReason::PrincipalRate => "principal_rate",
+            RefusalReason::OrgRate => "org_rate",
+            RefusalReason::OrgBudget => "org_budget",
+        }
+    }
+}
+
+/// Why the limits refused a request. The HTTP adapter maps it to a `GatewayError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitRefusal {
+    RateLimited {
+        retry_after_secs: u32,
+        reason: RefusalReason,
+    },
+    BudgetExhausted {
+        period: BudgetPeriod,
+        resets_at_unix: i64,
+    },
+    /// D2: the scope names no org, and an org rate or a budget applies (fail-closed, Q11).
+    Unscoped,
+}
+
+impl LimitRefusal {
+    /// The refusal-metric label; `None` for `Unscoped`, which has its own counter.
+    pub fn reason(&self) -> Option<RefusalReason> {
+        match self {
+            LimitRefusal::RateLimited { reason, .. } => Some(*reason),
+            LimitRefusal::BudgetExhausted { .. } => Some(RefusalReason::OrgBudget),
+            LimitRefusal::Unscoped => None,
+        }
+    }
+
+    /// A short name for the refusal log line.
+    pub fn label(&self) -> &'static str {
+        self.reason().map_or("unscoped", RefusalReason::as_label)
+    }
+}
+
+/// D8: the org budget first, then the principal rate, then the org rate. `Retry-After` is the
+/// largest wait over every failed rate check, at least 1 s. `None` for an empty list.
+pub fn choose_refusal(failed: &[FailedCheck]) -> Option<LimitRefusal> {
+    if let Some((period, resets_at_unix)) = failed.iter().find_map(|check| match check {
+        FailedCheck::Budget { period, resets_at_unix } => Some((*period, *resets_at_unix)),
+        _ => None,
+    }) {
+        return Some(LimitRefusal::BudgetExhausted { period, resets_at_unix });
+    }
+    let retry_after_secs = failed
+        .iter()
+        .filter_map(|check| match check {
+            FailedCheck::PrincipalRate(counts) | FailedCheck::OrgRate(counts) => Some(counts.retry_after_secs()),
+            FailedCheck::Budget { .. } => None,
+        })
+        .max()?;
+    let reason = if failed.iter().any(|check| matches!(check, FailedCheck::PrincipalRate(_))) {
+        RefusalReason::PrincipalRate
+    } else {
+        RefusalReason::OrgRate
+    };
+    Some(LimitRefusal::RateLimited {
+        retry_after_secs: retry_after_secs.max(1),
+        reason,
+    })
+}
+
+/// The `reason` label of `gateway_limit_charges_dropped_total` (D16, D18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChargeDropReason {
+    NoRuntime,
+    Shutdown,
+    PeriodExpired,
+}
+
+impl ChargeDropReason {
+    pub const ALL: [ChargeDropReason; 3] = [ChargeDropReason::NoRuntime, ChargeDropReason::Shutdown, ChargeDropReason::PeriodExpired];
+
+    pub fn as_label(self) -> &'static str {
+        match self {
+            ChargeDropReason::NoRuntime => "no_runtime",
+            ChargeDropReason::Shutdown => "shutdown",
+            ChargeDropReason::PeriodExpired => "period_expired",
+        }
+    }
+}
+
+/// D10: why a store call failed. `Copy`, and a bounded metric label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnavailableKind {
+    /// Redis is down, the connection failed, or the breaker is open.
+    Io,
+    /// Redis answered with an error (for example `OOM` under `noeviction`, or a script error).
+    Server,
+    /// Redis answered with a reply of the wrong type or shape.
+    Decode,
+}
+
+impl UnavailableKind {
+    pub const ALL: [UnavailableKind; 3] = [UnavailableKind::Io, UnavailableKind::Server, UnavailableKind::Decode];
+
+    pub fn as_label(self) -> &'static str {
+        match self {
+            UnavailableKind::Io => "io",
+            UnavailableKind::Server => "server",
+            UnavailableKind::Decode => "decode",
+        }
+    }
+}
+
+/// D10: the port's error. It names no `redis` type; the Redis adapter maps its errors here.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LimitStoreError {
+    /// `detail` is the store error's text. It never contains the store URL.
+    #[error("limit store unavailable ({kind:?}): {detail}")]
+    Unavailable { kind: UnavailableKind, detail: String },
+}
+
+/// D1/D16: the limit store port. Consumed as `dyn LimitStore`, hence `async_trait`
+/// (`rs/Cargo.toml:102-104`).
+#[async_trait::async_trait]
+pub trait LimitStore: Send + Sync {
+    /// D4: check every dimension of `policy`, then count the request on every rate key only when
+    /// every check passed. A ticket is issued only when a budget applies and `org` is `Some`.
+    async fn check_and_admit(&self, principal: &str, org: Option<Uuid>, policy: &LimitPolicy, now: SystemTime) -> Result<LimitDecision, LimitStoreError>;
+
+    /// D7/D16: add `tokens` to the ticket's period. Must not block and must not panic: the charge
+    /// guard calls it from `Drop`. An adapter that needs I/O spawns it.
+    fn charge(&self, ticket: LimitTicket, tokens: u64, now: SystemTime);
+}
+
+/// The injected clock (spec § 4.3a).
+pub trait Clock: Send + Sync {
+    fn now(&self) -> SystemTime;
+}
+
+/// The production clock. The only place in the domain and application layers that reads the
+/// system time.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
     }
 }
 
@@ -402,5 +774,231 @@ mod tests {
                 assert_eq!(counts.retry_after_secs(), retry_after(previous, current, elapsed, limit));
             }
         }
+    }
+
+    // `HashMap` and `Uuid` come from `super::*` (the parent's own imports).
+
+    fn instant(rfc3339: &str) -> SystemTime {
+        SystemTime::from(chrono::DateTime::parse_from_rfc3339(rfc3339).expect("a fixture instant"))
+    }
+
+    fn unix(rfc3339: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(rfc3339).expect("a fixture instant").timestamp()
+    }
+
+    /// (period, instant, label, start, end) — spec § 5.1.
+    #[test]
+    fn period_keys_and_reset_instants() {
+        let rows: &[(BudgetPeriod, &str, &str, &str, &str)] = &[
+            (BudgetPeriod::Daily, "2026-10-02T23:59:59.999Z", "2026-10-02", "2026-10-02T00:00:00Z", "2026-10-03T00:00:00Z"),
+            (BudgetPeriod::Daily, "2026-10-03T00:00:00Z", "2026-10-03", "2026-10-03T00:00:00Z", "2026-10-04T00:00:00Z"),
+            (BudgetPeriod::Daily, "2028-02-29T12:00:00Z", "2028-02-29", "2028-02-29T00:00:00Z", "2028-03-01T00:00:00Z"),
+            (BudgetPeriod::Weekly, "2026-10-04T23:59:59Z", "2026-W40", "2026-09-28T00:00:00Z", "2026-10-05T00:00:00Z"),
+            (BudgetPeriod::Weekly, "2026-10-05T00:00:00Z", "2026-W41", "2026-10-05T00:00:00Z", "2026-10-12T00:00:00Z"),
+            (BudgetPeriod::Weekly, "2026-12-31T12:00:00Z", "2026-W53", "2026-12-28T00:00:00Z", "2027-01-04T00:00:00Z"),
+            (BudgetPeriod::Weekly, "2027-01-01T00:00:00Z", "2026-W53", "2026-12-28T00:00:00Z", "2027-01-04T00:00:00Z"),
+            (BudgetPeriod::Monthly, "2026-10-31T23:59:59.999Z", "2026-10", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z"),
+            (BudgetPeriod::Monthly, "2026-12-31T23:59:59Z", "2026-12", "2026-12-01T00:00:00Z", "2027-01-01T00:00:00Z"),
+            (BudgetPeriod::Monthly, "2027-01-01T00:00:00Z", "2027-01", "2027-01-01T00:00:00Z", "2027-02-01T00:00:00Z"),
+            (BudgetPeriod::Monthly, "2028-02-29T00:00:00Z", "2028-02", "2028-02-01T00:00:00Z", "2028-03-01T00:00:00Z"),
+        ];
+        for &(period, now, label, start, end) in rows {
+            let key = period.key_at(instant(now));
+            assert_eq!(key.label(), label, "{period:?} at {now}");
+            assert_eq!(key.start().timestamp(), unix(start), "{period:?} at {now}: start");
+            assert_eq!(key.end().timestamp(), unix(end), "{period:?} at {now}: end");
+            assert_eq!(key.resets_at_unix(), unix(end));
+        }
+    }
+
+    #[test]
+    fn the_default_period_is_monthly() {
+        assert_eq!(BudgetPeriod::default(), BudgetPeriod::Monthly);
+    }
+
+    #[test]
+    fn the_refusal_label_is_the_period_one_second_before_the_reset() {
+        assert_eq!(BudgetPeriod::Monthly.label_at_reset(unix("2026-11-01T00:00:00Z")), "2026-10");
+        assert_eq!(BudgetPeriod::Weekly.label_at_reset(unix("2026-10-05T00:00:00Z")), "2026-W40");
+        assert_eq!(BudgetPeriod::Daily.label_at_reset(unix("2026-10-03T00:00:00Z")), "2026-10-02");
+    }
+
+    /// Spec § 5.1 `charge_ttl` rows. October 2026 has 31 days = 2_678_400 s.
+    #[test]
+    fn the_charge_ttl_is_relative_to_now() {
+        let october = BudgetPeriod::Monthly.key_at(instant("2026-10-15T00:00:00Z"));
+        assert_eq!(BudgetPeriod::charge_ttl(october, instant("2026-10-01T00:00:01Z")), Some(2_678_400 + 86_400 - 1));
+        assert_eq!(BudgetPeriod::charge_ttl(october, instant("2026-11-01T00:00:00Z")), Some(86_400));
+        assert_eq!(BudgetPeriod::charge_ttl(october, instant("2026-11-01T23:59:59Z")), Some(1));
+        assert_eq!(BudgetPeriod::charge_ttl(october, instant("2026-11-02T00:00:00Z")), None);
+    }
+
+    const ORG_A: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
+    const ORG_B: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000b2);
+    const ORG_C: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000c3);
+
+    fn rules() -> LimitRules {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            ORG_A,
+            OrgOverride {
+                org_requests_per_minute: Some(nz(1200)),
+                tokens_per_period: None,
+                exempt: false,
+            },
+        );
+        overrides.insert(
+            ORG_B,
+            OrgOverride {
+                exempt: true,
+                ..OrgOverride::default()
+            },
+        );
+        LimitRules {
+            principal_requests_per_minute: Some(nz(60)),
+            org_requests_per_minute: Some(nz(600)),
+            tokens_per_period: Some(nz(5_000_000)),
+            budget_period: BudgetPeriod::Weekly,
+            overrides,
+        }
+    }
+
+    #[test]
+    fn policy_for_applies_overrides_exemptions_and_defaults() {
+        let budget = Some(Budget {
+            tokens: nz(5_000_000),
+            period: BudgetPeriod::Weekly,
+        });
+        // An override that sets only the org rate keeps the default budget.
+        assert_eq!(
+            rules().policy_for(Some(ORG_A)),
+            LimitPolicy {
+                principal_requests_per_minute: Some(nz(60)),
+                org_requests_per_minute: Some(nz(1200)),
+                budget
+            }
+        );
+        // An exempt org keeps only the principal rate (D11).
+        assert_eq!(
+            rules().policy_for(Some(ORG_B)),
+            LimitPolicy {
+                principal_requests_per_minute: Some(nz(60)),
+                org_requests_per_minute: None,
+                budget: None
+            }
+        );
+        // An unlisted org and a request with no org get the table defaults.
+        let defaults = LimitPolicy {
+            principal_requests_per_minute: Some(nz(60)),
+            org_requests_per_minute: Some(nz(600)),
+            budget,
+        };
+        assert_eq!(rules().policy_for(Some(ORG_C)), defaults);
+        assert_eq!(rules().policy_for(None), defaults);
+    }
+
+    #[test]
+    fn is_empty_and_every_policy_is_empty() {
+        assert!(LimitPolicy::default().is_empty());
+        assert!(!LimitPolicy::default().has_org_dimension());
+        let exempt_only = LimitRules {
+            overrides: HashMap::from([(
+                ORG_B,
+                OrgOverride {
+                    exempt: true,
+                    ..OrgOverride::default()
+                },
+            )]),
+            ..LimitRules::default()
+        };
+        assert!(exempt_only.policy_for(Some(ORG_B)).is_empty(), "an exempt org with no principal rate gives an empty policy");
+        assert!(exempt_only.every_policy_is_empty());
+        let one_override = LimitRules {
+            overrides: HashMap::from([(
+                ORG_A,
+                OrgOverride {
+                    tokens_per_period: Some(nz(10)),
+                    ..OrgOverride::default()
+                },
+            )]),
+            ..LimitRules::default()
+        };
+        assert!(!one_override.every_policy_is_empty(), "an override with a value can give a non-empty policy");
+        assert!(one_override.policy_for(None).is_empty());
+        assert!(!rules().every_policy_is_empty());
+    }
+
+    fn rate(previous: u64, current: u64, elapsed_ms: u64, limit: u64) -> RateCounts {
+        RateCounts { previous, current, elapsed_ms, limit }
+    }
+
+    /// D8 precedence: budget, then principal rate, then org rate; Retry-After = max, at least 1.
+    #[test]
+    fn the_refusal_follows_the_d8_precedence() {
+        let budget = FailedCheck::Budget {
+            period: BudgetPeriod::Monthly,
+            resets_at_unix: unix("2026-11-01T00:00:00Z"),
+        };
+        let principal = FailedCheck::PrincipalRate(rate(0, 2, 59_999, 2)); // 31 s
+        let org = FailedCheck::OrgRate(rate(10, 5, 30_000, 10)); // 6 s
+        assert_eq!(
+            choose_refusal(&[org, principal, budget]),
+            Some(LimitRefusal::BudgetExhausted {
+                period: BudgetPeriod::Monthly,
+                resets_at_unix: unix("2026-11-01T00:00:00Z")
+            })
+        );
+        assert_eq!(
+            choose_refusal(&[org, principal]),
+            Some(LimitRefusal::RateLimited {
+                retry_after_secs: 31,
+                reason: RefusalReason::PrincipalRate
+            })
+        );
+        assert_eq!(
+            choose_refusal(&[org]),
+            Some(LimitRefusal::RateLimited {
+                retry_after_secs: 6,
+                reason: RefusalReason::OrgRate
+            })
+        );
+        assert_eq!(choose_refusal(&[]), None);
+        // The minimum is 1 s even when the counts would admit at once.
+        assert_eq!(
+            choose_refusal(&[FailedCheck::OrgRate(rate(0, 0, 0, 1))]),
+            Some(LimitRefusal::RateLimited {
+                retry_after_secs: 1,
+                reason: RefusalReason::OrgRate
+            })
+        );
+    }
+
+    #[test]
+    fn labels_are_the_bounded_metric_values() {
+        assert_eq!(RefusalReason::ALL.map(RefusalReason::as_label), ["principal_rate", "org_rate", "org_budget"]);
+        assert_eq!(UnavailableKind::ALL.map(UnavailableKind::as_label), ["io", "server", "decode"]);
+        assert_eq!(ChargeDropReason::ALL.map(ChargeDropReason::as_label), ["no_runtime", "shutdown", "period_expired"]);
+        assert_eq!(LimitRefusal::Unscoped.reason(), None);
+        assert_eq!(LimitRefusal::Unscoped.label(), "unscoped");
+        assert_eq!(
+            budget_refusal(
+                Budget {
+                    tokens: nz(1),
+                    period: BudgetPeriod::Daily
+                },
+                BudgetPeriod::Daily.key_at(instant("2026-10-02T12:00:00Z"))
+            ),
+            FailedCheck::Budget {
+                period: BudgetPeriod::Daily,
+                resets_at_unix: unix("2026-10-03T00:00:00Z")
+            }
+        );
+    }
+
+    #[test]
+    fn the_period_serde_spelling_is_lowercase() {
+        assert_eq!(serde_json::to_string(&BudgetPeriod::Weekly).expect("serializes"), "\"weekly\"");
+        assert_eq!(serde_json::from_str::<BudgetPeriod>("\"daily\"").expect("deserializes"), BudgetPeriod::Daily);
+        assert!(serde_json::from_str::<BudgetPeriod>("\"yearly\"").is_err());
     }
 }
