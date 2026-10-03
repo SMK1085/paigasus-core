@@ -28,7 +28,9 @@ members = [
   "crates/libs/paigasus-observability",
   "crates/libs/paigasus-proto",
   "crates/libs/paigasus-proto-derive",
+  "crates/libs/paigasus-redis",
   "crates/libs/paigasus-service-info",
+  "crates/libs/paigasus-test-docker",
   "crates/services/paigasus-gateway",
   "crates/services/paigasus-iam",
 ]
@@ -184,11 +186,20 @@ paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.4.0" }
 # their hot paths through it (Unit 2 — `paigasus-gateway` is the first consumer); same
 # in-tree-freshness rationale as paigasus-kernel/paigasus-proto above.
 paigasus-observability = { path = "crates/libs/paigasus-observability", version = "0.0.0" }
+# In-tree path dep: the one place a Paigasus service opens a Redis connection — the SMA-473
+# reconnect budget and the SMA-476 circuit breaker, moved out of `paigasus-iam` (SMA-726 D15).
+# Callers name the breaker's metrics. `version` is required: `rs/deny.toml` sets
+# `wildcards = "deny"`.
+paigasus-redis = { path = "crates/libs/paigasus-redis", version = "0.0.0" }
 # paigasus-service-info — the shared `ServiceInfo` builder + HTTP DTO (SMA-505). Owns the wire
 # invariants both services must not re-derive: the UNSPECIFIED sentinel is never advertised,
 # ordering is deterministic, and `capabilities` is always emitted (as `[]` when empty) so a
 # client doing `info.capabilities.includes(k)` cannot throw.
 paigasus-service-info = { path = "crates/libs/paigasus-service-info", version = "0.0.0" }
+# In-tree path dep, DEV-ONLY: the one Docker-skip policy for container-backed test suites
+# (SMA-538, moved out of paigasus-iam by SMA-726 D22). Consumers list it under
+# [dev-dependencies] only.
+paigasus-test-docker = { path = "crates/libs/paigasus-test-docker", version = "0.0.0" }
 # sea-orm — async ORM for service persistence adapters (paigasus-iam's AppState/readyz ping,
 # later the Postgres repository). `runtime-tokio-rustls` keeps the TLS posture on rustls/ring
 # (see reqwest above) instead of native-tls/openssl; `sqlx-postgres` is the only backend we run.

@@ -19,3 +19,10 @@ rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js text eol=lf linguist-genera
 rs/crates/bindings/paigasus-wasm/paigasus_wasm.js text eol=lf linguist-generated=true
 rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts text eol=lf linguist-generated=true
 rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts text eol=lf linguist-generated=true
+#
+# SMA-667. The two committed napi glue files. The drift gate (tests/committed-napi-glue.test.ts)
+# compares WORKING-TREE bytes with a fresh build, so a CRLF checkout must not change them. A rebase
+# or merge conflict in these files is NEVER resolved by hand: take either side, run
+# `moon run paigasus-kernel-ts:generate-napi-glue`, and commit its result.
+rs/crates/bindings/paigasus-node-bindings/index.js text eol=lf linguist-generated=true
+rs/crates/bindings/paigasus-node-bindings/index.d.ts text eol=lf linguist-generated=true

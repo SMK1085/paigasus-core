@@ -23,14 +23,16 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   dedicated `[profile.iam]` instead, selected only by `paigasus-iam-rs:test`'s `args: ['--profile',
   'iam']` — CI uploads it as the `nextest-junit` artifact, but a bare `cargo nextest run -p
   paigasus-iam` writes no report at all.
-- `paigasus-iam`'s **Docker-backed** suites (65 of its 69 integration binaries) skip when the
+- `paigasus-iam`'s **Docker-backed** suites (74 of its 77 integration binaries) skip when the
   daemon is unreachable, and that skip is deliberately quiet — nextest discards a passing test's
   stderr and Moon discards a passing task's output, so no message can surface there. What makes
   it visible is `tests/docker_preflight.rs`, a canary that FAILS when Docker is unreachable: a
-  Docker-less run yields exactly one red instead of 64 silent passes (SMA-538). The policy itself
-  lives once, in `tests/support/docker.rs`, and `repo:iam-docker-policy-single-site` fails if a
-  new suite hand-rolls its own copy. Two env vars, both parsing `1`/`true`/`yes` (anything else,
-  including `0`, is off — unlike `CI`, which is presence-based):
+  Docker-less run yields exactly one red instead of 73 silent passes (SMA-538). The policy itself
+  lives once, in the dev-only crate `paigasus-test-docker` (SMA-726; IAM's
+  `tests/support/docker.rs` only re-exports it), and `repo:iam-docker-policy-single-site` fails
+  if a suite in IAM or the gateway hand-rolls its own copy. Two env vars, both parsing
+  `1`/`true`/`yes` (anything else, including `0`, is off — unlike `CI`, which is
+  presence-based):
   `PAIGASUS_REQUIRE_DOCKER=1` turns every suite's skip into a panic, which is what a FILTERED run
   (`--test relay_pg`, `-E 'test(foo)'`) needs, since the canary is not in that filter.
   `PAIGASUS_SKIP_DOCKER=1` restores skipping everywhere including the canary — it is a
@@ -257,9 +259,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `ts/` these are `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
   `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
   `ts/apps/*/next.config.ts`, `ts/apps/*/package.json`,
-  `ts/packages/paigasus-kernel/package.json`,
-  `rs/crates/bindings/paigasus-node-bindings/index.js` and
-  `rs/crates/bindings/paigasus-node-bindings/index.d.ts`. It also lists four smoke-runtime files
+  and `ts/packages/paigasus-kernel/package.json`. It also lists four smoke-runtime files
   (SMA-675, the second clause of RUNBOOK-containers.md section 1):
   `ts/packages/paigasus-auth/src/core/session.ts`, `ts/apps/*/app/*console*/layout.tsx`,
   `ts/apps/iam-console/app/*console*/orgs/page.tsx` and
@@ -268,10 +268,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   runs the workflow automatically. The rule for a `ts/` entry is in RUNBOOK-containers.md section 1.
   A file that is already a Moon task `input` stays off this filter, even if `ts/Dockerfile` reads
   it too, because a bad edit there already reds the ordinary `moon ci` build — this is why the
-  five committed wasm artifacts, `paigasus-wasm/package.json` and
-  `paigasus-node-bindings/package.json` are absent, but the napi crate's `index.js`/`index.d.ts`
-  are present: those two are Docker-copied by name yet are not Moon `inputs` anywhere, since the
-  kernel build task's own `napi build` step regenerates them fresh every run.
+  five committed wasm artifacts, `paigasus-wasm/package.json`,
+  `paigasus-node-bindings/package.json` and the napi crate's `index.js`/`index.d.ts` are absent.
+  The two napi glue files are `paigasus-kernel-ts:test` inputs since SMA-667, and
+  `tests/committed-napi-glue.test.ts` holds them to the generator.
   `@paigasus/next-config` is off the filter too (SMA-671): it is a Moon input, the unit tests and
   `standalone-runtime.test.ts` pin both base paths, and `chart.yml` is the second control.
 - The filter does not list `rs/**` or `ts/**`. A PR that changes `rs/**` or `ts/**` but no

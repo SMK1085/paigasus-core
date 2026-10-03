@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The single place this service constructs a Redis [`ConnectionManager`] (SMA-473).
+//! The single place a Paigasus service constructs a Redis [`ConnectionManager`] (SMA-473).
+//!
+//! Moved out of `paigasus-iam`'s `adapters::redis_conn` by SMA-726 (D15), so that IAM and the
+//! gateway share one tuned connection and one circuit breaker. The caller names the breaker's
+//! metrics with [`BreakerMetrics`]; this crate does not depend on `paigasus-observability`.
+//! The `test-support` feature adds the test-only constructors and the `test_support` blackhole
+//! listener. Turn it on from `[dev-dependencies]` only.
 //!
 //! **Why this module exists.** `ConnectionManager::new` applies a stock
 //! `ConnectionManagerConfig::default()`, whose reconnect budget is 6 retries on a
@@ -23,7 +29,6 @@
 //! not a *blackholed* one, where `connection_timeout` dominates at ~2.1 s per command.
 
 use metrics::{counter, gauge};
-use paigasus_observability::names;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -39,12 +44,30 @@ const CONNECT_RETRIES: usize = 1;
 /// `CONNECT_RETRIES` later caps each step here rather than at `backon`'s own 60 s default.
 const RETRY_MAX_DELAY: Duration = Duration::from_millis(500);
 
-/// The tuned config every Redis connection in this service is opened with.
+/// The metric names and the `role` label value of one breaker (SMA-726 D15).
 ///
-/// `pub(crate)` and exposed separately from [`connect`] so the config tests can assert on it
-/// directly, and so the two `#[cfg(test)]` lazy managers elsewhere in this crate can build
-/// from the exact production config rather than a hand-rolled copy.
-pub(crate) fn connection_manager_config() -> ConnectionManagerConfig {
+/// The caller supplies them, because the names belong to the service, not to this crate. IAM
+/// passes `iam_redis_breaker_state` and `iam_redis_breaker_transitions_total` through
+/// `impl From<RedisRole> for BreakerMetrics`. The `'static` lifetime keeps the label set bounded:
+/// a caller cannot make a label value per request (SMA-476 D10).
+///
+/// The breaker emits the gauge `<state>{role}` (0 closed, 1 half-open, 2 open) and the counter
+/// `<transitions>{role, to}`, where `to` is `closed`, `half_open` or `open`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BreakerMetrics {
+    /// The name of the state gauge.
+    pub state: &'static str,
+    /// The name of the transitions counter.
+    pub transitions: &'static str,
+    /// The value of the `role` label on both series.
+    pub role: &'static str,
+}
+
+/// The tuned config every Redis connection of a Paigasus service is opened with.
+///
+/// Public and separate from [`connect`], so the config tests can assert on it directly, and so a
+/// test that builds a lazy manager by hand uses the exact production config, not a copy.
+pub fn connection_manager_config() -> ConnectionManagerConfig {
     ConnectionManagerConfig::new().set_number_of_retries(CONNECT_RETRIES).set_max_delay(RETRY_MAX_DELAY)
 }
 
@@ -66,7 +89,7 @@ pub(crate) fn connection_manager_config() -> ConnectionManagerConfig {
 /// connect future the instant a command fails (`redis-1.3.0/src/aio/connection_manager.rs:649`),
 /// not on the next probe, so whether a probe joins that still-in-flight dial (one window) or
 /// consumes an already-resolved `Err` (two windows) depends on dial duration vs the open window.
-/// See [`OPEN_DURATION`]'s doc for both regimes; either way the bound stays ≤ 2 open windows plus
+/// See `OPEN_DURATION`'s doc for both regimes; either way the bound stays ≤ 2 open windows plus
 /// one connect budget.
 ///
 /// A second coupling (SMA-702): the open-breaker tests assert that the test blackhole accepted
@@ -112,46 +135,58 @@ impl redis::aio::ConnectionLike for RedisHandle {
 }
 
 /// Opens `redis_url` and wraps it in a [`RedisHandle`] — a [`ConnectionManager`] built with
-/// [`connection_manager_config`] behind a fresh circuit breaker. The ONLY way this crate obtains
-/// a Redis connection (enforced by the `repo:redis-connect-single-site` CI gate, which since
-/// SMA-476 also bans naming the `ConnectionManager` type outside this module).
+/// [`connection_manager_config`] behind a fresh circuit breaker that emits under `metrics`. The
+/// ONLY way a Paigasus service obtains a Redis connection (enforced by the
+/// `repo:redis-connect-single-site` CI gate, which also bans naming the `ConnectionManager` type
+/// outside this crate).
 ///
 /// **Eager**: `new_with_config` awaits the initial connection, so a Redis that is down at boot
-/// still fails `AppState::new` rather than yielding a manager that fails later. That preserves
+/// fails the caller's boot rather than yielding a manager that fails later. That preserves
 /// the pre-SMA-473 contract — but note the tolerance window shrinks from ~6-12 s to ~200 ms, so a
 /// Redis slow to start now costs one crash-restart (SMA-473 D10).
 ///
 /// The boot dial is deliberately NOT breaker-mediated (SMA-476 D11): the breaker starts Closed
 /// and wraps commands only. A single boot dial has nothing to break on.
 ///
-/// Returns a bare [`redis::RedisResult`] rather than a domain error because the callers map it
-/// differently on purpose: `http::connect_redis` to `AuthnError::Backend`,
-/// `RedisJwksCache::connect` to the fail-closed `AuthnError::Unavailable`.
-pub(crate) async fn connect(redis_url: &str, role: RedisRole) -> redis::RedisResult<RedisHandle> {
+/// Returns a bare [`redis::RedisResult`] rather than a domain error because callers map it
+/// differently on purpose (IAM: `http::connect_redis` to `AuthnError::Backend`,
+/// `RedisJwksCache::connect` to the fail-closed `AuthnError::Unavailable`).
+pub async fn connect(redis_url: &str, metrics: impl Into<BreakerMetrics>) -> redis::RedisResult<RedisHandle> {
     let client = redis::Client::open(redis_url)?;
     let conn = ConnectionManager::new_with_config(client, connection_manager_config()).await?;
-    Ok(RedisHandle { conn, breaker: Breaker::new(role) })
+    Ok(RedisHandle {
+        conn,
+        breaker: Breaker::new(metrics.into()),
+    })
 }
 
-/// A lazily-connecting handle with a CLOSED breaker, using [`Breaker::new`]'s PRODUCTION
+/// A lazily-connecting handle with a CLOSED breaker, using `Breaker::new`'s PRODUCTION
 /// durations (2s open / 5s half-open probe budget) — NOT short test durations, despite the name.
 ///
 /// Required wherever a test must actually dial: the production [`connect`] is eager, so against a
 /// dead or blackholed backend it fails before any command can be issued. A test that needs a
-/// short window instead must hand-roll a [`RedisHandle`] with [`Breaker::with_durations`] (see
+/// short window instead must hand-roll a [`RedisHandle`] with `Breaker::with_durations` (see
 /// `the_breaker_recloses_once_the_backend_answers_again`).
-#[cfg(test)]
-pub(crate) fn new_lazy_for_tests(redis_url: &str, role: RedisRole) -> redis::RedisResult<RedisHandle> {
+///
+/// Call it inside a Tokio runtime (`#[tokio::test]`): `new_lazy_with_config` spawns on the
+/// current runtime and panics outside one. It never dials.
+#[cfg(any(test, feature = "test-support"))]
+pub fn new_lazy_for_tests(redis_url: &str, metrics: impl Into<BreakerMetrics>) -> redis::RedisResult<RedisHandle> {
     let client = redis::Client::open(redis_url)?;
     let conn = ConnectionManager::new_lazy_with_config(client, connection_manager_config())?;
-    Ok(RedisHandle { conn, breaker: Breaker::new(role) })
+    Ok(RedisHandle {
+        conn,
+        breaker: Breaker::new(metrics.into()),
+    })
 }
 
 /// A lazily-connecting handle whose breaker is forced OPEN, for proving that a call site
-/// short-circuits rather than dials. NOT interchangeable with [`new_lazy_for_tests`].
-#[cfg(test)]
-pub(crate) fn with_open_breaker_for_tests(redis_url: &str, role: RedisRole) -> redis::RedisResult<RedisHandle> {
-    let handle = new_lazy_for_tests(redis_url, role)?;
+/// short-circuits rather than dials. NOT interchangeable with [`new_lazy_for_tests`]. Forcing
+/// the breaker open is a transition, so it emits both breaker series once. Needs a Tokio
+/// runtime, as [`new_lazy_for_tests`] does.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_open_breaker_for_tests(redis_url: &str, metrics: impl Into<BreakerMetrics>) -> redis::RedisResult<RedisHandle> {
+    let handle = new_lazy_for_tests(redis_url, metrics)?;
     handle.breaker.force_open_for_tests();
     Ok(handle)
 }
@@ -197,28 +232,9 @@ pub(crate) const OPEN_DURATION: Duration = Duration::from_secs(2);
 pub(crate) const HALF_OPEN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The short-circuit error's message. Pinned by test and deliberately free of any URL, host or
-/// credential: `cedar_authorizer.rs` and `generation.rs` log the wrapping `AuthzError` with
-/// `error = %err`, so this literal reaches the logs (SMA-476 D4).
-pub(crate) const BREAKER_OPEN_MESSAGE: &str = "redis circuit breaker open (SMA-476)";
-
-/// Which connection a breaker guards. A CLOSED set, so the `role` metric label is bounded by the
-/// type system and cannot mint cardinality (SMA-476 D10).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RedisRole {
-    Authz,
-    ApiKeys,
-    Jwks,
-}
-
-impl RedisRole {
-    fn as_label(self) -> &'static str {
-        match self {
-            RedisRole::Authz => "authz",
-            RedisRole::ApiKeys => "api_keys",
-            RedisRole::Jwks => "jwks",
-        }
-    }
-}
+/// credential: callers log the wrapping error with `error = %err` (IAM's `cedar_authorizer.rs`
+/// and `generation.rs` do), so this literal reaches the logs (SMA-476 D4).
+pub const BREAKER_OPEN_MESSAGE: &str = "redis circuit breaker open (SMA-476)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BreakerState {
@@ -265,7 +281,7 @@ struct Inner {
 /// `Result::expect_err` requires `T: Debug`; see `connect_is_eager_so_a_dead_backend_fails_at_construction`).
 #[derive(Debug)]
 pub(crate) struct Breaker {
-    role: RedisRole,
+    metrics: BreakerMetrics,
     open_duration: Duration,
     half_open_deadline: Duration,
     inner: Mutex<Inner>,
@@ -329,16 +345,16 @@ impl Drop for ProbePermit {
 }
 
 impl Breaker {
-    pub(crate) fn new(role: RedisRole) -> Arc<Breaker> {
-        Breaker::with_durations(role, OPEN_DURATION, HALF_OPEN_DEADLINE)
+    pub(crate) fn new(metrics: BreakerMetrics) -> Arc<Breaker> {
+        Breaker::with_durations(metrics, OPEN_DURATION, HALF_OPEN_DEADLINE)
     }
 
-    pub(crate) fn with_durations(role: RedisRole, open_duration: Duration, half_open_deadline: Duration) -> Arc<Breaker> {
+    pub(crate) fn with_durations(metrics: BreakerMetrics, open_duration: Duration, half_open_deadline: Duration) -> Arc<Breaker> {
         // Publish the healthy state up front (SMA-476 D10): an unset gauge renders as "No data",
         // which an operator cannot distinguish from a broken scrape or an unregistered metric.
-        gauge!(names::IAM_REDIS_BREAKER_STATE, "role" => role.as_label()).set(BreakerState::Closed.gauge_value());
+        gauge!(metrics.state, "role" => metrics.role).set(BreakerState::Closed.gauge_value());
         Arc::new(Breaker {
-            role,
+            metrics,
             open_duration,
             half_open_deadline,
             inner: Mutex::new(Inner {
@@ -459,11 +475,11 @@ impl Breaker {
         if next == BreakerState::Closed {
             inner.consecutive_failures = 0;
         }
-        gauge!(names::IAM_REDIS_BREAKER_STATE, "role" => self.role.as_label()).set(next.gauge_value());
-        counter!(names::IAM_REDIS_BREAKER_TRANSITIONS_TOTAL, "role" => self.role.as_label(), "to" => next.as_label()).increment(1);
+        gauge!(self.metrics.state, "role" => self.metrics.role).set(next.gauge_value());
+        counter!(self.metrics.transitions, "role" => self.metrics.role, "to" => next.as_label()).increment(1);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn force_open_for_tests(self: &Arc<Self>) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.transition(&mut inner, BreakerState::Open);
@@ -498,6 +514,14 @@ fn breaker_open_error() -> redis::RedisError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The names the moved tests pass. The crate takes its metric names from the caller
+    /// (SMA-726 D15); IAM's own names are pinned by IAM's `adapters::redis_role` tests.
+    const TEST_METRICS: BreakerMetrics = BreakerMetrics {
+        state: "test_redis_breaker_state",
+        transitions: "test_redis_breaker_transitions_total",
+        role: "test_role",
+    };
 
     /// The change itself. If this fails, a Redis outage costs seconds per authz decision
     /// again (SMA-473) — do not "fix" it by relaxing the assertion.
@@ -570,7 +594,7 @@ mod tests {
 
         // Exactly ONE command: with more, SMA-476's breaker would open at the third and the
         // later ones would short-circuit rather than measuring a real dial.
-        let mut conn = new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually reachable");
+        let mut conn = new_lazy_for_tests("redis://127.0.0.1:1", TEST_METRICS).expect("well-formed redis URL, never actually reachable");
 
         let started = std::time::Instant::now();
         let result: redis::RedisResult<Option<Vec<u8>>> = conn.get("sma473:probe").await;
@@ -598,7 +622,7 @@ mod tests {
     #[tokio::test]
     async fn connect_is_eager_so_a_dead_backend_fails_at_construction() {
         let started = std::time::Instant::now();
-        let result = connect("redis://127.0.0.1:1", RedisRole::Authz).await;
+        let result = connect("redis://127.0.0.1:1", TEST_METRICS).await;
         let elapsed = started.elapsed();
 
         let err = result.expect_err(
@@ -619,7 +643,7 @@ mod tests {
     /// Test breakers use a 50ms window so the whole suite stays fast; production values are
     /// pinned separately by `the_breaker_constants_are_pinned`.
     fn test_breaker() -> std::sync::Arc<Breaker> {
-        Breaker::with_durations(RedisRole::Authz, Duration::from_millis(50), Duration::from_millis(200))
+        Breaker::with_durations(TEST_METRICS, Duration::from_millis(50), Duration::from_millis(200))
     }
 
     fn io_err() -> redis::RedisError {
@@ -898,7 +922,7 @@ mod tests {
         use redis::AsyncCommands;
 
         let blackhole = test_support::start().await;
-        let handle = with_open_breaker_for_tests(&blackhole.url, RedisRole::Authz).expect("well-formed url");
+        let handle = with_open_breaker_for_tests(&blackhole.url, TEST_METRICS).expect("well-formed url");
         let mut clone = handle.clone();
 
         let result: redis::RedisResult<Option<Vec<u8>>> = clone.get("sma476:probe").await;
@@ -923,7 +947,7 @@ mod tests {
     async fn an_open_breaker_short_circuits_asynccommands_without_dialling() {
         use redis::AsyncCommands;
 
-        let mut handle = with_open_breaker_for_tests("redis://127.0.0.1:1", RedisRole::Jwks).expect("well-formed url");
+        let mut handle = with_open_breaker_for_tests("redis://127.0.0.1:1", TEST_METRICS).expect("well-formed url");
         let result: redis::RedisResult<Option<Vec<u8>>> = handle.get("sma476:probe").await;
         let err = result.expect_err("an open breaker must error");
         assert!(err.is_io_error(), "SMA-476 D4: the short-circuit error must be an IO error");
@@ -953,7 +977,7 @@ mod tests {
         use redis::AsyncCommands;
 
         let blackhole = test_support::start().await;
-        let mut conn = new_lazy_for_tests(&blackhole.url, RedisRole::Authz).expect("well-formed redis URL");
+        let mut conn = new_lazy_for_tests(&blackhole.url, TEST_METRICS).expect("well-formed redis URL");
 
         let overall = std::time::Instant::now();
 
@@ -1022,7 +1046,7 @@ mod tests {
     /// SMA-476 D7. The breaker must re-close once the backend answers again.
     ///
     /// Asserts a BOUND, not an exact window count, on purpose. How many windows recovery costs is
-    /// regime-dependent (see [`OPEN_DURATION`]'s doc): `ConnectionManager::reconnect()` spawns the
+    /// regime-dependent (see `OPEN_DURATION`'s doc): `ConnectionManager::reconnect()` spawns the
     /// replacement connect future the instant a command fails (`connection_manager.rs:649`), not
     /// on the next probe, so a probe either joins that still-in-flight dial (one window — this
     /// test's regime, a 50 ms window against a blackholed backend's ~2.1 s dial) or consumes an
@@ -1039,7 +1063,7 @@ mod tests {
         let conn = ConnectionManager::new_lazy_with_config(client, connection_manager_config()).expect("lazy construction never connects");
         let mut handle = RedisHandle {
             conn,
-            breaker: Breaker::with_durations(RedisRole::Authz, Duration::from_millis(50), Duration::from_millis(500)),
+            breaker: Breaker::with_durations(TEST_METRICS, Duration::from_millis(50), Duration::from_millis(500)),
         };
 
         for _ in 0..3 {
@@ -1075,20 +1099,21 @@ mod tests {
         assert!(after.is_ok(), "the breaker re-opened immediately after a successful probe: {after:?}");
     }
 
-    /// SMA-476 AC5. `tests/drift.rs` proves rules reference registered names; nothing proves a
-    /// name is ever EMITTED. This does.
+    /// SMA-476 AC5, made generic by SMA-726 D15. The breaker must EMIT the gauge and the counter
+    /// under the names the CALLER supplies, with exactly the label keys `role` (both series) and
+    /// `to` (the counter), and the state values `closed` / `half_open` / `open`.
     ///
     /// Uses a local recorder rather than the global one so it cannot race other tests.
     #[test]
-    fn breaker_transitions_emit_the_gauge_and_the_counter() {
+    fn breaker_transitions_emit_the_callers_gauge_and_counter() {
         use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
         metrics::with_local_recorder(&recorder, || {
-            let b = Breaker::with_durations(RedisRole::Jwks, Duration::from_millis(50), Duration::from_millis(200));
-            // Three failures: Closed -> Open.
+            let b = Breaker::with_durations(TEST_METRICS, Duration::from_millis(50), Duration::from_millis(200));
+            // Three failures: Closed -> Open, which is exactly one transition.
             for _ in 0..3 {
                 match b.admit() {
                     Admission::Pass(permit) => permit.record::<()>(&Err(io_err())),
@@ -1098,11 +1123,14 @@ mod tests {
         });
 
         let snapshot = snapshotter.snapshot().into_vec();
+
         let gauge = snapshot
             .iter()
-            .find(|(key, _, _, _)| key.key().name() == names::IAM_REDIS_BREAKER_STATE)
-            .expect("SMA-476 AC5: iam_redis_breaker_state was never emitted");
-        assert!(gauge.0.key().labels().any(|l| l.key() == "role" && l.value() == "jwks"), "the gauge must carry the role label");
+            .find(|(key, _, _, _)| key.key().name() == TEST_METRICS.state)
+            .expect("the caller's state gauge was never emitted");
+        let mut gauge_labels: Vec<(&str, &str)> = gauge.0.key().labels().map(|l| (l.key(), l.value())).collect();
+        gauge_labels.sort_unstable();
+        assert_eq!(gauge_labels, vec![("role", TEST_METRICS.role)], "the gauge must carry exactly the caller's role label");
         assert!(
             matches!(gauge.3, DebugValue::Gauge(v) if (v.into_inner() - 2.0).abs() < f64::EPSILON),
             "an open breaker must report 2, got {:?}",
@@ -1111,16 +1139,23 @@ mod tests {
 
         let transitions = snapshot
             .iter()
-            .find(|(key, _, _, _)| key.key().name() == names::IAM_REDIS_BREAKER_TRANSITIONS_TOTAL)
-            .expect("SMA-476 AC5: iam_redis_breaker_transitions_total was never emitted");
-        assert!(matches!(transitions.3, DebugValue::Counter(n) if n >= 1), "expected at least one transition, got {:?}", transitions.3);
+            .find(|(key, _, _, _)| key.key().name() == TEST_METRICS.transitions)
+            .expect("the caller's transitions counter was never emitted");
+        let mut transition_labels: Vec<(&str, &str)> = transitions.0.key().labels().map(|l| (l.key(), l.value())).collect();
+        transition_labels.sort_unstable();
+        assert_eq!(
+            transition_labels,
+            vec![("role", TEST_METRICS.role), ("to", "open")],
+            "the counter must carry exactly the role and to labels"
+        );
+        assert!(matches!(transitions.3, DebugValue::Counter(1)), "expected exactly one transition, got {:?}", transitions.3);
     }
 }
 
-/// Shared test fixtures for the SMA-476 breaker tests. Lives here rather than in each adapter so
-/// the five posture tests (Task 6) and the blackhole measurement (Task 4) use one implementation.
-#[cfg(test)]
-pub(crate) mod test_support {
+/// Shared test fixtures for the SMA-476 breaker tests: one blackhole listener for this crate's
+/// tests and for every caller's posture tests (IAM's five Redis adapters).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::TcpListener;
@@ -1150,8 +1185,8 @@ pub(crate) mod test_support {
     /// It also counts the connections it accepts ([`Blackhole::accepted`]). The open-breaker
     /// posture tests assert that this count stays 0 to prove "no dial". That count replaces a
     /// 100 ms wall-clock bound that failed on a loaded CI runner (SMA-702).
-    pub(crate) struct Blackhole {
-        pub(crate) url: String,
+    pub struct Blackhole {
+        pub url: String,
         // Written only by `start_responding`, below; read by the accept loop in `start`.
         responding: Arc<AtomicBool>,
         // Incremented by the accept loop in `start` for every accepted connection, in both modes.
@@ -1163,7 +1198,7 @@ pub(crate) mod test_support {
     impl Blackhole {
         /// Switch the listener from blackholing to answering as a minimal RESP server. Only
         /// affects connections opened AFTER this call. Used by the recovery test (Task 7).
-        pub(crate) fn start_responding(&self) {
+        pub fn start_responding(&self) {
             self.responding.store(true, Ordering::SeqCst);
         }
 
@@ -1173,12 +1208,12 @@ pub(crate) mod test_support {
         /// This counts application-level `accept()`, not the kernel handshake. It is exact only
         /// because a real dial suspends the calling test for about 1 s or more, which lets the
         /// runtime poll the accept task before the test asserts.
-        pub(crate) fn accepted(&self) -> usize {
+        pub fn accepted(&self) -> usize {
             self.accepted.load(Ordering::SeqCst)
         }
     }
 
-    pub(crate) async fn start() -> Blackhole {
+    pub async fn start() -> Blackhole {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("binding an ephemeral loopback port never fails in tests");
         let port = listener.local_addr().expect("a bound listener always has a local address").port();
         let responding = Arc::new(AtomicBool::new(false));

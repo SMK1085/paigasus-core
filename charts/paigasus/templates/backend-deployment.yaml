@@ -120,8 +120,16 @@ spec:
 {{- if $root.Values.oidc.audience }}
             # oidc.audience is set: IAM accepts that audience, not the client id.
 {{- end }}
+{{- /*
+  oidc.idTokenMarkerClaims (SMA-703). paigasus.iamIdTokenMarkerClaims returns "" for the default
+  [], so the default render stays byte-identical. The comment line is inside the `if`, so it does
+  not render by default either (charts/CLAUDE.md, golden files).
+*/}}
+{{- if include "paigasus.iamIdTokenMarkerClaims" $root }}
+            # oidc.idTokenMarkerClaims is set: IAM refuses a token that carries one of these claims.
+{{- end }}
             - name: IAM_AUTHN__ISSUERS
-              value: {{ printf "[{issuer=%q,audiences=[%q]}]" $root.Values.oidc.issuer (include "paigasus.iamAudience" $root) | quote }}
+              value: {{ printf "[{issuer=%q,audiences=[%q]%s}]" $root.Values.oidc.issuer (include "paigasus.iamAudience" $root) (include "paigasus.iamIdTokenMarkerClaims" $root) | quote }}
             # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
             # than 32 decoded bytes. See zones.iam.backend.apiKeysPepperSecret in values.yaml.
             - name: IAM_API_KEYS__PEPPER

@@ -63,10 +63,11 @@ async fn redis_bump_and_read_round_trip_across_two_clones_sharing_one_connection
 ///
 /// Deliberately out-of-band rather than a second Rust client. Two reasons, one hard and one
 /// soft. The hard one: `repo:redis-connect-single-site` (SMA-473/SMA-476) forbids every known
-/// unnamed-connection constructor outside `adapters::redis_conn`, `tests/` included, so a
-/// test-local `redis::Client` is exactly the bypass that gate exists to prevent — and
-/// `redis_conn` is `pub(crate)`, so an integration test cannot reach the blessed constructor
-/// either. The soft one: eviction, `FLUSHALL` and an operator's `CONFIG SET` all act on Redis
+/// unnamed-connection constructor outside `paigasus_redis`, `tests/` included, so a
+/// test-local `redis::Client` is exactly the bypass that gate exists to prevent. (Since SMA-726
+/// the blessed constructor `paigasus_redis::connect` is public, but this test still drives Redis
+/// from outside, for the soft reason.) The soft one: eviction, `FLUSHALL` and an operator's
+/// `CONFIG SET` all act on Redis
 /// from OUTSIDE the service, so driving them through `redis-cli` models the real thing more
 /// closely than a second in-process connection would.
 async fn redis_cli(node: &ContainerAsync<Redis>, args: &[&str]) -> String {

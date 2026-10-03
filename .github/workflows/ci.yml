@@ -33,7 +33,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       # The hosted runner's ~14 GB free root disk is exhausted by this repo's Rust target
-      # + restored caches + testcontainers images (Postgres/Redis/Keycloak since SMA-443)
+      # + restored caches + testcontainers images (Postgres/Redis/Keycloak since SMA-443, Zitadel since SMA-703)
       # — the runner dies mid `moon ci` with "No space left on device". Reclaim ~15 GB by
       # dropping preinstalled toolchains this workflow never uses (inline rm, no
       # third-party action to pin/audit). Errors are tolerated (paths shift across

@@ -99,6 +99,9 @@ uuid = { workspace = true, features = ["serde"] }
 # `adapters::oidc::redis_cache::RedisJwksCache` — external `JwksCache` backend so cached
 # JWKS survive process restarts and are shared across replicas (SMA-443 Task 8).
 redis = { workspace = true }
+# `paigasus_redis::connect` — the tuned connection and the SMA-476 circuit breaker, moved out of
+# this crate's `adapters::redis_conn` (SMA-726 D15). `adapters::redis_role` names the metrics.
+paigasus-redis = { workspace = true }
 # `adapters::authz::decision_cache::decision_key` — blake3-hashes the canonical
 # `(principal, action, resource, context)` serialization into the decision cache's key
 # (SMA-444 Task 14).
@@ -159,8 +162,9 @@ axum-server = { version = "0.8", default-features = false, features = ["tls-rust
 # fast-forwards past `AUDIT_PERSIST_TIMEOUT` instead of a real multi-second sleep (feature-only
 # addition: `tokio` is already a normal dependency above, unified with this for test builds).
 tokio = { workspace = true, features = ["test-util"] }
-# `adapters::redis_conn` tests — `metrics_util::debugging::{DebuggingRecorder, Snapshotter}`
-# proves the breaker's gauge/counter are actually EMITTED (SMA-476 AC5), not just registered.
+# `adapters::redis_role`'s name-pin test and the `application` tests —
+# `metrics_util::debugging::{DebuggingRecorder, Snapshotter}` proves a series is actually
+# EMITTED (SMA-476 AC5, SMA-726 A13), not just registered.
 # Pinned to the version already resolved transitively via `metrics-exporter-prometheus`
 # (`rs/Cargo.lock`). That consumer disables default features and only enables
 # recency/registry/storage, so "debugging" is turned on explicitly here — dev-only, unified
@@ -178,6 +182,12 @@ strum = { version = "0.28", features = ["derive"] }
 # shipped binary. `version = "0.0.0"` is REQUIRED, not redundant: `rs/deny.toml` sets
 # `wildcards = "deny"`, and a path dependency with no version counts as a wildcard.
 paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0", features = ["test-support"] }
+# The test-only constructors and the blackhole listener of `paigasus-redis` (SMA-726). Listed a
+# second time, here, so that `test-support` reaches test builds only, never the shipped binary.
+paigasus-redis = { workspace = true, features = ["test-support"] }
+# The one Docker-skip policy (SMA-538), moved out of `tests/support/docker.rs` by SMA-726 D22.
+# That file now only re-exports it. Dev-only.
+paigasus-test-docker = { workspace = true }
 
 [lints]
 workspace = true

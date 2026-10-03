@@ -1,0 +1,24 @@
+[package]
+name = "paigasus-test-docker"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+# A DEV-ONLY crate: the one Docker-skip policy for every container-backed test suite (SMA-538,
+# moved out of paigasus-iam by SMA-726 D22). List it under [dev-dependencies] only, never
+# [dependencies]. The two testcontainers pins are the ones paigasus-iam already resolves, so the
+# `ContainerAsync<Redis>` this crate returns is the same type IAM's tests name.
+[dependencies]
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["redis"] }
+# `mapped_port` sleeps between port probes.
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[lints]
+workspace = true

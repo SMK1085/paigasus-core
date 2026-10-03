@@ -34,7 +34,7 @@
 //!    cache is bypassed entirely for this call — no key, no `get`, no `put` — and evaluation
 //!    proceeds unconditionally (D11/D12's fail-open property: an accelerator outage costs
 //!    latency, never correctness). That latency is BOUNDED, but only because it was
-//!    deliberately bounded: the shared `ConnectionManager` (`adapters::redis_conn`) caps the
+//!    deliberately bounded: the shared `ConnectionManager` (`paigasus_redis`) caps the
 //!    reconnect retry budget at ONE retry (SMA-473), so a counter read against a dead backend
 //!    fails in ~100-200 ms. A decision makes 2-3 such reads — 3 while the policy-snapshot
 //!    stamp is still trusted, 2 once it goes provisional and `reload_if_stale` stops reading

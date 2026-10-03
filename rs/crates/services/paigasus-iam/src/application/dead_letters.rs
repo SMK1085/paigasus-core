@@ -320,7 +320,7 @@ mod tests {
     type MetricsSnapshot = Vec<(metrics_util::CompositeKey, Option<metrics::Unit>, Option<metrics::SharedString>, metrics_util::debugging::DebugValue)>;
 
     /// Drives `fut` to completion under a `metrics_util::debugging::DebuggingRecorder`, exactly
-    /// as `redis_conn.rs`'s `breaker_transitions_emit_the_gauge_and_the_counter` proves a
+    /// as `paigasus-redis`'s `breaker_transitions_emit_the_callers_gauge_and_counter` proves a
     /// metric is actually EMITTED rather than merely computed. `DeadLetterService`'s methods are
     /// async, so `fut` is polled to completion on a dedicated current-thread `tokio` runtime
     /// INSIDE the closure `with_local_recorder` runs — `with_local_recorder` only installs the

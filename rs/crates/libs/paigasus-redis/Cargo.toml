@@ -1,0 +1,28 @@
+[package]
+name = "paigasus-redis"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+redis = { workspace = true }
+metrics = { workspace = true }
+# Only the `test_support` blackhole listener needs tokio, so it comes in with the feature.
+tokio = { workspace = true, features = ["rt", "net", "sync", "io-util"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "net", "sync", "io-util", "time"] }
+# `DebuggingRecorder` proves that the breaker emits the caller's series (SMA-476 AC5, SMA-726 D15).
+# The same pin and feature as `paigasus-iam`'s dev-dependency.
+metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
+
+[features]
+# Test-only constructors and the blackhole listener (`new_lazy_for_tests`,
+# `with_open_breaker_for_tests`, `test_support`). Turn it on from [dev-dependencies] only (SMA-726).
+test-support = ["dep:tokio"]
+
+[lints]
+workspace = true

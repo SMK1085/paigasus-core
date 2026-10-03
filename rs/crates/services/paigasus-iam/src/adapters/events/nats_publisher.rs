@@ -57,7 +57,7 @@ const SUBJECT_FILTER: &str = "iam.>";
 const CONTENT_TYPE: &str = "application/cloudevents+json; charset=utf-8";
 
 /// Consecutive publish failures that open the breaker. Three rather than one, mirroring
-/// `redis_conn.rs`'s `FAILURE_THRESHOLD`: a single blip during a reconnect must not disable the
+/// `paigasus-redis`'s `FAILURE_THRESHOLD`: a single blip during a reconnect must not disable the
 /// sink for a whole window.
 const FAILURE_THRESHOLD: u32 = 3;
 
@@ -73,7 +73,7 @@ const OPEN_DURATION: Duration = Duration::from_secs(2);
 /// orchestrator SIGKILLs mid-tick and the batch rolls back. With the breaker a bad tick costs
 /// `FAILURE_THRESHOLD × publish_timeout_secs` instead.
 ///
-/// Far simpler than `redis_conn.rs`'s `Breaker`: no half-open permit, no epoch, no metrics
+/// Far simpler than `paigasus-redis`'s `Breaker`: no half-open permit, no epoch, no metrics
 /// role label. Those exist there because the Redis breaker guards eleven concurrent call sites
 /// on the authz hot path; this one guards a single serial background loop, where a probe that
 /// is admitted and then fails simply re-opens the window on the next `on_failure`.
@@ -311,7 +311,7 @@ impl NatsEventPublisher {
         // Primed HERE, not in `describe_iam_metrics`: that runs only when `metrics.enabled`, and
         // a metrics-rs counter first appears at the value of its first increment — an unprimed
         // counter can never satisfy an `increase() > 0` alert on the FIRST duplicate. Same
-        // constructor-priming pattern as `redis_conn::Breaker::with_durations`.
+        // constructor-priming pattern as `paigasus_redis::Breaker::with_durations`.
         counter!(names::IAM_NATS_PUBLISH_DUPLICATES_TOTAL).increment(0);
 
         // The `iam_nats_connected` gauge sampler is NOT started here (SMA-471 review fix — it

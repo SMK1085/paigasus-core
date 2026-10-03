@@ -202,11 +202,11 @@ changelog_include = ["paigasus-proto"]
 # parked on that value (SMA-505 R7).
 #
 # publish = false MIRRORS each crate's Cargo manifest, same contradiction as the kernel-family
-# bindings above (SMA-579): all seven of these carry `publish = false` in Cargo.toml, and an
+# bindings above (SMA-579): all nine of these carry `publish = false` in Cargo.toml, and an
 # absent `publish` key here still reads as `publish = true` to release-plz — which errors even
 # though `release = false` already excludes the package from the release PR. `release = false`
 # stops the release-PR proposal; `publish = false` is what `release-plz release` itself checks.
-# Measured: `paigasus-iam-core` was the first of these seven to trip the same hard error the
+# Measured: `paigasus-iam-core` was the first of these nine to trip the same hard error the
 # kernel-family bindings did, once that contradiction was fixed above.
 [[package]]
 name = "paigasus-iam-core"
@@ -233,7 +233,19 @@ publish = false
 git_release_enable = false
 
 [[package]]
+name = "paigasus-redis"
+release = false
+publish = false
+git_release_enable = false
+
+[[package]]
 name = "paigasus-service-info"
+release = false
+publish = false
+git_release_enable = false
+
+[[package]]
+name = "paigasus-test-docker"
 release = false
 publish = false
 git_release_enable = false

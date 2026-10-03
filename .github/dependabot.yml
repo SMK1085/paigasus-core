@@ -1,6 +1,7 @@
-# Dependabot version updates. Each ecosystem gets ONE grouped PR per week covering
-# minor+patch bumps; major bumps intentionally arrive as separate individual PRs so a
-# breaking change is reviewed on its own (not hidden in a green group).
+# Dependabot version updates. Each ecosystem gets one grouped PR per week for minor and patch
+# bumps. The napi-rs crates (cargo) and `@napi-rs/cli` (npm) each get their own group. A bump of
+# one of them can change the committed napi glue (SMA-667). Major bumps arrive as separate PRs.
+# A breaking change is then reviewed on its own, not hidden in a green group.
 version: 2
 updates:
   # ---- Rust: Cargo workspace at rs/ ----
@@ -24,8 +25,24 @@ updates:
       prefix: "build(deps)"
       prefix-development: "build(deps)"
     groups:
+      # SMA-667: a `napi`, `napi-derive` or `napi-build` bump can change the committed napi glue.
+      # Then paigasus-kernel-ts:test reds until someone runs generate-napi-glue and pushes the
+      # result. Its own group keeps that work off the shared cargo-minor-patch PR.
+      napi-rs:
+        applies-to: version-updates
+        patterns:
+          - "napi"
+          - "napi-derive"
+          - "napi-build"
+        update-types:
+          - minor
+          - patch
       cargo-minor-patch:
         applies-to: version-updates
+        exclude-patterns:
+          - "napi"
+          - "napi-derive"
+          - "napi-build"
         update-types:
           - minor
           - patch
@@ -48,8 +65,21 @@ updates:
       prefix: "build(deps)"
       prefix-development: "build(deps)"
     groups:
+      # SMA-667: a `@napi-rs/cli` bump can change the committed napi glue, and then
+      # paigasus-kernel-ts:test reds until someone runs generate-napi-glue and pushes the result.
+      # Its own group keeps that work off the shared npm-minor-patch PR, so a glue change does not
+      # block the other JS updates.
+      napi-cli:
+        applies-to: version-updates
+        patterns:
+          - "@napi-rs/cli"
+        update-types:
+          - minor
+          - patch
       npm-minor-patch:
         applies-to: version-updates
+        exclude-patterns:
+          - "@napi-rs/cli"
         update-types:
           - minor
           - patch
