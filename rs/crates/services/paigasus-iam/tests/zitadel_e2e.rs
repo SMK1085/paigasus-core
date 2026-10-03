@@ -6,7 +6,7 @@
 //!
 //! The test sets up the paigasus console's own client type: a CONFIDENTIAL web app (client
 //! secret, HTTP Basic), the code flow with PKCE, a refresh token, and JWT access tokens. A human
-//! user logs in through the built-in Login v1 over plain HTTP (no browser): the test sends the
+//! user logs in through the built-in Login v1 with plain HTTP requests, no browser: the test sends the
 //! forms itself and keeps the cookies by hand. A machine user gets a token with the
 //! client-credentials grant. A v1 Action (Complement Token, pre access token creation) adds
 //! `email` to the access token, because Zitadel does not put it there (spec F12).
@@ -16,8 +16,8 @@
 //!   either (spec F6). If a Zitadel upgrade changes this, this test fails.
 //! - IAM, configured with `["at_hash", "azp"]`, refuses each ID token as `NotAnAccessToken`.
 //! - IAM accepts the human access token, the refreshed access token and the machine access token.
-//! - A control: with an EMPTY list, IAM accepts the human ID token. So the setting, not another
-//!   check, does the refusal.
+//! - A control: with an EMPTY list, IAM does not refuse any of the three ID tokens as
+//!   `NotAnAccessToken`. So the setting, not another check, does the refusal.
 //!
 //! Docker gating is the single policy of `tests/support/docker.rs`'s `start_or_skip` (SMA-538).
 //! Three containers start: IAM's own Postgres, a second Postgres for Zitadel, and Zitadel. The
@@ -63,7 +63,7 @@ const HTTPS_PORT: u16 = 8080;
 /// one.
 const STATE_DIR: &str = "/zitadel-e2e";
 /// `start-from-init` creates the schema and the first instance before it serves. MEASURED: about
-/// 5 s on an idle Docker Desktop. The budget is for a loaded CI runner.
+/// 2 s on an idle Docker Desktop. The budget is for a loaded CI runner.
 const READINESS_ATTEMPTS: u32 = 180;
 /// The console's redirect URI. The test never follows the redirect: it reads the code from the
 /// `Location` header. Login v1 accepts an `http` redirect URI only with `devMode` on the app.
@@ -73,6 +73,8 @@ const USER_PASSWORD: &str = "E2e-Passw0rd!x";
 /// The IAM setting under test (spec D1, the runbook recipe).
 const MARKER_CLAIMS: [&str; 2] = ["at_hash", "azp"];
 /// The v1 Action of the reference install. It adds `email` to the access token of a human user.
+/// This script must stay equal to the script in the Zitadel bullet of
+/// `docs/ops/RUNBOOK-chart.md` section 6. Change both files together.
 const ADD_EMAIL_CLAIM_SCRIPT: &str = r#"function addEmailClaim(ctx, api) {
   var user = ctx.v1.getUser();
   if (user.human === undefined || !user.human.email) {
@@ -304,17 +306,34 @@ async fn zitadel_id_tokens_are_refused_by_the_marker_claims() {
         "the machine access token must fail JIT only for the missing email, got {err:?}"
     );
 
-    // The control: with an EMPTY list (the default), IAM accepts the human ID token. So the
-    // setting does the refusal above, not some other check. The human is provisioned already,
-    // so the token resolves to the same principal.
+    // The control: with an EMPTY list (the default), IAM does not refuse any ID token as
+    // NotAnAccessToken. So the setting does the refusal above, not the typ/logout check. The
+    // human is provisioned already, so the human and the refreshed ID token resolve to the same
+    // principal. The machine ID token passes the same checks as the machine access token.
     let open_cfg = zitadel_config(&issuer, &setup.project_id, &[]);
     let open_state = AppState::new(state.db.clone(), &open_cfg).await.expect("AppState::new (empty marker list)");
-    let principal = open_state
+    for (label, token) in [("human ID token", &human_id), ("refreshed ID token", &refreshed_id)] {
+        let principal = open_state
+            .authn
+            .resolve(token, Provisioning::Disabled)
+            .await
+            .unwrap_or_else(|err| panic!("with an empty marker list, IAM must accept the {label}, got {err:?}"));
+        assert_eq!(principal.principal_id.canonical(), principal_prn, "the accepted {label} must resolve to the human principal");
+    }
+    let err = open_state
         .authn
-        .resolve(&human_id, Provisioning::Disabled)
+        .resolve(&machine_id, Provisioning::Disabled)
         .await
-        .expect("with an empty marker list, IAM accepts a Zitadel ID token (the gap SMA-703 closes)");
-    assert_eq!(principal.principal_id.canonical(), principal_prn, "the accepted ID token must resolve to the human principal");
+        .expect_err("no principal exists for the machine user");
+    assert!(
+        matches!(err, AuthnError::IdentityNotProvisioned),
+        "with an empty marker list, the machine ID token must reach the identity lookup, got {err:?}"
+    );
+    let err = open_state.authn.resolve(&machine_id, Provisioning::Enabled).await.expect_err("JIT needs an email");
+    assert!(
+        matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)),
+        "with an empty marker list, the machine ID token must fail JIT only for the missing email, got {err:?}"
+    );
 }
 
 /// The ids and secrets that [`setup_zitadel`] creates.
@@ -438,7 +457,7 @@ async fn setup_zitadel(api: &ZitadelApi<'_>) -> ZitadelSetup {
     }
 }
 
-/// The human flow over plain HTTP: `/oauth/v2/authorize` with PKCE S256, the Login v1 forms
+/// The human flow with plain HTTP requests, no browser: `/oauth/v2/authorize` with PKCE S256, the Login v1 forms
 /// (login name, password, skip the MFA setup prompt), the code from the last redirect, and the
 /// code exchange with HTTP Basic client auth. Returns the token response.
 async fn human_login(http: &reqwest::Client, issuer: &str, setup: &ZitadelSetup) -> Value {
@@ -467,6 +486,7 @@ async fn human_login(http: &reqwest::Client, issuer: &str, setup: &ZitadelSetup)
     let mut form: Option<Vec<(String, String)>> = None;
     let mut callback = None;
     // The measured flow has five hops. The bound stops a loop if Zitadel shows a page twice.
+    let mut last_page = String::from("(no page was rendered)");
     for _ in 0..12 {
         let response = browser.send(&url, form.take()).await;
         let status = response.status();
@@ -481,6 +501,7 @@ async fn human_login(http: &reqwest::Client, issuer: &str, setup: &ZitadelSetup)
             continue;
         }
         let page = response.text().await.unwrap_or_default();
+        last_page = page_title(&page);
         assert!(status.is_success(), "login v1 returned {status} at {url}: {}", page_title(&page));
         let (action, mut fields) = first_form(&page).unwrap_or_else(|| panic!("login v1 page at {url} has no form: {}", page_title(&page)));
         match action.as_str() {
@@ -496,7 +517,7 @@ async fn human_login(http: &reqwest::Client, issuer: &str, setup: &ZitadelSetup)
         url = url.join(&action).expect("form action is a valid URL");
         form = Some(fields);
     }
-    let callback = callback.expect("login v1 never redirected to the redirect URI");
+    let callback = callback.unwrap_or_else(|| panic!("login v1 never redirected to the redirect URI. Last URL: {url}. Last page: {last_page}"));
     let params: BTreeMap<String, String> = callback.query_pairs().into_owned().collect();
     assert_eq!(params.get("state"), Some(&state), "the callback must return the state: {callback}");
     let code = params.get("code").unwrap_or_else(|| panic!("the callback has no code: {callback}"));

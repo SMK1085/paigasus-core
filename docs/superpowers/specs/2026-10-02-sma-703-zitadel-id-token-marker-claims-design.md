@@ -399,30 +399,30 @@ against the code and the measurement file before folding them in.
 
 `rs/crates/services/paigasus-iam/tests/zitadel_e2e.rs` runs a real Zitadel `v4.15.3` in Docker,
 with its own Postgres (`16-alpine`) on a Docker network, and IAM's own migrated Postgres. It
-closes the first follow-up in § 10, and it relaxes N2: the test runs in CI with the other
+completes the first follow-up in § 10, and it relaxes N2: the test runs in CI with the other
 Docker-backed suites. Sven approved the design ("full console path").
 
-The setup is the paigasus console's client type. This closes the gap "a confidential app is not
+The setup is the paigasus console's client type. This fills the gap "a confidential app is not
 measured" of § 3:
 
 - A confidential web app (`OIDC_AUTH_METHOD_TYPE_BASIC`), code flow with PKCE, refresh token,
   access token type JWT, "User Info inside ID Token" on.
-- A human user who logs in through Login v1 over plain HTTP. The test sends the forms itself.
+- A human user who logs in through Login v1. The test uses plain HTTP requests, with no browser, and sends the forms itself.
 - A machine user with a client secret, the client-credentials grant, and access token type JWT.
 - The `addEmailClaim` v1 Action (Complement Token, pre access token creation).
 
 The test asserts:
 
 - Every ID token (human, refreshed, machine) has `at_hash` and `azp`. No access token has either.
-  This pins F6 for the pinned version.
-- The Action puts `email` into the human access token, also after the refresh grant. This closes
+  This checks F6 for the pinned version.
+- The Action puts `email` into the human access token, also after the refresh grant. This fills
   the gap of F12 and N5 for the reference install.
 - IAM with `["at_hash", "azp"]` refuses each ID token as `NotAnAccessToken`, and a protected route
   returns 401 `invalid-token`.
 - The human access token provisions a user by JIT. The refreshed access token resolves to the same
   principal. The machine access token passes the authenticator. It has no `email`, so JIT
   provisioning fails with `MissingEmail`.
-- A control: with an empty list, IAM accepts the human ID token.
+- A control: with an empty list, IAM does not refuse the human, the refreshed or the machine ID token as `NotAnAccessToken`. The human and the refreshed ID token resolve to the human principal. The machine ID token gives `IdentityNotProvisioned`, and `ProvisioningFailed(MissingEmail)` with provisioning on.
 
 Measured during the build of the test (2026-10-03, v4.15.3):
 
@@ -434,5 +434,5 @@ Measured during the build of the test (2026-10-03, v4.15.3):
 - The discovery endpoint answers some seconds before the management API. The API first returns
   503.
 
-A mutation proves that the test bites: with `["nonce"]` as the IAM list, the machine ID token
+A mutation shows that the test can fail: with `["nonce"]` as the IAM list, the machine ID token
 (which has no `nonce`) is not refused, and the test fails.
