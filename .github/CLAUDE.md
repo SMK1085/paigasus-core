@@ -186,6 +186,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   drift silently without this check. `py/uv.lock` drifts because its `moon.yml` runs bare
   `uv sync`, not `--locked`. The 26 `bindingPackageVersion` guards in the committed napi glue
   drift because the codegen-drift gate covers only the three `**/generated` proto dirs.
+  Since SMA-667, `paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`) also fails on stale
+  guards. The generator reads the version from the crate `package.json`.
 - `repo:version-lockstep` is script-pinned the same way the
   `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its **four** `moon.yml` lines
   (`--self-test`, `--negative-control`, the real run, and `set -euo pipefail`; one more than the
