@@ -760,6 +760,16 @@ run_suite() {
   #   printf '%s\n' ts/packages/paigasus-kernel/src/wasm.ts | moon query tasks --affected | ...
   run_task_case_ci "kernel-wasm-src->console" "ts/packages/paigasus-kernel/src/wasm.ts" \
     "paigasus-console-core-ts:build,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-kernel-ts:build,paigasus-kernel-ts:test,ts:lint"
+  # SMA-667 — the two committed napi glue files. A PR that changes only one of them reaches the
+  # drift gate (paigasus-kernel-ts:test, tests/committed-napi-glue.test.ts) through the `test`
+  # task's two input lines alone; no `dependsOn` edge carries it. Without these cases, an edit that
+  # dropped either input line would leave every other case green while a glue-only PR selected no
+  # task that runs the gate. Expected sets MEASURED with the same no-flag
+  # `moon query tasks --affected` traversal `_assert_task_case_impl` uses.
+  run_task_case_ci "napi-glue-js->kernel-test" "rs/crates/bindings/paigasus-node-bindings/index.js" \
+    "paigasus-kernel-ts:test"
+  run_task_case_ci "napi-glue-dts->kernel-test" "rs/crates/bindings/paigasus-node-bindings/index.d.ts" \
+    "paigasus-kernel-ts:test"
   # SMA-625, spec § 8.4 and § 11.2 obligation 9 — a gateway chat.rs edit must select the SDK's
   # test. This is the ONLY control on the '/rs/.../chat.rs' entry in paigasus-sdk-ts:test's
   # `inputs`. tests/terminal-frame.test.ts reads TERMINAL_SSE_ERROR out of that Rust file by

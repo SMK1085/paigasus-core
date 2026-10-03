@@ -23,7 +23,9 @@ not (SMA-685). So five classes of site are owned by nobody:
 
 `py/packages/paigasus-kernel/moon.yml` runs bare `uv sync` (not `--locked`), and
 `ci.yml`'s codegen-drift gate covers only the three `**/generated` proto dirs — so the
-`uv.lock` and napi-glue classes still drift **silently** today.
+`uv.lock` class still drifts **silently** today. The napi glue does not since SMA-667:
+`paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`) fails when the committed
+`index.js`, version guards included, is not the generator's output.
 
 ## Why `--check` verifies sites release-plz owns
 

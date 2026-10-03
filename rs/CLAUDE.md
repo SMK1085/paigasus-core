@@ -245,9 +245,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `ts/` these are `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
   `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
   `ts/apps/*/next.config.ts`, `ts/apps/*/package.json`,
-  `ts/packages/paigasus-kernel/package.json`,
-  `rs/crates/bindings/paigasus-node-bindings/index.js` and
-  `rs/crates/bindings/paigasus-node-bindings/index.d.ts`. It also lists four smoke-runtime files
+  and `ts/packages/paigasus-kernel/package.json`. It also lists four smoke-runtime files
   (SMA-675, the second clause of RUNBOOK-containers.md section 1):
   `ts/packages/paigasus-auth/src/core/session.ts`, `ts/apps/*/app/*console*/layout.tsx`,
   `ts/apps/iam-console/app/*console*/orgs/page.tsx` and
@@ -256,10 +254,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   runs the workflow automatically. The rule for a `ts/` entry is in RUNBOOK-containers.md section 1.
   A file that is already a Moon task `input` stays off this filter, even if `ts/Dockerfile` reads
   it too, because a bad edit there already reds the ordinary `moon ci` build — this is why the
-  five committed wasm artifacts, `paigasus-wasm/package.json` and
-  `paigasus-node-bindings/package.json` are absent, but the napi crate's `index.js`/`index.d.ts`
-  are present: those two are Docker-copied by name yet are not Moon `inputs` anywhere, since the
-  kernel build task's own `napi build` step regenerates them fresh every run.
+  five committed wasm artifacts, `paigasus-wasm/package.json`,
+  `paigasus-node-bindings/package.json` and the napi crate's `index.js`/`index.d.ts` are absent.
+  The two napi glue files are `paigasus-kernel-ts:test` inputs since SMA-667, and
+  `tests/committed-napi-glue.test.ts` holds them to the generator.
   `@paigasus/next-config` is off the filter too (SMA-671): it is a Moon input, the unit tests and
   `standalone-runtime.test.ts` pin both base paths, and `chart.yml` is the second control.
 - The filter does not list `rs/**` or `ts/**`. A PR that changes `rs/**` or `ts/**` but no
