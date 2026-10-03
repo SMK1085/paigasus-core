@@ -14,13 +14,19 @@
 //! `type`/`code` strings are stable diagnostics.
 
 use axum::Json;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, SecondsFormat, Utc};
 use paigasus_observability::Retryable;
 use paigasus_observability::correlation::RETRYABLE_HEADER;
 use serde::Serialize;
 
 use crate::adapters::openai::OpenAiError;
+use crate::domain::limits::{BudgetPeriod, LimitRefusal};
+
+/// D8: the OpenAI SDKs retry a 429 twice unless this header says `false`, and they ignore
+/// `paigasus-retryable`. Sent only on the two limit refusals.
+pub const SHOULD_RETRY_HEADER: &str = "x-should-retry";
 
 /// The OpenAI-compatible error envelope: a single `error` object. `#[derive(Serialize)]` only —
 /// the gateway never deserializes its own error bodies.
@@ -102,6 +108,26 @@ pub enum GatewayError {
     /// An OIDC caller sent no `paigasus-org` header, and reaches zero or several organizations →
     /// 400, `param: "paigasus-org"` (SMA-635 D3).
     OrgRequired,
+    // ---- limits (SMA-677) --------------------------------------------------------------------
+    /// The principal or its org is over its request rate (D3) → 429, `type: "requests"`,
+    /// `Retry-After`, `x-should-retry: true`. Retryable.
+    RateLimited { retry_after_secs: u32 },
+    /// The org used its token budget for the current period (D6) → 429,
+    /// `type: "insufficient_quota"`, `x-should-retry: false`. Not retryable: a retry in seconds
+    /// cannot succeed, and each retry costs 2-3 IAM RPCs before the refusal.
+    BudgetExhausted { resets_at_unix: i64, period: BudgetPeriod },
+}
+
+/// Map a limit refusal (SMA-677 § 4.5). `Unscoped` is the D2 fail-closed case: a scope with no
+/// org is a parse mismatch or an IAM defect, so it is a plain `500 internal`.
+impl From<LimitRefusal> for GatewayError {
+    fn from(refusal: LimitRefusal) -> Self {
+        match refusal {
+            LimitRefusal::RateLimited { retry_after_secs, .. } => GatewayError::RateLimited { retry_after_secs },
+            LimitRefusal::BudgetExhausted { period, resets_at_unix } => GatewayError::BudgetExhausted { resets_at_unix, period },
+            LimitRefusal::Unscoped => GatewayError::Internal,
+        }
+    }
 }
 
 /// Map an [`OpenAiError`] (egress send/connect/timeout/build/CA-bundle failure) to its
@@ -204,6 +230,34 @@ impl GatewayError {
                 Some("paigasus-org"),
                 "Send the paigasus-org header with the organization UUID: the gateway cannot choose one organization for this user.",
             ),
+            GatewayError::RateLimited { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "requests",
+                Some("rate-limited"),
+                None,
+                "Too many requests. Wait for the number of seconds in the Retry-After header, then try again.",
+            ),
+            GatewayError::BudgetExhausted { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "insufficient_quota",
+                Some("budget-exhausted"),
+                None,
+                "The organization token budget for this period is used up.",
+            ),
+        }
+    }
+
+    /// The caller-safe message. Static for every case except the budget refusal, which names the
+    /// period and the reset instant (D8) — never a count and never the org id.
+    fn message(self) -> String {
+        match self {
+            GatewayError::BudgetExhausted { resets_at_unix, period } => {
+                let resets_at = DateTime::<Utc>::from_timestamp(resets_at_unix, 0)
+                    .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
+                    .unwrap_or_default();
+                format!("The organization token budget for {} is used up. It resets at {resets_at}.", period.label_at_reset(resets_at_unix))
+            }
+            other => other.parts().4.to_owned(),
         }
     }
 
@@ -213,7 +267,7 @@ impl GatewayError {
     /// status-class guess this replaces.
     pub fn retryable(self) -> Retryable {
         match self {
-            Self::IamUnavailable | Self::UpstreamUnavailable | Self::UpstreamTimeout => Retryable::Yes,
+            Self::IamUnavailable | Self::UpstreamUnavailable | Self::UpstreamTimeout | Self::RateLimited { .. } => Retryable::Yes,
             Self::Internal | Self::MissingScope => Retryable::Unknown,
             Self::MissingBearer
             | Self::InvalidCredential
@@ -223,24 +277,36 @@ impl GatewayError {
             | Self::RequestTooLarge
             | Self::StreamingDisabled
             | Self::InvalidOrgHeader
-            | Self::OrgRequired => Retryable::No,
+            | Self::OrgRequired
+            | Self::BudgetExhausted { .. } => Retryable::No,
         }
     }
 }
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let (status, r#type, code, param, message) = self.parts();
+        let (status, r#type, code, param, _) = self.parts();
         let envelope = ErrorEnvelope {
             error: ErrorBody {
-                message: message.to_owned(),
+                message: self.message(),
                 r#type: r#type.to_owned(),
                 param: param.map(str::to_owned),
                 code: code.map(str::to_owned),
             },
         };
         let mut response = (status, Json(envelope)).into_response();
-        response.headers_mut().insert(RETRYABLE_HEADER, HeaderValue::from_static(self.retryable().as_wire()));
+        let headers = response.headers_mut();
+        headers.insert(RETRYABLE_HEADER, HeaderValue::from_static(self.retryable().as_wire()));
+        match self {
+            GatewayError::RateLimited { retry_after_secs } => {
+                headers.insert(header::RETRY_AFTER, HeaderValue::from(retry_after_secs.max(1)));
+                headers.insert(SHOULD_RETRY_HEADER, HeaderValue::from_static("true"));
+            }
+            GatewayError::BudgetExhausted { .. } => {
+                headers.insert(SHOULD_RETRY_HEADER, HeaderValue::from_static("false"));
+            }
+            _ => {}
+        }
         response
     }
 }
@@ -250,9 +316,103 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
+    use crate::domain::limits::{BudgetPeriod, LimitRefusal, RefusalReason};
+
+    /// 2026-11-01T00:00:00Z.
+    const NOV_1: i64 = 1_793_491_200;
+
     async fn body_json(resp: Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_rate_refusal_is_429_requests_with_retry_after() {
+        let resp = GatewayError::RateLimited { retry_after_secs: 17 }.into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()["retry-after"], "17");
+        assert_eq!(resp.headers()["paigasus-retryable"], "true");
+        assert_eq!(resp.headers()["x-should-retry"], "true");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["type"], "requests");
+        assert_eq!(body["error"]["code"], "rate-limited");
+        assert!(body["error"]["param"].is_null());
+    }
+
+    #[tokio::test]
+    async fn retry_after_is_never_zero() {
+        let resp = GatewayError::RateLimited { retry_after_secs: 0 }.into_response();
+        assert_eq!(resp.headers()["retry-after"], "1");
+    }
+
+    #[tokio::test]
+    async fn a_budget_refusal_is_429_insufficient_quota_and_not_retryable() {
+        let resp = GatewayError::BudgetExhausted {
+            resets_at_unix: NOV_1,
+            period: BudgetPeriod::Monthly,
+        }
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
+        assert_eq!(resp.headers()["x-should-retry"], "false");
+        assert!(resp.headers().get("retry-after").is_none(), "a retry in seconds cannot succeed");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["type"], "insufficient_quota");
+        assert_eq!(body["error"]["code"], "budget-exhausted");
+        assert_eq!(body["error"]["message"], "The organization token budget for 2026-10 is used up. It resets at 2026-11-01T00:00:00Z.");
+    }
+
+    #[tokio::test]
+    async fn the_budget_message_names_the_period_kind() {
+        let weekly = body_json(
+            GatewayError::BudgetExhausted {
+                resets_at_unix: 1_791_158_400,
+                period: BudgetPeriod::Weekly,
+            }
+            .into_response(),
+        )
+        .await;
+        assert_eq!(weekly["error"]["message"], "The organization token budget for 2026-W40 is used up. It resets at 2026-10-05T00:00:00Z.");
+        let daily = body_json(
+            GatewayError::BudgetExhausted {
+                resets_at_unix: 1_790_985_600,
+                period: BudgetPeriod::Daily,
+            }
+            .into_response(),
+        )
+        .await;
+        assert_eq!(daily["error"]["message"], "The organization token budget for 2026-10-02 is used up. It resets at 2026-10-03T00:00:00Z.");
+    }
+
+    #[test]
+    fn a_limit_refusal_maps_one_to_one() {
+        assert_eq!(
+            GatewayError::from(LimitRefusal::RateLimited {
+                retry_after_secs: 3,
+                reason: RefusalReason::OrgRate
+            }),
+            GatewayError::RateLimited { retry_after_secs: 3 }
+        );
+        assert_eq!(
+            GatewayError::from(LimitRefusal::BudgetExhausted {
+                period: BudgetPeriod::Daily,
+                resets_at_unix: NOV_1
+            }),
+            GatewayError::BudgetExhausted {
+                resets_at_unix: NOV_1,
+                period: BudgetPeriod::Daily
+            }
+        );
+        assert_eq!(GatewayError::from(LimitRefusal::Unscoped), GatewayError::Internal, "D2/Q11: fail-closed as 500 internal");
+    }
+
+    #[tokio::test]
+    async fn only_the_two_refusals_carry_x_should_retry() {
+        use strum::IntoEnumIterator;
+        for err in GatewayError::iter() {
+            let has = err.into_response().headers().contains_key("x-should-retry");
+            assert_eq!(has, matches!(err, GatewayError::RateLimited { .. } | GatewayError::BudgetExhausted { .. }), "{err:?}");
+        }
     }
 
     #[tokio::test]
@@ -271,6 +431,16 @@ mod tests {
         assert_eq!(GatewayError::StreamingDisabled.into_response().status(), StatusCode::BAD_REQUEST);
         assert_eq!(GatewayError::InvalidOrgHeader.into_response().status(), StatusCode::BAD_REQUEST);
         assert_eq!(GatewayError::OrgRequired.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::RateLimited { retry_after_secs: 1 }.into_response().status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            GatewayError::BudgetExhausted {
+                resets_at_unix: 0,
+                period: BudgetPeriod::Monthly
+            }
+            .into_response()
+            .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     #[tokio::test]
@@ -357,8 +527,9 @@ mod tests {
 
         for err in GatewayError::iter() {
             let want = match err {
-                GatewayError::IamUnavailable | GatewayError::UpstreamUnavailable | GatewayError::UpstreamTimeout => Retryable::Yes,
+                GatewayError::IamUnavailable | GatewayError::UpstreamUnavailable | GatewayError::UpstreamTimeout | GatewayError::RateLimited { .. } => Retryable::Yes,
                 GatewayError::Internal | GatewayError::MissingScope => Retryable::Unknown,
+                GatewayError::BudgetExhausted { .. } => Retryable::No,
                 _ => Retryable::No,
             };
             assert_eq!(err.retryable(), want, "{err:?}");
