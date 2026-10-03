@@ -136,6 +136,19 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `gateway_iam_call_duration_seconds` | histogram | `operation` | Latency of each IAM call, from the same middleware call sites. |
 | `gateway_upstream_requests_total` | counter | `status_class` | One increment per OpenAI upstream call, `status_class` derived from the upstream HTTP status (`2xx`/`4xx`/`5xx`). **Streaming caveat (TTFB):** for `stream: true` this only covers the initial POST/headers exchange — `OpenAiClient::chat_completion` returns as soon as the response head arrives, and the SSE body streams lazily afterward. A mid-stream terminal SSE error (emitted as a `data: {"error":…}` event, §5 gateway-m0 spec) happens **past** this measured boundary and is **not** counted here. |
 | `gateway_upstream_request_duration_seconds` | histogram | — | Upstream call latency — same TTFB caveat as above; do not read this as end-to-end stream duration. |
+| `gateway_limit_refusals_total` | counter | `reason` | SMA-677. Chat requests refused by a limit before egress, one per request. `reason` ∈ `principal_rate` / `org_rate` / `org_budget` (the D8 precedence picks one). Primed at 0 when `[limits]` is set; absent without it. |
+| `gateway_tokens_charged_total` | counter | `source` | Tokens the charge guard sent to the limit store. `source` ∈ `reported` (the answer's `usage.total_tokens`) / `estimated` (no usage record). Requests admitted under fail-open are NOT counted here; see the `chat completion metered` log line. |
+| `gateway_limit_unscoped_requests_total` | counter | — | Chat requests whose scope PRN names no organization. Expected 0; non-zero is a scope parse mismatch or an IAM defect. With an org rate or a budget configured, these requests get `500 internal`. |
+| `gateway_limit_store_unavailable_total` | counter | `op`, `kind` | Limit-store calls that failed or met an open breaker. `op` ∈ `check` (the request was admitted with NO limit) / `charge` (the tokens were NOT counted). `kind` ∈ `io` (Redis down or unreachable) / `server` (Redis answered with an error: OOM under `noeviction`, `READONLY`, a script error) / `decode` (a reply of the wrong shape). |
+| `gateway_limit_charges_dropped_total` | counter | `reason` | Charges that were not sent. `reason` ∈ `no_runtime` (a guard dropped outside the async runtime) / `shutdown` (still running after the 5 s shutdown drain) / `period_expired` (more than one day after its budget period ended). |
+| `gateway_redis_breaker_state` | gauge | `role` | The limits Redis circuit breaker (`role="limits"`): 0 closed, 1 half-open, 2 open. Only with `backend = "redis"`. Per replica: aggregate `max by (job, role)`, never `sum`. |
+| `gateway_redis_breaker_transitions_total` | counter | `role`, `to` | One per transition of that breaker; `to` ∈ `closed` / `half_open` / `open`. Catches a flapping breaker that the gauge misses between scrapes. |
+
+**The `chat completion metered` log line** (`info` when tokens > 0, `debug` otherwise) is the
+per-org spend record: fields `org`, `tokens`, `source`, `outcome` (`charged` / `store_unavailable`
+/ `no_budget` / `zero`), `request_id`, `correlation_id`. No metric label carries an org id
+(unbounded); use this line for per-org use, and its `outcome="store_unavailable"` lines for the
+spend that fail-open did not charge.
 
 ---
 
@@ -238,6 +251,8 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `GatewayHighErrorRate` | `sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `GatewayIamDependencyUnavailable` | `rate(gateway_iam_calls_total{result="unavailable"}[5m]) > 0` for 5m | critical |
 | `GatewayUpstreamErrors` | `sum(rate(gateway_upstream_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_upstream_requests_total[5m])) > 0.05` for 10m | warning |
+| `GatewayLimitsRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state) != 0` for 2m | warning |
+| `GatewayLimitStoreUnavailable` | `sum by (job, op, kind) (increase(gateway_limit_store_unavailable_total[10m])) > 0` | warning |
 | `TargetDown` | `up == 0` for 2m | critical |
 
 ### `IamDenialAuditDrops` — denial-audit rows being dropped
@@ -1719,6 +1734,67 @@ typically not actionable on the gateway side beyond confirming it isn't a gatewa
 malformed-request pattern (check `gateway_upstream_requests_total{status_class="4xx"}` isn't
 also elevated, which would point at a gateway bug instead).
 
+### `GatewayLimitsRedisBreakerOpen` — the limits Redis breaker is not closed (warning)
+
+**Meaning.** The gateway's limits Redis circuit breaker (`gateway_redis_breaker_state{role="limits"}`)
+has been open or half-open for 2m. While it is, every chat request is admitted with no rate
+limit and no budget, and its tokens are not charged (fail-open, SMA-677 D10). The exposure is
+"the upstream's own rate limit × the outage duration".
+
+**Confirm:** is the limits Redis up and reachable from the gateway? Does `limits.redis_url`
+reach the primary? Read `gateway_limit_store_unavailable_total` by `kind`.
+
+**Remediation:** see "Gateway limits: fail-open and Redis requirements" below.
+
+### `GatewayLimitStoreUnavailable` — limit store calls are failing (warning)
+
+**Meaning.** At least one limit-store call failed in the last 10m. It also fires on an outage
+shorter than a scrape interval, and on `kind="server"` and `kind="decode"`, which never open the
+breaker. `op="check"`: requests were admitted with no limit. `op="charge"`: tokens were not counted.
+
+**Confirm:** the `kind` label. `io` — Redis is down or unreachable (also logged at `warn`).
+`server` — Redis answered with an error, for example `OOM` under `noeviction` (the instance is
+full) or `READONLY` (the URL reaches a replica); logged at `error`. `decode` — a reply of the
+wrong shape; logged at `error`, and a defect. The log lines are rate-limited to one per
+(operation, kind) per 10 s and carry the count of suppressed events.
+
+**Remediation:** see the next section.
+
+### Gateway limits: fail-open and Redis requirements
+
+**Fail-open (SMA-677 D10).** With `[limits] backend = "redis"`, a Redis that does not answer,
+answers with an error, or sits behind an open breaker does not stop chat traffic: the request is
+admitted, and no tokens are charged. Readiness (`/readyz`) does not check Redis, on purpose: a
+Redis check there would take every replica out of the balancer during a Redis outage. To find
+the spend that fail-open did not charge, search the `chat completion metered` lines with
+`outcome="store_unavailable"`; their `org` and `tokens` fields hold it.
+
+**Boot needs Redis (D17).** A gateway with `backend = "redis"` connects at boot and does not
+start while Redis is down, so a wrong URL or password shows at deploy time. During a Redis
+outage a scale-up or a rollout stalls.
+
+**Redis requirements (D21).** A lost or evicted budget key reads as zero, which silently resets
+that org's budget. So:
+1. Use a dedicated Redis instance for limits (strongest), or at least a dedicated logical
+   database (`redis://host:6379/2`; this separates the keys but not the memory pool).
+2. Set `maxmemory-policy noeviction`, or keep enough headroom that eviction never runs. Under
+   `noeviction` a full instance refuses writes with `OOM`, which shows as `kind="server"`. Under an
+   `allkeys-*` or `volatile-*` policy, Redis evicts budget keys silently (every limit key has a TTL).
+3. Turn on AOF (`appendonly yes`) if budgets must survive a Redis restart. With no persistence a
+   restart resets every budget and rate count; with RDB only, it loses the charges since the last
+   snapshot.
+4. Replication is asynchronous: a failover can lose the last charges (an under-count).
+5. The URL must always reach the primary (a single node, or a primary behind a service address
+   that moves on failover). Redis Cluster is not supported. Minimum Redis 6.2.
+
+**Other known limits.** Concurrent requests can overshoot a budget by the use of the requests in
+flight (D7). Replicas with different `[[limits.org]]` lists apply different limits to one shared
+count. Clock skew between replicas moves a rate estimate by about `skew / 60 s` of one window.
+A client that does not send `stream_options.include_usage` is charged an estimate.
+
+**Hot-path latency during a blackhole (D20).** A few requests per 2 s window wait about 2.1 s
+(the dial budget); after three failures the breaker opens and the rest pay nothing.
+
 ### `TargetDown` — a scrape target is unreachable (critical)
 
 **Meaning.** `up == 0` for 2 minutes — Prometheus could not scrape `/metrics` on the named
@@ -1737,14 +1813,13 @@ isn't coming back up on its own.
 
 ### Gateway deployment posture (applies across the alerts above)
 
-**M0 is internal-only or spend-capped.** The gateway M0 walking skeleton ships **no** rate
-limiting and **no** cost/budget enforcement (both are gateway M3/M4 work) — a single
-over-provisioned or leaked API key means effectively unbounded OpenAI spend. Per the gateway-m0
-design (D6), M0 must run in **one** of two postures:
+**Keep a spend cap, even with `[limits]`.** Without a `[limits]` table the gateway has no rate
+limit and no budget, so a leaked API key means effectively unbounded OpenAI spend. With
+`[limits]` (SMA-677) the gateway enforces a request rate and a token budget, but the budget counts
+tokens, not money, requests in flight still complete when it runs out, and a Redis outage is
+fail-open. So run the gateway in **one** of two postures:
 1. **Internal/non-production** — not reachable from untrusted networks, or
-2. **Behind a hard OpenAI account-level spend cap** set at the OpenAI account/org level, so a
-   worst-case abuse scenario is bounded by that cap rather than by anything the gateway itself
-   enforces.
+2. **Behind a hard OpenAI account-level spend cap**, so a worst case is bounded by that cap.
 
 **`/metrics` network-restriction is part of this posture, not separate from it.** `/metrics` is
 unauthenticated (D4, §1). For an **internal-only** deployment, same-port `/metrics` (the default,
