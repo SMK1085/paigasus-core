@@ -63,6 +63,11 @@ async fn the_window_edge_gives_the_d3_estimate() {
     contract::the_window_edge_gives_the_d3_estimate(&harness()).await;
 }
 
+#[tokio::test]
+async fn the_clamp_boundary_refuses_at_59_999_and_admits_at_60_000() {
+    contract::the_clamp_boundary_refuses_at_59_999_and_admits_at_60_000(&harness()).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_admissions_never_pass_the_limit() {
     contract::concurrent_admissions_never_pass_the_limit(&harness()).await;

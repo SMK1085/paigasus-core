@@ -214,6 +214,24 @@ pub async fn the_window_edge_gives_the_d3_estimate(h: &dyn Harness) {
     );
 }
 
+/// D3 boundary rows (Task 11 review): with `previous = limit`, the last millisecond of a window
+/// (elapsed 59_999) is still refused, because the clamp keeps the previous window's weight at
+/// 1 ms; the first millisecond of the window after next (elapsed 0, `previous = 0`) admits.
+pub async fn the_clamp_boundary_refuses_at_59_999_and_admits_at_60_000(h: &dyn Harness) {
+    let store = h.store().await;
+    let (p, org) = fresh_ids();
+    let one = rates(Some(1), None);
+    // Window w: one request, so previous = limit = 1 in window w + 1.
+    assert_eq!(admit(&store, &p, org, &one, at("2026-10-02T12:00:30.000Z")).await, LimitDecision::Admit(None));
+    // 1 × 1 + 0 + 60000 = 60001 > 60000: refused even 1 ms before the window ends.
+    assert_eq!(
+        admit(&store, &p, org, &one, at("2026-10-02T12:01:59.999Z")).await,
+        LimitDecision::Refused(vec![FailedCheck::PrincipalRate(rate(1, 0, 59_999, 1))])
+    );
+    // 120.000 s: window w + 2, where window w is two windows back and reads as 0.
+    assert_eq!(admit(&store, &p, org, &one, at("2026-10-02T12:02:00.000Z")).await, LimitDecision::Admit(None));
+}
+
 /// D4 under concurrency: 64 tasks over 4 stores (4 replicas on Redis), limit 10, one instant.
 pub async fn concurrent_admissions_never_pass_the_limit(h: &dyn Harness) {
     let mut stores = Vec::new();
@@ -246,5 +264,6 @@ pub async fn run_all(h: &dyn Harness) {
     budget_admits_below_and_refuses_at_the_limit(h).await;
     a_new_period_starts_at_zero_and_a_late_charge_keeps_its_period(h).await;
     the_window_edge_gives_the_d3_estimate(h).await;
+    the_clamp_boundary_refuses_at_59_999_and_admits_at_60_000(h).await;
     concurrent_admissions_never_pass_the_limit(h).await;
 }

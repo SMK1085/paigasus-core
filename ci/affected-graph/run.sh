@@ -321,9 +321,10 @@ run_suite() {
   run_case "redis->services" "rs/crates/libs/paigasus-redis/src/lib.rs" \
     "paigasus-redis-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
   # paigasus-test-docker edit -> the dev-only Docker policy crate + the services whose suites use it
-  # (SMA-726). Only IAM today; the gateway joins in SMA-677 PR 2.
+  # (SMA-726): IAM, and the gateway's Redis suites (SMA-677 PR 2), plus gateway-console-ts, whose
+  # playground project runs the real gateway binary (measured with /bin/bash, as for redis above).
   run_case "test-docker->services" "rs/crates/libs/paigasus-test-docker/src/lib.rs" \
-    "paigasus-test-docker-rs,paigasus-iam-rs"
+    "paigasus-test-docker-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
   # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427)
   # + the IAM crates that consume the kernel's PRN/UUIDv7 (paigasus-iam-core-rs & the paigasus-iam-rs
   # service, SMA-441). paigasus-logging-rs is deliberately ABSENT — it has no kernel edge.

@@ -43,10 +43,16 @@ const ADMISSION_SCRIPT: &str = r#"
 -- reads 0 (the same reset the Rust form gets from an empty previous count).
 local elapsed = tonumber(ARGV[1])
 if elapsed > 59999 then elapsed = 59999 end
+-- A stored count that is not an integer raises a script error HERE, in the read phase, before any
+-- INCR: otherwise an INCR on it would fail after an earlier key was already incremented (D4).
 local function count(key)
   local value = redis.call('GET', key)
-  if value then return tonumber(value) end
-  return 0
+  if not value then return 0 end
+  local n = tonumber(value)
+  if n == nil or n ~= math.floor(n) then
+    error('limit key holds a non-integer count: ' .. key)
+  end
+  return n
 end
 local function rate(current_key, previous_key, limit_arg)
   if limit_arg == '' then return 1, 0, 0 end

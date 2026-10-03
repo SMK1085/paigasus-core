@@ -101,6 +101,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # SMA-677: the blackhole listener and the lazy / open-breaker handles for the fail-open tests.
 # Test builds only, like paigasus-logging/test-support above.
 paigasus-redis = { workspace = true, features = ["test-support"] }
+# SMA-677 D22: the one Docker-skip policy (SMA-538), shared with paigasus-iam. Dev-only.
+paigasus-test-docker = { workspace = true }
+# SMA-677: the Redis image type, `ContainerAsync` and `ExecCommand` for the raw `redis-cli` reads
+# (the single-site gate bans a second Rust Redis client in tests). Already in Cargo.lock via IAM.
+testcontainers-modules = { version = "0.15", features = ["redis"] }
 # SMA-677: unit tests read the limit metrics from a local DebuggingRecorder instead of the
 # process-global Prometheus recorder. Same line as paigasus-iam's.
 metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }

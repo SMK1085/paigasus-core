@@ -15,6 +15,7 @@ dependsOn:
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-service-info-rs'
+  - 'paigasus-test-docker-rs'
 
 # SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
 # `@group(upstreams)` in .moon/tasks/rust.yml. Moon confers affectedness ONLY through a task's own
@@ -36,12 +37,19 @@ fileGroups:
     - '/rs/crates/libs/paigasus-redis/Cargo.toml'
     - '/rs/crates/libs/paigasus-service-info/src/**/*'
     - '/rs/crates/libs/paigasus-service-info/Cargo.toml'
+    - '/rs/crates/libs/paigasus-test-docker/src/**/*'
+    - '/rs/crates/libs/paigasus-test-docker/Cargo.toml'
 
 tasks:
   build:
     deps: ['^:build']
   test:
     deps: ['^:build']
+    # SMA-677 D22. This task now starts Redis containers. It shares one CI runner with the two
+    # console e2e tasks, and SMA-718 showed that such overlap starves the browser, so it takes the
+    # same mutex as paigasus-iam-rs:test.
+    options:
+      mutex: 'heavy-integration'
   # SMA-635. The gateway-console `playground` Playwright project runs THIS binary, so the e2e tier
   # must never run an old one. The Rust `build` task declares no `outputs` (.moon/tasks/rust.yml)
   # and CI restores both rs/target and .moon/cache, so a cache hit on `build` can leave a stale
