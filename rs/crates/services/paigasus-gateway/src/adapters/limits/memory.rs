@@ -220,9 +220,19 @@ mod tests {
     /// D18 parity: a charge more than a day late is dropped, not booked.
     #[tokio::test]
     async fn a_charge_more_than_a_day_late_is_dropped() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
         let store = MemoryLimitStore::new();
         let october = BudgetPeriod::Monthly.key_at(at("2026-10-15T00:00:00Z"));
-        store.charge(LimitTicket { org: ORG, period: october }, 5, at("2026-11-02T00:00:00Z"));
+        {
+            let _local = metrics::set_default_local_recorder(&recorder);
+            store.charge(LimitTicket { org: ORG, period: october }, 5, at("2026-11-02T00:00:00Z"));
+        }
+        assert_eq!(
+            crate::test_support::counter(&snapshotter, names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL, &[("reason", "period_expired")]),
+            Some(1),
+            "the drop is counted once"
+        );
         assert!(!store.lock().orgs.contains_key(&ORG), "nothing is booked");
     }
 }

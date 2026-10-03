@@ -3167,6 +3167,7 @@ dependencies = [
  "figment",
  "futures",
  "metrics",
+ "metrics-util",
  "paigasus-kernel",
  "paigasus-logging",
  "paigasus-observability",

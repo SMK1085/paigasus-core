@@ -8,7 +8,10 @@
 //! Config reference + defaults: `gateway.toml.example` (crate root).
 
 pub mod adapters;
+pub mod application;
 pub mod config;
 pub mod domain;
 pub mod runtime;
 pub mod service_info;
+#[cfg(test)]
+mod test_support;

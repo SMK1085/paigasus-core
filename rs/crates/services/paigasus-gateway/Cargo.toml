@@ -89,6 +89,9 @@ chrono = { workspace = true }
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a
 # dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
+# SMA-677: unit tests read the limit metrics from a local DebuggingRecorder instead of the
+# process-global Prometheus recorder. Same line as paigasus-iam's.
+metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
 figment = { workspace = true, features = ["test"] }
 # `src/adapters/http/mod.rs`'s health unit tests and `tests/chat_proxy.rs`'s integration tests
 # both drive the router via `ServiceExt::oneshot` (no real listener).
