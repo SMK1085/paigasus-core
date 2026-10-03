@@ -33,7 +33,7 @@ zones:
         repository: ghcr.io/smk1085/paigasus-iam
         # Pinned to the image version in rs/crates/services/paigasus-iam/Cargo.toml (SMA-688).
         # repo:helm-render row 8a fails when the two differ.
-        tag: "0.2.0"
+        tag: "0.2.1"
       # replicas and maxSurge are pinned; see the comment in templates/backend-deployment.yaml.
       httpPort: 8080
       grpcPort: 9090

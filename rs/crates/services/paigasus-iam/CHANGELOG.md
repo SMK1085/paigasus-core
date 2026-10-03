@@ -10,6 +10,8 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-03
+
 ### Added
 
 - Each `[[authn.issuers]]` entry has a new setting, `id_token_marker_claims`. It is a list of
