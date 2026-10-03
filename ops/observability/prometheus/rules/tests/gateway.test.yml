@@ -51,3 +51,56 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations: { summary: "Gateway upstream HTTP 5xx ratio > 5%" }
+
+  # GatewayLimitsRedisBreakerOpen: max by (job, role) (gateway_redis_breaker_state) != 0, for: 2m.
+  # Firing: the breaker reads 2 (open) for 5 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="limits"}'
+        values: '2x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: GatewayLimitsRedisBreakerOpen
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GatewayLimitsRedisBreakerOpen
+        exp_alerts:
+          - exp_labels: { severity: warning, job: gateway, role: limits }
+            exp_annotations:
+              summary: "Gateway limits Redis circuit breaker is not closed (role limits)"
+              description: "The gateway's limits Redis circuit breaker has been open or half-open for 2m. The rate limits and token budgets are NOT applied (fail-open), and the tokens used now are not charged to any budget. See RUNBOOK-observability.md, section \"Gateway limits: fail-open and Redis requirements\"."
+
+  # Quiet: a closed breaker (primed at 0) never fires.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="limits"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayLimitsRedisBreakerOpen
+        exp_alerts: []
+
+  # GatewayLimitStoreUnavailable: sum by (job, op, kind) (increase(...[10m])) > 0, for: 0m.
+  # Firing: one failed check after a primed 0 — increase() sees it only because of the 0 sample.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_limit_store_unavailable_total{job="gateway",instance="gw-1",op="check",kind="io"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayLimitStoreUnavailable
+        exp_alerts:
+          - exp_labels: { severity: warning, job: gateway, op: check, kind: io }
+            exp_annotations:
+              summary: "Gateway limit store calls are failing (op check, kind io)"
+              description: "Limit-store calls failed in the last 10m. A failed check admits the request with no limit, and a failed charge is not counted against any budget (fail-open). kind=io: Redis is down or unreachable. kind=server or decode: Redis answered with an error (for example OOM under noeviction, or READONLY from a replica), which never opens the breaker. See RUNBOOK-observability.md, section \"Gateway limits: fail-open and Redis requirements\"."
+
+  # Quiet: a primed series that never moves.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_limit_store_unavailable_total{job="gateway",instance="gw-1",op="check",kind="io"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayLimitStoreUnavailable
+        exp_alerts: []
