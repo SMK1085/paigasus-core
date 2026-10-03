@@ -31,7 +31,6 @@ use axum::http::{Request, StatusCode, header};
 use bytes::Bytes;
 use futures::StreamExt; // for `bytes_stream().next()`
 use secrecy::SecretString;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tonic::Status;
 use tower::ServiceExt; // for `oneshot`
 
@@ -167,6 +166,7 @@ fn app_for_with_streaming(fake: FakeIam, base_url: String, max_request_bytes: us
         openai: Arc::new(openai),
         max_request_bytes,
         capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: stream_enabled },
+        limits: None,
     };
     router(state)
 }
@@ -380,7 +380,7 @@ async fn stream_request_returns_ordered_event_stream() {
 /// precisely so that abort survives.)
 #[tokio::test]
 async fn mid_stream_error_emits_terminal_sse_event() {
-    let base_url = spawn_truncated_sse_server().await;
+    let base_url = support::spawn_truncated_sse().await;
     let app = app_for(FakeIam::allowed(), base_url, ONE_MIB);
     let resp = app.oneshot(chat_request(STREAM_BODY, Some(CALLER_KEY))).await.unwrap();
 
@@ -541,34 +541,6 @@ async fn an_oidc_user_with_an_invalid_org_header_is_400() {
 }
 
 // ---- raw truncated-stream upstream (mid-stream error) -----------------------------------------
-
-/// Bind an ephemeral port and serve ONE connection with a chunked `text/event-stream` response that
-/// sends two `data:` frames then CLOSES the socket WITHOUT the terminating `0\r\n\r\n` chunk. reqwest
-/// yields the two frames and then errors on the premature EOF — exactly the mid-stream failure the
-/// handler's terminal-SSE-error adapter must handle. Returns the `http://…` base URL.
-async fn spawn_truncated_sse_server() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        if let Ok((mut sock, _)) = listener.accept().await {
-            // Best-effort drain of the (small) request head+body so the client finishes sending.
-            let mut buf = [0u8; 8192];
-            let _ = sock.read(&mut buf).await;
-
-            let frame1 = "data: first\n\n";
-            let frame2 = "data: second\n\n";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{l1:x}\r\n{frame1}\r\n{l2:x}\r\n{frame2}\r\n",
-                l1 = frame1.len(),
-                l2 = frame2.len(),
-            );
-            let _ = sock.write_all(response.as_bytes()).await;
-            let _ = sock.flush().await;
-            // Drop `sock` here -> the connection closes mid-stream (no terminating chunk).
-        }
-    });
-    format!("http://{addr}")
-}
 
 // ---- client-abort cancel-on-drop (G8) ---------------------------------------------------------
 

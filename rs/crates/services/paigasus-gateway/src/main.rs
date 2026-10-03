@@ -89,6 +89,7 @@ async fn serve() -> anyhow::Result<()> {
         openai: Arc::new(openai),
         max_request_bytes: config.max_request_bytes,
         capabilities: Capabilities::from_config(&config),
+        limits: None,
     };
 
     let app = router(state);
