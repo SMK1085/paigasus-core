@@ -282,6 +282,12 @@ impl LimitStore for RedisLimitStore {
         if tokens == 0 {
             return;
         }
+        // The drain closed the tracker: the process is stopping, so count the charge instead of
+        // spawning a task nobody waits for.
+        if self.tracker.is_closed() {
+            counter!(names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL, "reason" => ChargeDropReason::Shutdown.as_label()).increment(1);
+            return;
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             counter!(names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL, "reason" => ChargeDropReason::NoRuntime.as_label()).increment(1);
             return;
@@ -471,6 +477,31 @@ mod tests {
         tracker.close();
         tracker.wait().await;
         assert_eq!(counter(&snapshotter, names::GATEWAY_LIMIT_STORE_UNAVAILABLE_TOTAL, &[("op", "charge"), ("kind", "io")]), Some(1));
+    }
+
+    /// Carry (b): a charge that arrives after the drain closed the tracker is counted as
+    /// `reason="shutdown"`, not spawned and not lost uncounted.
+    #[tokio::test]
+    async fn a_charge_after_the_drain_closed_the_tracker_is_counted_as_shutdown() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let blackhole = paigasus_redis::test_support::start().await;
+        let store = RedisLimitStore::from_handle(paigasus_redis::with_open_breaker_for_tests(&blackhole.url, breaker_metrics()).expect("a lazy handle"));
+        let now = at("2026-10-02T12:00:00Z");
+        let tracker = store.tracker();
+        tracker.close();
+        store.charge(
+            LimitTicket {
+                org: ORG_A,
+                period: BudgetPeriod::Monthly.key_at(now),
+            },
+            5,
+            now,
+        );
+        assert_eq!(tracker.len(), 0, "nothing was spawned");
+        assert_eq!(counter(&snapshotter, names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL, &[("reason", "shutdown")]), Some(1));
+        assert_eq!(counter(&snapshotter, names::GATEWAY_LIMIT_STORE_UNAVAILABLE_TOTAL, &[("op", "charge"), ("kind", "io")]), None);
     }
 
     /// D16, spec § 5.8: a guard with a ticket dropped on a plain thread (no runtime) counts
