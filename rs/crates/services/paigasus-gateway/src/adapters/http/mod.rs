@@ -15,6 +15,7 @@ pub mod chat;
 pub mod dto;
 pub mod error;
 pub mod service_info;
+pub mod usage;
 
 pub use auth::{require_authenticated, require_iam_auth};
 pub use dto::ChatCompletionRequest;
