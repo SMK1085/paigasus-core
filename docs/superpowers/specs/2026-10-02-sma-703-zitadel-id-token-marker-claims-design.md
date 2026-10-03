@@ -359,8 +359,11 @@ Sven approved the spec on 2026-10-02 with no answer to Q1-Q3. So Q1 and Q2 take 
 
 ## 10. Follow-ups
 
-- A Docker Zitadel end-to-end test, like `keycloak_e2e.rs`, that pins F6 for the pinned version.
-- The `email` claim in a Zitadel access token: measure a Zitadel Action that adds it.
+- DONE (§ 12): A Docker Zitadel end-to-end test, like `keycloak_e2e.rs`, that pins F6 for the
+  pinned version.
+- The `email` claim in a Zitadel access token: measure a Zitadel Action that adds it. § 12 runs
+  the `addEmailClaim` Action of the reference install in the test, on the human flow and on the
+  refresh grant.
 
 ## 11. Spec challenge (2026-10-02)
 
@@ -391,3 +394,45 @@ against the code and the measurement file before folding them in.
 | Login v2 label | QUESTION | Folded in: the runbook label names Login v1. |
 | Refreshed access token keeps `iat`/`exp` | QUESTION | Q3. |
 | T12: which defect? | QUESTION | `Malformed`. |
+
+## 12. Addendum (2026-10-03): Zitadel end-to-end test
+
+`rs/crates/services/paigasus-iam/tests/zitadel_e2e.rs` runs a real Zitadel `v4.15.3` in Docker,
+with its own Postgres (`16-alpine`) on a Docker network, and IAM's own migrated Postgres. It
+closes the first follow-up in § 10, and it relaxes N2: the test runs in CI with the other
+Docker-backed suites. Sven approved the design ("full console path").
+
+The setup is the paigasus console's client type. This closes the gap "a confidential app is not
+measured" of § 3:
+
+- A confidential web app (`OIDC_AUTH_METHOD_TYPE_BASIC`), code flow with PKCE, refresh token,
+  access token type JWT, "User Info inside ID Token" on.
+- A human user who logs in through Login v1 over plain HTTP. The test sends the forms itself.
+- A machine user with a client secret, the client-credentials grant, and access token type JWT.
+- The `addEmailClaim` v1 Action (Complement Token, pre access token creation).
+
+The test asserts:
+
+- Every ID token (human, refreshed, machine) has `at_hash` and `azp`. No access token has either.
+  This pins F6 for the pinned version.
+- The Action puts `email` into the human access token, also after the refresh grant. This closes
+  the gap of F12 and N5 for the reference install.
+- IAM with `["at_hash", "azp"]` refuses each ID token as `NotAnAccessToken`, and a protected route
+  returns 401 `invalid-token`.
+- The human access token provisions a user by JIT. The refreshed access token resolves to the same
+  principal. The machine access token passes the authenticator. It has no `email`, so JIT
+  provisioning fails with `MissingEmail`.
+- A control: with an empty list, IAM accepts the human ID token.
+
+Measured during the build of the test (2026-10-03, v4.15.3):
+
+- A confidential app gives `aud = [client id, P]` on both human tokens. The public app of § 3 had a
+  third value (F2).
+- Zitadel takes the host of `iss` from `ZITADEL_EXTERNALDOMAIN`. It takes the port of `iss` from
+  the request `Host` header, not from `ZITADEL_EXTERNALPORT`. A request with another host gets
+  404.
+- The discovery endpoint answers some seconds before the management API. The API first returns
+  503.
+
+A mutation proves that the test bites: with `["nonce"]` as the IAM list, the machine ID token
+(which has no `nonce`) is not refused, and the test fails.
