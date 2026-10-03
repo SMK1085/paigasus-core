@@ -87,7 +87,7 @@ not on the next Tuesday.
 | P15 | No step `if:` calls `always()`, `failure()` or `cancelled()`. |
 | P16 | The token step uses `actions/create-github-app-token` with exactly `client-id`, `private-key`, `permission-contents: write` and `permission-pull-requests: write`. |
 | P17 | Every checkout sets `persist-credentials: false`. |
-| P18 | The `verify` and `status` commands of `lockstep_check.py` are whole commands: the last command of the step, with no `||`, `;`, pipe, `&&` guard, `if` or later `exit` joined to them. A refusal then fails the step. |
+| P18 | The `verify` and `status` commands of `lockstep_check.py` are whole commands: the last command of the step, with no `\|\|`, `;`, pipe, `&&` guard, `if` or later `exit` joined to them. A refusal then fails the step. |
 | P19 | No step sets `working-directory`. No `env:` key at any level (workflow, job or step) is `BASH_ENV`, `ENV` or `ACTIONS_ALLOW_UNSECURE_COMMANDS`. No script names `GITHUB_ENV` or `GITHUB_PATH`. |
 | P20 | `propose` makes no `gh api` call other than GET: no `-X` or `--method` with another verb, no `-f`, `-F`, `--field`, `--raw-field` or `--input`, and no `graphql`. No `git` call takes `-c` or `--config-env`. |
 | P21 | The `gh pr list --head` call passes `--json` and `--jq` that name `isCrossRepository`, and the jq selects `select(.isCrossRepository \| not)`. The App token then never edits a pull request from a fork. |

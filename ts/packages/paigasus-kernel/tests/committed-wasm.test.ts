@@ -73,7 +73,7 @@ const EXPECTED_IMPORTS = [
 ];
 
 const REGENERATE =
-  'Run `moon run paigasus-kernel-ts:generate-wasm` and commit all five files under rs/crates/bindings/paigasus-wasm/ (paigasus_wasm_bg.wasm and the four glue files). If wasm-bindgen moved, run the wasm-lockstep workflow (`gh workflow run wasm-lockstep.yml --ref main`), or follow the wasm-bindgen runbook in rs/CLAUDE.md ("The wasm-bindgen family does not move through dependabot").';
+  'Run `moon run paigasus-kernel-ts:generate-wasm` and commit all five files under rs/crates/bindings/paigasus-wasm/ (paigasus_wasm_bg.wasm and the four glue files). If wasm-bindgen moved on this branch (a feature or Dependabot branch), follow the wasm-bindgen runbook in rs/CLAUDE.md ("The wasm-bindgen family does not move through dependabot"). Run the wasm-lockstep workflow (`gh workflow run wasm-lockstep.yml --ref main`) only to propose the family update from main.';
 
 // The remedy for the two literal assertions below, which `generate-wasm` alone CANNOT repair. When a
 // kernel export is added, removed or renamed on purpose, a regeneration makes both binaries carry
