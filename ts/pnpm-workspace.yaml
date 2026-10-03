@@ -231,4 +231,4 @@ catalog:
   # `fetch` — @paigasus/discovery's `GET /v1/service-info` probe. It cannot intercept the SDK's gRPC
   # calls over node:http2; an in-process fake server answers those. 2.15.0 was released 2026-07-08.
   # Pinned EXACTLY, not a caret range (the Global Constraints): a later 2.x must not install silently.
-  msw: 2.15.0
+  msw: 3.0.0
