@@ -11,6 +11,8 @@
 // dead-code lint rather than sprinkle `#[allow]` on each item.
 #![allow(dead_code)]
 
+pub mod limits_contract;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 

@@ -11,6 +11,25 @@ pub const GATEWAY_IAM_CALLS_TOTAL: &str = "gateway_iam_calls_total";
 pub const GATEWAY_IAM_CALL_DURATION_SECONDS: &str = "gateway_iam_call_duration_seconds";
 pub const GATEWAY_UPSTREAM_REQUESTS_TOTAL: &str = "gateway_upstream_requests_total";
 pub const GATEWAY_UPSTREAM_REQUEST_DURATION_SECONDS: &str = "gateway_upstream_request_duration_seconds";
+// Gateway limits (SMA-677). No label carries a principal or an org id (unbounded).
+/// Chat requests refused before egress, one per request; `reason` = `principal_rate` |
+/// `org_rate` | `org_budget`, chosen by the D8 precedence.
+pub const GATEWAY_LIMIT_REFUSALS_TOTAL: &str = "gateway_limit_refusals_total";
+/// Tokens the charge guard sent to the limit store; `source` = `reported` | `estimated`.
+pub const GATEWAY_TOKENS_CHARGED_TOTAL: &str = "gateway_tokens_charged_total";
+/// Chat requests whose scope PRN names no organization (D2). Expected 0.
+pub const GATEWAY_LIMIT_UNSCOPED_REQUESTS_TOTAL: &str = "gateway_limit_unscoped_requests_total";
+/// Limit-store calls that failed or met an open breaker; `op` = `check` | `charge`, `kind` = `io` |
+/// `server` | `decode`. A `check` here is a request admitted with no limit (fail-open, D10).
+pub const GATEWAY_LIMIT_STORE_UNAVAILABLE_TOTAL: &str = "gateway_limit_store_unavailable_total";
+/// Charges that were not sent; `reason` = `no_runtime` | `shutdown` | `period_expired`.
+pub const GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL: &str = "gateway_limit_charges_dropped_total";
+/// The gateway's limits Redis circuit breaker: 0 closed, 1 half-open, 2 open; `role` = `limits`.
+/// Emitted by `paigasus-redis` with this name. Set by every replica: aggregate
+/// `max by (job, role)`, never `sum`.
+pub const GATEWAY_REDIS_BREAKER_STATE: &str = "gateway_redis_breaker_state";
+/// One increment per breaker transition; `role` = `limits`, `to` = `closed` | `half_open` | `open`.
+pub const GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL: &str = "gateway_redis_breaker_transitions_total";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -250,6 +269,13 @@ pub const ALL: &[&str] = &[
     GATEWAY_IAM_CALL_DURATION_SECONDS,
     GATEWAY_UPSTREAM_REQUESTS_TOTAL,
     GATEWAY_UPSTREAM_REQUEST_DURATION_SECONDS,
+    GATEWAY_LIMIT_REFUSALS_TOTAL,
+    GATEWAY_TOKENS_CHARGED_TOTAL,
+    GATEWAY_LIMIT_UNSCOPED_REQUESTS_TOTAL,
+    GATEWAY_LIMIT_STORE_UNAVAILABLE_TOTAL,
+    GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL,
+    GATEWAY_REDIS_BREAKER_STATE,
+    GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL,
     IAM_HTTP_REQUESTS_TOTAL,
     IAM_HTTP_REQUEST_DURATION_SECONDS,
     IAM_HTTP_INFLIGHT_REQUESTS,
@@ -296,6 +322,22 @@ pub const ALL: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gateway_limit_families_are_registered() {
+        for name in [
+            GATEWAY_LIMIT_REFUSALS_TOTAL,
+            GATEWAY_TOKENS_CHARGED_TOTAL,
+            GATEWAY_LIMIT_UNSCOPED_REQUESTS_TOTAL,
+            GATEWAY_LIMIT_STORE_UNAVAILABLE_TOTAL,
+            GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL,
+            GATEWAY_REDIS_BREAKER_STATE,
+            GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
     #[test]
     fn all_names_are_unique_and_snake_case() {
         let mut seen = std::collections::HashSet::new();
