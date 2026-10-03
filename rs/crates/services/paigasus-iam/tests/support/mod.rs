@@ -484,6 +484,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
                     issuer: idp.issuer.clone(),
                     audiences: vec!["paigasus".to_string()],
                     jit_provisioning: *jit_provisioning,
+                    id_token_marker_claims: Vec::new(),
                 })
                 .collect(),
         },

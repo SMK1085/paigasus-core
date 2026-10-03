@@ -691,5 +691,120 @@ if [ "$BOOT_ROWS" -lt "$BOOT_ROWS_WANT" ]; then
   echo "FAIL [bootstrap rows]: $BOOT_ROWS bootstrap row(s) ran, want $BOOT_ROWS_WANT"; ec=1
 fi
 
+# oidc.idTokenMarkerClaims (SMA-703). Renders go to a file, as for check_audience. One row per
+# property:
+#   M1 default      IAM_AUTHN__ISSUERS is the value from before SMA-703, and the
+#                   "oidc.idTokenMarkerClaims is set" comment line is absent.
+#   M2 reuse-values-no-key
+#                   `--set oidc.idTokenMarkerClaims=null` on this chart. Helm deletes the key
+#                   and dig gives the default, so this row does NOT reach the nil guard in
+#                   paigasus.validateIdTokenMarkerClaims. The value does not change (spec T20).
+#   M3 set          The Zitadel recipe. Each name is quoted with %q, in values order, after the
+#                   audiences. config.rs parses this exact form in
+#                   issuers_env_in_the_chart_form_parses_id_token_marker_claims.
+#   M4 empty-list-in-file
+#                   `idTokenMarkerClaims: []` in a values file renders no key. This is a rollback
+#                   form. `--set oidc.idTokenMarkerClaims={}` is NOT one: helm makes it [""], and
+#                   refusals.sh refuses it.
+#   M5 with-audience
+#                   Runbook option 1: oidc.audience is a Zitadel project id of digits only. The
+#                   audience stays a quoted string, and the names follow it.
+#   M6 restart-scope
+#                   A change of the value changes the IAM pod template and no console pod template.
+#   M7 empty-list-set-json
+#                   `--set-json 'oidc.idTokenMarkerClaims=[]'` renders the default value. It is
+#                   the removal form that the runbook gives for --reuse-values.
+#   M8 reuse-values-nil-guard
+#                   A copy of the chart without the idTokenMarkerClaims key in values.yaml, and
+#                   `--set oidc.idTokenMarkerClaims=null`. This is a release from before SMA-703
+#                   with --reuse-values. Helm keeps a nil value, so the row reaches the nil guard
+#                   in paigasus.validateIdTokenMarkerClaims. The render must succeed with the
+#                   default value.
+# A sixth row counter reds the script when an M row call line is deleted.
+MARKER_ROWS=0
+MARKER_ROWS_WANT=8
+
+# check_markers <label> <want suffix or -> <want audience> <present|absent> [helm args...]
+# The fourth argument is the state of the "oidc.idTokenMarkerClaims is set" YAML comment line.
+# MARKERS_CHART, when set, is the chart directory to render instead of $CHART.
+check_markers() {
+  local label="$1" suffix="$2" audience="$3" comment="$4"; shift 4
+  local out
+  MARKER_ROWS=$((MARKER_ROWS + 1))
+  if ! helm template paigasus "${MARKERS_CHART:-$CHART}" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/markers.yaml" 2>"$TMP/markers.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/markers.err"; ec=1; return 0
+  fi
+  if ! out="$(SUFFIX="$suffix" AUDIENCE="$audience" COMMENT="$comment" python3 -c '
+import os, sys, yaml
+suffix = "" if os.environ["SUFFIX"] == "-" else os.environ["SUFFIX"]
+want = "[{issuer=\"https://idp.example.test/realms/paigasus\",audiences=[\"" + os.environ["AUDIENCE"] + "\"]" + suffix + "}]"
+line = "            # oidc.idTokenMarkerClaims is set: IAM refuses a token that carries one of these claims."
+with open(sys.argv[1]) as fh:
+    raw = fh.read()
+docs = [d for d in yaml.safe_load_all(raw) if d]
+problems = []
+deps = [d for d in docs if d.get("kind") == "Deployment"
+        and d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name") == "iam-backend"]
+if len(deps) != 1:
+    problems.append(str(len(deps)) + " iam-backend Deployment(s), want 1")
+else:
+    env = deps[0]["spec"]["template"]["spec"]["containers"][0].get("env") or []
+    issuers = [e for e in env if e.get("name") == "IAM_AUTHN__ISSUERS"]
+    if len(issuers) != 1:
+        problems.append(str(len(issuers)) + " IAM_AUTHN__ISSUERS entries, want 1")
+    elif issuers[0].get("value") != want:
+        problems.append("IAM_AUTHN__ISSUERS is " + repr(issuers[0].get("value")) + ", want " + repr(want))
+count = raw.splitlines().count(line)
+if os.environ["COMMENT"] == "present" and count != 1:
+    problems.append("the oidc.idTokenMarkerClaims comment line renders " + str(count) + " time(s), want 1")
+if os.environ["COMMENT"] == "absent" and count != 0:
+    problems.append("the oidc.idTokenMarkerClaims comment line renders " + str(count) + " time(s), want 0")
+print("|".join(problems) if problems else "OK")' "$TMP/markers.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# check_markers_restart <label>: the value changes the IAM pod template only. It reuses
+# check_boot_restart. The row counts in the M counter and also in the B counter, because that
+# function counts it as a B row. The B-row floor check runs before the M rows, so this row is not
+# in the B total that it checks.
+check_markers_restart() {
+  local label="$1"
+  MARKER_ROWS=$((MARKER_ROWS + 1))
+  check_boot_restart "$label" --set 'oidc.idTokenMarkerClaims={at_hash,azp}'
+}
+
+printf 'oidc:\n  idTokenMarkerClaims: []\n' >"$TMP/markers-empty.yaml"
+printf 'oidc:\n  audience: "393381921683406851"\n  idTokenMarkerClaims: ["at_hash", "azp"]\n' >"$TMP/markers-zitadel.yaml"
+ZITADEL_SUFFIX=',id_token_marker_claims=["at_hash","azp"]'
+
+# M8 chart copy: no idTokenMarkerClaims key in values.yaml. The copy goes in $TMP, which the EXIT
+# trap removes. The script reds when the copy still has the key after the sed.
+cp -R "$CHART" "$TMP/chart-no-markers"
+if ! grep -q '^  idTokenMarkerClaims:' "$TMP/chart-no-markers/values.yaml"; then
+  echo "FAIL [M8 setup]: values.yaml has no idTokenMarkerClaims line to remove"; ec=1
+fi
+# Remove the key line and the comment lines that follow it, up to the next key (scopes).
+sed -e '/^  idTokenMarkerClaims:/,/^  scopes:/{/^  scopes:/!d;}' "$TMP/chart-no-markers/values.yaml" >"$TMP/values-no-markers.yaml"
+cp "$TMP/values-no-markers.yaml" "$TMP/chart-no-markers/values.yaml"
+if grep -q 'idTokenMarkerClaims' "$TMP/chart-no-markers/values.yaml"; then
+  echo "FAIL [M8 setup]: the chart copy still has idTokenMarkerClaims in values.yaml"; ec=1
+fi
+
+check_markers "M1 default"               -                 paigasus-console   absent
+check_markers "M2 reuse-values-no-key"   -                 paigasus-console   absent  --set oidc.idTokenMarkerClaims=null
+check_markers "M3 set"                   "$ZITADEL_SUFFIX" paigasus-console   present --set 'oidc.idTokenMarkerClaims={at_hash,azp}'
+check_markers "M4 empty-list-in-file"    -                 paigasus-console   absent  -f "$TMP/markers-empty.yaml"
+check_markers "M5 with-audience"         "$ZITADEL_SUFFIX" 393381921683406851 present -f "$TMP/markers-zitadel.yaml"
+check_markers_restart "M6 restart-scope"
+check_markers "M7 empty-list-set-json"   -                 paigasus-console   absent  --set-json 'oidc.idTokenMarkerClaims=[]'
+MARKERS_CHART="$TMP/chart-no-markers" \
+check_markers "M8 reuse-values-nil-guard" -                paigasus-console   absent  --set oidc.idTokenMarkerClaims=null
+
+if [ "$MARKER_ROWS" -lt "$MARKER_ROWS_WANT" ]; then
+  echo "FAIL [marker rows]: $MARKER_ROWS marker row(s) ran, want $MARKER_ROWS_WANT"; ec=1
+fi
+
 if [ "$ec" -eq 0 ]; then echo "== chart env OK =="; fi
 exit "$ec"
