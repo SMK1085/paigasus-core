@@ -56,16 +56,17 @@ jobs:
     name: kind install + upgrade (amd64)
     # NOT a required check (spec § 7): a broken chart reds main, the same trade images.yml makes.
     runs-on: ubuntu-latest
-    # 169 (SMA-514). Each step timeout below is sized to the SUM of ci/kind/run.sh's own
-    # --timeout/deadline values for that mode (review Minor 1), because each is a generous allowance
-    # for Docker Hub throttling and can legitimately run close to its cap on the same slow pull. The
-    # job budget must hold them all, or a slow but passing run is killed by the JOB timeout. The
-    # step timeouts sum to 158 minutes: 57 (up) + 25 (images) + 12 (install a) + 10 (specs a) +
-    # 9 (stub up) + 10 (specs journeys) + 17 (upgrade b) + 8 (specs b) + 5 (evidence) + 5 (down).
-    # Before SMA-514 the sum was 139 and the budget 150; the budget grows by the two new step
-    # timeouts (9 + 10), which keeps the same 11-minute room for the untimed steps (reclaim,
-    # checkout, tool and dependency installs, Chromium).
-    timeout-minutes: 169
+    # 182 (SMA-701; 169 in SMA-514). Each step timeout below is sized to the SUM of
+    # ci/kind/run.sh's own --timeout/deadline values for that mode (review Minor 1), because each is
+    # a generous allowance for Docker Hub throttling and can legitimately run close to its cap on the
+    # same slow pull. The job budget must hold them all, or a slow but passing run is killed by the
+    # JOB timeout. The step timeouts sum to 171 minutes: 57 (up) + 25 (images) + 19 (install a) +
+    # 10 (specs a) + 9 (stub up) + 10 (specs journeys) + 23 (upgrade b) + 8 (specs b) +
+    # 5 (evidence) + 5 (down). Before SMA-514 the sum was 139 and the budget 150; the budget grew by
+    # the two new step timeouts (9 + 10). SMA-701 adds the IAM settle: +7 (install a) and
+    # +6 (upgrade b), to the sum and to the budget. Both keep the same 11-minute room for the
+    # untimed steps (reclaim, checkout, tool and dependency installs, Chromium).
+    timeout-minutes: 182
     env:
       # SMA-609: every captured shim output must set this.
       PROTO_REPORTER: text
@@ -143,9 +144,13 @@ jobs:
         timeout-minutes: 25
         run: bash ci/kind/run.sh images
 
+      # 19, not 12 (SMA-701). run.sh install_a's own waits, summed: helm install --timeout 10m
+      # (10m) + the IAM rollout status --timeout=240s (4m) + the IAM data-path poll, 1.5 min per
+      # console pod (the 60-s deadline, one last 20-s exec bound and one 2-s sleep), 2 pods in
+      # phase A (3m) = 10+4+3 = 17 minutes. +2 min margin.
       - name: helm install (phase A, both zones)
         id: install-a
-        timeout-minutes: 12
+        timeout-minutes: 19
         run: bash ci/kind/run.sh install a
 
       - name: Specs, phase A (R1, R1-control, R2, R3-control)
@@ -171,11 +176,13 @@ jobs:
         timeout-minutes: 10
         run: bash ci/kind/run.sh specs journeys
 
-      # 17, not 12 (review Minor 1, the reviewer's own worked example). run.sh upgrade_b's own
-      # waits, summed: helm upgrade --timeout 10m (10m) + the old-ReplicaSet settle deadline (3m)
-      # + settle_gateway_404's deadline (2m) = 10+3+2 = 15 minutes. +2 min margin.
+      # 23 (SMA-701; 17 in review Minor 1, the reviewer's own worked example). run.sh upgrade_b's
+      # own waits, summed: helm upgrade --timeout 10m (10m) + the old-ReplicaSet settle deadline
+      # (3m) + settle_gateway_404's deadline (2m) + the IAM rollout status --timeout=240s (4m) +
+      # the IAM data-path poll, 1 pod in phase B (1.5m) = 10+3+2+4+1.5 = 20.5 minutes.
+      # +2.5 min margin.
       - name: helm upgrade (phase B, gateway zone off) and settle
-        timeout-minutes: 17
+        timeout-minutes: 23
         run: bash ci/kind/run.sh upgrade b
 
       - name: Specs, phase B (R3)
