@@ -12,12 +12,12 @@ Spec: `docs/superpowers/specs/2026-09-23-sma-513-pr3-kind-chart-job-design.md`.
 | -- | -- |
 | `bash ci/kind/run.sh up` | kind v0.31.0 with a Kubernetes 1.31.14 node; Traefik 3.7.13 (chart 41.6.0, SHA-256 checked); a throwaway CA and two leaves; the CoreDNS `hosts` block; Postgres, Redis and Keycloak; the three chart Secrets; the discovery preflight |
 | `bash ci/kind/run.sh images` | `ci/images/run.sh build iam` and `build-console`, then `kind load` the three images: `paigasus-iam:dev`, `iam-console:dev`, `gateway-console:dev` |
-| `bash ci/kind/run.sh install a` | `helm install` with `values/a.yaml` (both zones, the CA bundle set), then the NOTES check (SMA-691) |
+| `bash ci/kind/run.sh install a` | `helm install` with `values/a.yaml` (both zones, the CA bundle set), then the IAM settle (SMA-701) and the NOTES check (SMA-691) |
 | `bash ci/kind/run.sh specs a` | Playwright project `phase-a` (tests R1, R1-control, R2, R3-control) |
 | `bash ci/kind/run.sh stub up` | scale the gateway stub to 1 replica, wait for it, and GET `/v1/service-info` from inside the cluster (`manifests/stub-check.yaml`, `stub-check.mjs`). Any failure is rc 2 |
 | `bash ci/kind/run.sh specs journeys` | Playwright project `journeys` (SMA-514: J1 auth round trip, J2 cross-zone round trip). Before the run: the skip scan, the step-title check and the checkers' own unit tests. After `--list`: exactly 2 tests. After the run: the JSON report check (`journeys-report.mjs`) |
 | `bash ci/kind/run.sh stub down` | scale the gateway stub to 0 and wait until its Service has no endpoints. For local re-runs only |
-| `bash ci/kind/run.sh upgrade b` | `helm upgrade` with `a.yaml` + `b.yaml` (the gateway zone off), then the settle step and the NOTES check (SMA-691) |
+| `bash ci/kind/run.sh upgrade b` | `helm upgrade` with `a.yaml` + `b.yaml` (the gateway zone off), then the settle step, the IAM settle (SMA-701) and the NOTES check (SMA-691) |
 | `bash ci/kind/run.sh specs b` | Playwright project `phase-b` (test R3), then check that R3's Deployment does not exist |
 | `bash ci/kind/run.sh diagnose` | write evidence into `<state>/diagnose` |
 | `bash ci/kind/run.sh down` | delete the cluster |
@@ -38,7 +38,7 @@ The chart does not deploy the gateway backend. `values/a.yaml` points `zones.gat
 
 - `up` applies the stub with **0 replicas**. In phase A the Service has no endpoints, so the gateway zone is `degraded`, and R3-control needs that.
 - `stub up` runs after `specs a` and makes the zone `available` for the journeys.
-- **Order rule for a local re-run.** `specs a` needs the stub down: run `stub down`, then wait about 60 s before `specs a`. The discovery cache keeps a good probe for 60 s (`freshMs`) and a failed probe for 10 s (`negativeMs`). So `available` → `degraded` takes about 60 s plus one render, and `degraded` → `available` takes about 10 s plus two renders. J2 waits up to 30 s for the Gateway link. These times assume the chart sets no `PAIGASUS_DISCOVERY_*` variable (spec assumption A1).
+- **Order rule for a local re-run.** `specs a` needs the stub down: run `stub down`, then wait about 60 s before `specs a`. The discovery cache keeps a good probe for 60 s (`freshMs`) and a failed probe for 10 s (`negativeMs`). So `available` → `degraded` takes about 60 s plus one render, and `degraded` → `available` takes about 10 s plus two renders: the first render after the 10 s starts a background re-probe, and a later render shows its result. J2 waits up to 30 s for the Gateway link. These times assume the chart sets no `PAIGASUS_DISCOVERY_*` variable (spec assumption A1).
 
 ## The journeys checks
 
@@ -54,6 +54,30 @@ It fails with rc 2 when `--list` finds any count other than 2, or when the repor
 - The check is inside `install a`. A NOTES failure there stops the later steps of that run. The rows N0-N6 in `charts/paigasus/tests/env.sh` test the NOTES text offline, on every pull request, so they find a text change first.
 - This job is not a required check. If a change deletes the NOTES check, nothing fails (SMA-691 spec, residual R2).
 
+## The IAM settle (SMA-701)
+
+`install a` and `upgrade b` call `settle_iam_service` before the NOTES check. Spec: `docs/superpowers/specs/2026-10-02-sma-701-kind-iam-service-settle-design.md`.
+
+- **Why `--wait` is not enough.** Helm 3.22.0 (`.prototools`) counts a Deployment as ready when `readyReplicas >= replicas - maxUnavailable` (`pkg/kube/ready.go`). The IAM backend Deployment has `replicas: 1` and `maxUnavailable: 1` on purpose (`charts/paigasus/templates/backend-deployment.yaml`). So the floor is 0, and `helm install --wait` can return while IAM has no Ready pod. Then the IAM Service has no endpoint, the console's discovery probe fails, and the IAM nav link stays disabled (PR 316). Do not remove the settle as a copy of `--wait`.
+- **Do not use `kubectl wait --for=condition=Available`.** The Deployment controller sets `Available=True` when `availableReplicas >= replicas - maxUnavailable`, which is 0 here too. `kubectl rollout status` compares `availableReplicas` with `updatedReplicas` and has no such floor. Part A uses it, with a 240 s timeout.
+- **Part B** runs `node -e` in each Running console pod (`kubectl exec -c console`). The script reads the IAM URL from `PAIGASUS_SERVICES` and asks `<url>/readyz` until it gets HTTP 200, for up to 60 s per pod. A watchdog stops each `kubectl exec` after 20 s. Each console Deployment of the release must have one Running pod to ask. A pod that is shutting down is not asked. When the probe gets an error, it writes `probe: <reason>` to stderr before it prints `000`. The `cannot reach IAM` message shows that line.
+- **What a run prints.** `iam settle: start HH:MM:SS UTC, IAM readyReplicas=N`. `readyReplicas=0` means that Helm returned before IAM was Ready, so the race occurred and the settle waited. Then `settled: IAM Ready after N s`, the console Deployments it found, and one `settled: <pod> reaches IAM /readyz (HTTP 200)` line per pod.
+- **Helm 4.** Helm 4 uses kstatus for `--wait`, which can change this arithmetic. After a Helm 4 bump the settle stays correct, but it can become redundant. Measure it before you remove it.
+- **Assumption A1.** The settle helps only if nothing probes IAM through discovery before the settle ends. A failed probe writes a failed record to Redis, and the settle cannot remove it. Today the console `/readyz` routes do not call discovery, the console liveness probe is `tcpSocket`, discovery has no timer and no warm-up, and the first page render is in `specs a`. A change to any of these can make A1 false.
+- **Local re-run hazard.** In CI, each run has a new cluster and a new Redis. A local re-run in the same cluster (`helm uninstall`, then `install a`) can find a failed `iam` record from the earlier attempt. Redis keeps it for 600 s (`staleMs`). The settle then passes, and R2 can fail again. Do one of these: wait more than 10 s (`negativeMs`), render the page once to start the background re-probe, and render it again after the probe completes (at most 1.5 s later); wait 600 s; or delete the record. The key is `pgs:svcinfo:iam` (`pgs:svcinfo:<service>`, no prefix in production, `ts/packages/paigasus-discovery/src/adapters/redis-cache.ts`):
+  `kubectl --context kind-paigasus-kind -n paigasus-deps exec deploy/redis -- redis-cli DEL pgs:svcinfo:iam`
+
+| Situation | rc | Message start |
+| -- | -- | -- |
+| The IAM backend Deployment name or object is not found | 2 | `cannot find the IAM backend Deployment` |
+| The IAM rollout is not done in 240 s | 1 | `the IAM backend Deployment did not become Ready` |
+| No `iam-console` Deployment, or a console Deployment has no Running pod to check | 2 | `no iam-console Deployment` / `no Running <name> pod to check the IAM data path from` |
+| At the 60 s deadline the last answer is another HTTP status | 1 | `<pod> reaches IAM, but it answers HTTP <code>` |
+| At the deadline there is no answer, and IAM `readyReplicas` is 0 | 1 | `IAM became NotReady after the rollout` |
+| At the deadline there is no answer, and IAM is still Ready | 2 | `<pod> cannot reach IAM` + the exec rc and stderr |
+| The probe printed something that is not an HTTP status | 2 | `the IAM probe in <pod> printed` |
+| A `kubectl` read fails | 2 | `cannot read the readyReplicas of` / `cannot list the Deployments in` / `cannot list the console pods in` |
+
 ## Reading the evidence
 
 On a failure or cancel, `chart.yml` runs `diagnose` and uploads `kind-evidence` (7 days).
@@ -65,6 +89,7 @@ On a failure or cancel, `chart.yml` runs `diagnose` and uploads `kind-evidence` 
 - `idp-preflight.json` — the discovery document the pods saw
 - `playwright/phase-a|b|journeys/` — the HTML report, `report.json`, and the traces of failed tests. For journeys also `skip-scan.txt`, `sources.txt`, `checker-tests.txt`, `list.txt` and `report-check.txt`
 - `stub-check.log` — the stub's in-cluster answer; `gateway-stub.txt` — its Deployment, pods and endpoints
+- `endpointslices.txt` — every EndpointSlice in `paigasus` (SMA-701)
 
 Secrets and the realm ConfigMap are never collected. The Playwright traces hold the per-run user password as typed. It is a throwaway that is valid only while that one cluster exists.
 
@@ -73,6 +98,7 @@ Where to look first:
 - The login ends on the IAM console, but IAM shows as unusable: IAM refused the token. Read `logs/paigasus-*-iam-backend-*.log` for the JWKS fetch or the `aud` check (spec F3, F4). A wrong or missing `aud` is the `info` line "its aud claim holds none of the accepted audiences" (at most one line per issuer in 10 seconds). IAM logs two other refusals at `info`. A token that is not an access token shows "a verified marker shows it is not an access token" (SMA-686). A sender-constrained token shows "it is bound to a key, and IAM cannot check the binding" (SMA-690).
 - The preflight fails: read `idp-preflight.json` and `keycloak.log`. A wrong `issuer` comes from Keycloak hostname options. A TLS error comes from the CA or the CoreDNS block.
 - `helm install --wait` times out and a console pod is not Ready: the pod failed its `/readyz` probe (SMA-705). Read `logs/paigasus-*-iam-console-*.log` or `logs/paigasus-*-gateway-console-*.log`. Look for `oidc.discovery_failed` with `"stage":"readiness"`. Its `reason` names the fault. A `tls` reason comes from the CA or the CoreDNS block, same as for the preflight. Or look for `readiness.runtime_failed`: its `error` names the error class.
+- `install a` or `upgrade b` fails in the IAM settle (SMA-701): read the `kind:` line, and see the table in "The IAM settle". For `cannot reach IAM`, read `endpointslices.txt` for the slice whose name starts with `paigasus-paigasus-iam-backend-`, and the `conditions.ready` value of each of its endpoints, then `logs/paigasus-*-iam-backend-*.log`. For `did not become Ready`, read `describe/` for the IAM pod: an image pull error or a failed probe shows there.
 
 ## Hazards
 

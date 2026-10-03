@@ -315,6 +315,15 @@ run_suite() {
   # runs the real binary), so it is a legitimate PROJECT-level dependent here too.
   run_case "service-info->services" "rs/crates/libs/paigasus-service-info/src/lib.rs" \
     "paigasus-service-info-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
+  # paigasus-redis edit -> the lib + every service that opens Redis through it (SMA-726). Only IAM
+  # today; SMA-677 PR 2 adds paigasus-gateway-rs and gateway-console-ts (whose playground project
+  # runs the real gateway binary). One-directional: the lib has no in-tree dependency.
+  run_case "redis->services" "rs/crates/libs/paigasus-redis/src/lib.rs" \
+    "paigasus-redis-rs,paigasus-iam-rs"
+  # paigasus-test-docker edit -> the dev-only Docker policy crate + the services whose suites use it
+  # (SMA-726). Only IAM today; the gateway joins in SMA-677 PR 2.
+  run_case "test-docker->services" "rs/crates/libs/paigasus-test-docker/src/lib.rs" \
+    "paigasus-test-docker-rs,paigasus-iam-rs"
   # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427)
   # + the IAM crates that consume the kernel's PRN/UUIDv7 (paigasus-iam-core-rs & the paigasus-iam-rs
   # service, SMA-441). paigasus-logging-rs is deliberately ABSENT — it has no kernel edge.
@@ -388,13 +397,13 @@ run_suite() {
   # coverage.
   # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case "lockfile->all-lint" "rs/Cargo.lock" \
-    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-redis-rs:lint,paigasus-service-info-rs:lint,paigasus-test-docker-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
   # CI-traversal twin of lockfile->all-lint. A Cargo.lock touch reaches every crate through `lint`'s
   # workspace inputs (SMA-534) and the three FFI tasks through theirs (SMA-546) — through INPUTS,
   # not dependsOn — so this set is expected to equal the deep one.
   # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case_ci "lockfile->all-lint-ci" "rs/Cargo.lock" \
-    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-redis-rs:lint,paigasus-service-info-rs:lint,paigasus-test-docker-rs:lint,paigasus-wasm-rs:lint,gateway-console-ts:test-e2e"
   # SMA-528 — a kernel SOURCE edit must select every consumer's build/test/lint under the traversal
   # `moon ci` uses. This is the case the issue exists for: before SMA-528 a kernel behavioural
   # change ran the kernel's own tests and NOT ONE consumer's, including paigasus-kernel-parity-rs,

@@ -181,7 +181,7 @@ catalog:
   jose: ^6.2.12
   # node-redis, the official client. v6 — its client API differs from v5, so check the installed
   # types rather than older examples. Chosen over ioredis because its redis:// DSN parsing matches
-  # rs/crates/services/paigasus-iam/src/adapters/redis_conn.rs verbatim.
+  # rs/crates/libs/paigasus-redis/src/lib.rs verbatim.
   redis: ^6.2.1
   # E2E tier for @paigasus/auth. A real browser is the only thing that can prove SameSite behaviour
   # on the cross-site redirect back from the IdP, and __Host- cookie-prefix enforcement.

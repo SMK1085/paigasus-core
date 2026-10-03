@@ -23,14 +23,16 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   dedicated `[profile.iam]` instead, selected only by `paigasus-iam-rs:test`'s `args: ['--profile',
   'iam']` — CI uploads it as the `nextest-junit` artifact, but a bare `cargo nextest run -p
   paigasus-iam` writes no report at all.
-- `paigasus-iam`'s **Docker-backed** suites (74 of its 79 integration binaries) skip when the
+- `paigasus-iam`'s **Docker-backed** suites (74 of its 77 integration binaries) skip when the
   daemon is unreachable, and that skip is deliberately quiet — nextest discards a passing test's
   stderr and Moon discards a passing task's output, so no message can surface there. What makes
   it visible is `tests/docker_preflight.rs`, a canary that FAILS when Docker is unreachable: a
   Docker-less run yields exactly one red instead of 73 silent passes (SMA-538). The policy itself
-  lives once, in `tests/support/docker.rs`, and `repo:iam-docker-policy-single-site` fails if a
-  new suite hand-rolls its own copy. Two env vars, both parsing `1`/`true`/`yes` (anything else,
-  including `0`, is off — unlike `CI`, which is presence-based):
+  lives once, in the dev-only crate `paigasus-test-docker` (SMA-726; IAM's
+  `tests/support/docker.rs` only re-exports it), and `repo:iam-docker-policy-single-site` fails
+  if a suite in IAM or the gateway hand-rolls its own copy. Two env vars, both parsing
+  `1`/`true`/`yes` (anything else, including `0`, is off — unlike `CI`, which is
+  presence-based):
   `PAIGASUS_REQUIRE_DOCKER=1` turns every suite's skip into a panic, which is what a FILTERED run
   (`--test relay_pg`, `-E 'test(foo)'`) needs, since the canary is not in that filter.
   `PAIGASUS_SKIP_DOCKER=1` restores skipping everywhere including the canary — it is a

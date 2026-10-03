@@ -2,7 +2,7 @@
 
 //! The canary that makes a Docker-less run of this crate impossible to miss (SMA-538).
 //!
-//! 74 of this crate's 79 integration binaries start a container, and each returns early when
+//! 74 of this crate's 77 integration binaries start a container, and each returns early when
 //! Docker is unavailable — reporting PASS in under a second having executed nothing. The
 //! `SKIP[docker-unavailable]` markers those suites print cannot fix that: nextest discards a
 //! PASSING test's stderr (`success-output` defaults to `never`) and Moon discards a passing
@@ -14,16 +14,15 @@
 //! **These counts are derived, not typed by hand.** Before editing this file, re-derive them
 //! and grep for the NUMBERS themselves, not a fixed word list — a "56 silent" search once
 //! missed this file's own "56 quiet" wording. Update every hit: this doc comment's two
-//! sentences, the assertion message below, `tests/support/docker.rs`'s `start_or_skip` doc
-//! comment (it restates the same fact in the one file that owns the policy), and the
-//! Docker-backed-suites bullets in `CLAUDE.md` and `docs/dev-setup.md`.
-//! `ls *.rs | wc -l` for the total (79); `grep -Ln "start_or_skip\|start_redis_or_skip\|
+//! sentences, the assertion message below, and the Docker-backed-suites bullets in
+//! `rs/CLAUDE.md` and `docs/dev-setup.md`. (The policy itself now lives in the
+//! `paigasus-test-docker` crate, SMA-726, and states no count.)
+//! `ls *.rs | wc -l` for the total (77); `grep -Ln "start_or_skip\|start_redis_or_skip\|
 //! start_migrated_postgres\|start_raw_postgres" *.rs` for the binaries that never start a
-//! container (currently `boot_deferred.rs`, `grpc_health.rs`, `health.rs`,
-//! `support_docker_policy.rs`, `support_docker_retry.rs` — 5 of them). Docker-backed = total
-//! minus that count (74); every
-//! "N silently/quietly pass" occurrence subtracts one more, for whichever binary is the one
-//! reporting red, since it is not among the suites that would otherwise pass unnoticed (73).
+//! container (currently `boot_deferred.rs`, `grpc_health.rs`, `health.rs` — 3 of them).
+//! Docker-backed = total minus that count (74); every "N silently/quietly pass" occurrence
+//! subtracts one more, for whichever binary is the one reporting red, since it is not among the
+//! suites that would otherwise pass unnoticed (73).
 //!
 //! It starts a real Redis rather than pinging the daemon: testcontainers exposes no ping, and
 //! merely constructing a client is not a probe — that succeeds when the endpoint exists with
@@ -42,7 +41,7 @@ async fn docker_backed_suites_can_actually_run() {
 
     assert!(
         docker::start_redis_or_skip("docker_preflight").await.is_some(),
-        "Docker is unreachable, so 73 of this crate's 79 integration suites will report PASS \
+        "Docker is unreachable, so 73 of this crate's 77 integration suites will report PASS \
          having executed nothing.\n  \
          Start the daemon, or re-run with PAIGASUS_SKIP_DOCKER=1 to accept the skips."
     );

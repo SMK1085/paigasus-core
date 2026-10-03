@@ -67,7 +67,7 @@ use crate::adapters::persistence::{
     PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgIdentityLinkStore, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore,
     PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, SeaOrmUnitOfWork,
 };
-use crate::adapters::redis_conn::{RedisHandle, RedisRole};
+use crate::adapters::redis_role::RedisRole;
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
 use crate::application::audit::AuditQueryService;
 use crate::application::authenticate_api_key::AuthenticateApiKey;
@@ -92,6 +92,7 @@ use paigasus_iam_core::{
     ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntityGenBumper, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore,
     SystemPolicyReconciler, SystemRoleReconciler, TeamRepository, UnitOfWork,
 };
+use paigasus_redis::RedisHandle;
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -861,16 +862,16 @@ impl AppState {
 /// `SliceCache` trio, SMA-444 Task 21; the API-key `RedisApiKeyCache`, SMA-445 Task 19, when
 /// [`shares_one_connection`] says its configured URL matches the authz one — otherwise that cache
 /// gets its OWN handle from this same function, SMA-485). The `redis_conn` LOCAL BINDING in
-/// `AppState::new` is not to be confused with the [`crate::adapters::redis_conn`] MODULE this
-/// delegates to. Mirrors `RedisJwksCache::connect`'s connect pattern.
+/// `AppState::new` is not to be confused with the `paigasus-redis` CRATE this delegates to
+/// (SMA-726). Mirrors `RedisJwksCache::connect`'s connect pattern.
 ///
-/// Delegates to [`crate::adapters::redis_conn::connect`] for the tuned reconnect retry budget
+/// Delegates to [`paigasus_redis::connect`] for the tuned reconnect retry budget
 /// (SMA-473) and the per-connection circuit breaker (SMA-476) — this function owns only the
 /// `AuthnError` mapping. `role` labels this connection's breaker metrics; a SHARED connection
 /// reports every command as `authz`, including the API-key cache's (SMA-476 D10, as amended by
 /// SMA-485 D1: sharing now requires the two URLs to match).
 async fn connect_redis(redis_url: &str, role: RedisRole) -> Result<RedisHandle, AuthnError> {
-    crate::adapters::redis_conn::connect(redis_url, role).await.map_err(|e| AuthnError::Backend(Box::new(e)))
+    paigasus_redis::connect(redis_url, role).await.map_err(|e| AuthnError::Backend(Box::new(e)))
 }
 
 /// Whether the API-key introspect cache may reuse the authz connection: textual equality of the
