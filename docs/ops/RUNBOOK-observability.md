@@ -1779,7 +1779,7 @@ and adding one is explicitly out of scope.
 **Fail-open is bounded, not free: while Redis is down, budget ~0.2–0.6 s per authz decision,
 ~0.3–0.8 s per authz-mutating request, and up to ~1.2 s for a gated cross-principal decision
 (the table below).** That bound exists only because it was
-deliberately imposed. `adapters::redis_conn::connect` is the
+deliberately imposed. `paigasus_redis::connect` (the `paigasus-redis` lib crate since SMA-726) is the
 **single** place this service constructs the shared `ConnectionManager` (enforced by the
 `repo:redis-connect-single-site` CI gate), and it caps the reconnect budget at
 **`number_of_retries = 1`** — down from redis-rs's stock 6 (SMA-473). A counter read against a
@@ -1857,7 +1857,7 @@ connect including address resolution (`redis-1.3.0/src/client.rs:505-510`).
 
 **That ~2.15 s figure is now measured, not calculated — the single most important correction in
 this section.**
-`adapters::redis_conn::tests::a_blackholed_backend_costs_seconds_per_command_until_the_breaker_opens`
+`paigasus_redis::tests::a_blackholed_backend_costs_seconds_per_command_until_the_breaker_opens` (in `rs/crates/libs/paigasus-redis`)
 drives a real dial against a Docker-free blackholed listener and pins it directly. Three runs of one command against a Closed
 breaker: **2.1531 s / 2.1540 s / 2.1523 s** — tight enough to be a floor (two ~1 s
 `connection_timeout` attempts plus a jittered retry delay), not an estimate. The same test's
@@ -1869,7 +1869,7 @@ from.
 
 **Since SMA-476, that ~2.15 s cost applies only to the failures that open the breaker, and to the
 request cohort already in flight when the outage starts — not to every command.** A per-connection
-circuit breaker (`adapters::redis_conn::RedisHandle`; one breaker per connection — one instance per
+circuit breaker (`paigasus_redis::RedisHandle`; one breaker per connection — one instance per
 `RedisRole`, i.e. `authz`, `api_keys` when that cache holds its own connection, and `jwks`) now sits in front of
 every Redis command:
 
@@ -1964,7 +1964,7 @@ the alert catalog above) are the most direct signal of everything in this subsec
 breaker's own state rather than a decision-cache side effect. Reach for those first; the narrative
 below (`IamAuthzRedisCacheBypassed`) remains accurate but is one step removed.
 
-**Boot still fails fast — just ~50× sooner.** `redis_conn::connect` is eager
+**Boot still fails fast — just ~50× sooner.** `paigasus_redis::connect` is eager
 (`ConnectionManager::new_with_config` awaits the initial connection), so a Redis that is down when
 IAM starts still fails `AppState::new` and the process exits, rather than coming up with a manager
 that only fails on first use. What changed is the tolerance window: ~6–12 s of retries became
@@ -2237,7 +2237,7 @@ hangs until you give up, the backlog fills, or you unpause it (this was confirme
 earlier attempt with `redis-cli -t 30` neither returned nor errored inside 40 s and had to be
 killed). The ~2.15 s / ~6.46 s figures in this section come **only** from Task 4's hermetic test,
 which exercises the actual production client configuration
-(`adapters::redis_conn::connect`'s `ConnectionManagerConfig`), not a generic client against a
+(`paigasus_redis::connect`'s `ConnectionManagerConfig`), not a generic client against a
 manually paused container. Use this procedure to confirm the *mechanism*; use the automated test's
 numbers to reason about *duration*.
 
@@ -2701,7 +2701,7 @@ Not implemented in this cycle; tracked as explicit follow-ups:
 - **A combined IAM introspect-and-authorize RPC**, which would also reduce the gateway's
   per-request round-trip count and the surface area of `GatewayIamDependencyUnavailable`.
 - **A Redis circuit breaker shipped in SMA-476** — every Redis command now runs behind a
-  per-connection breaker (`adapters::redis_conn::RedisHandle`) that stops attempting a known-down
+  per-connection breaker (`paigasus_redis::RedisHandle`) that stops attempting a known-down
   backend, capping the recovery lag added on top of any Redis outage at ~6 s instead of paying
   ~2.15 s **per failed command** for the outage's entire duration. Degradation (cache bypass, or
   503s on the fail-closed JWKS path) still lasts as long as the breaker itself stays non-closed,
@@ -2712,7 +2712,7 @@ Not implemented in this cycle; tracked as explicit follow-ups:
     (higher baseline RTT, a proxy hop in front of it) makes a global tightening a false-trip risk
     against connections that are merely slow, not down, so it was deliberately left alone rather
     than tuned down alongside the breaker.
-  - **SMA-473 D10's boot-tolerance residual.** `redis_conn::connect` is still eager and
+  - **SMA-473 D10's boot-tolerance residual.** `paigasus_redis::connect` is still eager and
     breaker-independent at boot (SMA-476 D11: a single boot dial has nothing to break on, so the
     breaker starts Closed and wraps commands only), so a Redis that is down or slow to start at
     boot still fails `AppState::new` and costs a crash-restart, exactly as before this cycle. If a

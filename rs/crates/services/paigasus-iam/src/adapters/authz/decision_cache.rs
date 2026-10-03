@@ -28,7 +28,8 @@ use redis::AsyncCommands;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::adapters::redis_conn::{RedisHandle, RedisRole};
+use crate::adapters::redis_role::RedisRole;
+use paigasus_redis::RedisHandle;
 
 /// Redis/in-proc key prefix (spec §7): `iam:authz:dec:<policy_content>:<entity_gen>:<hash>`.
 const KEY_PREFIX: &str = "iam:authz:dec:";
@@ -125,7 +126,7 @@ impl RedisDecisionCache {
     /// entry disappearing after `ttl_secs` (or on eviction) never surfaces as anything
     /// other than a subsequent miss.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthzError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Authz).await.map_err(redis_connect_err)?;
+        let conn = paigasus_redis::connect(redis_url, RedisRole::Authz).await.map_err(redis_connect_err)?;
         Ok(Self { conn, ttl_secs })
     }
 
@@ -310,8 +311,8 @@ mod tests {
     /// short-circuited (SMA-702). The 1 s clock is only a stall backstop.
     #[tokio::test]
     async fn an_open_breaker_keeps_the_decision_cache_failing_open() {
-        let blackhole = crate::adapters::redis_conn::test_support::start().await;
-        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, crate::adapters::redis_conn::RedisRole::Authz).expect("well-formed redis URL");
+        let blackhole = paigasus_redis::test_support::start().await;
+        let conn = paigasus_redis::with_open_breaker_for_tests(&blackhole.url, crate::adapters::redis_role::RedisRole::Authz).expect("well-formed redis URL");
         let cache = RedisDecisionCache::from_connection(conn, 60);
         let key = decision_key("content-a", 2, &base_request());
 

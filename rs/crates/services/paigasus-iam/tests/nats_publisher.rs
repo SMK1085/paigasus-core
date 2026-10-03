@@ -422,8 +422,8 @@ async fn the_relay_drains_rows_into_jetstream() {
 /// `spawn_connection_gauge_sampler` is ever actually called (`main.rs:98`) — was asserted by
 /// nothing at all.
 ///
-/// **This genuinely cannot be done Docker-free**, unlike `redis_conn.rs`'s equivalent
-/// (`breaker_transitions_emit_the_gauge_and_the_counter`, which needs no Redis at all because
+/// **This genuinely cannot be done Docker-free**, unlike `paigasus-redis`'s equivalent
+/// (`breaker_transitions_emit_the_callers_gauge_and_counter`, which needs no Redis at all because
 /// `ConnectionManager::new_lazy_with_config` never dials). `async-nats` has no lazy/mock client
 /// constructor: `NatsEventPublisher::connect` cannot return `Ok` — and so a `NatsEventPublisher`
 /// cannot exist at all, let alone reach the priming line or have a sampler spawned against it —
