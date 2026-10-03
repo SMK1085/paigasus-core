@@ -315,11 +315,11 @@ run_suite() {
   # runs the real binary), so it is a legitimate PROJECT-level dependent here too.
   run_case "service-info->services" "rs/crates/libs/paigasus-service-info/src/lib.rs" \
     "paigasus-service-info-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
-  # paigasus-redis edit -> the lib + every service that opens Redis through it (SMA-726). Only IAM
-  # today; SMA-677 PR 2 adds paigasus-gateway-rs and gateway-console-ts (whose playground project
-  # runs the real gateway binary). One-directional: the lib has no in-tree dependency.
+  # paigasus-redis edit -> the lib + every service that opens Redis through it (SMA-726): IAM, and
+  # the gateway's limit store (SMA-677), plus gateway-console-ts, whose playground project runs the
+  # real gateway binary. One-directional: the lib has no in-tree dependency.
   run_case "redis->services" "rs/crates/libs/paigasus-redis/src/lib.rs" \
-    "paigasus-redis-rs,paigasus-iam-rs"
+    "paigasus-redis-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
   # paigasus-test-docker edit -> the dev-only Docker policy crate + the services whose suites use it
   # (SMA-726). Only IAM today; the gateway joins in SMA-677 PR 2.
   run_case "test-docker->services" "rs/crates/libs/paigasus-test-docker/src/lib.rs" \

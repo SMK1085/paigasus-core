@@ -84,11 +84,23 @@ uuid = { workspace = true }
 # SMA-677 D6: the UTC budget periods (`iso_week()` for the ISO week-year) and the RFC 3339 reset
 # instant in the budget refusal message. Already a workspace dependency.
 chrono = { workspace = true }
+# SMA-677 D15: the one Redis connection site (tuned ConnectionManager + the SMA-476 breaker).
+# `{ workspace = true }`, so `moon.yml` hand-declares the `dependsOn` edge (ci/CLAUDE.md).
+paigasus-redis = { workspace = true }
+# SMA-677: the limit store names `redis::Script`, `redis::pipe` and `redis::RedisError`. The
+# `script` feature comes from paigasus-redis's own line (D19).
+redis = { workspace = true }
+# SMA-677 D16: `TaskTracker` for the spawned charges and the 5 s shutdown drain. `rt` adds only
+# tokio/rt, tokio/sync and futures-util, all already in Cargo.lock.
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a
 # dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
+# SMA-677: the blackhole listener and the lazy / open-breaker handles for the fail-open tests.
+# Test builds only, like paigasus-logging/test-support above.
+paigasus-redis = { workspace = true, features = ["test-support"] }
 # SMA-677: unit tests read the limit metrics from a local DebuggingRecorder instead of the
 # process-global Prometheus recorder. Same line as paigasus-iam's.
 metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }

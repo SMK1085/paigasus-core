@@ -5,3 +5,6 @@
 pub mod memory;
 
 pub use memory::MemoryLimitStore;
+pub mod redis;
+
+pub use self::redis::RedisLimitStore;

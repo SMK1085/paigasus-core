@@ -6,6 +6,8 @@ language: 'rust'
 
 dependsOn:
   - 'paigasus-proto-rs'
+  # SMA-677: { workspace = true } in Cargo.toml, so this edge is hand-written.
+  - 'paigasus-redis-rs'
   # A `{ workspace = true }` Cargo dependency since SMA-635 (`domain::resolve_org` uses the kernel
   # `Prn` API), so this hand-written edge is REQUIRED (ci/CLAUDE.md: Moon does not resolve
   # `workspace = true`). It also feeds `fileGroups.upstreams` below.
@@ -30,6 +32,8 @@ fileGroups:
     - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto/src/**/*'
     - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+    - '/rs/crates/libs/paigasus-redis/src/**/*'
+    - '/rs/crates/libs/paigasus-redis/Cargo.toml'
     - '/rs/crates/libs/paigasus-service-info/src/**/*'
     - '/rs/crates/libs/paigasus-service-info/Cargo.toml'
 
