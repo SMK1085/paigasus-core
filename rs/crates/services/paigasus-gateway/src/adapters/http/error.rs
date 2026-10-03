@@ -251,12 +251,15 @@ impl GatewayError {
     /// period and the reset instant (D8) — never a count and never the org id.
     fn message(self) -> String {
         match self {
-            GatewayError::BudgetExhausted { resets_at_unix, period } => {
-                let resets_at = DateTime::<Utc>::from_timestamp(resets_at_unix, 0)
-                    .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
-                    .unwrap_or_default();
-                format!("The organization token budget for {} is used up. It resets at {resets_at}.", period.label_at_reset(resets_at_unix))
-            }
+            GatewayError::BudgetExhausted { resets_at_unix, period } => match DateTime::<Utc>::from_timestamp(resets_at_unix, 0) {
+                Some(instant) => format!(
+                    "The organization token budget for {} is used up. It resets at {}.",
+                    period.label_at_reset(resets_at_unix),
+                    instant.to_rfc3339_opts(SecondsFormat::Secs, true)
+                ),
+                // An instant outside chrono's range is a corrupt record: name no period, no instant.
+                None => self.parts().4.to_owned(),
+            },
             other => other.parts().4.to_owned(),
         }
     }
@@ -360,6 +363,22 @@ mod tests {
         assert_eq!(body["error"]["type"], "insufficient_quota");
         assert_eq!(body["error"]["code"], "budget-exhausted");
         assert_eq!(body["error"]["message"], "The organization token budget for 2026-10 is used up. It resets at 2026-11-01T00:00:00Z.");
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_reset_instant_does_not_panic() {
+        for resets_at_unix in [i64::MAX, i64::MIN] {
+            let resp = GatewayError::BudgetExhausted {
+                resets_at_unix,
+                period: BudgetPeriod::Monthly,
+            }
+            .into_response();
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(resp.headers()["paigasus-retryable"], "false");
+            assert_eq!(resp.headers()["x-should-retry"], "false");
+            let body = body_json(resp).await;
+            assert_eq!(body["error"]["message"], "The organization token budget for this period is used up.");
+        }
     }
 
     #[tokio::test]

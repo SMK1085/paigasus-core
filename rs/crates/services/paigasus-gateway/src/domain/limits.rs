@@ -193,7 +193,21 @@ pub enum PeriodKey {
 impl BudgetPeriod {
     /// The period that holds `now`. Every replica derives the same key from the instant alone.
     pub fn key_at(self, now: SystemTime) -> PeriodKey {
-        let date = DateTime::<Utc>::from(now).date_naive();
+        let secs = match now.duration_since(UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
+            Err(before) => i64::try_from(before.duration().as_secs()).map_or(i64::MIN, |s| -s),
+        };
+        self.key_at_unix(secs)
+    }
+
+    /// Total for every `i64`: an instant outside chrono's range clamps to its first or last date,
+    /// so no caller can panic on a hostile or corrupt timestamp.
+    fn key_at_unix(self, secs: i64) -> PeriodKey {
+        let date = match DateTime::<Utc>::from_timestamp(secs, 0) {
+            Some(instant) => instant.date_naive(),
+            None if secs < 0 => NaiveDate::MIN,
+            None => NaiveDate::MAX,
+        };
         match self {
             BudgetPeriod::Daily => PeriodKey::Day(date),
             BudgetPeriod::Weekly => {
@@ -219,8 +233,7 @@ impl BudgetPeriod {
     /// D8: the label of the period that resets at `resets_at_unix`, from the instant one second
     /// before the reset ("2026-10", "2026-W40", "2026-10-02").
     pub fn label_at_reset(self, resets_at_unix: i64) -> String {
-        let secs = u64::try_from(resets_at_unix.saturating_sub(1)).unwrap_or(0);
-        self.key_at(UNIX_EPOCH + Duration::from_secs(secs)).label()
+        self.key_at_unix(resets_at_unix.saturating_sub(1).max(0)).label()
     }
 }
 
@@ -814,6 +827,17 @@ mod tests {
     #[test]
     fn the_default_period_is_monthly() {
         assert_eq!(BudgetPeriod::default(), BudgetPeriod::Monthly);
+    }
+
+    #[test]
+    fn extreme_instants_never_panic() {
+        for period in [BudgetPeriod::Daily, BudgetPeriod::Weekly, BudgetPeriod::Monthly] {
+            for secs in [i64::MIN, i64::MIN + 1, -1, 0, i64::MAX - 1, i64::MAX] {
+                let _ = period.label_at_reset(secs);
+            }
+            let _ = period.key_at(UNIX_EPOCH + Duration::from_secs(u64::MAX / 2)).label();
+            let _ = period.key_at(UNIX_EPOCH - Duration::from_secs(u64::MAX / 2)).label();
+        }
     }
 
     #[test]
