@@ -10,11 +10,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use futures::StreamExt;
 use paigasus_gateway::adapters::limits::MemoryLimitStore;
 use paigasus_gateway::domain::limits::UnavailableKind;
 use paigasus_logging::test_support::capture_logs_at;
 use support::MockOpenAi;
 use support::limits::*;
+use tower::ServiceExt;
 
 fn memory() -> Arc<MemoryLimitStore> {
     Arc::new(MemoryLimitStore::new())
@@ -200,4 +202,111 @@ async fn an_unscoped_request_with_a_budget_is_500_internal() {
     assert_eq!(refused.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(refused.json()["error"]["code"], "internal");
     assert_eq!(mock.request_count(), 0);
+}
+
+/// Send `STREAM_BODY` through a recording store with a large budget; read the whole stream.
+async fn stream_charged(base_url: &str) -> (Sent, Vec<u64>) {
+    let store = RecordingStore::new();
+    let app = app(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), base_url, Some(limits(rules(None, None, Some(1_000_000)), store.clone())));
+    let sent = send(&app, STREAM_BODY).await;
+    (sent, store.charges())
+}
+
+/// A4: a stream with a usage record charges the reported total.
+#[tokio::test]
+async fn a_stream_with_a_usage_record_charges_the_reported_tokens() {
+    let mock = MockOpenAi::spawn_raw_sse(vec![chunk("Hel", true), chunk("lo", true), usage_chunk(7), "data: [DONE]\n\n".to_owned()]).await;
+    let (sent, charges) = stream_charged(&mock.base_url).await;
+    assert_eq!(sent.status, StatusCode::OK);
+    assert_eq!(charges, vec![7]);
+}
+
+/// A4/D14: no usage gives the request estimate (1) plus one token per record, with and without
+/// `"usage":null`.
+#[tokio::test]
+async fn a_stream_without_usage_charges_one_token_per_record() {
+    let mock = MockOpenAi::spawn_raw_sse(vec![chunk("a", false), chunk("b", true), chunk("c", true), "data: [DONE]\n\n".to_owned()]).await;
+    assert_eq!(stream_charged(&mock.base_url).await.1, vec![1 + 3]);
+}
+
+/// Section 4.6: CRLF record delimiters (vLLM, LiteLLM; SMA-558).
+#[tokio::test]
+async fn crlf_records_are_counted_and_a_crlf_usage_record_is_read() {
+    let crlf = |record: String| record.replace("\n\n", "\r\n\r\n");
+    let estimated = MockOpenAi::spawn_raw_sse(vec![crlf(chunk("a", true)), crlf(chunk("b", true)), "data: [DONE]\r\n\r\n".to_owned()]).await;
+    assert_eq!(stream_charged(&estimated.base_url).await.1, vec![1 + 2]);
+    let reported = MockOpenAi::spawn_raw_sse(vec![crlf(chunk("a", true)), crlf(usage_chunk(9)), "data: [DONE]\r\n\r\n".to_owned()]).await;
+    assert_eq!(stream_charged(&reported.base_url).await.1, vec![9]);
+}
+
+/// A4: a mid-stream upstream error charges exactly once (two records forwarded plus the estimate).
+#[tokio::test]
+async fn a_mid_stream_error_charges_exactly_once() {
+    let base_url = support::spawn_truncated_sse().await;
+    let (sent, charges) = stream_charged(&base_url).await;
+    assert!(sent.text().contains("\"code\":\"upstream-error\""), "{}", sent.text());
+    assert_eq!(charges, vec![1 + 2]);
+}
+
+/// A4: a client that disconnects mid-stream is charged the estimate, once, when the body drops.
+#[tokio::test]
+async fn a_client_disconnect_mid_stream_charges_the_estimate_once() {
+    let (mock, _cancelled) = MockOpenAi::spawn_abortable_stream().await;
+    let store = RecordingStore::new();
+    let app = app(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, Some(limits(rules(None, None, Some(1_000_000)), store.clone())));
+    let resp = app.oneshot(post(STREAM_BODY)).await.expect("the router answers");
+    let mut body = resp.into_body().into_data_stream();
+    let first = body.next().await.expect("a first frame").expect("not a transport error");
+    assert!(first.starts_with(b"data: hold"), "{first:?}");
+    assert!(store.charges().is_empty(), "nothing is charged while the stream is open");
+    drop(body);
+    assert_eq!(store.charges(), vec![1 + 1], "the request estimate plus the one forwarded record");
+}
+
+/// A5, stream: the SSE bytes are byte-identical with and without limits.
+#[tokio::test]
+async fn the_sse_bytes_are_byte_identical_with_limits() {
+    let records = vec![chunk("Hel", true), chunk("lo", true), usage_chunk(7), "data: [DONE]\n\n".to_owned()];
+    let mock = MockOpenAi::spawn_raw_sse(records.clone()).await;
+    let plain = send(&app(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, None), STREAM_BODY).await;
+    let limited = send(
+        &app(
+            ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN),
+            &mock.base_url,
+            Some(limits(rules(Some(100), Some(100), Some(1_000_000)), memory())),
+        ),
+        STREAM_BODY,
+    )
+    .await;
+    assert_eq!(plain.body, limited.body);
+    assert_eq!(limited.text(), records.concat());
+}
+
+/// A4: a client disconnect before the upstream answers drops the handler future; the guard
+/// charges the request estimate, once. No sleep race: wait for the upstream request, drop, then
+/// poll the store with a bound.
+#[tokio::test]
+async fn a_non_stream_client_disconnect_charges_the_request_estimate() {
+    let mock = MockOpenAi::spawn_delayed_json(Duration::from_secs(30), StatusCode::OK, USAGE_BODY).await;
+    let store = RecordingStore::new();
+    let app = app(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, Some(limits(rules(None, None, Some(1_000_000)), store.clone())));
+    let request = send(&app, NON_STREAM_BODY);
+    let upstream_reached = async {
+        while mock.request_count() < 1 {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::select! {
+        _ = request => panic!("the delayed upstream must not answer"),
+        _ = tokio::time::timeout(Duration::from_secs(10), upstream_reached) => {}
+    }
+    // The select dropped the request future: that is the client disconnect.
+    assert_eq!(mock.request_count(), 1, "the upstream request was made");
+    for _ in 0..200 {
+        if !store.charges().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(store.charges(), vec![1], "exactly the request estimate, one charge");
 }

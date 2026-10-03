@@ -45,7 +45,7 @@ use super::AppState;
 use super::error::GatewayError;
 use crate::adapters::http::bytes::EnvelopeBytes;
 use crate::adapters::http::dto::ChatCompletionRequest;
-use crate::adapters::http::usage::{self, BodyUsage};
+use crate::adapters::http::usage::{self, BodyUsage, UsageScanner};
 use crate::adapters::openai::{ChatResponse, OpenAiByteStream, OpenAiError};
 use crate::application::charge_guard::ChargeGuard;
 use crate::domain::{CallerContext, Credential};
@@ -264,6 +264,7 @@ enum StreamState {
 /// fails, or is dropped, this value drops once, and the guard with it (SMA-677 § 4.6).
 struct Relay {
     phase: StreamState,
+    scan: UsageScanner,
     guard: Option<ChargeGuard>,
 }
 
@@ -282,21 +283,37 @@ struct Relay {
 fn terminal_sse_error_stream(inner: OpenAiByteStream, guard: Option<ChargeGuard>) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     let start = Relay {
         phase: StreamState::Streaming(inner),
+        scan: UsageScanner::new(),
         guard,
     };
-    futures::stream::unfold(start, |Relay { phase, guard }| async move {
+    futures::stream::unfold(start, |Relay { phase, mut scan, mut guard }| async move {
         match phase {
             StreamState::Streaming(mut inner) => match inner.next().await {
-                // Forward each chunk exactly as it arrived (unbuffered).
-                Some(Ok(chunk)) => Some((
-                    Ok(chunk),
+                // Forward each chunk exactly as it arrived (unbuffered). The scanner reads a copy,
+                // and only when a guard exists (no `[limits]`: no parsing at all).
+                Some(Ok(chunk)) => {
+                    if let Some(guard) = guard.as_mut() {
+                        scan.feed(&chunk);
+                        guard.set_stream_progress(scan.completion_records(), scan.reported_total());
+                    }
+                    Some((
+                        Ok(chunk),
+                        Relay {
+                            phase: StreamState::Streaming(inner),
+                            scan,
+                            guard,
+                        },
+                    ))
+                }
+                // First upstream error: emit the terminal event, then end.
+                Some(Err(_)) => Some((
+                    Ok(Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes())),
                     Relay {
-                        phase: StreamState::Streaming(inner),
+                        phase: StreamState::Done,
+                        scan,
                         guard,
                     },
                 )),
-                // First upstream error: emit the terminal event, then end.
-                Some(Err(_)) => Some((Ok(Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes())), Relay { phase: StreamState::Done, guard })),
                 // Clean upstream end.
                 None => None,
             },
@@ -308,6 +325,14 @@ fn terminal_sse_error_stream(inner: OpenAiByteStream, guard: Option<ChargeGuard>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Section 4.6: the relay never changes a forwarded byte, with or without a scanner (A5).
+    #[tokio::test]
+    async fn the_relay_forwards_bytes_unchanged() {
+        let chunks = vec![Ok(Bytes::from_static(b"data: {\"usage\":{\"total_tokens\":3}}\r\n")), Ok(Bytes::from_static(b"\r\ndata: [DONE]\n\n"))];
+        let out: Vec<Bytes> = terminal_sse_error_stream(futures::stream::iter(chunks).boxed(), None).map(|r| r.unwrap()).collect().await;
+        assert_eq!(out.concat(), b"data: {\"usage\":{\"total_tokens\":3}}\r\n\r\ndata: [DONE]\n\n".to_vec());
+    }
 
     #[tokio::test]
     async fn terminal_stream_forwards_chunks_then_ends_cleanly() {
