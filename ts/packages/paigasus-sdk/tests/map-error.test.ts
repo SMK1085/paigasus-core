@@ -151,12 +151,38 @@ describe("arm 3 — the gateway's OpenAI envelope", () => {
     expect(result.rawReason).toBe('insufficient_quota');
     // `rate-limited`, not `degraded`. This is THE case that state exists for: an upstream quota
     // refusal forwarded verbatim through the chat passthrough, which wants different copy from a
-    // sick service. Nothing in this repository emits 429 itself, so every 429 the SDK sees is
-    // this one.
+    // sick service. The gateway's OWN 429s carry a registry reason (SMA-677, cases below); this
+    // fixture has none, so it takes the transport table's answer.
     expect(result.presentation).toBe('rate-limited');
     expect(result.retryable).toBeNull();
     // A null param must not enter metadata as the string "null".
     expect(result.metadata).toEqual({});
+  });
+
+  // SMA-677. The gateway's own budget refusal: never retryable, and its own presentation.
+  it('maps budget-exhausted to quota-exhausted, not retryable', () => {
+    const result = mapError({
+      kind: 'http',
+      status: 429,
+      headers: new Headers({ 'paigasus-retryable': 'false' }),
+      body: { error: { message: 'The organization token budget for 2026-10 is used up. It resets at 2026-11-01T00:00:00Z.', type: 'insufficient_quota', param: null, code: 'budget-exhausted' } },
+    });
+    expect(result.reason).toBe(ErrorReason.BUDGET_EXHAUSTED);
+    expect(result.presentation).toBe('quota-exhausted');
+    expect(result.retryable).toBe(false);
+  });
+
+  // SMA-677. The gateway's own rate refusal keeps the transport table's `rate-limited`.
+  it('maps rate-limited to rate-limited, retryable', () => {
+    const result = mapError({
+      kind: 'http',
+      status: 429,
+      headers: new Headers({ 'paigasus-retryable': 'true' }),
+      body: { error: { message: 'Too many requests.', type: 'requests', param: null, code: 'rate-limited' } },
+    });
+    expect(result.reason).toBe(ErrorReason.RATE_LIMITED);
+    expect(result.presentation).toBe('rate-limited');
+    expect(result.retryable).toBe(true);
   });
 
   it('handles a null code', () => {

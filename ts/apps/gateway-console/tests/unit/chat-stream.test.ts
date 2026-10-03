@@ -46,6 +46,18 @@ describe('createChatStreamParser', () => {
     expect(all([delta('a'), raw, 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'a' }, { kind: 'done' }]);
   });
 
+  // SMA-677 A10. With include_usage, OpenAI sends `"usage": null` in every chunk and ends the stream
+  // with one usage record whose `choices` is empty. Neither may change what the user sees.
+  it('reads a chunk that carries usage: null', () => {
+    const chunk = `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'b' } }], usage: null })}\n\n`;
+    expect(all([chunk, 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'b' }, { kind: 'done' }]);
+  });
+
+  it('emits nothing for the final usage record', () => {
+    const usage = `data: ${JSON.stringify({ id: 'chatcmpl-1', object: 'chat.completion.chunk', choices: [], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } })}\n\n`;
+    expect(all([delta('a'), usage, 'data: [DONE]\n\n'])).toEqual([{ kind: 'delta', text: 'a' }, { kind: 'done' }]);
+  });
+
   it('reports an end with no [DONE] and no paigasus-error as an error', () => {
     expect(all([delta('cut')])).toEqual([
       { kind: 'delta', text: 'cut' },

@@ -11,8 +11,12 @@
 // dead-code lint rather than sprinkle `#[allow]` on each item.
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+pub mod limits;
+pub mod limits_contract;
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -49,6 +53,11 @@ enum MockResponse {
     /// [`CancelGuard`] that flips `cancelled` when the response body future is dropped — i.e. when
     /// the upstream request is cancelled on client disconnect. The client-abort proof (G8).
     AbortableStream { cancelled: Arc<AtomicBool> },
+    /// Non-stream, after `delay`: drives the first-byte timeout (SMA-677 A4).
+    DelayedJson { delay: Duration, status: StatusCode, body: String },
+    /// Stream: emit each element VERBATIM as one frame — no `data:` prefix and no terminator are
+    /// added, so a test controls line endings and record shape exactly (SMA-677).
+    RawSse { chunks: Vec<String> },
 }
 
 /// A Drop guard carried inside the abortable-stream response body: dropping it (which hyper does
@@ -64,6 +73,7 @@ impl Drop for CancelGuard {
 struct MockState {
     response: MockResponse,
     recorded: Mutex<Option<RecordedRequest>>,
+    requests: AtomicUsize,
 }
 
 /// A running mock OpenAI server. Its `base_url` is what you feed into [`OpenAiConfig`]; the server
@@ -102,8 +112,27 @@ impl MockOpenAi {
         (mock, cancelled)
     }
 
+    /// Start a mock that answers after `delay` (the non-stream path).
+    pub async fn spawn_delayed_json(delay: Duration, status: StatusCode, body: impl Into<String>) -> Self {
+        Self::spawn(MockResponse::DelayedJson { delay, status, body: body.into() }).await
+    }
+
+    /// Start a mock that streams each chunk verbatim (the stream path).
+    pub async fn spawn_raw_sse(chunks: Vec<String>) -> Self {
+        Self::spawn(MockResponse::RawSse { chunks }).await
+    }
+
+    /// How many requests reached the upstream (SMA-677: a refused request makes none).
+    pub fn request_count(&self) -> usize {
+        self.state.requests.load(Ordering::SeqCst)
+    }
+
     async fn spawn(response: MockResponse) -> Self {
-        let state = Arc::new(MockState { response, recorded: Mutex::new(None) });
+        let state = Arc::new(MockState {
+            response,
+            recorded: Mutex::new(None),
+            requests: AtomicUsize::new(0),
+        });
         let router = Router::new().route("/v1/chat/completions", post(handle)).with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
@@ -126,12 +155,25 @@ impl MockOpenAi {
 /// Records the inbound request, then answers per the configured [`MockResponse`]. `Bytes` is the
 /// body-consuming extractor, so it comes last.
 async fn handle(State(state): State<Arc<MockState>>, headers: HeaderMap, body: Bytes) -> Response {
+    state.requests.fetch_add(1, Ordering::SeqCst);
     *state.recorded.lock().expect("recorded lock not poisoned") = Some(RecordedRequest {
         headers: headers.clone(),
         body: body.clone(),
     });
 
     match &state.response {
+        MockResponse::DelayedJson { delay, status, body } => {
+            tokio::time::sleep(*delay).await;
+            (*status, [(axum::http::header::CONTENT_TYPE, "application/json")], body.clone()).into_response()
+        }
+        MockResponse::RawSse { chunks } => {
+            let stream = futures::stream::iter(chunks.clone().into_iter().map(|c| Ok::<Bytes, std::convert::Infallible>(Bytes::from(c))));
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(stream))
+                .expect("build sse response")
+        }
         MockResponse::Json { status, body } => (*status, [(axum::http::header::CONTENT_TYPE, "application/json")], body.clone()).into_response(),
         MockResponse::Sse { events } => {
             // Stream each event as its own frame via `Body::from_stream` — genuinely streamed
@@ -170,4 +212,33 @@ async fn handle(State(state): State<Arc<MockState>>, headers: HeaderMap, body: B
                 .expect("build sse response")
         }
     }
+}
+
+/// Bind an ephemeral port and serve ONE connection with a chunked `text/event-stream` response that
+/// sends two `data:` frames then CLOSES the socket WITHOUT the terminating `0\r\n\r\n` chunk. reqwest
+/// yields the two frames and then errors on the premature EOF — exactly the mid-stream failure the
+/// handler's terminal-SSE-error adapter must handle. Returns the `http://…` base URL.
+pub async fn spawn_truncated_sse() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            // Best-effort drain of the (small) request head+body so the client finishes sending.
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+
+            let frame1 = "data: first\n\n";
+            let frame2 = "data: second\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{l1:x}\r\n{frame1}\r\n{l2:x}\r\n{frame2}\r\n",
+                l1 = frame1.len(),
+                l2 = frame2.len(),
+            );
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Drop `sock` here -> the connection closes mid-stream (no terminating chunk).
+        }
+    });
+    format!("http://{addr}")
 }

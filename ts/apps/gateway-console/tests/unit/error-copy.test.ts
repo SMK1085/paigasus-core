@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { ErrorReason, type PaigasusError, type Presentation } from '@paigasus/sdk/errors/types';
 import { FORM_REASON_COPY, PRESENTATION_COPY, formMessage } from '../../app/_components/error-copy';
 
-const PRESENTATIONS: readonly Presentation[] = ['relogin', 'forbidden', 'not-found', 'degraded', 'rate-limited', 'invalid-input', 'conflict', 'disabled', 'generic'];
+const PRESENTATIONS: readonly Presentation[] = ['relogin', 'forbidden', 'not-found', 'degraded', 'rate-limited', 'quota-exhausted', 'invalid-input', 'conflict', 'disabled', 'generic'];
 
 function errorWith(presentation: Presentation, reason: ErrorReason | null): PaigasusError {
   return {

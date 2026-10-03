@@ -238,6 +238,14 @@ enum ErrorReason {
   // "org-required" — no paigasus-org header, and the user reaches zero or
   // several organizations (400, param "paigasus-org").
   ERROR_REASON_ORG_REQUIRED = 310;
+  // "rate-limited" — the principal or its organization sent more chat requests
+  // in the current 60 s window than its configured limit (429, OpenAI type
+  // "requests"). Retryable: the answer carries Retry-After (SMA-677).
+  ERROR_REASON_RATE_LIMITED = 311;
+  // "budget-exhausted" — the organization used its token budget for the
+  // current UTC period (429, OpenAI type "insufficient_quota"). Not retryable
+  // until the period resets; the answer carries x-should-retry: false (SMA-677).
+  ERROR_REASON_BUDGET_EXHAUSTED = 312;
 
   // ---- Shared (900-999) ----------------------------------------------------
   // Any domain may emit these; `domain` is what distinguishes them.

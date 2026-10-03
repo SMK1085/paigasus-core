@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { presentationForGrpcCode, presentationForHttpStatus, presentationForTransportCause } from '../src/errors/transport-status.js';
 import type { Presentation } from '../src/errors/types.js';
 
-const PRESENTATIONS: readonly Presentation[] = ['relogin', 'forbidden', 'not-found', 'degraded', 'rate-limited', 'invalid-input', 'conflict', 'disabled', 'generic'];
+const PRESENTATIONS: readonly Presentation[] = ['relogin', 'forbidden', 'not-found', 'degraded', 'rate-limited', 'quota-exhausted', 'invalid-input', 'conflict', 'disabled', 'generic'];
 
 describe('the gRPC status table', () => {
   // TOTALITY is the assertion that carries this suite. A transcription of the table into the
