@@ -4,6 +4,8 @@
 //! bearer credential, and the organization resolution the OIDC path uses (SMA-635). Consumed by
 //! the chat handler to log request metadata (never the prompt/response body or any other PII).
 
+pub mod limits;
+
 /// Which credential authenticated the request. `Oidc`, not `User`: an OIDC bearer can belong to a
 /// machine client, and IAM uses the same name (`paigasus-iam` `authn.rs:230`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +92,7 @@ pub fn resolve_org(header: OrgHeader<'_>, node_prns: &[&str]) -> Result<Prn, Org
 /// The kernel's UUID rule: exactly 36 characters, and `Uuid::try_parse` accepts it. The length
 /// check rejects the simple (32), braced (38) and `urn:uuid:` (45) forms that `try_parse` would
 /// otherwise accept.
-fn parse_org_uuid(value: &str) -> Option<Uuid> {
+pub(crate) fn parse_org_uuid(value: &str) -> Option<Uuid> {
     if value.len() != 36 {
         return None;
     }
@@ -102,7 +104,7 @@ fn org_prn(id: Uuid) -> Prn {
 }
 
 /// The org a tenancy PRN belongs to, or `None` when the PRN names no org.
-fn org_of(raw: &str) -> Option<Uuid> {
+pub(crate) fn org_of(raw: &str) -> Option<Uuid> {
     let prn = Prn::parse(raw).ok()?;
     if prn.service() != IAM_SERVICE {
         return None;
