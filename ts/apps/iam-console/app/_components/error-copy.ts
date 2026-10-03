@@ -4,7 +4,7 @@
 // import is @paigasus/sdk's guard-free ./errors/types entry (ts/packages/paigasus-sdk/src/errors/types.ts),
 // so form-error.tsx (a client component) can use it.
 //
-// Two tables. PRESENTATION_COPY is total over Presentation, so a tenth presentation fails the
+// Two tables. PRESENTATION_COPY is total over Presentation, so an eleventh presentation fails the
 // type-check. FORM_REASON_COPY covers the reasons that the create, membership, rename, archive and
 // restore forms can get (SMA-630 added the last three); a test asserts every key
 // is a real ErrorReason. A reason with no entry — including one this build does not know, which
@@ -18,6 +18,7 @@ export const PRESENTATION_COPY: Record<Presentation, { title: string; body: stri
   'not-found': { title: 'Not found', body: 'This item does not exist, or it was removed.' },
   degraded: { title: 'IAM is not available', body: 'IAM did not answer in time. Try again in a moment.' },
   'rate-limited': { title: 'Too many requests', body: 'Wait a moment, then try again.' },
+  'quota-exhausted': { title: 'Usage limit reached', body: 'Your organization used its token budget for this period. Ask an administrator, or wait until the budget resets.' },
   'invalid-input': { title: 'The request was not valid', body: 'Check the values and try again.' },
   conflict: { title: 'The request conflicts with the current state', body: 'Reload the page and try again.' },
   disabled: { title: 'This feature is not enabled on this IAM', body: 'An operator can enable it in the IAM configuration.' },
@@ -39,7 +40,7 @@ export const FORM_REASON_COPY: Partial<Record<ErrorReason, string>> = {
   [ErrorReason.NOT_FOUND]: 'The item was not found. It may have been removed.',
   [ErrorReason.MISSING_REQUIRED_FIELD]: 'Fill in every required field.',
   [ErrorReason.FORBIDDEN]: 'You do not have permission to do this.',
-  // The SDK maps TWO reasons to the `disabled` presentation (ts/packages/paigasus-sdk/src/errors/presentation.ts:49,74).
+  // The SDK maps TWO reasons to the `disabled` presentation (presentation.ts: PRINCIPAL_INACTIVE and CAPABILITY_DISABLED).
   // Spec § 6.1 gives a Server Action the same "not enabled" copy as a page, so a disabled capability
   // shows it. An inactive principal is not a disabled feature, so it gets its own sentence.
   [ErrorReason.CAPABILITY_DISABLED]: 'This feature is not enabled on this IAM.',

@@ -215,6 +215,9 @@ mod tests {
         "streaming-disabled",
         "invalid-org-header",
         "org-required",
+        // Gateway limits (SMA-677)
+        "rate-limited",
+        "budget-exhausted",
         // Shared
         "internal",
         "invalid-request-body",
@@ -236,7 +239,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 65, "the registry should hold 65 reasons");
+        assert_eq!(actual.len(), 67, "the registry should hold 67 reasons");
     }
 
     #[test]
