@@ -432,6 +432,12 @@ ALLOW_UNLOCKED_CARGO = {
         "there (measured, SMA-601). SMA-634 made this task the only writer of the committed wasm "
         "artifacts; it is runInCI: false, so CI never runs it, but A8 reads the declaration."
     ),
+    "paigasus-kernel-ts:generate-napi-glue": (
+        "as paigasus-kernel-ts:build — it reaches cargo through `napi build`, which exposes no "
+        "--locked and no cargo passthrough (SMA-601). SMA-667 made this task the sanctioned local "
+        "writer of the committed napi glue; it is runInCI: false, so CI never runs it, but A8 "
+        "reads the declaration."
+    ),
     "paigasus-kernel-py:test": (
         "reaches cargo through `uv sync --reinstall-package`, which drives maturin, which drives "
         "cargo — no flag path through either (SMA-601)"

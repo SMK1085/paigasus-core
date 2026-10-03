@@ -36,8 +36,6 @@ requests that touch the build inputs (`rs/Cargo.lock`, `rs/Cargo.toml`, `rs/rust
 `rs/Dockerfile`, `rs/.dockerignore`, `ts/Dockerfile`, `ts/.dockerignore`, `ts/pnpm-lock.yaml`,
 `ts/pnpm-workspace.yaml`, `ts/package.json`, `ts/.npmrc`, `ts/apps/*/lib/config.ts`,
 `ts/apps/*/next.config.ts`, `ts/apps/*/package.json`, `ts/packages/paigasus-kernel/package.json`,
-`rs/crates/bindings/paigasus-node-bindings/index.js`,
-`rs/crates/bindings/paigasus-node-bindings/index.d.ts`,
 `ts/packages/paigasus-auth/src/core/session.ts`, `ts/apps/*/app/*console*/layout.tsx`,
 `ts/apps/iam-console/app/*console*/orgs/page.tsx`,
 `ts/apps/gateway-console/app/*console*/overview/page.tsx`,
@@ -59,11 +57,11 @@ it too — a bad edit there already reds the ordinary `moon ci` build, so the im
 new coverage. The five committed wasm artifacts and `rs/crates/bindings/paigasus-wasm/package.json`
 are `inputs` of the console `build`/`test` tasks (`ts/apps/*/moon.yml`,
 `ts/packages/paigasus-console-core/moon.yml`) for this reason, and stay off the filter.
-`rs/crates/bindings/paigasus-node-bindings/package.json` is an `input` of
-`paigasus-kernel-ts:build`/`:test` for the same reason. Its two siblings, `index.js` and
-`index.d.ts`, are NOT inputs anywhere — the kernel build task's own `napi build` step regenerates
-them fresh every run, so their committed content can drift without reding the ordinary build — and
-`ts/Dockerfile` copies both by name, so they are on the filter.
+`rs/crates/bindings/paigasus-node-bindings/package.json` and its two siblings, `index.js` and
+`index.d.ts`, are `inputs` of `paigasus-kernel-ts:test` for the same reason, and stay off the
+filter. Since SMA-667 the build tasks do not write the two glue files, and
+`tests/committed-napi-glue.test.ts` reds the ordinary `moon ci` when the committed copy is not the
+generator's output.
 
 A second clause covers the image SMOKE (SMA-675). A file is also on the filter when the console
 smoke depends on it at runtime, so that a change to it can red the smoke while the ordinary build
