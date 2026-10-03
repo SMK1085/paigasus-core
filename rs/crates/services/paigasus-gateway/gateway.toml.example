@@ -77,7 +77,7 @@
 #
 # Off unless this table exists. An unset key means no limit on that dimension. The value 0 is
 # rejected. A misspelt key fails the boot. A table with no limit value set builds no store and
-# opens no Redis connection, and the gateway logs one info line. Refusals: 429 "rate-limited"
+# opens no Redis connection. The gateway logs one info line. Refusals: 429 "rate-limited"
 # (Retry-After, retryable) and 429 "budget-exhausted" (type "insufficient_quota",
 # x-should-retry: false).
 #
