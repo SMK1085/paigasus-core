@@ -865,8 +865,9 @@ jobs:
       # PATH. Without it the next step dies with `pnpm: command not found`, exit 127 — MEASURED on
       # run 33264074393, after crates.io and PyPI had already published.
       #
-      # Every other job in this repository that runs pnpm already does this: `release-pr` below,
-      # `proto-dist` above, and both `prebuild.yml` jobs. `publish-npm` was the only one missing
+      # Every other job in this repository that runs pnpm already does this: both `prebuild.yml`
+      # jobs. (`proto-dist` above also runs `moon setup`, but it runs uv, not pnpm. `release-pr`
+      # above runs no pnpm since SMA-684.) `publish-npm` was the only one missing
       # it, and it is the one job that had never executed before the flag was flipped.
       - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
         run: moon setup
