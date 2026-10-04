@@ -35,7 +35,7 @@ use tonic::Status;
 use tower::ServiceExt; // for `oneshot`
 
 use paigasus_gateway::adapters::http::{AppState, router};
-use paigasus_gateway::adapters::iam::{Iam, IamError};
+use paigasus_gateway::adapters::iam::{CallerCredential, DpopContext, Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
 use paigasus_logging::test_support::capture_logs_at;
@@ -104,14 +104,14 @@ impl Iam for FakeIam {
         }
     }
 
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(self.allow)
     }
 
     /// Since SMA-635 the chat path tries this leg after a rejected or inconclusive key leg. Real
     /// IAM answers `Unauthenticated` for a bearer that is not a JWT (`convert.rs:141`), which is
     /// every API key and every garbage credential here.
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         match self.introspect {
             Introspect::User => Ok(IntrospectResponse {
                 principal_prn: USER_PRN.to_owned(),

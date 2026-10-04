@@ -52,7 +52,7 @@ use tonic::{Code, Status};
 use tonic_types::StatusExt;
 
 use super::error::GatewayError;
-use crate::adapters::iam::{Iam, IamError};
+use crate::adapters::iam::{CallerCredential, Iam, IamError};
 use crate::domain::{CallerContext, Credential, OrgHeader, resolve_org};
 use paigasus_proto::paigasus::iam::v1::IntrospectApiKeyResponse;
 
@@ -109,7 +109,7 @@ pub async fn require_iam_auth(State(auth): State<AuthState>, mut req: Request, n
     //    `PermissionDenied` to a 401, and `preserve_outage` widens it to a 503 when the key leg
     //    never reached a verdict.
     let started = Instant::now();
-    let user = match iam.introspect_token(&token).await {
+    let user = match iam.introspect_token(&token, None).await {
         Ok(resp) if resp.status == "active" => {
             record_iam_call("introspect_token", "ok", started);
             resp
@@ -142,7 +142,7 @@ pub async fn require_iam_auth(State(auth): State<AuthState>, mut req: Request, n
 
     // 5. The self-query against the ORG (D4): an org UUID that does not exist is a Deny, not an
     //    error, so the answer does not show whether the org exists.
-    if let Err(denied) = authorize_self(iam.as_ref(), &token, &principal_prn, &org_prn, None).await {
+    if let Err(denied) = authorize_self(iam.as_ref(), &CallerCredential::Bearer(token.clone()), &principal_prn, &org_prn, None).await {
         return denied;
     }
 
@@ -172,7 +172,7 @@ async fn api_key_caller(iam: &dyn Iam, token: &str, resp: IntrospectApiKeyRespon
         // D5. The header VALUE is never logged: it is caller input.
         tracing::warn!(key_id = %resp.key_id, "paigasus-org ignored for an API key");
     }
-    if let Err(denied) = authorize_self(iam, token, &resp.principal_prn, &resp.scope_prn, Some(&resp.key_id)).await {
+    if let Err(denied) = authorize_self(iam, &CallerCredential::ApiKey(token.to_owned()), &resp.principal_prn, &resp.scope_prn, Some(&resp.key_id)).await {
         return denied;
     }
     req.extensions_mut().insert(CallerContext {
@@ -186,9 +186,9 @@ async fn api_key_caller(iam: &dyn Iam, token: &str, resp: IntrospectApiKeyRespon
 /// The D9 self-query, shared by both credentials: the caller's OWN token as the bearer, the
 /// caller's OWN introspected principal, `InvokeModel`, and the resolved scope. `Err` carries the
 /// response to return.
-async fn authorize_self(iam: &dyn Iam, token: &str, principal_prn: &str, scope_prn: &str, key_id: Option<&str>) -> Result<(), Response> {
+async fn authorize_self(iam: &dyn Iam, caller: &CallerCredential, principal_prn: &str, scope_prn: &str, key_id: Option<&str>) -> Result<(), Response> {
     let started = Instant::now();
-    match iam.is_authorized_self(token, principal_prn, INVOKE_MODEL_ACTION, scope_prn).await {
+    match iam.is_authorized_self(caller, principal_prn, INVOKE_MODEL_ACTION, scope_prn).await {
         Ok(true) => {
             record_iam_call("authorize", "ok", started);
             Ok(())
@@ -292,7 +292,7 @@ pub async fn require_authenticated(State(auth): State<AuthState>, req: Request, 
     }
 
     let started = Instant::now();
-    match iam.introspect_token(&token).await {
+    match iam.introspect_token(&token, None).await {
         Ok(resp) if resp.status == "active" => {
             record_iam_call("introspect_token", "ok", started);
             next.run(req).await
@@ -522,6 +522,7 @@ fn authz_error(err: IamError) -> GatewayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::iam::DpopContext;
     use axum::Router;
     use axum::body::Body;
     use axum::http::HeaderValue;
@@ -588,7 +589,7 @@ mod tests {
     /// The args recorded from a call to `is_authorized_self` — the self-query proof.
     #[derive(Debug, Clone)]
     struct RecordedAuthz {
-        caller_key: String,
+        caller: CallerCredential,
         principal_prn: String,
         action: String,
         resource_prn: String,
@@ -639,9 +640,9 @@ mod tests {
             }
         }
 
-        async fn is_authorized_self(&self, caller_key: &str, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError> {
+        async fn is_authorized_self(&self, caller: &CallerCredential, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError> {
             *self.recorded.lock().unwrap() = Some(RecordedAuthz {
-                caller_key: caller_key.to_owned(),
+                caller: caller.clone(),
                 principal_prn: principal_prn.to_owned(),
                 action: action.to_owned(),
                 resource_prn: resource_prn.to_owned(),
@@ -657,7 +658,7 @@ mod tests {
             }
         }
 
-        async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+        async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
             match self
                 .token_introspect
                 .as_ref()
@@ -1128,7 +1129,7 @@ mod tests {
 
         let rec = recorded.lock().unwrap().take().expect("is_authorized_self must have been called on the happy path");
         // A self-query, never cross-principal: the caller's OWN bearer + the introspected SA.
-        assert_eq!(rec.caller_key, CALLER_KEY, "authz must present the caller's OWN bearer");
+        assert_eq!(rec.caller, CallerCredential::ApiKey(CALLER_KEY.to_owned()), "authz must present the caller's OWN key");
         assert_eq!(rec.principal_prn, CALLER_SA, "authz must query the introspected caller SA, never a different principal");
         assert_eq!(rec.action, INVOKE_MODEL_ACTION);
         assert_eq!(rec.resource_prn, CALLER_SCOPE, "resource must be the introspected scope_prn");
@@ -1414,7 +1415,7 @@ mod tests {
         let (status, _) = run(fake, req_with_orgs(USER_TOKEN, &[ORG_B.as_bytes()])).await;
         assert_eq!(status, StatusCode::OK);
         let rec = recorded.lock().unwrap().take().expect("is_authorized_self was called");
-        assert_eq!(rec.caller_key, USER_TOKEN);
+        assert_eq!(rec.caller, CallerCredential::Bearer(USER_TOKEN.to_owned()));
         assert_eq!(rec.principal_prn, USER_PRN);
         assert_eq!(rec.action, INVOKE_MODEL_ACTION);
         assert_eq!(

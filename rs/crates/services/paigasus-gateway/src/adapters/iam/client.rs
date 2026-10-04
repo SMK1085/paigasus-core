@@ -17,6 +17,8 @@ use async_trait::async_trait;
 use paigasus_proto::paigasus::iam::v1::authn_service_client::AuthnServiceClient;
 use paigasus_proto::paigasus::iam::v1::authorization_service_client::AuthorizationServiceClient;
 use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyRequest, IntrospectApiKeyResponse, IntrospectRequest, IntrospectResponse, IsAuthorizedRequest};
+
+pub use paigasus_proto::paigasus::iam::v1::DpopContext;
 use tonic::Request;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
@@ -44,6 +46,26 @@ pub enum IamError {
     Rpc(#[from] tonic::Status),
 }
 
+/// The credential that the self-query presents to IAM (SMA-700 4.10). `ApiKey` and `Bearer`
+/// both send `authorization: Bearer <secret>`; `Dpop` sends `authorization: DPoP <token>` and the
+/// one `dpop: <proof>` that IAM's `IsAuthorized` follow-up needs. `Debug` prints no secret.
+#[derive(Clone, PartialEq, Eq)]
+pub enum CallerCredential {
+    ApiKey(String),
+    Bearer(String),
+    Dpop { token: String, proof: String },
+}
+
+impl std::fmt::Debug for CallerCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CallerCredential::ApiKey(_) => "ApiKey(..)",
+            CallerCredential::Bearer(_) => "Bearer(..)",
+            CallerCredential::Dpop { .. } => "Dpop { .. }",
+        })
+    }
+}
+
 /// Port trait for the IAM calls the gateway's auth middleware makes. Deliberately minimal —
 /// exactly the operations G5/G7 need — so it can be faked in the decision-table unit tests (an
 /// `Arc<dyn Iam>`), while G7 injects the real [`IamClient`]. `#[async_trait]` (rather than a
@@ -56,22 +78,24 @@ pub trait Iam: Send + Sync {
     /// attaching a bearer would be a protocol error).
     async fn introspect_api_key(&self, token: &str) -> Result<IntrospectApiKeyResponse, IamError>;
 
-    /// The self-query `IsAuthorized` (D9). The caller's own key rides as the `authorization`
-    /// bearer AND `principal_prn` is that same caller's SA PRN — so IAM sees a principal asking
-    /// about *itself* and applies no cross-principal exposure gate. This method builds the
-    /// request faithfully from its arguments; the invariant that `principal_prn` really is the
-    /// introspected caller (never an attacker-chosen principal) is enforced by G5's call site,
-    /// which sources both `caller_key` and `principal_prn` from the same inbound request.
-    async fn is_authorized_self(&self, caller_key: &str, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError>;
+    /// The self-query `IsAuthorized` (D9). The caller's own credential rides as the
+    /// `authorization` metadata AND `principal_prn` is that same caller's PRN — so IAM sees a
+    /// principal asking about *itself* and applies no cross-principal exposure gate. For a DPoP
+    /// caller (SMA-700) the credential is the DPoP follow-up: the same token and the same proof
+    /// that `introspect_token` carried. This method builds the request faithfully from its
+    /// arguments; the invariant that `principal_prn` really is the introspected caller is
+    /// enforced by the call site, which sources both from the same inbound request.
+    async fn is_authorized_self(&self, caller: &CallerCredential, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError>;
 
     /// Introspect a caller-presented OIDC token (IAM's `AuthnService.Introspect`). **Bearer-
     /// EXEMPT**, exactly like [`Iam::introspect_api_key`]: the token is the request body, so no
-    /// `authorization` metadata is attached.
+    /// `authorization` metadata is attached. `dpop` is the client's DPoP context (SMA-700);
+    /// `None` is the Bearer scheme.
     ///
     /// Used by BOTH middlewares as their second leg: capability discovery accepts a console
     /// user's own session (ADR-0020 D4), and since SMA-635 the chat path accepts an OIDC caller
     /// too (it then authorizes the user against one organization).
-    async fn introspect_token(&self, token: &str) -> Result<IntrospectResponse, IamError>;
+    async fn introspect_token(&self, token: &str, dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError>;
 }
 
 /// The real IAM adapter: one lazily-connected `tonic` [`Channel`] shared by both generated
@@ -107,26 +131,14 @@ impl Iam for IamClient {
         Ok(resp.into_inner())
     }
 
-    async fn is_authorized_self(&self, caller_key: &str, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError> {
-        let req = self_authorize_request(caller_key, principal_prn, action, resource_prn)?;
+    async fn is_authorized_self(&self, caller: &CallerCredential, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError> {
+        let req = self_authorize_request(caller, principal_prn, action, resource_prn)?;
         let resp = self.authz.clone().is_authorized(req).await?;
         Ok(resp.into_inner().allowed)
     }
 
-    async fn introspect_token(&self, token: &str) -> Result<IntrospectResponse, IamError> {
-        // THIRD `with_correlation` site (SMA-504). Unlike `introspect_request` and
-        // `self_authorize_request`, this one is inline rather than a separately-testable free
-        // function — extracting it would require returning a `Request` out of a method whose
-        // whole job is to also dispatch it. It is legitimately out of unit-test reach: proving
-        // the header lands would need a live channel (`authn.clone().introspect(..)` immediately
-        // makes the RPC), which is G7's integration-test territory, not a unit test here.
-        // Covered by construction: it is the same one-line `with_correlation(Request::new(..))`
-        // shape as the other two sites, which unit tests DO cover directly.
-        let resp = self
-            .authn
-            .clone()
-            .introspect(with_correlation(Request::new(IntrospectRequest { token: token.to_owned(), dpop: None })))
-            .await?;
+    async fn introspect_token(&self, token: &str, dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
+        let resp = self.authn.clone().introspect(token_introspect_request(token, dpop)).await?;
         Ok(resp.into_inner())
     }
 }
@@ -151,24 +163,42 @@ fn introspect_request(token: &str) -> Request<IntrospectApiKeyRequest> {
     with_correlation(Request::new(IntrospectApiKeyRequest { token: token.to_owned() }))
 }
 
+/// Build the `Introspect` request: the token and the optional DPoP context in the body, **no**
+/// `authorization` metadata (bearer-exempt). The third `with_correlation` site, extracted so a
+/// unit test reaches it.
+fn token_introspect_request(token: &str, dpop: Option<DpopContext>) -> Request<IntrospectRequest> {
+    with_correlation(Request::new(IntrospectRequest { token: token.to_owned(), dpop }))
+}
+
 /// Build the self-query `IsAuthorized` request: the message carries the caller's own SA PRN as
-/// `principal_prn`, and the caller's own key rides in the `authorization: Bearer <key>` metadata
-/// (IAM resolves that bearer to the SAME principal — that pairing is exactly what makes it a
+/// `principal_prn`, and the caller's own credential rides in the `authorization` metadata
+/// (IAM resolves that credential to the SAME principal — that pairing is exactly what makes it a
 /// *self* query with no cross-principal gate). `context` is empty (M0 sends no ABAC attributes).
 ///
-/// A `caller_key` that cannot form a valid metadata value → [`IamError::Connect`] (a plumbing
+/// SMA-700: a DPoP caller adds one `dpop` entry.
+///
+/// A credential that cannot form a valid metadata value → [`IamError::Connect`] (a plumbing
 /// failure, not a live-call `Status`; it should not occur for a key that already passed the
 /// inbound bearer parse). Extracted so the D9 wiring — metadata AND body — is unit-testable
 /// without a live server.
-fn self_authorize_request(caller_key: &str, principal_prn: &str, action: &str, resource_prn: &str) -> Result<Request<IsAuthorizedRequest>, IamError> {
+fn self_authorize_request(caller: &CallerCredential, principal_prn: &str, action: &str, resource_prn: &str) -> Result<Request<IsAuthorizedRequest>, IamError> {
     let mut req = with_correlation(Request::new(IsAuthorizedRequest {
         principal_prn: principal_prn.to_owned(),
         action: action.to_owned(),
         resource_prn: resource_prn.to_owned(),
         context: Default::default(),
     }));
-    let bearer = MetadataValue::try_from(format!("Bearer {caller_key}")).map_err(|e| IamError::Connect(format!("caller key is not a valid `authorization` metadata value: {e}")))?;
-    req.metadata_mut().insert("authorization", bearer);
+    let (authorization, proof) = match caller {
+        CallerCredential::ApiKey(secret) | CallerCredential::Bearer(secret) => (format!("Bearer {secret}"), None),
+        CallerCredential::Dpop { token, proof } => (format!("DPoP {token}"), Some(proof)),
+    };
+    // The error text of `try_from` names no value, so no credential reaches the message.
+    let authorization = MetadataValue::try_from(authorization).map_err(|e| IamError::Connect(format!("the caller credential is not a valid `authorization` metadata value: {e}")))?;
+    req.metadata_mut().insert("authorization", authorization);
+    if let Some(proof) = proof {
+        let proof = MetadataValue::try_from(proof.as_str()).map_err(|e| IamError::Connect(format!("the DPoP proof is not a valid `dpop` metadata value: {e}")))?;
+        req.metadata_mut().insert("dpop", proof);
+    }
     Ok(req)
 }
 
@@ -262,7 +292,13 @@ mod tests {
             correlation_id: uuid::Uuid::from_u128(4),
         };
         let req = paigasus_observability::correlation::scope_for_test(ids, async {
-            self_authorize_request(caller_key, "prn:paigasus:iam:default:sa/gw-caller", "InvokeModel", "prn:paigasus:iam:default:scope/team-a").expect("valid metadata")
+            self_authorize_request(
+                &CallerCredential::ApiKey(caller_key.to_owned()),
+                "prn:paigasus:iam:default:sa/gw-caller",
+                "InvokeModel",
+                "prn:paigasus:iam:default:scope/team-a",
+            )
+            .expect("valid metadata")
         })
         .await;
 
@@ -277,6 +313,67 @@ mod tests {
 
         assert_eq!(req.metadata().get("paigasus-correlation-id").unwrap().to_str().unwrap(), ids.correlation_id.to_string());
         assert!(req.metadata().get("paigasus-request-id").is_none(), "the request id is per-hop and is not forwarded");
+    }
+
+    #[test]
+    fn a_bearer_caller_sends_the_bearer_scheme_and_no_proof() {
+        let req = self_authorize_request(&CallerCredential::Bearer("user-token".into()), "p", "InvokeModel", "r").expect("valid metadata");
+        assert_eq!(req.metadata().get("authorization").unwrap().to_str().unwrap(), "Bearer user-token");
+        assert!(req.metadata().get("dpop").is_none());
+    }
+
+    #[test]
+    fn a_dpop_caller_sends_the_dpop_scheme_and_one_proof() {
+        // SMA-700 4.10: the IsAuthorized follow-up metadata.
+        let caller = CallerCredential::Dpop {
+            token: "bound-token".into(),
+            proof: "a.b.c".into(),
+        };
+        let req = self_authorize_request(&caller, "p", "InvokeModel", "r").expect("valid metadata");
+        assert_eq!(req.metadata().get("authorization").unwrap().to_str().unwrap(), "DPoP bound-token");
+        assert_eq!(
+            req.metadata().get_all("dpop").iter().map(|v| v.to_str().unwrap().to_owned()).collect::<Vec<_>>(),
+            vec!["a.b.c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_dpop_proof_that_is_not_a_metadata_value_is_a_connect_error_without_the_secret() {
+        let caller = CallerCredential::Dpop {
+            token: "bound-token".into(),
+            proof: "bad\nproof-secret".into(),
+        };
+        let err = self_authorize_request(&caller, "p", "InvokeModel", "r").expect_err("a newline is not valid metadata");
+        assert!(matches!(err, IamError::Connect(_)));
+        assert!(!err.to_string().contains("proof-secret"), "{err}");
+    }
+
+    #[test]
+    fn a_token_introspect_carries_the_dpop_context_and_no_authorization() {
+        let context = DpopContext {
+            proof: "a.b.c".into(),
+            method: "POST".into(),
+            path: "/v1/chat/completions".into(),
+        };
+        let req = token_introspect_request("tok", Some(context.clone()));
+        assert!(req.metadata().get("authorization").is_none(), "Introspect is bearer-exempt");
+        assert_eq!(req.get_ref().token, "tok");
+        assert_eq!(req.get_ref().dpop, Some(context));
+        assert_eq!(token_introspect_request("tok", None).get_ref().dpop, None);
+    }
+
+    #[test]
+    fn caller_credential_debug_prints_no_secret() {
+        let printed = format!(
+            "{:?} {:?} {:?}",
+            CallerCredential::ApiKey("key-secret".into()),
+            CallerCredential::Bearer("tok-secret".into()),
+            CallerCredential::Dpop {
+                token: "tok-secret".into(),
+                proof: "proof-secret".into()
+            }
+        );
+        assert!(!printed.contains("secret"), "{printed}");
     }
 
     #[test]

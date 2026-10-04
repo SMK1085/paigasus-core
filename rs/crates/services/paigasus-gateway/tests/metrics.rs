@@ -23,7 +23,7 @@ use secrecy::SecretString;
 use tower::ServiceExt; // for `oneshot`
 
 use paigasus_gateway::adapters::http::{AppState, router};
-use paigasus_gateway::adapters::iam::{Iam, IamError};
+use paigasus_gateway::adapters::iam::{CallerCredential, DpopContext, Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
 use paigasus_gateway::service_info::Capabilities;
@@ -46,10 +46,10 @@ impl Iam for UnusedIam {
     async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
         unreachable!("these tests never drive the protected route")
     }
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         unreachable!("these tests never drive the protected route")
     }
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         unreachable!("these tests never drive the protected route")
     }
 }
@@ -72,11 +72,11 @@ impl Iam for AllowedIam {
         })
     }
 
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(true)
     }
 
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         Ok(IntrospectResponse {
             principal_prn: CALLER_SA.to_owned(),
             status: "active".to_owned(),
@@ -196,10 +196,10 @@ impl Iam for UserIam {
     async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
         Err(IamError::Rpc(Status::unauthenticated("not an API key")))
     }
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(true)
     }
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         Ok(IntrospectResponse {
             principal_prn: USER_PRN.to_owned(),
             status: "active".to_owned(),

@@ -173,6 +173,7 @@ fn iam_not_ready() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::iam::{CallerCredential, DpopContext};
     use crate::config::OpenAiConfig;
     use axum::body::Body;
     use axum::http::Request;
@@ -194,10 +195,10 @@ mod tests {
         async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
             unreachable!("this route must never call IAM")
         }
-        async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+        async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
             unreachable!("this route must never call IAM")
         }
-        async fn introspect_token(&self, _token: &str) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
+        async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
             unreachable!("this route must never call IAM")
         }
     }
@@ -232,10 +233,10 @@ mod tests {
                 Probe::UnreachableConnect => Err(IamError::Connect("channel build failed".to_string())),
             }
         }
-        async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+        async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
             unreachable!("the readiness probe never authorizes")
         }
-        async fn introspect_token(&self, _token: &str) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
+        async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
             unreachable!("the readiness probe never introspects a token")
         }
     }

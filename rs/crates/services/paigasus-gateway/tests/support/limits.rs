@@ -19,7 +19,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use paigasus_gateway::adapters::http::{AppState, router};
-use paigasus_gateway::adapters::iam::{Iam, IamError};
+use paigasus_gateway::adapters::iam::{CallerCredential, DpopContext, Iam, IamError};
 use paigasus_gateway::adapters::limits::MemoryLimitStore;
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::application::limits::Limits;
@@ -71,11 +71,11 @@ impl Iam for ScopedIam {
         })
     }
 
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(true)
     }
 
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         Err(IamError::Rpc(Status::unauthenticated("not a token")))
     }
 }
