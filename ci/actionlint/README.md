@@ -637,10 +637,18 @@ a normal pipe size, stays undetected. The gate has no watchdog timer.
 `UNGATED_JOBS` member (today only `release-pr`) to three actions and a short list of command
 words and exact command prefixes, because every step of that job can read the App private key
 from the runner. V18 reads a `run:` block like this. It splits the text on `\n` only, because bash
-breaks lines only there. It refuses a block that holds any C0 control character except tab and
-newline, or U+007F, U+0085, U+00A0, U+2028 or U+2029: Python reads those as line breaks or blanks
-and bash does not, so a `\r` before a `#` hid a command from V18 that bash ran. A YAML
-double-quoted scalar can carry each of them. A `#` is allowed only as the first character after
+breaks lines only there. Bash blanks are only space and tab. V18 refuses a block that holds any C0
+control character except tab and newline, U+007F, or any other character for which Python's
+`str.isspace()` is true (U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+205F, U+3000
+and more): Python reads those as line breaks or blanks and bash does not. So a `\r` before a `#`
+hid a command from V18 that bash ran, and `A=x<U+3000>echo cargo build` is one assignment word to
+bash, which then runs `cargo build`. A YAML double-quoted scalar can carry each of them, and a
+plain or literal scalar can carry the non-ASCII ones as raw UTF-8. V18 also refuses U+FEFF: bash
+reads it as a word character, as V18 does, but it is invisible in a diff. Other non-ASCII text
+is allowed (the real job's echo text holds an em dash). Every split, strip and regex in V18 uses
+space and tab only, never Python's `\s`. A leading `NAME=value` word skips a `\"` inside double
+quotes, and an unquoted value that holds a backslash is not read as an assignment, so
+`A=x\ echo cargo build` reds on its command word `A=x\`. A `#` is allowed only as the first character after
 spaces and tabs of a physical line that does not continue the line before it, and that comment
 line must not end in a backslash. Any other `#` is refused, quotes included, so a `#` can never
 hide a separator. The refusal gives a false positive for `${X#…}` and `${#X}`. A line joins the
