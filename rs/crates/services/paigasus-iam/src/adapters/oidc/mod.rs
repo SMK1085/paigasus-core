@@ -2,8 +2,10 @@
 
 //! OIDC adapters (SMA-443, M2): discovery + JWKS fetch/cache/rotation live in `jwks`; the
 //! `Authenticator` v1 implementation lives in `validator`; the external, Redis-backed
-//! `JwksCache` implementation lives in `redis_cache`.
+//! `JwksCache` implementation lives in `redis_cache`; the DPoP proof checker
+//! (`JoseDpopProofChecker`, SMA-700) lives in `dpop`.
 
+pub mod dpop;
 pub mod jwks;
 pub mod redis_cache;
 pub mod validator;
