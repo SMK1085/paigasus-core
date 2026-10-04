@@ -46,7 +46,7 @@ passing state — the proto family activates in SMA-577.
 | Mode | Behaviour |
 |---|---|
 | `--check` (default) | Compare all 20 sites, and assert static uv metadata (SMA-684). Exit 1 on any drift or violation. |
-| `--write` | Rewrite the ten sites release-plz cannot reach (the six non-Cargo sites, the three `publish = false` binding manifests, and the version literals of the napi glue `index.js`) and regenerate the two lock files (four `SITES` rows: 16, 17, 19 and 20). It compiles nothing (SMA-684). |
+| `--write` | Rewrite the ten sites release-plz cannot reach (the six non-Cargo sites, the three `publish = false` binding manifests, and the version literals of the napi glue `index.js`) and regenerate the two lock files (four `SITES` rows: 16, 17, 19 and 20). It compiles nothing, and it exits 2 when a path outside the SITES paths changed (SMA-684). |
 | `--negative-control` | Prove the checker can still report red. |
 | `--self-test` | Fixture tables for the verdict function, the lock readers, the cargo-package writer, the napi-glue writer and the static uv metadata check, plus `stamp_sites` on a staged copy of the real tree. |
 
@@ -64,6 +64,16 @@ reads the members from `py/pyproject.toml`'s members glob, not from `SITES`, so 
 `paigasus-ml` and `paigasus-workflows`. `stage_pristine_tree` stages the same files
 (`uv_static_metadata_check --list`), so the negative control and `stamp_sites_self_test` run the
 check on a complete tree.
+
+## The changed-path check (SMA-684)
+
+`run_write` records the dirty and untracked paths before it starts (`dirty_paths`, which reads
+`git status --porcelain=v1 -z --untracked-files=all`). After it finishes, every path that is new
+in that list must be a `SITES` path; `rs/Cargo.lock` and `py/uv.lock` are `SITES` paths.
+Otherwise it exits 2 and names the paths. The release-PR stamp step runs `git add -A`, so this
+check is the boundary of what that job commits. A path that was already dirty before `--write`
+is not new, so a local run in a dirty tree does not red on it. `stamp_sites_self_test` drives the
+check on a scratch git repository and pins its two call sites in `run_write`.
 
 ## How it runs in CI
 

@@ -551,6 +551,59 @@ PY
   [ "$rc3" -eq 1 ] \
     || { fail "self-test: stamp_sites must return 1 when a site is higher than the head, got rc=$rc3"; return 1; }
 
+  # SMA-684 §5.3: the changed-path check, on a scratch git repository with the staged tree
+  # committed. A path dirty before the snapshot stays unreported. A SITES path changed after it is
+  # allowed. A file in a NEW directory must be reported by its full path, which only
+  # --untracked-files=all gives (the default reports `extra/`). A rename names two paths: one
+  # rename moves a SITES file to a new outside path, and one moves an outside file onto a SITES
+  # path. Both outside paths must be reported, and both SITES paths must not. The fixture commits,
+  # so it sets the keys ci/CLAUDE.md requires (no background maintenance, no signing, no global
+  # config).
+  local g before viol wbody expected_viol bpos spos
+  g="$(mktemp -d)" || { rm -rf "$tmp"; die_infra "cannot create a scratch dir"; }
+  stage_pristine_tree "$g"
+  rm -f "$g/py/uv.lock"
+  printf 'outside\n' >"$g/old-b.txt"
+  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    git -C "$g" init -q \
+      && git -C "$g" config maintenance.auto false && git -C "$g" config gc.auto 0 \
+      && git -C "$g" config commit.gpgsign false && git -C "$g" config tag.gpgsign false \
+      && git -C "$g" config user.name self-test && git -C "$g" config user.email self-test@invalid \
+      && git -C "$g" add -A && git -C "$g" commit -q -m base ) >/dev/null 2>&1 \
+    || { rm -rf "$tmp" "$g"; die_infra "cannot make the scratch git repository"; }
+  printf 'x\n' >"$g/pre-existing.txt"
+  before="$(REPO_ROOT="$g" dirty_paths)" \
+    || { rm -rf "$tmp" "$g"; die_infra "dirty_paths failed on the scratch repository"; }
+  printf 'y\n' >>"$g/pre-existing.txt"
+  printf '{"version": "9.9.9"}\n' >"$g/rs/crates/bindings/paigasus-wasm/package.json"
+  mkdir -p "$g/extra/new"
+  printf 'z\n' >"$g/extra/new/file.txt"
+  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    git -C "$g" mv rs/Cargo.lock moved-outside.txt \
+      && git -C "$g" mv old-b.txt py/uv.lock ) >/dev/null 2>&1 \
+    || { rm -rf "$tmp" "$g"; die_infra "cannot make the renames in the scratch git repository"; }
+  viol="$(REPO_ROOT="$g" write_set_violations "$before")" \
+    || { rm -rf "$tmp" "$g"; die_infra "write_set_violations failed on the scratch repository"; }
+  rm -rf "$g"
+  expected_viol=$'extra/new/file.txt\nmoved-outside.txt\nold-b.txt'
+  [ "$viol" = "$expected_viol" ] \
+    || { fail "self-test: the changed-path check reported '${viol//$'\n'/, }', expected exactly 'extra/new/file.txt, moved-outside.txt, old-b.txt'"; return 1; }
+  # ...and run_write still takes the snapshot and still applies the check.
+  wbody="$(_fn_body run_write)" || { fail "self-test: cannot read the body of run_write"; return 1; }
+  grep -Fq 'before="$(dirty_paths)" || die_infra' < <(printf '%s\n' "$wbody") \
+    || { fail "self-test: run_write no longer records the dirty paths before it writes"; return 1; }
+  grep -Fq 'violations="$(write_set_violations "$before")" || die_infra' < <(printf '%s\n' "$wbody") \
+    || { fail "self-test: run_write no longer computes the paths outside its write set"; return 1; }
+  grep -Fq '|| die_infra "--write changed paths outside its write set' < <(printf '%s\n' "$wbody") \
+    || { fail "self-test: run_write no longer refuses a path outside its write set"; return 1; }
+  # The snapshot must come BEFORE the write. A snapshot taken after stamp_sites sees the stamped
+  # paths as already dirty, so it would hide every path the write changed.
+  bpos="$(grep -Fn 'before="$(dirty_paths)" || die_infra' < <(printf '%s\n' "$wbody"))"
+  spos="$(grep -Fn 'wrote="$(stamp_sites)"' < <(printf '%s\n' "$wbody"))"
+  bpos="${bpos%%:*}"; spos="${spos%%:*}"
+  { [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$spos" ]; } \
+    || { fail "self-test: run_write must record the dirty paths before it calls stamp_sites"; return 1; }
+
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
@@ -1477,8 +1530,60 @@ PY
   esac
 }
 
+# SMA-684 §5.3: the dirty and untracked paths of the work tree at $REPO_ROOT, one per line,
+# sorted. `-z` keeps a path with a space or a quote intact. `--untracked-files=all` names every
+# untracked FILE: the default collapses a new directory to `dir/`, which would hide a file inside
+# a directory that was already untracked. A rename or copy names both of its paths.
+dirty_paths() {
+  python3 - "$REPO_ROOT" <<'PY'
+import subprocess, sys
+try:
+    out = subprocess.run(
+        ["git", "-C", sys.argv[1], "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        check=True, capture_output=True).stdout.decode("utf-8", "surrogateescape")
+except (OSError, subprocess.CalledProcessError) as e:
+    print(f"INFRA: git status failed in {sys.argv[1]}: {e}", file=sys.stderr)
+    raise SystemExit(2) from None
+parts, paths, i = out.split("\0"), set(), 0
+while i < len(parts):
+    entry = parts[i]
+    i += 1
+    if not entry:
+        continue
+    xy, path = entry[:2], entry[3:]
+    paths.add(path)
+    if "R" in xy or "C" in xy:
+        paths.add(parts[i])
+        i += 1
+for p in sorted(paths):
+    print(p)
+PY
+}
+
+# SMA-684 §5.3: print every path that is dirty now, was not dirty in $1 (dirty_paths' output from
+# before the write), and is not in the write set. The write set is the SITES paths, rs/Cargo.lock
+# and py/uv.lock among them; a cargo-wsdep row names a crate, not a file, so it adds no path. The
+# stamp step runs `git add -A`, so this set is the boundary of what the release-PR job commits.
+write_set_violations() { # $1 the dirty_paths output from before the write
+  local after entry kind target allowed=""
+  after="$(dirty_paths)" || return 2
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r _ kind target <<<"$entry"
+    [ "$kind" = cargo-wsdep ] || allowed="$allowed$target"$'\n'
+  done
+  python3 - "$1" "$after" "$allowed" <<'PY'
+import sys
+before, after, allowed = (set(filter(None, a.split("\n"))) for a in sys.argv[1:4])
+for p in sorted(after - before - allowed):
+    print(p)
+PY
+}
+
 run_write() {
-  local wrote rc=0
+  local wrote rc=0 before violations
+  # SMA-684 §5.3: the paths that were dirty before this run. Every path that is new after it must
+  # be in the write set; write_set_violations below holds that.
+  before="$(dirty_paths)" || die_infra "cannot list the dirty paths before --write"
   wrote="$(stamp_sites)" || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
 
@@ -1493,6 +1598,10 @@ run_write() {
     || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
     || die_infra "cargo update -w failed (site 16)"
   ( cd "$REPO_ROOT/py" && uv lock >/dev/null ) || die_infra "uv lock failed (site 17)"
+
+  violations="$(write_set_violations "$before")" || die_infra "cannot list the changed paths after --write"
+  [ -z "$violations" ] \
+    || die_infra "--write changed paths outside its write set (the SITES paths): ${violations//$'\n'/, }"
 
   if [ "$wrote" -gt 0 ]; then
     printf 'version-lockstep: wrote %d site(s)\n' "$wrote"
