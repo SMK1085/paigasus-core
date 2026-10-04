@@ -603,6 +603,17 @@ PY
   bpos="${bpos%%:*}"; spos="${spos%%:*}"
   { [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$spos" ]; } \
     || { fail "self-test: run_write must record the dirty paths before it calls stamp_sites"; return 1; }
+  # SMA-684 §5.2: run_write runs the static uv metadata check, and BEFORE uv lock. A check after
+  # uv lock is too late: uv lock would already have run the build backend.
+  local cpos lpos
+  # `|| cpos=""`: under errexit, a grep that finds nothing would stop the script with no message.
+  cpos="$(grep -Fn 'uv_static_metadata_check || uvrc=$?' < <(printf '%s\n' "$wbody"))" || cpos=""
+  lpos="$(grep -Fn '( cd "$REPO_ROOT/py" && uv lock' < <(printf '%s\n' "$wbody"))" || lpos=""
+  cpos="${cpos%%:*}"; lpos="${lpos%%:*}"
+  { [ -n "$cpos" ] && [ -n "$lpos" ] && [ "$cpos" -lt "$lpos" ]; } \
+    || { fail "self-test: run_write must run uv_static_metadata_check before uv lock"; return 1; }
+  grep -Eq '^    1\) exit 1 ;;$' < <(printf '%s\n' "$wbody") \
+    || { fail "self-test: run_write no longer maps the uv metadata check's rc 1 to exit 1"; return 1; }
 
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
@@ -1580,7 +1591,7 @@ PY
 }
 
 run_write() {
-  local wrote rc=0 before violations
+  local wrote rc=0 before violations uvrc
   # SMA-684 §5.3: the paths that were dirty before this run. Every path that is new after it must
   # be in the write set; write_set_violations below holds that.
   before="$(dirty_paths)" || die_infra "cannot list the dirty paths before --write"
@@ -1597,6 +1608,18 @@ run_write() {
   ( cd "$REPO_ROOT/rs" && cargo update -w --offline >/dev/null 2>&1 ) \
     || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
     || die_infra "cargo update -w failed (site 16)"
+  # SMA-684 §5.2: uv lock runs no build backend only while every local package declares static
+  # metadata. run_check asserts that too, but a path source outside py/packages/* is not an input
+  # of repo:version-lockstep, so a later PR could add `dynamic` there unseen. Check it here again,
+  # right before uv lock, with the same status routing as run_check. Print nothing on success: the
+  # stamp step's output stays the same.
+  uvrc=0
+  uv_static_metadata_check || uvrc=$?
+  case "$uvrc" in
+    0) ;;
+    1) exit 1 ;;
+    *) exit 2 ;;
+  esac
   ( cd "$REPO_ROOT/py" && uv lock >/dev/null ) || die_infra "uv lock failed (site 17)"
 
   violations="$(write_set_violations "$before")" || die_infra "cannot list the changed paths after --write"

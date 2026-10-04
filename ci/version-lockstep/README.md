@@ -63,7 +63,11 @@ directory, are violations too. A violation exits 1 and names the file and the fi
 reads the members from `py/pyproject.toml`'s members glob, not from `SITES`, so it covers
 `paigasus-ml` and `paigasus-workflows`. `stage_pristine_tree` stages the same files
 (`uv_static_metadata_check --list`), so the negative control and `stamp_sites_self_test` run the
-check on a complete tree.
+check on a complete tree. `run_write` runs the same check again directly before `uv lock`, with
+the same status routing (1 exits 1, any other failure exits 2), because a path source outside
+`py/packages/*` is not an input of `repo:version-lockstep`. This check covers local packages
+only: a future sdist-only third-party package in `py/uv.lock` would make `uv lock` build it, and
+today only the F7 measurement covers that.
 
 ## The changed-path check (SMA-684)
 

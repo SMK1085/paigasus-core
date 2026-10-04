@@ -357,9 +357,9 @@ jobs:
       # The isolation level is the JOB, not the step: every step of this job can read the App
       # private key from the runner, so no step may compile or run an install script.
       # ci/actionlint/release_guard.py V18 holds this job to an allowlist of actions, command
-      # words and command prefixes. V18 splits a line on `|` without reading quotes, which is
-      # why PR_COUNT below uses two jq calls and not `jq '.prs | length'`. The spec's §4.1 lists
-      # the tools this job still trusts:
+      # words and command prefixes. PR_COUNT below uses two jq calls because an older V18
+      # splitter did not read quotes; V18 reads quotes now, and the two calls are harmless.
+      # The spec's §4.1 lists the tools this job still trusts:
       # docs/superpowers/specs/2026-10-04-sma-684-release-pr-stamp-token-isolation-design.md
       - name: Stamp the lockstep manifests onto the release PR branch
         if: steps.preflight.outputs.configured == 'true'

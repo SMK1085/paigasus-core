@@ -1674,6 +1674,9 @@ _V18_WRAP_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*="\$\((.*)\)"')
 _V18_ASSIGN_RE = re.compile(
     r"""[A-Za-z_][A-Za-z0-9_]*=("(?:[^"\\]|\\.)*"|'[^']*'|[^ \t"'\\]*)(?=[ \t]|$)""")
 _V18_DOLLAR_QUOTES = ("$'", '$"')
+# The words `set` may take in an UNGATED_JOBS member: short flags from e, u, o, x and v, and the
+# `-o` names that match them. `set -euo pipefail` is what the real job runs.
+_V18_SET_WORD_RE = re.compile(r"[-+][euoxv]+|pipefail|errexit|nounset|xtrace|verbose")
 _V18_WORD_SPLIT_RE = re.compile(r"[ \t]+")
 _V18_SUBST_MARKERS = ("$(", "`", "<(", ">(")
 
@@ -1773,18 +1776,33 @@ def v18_segment_verdict(segment: str) -> str | None:
     """None when one command segment may run in an UNGATED_JOBS member, else the reason it may
     not. Leading variable assignments are removed; then shell keywords; then the rest must start
     with an allowed command prefix or an allowed command word. Substitutions never reach here:
-    v18_line_segments refuses them. Not a shell parser: see README L43."""
+    v18_line_segments refuses them. Not a shell parser: see README L43.
+
+    An assignment before a command word puts the variable into that command's environment, so
+    `BASH_ENV=./x.sh bash ci/version-lockstep/run.sh --write` and `GIT_EXTERNAL_DIFF=./x git diff`
+    run code. Such a segment is refused; a segment of assignments only stays allowed. `set` may
+    use only the flags in _V18_SET_WORD_RE: `-a` (allexport) and `-k` export later assignments."""
     s = segment.strip(_V18_BLANKS)
+    assigned = False
     while True:
         m = _V18_ASSIGN_RE.match(s)
         if not m:
             break
+        assigned = True
         s = s[m.end():].lstrip(_V18_BLANKS)
     words = [w for w in _V18_WORD_SPLIT_RE.split(s) if w]
+    if assigned and words:
+        return (f"an assignment before the command word {words[0]!r} puts the variable into that "
+                f"command's environment")
     while words and words[0] in UNGATED_JOB_KEYWORDS:
         words = words[1:]
     if not words:
         return None
+    if words[0] == "set":
+        for w in words[1:]:
+            if not _V18_SET_WORD_RE.fullmatch(w):
+                return (f"`set` with {w!r}, which is not on the allowlist (`-a`, `-o allexport` and "
+                        f"`-k` export later assignments)")
     rest = " ".join(words)
     for prefix in UNGATED_JOB_PREFIXES:
         if rest == prefix or rest.startswith(prefix + " "):
@@ -4654,8 +4672,18 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("fix4: an escaped tab inside an assignment value", {"run": "A=x\\\techo cargo build"}, True),
     ("fix4: an escaped quote inside a double-quoted value", {"run": 'A="x\\" echo " cargo build'}, True),
     ("fix4: an em dash inside an echo string", {"run": 'echo "Release PR \u2014 no changes"'}, False),
-    ("fix4: a tab after an assignment", {"run": "A=x\techo ok"}, False),
-    ("fix4: an escaped quote inside a double-quoted value, then echo", {"run": 'A="x\\"y" echo ok'}, False),
+    ("fix4: a tab between two assignments", {"run": "A=x\tB=y"}, False),
+    ("fix4: an escaped quote inside a double-quoted value", {"run": 'A="x\\"y"'}, False),
+    # Final review M1: an assignment before an allowed command word reaches its environment.
+    ("final: BASH_ENV before the allowed write", {"run": "BASH_ENV=./x.sh bash ci/version-lockstep/run.sh --write"}, True),
+    ("final: GIT_EXTERNAL_DIFF before git diff", {"run": "GIT_EXTERNAL_DIFF=./x.sh git diff"}, True),
+    ("final: an assignment before echo", {"run": "A=x echo ok"}, True),
+    ("final: set -a", {"run": "set -a"}, True),
+    ("final: set -o allexport", {"run": "set -o allexport"}, True),
+    ("final: set -k", {"run": "set -k"}, True),
+    ("final: set -ea in a cluster", {"run": "set -euoa pipefail"}, True),
+    ("final: set -euo pipefail", {"run": "set -euo pipefail"}, False),
+    ("final: two standalone assignments", {"run": 'A=1 B="two words"'}, False),
     # T7-R8: ANSI-C and locale quoting. The first row read CLEAN before, and bash ran cargo.
     ("fix5: an escaped quote inside ANSI-C quoting", {"run": "echo $'\\'' ; cargo build ; echo \\'"}, True),
     ("fix5: ANSI-C quoting", {"run": "echo $'a'"}, True),
@@ -4677,7 +4705,7 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("a comment line with separators", {"run": "# a | b; c && d\necho ok"}, False),
 )
 # Deleting a row must red: the table is the only pin on each shape.
-_SMA684_V18_CASE_COUNT = 138
+_SMA684_V18_CASE_COUNT = 147
 
 
 def _sma684_v18_allowlist_bites() -> str | None:

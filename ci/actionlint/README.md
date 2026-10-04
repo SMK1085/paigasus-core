@@ -665,14 +665,20 @@ is unwrapped, where NAME is a shell identifier and the `)` before the final `"` 
 wrapped text must hold no backslash and no unquoted parenthesis, so that last `)` is the one that
 matches the opening `$(`. Its inside is then checked as a command line. `NAME=$(...)` without
 quotes, text after the closing quote, and a substitution with no `NAME=` are all refused. Shell
-keywords (`if`, `then`, `else`, `elif`, `fi`, `!`) are stripped and the next word is checked.
-`shell:`, `container:`, `services:`, `defaults:`, a job-level `env:` or `uses:`, and a
-workflow-level `env:` or `defaults:` (when the file has an `UNGATED_JOBS` member) are refused. A
-step may use only the keys `name`, `id`, `if`, `uses`, `with`, `env`, `run` and
-`working-directory`. Its `env:` names are limited to `APP_ID_SET`, `GIT_TOKEN`, `PR_JSON` and
-`GH_TOKEN_FOR_PUSH`, its `working-directory:` to `rs`, and its `with:` keys to a list per action,
-with `persist-credentials: false` on the checkout. That check is case-insensitive, so the string
-`False` passes. Residuals follow.
+keywords (`if`, `then`, `else`, `elif`, `fi`, `!`) are stripped and the next word is checked. An
+assignment before a command word is refused, also before an allowed word, because it puts the
+variable into that command's environment. For example, these two run code: `BASH_ENV=./x.sh bash
+ci/version-lockstep/run.sh --write` and `GIT_EXTERNAL_DIFF=./x.sh git diff`. A segment of
+assignments only (`AUTH_REMOTE="…"`) and the `NAME="$(...)"` unwrap stay allowed. `set` may take
+only short flags from `e`, `u`, `o`, `x` and `v`, and the names `pipefail`, `errexit`, `nounset`,
+`xtrace` and `verbose`: `set -a`, `set -o allexport` and `set -k` make a later assignment reach
+the environment. `set -euo pipefail` stays allowed. `shell:`, `container:`, `services:`,
+`defaults:`, a job-level `env:` or `uses:`, and a workflow-level `env:` or `defaults:` (when the
+file has an `UNGATED_JOBS` member) are refused. A step may use only the keys `name`, `id`, `if`,
+`uses`, `with`, `env`, `run` and `working-directory`. Its `env:` names are limited to
+`APP_ID_SET`, `GIT_TOKEN`, `PR_JSON` and `GH_TOKEN_FOR_PUSH`, its `working-directory:` to `rs`,
+and its `with:` keys to a list per action, with `persist-credentials: false` on the checkout. That
+check is case-insensitive, so the string `False` passes. Residuals follow.
 
 V18 cannot see inside an allowed program: `bash ci/version-lockstep/run.sh --write` is guarded
 by that script's own self-tests (the napi-glue writer, the `run_write` pins and the changed-path
