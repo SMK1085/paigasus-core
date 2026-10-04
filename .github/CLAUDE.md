@@ -33,8 +33,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   M2). release-plz then reports `already up to date`. `git branch -u origin/main` sets this
   upstream. CI is not affected (INFERRED): `main` tracks `origin/main`.
 - `dependencies_update` is `false` since SMA-680. `true` runs a full `cargo update` in the release
-  PR. That made the committed wasm glue stale on v0.2.0, and it ran unreviewed third-party build
-  scripts in the stamp step, which holds a write-capable token. `false` runs
+  PR. That made the committed wasm glue stale on v0.2.0. Before SMA-684 it also ran unreviewed
+  third-party build scripts in the stamp step, which holds a write-capable token. Since SMA-684
+  that step compiles nothing, so the wasm glue reason alone keeps the key `false`. `false` runs
   `cargo update --workspace`. The reasons and the source lines are in the key's comment.
 - release-plz's `release_pr()` does all its work in a **tempdir copy** (`copy_to_temp_dir`,
   measured against the pinned 0.3.158) — it never touches the local working tree or `HEAD`. This
@@ -180,20 +181,26 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `paigasus-proto` and `paigasus-proto-derive`. release-plz owns the Cargo `[package] version`
   of each group's publishable crates, and the `[workspace.dependencies]` version requirements
   (measured against 0.3.158). It does NOT write a Cargo `publish = false` crate (SMA-685).
-- `--write` owns nine sites: five kernel non-Cargo sites, one proto pyproject site, and three
-  binding manifests. The script checks all twenty sites, because a `version_group` fault could
-  stop applying silently. Today that risk is real only for `paigasus-proto-derive`. Two sites
-  drift silently without this check. `py/uv.lock` drifts because its `moon.yml` runs bare
-  `uv sync`, not `--locked`. The 26 `bindingPackageVersion` guards in the committed napi glue
-  drift because the codegen-drift gate covers only the three `**/generated` proto dirs.
-  Since SMA-667, `paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`) also fails on stale
-  guards. The generator reads the version from the crate `package.json`.
+- `--write` owns ten sites: five kernel non-Cargo sites, one proto pyproject site, three binding
+  manifests, and the version literals of the napi glue `index.js` (SMA-684). The script checks
+  all twenty sites, because a `version_group` fault could stop applying silently. Today that risk
+  is real only for `paigasus-proto-derive`. Two sites drift silently without this check.
+  `py/uv.lock` drifts because its `moon.yml` runs bare `uv sync`, not `--locked`. The 27
+  `bindingPackageVersion` guards in the committed napi glue (26 native, 1 WASI) drift because the
+  codegen-drift gate covers only the three `**/generated` proto dirs. Since SMA-667,
+  `paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`) also fails on stale guards.
+- `--write` writes the napi guards with a text writer, not with `napi build` (SMA-684). The
+  release-PR job compiles nothing, because every step of that job can read the App private key.
+  The writer exits 2 when the napi guard format changes. `stamp_sites_self_test` runs it on the
+  real `index.js`, so a napi bump PR that regenerates the glue reds `repo:version-lockstep`
+  before a release. `release_guard.py` V18 holds the `release-pr` job to an allowlist of steps.
 - `repo:version-lockstep` is script-pinned the same way the
   `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its **four** `moon.yml` lines
   (`--self-test`, `--negative-control`, the real run, and `set -euo pipefail`; one more than the
   `release-parity*` tasks, which have no self-test invocation) — and takes the
   `SELF_TASK_EXPECTED_GLOBS` route through the
-  pairing rule above, listing all sixteen of its literal `inputs`, so it needs no
+  pairing rule above, listing all eighteen of its `inputs` (seventeen literal paths and the glob
+  `py/packages/*/pyproject.toml`, SMA-684), so it needs no
   `SELF_TASK_GLOBS_EXEMPT` entry (holding both would itself be reported).
 - Any crate flipping `publish = true` must carry **its own `[lints.*]` table** and **its own
   `include` allowlist** — enforced by `repo:publish-metadata` Checks 1c/1d (SMA-577). Cargo
