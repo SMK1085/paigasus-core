@@ -721,6 +721,15 @@ PY
   grep -Eq '^    verify\(old, new, target\)$' < <(_fn_body napi_glue_py) \
     || { fail "self-test: napi_glue_py write mode does not call verify()"; return 1; }
 
+  # run_write compiles nothing (spec A1, A3). Comment lines are removed first. A bare \bnode\b
+  # would match paigasus-node-bindings, so a command word is matched by its neighbours instead.
+  local body
+  body="$(_fn_body run_write)" || { fail "self-test: cannot read the body of run_write"; return 1; }
+  if grep -Eq '(^|[[:space:];&|(])(pnpm|npx|napi|node)([[:space:];&|)]|$)' < <(printf '%s\n' "$body"); then
+    fail "self-test: run_write names pnpm, npx, napi or node as a command word; --write must compile nothing (SMA-684)"
+    return 1
+  fi
+
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
@@ -1299,21 +1308,17 @@ run_write() {
   wrote="$(stamp_sites)" || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
 
-  # Regenerate the three derived files (SITES rows 16-20 — kernel's and proto's cargo-lock and
-  # uv-lock rows each point at the same file, so five rows resolve to three files). Each file is
-  # owned by a tool, not by this script.
+  # Regenerate the two derived lock files (SITES rows 16, 17, 19 and 20: kernel's and proto's
+  # cargo-lock and uv-lock rows each point at the same file, so four rows resolve to two files).
+  # Each lock file is owned by its tool. Neither command runs a build script or a build backend
+  # (spec F6, F7; --check asserts the static uv metadata that F7 needs). Row 18, the napi glue,
+  # is written by stamp_sites above through write_site's napi-glue arm (SMA-684). This function
+  # compiles nothing: the release-PR job runs it, and every step of that job can read the App
+  # private key. napi_glue_writer_self_test pins that no build command comes back here.
   ( cd "$REPO_ROOT/rs" && cargo update -w --offline >/dev/null 2>&1 ) \
     || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
     || die_infra "cargo update -w failed (site 16)"
   ( cd "$REPO_ROOT/py" && uv lock >/dev/null ) || die_infra "uv lock failed (site 17)"
-  # @napi-rs/cli is a devDependency of @paigasus/kernel, not of the ts workspace root
-  # (pnpm-workspace.yaml's catalog comment: a file:-linked dep's devDeps aren't installed
-  # at the consumer's node_modules root) — a bare `pnpm exec` from ts/ cannot find `napi`
-  # and pnpm treats it as a recursive exec across every workspace package instead, failing
-  # on the first one that lacks it. Scope it with --filter to the package that has it.
-  ( cd "$REPO_ROOT/ts" && pnpm --filter @paigasus/kernel exec napi build --platform \
-      --cwd "$REPO_ROOT/rs/crates/bindings/paigasus-node-bindings" >/dev/null ) \
-    || die_infra "napi build failed (site 18)"
 
   if [ "$wrote" -gt 0 ]; then
     printf 'version-lockstep: wrote %d site(s)\n' "$wrote"

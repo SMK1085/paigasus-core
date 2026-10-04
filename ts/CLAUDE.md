@@ -138,9 +138,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   npm publishes it and `ts/Dockerfile` copies it (SMA-667). `paigasus-kernel-ts:build` and `:test`
   write only the scratch files `index.fresh.js` and `index.fresh.d.ts`.
   `tests/committed-napi-glue.test.ts` reds until the committed files equal the scratch build.
-  `moon run paigasus-kernel-ts:generate-napi-glue` is the local writer. `version-lockstep --write`
-  also writes both files in a release. It runs a full `napi build --platform` in place, which stamps
-  the version guards and replaces both files by rename.
+  `moon run paigasus-kernel-ts:generate-napi-glue` is the local writer. In a release,
+  `version-lockstep --write` writes only the version literals of `index.js`, as text and in place
+  (SMA-684). It runs no `napi build` and does not touch `index.d.ts`, which holds no version.
 
   Run `generate-napi-glue` after a napi binding or kernel export change. Run it also after a
   `@napi-rs/cli` change in `ts/pnpm-lock.yaml`, or after a `napi` or `napi-derive` change in
@@ -148,9 +148,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `test`.
 
   The `build` task runs `tsc`, and `tsc` reads the installed copy of `index.d.ts` through
-  `ts/node_modules`. A rename-write breaks the pnpm hard link of that copy. After a checkout, a
-  rebase or `version-lockstep --write` that replaces `index.d.ts`, run `rm -rf ts/node_modules &&
-  pnpm -C ts install`, as in the wasm paragraph above.
+  `ts/node_modules`. A rename-write breaks the pnpm hard link of that copy. After a checkout or a
+  rebase that replaces `index.d.ts`, run `rm -rf ts/node_modules && pnpm -C ts install`, as in the
+  wasm paragraph above.
 
   `@napi-rs/cli` (npm) and the `napi`, `napi-derive` and `napi-build` crates (cargo) each have their
   own Dependabot group. On such a PR, run `generate-napi-glue` and push the result to the PR

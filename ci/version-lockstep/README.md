@@ -46,7 +46,7 @@ passing state — the proto family activates in SMA-577.
 | Mode | Behaviour |
 |---|---|
 | `--check` (default) | Compare all 20 sites. Exit 1 on any drift. |
-| `--write` | Rewrite the nine sites release-plz cannot reach (the six non-Cargo sites and the three `publish = false` binding manifests) and regenerate the three derived files (five `SITES` rows: 16-20). |
+| `--write` | Rewrite the ten sites release-plz cannot reach (the six non-Cargo sites, the three `publish = false` binding manifests, and the version literals of the napi glue `index.js`) and regenerate the two lock files (four `SITES` rows: 16, 17, 19 and 20). It compiles nothing (SMA-684). |
 | `--negative-control` | Prove the checker can still report red. |
 | `--self-test` | Fixture tables for the verdict function, the lock readers, the cargo-package writer and the napi-glue writer, plus `stamp_sites` on a staged copy of the real tree. |
 
@@ -180,9 +180,12 @@ cannot silently drift apart from each other.
   `package.json` files, that reports `wrote N site(s)` and rewrites unrelated Prettier-style
   formatting even when the version was already correct, which breaks the "already in
   lockstep" no-op case and pollutes the release-PR diff.
-- `@napi-rs/cli` is a devDependency of `@paigasus/kernel` (`ts/packages/paigasus-kernel`),
-  not of the ts workspace root — a `file:`-linked consumer's own devDeps aren't installed at
-  the root `node_modules`. A bare `pnpm exec napi …` from `ts/` finds no `napi` binary and
-  pnpm treats it as a recursive exec across every workspace package, failing on the first
-  one that lacks it. `run_write` scopes the call with `pnpm --filter @paigasus/kernel exec`
-  instead.
+- The `napi-glue` writer (SMA-684) edits the version literals of `index.js` as text. It
+  replaced `napi build`, which compiled the binding crate and its whole build graph in the
+  release-PR job, where every step can read the App private key. It checks the file in memory
+  before it writes (spec §5.1: V, E1, E2, E6, E3, L, E4, E5) and writes in place, never by
+  rename, because a rename breaks the pnpm hard link (`ts/CLAUDE.md`). A guard format change in
+  a new `@napi-rs/cli` exits 2. `stamp_sites_self_test` runs the writer on the real `index.js`,
+  and `index.js` is an input of this task, so a napi bump PR that regenerates the glue reds here
+  before a release. `run_write` runs no `pnpm`, `npx`, `napi` or `node` command;
+  `napi_glue_writer_self_test` pins that.
