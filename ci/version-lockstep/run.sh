@@ -603,6 +603,13 @@ PY
   bpos="${bpos%%:*}"; spos="${spos%%:*}"
   { [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$spos" ]; } \
     || { fail "self-test: run_write must record the dirty paths before it calls stamp_sites"; return 1; }
+  # The CI clean-tree guard sits after the snapshot and before the write. After the write it is
+  # too late, and without it the stamp step's `git add -A` commits a path that was dirty before.
+  local gpos
+  gpos="$(grep -Fn 'die_infra "--write found a dirty work tree before it started in CI' < <(printf '%s\n' "$wbody"))" || gpos=""
+  gpos="${gpos%%:*}"
+  { [ -n "$gpos" ] && [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$gpos" ] && [ "$gpos" -lt "$spos" ]; } \
+    || { fail "self-test: run_write must refuse a dirty tree in CI after the snapshot and before stamp_sites"; return 1; }
   # SMA-684 §5.2: run_write runs the static uv metadata check, and BEFORE uv lock. A check after
   # uv lock is too late: uv lock would already have run the build backend.
   local cpos lpos
@@ -1595,6 +1602,11 @@ run_write() {
   # SMA-684 §5.3: the paths that were dirty before this run. Every path that is new after it must
   # be in the write set; write_set_violations below holds that.
   before="$(dirty_paths)" || die_infra "cannot list the dirty paths before --write"
+  # In CI the stamp step runs `git add -A`, so a path that was dirty before this run would be
+  # committed although write_set_violations never reports it. Refuse the start instead.
+  if [ -n "${CI:-}" ] && [ -n "$before" ]; then
+    die_infra "--write found a dirty work tree before it started in CI: ${before//$'\n'/, }"
+  fi
   wrote="$(stamp_sites)" || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
 

@@ -75,8 +75,9 @@ today only the F7 measurement covers that.
 `git status --porcelain=v1 -z --untracked-files=all`). After it finishes, every path that is new
 in that list must be a `SITES` path; `rs/Cargo.lock` and `py/uv.lock` are `SITES` paths.
 Otherwise it exits 2 and names the paths. The release-PR stamp step runs `git add -A`, so this
-check is the boundary of what that job commits. A path that was already dirty before `--write`
-is not new, so a local run in a dirty tree does not red on it. `stamp_sites_self_test` drives the
+check and the CI clean-tree rule together are the boundary of what that job commits. When `CI` is
+set, `run_write` exits 2 before it writes if the work tree is already dirty, and it names the paths.
+Locally, a path that was already dirty before `--write` is not new, so it is not reported. `stamp_sites_self_test` drives the
 check on a scratch git repository and pins its two call sites in `run_write`.
 
 ## How it runs in CI
