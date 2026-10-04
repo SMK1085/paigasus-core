@@ -2,7 +2,7 @@
 
 - Linear: SMA-684 (related: SMA-680, SMA-667, SMA-685)
 - Date: 2026-10-04
-- Status: draft, revised after the spec challenge, waits for approval (GATE 1)
+- Status: approved by Sven on 2026-10-04 (GATE 1). Q1-Q3 in §10 are accepted as written.
 - Replaces: the 2026-09-27 draft. That file was in a session scratchpad and is lost. Its Linear
   comment is the only record. This spec does not depend on it.
 
