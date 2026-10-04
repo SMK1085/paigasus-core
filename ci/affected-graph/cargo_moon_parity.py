@@ -2410,6 +2410,56 @@ def check_ts_tsc_inputs(projects, root, floor=REQUIRED_TSC_TASKS, closure_floor=
     return list(dict.fromkeys(rows))
 
 
+# The joins between the preflight and `tsc` that let `tsc` run after a failed preflight. `||` is
+# checked before `|`, because it contains it. `&&` is removed first, so a lone `&` is a background job.
+_PREFLIGHT_BAD_JOINS = (("||", "`||`"), (";", "`;`"), ("\n", "a newline"), ("|", "`|`"), ("&", "`&`"))
+
+
+def preflight_order_verdict(blob):
+    """None if `blob` runs the preflight before its first `tsc`, joined only with `&&`; else why not."""
+    tsc = TSC_TOKEN_RE.search(blob)
+    if tsc is None:
+        return "runs no `tsc` token"
+    pre = PREFLIGHT_RE.search(blob)
+    if pre is None:
+        return f"does not run {PREFLIGHT_SCRIPT} before `tsc`, so `tsc` can read stale installed typings"
+    if pre.start() > tsc.start():
+        return f"runs {PREFLIGHT_SCRIPT} after `tsc`, so `tsc` can read stale installed typings first"
+    # Up to the END of the separator group, so the character just before `tsc` (a newline, a `;`)
+    # is part of what is checked.
+    leftover = blob[pre.end():tsc.end(1)].replace("&&", "")
+    for op, shown in _PREFLIGHT_BAD_JOINS:
+        if op in leftover:
+            return (
+                f"joins {PREFLIGHT_SCRIPT} to `tsc` with {shown}, not `&&`, so a failed preflight "
+                f"does not stop `tsc`"
+            )
+    return None
+
+
+def check_ts_tsc_preflight(projects, root, floor=REQUIRED_TSC_TASKS):
+    """Return the A12b violation list: binding `tsc` tasks that do not run the preflight first.
+
+    Examines every task A12 derives whose closure holds a `file:` binding. The package.json walk
+    rows are A12a's to report; A12b drops them, so one broken manifest does not print under two
+    titles. `root` is positional and required, as in A12a.
+    """
+    tasks, per_task, _names, _walk_rows = ts_tsc_analysis(projects, root)
+    examined = {target for target in tasks if per_task[target]["binding"]}
+    rows = []
+    for target in sorted(set(floor or ()) - examined):
+        rows.append(
+            f"FLOOR: {target} is in the A12 floor, but A12b does not examine it — it runs no `tsc` "
+            f"token, or its package closure no longer holds a `file:` binding"
+        )
+    for target in sorted(examined):
+        pid, _, task = target.partition(":")
+        verdict = preflight_order_verdict(projects[pid]["invocations"][task])
+        if verdict:
+            rows.append(f"{target} {verdict}")
+    return rows
+
+
 def moon_projects():
     """Moon's own resolved graph. Never parse moon.yml — Moon already resolved it.
 
@@ -4932,6 +4982,71 @@ def self_test():
     else:
         failures.append("derive_tsc_tasks accepted a task with no command, script or args")
 
+    def _a12b(fixture=None, tree=None, **kw):
+        kw.setdefault("floor", a12_floor)
+        return _a12_run(
+            check_ts_tsc_preflight, a12 if fixture is None else fixture,
+            a12_tree if tree is None else tree, **kw,
+        )
+
+    rows = _a12b()
+    if rows != []:
+        failures.append(f"A12b reported violations on a complete fixture: {rows}")
+
+    # The order verdict, exercised directly. `None` means no violation; a string must appear in the
+    # verdict. Row 2 is moon's joined form of a script task (the first word repeats).
+    for blob, want in (
+        ("node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit", None),
+        ("node node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit", None),
+        ("touch a && pnpm exec napi build && node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p x", None),
+        ("node ts/scripts/check-installed-bindings.mjs && tsc", None),
+        ("pnpm exec tsc -p x", "does not run"),
+        ("node ../../../ts/scripts/check-installed-bindings.mjsx && pnpm exec tsc -p x", "does not run"),
+        ("echo ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p x", "does not run"),
+        ("pnpm exec tsc -p x && node ts/scripts/check-installed-bindings.mjs", "after `tsc`"),
+        ("node ts/scripts/check-installed-bindings.mjs; pnpm exec tsc -p x", "with `;`"),
+        ("node ts/scripts/check-installed-bindings.mjs || pnpm exec tsc -p x", "with `||`"),
+        ("node ts/scripts/check-installed-bindings.mjs | pnpm exec tsc -p x", "with `|`"),
+        ("node ts/scripts/check-installed-bindings.mjs & pnpm exec tsc -p x", "with `&`"),
+        ("node ts/scripts/check-installed-bindings.mjs\npnpm exec tsc -p x", "with a newline"),
+    ):
+        got = preflight_order_verdict(blob)
+        if (want is None and got is not None) or (want is not None and (got is None or want not in got)):
+            failures.append(
+                f"preflight_order_verdict({blob!r}) is {got!r}, expected "
+                f"{'no violation' if want is None else repr(want)}"
+            )
+
+    # A12b-a: a binding task with no preflight.
+    broken = _a12_copy(a12)
+    broken["k-ts"]["invocations"]["typecheck"] = a12_tsc
+    if not any(r.startswith("k-ts:typecheck does not run") for r in _a12b(broken)):
+        failures.append("A12b did not fire on a binding task with no preflight")
+
+    # A12b-b: a preflight after `tsc`, read PER TASK (c-ts:build keeps the right order).
+    broken = _a12_copy(a12)
+    broken["c-ts"]["invocations"]["typecheck"] = a12_tsc + " && node ../../../ts/scripts/check-installed-bindings.mjs"
+    rows = _a12b(broken)
+    if not any(r.startswith("c-ts:typecheck runs") and "after `tsc`" in r for r in rows):
+        failures.append("A12b did not fire on a preflight after `tsc`")
+    if any(r.startswith("c-ts:build ") for r in rows):
+        failures.append("A12b blamed `build` for a script that lives on `typecheck`")
+
+    # A12b-c: a preflight joined with `;`.
+    broken = _a12_copy(a12)
+    broken["app-ts"]["invocations"]["typecheck"] = a12_pre.replace(" && ", "; ", 1)
+    if not any(r.startswith("app-ts:typecheck joins") and "with `;`" in r for r in _a12b(broken)):
+        failures.append("A12b did not fire on a preflight joined with `;`")
+
+    # A12b-d: the floor. A floor task with no binding in its closure is not examined, and so is
+    # every task when the kernel loses its binding edge. Both must red, with THIS branch's prefix.
+    if not any(r.startswith("FLOOR:") and "p-ts:typecheck" in r for r in _a12b(floor=("p-ts:typecheck",))):
+        failures.append("A12b's floor did not fire on a floor task it does not examine")
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/kernel"]["dependencies"] = {}
+    if not any(r.startswith("FLOOR:") and "k-ts:typecheck" in r for r in _a12b(tree=tree)):
+        failures.append("A12b's floor did not fire when a floor task's closure lost its binding")
+
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
@@ -4954,7 +5069,7 @@ def self_test():
 # rather than a bare count.
 #
 # Adding a check means adding its key here AND its tuple there, in the same order.
-EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12a")
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12a", "a12b")
 
 
 def collect_findings(projects, crates, root):
@@ -5106,6 +5221,13 @@ def collect_findings(projects, crates, root):
              "    Extra inputs are ALLOWED (this is containment, like A7).\n"
              "    A `FLOOR:` row, or a row about an unreadable package.json, means the check itself\n"
              "    cannot be trusted — fix that first."),
+        ("a12b", check_ts_tsc_preflight(projects, root),
+             "A ts `tsc` task whose package closure holds a `file:` binding does not run the\n"
+             "    installed-typings preflight before `tsc`, so `tsc` can read stale typings through\n"
+             "    ts/node_modules and pass (SMA-536).\n"
+             "    Fix: make the task a script that starts\n"
+             "    `node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc ...`.\n"
+             "    A `FLOOR:` row means A12b examines less than the A12 floor — fix that first."),
     ]
 
     return findings
@@ -5132,7 +5254,9 @@ def main():
             f"Rust crates it builds, every cargo-resolving task passes --locked, and every "
             f"workspace crate is reachable through Dependabot's member expansion, and "
             f"every compiling cargo task inside rs/ keys on .cargo/config.toml, and every "
-            f"workspace members entry is a literal path"
+            f"workspace members entry is a literal path, and every ts tsc task keys on its "
+            f"package.json closure and runs the installed-typings preflight first when that "
+            f"closure holds a binding"
         )
         return 0
 

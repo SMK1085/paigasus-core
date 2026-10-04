@@ -286,6 +286,34 @@ It also runs several checks that the per-case project sets structurally **cannot
   from A8 — reusing A8's would pull `"$CARGO_BIN" tree` into A10's scope with nothing to red it
   — and the `CARGO=` prefix, which makes a task sensitive UNCONDITIONALLY, since A10 cannot read
   the subcommand the redirected tool will run.
+- **A12** (`check_ts_tsc_inputs` and `check_ts_tsc_preflight` in `cargo_moon_parity.py`, SMA-536,
+  findings keys `a12a` and `a12b`) covers every task of a `language: typescript` project whose
+  resolved invocation runs `tsc` (`TSC_TOKEN_RE`). It reads each task's `package.json` closure
+  from disk: the transitive `workspace:` and `file:` specifiers in `dependencies`,
+  `devDependencies` and `peerDependencies`, with upstream devDependencies included and the own
+  package excluded. **A12a** asserts CONTAINMENT, per task and over both input buckets, like A7.
+  For each workspace package `D` it demands `D/src/**/*`, `D/package.json` and each `exports`
+  target outside `src/` (`D/<dir>/**/*` for a subdirectory target, the file itself for a root
+  target). For each `file:` binding `B` it demands `B/package.json` and each `.d.ts` in `B`'s
+  `files`. It demands `ts/tsconfig.base.json` of every task,
+  `ts/scripts/check-installed-bindings.mjs` of every task whose closure holds a binding, and a
+  direct `contracts:generate` in `deps` of every task whose package or closure is
+  `@paigasus/proto`. **A12b** asserts that every task whose closure holds a binding runs that
+  preflight before its first `tsc`, joined only with `&&`. The preflight is what makes the typings
+  inputs real: `tsc` reads the INSTALLED copy under `ts/node_modules`, and the preflight fails
+  unless that copy equals the committed file. A broken `package.json`, a `link:` specifier, a
+  `workspace:` name with no package and a `file:` path that does not exist are each a row, never a
+  skip. `REQUIRED_TSC_TASKS` and `REQUIRED_TS_CLOSURE` are the floors (rows prefixed `FLOOR:`).
+  Accepted over-approximations: console-core and both apps reach `@paigasus/node-bindings` only
+  through the kernel's `package.json` and import only the wasm `.` entry, so a napi glue change
+  also runs their `tsc` tasks; and app-shell keys on next-config and `@paigasus/proto`, although
+  its `tsconfig.json` excludes the fixture that uses next-config and discovery's `./client` graph
+  does not reach proto. A per-import closure would need a TypeScript resolver in the gate.
+  Limits: vitest `test` tasks are out of scope, because they resolve the bindings through
+  `vitest.config.ts` aliases (a follow-up issue holds them); `next build`'s own type check is not a
+  `tsc` task; own-package files outside `src/` (for example `tests/**/*`) are not asserted;
+  relative reads that `package.json` does not declare are not seen; and a `tsc` behind a wrapper
+  script is invisible (the floor catches only the loss of a known task).
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
@@ -352,7 +380,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
   passes C1-C6 by never executing them, and takes the eight project cascade cases, the five task
-  cases, A1-A11 and `assert_include_relations` with it. Never exempt or drop it — see the design
+  cases, A1-A12 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.

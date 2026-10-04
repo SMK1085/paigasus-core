@@ -2596,8 +2596,53 @@ Fill each entry in the task that names it. Paste command output where the step s
 ### E2 — A12 on the real tree before the moon.yml fixes (Task 4)
 
 ```text
-(paste $SCRATCH/a12-before.txt)
+a12a	gateway-console-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/index.d.ts
+a12a	gateway-console-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/package.json
+a12a	gateway-console-ts:typecheck inputs omit ts/scripts/check-installed-bindings.mjs
+a12a	iam-console-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/index.d.ts
+a12a	iam-console-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/package.json
+a12a	iam-console-ts:typecheck inputs omit ts/scripts/check-installed-bindings.mjs
+a12a	paigasus-app-shell-ts:build inputs omit ts/packages/paigasus-next-config/package.json
+a12a	paigasus-app-shell-ts:build inputs omit ts/packages/paigasus-next-config/src/**/*
+a12a	paigasus-app-shell-ts:build inputs omit ts/packages/paigasus-next-config/tsconfig.app.json
+a12a	paigasus-app-shell-ts:build inputs omit ts/packages/paigasus-proto/package.json
+a12a	paigasus-app-shell-ts:build inputs omit ts/packages/paigasus-proto/src/**/*
+a12a	paigasus-app-shell-ts:build deps omit contracts:generate — it reads @paigasus/proto's generated tree, so it must run after the generator for a deterministic cache key
+a12a	paigasus-app-shell-ts:typecheck inputs omit ts/packages/paigasus-next-config/package.json
+a12a	paigasus-app-shell-ts:typecheck inputs omit ts/packages/paigasus-next-config/src/**/*
+a12a	paigasus-app-shell-ts:typecheck inputs omit ts/packages/paigasus-next-config/tsconfig.app.json
+a12a	paigasus-app-shell-ts:typecheck inputs omit ts/packages/paigasus-proto/package.json
+a12a	paigasus-app-shell-ts:typecheck inputs omit ts/packages/paigasus-proto/src/**/*
+a12a	paigasus-app-shell-ts:typecheck deps omit contracts:generate — it reads @paigasus/proto's generated tree, so it must run after the generator for a deterministic cache key
+a12a	paigasus-console-core-ts:build inputs omit rs/crates/bindings/paigasus-node-bindings/index.d.ts
+a12a	paigasus-console-core-ts:build inputs omit rs/crates/bindings/paigasus-node-bindings/package.json
+a12a	paigasus-console-core-ts:build inputs omit ts/scripts/check-installed-bindings.mjs
+a12a	paigasus-console-core-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/index.d.ts
+a12a	paigasus-console-core-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/package.json
+a12a	paigasus-console-core-ts:typecheck inputs omit ts/scripts/check-installed-bindings.mjs
+a12a	paigasus-discovery-ts:build inputs omit ts/packages/paigasus-proto/package.json
+a12a	paigasus-discovery-ts:typecheck inputs omit ts/packages/paigasus-proto/package.json
+a12a	paigasus-kernel-ts:build inputs omit rs/crates/bindings/paigasus-node-bindings/index.d.ts
+a12a	paigasus-kernel-ts:build inputs omit rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts
+a12a	paigasus-kernel-ts:build inputs omit rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts
+a12a	paigasus-kernel-ts:build inputs omit ts/scripts/check-installed-bindings.mjs
+a12a	paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/index.d.ts
+a12a	paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/package.json
+a12a	paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-wasm/package.json
+a12a	paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts
+a12a	paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts
+a12a	paigasus-kernel-ts:typecheck inputs omit ts/scripts/check-installed-bindings.mjs
+a12a	paigasus-sdk-ts:build inputs omit ts/packages/paigasus-proto/package.json
+a12a	paigasus-sdk-ts:typecheck inputs omit ts/packages/paigasus-proto/package.json
+a12b	gateway-console-ts:typecheck does not run ts/scripts/check-installed-bindings.mjs before `tsc`, so `tsc` can read stale installed typings
+a12b	iam-console-ts:typecheck does not run ts/scripts/check-installed-bindings.mjs before `tsc`, so `tsc` can read stale installed typings
+a12b	paigasus-console-core-ts:build does not run ts/scripts/check-installed-bindings.mjs before `tsc`, so `tsc` can read stale installed typings
+a12b	paigasus-console-core-ts:typecheck does not run ts/scripts/check-installed-bindings.mjs before `tsc`, so `tsc` can read stale installed typings
+a12b	paigasus-kernel-ts:build does not run ts/scripts/check-installed-bindings.mjs before `tsc`, so `tsc` can read stale installed typings
+a12b	paigasus-kernel-ts:typecheck does not run ts/scripts/check-installed-bindings.mjs before `tsc`, so `tsc` can read stale installed typings
 ```
+
+Measured on 2026-10-04: 38 `a12a` rows and 6 `a12b` rows, 44 lines. No `FLOOR:` row and no package.json row. The list matches the prediction.
 
 ### E3 — run.sh re-measurement (Task 8)
 
