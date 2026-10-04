@@ -12,11 +12,10 @@ import type { Presentation, TransportCause } from './types';
  * Two rows carry a decision rather than an obvious mapping.
  *
  * `ResourceExhausted` gets its OWN `rate-limited` state rather than sharing `degraded`. A quota
- * refusal and a sick service want different copy. MEASURED: nothing in this repository emits 429
- * or `ResourceExhausted` today, so every one the SDK can currently see is the UPSTREAM's quota
- * arriving through the chat passthrough — which is exactly what lets that copy be specific instead
- * of hedged. A future Paigasus-side quota gets a registry reason, and the override table can give
- * it this same screen without a tenth presentation value.
+ * refusal and a sick service want different copy. Since SMA-677 the gateway emits 429 itself, with
+ * a registry reason: `rate-limited` keeps this table's answer, and `budget-exhausted` overrides it
+ * with `quota-exhausted` (presentation.ts). An upstream 429 forwarded through the chat passthrough
+ * carries no registry reason, so it still takes this table's answer.
  *
  * `Unimplemented` maps to `generic`, NOT to `disabled`, and that is load-bearing. IAM's
  * `capability_disabled` is the only thing that emits `Unimplemented` (`convert.rs:96-104`), so if

@@ -11,9 +11,18 @@
 //! share one model.
 
 use std::future::Future;
+use std::time::Duration;
 
+use metrics::counter;
+use paigasus_observability::names;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio_util::task::TaskTracker;
+
+use crate::domain::limits::ChargeDropReason;
+
+/// D16: how long shutdown waits for in-flight limit charges.
+pub const CHARGE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Supervise a set of server tasks on a shared graceful-shutdown watch.
 ///
@@ -27,10 +36,12 @@ use tokio::task::JoinSet;
 ///   from the same channel as `tx` **before** this function is called, so `tx.send`
 ///   reaches it. Receivers cloned before the first send do not wake spuriously, so the
 ///   first `changed().await` correctly waits.
+/// - `charges`: the Redis limit store's spawned charges (SMA-677 D16). After the servers drain,
+///   they get at most [`CHARGE_DRAIN_BUDGET`]; the rest are counted as dropped.
 /// - Callers must pass either a non-empty `servers` or a `shutdown` that resolves; an
 ///   empty set with a non-resolving `shutdown` would disable both `select!` arms and
 ///   wait forever. The gateway always spawns its main HTTP task, so it never hits this.
-pub async fn supervise(mut servers: JoinSet<anyhow::Result<()>>, shutdown: impl Future<Output = ()>, tx: watch::Sender<()>) -> anyhow::Result<()> {
+pub async fn supervise(mut servers: JoinSet<anyhow::Result<()>>, shutdown: impl Future<Output = ()>, tx: watch::Sender<()>, charges: Option<TaskTracker>) -> anyhow::Result<()> {
     // Stop on the first of: shutdown signal, or a server task ending.
     let early_error: Option<anyhow::Error> = tokio::select! {
         () = shutdown => {
@@ -69,7 +80,23 @@ pub async fn supervise(mut servers: JoinSet<anyhow::Result<()>>, shutdown: impl 
             Err(_) => {}
         }
     }
+    if let Some(charges) = charges {
+        drain_charges(&charges, CHARGE_DRAIN_BUDGET).await;
+    }
     result
+}
+
+/// D16: close the tracker and wait at most `budget`. Returns the number of charges still running
+/// then. They are lost, and counted as `gateway_limit_charges_dropped_total{reason="shutdown"}`.
+pub async fn drain_charges(charges: &TaskTracker, budget: Duration) -> usize {
+    charges.close();
+    if tokio::time::timeout(budget, charges.wait()).await.is_ok() {
+        return 0;
+    }
+    let lost = charges.len();
+    counter!(names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL, "reason" => ChargeDropReason::Shutdown.as_label()).increment(u64::try_from(lost).unwrap_or(u64::MAX));
+    tracing::warn!(lost, "shutdown: limit charges still running after the drain budget were dropped");
+    lost
 }
 
 #[cfg(test)]
@@ -95,7 +122,7 @@ mod tests {
         servers.spawn(async { Err(anyhow::anyhow!("boom")) });
 
         // `shutdown` never fires; the only way out is the failing task.
-        let result = supervise(servers, pending(), tx).await;
+        let result = supervise(servers, pending(), tx, None).await;
 
         let err = result.expect_err("a failing task must surface as Err");
         assert_eq!(err.to_string(), "boom");
@@ -109,7 +136,7 @@ mod tests {
         spawn_until_shutdown(&mut servers, rx.clone());
 
         // `shutdown` is ready immediately → supervise broadcasts, both tasks drain Ok.
-        let result = supervise(servers, ready(()), tx).await;
+        let result = supervise(servers, ready(()), tx, None).await;
 
         assert!(result.is_ok(), "clean shutdown must drain all tasks to Ok, got {result:?}");
     }
@@ -122,7 +149,7 @@ mod tests {
         // A task that returns Ok before any shutdown — the warn branch, not an error.
         servers.spawn(async { Ok(()) });
 
-        let result = supervise(servers, pending(), tx).await;
+        let result = supervise(servers, pending(), tx, None).await;
 
         assert!(result.is_ok(), "a clean early return is not an error, got {result:?}");
     }
@@ -136,9 +163,51 @@ mod tests {
         servers.spawn(async { Err(anyhow::anyhow!("late boom")) });
 
         // Whichever `select!` arm wins, the drain must still surface the error.
-        let result = supervise(servers, ready(()), tx).await;
+        let result = supervise(servers, ready(()), tx, None).await;
 
         let err = result.expect_err("the error must survive even when shutdown wins the select");
         assert_eq!(err.to_string(), "late boom");
+    }
+
+    use crate::test_support::counter;
+    use metrics_util::debugging::DebuggingRecorder;
+    use paigasus_observability::names;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio_util::task::TaskTracker;
+
+    #[test]
+    fn the_drain_budget_is_five_seconds() {
+        assert_eq!(CHARGE_DRAIN_BUDGET, Duration::from_secs(5));
+    }
+
+    /// D16: a charge still running after the budget is lost and counted as `reason="shutdown"`.
+    #[tokio::test]
+    async fn a_charge_still_running_after_the_budget_is_counted_as_dropped() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let charges = TaskTracker::new();
+        charges.spawn(std::future::pending::<()>());
+        assert_eq!(drain_charges(&charges, Duration::from_millis(50)).await, 1);
+        assert_eq!(counter(&snapshotter, names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL, &[("reason", "shutdown")]), Some(1));
+    }
+
+    #[tokio::test]
+    async fn supervise_drains_the_charges_after_the_servers() {
+        let (tx, rx) = watch::channel(());
+        let mut servers = JoinSet::new();
+        spawn_until_shutdown(&mut servers, rx.clone());
+        let charges = TaskTracker::new();
+        let landed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&landed);
+        charges.spawn(async move {
+            tokio::task::yield_now().await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        let result = supervise(servers, ready(()), tx, Some(charges)).await;
+        assert!(result.is_ok());
+        assert!(landed.load(Ordering::SeqCst), "supervise waits for an in-flight charge");
     }
 }

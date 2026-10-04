@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+# expect: 3 shipped-path
+# The only path to braces uses an alias value (`micromatch-cjs: micromatch@4.0.8`), in the
+# shape of the real `string-width-cjs: string-width@4.2.3` entry under '@isaacs/cliui@8.0.2'.
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  apps/iam-console:
+    dependencies:
+      '@inquirer/type':
+        specifier: 'catalog:'
+        version: 4.1.1(@types/node@24.13.6)
+      '@isaacs/cliui':
+        specifier: 'catalog:'
+        version: 8.0.2
+
+snapshots:
+
+  '@inquirer/type@4.1.1(@types/node@24.13.6)':
+    optionalDependencies:
+      '@types/node': 24.13.6
+
+  '@isaacs/cliui@8.0.2':
+    dependencies:
+      micromatch-cjs: micromatch@4.0.8
+      string-width: 5.1.2
+
+  '@types/node@24.13.6': {}
+
+  braces@3.0.3:
+    dependencies:
+      fill-range: 7.1.1
+
+  fill-range@7.1.1: {}
+
+  micromatch@4.0.8:
+    dependencies:
+      braces: 3.0.3
+      picomatch: 2.3.2
+
+  picomatch@2.3.2: {}
+
+  string-width@5.1.2: {}
+
+  typescript@6.0.3: {}

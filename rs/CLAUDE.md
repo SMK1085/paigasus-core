@@ -45,6 +45,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   it to a skip, since that hatch is checked before any classification happens. A stray `CI=false` still counts as "CI present" (the
   check is presence-based, not value-based) — clear it with `env -u CI cargo nextest run -p
   paigasus-iam`.
+- The gateway also has Docker-backed suites now (SMA-677). It has a `docker_preflight` canary.
+  It has two Redis test binaries in the nextest `docker-containers` group. Its Moon task
+  `paigasus-gateway-rs:test` runs on the `heavy-integration` mutex.
 - This repo now has **four** CA-bundle config knobs and they do NOT share semantics. `authn.extra_ca_bundle_path`
   and `upstream.openai.extra_ca_bundle_path` (SMA-558) **ADD** to the trust store — reqwest builds one
   `RootCertStore` by unioning `add_root_certificate` calls with the webpki roots and the platform store, so

@@ -542,6 +542,20 @@ class ErrorReason(betterproto2.Enum):
     several organizations (400, param "paigasus-org").
     """
 
+    RATE_LIMITED = 311
+    """
+    "rate-limited" — the principal or its organization sent more chat requests
+    in the current 60 s window than its configured limit (429, OpenAI type
+    "requests"). Retryable: the answer carries Retry-After (SMA-677).
+    """
+
+    BUDGET_EXHAUSTED = 312
+    """
+    "budget-exhausted" — the organization used its token budget for the
+    current UTC period (429, OpenAI type "insufficient_quota"). Not retryable
+    until the period resets; the answer carries x-should-retry: false (SMA-677).
+    """
+
     INTERNAL = 900
     """
     ---- Shared (900-999) ----------------------------------------------------
@@ -680,6 +694,8 @@ class ErrorReason(betterproto2.Enum):
             308: "ERROR_REASON_STREAMING_DISABLED",
             309: "ERROR_REASON_INVALID_ORG_HEADER",
             310: "ERROR_REASON_ORG_REQUIRED",
+            311: "ERROR_REASON_RATE_LIMITED",
+            312: "ERROR_REASON_BUDGET_EXHAUSTED",
             900: "ERROR_REASON_INTERNAL",
             901: "ERROR_REASON_INVALID_REQUEST_BODY",
             902: "ERROR_REASON_REQUEST_TOO_LARGE",
@@ -751,6 +767,8 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_STREAMING_DISABLED": 308,
             "ERROR_REASON_INVALID_ORG_HEADER": 309,
             "ERROR_REASON_ORG_REQUIRED": 310,
+            "ERROR_REASON_RATE_LIMITED": 311,
+            "ERROR_REASON_BUDGET_EXHAUSTED": 312,
             "ERROR_REASON_INTERNAL": 900,
             "ERROR_REASON_INVALID_REQUEST_BODY": 901,
             "ERROR_REASON_REQUEST_TOO_LARGE": 902,

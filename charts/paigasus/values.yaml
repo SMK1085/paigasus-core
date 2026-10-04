@@ -33,7 +33,7 @@ zones:
         repository: ghcr.io/smk1085/paigasus-iam
         # Pinned to the image version in rs/crates/services/paigasus-iam/Cargo.toml (SMA-688).
         # repo:helm-render row 8a fails when the two differ.
-        tag: "0.2.0"
+        tag: "0.2.1"
       # replicas and maxSurge are pinned; see the comment in templates/backend-deployment.yaml.
       httpPort: 8080
       grpcPort: 9090
@@ -104,6 +104,8 @@ zones:
       # Genuinely missing from the original schema (SMA-513 Task 11) — the gateway backend is
       # stateless and horizontally scalable, unlike IAM's SMA-559-pinned single replica, so it
       # gets a real knob rather than a hardcoded default. Mirrors console.replicas above.
+      # With gateway [limits] (SMA-677), more than one replica needs limits.backend = "redis": the
+      # memory backend keeps per-replica counts, so N replicas allow about N times the configured limits.
       replicas: 2
       # REQUIRED whenever the gateway zone is enabled (deploy is false and stays false; see
       # above). The full base URL of an existing gateway backend, e.g. "http://gateway.internal:8088".

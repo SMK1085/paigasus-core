@@ -110,6 +110,7 @@ mod tests {
                 log_level: "info".to_string(),
                 metrics: MetricsConfig::default(),
                 stream_enabled,
+                limits: None,
             }
         }
 

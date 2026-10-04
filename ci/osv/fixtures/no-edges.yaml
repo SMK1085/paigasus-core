@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# expect: 2 edge-control
+# braces is a direct root dependency of `.` only. No snapshot has an edge to it, so the walk
+# does not prove that it follows snapshot edges, and the guard must refuse to pass.
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      '@next/eslint-plugin-next':
+        specifier: 'catalog:'
+        version: 16.3.6(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
+      braces:
+        specifier: ^3.0.3
+        version: 3.0.3
+
+  apps/iam-console:
+    dependencies:
+      '@connectrpc/connect':
+        specifier: 'catalog:'
+        version: 2.2.0(@bufbuild/protobuf@2.15.0)
+
+snapshots:
+
+  '@bufbuild/protobuf@2.15.0': {}
+
+  '@connectrpc/connect@2.2.0(@bufbuild/protobuf@2.15.0)':
+    dependencies:
+      '@bufbuild/protobuf': 2.15.0
+
+  '@next/eslint-plugin-next@16.3.6(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))':
+    dependencies:
+      fast-glob: 3.3.1
+    transitivePeerDependencies:
+      - eslint
+
+  braces@3.0.3:
+    dependencies:
+      fill-range: 7.1.1
+
+  fast-glob@3.3.1:
+    dependencies:
+      picomatch: 2.3.2
+
+  fill-range@7.1.1: {}
+
+  picomatch@2.3.2: {}

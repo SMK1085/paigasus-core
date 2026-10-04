@@ -8,7 +8,11 @@ authors.workspace = true
 publish = false
 
 [dependencies]
-redis = { workspace = true }
+# SMA-677 D19: `script` gives `redis::Script` (EVALSHA with a NOSCRIPT -> SCRIPT LOAD retry) to the
+# gateway's limit store. Added here, not in the workspace table, so the workspace comment that
+# trims `script` stays true for every other consumer. Cargo unions features, so IAM builds it too;
+# that changes no IAM behavior.
+redis = { workspace = true, features = ["script"] }
 metrics = { workspace = true }
 # Only the `test_support` blackhole listener needs tokio, so it comes in with the feature.
 tokio = { workspace = true, features = ["rt", "net", "sync", "io-util"], optional = true }

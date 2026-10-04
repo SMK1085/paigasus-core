@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::IamClient;
+use paigasus_gateway::adapters::limits::build_limits;
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::GatewayConfig;
 use paigasus_gateway::runtime;
@@ -74,6 +75,11 @@ async fn serve() -> anyhow::Result<()> {
         describe_gateway_metrics();
     }
 
+    // SMA-677 D17 "Order": after `paigasus_observability::init`, so `prime_metrics` and the Redis
+    // breaker's constructor reach the installed recorder. Eager: with `backend = "redis"`, a Redis
+    // that is down fails the boot here (Q14).
+    let limits = build_limits(config.limits.as_ref()).await?;
+
     // Outbound clients. IAM connects lazily (a dead IAM does not block startup); the OpenAI client
     // is built with the three split timeout budgets. Neither construction logs the key.
     let iam = IamClient::connect(&config.iam).await?;
@@ -89,6 +95,7 @@ async fn serve() -> anyhow::Result<()> {
         openai: Arc::new(openai),
         max_request_bytes: config.max_request_bytes,
         capabilities: Capabilities::from_config(&config),
+        limits: limits.limits,
     };
 
     let app = router(state);
@@ -168,10 +175,10 @@ async fn serve() -> anyhow::Result<()> {
 
     // Supervise: stop on the first of a shutdown signal or any task ending, broadcast graceful
     // shutdown to the rest, and surface the first error (SMA-463).
-    runtime::supervise(servers, shutdown_signal(), tx).await
+    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks).await
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 7 metric families `paigasus-gateway`
+/// Registers `# HELP`/`# TYPE` exposition text for the 14 metric families `paigasus-gateway`
 /// emits (spec §4.1), via the `names::` consts so this can't drift from `names::ALL`. Mirrors
 /// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.3.
 fn describe_gateway_metrics() {
@@ -198,6 +205,31 @@ fn describe_gateway_metrics() {
     describe_histogram!(
         names::GATEWAY_UPSTREAM_REQUEST_DURATION_SECONDS,
         "OpenAI upstream call latency in seconds (time-to-first-byte only for streaming responses)."
+    );
+    describe_counter!(
+        names::GATEWAY_LIMIT_REFUSALS_TOTAL,
+        "Chat requests refused by a limit before egress, labeled by reason (principal_rate, org_rate, org_budget)."
+    );
+    describe_counter!(
+        names::GATEWAY_TOKENS_CHARGED_TOTAL,
+        "Tokens the charge guard sent to the limit store, labeled by source (reported, estimated)."
+    );
+    describe_counter!(names::GATEWAY_LIMIT_UNSCOPED_REQUESTS_TOTAL, "Chat requests whose scope names no organization. Expected 0.");
+    describe_counter!(
+        names::GATEWAY_LIMIT_STORE_UNAVAILABLE_TOTAL,
+        "Limit-store calls that failed or met an open breaker, labeled by op (check, charge) and kind (io, server, decode). A check here is a request admitted with no limit (fail-open)."
+    );
+    describe_counter!(
+        names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL,
+        "Limit charges that were not sent, labeled by reason (no_runtime, shutdown, period_expired)."
+    );
+    describe_gauge!(
+        names::GATEWAY_REDIS_BREAKER_STATE,
+        "The limits Redis circuit breaker: 0 closed, 1 half-open, 2 open. Aggregate max by (job, role), never sum."
+    );
+    describe_counter!(
+        names::GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL,
+        "Transitions of the limits Redis circuit breaker, labeled by role and to."
     );
 }
 
