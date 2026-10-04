@@ -54,7 +54,8 @@ SITES=(
 # which independently asserts moon.yml's own `inputs:` list — the paths SITES reads (14
 # distinct: py/packages/paigasus-kernel/pyproject.toml, rs/Cargo.lock, and py/uv.lock are each
 # read by two rows) plus rs/Cargo.toml (read by the cargo-wsdep kind by name, not by a SITES
-# path) plus this script itself — 16 total, matching moon.yml's inputs: list.
+# path) plus this script itself, plus py/pyproject.toml and the glob py/packages/*/pyproject.toml
+# (read by uv_static_metadata_check, SMA-684) — 18 entries, matching moon.yml's inputs: list.
 EXPECTED_SITE_COUNT=20
 
 # Source of truth per group.
@@ -77,7 +78,7 @@ declare -A LOCK_MEMBERS=(
 )
 
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=4   # site_verdict, lock_reader, cargo_package_writer, stamp_sites
+SELF_TEST_COUNT=6   # site_verdict, lock_reader, cargo_package_writer, stamp_sites, napi_glue_writer, uv_static_metadata
 
 site_verdict() { # $1 expected  $2 actual
   if [ -n "$2" ] && [ "$1" = "$2" ]; then printf 'OK'; else printf 'MISMATCH'; fi
@@ -220,9 +221,9 @@ print(found.pop() if present == names and len(found) == 1 else "")
 PY
       ;;
     napi-glue)
-      # napi regenerates 26 `bindingPackageVersion !== '<v>'` guards from package.json.
-      # A non-uniform set prints "" and reads as MISMATCH; an unreadable or undecodable
-      # file exits 2.
+      # The 27 `bindingPackageVersion !== '<v>'` guards (26 native, 1 WASI). --write's text writer
+      # (write_site's napi-glue arm, SMA-684) writes them, and this arm reads them back. A
+      # non-uniform set prints "" and reads as MISMATCH; an unreadable or undecodable file exits 2.
       [ -r "$abs" ] || die_infra "cannot read $target"
       python3 - "$abs" <<'PY'
 import re, sys
@@ -455,7 +456,7 @@ stamp_sites_self_test() {
   local kv="" pv="" kcount=0 pcount=0
   for entry in "${SITES[@]}"; do
     IFS='|' read -r group kind target <<<"$entry"
-    case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson|napi-glue) ;; *) continue ;; esac
     got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
     [ -n "$got" ] \
       || { rm -rf "$tmp"; die_infra "self-test: $kind $target read back empty while validating the sentinels"; }
@@ -510,10 +511,22 @@ PY
   for entry in "${SITES[@]}"; do
     IFS='|' read -r group kind target <<<"$entry"
     [ "$group" = kernel ] || continue
-    case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    case "$kind" in cargo-package|pyproject|pyproject-dep|packagejson|napi-glue) ;; *) continue ;; esac
     got="$(REPO_ROOT="$tmp" read_version "$kind" "$target" "$group")" || return 2
     [ "$got" = "9.9.9" ] || { fail "self-test: stamp_sites left $kind $target at '$got', expected 9.9.9"; return 1; }
   done
+  # SMA-684: read_version's napi-glue arm reads the G1 literals only. Count both literal forms in
+  # the stamped file, so a writer that moved G1 and left G2 behind cannot pass this table.
+  got="$(python3 - "$tmp/rs/crates/bindings/paigasus-node-bindings/index.js" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    s = f.read()
+print(s.count("bindingPackageVersion !== '9.9.9'"), s.count("expected 9.9.9 but got"))
+PY
+)" || return 2
+  [ "${got% *}" -gt 0 ] && [ "${got% *}" = "${got#* }" ] \
+    || { fail "self-test: stamp_sites left the napi glue G1/G2 counts at '$got', expected two equal non-zero counts at 9.9.9"; return 1; }
+
   for entry in "${SITES[@]}"; do
     IFS='|' read -r group kind target <<<"$entry"
     [ "$group" = proto ] || continue
@@ -538,6 +551,329 @@ PY
   [ "$rc3" -eq 1 ] \
     || { fail "self-test: stamp_sites must return 1 when a site is higher than the head, got rc=$rc3"; return 1; }
 
+  # SMA-684 §5.3: the changed-path check, on a scratch git repository with the staged tree
+  # committed. A path dirty before the snapshot stays unreported. A SITES path changed after it is
+  # allowed. A file in a NEW directory must be reported by its full path, which only
+  # --untracked-files=all gives (the default reports `extra/`). A rename names two paths: one
+  # rename moves a SITES file to a new outside path, and one moves an outside file onto a SITES
+  # path. Both outside paths must be reported, and both SITES paths must not. The fixture commits,
+  # so it sets the keys ci/CLAUDE.md requires (no background maintenance, no signing, no global
+  # config).
+  local g before viol wbody expected_viol bpos spos
+  g="$(mktemp -d)" || { rm -rf "$tmp"; die_infra "cannot create a scratch dir"; }
+  stage_pristine_tree "$g"
+  rm -f "$g/py/uv.lock"
+  printf 'outside\n' >"$g/old-b.txt"
+  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    git -C "$g" init -q \
+      && git -C "$g" config maintenance.auto false && git -C "$g" config gc.auto 0 \
+      && git -C "$g" config commit.gpgsign false && git -C "$g" config tag.gpgsign false \
+      && git -C "$g" config user.name self-test && git -C "$g" config user.email self-test@invalid \
+      && git -C "$g" add -A && git -C "$g" commit -q -m base ) >/dev/null 2>&1 \
+    || { rm -rf "$tmp" "$g"; die_infra "cannot make the scratch git repository"; }
+  printf 'x\n' >"$g/pre-existing.txt"
+  before="$(REPO_ROOT="$g" dirty_paths)" \
+    || { rm -rf "$tmp" "$g"; die_infra "dirty_paths failed on the scratch repository"; }
+  printf 'y\n' >>"$g/pre-existing.txt"
+  printf '{"version": "9.9.9"}\n' >"$g/rs/crates/bindings/paigasus-wasm/package.json"
+  mkdir -p "$g/extra/new"
+  printf 'z\n' >"$g/extra/new/file.txt"
+  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    git -C "$g" mv rs/Cargo.lock moved-outside.txt \
+      && git -C "$g" mv old-b.txt py/uv.lock ) >/dev/null 2>&1 \
+    || { rm -rf "$tmp" "$g"; die_infra "cannot make the renames in the scratch git repository"; }
+  viol="$(REPO_ROOT="$g" write_set_violations "$before")" \
+    || { rm -rf "$tmp" "$g"; die_infra "write_set_violations failed on the scratch repository"; }
+  rm -rf "$g"
+  expected_viol=$'extra/new/file.txt\nmoved-outside.txt\nold-b.txt'
+  [ "$viol" = "$expected_viol" ] \
+    || { fail "self-test: the changed-path check reported '${viol//$'\n'/, }', expected exactly 'extra/new/file.txt, moved-outside.txt, old-b.txt'"; return 1; }
+  # ...and run_write still takes the snapshot and still applies the check.
+  wbody="$(_fn_body run_write)" || { fail "self-test: cannot read the body of run_write"; return 1; }
+  grep -Fq 'before="$(dirty_paths)" || die_infra' < <(printf '%s\n' "$wbody") \
+    || { fail "self-test: run_write no longer records the dirty paths before it writes"; return 1; }
+  grep -Fq 'violations="$(write_set_violations "$before")" || die_infra' < <(printf '%s\n' "$wbody") \
+    || { fail "self-test: run_write no longer computes the paths outside its write set"; return 1; }
+  grep -Fq '|| die_infra "--write changed paths outside its write set' < <(printf '%s\n' "$wbody") \
+    || { fail "self-test: run_write no longer refuses a path outside its write set"; return 1; }
+  # The snapshot must come BEFORE the write. A snapshot taken after stamp_sites sees the stamped
+  # paths as already dirty, so it would hide every path the write changed.
+  bpos="$(grep -Fn 'before="$(dirty_paths)" || die_infra' < <(printf '%s\n' "$wbody"))"
+  spos="$(grep -Fn 'wrote="$(stamp_sites)"' < <(printf '%s\n' "$wbody"))"
+  bpos="${bpos%%:*}"; spos="${spos%%:*}"
+  { [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$spos" ]; } \
+    || { fail "self-test: run_write must record the dirty paths before it calls stamp_sites"; return 1; }
+  # The CI clean-tree guard sits after the snapshot and before the write. After the write it is
+  # too late, and without it the stamp step's `git add -A` commits a path that was dirty before.
+  local gpos
+  gpos="$(grep -Fn 'die_infra "--write found a dirty work tree before it started in CI' < <(printf '%s\n' "$wbody"))" || gpos=""
+  gpos="${gpos%%:*}"
+  { [ -n "$gpos" ] && [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$gpos" ] && [ "$gpos" -lt "$spos" ]; } \
+    || { fail "self-test: run_write must refuse a dirty tree in CI after the snapshot and before stamp_sites"; return 1; }
+  # SMA-684 §5.2: run_write runs the static uv metadata check, and BEFORE uv lock. A check after
+  # uv lock is too late: uv lock would already have run the build backend.
+  local cpos lpos
+  # `|| cpos=""`: under errexit, a grep that finds nothing would stop the script with no message.
+  cpos="$(grep -Fn 'uv_static_metadata_check || uvrc=$?' < <(printf '%s\n' "$wbody"))" || cpos=""
+  lpos="$(grep -Fn '( cd "$REPO_ROOT/py" && uv lock' < <(printf '%s\n' "$wbody"))" || lpos=""
+  cpos="${cpos%%:*}"; lpos="${lpos%%:*}"
+  { [ -n "$cpos" ] && [ -n "$lpos" ] && [ "$cpos" -lt "$lpos" ]; } \
+    || { fail "self-test: run_write must run uv_static_metadata_check before uv lock"; return 1; }
+  grep -Eq '^    1\) exit 1 ;;$' < <(printf '%s\n' "$wbody") \
+    || { fail "self-test: run_write no longer maps the uv metadata check's rc 1 to exit 1"; return 1; }
+
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
+# SMA-684: print the body of the shell function $1 in this file, with comment lines removed. The
+# call-site pins below read a body this way. A process substitution feeds grep, because check 13
+# bans a pipe into `grep -q`, and a here-string over 512 bytes deadlocks Homebrew bash 5.3.15 on a
+# host whose new pipes hold 512 bytes (ci/CLAUDE.md).
+_fn_body() { # $1 function name
+  local all
+  all="$(sed -n "/^$1() {/,/^}\$/p" "${BASH_SOURCE[0]}")" || return 2
+  [ -n "$all" ] || return 2
+  grep -Ev '^[[:space:]]*#' < <(printf '%s\n' "$all") || return 2
+}
+
+# SMA-684: fixture table for the napi-glue text writer (spec §5.1, §5.7), plus the call-site pins
+# that keep it on the write path. The generator writes the two guard shapes that napi 3.10.4
+# writes: 26 native guards and one WASI guard, as in the real index.js, so 54 version literals. A
+# correct edit must equal the generator's output at the new version, byte for byte.
+napi_glue_writer_self_test() {
+  local tmp rc got before after entry f tgt want ino_before ino_after
+  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+
+  _ngw_gen() { # $1 file  $2 version  $3 native guard count  [$4 one extra line]
+    python3 - "$tmp/$1" "$2" "$3" "${4:-}" <<'PY'
+import sys
+p, v, n, extra = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+out = ["// prettier-ignore", "/* auto-generated by NAPI-RS */", ""]
+for i in range(n):
+    out += [
+        "      try {",
+        f"        const binding = require('@paigasus/node-bindings-t{i}')",
+        f"        const bindingPackageVersion = require('@paigasus/node-bindings-t{i}/package.json').version",
+        f"        if (bindingPackageVersion !== '{v}' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {{",
+        f"          throw new Error(`Native binding package version mismatch, expected {v} but got ${{bindingPackageVersion}}. You can reinstall dependencies to fix this issue.`)",
+        "        }",
+        "        return binding",
+        "      } catch (e) {",
+        "        loadErrors.push(e)",
+        "      }",
+    ]
+out += [
+    "        if (process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {",
+    "          const bindingPackageVersion = require('@paigasus/node-bindings-wasm32-wasi/package.json').version",
+    f"          if (bindingPackageVersion !== '{v}') {{",
+    f"            throw new Error(`WASI binding package version mismatch, expected {v} but got ${{bindingPackageVersion}}. You can reinstall dependencies to fix this issue.`)",
+    "          }",
+    "        }",
+    "module.exports.parsePrn = nativeBinding.parsePrn",
+]
+if extra:
+    out.append(extra)
+with open(p, "w", encoding="utf-8") as f:
+    f.write("\n".join(out) + "\n")
+PY
+  }
+  _ngw() { # $1 fixture  $2 version -> sets rc and got
+    rc=0
+    got="$(REPO_ROOT="$tmp" write_site napi-glue "$1" "$2" 2>/dev/null)" || rc=$?
+  }
+  _ngw_count() { # $1 file  $2 literal -> prints the number of occurrences
+    python3 -c 'import sys; print(open(sys.argv[1], encoding="utf-8").read().count(sys.argv[2]))' "$tmp/$1" "$2"
+  }
+  _ngw_sub() { # $1 file  $2 literal  $3 replacement -> replaces the FIRST occurrence only
+    python3 - "$tmp/$1" "$2" "$3" <<'PY'
+import sys
+p, a, b = sys.argv[1:4]
+with open(p, encoding="utf-8") as f:
+    s = f.read()
+if a not in s:
+    raise SystemExit(2)
+with open(p, "w", encoding="utf-8") as f:
+    f.write(s.replace(a, b, 1))
+PY
+  }
+  _ngw_ino() { # $1 file -> prints the inode number
+    python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_ino)' "$tmp/$1"
+  }
+
+  # N1: a normal bump. All 54 literals move, and the file equals the generator's 0.3.0 output.
+  _ngw_gen n1.js 0.2.0 26; _ngw_gen n1.want 0.3.0 26
+  _ngw n1.js 0.3.0
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] || { fail "self-test: napi-glue N1 rc=$rc got='$got', expected rc 0 and 1"; return 1; }
+  cmp -s "$tmp/n1.js" "$tmp/n1.want" || { fail "self-test: napi-glue N1 is not the generator's 0.3.0 output"; return 1; }
+  [ "$(_ngw_count n1.js 0.3.0)" = 54 ] || { fail "self-test: napi-glue N1 does not hold 54 literals at 0.3.0"; return 1; }
+
+  # N2: a bump that changes the length, 0.9.9 -> 0.10.0. A string compare would refuse it.
+  _ngw_gen n2.js 0.9.9 26; _ngw_gen n2.want 0.10.0 26
+  _ngw n2.js 0.10.0
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] || { fail "self-test: napi-glue N2 rc=$rc got='$got', expected rc 0 and 1"; return 1; }
+  cmp -s "$tmp/n2.js" "$tmp/n2.want" || { fail "self-test: napi-glue N2 is not the generator's 0.10.0 output"; return 1; }
+
+  # N3: already current. Prints 0, changes no byte and keeps the mtime.
+  touch -t 200001010000 "$tmp/n2.js"
+  before="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_mtime_ns)' "$tmp/n2.js")"
+  _ngw n2.js 0.10.0
+  after="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_mtime_ns)' "$tmp/n2.js")"
+  [ "$rc" -eq 0 ] && [ "$got" = 0 ] && [ "$before" = "$after" ] \
+    || { fail "self-test: napi-glue N3 rc=$rc got='$got' mtime $before -> $after"; return 1; }
+  cmp -s "$tmp/n2.js" "$tmp/n2.want" || { fail "self-test: napi-glue N3 changed a byte"; return 1; }
+
+  # N4: the NEW version string already occurs outside the two forms. It is left alone.
+  _ngw_gen n4.js 0.2.0 26 "// release notes for 0.3.0"; _ngw_gen n4.want 0.3.0 26 "// release notes for 0.3.0"
+  _ngw n4.js 0.3.0
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] || { fail "self-test: napi-glue N4 rc=$rc got='$got'"; return 1; }
+  cmp -s "$tmp/n4.js" "$tmp/n4.want" || { fail "self-test: napi-glue N4 touched the text outside the guards"; return 1; }
+
+  # N6: the WASI guard shape alone (no env condition on the comparison line).
+  _ngw_gen n6.js 0.2.0 0; _ngw_gen n6.want 0.3.0 0
+  _ngw n6.js 0.3.0
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] || { fail "self-test: napi-glue N6 rc=$rc got='$got'"; return 1; }
+  cmp -s "$tmp/n6.js" "$tmp/n6.want" || { fail "self-test: napi-glue N6 is not the generator's WASI output"; return 1; }
+
+  # N9 (controller ruling P6): the write is in place. The inode stays, because a rename would break
+  # the pnpm hard link (ts/CLAUDE.md).
+  _ngw_gen n9.js 0.2.0 26
+  ino_before="$(_ngw_ino n9.js)"
+  _ngw n9.js 0.3.0
+  ino_after="$(_ngw_ino n9.js)"
+  [ "$rc" -eq 0 ] && [ "$got" = 1 ] && [ "$ino_before" = "$ino_after" ] \
+    || { fail "self-test: napi-glue N9 rc=$rc got='$got' inode $ino_before -> $ino_after; the write must be in place"; return 1; }
+
+  # N5 and N7: shapes the writer must refuse, each with its exit code, leaving the file unchanged.
+  _ngw_gen n5.js 0.2.0 26 "// pinned at 0.2.0"         # E6: a decoy <old> outside a guard
+  printf 'module.exports = {}\n' >"$tmp/e1.js"           # E1: no G1 guard at all
+  _ngw_gen e2.js 0.2.0 26                                 # E2: one G2 literal lost
+  _ngw_sub e2.js "expected 0.2.0 but got" "expected-0.2.0-but got" || die_infra "cannot build fixture e2"
+  _ngw_gen e2b.js 0.2.0 26                                # E2: a G1 literal in a form G1 does not read
+  _ngw_sub e2b.js "!== '0.2.0'" "!== '0.2.0-rc.1'" || die_infra "cannot build fixture e2b"
+  _ngw_gen e3.js 0.2.0 26                                 # E3: one guard holds another version
+  _ngw_sub e3.js "!== '0.2.0'" "!== '0.1.0'" || die_infra "cannot build fixture e3"
+  _ngw_sub e3.js "expected 0.2.0 but got" "expected 0.1.0 but got" || die_infra "cannot build fixture e3"
+  _ngw_gen l1.js 0.3.0 26                                 # L: lowering
+  _ngw_gen l2.js 0.10.0 26                                # L: lowering across a length change
+  _ngw_gen v1.js 0.2.0 26                                 # V: a non-plain target
+  for entry in n5:0.3.0:2 e1:0.3.0:2 e2:0.3.0:2 e2b:0.3.0:2 e3:0.3.0:3 l1:0.2.0:3 l2:0.9.9:3 v1:0.3.0-rc.1:2; do
+    IFS=':' read -r f tgt want <<<"$entry"
+    cp "$tmp/$f.js" "$tmp/$f.before"
+    _ngw "$f.js" "$tgt"
+    [ "$rc" -eq "$want" ] || { fail "self-test: napi-glue $f must exit $want, got rc=$rc"; return 1; }
+    cmp -s "$tmp/$f.js" "$tmp/$f.before" || { fail "self-test: napi-glue $f changed the file although refused"; return 1; }
+  done
+
+  # N8: E4 and E5 cannot fire on a correct writer, so the verify mode gets an edit that no correct
+  # writer makes. The positive control first: a correct edit verifies.
+  _ngw_gen x_old.js 0.2.0 26; _ngw_gen x_ok.js 0.3.0 26
+  napi_glue_py verify "$tmp/x_old.js" "$tmp/x_ok.js" 0.3.0 2>/dev/null \
+    || { fail "self-test: napi-glue verify refused a correct edit"; return 1; }
+  cp "$tmp/x_ok.js" "$tmp/x_e4.js"
+  _ngw_sub x_e4.js "!== '0.3.0'" "!== '0.2.0'" || die_infra "cannot build fixture x_e4"
+  rc=0; napi_glue_py verify "$tmp/x_old.js" "$tmp/x_e4.js" 0.3.0 2>/dev/null || rc=$?
+  [ "$rc" -eq 2 ] || { fail "self-test: napi-glue E4 (one G1 literal left behind) rc=$rc, expected 2"; return 1; }
+  # Controller ruling P5: the G2 half of E4. Only a G2 literal stays at the old version.
+  cp "$tmp/x_ok.js" "$tmp/x_e4g2.js"
+  _ngw_sub x_e4g2.js "expected 0.3.0 but got" "expected 0.2.0 but got" || die_infra "cannot build fixture x_e4g2"
+  rc=0; napi_glue_py verify "$tmp/x_old.js" "$tmp/x_e4g2.js" 0.3.0 2>/dev/null || rc=$?
+  [ "$rc" -eq 2 ] || { fail "self-test: napi-glue E4 (one G2 literal left behind) rc=$rc, expected 2"; return 1; }
+  cp "$tmp/x_ok.js" "$tmp/x_e5.js"; printf 'x' >>"$tmp/x_e5.js"
+  rc=0; napi_glue_py verify "$tmp/x_old.js" "$tmp/x_e5.js" 0.3.0 2>/dev/null || rc=$?
+  [ "$rc" -eq 2 ] || { fail "self-test: napi-glue E5 (a byte outside the literals) rc=$rc, expected 2"; return 1; }
+
+  # Call-site pins (spec §5.7). write_site keeps its arm, and stamp_sites passes the kind to it.
+  grep -Eq '^    napi-glue\)$' < <(_fn_body write_site) \
+    || { fail "self-test: write_site has no napi-glue) arm"; return 1; }
+  grep -Eq '^      ([a-z-]+[|])*napi-glue([|][a-z-]+)*\) ;;$' < <(_fn_body stamp_sites) \
+    || { fail "self-test: the stamp_sites filter does not name napi-glue"; return 1; }
+  # Controller ruling P5: the write mode of napi_glue_py calls verify() before it writes.
+  grep -Eq '^    verify\(old, new, target\)$' < <(_fn_body napi_glue_py) \
+    || { fail "self-test: napi_glue_py write mode does not call verify()"; return 1; }
+
+  # run_write compiles nothing (spec A1, A3). Comment lines are removed first. A bare \bnode\b
+  # would match paigasus-node-bindings, so a command word is matched by its neighbours instead.
+  local body
+  body="$(_fn_body run_write)" || { fail "self-test: cannot read the body of run_write"; return 1; }
+  if grep -Eq '(^|[[:space:];&|(])(pnpm|npx|napi|node)([[:space:];&|)]|$)' < <(printf '%s\n' "$body"); then
+    fail "self-test: run_write names pnpm, npx, napi or node as a command word; --write must compile nothing (SMA-684)"
+    return 1
+  fi
+
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
+# SMA-684 §5.2: fixture table for the static uv metadata check. Each case is a small uv workspace
+# under its own scratch REPO_ROOT: one member with a path source (the maturin crate's shape), and
+# one member that SITES does not name (the dormant shape of paigasus-ml and paigasus-workflows).
+uv_static_metadata_self_test() {
+  local tmp rc listed out
+  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+
+  _usm_tree() { # $1 case dir -> a clean workspace
+    local r="$tmp/$1"
+    mkdir -p "$r/py/packages/a" "$r/py/packages/dormant" "$r/rs/b"
+    printf '[tool.uv.workspace]\nmembers = ["packages/*"]\n' >"$r/py/pyproject.toml"
+    printf '[project]\nname = "a"\nversion = "0.1.0"\ndependencies = ["b==0.1.0"]\n\n[tool.uv.sources]\nb = { path = "../../../rs/b" }\n' >"$r/py/packages/a/pyproject.toml"
+    printf '[project]\nname = "dormant"\nversion = "0.0.0"\ndependencies = []\n' >"$r/py/packages/dormant/pyproject.toml"
+    printf '[project]\nname = "b"\nversion = "0.1.0"\n\n[build-system]\nrequires = ["maturin>=1.9.6,<2"]\nbuild-backend = "maturin"\n' >"$r/rs/b/pyproject.toml"
+  }
+  _usm() { # $1 case dir -> sets rc
+    rc=0
+    REPO_ROOT="$tmp/$1" uv_static_metadata_check >/dev/null 2>&1 || rc=$?
+  }
+
+  # U0: the clean tree passes.
+  _usm_tree u0; _usm u0
+  [ "$rc" -eq 0 ] || { fail "self-test: uv-static U0 (clean) rc=$rc, expected 0"; return 1; }
+  # U0b: --list names every file the check reads, the path source included. stage_pristine_tree
+  # stages exactly this list, so a file missing here is a file the staged trees lack.
+  listed="$(REPO_ROOT="$tmp/u0" uv_static_metadata_check --list)" \
+    || { fail "self-test: uv-static --list failed on the clean tree"; return 1; }
+  [ "$listed" = "$(printf 'py/packages/a/pyproject.toml\npy/packages/dormant/pyproject.toml\npy/pyproject.toml\nrs/b/pyproject.toml')" ] \
+    || { fail "self-test: uv-static --list printed '$listed'"; return 1; }
+  # U1: dynamic version in a member that SITES does not name.
+  _usm_tree u1
+  printf '[project]\nname = "dormant"\ndynamic = ["version"]\ndependencies = []\n' >"$tmp/u1/py/packages/dormant/pyproject.toml"
+  _usm u1; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U1 (dynamic version) rc=$rc, expected 1"; return 1; }
+  # U2: dynamic dependencies in a member.
+  _usm_tree u2
+  printf '[project]\nname = "a"\nversion = "0.1.0"\ndynamic = ["dependencies"]\n\n[tool.uv.sources]\nb = { path = "../../../rs/b" }\n' >"$tmp/u2/py/packages/a/pyproject.toml"
+  _usm u2; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U2 (dynamic dependencies) rc=$rc, expected 1"; return 1; }
+  # U3: dynamic optional-dependencies in the path source.
+  _usm_tree u3
+  printf '[project]\nname = "b"\nversion = "0.1.0"\ndynamic = ["optional-dependencies"]\n\n[build-system]\nrequires = ["maturin>=1.9.6,<2"]\nbuild-backend = "maturin"\n' >"$tmp/u3/rs/b/pyproject.toml"
+  _usm u3; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U3 (dynamic optional-dependencies) rc=$rc, expected 1"; return 1; }
+  # U4: a member with no [project] table: uv would run its build backend to read its metadata.
+  _usm_tree u4
+  printf '[build-system]\nrequires = ["setuptools"]\n' >"$tmp/u4/py/packages/dormant/pyproject.toml"
+  _usm u4; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U4 (no [project]) rc=$rc, expected 1"; return 1; }
+  # U5: a dynamic field outside the three named ones is allowed (the check is not over-broad).
+  _usm_tree u5
+  printf '[project]\nname = "dormant"\nversion = "0.0.0"\ndependencies = []\ndynamic = ["classifiers"]\n' >"$tmp/u5/py/packages/dormant/pyproject.toml"
+  _usm u5; [ "$rc" -eq 0 ] || { fail "self-test: uv-static U5 (dynamic classifiers) rc=$rc, expected 0"; return 1; }
+  # U6: the message names the file and the field.
+  out="$(REPO_ROOT="$tmp/u1" uv_static_metadata_check 2>&1 >/dev/null)" || true
+  grep -Fq "py/packages/dormant/pyproject.toml: [project].dynamic lists 'version'" < <(printf '%s\n' "$out") \
+    || { fail "self-test: uv-static U6 message does not name the file and the field: '$out'"; return 1; }
+  # U7: a malformed member is an infrastructure failure, not a verdict.
+  _usm_tree u7
+  printf '[project\n' >"$tmp/u7/py/packages/dormant/pyproject.toml"
+  _usm u7; [ "$rc" -eq 2 ] || { fail "self-test: uv-static U7 (malformed) rc=$rc, expected 2"; return 1; }
+  # U8: the production path. The real run_check, on a staged copy of the real tree, with a dynamic
+  # version in the staged paigasus-ml (a uv member that SITES does not name). rc 2 here means the
+  # staging lacks a uv file; rc 0 means run_check no longer calls the check.
+  mkdir "$tmp/st"
+  stage_pristine_tree "$tmp/st"
+  mkdir -p "$tmp/st/py/packages/paigasus-ml"
+  printf '[project]\nname = "paigasus-ml"\ndynamic = ["version"]\ndependencies = []\n' >"$tmp/st/py/packages/paigasus-ml/pyproject.toml"
+  rc=0; ( REPO_ROOT="$tmp/st" run_check ) >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { fail "self-test: uv-static U8 run_check on a staged tree with a dynamic member rc=$rc, expected 1"; return 1; }
+
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
@@ -551,6 +887,8 @@ run_self_tests() {
   lock_reader_self_test
   cargo_package_writer_self_test
   stamp_sites_self_test
+  napi_glue_writer_self_test
+  uv_static_metadata_self_test
   [ "$SELF_TESTS_RAN" -eq "$SELF_TEST_COUNT" ] \
     || die_infra "self-tests ran $SELF_TESTS_RAN, expected $SELF_TEST_COUNT"
   printf '== version-lockstep self-tests passed (%d tables) ==\n' "$SELF_TESTS_RAN"
@@ -587,6 +925,15 @@ run_check() {
   # Non-vacuity: the loop must have covered every declared site.
   [ "$checked" -eq "${#SITES[@]}" ] \
     || die_infra "checked $checked sites but ${#SITES[@]} are declared"
+  # SMA-684 §5.2: uv lock in --write must never need a build backend. Explicit status routing,
+  # not errexit, for the same reason as read_version above.
+  local uvrc=0
+  uv_static_metadata_check || uvrc=$?
+  case "$uvrc" in
+    0) printf 'uv workspace: every local package declares static metadata\n' ;;
+    1) rc=1 ;;
+    *) return 2 ;;
+  esac
   if [ "$rc" -eq 0 ]; then
     printf '== all %d version-lockstep sites agree ==\n' "$checked"
   fi
@@ -610,9 +957,14 @@ run_check() {
 # `die_infra` exits the whole process. An `exit` does not run a caller's RETURN trap, so a
 # caller-owned cleanup would not fire. This function owns $dest, so it cleans $dest itself.
 stage_pristine_tree() { # $1 destination dir
-  local dest="$1" entry kind target
+  local dest="$1" entry kind target uvfiles
+  # SMA-684: run_check also reads the uv workspace pyproject files (uv_static_metadata_check), so
+  # the staged tree carries the same list that check reads, derived from the check itself.
+  uvfiles="$(uv_static_metadata_check --list)" \
+    || { rm -rf "$dest"; die_infra "cannot list the uv workspace pyproject files to stage"; }
   {
     printf 'rs/Cargo.toml\n'
+    printf '%s\n' "$uvfiles"
     for entry in "${SITES[@]}"; do
       IFS='|' read -r _ kind target <<<"$entry"
       [ "$kind" = cargo-wsdep ] || printf '%s\n' "$target"
@@ -739,8 +1091,213 @@ else:
 PY
 }
 
+# SMA-684: the version literals of the committed napi glue, written as TEXT (spec §5.1). `napi
+# build` wrote them before, and it compiled the binding crate, the kernel and every build script
+# and proc macro in their graph, in the release-PR job, where every step can read the App private
+# key. This writer compiles nothing.
+#
+# Two literal forms carry the version, and the version is the only capture group:
+#   G1  bindingPackageVersion !== '<X.Y.Z>'
+#   G2  expected <X.Y.Z> but got
+# Modes:
+#   write <file> <version>         every check in memory, then an in-place write (open for
+#                                  writing, never a rename: a rename breaks the pnpm hard link,
+#                                  ts/CLAUDE.md). Prints 1 if it wrote, 0 if already current.
+#   verify <old> <new> <version>   E4 and E5 only. The self-test drives this mode with an edit
+#                                  that no correct writer makes.
+# Exit codes follow write_site's contract (see stamp_sites below): 0 wrote or already current;
+# 3 the repo is wrong (E3: the guards disagree; L: the file is higher than the head), which
+# stamp_sites maps to rc 1; 2 for every other failure (V, E1, E2, E4, E5, E6, an unreadable
+# file). E3 exits 3 and not 1 here: a python traceback also exits 1, and stamp_sites must read
+# that as an infrastructure failure.
+napi_glue_py() { # write <file> <version> | verify <old-file> <new-file> <version>
+  python3 - "$@" <<'PY'
+import re, sys
+
+VER = r"[0-9]+\.[0-9]+\.[0-9]+"
+G1 = re.compile(r"bindingPackageVersion !== '(" + VER + r")'")
+G2 = re.compile(r"expected (" + VER + r") but got")
+G1_ANY = "bindingPackageVersion !== '"
+G2_ANY = re.compile(r"expected \S+ but got")
+MASK = "\x00V\x00"
+
+
+def fatal(msg):
+    print(f"FATAL: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def repo_wrong(msg):
+    print(f"FAIL: {msg}", file=sys.stderr)
+    raise SystemExit(3)
+
+
+def plain(v, what):
+    m = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", v)
+    if m is None:
+        fatal(f"{what} version '{v}' is not plain X.Y.Z")
+    return tuple(int(x) for x in m.groups())
+
+
+def read_text(p):
+    try:
+        with open(p, "rb") as f:
+            return f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        fatal(f"cannot read {p} as UTF-8: {e}")
+
+
+def masked(s):
+    s = G1.sub(lambda m: "bindingPackageVersion !== '" + MASK + "'", s)
+    return G2.sub(lambda m: "expected " + MASK + " but got", s)
+
+
+def verify(old, new, target):
+    # E4: every literal in the new text holds the target, and no literal appeared or vanished.
+    old1, old2 = G1.findall(old), G2.findall(old)
+    new1, new2 = G1.findall(new), G2.findall(new)
+    if len(new1) != len(old1) or len(new2) != len(old2) or any(v != target for v in new1 + new2):
+        fatal(f"E4: after the edit, not every guard literal holds {target}; writer defect")
+    # E5: masks, not a reverse edit on positions. A reverse edit shares code with the forward
+    # edit, and its positions move when the version length changes (0.9.9 -> 0.10.0).
+    if masked(old) != masked(new):
+        fatal("E5: the edit changed a byte outside the guard literals; writer defect")
+
+
+def write(path, target):
+    # V: the target is plain X.Y.Z, the same rule as the cargo-package arm's plain().
+    head = plain(target, "head")
+    old = read_text(path)
+    g1, g2 = G1.findall(old), G2.findall(old)
+    # E1: at least one G1 literal.
+    if not g1:
+        fatal(f"E1: {path} has no `bindingPackageVersion !== '<X.Y.Z>'` guard; the napi format changed")
+    # E2: G1 and G2 agree in count, and no literal of either form escapes the strict pattern.
+    n1_any, n2_any = old.count(G1_ANY), len(G2_ANY.findall(old))
+    if len(g1) != len(g2) or n1_any != len(g1) or n2_any != len(g2):
+        fatal(f"E2: {path} has {len(g1)} G1 and {len(g2)} G2 literals, {n1_any} and {n2_any} in any form; the napi format changed")
+    # E6: each version string the guards hold occurs exactly twice per guard in the whole file.
+    values = sorted(set(g1 + g2))
+    found = sum(old.count(v) for v in values)
+    if found != 2 * len(g1):
+        fatal(f"E6: {path} holds {values} {found} times, expected {2 * len(g1)} (two per guard); napi added or removed a version-bearing literal")
+    # E3: one value across every literal.
+    if len(values) != 1:
+        repo_wrong(f"{path}: the guards hold more than one version: {values}")
+    cur = values[0]
+    # L: never lower. Integer tuples, not strings: "0.10.0" < "0.9.9" as strings.
+    if plain(cur, "site") > head:
+        repo_wrong(f"{path} is at {cur}, higher than the head {target}; not lowered")
+    if cur == target:
+        print(0)
+        raise SystemExit(0)
+    new = G1.sub(lambda m: "bindingPackageVersion !== '" + target + "'", old)
+    new = G2.sub(lambda m: "expected " + target + " but got", new)
+    verify(old, new, target)
+    with open(path, "wb") as f:
+        f.write(new.encode("utf-8"))
+    print(1)
+
+
+args = sys.argv[1:]
+if len(args) == 3 and args[0] == "write":
+    write(args[1], args[2])
+elif len(args) == 4 and args[0] == "verify":
+    verify(read_text(args[1]), read_text(args[2]), args[3])
+else:
+    fatal(f"usage: napi_glue_py write <file> <version> | verify <old> <new> <version>, got {args}")
+PY
+}
+
+# SMA-684 §5.2: `uv lock` runs no build backend only while uv can read every local package's
+# metadata without a build (spec F7). A `dynamic` version, dependencies or optional-dependencies
+# field makes `uv lock` run the build backend, and for paigasus-py-bindings that backend is
+# maturin, which compiles Rust in the release-PR job. The pyproject reader above covers only the
+# three SITES pyproject files; this check reads every uv workspace member (members glob of
+# py/pyproject.toml, minus `exclude`) and every [tool.uv.sources] path source, transitively. A
+# member with no [project] table and a path source that is not a directory are violations too:
+# uv would build either to read its metadata. With --list it prints the files it reads instead,
+# so stage_pristine_tree can stage them.
+uv_static_metadata_check() { # [--list] -> rc 0 clean | 1 a violation | 2 cannot read
+  python3 - "$REPO_ROOT" "$@" <<'PY'
+import glob, os, sys, tomllib
+from fnmatch import fnmatch
+
+root, args = sys.argv[1], sys.argv[2:]
+listing = args == ["--list"]
+if args and not listing:
+    print(f"INFRA: unknown argument(s) {args}", file=sys.stderr)
+    raise SystemExit(2)
+py = os.path.join(root, "py")
+ws_file = os.path.normpath(os.path.join(py, "pyproject.toml"))
+
+
+def rel(p):
+    return os.path.relpath(p, root)
+
+
+def load(p):
+    try:
+        with open(p, "rb") as f:
+            return tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"INFRA: cannot read {rel(p)}: {e}", file=sys.stderr)
+        raise SystemExit(2) from None
+
+
+ws = load(ws_file)
+uvws = ws.get("tool", {}).get("uv", {}).get("workspace")
+if not isinstance(uvws, dict) or not uvws.get("members"):
+    print("INFRA: py/pyproject.toml declares no [tool.uv.workspace] members", file=sys.stderr)
+    raise SystemExit(2)
+queue = [ws_file]
+for pat in uvws["members"]:
+    dirs = [d for d in sorted(glob.glob(os.path.join(py, pat))) if os.path.isdir(d)]
+    if not dirs:
+        print(f"INFRA: the uv workspace member glob {pat!r} matches no directory", file=sys.stderr)
+        raise SystemExit(2)
+    for d in dirs:
+        if not any(fnmatch(os.path.relpath(d, py), e) for e in uvws.get("exclude", [])):
+            queue.append(os.path.normpath(os.path.join(d, "pyproject.toml")))
+
+seen, violations = set(), []
+while queue:
+    p = queue.pop(0)
+    if p in seen:
+        continue
+    seen.add(p)
+    doc = load(p)
+    proj = doc.get("project")
+    if p != ws_file and not isinstance(proj, dict):
+        violations.append(f"{rel(p)}: no [project] table, so uv would run the build backend to read its metadata")
+    if isinstance(proj, dict):
+        dynamic = proj.get("dynamic", [])
+        for field in ("version", "dependencies", "optional-dependencies"):
+            if field in dynamic:
+                violations.append(f"{rel(p)}: [project].dynamic lists '{field}', so uv lock would run the build backend")
+    sources = doc.get("tool", {}).get("uv", {}).get("sources", {})
+    for name, src in sources.items():
+        for entry in src if isinstance(src, list) else [src]:
+            if isinstance(entry, dict) and "path" in entry:
+                target = os.path.normpath(os.path.join(os.path.dirname(p), entry["path"]))
+                if os.path.isdir(target):
+                    queue.append(os.path.join(target, "pyproject.toml"))
+                else:
+                    violations.append(f"{rel(p)}: [tool.uv.sources] {name} path {entry['path']!r} is not a directory, so uv would build it")
+
+if listing:
+    for p in sorted(seen):
+        print(rel(p))
+    raise SystemExit(0)
+for v in violations:
+    print(f"FAIL: {v}", file=sys.stderr)
+raise SystemExit(1 if violations else 0)
+PY
+}
+
 # SMA-685: the per-site loop of --write, split out of run_write so the self-test runs the SAME
-# loop on a staged tree. It writes the pyproject, pyproject-dep and packagejson sites, and the
+# loop on a staged tree. It writes the pyproject, pyproject-dep, packagejson and napi-glue sites
+# (napi-glue since SMA-684), and the
 # cargo-package sites that are NOT the group head and whose Cargo manifest says
 # `publish = false`. release-plz 0.3.158 never writes those (READ, updater.rs:283-302). A
 # publishable non-head (paigasus-proto-derive) is left to release-plz, so --check still sees a
@@ -759,7 +1316,7 @@ stamp_sites() {
     IFS='|' read -r group kind target <<<"$entry"
     head="${SOURCE_OF_TRUTH[$group]}"
     case "$kind" in
-      pyproject|pyproject-dep|packagejson) ;;
+      pyproject|pyproject-dep|packagejson|napi-glue) ;;
       cargo-package)
         [ "$target" != "$head" ] || continue
         pf="$(cargo_publish_false "$target")" || return 2
@@ -981,30 +1538,105 @@ open(p, "wb").write(new.encode("utf-8"))
 print(1)
 PY
       ;;
-    *) printf '0' ;;   # regeneration-owned kinds (cargo-wsdep, the locks, the napi glue) are not written here
+    napi-glue)
+      # SMA-684: the version literals of the committed napi glue, edited as text. napi_glue_py
+      # holds the checks and the exit codes; this arm only names the file.
+      [ -r "$abs" ] || die_infra "cannot read $target"
+      napi_glue_py write "$abs" "$version"
+      ;;
+    *) printf '0' ;;   # regeneration-owned kinds (cargo-wsdep, the two locks) are not written here
   esac
 }
 
+# SMA-684 §5.3: the dirty and untracked paths of the work tree at $REPO_ROOT, one per line,
+# sorted. `-z` keeps a path with a space or a quote intact. `--untracked-files=all` names every
+# untracked FILE: the default collapses a new directory to `dir/`, which would hide a file inside
+# a directory that was already untracked. A rename or copy names both of its paths.
+dirty_paths() {
+  python3 - "$REPO_ROOT" <<'PY'
+import subprocess, sys
+try:
+    out = subprocess.run(
+        ["git", "-C", sys.argv[1], "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        check=True, capture_output=True).stdout.decode("utf-8", "surrogateescape")
+except (OSError, subprocess.CalledProcessError) as e:
+    print(f"INFRA: git status failed in {sys.argv[1]}: {e}", file=sys.stderr)
+    raise SystemExit(2) from None
+parts, paths, i = out.split("\0"), set(), 0
+while i < len(parts):
+    entry = parts[i]
+    i += 1
+    if not entry:
+        continue
+    xy, path = entry[:2], entry[3:]
+    paths.add(path)
+    if "R" in xy or "C" in xy:
+        paths.add(parts[i])
+        i += 1
+for p in sorted(paths):
+    print(p)
+PY
+}
+
+# SMA-684 §5.3: print every path that is dirty now, was not dirty in $1 (dirty_paths' output from
+# before the write), and is not in the write set. The write set is the SITES paths, rs/Cargo.lock
+# and py/uv.lock among them; a cargo-wsdep row names a crate, not a file, so it adds no path. The
+# stamp step runs `git add -A`, so this set is the boundary of what the release-PR job commits.
+write_set_violations() { # $1 the dirty_paths output from before the write
+  local after entry kind target allowed=""
+  after="$(dirty_paths)" || return 2
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r _ kind target <<<"$entry"
+    [ "$kind" = cargo-wsdep ] || allowed="$allowed$target"$'\n'
+  done
+  python3 - "$1" "$after" "$allowed" <<'PY'
+import sys
+before, after, allowed = (set(filter(None, a.split("\n"))) for a in sys.argv[1:4])
+for p in sorted(after - before - allowed):
+    print(p)
+PY
+}
+
 run_write() {
-  local wrote rc=0
+  local wrote rc=0 before violations uvrc
+  # SMA-684 §5.3: the paths that were dirty before this run. Every path that is new after it must
+  # be in the write set; write_set_violations below holds that.
+  before="$(dirty_paths)" || die_infra "cannot list the dirty paths before --write"
+  # In CI the stamp step runs `git add -A`, so a path that was dirty before this run would be
+  # committed although write_set_violations never reports it. Refuse the start instead.
+  if [ -n "${CI:-}" ] && [ -n "$before" ]; then
+    die_infra "--write found a dirty work tree before it started in CI: ${before//$'\n'/, }"
+  fi
   wrote="$(stamp_sites)" || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
 
-  # Regenerate the three derived files (SITES rows 16-20 — kernel's and proto's cargo-lock and
-  # uv-lock rows each point at the same file, so five rows resolve to three files). Each file is
-  # owned by a tool, not by this script.
+  # Regenerate the two derived lock files (SITES rows 16, 17, 19 and 20: kernel's and proto's
+  # cargo-lock and uv-lock rows each point at the same file, so four rows resolve to two files).
+  # Each lock file is owned by its tool. Neither command runs a build script or a build backend
+  # (spec F6, F7; --check asserts the static uv metadata that F7 needs). Row 18, the napi glue,
+  # is written by stamp_sites above through write_site's napi-glue arm (SMA-684). This function
+  # compiles nothing: the release-PR job runs it, and every step of that job can read the App
+  # private key. napi_glue_writer_self_test pins that no build command comes back here.
   ( cd "$REPO_ROOT/rs" && cargo update -w --offline >/dev/null 2>&1 ) \
     || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
     || die_infra "cargo update -w failed (site 16)"
+  # SMA-684 §5.2: uv lock runs no build backend only while every local package declares static
+  # metadata. run_check asserts that too, but a path source outside py/packages/* is not an input
+  # of repo:version-lockstep, so a later PR could add `dynamic` there unseen. Check it here again,
+  # right before uv lock, with the same status routing as run_check. Print nothing on success: the
+  # stamp step's output stays the same.
+  uvrc=0
+  uv_static_metadata_check || uvrc=$?
+  case "$uvrc" in
+    0) ;;
+    1) exit 1 ;;
+    *) exit 2 ;;
+  esac
   ( cd "$REPO_ROOT/py" && uv lock >/dev/null ) || die_infra "uv lock failed (site 17)"
-  # @napi-rs/cli is a devDependency of @paigasus/kernel, not of the ts workspace root
-  # (pnpm-workspace.yaml's catalog comment: a file:-linked dep's devDeps aren't installed
-  # at the consumer's node_modules root) — a bare `pnpm exec` from ts/ cannot find `napi`
-  # and pnpm treats it as a recursive exec across every workspace package instead, failing
-  # on the first one that lacks it. Scope it with --filter to the package that has it.
-  ( cd "$REPO_ROOT/ts" && pnpm --filter @paigasus/kernel exec napi build --platform \
-      --cwd "$REPO_ROOT/rs/crates/bindings/paigasus-node-bindings" >/dev/null ) \
-    || die_infra "napi build failed (site 18)"
+
+  violations="$(write_set_violations "$before")" || die_infra "cannot list the changed paths after --write"
+  [ -z "$violations" ] \
+    || die_infra "--write changed paths outside its write set (the SITES paths): ${violations//$'\n'/, }"
 
   if [ "$wrote" -gt 0 ]; then
     printf 'version-lockstep: wrote %d site(s)\n' "$wrote"
