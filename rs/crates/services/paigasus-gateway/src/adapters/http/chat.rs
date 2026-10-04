@@ -45,7 +45,9 @@ use super::AppState;
 use super::error::GatewayError;
 use crate::adapters::http::bytes::EnvelopeBytes;
 use crate::adapters::http::dto::ChatCompletionRequest;
-use crate::adapters::openai::{ChatResponse, OpenAiByteStream};
+use crate::adapters::http::usage::{self, BodyUsage, UsageScanner};
+use crate::adapters::openai::{ChatResponse, OpenAiByteStream, OpenAiError};
+use crate::application::charge_guard::ChargeGuard;
 use crate::domain::{CallerContext, Credential};
 
 /// The single terminal SSE event emitted when a stream fails mid-flight. Static, caller-safe (no
@@ -102,12 +104,33 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
     };
     let model = dto.model;
     let stream = dto.stream;
+    let messages = dto.messages;
 
     // SMA-505 D9: streaming is a request PARAMETER, not a route, so a disabled capability is
     // enforced here rather than by unmounting. Checked before any egress call, so a refused
     // request never reaches the upstream or its rate limit.
     if stream && !state.capabilities.chat_stream {
         return GatewayError::StreamingDisabled.into_response();
+    }
+
+    // SMA-677 D9: the limits run after the body and streaming checks and just before egress, so a
+    // refused body never uses quota. `None` (no `[limits]` table) skips them entirely (A6).
+    let mut guard = match &state.limits {
+        None => None,
+        Some(limits) => match limits.admit(&caller).await {
+            Ok(guard) => Some(guard),
+            Err(refusal) => {
+                // The refusal metric is the operator's signal; this line stays at debug.
+                tracing::debug!(principal = %caller.principal_prn, scope = %caller.scope_prn, reason = refusal.label(), "chat completion refused by a limit");
+                return GatewayError::from(refusal).into_response();
+            }
+        },
+    };
+    if let Some(guard) = guard.as_mut() {
+        guard.set_request_estimate(usage::request_tokens_estimate(&messages, body.len()));
+        // The ids exist here; inside the stream `current_ids()` is `None` (SMA-504 § 4.3).
+        guard.set_ids(paigasus_observability::current_ids());
+        guard.mark_sent();
     }
 
     let started = Instant::now();
@@ -119,6 +142,17 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
             // Non-stream: the upstream head AND body have both landed, so this is a genuine
             // full-request latency, not just TTFB (see the NOTE on the stream arm below).
             record_upstream_call(status, started);
+            // A4: a 2xx reads a COPY of the body for its usage; a non-2xx charges nothing.
+            if let Some(guard) = guard.as_mut() {
+                if status.is_success() {
+                    match usage::non_stream_usage(&body) {
+                        BodyUsage::Reported(total) => guard.set_reported(total),
+                        BodyUsage::Completion(tokens) => guard.set_completion_estimate(tokens),
+                    }
+                } else {
+                    guard.mark_no_charge();
+                }
+            }
             // Forward the upstream status + body VERBATIM, including a non-2xx OpenAI error envelope.
             let resp = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
             (resp, status)
@@ -139,10 +173,18 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
                 // runs — hyper polls the `Body::from_stream` future (and therefore
                 // `terminal_sse_error_stream` below) AFTERWARDS, outside the scope. Anything
                 // added inside the stream adapter — a log line, a metric — will see no ids.
-                (status, [(header::CONTENT_TYPE, "text/event-stream")], Body::from_stream(terminal_sse_error_stream(stream))).into_response()
+                (
+                    status,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from_stream(terminal_sse_error_stream(stream, guard.take())),
+                )
+                    .into_response()
             } else {
                 // Non-2xx `stream:true` request: OpenAI answers with a JSON error body (NOT SSE), so
                 // forward it as an error passthrough — no SSE terminal-error wrapping applies.
+                if let Some(guard) = guard.as_mut() {
+                    guard.mark_no_charge();
+                }
                 (status, [(header::CONTENT_TYPE, "application/json")], Body::from_stream(stream)).into_response()
             };
             (resp, status)
@@ -152,6 +194,13 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
             // HTTP status exists in this case at all, so record under the MAPPED gateway status
             // instead (still a `status_class` derived from an HTTP status, per the global
             // constraints — never a free-form error string).
+            // A4: a connect failure never reached the upstream; any other failure after the send
+            // (timeout, transport) keeps the request estimate.
+            if matches!(err, OpenAiError::Connect(_))
+                && let Some(guard) = guard.as_mut()
+            {
+                guard.mark_no_charge();
+            }
             let resp = GatewayError::from(err).into_response();
             let status = resp.status();
             record_upstream_call(status, started);
@@ -210,6 +259,15 @@ enum StreamState {
     Done,
 }
 
+/// The unfold state. The charge guard is a FIELD here, not a `Drop` on `StreamState`: the closure
+/// destructures the state by move, which a type with `Drop` forbids (E0509). When the stream ends,
+/// fails, or is dropped, this value drops once, and the guard with it (SMA-677 § 4.6).
+struct Relay {
+    phase: StreamState,
+    scan: UsageScanner,
+    guard: Option<ChargeGuard>,
+}
+
 /// Adapt an [`OpenAiByteStream`] into a body stream that forwards each upstream chunk UNBUFFERED
 /// and, on the FIRST upstream error, emits one terminal [`TERMINAL_SSE_ERROR`] event and ends.
 ///
@@ -222,14 +280,40 @@ enum StreamState {
 /// this function is polled by hyper after the request-head future — the one the
 /// `CorrelationLayer` task-local scope covers — has already resolved. See the call site's
 /// comment in `chat_completions`.
-fn terminal_sse_error_stream(inner: OpenAiByteStream) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
-    futures::stream::unfold(StreamState::Streaming(inner), |state| async move {
-        match state {
+fn terminal_sse_error_stream(inner: OpenAiByteStream, guard: Option<ChargeGuard>) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
+    let start = Relay {
+        phase: StreamState::Streaming(inner),
+        scan: UsageScanner::new(),
+        guard,
+    };
+    futures::stream::unfold(start, |Relay { phase, mut scan, mut guard }| async move {
+        match phase {
             StreamState::Streaming(mut inner) => match inner.next().await {
-                // Forward each chunk exactly as it arrived (unbuffered).
-                Some(Ok(chunk)) => Some((Ok(chunk), StreamState::Streaming(inner))),
+                // Forward each chunk exactly as it arrived (unbuffered). The scanner reads a copy,
+                // and only when a guard exists (no `[limits]`: no parsing at all).
+                Some(Ok(chunk)) => {
+                    if let Some(guard) = guard.as_mut() {
+                        scan.feed(&chunk);
+                        guard.set_stream_progress(scan.completion_records(), scan.reported_total());
+                    }
+                    Some((
+                        Ok(chunk),
+                        Relay {
+                            phase: StreamState::Streaming(inner),
+                            scan,
+                            guard,
+                        },
+                    ))
+                }
                 // First upstream error: emit the terminal event, then end.
-                Some(Err(_)) => Some((Ok(Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes())), StreamState::Done)),
+                Some(Err(_)) => Some((
+                    Ok(Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes())),
+                    Relay {
+                        phase: StreamState::Done,
+                        scan,
+                        guard,
+                    },
+                )),
                 // Clean upstream end.
                 None => None,
             },
@@ -242,11 +326,19 @@ fn terminal_sse_error_stream(inner: OpenAiByteStream) -> impl Stream<Item = Resu
 mod tests {
     use super::*;
 
+    /// Section 4.6: the relay never changes a forwarded byte, with or without a scanner (A5).
+    #[tokio::test]
+    async fn the_relay_forwards_bytes_unchanged() {
+        let chunks = vec![Ok(Bytes::from_static(b"data: {\"usage\":{\"total_tokens\":3}}\r\n")), Ok(Bytes::from_static(b"\r\ndata: [DONE]\n\n"))];
+        let out: Vec<Bytes> = terminal_sse_error_stream(futures::stream::iter(chunks).boxed(), None).map(|r| r.unwrap()).collect().await;
+        assert_eq!(out.concat(), b"data: {\"usage\":{\"total_tokens\":3}}\r\n\r\ndata: [DONE]\n\n".to_vec());
+    }
+
     #[tokio::test]
     async fn terminal_stream_forwards_chunks_then_ends_cleanly() {
         // A clean upstream stream (no error) is forwarded chunk-for-chunk with no terminal event.
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(b"data: a\n\n")), Ok(Bytes::from_static(b"data: b\n\n"))]).boxed();
-        let out: Vec<Bytes> = terminal_sse_error_stream(inner).map(|r| r.unwrap()).collect().await;
+        let out: Vec<Bytes> = terminal_sse_error_stream(inner, None).map(|r| r.unwrap()).collect().await;
         let assembled: Vec<u8> = out.iter().flat_map(|b| b.to_vec()).collect();
         assert_eq!(String::from_utf8(assembled).unwrap(), "data: a\n\ndata: b\n\n");
     }
@@ -258,7 +350,7 @@ mod tests {
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(b"data: a\n\n"))])
             .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
             .boxed();
-        let out: Vec<Bytes> = terminal_sse_error_stream(inner).map(|r| r.unwrap()).collect().await;
+        let out: Vec<Bytes> = terminal_sse_error_stream(inner, None).map(|r| r.unwrap()).collect().await;
         let assembled: Vec<u8> = out.iter().flat_map(|b| b.to_vec()).collect();
         let text = String::from_utf8(assembled).unwrap();
         assert!(text.starts_with("data: a\n\n"), "the pre-error chunk is forwarded: {text}");
@@ -274,7 +366,7 @@ mod tests {
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"par"))])
             .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
             .boxed();
-        let out: Vec<Bytes> = terminal_sse_error_stream(inner).map(|r| r.unwrap()).collect().await;
+        let out: Vec<Bytes> = terminal_sse_error_stream(inner, None).map(|r| r.unwrap()).collect().await;
         let text = String::from_utf8(out.iter().flat_map(|b| b.to_vec()).collect()).unwrap();
         let records: Vec<&str> = text.split("\n\n").filter(|record| !record.is_empty()).collect();
         let last = records.last().expect("at least one record");

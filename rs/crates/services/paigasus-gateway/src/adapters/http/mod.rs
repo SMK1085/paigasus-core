@@ -15,6 +15,7 @@ pub mod chat;
 pub mod dto;
 pub mod error;
 pub mod service_info;
+pub mod usage;
 
 pub use auth::{require_authenticated, require_iam_auth};
 pub use dto::ChatCompletionRequest;
@@ -29,6 +30,7 @@ use serde_json::json;
 
 use crate::adapters::iam::{Iam, IamError};
 use crate::adapters::openai::OpenAiClient;
+use crate::application::limits::Limits;
 
 /// Deliberately-INVALID sentinel token for the `/readyz` IAM-reachability probe. It has no
 /// `pgs_sk_` prefix, so a REACHABLE IAM parses and rejects it (an application-level `Status`, e.g.
@@ -53,6 +55,9 @@ pub struct AppState {
     /// — one source of truth, read by both the `chat` streaming guard and the `service_info`
     /// descriptor handler, rather than each holding/re-deriving its own bare bool).
     pub capabilities: crate::service_info::Capabilities,
+    /// SMA-677: the rate limit and token budget, or `None` when `[limits]` is absent — then the
+    /// handler skips them entirely and behaves exactly as before (A6).
+    pub limits: Option<Arc<Limits>>,
 }
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
@@ -248,6 +253,7 @@ mod tests {
             openai: Arc::new(unused_openai()),
             max_request_bytes: 1_048_576,
             capabilities: crate::service_info::Capabilities { chat_stream: true },
+            limits: None,
         }
     }
 

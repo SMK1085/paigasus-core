@@ -448,6 +448,8 @@ tasks:
       - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
       - '/rs/crates/libs/paigasus-proto/src/**/*'
       - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+      - '/rs/crates/libs/paigasus-redis/src/**/*'
+      - '/rs/crates/libs/paigasus-redis/Cargo.toml'
       - '/rs/crates/libs/paigasus-service-info/src/**/*'
       - '/rs/crates/libs/paigasus-service-info/Cargo.toml'
       # SMA-512 PR 4. The two-zone tier runs the iam-console standalone server, so an iam-console

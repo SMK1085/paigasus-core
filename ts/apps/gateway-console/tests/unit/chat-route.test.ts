@@ -223,13 +223,13 @@ describe('the local checks, in order', () => {
 });
 
 describe('the gateway call', () => {
-  it('sends only model, messages and stream: true, with the org, the correlation id, the signal, the bearer and 35 s', async () => {
+  it('sends only model, messages, stream: true and include_usage, with the org, the correlation id, the signal, the bearer and 35 s', async () => {
     const { route, completions, chatClient } = setup(streamOk());
     const request = post(JSON.stringify(GOOD));
     await route(request);
     expect(chatClient).toHaveBeenCalledWith({ baseUrl: 'http://gateway.test', headerTimeoutMs: CHAT_HEADER_TIMEOUT_MS }, { bearer: 'session-token' });
     const [body, options] = completions.mock.calls[0] ?? [];
-    expect(body).toEqual({ model: 'gpt-e2e', messages: [{ role: 'user', content: 'hi' }], stream: true });
+    expect(body).toEqual({ model: 'gpt-e2e', messages: [{ role: 'user', content: 'hi' }], stream: true, stream_options: { include_usage: true } });
     expect(options?.org).toBe(ORG);
     expect(options?.correlationId).toBe(CORRELATION);
     expect(options?.signal).toBe(request.signal);

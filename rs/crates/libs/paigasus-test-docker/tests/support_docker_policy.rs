@@ -1,18 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Docker-free unit tests for `support::docker`'s skip policy (SMA-538).
-//!
-//! Lives in its own test binary, included via `#[path]`, for the same reasons
-//! `support_docker_retry.rs` does: a `#[cfg(test)]` module inside `docker.rs` would be
-//! silently compiled out (`cfg(test)` is not set when rustc builds an integration-test
-//! binary), and bare `#[tokio::test]` functions inside `docker.rs` would run once per
-//! including binary — currently 67 of them, `mod support;` or a direct `#[path]` alike —
-//! duplicating these assertions instead of asserting them once, here.
+//! Docker-free tests for the crate's skip policy (SMA-538). Moved from `paigasus-iam`'s
+//! `tests/support_docker_policy.rs` by SMA-726; only the import paths changed.
 
-#[path = "support/docker.rs"]
-mod docker;
-
-use docker::{env_flag, is_daemon_unreachable};
+use paigasus_test_docker::{env_flag, is_daemon_unreachable, source_chain_is_permission_denied};
 use std::ffi::OsStr;
 use std::io::{Error as IoError, ErrorKind};
 use testcontainers::bollard::errors::Error as BollardError;
@@ -161,17 +152,17 @@ impl std::error::Error for Wrapper {
 #[test]
 fn permission_denied_is_found_through_the_source_chain() {
     let e = Wrapper(IoError::new(ErrorKind::PermissionDenied, "permission denied"));
-    assert!(docker::source_chain_is_permission_denied(&e));
+    assert!(source_chain_is_permission_denied(&e));
 }
 
 #[test]
 fn a_refused_connection_is_not_permission_denied() {
     let e = Wrapper(IoError::new(ErrorKind::ConnectionRefused, "connection refused"));
-    assert!(!docker::source_chain_is_permission_denied(&e));
+    assert!(!source_chain_is_permission_denied(&e));
 }
 
 #[test]
 fn an_error_chain_without_a_permission_error_is_not_flagged() {
     let e = IoError::other("nothing permission-related in here");
-    assert!(!docker::source_chain_is_permission_denied(&e));
+    assert!(!source_chain_is_permission_denied(&e));
 }

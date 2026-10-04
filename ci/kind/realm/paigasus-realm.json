@@ -16,7 +16,8 @@
       "implicitFlowEnabled": false,
       "redirectUris": [
         "https://console.paigasus.test/iam/auth/callback",
-        "https://console.paigasus.test/gateway/auth/callback"
+        "https://console.paigasus.test/gateway/auth/callback",
+        "https://console.paigasus.test/kind-sso-probe"
       ],
       "webOrigins": ["https://console.paigasus.test"],
       "attributes": {
@@ -51,8 +52,8 @@
           }
         }
       ],
-      "defaultClientScopes": ["basic", "web-origins", "acr", "profile", "roles", "email", "offline_access"],
-      "optionalClientScopes": ["address", "phone", "microprofile-jwt"]
+      "defaultClientScopes": ["basic", "web-origins", "acr", "profile", "roles", "email"],
+      "optionalClientScopes": ["address", "phone", "microprofile-jwt", "offline_access"]
     }
   ],
   "users": [

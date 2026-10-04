@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 66 keys rather than 65.
+// demanding an entry for it would make the table 68 keys rather than 67.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -79,6 +79,11 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   // does for the other gateway 400 codes.
   [ErrorReason.INVALID_ORG_HEADER]: 'from-transport',
   [ErrorReason.ORG_REQUIRED]: 'from-transport',
+  // SMA-677. The gateway's own 429s. A rate refusal keeps the transport table's `rate-limited`
+  // answer ("try again soon"). A used-up budget cannot succeed for hours, so it gets its own
+  // presentation, whose copy says to ask an administrator instead of to try again.
+  [ErrorReason.RATE_LIMITED]: 'from-transport',
+  [ErrorReason.BUDGET_EXHAUSTED]: 'quota-exhausted',
   [ErrorReason.INTERNAL]: 'from-transport',
   [ErrorReason.INVALID_REQUEST_BODY]: 'from-transport',
   [ErrorReason.REQUEST_TOO_LARGE]: 'from-transport',

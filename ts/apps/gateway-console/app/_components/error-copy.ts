@@ -9,7 +9,7 @@
 // two zones are separate products whose wording may legitimately differ, and
 // @paigasus/console-core's boundary rule bans a React component from its `src/`.
 //
-// Two tables. PRESENTATION_COPY is total over Presentation, so a tenth presentation fails the
+// Two tables. PRESENTATION_COPY is total over Presentation, so an eleventh presentation fails the
 // type-check. FORM_REASON_COPY covers the reasons the service-account forms can get (SMA-636); a
 // test asserts every key is a real ErrorReason. A reason with no entry — including one this build
 // does not know, which the SDK reports as reason null — falls back to the presentation's copy (the
@@ -22,6 +22,7 @@ export const PRESENTATION_COPY: Record<Presentation, { title: string; body: stri
   'not-found': { title: 'Not found', body: 'This item does not exist, or it was removed.' },
   degraded: { title: 'IAM is not available', body: 'IAM did not answer in time. Try again in a moment.' },
   'rate-limited': { title: 'Too many requests', body: 'Wait a moment, then try again.' },
+  'quota-exhausted': { title: 'Usage limit reached', body: 'Your organization used its token budget for this period. Ask an administrator, or wait until the budget resets.' },
   'invalid-input': { title: 'The request was not valid', body: 'Check the values and try again.' },
   conflict: { title: 'The request conflicts with the current state', body: 'Reload the page and try again.' },
   disabled: { title: 'This feature is not enabled on this IAM', body: 'An operator can enable it in the IAM configuration.' },

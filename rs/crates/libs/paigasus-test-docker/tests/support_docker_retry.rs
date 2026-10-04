@@ -1,18 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Docker-free unit tests for `support::docker::mapped_port`'s retry loop (SMA-521).
-//!
-//! Lives in its OWN test binary, included via `#[path]`, for two reasons. A `#[cfg(test)]`
-//! module inside `docker.rs` would be silently compiled out — `cfg(test)` is not enabled when
-//! rustc builds an integration-test binary — and would therefore never run. Plain
-//! `#[tokio::test]` functions inside `docker.rs` would instead run once per binary that
-//! includes it — currently 67 of them, same count `support_docker_policy.rs` cites for the
-//! identical reason — duplicating the same assertions instead of asserting them once, here.
+//! Docker-free tests for the crate's `mapped_port` retry loop (SMA-521). Moved from
+//! `paigasus-iam`'s `tests/support_docker_retry.rs` by SMA-726; only the import paths changed.
 
-#[path = "support/docker.rs"]
-mod docker;
-
-use docker::{PortSource, mapped_port};
+use paigasus_test_docker::{PortSource, mapped_port};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Fails its first `fails` probes, then reports `port` — the shape of a container whose runtime

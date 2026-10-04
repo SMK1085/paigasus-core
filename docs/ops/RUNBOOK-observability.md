@@ -136,6 +136,19 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `gateway_iam_call_duration_seconds` | histogram | `operation` | Latency of each IAM call, from the same middleware call sites. |
 | `gateway_upstream_requests_total` | counter | `status_class` | One increment per OpenAI upstream call, `status_class` derived from the upstream HTTP status (`2xx`/`4xx`/`5xx`). **Streaming caveat (TTFB):** for `stream: true` this only covers the initial POST/headers exchange — `OpenAiClient::chat_completion` returns as soon as the response head arrives, and the SSE body streams lazily afterward. A mid-stream terminal SSE error (emitted as a `data: {"error":…}` event, §5 gateway-m0 spec) happens **past** this measured boundary and is **not** counted here. |
 | `gateway_upstream_request_duration_seconds` | histogram | — | Upstream call latency — same TTFB caveat as above; do not read this as end-to-end stream duration. |
+| `gateway_limit_refusals_total` | counter | `reason` | SMA-677. Chat requests refused by a limit before egress, one per request. `reason` ∈ `principal_rate` / `org_rate` / `org_budget` (the D8 precedence picks one). Primed at 0 when `[limits]` is set; absent without it. |
+| `gateway_tokens_charged_total` | counter | `source` | Tokens the charge guard sent to the limit store. `source` ∈ `reported` (the answer's `usage.total_tokens`) / `estimated` (no usage record). Requests admitted under fail-open are not counted here (see "Gateway limits: fail-open and Redis requirements"). Requests with no budget (outcome `no_budget`) are not counted here either. So this counter is not the total token use. See the `chat completion metered` log line. |
+| `gateway_limit_unscoped_requests_total` | counter | — | Chat requests whose scope PRN names no organization. Expected 0; non-zero is a scope parse mismatch or an IAM defect. With an org rate or a budget configured, these requests get `500 internal`. |
+| `gateway_limit_store_unavailable_total` | counter | `op`, `kind` | Limit-store calls that failed or met an open breaker. `op` ∈ `check` (the request was admitted with NO limit) / `charge` (the tokens were NOT counted). `kind` ∈ `io` (Redis down or unreachable) / `server` (Redis answered with an error: OOM under `noeviction`, `READONLY`, a script error) / `decode` (a reply of the wrong shape). |
+| `gateway_limit_charges_dropped_total` | counter | `reason` | Charges that were not sent. `reason` ∈ `no_runtime` (a guard dropped outside the async runtime) / `shutdown` (still running after the 5 s shutdown drain) / `period_expired` (more than one day after its budget period ended). |
+| `gateway_redis_breaker_state` | gauge | `role` | The limits Redis circuit breaker (`role="limits"`): 0 closed, 1 half-open, 2 open. Only with `backend = "redis"`. Per replica: aggregate `max by (job, role)`, never `sum`. |
+| `gateway_redis_breaker_transitions_total` | counter | `role`, `to` | One per transition of that breaker; `to` ∈ `closed` / `half_open` / `open`. Catches a flapping breaker that the gauge misses between scrapes. |
+
+**The `chat completion metered` log line** (`info` when tokens > 0, `debug` otherwise) is the
+per-org spend record: fields `org`, `tokens`, `source`, `outcome` (`charged` / `store_unavailable`
+/ `no_budget` / `zero`), `request_id`, `correlation_id`. No metric label carries an org id
+(unbounded); use this line for per-org use, and its `outcome="store_unavailable"` lines for the
+spend that fail-open did not charge.
 
 ---
 
@@ -238,6 +251,8 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `GatewayHighErrorRate` | `sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `GatewayIamDependencyUnavailable` | `rate(gateway_iam_calls_total{result="unavailable"}[5m]) > 0` for 5m | critical |
 | `GatewayUpstreamErrors` | `sum(rate(gateway_upstream_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_upstream_requests_total[5m])) > 0.05` for 10m | warning |
+| `GatewayLimitsRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state) != 0` for 2m | warning |
+| `GatewayLimitStoreUnavailable` | `sum by (job, op, kind) (increase(gateway_limit_store_unavailable_total[10m])) > 0` | warning |
 | `TargetDown` | `up == 0` for 2m | critical |
 
 ### `IamDenialAuditDrops` — denial-audit rows being dropped
@@ -1719,6 +1734,81 @@ typically not actionable on the gateway side beyond confirming it isn't a gatewa
 malformed-request pattern (check `gateway_upstream_requests_total{status_class="4xx"}` isn't
 also elevated, which would point at a gateway bug instead).
 
+### `GatewayLimitsRedisBreakerOpen` — the limits Redis breaker is not closed (warning)
+
+**Meaning.** The gateway's limits Redis circuit breaker (`gateway_redis_breaker_state{role="limits"}`)
+has been open or half-open for 2m. While it is, every chat request is admitted with no rate
+limit and no budget, and its tokens are not charged (fail-open, SMA-677 D10). The exposure is the
+rate limit of the upstream, for the whole length of the outage.
+
+**Confirm:** is the limits Redis up and reachable from the gateway? Does `limits.redis_url`
+reach the primary? Read `gateway_limit_store_unavailable_total` by `kind`.
+
+**Remediation:** see "Gateway limits: fail-open and Redis requirements" below.
+
+### `GatewayLimitStoreUnavailable` — limit store calls are failing (warning)
+
+**Meaning.** At least one limit-store call failed in the last 10m. It also fires on an outage
+shorter than a scrape interval, and on `kind="server"` and `kind="decode"`, which never open the
+breaker. `op="check"`: requests were admitted with no limit. `op="charge"`: tokens were not counted.
+
+**Confirm:** the `kind` label. `io` — Redis is down or unreachable (also logged at `warn`).
+`server` — Redis answered with an error, for example `OOM` under `noeviction` (the instance is
+full) or `READONLY` (the URL reaches a replica); logged at `error`. `decode` — a reply of the
+wrong shape; logged at `error`, and a defect. The log lines are rate-limited to one per
+(operation, kind) per 10 s and carry the count of suppressed events.
+
+**Remediation:** see the next section.
+
+### Gateway limits: fail-open and Redis requirements
+
+**Fail-open (SMA-677 D10).** Fail-open means that the gateway admits a request when the limit
+store fails. With `[limits] backend = "redis"`, three Redis states do not stop chat traffic:
+- Redis does not answer.
+- Redis answers with an error.
+- The breaker is open.
+
+In each state the gateway admits the request and charges no tokens.
+
+Readiness (`/readyz`) does not check Redis, on purpose. A Redis check there would take every
+replica out of the balancer during a Redis outage. To find the spend that fail-open did not
+charge, search the `chat completion metered` lines with `outcome="store_unavailable"`. Their
+`org` and `tokens` fields hold it.
+
+**Boot needs Redis (D17).** A gateway with `backend = "redis"` connects at boot. It does not
+start while Redis is down, so a wrong URL or password shows at deploy time. During a Redis
+outage, a new replica cannot start. A scale-up or a rollout therefore cannot finish.
+
+**An empty `[limits]` table (D11).** A `[limits]` table with no limit value set builds no store
+and opens no Redis connection. No limit applies. The gateway writes one `info` line:
+`[limits] is set, but no limit is configured`. This is true for `backend = "redis"` also, so
+Redis is not needed in this case.
+
+**Redis requirements (D21).** A lost or evicted budget key reads as zero, which silently resets
+that org's budget. So:
+1. Use a dedicated Redis instance for limits. This is the strongest option. At least use a
+   dedicated logical database, for example `redis://host:6379/2`. It separates the keys but
+   not the memory pool.
+2. Set `maxmemory-policy noeviction`, or keep enough headroom that eviction never runs. Under
+   `noeviction` a full instance refuses writes with `OOM`, which shows as `kind="server"`. Under an
+   `allkeys-*` or `volatile-*` policy, Redis evicts budget keys silently (every limit key has a TTL).
+3. Turn on AOF (`appendonly yes`) if budgets must survive a Redis restart. With no persistence,
+   a restart resets every budget and rate count. With RDB only, a restart loses the charges
+   since the last snapshot.
+4. Replication is asynchronous: a failover can lose the last charges (an under-count).
+5. The URL must always reach the primary. Use a single node, or a service address that moves
+   on failover. Redis Cluster is not supported. The minimum Redis version is 6.2.
+
+**Other known limits.** Requests that are in flight when the budget runs out still complete.
+Their tokens go over the budget (D7). Replicas with different `[[limits.org]]` lists apply
+different limits to one shared count.
+
+Clock skew between replicas moves the rate estimate by about the skew divided by 60 s, as a share of one window. A client
+that does not send `stream_options.include_usage` is charged an estimate.
+
+**Latency when Redis is unreachable (D20).** The first three requests that meet an unreachable
+Redis each wait about 2.1 s. Then the breaker opens.
+
 ### `TargetDown` — a scrape target is unreachable (critical)
 
 **Meaning.** `up == 0` for 2 minutes — Prometheus could not scrape `/metrics` on the named
@@ -1737,14 +1827,15 @@ isn't coming back up on its own.
 
 ### Gateway deployment posture (applies across the alerts above)
 
-**M0 is internal-only or spend-capped.** The gateway M0 walking skeleton ships **no** rate
-limiting and **no** cost/budget enforcement (both are gateway M3/M4 work) — a single
-over-provisioned or leaked API key means effectively unbounded OpenAI spend. Per the gateway-m0
-design (D6), M0 must run in **one** of two postures:
+**Keep a spend cap, even with `[limits]`.** Without a `[limits]` table the gateway has no rate
+limit and no budget, so a leaked API key means effectively unbounded OpenAI spend. With
+`[limits]` (SMA-677) the gateway enforces a request rate and a token budget. But the budget counts
+tokens, not money.
+
+Requests in flight still complete when the budget runs out. A Redis outage is fail-open (see
+"Gateway limits: fail-open and Redis requirements"). So run the gateway in **one** of two postures:
 1. **Internal/non-production** — not reachable from untrusted networks, or
-2. **Behind a hard OpenAI account-level spend cap** set at the OpenAI account/org level, so a
-   worst-case abuse scenario is bounded by that cap rather than by anything the gateway itself
-   enforces.
+2. **Behind a hard OpenAI account-level spend cap**, so that cap limits the worst case.
 
 **`/metrics` network-restriction is part of this posture, not separate from it.** `/metrics` is
 unauthenticated (D4, §1). For an **internal-only** deployment, same-port `/metrics` (the default,
@@ -1779,7 +1870,7 @@ and adding one is explicitly out of scope.
 **Fail-open is bounded, not free: while Redis is down, budget ~0.2–0.6 s per authz decision,
 ~0.3–0.8 s per authz-mutating request, and up to ~1.2 s for a gated cross-principal decision
 (the table below).** That bound exists only because it was
-deliberately imposed. `adapters::redis_conn::connect` is the
+deliberately imposed. `paigasus_redis::connect` (the `paigasus-redis` lib crate since SMA-726) is the
 **single** place this service constructs the shared `ConnectionManager` (enforced by the
 `repo:redis-connect-single-site` CI gate), and it caps the reconnect budget at
 **`number_of_retries = 1`** — down from redis-rs's stock 6 (SMA-473). A counter read against a
@@ -1857,7 +1948,7 @@ connect including address resolution (`redis-1.3.0/src/client.rs:505-510`).
 
 **That ~2.15 s figure is now measured, not calculated — the single most important correction in
 this section.**
-`adapters::redis_conn::tests::a_blackholed_backend_costs_seconds_per_command_until_the_breaker_opens`
+`paigasus_redis::tests::a_blackholed_backend_costs_seconds_per_command_until_the_breaker_opens` (in `rs/crates/libs/paigasus-redis`)
 drives a real dial against a Docker-free blackholed listener and pins it directly. Three runs of one command against a Closed
 breaker: **2.1531 s / 2.1540 s / 2.1523 s** — tight enough to be a floor (two ~1 s
 `connection_timeout` attempts plus a jittered retry delay), not an estimate. The same test's
@@ -1869,7 +1960,7 @@ from.
 
 **Since SMA-476, that ~2.15 s cost applies only to the failures that open the breaker, and to the
 request cohort already in flight when the outage starts — not to every command.** A per-connection
-circuit breaker (`adapters::redis_conn::RedisHandle`; one breaker per connection — one instance per
+circuit breaker (`paigasus_redis::RedisHandle`; one breaker per connection — one instance per
 `RedisRole`, i.e. `authz`, `api_keys` when that cache holds its own connection, and `jwks`) now sits in front of
 every Redis command:
 
@@ -1964,7 +2055,7 @@ the alert catalog above) are the most direct signal of everything in this subsec
 breaker's own state rather than a decision-cache side effect. Reach for those first; the narrative
 below (`IamAuthzRedisCacheBypassed`) remains accurate but is one step removed.
 
-**Boot still fails fast — just ~50× sooner.** `redis_conn::connect` is eager
+**Boot still fails fast — just ~50× sooner.** `paigasus_redis::connect` is eager
 (`ConnectionManager::new_with_config` awaits the initial connection), so a Redis that is down when
 IAM starts still fails `AppState::new` and the process exits, rather than coming up with a manager
 that only fails on first use. What changed is the tolerance window: ~6–12 s of retries became
@@ -2237,7 +2328,7 @@ hangs until you give up, the backlog fills, or you unpause it (this was confirme
 earlier attempt with `redis-cli -t 30` neither returned nor errored inside 40 s and had to be
 killed). The ~2.15 s / ~6.46 s figures in this section come **only** from Task 4's hermetic test,
 which exercises the actual production client configuration
-(`adapters::redis_conn::connect`'s `ConnectionManagerConfig`), not a generic client against a
+(`paigasus_redis::connect`'s `ConnectionManagerConfig`), not a generic client against a
 manually paused container. Use this procedure to confirm the *mechanism*; use the automated test's
 numbers to reason about *duration*.
 
@@ -2701,7 +2792,7 @@ Not implemented in this cycle; tracked as explicit follow-ups:
 - **A combined IAM introspect-and-authorize RPC**, which would also reduce the gateway's
   per-request round-trip count and the surface area of `GatewayIamDependencyUnavailable`.
 - **A Redis circuit breaker shipped in SMA-476** — every Redis command now runs behind a
-  per-connection breaker (`adapters::redis_conn::RedisHandle`) that stops attempting a known-down
+  per-connection breaker (`paigasus_redis::RedisHandle`) that stops attempting a known-down
   backend, capping the recovery lag added on top of any Redis outage at ~6 s instead of paying
   ~2.15 s **per failed command** for the outage's entire duration. Degradation (cache bypass, or
   503s on the fail-closed JWKS path) still lasts as long as the breaker itself stays non-closed,
@@ -2712,7 +2803,7 @@ Not implemented in this cycle; tracked as explicit follow-ups:
     (higher baseline RTT, a proxy hop in front of it) makes a global tightening a false-trip risk
     against connections that are merely slow, not down, so it was deliberately left alone rather
     than tuned down alongside the breaker.
-  - **SMA-473 D10's boot-tolerance residual.** `redis_conn::connect` is still eager and
+  - **SMA-473 D10's boot-tolerance residual.** `paigasus_redis::connect` is still eager and
     breaker-independent at boot (SMA-476 D11: a single boot dial has nothing to break on, so the
     breaker starts Closed and wraps commands only), so a Redis that is down or slow to start at
     boot still fails `AppState::new` and costs a crash-restart, exactly as before this cycle. If a

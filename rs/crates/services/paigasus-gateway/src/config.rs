@@ -6,7 +6,12 @@ use figment::providers::{Env, Format, Serialized, Toml};
 use figment::{Figment, error::Error as FigmentError};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
+
+use crate::domain::limits::{BudgetPeriod, LimitRules, MAX_REQUESTS_PER_MINUTE, MAX_TOKENS_PER_PERIOD, OrgOverride};
+use crate::domain::parse_org_uuid;
 
 /// M0 walking-skeleton config (see the module doc): one HTTP port, an IAM gRPC client
 /// endpoint (G4 dials it), and the single OpenAI upstream (G6 calls out to it). No database,
@@ -32,6 +37,11 @@ pub struct GatewayConfig {
     /// SDKs commonly retry 5xx, which would turn a deliberate configuration choice into
     /// repeated load.
     pub stream_enabled: bool,
+    /// SMA-677: the optional rate limit and token budget on `POST /v1/chat/completions`. `None`
+    /// (no `[limits]` table, the default) means no limit at all and no Redis connection (A6, Q5).
+    /// The `Defaults` layer has no `limits` entry on purpose.
+    #[serde(default)]
+    pub limits: Option<LimitsConfig>,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -140,6 +150,122 @@ pub struct MetricsConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         MetricsConfig { enabled: true, addr: None }
+    }
+}
+
+/// `[limits]` (SMA-677 § 4.1). An unset key means no limit on that dimension (D11). A misspelt
+/// key fails extraction (`deny_unknown_fields`): a typo must not switch a budget off silently.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LimitsConfig {
+    /// D17: `memory` (one replica, the default) or `redis` (shared across replicas).
+    pub backend: LimitsBackend,
+    /// D17: required for `backend = "redis"`, rejected for `memory`. It can carry a password, so
+    /// it is skipped on `Serialize`, and `SecretString` redacts it on `Debug` — the same pattern
+    /// as `upstream.openai.api_key` (Q15). Set it through `GATEWAY_LIMITS__REDIS_URL`.
+    #[serde(skip_serializing)]
+    pub redis_url: Option<SecretString>,
+    pub principal_requests_per_minute: Option<u64>,
+    pub org_requests_per_minute: Option<u64>,
+    pub tokens_per_period: Option<u64>,
+    /// D6: `daily`, `weekly` (ISO week) or `monthly` (default), in UTC.
+    pub budget_period: BudgetPeriod,
+    /// D12: `[[limits.org]]`, TOML only (figment's environment provider cannot express an array
+    /// of tables). With `backend = "redis"`, every replica must carry the same list.
+    pub org: Vec<OrgLimitsConfig>,
+}
+
+/// One `[[limits.org]]` entry (D12).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrgLimitsConfig {
+    /// The org UUID in the 36-character form (the `domain::parse_org_uuid` rule).
+    pub id: String,
+    #[serde(default)]
+    pub org_requests_per_minute: Option<u64>,
+    #[serde(default)]
+    pub tokens_per_period: Option<u64>,
+    /// D11: no org rate and no budget; the principal rate still applies.
+    #[serde(default)]
+    pub exempt: bool,
+}
+
+/// D17: which limit store backs `[limits]`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitsBackend {
+    #[default]
+    Memory,
+    Redis,
+}
+
+/// D11/D23: `0` refuses every request (never what an operator means), and a value above the cap
+/// would break the D23 arithmetic bound.
+fn check_limit(name: &str, value: Option<u64>, cap: u64) -> Result<(), String> {
+    match value {
+        Some(0) => Err(format!("{name} must be at least 1 (unset it for no limit; 0 would refuse every request)")),
+        Some(v) if v > cap => Err(format!("{name} must be at most {cap}; got {v}")),
+        _ => Ok(()),
+    }
+}
+
+impl LimitsConfig {
+    /// Every `[limits]` rule of spec § 4.1. Each message names the key.
+    pub fn validate(&self) -> Result<(), String> {
+        check_limit("limits.principal_requests_per_minute", self.principal_requests_per_minute, MAX_REQUESTS_PER_MINUTE)?;
+        check_limit("limits.org_requests_per_minute", self.org_requests_per_minute, MAX_REQUESTS_PER_MINUTE)?;
+        check_limit("limits.tokens_per_period", self.tokens_per_period, MAX_TOKENS_PER_PERIOD)?;
+
+        let mut seen = HashSet::new();
+        for (i, entry) in self.org.iter().enumerate() {
+            let Some(id) = parse_org_uuid(&entry.id) else {
+                return Err(format!("limits.org[{i}].id must be one organization UUID in the 36-character form; got {:?}", entry.id));
+            };
+            if !seen.insert(id) {
+                return Err(format!("limits.org[{i}].id {:?} names an org that an earlier [[limits.org]] entry already lists", entry.id));
+            }
+            check_limit(&format!("limits.org[{i}].org_requests_per_minute"), entry.org_requests_per_minute, MAX_REQUESTS_PER_MINUTE)?;
+            check_limit(&format!("limits.org[{i}].tokens_per_period"), entry.tokens_per_period, MAX_TOKENS_PER_PERIOD)?;
+            if entry.exempt && (entry.org_requests_per_minute.is_some() || entry.tokens_per_period.is_some()) {
+                return Err(format!("limits.org[{i}] sets exempt = true together with a limit; an exempt org has no org rate and no budget"));
+            }
+        }
+
+        let url_set = self.redis_url.as_ref().is_some_and(|url| !url.expose_secret().trim().is_empty());
+        match self.backend {
+            LimitsBackend::Redis if !url_set => Err("limits.backend = \"redis\" requires limits.redis_url (set GATEWAY_LIMITS__REDIS_URL)".to_string()),
+            LimitsBackend::Memory if self.redis_url.is_some() => {
+                Err("limits.redis_url is set but limits.backend is \"memory\": the counts would not be shared; set limits.backend = \"redis\" or unset the URL".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The domain rules. Call after `validate`: an entry with a bad id is skipped, and a `0` value
+    /// reads as "no limit" rather than panicking.
+    pub fn rules(&self) -> LimitRules {
+        LimitRules {
+            principal_requests_per_minute: self.principal_requests_per_minute.and_then(NonZeroU64::new),
+            org_requests_per_minute: self.org_requests_per_minute.and_then(NonZeroU64::new),
+            tokens_per_period: self.tokens_per_period.and_then(NonZeroU64::new),
+            budget_period: self.budget_period,
+            overrides: self
+                .org
+                .iter()
+                .filter_map(|entry| {
+                    parse_org_uuid(&entry.id).map(|id| {
+                        (
+                            id,
+                            OrgOverride {
+                                org_requests_per_minute: entry.org_requests_per_minute.and_then(NonZeroU64::new),
+                                tokens_per_period: entry.tokens_per_period.and_then(NonZeroU64::new),
+                                exempt: entry.exempt,
+                            },
+                        )
+                    })
+                })
+                .collect(),
+        }
     }
 }
 
@@ -306,6 +432,9 @@ impl GatewayConfig {
             return Err("metrics.addr must use a different port than http_addr".to_string());
         }
 
+        if let Some(limits) = &self.limits {
+            limits.validate()?;
+        }
         Ok(())
     }
 }
@@ -601,6 +730,189 @@ mod tests {
             assert!(!dumped.contains("api_key"), "the api_key field itself must be entirely absent from Serialize output: {dumped}");
             let debugged = format!("{cfg:?}");
             assert!(!debugged.contains("sk-test-key"), "the configured API key must never appear in Debug output: {debugged}");
+            Ok(())
+        });
+    }
+
+    use crate::domain::limits::{BudgetPeriod, OrgOverride};
+    use std::num::NonZeroU64;
+
+    const ORG_A: &str = "0190a100-0000-7000-8000-0000000000a1";
+
+    fn limits_toml(body: &str) -> String {
+        format!("{}\n[limits]\n{body}\n", valid_toml())
+    }
+
+    #[test]
+    fn no_limits_table_means_no_limits() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.limits.is_none(), "A6/Q5: limits are off unless configured");
+            assert!(cfg.validate().is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_empty_limits_table_gives_only_empty_policies() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &limits_toml(""))?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            let limits = cfg.limits.as_ref().expect("an empty [limits] table is Some");
+            assert_eq!(limits.backend, LimitsBackend::Memory, "the backend defaults to memory");
+            assert_eq!(limits.budget_period, BudgetPeriod::Monthly, "the period defaults to monthly");
+            assert!(cfg.validate().is_ok());
+            assert!(limits.rules().every_policy_is_empty());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_full_limits_table_loads_and_converts_to_rules() {
+        figment::Jail::expect_with(|jail| {
+            let body = format!(
+                "principal_requests_per_minute = 60\norg_requests_per_minute = 600\ntokens_per_period = 5000000\nbudget_period = \"weekly\"\n\n[[limits.org]]\nid = \"{ORG_A}\"\norg_requests_per_minute = 1200\ntokens_per_period = 20000000\n\n[[limits.org]]\nid = \"0190a100-0000-7000-8000-0000000000b2\"\nexempt = true\n"
+            );
+            jail.create_file("gateway.toml", &limits_toml(&body))?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+            let rules = cfg.limits.as_ref().expect("the table is set").rules();
+            assert_eq!(rules.principal_requests_per_minute, NonZeroU64::new(60));
+            assert_eq!(rules.org_requests_per_minute, NonZeroU64::new(600));
+            assert_eq!(rules.tokens_per_period, NonZeroU64::new(5_000_000));
+            assert_eq!(rules.budget_period, BudgetPeriod::Weekly);
+            let a = uuid::Uuid::try_parse(ORG_A).expect("a uuid");
+            assert_eq!(
+                rules.overrides[&a],
+                OrgOverride {
+                    org_requests_per_minute: NonZeroU64::new(1200),
+                    tokens_per_period: NonZeroU64::new(20_000_000),
+                    exempt: false
+                }
+            );
+            let b = uuid::Uuid::try_parse("0190a100-0000-7000-8000-0000000000b2").expect("a uuid");
+            assert!(rules.overrides[&b].exempt);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_each_bad_limits_value_and_names_the_key() {
+        let cases: &[(&str, &str)] = &[
+            ("principal_requests_per_minute = 0", "limits.principal_requests_per_minute must be at least 1"),
+            ("org_requests_per_minute = 0", "limits.org_requests_per_minute must be at least 1"),
+            ("tokens_per_period = 0", "limits.tokens_per_period must be at least 1"),
+            ("principal_requests_per_minute = 1000000001", "limits.principal_requests_per_minute must be at most 1000000000"),
+            ("org_requests_per_minute = 1000000001", "limits.org_requests_per_minute must be at most 1000000000"),
+            ("tokens_per_period = 1000000000001", "limits.tokens_per_period must be at most 1000000000000"),
+            ("[[limits.org]]\nid = \"acme\"", "limits.org[0].id must be one organization UUID"),
+            ("[[limits.org]]\nid = \"0190a1000000700080000000000000a1\"", "limits.org[0].id must be one organization UUID"),
+            (
+                "[[limits.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\n[[limits.org]]\nid = \"0190A100-0000-7000-8000-0000000000A1\"",
+                "limits.org[1].id",
+            ),
+            (
+                "[[limits.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\norg_requests_per_minute = 0",
+                "limits.org[0].org_requests_per_minute must be at least 1",
+            ),
+            (
+                "[[limits.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\ntokens_per_period = 1000000000001",
+                "limits.org[0].tokens_per_period must be at most",
+            ),
+            (
+                "[[limits.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nexempt = true\ntokens_per_period = 5",
+                "limits.org[0] sets exempt = true together with a limit",
+            ),
+            ("backend = \"redis\"", "limits.backend = \"redis\" requires limits.redis_url"),
+            ("backend = \"redis\"\nredis_url = \"  \"", "limits.backend = \"redis\" requires limits.redis_url"),
+            ("redis_url = \"redis://127.0.0.1:6379\"", "limits.redis_url is set but limits.backend is \"memory\""),
+        ];
+        for (body, want) in cases {
+            figment::Jail::expect_with(|jail| {
+                jail.create_file("gateway.toml", &limits_toml(body))?;
+                let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+                let err = cfg.validate().expect_err(body);
+                assert!(err.contains(want), "{body}: got {err}");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn an_unknown_budget_period_fails_extraction() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &limits_toml("budget_period = \"yearly\""))?;
+            assert!(GatewayConfig::figment().extract::<GatewayConfig>().is_err());
+            Ok(())
+        });
+    }
+
+    /// Review Focus 1: a typo must fail the boot, not switch a budget off silently.
+    #[test]
+    fn a_misspelt_limits_key_fails_extraction() {
+        for body in ["token_per_period = 5", "[[limits.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nexmpt = true"] {
+            figment::Jail::expect_with(|jail| {
+                jail.create_file("gateway.toml", &limits_toml(body))?;
+                let err = GatewayConfig::figment().extract::<GatewayConfig>().expect_err(body);
+                assert!(err.to_string().contains("unknown field"), "{body}: {err}");
+                Ok(())
+            });
+        }
+    }
+
+    /// Review Focus 2: the override id and the scope PRN may use different letter case.
+    #[test]
+    fn an_upper_case_override_id_applies_to_the_canonical_org() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "gateway.toml",
+                &limits_toml("org_requests_per_minute = 10\n[[limits.org]]\nid = \"0190A100-0000-7000-8000-0000000000A1\"\norg_requests_per_minute = 99"),
+            )?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok());
+            let lower = uuid::Uuid::try_parse(ORG_A).expect("a uuid");
+            assert_eq!(cfg.limits.as_ref().expect("set").rules().policy_for(Some(lower)).org_requests_per_minute, NonZeroU64::new(99));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn every_limits_key_reads_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            jail.set_env("GATEWAY_LIMITS__BACKEND", "redis");
+            jail.set_env("GATEWAY_LIMITS__REDIS_URL", "redis://:hunter2@127.0.0.1:6379/2");
+            jail.set_env("GATEWAY_LIMITS__PRINCIPAL_REQUESTS_PER_MINUTE", "60");
+            jail.set_env("GATEWAY_LIMITS__ORG_REQUESTS_PER_MINUTE", "600");
+            jail.set_env("GATEWAY_LIMITS__TOKENS_PER_PERIOD", "5000000");
+            jail.set_env("GATEWAY_LIMITS__BUDGET_PERIOD", "daily");
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+            let limits = cfg.limits.as_ref().expect("the env vars create the table");
+            assert_eq!(limits.backend, LimitsBackend::Redis);
+            assert_eq!(limits.redis_url.as_ref().map(|u| u.expose_secret().to_owned()), Some("redis://:hunter2@127.0.0.1:6379/2".to_owned()));
+            assert_eq!(
+                (limits.principal_requests_per_minute, limits.org_requests_per_minute, limits.tokens_per_period),
+                (Some(60), Some(600), Some(5_000_000))
+            );
+            assert_eq!(limits.budget_period, BudgetPeriod::Daily);
+            Ok(())
+        });
+    }
+
+    /// D17: the Redis URL can carry a password, and `GatewayConfig` derives Debug and Serialize.
+    #[test]
+    fn the_redis_url_never_reaches_debug_or_serialize() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            jail.set_env("GATEWAY_LIMITS__BACKEND", "redis");
+            jail.set_env("GATEWAY_LIMITS__REDIS_URL", "rediss://:hunter2@redis.internal:6380/2");
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            let serialized = serde_json::to_string(&cfg).expect("the config serializes");
+            assert!(!serialized.contains("hunter2") && !serialized.contains("redis.internal"), "{serialized}");
+            let debug = format!("{cfg:?}");
+            assert!(!debug.contains("hunter2") && !debug.contains("redis.internal"), "{debug}");
             Ok(())
         });
     }

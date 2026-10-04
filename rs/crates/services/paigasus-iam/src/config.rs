@@ -178,11 +178,22 @@ pub struct IssuerConfig {
     pub audiences: Vec<String>,
     #[serde(default = "default_jit_provisioning")]
     pub jit_provisioning: bool,
+    /// Claim names that mark a verified token as NOT an access token for this issuer (SMA-703).
+    /// Empty by default. A token that carries one of them, with any value except JSON `null`, is
+    /// refused as `NotAnAccessToken`. For Zitadel, use `["at_hash", "azp"]` (spec § 3, F6).
+    #[serde(default)]
+    pub id_token_marker_claims: Vec<String>,
 }
 
 fn default_jit_provisioning() -> bool {
     true
 }
+
+/// Claim names that every token IAM accepts carries (SMA-703 D2). A marker list that names one
+/// would make IAM refuse every token of that issuer, so `IamConfig::validate` refuses it.
+/// Keep this list equal to the reserved names in `paigasus.validateIdTokenMarkerClaims` in
+/// `charts/paigasus/templates/_iam-backend.tpl`.
+const RESERVED_MARKER_CLAIMS: [&str; 4] = ["iss", "sub", "aud", "exp"];
 
 /// Cedar authorization config (SMA-444 Task 21, spec §7/§11) — mirrors `AuthnConfig`'s
 /// shape/style: the in-process [`PolicySnapshot`](crate::adapters::authz::PolicySnapshot)
@@ -1028,7 +1039,9 @@ impl IamConfig {
     /// whose floor scales with `key_prefix.len()` — a `max_token_bytes` below the shortest
     /// token this config can ever emit would make `api_key::parse_token` reject every issued
     /// key. Also (SMA-558): `authn.accept_invalid_tls` and `authn.extra_ca_bundle_path` are
-    /// mutually exclusive, and the latter is non-empty when present.
+    /// mutually exclusive, and the latter is non-empty when present. Also (SMA-703 D2): each
+    /// `id_token_marker_claims` name is not empty, has no leading or trailing whitespace, is not
+    /// `iss`/`sub`/`aud`/`exp`, and occurs once in its list.
     pub fn validate(&self) -> Result<(), String> {
         if self.authn.issuers.is_empty() {
             return Err("authn.issuers must contain at least one issuer".to_string());
@@ -1049,6 +1062,24 @@ impl IamConfig {
             }
             if let Err(e) = Issuer::parse(&issuer_cfg.issuer) {
                 return Err(format!("authn.issuers[{trimmed}] is not a valid issuer: {e}"));
+            }
+            // SMA-703 D2. Names compare exactly: JSON member names are case-sensitive.
+            let mut seen_markers = HashSet::with_capacity(issuer_cfg.id_token_marker_claims.len());
+            for name in &issuer_cfg.id_token_marker_claims {
+                if name.is_empty() {
+                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims contains an empty name"));
+                }
+                if name.trim() != name {
+                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims has a name with leading or trailing whitespace: {name:?}"));
+                }
+                if RESERVED_MARKER_CLAIMS.contains(&name.as_str()) {
+                    return Err(format!(
+                        "authn.issuers[{trimmed}].id_token_marker_claims must not contain {name:?}: every token that IAM accepts carries it, so IAM would refuse every token of this issuer"
+                    ));
+                }
+                if !seen_markers.insert(name.as_str()) {
+                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims contains the name {name:?} twice"));
+                }
             }
         }
 
@@ -1498,6 +1529,92 @@ mod tests {
                 assert!(cfg.validate().is_ok(), "the chart's issuer string must pass validation");
                 Ok(())
             });
+        }
+    }
+
+    #[test]
+    fn issuers_env_in_the_chart_form_parses_id_token_marker_claims() {
+        // SMA-703 T17: the exact string that charts/paigasus renders into IAM_AUTHN__ISSUERS with
+        // oidc.idTokenMarkerClaims set (env.sh row M3), the same string without the key (row M1),
+        // and Review Focus 2: the chart allows figment's separators `[ ] { } , =` and `#` inside a
+        // quoted name, so figment must read them as part of the string.
+        let cases: [(&str, Vec<&str>); 3] = [
+            (
+                r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["393381921683406851"],id_token_marker_claims=["at_hash","azp"]}]"#,
+                vec!["at_hash", "azp"],
+            ),
+            (r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["393381921683406851"]}]"#, vec![]),
+            (
+                r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["paigasus-console"],id_token_marker_claims=["a[0]","b]x","{c},d=e#"]}]"#,
+                vec!["a[0]", "b]x", "{c},d=e#"],
+            ),
+        ];
+        for (issuers, want) in cases {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+                jail.set_env("IAM_AUTHN__ISSUERS", issuers);
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert_eq!(cfg.authn.issuers.len(), 1);
+                assert_eq!(cfg.authn.issuers[0].id_token_marker_claims, want, "{issuers}");
+                assert!(cfg.validate().is_ok(), "the chart's issuer string must pass validation: {issuers}");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn a_misspelled_marker_key_is_ignored() {
+        // SMA-703 D2 / Review Focus 5: IssuerConfig ignores an unknown key, so a typo gives an
+        // empty list and no error. The boot line in validator.rs is then absent; that is the
+        // only sign. This test pins the fact the runbook relies on.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+            jail.set_env(
+                "IAM_AUTHN__ISSUERS",
+                r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["paigasus-console"],id_token_marker_claim=["at_hash"]}]"#,
+            );
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.authn.issuers[0].id_token_marker_claims.is_empty());
+            assert!(cfg.validate().is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_refuses_bad_id_token_marker_claims() {
+        // SMA-703 T16: each D2 rule fails validate, and the message names the issuer.
+        let cases: [(&[&str], &str); 9] = [
+            (&[""], "contains an empty name"),
+            (&[" at_hash"], "leading or trailing whitespace"),
+            (&["azp\n"], "leading or trailing whitespace"),
+            (&[" "], "leading or trailing whitespace"),
+            (&["iss"], "must not contain \"iss\""),
+            (&["sub"], "must not contain \"sub\""),
+            (&["aud"], "must not contain \"aud\""),
+            (&["exp"], "must not contain \"exp\""),
+            (&["at_hash", "azp", "at_hash"], "contains the name \"at_hash\" twice"),
+        ];
+        for (names, want) in cases {
+            let mut cfg = load_minimal_config();
+            cfg.authn.issuers[0].id_token_marker_claims = names.iter().map(|name| (*name).to_string()).collect();
+            let err = cfg.validate().expect_err("a bad marker list must fail validation");
+            assert!(
+                err.contains("authn.issuers[https://idp.example.com/realms/acme].id_token_marker_claims"),
+                "{names:?}: the message names the issuer and the key: {err}"
+            );
+            assert!(err.contains(want), "{names:?}: want {want:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_marker_claims_and_compares_names_exactly() {
+        // SMA-703 D2: the Zitadel recipe passes, and names differing only in case are two names.
+        for names in [vec!["at_hash", "azp"], vec!["at_hash", "AT_HASH"], vec!["ISS"], vec![]] {
+            let mut cfg = load_minimal_config();
+            cfg.authn.issuers[0].id_token_marker_claims = names.iter().map(|name| (*name).to_string()).collect();
+            assert!(cfg.validate().is_ok(), "{names:?} must pass validation: {:?}", cfg.validate());
         }
     }
 

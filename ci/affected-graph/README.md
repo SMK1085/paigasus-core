@@ -26,6 +26,10 @@ runs is the `*_ci` task cases' job.
   contracts: the derive crate is strictly upstream of `paigasus-proto`.
 - **service-info edit** → `paigasus-service-info-rs` + `paigasus-iam-rs` + `paigasus-gateway-rs`
   (SMA-524). One-directional w.r.t. `paigasus-proto`.
+- **redis lib edit** → `paigasus-redis-rs` + `paigasus-iam-rs` + `paigasus-gateway-rs` +
+  `gateway-console-ts` (SMA-726, SMA-677).
+- **test-docker lib edit** → `paigasus-test-docker-rs` + `paigasus-iam-rs` + `paigasus-gateway-rs`
+  + `gateway-console-ts` (SMA-726, SMA-677).
 - **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-node-bindings-rs`
   + `paigasus-wasm-rs` + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts`
   + `paigasus-kernel-parity-rs` (both language wrappers wrap their bindings, SMA-419/420/427)
@@ -369,8 +373,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   cited "run.sh:404". Both statements were wrong; SMA-638 corrected them.
   Each value there is the gate's WHOLE authored input set, globs first then literal files,
   because moon resolves a wildcard entry into `inputGlobs` and a literal path into
-  `inputFiles`: `repo:version-lockstep` (SMA-576) declares sixteen literal paths and no glob
-  at all, so the glob-only comparison this replaced would have read every one of them as
+  `inputFiles`: `repo:version-lockstep` (SMA-576) declared sixteen literal paths and no glob
+  at all (SMA-684 later added one glob and one more path), so the glob-only comparison this replaced would have read every one of them as
   absent — and, being `got != expected or files`, was unsatisfiable for a file-only gate.
 
   SMA-572 added four more script-pinned gates to this pairing. Three carry exact

@@ -39,8 +39,10 @@ export const EXPECTED_STEPS = Object.freeze({
     'cold visit: /iam/orgs goes through /iam/auth/login to the IdP form',
     'login: the callback returns to /iam/orgs with a session',
     'control: the sid replays in both zones',
+    'control: the IdP session answers prompt=none with a code',
     'logout: the shell form ends at the IdP and returns to /iam/ with no session cookie',
     'the old sid is refused by both zones',
+    'the IdP session is dead: prompt=none returns login_required',
   ]),
   'zone-round-trip.spec.ts': Object.freeze([
     'record every request of the context',

@@ -50,6 +50,9 @@ tasks:
       # SMA-513 PR 2b — the same for repo:helm-render's own uv project; it is in
       # ci/osv/run.sh's LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
       - 'ci/helm-render/uv.lock'
+      # SMA-693 — the same for repo:wasm-lockstep's own uv project; it is in ci/osv/run.sh's
+      # LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
+      - 'ci/wasm-lockstep/uv.lock'
       - '.prototools'
       - '.proto/plugins/osv-scanner.toml'
 
@@ -275,6 +278,12 @@ tasks:
       # 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to
       # keep narrow globs rather than collapse them into the broad one.
       - 'ci/next-env/**/*'
+      # SMA-693 — this task pins load-bearing lines inside ci/wasm-lockstep/run.sh
+      # (WASM_LOCKSTEP_SH_CALL_SITES), so a change under ci/wasm-lockstep/ MUST re-key it. The
+      # broad 'ci/**/*' entry already covers it for SCHEDULING; the narrow entry is kept because
+      # check 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to
+      # keep narrow globs rather than collapse them into the broad one.
+      - 'ci/wasm-lockstep/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -380,6 +389,8 @@ tasks:
       - 'rs/crates/services/paigasus-iam/tests/nats_permissions.rs'
       - 'rs/crates/services/paigasus-iam/tests/docker_preflight.rs'
       - 'rs/crates/services/paigasus-iam/tests/support/docker.rs'
+      - 'rs/crates/libs/paigasus-test-docker/src/**/*'
+      - 'rs/crates/libs/paigasus-test-docker/Cargo.toml'
       - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
       - 'rs/crates/services/paigasus-iam/src/config.rs'
       - 'rs/crates/services/paigasus-iam/Cargo.toml'
@@ -418,10 +429,10 @@ tasks:
       # apple-darwin rustflags in that file cannot change what it prints.
 
   redis-connect-single-site:
-    description: 'Assert the redis `ConnectionManager` type name, and the known unnamed-connection constructors, never appear outside `adapters::redis_conn`, so no known call site can bypass the circuit breaker (SMA-473, SMA-476).'
+    description: 'Assert the redis `ConnectionManager` type name, and the known unnamed-connection constructors, never appear outside the `paigasus-redis` lib crate, in IAM or the gateway, so no known call site can bypass the circuit breaker (SMA-473, SMA-476, SMA-726).'
     # WHAT IS GATED: the `ConnectionManager` TYPE NAME, plus a maintained allowlist of
     # `redis::Client` methods that hand back an ALTERNATIVE `ConnectionLike` without ever naming a
-    # gated type — anywhere outside redis_conn.rs.
+    # gated type — anywhere outside rs/crates/libs/paigasus-redis/src/ (SMA-726 moved IAM's redis_conn.rs there).
     #
     # SMA-473 gated only the constructors (`::new(`, `::new_with_config(`,
     # `ConnectionManagerConfig`, `.get_connection_manager`), because adapters legitimately HELD a
@@ -455,12 +466,15 @@ tasks:
     # excluded from THIS term. It stays fully in scope for `ConnectionManager` and the other two
     # terms, none of which collide with anything SeaORM exposes.
     #
-    # SCOPE is `src/` AND `tests/`: a Docker-gated integration test is just as able to construct a
-    # stock manager as production code.
+    # SCOPE (SMA-726 § 4.11): the lib's src/ (the one allowed site), and src/ AND tests/ of both
+    # services that open Redis — paigasus-iam and paigasus-gateway. A Docker-gated integration test
+    # is just as able to construct a stock manager as production code. Every scan directory must
+    # exist: `grep -r` on a missing one only prints to stderr, and `|| true` would hide that the
+    # gate scans less. The loop below exits 2 instead.
     #
     # Comment lines are excluded so prose may still name the API — several module docs do. NOTE
     # the filter anchors on `//` only, so a `/* ... */` BLOCK comment naming ConnectionManager
-    # WILL trip this gate. Use `//` in this crate when writing about the type.
+    # WILL trip this gate. Use `//` in these crates when writing about the type.
     #
     # Two portability notes, both learned the hard way:
     #   - Do NOT anchor paths on `^\./`. GNU grep (CI, Linux) emits the `./` prefix; ugrep
@@ -473,31 +487,40 @@ tasks:
     # The control (`expected` must be non-empty) is what catches a pattern typo or an upstream
     # rename: without it, BOTH greps could go empty and the gate would pass while guarding nothing.
     script: |
-      cd rs/crates/services/paigasus-iam
-      named_hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager|\.get_multiplexed_async_connection' src tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
-      bare_get_connection_hits="$(grep -rnE '\.get_connection\b' src tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -v '/persistence/migration/' || true)"
+      cd rs/crates
+      for d in libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests; do
+        if [ ! -d "$d" ]; then
+          echo "scan directory rs/crates/$d is missing — the guard would scan less without saying so (moved? renamed?)" >&2
+          exit 2
+        fi
+      done
+      named_hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager|\.get_multiplexed_async_connection' libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      bare_get_connection_hits="$(grep -rnE '\.get_connection\b' libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -v '/persistence/migration/' || true)"
       hits="$(printf '%s\n%s\n' "$named_hits" "$bare_get_connection_hits" | grep -v '^$' || true)"
-      expected="$(printf '%s\n' "$hits" | grep -E 'adapters/redis_conn\.rs:' || true)"
-      offenders="$(printf '%s\n' "$hits" | grep -vE 'adapters/redis_conn\.rs:' || true)"
+      expected="$(printf '%s\n' "$hits" | grep -E '^libs/paigasus-redis/src/' || true)"
+      offenders="$(printf '%s\n' "$hits" | grep -vE '^libs/paigasus-redis/src/' || true)"
       if [ -z "$expected" ]; then
-        echo "no redis connection-config construction found in adapters/redis_conn.rs — the guard is not guarding anything (renamed file? changed API?)" >&2
+        echo "no redis connection-config construction found in rs/crates/libs/paigasus-redis/src/ — the guard is not guarding anything (renamed file? changed API?)" >&2
         exit 2
       fi
       if [ -n "$offenders" ]; then
-        echo "redis connection config built outside adapters/redis_conn.rs (SMA-473 — use redis_conn::connect):" >&2
+        echo "redis connection config built outside rs/crates/libs/paigasus-redis/src/ (SMA-473 — use paigasus_redis::connect):" >&2
         printf '%s\n' "$offenders" >&2
         exit 1
       fi
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     inputs:
+      - 'rs/crates/libs/paigasus-redis/src/**/*'
       - 'rs/crates/services/paigasus-iam/src/**/*'
       - 'rs/crates/services/paigasus-iam/tests/**/*'
+      - 'rs/crates/services/paigasus-gateway/src/**/*'
+      - 'rs/crates/services/paigasus-gateway/tests/**/*'
 
   iam-docker-policy-single-site:
-    description: 'Assert the Docker-unavailable decision exists exactly once, in tests/support/docker.rs, so a new container-backed suite cannot hand-roll copy #12 (SMA-538).'
-    # WHAT IS GATED — two independent tells, both under this crate's tests/, both expected to
-    # appear ONLY in the one file that owns the policy:
+    description: 'Assert the Docker-unavailable decision exists exactly once, in the paigasus-test-docker crate, so a new container-backed suite in IAM or the gateway cannot hand-roll copy #12 (SMA-538, SMA-726). The id still says iam: ci.yml and the root CLAUDE.md gate the target list byte for byte.'
+    # WHAT IS GATED — two independent tells, in IAM's and the gateway's tests/, both expected to
+    # appear ONLY in rs/crates/libs/paigasus-test-docker/src/, which owns the policy (SMA-726 D22):
     #
     #   1. Reading the `CI` environment variable. Every one of the 11 copies SMA-538 removed was
     #      `if std::env::var_os("CI").is_some() { panic!(..) }` followed by an `eprintln!` and a
@@ -536,26 +559,40 @@ tasks:
     # lines by CONTENT (`:[0-9]+:[[:space:]]*//`) so prose may still name the variable or the API
     # (e.g. `nats_publisher.rs`'s two `AsyncRunner::start` doc-comment mentions).
     #
+    # SCOPE (SMA-726): the crate's src/ (the one allowed site), IAM's tests/ and the gateway's
+    # tests/. IAM's tests/support/docker.rs is now a one-line re-export, so it holds no hit. The
+    # crate's own tests/ is not scanned: it tests the policy, it does not consume it. Every scan
+    # directory must exist; the loop below exits 2 if one is missing, because `grep -r` on a
+    # missing directory only prints to stderr and `|| true` would hide it.
+    #
     # The control — `expected` must be non-empty — is what catches a pattern typo or a rename:
     # without it all greps could go empty and the gate would pass while guarding nothing.
     script: |
-      cd rs/crates/services/paigasus-iam
-      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::.*AsyncRunner' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
-      expected="$(printf '%s\n' "$hits" | grep -E '^tests/support/docker\.rs:' || true)"
-      offenders="$(printf '%s\n' "$hits" | grep -vE '^tests/support/docker\.rs:' | grep -v '^$' || true)"
+      cd rs/crates
+      for d in libs/paigasus-test-docker/src services/paigasus-iam/tests services/paigasus-gateway/tests; do
+        if [ ! -d "$d" ]; then
+          echo "scan directory rs/crates/$d is missing — the guard would scan less without saying so (moved? renamed?)" >&2
+          exit 2
+        fi
+      done
+      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::.*AsyncRunner' libs/paigasus-test-docker/src services/paigasus-iam/tests services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      expected="$(printf '%s\n' "$hits" | grep -E '^libs/paigasus-test-docker/src/' || true)"
+      offenders="$(printf '%s\n' "$hits" | grep -vE '^libs/paigasus-test-docker/src/' | grep -v '^$' || true)"
       if [ -z "$expected" ]; then
-        echo "no CI check or AsyncRunner import found in tests/support/docker.rs — the guard is not guarding anything (moved? renamed?)" >&2
+        echo "no CI check or AsyncRunner import found in rs/crates/libs/paigasus-test-docker/src/ — the guard is not guarding anything (moved? renamed?)" >&2
         exit 2
       fi
       if [ -n "$offenders" ]; then
-        echo "Docker-skip policy hand-rolled outside tests/support/docker.rs (SMA-538 — call start_or_skip):" >&2
+        echo "Docker-skip policy hand-rolled outside rs/crates/libs/paigasus-test-docker/src/ (SMA-538 — call paigasus_test_docker::start_or_skip):" >&2
         printf '%s\n' "$offenders" >&2
         exit 1
       fi
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     inputs:
+      - 'rs/crates/libs/paigasus-test-docker/src/**/*'
       - 'rs/crates/services/paigasus-iam/tests/**/*'
+      - 'rs/crates/services/paigasus-gateway/tests/**/*'
 
   input-liveness:
     description: 'Assert every repo:* task input still matches a tracked file, so a wired gate cannot silently stop firing (SMA-553).'
@@ -664,7 +701,10 @@ tasks:
       bash ci/version-lockstep/run.sh --negative-control
       bash ci/version-lockstep/run.sh
     toolchain: 'system'
-    # Every file that CARRIES a version in either family, plus the script itself. Narrower than
+    # Every file that CARRIES a version in either family, plus the script itself, plus the uv
+    # workspace pyproject files that --check's static uv metadata assertion reads (SMA-684): the
+    # workspace root as a literal path, and every member as a glob, because that check discovers
+    # members at runtime from the members glob. Narrower than
     # publish-metadata's `rs/crates/**/*` because the site list here is STATIC (declared in run.sh's
     # SITES array), not discovered at runtime — so a per-file list cannot go stale behind a new
     # crate the way a runtime-discovered set would. Each entry must match a tracked file or
@@ -687,6 +727,8 @@ tasks:
       - 'py/uv.lock'
       - 'py/packages/paigasus-kernel/pyproject.toml'
       - 'py/packages/paigasus-proto/pyproject.toml'
+      - 'py/pyproject.toml'
+      - 'py/packages/*/pyproject.toml'
 
   actionlint:
     description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree, every branches: entry names a real branch, and the self-test/mutation-battery invocations that guard all of it cannot be silently deleted (SMA-525, SMA-540, SMA-542).'
@@ -1070,3 +1112,31 @@ tasks:
       - 'CLAUDE.md'
       - '.prototools'
       - 'ci/moon-diagnosis/**/*'
+
+  wasm-lockstep:
+    description: 'Check the wasm-lockstep workflow against its trust model, and the family invariant on HEAD rs/Cargo.lock (SMA-693).'
+    # WHY THIS EXISTS — .github/workflows/wasm-lockstep.yml runs third-party build code in one job
+    # and holds the App key in the other. pin_check.py asserts the rules that keep the two apart
+    # (no secret in build, the docker form, the command-word allowlists, the step order, the push
+    # refspec, the output rule). lockstep_check.py is the checker both jobs run; its self-test and
+    # control run here, and its `current` verdict on HEAD's lock reds a PR that breaks the family
+    # invariant before the next scheduled run does (ci/wasm-lockstep/README.md).
+    #
+    # INPUTS. The workflow is what pin_check.py reads. rs/Cargo.lock is what the real run reads
+    # through `git show HEAD:` (spec F15: never the working tree). .prototools pins the `uv` the
+    # gate shells out to. SELF_TASK_EXPECTED_GLOBS pins these four.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
+    # is REQUIRED: Moon takes a `script:` block's status from its LAST command, so without it a
+    # failing control is masked by the passing real run. SELF_SCHEDULED_GATES pins these four lines.
+    script: |
+      set -euo pipefail
+      bash ci/wasm-lockstep/run.sh --self-test
+      bash ci/wasm-lockstep/run.sh --negative-control
+      bash ci/wasm-lockstep/run.sh
+    toolchain: 'system'
+    inputs:
+      - 'ci/wasm-lockstep/**/*'
+      - '.github/workflows/wasm-lockstep.yml'
+      - 'rs/Cargo.lock'
+      - '.prototools'

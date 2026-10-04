@@ -71,9 +71,10 @@ release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(, ?(rs|py|ts|con
 #   1. The wasm glue under rs/crates/bindings/paigasus-wasm/ is committed (SMA-634), and no
 #      release step regenerates it. A full `cargo update` that moved wasm-bindgen made that glue
 #      stale, and the v0.2.0 release PR failed committed-wasm.test.ts.
-#   2. The release-pr job's stamp step builds with a write-capable App token in its environment
-#      (release.yml, GH_TOKEN_FOR_PUSH). With `true`, third-party build scripts that no person
-#      reviewed ran there.
+#   2. Before SMA-684 the release-pr job's stamp step compiled with a write-capable App token in
+#      its environment (release.yml, GH_TOKEN_FOR_PUSH), so with `true` third-party build scripts
+#      that no person reviewed ran there. Since SMA-684 that job compiles nothing, so this reason
+#      is historical; reason 1 alone keeps the key `false`.
 # Setting it to `true` again CAN make a release PR fail committed-wasm.test.ts, on a day when the
 # registry has a newer compatible wasm-bindgen. That test's message then asks for a manual
 # `generate-wasm` commit. The real cause is this key. Third-party Rust updates come from
@@ -82,6 +83,17 @@ release_commits = '^(feat|fix|perf)(\((rs|py|ts|contracts|deps)(, ?(rs|py|ts|con
 # `false` is not enough if a crate version ever enters the glue. See the note above
 # `generate-wasm` in ts/packages/paigasus-kernel/moon.yml.
 dependencies_update = false
+
+# --- No cargo-semver-checks in the release-PR job (SMA-684) --------------------------------
+# release-plz runs cargo-semver-checks, which builds rustdoc, for every library crate when the
+# binary is on PATH and this key is not set (READ, release_plz_core updater.rs:867-876 at
+# 0.3.158). No repo file installs the binary, so today it does not run only because the runner
+# does not have it. This key makes that a property of the config: the release-pr job holds the
+# App private key and a write-capable token, and it compiles nothing (spec F5, §5.5). If a
+# semver check is wanted later, it must run in a job without credentials. The release-parity
+# harness copies only `features_always_increment_minor` from this file
+# (ci/release-parity/ecosystems/release-plz.sh:84-97), so this key does not reach it.
+semver_check = false
 
 # --- Releasable: the kernel family (ADR-0011 S1) ------------------------------------------
 # One version across crates.io/PyPI/npm. release-plz 0.3.158 bumps ONLY `paigasus-kernel` here.
@@ -202,11 +214,11 @@ changelog_include = ["paigasus-proto"]
 # parked on that value (SMA-505 R7).
 #
 # publish = false MIRRORS each crate's Cargo manifest, same contradiction as the kernel-family
-# bindings above (SMA-579): all seven of these carry `publish = false` in Cargo.toml, and an
+# bindings above (SMA-579): all nine of these carry `publish = false` in Cargo.toml, and an
 # absent `publish` key here still reads as `publish = true` to release-plz — which errors even
 # though `release = false` already excludes the package from the release PR. `release = false`
 # stops the release-PR proposal; `publish = false` is what `release-plz release` itself checks.
-# Measured: `paigasus-iam-core` was the first of these seven to trip the same hard error the
+# Measured: `paigasus-iam-core` was the first of these nine to trip the same hard error the
 # kernel-family bindings did, once that contradiction was fixed above.
 [[package]]
 name = "paigasus-iam-core"
@@ -233,7 +245,19 @@ publish = false
 git_release_enable = false
 
 [[package]]
+name = "paigasus-redis"
+release = false
+publish = false
+git_release_enable = false
+
+[[package]]
 name = "paigasus-service-info"
+release = false
+publish = false
+git_release_enable = false
+
+[[package]]
+name = "paigasus-test-docker"
 release = false
 publish = false
 git_release_enable = false

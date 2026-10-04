@@ -13,7 +13,8 @@ use paigasus_iam_core::{AuthnError, Issuer};
 use redis::AsyncCommands;
 
 use super::jwks::{CachedJwks, JwksCache};
-use crate::adapters::redis_conn::{RedisHandle, RedisRole};
+use crate::adapters::redis_role::RedisRole;
+use paigasus_redis::RedisHandle;
 
 /// Redis key prefix for cached JWKS entries (spec §4.3): `iam:jwks:<issuer canonical
 /// string>`.
@@ -38,9 +39,7 @@ impl RedisJwksCache {
     /// drop still surfaces its error to the caller — see `get`/`put` below). `ttl_secs` is
     /// applied to every `put` as Redis's own `EX` expiry.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthnError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Jwks)
-            .await
-            .map_err(|err| log_unavailable(None, err.kind()))?;
+        let conn = paigasus_redis::connect(redis_url, RedisRole::Jwks).await.map_err(|err| log_unavailable(None, err.kind()))?;
         Ok(Self { conn, ttl_secs })
     }
 }
@@ -98,8 +97,8 @@ mod tests {
     /// short-circuited (SMA-702). The 1 s clock is only a stall backstop.
     #[tokio::test]
     async fn an_open_breaker_keeps_the_jwks_cache_failing_closed() {
-        let blackhole = crate::adapters::redis_conn::test_support::start().await;
-        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, RedisRole::Jwks).expect("well-formed redis URL");
+        let blackhole = paigasus_redis::test_support::start().await;
+        let conn = paigasus_redis::with_open_breaker_for_tests(&blackhole.url, RedisRole::Jwks).expect("well-formed redis URL");
         let cache = RedisJwksCache { conn, ttl_secs: 300 };
         let issuer = Issuer::parse("https://idp.example.com").expect("a well-formed issuer");
 

@@ -33,7 +33,8 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `oidc.clientId` | yes | The console's OIDC client. By default IAM also uses it as the access-token audience. Then an ID token passes IAM's audience check, and the chart shows a warning (§ 6) |
 | `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Recommended: a dedicated API audience. Follow the migration order in § 6 |
 | `oidc.acknowledgeClientIdAudience` | no | Set it to the value of `oidc.clientId` to remove the audience warning (§ 6). It does not change what IAM accepts |
-| `oidc.scopes` | no | The scopes that both consoles request. Empty: `openid profile email offline_access`. The list must contain `openid`, or the render fails. Keep `offline_access`, or the IdP issues no refresh token. When set, the consoles also send it on each refresh. Entra ID needs it (§ 6) |
+| `oidc.idTokenMarkerClaims` | no | Claim names that the IdP puts into its ID token and never into its access token. IAM refuses a token that carries one of them. Default `[]`: no such check. Zitadel: `["at_hash", "azp"]` (§ 6) |
+| `oidc.scopes` | no | The scopes that both consoles request. Empty: `openid profile email offline_access`. The list must contain `openid`, or the render fails. Keep `offline_access`, except on Keycloak when you want SSO (§ 6, "Keycloak: online tokens and session length"). Without it, Entra ID, Auth0 and Okta issue no refresh token. When set, the consoles also send it on each refresh. Entra ID needs it (§ 6) |
 | `oidc.authorizationAudience` | no | The `audience` parameter that both consoles send in the authorization request. Empty: no `audience` parameter. It must equal `oidc.audience`, or the render fails. Auth0 needs it (§ 6) |
 | `oidc.existingSecret` | yes | A Secret with keys `oidc-client-secret` and `session-redis-url` |
 | `oidc.secretVersion` | no | Change it after the Secret changes, so the console pods restart |
@@ -134,6 +135,7 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). IAM is not available during the restart. |
 | `zones.iam.backend.bootstrapAdmins` or `zones.iam.backend.extraEnv` | the IAM pod, not the consoles | it changes the env in the IAM pod template (`tests/env.sh` rows B7a and B7b). IAM is not available during the restart, as for `oidc.audience` |
 | `oidc.acknowledgeClientIdAudience` | nothing | it changes only the IAM Deployment's `metadata` annotation and the NOTES, not a pod template (`tests/env.sh` row W14) |
+| `oidc.idTokenMarkerClaims` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template (`tests/env.sh` row M6). IAM is not available during the restart, as for `oidc.audience` |
 | `oidc.scopes` or `oidc.authorizationAudience` | both consoles, not IAM | it changes the `console-env` ConfigMap and so `checksum/console-env` (`tests/env.sh` rows O5 and O6) |
 
 A change of `oidc.caBundle.version` restarts every pod that mounts the bundle: both consoles and
@@ -152,7 +154,8 @@ late and unclearly. Check these four items before you install:
    after this list. The value replaces the client id. It does not add another value next to the
    client id. Before you choose the value, decode a real access token and read its `aud` claim.
    The value helps only when the IdP issues a JWT access token for the console's scopes
-   (`oidc.scopes`, default `openid profile email offline_access`). The console sends an
+   (`oidc.scopes`, default `openid profile email offline_access`; `openid profile email` on
+   Keycloak with SSO). The console sends an
    `audience` parameter only when `oidc.authorizationAudience` is set. It never sends a
    `resource` parameter. This value does not work with an opaque token, or a token for a
    different API.
@@ -191,10 +194,36 @@ number of refusals that IAM did not log.
 This adds no requirement on the IdP. No Keycloak or Dex access token measured for SMA-686 has
 one of these markers. Do not add a mapper that sets `typ` on the access token.
 
-The check does not protect an IdP whose ID token has no `typ` claim. For such an IdP, a
-dedicated API audience is the only protection. This works only when the IdP can put a different
-audience into the access token than into the ID token. Dex cannot: both tokens have the same
-`aud`, so IAM accepts a Dex ID token as a bearer token. See "Dex" below.
+The check does not protect an IdP whose ID token has no `typ` claim. For such an IdP, two
+protections are possible. A dedicated API audience works only when the IdP can put a different
+audience into the access token than into the ID token. Dex and Zitadel cannot: see "Dex" and
+"Zitadel" below. The second protection is `oidc.idTokenMarkerClaims`. It works only for an IdP
+whose ID token has a claim that its access token never has.
+
+**IAM refuses a token by a claim name that you configure (SMA-703).** Set
+`oidc.idTokenMarkerClaims` to a list of claim names. IAM then refuses a token that carries one of
+these claims, with any value except `null`. The default is `[]`, and IAM then does no such check.
+
+- Use a name only when the IdP puts it into its ID token and never into its access token. If the
+  access token also has the claim, IAM refuses every token of the IdP. Dex puts `at_hash` and
+  `nonce` into its access token. Keycloak puts `azp` into its access token.
+- Before you set the value, decode one access token for each grant type in use. No access token
+  can have a configured claim. Decode one ID token. It must have the claims.
+- At start, IAM writes one `info` line with the issuer and the configured names. This line, and
+  the refusal line below, show only when the log level includes `info`. `RUST_LOG` sets the level.
+  When the level includes `info` and the line is not in the IAM log, IAM does not use the setting.
+  A wrong key in a raw `iam.toml` gives no other sign. When the level hides `info`, a missing line
+  proves nothing.
+- The IAM log shows a refusal at `info`, with the issuer and the marker `claim <name>`, for
+  example `claim at_hash`. The line does not show the claim value. The rate limit above applies.
+- The chart refuses a name that is empty, a name with a character outside printable ASCII, a
+  space, `"` or `\`, the names `iss`, `sub`, `aud` and `exp`, and a name that occurs two times.
+- A change of the value restarts IAM (§ 5).
+- To remove the setting, set it to `[]` in a values file, or use
+  `--set-json 'oidc.idTokenMarkerClaims=[]'`. With `helm upgrade --reuse-values`, deleting the
+  key from a values file does not remove the old list: Helm gives the old value back. Do not use
+  `--set oidc.idTokenMarkerClaims={}`: Helm makes it a list with one empty name, and the chart
+  refuses it.
 
 **IAM refuses a sender-constrained token (SMA-690).** IAM refuses an access token that has one
 of these markers:
@@ -223,18 +252,23 @@ binding". The line gives the issuer and the marker `cnf` or `typ DPoP`. The same
 applies as for the refusal of a token that is not an access token.
 
 By default the console requests the scopes `openid profile email offline_access`. Set
-`oidc.scopes` to request a different list. The list must contain `openid`. Keep `offline_access`.
+`oidc.scopes` to request a different list. The list must contain `openid`. Keep `offline_access`,
+except on Keycloak when you want SSO (see "Keycloak: online tokens and session length" below).
 
-Without it, the IdP issues no refresh token. Every user must log in again when the access token
-expires. When `oidc.scopes` is set, the console also sends the list as the `scope` of each
-refresh request. When it is empty, a refresh request has no `scope`, as before SMA-692.
+Without it, Entra ID, Auth0 and Okta issue no refresh token. Every user must log in again when the
+access token expires. Keycloak issues a refresh token also without it. When `oidc.scopes` is set,
+the console also sends the list as the `scope` of each refresh request. When it is empty, a
+refresh request has no `scope`, as before SMA-692.
 
 **Set `oidc.scopes` only when your IdP needs it.** This applies to any IdP, not only Entra ID
-(see "Entra ID moving to a new scope list" below). RFC 6749 § 6 lets an authorization server
-refuse a refresh `scope` that is not a subset of the originally granted scope. So a refresh with
-this list can fail on an IdP that enforces that rule. The user is then signed out at each
-access-token expiry, not only at the next login. After you set or change `oidc.scopes`, read the
-`oauthError` field of the `session.refresh_failed` log line to check for this.
+(see "Entra ID moving to a new scope list" below). Keycloak with SSO also needs it (see Keycloak
+example 1). RFC 6749 § 6 lets an authorization server refuse a refresh `scope` that is not a
+subset of the originally granted scope. So a refresh with this list can fail on an IdP that
+enforces that rule. The user is then signed out at each access-token expiry, not only at the next
+login. After you set or change `oidc.scopes`, read the `oauthError` field of the
+`session.refresh_failed` log line to check for this. The Keycloak list `openid profile email` is
+the list that the console requested, so it is not wider than the granted scope. Keycloak 26.7
+accepts it on a refresh (SMA-682 spec § 13, row M3).
 
 **The recommended audience setup (SMA-691).** An OIDC ID token has the client id as its `aud`.
 So when the IAM audience equals `oidc.clientId`, an ID token passes IAM's audience check. This is
@@ -299,7 +333,8 @@ sync does not fail because of it.
 **The acknowledgement.** If your IdP cannot give the API its own audience, set
 `oidc.acknowledgeClientIdAudience` to the value of `oidc.clientId`. The warning then does not
 show. The acknowledgement does not change what IAM accepts. IAM still accepts an ID token as a
-bearer token, except a Keycloak ID token (SMA-686).
+bearer token, except a Keycloak ID token (SMA-686) or a token with a claim named in
+`oidc.idTokenMarkerClaims` (SMA-703).
 
 - The value must equal the client id exactly, with the same letter case. `true` does not work.
 - When you change `oidc.clientId`, the warning shows again.
@@ -312,7 +347,7 @@ passes IAM's audience check, and nothing warns. Decode a real ID token. Its `aud
 contain the value of `oidc.audience`.
 
 **Per IdP. Not measured.** These lines state what each IdP offers. This chart did not measure
-them.
+them. The Zitadel item is measured, except where it says otherwise.
 
 - **Keycloak.** Add an "Audience" protocol mapper to the console client, or to a client scope of
   that client. Set "Included Custom Audience" to the API audience. Set "Add to access token" on
@@ -349,7 +384,64 @@ them.
   - Before the switch, decode a real access token and check its `aud`, `iss` and `email`.
 - **Dex.** Dex gives the ID token and the access token the same `aud`. No audience setting helps.
   Set `oidc.acknowledgeClientIdAudience` to remove the warning. IAM still accepts a Dex ID token
-  as a bearer token. SMA-686 residual R1 stays open for Dex.
+  as a bearer token.
+  - `oidc.idTokenMarkerClaims: ["c_hash"]` refuses a Dex ID token from the code flow only.
+  - A refreshed Dex ID token has no claim that the access token does not also have.
+  - So SMA-686 residual R1 stays open for Dex (SMA-686 § 2).
+- **Zitadel. Measured, Zitadel v4.15.3 with Login v1, 2026-10-02 (SMA-703). The Docker measurement
+  used a public PKCE web app. One decoded session from the reference install, a confidential web
+  app (HTTP Basic client authentication, Login v2), showed the same split: `at_hash` and `azp` on
+  the ID token, neither on the access token (SMA-703 issue, 2026-09-26).**
+  - In the human flow, the ID token and the access token have the same `aud`. In the machine flow
+    (client credentials), the ID token `aud` contains the access token `aud`. Both tokens have
+    `client_id`. No `urn:zitadel:iam:org:project:id:<id>:aud` scope puts an audience into the
+    access token only. So `oidc.audience` alone does not refuse a Zitadel ID token.
+  - Set the access token type to JWT on the app, and on each machine user. IAM cannot validate
+    an opaque access token. An app that you make without a token type gets the opaque type
+    (inferred, not measured).
+  - IAM needs `email` in the access token (item 2). Zitadel v4.15 does not put it there, also with
+    the scope `email`. Add it with a Zitadel Action. Never send the ID token instead. Used on the
+    reference install (SMA-703 issue, 2026-09-26):
+    - Make a v1 Action with the name `addEmailClaim`. Zitadel calls the function whose name is
+      equal to the Action name.
+    - Bind it to the flow "Complement Token" and the trigger "Pre access token creation". Set the
+      timeout to 10 s. Set "allowed to fail" to off.
+    - Use this script:
+
+      ```js
+      function addEmailClaim(ctx, api) {
+        var user = ctx.v1.getUser();
+        if (user.human === undefined || !user.human.email) {
+          return;
+        }
+        // human.email is the Go type domain.EmailAddress. goja gives a named Go type
+        // to JavaScript as an object, not as a primitive string, so convert it.
+        api.v1.claims.setClaim('email', String(user.human.email));
+      }
+      ```
+
+    - The call to `String(...)` is necessary for the reason in the comment.
+    - A machine user has no `email`. The Action adds nothing to a machine token.
+  - Set `oidc.idTokenMarkerClaims: ["at_hash", "azp"]`. Every measured Zitadel ID token has both
+    claims. No measured Zitadel access token has one of them.
+  - The audience. Option 1, for an install with machine clients: set `oidc.audience` to the
+    project id. Each machine client must request the scope
+    `urn:zitadel:iam:org:project:id:<project id>:aud`. Without this scope, a machine token has
+    only its own client id as `aud` (measured with scope `openid` only), and IAM refuses it with the
+    reason `AudienceMismatch`. Option 2, for an
+    install with the console only: keep the client id as the audience, and set
+    `oidc.acknowledgeClientIdAudience`.
+  - Before the switch: decode one access token for each grant type in use (authorization code,
+    refresh token, client credentials). No access token can have `at_hash` or `azp`. Decode one
+    ID token. It must have both claims. This check stays required. The paigasus console is
+    a confidential client. The reference install gave one confidential sample only. One sample is
+    not proof for every install.
+  - After the switch: send an ID token to IAM. Expect a `401` and the IAM log line with
+    `claim at_hash`.
+  - A change of the value restarts IAM (§ 5).
+  - After each Zitadel upgrade, decode the tokens again. If a new version puts `azp` or `at_hash`
+    into the access token, IAM refuses every token, and the log line names the claim. If a new
+    version removes both claims from the ID token, the protection stops, and nothing warns.
 
 **Keycloak example 1: the kind job's setup. This setup shows the warning.** Keycloak does not put
 the client id into the access token's `aud` by default. The kind job adds an audience mapper to
@@ -368,10 +460,56 @@ the client. The mapper adds the client id, so the IAM audience equals `oidc.clie
 }
 ```
 
-Put `basic`, `profile`, `email` and `offline_access` in the client's default client scopes. In
-Keycloak 25 and later the `sub` claim comes from the `basic` scope. Give each user an email
-address and the `offline_access` role. The kind job's realm, `ci/kind/realm/paigasus-realm.json`,
-is a complete example of this setup.
+Put `basic`, `profile` and `email` in the client's default client scopes, and `offline_access` in
+the optional client scopes. Set `oidc.scopes=openid profile email`. Keycloak then issues an online
+refresh token and keeps the SSO session after the console login. In Keycloak 25 and later the
+`sub` claim comes from the `basic` scope. Give each user an email address. This setup does not use
+the `offline_access` role. The kind job's user keeps the role (SMA-682 D4). The kind job's realm,
+`ci/kind/realm/paigasus-realm.json`, with `ci/kind/values/a.yaml`, is an example of this scope
+setup. It keeps the Keycloak default SSO timeouts.
+
+**Keycloak: online tokens and session length (SMA-682).** Read these facts before you select the
+scopes for Keycloak:
+
+1. With the setup of example 1, each console refresh needs a live Keycloak SSO session. So the
+   console session ends when the SSO session ends.
+2. The Keycloak defaults are `SSO Session Idle` 30 min and `SSO Session Max` 10 h. The console
+   session is 8 h idle and 24 h absolute. The chart does not expose the two console values, so
+   you cannot change them with the chart.
+3. So on the Keycloak defaults, the setup of example 1 makes console sessions shorter. Keycloak
+   signs out an idle user after 30 min, and every user after 10 h. The setup gives SSO to the
+   other applications of the realm, and nothing more. It does not remove the password prompt when
+   the console session ends, because the SSO session has already ended at that time.
+4. `SSO Session Idle` and `SSO Session Max` apply to all clients of the realm. If you increase
+   them to 8 h and 24 h, the SSO session of every application in the realm becomes longer.
+   A stolen `KEYCLOAK_IDENTITY` cookie and an unattended SSO session then also stay valid for a
+   longer time.
+5. `Client Session Idle` and `Client Session Max` (at the realm or the client level) can make the
+   console session shorter than the SSO session. Do not set them, or set them to values that are
+   not lower than the SSO values.
+6. Online sessions stay after a Keycloak restart only with persistent user sessions. This is the
+   default since Keycloak 26, and you can turn it off. Without persistent user sessions, a restart
+   signs out every console user at the next refresh.
+7. A logout in another application of the realm, or an administrator "sign out" of the user, ends
+   the console session at the next refresh. With offline tokens, these events do not end the
+   console session.
+
+You can use one of these three setups:
+
+- **(i) Example 1 on the Keycloak default timeouts.** Other applications of the realm get SSO.
+  Console sessions end after 30 min idle and after 10 h.
+- **(ii) Example 1, and increase `SSO Session Idle` to 8 h and `SSO Session Max` to 24 h for the
+  realm.** Console sessions are as long as with offline tokens, and all applications get SSO.
+  Every application of the realm then has a longer SSO session (item 4). This is a security
+  trade-off.
+- **(iii) Keep `offline_access`.** Keep the default scopes, and keep `offline_access` as a default
+  client scope. Console sessions last 8 h idle and 24 h absolute, and the SSO timeouts have no
+  effect on them. Keycloak keeps no SSO session after a console login, so other applications get
+  no SSO from it. An SSO session that another application of the realm started before in the same
+  browser stays (SMA-682 spec § 13, row M10).
+
+**Recommendation.** If no other application of the realm needs SSO, use (iii). If another
+application needs SSO, use (i) or (ii). Use (ii) only when you accept item 4.
 
 **Keycloak example 2: a dedicated API audience. Not tested in the kind job.** Add this mapper to
 the console client (step 1 of the migration order). Keep the mapper of example 1 until step 4:

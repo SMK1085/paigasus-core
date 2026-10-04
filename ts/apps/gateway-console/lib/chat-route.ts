@@ -202,8 +202,13 @@ export function createChatRoute(deps: ChatRouteDeps): (request: Request) => Prom
 
     const { org, model, messages } = parsed.data;
     const client = deps.chatClient({ baseUrl, headerTimeoutMs: CHAT_HEADER_TIMEOUT_MS }, { bearer: session.accessToken });
-    // The gateway request is built HERE: no other client field is forwarded.
-    const result = await client.completions({ model, messages, stream: true }, correlationId === null ? { signal: request.signal, org } : { signal: request.signal, org, correlationId });
+    // The gateway request is built HERE: no other client field is forwarded. `include_usage` makes
+    // OpenAI end the stream with a usage record, so the gateway charges the reported tokens and not
+    // an estimate (SMA-677 A10).
+    const result = await client.completions(
+      { model, messages, stream: true, stream_options: { include_usage: true } },
+      correlationId === null ? { signal: request.signal, org } : { signal: request.signal, org, correlationId },
+    );
 
     switch (result.kind) {
       case 'error':

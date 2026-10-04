@@ -25,8 +25,8 @@ pub struct ChatCompletionRequest {
     /// Whether the caller requested a streamed (SSE) completion. Absent → `false`.
     #[serde(default)]
     pub stream: bool,
-    /// The conversation turns, kept as opaque JSON — the gateway never inspects message content
-    /// (no prompt is ever logged or transformed).
+    /// The conversation turns, kept as opaque JSON. The gateway reads only the lengths of the
+    /// message text, to estimate tokens. It never logs the content and never changes it.
     pub messages: Vec<serde_json::Value>,
     /// Every unmodelled top-level field, preserved verbatim so a round-trip is lossless.
     #[serde(flatten)]

@@ -60,10 +60,17 @@ describe('PageError', () => {
     await expect(PageError({ error: errorWith('not-found') })).rejects.toMatchObject({ digest: 'NEXT_HTTP_ERROR_FALLBACK;404' });
   });
 
-  it.each(['degraded', 'generic', 'conflict', 'invalid-input', 'rate-limited'] as const)('renders ErrorState with the correlation id for %s', async (presentation) => {
+  it.each(['degraded', 'generic', 'conflict', 'invalid-input', 'rate-limited', 'quota-exhausted'] as const)('renders ErrorState with the correlation id for %s', async (presentation) => {
     const html = render(await PageError({ error: errorWith(presentation) }));
     expect(html).toContain(CID);
     expect(html).not.toContain('IAM text');
+  });
+
+  it('renders the quota-exhausted copy, which never says "try again"', async () => {
+    const html = render(await PageError({ error: errorWith('quota-exhausted') }));
+    expect(html).toContain('Usage limit reached');
+    expect(html).toContain('Ask an administrator');
+    expect(html).not.toContain('try again');
   });
 
   it('renders the "not enabled" EmptyState for disabled', async () => {

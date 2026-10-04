@@ -33,7 +33,7 @@ zones:
         repository: ghcr.io/smk1085/paigasus-iam
         # Pinned to the image version in rs/crates/services/paigasus-iam/Cargo.toml (SMA-688).
         # repo:helm-render row 8a fails when the two differ.
-        tag: "0.2.0"
+        tag: "0.2.1"
       # replicas and maxSurge are pinned; see the comment in templates/backend-deployment.yaml.
       httpPort: 8080
       grpcPort: 9090
@@ -104,6 +104,8 @@ zones:
       # Genuinely missing from the original schema (SMA-513 Task 11) — the gateway backend is
       # stateless and horizontally scalable, unlike IAM's SMA-559-pinned single replica, so it
       # gets a real knob rather than a hardcoded default. Mirrors console.replicas above.
+      # With gateway [limits] (SMA-677), more than one replica needs limits.backend = "redis": the
+      # memory backend keeps per-replica counts, so N replicas allow about N times the configured limits.
       replicas: 2
       # REQUIRED whenever the gateway zone is enabled (deploy is false and stays false; see
       # above). The full base URL of an existing gateway backend, e.g. "http://gateway.internal:8088".
@@ -169,18 +171,31 @@ oidc:
                                     # oidc.clientId. It does not change what IAM accepts. A
                                     # change of oidc.clientId shows the warning again. Quote the
                                     # value in a values file. See RUNBOOK-chart.md § 6.
+  idTokenMarkerClaims: []   # NOT required. Claim names that the IdP puts into its ID token and
+                            # never into its access token (SMA-703). IAM refuses a token that
+                            # carries one of them, with any value except null. Empty: no such
+                            # check. Zitadel: ["at_hash", "azp"]. Do not name a claim that your
+                            # IdP's access token carries: IAM then refuses every token. Each name
+                            # is printable ASCII with no space, " or \, and not iss, sub, aud or
+                            # exp. A change restarts IAM. To remove it, set [] in a values file
+                            # or use --set-json 'oidc.idTokenMarkerClaims=[]', not {}. With
+                            # --reuse-values, deleting the key from a values file does not
+                            # remove the old list. See RUNBOOK-chart.md § 6.
   scopes: ""             # NOT required. The scopes that both consoles request (SMA-692). Empty:
                          # the console default, openid profile email offline_access. Entra ID
                          # needs it: add exactly one scope of the API app registration, for
                          # example api://paigasus-api/access. The list must contain openid (the
                          # render fails without it). It should contain offline_access: without
-                         # it the IdP issues no refresh token, and every user must log in again
-                         # at each access-token expiry. When set, the consoles also send it on
-                         # each refresh. Set it only when your IdP needs it: on any IdP, a
-                         # refresh scope wider than the granted scope can fail (RFC 6749 § 6) and
-                         # sign the user out at each access-token expiry. Read the oauthError
-                         # field of the session.refresh_failed log after a change. A change
-                         # restarts both consoles, not IAM. See RUNBOOK-chart.md § 6.
+                         # it Entra ID, Auth0 and Okta issue no refresh token, and every user
+                         # must log in again at each access-token expiry. On Keycloak, leave out
+                         # offline_access to keep SSO, and make it an optional client scope
+                         # (RUNBOOK-chart.md § 6). When set, the
+                         # consoles also send it on each refresh. Set it only when your IdP
+                         # needs it, or on Keycloak to keep SSO: on any IdP, a refresh scope
+                         # wider than the granted scope can fail (RFC 6749 § 6) and sign the
+                         # user out at each access-token expiry. Read the oauthError field of
+                         # the session.refresh_failed log after a change. A change restarts both
+                         # consoles, not IAM. See RUNBOOK-chart.md § 6.
   authorizationAudience: ""   # NOT required. The audience parameter that both consoles send in
                               # the authorization request (SMA-692). Empty: no audience
                               # parameter. Auth0 needs it to issue an access token for an API.
