@@ -84,7 +84,7 @@ Expected: a Docker server version and three paths. If Docker does not answer, ST
 Write `$WORK/realms.py`:
 
 ```python
-# Builds the two scratch realms for SMA-682 § 6.1 from the repository realm. Not a repository file.
+# Builds the two scratch realms for SMA-682 § 6.1 from the pre-change realm (020a6a33). Not a repository file.
 import copy
 import json
 import os
@@ -125,8 +125,14 @@ json.dump(old, open(os.path.join(out, "paigasus-old-realm.json"), "w"), indent=2
 
 Run:
 
+The builder reads the realm of the base commit `020a6a33`, not the working tree. Task 2 changes
+`ci/kind/realm/paigasus-realm.json`, so after Task 2 the working-tree realm has no `offline_access`
+default scope, and `remove("offline_access")` fails. The base realm is also the unchanged control
+realm for M5 and M9.
+
 ```bash
-python3 "$WORK/realms.py" /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-682-keycloak-sso/ci/kind/realm/paigasus-realm.json "$WORK/import" sma682-client-secret sma682-user-password
+git -C /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-682-keycloak-sso show 020a6a33:ci/kind/realm/paigasus-realm.json > "$WORK/base-realm.json"
+python3 "$WORK/realms.py" "$WORK/base-realm.json" "$WORK/import" sma682-client-secret sma682-user-password
 chmod a+r "$WORK"/import/*.json
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); c=r["clients"][0]; print(c["defaultClientScopes"], c["optionalClientScopes"], c["redirectUris"])' "$WORK/import/paigasus-realm.json"
 ```
