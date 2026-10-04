@@ -2,10 +2,10 @@
 
 - Linear: SMA-700 (decision D9 of SMA-690,
   `2026-09-26-sma-690-refuse-sender-constrained-token-design.md`)
-- Status: draft 3, waits for GATE 1. The two spec challenges are in § 11.
+- Status: approved at GATE 1 (2026-10-04). The two spec challenges are in § 11.
 - Path: architectural (a new authentication scheme, a proto contract change, new ports, a
   change in two services)
-- ADR: ADR-0026 (Notion, status Proposed until GATE 1)
+- ADR: ADR-0026 (Notion, Accepted 2026-10-04)
 - History: a draft of 2026-09-27 was lost before it was committed. Draft 1 of this spec
   (commit `1016c0b3`) put the check on IAM's own API. Challenge 1 showed that the chart gives
   no route to IAM's own API. Sven changed the scope to the gateway path on 2026-10-04 (D1, D14).
