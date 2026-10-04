@@ -1153,6 +1153,7 @@ mod tests {
             max_token_bytes: 16384,
             accept_invalid_tls,
             extra_ca_bundle_path: extra_ca_bundle_path.map(str::to_string),
+            dpop: crate::config::DpopConfig::default(),
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,
