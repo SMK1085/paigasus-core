@@ -323,10 +323,44 @@ mod tests {
         Jkt::new(thumbprint(&PublicJwk::Ec { x: key.x.clone(), y: key.y.clone() }))
     }
 
-    /// The committed RS256 test key (decision P1) and its public JWK.
+    /// A throwaway RSA-2048 key (PKCS#1) that signs only these unit tests (decision P1). It guards nothing.
+    const RS256_TEST_KEY_PEM: &str = "\
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpQIBAAKCAQEA0lAH+dtkLqjM8E3ndcuPr8V1HyFk35q12YRLSt0rjmF3H01k
+LLNgFTlYlobtoABHiE01Xy+WBvyRPdQZXGtdArf95HGm43H9E/zydVRjlnwRbCMq
+2y4vtUxV151TM8bnygSNEZeN6tOe+e2ptwslXssaJB1UR7jlpMOX8rhn+xeKSrFz
+R4tT4L8VVSPSbo0U6XGqe1bGrJ7vSboNX1X5oSq8n9w6t/rIyW3miAeu6z2+9TQq
+/nJdKNFK85k7QW9ZyFA4WVjYLCcCHqhaNFiJ6Det0Ps7RiD6lZEw5arLzCM+zacx
+tutI5tjos10aLW0e8f1ahyuM6CB4yOlRcOXwIQIDAQABAoIBAE8o32+so88qKwUy
+FXJRfdJHjLd8bsb5KQRn1p0llTzgs6EdFJz8oSgr7wutWqiUIliL0xByTVJw40w1
+1pviL16UGWTQYGQQphTNawc9jcR5C2e77ugTwNJJGrBu33/IGLuBrgVWmYyvPZHN
+4kjq0ZSV9s9sGKpsTkePdVRfE4g+27jVnvmK9kIguAgWKHQu2R+dcEVz4slmrT9X
+5y3MibD5DFTJnMVyx2nUGIe9wMMCQgdT/0QZUWkogSgBhRtxUGJkJDGbcEP//ppr
+BfPwche9Srt8sI9SKthEJVW46/pNiGcF9zVONkxrAQAdi13AME3KayLCC/+JOffA
+QPN00ycCgYEA8TnFaC95r5/kJbr8DVyWoSGZHYvU5ZfQ2t8h6M+m16u5zaSAgnc9
+xm+R1q6oh/+9xutzcYakhqWQQfoF1d6konWAD4fWttBq8SI1WKvLbUdbpwYOEkjj
+MhGQmpYntaFX1JPgYrREQljU2W8sNyV/zbH0R12MxpTenBD/Lt2wMwMCgYEA3zGR
+WLb7rbeYfS0R5yM/1ln+a89ewesTSLoECv4ukdrDDpBchKsThZh7BLhpz2uIjRd0
+7XX+AeifT5zjRPR4E+ILkqFTs0jQEvl0ML+mM0wXyzxH/knpbyK0BFr6JCjb5fev
+fJ8fb4L3HnwI3+Ij2nVQXhMVGjHD2iUYJi3hlQsCgYEAtN9QeZI/d8Q32WKe45Xt
+C9yZZmIWvCBdZf+w+VPaEhSdOOiDw0+NbmDxxTso+vBzZ9fbs9/1NVCnHhFOltJe
+N8JKx1pfUKxtw2iW/2mxGrtKqa4MlwE3+a7Z8k9sbvAPX0GSGfB4zha1YmPNj3v6
+nE02kNxAVhYB5JuJ+6YWG+kCgYEAlwIdee2MCPQAGylERKNnzKpk5iKO1Rssl/cr
+RxjE/3AIqzDnN+fbtHb/PKldBbaW1Ac72HINotL1/tKCPiQ9ng5BkDrQu6uXBE98
+2oLAe1KPgrVNbHIrm0Lak1vOhGqUpVpYhDPQ/AybECgRhRCm+2aGMrAsheWHwm94
+kFRYnRMCgYEAyUInCDFGpYHc88Iy0iyiNAxuabKwM2IsKWB2AITTHWST7xIEgrVC
+X5WTLrgJdJ2zPpUqHrqzLd6W5pPQQRAmagh5zH8/Xs0Ar72gkuGOfzldsbeohFST
+VJ6/mtjJ4EykrVcTEdQoCQC7J3NFUpOXZ2aaYOHgLSddm2Med29SXc8=
+-----END RSA PRIVATE KEY-----
+";
+
+    /// The modulus of that key, base64url. The exponent is 65537 (`AQAB`).
+    const RS256_TEST_KEY_N: &str = "0lAH-dtkLqjM8E3ndcuPr8V1HyFk35q12YRLSt0rjmF3H01kLLNgFTlYlobtoABHiE01Xy-WBvyRPdQZXGtdArf95HGm43H9E_zydVRjlnwRbCMq2y4vtUxV151TM8bnygSNEZeN6tOe-e2ptwslXssaJB1UR7jlpMOX8rhn-xeKSrFzR4tT4L8VVSPSbo0U6XGqe1bGrJ7vSboNX1X5oSq8n9w6t_rIyW3miAeu6z2-9TQq_nJdKNFK85k7QW9ZyFA4WVjYLCcCHqhaNFiJ6Det0Ps7RiD6lZEw5arLzCM-zacxtutI5tjos10aLW0e8f1ahyuM6CB4yOlRcOXwIQ";
+
+    /// The inline RS256 test key (decision P1) and its public JWK.
     fn rs_key() -> (EncodingKey, Value) {
-        let sign = EncodingKey::from_rsa_pem(include_bytes!("testdata/dpop-rs256-test-key.pem")).expect("rsa pem fixture");
-        let jwk: Value = serde_json::from_str(include_str!("testdata/dpop-rs256-test-jwk.json")).expect("jwk fixture");
+        let sign = EncodingKey::from_rsa_pem(RS256_TEST_KEY_PEM.as_bytes()).expect("rsa pem fixture");
+        let jwk: Value = json!({ "kty": "RSA", "n": RS256_TEST_KEY_N, "e": "AQAB" });
         (sign, jwk)
     }
 
