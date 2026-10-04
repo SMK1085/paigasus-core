@@ -232,16 +232,45 @@ so the chart is stricter, never looser. A nil value counts as absent.
 {{- if not (kindIs "string" $u) -}}
 {{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] must be a string" $i) -}}
 {{- end -}}
-{{- if not (regexMatch `^[!#-\[\]-~]+$` $u) -}}
-{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: use printable ASCII only, with no space, no \" and no \\. IAM cannot read another character from IAM_AUTHN__DPOP__FORWARDED_BASE_URLS" $i $u) -}}
+{{- if not (regexMatch `^[!#%-\[\]-~]+$` $u) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: use printable ASCII only, with no space, no \", no $ and no \\. IAM cannot read another character from IAM_AUTHN__DPOP__FORWARDED_BASE_URLS" $i $u) -}}
 {{- end -}}
 {{- $p := urlParse $u -}}
 {{- if or $p.query $p.fragment $p.userinfo (contains "?" $u) (contains "#" $u) -}}
 {{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: it must have no query, fragment or user info. IamConfig::validate refuses it, and IAM does not boot" $i $u) -}}
 {{- end -}}
 {{- $host := lower $p.hostname -}}
-{{- $loopback := or (eq $host "localhost") (eq $host "::1") (regexMatch `^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$` $host) -}}
-{{- if not (and $host (or (eq $p.scheme "https") (and (eq $p.scheme "http") $loopback))) -}}
+{{- if not (and $host (or (eq $p.scheme "https") (eq $p.scheme "http"))) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: use https, or http on localhost, 127.x.x.x or [::1]. IamConfig::validate refuses it, and IAM does not boot" $i $u) -}}
+{{- end -}}
+{{- /* Go's url.Parse is lenient where IAM's url::Url::parse is strict. The rules below are stricter
+       than IAM: a plain host name, a dotted IPv4 or exactly [::1]; a port from 1 to 65535. */ -}}
+{{- if not (regexMatch `^([A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*|\[::1\])(:[0-9]{1,5})?$` $p.host) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: its host or port is not valid. Use a host name of letters, digits, hyphen, underscore and dots, a dotted IPv4 address, or [::1], with an optional decimal port. IamConfig::validate refuses a URL that does not parse, and IAM does not boot" $i $u) -}}
+{{- end -}}
+{{- $port := trimPrefix ":" (regexFind `:[0-9]+$` $p.host) -}}
+{{- if and $port (or (lt (atoi $port) 1) (gt (atoi $port) 65535)) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: its port must be from 1 to 65535. IamConfig::validate refuses it, and IAM does not boot" $i $u) -}}
+{{- end -}}
+{{- $v4 := false -}}
+{{- if ne $host "::1" -}}
+{{- if contains "xn--" $host -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: its host has an IDNA label (xn--). Use a host that IAM can parse for certain" $i $u) -}}
+{{- end -}}
+{{- if regexMatch `^[0-9]+$` (last (splitList "." $host)) -}}
+{{- if not (regexMatch `^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$` $host) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: its host ends in a number but is not a dotted IPv4 address, and IAM reads such a host as an IPv4 address and refuses it. IAM does not boot" $i $u) -}}
+{{- end -}}
+{{- range (splitList "." $host) -}}
+{{- if gt (atoi .) 255 -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: its IPv4 host has an octet above 255. IamConfig::validate refuses it, and IAM does not boot" $i $u) -}}
+{{- end -}}
+{{- end -}}
+{{- $v4 = true -}}
+{{- end -}}
+{{- end -}}
+{{- $loopback := or (eq $host "localhost") (eq $host "::1") (and $v4 (hasPrefix "127." $host)) -}}
+{{- if not (or (eq $p.scheme "https") (and (eq $p.scheme "http") $loopback)) -}}
 {{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: use https, or http on localhost, 127.x.x.x or [::1]. IamConfig::validate refuses it, and IAM does not boot" $i $u) -}}
 {{- end -}}
 {{- end -}}

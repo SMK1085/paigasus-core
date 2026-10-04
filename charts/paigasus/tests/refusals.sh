@@ -333,6 +333,19 @@ expect_fail "dpop URL with a query" "zones.iam.backend.dpop.forwardedBaseUrls[0]
 rm -f "$DPOP_QUERY"
 expect_fail "dpop URL with a space" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://gw.example.test/a b\": use printable ASCII only" \
   --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test/a b"
+# Go's url.Parse is lenient where IAM's url::Url::parse is strict. The chart is stricter.
+expect_fail "dpop URL port above 65535" "forwardedBaseUrls[0] is \"https://gw.example.test:99999\": its port must be from 1 to 65535" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test:99999"
+expect_fail "dpop URL loopback octet above 255" "forwardedBaseUrls[0] is \"http://127.0.0.256\"" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://127.0.0.256"
+expect_fail "dpop URL IPv4 octet above 255" "forwardedBaseUrls[0] is \"https://999.1.1.1\": its IPv4 host has an octet above 255" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://999.1.1.1"
+expect_fail "dpop URL host with a numeric last label" "forwardedBaseUrls[0] is \"https://gw.1\": its host ends in a number" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.1"
+expect_fail "dpop URL host with a forbidden code point" "forwardedBaseUrls[0] is \"https://a<b.example\"" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://a<b.example"
+expect_fail "dpop URL with a dollar sign" "forwardedBaseUrls[0] is \"https://gw.example.test/\$(X)\": use printable ASCII only" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test/\$(X)"
 # Decision P8: a bad entry is refused also while DPoP is off.
 expect_fail "dpop off with a bad URL" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"http://gw.example.test\": use https" \
   --set "$DPOP.forwardedBaseUrls[0]=http://gw.example.test"
