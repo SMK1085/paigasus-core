@@ -454,7 +454,7 @@ were already there (`_critical2_end_to_end`, `_minor9_empty_jobs_floor`). SMA-60
 fix round 1 added `_v10_minor6_scalar_env_fails_closed` (V10 Minor 6 below), the final review
 added `_v10_rule1_strict_equality`, and the fix wave added `_v11_id_token_write_required` (F2,
 L25), `_v12_npm_floor_pinned` (F3, L26) and `_non_list_steps_fails_closed` (F7). The
-`--fixture-count >= 120` floor counts fixture-table rows, not registered helpers, so it does not
+`--fixture-count >= 170` floor counts fixture-table rows, not registered helpers, so it does not
 reach this table and cannot catch a deleted registration — and nine of the twenty-three now exposed
 are the V8d controls this branch relies on.
 
@@ -636,21 +636,31 @@ a normal pipe size, stays undetected. The gate has no watchdog timer.
 **L43 — V18 is an allowlist over command words, not a shell parser (SMA-684).** V18 holds every
 `UNGATED_JOBS` member (today only `release-pr`) to three actions and a short list of command
 words and exact command prefixes, because every step of that job can read the App private key
-from the runner. V18 reads a `run:` block like this. A `#` is allowed only as the first
-non-blank character of a physical line that does not continue the line before it, and that comment
+from the runner. V18 reads a `run:` block like this. It splits the text on `\n` only, because bash
+breaks lines only there. It refuses a block that holds any C0 control character except tab and
+newline, or U+007F, U+0085, U+00A0, U+2028 or U+2029: Python reads those as line breaks or blanks
+and bash does not, so a `\r` before a `#` hid a command from V18 that bash ran. A YAML
+double-quoted scalar can carry each of them. A `#` is allowed only as the first character after
+spaces and tabs of a physical line that does not continue the line before it, and that comment
 line must not end in a backslash. Any other `#` is refused, quotes included, so a `#` can never
-hide a separator. A small splitter of its own (not `command_segments`) tracks single quotes,
-double quotes and backslash escapes. It splits on unquoted `;`, `&`, `|`, `&&`, `||` and `|&`,
-and it does not split the `&` of a redirection (`>&2`, `2>&1`, `&>`). A line with an unterminated
-quote is refused. `$(`, a backtick, `<(` and `>(` are refused anywhere on a line, quotes
-included, except that a whole line of the form `NAME="$(...)"` is unwrapped and its inside is
-checked as a command line. Shell keywords (`if`, `then`, `else`, `elif`, `fi`, `!`) are stripped and
-the next word is checked. `shell:`, `container:`, `services:`, `defaults:`, a job-level `env:` or
-`uses:`, and a workflow-level `env:` or `defaults:` (when the file has an `UNGATED_JOBS` member)
+hide a separator. The refusal gives a false positive for `${X#…}` and `${#X}`. A line joins the
+next one only after an odd number of trailing backslashes, and with nothing between the two, as in
+bash. A small splitter of its own (not `command_segments`) tracks single quotes, double quotes
+and backslash escapes. It splits on unquoted `;`, `&`, `|`, `&&`, `||` and `|&`, and it does not
+split the `&` of a redirection (`>&2`, `2>&1`, `&>`). A line with an unterminated quote is
+refused. `$(`, a backtick, `<(` and `>(` are refused anywhere on a line, quotes included. One
+exception: a whole line of exactly the form `NAME="$(...)"` is unwrapped, where NAME is a shell
+identifier and the `)` before the final `"` ends the line. The wrapped text must hold no
+backslash and no unquoted parenthesis, so that last `)` is the one that matches the opening
+`$(`. Its inside is then checked as a command line. `NAME=$(...)` without quotes, text after the
+closing quote, and a substitution with no `NAME=` are all refused. Shell keywords (`if`, `then`,
+`else`, `elif`, `fi`, `!`) are stripped and the next word is checked. `shell:`, `container:`, `services:`, `defaults:`, a
+job-level `env:` or `uses:`, and a workflow-level `env:` or `defaults:` (when the file has an `UNGATED_JOBS` member)
 are refused. A step may use only the keys `name`, `id`, `if`, `uses`, `with`, `env`, `run` and
 `working-directory`. Its `env:` names are limited to `APP_ID_SET`, `GIT_TOKEN`, `PR_JSON` and
 `GH_TOKEN_FOR_PUSH`, its `working-directory:` to `rs`, and its `with:` keys to a list per action,
-with `persist-credentials: false` on the checkout. Residuals follow.
+with `persist-credentials: false` on the checkout. That check is case-insensitive, so the
+string `False` passes. Residuals follow.
 
 V18 cannot see inside an allowed program: `bash ci/version-lockstep/run.sh --write` is guarded
 by that script's own self-tests (the napi-glue writer, the `run_write` pins and the changed-path

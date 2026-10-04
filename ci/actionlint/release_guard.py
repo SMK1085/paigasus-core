@@ -1607,33 +1607,41 @@ UNGATED_JOB_BANNED_KEYS = ("container", "services", "defaults", "env", "uses")
 V18_HINT = ("The release-pr job can read the App private key, so it may run only the tools on "
             "V18's allowlist (docs/superpowers/specs/2026-10-04-sma-684-release-pr-stamp-token-"
             "isolation-design.md, section 5.6).")
-_V18_SUBST_RE = re.compile(r"""(?:[A-Za-z_][A-Za-z0-9_]*=)?"?\$\(""")
-_V18_ASSIGN_RE = re.compile(r"""[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|[^\s"']*)(?=\s|$)""")
+
+
+# Bash breaks lines only on \n and treats only space and tab as blanks. Python reads many more
+# characters as line breaks or blanks, so V18 refuses any run: block that holds one (T7-R6).
+_V18_CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f\x85\xa0\\u2028\\u2029]")
 
 
 def _v18_logical_lines(run_text: str) -> tuple[list[str], str | None]:
-    """The run: text as V18 reads it, and a reason to refuse it, if any (controller ruling T7-R4).
-    A `#` is allowed only as the first non-blank character of a physical line that does NOT
+    r"""The run: text as V18 reads it, and a reason to refuse it, if any (controller rulings T7-R4
+    and T7-R6). The text is split on `\n` only. A control character other than tab and newline,
+    a no-break space, U+0085, U+2028 and U+2029 are refused: bash and Python disagree on them.
+    A `#` is allowed only as the first blank-stripped character of a physical line that does NOT
     continue the line before it, and such a comment line must not end in a backslash. Any other
-    `#` is refused: bash reads a `#` as a comment only at the start of a word and never inside
-    quotes, and V18 does not parse enough to tell the cases apart. A comment line is dropped. A
-    line joins the next one only when it ends in an ODD number of backslashes."""
+    `#` is refused, quotes included. A comment line is dropped. A line joins the next one only
+    when it ends in an ODD number of backslashes, and then the two join with NOTHING between
+    them, as in bash (`$\` newline `(x)` is `$(x)`)."""
+    bad = _V18_CONTROL_RE.search(run_text)
+    if bad:
+        return [], (f"the run text holds the character U+{ord(bad.group()):04X}, which bash and "
+                    f"Python read differently")
     out: list[str] = []
     buf = ""
     continued = False
-    for raw in run_text.splitlines():
-        if not continued and raw.lstrip().startswith("#"):
-            if raw.rstrip().endswith("\\"):
+    for raw in run_text.split("\n"):
+        if not continued and raw.lstrip(" \t").startswith("#"):
+            if raw.rstrip(" \t").endswith("\\"):
                 return [], f"the comment line {raw.strip()!r} ends in a backslash"
             continue
         if "#" in raw:
             return [], (f"the line {raw.strip()!r} has a `#` that is not the start of a comment "
                         f"line; V18 does not read comments inside a command")
-        stripped = raw.rstrip()
-        trailing = len(stripped) - len(stripped.rstrip("\\"))
+        trailing = len(raw) - len(raw.rstrip("\\"))
         continued = trailing % 2 == 1
         if continued:
-            buf += stripped[:-1] + " "
+            buf += raw[:-1]
             continue
         out.append(buf + raw)
         buf = ""
@@ -1642,9 +1650,9 @@ def _v18_logical_lines(run_text: str) -> tuple[list[str], str | None]:
     return out, None
 
 
-# A whole line that is one command substitution, with an optional `NAME=` and optional quotes:
+# A whole line that is exactly `NAME="$(...)"` (controller ruling T7-R6), for example
 # `OUT="$(release-plz release-pr --output json)"`. Its inside is checked as a command line.
-_V18_WRAP_RE = re.compile(r"""(?:[A-Za-z_][A-Za-z0-9_]*=)?"?\$\((.*)\)"?""", re.S)
+_V18_WRAP_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*="\$\((.*)\)"')
 _V18_ASSIGN_RE = re.compile(r"""[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|[^\s"']*)(?=\s|$)""")
 _V18_SUBST_MARKERS = ("$(", "`", "<(", ">(")
 
@@ -1699,15 +1707,34 @@ def v18_split(text: str) -> tuple[list[str], str | None]:
     return [seg for seg in segs if seg.strip()], None
 
 
+def _v18_unquoted_paren(text: str) -> bool:
+    """True when `text` holds a `(` or `)` outside single and double quotes. A `)` there could
+    close the opening `$(` early, so the last `)` of the line would not be the matching one."""
+    quote = ""
+    for c in text:
+        if quote:
+            if c == quote:
+                quote = ""
+        elif c in "'\"":
+            quote = c
+        elif c in "()":
+            return True
+    return False
+
+
 def v18_line_segments(line: str) -> tuple[list[str], str | None]:
     """The command segments of one logical line for V18, and a reason to refuse the line, if any.
     command_segments is not used (see README L43). A line that is one `NAME="$(...)"` is
     unwrapped first. Then `$(`, a backtick, `<(` and `>(` are refused anywhere, quotes included:
     fail closed, so `echo '$(x)'` reds."""
-    text = line.strip()
+    text = line.strip(" \t")
     m = _V18_WRAP_RE.fullmatch(text)
     if m:
         text = m.group(1)
+        if "\\" in text:
+            return [], "a backslash inside a wrapped command substitution"
+        if _v18_unquoted_paren(text):
+            return [], "an unquoted parenthesis inside a wrapped command substitution"
     for mark in _V18_SUBST_MARKERS:
         if mark in text:
             return [], f"a substitution ({mark!r})"
@@ -4557,6 +4584,32 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("fix2: a quoted pipe and ampersand", {"run": "echo 'a | b && c'"}, False),
     ("fix2: a comment line before a command", {"run": "# a note\necho ok"}, False),
     ("fix2: a wrapped substitution with a pipeline", {"run": 'X="$(echo hi | jq .)"'}, False),
+    ("fix3: a carriage return before a hash", {"run": "echo ok\r# x; cargo build"}, True),
+    ("fix3: a vertical tab before a hash", {"run": "echo ok\x0b# x; cargo build"}, True),
+    ("fix3: a form feed before a hash", {"run": "echo ok\x0c# x; cargo build"}, True),
+    ("fix3: a file separator before a hash", {"run": "echo ok\x1c# x; cargo build"}, True),
+    ("fix3: U+0085 before a hash", {"run": "echo ok\x85# x; cargo build"}, True),
+    ("fix3: U+2028 before a hash", {"run": "echo ok\u2028# x; cargo build"}, True),
+    ("fix3: U+2029 before a hash", {"run": "echo ok\u2029# x; cargo build"}, True),
+    ("fix3: a no-break space before a hash", {"run": "\xa0# x || cargo build"}, True),
+    ("fix3: a vertical tab as the first blank", {"run": "\x0b# x || cargo build"}, True),
+    ("fix3: a NUL byte", {"run": "echo ok\x00"}, True),
+    ("fix3: a substitution closed early by a backslash paren", {"run": "$(echo cargo) build\\)"}, True),
+    ("fix3: a substitution closed early with a quoted argument", {"run": "$(echo bash) -c 'cargo build' \\)"}, True),
+    ("fix3: text after a wrapped substitution", {"run": 'NAME="$(a)" b'}, True),
+    ("fix3: a substitution with no NAME", {"run": '"$(echo a)"'}, True),
+    ("fix3: an unquoted wrapped substitution", {"run": "NAME=$(echo a)"}, True),
+    ("fix3: two substitutions in one wrapped value", {"run": 'NAME="$(echo a) $(echo b)"'}, True),
+    ("fix3: a backslash inside a wrapped substitution", {"run": 'NAME="$(echo \\) )"'}, True),
+    ("fix3: an unquoted paren inside a wrapped substitution", {"run": 'NAME="$(echo a) ; (echo b)"'}, True),
+    ("fix3: a join that makes a substitution", {"run": "echo $\\\n(cargo build)"}, True),
+    ("fix3: a trailing space after a backslash is not a join", {"run": "echo a\\ \ncargo build"}, True),
+    ("fix3: a parameter expansion with a hash", {"run": 'echo "${#X}"'}, True),
+    ("fix3: a wrapped substitution with a quoted paren", {"run": 'NAME="$(echo \'a)\')"'}, False),
+    ("fix3: a wrapped substitution", {"run": 'NAME="$(echo a)"'}, False),
+    ("fix3: a continued echo joins with nothing between", {"run": "echo a\\\nb"}, False),
+    ("fix3: a quote hides the true close of the substitution", {"run": 'NAME="$(echo a)"; cargo build; echo "x)"'}, True),
+    ("fix3: a backslash inside a wrapped substitution, no paren", {"run": 'NAME="$(echo a\\b)"'}, True),
     ("moon setup", {"run": "moon setup"}, False),
     ("proto install release-plz", {"run": "proto install release-plz"}, False),
     ("release-plz release-pr", {"run": "release-plz release-pr --output json"}, False),
@@ -4572,7 +4625,7 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("a comment line with separators", {"run": "# a | b; c && d\necho ok"}, False),
 )
 # Deleting a row must red: the table is the only pin on each shape.
-_SMA684_V18_CASE_COUNT = 93
+_SMA684_V18_CASE_COUNT = 119
 
 
 def _sma684_v18_allowlist_bites() -> str | None:
@@ -4599,6 +4652,13 @@ def _sma684_v18_allowlist_bites() -> str | None:
     # A reusable-workflow call has no steps: it must still red.
     if not ungated_job_violations({"jobs": {"release-pr": {"uses": "./.github/workflows/x.yml"}}}, "fixture"):
         return "a job-level `uses:` with no steps read clean"
+    # T7-R6: a control character reaches V18 through a YAML double-quoted scalar, so prove the
+    # refusal through yaml.safe_load, not only through a Python string.
+    for esc in ("\\r", "\\x0b", "\\x0c", "\\x85", "\\u2028"):
+        loaded = yaml.safe_load(
+            'jobs:\n  release-pr:\n    steps:\n      - run: "echo ok' + esc + '# x; cargo build"\n')
+        if not ungated_job_violations(loaded, "fixture"):
+            return f"a YAML-loaded run: with {esc} before a hash read clean"
     # T7-R5: V13's workflow-level silence for a different secret, pinned where a substring match
     # cannot hide it. The SMA-658 FIXTURES row for this shape now expects V18's refusal instead.
     other = {"env": {"T": "${{ secrets.PAIGASUS_BOT_APP_ID }}"}, "jobs": {}}
