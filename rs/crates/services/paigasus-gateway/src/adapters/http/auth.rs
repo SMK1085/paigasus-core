@@ -22,6 +22,12 @@
 //! A user turn costs three IAM RPCs (`IntrospectApiKey`, `Introspect`, `IsAuthorized`); an
 //! API-key turn costs two. There is no cache (SMA-635 spec §4.1).
 //!
+//! ## The DPoP scheme (SMA-700)
+//! With gateway DPoP on, `Authorization: DPoP <token>` plus one `DPoP` header skips the API-key leg
+//! and sends the proof, the method and the path to `Introspect`. The self-query then sends the
+//! same token and proof as IAM's `IsAuthorized` follow-up. Every 401 carries one
+//! `WWW-Authenticate: DPoP` line (`dpop_challenge`).
+//!
 //! ## The self-query invariant (D9 — the whole point)
 //! The authorization call ([`Iam::is_authorized_self`]) is made with the caller's OWN bearer as
 //! the credential AND the caller's OWN principal PRN (the one IAM's introspect response just
@@ -42,8 +48,8 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use axum::extract::{Request, State};
-use axum::http::{HeaderMap, header};
+use axum::extract::{OriginalUri, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use metrics::{counter, histogram};
@@ -52,9 +58,9 @@ use tonic::{Code, Status};
 use tonic_types::StatusExt;
 
 use super::error::GatewayError;
-use crate::adapters::iam::{CallerCredential, Iam, IamError};
+use crate::adapters::iam::{CallerCredential, DpopContext, Iam, IamError};
 use crate::domain::{CallerContext, Credential, OrgHeader, resolve_org};
-use paigasus_proto::paigasus::iam::v1::IntrospectApiKeyResponse;
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
 
 /// The wire action string the gateway authorizes every chat request against. Hardcoded because the
 /// gateway cannot import iam-core's `Action` enum across the gRPC boundary — it sends the literal
@@ -73,18 +79,121 @@ pub struct AuthState {
     pub dpop_enabled: bool,
 }
 
-/// Authenticate + authorize a request before it reaches the protected handler. Wired via
-/// `from_fn_with_state(AuthState { iam, dpop_enabled }, require_iam_auth)`; the middleware's state
-/// ([`AuthState`]) is independent of the handler's `AppState`. On success the request carries a
-/// [`CallerContext`] extension; on any failure it returns the mapped [`GatewayError`].
-pub async fn require_iam_auth(State(auth): State<AuthState>, mut req: Request, next: Next) -> Response {
-    let iam = auth.iam;
-    // 1. Bearer — the ONLY accepted credential source (no cookies, no query params). The DPoP
-    //    scheme is added in SMA-700 Task 13.
-    let Some(Credentials::Bearer(token)) = credentials(req.headers(), auth.dpop_enabled) else {
-        return GatewayError::MissingBearer.into_response();
-    };
+/// Which `Authorization` scheme the client used, for the challenge (SMA-700 § 4.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemeUsed {
+    /// No usable credential (absent, unknown scheme, empty token, or `DPoP` while DPoP is off).
+    None,
+    Bearer,
+    Dpop,
+}
 
+impl SchemeUsed {
+    fn of(credentials: Option<&Credentials>) -> Self {
+        match credentials {
+            None => SchemeUsed::None,
+            Some(Credentials::Bearer(_)) => SchemeUsed::Bearer,
+            Some(Credentials::Dpop { .. }) => SchemeUsed::Dpop,
+        }
+    }
+}
+
+const CHALLENGE_INVALID_PROOF: &str = "DPoP error=\"invalid_dpop_proof\", algs=\"ES256 RS256\"";
+const CHALLENGE_INVALID_TOKEN: &str = "DPoP error=\"invalid_token\", algs=\"ES256 RS256\"";
+const CHALLENGE_BARE: &str = "DPoP algs=\"ES256 RS256\"";
+
+/// The `WWW-Authenticate` value of a refusal (SMA-700 § 4.10), or `None`. Only when gateway DPoP
+/// is on, and only on a 401. The error attribute goes on the scheme the client used (RFC 6750
+/// § 3): a Bearer client or one with no credential gets the bare DPoP challenge. With DPoP off the
+/// gateway sends no challenge, as before (D11). `algs` is D8's list.
+pub fn dpop_challenge(dpop_enabled: bool, scheme: SchemeUsed, err: &GatewayError) -> Option<HeaderValue> {
+    if !dpop_enabled || err.status() != StatusCode::UNAUTHORIZED {
+        return None;
+    }
+    let value = match (scheme, err) {
+        (SchemeUsed::Dpop, GatewayError::InvalidDpopProof) => CHALLENGE_INVALID_PROOF,
+        (SchemeUsed::Dpop, _) => CHALLENGE_INVALID_TOKEN,
+        (SchemeUsed::Bearer | SchemeUsed::None, _) => CHALLENGE_BARE,
+    };
+    Some(HeaderValue::from_static(value))
+}
+
+/// Render a refusal, with the challenge appended after `into_response` (`IntoResponse` does not
+/// change; the gateway sends one line, through `append`).
+fn reject(dpop_enabled: bool, scheme: SchemeUsed, err: GatewayError) -> Response {
+    let challenge = dpop_challenge(dpop_enabled, scheme, &err);
+    let mut response = err.into_response();
+    if let Some(value) = challenge {
+        response.headers_mut().append(header::WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
+/// The proof value of a DPoP request. A missing or invalid `DPoP` header is a 401 at once, with
+/// no IAM call (§ 4.10).
+fn proof_value(proof: ProofHeader) -> Result<String, GatewayError> {
+    match proof {
+        ProofHeader::One(proof) => Ok(proof),
+        ProofHeader::Missing | ProofHeader::Invalid => Err(GatewayError::InvalidDpopProof),
+    }
+}
+
+/// The DPoP context that IAM checks (§ 4.10, D5): the proof, the method, and the path as the
+/// gateway received it, with no query (`OriginalUri`, so a nested router cannot shorten it).
+fn dpop_context(req: &Request, proof: &str) -> DpopContext {
+    let uri = req.extensions().get::<OriginalUri>().map_or(req.uri(), |original| &original.0);
+    DpopContext {
+        proof: proof.to_owned(),
+        method: req.method().as_str().to_owned(),
+        path: uri.path().to_owned(),
+    }
+}
+
+/// Authenticate + authorize a request before it reaches the protected handler. Wired via
+/// `from_fn_with_state(AuthState { iam, dpop_enabled }, require_iam_auth)`. On success the request
+/// carries a [`CallerContext`] extension; on any failure it returns the mapped [`GatewayError`],
+/// with the DPoP challenge when gateway DPoP is on.
+pub async fn require_iam_auth(State(auth): State<AuthState>, req: Request, next: Next) -> Response {
+    let credentials = credentials(req.headers(), auth.dpop_enabled);
+    let scheme = SchemeUsed::of(credentials.as_ref());
+    match iam_auth(auth.iam.as_ref(), credentials, req, next).await {
+        Ok(response) => response,
+        Err(err) => reject(auth.dpop_enabled, scheme, err),
+    }
+}
+
+async fn iam_auth(iam: &dyn Iam, credentials: Option<Credentials>, req: Request, next: Next) -> Result<Response, GatewayError> {
+    match credentials {
+        None => Err(GatewayError::MissingBearer),
+        Some(Credentials::Bearer(token)) => bearer_iam_auth(iam, token, req, next).await,
+        Some(Credentials::Dpop { token, proof }) => {
+            // D15: no API-key leg on the DPoP scheme; API keys are not bound to a key, and the
+            // proof goes to IAM on the token leg only.
+            let proof = proof_value(proof)?;
+            let context = dpop_context(&req, &proof);
+            let started = Instant::now();
+            let user = match iam.introspect_token(&token, Some(context)).await {
+                Ok(resp) if resp.status == "active" => {
+                    record_iam_call("introspect_token", "ok", started);
+                    resp
+                }
+                Ok(_) => {
+                    record_iam_call("introspect_token", "denied", started);
+                    return Err(GatewayError::InvalidCredential);
+                }
+                Err(err) => {
+                    record_iam_call("introspect_token", iam_result(&err), started);
+                    return Err(introspect_error(err));
+                }
+            };
+            // IAM's IsAuthorized follow-up: the same token and the same proof bytes (§ 4.8).
+            oidc_caller(iam, CallerCredential::Dpop { token, proof }, user, req, next).await
+        }
+    }
+}
+
+/// The Bearer scheme: the API-key leg, then the OIDC leg (SMA-635), unchanged.
+async fn bearer_iam_auth(iam: &dyn Iam, token: String, req: Request, next: Next) -> Result<Response, GatewayError> {
     // 2. The API-key leg. An `active` key continues on the unchanged API-key path. Anything else
     //    falls through to the OIDC leg; `api_key_inconclusive` records whether this leg failed to
     //    reach a VERDICT, with the same rule `require_authenticated` uses.
@@ -93,7 +202,7 @@ pub async fn require_iam_auth(State(auth): State<AuthState>, mut req: Request, n
     match iam.introspect_api_key(&token).await {
         Ok(resp) if resp.status == "active" => {
             record_iam_call("introspect", "ok", started);
-            return api_key_caller(iam.as_ref(), &token, resp, req, next).await;
+            return api_key_caller(iam, &token, resp, req, next).await;
         }
         // IAM answered, and the answer was "not active" — a verdict, not an outage.
         Ok(_) => record_iam_call("introspect", "denied", started),
@@ -116,35 +225,37 @@ pub async fn require_iam_auth(State(auth): State<AuthState>, mut req: Request, n
         }
         Ok(_) => {
             record_iam_call("introspect_token", "denied", started);
-            return preserve_outage(api_key_inconclusive, GatewayError::InvalidCredential).into_response();
+            return Err(preserve_outage(api_key_inconclusive, GatewayError::InvalidCredential));
         }
         Err(err) => {
             let label = iam_result(&err);
             let mapped = introspect_error(err);
             record_iam_call("introspect_token", label, started);
-            return preserve_outage(api_key_inconclusive, mapped).into_response();
+            return Err(preserve_outage(api_key_inconclusive, mapped));
         }
     };
+    oidc_caller(iam, CallerCredential::Bearer(token), user, req, next).await
+}
 
+/// Steps 4-6 of the OIDC leg, shared by the Bearer and the DPoP scheme: the organization, the
+/// self-query, the caller context.
+async fn oidc_caller(iam: &dyn Iam, caller: CallerCredential, user: IntrospectResponse, mut req: Request, next: Next) -> Result<Response, GatewayError> {
     // 4. The organization (spec §4.2). Every membership node and every grant scope is evidence
     //    for inference; the header, when present, wins and is checked by IAM in step 5.
-    let node_prns: Vec<&str> = user
-        .memberships
-        .iter()
-        .map(|m| m.node_prn.as_str())
-        .chain(user.role_grants.iter().map(|g| g.scope_prn.as_str()))
-        .collect();
-    let org_prn = match org_header(req.headers()).and_then(|header| resolve_org(header, &node_prns).map_err(GatewayError::from)) {
-        Ok(prn) => prn.canonical(),
-        Err(err) => return err.into_response(),
+    let org_prn = {
+        let node_prns: Vec<&str> = user
+            .memberships
+            .iter()
+            .map(|m| m.node_prn.as_str())
+            .chain(user.role_grants.iter().map(|g| g.scope_prn.as_str()))
+            .collect();
+        org_header(req.headers()).and_then(|header| resolve_org(header, &node_prns).map_err(GatewayError::from))?.canonical()
     };
     let principal_prn = user.principal_prn;
 
     // 5. The self-query against the ORG (D4): an org UUID that does not exist is a Deny, not an
     //    error, so the answer does not show whether the org exists.
-    if let Err(denied) = authorize_self(iam.as_ref(), &CallerCredential::Bearer(token.clone()), &principal_prn, &org_prn, None).await {
-        return denied;
-    }
+    authorize_self(iam, &caller, &principal_prn, &org_prn, None).await?;
 
     // 6. Attach the resolved caller and proceed.
     req.extensions_mut().insert(CallerContext {
@@ -152,12 +263,12 @@ pub async fn require_iam_auth(State(auth): State<AuthState>, mut req: Request, n
         scope_prn: org_prn,
         credential: Credential::Oidc,
     });
-    next.run(req).await
+    Ok(next.run(req).await)
 }
 
 /// The API-key path, unchanged since SMA-446 apart from the D5 warning: the key's own
 /// `scope_prn` is the scope, and a `paigasus-org` header is never read for it.
-async fn api_key_caller(iam: &dyn Iam, token: &str, resp: IntrospectApiKeyResponse, mut req: Request, next: Next) -> Response {
+async fn api_key_caller(iam: &dyn Iam, token: &str, resp: IntrospectApiKeyResponse, mut req: Request, next: Next) -> Result<Response, GatewayError> {
     if resp.scope_prn.is_empty() {
         // A missing scope is a plumbing bug (introspect should always return one), surfaced as a
         // distinct 500 diagnostic rather than a silent deny. The response body stays generic.
@@ -166,27 +277,24 @@ async fn api_key_caller(iam: &dyn Iam, token: &str, resp: IntrospectApiKeyRespon
             key_id = %resp.key_id,
             "introspect returned an empty scope_prn — IAM plumbing bug (SMA-446 D11)"
         );
-        return GatewayError::MissingScope.into_response();
+        return Err(GatewayError::MissingScope);
     }
     if req.headers().contains_key(ORG_HEADER) {
         // D5. The header VALUE is never logged: it is caller input.
         tracing::warn!(key_id = %resp.key_id, "paigasus-org ignored for an API key");
     }
-    if let Err(denied) = authorize_self(iam, &CallerCredential::ApiKey(token.to_owned()), &resp.principal_prn, &resp.scope_prn, Some(&resp.key_id)).await {
-        return denied;
-    }
+    authorize_self(iam, &CallerCredential::ApiKey(token.to_owned()), &resp.principal_prn, &resp.scope_prn, Some(&resp.key_id)).await?;
     req.extensions_mut().insert(CallerContext {
         principal_prn: resp.principal_prn,
         scope_prn: resp.scope_prn,
         credential: Credential::ApiKey { key_id: resp.key_id },
     });
-    next.run(req).await
+    Ok(next.run(req).await)
 }
 
-/// The D9 self-query, shared by both credentials: the caller's OWN token as the bearer, the
-/// caller's OWN introspected principal, `InvokeModel`, and the resolved scope. `Err` carries the
-/// response to return.
-async fn authorize_self(iam: &dyn Iam, caller: &CallerCredential, principal_prn: &str, scope_prn: &str, key_id: Option<&str>) -> Result<(), Response> {
+/// The D9 self-query, shared by every credential: the caller's OWN credential, the caller's OWN
+/// introspected principal, `InvokeModel`, and the resolved scope.
+async fn authorize_self(iam: &dyn Iam, caller: &CallerCredential, principal_prn: &str, scope_prn: &str, key_id: Option<&str>) -> Result<(), GatewayError> {
     let started = Instant::now();
     match iam.is_authorized_self(caller, principal_prn, INVOKE_MODEL_ACTION, scope_prn).await {
         Ok(true) => {
@@ -195,7 +303,7 @@ async fn authorize_self(iam: &dyn Iam, caller: &CallerCredential, principal_prn:
         }
         Ok(false) => {
             record_iam_call("authorize", "denied", started);
-            Err(GatewayError::AuthzDenied.into_response())
+            Err(GatewayError::AuthzDenied)
         }
         Err(err) => {
             record_iam_call("authorize", iam_result(&err), started);
@@ -211,7 +319,7 @@ async fn authorize_self(iam: &dyn Iam, caller: &CallerCredential, principal_prn:
                     "self-query IsAuthorized returned an unexpected error mapped to 500 — possible broken self-query (SMA-446 D9)"
                 );
             }
-            Err(mapped.into_response())
+            Err(mapped)
         }
     }
 }
@@ -258,11 +366,29 @@ fn org_header(headers: &HeaderMap) -> Result<OrgHeader<'_>, GatewayError> {
 /// rejected, as is a `Status` carrying no details at all. This replaces the blanket
 /// code-only accept, which was correct only by reachability accident.
 pub async fn require_authenticated(State(auth): State<AuthState>, req: Request, next: Next) -> Response {
-    let iam = auth.iam;
-    let Some(Credentials::Bearer(token)) = credentials(req.headers(), auth.dpop_enabled) else {
-        return GatewayError::MissingBearer.into_response();
-    };
+    let credentials = credentials(req.headers(), auth.dpop_enabled);
+    let scheme = SchemeUsed::of(credentials.as_ref());
+    match authenticated(auth.iam.as_ref(), credentials, req, next).await {
+        Ok(response) => response,
+        Err(err) => reject(auth.dpop_enabled, scheme, err),
+    }
+}
 
+async fn authenticated(iam: &dyn Iam, credentials: Option<Credentials>, req: Request, next: Next) -> Result<Response, GatewayError> {
+    match credentials {
+        None => Err(GatewayError::MissingBearer),
+        Some(Credentials::Bearer(token)) => bearer_authenticated(iam, &token, req, next).await,
+        // D15: no API-key leg. The `identity-not-provisioned` rule stays: IAM answers it only
+        // after the proof check passed (D18).
+        Some(Credentials::Dpop { token, proof }) => {
+            let proof = proof_value(proof)?;
+            let context = dpop_context(&req, &proof);
+            token_authenticated(iam, &token, Some(context), false, req, next).await
+        }
+    }
+}
+
+async fn bearer_authenticated(iam: &dyn Iam, token: &str, req: Request, next: Next) -> Result<Response, GatewayError> {
     let started = Instant::now();
     // Whether the API-key leg failed to reach a VERDICT, as opposed to reaching a rejection.
     // An outage here must not be laundered into a `401` by the fallback below: an API key is
@@ -271,56 +397,51 @@ pub async fn require_authenticated(State(auth): State<AuthState>, req: Request, 
     // API-key-leg failure is a definitive-looking `401` telling the client to stop retrying —
     // during exactly the outage it should be backing off through.
     let mut api_key_inconclusive = false;
-    match iam.introspect_api_key(&token).await {
+    match iam.introspect_api_key(token).await {
         Ok(resp) if resp.status == "active" => {
             record_iam_call("introspect", "ok", started);
-            return next.run(req).await;
+            return Ok(next.run(req).await);
         }
         // IAM answered, and the answer was "not active" — a verdict, not an outage.
         Ok(_) => record_iam_call("introspect", "denied", started),
         Err(err) => {
             // `IamError` is not `Clone`, so compute the bounded metric label before
-            // `introspect_error` consumes `err`.
+            // `introspect_error` consumes `err`. Reuse `introspect_error`'s own mapping as the
+            // predicate: everything it calls `IamUnavailable` is a failure to reach a verdict.
             let label = iam_result(&err);
-            // Reuse `introspect_error`'s own mapping as the predicate rather than re-listing
-            // status codes here: everything it calls `IamUnavailable` is a failure to reach a
-            // verdict, and everything else (`Unauthenticated`/`PermissionDenied`) is a real
-            // rejection. One definition, so the two cannot drift apart.
             api_key_inconclusive = introspect_error(err) == GatewayError::IamUnavailable;
             record_iam_call("introspect", label, started);
         }
     }
+    token_authenticated(iam, token, None, api_key_inconclusive, req, next).await
+}
 
+/// The token leg of discovery: an active identity, or a VALIDATED but unprovisioned one (see the
+/// doc of [`require_authenticated`]), reaches the handler.
+async fn token_authenticated(iam: &dyn Iam, token: &str, dpop: Option<DpopContext>, api_key_inconclusive: bool, req: Request, next: Next) -> Result<Response, GatewayError> {
     let started = Instant::now();
-    match iam.introspect_token(&token, None).await {
+    match iam.introspect_token(token, dpop).await {
         Ok(resp) if resp.status == "active" => {
             record_iam_call("introspect_token", "ok", started);
-            next.run(req).await
+            Ok(next.run(req).await)
         }
-        // Belt-and-braces, symmetric with the API-key leg above: a success carrying a non-active
-        // status is a rejected credential, not a pass. Currently a dead branch in production (IAM
-        // resolve fails closed on anything but `Active`, so a success response never carries a
-        // non-active status — see `PrincipalStatus` in `paigasus-iam-core`), but keeping this
-        // fail-closed rather than trusting the field is unset costs nothing and guards exactly the
-        // kind of future IAM change the doc comment above calls out.
+        // Belt-and-braces: a success carrying a non-active status is a rejected credential, not a
+        // pass. Keeping this fail-closed costs nothing and guards a future IAM change.
         Ok(_) => {
             record_iam_call("introspect_token", "denied", started);
-            preserve_outage(api_key_inconclusive, GatewayError::InvalidCredential).into_response()
+            Err(preserve_outage(api_key_inconclusive, GatewayError::InvalidCredential))
         }
-        // A validated-but-unprovisioned identity — see the doc comment above. Recorded as
-        // "denied" rather than "ok": IAM did reject the RPC, and conflating it with success would
-        // hide a genuine provisioning problem from the dashboard.
+        // A validated-but-unprovisioned identity. Recorded as "denied" rather than "ok": IAM did
+        // reject the RPC, and conflating it with success would hide a provisioning problem.
         Err(IamError::Rpc(ref status)) if is_identity_not_provisioned(status) => {
             record_iam_call("introspect_token", "denied", started);
-            next.run(req).await
+            Ok(next.run(req).await)
         }
         Err(err) => {
-            // `IamError` is not `Clone` (and does not get a `Clone` impl just for this): compute
-            // the bounded metric label BEFORE `introspect_error` consumes `err`.
             let label = iam_result(&err);
             let mapped = introspect_error(err);
             record_iam_call("introspect_token", label, started);
-            preserve_outage(api_key_inconclusive, mapped).into_response()
+            Err(preserve_outage(api_key_inconclusive, mapped))
         }
     }
 }
@@ -345,17 +466,70 @@ static PROVISIONING_FAILED: LazyLock<String> = LazyLock::new(|| {
         .expect("a declared reason is never the sentinel")
 });
 
+static INVALID_DPOP_PROOF: LazyLock<String> = LazyLock::new(|| {
+    paigasus_proto::paigasus::common::v1::ErrorReason::InvalidDpopProof
+        .as_wire_reason()
+        .expect("a declared reason is never the sentinel")
+});
+static DPOP_QUOTA_EXCEEDED: LazyLock<String> = LazyLock::new(|| {
+    paigasus_proto::paigasus::common::v1::ErrorReason::DpopQuotaExceeded
+        .as_wire_reason()
+        .expect("a declared reason is never the sentinel")
+});
+
 /// The `ErrorInfo` reason of an IAM `Status`, read only on the IAM domain — never the message
-/// string. `None` when the `Status` carries no `ErrorInfo` (version skew: IAM must roll before the
-/// gateway, SMA-504) or a foreign domain carries it (a foreign service must not forge IAM's reason).
-fn iam_reason(status: &Status) -> Option<String> {
-    // `get_error_details` returns an OWNED `ErrorDetails`; bind it before borrowing out of it.
+/// string — and with no log line. For `Unauthenticated` and `ResourceExhausted` (SMA-700), where a
+/// status with no `ErrorInfo` is ordinary and must not write the SMA-504 skew warning.
+fn iam_reason_quiet(status: &Status) -> Option<String> {
     let details = status.get_error_details();
-    let Some(info) = details.error_info() else {
+    let info = details.error_info()?;
+    (info.domain == *paigasus_proto::error::IAM_DOMAIN).then(|| info.reason.clone())
+}
+
+/// [`iam_reason_quiet`] for a `PermissionDenied`: a status with no `ErrorInfo` there is version
+/// skew (IAM must roll before the gateway, SMA-504), so it writes one warning.
+fn iam_reason(status: &Status) -> Option<String> {
+    if status.get_error_details().error_info().is_none() {
         tracing::warn!("IAM returned a PermissionDenied with no ErrorInfo — rolling-upgrade skew? (SMA-504)");
         return None;
-    };
-    (info.domain == *paigasus_proto::error::IAM_DOMAIN).then(|| info.reason.clone())
+    }
+    iam_reason_quiet(status)
+}
+
+/// IAM's DPoP quota refusal (SMA-700 D10): `ResourceExhausted` with `dpop-quota-exceeded`.
+fn is_dpop_quota(status: &Status) -> bool {
+    status.code() == Code::ResourceExhausted && iam_reason_quiet(status).as_deref() == Some(DPOP_QUOTA_EXCEEDED.as_str())
+}
+
+/// The `RetryInfo` delay in whole seconds, at least 1; 1 when IAM sent none.
+fn retry_after_secs(status: &Status) -> u32 {
+    status
+        .get_error_details()
+        .retry_info()
+        .and_then(|info| info.retry_delay)
+        .map_or(1, |delay| u32::try_from(delay.as_secs()).unwrap_or(u32::MAX).max(1))
+}
+
+/// An IAM `Unauthenticated`: a refused DPoP proof keeps its own code; every other one is the
+/// credential rejection it was before.
+fn unauthenticated_error(status: &Status) -> GatewayError {
+    if iam_reason_quiet(status).as_deref() == Some(INVALID_DPOP_PROOF.as_str()) {
+        GatewayError::InvalidDpopProof
+    } else {
+        GatewayError::InvalidCredential
+    }
+}
+
+/// An IAM `ResourceExhausted`: the DPoP quota is the gateway's own 429 `rate-limited` with
+/// `Retry-After` (D10); anything else stays an IAM failure.
+fn resource_exhausted_error(status: &Status) -> GatewayError {
+    if is_dpop_quota(status) {
+        GatewayError::RateLimited {
+            retry_after_secs: retry_after_secs(status),
+        }
+    } else {
+        GatewayError::IamUnavailable
+    }
 }
 
 /// Is this IAM `Status` specifically "validated, but not yet provisioned"? SMA-504 discharges
@@ -402,6 +576,8 @@ fn iam_result(err: &IamError) -> &'static str {
         IamError::Connect(_) => "unavailable",
         IamError::Rpc(status) if matches!(status.code(), Code::Unavailable | Code::DeadlineExceeded) => "unavailable",
         IamError::Rpc(status) if status.code() == Code::Unauthenticated => "denied",
+        // SMA-700 D10: a quota hit is a verdict about one client, not an outage.
+        IamError::Rpc(status) if is_dpop_quota(status) => "denied",
         IamError::Rpc(_) => "error",
     }
 }
@@ -489,10 +665,11 @@ fn introspect_error(err: IamError) -> GatewayError {
     match err {
         IamError::Connect(_) => GatewayError::IamUnavailable,
         IamError::Rpc(status) => match status.code() {
-            Code::Unauthenticated => GatewayError::InvalidCredential,
+            Code::Unauthenticated => unauthenticated_error(&status),
             // Inactive/unprovisioned principal on either introspect leg — a client-auth failure,
             // not a 403.
             Code::PermissionDenied => GatewayError::InvalidCredential,
+            Code::ResourceExhausted => resource_exhausted_error(&status),
             Code::Unavailable | Code::DeadlineExceeded | Code::Internal => GatewayError::IamUnavailable,
             _ => GatewayError::IamUnavailable,
         },
@@ -512,7 +689,8 @@ fn authz_error(err: IamError) -> GatewayError {
                 Some(reason) if reason == PRINCIPAL_INACTIVE.as_str() || reason == PROVISIONING_FAILED.as_str() => GatewayError::InvalidCredential,
                 _ => GatewayError::Internal,
             },
-            Code::Unauthenticated => GatewayError::InvalidCredential,
+            Code::Unauthenticated => unauthenticated_error(&status),
+            Code::ResourceExhausted => resource_exhausted_error(&status),
             Code::Unavailable | Code::DeadlineExceeded | Code::Internal => GatewayError::IamUnavailable,
             _ => GatewayError::IamUnavailable,
         },
@@ -534,6 +712,7 @@ mod tests {
     use paigasus_logging::test_support::capture_logs;
     use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse, Membership, RoleGrantRef};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt; // for `oneshot`
 
     const CALLER_KEY: &str = "sk-caller-secret";
@@ -607,6 +786,10 @@ mod tests {
         token_introspect: Option<TokenIntrospectOutcome>,
         authz: AuthzOutcome,
         recorded: Arc<Mutex<Option<RecordedAuthz>>>,
+        /// SMA-700 D15: how often the API-key leg ran.
+        api_key_calls: Arc<AtomicUsize>,
+        /// SMA-700: the `dpop` argument of the last `introspect_token` call.
+        token_dpop: Arc<Mutex<Option<Option<DpopContext>>>>,
     }
 
     impl FakeIam {
@@ -616,6 +799,8 @@ mod tests {
                 token_introspect: None,
                 authz,
                 recorded: Arc::new(Mutex::new(None)),
+                api_key_calls: Arc::new(AtomicUsize::new(0)),
+                token_dpop: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -630,6 +815,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Iam for FakeIam {
         async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
+            self.api_key_calls.fetch_add(1, Ordering::SeqCst);
             match &self.introspect {
                 IntrospectOutcome::Ok(resp) => Ok(resp.clone()),
                 IntrospectOutcome::Rpc(code, details) => Err(IamError::Rpc(match details {
@@ -658,7 +844,8 @@ mod tests {
             }
         }
 
-        async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
+        async fn introspect_token(&self, _token: &str, dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
+            *self.token_dpop.lock().unwrap() = Some(dpop);
             match self
                 .token_introspect
                 .as_ref()
@@ -708,10 +895,11 @@ mod tests {
     }
 
     fn build_app(fake: FakeIam) -> Router {
-        let state = AuthState {
-            iam: Arc::new(fake),
-            dpop_enabled: false,
-        };
+        build_app_with(fake, false)
+    }
+
+    fn build_app_with(fake: FakeIam, dpop_enabled: bool) -> Router {
+        let state = AuthState { iam: Arc::new(fake), dpop_enabled };
         Router::new().route("/x", get(probe)).layer(from_fn_with_state(state, require_iam_auth))
     }
 
@@ -765,10 +953,11 @@ mod tests {
     }
 
     fn build_discovery_app(fake: FakeIam) -> Router {
-        let state = AuthState {
-            iam: Arc::new(fake),
-            dpop_enabled: false,
-        };
+        build_discovery_app_with(fake, false)
+    }
+
+    fn build_discovery_app_with(fake: FakeIam, dpop_enabled: bool) -> Router {
+        let state = AuthState { iam: Arc::new(fake), dpop_enabled };
         Router::new().route("/x", get(discovery_probe)).layer(from_fn_with_state(state, require_authenticated))
     }
 
@@ -877,12 +1066,266 @@ mod tests {
             (IamError::Rpc(tonic::Status::new(Code::Unavailable, "")), "unavailable"),
             (IamError::Rpc(tonic::Status::new(Code::DeadlineExceeded, "")), "unavailable"),
             (IamError::Rpc(tonic::Status::new(Code::Unauthenticated, "")), "denied"),
+            (
+                IamError::Rpc(tonic::Status::with_error_details(Code::ResourceExhausted, "", quota_details(std::time::Duration::from_secs(1)))),
+                "denied",
+            ),
+            (IamError::Rpc(tonic::Status::new(Code::ResourceExhausted, "")), "error"),
             (IamError::Rpc(tonic::Status::new(Code::PermissionDenied, "")), "error"),
             (IamError::Rpc(tonic::Status::new(Code::Internal, "")), "error"),
             (IamError::Rpc(tonic::Status::new(Code::NotFound, "")), "error"),
         ];
         for (err, want) in cases {
             assert_eq!(iam_result(err), *want, "iam_result({err:?}) should map to {want:?}");
+        }
+    }
+
+    // ---- SMA-700: the DPoP flow ------------------------------------------------------------------
+
+    const PROOF: &str = "proof.header.sig";
+    const CHALLENGE_PROOF: &str = "DPoP error=\"invalid_dpop_proof\", algs=\"ES256 RS256\"";
+    const CHALLENGE_TOKEN: &str = "DPoP error=\"invalid_token\", algs=\"ES256 RS256\"";
+    const CHALLENGE_BARE: &str = "DPoP algs=\"ES256 RS256\"";
+
+    fn dpop_req(uri: &str, proofs: &[&str]) -> HttpRequest<Body> {
+        let mut builder = HttpRequest::builder().uri(uri).header(header::AUTHORIZATION, format!("DPoP {USER_TOKEN}"));
+        for proof in proofs {
+            builder = builder.header(DPOP_HEADER, *proof);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn challenges(resp: &Response) -> Vec<String> {
+        resp.headers().get_all(header::WWW_AUTHENTICATE).iter().map(|v| v.to_str().unwrap().to_owned()).collect()
+    }
+
+    /// A fake whose IAM must never be reached: the key leg answers a connect failure only if it
+    /// runs, and `introspect_token` is unconfigured (it panics).
+    fn untouched_fake() -> FakeIam {
+        FakeIam::new(IntrospectOutcome::Connect, AuthzOutcome::Unreachable)
+    }
+
+    #[tokio::test]
+    async fn a_dpop_request_forwards_its_context_skips_the_key_leg_and_self_queries_with_dpop() {
+        let fake = user_fake(user_response(&[ORG_A_PRN], &[]), AuthzOutcome::Ok(true));
+        let (api_key_calls, token_dpop, recorded) = (fake.api_key_calls.clone(), fake.token_dpop.clone(), fake.recorded.clone());
+        let resp = build_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(api_key_calls.load(Ordering::SeqCst), 0, "D15: the DPoP scheme skips the API-key leg");
+        assert_eq!(
+            token_dpop.lock().unwrap().clone().expect("introspect_token ran"),
+            Some(DpopContext {
+                proof: PROOF.into(),
+                method: "GET".into(),
+                path: "/x".into()
+            })
+        );
+        let rec = recorded.lock().unwrap().take().expect("is_authorized_self ran");
+        assert_eq!(
+            rec.caller,
+            CallerCredential::Dpop {
+                token: USER_TOKEN.into(),
+                proof: PROOF.into()
+            }
+        );
+        assert_eq!((rec.principal_prn.as_str(), rec.resource_prn.as_str()), (USER_PRN, ORG_A_PRN));
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(String::from_utf8(body.to_vec()).unwrap(), format!("{USER_PRN}|{ORG_A_PRN}|oidc"));
+    }
+
+    #[tokio::test]
+    async fn a_query_string_is_not_forwarded_in_the_path() {
+        // Review Focus 3: IAM refuses a path with `?`, so the gateway must send the path alone.
+        let fake = user_fake(user_response(&[ORG_A_PRN], &[]), AuthzOutcome::Ok(true));
+        let token_dpop = fake.token_dpop.clone();
+        let resp = build_app_with(fake, true).oneshot(dpop_req("/x?trace=1", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(token_dpop.lock().unwrap().clone().flatten().expect("a context").path, "/x");
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_doubled_proof_is_401_with_no_iam_call() {
+        for proofs in [&[][..], &[PROOF, PROOF][..]] {
+            let fake = untouched_fake();
+            let api_key_calls = fake.api_key_calls.clone();
+            let resp = build_app_with(fake, true).oneshot(dpop_req("/x", proofs)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{proofs:?}");
+            assert_eq!(challenges(&resp), vec![CHALLENGE_PROOF.to_owned()]);
+            assert_eq!(api_key_calls.load(Ordering::SeqCst), 0);
+            let want = GatewayError::InvalidDpopProof.into_response();
+            let want = body_json(want).await["error"]["code"].clone();
+            assert_eq!(body_json(resp).await["error"]["code"], want);
+        }
+    }
+
+    #[tokio::test]
+    async fn iam_invalid_dpop_proof_is_401_with_the_proof_challenge() {
+        let fake = FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(
+            Code::Unauthenticated,
+            Some(reason_details(paigasus_proto::paigasus::common::v1::ErrorReason::InvalidDpopProof)),
+        ));
+        let resp = build_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenges(&resp), vec![CHALLENGE_PROOF.to_owned()]);
+        let want = body_json(GatewayError::InvalidDpopProof.into_response()).await;
+        assert_eq!(body_json(resp).await, want);
+    }
+
+    #[tokio::test]
+    async fn another_401_on_the_dpop_scheme_gets_the_invalid_token_challenge() {
+        let fake = FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(rejected_token());
+        let resp = build_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenges(&resp), vec![CHALLENGE_TOKEN.to_owned()]);
+        let want = body_json(GatewayError::InvalidCredential.into_response()).await;
+        assert_eq!(body_json(resp).await, want);
+    }
+
+    #[tokio::test]
+    async fn a_bearer_or_absent_credential_gets_the_bare_challenge_when_dpop_is_on() {
+        // RFC 6750 § 3: the error attribute belongs to the scheme the client used.
+        let resp = build_app_with(untouched_fake(), true).oneshot(req_no_auth()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenges(&resp), vec![CHALLENGE_BARE.to_owned()]);
+        let fake = FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(rejected_token());
+        let resp = build_app_with(fake, true).oneshot(req_with_auth("Bearer some-token")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenges(&resp), vec![CHALLENGE_BARE.to_owned()]);
+        // A 403 gets no challenge.
+        let resp = build_app_with(user_fake(user_response(&[ORG_A_PRN], &[]), AuthzOutcome::Ok(false)), true)
+            .oneshot(dpop_req("/x", &[PROOF]))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(challenges(&resp).is_empty());
+    }
+
+    #[tokio::test]
+    async fn dpop_off_answers_as_today_with_no_challenge() {
+        // D11: the DPoP scheme is ignored (a missing bearer), no IAM call, no WWW-Authenticate.
+        let fake = untouched_fake();
+        let api_key_calls = fake.api_key_calls.clone();
+        let resp = build_app_with(fake, false).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(challenges(&resp).is_empty());
+        assert_eq!(api_key_calls.load(Ordering::SeqCst), 0);
+        let want = body_json(GatewayError::MissingBearer.into_response()).await;
+        assert_eq!(body_json(resp).await, want);
+        let fake = FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(rejected_token());
+        let resp = build_app_with(fake, false).oneshot(req_with_auth("Bearer some-token")).await.unwrap();
+        assert!(challenges(&resp).is_empty(), "no challenge for Bearer either while off");
+    }
+
+    /// The headers of a response, minus `content-length` (the router adds it to a served response).
+    fn headers_sans_length(resp: &Response) -> HeaderMap {
+        let mut headers = resp.headers().clone();
+        headers.remove(header::CONTENT_LENGTH);
+        headers
+    }
+
+    /// With DPoP off, the full response (status, every header, body) equals the bare
+    /// `GatewayError` response: the middleware adds nothing.
+    #[tokio::test]
+    async fn dpop_off_responses_equal_the_bare_error_response() {
+        let cases: [(HttpRequest<Body>, GatewayError); 2] = [(req_no_auth(), GatewayError::MissingBearer), (dpop_req("/x", &[PROOF]), GatewayError::MissingBearer)];
+        for (req, err) in cases {
+            let resp = build_app_with(untouched_fake(), false).oneshot(req).await.unwrap();
+            let want = err.into_response();
+            assert_eq!(resp.status(), want.status());
+            assert_eq!(headers_sans_length(&resp), headers_sans_length(&want));
+            assert_eq!(body_json(resp).await, body_json(want).await);
+        }
+        let fake = FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(rejected_token());
+        let resp = build_app_with(fake, false).oneshot(req_with_auth("Bearer some-token")).await.unwrap();
+        let want = GatewayError::InvalidCredential.into_response();
+        assert_eq!(resp.status(), want.status());
+        assert_eq!(headers_sans_length(&resp), headers_sans_length(&want));
+        assert_eq!(body_json(resp).await, body_json(want).await);
+    }
+
+    fn quota_details(retry: std::time::Duration) -> tonic_types::ErrorDetails {
+        let mut details = reason_details(paigasus_proto::paigasus::common::v1::ErrorReason::DpopQuotaExceeded);
+        details.set_retry_info(Some(retry));
+        details
+    }
+
+    #[tokio::test]
+    async fn an_iam_dpop_quota_refusal_is_429_with_retry_after_labelled_denied_and_no_warning() {
+        let handle = paigasus_observability::init("test-gateway-dpop-quota");
+        let (logs, _guard) = capture_logs();
+        let fake =
+            FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::ResourceExhausted, Some(quota_details(std::time::Duration::from_secs(7)))));
+        let resp = build_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()["retry-after"], "7");
+        assert!(challenges(&resp).is_empty(), "a 429 gets no challenge");
+        let want = body_json(GatewayError::RateLimited { retry_after_secs: 7 }.into_response()).await;
+        assert_eq!(body_json(resp).await, want);
+        let out = handle.render();
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("gateway_iam_calls_total") && l.contains(r#"operation="introspect_token""#) && l.contains(r#"result="denied""#)),
+            "D10: a quota hit is a verdict, not an outage:\n{out}"
+        );
+        assert!(!logs.text().contains("PermissionDenied with no ErrorInfo"), "{}", logs.text());
+    }
+
+    #[tokio::test]
+    async fn reading_a_reason_on_a_detail_less_401_writes_no_warning() {
+        let (logs, _guard) = capture_logs();
+        let fake = FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::Unauthenticated, None));
+        let resp = build_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(!logs.text().contains("PermissionDenied with no ErrorInfo"), "{}", logs.text());
+    }
+
+    #[tokio::test]
+    async fn discovery_on_dpop_forwards_the_context_and_never_authorizes() {
+        let fake = FakeIam::new(IntrospectOutcome::Connect, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Ok(active_token_response()));
+        let (api_key_calls, token_dpop) = (fake.api_key_calls.clone(), fake.token_dpop.clone());
+        let resp = build_discovery_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(api_key_calls.load(Ordering::SeqCst), 0);
+        let ctx = token_dpop.lock().unwrap().clone().flatten().expect("a context");
+        assert_eq!((ctx.proof.as_str(), ctx.method.as_str(), ctx.path.as_str()), (PROOF, "GET", "/x"));
+    }
+
+    #[tokio::test]
+    async fn discovery_on_dpop_keeps_its_unprovisioned_rule_and_maps_a_bad_proof() {
+        // IAM answers identity-not-provisioned only after the proof check passed (D18).
+        let fake =
+            FakeIam::new(IntrospectOutcome::Connect, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::PermissionDenied, Some(identity_not_provisioned_details())));
+        assert_eq!(build_discovery_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap().status(), StatusCode::OK);
+        let fake = FakeIam::new(IntrospectOutcome::Connect, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(
+            Code::Unauthenticated,
+            Some(reason_details(paigasus_proto::paigasus::common::v1::ErrorReason::InvalidDpopProof)),
+        ));
+        let resp = build_discovery_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenges(&resp), vec![CHALLENGE_PROOF.to_owned()]);
+    }
+
+    #[test]
+    fn the_dpop_challenge_table() {
+        use SchemeUsed::{Bearer, Dpop, None as NoScheme};
+        let cases = [
+            (true, Dpop, GatewayError::InvalidDpopProof, Some(CHALLENGE_PROOF)),
+            (true, Dpop, GatewayError::InvalidCredential, Some(CHALLENGE_TOKEN)),
+            (true, Dpop, GatewayError::MissingBearer, Some(CHALLENGE_TOKEN)),
+            (true, Bearer, GatewayError::InvalidCredential, Some(CHALLENGE_BARE)),
+            (true, NoScheme, GatewayError::MissingBearer, Some(CHALLENGE_BARE)),
+            (true, Dpop, GatewayError::AuthzDenied, None),
+            (true, Dpop, GatewayError::RateLimited { retry_after_secs: 3 }, None),
+            (true, Dpop, GatewayError::IamUnavailable, None),
+            (false, Dpop, GatewayError::InvalidDpopProof, None),
+            (false, Bearer, GatewayError::InvalidCredential, None),
+        ];
+        for (on, scheme, err, want) in cases {
+            assert_eq!(
+                dpop_challenge(on, scheme, &err).map(|v| v.to_str().unwrap().to_owned()),
+                want.map(str::to_owned),
+                "{on} {scheme:?} {err:?}"
+            );
         }
     }
 
