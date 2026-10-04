@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fixture config for ci/osv/shipped_reachability.py --self-test (SMA-733). It names
+# GHSA-vfj7-8cjw-p6xm only in a comment, which must not count as a waiver:
+#   id = "GHSA-vfj7-8cjw-p6xm"
+[[IgnoredVulns]]
+id = "GHSA-xxxx-xxxx-xxxx"
+ignoreUntil = 2027-01-02
+reason = "Fixture only."

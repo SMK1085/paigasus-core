@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: Apache-2.0
+# expect: 0
+# braces is reached only from the root importer's devDependencies, through three snapshot
+# edges, and from packages/commitlint-config, which only `.` links. A shipped app reaches
+# brace-expansion, a different package: the name match must be exact.
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      '@next/eslint-plugin-next':
+        specifier: 'catalog:'
+        version: 16.3.6(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
+      '@paigasus/commitlint-config':
+        specifier: workspace:*
+        version: link:packages/commitlint-config
+
+  apps/iam-console:
+    dependencies:
+      '@paigasus/ui':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-ui
+    devDependencies:
+      minimatch:
+        specifier: 'catalog:'
+        version: 10.2.6
+
+  packages/commitlint-config:
+    dependencies:
+      '@semantic-release/commit-analyzer':
+        specifier: 'catalog:'
+        version: 13.0.1(semantic-release@25.0.9(supports-color@7.2.0)(typescript@6.0.3))(supports-color@7.2.0)
+
+  packages/paigasus-ui:
+    dependencies:
+      clsx:
+        specifier: 'catalog:'
+        version: 2.1.1
+
+packages:
+
+  braces@3.0.3:
+    resolution: {integrity: sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==}
+    engines: {node: '>=8'}
+
+snapshots:
+
+  '@next/eslint-plugin-next@16.3.6(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))':
+    dependencies:
+      fast-glob: 3.3.1
+    transitivePeerDependencies:
+      - eslint
+
+  '@semantic-release/commit-analyzer@13.0.1(semantic-release@25.0.9(supports-color@7.2.0)(typescript@6.0.3))(supports-color@7.2.0)':
+    dependencies:
+      micromatch: 4.0.8
+    transitivePeerDependencies:
+      - supports-color
+
+  balanced-match@4.0.4: {}
+
+  brace-expansion@5.0.12:
+    dependencies:
+      balanced-match: 4.0.4
+
+  braces@3.0.3:
+    dependencies:
+      fill-range: 7.1.1
+
+  clsx@2.1.1: {}
+
+  fast-glob@3.3.1:
+    dependencies:
+      micromatch: 4.0.8
+
+  fill-range@7.1.1: {}
+
+  micromatch@4.0.8:
+    dependencies:
+      braces: 3.0.3
+      picomatch: 2.3.2
+
+  minimatch@10.2.6:
+    dependencies:
+      brace-expansion: 5.0.12
+
+  picomatch@2.3.2: {}

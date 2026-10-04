@@ -16,4 +16,39 @@
 #   # ignoreUntil = 2026-01-01   # optional — the waiver re-fires after this date
 #   reason = "Why the vulnerable path is unreachable here, or why no fix exists."
 #
-# There are currently no waivers. Every finding to date has been fixed by upgrading.
+# When a waiver's reason depends on "no shipped package reaches it", the advisory must also
+# be in SHIPPED_FREE_WAIVERS in ci/osv/shipped_reachability.py. ci/osv/run.sh runs that
+# guard, and it fails when a shipped importer reaches the waived package.
+#
+# The first waiver is GHSA-vfj7-8cjw-p6xm (braces, SMA-733). Every earlier finding was
+# fixed by upgrading.
+
+# GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, severity 8.7): "braces vulnerable to
+# stack-exhaustion denial of service through deeply nested patterns". It affects
+# braces@3.0.3 in ts/pnpm-lock.yaml.
+#
+# No fix: osv.dev records introduced=0, last_affected=3.0.3, and 3.0.3 is the newest braces
+# on npm. No upgrade removes the path: the newest micromatch (4.0.8), fast-glob (3.3.3),
+# @next/eslint-plugin-next (16.3.8, which pins fast-glob 3.3.1), semantic-release (25.0.9)
+# and @semantic-release/commit-analyzer (13.0.1) all still reach braces.
+#
+# Who reaches it: only micromatch@4.0.8, and only from the root importer `.` through
+# devDependencies (@next/eslint-plugin-next -> fast-glob, semantic-release,
+# @semantic-release/commit-analyzer). No console image contains it: ts/Dockerfile installs
+# with --filter "@paigasus/${APP}...", which excludes the root importer, and the image ships
+# only .next/standalone and .next/static.
+#
+# Threat model: micromatch calls braces only to expand a glob pattern, and fast-glob expands
+# only the patterns it gets. These tools expand only patterns that the repo's own config
+# holds (for example the ESLint config's settings.next.rootDir). A fork PR can change those
+# patterns. The worst result is then a stack exhaustion that stops that PR's own CI job,
+# which has no write credentials. No workflow runs semantic-release, so no release job runs
+# braces on untrusted input.
+#
+# Guard: ci/osv/shipped_reachability.py fails `repo:osv` when a shipped importer (apps/* and
+# the workspace packages they link) reaches braces. Residual: nothing reds if someone
+# deletes the guard call from ci/osv/run.sh (SMA-733 spec section 4.5).
+[[IgnoredVulns]]
+id = "GHSA-vfj7-8cjw-p6xm"
+ignoreUntil = 2027-01-02
+reason = "No fixed braces release. Only root dev tooling (ESLint Next plugin, semantic-release) reaches it, on repo-authored glob patterns; no shipped package does, and ci/osv/shipped_reachability.py enforces that (SMA-733)."
