@@ -150,10 +150,13 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `rs/Cargo.lock`. Commit both files. Run it as its own command, not in the same `moon run` as
   `test`.
 
-  The `build` task runs `tsc`, and `tsc` reads the installed copy of `index.d.ts` through
-  `ts/node_modules`. A rename-write breaks the pnpm hard link of that copy. After a checkout, a
-  rebase or `version-lockstep --write` that replaces `index.d.ts`, run `rm -rf ts/node_modules &&
-  pnpm -C ts install`, as in the wasm paragraph above.
+  The `build` and `typecheck` tasks run `tsc`, and `tsc` reads the installed copy of the binding
+  typings through `ts/node_modules`. A rename-write breaks the pnpm hard link of that copy. Since
+  SMA-536, `ts/scripts/check-installed-bindings.mjs` runs before `tsc` in every task whose
+  package closure holds a binding. It compares the installed typings with the committed files. If
+  they differ, the task fails and prints `rm -rf ts/node_modules && pnpm -C ts install`, as in the
+  wasm paragraph above. Before SMA-536 such a task passed against the stale typings.
+  `repo:affected-smoke`'s A12 asserts the inputs and the preflight of these tasks.
 
   `@napi-rs/cli` (npm) and the `napi`, `napi-derive` and `napi-build` crates (cargo) each have their
   own Dependabot group. On such a PR, run `generate-napi-glue` and push the result to the PR
