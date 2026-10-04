@@ -234,9 +234,30 @@ Run 2 passed. These are its values.
 
 ### M3 — the first `workflow_dispatch` run on `main`
 
-Not measured yet. This happens after the merge.
+Sven started the run on 2026-10-04 with `gh workflow run wasm-lockstep.yml --ref main`. The run used a GitHub-hosted `ubuntu-latest` runner (image `ubuntu24/20260927.320`). Both jobs passed. The bot opened its pull request.
 
-M3 creates the bot branch. So M3 does not answer Q11: whether a force-push across `main` commits that edit `.github/workflows/*` needs the `workflows` permission of the App. Only a later run can answer Q11, because only then does the bot branch exist and differ from `main` in those files.
+| Item | Value |
+|---|---|
+| Run | https://github.com/SMK1085/paigasus-core/actions/runs/37203038886 (`workflow_dispatch`, head `c9df6f09`) |
+| Conclusion | success |
+| `build` job | success, 12:42:41Z to 12:46:45Z (4 min 4 s) |
+| `propose` job | success, 12:46:49Z to 12:47:00Z (11 s), environment `release-pr` |
+| Lock verdict on the host | rc 0, with seven `family-moved` lines: `js-sys 0.3.105 0.3.106`, `wasm-bindgen 0.2.128 0.2.129`, `wasm-bindgen-futures 0.4.78 0.4.79`, `wasm-bindgen-macro 0.2.128 0.2.129`, `wasm-bindgen-macro-support 0.2.128 0.2.129`, `wasm-bindgen-shared 0.2.128 0.2.129`, `web-sys 0.3.105 0.3.106` |
+| Compile container | Moon `SetupToolchain(rust:1.95.0)` passed. Moon printed that 2.5.6 is available. The repo pins 2.5.3. |
+| `generate-wasm` line | `generate-wasm: wrote 5 files into rs/crates/bindings/paigasus-wasm/` |
+| `propose` steps | All passed: checkout of the commit that `build` used, artifact download, artifact and lock check (the same seven `family-moved` lines), apply the files, mint the App installation token, commit as the bot, check that `main` did not move (no notice), check the bot branch owner and push, open or update the pull request |
+| Skipped step | "Close an obsolete pull request" was skipped, because `changed=true` |
+| Branch-owner check | `gh api` for `refs/heads/deps/wasm-bindgen-lockstep` returned `Not Found (HTTP 404)`. The step accepts this as "no bot branch yet". |
+| Push | `* [new branch] HEAD -> deps/wasm-bindgen-lockstep`. GitHub accepted the push from the App token. |
+| Bot commit | `c0fcb3ce`, `build(deps): move wasm-bindgen to 0.2.129 and regenerate the wasm glue`, author `paigasusbot[bot]` |
+| Files in the bot commit | 3 files: `rs/Cargo.lock` (+15 -14), `rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js` (+1 -1), `rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm` (binary) |
+| Why only 3 files | The other three glue files were byte-identical, so they are not in the diff. AC2 allows this. |
+| Bot pull request | https://github.com/SMK1085/paigasus-core/pull/380, opened by `app/paigasusbot` |
+| CI on the pull request | The CI and images workflows started (event `pull_request`). So the App token opened the pull request, not `GITHUB_TOKEN` (AC6). |
+
+The review of the `rs/Cargo.lock` diff and the merge of the bot pull request are for Sven.
+
+M3 creates the bot branch. So M3 does not answer Q11: whether a force-push across `main` commits that edit `.github/workflows/*` needs the `workflows` permission of the App. Only a later run can answer Q11, because only then does the bot branch exist and differ from `main` in those files. M3 confirms this: the push created a new branch, so Q11 is still open for M4.
 
 ### M4 — a second run with an open bot PR
 

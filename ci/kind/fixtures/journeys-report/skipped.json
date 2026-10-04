@@ -63,11 +63,19 @@
                       "duration": 1000
                     },
                     {
+                      "title": "control: the IdP session answers prompt=none with a code",
+                      "duration": 1000
+                    },
+                    {
                       "title": "logout: the shell form ends at the IdP and returns to /iam/ with no session cookie",
                       "duration": 1000
                     },
                     {
                       "title": "the old sid is refused by both zones",
+                      "duration": 1000
+                    },
+                    {
+                      "title": "the IdP session is dead: prompt=none returns login_required",
                       "duration": 1000
                     }
                   ]
