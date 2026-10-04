@@ -23,6 +23,10 @@ fileGroups:
     # SMA-634: paigasus-kernel/scripts/generate-wasm.mjs. Without this, ts:lint and ts:fmt do not
     # key on packages/*/scripts and an edit there serves a cached pass.
     - 'packages/*/scripts/**/*'
+    # SMA-536: ts/scripts/ holds plain Node scripts (check-config-only.mjs, the installed-typings
+    # preflight). Without this, ts:lint and ts:fmt do not key on ts/scripts and an edit there serves
+    # a cached pass.
+    - 'scripts/**/*'
     - 'tooling/**/*' # SMA-406 parity helpers; lint/fmt lint the whole tree, so the cache must track these too
   tests:
     - 'packages/*/tests/**/*'
@@ -59,3 +63,13 @@ tasks:
     inputs: []
     options:
       cache: false
+  # SMA-536. The unit tests of scripts/check-installed-bindings.mjs, the installed-typings
+  # preflight that runs before `tsc` in every task whose package closure holds a `file:` binding.
+  # `node --test`, not vitest: the script is plain Node ESM with no dependencies, and this
+  # configuration root has no vitest config. The name is `test` so that ci.yml's `:test` target
+  # selects it; another name would never run in CI. The inputs are the script and its test only.
+  test:
+    command: 'node --test scripts/check-installed-bindings.test.mjs'
+    inputs:
+      - 'scripts/check-installed-bindings.mjs'
+      - 'scripts/check-installed-bindings.test.mjs'
