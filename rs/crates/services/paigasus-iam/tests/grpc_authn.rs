@@ -357,6 +357,12 @@ async fn dpop_server(db: DatabaseConnection) -> (SocketAddr, JoinHandle<()>, sup
     (addr, server, idp, state)
 }
 
+/// A refusal: `Unauthenticated` with the given `ErrorReason` on the wire.
+fn assert_refusal(status: &tonic::Status, reason: ErrorReason) {
+    assert_eq!(status.code(), Code::Unauthenticated, "{status:?}");
+    assert_eq!(support::reason_of(status), support::wire(reason), "{status:?}");
+}
+
 /// The gateway's self-query: the caller's own principal, InvokeModel, at Root.
 fn self_query(principal_prn: &str) -> IsAuthorizedRequest {
     IsAuthorizedRequest {
@@ -405,9 +411,9 @@ async fn a_dpop_gateway_sequence_passes_once_and_never_again() {
     // AC 3: the same Introspect again is a replay, and the follow-up works once.
     let replay = authn.introspect(support::dpop_introspect(&token, &proof)).await.unwrap_err();
     assert_eq!(replay.code(), Code::Unauthenticated, "{replay:?}");
-    assert_eq!(support::reason_of(&replay), support::wire(ErrorReason::InvalidDpopProof));
+    assert_refusal(&replay, ErrorReason::InvalidDpopProof);
     let twice = authz.is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token, &proof)).await.unwrap_err();
-    assert_eq!(support::reason_of(&twice), support::wire(ErrorReason::InvalidDpopProof));
+    assert_refusal(&twice, ErrorReason::InvalidDpopProof);
 
     server.abort();
 }
@@ -421,7 +427,13 @@ async fn a_follow_up_with_another_token_of_the_same_key_is_refused() {
     let principal_prn = provisioned(&state, &idp, "dpop-ath").await;
     let key = support::DpopKey::generate();
     let token_a = idp.bound_bearer("dpop-ath", Some("dpop-ath@example.com"), "paigasus", 3600, &key.jkt());
-    let token_b = idp.bound_bearer("dpop-ath", Some("dpop-ath@example.com"), "paigasus", 3599, &key.jkt());
+    let token_b = idp.bearer_with(
+        "dpop-ath",
+        Some("dpop-ath@example.com"),
+        "paigasus",
+        3600,
+        json!({ "typ": "DPoP", "cnf": { "jkt": key.jkt() }, "variant": "b" }),
+    );
     assert_ne!(token_a, token_b);
     let proof = key.proof("POST", support::CHAT_URL, &token_a, "jti-ath", json!({}));
     let ch = channel(addr).await;
@@ -430,7 +442,7 @@ async fn a_follow_up_with_another_token_of_the_same_key_is_refused() {
         .is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token_b, &proof))
         .await
         .unwrap_err();
-    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof), "the ath of the proof names token_a");
+    assert_refusal(&err, ErrorReason::InvalidDpopProof); // the ath of the proof names token_a
     server.abort();
 }
 
@@ -452,7 +464,7 @@ async fn a_follow_up_for_another_principal_is_refused() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
-    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof), "the follow-up answers a self-query only");
+    assert_refusal(&err, ErrorReason::InvalidDpopProof); // the follow-up answers a self-query only
     server.abort();
 }
 
@@ -470,7 +482,7 @@ async fn a_follow_up_on_another_rpc_is_an_invalid_token() {
     // A live ticket exists, so the refusal is the path rule, not a missing ticket.
     authn.introspect(support::dpop_introspect(&token, &proof)).await.expect("Introspect");
     let err = authn.who_am_i(support::dpop_follow_up(WhoAmIRequest {}, &token, &proof)).await.unwrap_err();
-    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidToken), "the DPoP scheme is accepted on IsAuthorized only");
+    assert_refusal(&err, ErrorReason::InvalidToken); // the DPoP scheme is accepted on IsAuthorized only
     server.abort();
 }
 
@@ -488,7 +500,7 @@ async fn a_follow_up_with_no_introspect_is_refused() {
         .is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token, &proof))
         .await
         .unwrap_err();
-    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof));
+    assert_refusal(&err, ErrorReason::InvalidDpopProof);
     server.abort();
 }
 
@@ -504,7 +516,7 @@ async fn an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof() {
     let mut authn = AuthnServiceClient::new(channel(addr).await);
     let bad = key.proof("POST", "https://elsewhere.example.test/v1/chat/completions", &token, "jti-nobody-1", json!({}));
     let err = authn.introspect(support::dpop_introspect(&token, &bad)).await.unwrap_err();
-    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof), "not identity-not-provisioned");
+    assert_refusal(&err, ErrorReason::InvalidDpopProof); // not identity-not-provisioned
     // The control: with a good proof, the same identity reaches the lookup.
     let good = key.proof("POST", support::CHAT_URL, &token, "jti-nobody-2", json!({}));
     let err = authn.introspect(support::dpop_introspect(&token, &good)).await.unwrap_err();
@@ -523,7 +535,7 @@ async fn a_proof_for_a_base_url_that_is_not_configured_is_refused() {
     let token = bound(&idp, "dpop-htu", &key);
     let proof = key.proof("POST", "https://gw.example.test:8443/v1/chat/completions", &token, "jti-htu", json!({}));
     let err = AuthnServiceClient::new(channel(addr).await).introspect(support::dpop_introspect(&token, &proof)).await.unwrap_err();
-    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof));
+    assert_refusal(&err, ErrorReason::InvalidDpopProof);
     server.abort();
 }
 
@@ -541,7 +553,7 @@ async fn with_dpop_off_a_dpop_context_is_an_invalid_token() {
     let token = bound(&idp, "dpop-off", &key);
     let proof = key.proof("POST", support::CHAT_URL, &token, "jti-off", json!({}));
     let err = AuthnServiceClient::new(channel(addr).await).introspect(support::dpop_introspect(&token, &proof)).await.unwrap_err();
-    assert_eq!((err.code(), support::reason_of(&err)), (Code::Unauthenticated, support::wire(ErrorReason::InvalidToken)));
+    assert_refusal(&err, ErrorReason::InvalidToken);
     server.abort();
 }
 
@@ -555,7 +567,7 @@ async fn a_bound_token_with_no_dpop_context_is_an_invalid_token() {
     provisioned(&state, &idp, "dpop-bearer").await;
     let token = bound(&idp, "dpop-bearer", &support::DpopKey::generate());
     let err = AuthnServiceClient::new(channel(addr).await).introspect(IntrospectRequest { token, dpop: None }).await.unwrap_err();
-    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidToken));
+    assert_refusal(&err, ErrorReason::InvalidToken);
     server.abort();
 }
 
@@ -604,6 +616,6 @@ async fn with_dpop_off_the_dpop_scheme_on_is_authorized_is_an_invalid_token() {
         .is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token, &proof))
         .await
         .unwrap_err();
-    assert_eq!((err.code(), support::reason_of(&err)), (Code::Unauthenticated, support::wire(ErrorReason::InvalidToken)));
+    assert_refusal(&err, ErrorReason::InvalidToken);
     server.abort();
 }
