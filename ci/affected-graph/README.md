@@ -480,7 +480,7 @@ implicitly: any project that appears but isn't in the expected set fails the cas
   one project to that case's expected set.
 - A **task** case (`assert_task_case`/`assert_task_case_ci`, e.g. `proto->svc-info-deep`) works at `pid:task`
   granularity, not project granularity, so its set can also grow without any new dependent
-  project: widening the task-name filter itself (e.g. `lint` joining `build`/`test` in SMA-526)
+  project: widening the task-name filter itself (e.g. `lint` joining `build`/`test` in SMA-526, or `typecheck` joining in SMA-536)
   makes every already-listed project pick up a new `pid:task` row at once → same fix, confirm
   the new rows are intended, then add them to the case's expected set.
 - `lockfile->all-lint` lists **every** Rust crate, so **adding a Rust crate always changes it** —

@@ -2647,8 +2647,41 @@ Measured on 2026-10-04: 38 `a12a` rows and 6 `a12b` rows, 44 lines. No `FLOOR:` 
 ### E3 — run.sh re-measurement (Task 8)
 
 ```text
-(paste $SCRATCH/rebaseline.txt)
+367	proto->svc-info-deep	ADDED=-	REMOVED=-
+373	proto->svc-info-ci	ADDED=-	REMOVED=-
+404	lockfile->all-lint	ADDED=-	REMOVED=-
+410	lockfile->all-lint-ci	ADDED=-	REMOVED=-
+419	kernel->consumer-tasks	ADDED=-	REMOVED=-
+436	ui->console	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck,paigasus-ui-ts:typecheck	REMOVED=-
+457	ui-components->console	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck,paigasus-ui-ts:typecheck	REMOVED=-
+475	auth->auth-tasks	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck,paigasus-auth-ts:typecheck,paigasus-console-core-ts:typecheck	REMOVED=-
+496	proto->sdk	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:build,paigasus-app-shell-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-discovery-ts:typecheck,paigasus-proto-ts:typecheck,paigasus-sdk-ts:typecheck	REMOVED=-
+524	proto-iam->sdk	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:build,paigasus-app-shell-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-discovery-ts:typecheck,paigasus-proto-ts:typecheck,paigasus-sdk-ts:typecheck	REMOVED=-
+544	discovery->discovery-tasks	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-discovery-ts:typecheck	REMOVED=-
+565	discovery-adapters->discovery-tasks	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-discovery-ts:typecheck	REMOVED=-
+578	app-shell->app-shell-tasks	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck	REMOVED=-
+590	app-shell-shell->app-shell-tasks	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck	REMOVED=-
+610	sdk->iam-console	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-sdk-ts:typecheck	REMOVED=-
+612	sdk-errors->iam-console	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-sdk-ts:typecheck	REMOVED=-
+622	sdk-tests->sdk	ADDED=paigasus-sdk-ts:typecheck	REMOVED=-
+633	app-shell->console	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck	REMOVED=-
+653	iam-console-lib->iam-console-tasks	ADDED=iam-console-ts:typecheck	REMOVED=-
+655	iam-console-proxy->iam-console-tasks	ADDED=iam-console-ts:typecheck	REMOVED=-
+667	iam-console-app->two-zone-tier	ADDED=iam-console-ts:typecheck	REMOVED=-
+685	gateway-console-lib->gateway-console-tasks	ADDED=gateway-console-ts:typecheck	REMOVED=-
+690	gateway-console-proxy->gateway-console-tasks	ADDED=gateway-console-ts:typecheck	REMOVED=-
+712	console-core->consumers	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck	REMOVED=-
+714	console-core-prn-tenancy->consumers	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck	REMOVED=-
+737	console-core-testing->consumers	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck	REMOVED=-
+754	wasm-artifact->console	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck	REMOVED=-
+762	kernel-wasm-src->console	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-kernel-ts:typecheck	REMOVED=-
+770	napi-glue-js->kernel-test	ADDED=-	REMOVED=-
+777	napi-glue-dts->kernel-test	ADDED=gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:build,paigasus-console-core-ts:typecheck,paigasus-kernel-ts:build,paigasus-kernel-ts:typecheck	REMOVED=-
+785	wasm-typings->typecheck	ADDED=-	REMOVED=-
+800	gateway->sdk	ADDED=-	REMOVED=-
 ```
+
+Measured on 2026-10-04: 32 task cases, no REMOVED target. `wasm-typings->typecheck` showed ADDED=- and holds the four required `typecheck` targets. `kernel->bindings` is a project case and was not re-measured.
 
 ### E4 — after the change (Task 9)
 
