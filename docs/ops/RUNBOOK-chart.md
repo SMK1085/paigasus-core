@@ -245,12 +245,13 @@ on (SMA-700, below),** a bound token works on the protected routes of the gatewa
 uses the `DPoP` scheme and a proof. The `Bearer` scheme still refuses a bound token. The API of
 IAM never accepts the `DPoP` scheme.
 
-Do not set the Keycloak client attribute `dpop.bound.access.tokens` on a client that calls
-Paigasus. A Keycloak client policy can also require DPoP. Do not use such a policy for this
-client (not measured).
+With DPoP off, do not set the Keycloak client attribute `dpop.bound.access.tokens` on a client
+that calls Paigasus. A Keycloak client policy can also require DPoP. With DPoP off, do not use
+such a policy for this client (not measured).
 
 The console does not send a `DPoP` header. The SDKs do not get tokens. They send the token that
-you give them. If you use an SDK, do not turn on DPoP in your own OIDC library.
+you give them. With DPoP off, do not turn on DPoP in your own OIDC library. With DPoP on, make
+a new proof for each attempt (see "A new proof for each attempt" below).
 
 The IAM log shows the refusal at `info`: "it is bound to a key, and IAM cannot check the
 binding". The line gives the issuer and the marker `cnf` or `typ DPoP`. The same rate limit
@@ -266,16 +267,23 @@ To turn it on:
 
 1. Set `zones.iam.backend.dpop.enabled: true` and `zones.iam.backend.dpop.forwardedBaseUrls`. List
    each public URL at which clients reach the gateway. Add any path prefix that a proxy removes.
-   Example: a client calls `https://api.example.com/llm/v1/chat/completions`, and the proxy
-   removes `/llm`. Then the entry is `https://api.example.com/llm`. TLS must end in front of the
+   Example: a client calls `https://api.example.com/llm/v1/chat/completions`. The proxy removes
+   `/llm`. Then the entry is `https://api.example.com/llm`. TLS must end in front of the
    gateway. A wrong entry makes IAM refuse DPoP requests. It does not make IAM accept a wrong
    request.
 2. Wait until the IAM pod runs with the new values. Then set `GATEWAY_DPOP__ENABLED=true` on the
-   gateway. The other order also fails closed: IAM refuses the DPoP context while it is off.
+   gateway. With the other order, IAM refuses the DPoP context while it is off.
 
-The chart is stricter than IAM for these URLs. The chart refuses an `xn--` host, an IPv6 literal
-except `[::1]`, a `$`, a port outside 1 to 65535, an IPv4 address with an invalid octet, and a
-host with a numeric or hexadecimal last label. Use a plain DNS name or a valid IPv4 address.
+The chart is stricter than IAM for these URLs. The chart refuses these:
+
+- An `xn--` host.
+- An IPv6 literal, except `[::1]`.
+- A `$`.
+- A port outside 1 to 65535.
+- An IPv4 address with an invalid octet.
+- A host with a numeric or hexadecimal last label.
+
+Use a plain DNS name or a valid IPv4 address.
 
 Rules for clients and operators:
 
@@ -286,15 +294,18 @@ Rules for clients and operators:
   retry that sends the same headers again is refused as a replay (401 `invalid-dpop-proof`).
 - **The quota.** An entry lives up to 2 × `iat_window_secs` (120 s with the defaults). With the
   defaults, one key can make about 8 proofs a second, and one user about 16. A client over its
-  quota gets 429 `rate-limited` with `Retry-After`. To change the quotas, set
-  `IAM_AUTHN__DPOP__PER_KEY_QUOTA` and `IAM_AUTHN__DPOP__PER_SUBJECT_QUOTA` in `extraEnv`. These
-  two names, `IAM_AUTHN__DPOP__IAT_WINDOW_SECS` and `IAM_AUTHN__DPOP__REPLAY_CAPACITY` are not
-  chart values.
+  quota gets 429 `rate-limited` with `Retry-After`. To change a quota, set its name in
+  `extraEnv`. The chart has no value for these four names:
+
+  - `IAM_AUTHN__DPOP__PER_KEY_QUOTA`
+  - `IAM_AUTHN__DPOP__PER_SUBJECT_QUOTA`
+  - `IAM_AUTHN__DPOP__IAT_WINDOW_SECS`
+  - `IAM_AUTHN__DPOP__REPLAY_CAPACITY`
 - **A full replay store.** When the store holds `replay_capacity` entries, IAM answers DPoP
   requests with `Unavailable` (gateway 503) until entries expire. The IAM log shows the `warn`
   line "the DPoP replay store is full" with the entry count. Raise
   `IAM_AUTHN__DPOP__REPLAY_CAPACITY` in `extraEnv`. The chart sets no IAM memory limit. The
-  default capacity is 200 000 entries. Measured memory at that capacity (SMA-700, R8):
+  default capacity is 200 000 entries. Measured memory at that capacity:
 
   | Shape of the entries | Bytes per entry | Memory |
   |---|---|---|
@@ -304,7 +315,7 @@ Rules for clients and operators:
 
   Use the worst case (328 bytes for each entry) to size the memory of the IAM pod.
 - **Restarts.** A restart clears the store. A proof that the client used before the restart can
-  be used again until it expires. With the defaults this is up to 120 s after the restart (R1).
+  be used again until it expires. With the defaults this is up to 120 s after the restart.
 - **The challenge.** With gateway DPoP on, every 401 of the gateway carries one
   `WWW-Authenticate: DPoP` line. The gateway uses no server nonce.
 - **The log.** IAM logs each refused proof at `info`: "refused a DPoP proof". The line gives the
@@ -661,11 +672,10 @@ grant heals at the next login.
 that it sets itself: `IAM_HTTP_ADDR`, `IAM_GRPC_ADDR`, `IAM_MIGRATION__LOCK_WAIT_SECS`,
 `IAM_DATABASE_URL`, `IAM_AUTHN__ISSUERS`, `IAM_API_KEYS__PEPPER`,
 `IAM_AUTHN__EXTRA_CA_BUNDLE_PATH`, `IAM_AUTHZ__BOOTSTRAP_ADMINS`, `IAM_AUTHN__DPOP__ENABLED` and
-`IAM_AUTHN__DPOP__FORWARDED_BASE_URLS`. It also refuses a name that
-starts with one of these names and `__`. Set those values through their chart values. The other `IAM_AUTHN__DPOP__*` names stay settable
-through `extraEnv`. The list is
-`paigasus.iamReservedEnv` in `templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it
-equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
+`IAM_AUTHN__DPOP__FORWARDED_BASE_URLS`. It also refuses a name that starts with one of these
+names and `__`. Set those values through their chart values. The other `IAM_AUTHN__DPOP__*`
+names stay settable through `extraEnv`. The list is `paigasus.iamReservedEnv` in
+`templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
 `IAM_AUTHZ__ENFORCE_TENANCY`. The chart does not check those values; IAM checks them at boot.
 
 ## 10. Console pods stay NotReady (SMA-705)
