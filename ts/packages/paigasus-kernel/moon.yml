@@ -203,12 +203,15 @@ tasks:
   # uses a third out-dir, `.wasmpack-regen-out`, so a concurrent `test` run's wasm-pack wipe cannot
   # interleave with this task's copy into the crate directory.
   #
-  # Run it after an edit to the Rust kernel or the wasm binding, then commit all five files.
-  # tests/committed-wasm.test.ts reds until the committed files agree with the source.
+  # Run it after an edit to the Rust kernel or the wasm binding, then commit all five files. A
+  # wasm-bindgen family bump runs it in the build container of .github/workflows/wasm-lockstep.yml
+  # (SMA-693). tests/committed-wasm.test.ts reds until the committed files agree with the source.
   #
-  # ONE host regenerates them. The binary bytes differ per host (spec F12), so a second host
-  # produces a diff that says nothing. The four glue files are byte-identical on macOS, Linux arm64
-  # and Linux amd64 (spec F15), which is what makes the gate valid in CI.
+  # ONE host per PR regenerates them. A family bump from the wasm-lockstep workflow regenerates on
+  # Linux; a kernel or binding edit regenerates on the author's host. The binary bytes differ per
+  # host (spec F12), so the binary changes host between PRs, and a second host in one PR produces
+  # a diff that says nothing. The four glue files are byte-identical on macOS, Linux arm64 and
+  # Linux amd64 (spec F15), which is what makes the gate valid in CI.
   #
   # The literal `wasm-pack` call stays HERE, not inside the script file:
   # ci/affected-graph/cargo_moon_parity.py derives an FFI task from the resolved invocation
@@ -232,8 +235,10 @@ tasks:
   # (inferred, not measured) of tests/committed-wasm.test.ts, also with
   # `dependencies_update = false` in rs/release-plz.toml.
   #
-  # runInCI: false — CI never regenerates; it only compares. cache: false — the task writes tracked
-  # files, and a cached replay would write nothing.
+  # runInCI: false — the CI workflow never regenerates; it only compares. The wasm-lockstep
+  # workflow runs this task inside a container that has no CI variable, so Moon does not drop it
+  # there (SMA-693 spec F2). cache: false — the task writes tracked files, and a cached replay
+  # would write nothing.
   generate-wasm:
     script: |
       set -euo pipefail

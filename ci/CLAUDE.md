@@ -57,7 +57,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `rs/deny.toml` `[licenses] exceptions` or a dev-only
   `[advisories] ignore` (Rust); an npm/pip advisory needs a version bump — a pnpm-workspace
   `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`
-  waiver; a dep consumed only by a later commit needs a temporary
+  waiver (a waiver whose reason depends on "no shipped package reaches it" also needs a
+  `SHIPPED_FREE_WAIVERS` entry in `ci/osv/shipped_reachability.py`, SMA-733); a dep consumed
+  only by a later commit needs a temporary
   `[package.metadata.cargo-machete] ignored` allowlist (prune once consumed).
 - **Standing rule: A `{ workspace = true }` in-tree dep needs a hand-written `dependsOn`; a
   `path =` dep needs none. Neither `dependsOn` nor `^:build` selects a downstream — only task

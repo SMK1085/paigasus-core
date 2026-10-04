@@ -26,6 +26,22 @@
 # stable API. That is deliberate and safe in one direction only: if the line cannot be
 # found for a lockfile, this script FAILS (exit 2) asking for the parser to be updated. It
 # must never degrade to a silent pass.
+#
+# SHIPPED-PATH GUARD (SMA-733). Some waivers in osv-scanner.toml are true only while no
+# shipped package reaches the waived package. ci/osv/shipped_reachability.py walks
+# ts/pnpm-lock.yaml and keeps that true for every advisory in its SHIPPED_FREE_WAIVERS
+# table. This script runs it twice, `--self-test` first and then on the real files, and maps
+# each exit code:
+#
+#   0          pass
+#   3          the real run found a shipped path to a waived package (a finding, guard=1)
+#   any other  infrastructure error (guard=2): 1 is a traceback, 2 is a guard refusal, 127
+#              is a missing python3. A self-test that does not exit 0 is always guard=2.
+#
+# The findings block runs also when the guard failed, so a new, unrelated osv finding still
+# prints. Exit precedence: 2 if the guard is 2 (or osv-scanner itself failed, above); else 1
+# if osv found something or the guard is 1; else 0.
+# Residual: nothing reds if someone deletes the guard calls below (SMA-733 spec section 4.5).
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
@@ -37,6 +53,9 @@ LOCKFILES=(
   # SMA-513 PR 2b — repo:helm-render resolves pyyaml through its own uv project, so its lockfile
   # is a fourth pip-ecosystem manifest. moon.yml's repo:osv inputs carry the same path.
   'ci/helm-render/uv.lock'
+  # SMA-693 — repo:wasm-lockstep resolves pyyaml through its own uv project, so its lockfile is a
+  # fifth pip-ecosystem manifest. moon.yml's repo:osv inputs carry the same path.
+  'ci/wasm-lockstep/uv.lock'
 )
 
 args=(scan source --config osv-scanner.toml --format json)
@@ -85,8 +104,31 @@ for lf in "${LOCKFILES[@]}"; do
   printf 'osv gate: %-22s %6s packages scanned\n' "$lf" "$count"
 done
 
+# --- Shipped-path guard (SMA-733) ---------------------------------------------------------
+# No `-e` here, so each status is captured with `|| var=$?` and mapped explicitly. An
+# unmapped status must never read as clean (see the header).
+guard=0
+selftest_rc=0
+python3 ci/osv/shipped_reachability.py --self-test || selftest_rc=$?
+guard_rc=0
+python3 ci/osv/shipped_reachability.py --lockfile ts/pnpm-lock.yaml --config osv-scanner.toml || guard_rc=$?
+if [ "$selftest_rc" -ne 0 ]; then
+  echo "osv gate: the shipped-path guard's self-test exited $selftest_rc — the guard cannot be trusted." >&2
+  guard=2
+fi
+case "$guard_rc" in
+  0) ;;
+  3) [ "$guard" -eq 2 ] || guard=1 ;;
+  *)
+    echo "osv gate: the shipped-path guard exited $guard_rc (1=traceback, 2=refusal, 127=no python3) — infrastructure error." >&2
+    guard=2
+    ;;
+esac
+
 # --- Findings -----------------------------------------------------------------------------
+osv_found=0
 if [ "$rc" -eq 1 ]; then
+  osv_found=1
   echo "" >&2
   echo "osv gate: vulnerabilities found." >&2
   python3 - "$json_file" >&2 <<'PY'
@@ -120,7 +162,16 @@ PY
   echo "  Fix by raising the resolved version (a pnpm-workspace.yaml override for a pinned" >&2
   echo "  npm transitive, or 'uv lock --upgrade-package <name>' for pip). Waive ONLY with a" >&2
   echo "  justified [[IgnoredVulns]] entry in osv-scanner.toml." >&2
-  exit 1
 fi
 
+# --- Verdict --------------------------------------------------------------------------------
+case "$guard" in 0) guard_word='pass' ;; 1) guard_word='shipped path found' ;; *) guard_word='infrastructure error' ;; esac
+if [ "$osv_found" -eq 1 ]; then osv_word='vulnerabilities found'; else osv_word='no known vulnerabilities'; fi
+echo "osv gate: summary: osv-scanner: $osv_word; shipped-path guard: $guard_word."
+if [ "$guard" -eq 2 ]; then
+  exit 2
+fi
+if [ "$osv_found" -eq 1 ] || [ "$guard" -eq 1 ]; then
+  exit 1
+fi
 echo "osv gate: no known vulnerabilities in the npm or pip lockfiles."

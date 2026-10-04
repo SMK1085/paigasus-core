@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# A DEDICATED one-dependency project, the layout of ci/workflow-credentials/ and ci/helm-render/.
+# Only pin_check.py needs it (PyYAML). lockstep_check.py stays stdlib-only, because the propose job
+# of .github/workflows/wasm-lockstep.yml runs it with the runner's own python3. A separate project,
+# not the workflow-credentials one, so the two gates do not share a lock (SMA-693 spec 5.4).
+[project]
+name = "paigasus-wasm-lockstep"
+version = "0.0.0"
+description = "The pin check of the wasm-lockstep workflow (repo:wasm-lockstep)"
+requires-python = ">=3.12"
+dependencies = ["pyyaml>=6.0.3,<7"]
