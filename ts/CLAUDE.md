@@ -131,9 +131,12 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   bytes**: they differ on macOS, Linux arm64 and Linux amd64, while the glue and the interface do
   not. After a `git checkout`, a rebase or a branch switch that replaces those files, run `rm -rf
   ts/node_modules && pnpm -C ts install`: pnpm hard-links a `file:` dependency and does not repair a
-  broken link, not even with `--force`. Only ONE host regenerates the artifacts; a second host makes
-  different bytes and a diff that says nothing. A conflict in the five files is resolved by taking
-  either side and running `generate-wasm` again.
+  broken link, not even with `--force`. ONE host per PR regenerates the artifacts. A family bump
+  from the `wasm-lockstep` workflow (SMA-693) regenerates on Linux inside its build container; a
+  kernel or binding edit regenerates on the author's host. So the binary changes host between PRs,
+  and a second host in one PR makes different bytes and a diff that says nothing. `CI` never
+  regenerates; it only compares. A conflict in the five files is resolved by taking either side and
+  running `generate-wasm` again.
   The napi glue `rs/crates/bindings/paigasus-node-bindings/{index.js,index.d.ts}` is committed too.
   npm publishes it and `ts/Dockerfile` copies it (SMA-667). `paigasus-kernel-ts:build` and `:test`
   write only the scratch files `index.fresh.js` and `index.fresh.d.ts`.
