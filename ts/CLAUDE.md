@@ -148,7 +148,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   Run `generate-napi-glue` after a napi binding or kernel export change. Run it also after a
   `@napi-rs/cli` change in `ts/pnpm-lock.yaml`, or after a `napi` or `napi-derive` change in
   `rs/Cargo.lock`. Commit both files. Run it as its own command, not in the same `moon run` as
-  `test`.
+  `test`, `build` or `typecheck`. Each of them hashes `index.d.ts`.
 
   The `build` and `typecheck` tasks run `tsc`, and `tsc` reads the installed copy of the binding
   typings through `ts/node_modules`. A rename-write breaks the pnpm hard link of that copy. Since
