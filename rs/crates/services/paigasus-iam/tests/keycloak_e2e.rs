@@ -43,8 +43,9 @@ use p256::pkcs8::{EncodePrivateKey, LineEnding};
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::entities::user;
 use paigasus_iam::application::authenticate_token::Provisioning;
+use paigasus_iam::application::dpop::DpopRequest;
 use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, DpopConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
-use paigasus_iam_core::{AuthnError, TokenDefect};
+use paigasus_iam_core::{AuthnError, ProofDefect, TokenDefect};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use sha2::Digest;
@@ -177,7 +178,7 @@ async fn keycloak_end_to_end_config_only_oidc() {
     let (dpop_key, dpop_x, dpop_y) = dpop_keypair();
     let dpop_response = http
         .post(&token_url)
-        .header("DPoP", dpop_proof(&dpop_key, &dpop_x, &dpop_y, "POST", &token_url))
+        .header("DPoP", dpop_proof(&dpop_key, &dpop_x, &dpop_y, "POST", &token_url, None))
         .form(&[
             ("grant_type", "password"),
             ("client_id", "paigasus-cli"),
@@ -278,6 +279,24 @@ async fn keycloak_end_to_end_config_only_oidc() {
     assert_eq!(second["principal_prn"], principal_prn, "principal_prn must be stable across introspect calls");
     assert_eq!(second["issuer"], issuer);
     assert_eq!(second["subject"], subject);
+
+    // SMA-700 AC 1 with a real Keycloak token: alice is provisioned now (above). The same bound
+    // token and a NEW proof for the gateway URL pass Introspect with a DPoP context. The Bearer
+    // refusals above still hold with DPoP on (D7).
+    let proof = dpop_proof(&dpop_key, &dpop_x, &dpop_y, "POST", "https://gw.example.test/v1/chat/completions", Some(&dpop_token));
+    let request = DpopRequest {
+        proof,
+        method: "POST".to_string(),
+        path: "/v1/chat/completions".to_string(),
+    };
+    let ctx = state
+        .authn
+        .introspect_dpop(&dpop_token, request.clone())
+        .await
+        .expect("a Keycloak DPoP-bound token with a valid proof passes Introspect");
+    assert_eq!(ctx.principal.principal_id.canonical(), principal_prn, "the bound token resolves to alice");
+    let err = state.authn.introspect_dpop(&dpop_token, request).await.expect_err("the same proof twice is a replay");
+    assert!(matches!(err, AuthnError::InvalidDpopProof(ProofDefect::Replayed)), "got {err:?}");
 }
 
 /// An `IamConfig` pointed at the running Keycloak: a single issuer (audiences `paigasus` and
@@ -298,7 +317,12 @@ fn keycloak_config(issuer: &str) -> IamConfig {
             max_token_bytes: 16384,
             accept_invalid_tls: true,
             extra_ca_bundle_path: None,
-            dpop: DpopConfig::default(),
+            // SMA-700: DPoP on. The Bearer assertions below do not change (D7).
+            dpop: DpopConfig {
+                enabled: true,
+                forwarded_base_urls: vec!["https://gw.example.test".to_string()],
+                ..DpopConfig::default()
+            },
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,
@@ -355,14 +379,18 @@ fn dpop_keypair() -> (EncodingKey, String, String) {
 }
 
 /// A DPoP proof (RFC 9449 § 4.2) for one request: header `typ: dpop+jwt`, `alg: ES256` and the
-/// public `jwk`; payload `jti`, `htm`, `htu` and `iat`.
-fn dpop_proof(key: &EncodingKey, x: &str, y: &str, htm: &str, htu: &str) -> String {
+/// public `jwk`; payload `jti`, `htm`, `htu`, `iat`, and `ath` when `token` is given (a proof that
+/// a resource server checks, SMA-700). The token endpoint gets no `ath`.
+fn dpop_proof(key: &EncodingKey, x: &str, y: &str, htm: &str, htu: &str, token: Option<&str>) -> String {
     let jwk: Jwk = serde_json::from_value(json!({ "kty": "EC", "crv": "P-256", "x": x, "y": y })).expect("public EC jwk");
     let mut header = Header::new(Algorithm::ES256);
     header.typ = Some("dpop+jwt".to_string());
     header.jwk = Some(jwk);
     let jti = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
-    let claims = json!({ "jti": jti, "htm": htm, "htu": htu, "iat": chrono::Utc::now().timestamp() });
+    let mut claims = json!({ "jti": jti, "htm": htm, "htu": htu, "iat": chrono::Utc::now().timestamp() });
+    if let Some(token) = token {
+        claims["ath"] = json!(URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(token.as_bytes())));
+    }
     jsonwebtoken::encode(&header, &claims, key).expect("sign the DPoP proof")
 }
 

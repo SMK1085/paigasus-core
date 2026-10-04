@@ -19,9 +19,13 @@ use std::time::Duration;
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::AppState;
 use paigasus_iam_core::authz::model::root_prn;
+use paigasus_proto::paigasus::common::v1::ErrorReason;
 use paigasus_proto::paigasus::iam::v1::authn_service_client::AuthnServiceClient;
+use paigasus_proto::paigasus::iam::v1::authorization_service_client::AuthorizationServiceClient;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
-use paigasus_proto::paigasus::iam::v1::{AttachMembershipRequest, CreateOrganizationRequest, IntrospectRequest};
+use paigasus_proto::paigasus::iam::v1::{AttachMembershipRequest, CreateOrganizationRequest, IntrospectRequest, IsAuthorizedRequest, WhoAmIRequest};
+use sea_orm::DatabaseConnection;
+use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tonic::Code;
@@ -340,5 +344,266 @@ async fn grpc_health_serves_without_bearer_through_the_layered_router() {
     let resp = health.check(HealthCheckRequest { service: String::new() }).await.unwrap().into_inner();
     assert_eq!(resp.status, ServingStatus::Serving as i32);
 
+    server.abort();
+}
+
+// ---- SMA-700: the DPoP gateway path ------------------------------------------------------------
+
+/// IAM with DPoP on, on an ephemeral port. The `AppState` clone lets a test provision first.
+async fn dpop_server(db: DatabaseConnection) -> (SocketAddr, JoinHandle<()>, support::MockIdp, AppState) {
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config_dpop(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state.clone()).await;
+    (addr, server, idp, state)
+}
+
+/// The gateway's self-query: the caller's own principal, InvokeModel, at Root.
+fn self_query(principal_prn: &str) -> IsAuthorizedRequest {
+    IsAuthorizedRequest {
+        principal_prn: principal_prn.to_string(),
+        action: "InvokeModel".to_string(),
+        resource_prn: root_prn().canonical(),
+        context: Default::default(),
+    }
+}
+
+/// Provisions `sub` with a plain bearer (the precondition of § 2) and returns its PRN.
+async fn provisioned(state: &AppState, idp: &support::MockIdp, sub: &str) -> String {
+    support::provision(state, &idp.bearer(sub, Some(&format!("{sub}@example.com")), "paigasus", 3600)).await
+}
+
+fn bound(idp: &support::MockIdp, sub: &str, key: &support::DpopKey) -> String {
+    idp.bound_bearer(sub, Some(&format!("{sub}@example.com")), "paigasus", 3600, &key.jkt())
+}
+
+#[tokio::test]
+async fn a_dpop_gateway_sequence_passes_once_and_never_again() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, state) = dpop_server(db).await;
+    let principal_prn = provisioned(&state, &idp, "dpop-alice").await;
+    // A grant at Root, so that the accepted follow-up is also an allowed one (AC 1).
+    support::seed_platform_admin(&state, &principal_prn).await;
+    let key = support::DpopKey::generate();
+    let token = bound(&idp, "dpop-alice", &key);
+    let proof = key.proof("POST", support::CHAT_URL, &token, "jti-sequence", json!({}));
+    let ch = channel(addr).await;
+    let mut authn = AuthnServiceClient::new(ch.clone());
+    let mut authz = AuthorizationServiceClient::new(ch);
+
+    // AC 1: Introspect with the context, then the follow-up. Both pass.
+    let ctx = authn.introspect(support::dpop_introspect(&token, &proof)).await.expect("Introspect with a valid proof").into_inner();
+    assert_eq!(ctx.principal_prn, principal_prn);
+    let decision = authz
+        .is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token, &proof))
+        .await
+        .expect("the follow-up passes")
+        .into_inner();
+    assert!(decision.allowed, "AC 1: accepted and authorized: {decision:?}");
+
+    // AC 3: the same Introspect again is a replay, and the follow-up works once.
+    let replay = authn.introspect(support::dpop_introspect(&token, &proof)).await.unwrap_err();
+    assert_eq!(replay.code(), Code::Unauthenticated, "{replay:?}");
+    assert_eq!(support::reason_of(&replay), support::wire(ErrorReason::InvalidDpopProof));
+    let twice = authz.is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token, &proof)).await.unwrap_err();
+    assert_eq!(support::reason_of(&twice), support::wire(ErrorReason::InvalidDpopProof));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_follow_up_with_another_token_of_the_same_key_is_refused() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, state) = dpop_server(db).await;
+    let principal_prn = provisioned(&state, &idp, "dpop-ath").await;
+    let key = support::DpopKey::generate();
+    let token_a = idp.bound_bearer("dpop-ath", Some("dpop-ath@example.com"), "paigasus", 3600, &key.jkt());
+    let token_b = idp.bound_bearer("dpop-ath", Some("dpop-ath@example.com"), "paigasus", 3599, &key.jkt());
+    assert_ne!(token_a, token_b);
+    let proof = key.proof("POST", support::CHAT_URL, &token_a, "jti-ath", json!({}));
+    let ch = channel(addr).await;
+    AuthnServiceClient::new(ch.clone()).introspect(support::dpop_introspect(&token_a, &proof)).await.expect("Introspect");
+    let err = AuthorizationServiceClient::new(ch)
+        .is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token_b, &proof))
+        .await
+        .unwrap_err();
+    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof), "the ath of the proof names token_a");
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_follow_up_for_another_principal_is_refused() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, state) = dpop_server(db).await;
+    provisioned(&state, &idp, "dpop-self").await;
+    let other_prn = provisioned(&state, &idp, "dpop-other").await;
+    let key = support::DpopKey::generate();
+    let token = bound(&idp, "dpop-self", &key);
+    let proof = key.proof("POST", support::CHAT_URL, &token, "jti-other", json!({}));
+    let ch = channel(addr).await;
+    AuthnServiceClient::new(ch.clone()).introspect(support::dpop_introspect(&token, &proof)).await.expect("Introspect");
+    let err = AuthorizationServiceClient::new(ch)
+        .is_authorized(support::dpop_follow_up(self_query(&other_prn), &token, &proof))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof), "the follow-up answers a self-query only");
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_follow_up_on_another_rpc_is_an_invalid_token() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, state) = dpop_server(db).await;
+    provisioned(&state, &idp, "dpop-whoami").await;
+    let key = support::DpopKey::generate();
+    let token = bound(&idp, "dpop-whoami", &key);
+    let proof = key.proof("POST", support::CHAT_URL, &token, "jti-whoami", json!({}));
+    let mut authn = AuthnServiceClient::new(channel(addr).await);
+    // A live ticket exists, so the refusal is the path rule, not a missing ticket.
+    authn.introspect(support::dpop_introspect(&token, &proof)).await.expect("Introspect");
+    let err = authn.who_am_i(support::dpop_follow_up(WhoAmIRequest {}, &token, &proof)).await.unwrap_err();
+    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidToken), "the DPoP scheme is accepted on IsAuthorized only");
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_follow_up_with_no_introspect_is_refused() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, state) = dpop_server(db).await;
+    let principal_prn = provisioned(&state, &idp, "dpop-noticket").await;
+    let key = support::DpopKey::generate();
+    let token = bound(&idp, "dpop-noticket", &key);
+    let proof = key.proof("POST", support::CHAT_URL, &token, "jti-noticket", json!({}));
+    let err = AuthorizationServiceClient::new(channel(addr).await)
+        .is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token, &proof))
+        .await
+        .unwrap_err();
+    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof));
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof() {
+    // AC 4 / D18 over the wire: the proof check runs before the identity lookup.
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, _state) = dpop_server(db).await;
+    let key = support::DpopKey::generate();
+    let token = bound(&idp, "dpop-nobody", &key);
+    let mut authn = AuthnServiceClient::new(channel(addr).await);
+    let bad = key.proof("POST", "https://elsewhere.example.test/v1/chat/completions", &token, "jti-nobody-1", json!({}));
+    let err = authn.introspect(support::dpop_introspect(&token, &bad)).await.unwrap_err();
+    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof), "not identity-not-provisioned");
+    // The control: with a good proof, the same identity reaches the lookup.
+    let good = key.proof("POST", support::CHAT_URL, &token, "jti-nobody-2", json!({}));
+    let err = authn.introspect(support::dpop_introspect(&token, &good)).await.unwrap_err();
+    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::IdentityNotProvisioned));
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_proof_for_a_base_url_that_is_not_configured_is_refused() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, state) = dpop_server(db).await;
+    provisioned(&state, &idp, "dpop-htu").await;
+    let key = support::DpopKey::generate();
+    let token = bound(&idp, "dpop-htu", &key);
+    let proof = key.proof("POST", "https://gw.example.test:8443/v1/chat/completions", &token, "jti-htu", json!({}));
+    let err = AuthnServiceClient::new(channel(addr).await).introspect(support::dpop_introspect(&token, &proof)).await.unwrap_err();
+    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidDpopProof));
+    server.abort();
+}
+
+#[tokio::test]
+async fn with_dpop_off_a_dpop_context_is_an_invalid_token() {
+    // D11: the same answer as for a malformed token.
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    provisioned(&state, &idp, "dpop-off").await;
+    let (addr, server) = spawn_server(state).await;
+    let key = support::DpopKey::generate();
+    let token = bound(&idp, "dpop-off", &key);
+    let proof = key.proof("POST", support::CHAT_URL, &token, "jti-off", json!({}));
+    let err = AuthnServiceClient::new(channel(addr).await).introspect(support::dpop_introspect(&token, &proof)).await.unwrap_err();
+    assert_eq!((err.code(), support::reason_of(&err)), (Code::Unauthenticated, support::wire(ErrorReason::InvalidToken)));
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_bound_token_with_no_dpop_context_is_an_invalid_token() {
+    // D7: with DPoP on, the Bearer scheme still refuses a bound token.
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, state) = dpop_server(db).await;
+    provisioned(&state, &idp, "dpop-bearer").await;
+    let token = bound(&idp, "dpop-bearer", &support::DpopKey::generate());
+    let err = AuthnServiceClient::new(channel(addr).await).introspect(IntrospectRequest { token, dpop: None }).await.unwrap_err();
+    assert_eq!(support::reason_of(&err), support::wire(ErrorReason::InvalidToken));
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_large_token_and_a_large_proof_pass_the_transport() {
+    // § 4.8: the follow-up metadata holds a token near max_token_bytes and a proof near 8192 bytes.
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (addr, server, idp, state) = dpop_server(db).await;
+    let principal_prn = provisioned(&state, &idp, "dpop-big").await;
+    let key = support::DpopKey::generate();
+    let token = idp.bearer_with(
+        "dpop-big",
+        Some("dpop-big@example.com"),
+        "paigasus",
+        3600,
+        json!({ "typ": "DPoP", "cnf": { "jkt": key.jkt() }, "pad": "x".repeat(11_500) }),
+    );
+    assert!((15_000..=16_384).contains(&token.len()), "token is {} bytes", token.len());
+    let proof = key.proof("POST", support::CHAT_URL, &token, "jti-big", json!({ "pad": "y".repeat(5_500) }));
+    assert!((7_500..=8_192).contains(&proof.len()), "proof is {} bytes", proof.len());
+    let ch = channel(addr).await;
+    AuthnServiceClient::new(ch.clone()).introspect(support::dpop_introspect(&token, &proof)).await.expect("Introspect");
+    AuthorizationServiceClient::new(ch)
+        .is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token, &proof))
+        .await
+        .expect("the follow-up metadata fits the header list");
+    server.abort();
+}
+
+#[tokio::test]
+async fn with_dpop_off_the_dpop_scheme_on_is_authorized_is_an_invalid_token() {
+    // The follow-up path exists only with DPoP on; off, the DPoP scheme is an unknown scheme.
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let principal_prn = provisioned(&state, &idp, "dpop-off-follow").await;
+    let (addr, server) = spawn_server(state).await;
+    let key = support::DpopKey::generate();
+    let token = bound(&idp, "dpop-off-follow", &key);
+    let proof = key.proof("POST", support::CHAT_URL, &token, "jti-off-follow", json!({}));
+    let err = AuthorizationServiceClient::new(channel(addr).await)
+        .is_authorized(support::dpop_follow_up(self_query(&principal_prn), &token, &proof))
+        .await
+        .unwrap_err();
+    assert_eq!((err.code(), support::reason_of(&err)), (Code::Unauthenticated, support::wire(ErrorReason::InvalidToken)));
     server.abort();
 }
