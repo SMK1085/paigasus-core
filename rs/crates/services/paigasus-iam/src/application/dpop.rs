@@ -83,9 +83,16 @@ fn same_target(htu: &Url, expected: &Url) -> bool {
     htu.scheme() == expected.scheme() && htu.host_str() == expected.host_str() && htu.port() == expected.port() && htu.path() == expected.path()
 }
 
-/// § 4.8: the forwarded path starts with `/` and has no `?`, `#`, `\` or control character.
+/// § 4.8: the forwarded path starts with `/`, has no `?`, `#`, `\` or control character, and no
+/// segment that is `.` or `..`, also percent-encoded (`%2e`, in any case). So a forwarded path
+/// cannot leave the base prefix.
 fn path_is_well_formed(path: &str) -> bool {
-    path.starts_with('/') && !path.chars().any(|c| matches!(c, '?' | '#' | '\\') || c.is_control())
+    path.starts_with('/') && !path.chars().any(|c| matches!(c, '?' | '#' | '\\') || c.is_control()) && !path.split('/').any(is_dot_segment)
+}
+
+/// A segment that is `.` or `..` after the percent-encoded dots are decoded.
+fn is_dot_segment(segment: &str) -> bool {
+    matches!(segment.to_ascii_lowercase().replace("%2e", ".").as_str(), "." | "..")
 }
 
 /// The two replay-store events with their own log line.
@@ -240,6 +247,9 @@ impl DpopProofVerifier {
 
     /// Check 11: the proof matches when it matches one configured base.
     fn htu_matches(&self, htu: &str, path: &str) -> bool {
+        if !path_is_well_formed(path) {
+            return false;
+        }
         let Ok(htu) = Url::parse(htu) else {
             return false;
         };
@@ -481,12 +491,24 @@ mod tests {
     }
 
     #[test]
+    fn htu_matches_refuses_a_malformed_path() {
+        let (v, _) = verifier(Err(ProofDefect::Signature));
+        assert!(v.htu_matches(URL, PATH));
+        assert!(!v.htu_matches(URL, "/v1/../chat/completions"));
+        assert!(!v.htu_matches(URL, "x"));
+    }
+
+    #[test]
     fn the_forwarded_path_must_not_move_the_origin() {
         // § 5.1 forwarded path cases: each gives Malformed, before any proof check.
         let (v, _) = verifier(Err(ProofDefect::Signature));
         for path in [".evil.example/x", "@evil.example/x", ":8443/x", "x", "/v1?x=1", "/v1#f", "/v1\\x", "/v1\u{0}x", "/v1\nx", ""] {
             assert_eq!(defect(v.check_request(&request(path))), ProofDefect::Malformed, "{path:?}");
         }
+        for path in ["/../admin", "/v1/./x", "/v1/%2e%2e/x", "/v1/%2E./x", "/v1/.%2e/x", "/v1/%2e./x", "/v1/%2E/x", "/v1/..", "/v1/%2E%2E"] {
+            assert_eq!(defect(v.check_request(&request(path))), ProofDefect::Malformed, "{path:?}");
+        }
+        v.check_request(&request("/v1/a.b/..c/.d/%2e%2e%2e")).expect("dots inside a segment are not dot segments");
         v.check_request(&request(PATH)).expect("a plain path passes");
         v.check_request(&request("//evil.example/x"))
             .expect("a double slash stays on the base host; the host check after the parse holds");
