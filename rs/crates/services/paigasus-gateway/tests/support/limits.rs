@@ -211,6 +211,7 @@ pub fn app_with(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, 
         max_request_bytes: 1_048_576,
         capabilities: Capabilities { chat_stream },
         limits,
+        dpop_enabled: false,
     })
 }
 

@@ -106,6 +106,7 @@ fn unused_state() -> AppState {
         max_request_bytes: 1_048_576,
         capabilities: Capabilities { chat_stream: true },
         limits: None,
+        dpop_enabled: false,
     }
 }
 
@@ -159,6 +160,7 @@ async fn successful_proxied_request_records_iam_and_upstream_metrics() {
         max_request_bytes: 1_048_576,
         capabilities: Capabilities { chat_stream: true },
         limits: None,
+        dpop_enabled: false,
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
 
@@ -232,6 +234,7 @@ async fn an_oidc_request_records_a_denied_key_leg_and_an_ok_token_leg() {
         max_request_bytes: 1_048_576,
         capabilities: Capabilities { chat_stream: true },
         limits: None,
+        dpop_enabled: false,
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
     let req = Request::builder()

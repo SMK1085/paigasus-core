@@ -65,13 +65,23 @@ const INVOKE_MODEL_ACTION: &str = "InvokeModel";
 /// UUID in the 36-character form.
 pub const ORG_HEADER: &str = "paigasus-org";
 
+/// The auth middlewares' state (SMA-700 § 4.10): the IAM port and the DPoP switch. Independent of
+/// the handler's `AppState`, as before.
+#[derive(Clone)]
+pub struct AuthState {
+    pub iam: Arc<dyn Iam>,
+    pub dpop_enabled: bool,
+}
+
 /// Authenticate + authorize a request before it reaches the protected handler. Wired via
-/// `from_fn_with_state(app_state.iam.clone(), require_iam_auth)`; the middleware's state
-/// (`Arc<dyn Iam>`) is independent of the handler's `AppState`. On success the request carries a
+/// `from_fn_with_state(AuthState { iam, dpop_enabled }, require_iam_auth)`; the middleware's state
+/// ([`AuthState`]) is independent of the handler's `AppState`. On success the request carries a
 /// [`CallerContext`] extension; on any failure it returns the mapped [`GatewayError`].
-pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request, next: Next) -> Response {
-    // 1. Bearer — the ONLY accepted credential source (no cookies, no query params).
-    let Some(token) = bearer(req.headers()) else {
+pub async fn require_iam_auth(State(auth): State<AuthState>, mut req: Request, next: Next) -> Response {
+    let iam = auth.iam;
+    // 1. Bearer — the ONLY accepted credential source (no cookies, no query params). The DPoP
+    //    scheme is added in SMA-700 Task 13.
+    let Some(Credentials::Bearer(token)) = credentials(req.headers(), auth.dpop_enabled) else {
         return GatewayError::MissingBearer.into_response();
     };
 
@@ -247,8 +257,9 @@ fn org_header(headers: &HeaderMap) -> Result<OrgHeader<'_>, GatewayError> {
 /// reasons that share `PermissionDenied` — `provisioning-failed` and `principal-inactive` — are
 /// rejected, as is a `Status` carrying no details at all. This replaces the blanket
 /// code-only accept, which was correct only by reachability accident.
-pub async fn require_authenticated(State(iam): State<Arc<dyn Iam>>, req: Request, next: Next) -> Response {
-    let Some(token) = bearer(req.headers()) else {
+pub async fn require_authenticated(State(auth): State<AuthState>, req: Request, next: Next) -> Response {
+    let iam = auth.iam;
+    let Some(Credentials::Bearer(token)) = credentials(req.headers(), auth.dpop_enabled) else {
         return GatewayError::MissingBearer.into_response();
     };
 
@@ -395,21 +406,79 @@ fn iam_result(err: &IamError) -> &'static str {
     }
 }
 
-/// Extract a bearer credential from an `Authorization` header, independent of the iam crate.
-/// Matches IAM's own parser (`adapters/auth.rs::bearer_from_headers`): split on the first space,
-/// ASCII-case-insensitive `Bearer` scheme, trim the token, and require it non-empty. Any deviation
-/// (absent header, non-UTF-8 value, wrong scheme, empty token) yields `None`.
-fn bearer(headers: &HeaderMap) -> Option<String> {
+/// The DPoP proof request header (RFC 9449 § 4.1), in lower case as `HeaderMap` stores it.
+pub const DPOP_HEADER: &str = "dpop";
+
+/// The `DPoP` header of a DPoP request. `Debug` prints no proof.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ProofHeader {
+    One(String),
+    Missing,
+    /// Two or more `DPoP` headers, a value that is not visible ASCII, or an empty value.
+    Invalid,
+}
+
+impl std::fmt::Debug for ProofHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ProofHeader::One(_) => "One(..)",
+            ProofHeader::Missing => "Missing",
+            ProofHeader::Invalid => "Invalid",
+        })
+    }
+}
+
+/// The credential of a request. `Debug` prints no secret.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Credentials {
+    Bearer(String),
+    Dpop { token: String, proof: ProofHeader },
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credentials::Bearer(_) => f.write_str("Bearer(..)"),
+            Credentials::Dpop { proof, .. } => write!(f, "Dpop {{ token: .., proof: {proof:?} }}"),
+        }
+    }
+}
+
+/// Parse the `Authorization` header (SMA-700 § 4.10, decision P7). Matches IAM's own parser
+/// (`adapters/auth.rs`): split on the first space, an ASCII-case-insensitive scheme, the token
+/// trimmed and not empty. `Bearer` ignores a `DPoP` header. The `DPoP` scheme counts only when
+/// gateway DPoP is on; else it is `None`, as today (D11).
+pub fn credentials(headers: &HeaderMap, dpop_enabled: bool) -> Option<Credentials> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("Bearer") {
-        return None;
-    }
     let token = token.trim();
     if token.is_empty() {
         return None;
     }
-    Some(token.to_owned())
+    if scheme.eq_ignore_ascii_case("Bearer") {
+        return Some(Credentials::Bearer(token.to_owned()));
+    }
+    if dpop_enabled && scheme.eq_ignore_ascii_case("DPoP") {
+        return Some(Credentials::Dpop {
+            token: token.to_owned(),
+            proof: proof_header(headers),
+        });
+    }
+    None
+}
+
+fn proof_header(headers: &HeaderMap) -> ProofHeader {
+    let mut values = headers.get_all(DPOP_HEADER).iter();
+    let Some(first) = values.next() else {
+        return ProofHeader::Missing;
+    };
+    if values.next().is_some() {
+        return ProofHeader::Invalid;
+    }
+    match first.to_str() {
+        Ok(proof) if !proof.is_empty() => ProofHeader::One(proof.to_owned()),
+        _ => ProofHeader::Invalid,
+    }
 }
 
 /// Map an [`IamError`] from the **introspect** call (either leg: `introspect_api_key` or
@@ -638,7 +707,11 @@ mod tests {
     }
 
     fn build_app(fake: FakeIam) -> Router {
-        Router::new().route("/x", get(probe)).layer(from_fn_with_state(Arc::new(fake) as Arc<dyn Iam>, require_iam_auth))
+        let state = AuthState {
+            iam: Arc::new(fake),
+            dpop_enabled: false,
+        };
+        Router::new().route("/x", get(probe)).layer(from_fn_with_state(state, require_iam_auth))
     }
 
     fn req_no_auth() -> HttpRequest<Body> {
@@ -691,9 +764,11 @@ mod tests {
     }
 
     fn build_discovery_app(fake: FakeIam) -> Router {
-        Router::new()
-            .route("/x", get(discovery_probe))
-            .layer(from_fn_with_state(Arc::new(fake) as Arc<dyn Iam>, require_authenticated))
+        let state = AuthState {
+            iam: Arc::new(fake),
+            dpop_enabled: false,
+        };
+        Router::new().route("/x", get(discovery_probe)).layer(from_fn_with_state(state, require_authenticated))
     }
 
     async fn discovery_status_of(fake: FakeIam, req: HttpRequest<Body>) -> StatusCode {
@@ -808,6 +883,93 @@ mod tests {
         for (err, want) in cases {
             assert_eq!(iam_result(err), *want, "iam_result({err:?}) should map to {want:?}");
         }
+    }
+
+    // ---- SMA-700: the credentials parser -----------------------------------------------------
+
+    fn headers_of(authorization: Option<&str>, proofs: &[&[u8]]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = authorization {
+            headers.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+        }
+        for proof in proofs {
+            headers.append(DPOP_HEADER, HeaderValue::from_bytes(proof).unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn the_parser_reads_both_schemes_in_any_case() {
+        assert_eq!(credentials(&headers_of(Some("Bearer t"), &[]), true), Some(Credentials::Bearer("t".into())));
+        assert_eq!(credentials(&headers_of(Some("bearer t"), &[]), false), Some(Credentials::Bearer("t".into())));
+        for scheme in ["DPoP", "dpop", "DPOP"] {
+            assert_eq!(
+                credentials(&headers_of(Some(&format!("{scheme} t")), &[b"a.b.c"]), true),
+                Some(Credentials::Dpop {
+                    token: "t".into(),
+                    proof: ProofHeader::One("a.b.c".into())
+                }),
+                "{scheme}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_proof_header_is_one_visible_ascii_value() {
+        let dpop = |proofs: &[&[u8]]| credentials(&headers_of(Some("DPoP t"), proofs), true);
+        assert_eq!(
+            dpop(&[]),
+            Some(Credentials::Dpop {
+                token: "t".into(),
+                proof: ProofHeader::Missing
+            })
+        );
+        assert_eq!(
+            dpop(&[b"a.b.c", b"d.e.f"]),
+            Some(Credentials::Dpop {
+                token: "t".into(),
+                proof: ProofHeader::Invalid
+            }),
+            "two headers"
+        );
+        assert_eq!(
+            dpop(&[b"a.\xffb.c"]),
+            Some(Credentials::Dpop {
+                token: "t".into(),
+                proof: ProofHeader::Invalid
+            }),
+            "not visible ASCII"
+        );
+        assert_eq!(
+            dpop(&[b""]),
+            Some(Credentials::Dpop {
+                token: "t".into(),
+                proof: ProofHeader::Invalid
+            }),
+            "empty"
+        );
+    }
+
+    #[test]
+    fn the_bearer_scheme_ignores_a_dpop_header_and_dpop_off_ignores_the_scheme() {
+        assert_eq!(credentials(&headers_of(Some("Bearer t"), &[b"a.b.c"]), true), Some(Credentials::Bearer("t".into())));
+        assert_eq!(credentials(&headers_of(Some("DPoP t"), &[b"a.b.c"]), false), None, "D11: DPoP off is as today");
+        assert_eq!(credentials(&headers_of(Some("DPoP "), &[b"a.b.c"]), true), None, "an empty token");
+        assert_eq!(credentials(&headers_of(Some("Basic t"), &[]), true), None);
+        assert_eq!(credentials(&headers_of(None, &[b"a.b.c"]), true), None);
+    }
+
+    #[test]
+    fn credentials_debug_prints_no_secret() {
+        let printed = format!(
+            "{:?} {:?}",
+            Credentials::Bearer("tok-secret".into()),
+            Credentials::Dpop {
+                token: "tok-secret".into(),
+                proof: ProofHeader::One("proof-secret".into())
+            }
+        );
+        assert!(!printed.contains("secret"), "{printed}");
     }
 
     // ---- bearer extraction / missing-credential rows ----------------------------------------
@@ -960,7 +1122,7 @@ mod tests {
         // Capture the recorder before the fake is erased into `Arc<dyn Iam>`.
         let recorded = fake.recorded.clone();
 
-        let app = Router::new().route("/x", get(probe)).layer(from_fn_with_state(Arc::new(fake) as Arc<dyn Iam>, require_iam_auth));
+        let app = build_app(fake);
         let resp = app.oneshot(req_with_auth(&format!("Bearer {CALLER_KEY}"))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 

@@ -159,6 +159,7 @@ fn app_for(fake: FakeIam, stream_enabled: bool) -> Router {
         max_request_bytes: 1_048_576,
         capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: stream_enabled },
         limits: None,
+        dpop_enabled: false,
     };
     router(state)
 }
