@@ -337,8 +337,7 @@ run_suite() {
   # SMA-635: gateway-console-ts keys on the gateway's sources and upstreams (its playground project
   # runs the real binary), so it is a legitimate PROJECT-level dependent here too. MEASURED with the
   # no-flag `moon query tasks --affected` traversal: a throwaway kernel edit selects exactly one
-  # gateway-console-ts task, test-e2e. Re-measured by SMA-536 with `typecheck` in the name filter:
-  # no `typecheck` is selected, because no ts `tsc` task keys on the Rust kernel's sources.
+  # gateway-console-ts task, test-e2e (before SMA-536 added `typecheck` to the name filter).
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
     "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs,paigasus-iam-core-rs,paigasus-iam-rs,paigasus-observability-rs,gateway-console-ts"
   # py binding edit -> the binding + the py wrapper that depends on it (SMA-419). One-directional
