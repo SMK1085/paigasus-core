@@ -157,8 +157,9 @@ test('J1: a cold visit logs in through the IdP, and logout ends the session in b
   });
 
   const idpCookies = await test.step('control: the IdP session answers prompt=none with a code', async () => {
-    // SMA-682 AC 1. On the old realm (offline_access as a default client scope), this step fails
-    // at the cookie check or at the code check (SMA-682 spec § 6.2, bite 2 records which).
+    // SMA-682 AC 1. On the old scope setup (offline_access as a default client scope), Keycloak
+    // keeps both cookies, and this step fails at the code check with login_required (SMA-682 spec
+    // § 13.1, bite 2).
     const cookies = (await context.cookies(`https://${IDP_HOST}/realms/paigasus/`)).filter((cookie) => KEYCLOAK_COOKIES.some((name) => name === cookie.name));
     const names = cookies.map((cookie) => cookie.name);
     for (const name of KEYCLOAK_COOKIES) expect(names, `Keycloak keeps ${name} after the console login (SMA-682)`).toContain(name);

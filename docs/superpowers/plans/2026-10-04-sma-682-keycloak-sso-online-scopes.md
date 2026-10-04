@@ -1430,6 +1430,11 @@ On a scratch state, restore only the realm and the values to `origin/main`:
 git checkout origin/main -- ci/kind/realm/paigasus-realm.json ci/kind/values/a.yaml
 ```
 
+**Correction (2026-10-04, spec § 13.1):** this mutation is wrong. The `origin/main` realm does not
+register the probe redirect URI, so Keycloak answers the probe with HTTP 400 and step 4 fails
+before it tests SSO. After the checkout, add `https://console.paigasus.test/kind-sso-probe` back to
+the client's `redirectUris`. Keep `offline_access` in `defaultClientScopes`.
+
 This is safe on the feature branch only because Task 2 committed both files. Run J1 on a NEW cluster (local: `down`, then the five commands of Step 1; CI: commit on `feature/sma-682-keycloak-sso-bite-2-scratch`, push with Sven's OK, dispatch).
 
 Expected: J1 fails in step 4, at the cookie check (`Keycloak keeps KEYCLOAK_IDENTITY after the console login (SMA-682)`) or at the `code` check. Record which one. This is the red-first run of the defect. Then restore the two files to the branch head:

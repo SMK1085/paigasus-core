@@ -549,7 +549,7 @@ The revoke is RFC 7009 with no `token_type_hint`, as `bestEffortRevoke` sends it
 | M8 | Two jars, revoke jar 1, M2 in jar 2 (and jar 1) | revoke status 200; jar 2: status 302, code=yes, no error; jar 1: status 302, code=no, error=`login_required` | R6 |
 | M9 | Unchanged realm, offline token, scope moved by the admin API, refresh | admin statuses 204 (remove default) and 204 (add optional); refresh status 200, no error, typ `Offline` | § 3.6 (informative, Q1) |
 | M10 | Second client first, console with `offline_access` second, then M2 for the second client | second client typ `Refresh` (200); console typ `Offline` (200); then status 302, code=yes, no error | R2, approach B |
-| M11 | Probe URI on the kind stack | recorded from the PR's `chart` run, see below | D6 |
+| M11 | Probe URI on the kind stack | before logout: IdP `auth` 302, then `/kind-sso-probe` 404, code; after logout: the same chain, `error=login_required` (`chart` run 37184096092, see below) | D6 |
 
 Branch of § 3.3.1: B: M6 returned `login_required`. M7 is not a cross-check in branch B. It had no
 live session, and Keycloak answered 302. That is consistent with the revoke having ended the SSO
@@ -558,4 +558,29 @@ with no hint. SMA-681 rows M-b and M-c measured that on 26.4.7 only.
 
 M11 is covered by the `chart` workflow (`kind` job) on the pull request, not locally. J1 writes one
 `prompt=none probe` annotation per probe, and `journeys-report.mjs` prints each annotation in the
-job log of the step "Specs, journeys" on a green run. Plan Task 5 copies the two lines here.
+job log of the step "Specs, journeys" on a green run. The PR's `chart` run 37184096092 (head
+`a2054c52`) passed: `ok [journeys report]: 2 tests passed, 0 skipped, 0 flaky, every step ran`. Its
+two probe lines:
+
+- `idp.paigasus.test/realms/paigasus/protocol/openid-connect/auth 302 -> console.paigasus.test/kind-sso-probe 404 (code)`
+- `idp.paigasus.test/realms/paigasus/protocol/openid-connect/auth 302 -> console.paigasus.test/kind-sso-probe 404 (error=login_required)`
+
+The `post-logout documents` line starts with
+`/realms/paigasus/protocol/openid-connect/logout (no confirmation page, SMA-682 D8)`.
+
+### 13.1 Bite runs (§ 6.2)
+
+`kind` is not installed on the development Mac, so each bite ran in CI, on a scratch branch with
+the `chart` workflow, with Sven's OK (2026-10-04). The mutation was committed only on the scratch
+branch.
+
+| Bite | Where it ran | Result |
+|---|---|---|
+| Step 7 (assertion copied to step 4) | `feature/sma-682-keycloak-sso-bite-1-scratch`, run 37186331854 | J1 failed in step 4 with `BITE 1: step 7 assertion copied into step 4`: expected `login_required`, received `null` (the Location held a code) |
+| Step 4 (old realm, no `oidc.scopes`), first attempt | `feature/sma-682-keycloak-sso-bite-2-scratch`, run 37186340565 | Not a proof. The plan restored the whole old realm, which does not register the probe redirect URI. The step 4 cookie check passed (as M5 predicts). `silentAuthorize` then failed: Keycloak answered the probe with HTTP 400, not a redirect |
+| Step 4 (old scopes, probe URI kept), corrected | the same branch, run 37187163152 | J1 failed in step 4 at the code check: `prompt=none with a live IdP session: no error`, received `login_required`. This is the red-first run of the defect |
+| D8 (no hint, hint assertions off) | not run: branch B | M6 returned `login_required`, so the D8 mutation cannot bite (§ 3.3.1) |
+
+So on the old scope setup, step 4 fails at the code check, not at the cookie check. Keycloak keeps
+both cookies in the browser after the code exchange and answers `prompt=none` with
+`login_required`.
