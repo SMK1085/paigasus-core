@@ -18,8 +18,9 @@ not (SMA-685). So five classes of site are owned by nobody:
 - the `paigasus-py-bindings==X.Y.Z` pin in the Python wrapper — `[tool.uv.sources]` is
   development-only metadata that uv strips from the built wheel
 - `rs/Cargo.lock` and `py/uv.lock`
-- `rs/crates/bindings/paigasus-node-bindings/index.js`, whose 26 committed
-  `bindingPackageVersion !== '<v>'` guards napi regenerates from `package.json`
+- `rs/crates/bindings/paigasus-node-bindings/index.js`, whose 27 committed guards (26 native,
+  1 WASI) each carry the version twice: `bindingPackageVersion !== '<v>'` and
+  `expected <v> but got`
 
 `py/packages/paigasus-kernel/moon.yml` runs bare `uv sync` (not `--locked`), and
 `ci.yml`'s codegen-drift gate covers only the three `**/generated` proto dirs — so the
@@ -44,12 +45,40 @@ passing state — the proto family activates in SMA-577.
 
 | Mode | Behaviour |
 |---|---|
-| `--check` (default) | Compare all 20 sites. Exit 1 on any drift. |
-| `--write` | Rewrite the nine sites release-plz cannot reach (the six non-Cargo sites and the three `publish = false` binding manifests) and regenerate the three derived files (five `SITES` rows: 16-20). |
+| `--check` (default) | Compare all 20 sites, and assert static uv metadata (SMA-684). Exit 1 on any drift or violation. |
+| `--write` | Rewrite the ten sites release-plz cannot reach (the six non-Cargo sites, the three `publish = false` binding manifests, and the version literals of the napi glue `index.js`) and regenerate the two lock files (four `SITES` rows: 16, 17, 19 and 20). It compiles nothing, and it exits 2 when a path outside the SITES paths changed (SMA-684). |
 | `--negative-control` | Prove the checker can still report red. |
-| `--self-test` | Fixture tables for the verdict function, the lock readers and the cargo-package writer, plus `stamp_sites` on a staged copy of the real tree. |
+| `--self-test` | Fixture tables for the verdict function, the lock readers, the cargo-package writer, the napi-glue writer and the static uv metadata check, plus `stamp_sites` on a staged copy of the real tree. |
 
 Exit codes: `0` pass, `1` the repo is wrong, `2` infrastructure failed.
+
+## The static uv metadata check (SMA-684)
+
+`--write` runs `uv lock` in the release-PR job, where every step can read the App private key.
+`uv lock` runs no build backend only while uv can read every local package's metadata without a
+build (spec F7). `--check` therefore asserts that no uv workspace member, and no
+`[tool.uv.sources]` path source, lists `version`, `dependencies` or `optional-dependencies` in
+`[project].dynamic`. A package with no `[project]` table, and a path source that is not a
+directory, are violations too. A violation exits 1 and names the file and the field. The check
+reads the members from `py/pyproject.toml`'s members glob, not from `SITES`, so it covers
+`paigasus-ml` and `paigasus-workflows`. `stage_pristine_tree` stages the same files
+(`uv_static_metadata_check --list`), so the negative control and `stamp_sites_self_test` run the
+check on a complete tree. `run_write` runs the same check again directly before `uv lock`, with
+the same status routing (1 exits 1, any other failure exits 2), because a path source outside
+`py/packages/*` is not an input of `repo:version-lockstep`. This check covers local packages
+only: a future sdist-only third-party package in `py/uv.lock` would make `uv lock` build it, and
+today only the F7 measurement covers that.
+
+## The changed-path check (SMA-684)
+
+`run_write` records the dirty and untracked paths before it starts (`dirty_paths`, which reads
+`git status --porcelain=v1 -z --untracked-files=all`). After it finishes, every path that is new
+in that list must be a `SITES` path; `rs/Cargo.lock` and `py/uv.lock` are `SITES` paths.
+Otherwise it exits 2 and names the paths. The release-PR stamp step runs `git add -A`, so this
+check and the CI clean-tree rule together are the boundary of what that job commits. When `CI` is
+set, `run_write` exits 2 before it writes if the work tree is already dirty, and it names the paths.
+Locally, a path that was already dirty before `--write` is not new, so it is not reported. `stamp_sites_self_test` drives the
+check on a scratch git repository and pins its two call sites in `run_write`.
 
 ## How it runs in CI
 
@@ -71,12 +100,13 @@ wiring:
   because `bash ci/version-lockstep/run.sh` is a strict PREFIX of both the `--self-test` line
   and the `--negative-control` line: a substring test would read the script as wired after the
   real run had been deleted.
-- `SELF_TASK_EXPECTED_GLOBS` pins the task's sixteen `inputs:` entries. Drop one and the gate
-  stops re-keying on that version site — it then reports PASS from Moon's cache over a file it
-  never read. All sixteen are literal paths, so moon resolves them into `inputFiles` rather than
-  `inputGlobs`; that constant compares the whole authored set across both buckets (SMA-576).
-- `repo:input-liveness` asserts each of those sixteen still names a TRACKED file, so moving one
-  reds CI instead of silently switching part of this gate off.
+- `SELF_TASK_EXPECTED_GLOBS` pins the task's eighteen `inputs:` entries. Drop one and the gate
+  stops re-keying on that file — it then reports PASS from Moon's cache over a file it never
+  read. Seventeen are literal paths, which moon resolves into `inputFiles`; one,
+  `py/packages/*/pyproject.toml` (SMA-684), is a glob, which moon resolves into `inputGlobs`.
+  That constant compares the whole authored set across both buckets (SMA-576).
+- `repo:input-liveness` asserts each of those eighteen still matches a TRACKED file, so moving
+  one reds CI instead of silently switching part of this gate off.
 
 ## The negative control
 
@@ -112,10 +142,20 @@ the negative control for any of those five kinds (since the control never touche
 reader's file).
 
 **L2 — Fixture-table coverage now spans six of the eight `read_version` kinds, plus the
-cargo-package writer and the production stamping call site.**
-`--self-test` (`SELF_TEST_COUNT=4`) runs four tables: `site_verdict_self_test` (OK/MISMATCH
-logic), `lock_reader_self_test`, `cargo_package_writer_self_test` (SMA-685), and
-`stamp_sites_self_test` (SMA-685).
+cargo-package and napi-glue writers and the production stamping call site.**
+`--self-test` (`SELF_TEST_COUNT=6`) runs six tables: `site_verdict_self_test` (OK/MISMATCH
+logic), `lock_reader_self_test`, `cargo_package_writer_self_test` (SMA-685),
+`stamp_sites_self_test` (SMA-685), `napi_glue_writer_self_test` (SMA-684), and
+`uv_static_metadata_self_test` (SMA-684).
+
+`napi_glue_writer_self_test` drives `write_site napi-glue` against generated glue: a normal bump,
+a length-changing bump (`0.9.9` to `0.10.0`), an already-current file, a new version string that
+already occurs outside the guards, a decoy old version string (E6), the WASI guard alone, an
+in-place write (the inode stays), and the refusals E1, E2, E3, L (also across a length change)
+and a non-plain target. It drives E4 (both the G1 and the G2 half) and E5 through
+`napi_glue_py verify`, because a correct writer cannot trip them. It also pins the `napi-glue)`
+arm in `write_site`, the kind in the `stamp_sites` filter, and the `verify()` call in the write
+mode of `napi_glue_py`.
 
 `lock_reader_self_test`, added in SMA-577 to close this limitation for the lock kinds
 specifically: before it, neither lock arm had ever been exercised in isolation, so dropping
@@ -144,11 +184,12 @@ head's version would still pass this table. The site's real value and the head s
 the same value, by construction. This table proves `stamp_sites` writes the right sites. It
 does not prove `read_version` reads them correctly, on its own.
 
-The remaining two kinds (`cargo-wsdep` and `napi-glue`) still have no fixture of their own, so
-a broken parser inside one of them — the wrong TOML key, an off-by-one on the `[[package]]`
-block split, a regex that matches the wrong table — is caught only if it happens to manifest on
-the real repo's current files or on the one non-lock site (`packagejson`) the negative control
-drifts. The `cargo-package` kind's READ side is also proven only on the real tree's own file
+`cargo-wsdep` still has no fixture of its own, so a broken parser inside it — the wrong TOML key,
+a regex that matches the wrong table — is caught only if it happens to manifest on the real
+repo's current files. `napi-glue` has a WRITE fixture since SMA-684
+(`napi_glue_writer_self_test`), and `stamp_sites_self_test` writes the real `index.js`, reads it
+back and counts both literal forms, but the READ arm has no synthetic fixture. The
+`cargo-package` kind's READ side is also proven only on the real tree's own file
 shapes, not on the varied layouts the write-side fixtures cover.
 
 **L3 — The non-vacuity anchors are literals, not derived.** Both the `checked == ${#SITES[@]}`
@@ -169,9 +210,12 @@ cannot silently drift apart from each other.
   `package.json` files, that reports `wrote N site(s)` and rewrites unrelated Prettier-style
   formatting even when the version was already correct, which breaks the "already in
   lockstep" no-op case and pollutes the release-PR diff.
-- `@napi-rs/cli` is a devDependency of `@paigasus/kernel` (`ts/packages/paigasus-kernel`),
-  not of the ts workspace root — a `file:`-linked consumer's own devDeps aren't installed at
-  the root `node_modules`. A bare `pnpm exec napi …` from `ts/` finds no `napi` binary and
-  pnpm treats it as a recursive exec across every workspace package, failing on the first
-  one that lacks it. `run_write` scopes the call with `pnpm --filter @paigasus/kernel exec`
-  instead.
+- The `napi-glue` writer (SMA-684) edits the version literals of `index.js` as text. It
+  replaced `napi build`, which compiled the binding crate and its whole build graph in the
+  release-PR job, where every step can read the App private key. It checks the file in memory
+  before it writes (spec §5.1: V, E1, E2, E6, E3, L, E4, E5) and writes in place, never by
+  rename, because a rename breaks the pnpm hard link (`ts/CLAUDE.md`). A guard format change in
+  a new `@napi-rs/cli` exits 2. `stamp_sites_self_test` runs the writer on the real `index.js`,
+  and `index.js` is an input of this task, so a napi bump PR that regenerates the glue reds here
+  before a release. `run_write` runs no `pnpm`, `npx`, `napi` or `node` command;
+  `napi_glue_writer_self_test` pins that.
