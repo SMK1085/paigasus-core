@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fixture config for ci/osv/shipped_reachability.py --self-test (SMA-733). Every fixture
+# without a `# config:` line uses this file.
+[[IgnoredVulns]]
+id = "GHSA-vfj7-8cjw-p6xm"
+ignoreUntil = 2027-01-02
+reason = "Fixture only."
