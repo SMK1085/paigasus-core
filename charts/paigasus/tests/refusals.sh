@@ -342,6 +342,10 @@ expect_fail "dpop URL IPv4 octet above 255" "forwardedBaseUrls[0] is \"https://9
   --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://999.1.1.1"
 expect_fail "dpop URL host with a numeric last label" "forwardedBaseUrls[0] is \"https://gw.1\": its host ends in a number" \
   --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.1"
+expect_fail "dpop URL host with a hex last label" "forwardedBaseUrls[0] is \"https://gw.0x1\": its host ends in a number" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.0x1"
+expect_fail "dpop URL host with an empty hex last label" "forwardedBaseUrls[0] is \"https://gw.0X\": its host ends in a number" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.0X"
 expect_fail "dpop URL host with a forbidden code point" "forwardedBaseUrls[0] is \"https://a<b.example\"" \
   --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://a<b.example"
 expect_fail "dpop URL with a dollar sign" "forwardedBaseUrls[0] is \"https://gw.example.test/\$(X)\": use printable ASCII only" \

@@ -257,7 +257,7 @@ so the chart is stricter, never looser. A nil value counts as absent.
 {{- if contains "xn--" $host -}}
 {{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: its host has an IDNA label (xn--). Use a host that IAM can parse for certain" $i $u) -}}
 {{- end -}}
-{{- if regexMatch `^[0-9]+$` (last (splitList "." $host)) -}}
+{{- if regexMatch `^([0-9]+|0[xX][0-9A-Fa-f]*)$` (last (splitList "." $host)) -}}
 {{- if not (regexMatch `^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$` $host) -}}
 {{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: its host ends in a number but is not a dotted IPv4 address, and IAM reads such a host as an IPv4 address and refuses it. IAM does not boot" $i $u) -}}
 {{- end -}}
