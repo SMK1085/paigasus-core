@@ -23,7 +23,10 @@ dependsOn:
   - 'paigasus-proto-ts'
 
 tasks:
+  # SMA-536: both `tsc` tasks run the installed-typings preflight first. Their package closure holds
+  # both `file:` bindings, through @paigasus/kernel.
   build:
+    script: 'node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['contracts:generate']
     inputs: &upstreams
       - '/ts/packages/paigasus-auth/src/**/*'
@@ -50,7 +53,16 @@ tasks:
       # testing/ is a published subpath, not test-only scaffolding: both apps import it. It is
       # outside src/, so @group(sources) does not cover it.
       - 'testing/**/*'
+      # SMA-536. The preflight, and the napi binding's typings and manifest. The napi lines are an
+      # OVER-APPROXIMATION: this package reaches @paigasus/node-bindings only through the kernel's
+      # package.json and imports only the wasm `.` entry. A12 in
+      # ci/affected-graph/cargo_moon_parity.py demands the whole closure, as A7 accepts the .pyi
+      # case (spec section 3.4).
+      - '/rs/crates/bindings/paigasus-node-bindings/index.d.ts'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'
+      - '/ts/scripts/check-installed-bindings.mjs'
   typecheck:
+    script: 'node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['contracts:generate']
     inputs: *upstreams
   test:

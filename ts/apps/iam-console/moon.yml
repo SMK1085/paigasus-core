@@ -210,6 +210,10 @@ tasks:
     #
     # tsc resolves @paigasus/proto's generated tree through the source `exports` of @paigasus/sdk
     # and @paigasus/discovery, so this task needs the generator ordering too.
+    #
+    # SMA-536: the installed-typings preflight runs first, because this package closure holds both
+    # `file:` bindings through @paigasus/console-core and @paigasus/kernel.
+    script: 'node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['contracts:generate']
     inputs:
       - 'app/**/*'
@@ -265,6 +269,12 @@ tasks:
       - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
       - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
       - '/rs/crates/bindings/paigasus-wasm/package.json'
+      # SMA-536. The preflight, and the napi binding's typings and manifest: an accepted
+      # OVER-APPROXIMATION, because this app reaches the napi binding only through the kernel's
+      # package.json (spec section 3.4). A12 in ci/affected-graph/cargo_moon_parity.py asserts these lines.
+      - '/rs/crates/bindings/paigasus-node-bindings/index.d.ts'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'
+      - '/ts/scripts/check-installed-bindings.mjs'
 
   test:
     # Two jobs in one task. SMA-502's vitest suite boots the BUILT standalone server, and
