@@ -401,8 +401,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   cited "run.sh:404". Both statements were wrong; SMA-638 corrected them.
   Each value there is the gate's WHOLE authored input set, globs first then literal files,
   because moon resolves a wildcard entry into `inputGlobs` and a literal path into
-  `inputFiles`: `repo:version-lockstep` (SMA-576) declares sixteen literal paths and no glob
-  at all, so the glob-only comparison this replaced would have read every one of them as
+  `inputFiles`: `repo:version-lockstep` (SMA-576) declared sixteen literal paths and no glob
+  at all (SMA-684 later added one glob and one more path), so the glob-only comparison this replaced would have read every one of them as
   absent — and, being `got != expected or files`, was unsatisfiable for a file-only gate.
 
   SMA-572 added four more script-pinned gates to this pairing. Three carry exact

@@ -24,7 +24,8 @@ tasks:
   # inside `rs/` so it picks up the apple-darwin `-undefined dynamic_lookup` link flags from
   # rs/.cargo/config.toml (spike S1); the .node lands in the crate dir, not here. The glue goes to
   # the scratch files index.fresh.js and index.fresh.d.ts beside it (SMA-667): the committed
-  # index.js and index.d.ts have two writers only, generate-napi-glue and version-lockstep --write.
+  # index.js and index.d.ts have two writers only. generate-napi-glue writes both files.
+  # version-lockstep --write writes only the version literals of index.js, as text (SMA-684).
   # `--no-dts-cache` gives each run its own type-def folder. Without it, `build` and `test` share
   # one folder, and napi-derive rewrites its files there during each compile. A run that reads
   # the folder at that time can read a partial file.
@@ -299,8 +300,8 @@ tasks:
 
   # SMA-667. The sanctioned local writer of the two committed napi glue files
   # (rs/crates/bindings/paigasus-node-bindings/index.js and index.d.ts). `version-lockstep --write`
-  # is the only other writer. In a release it runs a full `napi build --platform` in place. That
-  # build stamps the version guards and rewrites both files by rename.
+  # is the only other writer, and of index.js only. In a release it edits the version literals of
+  # the guards as text, in place (SMA-684). It runs no `napi build` and does not write index.d.ts.
   #
   # Run it after a Rust change to the napi binding or the kernel. Run it also after a `@napi-rs/cli`
   # change in ts/pnpm-lock.yaml, or after a `napi` or `napi-derive` change in rs/Cargo.lock. The
