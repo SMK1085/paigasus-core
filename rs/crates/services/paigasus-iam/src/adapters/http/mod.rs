@@ -45,7 +45,7 @@ mod users;
 
 use async_trait::async_trait;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use paigasus_iam_core::{Authenticator, AuthnError, Authorizer, Issuer, ValidatedClaims};
+use paigasus_iam_core::{Authenticator, AuthnError, Authorizer, Issuer, TokenScheme, ValidatedClaims};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -148,10 +148,10 @@ pub enum WiredAuthenticator {
 
 #[async_trait]
 impl Authenticator for WiredAuthenticator {
-    async fn authenticate(&self, token: &str) -> Result<ValidatedClaims, AuthnError> {
+    async fn authenticate(&self, token: &str, scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError> {
         match self {
-            WiredAuthenticator::Memory(inner) => inner.authenticate(token).await,
-            WiredAuthenticator::Redis(inner) => inner.authenticate(token).await,
+            WiredAuthenticator::Memory(inner) => inner.authenticate(token, scheme).await,
+            WiredAuthenticator::Redis(inner) => inner.authenticate(token, scheme).await,
         }
     }
 }

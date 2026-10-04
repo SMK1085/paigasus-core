@@ -7,7 +7,7 @@
 
 use paigasus_iam_core::{
     Authenticator, AuthnError, AuthnPrincipal, AuthzError, Clock, ConflictKind, Credential, Email, ExternalIdentity, ExternalIdentityRepository, IdGenerator, Issuer, MembershipRepository, Principal,
-    PrincipalContext, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, ProvisioningDefect, RepositoryError, RoleGrantRef, RoleGrantStore, User, ValidatedClaims,
+    PrincipalContext, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, ProvisioningDefect, RepositoryError, RoleGrantRef, RoleGrantStore, TokenScheme, User, ValidatedClaims,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -186,7 +186,7 @@ where
     /// an issuer with JIT disabled never provisions even under `Enabled`. That refusal writes one
     /// rate-limited `info` line through `jit_disabled` (SMA-707); the `Disabled` refusal writes none.
     pub async fn resolve(&self, token: &str, provisioning: Provisioning) -> Result<AuthnPrincipal, AuthnError> {
-        let claims = self.authenticator.authenticate(token).await?;
+        let claims = self.authenticator.authenticate(token, TokenScheme::Bearer).await?;
 
         let principal_id = match self.identities.find_by_issuer_subject(&claims.issuer, &claims.subject).await.map_err(backend)? {
             Some(identity) => identity.principal_id,
@@ -404,6 +404,7 @@ mod tests {
             name: name.map(str::to_string),
             locale: locale.map(str::to_string),
             zoneinfo: zoneinfo.map(str::to_string),
+            key_binding: None,
         }
     }
 
@@ -601,7 +602,7 @@ mod tests {
 
     #[async_trait]
     impl Authenticator for FakeAuthenticator {
-        async fn authenticate(&self, _token: &str) -> Result<ValidatedClaims, AuthnError> {
+        async fn authenticate(&self, _token: &str, _scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError> {
             self.result.lock().unwrap().take().expect("FakeAuthenticator.authenticate called more than once")
         }
     }
@@ -619,7 +620,7 @@ mod tests {
 
     #[async_trait]
     impl Authenticator for QueueAuthenticator {
-        async fn authenticate(&self, _token: &str) -> Result<ValidatedClaims, AuthnError> {
+        async fn authenticate(&self, _token: &str, _scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError> {
             Ok(self.0.lock().unwrap().pop_front().expect("QueueAuthenticator ran out of claims"))
         }
     }
@@ -645,7 +646,7 @@ mod tests {
 
     #[async_trait]
     impl Authenticator for PanicIfCalledAuthenticator {
-        async fn authenticate(&self, _token: &str) -> Result<ValidatedClaims, AuthnError> {
+        async fn authenticate(&self, _token: &str, _scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError> {
             panic!("Authenticator must not be called by context_for — it takes an already-resolved principal")
         }
     }

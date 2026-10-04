@@ -19,7 +19,7 @@ pub mod value;
 
 pub use api_key::{ApiKey, ApiKeyDefect, ApiKeyId, ApiKeyStatus, NewApiKey, ParsedToken, display_prefix, format_token, parse_token};
 pub use audit::{AuditEntry, AuditFilter, AuditOutcome};
-pub use authn::{AuthnError, AuthnPrincipal, Credential, ExternalIdentity, Issuer, PrincipalContext, ProvisioningDefect, TokenDefect, ValidatedClaims};
+pub use authn::{AuthnError, AuthnPrincipal, Credential, ExternalIdentity, Issuer, Jkt, MAX_PROOF_BYTES, PrincipalContext, ProofDefect, ProvisioningDefect, TokenDefect, TokenScheme, ValidatedClaims};
 pub use authz::retirement::{GrantRef, RetireOutcome, StoredPolicy, StoredRole, SurvivingGrants, SystemRowRetirer};
 pub use authz::{
     AccessRequest, Action, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader, GrantScope, PolicyDocument, PolicyStore, PutOutcome, RequestContext, Role, RoleGrant,
@@ -28,9 +28,10 @@ pub use authz::{
 pub use dead_letter::{BulkReplayRequest, DeadLetterEntry, DeadLetterFilter, DeadLetters};
 pub use domain_event::{DomainEvent, EventType};
 pub use ports::{
-    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, EmailChange, EntityGenBumper, EventPublisher, ExternalIdentityRepository, IdGenerator, IdentityLinkStore, KeyEntropy,
-    MembershipAxis, MembershipKindQuery, MembershipRecord, MembershipRepository, Mutated, NodeView, OrganizationRepository, Outbox, PolicyGenBumper, PreconditionKind, PrincipalRepository,
-    ProjectRepository, PublishError, RepositoryError, Savepoint, SecretHasher, ServiceAccountRepository, TeamRepository, Transaction, UnitOfWork, UserWithIdentities,
+    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, DpopProofChecker, EmailChange, EntityGenBumper, EventPublisher, ExternalIdentityRepository, FollowUpClaims, IdGenerator,
+    IdentityLinkStore, KeyEntropy, MembershipAxis, MembershipKindQuery, MembershipRecord, MembershipRepository, Mutated, NewProof, NodeView, OrganizationRepository, Outbox, PolicyGenBumper,
+    PreconditionKind, PrincipalRepository, ProjectRepository, ProofClaims, ProofKey, PublishError, RecordOutcome, RedeemOutcome, ReplayStore, RepositoryError, Savepoint, SecretHasher,
+    ServiceAccountRepository, TeamRepository, Transaction, UnitOfWork, UserWithIdentities,
 };
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
 pub use service_account::{ServiceAccount, ServiceAccountRecord};
