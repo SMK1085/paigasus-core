@@ -91,7 +91,7 @@ async fn introspect_over_grpc_round_trips_a_jit_provisioned_principal() {
     // Introspect over gRPC WITHOUT auth metadata: proves the `Introspect` exemption. A
     // resolved context here is only possible because the write above already JIT-provisioned
     // this identity — introspect itself never provisions (D10).
-    let ctx = authn.introspect(IntrospectRequest { token: token.clone() }).await.unwrap().into_inner();
+    let ctx = authn.introspect(IntrospectRequest { token: token.clone(), dpop: None }).await.unwrap().into_inner();
     assert!(ctx.principal_prn.starts_with("prn:pgs:iam:::principal/"), "{}", ctx.principal_prn);
     assert_eq!(ctx.status, "active");
     assert_eq!(ctx.issuer, idp.issuer);
@@ -123,7 +123,7 @@ async fn introspect_over_grpc_round_trips_a_jit_provisioned_principal() {
         ))
         .await
         .unwrap();
-    let ctx = authn.introspect(IntrospectRequest { token }).await.unwrap().into_inner();
+    let ctx = authn.introspect(IntrospectRequest { token, dpop: None }).await.unwrap().into_inner();
     assert_eq!(ctx.memberships.len(), 1);
     assert_eq!(ctx.memberships[0].principal_prn, principal_prn);
     assert_eq!(ctx.memberships[0].node_prn, org.prn);

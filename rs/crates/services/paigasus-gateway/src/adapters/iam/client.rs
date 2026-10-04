@@ -122,7 +122,11 @@ impl Iam for IamClient {
         // makes the RPC), which is G7's integration-test territory, not a unit test here.
         // Covered by construction: it is the same one-line `with_correlation(Request::new(..))`
         // shape as the other two sites, which unit tests DO cover directly.
-        let resp = self.authn.clone().introspect(with_correlation(Request::new(IntrospectRequest { token: token.to_owned() }))).await?;
+        let resp = self
+            .authn
+            .clone()
+            .introspect(with_correlation(Request::new(IntrospectRequest { token: token.to_owned(), dpop: None })))
+            .await?;
         Ok(resp.into_inner())
     }
 }

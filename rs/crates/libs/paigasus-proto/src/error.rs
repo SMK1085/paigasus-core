@@ -203,6 +203,8 @@ mod tests {
         "invalid-subject",
         "cannot-unlink-own-identity",
         "external-identity-exists",
+        // IAM: DPoP (SMA-700)
+        "dpop-quota-exceeded",
         // Gateway
         "missing-authorization",
         "invalid-api-key",
@@ -228,6 +230,7 @@ mod tests {
         "invalid-request-schema",
         "invalid-query-parameter",
         "invalid-path-segment",
+        "invalid-dpop-proof",
     ];
 
     #[test]
@@ -239,7 +242,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 67, "the registry should hold 67 reasons");
+        assert_eq!(actual.len(), 69, "the registry should hold 69 reasons");
     }
 
     #[test]
@@ -398,5 +401,19 @@ mod tests {
             assert_eq!(variant.as_wire_reason().as_deref(), Some(wire));
             assert_eq!(ErrorReason::from_wire_reason(wire), Some(variant));
         }
+    }
+
+    /// SMA-700: the two DPoP reasons, by wire string AND by number. The number is the
+    /// SMA-498 D3 range rule: `invalid-dpop-proof` is emitted by IAM and by the gateway, so it is
+    /// in the shared range (D19); `dpop-quota-exceeded` is IAM-only. The registry is append-only,
+    /// so a wrong number is permanent.
+    #[test]
+    fn the_dpop_reasons_resolve_both_ways_in_their_ranges() {
+        assert_eq!(ErrorReason::InvalidDpopProof.as_wire_reason().as_deref(), Some("invalid-dpop-proof"));
+        assert_eq!(ErrorReason::from_wire_reason("invalid-dpop-proof"), Some(ErrorReason::InvalidDpopProof));
+        assert_eq!(ErrorReason::InvalidDpopProof as i32, 909);
+        assert_eq!(ErrorReason::DpopQuotaExceeded.as_wire_reason().as_deref(), Some("dpop-quota-exceeded"));
+        assert_eq!(ErrorReason::from_wire_reason("dpop-quota-exceeded"), Some(ErrorReason::DpopQuotaExceeded));
+        assert_eq!(ErrorReason::DpopQuotaExceeded as i32, 46);
     }
 }
