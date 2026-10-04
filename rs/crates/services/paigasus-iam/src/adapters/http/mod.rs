@@ -191,6 +191,9 @@ pub struct AppState {
     /// Route-level body cap for `POST /v1/authn/introspect` (H1): `max_token_bytes` +
     /// [`INTROSPECT_BODY_OVERHEAD_BYTES`], computed once at wiring time.
     pub introspect_body_limit: usize,
+    /// `authn.max_token_bytes`, for the gRPC header-list limit of the test router (SMA-700);
+    /// `main.rs` reads the config directly.
+    pub grpc_max_token_bytes: usize,
     /// Role-grant CRUD use case (SMA-444 Task 18) — the `/v1/authz/role-grants` HTTP routes
     /// call through this, mirroring `orgs`/`teams`/etc.'s posture.
     pub roles: RoleSvc,
@@ -860,6 +863,7 @@ impl AppState {
             authz,
             snapshot,
             introspect_body_limit: cfg.authn.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
+            grpc_max_token_bytes: cfg.authn.max_token_bytes,
             roles,
             policies,
             authorize,

@@ -2151,10 +2151,13 @@ mod tests {
             self.0.clone()
         }
         fn follow_up_claims(&self, _proof: &str) -> Result<FollowUpClaims, ProofDefect> {
-            Err(ProofDefect::Malformed)
+            Ok(FollowUpClaims {
+                jti: "jti-f".into(),
+                ath: "ath".into(),
+            })
         }
         fn ath_matches(&self, _ath: &str, _token: &str) -> bool {
-            false
+            true
         }
     }
 
@@ -2307,5 +2310,16 @@ mod tests {
         let uc = dpop_use_case(bound_claims("sub-ok"), Arc::new(AtomicUsize::new(0)), store, good_proof());
         let ctx = uc.introspect_dpop("token", dpop_request()).await.expect("resolves");
         assert_eq!(ctx.principal.principal_id, pid);
+    }
+
+    #[tokio::test]
+    async fn a_refused_follow_up_redeem_makes_no_identity_call() {
+        // Task 9 / D18: no earlier Introspect issued a ticket, so the redeem is refused and the
+        // identity port is never reached.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let uc = dpop_use_case(bound_claims("sub-f1"), calls.clone(), AuthnStore::default(), good_proof());
+        let err = uc.resolve_dpop("token", DpopInput::FollowUp("p.r.oof".into()), Provisioning::Disabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidDpopProof(ProofDefect::FollowUp)), "got {err:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "a refused redeem must not reach the identity port");
     }
 }
