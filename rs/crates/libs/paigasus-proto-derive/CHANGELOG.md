@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-derive-v0.4.0...paigasus-proto-derive-v0.5.0) - 2026-10-04
+
+### Added
+
+- *(rs)* rate limit and token budget for gateway chat completions (SMA-677) ([#373](https://github.com/SMK1085/paigasus-core/pull/373))
+
 ## [0.1.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-derive-v0.1.0-alpha.1...paigasus-proto-derive-v0.1.0) - 2026-08-29
 
 ### Added
