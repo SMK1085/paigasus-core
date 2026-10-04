@@ -92,6 +92,7 @@
 #                   oidc.scopes holds only separator characters. It normalizes to empty, and
 #                   renders no key — the same as an absent value, not a refusal.
 # A fourth row counter reds the script when an O row call line is deleted.
+#   D rows (SMA-700): zones.iam.backend.dpop; see the block above the end of the file.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
@@ -625,7 +626,8 @@ print("|".join(problems) if problems else "OK")' "$TMP/boot.yaml" 2>&1)"; then
   if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
 }
 
-# check_boot_reserved <label>: the chart's own names, with every optional entry on, equal the
+# check_boot_reserved <label>: the chart's own names, with every optional entry on (the CA bundle,
+# one admin, and DPoP since SMA-700), equal the
 # paigasus.iamReservedEnv list. The list is read from the template file, not copied here.
 check_boot_reserved() {
   local label="$1" reserved
@@ -636,7 +638,8 @@ check_boot_reserved() {
   fi
   BOOT_ROWS=$((BOOT_ROWS - 1))
   check_boot "$label" "[{issuer=\"$ISS\",subject=\"s\"}]" - "$reserved" \
-    --set oidc.caBundle.existingConfigMap=idp-ca --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=s"
+    --set oidc.caBundle.existingConfigMap=idp-ca --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=s" \
+    --set zones.iam.backend.dpop.enabled=true --set 'zones.iam.backend.dpop.forwardedBaseUrls[0]=https://gw.example.test'
 }
 
 # check_boot_restart <label> [helm args...]: the args change the IAM pod template only.
@@ -804,6 +807,74 @@ check_markers "M8 reuse-values-nil-guard" -                paigasus-console   ab
 
 if [ "$MARKER_ROWS" -lt "$MARKER_ROWS_WANT" ]; then
   echo "FAIL [marker rows]: $MARKER_ROWS marker row(s) ran, want $MARKER_ROWS_WANT"; ec=1
+fi
+
+# zones.iam.backend.dpop (SMA-700). Renders go to a file, as for check_boot. One row per property:
+#   D1 default      No DPoP env renders.
+#   D2 on           IAM_AUTHN__DPOP__ENABLED is "true", and IAM_AUTHN__DPOP__FORWARDED_BASE_URLS is
+#                   the exact figment inline string. config.rs parses this form in
+#                   dpop_env_in_the_chart_form_parses.
+#   D3 reuse-values-no-key
+#                   `--set zones.iam.backend.dpop=null`. No entry renders.
+#   D4 off-with-urls
+#                   A URL list with enabled false. No entry renders.
+#   D5 restart-scope
+#                   Turning DPoP on changes the IAM pod template and no console pod template.
+# A row counter reds the script when a D row call line is deleted.
+DPOP_ROWS=0
+DPOP_ROWS_WANT=5
+DPOP=zones.iam.backend.dpop
+
+# check_dpop <label> <want FORWARDED_BASE_URLS value or -> [helm args...]
+check_dpop() {
+  local label="$1" urls="$2"; shift 2
+  local out
+  DPOP_ROWS=$((DPOP_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/dpop.yaml" 2>"$TMP/dpop.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/dpop.err"; ec=1; return 0
+  fi
+  if ! out="$(URLS="$urls" python3 -c '
+import os, sys, yaml
+with open(sys.argv[1]) as fh:
+    docs = [d for d in yaml.safe_load_all(fh) if d]
+problems = []
+deps = [d for d in docs if d.get("kind") == "Deployment"
+        and d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name") == "iam-backend"]
+if len(deps) != 1:
+    problems.append(str(len(deps)) + " iam-backend Deployment(s), want 1")
+else:
+    env = {e.get("name"): e.get("value") for e in deps[0]["spec"]["template"]["spec"]["containers"][0].get("env") or []}
+    names = ("IAM_AUTHN__DPOP__ENABLED", "IAM_AUTHN__DPOP__FORWARDED_BASE_URLS")
+    if os.environ["URLS"] == "-":
+        problems += [name + " renders; want it absent" for name in names if name in env]
+    else:
+        if env.get(names[0]) != "true":
+            problems.append(names[0] + " is " + repr(env.get(names[0])) + ", want \"true\"")
+        if env.get(names[1]) != os.environ["URLS"]:
+            problems.append(names[1] + " is " + repr(env.get(names[1])) + ", want " + repr(os.environ["URLS"]))
+print("|".join(problems) if problems else "OK")' "$TMP/dpop.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# check_dpop_restart <label>: DPoP on changes the IAM pod template only. It reuses
+# check_boot_restart, so it also counts as a B row; the B floor check ran above, as for M6.
+check_dpop_restart() {
+  local label="$1"
+  DPOP_ROWS=$((DPOP_ROWS + 1))
+  check_boot_restart "$label" --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test"
+}
+
+check_dpop "D1 default"             -
+check_dpop "D2 on"                  '["https://gw.example.test","https://edge.example.test/api"]' \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test" --set "$DPOP.forwardedBaseUrls[1]=https://edge.example.test/api"
+check_dpop "D3 reuse-values-no-key" - --set "$DPOP=null"
+check_dpop "D4 off-with-urls"       - --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test"
+check_dpop_restart "D5 restart-scope"
+
+if [ "$DPOP_ROWS" -lt "$DPOP_ROWS_WANT" ]; then
+  echo "FAIL [dpop rows]: $DPOP_ROWS dpop row(s) ran, want $DPOP_ROWS_WANT"; ec=1
 fi
 
 if [ "$ec" -eq 0 ]; then echo "== chart env OK =="; fi

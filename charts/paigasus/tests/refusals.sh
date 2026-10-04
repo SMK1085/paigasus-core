@@ -306,6 +306,47 @@ expect_fail "markers duplicate" "oidc.idTokenMarkerClaims[2] \"at_hash\" is alre
 expect_render "markers Zitadel recipe" \
   --set "$MARKERS={at_hash,azp}"
 
+# SMA-700 (spec § 4.11). zones.iam.backend.dpop copies the IamConfig::validate rules for the URL
+# list, because a refused boot stops the one IAM replica. Each needle carries the key path.
+DPOP=zones.iam.backend.dpop
+expect_fail "dpop on with no URL" "zones.iam.backend.dpop.enabled is true and zones.iam.backend.dpop.forwardedBaseUrls is empty" \
+  --set "$DPOP.enabled=true"
+expect_fail "dpop enabled not a bool" "zones.iam.backend.dpop.enabled must be true or false" \
+  --set-string "$DPOP.enabled=yes"
+expect_fail "dpop URLs not a list" "zones.iam.backend.dpop.forwardedBaseUrls must be a list of URLs" \
+  --set "$DPOP.forwardedBaseUrls=https://gw.example.test"
+expect_fail "dpop URL http not loopback" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"http://gw.example.test\": use https" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://gw.example.test"
+expect_fail "dpop URL ftp" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"ftp://gw.example.test\": use https" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=ftp://gw.example.test"
+expect_fail "dpop URL with no scheme" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"gw.example.test\": use https" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=gw.example.test"
+expect_fail "dpop URL with user info" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://user@gw.example.test\": it must have no query, fragment or user info" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://user@gw.example.test"
+expect_fail "dpop URL with a fragment" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://gw.example.test/#x\": it must have no query, fragment or user info" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test/#x"
+# A query holds `=`, which --set reads as a second key. A values file carries it as written.
+DPOP_QUERY="$(mktemp)"
+printf 'zones:\n  iam:\n    backend:\n      dpop:\n        enabled: true\n        forwardedBaseUrls: ["https://gw.example.test/?a=1"]\n' >"$DPOP_QUERY"
+expect_fail "dpop URL with a query" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://gw.example.test/?a=1\": it must have no query, fragment or user info" \
+  -f "$DPOP_QUERY"
+rm -f "$DPOP_QUERY"
+expect_fail "dpop URL with a space" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://gw.example.test/a b\": use printable ASCII only" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test/a b"
+# Decision P8: a bad entry is refused also while DPoP is off.
+expect_fail "dpop off with a bad URL" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"http://gw.example.test\": use https" \
+  --set "$DPOP.forwardedBaseUrls[0]=http://gw.example.test"
+expect_fail "extraEnv sets the DPoP switch" "the chart sets IAM_AUTHN__DPOP__ENABLED itself" \
+  --set 'zones.iam.backend.extraEnv[0].name=IAM_AUTHN__DPOP__ENABLED' --set 'zones.iam.backend.extraEnv[0].value=true'
+expect_render "dpop https with a prefix" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test" --set "$DPOP.forwardedBaseUrls[1]=https://edge.example.test/api/"
+expect_render "dpop loopback http" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://localhost:8088" --set "$DPOP.forwardedBaseUrls[1]=http://127.0.0.1:8088"
+# Review Focus 5.
+expect_render "dpop IPv6 loopback http" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://[::1]:8088"
+expect_render "dpop reuse-values-no-key" --set "$DPOP=null"
+
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088

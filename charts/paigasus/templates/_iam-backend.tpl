@@ -14,7 +14,7 @@ the result depend on the order, and server-side apply refuses a duplicate merge 
 list equal to the IAM env entries in backend-deployment.yaml.
 */}}
 {{- define "paigasus.iamReservedEnv" -}}
-IAM_HTTP_ADDR IAM_GRPC_ADDR IAM_MIGRATION__LOCK_WAIT_SECS IAM_DATABASE_URL IAM_AUTHN__ISSUERS IAM_API_KEYS__PEPPER IAM_AUTHN__EXTRA_CA_BUNDLE_PATH IAM_AUTHZ__BOOTSTRAP_ADMINS
+IAM_HTTP_ADDR IAM_GRPC_ADDR IAM_MIGRATION__LOCK_WAIT_SECS IAM_DATABASE_URL IAM_AUTHN__ISSUERS IAM_API_KEYS__PEPPER IAM_AUTHN__EXTRA_CA_BUNDLE_PATH IAM_AUTHZ__BOOTSTRAP_ADMINS IAM_AUTHN__DPOP__ENABLED IAM_AUTHN__DPOP__FORWARDED_BASE_URLS
 {{- end -}}
 
 {{/*
@@ -39,7 +39,8 @@ trim a subject, and the match is exact.
 
 {{/*
 paigasus.validateIamBackend: the refusals for the two values, and for oidc.idTokenMarkerClaims
-(SMA-703, paigasus.validateIdTokenMarkerClaims below). paigasus.validate calls it.
+(SMA-703, paigasus.validateIdTokenMarkerClaims below) and zones.iam.backend.dpop (SMA-700,
+paigasus.validateIamDpop below). paigasus.validate calls it.
 
 bootstrapAdmins mirrors IamConfig::validate (config.rs, the bootstrap_admins loop): an https
 issuer and a subject that is not empty. It adds one rule that IAM does not have: the issuer must
@@ -102,6 +103,7 @@ Issuer::parse trims.
 {{- $_ := set $seen $e.name $i -}}
 {{- end -}}
 {{- include "paigasus.validateIdTokenMarkerClaims" . -}}
+{{- include "paigasus.validateIamDpop" . -}}
 {{- end -}}
 
 {{/*
@@ -161,5 +163,86 @@ The nil case happens when a release from before SMA-703 has no key and the user 
 {{- fail (printf "oidc.idTokenMarkerClaims[%d] %q is already in oidc.idTokenMarkerClaims[%d]. IamConfig::validate refuses a duplicate, and IAM does not boot" $i $n (index $seen $n)) -}}
 {{- end -}}
 {{- $_ := set $seen $n $i -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+paigasus.iamDpopEnabled: "true" when zones.iam.backend.dpop.enabled is true, else "" (SMA-700).
+The key can be absent or nil under `helm upgrade --reuse-values` from a release made before it;
+then DPoP is off. paigasus.validateIamDpop has already refused a value that is not a map or a bool.
+*/}}
+{{- define "paigasus.iamDpopEnabled" -}}
+{{- $dpop := dig "dpop" dict .Values.zones.iam.backend -}}
+{{- if and (kindIs "map" $dpop) (eq (toString (dig "enabled" false $dpop)) "true") -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+paigasus.iamDpopForwardedBaseUrls: the value of IAM_AUTHN__DPOP__FORWARDED_BASE_URLS (SMA-700), in
+the figment inline form that IAM_AUTHN__ISSUERS uses: each URL quoted with %q, joined by a comma,
+in brackets. The test dpop_env_in_the_chart_form_parses in rs/crates/services/paigasus-iam/src/config.rs
+parses this exact form. Called only when paigasus.iamDpopEnabled is "true", so the map exists.
+*/}}
+{{- define "paigasus.iamDpopForwardedBaseUrls" -}}
+{{- $dpop := dig "dpop" dict .Values.zones.iam.backend -}}
+{{- $quoted := list -}}
+{{- range (dig "forwardedBaseUrls" list $dpop) -}}
+{{- $quoted = append $quoted (printf "%q" .) -}}
+{{- end -}}
+{{- printf "[%s]" (join "," $quoted) -}}
+{{- end -}}
+
+{{/*
+paigasus.validateIamDpop: the refusals for zones.iam.backend.dpop (SMA-700 § 4.11). A refused boot
+stops the one IAM replica (maxSurge 0), so the chart copies IamConfig::validate's rules for the
+list: enabled with an empty list; an entry that is not https or loopback http; an entry with a
+query, a fragment or user info. Entries are checked also when enabled is false, as IAM checks them.
+The character rule is stricter than IAM, as for idTokenMarkerClaims: printable ASCII only, with no
+space, no " and no \, because %q writes other characters as escapes that figment does not read.
+Loopback http is localhost, a dotted 127.a.b.c, or ::1; IAM also accepts other 127/8 spellings,
+so the chart is stricter, never looser. A nil value counts as absent.
+*/}}
+{{- define "paigasus.validateIamDpop" -}}
+{{- $dpop := dig "dpop" dict .Values.zones.iam.backend -}}
+{{- if kindIs "invalid" $dpop -}}
+{{- $dpop = dict -}}
+{{- end -}}
+{{- if not (kindIs "map" $dpop) -}}
+{{- fail "zones.iam.backend.dpop must be a map with the keys enabled and forwardedBaseUrls" -}}
+{{- end -}}
+{{- $enabled := dig "enabled" false $dpop -}}
+{{- if kindIs "invalid" $enabled -}}
+{{- $enabled = false -}}
+{{- end -}}
+{{- if not (kindIs "bool" $enabled) -}}
+{{- fail "zones.iam.backend.dpop.enabled must be true or false" -}}
+{{- end -}}
+{{- $urls := dig "forwardedBaseUrls" list $dpop -}}
+{{- if kindIs "invalid" $urls -}}
+{{- $urls = list -}}
+{{- end -}}
+{{- if not (kindIs "slice" $urls) -}}
+{{- fail "zones.iam.backend.dpop.forwardedBaseUrls must be a list of URLs" -}}
+{{- end -}}
+{{- if and $enabled (not $urls) -}}
+{{- fail "zones.iam.backend.dpop.enabled is true and zones.iam.backend.dpop.forwardedBaseUrls is empty. IamConfig::validate refuses it, and IAM does not boot. List the public URLs at which clients reach the gateway" -}}
+{{- end -}}
+{{- range $i, $u := $urls -}}
+{{- if not (kindIs "string" $u) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] must be a string" $i) -}}
+{{- end -}}
+{{- if not (regexMatch `^[!#-\[\]-~]+$` $u) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: use printable ASCII only, with no space, no \" and no \\. IAM cannot read another character from IAM_AUTHN__DPOP__FORWARDED_BASE_URLS" $i $u) -}}
+{{- end -}}
+{{- $p := urlParse $u -}}
+{{- if or $p.query $p.fragment $p.userinfo (contains "?" $u) (contains "#" $u) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: it must have no query, fragment or user info. IamConfig::validate refuses it, and IAM does not boot" $i $u) -}}
+{{- end -}}
+{{- $host := lower $p.hostname -}}
+{{- $loopback := or (eq $host "localhost") (eq $host "::1") (regexMatch `^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$` $host) -}}
+{{- if not (and $host (or (eq $p.scheme "https") (and (eq $p.scheme "http") $loopback))) -}}
+{{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: use https, or http on localhost, 127.x.x.x or [::1]. IamConfig::validate refuses it, and IAM does not boot" $i $u) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
