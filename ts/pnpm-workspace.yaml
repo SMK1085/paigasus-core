@@ -103,18 +103,18 @@ catalog:
   # Runtime (React + Next)
   react: ^19.3.0
   react-dom: ^19.3.0
-  next: ^16.3.6
+  next: ^16.3.8
   # TypeScript + ESLint + Prettier
   typescript: ^6.0.3
   eslint: ^10.11.0
   '@eslint/js': ^10.0.1
-  '@eslint-react/eslint-plugin': ^5.20.8
+  '@eslint-react/eslint-plugin': ^5.23.3
   'eslint-plugin-react-hooks': ^7.1.1
   'eslint-plugin-jsx-a11y': ^6.10.2
-  'typescript-eslint': ^8.70.0
+  'typescript-eslint': ^8.71.0
   prettier: ^3.9.9
   # Test runner
-  vitest: ^5.0.0
+  vitest: ^5.0.3
   # @paigasus/discovery's browser test harness (SMA-509) uses Vite PROGRAMMATICALLY to bundle and
   # SSR-render a real-Chromium fixture — pinned to the version vitest already resolves, so this
   # adds no new package to the lockfile, only a direct dependency edge onto one already there.
@@ -135,9 +135,9 @@ catalog:
   '@types/react-dom': ^19.3.0
   # Track the Node runtime major (Active LTS 24); Dependabot ignores major bumps so
   # the types can't drift ahead of the runtime (see .github/dependabot.yml).
-  '@types/node': ^24.13.6
+  '@types/node': ^24.19.0
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
-  '@next/eslint-plugin-next': ^16.3.6
+  '@next/eslint-plugin-next': ^16.3.8
   '@tanstack/eslint-plugin-query': ^5.100.14
   # Commit tooling (SMA-371)
   '@commitlint/cli': ^21.2.2
@@ -146,7 +146,7 @@ catalog:
   semantic-release: ^25.0.9
   '@semantic-release/commit-analyzer': ^13.0.1
   # Protobuf-ES v2 runtime (SMA-389)
-  '@bufbuild/protobuf': ^2.15.0
+  '@bufbuild/protobuf': ^2.16.0
   # Connect-ES v2 — the gRPC transport and typed clients @paigasus/sdk builds on (SMA-508,
   # ADR-0018). `@connectrpc/connect` is the protocol-independent client half (createClient,
   # ContextValues, Interceptor); `@connectrpc/connect-node` supplies createGrpcTransport, which is
@@ -182,13 +182,13 @@ catalog:
   # node-redis, the official client. v6 — its client API differs from v5, so check the installed
   # types rather than older examples. Chosen over ioredis because its redis:// DSN parsing matches
   # rs/crates/libs/paigasus-redis/src/lib.rs verbatim.
-  redis: ^6.2.1
+  redis: ^6.3.0
   # E2E tier for @paigasus/auth. A real browser is the only thing that can prove SameSite behaviour
   # on the cross-site redirect back from the IdP, and __Host- cookie-prefix enforcement.
   '@playwright/test': ^1.63.0
   # Starts Keycloak and Redis for the E2E tier. The Rust side uses testcontainers-modules; this is
   # the TS equivalent. GitHub Actions `services:` cannot do the cert copy and realm import.
-  testcontainers: ^12.1.0
+  testcontainers: ^12.2.0
   # SMA-641: runs ts/tooling/dev-stack.ts. The dev stack imports @paigasus/console-core/testing,
   # whose exports map points at TypeScript source with EXTENSIONLESS relative imports. Node 24
   # strips types but resolves specifiers literally, so plain `node` cannot load it.
