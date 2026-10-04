@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use crate::application::dpop::DpopRequest;
 use paigasus_iam_core::{AuthnError, AuthnPrincipal, Credential, TokenDefect};
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::authn_service_server::AuthnService;
@@ -51,13 +52,26 @@ impl AuthnService for AuthnGrpc {
     /// `Introspect` (spec §7.2): the full `PrincipalContext` for a presented token. READ-ONLY
     /// (D10) — `AuthenticateToken::introspect` resolves with `Provisioning::Disabled`, so an
     /// unknown identity is `PermissionDenied` and this exempt RPC never has a user-creation
-    /// side effect. The token IS the credential (in the request body, never the metadata):
+    /// side effect. SMA-700: a `dpop` context runs the DPoP scheme (`introspect_dpop`). The token IS the credential (in the request body, never the metadata):
     /// nothing here logs it, and errors funnel through `authn_status` (static messages only).
     async fn introspect(&self, request: Request<IntrospectRequest>) -> Result<Response<IntrospectResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<IntrospectResponse>, Status> = async {
-            let token = request.into_inner().token;
-            let ctx = self.state.authn.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
+            let request = request.into_inner();
+            // SMA-700 § 4.8: no `dpop` context is the Bearer scheme, as before (D7). A context
+            // is the DPoP scheme; with DPoP off it is refused as a malformed token (D11).
+            let resolved = match request.dpop {
+                None => self.state.authn.introspect(&request.token).await,
+                Some(dpop) => {
+                    let context = DpopRequest {
+                        proof: dpop.proof,
+                        method: dpop.method,
+                        path: dpop.path,
+                    };
+                    self.state.authn.introspect_dpop(&request.token, context).await
+                }
+            };
+            let ctx = resolved.map_err(|e| convert::authn_status(&e))?;
             Ok(Response::new(convert::to_introspect_response(&ctx)))
         }
         .await;

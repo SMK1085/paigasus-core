@@ -59,7 +59,9 @@ use crate::adapters::authz::{
     MemoryDecisionCache, PolicySnapshot, RedisDecisionCache, SliceCache, TracingAuditSink,
 };
 use crate::adapters::clock::SystemClock;
+use crate::adapters::dpop_replay::InMemoryReplayStore;
 use crate::adapters::id::KernelIdGenerator;
+use crate::adapters::oidc::dpop::JoseDpopProofChecker;
 use crate::adapters::oidc::jwks::{HttpJwksFetcher, IdpTls, InMemoryJwksCache, JwksProvider};
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
@@ -77,6 +79,7 @@ use crate::application::bootstrap;
 use crate::application::bootstrap_admin::{BootstrapAdminSeeder, BootstrapAdminSeederDeps};
 use crate::application::create_user::{CreateUser, CreateUserDeps};
 use crate::application::dead_letters::{DeadLetterDeps, DeadLetterService};
+use crate::application::dpop::DpopProofVerifier;
 use crate::application::memberships::{MembershipService, MembershipServiceDeps};
 use crate::application::organizations::{OrganizationService, OrganizationServiceDeps};
 use crate::application::policies::{PolicyService, PolicyServiceDeps};
@@ -803,6 +806,28 @@ impl AppState {
             SystemClock,
             JitPolicy::from_issuers(&jit_flags),
         );
+        // SMA-700: ONE replay store for the whole process, shared by every `AppState` clone through
+        // the verifier's `Arc` (D3). Correct only with one IAM replica (R2).
+        let authn = if authn_cfg.dpop.enabled {
+            let dpop = &authn_cfg.dpop;
+            let verifier = DpopProofVerifier::new(
+                Arc::new(JoseDpopProofChecker),
+                Arc::new(InMemoryReplayStore::new(dpop.replay_capacity, dpop.per_key_quota, dpop.per_subject_quota)),
+                Arc::new(SystemClock),
+                &dpop.forwarded_base_urls,
+                dpop.iat_window_secs,
+            )
+            .map_err(|e| AuthnError::Backend(e.into()))?;
+            tracing::info!(
+                forwarded_base_urls = dpop.forwarded_base_urls.len(),
+                iat_window_secs = dpop.iat_window_secs,
+                replay_capacity = dpop.replay_capacity,
+                "DPoP is on: Introspect checks a forwarded DPoP proof, and IsAuthorized accepts the one follow-up"
+            );
+            authn.with_dpop(Arc::new(verifier))
+        } else {
+            authn
+        };
 
         // SMA-712: the operator identity-link calls. The issuer set is the one `jit_flags`
         // parsed from `authn.issuers` above, so a link can only name an issuer that IAM accepts

@@ -7,7 +7,8 @@
 
 use paigasus_iam_core::{
     Authenticator, AuthnError, AuthnPrincipal, AuthzError, Clock, ConflictKind, Credential, Email, ExternalIdentity, ExternalIdentityRepository, IdGenerator, Issuer, MembershipRepository, Principal,
-    PrincipalContext, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, ProvisioningDefect, RepositoryError, RoleGrantRef, RoleGrantStore, TokenScheme, User, ValidatedClaims,
+    PrincipalContext, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, ProvisioningDefect, RepositoryError, RoleGrantRef, RoleGrantStore, TokenDefect, TokenScheme, User,
+    ValidatedClaims,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use std::time::Instant;
 use metrics::counter;
 use paigasus_observability::names;
 
+use crate::application::dpop::{DpopProofVerifier, DpopRequest};
 use crate::application::log_rate_limit::{LOG_RATE_LIMIT_INTERVAL, LogRateLimiter};
 
 /// Whether `resolve` may just-in-time provision an unknown `(issuer, subject)` identity.
@@ -128,6 +130,14 @@ impl JitFailure {
     }
 }
 
+/// What the DPoP scheme brings besides the token (SMA-700 § 4.7). No `Debug`: both arms hold a proof.
+pub enum DpopInput {
+    /// `Introspect` with a `dpop` context from the gateway.
+    Introspect(DpopRequest),
+    /// The `IsAuthorized` follow-up: the `dpop` metadata value, as received.
+    FollowUp(String),
+}
+
 /// Generic-by-value over the ports it depends on, mirroring the M1 use cases
 /// (`CreateUser` et al.): the composition root instantiates this once per concrete adapter
 /// set (Task 14).
@@ -152,6 +162,9 @@ pub struct AuthenticateToken<A, E, P, M, I, C> {
     /// reason as `provisioning_log`. A separate instance keyed by `()`, because `provisioning_log`
     /// is keyed by the SMA-698 `defect` label, and `jit_disabled` is not a defect (SMA-707 D4).
     not_provisioned_log: Arc<LogRateLimiter<()>>,
+    /// SMA-700: the DPoP proof verifier, or `None` when `authn.dpop.enabled` is false. An `Arc`,
+    /// so every `AppState` clone shares the one replay store behind it (D3).
+    dpop: Option<Arc<DpopProofVerifier>>,
 }
 
 impl<A, E, P, M, I, C> AuthenticateToken<A, E, P, M, I, C>
@@ -176,6 +189,7 @@ where
             jit,
             provisioning_log: Arc::new(LogRateLimiter::new(LOG_RATE_LIMIT_INTERVAL)),
             not_provisioned_log: Arc::new(LogRateLimiter::new(LOG_RATE_LIMIT_INTERVAL)),
+            dpop: None,
         }
     }
 
@@ -187,7 +201,12 @@ where
     /// rate-limited `info` line through `jit_disabled` (SMA-707); the `Disabled` refusal writes none.
     pub async fn resolve(&self, token: &str, provisioning: Provisioning) -> Result<AuthnPrincipal, AuthnError> {
         let claims = self.authenticator.authenticate(token, TokenScheme::Bearer).await?;
+        self.resolve_claims(claims, provisioning).await
+    }
 
+    /// Everything `resolve` does after the token is verified: the identity lookup, JIT
+    /// provisioning, the principal read and its status. Shared by `resolve` and `resolve_dpop`.
+    async fn resolve_claims(&self, claims: ValidatedClaims, provisioning: Provisioning) -> Result<AuthnPrincipal, AuthnError> {
         let principal_id = match self.identities.find_by_issuer_subject(&claims.issuer, &claims.subject).await.map_err(backend)? {
             Some(identity) => identity.principal_id,
             None => match provisioning {
@@ -266,6 +285,47 @@ where
     /// provisions) plus `context_for`'s memberships.
     pub async fn introspect(&self, token: &str) -> Result<PrincipalContext, AuthnError> {
         let principal = self.resolve(token, Provisioning::Disabled).await?;
+        self.context_for(principal).await
+    }
+
+    /// SMA-700: attaches the DPoP proof verifier. `AppState::new` calls this when
+    /// `authn.dpop.enabled` is true.
+    #[must_use]
+    pub fn with_dpop(mut self, verifier: Arc<DpopProofVerifier>) -> Self {
+        self.dpop = Some(verifier);
+        self
+    }
+
+    /// Whether DPoP is on: `AuthEnforce` accepts the follow-up scheme only then.
+    #[must_use]
+    pub fn dpop_enabled(&self) -> bool {
+        self.dpop.is_some()
+    }
+
+    /// The DPoP scheme (SMA-700 § 4.7). The order is fixed (D18): the request checks of § 4.8,
+    /// `authenticate(.., Dpop)`, the proof check (`Introspect`) or the ticket redeem (the
+    /// follow-up), and only then the identity lookup and anything after it. No identity lookup,
+    /// provisioning, seeding or API-key branch runs before the proof check. With DPoP off, the
+    /// answer is the one a malformed token gets (D11).
+    pub async fn resolve_dpop(&self, token: &str, input: DpopInput, provisioning: Provisioning) -> Result<AuthnPrincipal, AuthnError> {
+        let Some(verifier) = &self.dpop else {
+            return Err(AuthnError::InvalidToken(TokenDefect::Malformed));
+        };
+        if let DpopInput::Introspect(request) = &input {
+            verifier.check_request(request)?;
+        }
+        let claims = self.authenticator.authenticate(token, TokenScheme::Dpop).await?;
+        match &input {
+            DpopInput::Introspect(request) => verifier.verify(&claims, token, request)?,
+            DpopInput::FollowUp(proof) => verifier.redeem(&claims, token, proof)?,
+        }
+        self.resolve_claims(claims, provisioning).await
+    }
+
+    /// `Introspect` with a `dpop` context (SMA-700 § 4.8): `resolve_dpop` with
+    /// `Provisioning::Disabled` (D10 holds), plus `context_for`.
+    pub async fn introspect_dpop(&self, token: &str, request: DpopRequest) -> Result<PrincipalContext, AuthnError> {
+        let principal = self.resolve_dpop(token, DpopInput::Introspect(request), Provisioning::Disabled).await?;
         self.context_for(principal).await
     }
 
@@ -373,16 +433,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::dpop_replay::InMemoryReplayStore;
     use crate::adapters::id::KernelIdGenerator;
+    use crate::application::dpop::{DpopProofVerifier, DpopRequest};
     use crate::application::fakes::{FixedClock, InMemoryMembershipRepository, InMemoryRoleGrants, SeqIds};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use paigasus_iam_core::{ApiKeyId, GrantScope, Membership, MembershipRecord, RoleGrant, Stamp, TenancyNodeRef, TokenDefect, Transaction};
+    use paigasus_iam_core::{DpopProofChecker, FollowUpClaims, Jkt, ProofClaims, ProofDefect};
     use paigasus_kernel::Prn;
     use paigasus_logging::test_support::capture_logs;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
@@ -2075,5 +2138,174 @@ mod tests {
         let text = logs.text();
         assert!(jit_disabled_lines(&text).is_empty(), "a JIT-enabled issuer never writes the line:\n{text}");
         assert_eq!(jit_lines(&text).len(), 1, "control: the SMA-698 line appears:\n{text}");
+    }
+
+    // ---- SMA-700: resolve_dpop (D18) -------------------------------------------------------
+
+    /// Checks 1-9 scripted: `Ok` gives a proof for `POST https://gw.example.test/v1/chat/completions`
+    /// at the epoch (`FixedClock::default()`), so checks 10-13 pass.
+    struct ScriptedChecker(Result<ProofClaims, ProofDefect>);
+
+    impl DpopProofChecker for ScriptedChecker {
+        fn check(&self, _proof: &str, _token: &str, _jkt: &Jkt) -> Result<ProofClaims, ProofDefect> {
+            self.0.clone()
+        }
+        fn follow_up_claims(&self, _proof: &str) -> Result<FollowUpClaims, ProofDefect> {
+            Err(ProofDefect::Malformed)
+        }
+        fn ath_matches(&self, _ath: &str, _token: &str) -> bool {
+            false
+        }
+    }
+
+    fn good_proof() -> Result<ProofClaims, ProofDefect> {
+        Ok(ProofClaims {
+            jti: "jti-1".into(),
+            iat: 0,
+            htm: "POST".into(),
+            htu: "https://gw.example.test/v1/chat/completions".into(),
+        })
+    }
+
+    fn verifier(check: Result<ProofClaims, ProofDefect>) -> Arc<DpopProofVerifier> {
+        let bases = vec!["https://gw.example.test".to_string()];
+        Arc::new(
+            DpopProofVerifier::new(
+                Arc::new(ScriptedChecker(check)),
+                Arc::new(InMemoryReplayStore::new(10, 10, 10)),
+                Arc::new(FixedClock::default()),
+                &bases,
+                60,
+            )
+            .expect("verifier"),
+        )
+    }
+
+    fn dpop_request() -> DpopRequest {
+        DpopRequest {
+            proof: "p.r.oof".into(),
+            method: "POST".into(),
+            path: "/v1/chat/completions".into(),
+        }
+    }
+
+    fn bound_claims(subject: &str) -> ValidatedClaims {
+        ValidatedClaims {
+            key_binding: Some(Jkt::new("jkt-1")),
+            ..claims("https://idp.example.com", subject, Some("x@example.com"), None)
+        }
+    }
+
+    /// Counts calls to the identity port, so a test proves the proof check came first (D18).
+    struct CountingIdentities {
+        calls: Arc<AtomicUsize>,
+        inner: InMemoryIdentities,
+    }
+
+    #[async_trait]
+    impl ExternalIdentityRepository for CountingIdentities {
+        async fn find_by_issuer_subject(&self, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.find_by_issuer_subject(issuer, subject).await
+        }
+        async fn provision(&self, principal: &Principal, user: &User, identity: &ExternalIdentity) -> Result<(), RepositoryError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.provision(principal, user, identity).await
+        }
+    }
+
+    fn dpop_use_case(
+        claims: ValidatedClaims,
+        calls: Arc<AtomicUsize>,
+        store: AuthnStore,
+        check: Result<ProofClaims, ProofDefect>,
+    ) -> AuthenticateToken<FakeAuthenticator, CountingIdentities, InMemoryPrincipals, InMemoryMemberships, SeqIds, FixedClock> {
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        AuthenticateToken::new(
+            FakeAuthenticator::ok(claims),
+            CountingIdentities {
+                calls,
+                inner: InMemoryIdentities(store.clone()),
+            },
+            InMemoryPrincipals(store),
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer, true)]),
+        )
+        .with_dpop(verifier(check))
+    }
+
+    #[tokio::test]
+    async fn no_identity_lookup_runs_before_the_proof_check() {
+        // D18 / AC 4, both directions: a bad proof makes NO identity call; a good proof makes one.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let uc = dpop_use_case(bound_claims("sub-d1"), calls.clone(), AuthnStore::default(), Err(ProofDefect::Signature));
+        let err = uc.resolve_dpop("token", DpopInput::Introspect(dpop_request()), Provisioning::Disabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidDpopProof(ProofDefect::Signature)), "got {err:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "the identity port must not run before the proof check");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let uc = dpop_use_case(bound_claims("sub-d1"), calls.clone(), AuthnStore::default(), good_proof());
+        let err = uc.resolve_dpop("token", DpopInput::Introspect(dpop_request()), Provisioning::Disabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::IdentityNotProvisioned), "got {err:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "after a good proof, the lookup runs once");
+    }
+
+    #[tokio::test]
+    async fn an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof() {
+        // § 5.1: InvalidDpopProof, not IdentityNotProvisioned — else a stolen token passes the
+        // gateway's service-info, which accepts identity-not-provisioned (challenge 2).
+        let uc = dpop_use_case(bound_claims("sub-unknown"), Arc::new(AtomicUsize::new(0)), AuthnStore::default(), Err(ProofDefect::Htu));
+        let err = uc.introspect_dpop("token", dpop_request()).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidDpopProof(ProofDefect::Htu)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_is_refused_before_the_token_is_verified() {
+        // Decision P5: the request checks run before `authenticate`.
+        let uc = AuthenticateToken::new(
+            PanicIfCalledAuthenticator,
+            PanicIfCalledIdentities,
+            PanicIfCalledPrincipals,
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[]),
+        )
+        .with_dpop(verifier(good_proof()));
+        let request = DpopRequest { path: "x".into(), ..dpop_request() };
+        let err = uc.resolve_dpop("token", DpopInput::Introspect(request), Provisioning::Disabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidDpopProof(ProofDefect::Malformed)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn with_dpop_off_a_dpop_context_is_a_malformed_token() {
+        // D11: the answer is the one a malformed token gets today.
+        let uc = AuthenticateToken::new(
+            PanicIfCalledAuthenticator,
+            PanicIfCalledIdentities,
+            PanicIfCalledPrincipals,
+            InMemoryMemberships::default(),
+            Arc::new(InMemoryRoleGrants::default()),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[]),
+        );
+        assert!(!uc.dpop_enabled());
+        let err = uc.resolve_dpop("token", DpopInput::Introspect(dpop_request()), Provisioning::Disabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Malformed)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_provisioned_identity_with_a_good_proof_resolves() {
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        let pid = seeded_principal(&store, &issuer, "sub-ok");
+        let uc = dpop_use_case(bound_claims("sub-ok"), Arc::new(AtomicUsize::new(0)), store, good_proof());
+        let ctx = uc.introspect_dpop("token", dpop_request()).await.expect("resolves");
+        assert_eq!(ctx.principal.principal_id, pid);
     }
 }
