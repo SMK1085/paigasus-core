@@ -54,7 +54,8 @@ SITES=(
 # which independently asserts moon.yml's own `inputs:` list — the paths SITES reads (14
 # distinct: py/packages/paigasus-kernel/pyproject.toml, rs/Cargo.lock, and py/uv.lock are each
 # read by two rows) plus rs/Cargo.toml (read by the cargo-wsdep kind by name, not by a SITES
-# path) plus this script itself — 16 total, matching moon.yml's inputs: list.
+# path) plus this script itself, plus py/pyproject.toml and the glob py/packages/*/pyproject.toml
+# (read by uv_static_metadata_check, SMA-684) — 18 entries, matching moon.yml's inputs: list.
 EXPECTED_SITE_COUNT=20
 
 # Source of truth per group.
@@ -77,7 +78,7 @@ declare -A LOCK_MEMBERS=(
 )
 
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=5   # site_verdict, lock_reader, cargo_package_writer, stamp_sites, napi_glue_writer
+SELF_TEST_COUNT=6   # site_verdict, lock_reader, cargo_package_writer, stamp_sites, napi_glue_writer, uv_static_metadata
 
 site_verdict() { # $1 expected  $2 actual
   if [ -n "$2" ] && [ "$1" = "$2" ]; then printf 'OK'; else printf 'MISMATCH'; fi
@@ -733,6 +734,78 @@ PY
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
+# SMA-684 §5.2: fixture table for the static uv metadata check. Each case is a small uv workspace
+# under its own scratch REPO_ROOT: one member with a path source (the maturin crate's shape), and
+# one member that SITES does not name (the dormant shape of paigasus-ml and paigasus-workflows).
+uv_static_metadata_self_test() {
+  local tmp rc listed out
+  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+
+  _usm_tree() { # $1 case dir -> a clean workspace
+    local r="$tmp/$1"
+    mkdir -p "$r/py/packages/a" "$r/py/packages/dormant" "$r/rs/b"
+    printf '[tool.uv.workspace]\nmembers = ["packages/*"]\n' >"$r/py/pyproject.toml"
+    printf '[project]\nname = "a"\nversion = "0.1.0"\ndependencies = ["b==0.1.0"]\n\n[tool.uv.sources]\nb = { path = "../../../rs/b" }\n' >"$r/py/packages/a/pyproject.toml"
+    printf '[project]\nname = "dormant"\nversion = "0.0.0"\ndependencies = []\n' >"$r/py/packages/dormant/pyproject.toml"
+    printf '[project]\nname = "b"\nversion = "0.1.0"\n\n[build-system]\nrequires = ["maturin>=1.9.6,<2"]\nbuild-backend = "maturin"\n' >"$r/rs/b/pyproject.toml"
+  }
+  _usm() { # $1 case dir -> sets rc
+    rc=0
+    REPO_ROOT="$tmp/$1" uv_static_metadata_check >/dev/null 2>&1 || rc=$?
+  }
+
+  # U0: the clean tree passes.
+  _usm_tree u0; _usm u0
+  [ "$rc" -eq 0 ] || { fail "self-test: uv-static U0 (clean) rc=$rc, expected 0"; return 1; }
+  # U0b: --list names every file the check reads, the path source included. stage_pristine_tree
+  # stages exactly this list, so a file missing here is a file the staged trees lack.
+  listed="$(REPO_ROOT="$tmp/u0" uv_static_metadata_check --list)" \
+    || { fail "self-test: uv-static --list failed on the clean tree"; return 1; }
+  [ "$listed" = "$(printf 'py/packages/a/pyproject.toml\npy/packages/dormant/pyproject.toml\npy/pyproject.toml\nrs/b/pyproject.toml')" ] \
+    || { fail "self-test: uv-static --list printed '$listed'"; return 1; }
+  # U1: dynamic version in a member that SITES does not name.
+  _usm_tree u1
+  printf '[project]\nname = "dormant"\ndynamic = ["version"]\ndependencies = []\n' >"$tmp/u1/py/packages/dormant/pyproject.toml"
+  _usm u1; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U1 (dynamic version) rc=$rc, expected 1"; return 1; }
+  # U2: dynamic dependencies in a member.
+  _usm_tree u2
+  printf '[project]\nname = "a"\nversion = "0.1.0"\ndynamic = ["dependencies"]\n\n[tool.uv.sources]\nb = { path = "../../../rs/b" }\n' >"$tmp/u2/py/packages/a/pyproject.toml"
+  _usm u2; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U2 (dynamic dependencies) rc=$rc, expected 1"; return 1; }
+  # U3: dynamic optional-dependencies in the path source.
+  _usm_tree u3
+  printf '[project]\nname = "b"\nversion = "0.1.0"\ndynamic = ["optional-dependencies"]\n\n[build-system]\nrequires = ["maturin>=1.9.6,<2"]\nbuild-backend = "maturin"\n' >"$tmp/u3/rs/b/pyproject.toml"
+  _usm u3; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U3 (dynamic optional-dependencies) rc=$rc, expected 1"; return 1; }
+  # U4: a member with no [project] table: uv would run its build backend to read its metadata.
+  _usm_tree u4
+  printf '[build-system]\nrequires = ["setuptools"]\n' >"$tmp/u4/py/packages/dormant/pyproject.toml"
+  _usm u4; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U4 (no [project]) rc=$rc, expected 1"; return 1; }
+  # U5: a dynamic field outside the three named ones is allowed (the check is not over-broad).
+  _usm_tree u5
+  printf '[project]\nname = "dormant"\nversion = "0.0.0"\ndependencies = []\ndynamic = ["classifiers"]\n' >"$tmp/u5/py/packages/dormant/pyproject.toml"
+  _usm u5; [ "$rc" -eq 0 ] || { fail "self-test: uv-static U5 (dynamic classifiers) rc=$rc, expected 0"; return 1; }
+  # U6: the message names the file and the field.
+  out="$(REPO_ROOT="$tmp/u1" uv_static_metadata_check 2>&1 >/dev/null)" || true
+  grep -Fq "py/packages/dormant/pyproject.toml: [project].dynamic lists 'version'" < <(printf '%s\n' "$out") \
+    || { fail "self-test: uv-static U6 message does not name the file and the field: '$out'"; return 1; }
+  # U7: a malformed member is an infrastructure failure, not a verdict.
+  _usm_tree u7
+  printf '[project\n' >"$tmp/u7/py/packages/dormant/pyproject.toml"
+  _usm u7; [ "$rc" -eq 2 ] || { fail "self-test: uv-static U7 (malformed) rc=$rc, expected 2"; return 1; }
+  # U8: the production path. The real run_check, on a staged copy of the real tree, with a dynamic
+  # version in the staged paigasus-ml (a uv member that SITES does not name). rc 2 here means the
+  # staging lacks a uv file; rc 0 means run_check no longer calls the check.
+  mkdir "$tmp/st"
+  stage_pristine_tree "$tmp/st"
+  mkdir -p "$tmp/st/py/packages/paigasus-ml"
+  printf '[project]\nname = "paigasus-ml"\ndynamic = ["version"]\ndependencies = []\n' >"$tmp/st/py/packages/paigasus-ml/pyproject.toml"
+  rc=0; ( REPO_ROOT="$tmp/st" run_check ) >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { fail "self-test: uv-static U8 run_check on a staged tree with a dynamic member rc=$rc, expected 1"; return 1; }
+
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
 run_self_tests() {
   SELF_TESTS_RAN=0
   local defs
@@ -744,6 +817,7 @@ run_self_tests() {
   cargo_package_writer_self_test
   stamp_sites_self_test
   napi_glue_writer_self_test
+  uv_static_metadata_self_test
   [ "$SELF_TESTS_RAN" -eq "$SELF_TEST_COUNT" ] \
     || die_infra "self-tests ran $SELF_TESTS_RAN, expected $SELF_TEST_COUNT"
   printf '== version-lockstep self-tests passed (%d tables) ==\n' "$SELF_TESTS_RAN"
@@ -780,6 +854,15 @@ run_check() {
   # Non-vacuity: the loop must have covered every declared site.
   [ "$checked" -eq "${#SITES[@]}" ] \
     || die_infra "checked $checked sites but ${#SITES[@]} are declared"
+  # SMA-684 §5.2: uv lock in --write must never need a build backend. Explicit status routing,
+  # not errexit, for the same reason as read_version above.
+  local uvrc=0
+  uv_static_metadata_check || uvrc=$?
+  case "$uvrc" in
+    0) printf 'uv workspace: every local package declares static metadata\n' ;;
+    1) rc=1 ;;
+    *) return 2 ;;
+  esac
   if [ "$rc" -eq 0 ]; then
     printf '== all %d version-lockstep sites agree ==\n' "$checked"
   fi
@@ -803,9 +886,14 @@ run_check() {
 # `die_infra` exits the whole process. An `exit` does not run a caller's RETURN trap, so a
 # caller-owned cleanup would not fire. This function owns $dest, so it cleans $dest itself.
 stage_pristine_tree() { # $1 destination dir
-  local dest="$1" entry kind target
+  local dest="$1" entry kind target uvfiles
+  # SMA-684: run_check also reads the uv workspace pyproject files (uv_static_metadata_check), so
+  # the staged tree carries the same list that check reads, derived from the check itself.
+  uvfiles="$(uv_static_metadata_check --list)" \
+    || { rm -rf "$dest"; die_infra "cannot list the uv workspace pyproject files to stage"; }
   {
     printf 'rs/Cargo.toml\n'
+    printf '%s\n' "$uvfiles"
     for entry in "${SITES[@]}"; do
       IFS='|' read -r _ kind target <<<"$entry"
       [ "$kind" = cargo-wsdep ] || printf '%s\n' "$target"
@@ -1047,6 +1135,92 @@ elif len(args) == 4 and args[0] == "verify":
     verify(read_text(args[1]), read_text(args[2]), args[3])
 else:
     fatal(f"usage: napi_glue_py write <file> <version> | verify <old> <new> <version>, got {args}")
+PY
+}
+
+# SMA-684 §5.2: `uv lock` runs no build backend only while uv can read every local package's
+# metadata without a build (spec F7). A `dynamic` version, dependencies or optional-dependencies
+# field makes `uv lock` run the build backend, and for paigasus-py-bindings that backend is
+# maturin, which compiles Rust in the release-PR job. The pyproject reader above covers only the
+# three SITES pyproject files; this check reads every uv workspace member (members glob of
+# py/pyproject.toml, minus `exclude`) and every [tool.uv.sources] path source, transitively. A
+# member with no [project] table and a path source that is not a directory are violations too:
+# uv would build either to read its metadata. With --list it prints the files it reads instead,
+# so stage_pristine_tree can stage them.
+uv_static_metadata_check() { # [--list] -> rc 0 clean | 1 a violation | 2 cannot read
+  python3 - "$REPO_ROOT" "$@" <<'PY'
+import glob, os, sys, tomllib
+from fnmatch import fnmatch
+
+root, args = sys.argv[1], sys.argv[2:]
+listing = args == ["--list"]
+if args and not listing:
+    print(f"INFRA: unknown argument(s) {args}", file=sys.stderr)
+    raise SystemExit(2)
+py = os.path.join(root, "py")
+ws_file = os.path.normpath(os.path.join(py, "pyproject.toml"))
+
+
+def rel(p):
+    return os.path.relpath(p, root)
+
+
+def load(p):
+    try:
+        with open(p, "rb") as f:
+            return tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"INFRA: cannot read {rel(p)}: {e}", file=sys.stderr)
+        raise SystemExit(2) from None
+
+
+ws = load(ws_file)
+uvws = ws.get("tool", {}).get("uv", {}).get("workspace")
+if not isinstance(uvws, dict) or not uvws.get("members"):
+    print("INFRA: py/pyproject.toml declares no [tool.uv.workspace] members", file=sys.stderr)
+    raise SystemExit(2)
+queue = [ws_file]
+for pat in uvws["members"]:
+    dirs = [d for d in sorted(glob.glob(os.path.join(py, pat))) if os.path.isdir(d)]
+    if not dirs:
+        print(f"INFRA: the uv workspace member glob {pat!r} matches no directory", file=sys.stderr)
+        raise SystemExit(2)
+    for d in dirs:
+        if not any(fnmatch(os.path.relpath(d, py), e) for e in uvws.get("exclude", [])):
+            queue.append(os.path.normpath(os.path.join(d, "pyproject.toml")))
+
+seen, violations = set(), []
+while queue:
+    p = queue.pop(0)
+    if p in seen:
+        continue
+    seen.add(p)
+    doc = load(p)
+    proj = doc.get("project")
+    if p != ws_file and not isinstance(proj, dict):
+        violations.append(f"{rel(p)}: no [project] table, so uv would run the build backend to read its metadata")
+    if isinstance(proj, dict):
+        dynamic = proj.get("dynamic", [])
+        for field in ("version", "dependencies", "optional-dependencies"):
+            if field in dynamic:
+                violations.append(f"{rel(p)}: [project].dynamic lists '{field}', so uv lock would run the build backend")
+    sources = doc.get("tool", {}).get("uv", {}).get("sources", {})
+    for name, src in sources.items():
+        for entry in src if isinstance(src, list) else [src]:
+            if isinstance(entry, dict) and "path" in entry:
+                target = os.path.normpath(os.path.join(os.path.dirname(p), entry["path"]))
+                if os.path.isdir(target):
+                    queue.append(os.path.join(target, "pyproject.toml"))
+                else:
+                    violations.append(f"{rel(p)}: [tool.uv.sources] {name} path {entry['path']!r} is not a directory, so uv would build it")
+
+if listing:
+    for p in sorted(seen):
+        print(rel(p))
+    raise SystemExit(0)
+for v in violations:
+    print(f"FAIL: {v}", file=sys.stderr)
+raise SystemExit(1 if violations else 0)
 PY
 }
 

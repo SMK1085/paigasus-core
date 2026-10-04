@@ -229,9 +229,9 @@ REQUIRED_REPO_TASKS = (
 # THE NAME IS HISTORICAL: each value is that gate's WHOLE authored input set — globs first
 # (sorted), then literal files (sorted) — because moon resolves a wildcard `inputs:` entry into
 # inputGlobs and a LITERAL path into inputFiles. While this table held only repo:input-liveness
-# every value was a glob; repo:version-lockstep (SMA-576) declares sixteen literal paths and no
+# every value was a glob; repo:version-lockstep (SMA-576) declared sixteen literal paths and no
 # glob at all, so a glob-only comparison would have read every one of them as absent and the entry
-# could not have been written. The order is FIXED (globs, then files) purely so the comparison is
+# could not have been written. (SMA-684 added one glob and one more literal path: eighteen now.) The order is FIXED (globs, then files) purely so the comparison is
 # deterministic and the failure message reads in a stable order; what actually catches a widening
 # such as `rs/Cargo.toml` -> `rs/*.toml` is the changed STRING, which moves the entry between the
 # buckets and out of the expected sequence at the same time. The constant keeps its name because
@@ -244,9 +244,11 @@ REQUIRED_REPO_TASKS = (
 SELF_TASK_EXPECTED_GLOBS = {
     "input-liveness": ("**/*",),
     "version-lockstep": (
+        "py/packages/*/pyproject.toml",
         "ci/version-lockstep/run.sh",
         "py/packages/paigasus-kernel/pyproject.toml",
         "py/packages/paigasus-proto/pyproject.toml",
+        "py/pyproject.toml",
         "py/uv.lock",
         "rs/Cargo.lock",
         "rs/Cargo.toml",
@@ -274,7 +276,7 @@ SELF_TASK_EXPECTED_GLOBS = {
     # .github/workflows/security-scan.yml ("Check 4 ASSERTS ON IT"; moon.yml:520-521) and
     # error-code's broad rs/crates/**/src/**/*.rs ("the one case it exists for would be the one
     # case it never runs on"; moon.yml:628-630). Both sets are STATIC — no runtime discovery —
-    # so exact match is affordable, exactly as for version-lockstep's sixteen.
+    # so exact match is affordable, exactly as for version-lockstep's eighteen.
     # The three py/ entries below arrived with SMA-578's Python arm (P0/P1/P2) and are
     # load-bearing, not incidental: P0 discovers the PyPI-bound set by globbing
     # py/packages/*/pyproject.toml, and P2 asserts the README/LICENSE those manifests
@@ -2132,7 +2134,7 @@ def check_gate_inputs(projects, expected_table=SELF_TASK_EXPECTED_GLOBS):
 
     `expected_table` defaults to the real registry and production never passes it — it exists so
     self_test() can drive a gate declaring BOTH globs and literal files, which no registered gate
-    does today (repo:input-liveness is glob-only, repo:version-lockstep file-only) and which is
+    did when this parameter was added (repo:input-liveness glob-only, repo:version-lockstep then file-only) and which is
     therefore the one property of the comparison the live table cannot exercise. The default is
     asserted to still BE that registry, so this parameter cannot quietly point production at a
     stub the way an `actionlint_sh_text=""` default would have (SMA-576).
@@ -2176,8 +2178,9 @@ def check_gate_inputs(projects, expected_table=SELF_TASK_EXPECTED_GLOBS):
         # This used to be `got != expected or files`, i.e. "the globs must match AND there must be
         # no file inputs at all", which was adequate while repo:input-liveness was the only entry
         # in the table and its whole declaration was a single glob. It cannot express a gate whose
-        # authored inputs are literal paths: repo:version-lockstep declares sixteen of them and no
-        # glob, so that form would have reported it as drifted on every run. Comparing the combined
+        # authored inputs are literal paths: repo:version-lockstep declared sixteen of them and no
+        # glob (SMA-576; it now has one glob too, SMA-684), so that form would have reported it as
+        # drifted on every run. Comparing the combined
         # sequence keeps every assertion the old form made — for a glob-only gate `files` is empty,
         # so a stray file input still lands in the comparison and still reds — and adds the two the
         # old form could not make: a dropped and an added file input.
@@ -4038,8 +4041,8 @@ def self_test():
     if not check_gate_inputs(wired({"input-liveness": {
             "inputGlobs": {"**/*": {}}, "inputFiles": {".prototools": {}}}})):
         failures.append("check_gate_inputs: missed a file input")
-    # ...and both directions on a FILES-ONLY gate (SMA-576). repo:version-lockstep declares
-    # sixteen literal paths and no glob, so neither of these rows is visible to the glob tuple at
+    # ...and both directions on the FILE half of a gate (SMA-576). repo:version-lockstep declares
+    # seventeen literal paths beside one glob (SMA-684), so neither of these rows is visible to the glob tuple at
     # all: dropping an input silently shrinks the set of files that re-key the gate — it then
     # reports PASS from cache over a version site it never read — and adding one is equally a
     # change to a set two independently scheduled gates are supposed to agree on.
@@ -4051,8 +4054,8 @@ def self_test():
     if not check_gate_inputs(wired({"version-lockstep": added})):
         failures.append("check_gate_inputs: missed an extra file input on a files-only gate")
     # ...and the ORDER the two buckets are compared in (SMA-576). Every row above is blind to it:
-    # both registered gates declare exactly one kind of input, so "globs then files" and "files
-    # then globs" agree on all of them, and a mutation reversing the two survived the whole battery
+    # when this pair was written, both registered gates declared one kind of input, so "globs then
+    # files" and "files then globs" agreed on all of them, and a mutation reversing the two survived the whole battery
     # until this pair. Driven through `expected_table` rather than by adding a fake gate to the
     # live registry, so nothing about the real graph is disturbed.
     mixed_payload = {"repo": {"mixed": {

@@ -199,7 +199,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   (`--self-test`, `--negative-control`, the real run, and `set -euo pipefail`; one more than the
   `release-parity*` tasks, which have no self-test invocation) — and takes the
   `SELF_TASK_EXPECTED_GLOBS` route through the
-  pairing rule above, listing all sixteen of its literal `inputs`, so it needs no
+  pairing rule above, listing all eighteen of its `inputs` (seventeen literal paths and the glob
+  `py/packages/*/pyproject.toml`, SMA-684), so it needs no
   `SELF_TASK_GLOBS_EXEMPT` entry (holding both would itself be reported).
 - Any crate flipping `publish = true` must carry **its own `[lints.*]` table** and **its own
   `include` allowlist** — enforced by `repo:publish-metadata` Checks 1c/1d (SMA-577). Cargo

@@ -45,12 +45,25 @@ passing state — the proto family activates in SMA-577.
 
 | Mode | Behaviour |
 |---|---|
-| `--check` (default) | Compare all 20 sites. Exit 1 on any drift. |
+| `--check` (default) | Compare all 20 sites, and assert static uv metadata (SMA-684). Exit 1 on any drift or violation. |
 | `--write` | Rewrite the ten sites release-plz cannot reach (the six non-Cargo sites, the three `publish = false` binding manifests, and the version literals of the napi glue `index.js`) and regenerate the two lock files (four `SITES` rows: 16, 17, 19 and 20). It compiles nothing (SMA-684). |
 | `--negative-control` | Prove the checker can still report red. |
-| `--self-test` | Fixture tables for the verdict function, the lock readers, the cargo-package writer and the napi-glue writer, plus `stamp_sites` on a staged copy of the real tree. |
+| `--self-test` | Fixture tables for the verdict function, the lock readers, the cargo-package writer, the napi-glue writer and the static uv metadata check, plus `stamp_sites` on a staged copy of the real tree. |
 
 Exit codes: `0` pass, `1` the repo is wrong, `2` infrastructure failed.
+
+## The static uv metadata check (SMA-684)
+
+`--write` runs `uv lock` in the release-PR job, where every step can read the App private key.
+`uv lock` runs no build backend only while uv can read every local package's metadata without a
+build (spec F7). `--check` therefore asserts that no uv workspace member, and no
+`[tool.uv.sources]` path source, lists `version`, `dependencies` or `optional-dependencies` in
+`[project].dynamic`. A package with no `[project]` table, and a path source that is not a
+directory, are violations too. A violation exits 1 and names the file and the field. The check
+reads the members from `py/pyproject.toml`'s members glob, not from `SITES`, so it covers
+`paigasus-ml` and `paigasus-workflows`. `stage_pristine_tree` stages the same files
+(`uv_static_metadata_check --list`), so the negative control and `stamp_sites_self_test` run the
+check on a complete tree.
 
 ## How it runs in CI
 
@@ -72,12 +85,13 @@ wiring:
   because `bash ci/version-lockstep/run.sh` is a strict PREFIX of both the `--self-test` line
   and the `--negative-control` line: a substring test would read the script as wired after the
   real run had been deleted.
-- `SELF_TASK_EXPECTED_GLOBS` pins the task's sixteen `inputs:` entries. Drop one and the gate
-  stops re-keying on that version site — it then reports PASS from Moon's cache over a file it
-  never read. All sixteen are literal paths, so moon resolves them into `inputFiles` rather than
-  `inputGlobs`; that constant compares the whole authored set across both buckets (SMA-576).
-- `repo:input-liveness` asserts each of those sixteen still names a TRACKED file, so moving one
-  reds CI instead of silently switching part of this gate off.
+- `SELF_TASK_EXPECTED_GLOBS` pins the task's eighteen `inputs:` entries. Drop one and the gate
+  stops re-keying on that file — it then reports PASS from Moon's cache over a file it never
+  read. Seventeen are literal paths, which moon resolves into `inputFiles`; one,
+  `py/packages/*/pyproject.toml` (SMA-684), is a glob, which moon resolves into `inputGlobs`.
+  That constant compares the whole authored set across both buckets (SMA-576).
+- `repo:input-liveness` asserts each of those eighteen still matches a TRACKED file, so moving
+  one reds CI instead of silently switching part of this gate off.
 
 ## The negative control
 
@@ -114,9 +128,10 @@ reader's file).
 
 **L2 — Fixture-table coverage now spans six of the eight `read_version` kinds, plus the
 cargo-package and napi-glue writers and the production stamping call site.**
-`--self-test` (`SELF_TEST_COUNT=5`) runs five tables: `site_verdict_self_test` (OK/MISMATCH
+`--self-test` (`SELF_TEST_COUNT=6`) runs six tables: `site_verdict_self_test` (OK/MISMATCH
 logic), `lock_reader_self_test`, `cargo_package_writer_self_test` (SMA-685),
-`stamp_sites_self_test` (SMA-685), and `napi_glue_writer_self_test` (SMA-684).
+`stamp_sites_self_test` (SMA-685), `napi_glue_writer_self_test` (SMA-684), and
+`uv_static_metadata_self_test` (SMA-684).
 
 `napi_glue_writer_self_test` drives `write_site napi-glue` against generated glue: a normal bump,
 a length-changing bump (`0.9.9` to `0.10.0`), an already-current file, a new version string that
