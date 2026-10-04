@@ -66,7 +66,7 @@ Measurement M10 (§ 6.1) checks one hypothesis about it.
 | D5 | The package e2e realm (`ts/packages/paigasus-auth/tests/e2e/keycloak-realm.json`) does NOT change. | That suite tests the package DEFAULT scope list, with `offline_access` (`roundtrip.spec.ts:114-120` asserts that a refresh token is issued). Only its comments that name SMA-682 get one clause: the fixture keeps the default on purpose. |
 | D6 | J1 checks the IdP session with a `prompt=none` authorization request, sent as a BROWSER navigation (`page.goto`) in a NEW context that holds only the two Keycloak cookies captured after login. The `redirect_uri` is a dedicated probe URI, `https://console.paigasus.test/kind-sso-probe`, which no ingress rule routes. The result is the `Location` of the Keycloak 302, read from the redirect chain. | (a) Playwright's Node-side request API cannot resolve the kind hosts. They resolve only through Chromium's `--host-resolver-rules` (`tests/cluster/playwright.config.ts:42-46`, and "Spec defect 4" in `phase-a/sso.spec.ts:34-35`). So `context.request` is not possible. (b) A replay of the captured cookies in a new context checks the SERVER-side SSO session. The end-session response expires `KEYCLOAK_IDENTITY` in context A, so a probe in context A could show `login_required` also with a live server session. This is the same rule that steps 3 and 6 apply to the console sid. SMA-514 D10 (the Keycloak cookie replay) is therefore restored, not obsolete. (c) The probe URI keeps the console out of the probe. With `redirect_uri=/iam/auth/callback`, the foreign `state` gives `txn_missing`, `server.ts:125-128` returns 302 to `/iam/auth/login`, and `handleLogin` then logs in again silently through SSO. That adds a console session and can hide a failure. The ingress routes only the zone base paths (`charts/paigasus/templates/ingress.yaml:39`), so the probe URI reaches no console. |
 | D7 | J1 gets two new steps with new titles, not new assertions inside old steps. `ci/kind/journeys-report.mjs` `EXPECTED_STEPS`, its fixtures and its test change with them. | A step title says what the step proves. The report checker then proves that each check ran. |
-| D8 | J1 step 5 asserts that Keycloak shows no "Do you want to log out?" page: the end-session document response is a 3xx. The assertion is placed right after the end-session request is observed, BEFORE the `id_token_hint` assertions and before the wait for `/iam/`. After `/iam/` loads, the step also asserts that no recorded document on `IDP_HOST` has status 200. What this proves depends on measurement M6 (§ 6.1): see § 3.3.1. | The Linear comment of 2026-09-25 asks for it. The placement lets the § 6.2 mutation fail at the D8 message, not at the hint assertion or at a 30 s timeout. |
+| D8 | J1 step 5 asserts that Keycloak shows no "Do you want to log out?" page: the end-session document response is a 3xx. The assertion is placed right after the end-session request is observed, BEFORE the `id_token_hint` assertions and before the wait for `/iam/`. After `/iam/` loads, the step also asserts that no recorded document on `IDP_HOST` has status 200. What this proves depends on measurement M6 (§ 6.1): see § 3.3.1. | The Linear comment of 2026-09-25 asks for it. The placement lets the § 6.2 mutation fail at the D8 message, not at the hint assertion or at a 30 s timeout. M6 returned `login_required` (§ 13): D8 is "no confirmation page on the console's real logout sequence". It is not a proof of SMA-681 AC 1 with a live session. |
 | D9 | The kind realm keeps the Keycloak default SSO timeouts. The runbook does NOT tell operators to raise the realm timeouts as a default step. It states the trade-off and the choices (§ 3.5). What the runbook recommends was Q2, decided on 2026-10-04 (§ 11). | With an online refresh token, a refresh fails when the Keycloak SSO session has ended. So the console session can last no longer than the Keycloak SSO session. `SSO Session Idle` and `SSO Session Max` are realm-wide: they apply to every client of the realm. Raising them makes a stolen `KEYCLOAK_IDENTITY` cookie and an unattended SSO session live longer for all applications. The chart does not expose `PAIGASUS_SESSION_TTL_SECONDS` or `PAIGASUS_SESSION_ABSOLUTE_TTL_SECONDS` (no match under `charts/`), so chart operators have the fixed package defaults, 8 h and 24 h (`config.ts:102-103`). The Keycloak `Client Session Idle` and `Client Session Max` settings (realm or client level) can cap the session lower still. J1 runs for less than 5 min, so the kind values do not matter for the test. |
 | D10 | No chart render check and no startup check detects `offline_access` on a Keycloak issuer. | The chart and the package do not know the IdP product. A guess from the issuer URL (`/realms/`) is not reliable. The documentation and J1 are the controls. See residual R1, which names an IdP-neutral log signal as a deferred option. |
 
@@ -292,7 +292,7 @@ true, so there is **no migration** (Q1). If a deployment exists, the order does 
 safety: `oidc.scopes` alone changes nothing (the default scope still grants `offline_access`), and
 the realm change alone changes nothing (the console still requests `offline_access`). The change
 takes effect only when both parts are done. An existing session keeps its offline refresh token
-until the next login; M9 measures that its refresh still works with the new refresh `scope`.
+until the next login; M9 measures that its refresh still works with the new refresh `scope`. M9 (§ 13): the refresh returned 200.
 
 The production realm (issue "Decide" item 3): the repository holds no production realm. The only
 realm guidance for operators is RUNBOOK-chart § 6, which this spec changes. See Q1.
@@ -312,12 +312,11 @@ realm guidance for operators is RUNBOOK-chart § 6, which this spec changes. See
    captured Keycloak cookies, in a new browser context, returns a code with no login form (J1
    step 4). This is issue AC 1.
 2. After "Sign out", the same request with the same captured cookies returns
-   `error=login_required` (J1 step 7). Together with step 4, this is issue AC 2. If M6 shows that
-   the revoke ends the SSO session, this AC says "the console logout sequence ends the IdP
-   session" (§ 3.3.1).
+   `error=login_required` (J1 step 7). Together with step 4, this is issue AC 2. M6 showed that
+   the revoke ends the SSO session (§ 13), so this AC is: the console logout sequence ends the IdP session (§ 3.3.1).
 3. After "Sign out", Keycloak shows no confirmation page. The end-session response is a 3xx, and
    the browser goes directly back to `/iam/` (J1 step 5, D8). This is the Linear comment of
-   2026-09-25. Whether this also proves SMA-681 AC 1 with a live session depends on M6 (§ 3.3.1).
+   2026-09-25. M6 returned `login_required` (§ 13), so this does not also prove SMA-681 AC 1 with a live session.
 4. `EXPECTED_STEPS` lists the seven J1 titles, and `node --test ci/kind/journeys-report.test.mjs`
    passes with the § 3.4 changes.
 5. The `chart` workflow (`kind` job) passes on the PR, with the seven J1 steps in its report.
@@ -374,7 +373,7 @@ Stop rules:
   `handleLogout`, and also disables the hint assertions of step 5
   (`auth-roundtrip.spec.ts:136-142` today). Step 5 must fail with the D8 message, not with a
   timeout and not with the hint message. Run it once if the kind stack is available, and record
-  the result. If M6 returns `login_required`, record that D8 cannot bite (§ 3.3.1).
+  the result. If M6 returns `login_required`, record that D8 cannot bite (§ 3.3.1). Recorded: M6 returned `login_required` (§ 13), so the D8 mutation cannot bite (§ 3.3.1). It is not run.
 
 ### 6.3 Unit and gate runs
 
@@ -413,7 +412,7 @@ it does not change.
   documentation-level issue; it is a candidate follow-up issue.
 - R2: The Keycloak mechanism that removes the online session is not known (§ 1). A later Keycloak
   version can change it. M5 re-measures it on 26.7, and M10 checks one hypothesis. The J1 step 4
-  control catches a change in one direction only.
+  control catches a change in one direction only. M10 (§ 13): the SSO session of the second client in the same jar survived a console login with `offline_access`.
 - R3: With D2, the console session length is capped by the Keycloak SSO session and by any client
   session caps (D9, § 3.5.1). On the defaults, an idle user is signed out after 30 min. The runbook
   says so.
@@ -423,8 +422,8 @@ it does not change.
   of the realm, or an admin sign-out ends the console session at the next refresh (§ 3.5.1 items 6
   and 7).
 - R6: Keycloak revocation can act on every session of the user for the console client. If M8 shows
-  it, a console logout on one device ends the SSO session on another device.
-- R7 (only if M6 returns `login_required`): the end-session path of logout is not proven end to end
+  it, a console logout on one device ends the SSO session on another device. Measured (§ 13, M8): no. Jar 2 kept its SSO session.
+- R7 (M6 returned `login_required`, § 13): the end-session path of logout is not proven end to end
   on the kind stack (§ 3.3.1).
 
 ## 9. Out of scope
@@ -514,3 +513,39 @@ contradicted. Line references moved in RUNBOOK-chart, `values.yaml`, the chart R
 
 Rejected: none. The challenger's option (a) alone (probe URI in context A) was not used, because
 it keeps the cookie-clear ambiguity of the step 7 finding; the design uses (a) and (b) together.
+
+## 13. Measurements
+
+Measured on 2026-10-04 by Task 1 of the plan, with
+`quay.io/keycloak/keycloak:26.7@sha256:82a77884f3af238beab1e7afd63b5f530e1b5c0590bd7aa60b40a40463e29b2c`
+(version line of the run: `Keycloak 26.7.4`), `start-dev --import-realm`, run locally with `docker run`.
+The method is the method of the SMA-681 spec § 3: two scratch realms, curl, one cookie jar per
+user agent, scope `openid profile email`, the realm default token lifespan. No repository file
+changed. The realm `paigasus` is the § 3.1 realm, with the secrets filled, `http://localhost:9999/*`
+added to the redirect URIs and `post.logout.redirect.uris`, and a second confidential client
+`sma682-second` (the same scopes, no audience mapper) for M10. The realm `paigasus-old` is the
+unchanged `ci/kind/realm/paigasus-realm.json` with the same three additions, and no second client.
+The revoke is RFC 7009 with no `token_type_hint`, as `bestEffortRevoke` sends it.
+
+| Row | Request | Result | Decides |
+|---|---|---|---|
+| M1 | The code exchange | status 200, typ `Refresh`, granted scope `openid email profile` | D2 |
+| M1 cookies | The jar after the login | `AUTH_SESSION_ID`, `KC_AUTH_SESSION_HASH`, `KEYCLOAK_IDENTITY`, `KEYCLOAK_SESSION` | step 4 cookie names |
+| M2 | `prompt=none` right after M1, the same jar | status 302, code=yes, no error | AC 1 |
+| M3 | Refresh with `scope=openid profile email` | status 200, typ `Refresh`, id_token yes | § 3.2 |
+| M4 | Logout with the hint and no revoke, then M2 again | end-session status 302 (to the post-logout URI, no code); then status 302, code=no, error=`login_required` | step 7 |
+| M5 | Unchanged realm, old default scope, then M2 | typ `Offline`; cookies `AUTH_SESSION_ID`, `KC_AUTH_SESSION_HASH`, `KEYCLOAK_IDENTITY`, `KEYCLOAK_SESSION`; status 302, code=no, error=`login_required` | the defect on 26.7 |
+| M6 | New login, revoke, then M2 in the same jar | revoke status 200 (token typ `Refresh`); status 302, code=no, error=`login_required` | § 3.3.1 |
+| M7 | After M6, end-session with no hint | status 302 (to the post-logout URI); 0 confirmation lines | § 3.3.1 cross-check |
+| M8 | Two jars, revoke jar 1, M2 in jar 2 (and jar 1) | revoke status 200; jar 2: status 302, code=yes, no error; jar 1: status 302, code=no, error=`login_required` | R6 |
+| M9 | Unchanged realm, offline token, scope moved by the admin API, refresh | admin statuses 204 (remove default) and 204 (add optional); refresh status 200, no error, typ `Offline` | § 3.6 (informative, Q1) |
+| M10 | Second client first, console with `offline_access` second, then M2 for the second client | second client typ `Refresh` (200); console typ `Offline` (200); then status 302, code=yes, no error | R2, approach B |
+| M11 | Probe URI on the kind stack | recorded from the PR's `chart` run, see below | D6 |
+
+Branch of § 3.3.1: B: M6 returned `login_required`. M7 agrees:
+yes. The revoke had already ended the SSO session in M6, so the end-session request without a
+hint found no session and Keycloak redirected at once with no confirmation page.
+
+M11 is covered by the `chart` workflow (`kind` job) on the pull request, not locally. J1 writes one
+`prompt=none probe` annotation per probe, and `journeys-report.mjs` prints each annotation in the
+job log of the step "Specs, journeys" on a green run. Plan Task 5 copies the two lines here.
