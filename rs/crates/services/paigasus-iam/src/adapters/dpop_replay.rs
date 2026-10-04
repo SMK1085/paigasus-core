@@ -9,7 +9,8 @@
 //! Time comes only from the `now` argument (the `Clock` port). One `Mutex` protects the state;
 //! it is never held across an `.await` (the port is synchronous).
 
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use paigasus_iam_core::{NewProof, ProofKey, RecordOutcome, RedeemOutcome, ReplayStore};
@@ -24,30 +25,25 @@ struct Entry {
     redeemed: bool,
 }
 
-/// The live entries of one `jkt` hash or one subject hash: the count, and the removal seconds as
-/// a multiset. The first key is the oldest removal, which a quota refusal reports.
+/// The live removal seconds of one `jkt` hash or one subject hash, as a min-heap. The count is
+/// the length. The minimum is the oldest removal, which a quota refusal reports. `purge` removes
+/// entries in ascending removal order over the whole store, so a released entry is always the
+/// minimum of its owner.
 #[derive(Default)]
 struct Owner {
-    count: usize,
-    removals: BTreeMap<i64, u32>,
+    removals: BinaryHeap<Reverse<i64>>,
 }
 
 impl Owner {
     fn add(&mut self, remove_at: i64) {
-        self.count += 1;
-        *self.removals.entry(remove_at).or_insert(0) += 1;
+        self.removals.push(Reverse(remove_at));
     }
 
-    /// Removes one entry. `true` when the owner has no entry left.
+    /// Removes the oldest entry. `true` when the owner has no entry left.
     fn release(&mut self, remove_at: i64) -> bool {
-        self.count = self.count.saturating_sub(1);
-        if let Some(n) = self.removals.get_mut(&remove_at) {
-            *n -= 1;
-            if *n == 0 {
-                self.removals.remove(&remove_at);
-            }
-        }
-        self.count == 0
+        let oldest = self.removals.pop().map(|Reverse(t)| t);
+        debug_assert_eq!(oldest, Some(remove_at));
+        self.removals.is_empty()
     }
 }
 
@@ -89,10 +85,10 @@ fn release(owners: &mut HashMap<[u8; 16], Owner>, id: [u8; 16], remove_at: i64) 
 /// the first call with `now > remove_at`, so the wait is `remove_at + 1 - now`, at least 1.
 fn quota_hit(owners: &HashMap<[u8; 16], Owner>, id: [u8; 16], quota: usize, now: i64) -> Option<u32> {
     let owner = owners.get(&id)?;
-    if owner.count < quota {
+    if owner.removals.len() < quota {
         return None;
     }
-    let oldest = owner.removals.keys().next().copied().unwrap_or(now);
+    let oldest = owner.removals.peek().map_or(now, |Reverse(t)| *t);
     let wait = oldest.saturating_add(1).saturating_sub(now).max(1);
     Some(u32::try_from(wait).unwrap_or(u32::MAX))
 }

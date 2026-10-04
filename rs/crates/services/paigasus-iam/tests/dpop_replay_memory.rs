@@ -42,19 +42,19 @@ fn id16(n: u64) -> [u8; 16] {
     out
 }
 
-#[test]
-#[ignore = "SMA-700 R8 measurement; run by hand with --run-ignored only"]
-fn bytes_per_entry_at_the_default_capacity() {
+/// Fills a store with `N` entries and prints the heap bytes per entry. `jkts` and `subjects` are
+/// the number of distinct values; `N` means every entry has its own.
+fn measure(label: &str, jkts: u64, subjects: u64) -> isize {
     const N: usize = 200_000;
     let store = InMemoryReplayStore::new(N, N, N);
     let before = LIVE.load(Ordering::SeqCst);
     for i in 0..N as u64 {
-        // 1000 keys, 500 subjects, removal seconds spread over 120 s: the default window shape.
+        // Removal seconds spread over 120 s: the default window shape.
         let remove_at = 1_000 + (i % 120) as i64;
         let entry = NewProof {
             key: ProofKey(id16(i)),
-            subject: id16(1_000_000 + i % 500),
-            jkt: id16(2_000_000 + i % 1_000),
+            subject: id16(1_000_000 + i % subjects),
+            jkt: id16(2_000_000 + i % jkts),
             expires_at: remove_at,
             follow_up_deadline: remove_at,
             follow_up_digest: [0u8; 32],
@@ -63,6 +63,17 @@ fn bytes_per_entry_at_the_default_capacity() {
     }
     let bytes = LIVE.load(Ordering::SeqCst) - before;
     let per_entry = bytes / N as isize;
-    println!("SMA-700 R8: {N} entries use {bytes} heap bytes, {per_entry} bytes per entry, {} MiB", bytes / (1024 * 1024));
+    println!("SMA-700 R8 [{label}]: {N} entries use {bytes} heap bytes, {per_entry} bytes per entry, {} MiB", bytes / (1024 * 1024));
     assert!(per_entry > 0);
+    drop(store);
+    per_entry
+}
+
+#[test]
+#[ignore = "SMA-700 R8 measurement; run by hand with --run-ignored only"]
+fn bytes_per_entry_at_the_default_capacity() {
+    const N: u64 = 200_000;
+    measure("brief: 1000 jkts, 500 subjects", 1_000, 500);
+    measure("distinct jkt, 500 subjects", N, 500);
+    measure("distinct jkt and subject", N, N);
 }
