@@ -58,16 +58,26 @@ max-threads = 8
 # first this narrower block would never apply and the safeguard would exist only as a comment.
 # Specific before general.
 [[profile.default.overrides]]
-# keycloak_e2e starts a Keycloak with a 240s startup timeout (tests/keycloak_e2e.rs:79). Three
-# attempts of a genuinely failing run would be ~18 minutes against ci.yml's 30-minute budget.
+# keycloak_e2e starts a Keycloak with a 240s startup timeout (tests/keycloak_e2e.rs:93). Three
+# attempts of a genuinely failing run would be ~18 minutes against ci.yml's 45-minute budget.
 # Scoped to the whole BINARY (`binary(keycloak_e2e)`), not a test name: the safeguard exists
 # because of the container this binary starts, not because of what any one test is called. A
 # `test(keycloak)` filter would silently stop covering a second test added to this file under a
 # different name, falling through to the general kind(test) override's count=2 retries — three
-# 240s startups (~12 minutes) against ci.yml's 30-minute budget. Verified the match set is
+# 240s startups (~12 minutes) against ci.yml's 45-minute budget. Verified the match set is
 # unchanged: `cargo nextest list -E 'package(=paigasus-iam) and binary(keycloak_e2e)'` lists the
 # same single test as the old `test(keycloak)` filter did.
 filter = 'package(=paigasus-iam) and binary(keycloak_e2e)'
+retries = 1
+
+[[profile.default.overrides]]
+# SMA-703: zitadel_e2e starts Zitadel and its own Postgres. A failing start waits for the Postgres
+# check (60 s), two readiness polls of 180 attempts each (discovery, then the management API) and
+# the PAT read (30 s). So one failing attempt can take about 7.5 minutes, and the general block's
+# three attempts about 22.5 minutes, against ci.yml's 45-minute budget. One retry is kept for a transient container start.
+# Scoped to the whole binary, for the same reason as keycloak_e2e above. Does NOT set
+# `test-group`; it inherits `docker-containers` from the general block below.
+filter = 'package(=paigasus-iam) and binary(zitadel_e2e)'
 retries = 1
 
 [[profile.default.overrides]]
@@ -104,6 +114,19 @@ retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s"
 # The keycloak override above deliberately does NOT set `test-group`, so keycloak_e2e still
 # picks up the group from here — precedence is per-setting, so a narrower block only overrides
 # the settings it names.
+test-group = 'docker-containers'
+
+[[profile.default.overrides]]
+# SMA-677 D22: the gateway's Docker canary, in the form of paigasus-iam's above. One retry; it
+# inherits `test-group` from the block below (per-setting precedence, specific before general).
+filter = 'package(=paigasus-gateway) and binary(docker_preflight)'
+retries = 1
+
+[[profile.default.overrides]]
+# SMA-677 D22: the gateway's Redis-backed binaries, named one by one so the crate's pure unit
+# tests keep retries = 0. Same retry budget and container cap as paigasus-iam's suites.
+filter = 'package(=paigasus-gateway) and (binary(docker_preflight) or binary(limits_store_redis) or binary(limits_redis_e2e))'
+retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
 test-group = 'docker-containers'
 
 # JUnit lives on a DEDICATED profile, not on `default`, because nextest resolves the report path

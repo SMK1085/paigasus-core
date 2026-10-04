@@ -158,6 +158,7 @@ fn app_for(fake: FakeIam, stream_enabled: bool) -> Router {
         openai: Arc::new(unused_openai()),
         max_request_bytes: 1_048_576,
         capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: stream_enabled },
+        limits: None,
     };
     router(state)
 }

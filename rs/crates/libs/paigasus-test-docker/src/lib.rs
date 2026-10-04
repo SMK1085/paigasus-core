@@ -15,6 +15,7 @@ use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::time::Duration;
 use testcontainers::Image;
+use testcontainers::ImageExt;
 use testcontainers::bollard::errors::Error as BollardError;
 use testcontainers::core::ContainerAsync;
 use testcontainers::core::ContainerRequest;
@@ -276,6 +277,16 @@ where
 /// An ephemeral Redis plus its connection URL — the shape six suites each hand-rolled.
 pub async fn start_redis_or_skip(what: &str) -> Option<(ContainerAsync<Redis>, String)> {
     let node = start_or_skip(Redis::default(), what).await?;
+    let port = mapped_port(&node, 6379, "redis").await;
+    Some((node, format!("redis://127.0.0.1:{port}")))
+}
+
+/// An ephemeral Redis of a pinned image `tag`, plus its URL (SMA-677 D22). `start_redis_or_skip`
+/// keeps `Redis::default()`, so IAM's tests keep the image they use today (A13); the gateway pins
+/// `6.2-alpine` (the stated minimum) and `7.4-alpine` (the version kind runs) with this one. The
+/// skip-versus-fail decision is `start_or_skip`'s, unchanged.
+pub async fn start_redis_image_or_skip(tag: &str, what: &str) -> Option<(ContainerAsync<Redis>, String)> {
+    let node = start_or_skip(Redis::default().with_tag(tag), what).await?;
     let port = mapped_port(&node, 6379, "redis").await;
     Some((node, format!("redis://127.0.0.1:{port}")))
 }

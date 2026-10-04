@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# expect: 2 lockfile-version
+# A pnpm 6.0 lock file. The parser knows only format 9.0, so the guard must refuse it.
+lockfileVersion: '6.0'
+
+importers:
+
+  .:
+    devDependencies:
+      '@next/eslint-plugin-next':
+        specifier: 'catalog:'
+        version: 16.3.6(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
+
+  apps/iam-console:
+    dependencies:
+      micromatch:
+        specifier: 'catalog:'
+        version: 4.0.8
+
+snapshots:
+
+  '@next/eslint-plugin-next@16.3.6(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))':
+    dependencies:
+      fast-glob: 3.3.1
+
+  braces@3.0.3: {}
+
+  fast-glob@3.3.1:
+    dependencies:
+      micromatch: 4.0.8
+
+  micromatch@4.0.8:
+    dependencies:
+      braces: 3.0.3

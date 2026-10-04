@@ -23,11 +23,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   dedicated `[profile.iam]` instead, selected only by `paigasus-iam-rs:test`'s `args: ['--profile',
   'iam']` — CI uploads it as the `nextest-junit` artifact, but a bare `cargo nextest run -p
   paigasus-iam` writes no report at all.
-- `paigasus-iam`'s **Docker-backed** suites (73 of its 76 integration binaries) skip when the
+- `paigasus-iam`'s **Docker-backed** suites (74 of its 77 integration binaries) skip when the
   daemon is unreachable, and that skip is deliberately quiet — nextest discards a passing test's
   stderr and Moon discards a passing task's output, so no message can surface there. What makes
   it visible is `tests/docker_preflight.rs`, a canary that FAILS when Docker is unreachable: a
-  Docker-less run yields exactly one red instead of 72 silent passes (SMA-538). The policy itself
+  Docker-less run yields exactly one red instead of 73 silent passes (SMA-538). The policy itself
   lives once, in the dev-only crate `paigasus-test-docker` (SMA-726; IAM's
   `tests/support/docker.rs` only re-exports it), and `repo:iam-docker-policy-single-site` fails
   if a suite in IAM or the gateway hand-rolls its own copy. Two env vars, both parsing
@@ -45,6 +45,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   it to a skip, since that hatch is checked before any classification happens. A stray `CI=false` still counts as "CI present" (the
   check is presence-based, not value-based) — clear it with `env -u CI cargo nextest run -p
   paigasus-iam`.
+- The gateway also has Docker-backed suites now (SMA-677). It has a `docker_preflight` canary.
+  It has two Redis test binaries in the nextest `docker-containers` group. Its Moon task
+  `paigasus-gateway-rs:test` runs on the `heavy-integration` mutex.
 - This repo now has **four** CA-bundle config knobs and they do NOT share semantics. `authn.extra_ca_bundle_path`
   and `upstream.openai.extra_ca_bundle_path` (SMA-558) **ADD** to the trust store — reqwest builds one
   `RootCertStore` by unioning `add_root_certificate` calls with the webpki roots and the platform store, so
@@ -178,9 +181,20 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - **The wasm-bindgen family does not move through dependabot (SMA-683).** `js-sys`, `web-sys`
   and `wasm-bindgen-futures` pin `wasm-bindgen` with `=`. Dependabot updates one package at a
   time. `cargo update -p wasm-bindgen` then locks 0 packages (MEASURED, spec M0). Since SMA-680
-  the release PR does not move it either. So `wasm-bindgen` stays frozen until a person moves
-  the whole family. Do that at a `rust-toolchain.toml` or `wasm-pack` bump, at a `repo:deny`
-  advisory for the family, or when a newer `wasm-bindgen` is needed. Use a normal
+  the release PR does not move it either.
+  **The normal path is `.github/workflows/wasm-lockstep.yml` (SMA-693).** Every Tuesday at
+  06:17 UTC it runs the four-package `cargo update -p` on `main`. When the lock changes, it
+  regenerates the five artifacts on Linux in a build container, and opens or updates ONE pull
+  request on the bot branch `deps/wasm-bindgen-lockstep`. Read the `rs/Cargo.lock` diff of that
+  pull request before the merge: nothing enforces this review. Do not push to the bot branch;
+  the next run refuses a branch that a person changed. To bring the pull request up to date with
+  `main`, run the workflow again. Do not use "Update branch" on it: a merge into the bot branch
+  makes the next run refuse. If a run refuses, close the pull request or delete the branch. To
+  start a run now: `gh workflow run wasm-lockstep.yml --ref main`. `ci/wasm-lockstep/README.md`
+  holds the trust model and the refusal codes.
+  Use the manual runbook below only when the workflow cannot help: it refuses the lock change (a
+  new transitive dependency, or a newer `syn`), its build fails because the pinned `wasm-pack`
+  does not support the new 0.2.z, or the `reqwest` case below. Use a normal
   `feature/sma-NNN-<slug>` PR.
   Before you start:
   - Put the proto shims on `PATH`.
@@ -197,10 +211,13 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   ```
   Push the branch, then open the PR.
   Read the `git diff` BEFORE `generate-wasm`. That task compiles the new proc-macro and build
-  scripts on your machine, where your `gh` token and signing agent are available. Run
-  `generate-wasm` on ONE host (SMA-634 F12). If the pinned `wasm-pack` does not support the new
-  0.2.z, bump it in `.prototools` in the same PR (the invariant above `wasm-bindgen` in
-  `rs/Cargo.toml`). Record its error text here when a bump first shows it. It is not measured.
+  scripts on your machine, where your `gh` token and signing agent are available. ONE host per
+  PR regenerates the artifacts. A family bump from the `wasm-lockstep` workflow regenerates on
+  Linux inside its build container; a kernel or binding edit regenerates on the author's host.
+  So the binary changes host between PRs (SMA-634 F12). `CI` never regenerates; it only
+  compares. If the pinned `wasm-pack` does not support the new 0.2.z, bump it in `.prototools`
+  in the same PR (the invariant above `wasm-bindgen` in `rs/Cargo.toml`). Record its error text
+  here when a bump first shows it. It is not measured.
   **The `reqwest` case (INFERRED).** A new `reqwest` can need newer wasm crates. Then a cargo PR
   (usually `cargo-minor-patch`) moves `wasm-bindgen` and fails `committed-wasm.test.ts`. Follow
   these steps in order:

@@ -17,3 +17,19 @@ groups:
         for: 10m
         labels: { severity: warning }
         annotations: { summary: "Gateway upstream HTTP 5xx ratio > 5%" }
+      - alert: GatewayLimitsRedisBreakerOpen
+        # SMA-677 § 4.8, in the form of IamRedisBreakerOpen. While the breaker is open or half-open
+        # the limits are NOT applied: every request is admitted and its tokens are not charged
+        # (fail-open, D10). `max by (job, role)`: every replica sets its own gauge, so sum() is wrong.
+        expr: max by (job, role) (gateway_redis_breaker_state) != 0
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway limits Redis circuit breaker is not closed (role {{ $labels.role }})", description: "The gateway's limits Redis circuit breaker has been open or half-open for 2m. The rate limits and token budgets are NOT applied (fail-open), and the tokens used now are not charged to any budget. See RUNBOOK-observability.md, section \"Gateway limits: fail-open and Redis requirements\"." }
+      - alert: GatewayLimitStoreUnavailable
+        # SMA-677 § 4.8. Also fires on an outage shorter than a scrape interval, which the gauge
+        # misses, and on `server` and `decode` errors, which never open the breaker
+        # (`counts_as_failure`). The series is primed at 0, so increase() sees the first event.
+        expr: sum by (job, op, kind) (increase(gateway_limit_store_unavailable_total[10m])) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway limit store calls are failing (op {{ $labels.op }}, kind {{ $labels.kind }})", description: "Limit-store calls failed in the last 10m. A failed check admits the request with no limit, and a failed charge is not counted against any budget (fail-open). kind=io: Redis is down or unreachable. kind=server or decode: Redis answered with an error (for example OOM under noeviction, or READONLY from a replica), which never opens the breaker. See RUNBOOK-observability.md, section \"Gateway limits: fail-open and Redis requirements\"." }

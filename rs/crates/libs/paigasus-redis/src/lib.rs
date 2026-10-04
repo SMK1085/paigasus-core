@@ -273,8 +273,8 @@ struct Inner {
 }
 
 /// Per-connection circuit breaker (SMA-476 D1). `Arc`-shared, so every clone of a
-/// [`RedisHandle`] observes one breaker — load-bearing, because all eleven command call sites do
-/// `self.conn.clone()` per command.
+/// [`RedisHandle`] observes one breaker — load-bearing, because every command call site of a caller
+/// does `self.conn.clone()` per command.
 ///
 /// `Debug` is derived (not part of the original design, added because [`connect`]'s Ok type
 /// replaced [`ConnectionManager`] — which already implemented `Debug` — with [`RedisHandle`], and
@@ -505,7 +505,7 @@ fn counts_as_failure(err: &redis::RedisError) -> bool {
 }
 
 /// The error an open breaker returns instead of dialling. `ErrorKind::Io` so `is_io_error()`
-/// holds and all five adapters' error arms fire exactly as they do against a genuinely dead
+/// holds and each caller's adapter error arms fire exactly as they do against a genuinely dead
 /// socket (SMA-476 D4) — they all read `err.kind()` and nothing else.
 fn breaker_open_error() -> redis::RedisError {
     redis::RedisError::from((redis::ErrorKind::Io, BREAKER_OPEN_MESSAGE))
@@ -627,7 +627,7 @@ mod tests {
 
         let err = result.expect_err(
             "connect() returned Ok against an unreachable backend — that means connect went \
-             lazy, and AppState::new would no longer fail fast at boot (SMA-473 D10)",
+             lazy, and a caller's startup would no longer fail fast at boot (SMA-473 D10)",
         );
         assert!(err.is_io_error(), "expected an IO/connection error, got {err:?} — the probe never actually dialed");
 
@@ -874,7 +874,7 @@ mod tests {
         assert!(matches!(b.admit(), Admission::Pass(_)), "an uncounted error must reset the consecutive-failure count");
     }
 
-    /// SMA-476 D4. The literal reaches the logs: unlike the five adapters (which log
+    /// SMA-476 D4. The literal reaches the logs: unlike IAM's adapters (which log
     /// `err.kind()` only), `cedar_authorizer.rs:167` and `generation.rs:141` log the wrapping
     /// AuthzError with `error = %err`, i.e. this Display.
     #[test]
@@ -882,7 +882,7 @@ mod tests {
         let err = breaker_open_error();
         assert!(
             err.is_io_error(),
-            "SMA-476 D4: the synthetic error must be indistinguishable from a real connection failure to all five adapters"
+            "SMA-476 D4: the synthetic error must be indistinguishable from a real connection failure to every caller's adapters"
         );
         let rendered = err.to_string();
         assert!(rendered.contains(BREAKER_OPEN_MESSAGE), "expected the pinned literal in {rendered:?}");
@@ -910,7 +910,7 @@ mod tests {
         );
     }
 
-    /// SMA-476 D1. Every one of the eleven call sites does `self.conn.clone()` per command, so a
+    /// SMA-476 D1. Every command call site of a caller does `self.conn.clone()` per command, so a
     /// `#[derive(Clone)]` over a non-`Arc` breaker field would compile and silently give every
     /// call its own breaker — which would never open. This is that guard.
     ///
@@ -1153,7 +1153,7 @@ mod tests {
 }
 
 /// Shared test fixtures for the SMA-476 breaker tests: one blackhole listener for this crate's
-/// tests and for every caller's posture tests (IAM's five Redis adapters).
+/// tests and for every caller's posture tests (for example IAM's Redis adapters).
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::sync::Arc;
