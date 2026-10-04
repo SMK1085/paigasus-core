@@ -134,11 +134,12 @@ imports.
   - A `link:` value goes to the importer at that path, resolved relative to the current
     importer. It is not a snapshot.
   - A `file:` value maps to the snapshot key `name@file:...`.
-  - A value is an alias when `@` appears after index 0 in the part before the first `(`.
-    The node key is then the value itself (`realname@version...`).
+  - A value is an alias when `@` appears after index 0 in the part before the first `(`
+    AND before any `://`. A URL value such as `git+ssh://git@host/...` is not an alias.
+    The node key of an alias is the value itself (`realname@version...`).
   - Else the node key is `name@version`, with the full value, peer suffixes included.
-- The package name of a snapshot key is the part before the first `(`, split at its last
-  `@`.
+- The package name of a snapshot key is the part before the first `(`, cut at the first `@`
+  after index 0.
 
 **Walks.** The guard does two breadth-first walks over the snapshot edges. It records the
 parent of each node, so that a hit can print its full path.
@@ -186,6 +187,7 @@ when every fixture matches. Else it exits 2 and names each fixture that did not 
 | `shipped-link.yaml` | an app links a workspace package, whose production dependency reaches `braces` | 3 `shipped-path` |
 | `shipped-optional.yaml` | the only path uses an `optionalDependencies` block in a snapshot | 3 `shipped-path` |
 | `shipped-alias.yaml` | the only path uses an alias value (`name: realname@1.0.0`) | 3 `shipped-path` |
+| `shipped-url.yaml` | the only path uses a URL value that contains `@` (`git+ssh://git@host/...`) | 3 `shipped-path` |
 | `block-end.yaml` | a `transitivePeerDependencies:` list with quoted items, and an `optional: true` snapshot, sit between edge blocks; `braces` must not be reached through them | 0 |
 | `catalogs.yaml` | a `catalogs:` block with importer-like `version:` lines that name `braces` | 0 |
 | `file-dep.yaml` | a `file:` dependency on the path | 3 `shipped-path` |
@@ -310,3 +312,9 @@ Not applied:
 - M, pin the call site: recorded as a residual instead (§4.5). Reason: it changes a second
   gate for a guard with a 90-day life. Sven can ask for the pin.
 - Q, PR 363's lock file: answered by F15. No design change.
+
+Found later:
+
+- The PR review (CodeRabbit) found that a URL-valued version with `@` was read as an alias,
+  and that the package name was cut at the last `@`. Both are fixed (§4.2), and
+  `shipped-url.yaml` covers them.

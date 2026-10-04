@@ -64,6 +64,7 @@ EXPECTED_FIXTURES = (
     "shipped-link.yaml",
     "shipped-optional.yaml",
     "shipped-prod.yaml",
+    "shipped-url.yaml",
     "table-stale.yaml",
 )
 
@@ -163,14 +164,15 @@ def node_for(importer: str, name: str, value: str | None) -> tuple[str, str]:
     if value.startswith("file:"):
         return ("snapshot", f"{name}@{value}")
     head = value.split("(", 1)[0]
-    if "@" in head[1:]:
+    pre = head.split("://", 1)[0]  # a URL value can hold `@` (git@host); it is not an alias
+    if "@" in pre[1:]:
         return ("snapshot", value)  # an alias: `name: realname@version`
     return ("snapshot", f"{name}@{value}")
 
 
 def package_name(snapshot_key: str) -> str:
     head = snapshot_key.split("(", 1)[0]
-    at = head.rfind("@")
+    at = head.find("@", 1)  # first `@` from index 1: a URL after the name can hold `@`
     return head[:at] if at > 0 else head
 
 
