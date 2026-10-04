@@ -2718,6 +2718,8 @@ Known limit (R4): the two kernel own-package inputs `tests/**/*` and `vitest.con
 
 | Run | Result |
 |---|---|
-| forced runs (Task 10 Step 1) | |
-| full `moon ci` graph | |
-| gates re-run directly, with the bash used | |
+| forced runs (Task 10 Step 1) | Run 1 on 2026-10-04 failed fast. `paigasus-kernel-ts:typecheck`'s preflight exited 1: the installed `@paigasus/wasm` package.json still listed `paigasus_wasm_extra.d.ts`, a leftover of Task 9 mutation M13 (the in-place edit reached the hard link; the git restore made a new inode). The preflight worked as designed. `contracts:generate` also deleted `error_details_pb.ts` (the known BSR artifact); it was restored. After `rm -rf ts/node_modules && pnpm -C ts install`, the preflight reported "checked 2 file: dependencies; the installed typings equal the committed files" (rc 0), and run 2 of the full Step 1 command gave rc 0 with a clean `git status`. |
+| full `moon ci` graph | The full target list from the root CLAUDE.md, with `--base origin/main --include-relations` and the bash 3.2 shim, ran 33 tasks: 23 cached (same hash as the green Step 1 runs), 7 passed (including `repo:affected-smoke`, `iam-console-ts:test`, `gateway-console-ts:test` and `gateway-console-ts:test-e2e`), 3 failed. The 3 failures are the documented bash-version artifacts: `repo:ruff-ci` (rc 127, `mapfile: command not found`), `repo:next-public-free` (rc 1, 7 self-test rows under bash 3.2) and `repo:actionlint` (rc 1, the two false `cargo-lock-step` rows under bash 3.2). |
+| gates re-run directly, with the bash used | Under `/opt/homebrew/bin/bash` 5.3.20: `ci/ruff/run.sh` rc 0 ("15 files clean"); `ci/next-public/run.sh` rc 0 ("763 tracked ts/ files free of NEXT_PUBLIC_"); `ci/actionlint/run.sh` rc 0, with the preflight line "pipe capacity 65536 bytes (floor 8192)". So every gate is green on this branch. |
+
+Follow-up issue (spec section 7): SMA-736, created by the coordinator.
