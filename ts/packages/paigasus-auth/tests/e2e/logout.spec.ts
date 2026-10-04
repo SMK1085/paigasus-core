@@ -29,8 +29,10 @@ test('AC 3: a stolen cookie is dead immediately after logout', async ({ page, co
   // SMA-681: routes.ts's handleLogout sends the stored raw ID token as `id_token_hint`, and
   // openid-client appends `client_id`. Keycloak 26.4 needs the hint to skip its confirmation page
   // when an SSO session is live (SMA-681 spec § 3). This realm grants `offline_access` as a default
-  // scope, so no SSO session exists here and no page appears either way (SMA-682): this test proves
-  // the hint is SENT, and that Keycloak still completes the redirect with it (§ 3.1 row M-i1).
+  // scope on purpose: this suite tests the package default scope list (SMA-682 D5). So no SSO
+  // session exists here and no page appears either way (SMA-682): this test proves the hint is
+  // SENT, and that Keycloak still completes the redirect with it (§ 3.1 row M-i1). J1 on the kind
+  // stack checks the live-session case.
   //
   // Asserting `public-heading` becomes visible afterward is NOT sufficient on its own (fix round
   // 1, Important 1): `routes.ts`'s handleLogout has a DEGRADED arm — if `buildEndSessionUrl`
