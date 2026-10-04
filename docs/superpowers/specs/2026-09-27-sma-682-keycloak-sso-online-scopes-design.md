@@ -292,7 +292,8 @@ true, so there is **no migration** (Q1). If a deployment exists, the order does 
 safety: `oidc.scopes` alone changes nothing (the default scope still grants `offline_access`), and
 the realm change alone changes nothing (the console still requests `offline_access`). The change
 takes effect only when both parts are done. An existing session keeps its offline refresh token
-until the next login; M9 measures that its refresh still works with the new refresh `scope`. M9 (§ 13): the refresh returned 200.
+until the next login; M9 measures that its refresh still works with the new refresh `scope`.
+M9 (§ 13): the refresh returned 200.
 
 The production realm (issue "Decide" item 3): the repository holds no production realm. The only
 realm guidance for operators is RUNBOOK-chart § 6, which this spec changes. See Q1.
@@ -313,10 +314,12 @@ realm guidance for operators is RUNBOOK-chart § 6, which this spec changes. See
    step 4). This is issue AC 1.
 2. After "Sign out", the same request with the same captured cookies returns
    `error=login_required` (J1 step 7). Together with step 4, this is issue AC 2. M6 showed that
-   the revoke ends the SSO session (§ 13), so this AC is: the console logout sequence ends the IdP session (§ 3.3.1).
+   the revoke ends the SSO session (§ 13), so this AC is: the console logout sequence
+   ends the IdP session (§ 3.3.1).
 3. After "Sign out", Keycloak shows no confirmation page. The end-session response is a 3xx, and
    the browser goes directly back to `/iam/` (J1 step 5, D8). This is the Linear comment of
-   2026-09-25. M6 returned `login_required` (§ 13), so this does not also prove SMA-681 AC 1 with a live session.
+   2026-09-25. M6 returned `login_required` (§ 13), so this does not also prove SMA-681 AC 1 with a
+   live session.
 4. `EXPECTED_STEPS` lists the seven J1 titles, and `node --test ci/kind/journeys-report.test.mjs`
    passes with the § 3.4 changes.
 5. The `chart` workflow (`kind` job) passes on the PR, with the seven J1 steps in its report.
@@ -373,7 +376,9 @@ Stop rules:
   `handleLogout`, and also disables the hint assertions of step 5
   (`auth-roundtrip.spec.ts:136-142` today). Step 5 must fail with the D8 message, not with a
   timeout and not with the hint message. Run it once if the kind stack is available, and record
-  the result. If M6 returns `login_required`, record that D8 cannot bite (§ 3.3.1). Recorded: M6 returned `login_required` (§ 13), so the D8 mutation cannot bite (§ 3.3.1). It is not run.
+  the result. If M6 returns `login_required`, record that D8 cannot bite (§ 3.3.1).
+  Recorded: M6 returned `login_required` (§ 13), so the D8 mutation cannot bite (§ 3.3.1). It is
+  not run.
 
 ### 6.3 Unit and gate runs
 
@@ -412,7 +417,10 @@ it does not change.
   documentation-level issue; it is a candidate follow-up issue.
 - R2: The Keycloak mechanism that removes the online session is not known (§ 1). A later Keycloak
   version can change it. M5 re-measures it on 26.7, and M10 checks one hypothesis. The J1 step 4
-  control catches a change in one direction only. M10 (§ 13): the SSO session of the second client in the same jar survived a console login with `offline_access`.
+  control catches a change in one direction only. M10 (§ 13): the SSO session of the second client
+  in the same jar survived a console login with `offline_access`. The console login in M10 probably
+  reused the live SSO session (not shown in the log), so M10 is not the M5-type test of a fresh
+  offline login.
 - R3: With D2, the console session length is capped by the Keycloak SSO session and by any client
   session caps (D9, § 3.5.1). On the defaults, an idle user is signed out after 30 min. The runbook
   says so.
@@ -422,7 +430,8 @@ it does not change.
   of the realm, or an admin sign-out ends the console session at the next refresh (§ 3.5.1 items 6
   and 7).
 - R6: Keycloak revocation can act on every session of the user for the console client. If M8 shows
-  it, a console logout on one device ends the SSO session on another device. Measured (§ 13, M8): no. Jar 2 kept its SSO session.
+  it, a console logout on one device ends the SSO session on another device. Measured (§ 13, M8): no.
+  Jar 2 kept its SSO session.
 - R7 (M6 returned `login_required`, § 13): the end-session path of logout is not proven end to end
   on the kind stack (§ 3.3.1).
 
@@ -536,15 +545,16 @@ The revoke is RFC 7009 with no `token_type_hint`, as `bestEffortRevoke` sends it
 | M4 | Logout with the hint and no revoke, then M2 again | end-session status 302 (to the post-logout URI, no code); then status 302, code=no, error=`login_required` | step 7 |
 | M5 | Unchanged realm, old default scope, then M2 | typ `Offline`; cookies `AUTH_SESSION_ID`, `KC_AUTH_SESSION_HASH`, `KEYCLOAK_IDENTITY`, `KEYCLOAK_SESSION`; status 302, code=no, error=`login_required` | the defect on 26.7 |
 | M6 | New login, revoke, then M2 in the same jar | revoke status 200 (token typ `Refresh`); status 302, code=no, error=`login_required` | § 3.3.1 |
-| M7 | After M6, end-session with no hint | status 302 (to the post-logout URI); 0 confirmation lines | § 3.3.1 cross-check |
+| M7 | After M6, end-session with no hint | status 302 (to the post-logout URI); the `grep` count of 0 is not meaningful on a 302 body | § 3.3.1 cross-check |
 | M8 | Two jars, revoke jar 1, M2 in jar 2 (and jar 1) | revoke status 200; jar 2: status 302, code=yes, no error; jar 1: status 302, code=no, error=`login_required` | R6 |
 | M9 | Unchanged realm, offline token, scope moved by the admin API, refresh | admin statuses 204 (remove default) and 204 (add optional); refresh status 200, no error, typ `Offline` | § 3.6 (informative, Q1) |
 | M10 | Second client first, console with `offline_access` second, then M2 for the second client | second client typ `Refresh` (200); console typ `Offline` (200); then status 302, code=yes, no error | R2, approach B |
 | M11 | Probe URI on the kind stack | recorded from the PR's `chart` run, see below | D6 |
 
-Branch of § 3.3.1: B: M6 returned `login_required`. M7 agrees:
-yes. The revoke had already ended the SSO session in M6, so the end-session request without a
-hint found no session and Keycloak redirected at once with no confirmation page.
+Branch of § 3.3.1: B: M6 returned `login_required`. M7 is not a cross-check in branch B. It had no
+live session, and Keycloak answered 302. That is consistent with the revoke having ended the SSO
+session (M6). It does not test whether Keycloak 26.7 shows a confirmation page on a live session
+with no hint. SMA-681 rows M-b and M-c measured that on 26.4.7 only.
 
 M11 is covered by the `chart` workflow (`kind` job) on the pull request, not locally. J1 writes one
 `prompt=none probe` annotation per probe, and `journeys-report.mjs` prints each annotation in the
