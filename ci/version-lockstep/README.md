@@ -18,8 +18,9 @@ not (SMA-685). So five classes of site are owned by nobody:
 - the `paigasus-py-bindings==X.Y.Z` pin in the Python wrapper — `[tool.uv.sources]` is
   development-only metadata that uv strips from the built wheel
 - `rs/Cargo.lock` and `py/uv.lock`
-- `rs/crates/bindings/paigasus-node-bindings/index.js`, whose 26 committed
-  `bindingPackageVersion !== '<v>'` guards napi regenerates from `package.json`
+- `rs/crates/bindings/paigasus-node-bindings/index.js`, whose 27 committed guards (26 native,
+  1 WASI) each carry the version twice: `bindingPackageVersion !== '<v>'` and
+  `expected <v> but got`
 
 `py/packages/paigasus-kernel/moon.yml` runs bare `uv sync` (not `--locked`), and
 `ci.yml`'s codegen-drift gate covers only the three `**/generated` proto dirs — so the
@@ -47,7 +48,7 @@ passing state — the proto family activates in SMA-577.
 | `--check` (default) | Compare all 20 sites. Exit 1 on any drift. |
 | `--write` | Rewrite the nine sites release-plz cannot reach (the six non-Cargo sites and the three `publish = false` binding manifests) and regenerate the three derived files (five `SITES` rows: 16-20). |
 | `--negative-control` | Prove the checker can still report red. |
-| `--self-test` | Fixture tables for the verdict function, the lock readers and the cargo-package writer, plus `stamp_sites` on a staged copy of the real tree. |
+| `--self-test` | Fixture tables for the verdict function, the lock readers, the cargo-package writer and the napi-glue writer, plus `stamp_sites` on a staged copy of the real tree. |
 
 Exit codes: `0` pass, `1` the repo is wrong, `2` infrastructure failed.
 
@@ -112,10 +113,19 @@ the negative control for any of those five kinds (since the control never touche
 reader's file).
 
 **L2 — Fixture-table coverage now spans six of the eight `read_version` kinds, plus the
-cargo-package writer and the production stamping call site.**
-`--self-test` (`SELF_TEST_COUNT=4`) runs four tables: `site_verdict_self_test` (OK/MISMATCH
-logic), `lock_reader_self_test`, `cargo_package_writer_self_test` (SMA-685), and
-`stamp_sites_self_test` (SMA-685).
+cargo-package and napi-glue writers and the production stamping call site.**
+`--self-test` (`SELF_TEST_COUNT=5`) runs five tables: `site_verdict_self_test` (OK/MISMATCH
+logic), `lock_reader_self_test`, `cargo_package_writer_self_test` (SMA-685),
+`stamp_sites_self_test` (SMA-685), and `napi_glue_writer_self_test` (SMA-684).
+
+`napi_glue_writer_self_test` drives `write_site napi-glue` against generated glue: a normal bump,
+a length-changing bump (`0.9.9` to `0.10.0`), an already-current file, a new version string that
+already occurs outside the guards, a decoy old version string (E6), the WASI guard alone, an
+in-place write (the inode stays), and the refusals E1, E2, E3, L (also across a length change)
+and a non-plain target. It drives E4 (both the G1 and the G2 half) and E5 through
+`napi_glue_py verify`, because a correct writer cannot trip them. It also pins the `napi-glue)`
+arm in `write_site`, the kind in the `stamp_sites` filter, and the `verify()` call in the write
+mode of `napi_glue_py`.
 
 `lock_reader_self_test`, added in SMA-577 to close this limitation for the lock kinds
 specifically: before it, neither lock arm had ever been exercised in isolation, so dropping
@@ -144,11 +154,12 @@ head's version would still pass this table. The site's real value and the head s
 the same value, by construction. This table proves `stamp_sites` writes the right sites. It
 does not prove `read_version` reads them correctly, on its own.
 
-The remaining two kinds (`cargo-wsdep` and `napi-glue`) still have no fixture of their own, so
-a broken parser inside one of them — the wrong TOML key, an off-by-one on the `[[package]]`
-block split, a regex that matches the wrong table — is caught only if it happens to manifest on
-the real repo's current files or on the one non-lock site (`packagejson`) the negative control
-drifts. The `cargo-package` kind's READ side is also proven only on the real tree's own file
+`cargo-wsdep` still has no fixture of its own, so a broken parser inside it — the wrong TOML key,
+a regex that matches the wrong table — is caught only if it happens to manifest on the real
+repo's current files. `napi-glue` has a WRITE fixture since SMA-684
+(`napi_glue_writer_self_test`), and `stamp_sites_self_test` writes the real `index.js`, reads it
+back and counts both literal forms, but the READ arm has no synthetic fixture. The
+`cargo-package` kind's READ side is also proven only on the real tree's own file
 shapes, not on the varied layouts the write-side fixtures cover.
 
 **L3 — The non-vacuity anchors are literals, not derived.** Both the `checked == ${#SITES[@]}`
