@@ -277,8 +277,9 @@ them.
 
 - `oidc.scopes` renders `PAIGASUS_OIDC_SCOPES` into the `console-env` ConfigMap. When empty, the
   console uses its default scopes: `openid profile email offline_access`. On Keycloak, leave out
-  `offline_access` to keep SSO (`docs/ops/RUNBOOK-chart.md` § 6). When set, the consoles also send
-  this list as the `scope` of each refresh request. Entra ID needs one scope of its API.
+  `offline_access` to keep SSO, and make it an optional client scope (`docs/ops/RUNBOOK-chart.md`
+  § 6). When set, the consoles also send this list as the `scope` of each refresh request. Entra
+  ID needs one scope of its API.
 - `oidc.authorizationAudience` renders `PAIGASUS_OIDC_AUTHORIZATION_AUDIENCE`. The consoles send
   it as the `audience` parameter of the authorization request. They do not send it on a refresh.
   Auth0 needs it.

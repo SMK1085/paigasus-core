@@ -188,7 +188,8 @@ oidc:
                          # render fails without it). It should contain offline_access: without
                          # it Entra ID, Auth0 and Okta issue no refresh token, and every user
                          # must log in again at each access-token expiry. On Keycloak, leave out
-                         # offline_access to keep SSO (RUNBOOK-chart.md § 6). When set, the
+                         # offline_access to keep SSO, and make it an optional client scope
+                         # (RUNBOOK-chart.md § 6). When set, the
                          # consoles also send it on each refresh. Set it only when your IdP
                          # needs it, or on Keycloak to keep SSO: on any IdP, a refresh scope
                          # wider than the granted scope can fail (RFC 6749 § 6) and sign the

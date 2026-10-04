@@ -32,7 +32,8 @@ test('AC 3: a stolen cookie is dead immediately after logout', async ({ page, co
   // scope on purpose: this suite tests the package default scope list (SMA-682 D5). So no SSO
   // session exists here and no page appears either way (SMA-682): this test proves the hint is
   // SENT, and that Keycloak still completes the redirect with it (§ 3.1 row M-i1). J1 on the kind
-  // stack checks the live-session case.
+  // stack checks that the console logout sequence ends a live SSO session. It does not prove what
+  // the hint does with a live session (SMA-682 R7).
   //
   // Asserting `public-heading` becomes visible afterward is NOT sufficient on its own (fix round
   // 1, Important 1): `routes.ts`'s handleLogout has a DEGRADED arm — if `buildEndSessionUrl`

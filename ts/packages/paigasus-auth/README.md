@@ -82,7 +82,8 @@ Keycloak issues a refresh token for the code flow also without `offline_access`.
 online token (`typ: Refresh`). With `offline_access`, Keycloak issues an offline token
 (`typ: Offline`), and it keeps no SSO session after the console login (SMA-682). Then other
 applications of the realm get no SSO from a console login, and a new authorization request shows
-the login form again.
+the login form again. An SSO session that another application of the realm started first stays
+(SMA-682 spec § 13, row M10).
 
 To keep the SSO session, do the two steps. Set `PAIGASUS_OIDC_SCOPES` to `openid profile email`.
 Put `offline_access` in the client's optional client scopes, not in its default client scopes.

@@ -162,7 +162,7 @@ The step list becomes seven steps. The new titles are fixed here:
    assert that both are present. Keep them for step 7. Then `silentAuthorize` with them. Assert
    `code` is present and `error` is absent. This is issue AC 1: a new authorization request with
    the browser's SSO cookies completes with no login form. On `main` this step fails at the cookie
-   check, because Keycloak clears both cookies (§ 1).
+   check or at the code check (§ 6.2).
 5. `logout: the shell form ends at the IdP and returns to /iam/ with no session cookie` (title
    unchanged). Add D8 in this order, right after `const endSessionRequest = await endSession;` and
    the `client_id` check: `(await endSessionRequest.response())?.status()` is in 300-399, with the

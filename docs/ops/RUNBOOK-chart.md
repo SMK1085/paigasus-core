@@ -481,7 +481,7 @@ scopes for Keycloak:
    other applications of the realm, and nothing more. It does not remove the password prompt when
    the console session ends, because the SSO session has already ended at that time.
 4. `SSO Session Idle` and `SSO Session Max` apply to all clients of the realm. If you increase
-   them to the console values, the SSO session of every application in the realm becomes longer.
+   them to 8 h and 24 h, the SSO session of every application in the realm becomes longer.
    A stolen `KEYCLOAK_IDENTITY` cookie and an unattended SSO session then also stay valid for a
    longer time.
 5. `Client Session Idle` and `Client Session Max` (at the realm or the client level) can make the
