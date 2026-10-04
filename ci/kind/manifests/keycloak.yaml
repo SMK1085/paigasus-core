@@ -7,9 +7,10 @@
 # Health is on the management port 9000. The realm comes from the ConfigMap keycloak-realm, which
 # run.sh writes per run with a generated client secret and user password; --import-realm reads
 # /opt/keycloak/data/import/<realm>-realm.json. Docs: keycloak.org/server/hostname,
-# /server/reverseproxy, /server/importExport, /observability/health. 26.4 is the tag the
-# paigasus-auth e2e uses. Refresh with:
-#   docker buildx imagetools inspect quay.io/keycloak/keycloak:26.4 --format '{{json .Manifest.Digest}}'
+# /server/reverseproxy, /server/importExport, /observability/health. The kind job pins 26.7 (the
+# image below). The paigasus-auth e2e pins 26.4 (ts/packages/paigasus-auth/tests/e2e/global-setup.ts).
+# SMA-682 measured the kind realm on this 26.7 digest. Refresh with:
+#   docker buildx imagetools inspect quay.io/keycloak/keycloak:26.7 --format '{{json .Manifest.Digest}}'
 apiVersion: apps/v1
 kind: Deployment
 metadata:

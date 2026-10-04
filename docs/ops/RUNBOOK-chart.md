@@ -34,7 +34,7 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Recommended: a dedicated API audience. Follow the migration order in § 6 |
 | `oidc.acknowledgeClientIdAudience` | no | Set it to the value of `oidc.clientId` to remove the audience warning (§ 6). It does not change what IAM accepts |
 | `oidc.idTokenMarkerClaims` | no | Claim names that the IdP puts into its ID token and never into its access token. IAM refuses a token that carries one of them. Default `[]`: no such check. Zitadel: `["at_hash", "azp"]` (§ 6) |
-| `oidc.scopes` | no | The scopes that both consoles request. Empty: `openid profile email offline_access`. The list must contain `openid`, or the render fails. Keep `offline_access`, or the IdP issues no refresh token. When set, the consoles also send it on each refresh. Entra ID needs it (§ 6) |
+| `oidc.scopes` | no | The scopes that both consoles request. Empty: `openid profile email offline_access`. The list must contain `openid`, or the render fails. Keep `offline_access`, except on Keycloak when you want SSO (§ 6, "Keycloak: online tokens and session length"). Without it, Entra ID, Auth0 and Okta issue no refresh token. When set, the consoles also send it on each refresh. Entra ID needs it (§ 6) |
 | `oidc.authorizationAudience` | no | The `audience` parameter that both consoles send in the authorization request. Empty: no `audience` parameter. It must equal `oidc.audience`, or the render fails. Auth0 needs it (§ 6) |
 | `oidc.existingSecret` | yes | A Secret with keys `oidc-client-secret` and `session-redis-url` |
 | `oidc.secretVersion` | no | Change it after the Secret changes, so the console pods restart |
@@ -154,7 +154,8 @@ late and unclearly. Check these four items before you install:
    after this list. The value replaces the client id. It does not add another value next to the
    client id. Before you choose the value, decode a real access token and read its `aud` claim.
    The value helps only when the IdP issues a JWT access token for the console's scopes
-   (`oidc.scopes`, default `openid profile email offline_access`). The console sends an
+   (`oidc.scopes`, default `openid profile email offline_access`; `openid profile email` on
+   Keycloak with SSO). The console sends an
    `audience` parameter only when `oidc.authorizationAudience` is set. It never sends a
    `resource` parameter. This value does not work with an opaque token, or a token for a
    different API.
@@ -251,18 +252,23 @@ binding". The line gives the issuer and the marker `cnf` or `typ DPoP`. The same
 applies as for the refusal of a token that is not an access token.
 
 By default the console requests the scopes `openid profile email offline_access`. Set
-`oidc.scopes` to request a different list. The list must contain `openid`. Keep `offline_access`.
+`oidc.scopes` to request a different list. The list must contain `openid`. Keep `offline_access`,
+except on Keycloak when you want SSO (see "Keycloak: online tokens and session length" below).
 
-Without it, the IdP issues no refresh token. Every user must log in again when the access token
-expires. When `oidc.scopes` is set, the console also sends the list as the `scope` of each
-refresh request. When it is empty, a refresh request has no `scope`, as before SMA-692.
+Without it, Entra ID, Auth0 and Okta issue no refresh token. Every user must log in again when the
+access token expires. Keycloak issues a refresh token also without it. When `oidc.scopes` is set,
+the console also sends the list as the `scope` of each refresh request. When it is empty, a
+refresh request has no `scope`, as before SMA-692.
 
 **Set `oidc.scopes` only when your IdP needs it.** This applies to any IdP, not only Entra ID
-(see "Entra ID moving to a new scope list" below). RFC 6749 § 6 lets an authorization server
-refuse a refresh `scope` that is not a subset of the originally granted scope. So a refresh with
-this list can fail on an IdP that enforces that rule. The user is then signed out at each
-access-token expiry, not only at the next login. After you set or change `oidc.scopes`, read the
-`oauthError` field of the `session.refresh_failed` log line to check for this.
+(see "Entra ID moving to a new scope list" below). Keycloak with SSO also needs it (see Keycloak
+example 1). RFC 6749 § 6 lets an authorization server refuse a refresh `scope` that is not a
+subset of the originally granted scope. So a refresh with this list can fail on an IdP that
+enforces that rule. The user is then signed out at each access-token expiry, not only at the next
+login. After you set or change `oidc.scopes`, read the `oauthError` field of the
+`session.refresh_failed` log line to check for this. The Keycloak list `openid profile email` is
+the list that the console requested, so it is not wider than the granted scope. Keycloak 26.7
+accepts it on a refresh (SMA-682 spec § 13, row M3).
 
 **The recommended audience setup (SMA-691).** An OIDC ID token has the client id as its `aud`.
 So when the IAM audience equals `oidc.clientId`, an ID token passes IAM's audience check. This is
@@ -454,10 +460,56 @@ the client. The mapper adds the client id, so the IAM audience equals `oidc.clie
 }
 ```
 
-Put `basic`, `profile`, `email` and `offline_access` in the client's default client scopes. In
-Keycloak 25 and later the `sub` claim comes from the `basic` scope. Give each user an email
-address and the `offline_access` role. The kind job's realm, `ci/kind/realm/paigasus-realm.json`,
-is a complete example of this setup.
+Put `basic`, `profile` and `email` in the client's default client scopes, and `offline_access` in
+the optional client scopes. Set `oidc.scopes=openid profile email`. Keycloak then issues an online
+refresh token and keeps the SSO session after the console login. In Keycloak 25 and later the
+`sub` claim comes from the `basic` scope. Give each user an email address. This setup does not use
+the `offline_access` role. The kind job's user keeps the role (SMA-682 D4). The kind job's realm,
+`ci/kind/realm/paigasus-realm.json`, with `ci/kind/values/a.yaml`, is an example of this scope
+setup. It keeps the Keycloak default SSO timeouts.
+
+**Keycloak: online tokens and session length (SMA-682).** Read these facts before you select the
+scopes for Keycloak:
+
+1. With the setup of example 1, each console refresh needs a live Keycloak SSO session. So the
+   console session ends when the SSO session ends.
+2. The Keycloak defaults are `SSO Session Idle` 30 min and `SSO Session Max` 10 h. The console
+   session is 8 h idle and 24 h absolute. The chart does not expose the two console values, so
+   you cannot change them with the chart.
+3. So on the Keycloak defaults, the setup of example 1 makes console sessions shorter. Keycloak
+   signs out an idle user after 30 min, and every user after 10 h. The setup gives SSO to the
+   other applications of the realm, and nothing more. It does not remove the password prompt when
+   the console session ends, because the SSO session has already ended at that time.
+4. `SSO Session Idle` and `SSO Session Max` apply to all clients of the realm. If you increase
+   them to 8 h and 24 h, the SSO session of every application in the realm becomes longer.
+   A stolen `KEYCLOAK_IDENTITY` cookie and an unattended SSO session then also stay valid for a
+   longer time.
+5. `Client Session Idle` and `Client Session Max` (at the realm or the client level) can make the
+   console session shorter than the SSO session. Do not set them, or set them to values that are
+   not lower than the SSO values.
+6. Online sessions stay after a Keycloak restart only with persistent user sessions. This is the
+   default since Keycloak 26, and you can turn it off. Without persistent user sessions, a restart
+   signs out every console user at the next refresh.
+7. A logout in another application of the realm, or an administrator "sign out" of the user, ends
+   the console session at the next refresh. With offline tokens, these events do not end the
+   console session.
+
+You can use one of these three setups:
+
+- **(i) Example 1 on the Keycloak default timeouts.** Other applications of the realm get SSO.
+  Console sessions end after 30 min idle and after 10 h.
+- **(ii) Example 1, and increase `SSO Session Idle` to 8 h and `SSO Session Max` to 24 h for the
+  realm.** Console sessions are as long as with offline tokens, and all applications get SSO.
+  Every application of the realm then has a longer SSO session (item 4). This is a security
+  trade-off.
+- **(iii) Keep `offline_access`.** Keep the default scopes, and keep `offline_access` as a default
+  client scope. Console sessions last 8 h idle and 24 h absolute, and the SSO timeouts have no
+  effect on them. Keycloak keeps no SSO session after a console login, so other applications get
+  no SSO from it. An SSO session that another application of the realm started before in the same
+  browser stays (SMA-682 spec § 13, row M10).
+
+**Recommendation.** If no other application of the realm needs SSO, use (iii). If another
+application needs SSO, use (i) or (ii). Use (ii) only when you accept item 4.
 
 **Keycloak example 2: a dedicated API audience. Not tested in the kind job.** Add this mapper to
 the console client (step 1 of the migration order). Keep the mapper of example 1 until step 4:

@@ -39,6 +39,12 @@ ingress:
 oidc:
   issuer: https://idp.paigasus.test/realms/paigasus
   clientId: paigasus-console
+  # The kind realm is the Keycloak example of the scope setup in RUNBOOK-chart.md § 6 (Keycloak
+  # example 1). No offline_access: Keycloak then issues an online refresh token and keeps the SSO
+  # session, which J1 steps 4 and 7 check (SMA-682). The realm grants offline_access only as an
+  # OPTIONAL client scope (ci/kind/realm/paigasus-realm.json). The realm keeps the Keycloak default
+  # SSO timeouts, so it is not an example of a session-length setup.
+  scopes: "openid profile email"
   existingSecret: paigasus-oidc
   caBundle:
     existingConfigMap: paigasus-idp-ca

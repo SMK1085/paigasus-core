@@ -83,8 +83,18 @@ test('skipped.json fails on the counter and on the test', () => {
   expectFail(join(FIXTURES, 'skipped.json'), 'expectedStatus is "skipped"');
 });
 
-test('early-return.json: every counter passes, the missing steps do not (now after step 2 of 5)', () => {
-  expectFail(join(FIXTURES, 'early-return.json'), '3 step(s) never ran');
+test('early-return.json: every counter passes, the missing steps do not (now after step 2 of 7)', () => {
+  expectFail(join(FIXTURES, 'early-return.json'), '5 step(s) never ran');
+});
+
+test('a J1 report without the two SSO steps fails and names them (SMA-682)', () => {
+  expectFail(
+    variant((d) => {
+      const result = d.suites[0].specs[0].tests[0].results[0];
+      result.steps = result.steps.filter((step) => !step.title.includes('prompt=none'));
+    }),
+    '2 step(s) never ran: "control: the IdP session answers prompt=none with a code", "the IdP session is dead: prompt=none returns login_required"',
+  );
 });
 
 test('a result with no `steps` key fails (Playwright omits the key when no step ran)', () => {
