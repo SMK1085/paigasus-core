@@ -280,9 +280,10 @@ jobs:
           # (artipacked hardening). An earlier revision persisted the App token here so the
           # stamping step could push — but `actions/checkout` writes that credential into
           # the local git config for the WHOLE job, which handed a write-capable token to
-          # four steps that have no business with it (setup-toolchain, proto install,
-          # moon setup, pnpm install). A compromised action or transitive dependency in any
-          # of them could have used it before release work even began.
+          # the steps that have no business with it (setup-toolchain, proto install,
+          # moon setup; a `pnpm install` step also ran here until SMA-684 removed it). A
+          # compromised action or transitive dependency in any of them could have used it
+          # before release work even began.
           #
           # The token now reaches only the two steps that genuinely need it, via their own
           # `env:` — release-plz (GIT_TOKEN) and the stamping step (which authenticates its
@@ -311,15 +312,12 @@ jobs:
         if: steps.preflight.outputs.configured == 'true'
         run: moon setup
 
-      - name: Install JS workspace deps
-        if: steps.preflight.outputs.configured == 'true'
-        run: pnpm --dir ts install --frozen-lockfile
-
       # release-plz first, ALWAYS, then --write (next step). release-plz owns the publishable
       # crates' Cargo versions and the [workspace.dependencies] requirements. --write then
-      # writes the nine sites release-plz cannot reach: the three publish = false binding
-      # manifests, the pyproject/package.json sites, and the dependency pin. It also
-      # regenerates three derived files (SMA-685).
+      # writes the ten sites release-plz cannot reach: the three publish = false binding
+      # manifests, the pyproject/package.json sites, the dependency pin, and the version
+      # literals of the napi glue index.js. It also regenerates the two lock files (SMA-685).
+      # It compiles nothing (SMA-684); see the comment on the stamp step.
       #
       # Run from rs/: release-plz's config/manifest discovery (./release-plz.toml,
       # ./Cargo.toml) is CWD-relative with no upward search, so this is what makes it find
@@ -352,6 +350,17 @@ jobs:
       # is therefore NEVER the branch to act on — the branch comes only from the JSON above,
       # never from `git rev-parse --abbrev-ref HEAD` (which would still read "main" here and
       # push straight to it).
+      #
+      # This step compiles nothing (SMA-684). `--write` edits text with python3 and runs
+      # `cargo update -w` and `uv lock`; neither runs a build script or a build backend (spec F6,
+      # F7, and repo:version-lockstep's --check asserts the static uv metadata that F7 needs).
+      # The isolation level is the JOB, not the step: every step of this job can read the App
+      # private key from the runner, so no step may compile or run an install script.
+      # ci/actionlint/release_guard.py V18 holds this job to an allowlist of actions, command
+      # words and command prefixes. V18 splits a line on `|` without reading quotes, which is
+      # why PR_COUNT below uses two jq calls and not `jq '.prs | length'`. The spec's §4.1 lists
+      # the tools this job still trusts:
+      # docs/superpowers/specs/2026-10-04-sma-684-release-pr-stamp-token-isolation-design.md
       - name: Stamp the lockstep manifests onto the release PR branch
         if: steps.preflight.outputs.configured == 'true'
         env:
@@ -364,7 +373,7 @@ jobs:
           GH_TOKEN_FOR_PUSH: ${{ steps.app_token.outputs.token }}
         run: |
           set -euo pipefail
-          PR_COUNT="$(printf '%s' "$PR_JSON" | jq '.prs | length')"
+          PR_COUNT="$(printf '%s' "$PR_JSON" | jq '.prs' | jq 'length')"
           if [ "$PR_COUNT" -eq 0 ]; then
             echo "release-plz: no release PR needed (every releasable package is already" \
                  "at its proposed version) — nothing to stamp"
