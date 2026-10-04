@@ -51,6 +51,10 @@ ACCEPTED_GATE_FORMS = frozenset({GATE_EXPR, "${{ " + GATE_EXPR + " }}"})
 # publish DETECTOR to every member of this set: a member may skip the gate, but must never
 # contain a publish step. The exemption's premise ("release-pr cannot reach a registry") is now
 # asserted rather than assumed.
+#
+# SMA-684: V18 (ungated_job_violations) also holds every member to an allowlist of actions,
+# command words and command prefixes, because such a job runs with the App private key on the
+# runner. A new member inherits V18 too.
 UNGATED_JOBS = frozenset({"release-pr"})
 
 # V8: the approval gate is the ONE human checkpoint in release.yml, and everything downstream of
@@ -1577,6 +1581,132 @@ def chain_download_violations(jobs: dict, name: str) -> list[str]:
     return out
 
 
+# V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
+# the runner receives every secret a job references when the job starts, so code in ANY step of
+# the job can read it, not only a step with a token in its env:. So no step of such a job may
+# compile, or run a build script, a proc macro, or an npm or pip lifecycle or install script
+# (spec A1). This is an ALLOWLIST (spec D4): a new tool reds until someone adds it here, with a
+# reason, after the job's trust in it is reviewed. The spec's §4.1 lists the tools it trusts.
+UNGATED_JOB_ACTIONS = frozenset({
+    "actions/create-github-app-token",
+    "actions/checkout",
+    "moonrepo/setup-toolchain",
+})
+UNGATED_JOB_COMMANDS = frozenset({"set", "echo", "printf", "[", "exit", "jq", "git"})
+# Shell keywords are NOT command words. They are stripped, and the word after them is checked:
+# as allowed words, `if cargo build; then` and `then cargo build` passed (plan Review Focus 2).
+UNGATED_JOB_KEYWORDS = frozenset({"if", "then", "else", "elif", "fi", "!"})
+UNGATED_JOB_PREFIXES = (
+    "proto install release-plz",
+    "moon setup",
+    "release-plz release-pr",
+    "bash ci/version-lockstep/run.sh --write",
+)
+# Job keys that run code (container:, services:) or change how every run: step runs (defaults:).
+UNGATED_JOB_BANNED_KEYS = ("container", "services", "defaults")
+V18_HINT = ("The release-pr job can read the App private key, so it may run only the tools on "
+            "V18's allowlist (docs/superpowers/specs/2026-10-04-sma-684-release-pr-stamp-token-"
+            "isolation-design.md, section 5.6).")
+_V18_SUBST_RE = re.compile(r"""(?:[A-Za-z_][A-Za-z0-9_]*=)?"?\$\(""")
+_V18_ASSIGN_RE = re.compile(r"""[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|[^\s"']*)(?=\s|$)""")
+
+
+def _v18_logical_lines(run_text: str) -> list[str]:
+    """The run: text as the shell reads it: a line that ends in a backslash joins the next one,
+    and a full-line comment is dropped. command_segments splits before it strips a `#` comment,
+    so a comment line holding `|` or `;` would otherwise yield a segment that is not a command."""
+    out: list[str] = []
+    buf = ""
+    for raw in run_text.splitlines():
+        stripped = raw.rstrip()
+        if stripped.endswith("\\"):
+            buf += stripped[:-1] + " "
+            continue
+        line = buf + raw
+        buf = ""
+        if not line.lstrip().startswith("#"):
+            out.append(line)
+    if buf and not buf.lstrip().startswith("#"):
+        out.append(buf)
+    return out
+
+
+def v18_segment_verdict(segment: str) -> str | None:
+    """None when one command segment may run in an UNGATED_JOBS member, else the reason it may
+    not. Leading variable assignments and a leading `$(` (with or without its opening quote) are
+    removed; then shell keywords; then the rest must start with an allowed command prefix or an
+    allowed command word. A command substitution anywhere after that point, or inside an
+    assignment value, is refused: it would run a command V18 does not see. Not a shell parser:
+    see command_segments and README L20/L43."""
+    s = segment.strip()
+    while True:
+        m = _V18_SUBST_RE.match(s)
+        if m:
+            s = s[m.end():].lstrip()
+            continue
+        m = _V18_ASSIGN_RE.match(s)
+        if m:
+            if "$(" in m.group(1) or "`" in m.group(1):
+                return "a command substitution inside an assignment value"
+            s = s[m.end():].lstrip()
+            continue
+        break
+    words = s.split()
+    while words and words[0] in UNGATED_JOB_KEYWORDS:
+        words = words[1:]
+    if not words:
+        return None
+    rest = " ".join(words)
+    if "$(" in rest or "`" in rest:
+        return "a command substitution after the command word"
+    for prefix in UNGATED_JOB_PREFIXES:
+        if rest == prefix or rest.startswith((prefix + " ", prefix + ")")):
+            return None
+    if words[0] in UNGATED_JOB_COMMANDS:
+        return None
+    return f"the command word {words[0]!r} is not on the allowlist"
+
+
+def ungated_job_violations(doc: dict, name: str) -> list[str]:
+    """V18 (SMA-684). Every step of every UNGATED_JOBS member must match the allowlist above.
+    Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles."""
+    out: list[str] = []
+    if "defaults" in doc:
+        out.append(f"{name}: V18: the workflow sets `defaults:`, which changes how every `run:` step "
+                   f"of an UNGATED_JOBS member runs. {V18_HINT}")
+    jobs = doc["jobs"]
+    for jid in sorted(UNGATED_JOBS):
+        job = jobs.get(jid)
+        if not isinstance(job, dict):
+            continue
+        for key in UNGATED_JOB_BANNED_KEYS:
+            if key in job:
+                out.append(f"{name}: V18: job '{jid}' sets `{key}:`, which runs code or changes how "
+                           f"its steps run. {V18_HINT}")
+        for i, step in enumerate(steps_of(job, f"{name}: job '{jid}'")):
+            if not isinstance(step, dict):
+                out.append(f"{name}: V18: job '{jid}' step #{i + 1} is not a mapping. {V18_HINT}")
+                continue
+            where = f"{name}: V18: job '{jid}' step '{step.get('name') or f'#{i + 1}'}'"
+            if "shell" in step:
+                out.append(f"{where} sets `shell:`, so its `run:` text is not read as bash. {V18_HINT}")
+            uses, run = step.get("uses"), step.get("run")
+            if uses is None and run is None:
+                out.append(f"{where} has neither `uses:` nor `run:`. {V18_HINT}")
+            if uses is not None:
+                action = str(uses).split("@", 1)[0]
+                if action not in UNGATED_JOB_ACTIONS:
+                    out.append(f"{where} uses the action {action!r}, which is not on the allowlist "
+                               f"{sorted(UNGATED_JOB_ACTIONS)}. {V18_HINT}")
+            if run is not None:
+                for line in _v18_logical_lines(str(run)):
+                    for seg in command_segments(line):
+                        why = v18_segment_verdict(seg)
+                        if why:
+                            out.append(f"{where}: the segment {seg.strip()!r} is not allowed: {why}. {V18_HINT}")
+    return out
+
+
 def plan_run_segments(run_text: str) -> list[str]:
     """Every non-empty command segment of a `run:` block, comments already stripped."""
     return [seg.strip()
@@ -1743,8 +1873,8 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
 
 
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5, V7, V8a-c, V8e, V9 and V13-V17 over the release workflow (V16a-c runs from
-    main()). V16e is one of the V13-V17 group. V6 applies to CALLED workflows (see
+    """V1-V5, V7, V8a-c, V8e, V9 and V13-V18 over the release workflow (V16a-c runs from
+    main()). V16e is one of the V13-V18 group. V6 applies to CALLED workflows (see
     check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
     need the filesystem, which this function, driven purely off a parsed doc, deliberately does
     not touch."""
@@ -1859,6 +1989,9 @@ def check_main(doc: dict, name: str) -> list[str]:
     out += chain_service_violations(jobs, name)
     out += chain_version_env_violations(jobs, name)
     out += chain_download_violations(jobs, name)
+    # SMA-684. V18: once, outside the per-job loop, like V8 above. The loop's `continue` for an
+    # UNGATED_JOBS member would otherwise skip it for exactly the job it exists for.
+    out += ungated_job_violations(doc, name)
     return out
 
 
@@ -3344,6 +3477,17 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_CONSOLE_MAIN.replace("        with: {name: image-iam-console-amd64, path: in}",
                               "        with: {path: in}"),
      "V17: job 'publish-images-iam-console' downloads artifacts without a `name:`"),
+    # SMA-684 V18 (spec V-3): each shape, end to end through check_main, in the release-pr job.
+    ("SMA-684 V18 pnpm install in release-pr", "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]",
+                      "steps: [{run: pnpm --dir ts install --frozen-lockfile}]", 1),
+     "the command word 'pnpm' is not on the allowlist"),
+    ("SMA-684 V18 napi build in release-pr", "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]", "steps: [{run: napi build --platform}]", 1),
+     "the command word 'napi' is not on the allowlist"),
+    ("SMA-684 V18 actions/setup-node in release-pr", "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]", "steps: [{uses: actions/setup-node@v4}]", 1),
+     "uses the action 'actions/setup-node'"),
 ]
 
 
@@ -4186,6 +4330,92 @@ def _sma658_new_publish_markers_bite() -> str | None:
     return None
 
 
+# SMA-684 V18. One case per step shape, driven straight at ungated_job_violations(), the way
+# _SMA658_MARKER_CASES drives job_publishes(): a FIXTURES row buries one rejected shape under every
+# other violation the same file produces, where this table reds on that one shape alone. Rows are
+# (label, step, want_red): first the spec's rejected shapes (§5.6), then the shapes the plan's
+# Review Focus added, then the clean controls. A step may be a non-mapping on purpose.
+_SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
+    ("pnpm install", {"run": "pnpm --dir ts install --frozen-lockfile"}, True),
+    ("napi build", {"run": "napi build"}, True),
+    ("node", {"run": "node x.js"}, True),
+    ("cargo build", {"run": "cargo build"}, True),
+    ("cargo b", {"run": "cargo b"}, True),
+    ("cargo with a toolchain", {"run": "cargo +1.95.0 build"}, True),
+    ("cargo publish --dry-run", {"run": "cargo publish --dry-run"}, True),
+    ("uvx", {"run": "uvx foo"}, True),
+    ("make", {"run": "make"}, True),
+    ("bash other.sh", {"run": "bash other.sh"}, True),
+    ("a chain after the allowed write", {"run": "bash ci/version-lockstep/run.sh --write && bash other.sh"}, True),
+    ("cargo update -w as a direct step", {"run": "cargo update -w"}, True),
+    ("uses setup-node", {"uses": "actions/setup-node@v4"}, True),
+    ("uses maturin-action", {"uses": "PyO3/maturin-action@v1"}, True),
+    ("uses pnpm action-setup", {"uses": "pnpm/action-setup@v4"}, True),
+    ("uses a local action", {"uses": "./local-action"}, True),
+    ("if as a prefix", {"run": "if cargo build; then\n  echo ok\nfi"}, True),
+    ("then as a prefix", {"run": 'if [ -n "$X" ]; then cargo build; fi'}, True),
+    ("a substitution after an allowed word", {"run": 'echo "$(cargo build)"'}, True),
+    ("a backtick substitution after an allowed word", {"run": "echo `cargo build`"}, True),
+    ("a substitution inside an assignment value", {"run": 'X="a$(cargo build)"'}, True),
+    ("an assignment and then a command", {"run": "X=1 cargo build"}, True),
+    ("a shell override", {"run": "echo hi", "shell": "python {0}"}, True),
+    ("neither uses nor run", {"name": "empty"}, True),
+    ("a docker action", {"uses": "docker://rust:1.95"}, True),
+    ("a longer flag than the allowed prefix", {"run": "bash ci/version-lockstep/run.sh --writex"}, True),
+    ("a pipe inside a quoted jq program", {"run": "PR_COUNT=\"$(printf '%s' \"$PR_JSON\" | jq '.prs | length')\""}, True),
+    ("elif as a prefix", {"run": 'if [ -n "$X" ]; then\n  echo a\nelif cargo build; then\n  echo b\nfi'}, True),
+    ("a negation as a prefix", {"run": "! cargo build"}, True),
+    ("a near-prefix of checkout", {"uses": "actions/checkout-evil@3d3c42e5aac5ba805825da76410c181273ba90b1"}, True),
+    ("a near-prefix of setup-toolchain", {"uses": "moonrepo/setup-toolchain-x@261c62cb5b0f580c7be7c8cd0f023a2e96756095"}, True),
+    ("a step that is not a mapping", "cargo build", True),
+    ("moon setup", {"run": "moon setup"}, False),
+    ("proto install release-plz", {"run": "proto install release-plz"}, False),
+    ("release-plz release-pr", {"run": "release-plz release-pr --output json"}, False),
+    ("the branch push", {"run": 'git push "$AUTH_REMOTE" "HEAD:$BRANCH"'}, False),
+    ("a captured release-plz call", {"run": 'OUT="$(release-plz release-pr --output json)"'}, False),
+    ("a continued echo", {"run": 'echo "a" \\\n     "b (c) d"'}, False),
+    ("pinned checkout", {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"}, False),
+    ("pinned setup-toolchain", {"uses": "moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095"}, False),
+    ("pinned app token", {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"}, False),
+    ("two jq calls", {"run": "PR_COUNT=\"$(printf '%s' \"$PR_JSON\" | jq '.prs' | jq 'length')\""}, False),
+    ("a plain assignment", {"run": 'AUTH_REMOTE="https://x-access-token:${GH_TOKEN_FOR_PUSH}@github.com/${GITHUB_REPOSITORY}.git"'}, False),
+    ("if, exit and fi", {"run": 'if [ "$PR_COUNT" -eq 0 ]; then\n  exit 0\nfi'}, False),
+    ("a comment line with separators", {"run": "# a | b; c && d\necho ok"}, False),
+)
+# Deleting a row must red: the table is the only pin on each shape.
+_SMA684_V18_CASE_COUNT = 45
+
+
+def _sma684_v18_allowlist_bites() -> str | None:
+    if len(_SMA684_V18_CASES) != _SMA684_V18_CASE_COUNT:
+        return f"_SMA684_V18_CASES holds {len(_SMA684_V18_CASES)} rows, expected {_SMA684_V18_CASE_COUNT}"
+    for label, step, want_red in _SMA684_V18_CASES:
+        found = ungated_job_violations({"jobs": {"release-pr": {"steps": [step]}}}, "fixture")
+        if bool(found) != want_red:
+            return f"{label}: expected {'a V18 violation' if want_red else 'clean'}, got {found or '(clean)'}"
+        if not all(": V18: " in v for v in found):
+            return f"{label}: a violation does not name V18: {found}"
+    # The keys that run code or change how every step of the job runs.
+    for key, value in (("container", "ubuntu:24.04"), ("services", {"db": {"image": "postgres"}}),
+                       ("defaults", {"run": {"shell": "python {0}"}})):
+        if not ungated_job_violations({"jobs": {"release-pr": {key: value, "steps": [{"run": "echo hi"}]}}}, "fixture"):
+            return f"a job-level `{key}:` on release-pr read clean"
+    if not ungated_job_violations({"defaults": {"run": {"shell": "python {0}"}},
+                                   "jobs": {"release-pr": {"steps": [{"run": "echo hi"}]}}}, "fixture"):
+        return "a workflow-level `defaults:` read clean"
+    # Scope: V18 applies to UNGATED_JOBS members only.
+    if ungated_job_violations({"jobs": {"build": {"steps": [{"run": "cargo build"}]}}}, "fixture"):
+        return "V18 fired on a job outside UNGATED_JOBS"
+    # The real job is the clean control the spec names (§5.6). check 10 runs this from the root.
+    real = Path(".github/workflows/release.yml")
+    if not real.is_file():
+        return f"{real} is not readable from {Path.cwd()}; run the self-test from the repository root"
+    found = ungated_job_violations(load_workflow(real), real.name)
+    if found:
+        return f"the real release-pr job fails V18: {found}"
+    return None
+
+
 def self_test() -> int:
     rc = 0
     for name, kind, text, want in FIXTURES:
@@ -4233,6 +4463,8 @@ def self_test() -> int:
         ("sma-658 fix round 1, I3: V13's cross-workflow sweep", _v13_cross_workflow_sweep),
         ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
         ("pr2 review i4: UNGATED_JOBS is pinned by strict equality", _ungated_jobs_pinned),
+        ("sma-684 V18 allowlist: every rejected shape reds, every control is clean",
+         _sma684_v18_allowlist_bites),
     ):
         err = fn()
         if err:
