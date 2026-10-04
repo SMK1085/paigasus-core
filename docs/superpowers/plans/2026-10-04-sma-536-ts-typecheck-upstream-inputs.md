@@ -2588,10 +2588,10 @@ Fill each entry in the task that names it. Paste command output where the step s
 
 | Row | Measurement | Result |
 |---|---|---|
-| 1 | `--traceResolution`, kernel and console-core | |
-| 2 | stale installed `paigasus_wasm.d.ts` → `moon run paigasus-kernel-ts:typecheck --force` | |
-| 3 | restored → same command | |
-| 4 | stale installed napi `index.d.ts` → same command; restored | |
+| 1 | `--traceResolution`, kernel and console-core | Kernel resolves `@paigasus/node-bindings` to `ts/node_modules/.pnpm/@paigasus+node-bindings@file+..+rs+crates+bindings+paigasus-node-bindings/node_modules/@paigasus/node-bindings/index.d.ts` and `@paigasus/wasm` to `ts/node_modules/.pnpm/@paigasus+wasm@file+..+rs+crates+bindings+paigasus-wasm/node_modules/@paigasus/wasm/paigasus_wasm.d.ts`. Console-core resolves only `@paigasus/wasm`, to the same wasm path. |
+| 2 | stale installed `paigasus_wasm.d.ts` → `moon run paigasus-kernel-ts:typecheck --force` | Inodes differ (166576231 and 168411783), `cmp rc=1`, no `git status` line. Moon rc=2 (the plan expected 1; `pnpm` exited 2). `src/binding-parity.types.ts(19,7): error TS2322: Type 'true' is not assignable to type 'never'.` and `tests/sum.wasm.test.ts(14,16): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.` No line names the installed file or a repair command. After the run, `still stale: cmp rc=1`: Moon did not repair the copy. |
+| 3 | restored → same command | `rm -rf ts/node_modules && pnpm -C ts install` rc=0, then `typecheck --force` rc=0. |
+| 4 | stale installed napi `index.d.ts` → same command; restored | `cmp rc=1`, no `git status` line. Moon rc=2. `src/binding-parity.types.ts(19,7): error TS2322: Type 'true' is not assignable to type 'never'.` and `tests/sum.test.ts(14,16): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.` After restore: `restored rc=0`. |
 
 ### E2 — A12 on the real tree before the moon.yml fixes (Task 4)
 
