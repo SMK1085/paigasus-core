@@ -496,6 +496,9 @@ mod tests {
         assert!(v.htu_matches(URL, PATH));
         assert!(!v.htu_matches(URL, "/v1/../chat/completions"));
         assert!(!v.htu_matches(URL, "x"));
+        // The URL parser folds `/v1/../chat/completions` to `/chat/completions`. Only the guard
+        // refuses this pair, so `htu_matches` must hold the guard itself, not only `check_request`.
+        assert!(!v.htu_matches("https://gw.example.test/chat/completions", "/v1/../chat/completions"));
     }
 
     #[test]

@@ -1280,6 +1280,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_detail_less_resource_exhausted_is_an_iam_failure_and_writes_no_warning() {
+        // Not the DPoP quota: no `ErrorInfo` at all. It stays a 503, and reading the reason must
+        // not write the SMA-504 skew warning (that one is for `PermissionDenied` only).
+        let (logs, _guard) = capture_logs();
+        let fake = FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::ResourceExhausted, None));
+        let resp = build_app_with(fake, true).oneshot(dpop_req("/x", &[PROOF])).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!logs.text().contains("PermissionDenied with no ErrorInfo"), "{}", logs.text());
+    }
+
+    #[test]
+    fn retry_after_is_whole_seconds_and_at_least_one() {
+        let status = |retry: Option<std::time::Duration>| {
+            let mut details = reason_details(paigasus_proto::paigasus::common::v1::ErrorReason::DpopQuotaExceeded);
+            details.set_retry_info(retry);
+            tonic::Status::with_error_details(Code::ResourceExhausted, "", details)
+        };
+        assert_eq!(retry_after_secs(&status(None)), 1, "no RetryInfo");
+        assert_eq!(retry_after_secs(&status(Some(std::time::Duration::from_millis(500)))), 1, "a delay under one second");
+        assert_eq!(retry_after_secs(&status(Some(std::time::Duration::from_secs(0)))), 1, "a zero delay");
+        assert_eq!(retry_after_secs(&status(Some(std::time::Duration::from_secs(61)))), 61);
+    }
+
+    #[test]
+    fn the_authz_leg_keeps_an_invalid_dpop_proof_apart_from_a_rejected_credential() {
+        let proof = tonic::Status::with_error_details(Code::Unauthenticated, "", reason_details(paigasus_proto::paigasus::common::v1::ErrorReason::InvalidDpopProof));
+        assert_eq!(authz_error(IamError::Rpc(proof)), GatewayError::InvalidDpopProof);
+        let plain = tonic::Status::new(Code::Unauthenticated, "");
+        assert_eq!(authz_error(IamError::Rpc(plain)), GatewayError::InvalidCredential);
+    }
+
+    #[test]
+    fn the_dpop_context_path_is_the_original_uri_not_the_nested_one() {
+        // A nested router strips its prefix from `req.uri()`; `OriginalUri` keeps the path that the
+        // client signed. No production route is nested today, so this builds the extension by hand.
+        let req = Request::builder()
+            .uri("/stripped")
+            .extension(OriginalUri("/v1/stripped?x=1".parse().unwrap()))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(dpop_context(&req, PROOF).path, "/v1/stripped");
+        let plain = Request::builder().uri("/plain?y=2").body(axum::body::Body::empty()).unwrap();
+        assert_eq!(dpop_context(&plain, PROOF).path, "/plain");
+    }
+
+    #[tokio::test]
     async fn discovery_on_dpop_forwards_the_context_and_never_authorizes() {
         let fake = FakeIam::new(IntrospectOutcome::Connect, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Ok(active_token_response()));
         let (api_key_calls, token_dpop) = (fake.api_key_calls.clone(), fake.token_dpop.clone());
