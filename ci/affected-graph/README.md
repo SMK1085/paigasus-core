@@ -379,7 +379,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   under `CI=true` (`ts/moon.yml`). `REQUIRED_REPO_TASKS` is the floor that stops the comparison
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
-  passes C1-C6 by never executing them, and takes the eight project cascade cases, the five task
+  passes C1-C6 by never executing them, and takes the eight project cascade cases, the 32 task
   cases, A1-A12 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the

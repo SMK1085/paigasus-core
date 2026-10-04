@@ -36,8 +36,8 @@ fileGroups:
 # .moon/tasks/typescript-project.yml, so they never attach to this configuration root. This
 # replaces the SMA-394 `workspace.inheritedTasks.exclude: ['build', 'typecheck']`, now redundant
 # under layer routing (the root has no tsconfig.json, so a root tsc would fail TS5058; routing
-# simply never gives it the task). ts `test` also routes per-project (no central vitest config).
-# The root owns only the whole-tree lint/fmt. (SMA-401)
+# simply never gives it the task). One exception: the `test` task below runs the node tests of
+# ts/scripts/ (SMA-536). The root owns only the whole-tree lint/fmt. (SMA-401)
 
 # Commit-message validation for CI (SMA-371 AC-E parity gate). Lives here because the
 # pinned commitlint binary + @paigasus/commitlint-config are installed under ts/. Invoked
