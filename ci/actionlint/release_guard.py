@@ -1603,7 +1603,7 @@ UNGATED_JOB_PREFIXES = (
     "bash ci/version-lockstep/run.sh --write",
 )
 # Job keys that run code (container:, services:) or change how every run: step runs (defaults:).
-UNGATED_JOB_BANNED_KEYS = ("container", "services", "defaults")
+UNGATED_JOB_BANNED_KEYS = ("container", "services", "defaults", "env", "uses")
 V18_HINT = ("The release-pr job can read the App private key, so it may run only the tools on "
             "V18's allowlist (docs/superpowers/specs/2026-10-04-sma-684-release-pr-stamp-token-"
             "isolation-design.md, section 5.6).")
@@ -1612,23 +1612,89 @@ _V18_ASSIGN_RE = re.compile(r"""[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|[^\s"']*
 
 
 def _v18_logical_lines(run_text: str) -> list[str]:
-    """The run: text as the shell reads it: a line that ends in a backslash joins the next one,
-    and a full-line comment is dropped. command_segments splits before it strips a `#` comment,
-    so a comment line holding `|` or `;` would otherwise yield a segment that is not a command."""
+    """The run: text as bash reads it. A full-line comment is dropped BEFORE any joining, so a
+    comment that ends in a backslash does not swallow the next line. A line joins the next one
+    only when it ends in an ODD number of backslashes: an even number is an escaped backslash."""
     out: list[str] = []
     buf = ""
     for raw in run_text.splitlines():
+        if not buf and raw.lstrip().startswith("#"):
+            continue
         stripped = raw.rstrip()
-        if stripped.endswith("\\"):
+        trailing = len(stripped) - len(stripped.rstrip("\\"))
+        if trailing % 2 == 1:
             buf += stripped[:-1] + " "
             continue
-        line = buf + raw
+        out.append(buf + raw)
         buf = ""
-        if not line.lstrip().startswith("#"):
-            out.append(line)
-    if buf and not buf.lstrip().startswith("#"):
+    if buf:
         out.append(buf)
     return out
+
+
+_V18_SEPS_RE = re.compile(r"&&|\|\||;|\||&")
+# bash starts a comment only at the start of a word, so `x#y` is not one.
+_V18_COMMENT_RE = re.compile(r"(?:^|\s)#")
+_V18_CLOSE_TAIL_RE = re.compile(r'\s*"?\s*')
+_V18_SUBST_MARKERS = ("$(", "`", "<(", ">(")
+
+
+def v18_line_segments(line: str) -> tuple[list[str], str | None]:
+    """The command segments of one logical line for V18, and a reason to refuse the line, if any.
+    command_segments is not used: it cuts at the FIRST `#`, which hides `echo x#$(cmd)`, and it
+    does not split on a single `&`. Here a comment starts only at the start of a word, and a
+    command or process substitution in the removed comment text is refused (a quote can hide the
+    real start of the comment). `<(` and `>(` are refused anywhere."""
+    m = _V18_COMMENT_RE.search(line)
+    if m:
+        if any(mark in line[m.start():] for mark in _V18_SUBST_MARKERS):
+            return [], "a substitution in or after a `#`, which may or may not be a comment"
+        line = line[:m.start()]
+    if "<(" in line or ">(" in line:
+        return [], "a process substitution"
+    return [seg for seg in _V18_SEPS_RE.split(line) if seg.strip()], None
+
+
+def _v18_verdict(segment: str, in_subst: bool) -> tuple[str | None, bool]:
+    """(reason, still_open). still_open is True when the segment leaves a command substitution
+    open, so the next segment of the same line is inside it."""
+    s = segment.strip()
+    opened = False
+    while True:
+        m = _V18_SUBST_RE.match(s)
+        if m:
+            opened = True
+            s = s[m.end():].lstrip()
+            continue
+        m = _V18_ASSIGN_RE.match(s)
+        if m:
+            if "$(" in m.group(1) or "`" in m.group(1):
+                return "a command substitution inside an assignment value", False
+            s = s[m.end():].lstrip()
+            continue
+        break
+    still_open = opened or in_subst
+    if (opened or in_subst) and ")" in s:
+        # The substitution closes here. Only a closing quote may follow: any other text would
+        # be a second command word around the substitution (`$(echo cargo) build`).
+        s, tail = s.split(")", 1)
+        if not _V18_CLOSE_TAIL_RE.fullmatch(tail):
+            return "text after the closing parenthesis of a command substitution", False
+        still_open = False
+    words = s.split()
+    while words and words[0] in UNGATED_JOB_KEYWORDS:
+        words = words[1:]
+    if not words:
+        return None, still_open
+    rest = " ".join(words)
+    if "$(" in rest or "`" in rest:
+        return "a command substitution after the command word", still_open
+    for prefix in UNGATED_JOB_PREFIXES:
+        if rest == prefix or rest.startswith(prefix + " "):
+            return None, still_open
+    if words[0] in UNGATED_JOB_COMMANDS:
+        return None, still_open
+    return f"the command word {words[0]!r} is not on the allowlist", still_open
 
 
 def v18_segment_verdict(segment: str) -> str | None:
@@ -1636,44 +1702,72 @@ def v18_segment_verdict(segment: str) -> str | None:
     not. Leading variable assignments and a leading `$(` (with or without its opening quote) are
     removed; then shell keywords; then the rest must start with an allowed command prefix or an
     allowed command word. A command substitution anywhere after that point, or inside an
-    assignment value, is refused: it would run a command V18 does not see. Not a shell parser:
-    see command_segments and README L20/L43."""
-    s = segment.strip()
-    while True:
-        m = _V18_SUBST_RE.match(s)
-        if m:
-            s = s[m.end():].lstrip()
-            continue
-        m = _V18_ASSIGN_RE.match(s)
-        if m:
-            if "$(" in m.group(1) or "`" in m.group(1):
-                return "a command substitution inside an assignment value"
-            s = s[m.end():].lstrip()
-            continue
-        break
-    words = s.split()
-    while words and words[0] in UNGATED_JOB_KEYWORDS:
-        words = words[1:]
-    if not words:
-        return None
-    rest = " ".join(words)
-    if "$(" in rest or "`" in rest:
-        return "a command substitution after the command word"
-    for prefix in UNGATED_JOB_PREFIXES:
-        if rest == prefix or rest.startswith((prefix + " ", prefix + ")")):
-            return None
-    if words[0] in UNGATED_JOB_COMMANDS:
-        return None
-    return f"the command word {words[0]!r} is not on the allowlist"
+    assignment value, is refused: it would run a command V18 does not see. Text after the
+    closing `)` of a leading substitution is refused. Not a shell parser: see README L43."""
+    return _v18_verdict(segment, False)[0]
+
+
+# Step keys, env names and per-action `with:` keys that V18 lets through: derived from the real
+# release-pr job (controller ruling T7-R1). Anything else can change what runs (BASH_ENV,
+# NODE_OPTIONS, LD_PRELOAD, RUSTC_WRAPPER, a checkout of another repository), so it reds.
+UNGATED_JOB_STEP_KEYS = frozenset({"name", "id", "if", "uses", "with", "env", "run", "working-directory"})
+UNGATED_JOB_ENV_NAMES = frozenset({"APP_ID_SET", "GIT_TOKEN", "PR_JSON", "GH_TOKEN_FOR_PUSH"})
+UNGATED_JOB_WORKDIRS = frozenset({"rs"})
+UNGATED_JOB_WITH_KEYS = {
+    "actions/create-github-app-token": frozenset({"client-id", "private-key", "permission-contents",
+                                                  "permission-pull-requests"}),
+    "actions/checkout": frozenset({"fetch-depth", "persist-credentials"}),
+    "moonrepo/setup-toolchain": frozenset({"cache"}),
+}
+
+
+def _v18_step_config_violations(step: dict, action: str | None) -> list[str]:
+    """Reasons (without the location prefix) that a step's keys, env, workdir or `with:` are not
+    allowed. `action` is the step's `uses:` path, or None."""
+    out: list[str] = []
+    for key in step:
+        if key not in UNGATED_JOB_STEP_KEYS and key != "shell":
+            out.append(f"sets the step key `{key}:`, which is not on the allowlist")
+    env = step.get("env")
+    if "env" in step:
+        if not isinstance(env, dict):
+            out.append("sets an `env:` that is not a mapping")
+        else:
+            for k in env:
+                if k not in UNGATED_JOB_ENV_NAMES:
+                    out.append(f"sets the env name {k!r}, which is not on the allowlist "
+                               f"{sorted(UNGATED_JOB_ENV_NAMES)}")
+    if "working-directory" in step and step["working-directory"] not in UNGATED_JOB_WORKDIRS:
+        out.append(f"sets `working-directory:` to {step['working-directory']!r}, "
+                   f"not one of {sorted(UNGATED_JOB_WORKDIRS)}")
+    if "with" in step:
+        with_ = step["with"]
+        allowed = UNGATED_JOB_WITH_KEYS.get(action or "")
+        if not isinstance(with_, dict):
+            out.append("sets a `with:` that is not a mapping")
+        elif allowed is None:
+            out.append("sets `with:` on a step that is not an allowed action")
+        else:
+            for k in with_:
+                if k not in allowed:
+                    out.append(f"sets the `with:` key {k!r} of {action!r}, which is not on the allowlist "
+                               f"{sorted(allowed)}")
+    if action == "actions/checkout":
+        with_ = step.get("with")
+        persist = with_.get("persist-credentials") if isinstance(with_, dict) else None
+        if str(persist).lower() != "false":
+            out.append("does not set `persist-credentials: false` on the checkout")
+    return out
 
 
 def ungated_job_violations(doc: dict, name: str) -> list[str]:
     """V18 (SMA-684). Every step of every UNGATED_JOBS member must match the allowlist above.
     Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles."""
     out: list[str] = []
-    if "defaults" in doc:
-        out.append(f"{name}: V18: the workflow sets `defaults:`, which changes how every `run:` step "
-                   f"of an UNGATED_JOBS member runs. {V18_HINT}")
+    for key in ("defaults", "env"):
+        if key in doc:
+            out.append(f"{name}: V18: the workflow sets `{key}:`, which reaches every step of an "
+                       f"UNGATED_JOBS member. {V18_HINT}")
     jobs = doc["jobs"]
     for jid in sorted(UNGATED_JOBS):
         job = jobs.get(jid)
@@ -1693,15 +1787,23 @@ def ungated_job_violations(doc: dict, name: str) -> list[str]:
             uses, run = step.get("uses"), step.get("run")
             if uses is None and run is None:
                 out.append(f"{where} has neither `uses:` nor `run:`. {V18_HINT}")
+            action = None
             if uses is not None:
                 action = str(uses).split("@", 1)[0]
                 if action not in UNGATED_JOB_ACTIONS:
                     out.append(f"{where} uses the action {action!r}, which is not on the allowlist "
                                f"{sorted(UNGATED_JOB_ACTIONS)}. {V18_HINT}")
+            for why in _v18_step_config_violations(step, action):
+                out.append(f"{where} {why}. {V18_HINT}")
             if run is not None:
                 for line in _v18_logical_lines(str(run)):
-                    for seg in command_segments(line):
-                        why = v18_segment_verdict(seg)
+                    segs, refused = v18_line_segments(line)
+                    if refused:
+                        out.append(f"{where}: the line {line.strip()!r} is not allowed: {refused}. {V18_HINT}")
+                        continue
+                    in_subst = False
+                    for seg in segs:
+                        why, in_subst = _v18_verdict(seg, in_subst)
                         if why:
                             out.append(f"{where}: the segment {seg.strip()!r} is not allowed: {why}. {V18_HINT}")
     return out
@@ -3381,11 +3483,14 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     # to SCOPED_SECRET, not to "any secret at all". Widening the check above from
     # `if SCOPED_SECRET in names:` to `if names:` would red this row too, so this is the fixture
     # that tells the two apart.
-    ("SMA-658 a different secret in the workflow-level env: stays clean", "main",
+    # SMA-684: a workflow-level env: reaches release-pr, so V18 now refuses it. The row used to
+    # expect a clean file, to show that V13 ignores a non-Docker Hub secret there. V13's silence
+    # is now only visible in the SMA-658 job-level rows; this row pins the V18 refusal.
+    ("SMA-658 a different secret in the workflow-level env: V18 refuses it", "main",
      _OK_IMAGES_MAIN.replace(
          "      - main\njobs:\n  release-pr:",
          "      - main\nenv:\n  T: ${{ secrets.PAIGASUS_BOT_APP_ID }}\njobs:\n  release-pr:"),
-     None),
+     "V18: the workflow sets `env:`"),
     ("SMA-658 a publish hidden inside a script", "main",
      _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
                              "    steps: [{run: ci/images/run.sh publish}]"),
@@ -4335,6 +4440,7 @@ def _sma658_new_publish_markers_bite() -> str | None:
 # other violation the same file produces, where this table reds on that one shape alone. Rows are
 # (label, step, want_red): first the spec's rejected shapes (§5.6), then the shapes the plan's
 # Review Focus added, then the clean controls. A step may be a non-mapping on purpose.
+SHA_CO = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("pnpm install", {"run": "pnpm --dir ts install --frozen-lockfile"}, True),
     ("napi build", {"run": "napi build"}, True),
@@ -4368,13 +4474,43 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("a near-prefix of checkout", {"uses": "actions/checkout-evil@3d3c42e5aac5ba805825da76410c181273ba90b1"}, True),
     ("a near-prefix of setup-toolchain", {"uses": "moonrepo/setup-toolchain-x@261c62cb5b0f580c7be7c8cd0f023a2e96756095"}, True),
     ("a step that is not a mapping", "cargo build", True),
+    ("fix1: text after a leading substitution", {"run": "$(echo cargo) build"}, True),
+    ("fix1: a quoted substitution then a command", {"run": 'X="$(echo hi)" cargo build'}, True),
+    ("fix1: a captured release-plz call then a command", {"run": 'OUT="$(release-plz release-pr)" cargo build'}, True),
+    ("fix1: a substitution closed in a later pipeline segment", {"run": 'X="$(echo hi | jq .)" cargo build'}, True),
+    ("fix1: a mid-word hash hides a substitution", {"run": "echo x#$(cargo build)"}, True),
+    ("fix1: a mid-word hash hides a backtick", {"run": "echo x#`cargo build`"}, True),
+    ("fix1: a quote hides the start of a comment", {"run": 'echo "a #b" $(cargo build)'}, True),
+    ("fix1: a single ampersand", {"run": "echo hi & cargo build"}, True),
+    ("fix1: a process substitution <(", {"run": "echo <(cargo build)"}, True),
+    ("fix1: a process substitution >(", {"run": "echo hi > >(sh)"}, True),
+    ("fix1: a comment that ends in a backslash", {"run": "# note \\\ncargo build"}, True),
+    ("fix1: an escaped backslash at the line end", {"run": "echo a\\\\\ncargo build"}, True),
+    ("fix1: a step env BASH_ENV", {"run": "echo hi", "env": {"BASH_ENV": "evil.sh"}}, True),
+    ("fix1: a step env NODE_OPTIONS", {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1", "env": {"NODE_OPTIONS": "--require ./x.js"}}, True),
+    ("fix1: a step env LD_PRELOAD", {"run": "echo hi", "env": {"LD_PRELOAD": "./x.so"}}, True),
+    ("fix1: a step env RUSTC_WRAPPER", {"run": "release-plz release-pr", "env": {"RUSTC_WRAPPER": "./x"}}, True),
+    ("fix1: an env that is not a mapping", {"run": "echo hi", "env": "BASH_ENV=x"}, True),
+    ("fix1: a working-directory outside rs", {"run": "bash ci/version-lockstep/run.sh --write", "working-directory": "evil"}, True),
+    ("fix1: an unlisted step key", {"run": "echo hi", "continue-on-error": True}, True),
+    ("fix1: a checkout of another repository", {"uses": "actions/checkout@" + SHA_CO, "with": {"repository": "evil/repo", "persist-credentials": False}}, True),
+    ("fix1: a checkout that keeps credentials", {"uses": "actions/checkout@" + SHA_CO, "with": {"persist-credentials": True}}, True),
+    ("fix1: a checkout without persist-credentials", {"uses": "actions/checkout@" + SHA_CO}, True),
+    ("fix1: an unlisted with key on the app token", {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1", "with": {"owner": "evil"}}, True),
+    ("fix1: an unlisted with key on setup-toolchain", {"uses": "moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095", "with": {"auto-install": True}}, True),
+    ("fix1: with on a run step", {"run": "echo hi", "with": {"a": "b"}}, True),
+    ("fix1: a with that is not a mapping", {"uses": "actions/checkout@" + SHA_CO, "with": "x"}, True),
+    ("fix1: working-directory rs", {"run": "echo hi", "working-directory": "rs"}, False),
+    ("fix1: the allowed env names", {"run": "echo hi", "env": {"APP_ID_SET": "x", "GIT_TOKEN": "x", "PR_JSON": "x", "GH_TOKEN_FOR_PUSH": "x"}}, False),
+    ("fix1: a checkout with the string false", {"uses": "actions/checkout@" + SHA_CO, "with": {"persist-credentials": "false"}}, False),
+    ("fix1: a substitution closed in a later segment", {"run": 'X="$(echo hi | jq .)"'}, False),
     ("moon setup", {"run": "moon setup"}, False),
     ("proto install release-plz", {"run": "proto install release-plz"}, False),
     ("release-plz release-pr", {"run": "release-plz release-pr --output json"}, False),
     ("the branch push", {"run": 'git push "$AUTH_REMOTE" "HEAD:$BRANCH"'}, False),
     ("a captured release-plz call", {"run": 'OUT="$(release-plz release-pr --output json)"'}, False),
     ("a continued echo", {"run": 'echo "a" \\\n     "b (c) d"'}, False),
-    ("pinned checkout", {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"}, False),
+    ("pinned checkout", {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "with": {"fetch-depth": 0, "persist-credentials": False}}, False),
     ("pinned setup-toolchain", {"uses": "moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095"}, False),
     ("pinned app token", {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"}, False),
     ("two jq calls", {"run": "PR_COUNT=\"$(printf '%s' \"$PR_JSON\" | jq '.prs' | jq 'length')\""}, False),
@@ -4383,7 +4519,7 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("a comment line with separators", {"run": "# a | b; c && d\necho ok"}, False),
 )
 # Deleting a row must red: the table is the only pin on each shape.
-_SMA684_V18_CASE_COUNT = 45
+_SMA684_V18_CASE_COUNT = 75
 
 
 def _sma684_v18_allowlist_bites() -> str | None:
@@ -4397,12 +4533,19 @@ def _sma684_v18_allowlist_bites() -> str | None:
             return f"{label}: a violation does not name V18: {found}"
     # The keys that run code or change how every step of the job runs.
     for key, value in (("container", "ubuntu:24.04"), ("services", {"db": {"image": "postgres"}}),
-                       ("defaults", {"run": {"shell": "python {0}"}})):
+                       ("defaults", {"run": {"shell": "python {0}"}}),
+                       ("env", {"BASH_ENV": "evil.sh"}), ("uses", "./.github/workflows/x.yml")):
         if not ungated_job_violations({"jobs": {"release-pr": {key: value, "steps": [{"run": "echo hi"}]}}}, "fixture"):
             return f"a job-level `{key}:` on release-pr read clean"
     if not ungated_job_violations({"defaults": {"run": {"shell": "python {0}"}},
                                    "jobs": {"release-pr": {"steps": [{"run": "echo hi"}]}}}, "fixture"):
         return "a workflow-level `defaults:` read clean"
+    if not ungated_job_violations({"env": {"BASH_ENV": "evil.sh"},
+                                   "jobs": {"release-pr": {"steps": [{"run": "echo hi"}]}}}, "fixture"):
+        return "a workflow-level `env:` read clean"
+    # A reusable-workflow call has no steps: it must still red.
+    if not ungated_job_violations({"jobs": {"release-pr": {"uses": "./.github/workflows/x.yml"}}}, "fixture"):
+        return "a job-level `uses:` with no steps read clean"
     # Scope: V18 applies to UNGATED_JOBS members only.
     if ungated_job_violations({"jobs": {"build": {"steps": [{"run": "cargo build"}]}}}, "fixture"):
         return "V18 fired on a job outside UNGATED_JOBS"

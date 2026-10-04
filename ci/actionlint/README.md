@@ -443,8 +443,9 @@ to `PUBLISH_MARKERS` with a fixture row.
 
 **L22 — a self-test helper's registration in `self_test`'s tuple is unpinned; deleting a helper's
 row leaves the suite green (SMA-603).** This is the pre-existing shape L4 and L15 already name
-for other tables. It is shared by ALL TWENTY-THREE registered helpers, not by two (the prose said sixteen while the tuple held twenty-two; SMA-684 counted it again when it added `_sma684_v18_allowlist_bites`). SMA-603 added nine
-of them (`_v8d_pre_approval_callee_publish`, `_v8d_sneak_shape`,
+for other tables. It is shared by ALL TWENTY-THREE registered helpers, not by two (the prose said
+sixteen while the tuple held twenty-two; SMA-684 counted it again when it added
+`_sma684_v18_allowlist_bites`). SMA-603 added nine of them (`_v8d_pre_approval_callee_publish`, `_v8d_sneak_shape`,
 `_v8d_unverifiable_remote_uses`, `_v8d_unverifiable_nested_local_callee`,
 `_v8d_dedup_shared_callee`, `_v8d_dedup_shared_nested_target`, `_v8d_approval_gate_self_case`,
 `_v8d_missing_local_callee_direct` and `_v8_fix4_dry_run_boundary_cases`) alongside the two that
@@ -453,7 +454,7 @@ fix round 1 added `_v10_minor6_scalar_env_fails_closed` (V10 Minor 6 below), the
 added `_v10_rule1_strict_equality`, and the fix wave added `_v11_id_token_write_required` (F2,
 L25), `_v12_npm_floor_pinned` (F3, L26) and `_non_list_steps_fails_closed` (F7). The
 `--fixture-count >= 120` floor counts fixture-table rows, not registered helpers, so it does not
-reach this table and cannot catch a deleted registration — and nine of the sixteen now exposed
+reach this table and cannot catch a deleted registration — and nine of the twenty-three now exposed
 are the V8d controls this branch relies on.
 
 COUNT THIS BY HAND WHEN YOU ADD ONE. The number above is prose, and nothing asserts it: it read
@@ -636,7 +637,14 @@ a normal pipe size, stays undetected. The gate has no watchdog timer.
 words and exact command prefixes, because every step of that job can read the App private key
 from the runner. Shell keywords (`if`, `then`, `else`, `elif`, `fi`, `!`) are stripped and the
 next word is checked; a command substitution after the command word or inside an assignment
-value is refused; `shell:`, `container:`, `services:` and `defaults:` are refused. Four residuals.
+value is refused; `<(` and `>(` are refused; a single `&` splits a segment; a `#` starts a comment
+only at the start of a word, and a substitution in the text after it is refused; text after the
+closing `)` of a leading substitution is refused. `shell:`, `container:`, `services:`,
+`defaults:`, a job-level `env:` or `uses:`, and a workflow-level `env:` are refused. A step may
+use only the keys `name`, `id`, `if`, `uses`, `with`, `env`, `run` and `working-directory`. Its
+`env:` names are limited to `APP_ID_SET`, `GIT_TOKEN`, `PR_JSON` and `GH_TOKEN_FOR_PUSH`, its
+`working-directory:` to `rs`, and its `with:` keys to a list per action, with
+`persist-credentials: false` on the checkout. Eight residuals.
 `command_segments` does not parse quotes (L20), so a command inside a quoted string is not seen,
 and a separator inside quotes splits a segment: the real job's `jq '.prs | length'` read as a
 command word `length')"`, so SMA-684 rewrote it as two `jq` calls. V18 cannot see inside an
@@ -647,6 +655,17 @@ still do harm that a person writes into the workflow itself, for example `echo` 
 into `.git/hooks`; a reviewer sees that in the diff, V18 does not. And the three allowed actions
 and the tools in the spec's §4.1 can read the key; V18 removes the compile and the install, not
 that trust.
+
+The other residuals, by name (controller ruling T7-R3). (a) Git subcommands and options that
+run code are allowed, because `git` is an allowed word: `git -c alias.x='!…'`,
+`git -c core.hooksPath=…`, `git config core.sshCommand …` and `git submodule update`. (b) An
+allowed word can write `$GITHUB_ENV` or `$GITHUB_PATH`, for example `echo "BASH_ENV=…" >>
+"$GITHUB_ENV"`, and a later step then runs with that value. (c) Trailing arguments on an allowed
+prefix are not checked: `release-plz release-pr --config …`, `proto install release-plz <tool>`
+and `bash ci/version-lockstep/run.sh --write --other`. (d) An allowed action is allowed at any
+ref, including an imposter SHA that exists only in the fork network of the action's repository.
+(e) The check fails closed, so it has false positives: `echo '$(x)'` and `$((1+1))` read as a
+command substitution and red.
 
 ## Cost
 
