@@ -138,3 +138,20 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 - The first released container image: `ghcr.io/smk1085/paigasus-iam` and
   `docker.io/smaschek/paigasus-iam` (SMA-658).
+
+### Added
+
+- A new table, `[authn.dpop]`, turns on the DPoP proof check of the gateway path (RFC 9449). It is
+  off by default. With `enabled = true`, `Introspect` accepts a new `dpop` context with the proof,
+  the method and the path. IAM checks the proof against `forwarded_base_urls` before the identity
+  lookup. `IsAuthorized` alone accepts one follow-up with `authorization: DPoP` and `dpop`
+  metadata, once, as a self-query. The HTTP and gRPC API of IAM keep refusing the DPoP scheme
+  (SMA-700).
+- Two new error reasons: `invalid-dpop-proof` (gRPC `Unauthenticated`) and `dpop-quota-exceeded`
+  (gRPC `ResourceExhausted`, with `RetryInfo`). A full replay store answers `authn-unavailable`
+  (SMA-700).
+- IAM refuses to boot in these cases: DPoP on and no `forwarded_base_urls`, a URL that is not
+  `https` or loopback `http`, a URL with a query, a fragment or user info, a window outside 1 to
+  300 seconds, and a quota of 0 or above the capacity (SMA-700).
+- The Helm chart has two new values: `zones.iam.backend.dpop.enabled` and
+  `zones.iam.backend.dpop.forwardedBaseUrls`. The default render does not change (SMA-700).

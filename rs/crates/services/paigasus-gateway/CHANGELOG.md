@@ -40,3 +40,14 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 - The first released container image: `ghcr.io/smk1085/paigasus-gateway` and
   `docker.io/smaschek/paigasus-gateway` (SMA-658).
+
+### Added
+
+- A new setting, `[dpop] enabled` (`GATEWAY_DPOP__ENABLED`), turns on the DPoP scheme on the
+  protected routes. It is off by default. With it on, a client sends `Authorization: DPoP <token>`
+  and one `DPoP` proof header. The gateway skips the API-key leg. It sends the proof, the method
+  and the path to IAM, and sends the same token and proof on the self-query. Turn DPoP on in IAM
+  first (SMA-700).
+- With DPoP on, every 401 carries one `WWW-Authenticate: DPoP` line. A bad proof is 401
+  `invalid-dpop-proof`. The DPoP quota of IAM is 429 `rate-limited` with `Retry-After`, and the
+  metric label is `denied`, not `unavailable`. With DPoP off, no response changes (SMA-700).

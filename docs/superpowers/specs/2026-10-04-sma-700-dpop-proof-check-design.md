@@ -288,9 +288,10 @@ pub trait ReplayStore: Send + Sync {
 - `redeem_follow_up` returns `Redeemed` only if the ticket is live, not used, and the digest
   matches. It then marks the ticket as used. A digest mismatch does not use the ticket.
 - One `Mutex` protects the store. A restart clears it (R1).
-- Memory budget (an estimate; the plan measures it): about 150 to 250 bytes for each entry with
-  the map, the index and the count maps, so about 30 to 50 MB at the default capacity of
-  200 000. The chart sets no IAM memory limit.
+- Memory budget (measured, SMA-700 Task 5, at the default capacity of 200 000 entries): 178 bytes
+  for each entry (34 MiB) with 1000 keys and 500 subjects. 253 bytes (48 MiB) with a distinct
+  key and 500 subjects. 328 bytes (62 MiB) with a distinct key and subject for each entry, the
+  worst case. The runbook uses the worst case as the budget. The chart sets no IAM memory limit.
 
 ### 4.6 `htu` comparison
 
@@ -677,7 +678,7 @@ Record the results in `docs/superpowers/plans/2026-10-04-sma-700-mutation-result
 | R5 | The follow-up skips the signature check, and a ticket can stay unredeemed. | The follow-up relies on the digest of bytes that `Introspect` verified, the `ath` check and the self-query rule. A captured proof and token give one self-query answer for the token owner, before the deadline. A `service-info` call or a 400 `org-required` leaves an unused ticket, which expires with its entry. | Accepted. |
 | R6 | IAM's own API does not accept DPoP. | A client cannot use DPoP against IAM directly, and a DPoP-only client cannot provision itself (§ 2). No shipped route exists for that (§ 1). | Not tracked. A new issue if a route is added. |
 | R7 | Many identities can still fill the global capacity. | DPoP requests get 503 until entries expire (up to 120 s with the defaults). | The `warn` line; the operator raises `replay_capacity`. |
-| R8 | The memory budget in § 4.5 is an estimate. | The default capacity can use more memory than stated. | The plan measures it, and corrects the default and the runbook. |
+| R8 | The memory budget in § 4.5 was an estimate. | The default capacity could use more memory than stated. | Measured (plan Task 5): 178, 253 and 328 bytes for each entry, so 34, 48 and 62 MiB at 200 000 entries. The default stays 200 000. The runbook states the table. |
 
 ## 10. Open questions
 
