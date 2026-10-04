@@ -2687,11 +2687,32 @@ Measured on 2026-10-04: 32 task cases, no REMOVED target. `wasm-typings->typeche
 
 | Row | Measurement | Result |
 |---|---|---|
-| 1 | stale installed `paigasus_wasm.d.ts` → kernel `typecheck` | |
-| 2 | restored | |
-| 3 | stale installed napi `index.d.ts` → kernel `typecheck`; restored | |
-| M1-M18 | one row per mutation: parity rc, smoke rc, first matching line | |
-| CI | M10 through `moon ci :affected-smoke --base origin/main` | |
+| 1 | stale installed `paigasus_wasm.d.ts` → kernel `typecheck` | Moon rc=1 (R11: assert non-zero, not a fixed rc). The preflight stopped the task: `@paigasus/wasm: the installed paigasus_wasm.d.ts differs from the committed rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts` and `Repair: rm -rf ts/node_modules && pnpm -C ts install`. No `error TS` line, so `tsc` did not run. Before (E1 row 2): rc=2 and two TS errors with no file named. |
+| 2 | restored | `rm -rf ts/node_modules && pnpm -C ts install` rc=0, then kernel `typecheck --force` rc=0. |
+| 3 | stale installed napi `index.d.ts` → kernel `typecheck`; restored | rc=1. `@paigasus/node-bindings: the installed index.d.ts differs from the committed rs/crates/bindings/paigasus-node-bindings/index.d.ts` and the `Repair:` line. No `error TS` line. After restore: kernel `typecheck` rc=0, `git status --short` empty. |
+| M1 | kernel typecheck: drop node-bindings `index.d.ts` | parity rc=1, smoke rc=1. paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/index.d.ts |
+| M2 | kernel typecheck: drop node-bindings `package.json` | parity rc=1, smoke rc=1. paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-node-bindings/package.json |
+| M3 | kernel typecheck: drop `paigasus_wasm.d.ts` | parity rc=1, smoke rc=1. paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts (smoke also reds `[wasm-typings->typecheck]`) |
+| M4 | kernel typecheck: drop `paigasus_wasm_bg.wasm.d.ts` | parity rc=1, smoke rc=1. paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts |
+| M5 | kernel typecheck: drop wasm `package.json` | parity rc=1, smoke rc=1. paigasus-kernel-ts:typecheck inputs omit rs/crates/bindings/paigasus-wasm/package.json |
+| M6 | kernel typecheck: drop the preflight script input | parity rc=1, smoke rc=1. paigasus-kernel-ts:typecheck inputs omit ts/scripts/check-installed-bindings.mjs |
+| M7 | kernel typecheck: drop `tests/**/*` | parity rc=0, smoke rc=0. GREEN as R4 and spec N6 expect: own-package inputs are not asserted. Known limit. |
+| M8 | kernel typecheck: drop `vitest.config.ts` | parity rc=0, smoke rc=0. GREEN as R4 and spec N6 expect. Known limit. |
+| M9 | discovery typecheck: drop proto `package.json` | parity rc=1, smoke rc=1. paigasus-discovery-ts:typecheck inputs omit ts/packages/paigasus-proto/package.json |
+| M10 | iam-console: remove the preflight from the script | parity rc=1, smoke rc=1. iam-console-ts:typecheck does not run ts/scripts/check-installed-bindings.mjs before `tsc`, so `tsc` can read stale installed typings |
+| M11 | iam-console: preflight after `tsc` | parity rc=1, smoke rc=1. iam-console-ts:typecheck runs ts/scripts/check-installed-bindings.mjs after `tsc`, so `tsc` can read stale installed typings first |
+| M12 | console-core: drop the `@paigasus/kernel` dependency | parity rc=1, smoke rc=1. FLOOR: gateway-console-ts:typecheck / iam-console-ts:typecheck / paigasus-console-core-ts:typecheck is in the A12 floor, but A12b does not examine it |
+| M13 | wasm `package.json`: add `paigasus_wasm_extra.d.ts` to `files` | parity rc=1, smoke rc=1. inputs omit rs/crates/bindings/paigasus-wasm/paigasus_wasm_extra.d.ts for gateway-console, iam-console, console-core and kernel typecheck (plus console-core and kernel build) |
+| M14 | shared typecheck task: drop `ts/tsconfig.base.json` | parity rc=1, smoke rc=1. paigasus-next-config-ts / proto / sdk / ui `:typecheck inputs omit ts/tsconfig.base.json` (every ts typecheck) |
+| M15 | sdk typecheck: drop `deps: ['contracts:generate']` | parity rc=1, smoke rc=1. paigasus-sdk-ts:typecheck deps omit contracts:generate |
+| M16 | parity.py: drop `a12b` from the expected key tuple | parity rc=0, smoke rc=1. FAIL collect_findings reported (…, 'a12a', 'a12b'), expected (…, 'a12a') |
+| M17 | parity.py: drop `a12a` from the expected key tuple | parity rc=0, smoke rc=1. FAIL collect_findings reported (…, 'a12a', 'a12b'), expected (…, 'a12b') |
+| M18 | run.sh: remove `typecheck` from the task-name filter | parity rc=0, smoke rc=1. FAIL  [ui->console] / [ui-components->console] / [auth->auth-tasks] affected TASK set != expected set; `missing` lists gateway-console-ts:typecheck and iam-console-ts:typecheck |
+| CI | M10 through `moon ci :affected-smoke --base HEAD~1` on a scratch commit (R2) | `moon ci` rc=1. `repo:affected-smoke affected by file ts/apps/iam-console/moon.yml`, then `iam-console-ts:typecheck does not run ts/scripts/check-installed-bindings.mjs before `tsc``. Scratch branch deleted; tree clean; HEAD back at the Task 8 commit. |
+| restore | after the battery | `cargo_moon_parity.py` rc=0. `/bin/bash ci/affected-graph/run.sh` rc=0. |
+
+Known limit (R4): the two kernel own-package inputs `tests/**/*` and `vitest.config.ts` are not asserted by A12 (spec N6). Dropping them re-keys nothing and no gate reds.
+
 
 ### E5 — forced runs and the full graph (Task 10)
 
