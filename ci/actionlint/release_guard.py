@@ -1650,8 +1650,8 @@ def _v18_logical_lines(run_text: str) -> tuple[list[str], str | None]:
                 return [], f"the comment line {raw.strip(_V18_BLANKS)!r} ends in a backslash"
             continue
         if "#" in raw:
-            return [], (f"the line {raw.strip(_V18_BLANKS)!r} has a `#` that is not the start of a comment "
-                        f"line; V18 does not read comments inside a command")
+            return [], (f"the line {raw.strip(_V18_BLANKS)!r} has a `#` that is not the start "
+                        f"of a comment line; V18 does not read comments inside a command")
         trailing = len(raw) - len(raw.rstrip("\\"))
         continued = trailing % 2 == 1
         if continued:
@@ -1671,7 +1671,9 @@ _V18_WRAP_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*="\$\((.*)\)"')
 # value ends at `[ \t]`, never at `\s`. A backslash may escape a `"` inside double quotes, so the
 # double-quoted form skips `\.`; an unquoted value may not hold a backslash at all (`A=x\ echo`
 # is ONE word to bash), so that shape does not match and its command word `A=x\` reds.
-_V18_ASSIGN_RE = re.compile(r"""[A-Za-z_][A-Za-z0-9_]*=("(?:[^"\\]|\\.)*"|'[^']*'|[^ \t"'\\]*)(?=[ \t]|$)""")
+_V18_ASSIGN_RE = re.compile(
+    r"""[A-Za-z_][A-Za-z0-9_]*=("(?:[^"\\]|\\.)*"|'[^']*'|[^ \t"'\\]*)(?=[ \t]|$)""")
+_V18_DOLLAR_QUOTES = ("$'", '$"')
 _V18_WORD_SPLIT_RE = re.compile(r"[ \t]+")
 _V18_SUBST_MARKERS = ("$(", "`", "<(", ">(")
 
@@ -1747,6 +1749,13 @@ def v18_line_segments(line: str) -> tuple[list[str], str | None]:
     unwrapped first. Then `$(`, a backtick, `<(` and `>(` are refused anywhere, quotes included:
     fail closed, so `echo '$(x)'` reds."""
     text = line.strip(_V18_BLANKS)
+    # T7-R8: v18_split does not parse ANSI-C (`$'...'`) or locale (`$"..."`) quoting. Inside
+    # `$'...'` bash reads `\'` as a quote character, so a `;` that V18 sees as quoted can be a
+    # real separator. Fail closed, like `$(`: refuse both anywhere on the line, quotes included.
+    for mark in _V18_DOLLAR_QUOTES:
+        if mark in line:
+            return [], (f"ANSI-C or locale quoting ({mark!r}), which V18 does not parse, so "
+                        f"it refuses it")
     m = _V18_WRAP_RE.fullmatch(text)
     if m:
         text = m.group(1)
@@ -1880,12 +1889,14 @@ def ungated_job_violations(doc: dict, name: str) -> list[str]:
                 for line in lines:
                     segs, refused = v18_line_segments(line)
                     if refused:
-                        out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not allowed: {refused}. {V18_HINT}")
+                        out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not "
+                                   f"allowed: {refused}. {V18_HINT}")
                         continue
                     for seg in segs:
                         why = v18_segment_verdict(seg)
                         if why:
-                            out.append(f"{where}: the segment {seg.strip(_V18_BLANKS)!r} is not allowed: {why}. {V18_HINT}")
+                            out.append(f"{where}: the segment {seg.strip(_V18_BLANKS)!r} is "
+                                       f"not allowed: {why}. {V18_HINT}")
     return out
 
 
@@ -4645,6 +4656,12 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("fix4: an em dash inside an echo string", {"run": 'echo "Release PR \u2014 no changes"'}, False),
     ("fix4: a tab after an assignment", {"run": "A=x\techo ok"}, False),
     ("fix4: an escaped quote inside a double-quoted value, then echo", {"run": 'A="x\\"y" echo ok'}, False),
+    # T7-R8: ANSI-C and locale quoting. The first row read CLEAN before, and bash ran cargo.
+    ("fix5: an escaped quote inside ANSI-C quoting", {"run": "echo $'\\'' ; cargo build ; echo \\'"}, True),
+    ("fix5: ANSI-C quoting", {"run": "echo $'a'"}, True),
+    ("fix5: locale quoting", {"run": 'echo $"a"'}, True),
+    ("fix5: ANSI-C quoting inside a wrapped substitution", {"run": "NAME=\"$(echo $'a')\""}, True),
+    ("fix5: a plain parameter expansion", {"run": "echo $HOME"}, False),
     ("moon setup", {"run": "moon setup"}, False),
     ("proto install release-plz", {"run": "proto install release-plz"}, False),
     ("release-plz release-pr", {"run": "release-plz release-pr --output json"}, False),
@@ -4660,7 +4677,7 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("a comment line with separators", {"run": "# a | b; c && d\necho ok"}, False),
 )
 # Deleting a row must red: the table is the only pin on each shape.
-_SMA684_V18_CASE_COUNT = 133
+_SMA684_V18_CASE_COUNT = 138
 
 
 def _sma684_v18_allowlist_bites() -> str | None:

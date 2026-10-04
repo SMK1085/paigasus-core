@@ -634,41 +634,45 @@ R4: the probe detects only the one measured trigger. A different cause of the sa
 a normal pipe size, stays undetected. The gate has no watchdog timer.
 
 **L43 — V18 is an allowlist over command words, not a shell parser (SMA-684).** V18 holds every
-`UNGATED_JOBS` member (today only `release-pr`) to three actions and a short list of command
-words and exact command prefixes, because every step of that job can read the App private key
-from the runner. V18 reads a `run:` block like this. It splits the text on `\n` only, because bash
-breaks lines only there. Bash blanks are only space and tab. V18 refuses a block that holds any C0
+`UNGATED_JOBS` member (today only `release-pr`) to three actions and a short list of command words
+and exact command prefixes, because every step of that job can read the App private key from the
+runner. V18 reads a `run:` block like this. It splits the text on `\n` only, because bash breaks
+lines only there. Bash blanks are only space and tab. V18 refuses a block that holds any C0
 control character except tab and newline, U+007F, or any other character for which Python's
-`str.isspace()` is true (U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+205F, U+3000
-and more): Python reads those as line breaks or blanks and bash does not. So a `\r` before a `#`
-hid a command from V18 that bash ran, and `A=x<U+3000>echo cargo build` is one assignment word to
-bash, which then runs `cargo build`. A YAML double-quoted scalar can carry each of them, and a
-plain or literal scalar can carry the non-ASCII ones as raw UTF-8. V18 also refuses U+FEFF: bash
-reads it as a word character, as V18 does, but it is invisible in a diff. Other non-ASCII text
-is allowed (the real job's echo text holds an em dash). Every split, strip and regex in V18 uses
-space and tab only, never Python's `\s`. A leading `NAME=value` word skips a `\"` inside double
-quotes, and an unquoted value that holds a backslash is not read as an assignment, so
-`A=x\ echo cargo build` reds on its command word `A=x\`. A `#` is allowed only as the first character after
-spaces and tabs of a physical line that does not continue the line before it, and that comment
-line must not end in a backslash. Any other `#` is refused, quotes included, so a `#` can never
-hide a separator. The refusal gives a false positive for `${X#…}` and `${#X}`. A line joins the
-next one only after an odd number of trailing backslashes, and with nothing between the two, as in
-bash. A small splitter of its own (not `command_segments`) tracks single quotes, double quotes
-and backslash escapes. It splits on unquoted `;`, `&`, `|`, `&&`, `||` and `|&`, and it does not
-split the `&` of a redirection (`>&2`, `2>&1`, `&>`). A line with an unterminated quote is
-refused. `$(`, a backtick, `<(` and `>(` are refused anywhere on a line, quotes included. One
-exception: a whole line of exactly the form `NAME="$(...)"` is unwrapped, where NAME is a shell
-identifier and the `)` before the final `"` ends the line. The wrapped text must hold no
-backslash and no unquoted parenthesis, so that last `)` is the one that matches the opening
-`$(`. Its inside is then checked as a command line. `NAME=$(...)` without quotes, text after the
-closing quote, and a substitution with no `NAME=` are all refused. Shell keywords (`if`, `then`,
-`else`, `elif`, `fi`, `!`) are stripped and the next word is checked. `shell:`, `container:`, `services:`, `defaults:`, a
-job-level `env:` or `uses:`, and a workflow-level `env:` or `defaults:` (when the file has an `UNGATED_JOBS` member)
-are refused. A step may use only the keys `name`, `id`, `if`, `uses`, `with`, `env`, `run` and
+`str.isspace()` is true (U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+205F, U+3000 and
+more): Python reads those as line breaks or blanks and bash does not. So a `\r` before a `#` hid a
+command from V18 that bash ran, and `A=x<U+3000>echo cargo build` is one assignment word to bash,
+which then runs `cargo build`. A YAML double-quoted scalar can carry each of them, and a plain or
+literal scalar can carry the non-ASCII ones as raw UTF-8. V18 also refuses U+FEFF: bash reads it
+as a word character, as V18 does, but it is invisible in a diff. Other non-ASCII text is allowed
+(the real job's echo text holds an em dash). Every split, strip and regex in V18 uses space and
+tab only, never Python's `\s`. A leading `NAME=value` word skips a `\"` inside double quotes, and
+an unquoted value that holds a backslash is not read as an assignment, so `A=x\ echo cargo build`
+reds on its command word `A=x\`. A `#` is allowed only as the first character after spaces and
+tabs of a physical line that does not continue the line before it, and that comment line must not
+end in a backslash. Any other `#` is refused, quotes included, so a `#` can never hide a
+separator. The refusal gives a false positive for `${X#…}` and `${#X}`. A line joins the next one
+only after an odd number of trailing backslashes, and with nothing between the two, as in bash. A
+small splitter of its own (not `command_segments`) tracks single quotes, double quotes and
+backslash escapes. It splits on unquoted `;`, `&`, `|`, `&&`, `||` and `|&`, and it does not split
+the `&` of a redirection (`>&2`, `2>&1`, `&>`). A line with an unterminated quote is refused.
+`$(`, a backtick, `<(` and `>(` are refused anywhere on a line, quotes included. The splitter does
+not parse ANSI-C quoting (`$'...'`) or locale quoting (`$"..."`): inside `$'...'` bash reads `\'`
+as a quote character, so `echo $'\'' ; cargo build ; echo \'` ran cargo while V18 read it clean.
+So `$'` and `$"` are refused anywhere on a line, quotes included. This is fail-closed, the same as
+`$(`: `echo "cost: 5$"` reds too. One exception: a whole line of exactly the form `NAME="$(...)"`
+is unwrapped, where NAME is a shell identifier and the `)` before the final `"` ends the line. The
+wrapped text must hold no backslash and no unquoted parenthesis, so that last `)` is the one that
+matches the opening `$(`. Its inside is then checked as a command line. `NAME=$(...)` without
+quotes, text after the closing quote, and a substitution with no `NAME=` are all refused. Shell
+keywords (`if`, `then`, `else`, `elif`, `fi`, `!`) are stripped and the next word is checked.
+`shell:`, `container:`, `services:`, `defaults:`, a job-level `env:` or `uses:`, and a
+workflow-level `env:` or `defaults:` (when the file has an `UNGATED_JOBS` member) are refused. A
+step may use only the keys `name`, `id`, `if`, `uses`, `with`, `env`, `run` and
 `working-directory`. Its `env:` names are limited to `APP_ID_SET`, `GIT_TOKEN`, `PR_JSON` and
 `GH_TOKEN_FOR_PUSH`, its `working-directory:` to `rs`, and its `with:` keys to a list per action,
-with `persist-credentials: false` on the checkout. That check is case-insensitive, so the
-string `False` passes. Residuals follow.
+with `persist-credentials: false` on the checkout. That check is case-insensitive, so the string
+`False` passes. Residuals follow.
 
 V18 cannot see inside an allowed program: `bash ci/version-lockstep/run.sh --write` is guarded
 by that script's own self-tests (the napi-glue writer, the `run_write` pins and the changed-path
