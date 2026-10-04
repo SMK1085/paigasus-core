@@ -1611,100 +1611,132 @@ _V18_SUBST_RE = re.compile(r"""(?:[A-Za-z_][A-Za-z0-9_]*=)?"?\$\(""")
 _V18_ASSIGN_RE = re.compile(r"""[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|[^\s"']*)(?=\s|$)""")
 
 
-def _v18_logical_lines(run_text: str) -> list[str]:
-    """The run: text as bash reads it. A full-line comment is dropped BEFORE any joining, so a
-    comment that ends in a backslash does not swallow the next line. A line joins the next one
-    only when it ends in an ODD number of backslashes: an even number is an escaped backslash."""
+def _v18_logical_lines(run_text: str) -> tuple[list[str], str | None]:
+    """The run: text as V18 reads it, and a reason to refuse it, if any (controller ruling T7-R4).
+    A `#` is allowed only as the first non-blank character of a physical line that does NOT
+    continue the line before it, and such a comment line must not end in a backslash. Any other
+    `#` is refused: bash reads a `#` as a comment only at the start of a word and never inside
+    quotes, and V18 does not parse enough to tell the cases apart. A comment line is dropped. A
+    line joins the next one only when it ends in an ODD number of backslashes."""
     out: list[str] = []
     buf = ""
+    continued = False
     for raw in run_text.splitlines():
-        if not buf and raw.lstrip().startswith("#"):
+        if not continued and raw.lstrip().startswith("#"):
+            if raw.rstrip().endswith("\\"):
+                return [], f"the comment line {raw.strip()!r} ends in a backslash"
             continue
+        if "#" in raw:
+            return [], (f"the line {raw.strip()!r} has a `#` that is not the start of a comment "
+                        f"line; V18 does not read comments inside a command")
         stripped = raw.rstrip()
         trailing = len(stripped) - len(stripped.rstrip("\\"))
-        if trailing % 2 == 1:
+        continued = trailing % 2 == 1
+        if continued:
             buf += stripped[:-1] + " "
             continue
         out.append(buf + raw)
         buf = ""
     if buf:
         out.append(buf)
-    return out
+    return out, None
 
 
-_V18_SEPS_RE = re.compile(r"&&|\|\||;|\||&")
-# bash starts a comment only at the start of a word, so `x#y` is not one.
-_V18_COMMENT_RE = re.compile(r"(?:^|\s)#")
-_V18_CLOSE_TAIL_RE = re.compile(r'\s*"?\s*')
+# A whole line that is one command substitution, with an optional `NAME=` and optional quotes:
+# `OUT="$(release-plz release-pr --output json)"`. Its inside is checked as a command line.
+_V18_WRAP_RE = re.compile(r"""(?:[A-Za-z_][A-Za-z0-9_]*=)?"?\$\((.*)\)"?""", re.S)
+_V18_ASSIGN_RE = re.compile(r"""[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|[^\s"']*)(?=\s|$)""")
 _V18_SUBST_MARKERS = ("$(", "`", "<(", ">(")
+
+
+def v18_split(text: str) -> tuple[list[str], str | None]:
+    """Split one logical line into command segments on UNQUOTED `;`, `&`, `|`, `&&`, `||` and
+    `|&`. Tracks single quotes, double quotes and backslash escapes. An `&` that belongs to a
+    redirection (`>&2`, `2>&1`, `<&`, `&>`) does not split. A line with an unterminated quote is
+    refused. Not a shell parser: it knows no heredoc, no `$(( ))` and no brace group."""
+    segs: list[str] = []
+    cur: list[str] = []
+    quote = ""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            cur.append(c)
+            if c == "'":
+                quote = ""
+            i += 1
+            continue
+        if c == "\\":
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote == '"':
+            cur.append(c)
+            if c == '"':
+                quote = ""
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            cur.append(c)
+            i += 1
+            continue
+        if c in ";|&":
+            if c == "&" and ((i > 0 and text[i - 1] in "<>") or text[i + 1:i + 2] == ">"):
+                cur.append(c)
+                i += 1
+                continue
+            width = 2 if text[i:i + 2] in ("&&", "||", "|&") else 1
+            segs.append("".join(cur))
+            cur = []
+            i += width
+            continue
+        cur.append(c)
+        i += 1
+    if quote:
+        return [], "the line has an unterminated quote"
+    segs.append("".join(cur))
+    return [seg for seg in segs if seg.strip()], None
 
 
 def v18_line_segments(line: str) -> tuple[list[str], str | None]:
     """The command segments of one logical line for V18, and a reason to refuse the line, if any.
-    command_segments is not used: it cuts at the FIRST `#`, which hides `echo x#$(cmd)`, and it
-    does not split on a single `&`. Here a comment starts only at the start of a word, and a
-    command or process substitution in the removed comment text is refused (a quote can hide the
-    real start of the comment). `<(` and `>(` are refused anywhere."""
-    m = _V18_COMMENT_RE.search(line)
+    command_segments is not used (see README L43). A line that is one `NAME="$(...)"` is
+    unwrapped first. Then `$(`, a backtick, `<(` and `>(` are refused anywhere, quotes included:
+    fail closed, so `echo '$(x)'` reds."""
+    text = line.strip()
+    m = _V18_WRAP_RE.fullmatch(text)
     if m:
-        if any(mark in line[m.start():] for mark in _V18_SUBST_MARKERS):
-            return [], "a substitution in or after a `#`, which may or may not be a comment"
-        line = line[:m.start()]
-    if "<(" in line or ">(" in line:
-        return [], "a process substitution"
-    return [seg for seg in _V18_SEPS_RE.split(line) if seg.strip()], None
-
-
-def _v18_verdict(segment: str, in_subst: bool) -> tuple[str | None, bool]:
-    """(reason, still_open). still_open is True when the segment leaves a command substitution
-    open, so the next segment of the same line is inside it."""
-    s = segment.strip()
-    opened = False
-    while True:
-        m = _V18_SUBST_RE.match(s)
-        if m:
-            opened = True
-            s = s[m.end():].lstrip()
-            continue
-        m = _V18_ASSIGN_RE.match(s)
-        if m:
-            if "$(" in m.group(1) or "`" in m.group(1):
-                return "a command substitution inside an assignment value", False
-            s = s[m.end():].lstrip()
-            continue
-        break
-    still_open = opened or in_subst
-    if (opened or in_subst) and ")" in s:
-        # The substitution closes here. Only a closing quote may follow: any other text would
-        # be a second command word around the substitution (`$(echo cargo) build`).
-        s, tail = s.split(")", 1)
-        if not _V18_CLOSE_TAIL_RE.fullmatch(tail):
-            return "text after the closing parenthesis of a command substitution", False
-        still_open = False
-    words = s.split()
-    while words and words[0] in UNGATED_JOB_KEYWORDS:
-        words = words[1:]
-    if not words:
-        return None, still_open
-    rest = " ".join(words)
-    if "$(" in rest or "`" in rest:
-        return "a command substitution after the command word", still_open
-    for prefix in UNGATED_JOB_PREFIXES:
-        if rest == prefix or rest.startswith(prefix + " "):
-            return None, still_open
-    if words[0] in UNGATED_JOB_COMMANDS:
-        return None, still_open
-    return f"the command word {words[0]!r} is not on the allowlist", still_open
+        text = m.group(1)
+    for mark in _V18_SUBST_MARKERS:
+        if mark in text:
+            return [], f"a substitution ({mark!r})"
+    return v18_split(text)
 
 
 def v18_segment_verdict(segment: str) -> str | None:
     """None when one command segment may run in an UNGATED_JOBS member, else the reason it may
-    not. Leading variable assignments and a leading `$(` (with or without its opening quote) are
-    removed; then shell keywords; then the rest must start with an allowed command prefix or an
-    allowed command word. A command substitution anywhere after that point, or inside an
-    assignment value, is refused: it would run a command V18 does not see. Text after the
-    closing `)` of a leading substitution is refused. Not a shell parser: see README L43."""
-    return _v18_verdict(segment, False)[0]
+    not. Leading variable assignments are removed; then shell keywords; then the rest must start
+    with an allowed command prefix or an allowed command word. Substitutions never reach here:
+    v18_line_segments refuses them. Not a shell parser: see README L43."""
+    s = segment.strip()
+    while True:
+        m = _V18_ASSIGN_RE.match(s)
+        if not m:
+            break
+        s = s[m.end():].lstrip()
+    words = s.split()
+    while words and words[0] in UNGATED_JOB_KEYWORDS:
+        words = words[1:]
+    if not words:
+        return None
+    rest = " ".join(words)
+    for prefix in UNGATED_JOB_PREFIXES:
+        if rest == prefix or rest.startswith(prefix + " "):
+            return None
+    if words[0] in UNGATED_JOB_COMMANDS:
+        return None
+    return f"the command word {words[0]!r} is not on the allowlist"
 
 
 # Step keys, env names and per-action `with:` keys that V18 lets through: derived from the real
@@ -1764,11 +1796,11 @@ def ungated_job_violations(doc: dict, name: str) -> list[str]:
     """V18 (SMA-684). Every step of every UNGATED_JOBS member must match the allowlist above.
     Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles."""
     out: list[str] = []
+    jobs = doc["jobs"]
     for key in ("defaults", "env"):
-        if key in doc:
+        if key in doc and any(isinstance(jobs.get(jid), dict) for jid in UNGATED_JOBS):
             out.append(f"{name}: V18: the workflow sets `{key}:`, which reaches every step of an "
                        f"UNGATED_JOBS member. {V18_HINT}")
-    jobs = doc["jobs"]
     for jid in sorted(UNGATED_JOBS):
         job = jobs.get(jid)
         if not isinstance(job, dict):
@@ -1796,14 +1828,16 @@ def ungated_job_violations(doc: dict, name: str) -> list[str]:
             for why in _v18_step_config_violations(step, action):
                 out.append(f"{where} {why}. {V18_HINT}")
             if run is not None:
-                for line in _v18_logical_lines(str(run)):
+                lines, refused = _v18_logical_lines(str(run))
+                if refused:
+                    out.append(f"{where}: {refused}. {V18_HINT}")
+                for line in lines:
                     segs, refused = v18_line_segments(line)
                     if refused:
                         out.append(f"{where}: the line {line.strip()!r} is not allowed: {refused}. {V18_HINT}")
                         continue
-                    in_subst = False
                     for seg in segs:
-                        why, in_subst = _v18_verdict(seg, in_subst)
+                        why = v18_segment_verdict(seg)
                         if why:
                             out.append(f"{where}: the segment {seg.strip()!r} is not allowed: {why}. {V18_HINT}")
     return out
@@ -3483,9 +3517,10 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     # to SCOPED_SECRET, not to "any secret at all". Widening the check above from
     # `if SCOPED_SECRET in names:` to `if names:` would red this row too, so this is the fixture
     # that tells the two apart.
-    # SMA-684: a workflow-level env: reaches release-pr, so V18 now refuses it. The row used to
-    # expect a clean file, to show that V13 ignores a non-Docker Hub secret there. V13's silence
-    # is now only visible in the SMA-658 job-level rows; this row pins the V18 refusal.
+    # SMA-684: a workflow-level env: reaches release-pr, so V18 now refuses it. This row used to
+    # expect a clean file, to show that V13 ignores a non-Docker Hub secret there. A substring
+    # match cannot show an ABSENT V13 line, so that half now lives in
+    # `_sma684_v18_allowlist_bites`, which calls credential_scope_violations directly.
     ("SMA-658 a different secret in the workflow-level env: V18 refuses it", "main",
      _OK_IMAGES_MAIN.replace(
          "      - main\njobs:\n  release-pr:",
@@ -4468,7 +4503,7 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("neither uses nor run", {"name": "empty"}, True),
     ("a docker action", {"uses": "docker://rust:1.95"}, True),
     ("a longer flag than the allowed prefix", {"run": "bash ci/version-lockstep/run.sh --writex"}, True),
-    ("a pipe inside a quoted jq program", {"run": "PR_COUNT=\"$(printf '%s' \"$PR_JSON\" | jq '.prs | length')\""}, True),
+    ("a pipe inside a quoted jq program (the splitter reads quotes now)", {"run": "PR_COUNT=\"$(printf '%s' \"$PR_JSON\" | jq '.prs | length')\""}, False),
     ("elif as a prefix", {"run": 'if [ -n "$X" ]; then\n  echo a\nelif cargo build; then\n  echo b\nfi'}, True),
     ("a negation as a prefix", {"run": "! cargo build"}, True),
     ("a near-prefix of checkout", {"uses": "actions/checkout-evil@3d3c42e5aac5ba805825da76410c181273ba90b1"}, True),
@@ -4504,6 +4539,24 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("fix1: the allowed env names", {"run": "echo hi", "env": {"APP_ID_SET": "x", "GIT_TOKEN": "x", "PR_JSON": "x", "GH_TOKEN_FOR_PUSH": "x"}}, False),
     ("fix1: a checkout with the string false", {"uses": "actions/checkout@" + SHA_CO, "with": {"persist-credentials": "false"}}, False),
     ("fix1: a substitution closed in a later segment", {"run": 'X="$(echo hi | jq .)"'}, False),
+    ("fix2: a quoted hash hides a separator", {"run": 'echo "a #b"; cargo build'}, True),
+    ("fix2: a single-quoted hash hides a separator", {"run": "echo 'a #b' && cargo build"}, True),
+    ("fix2: an escaped space before a hash", {"run": "echo a\\ #b; cargo build"}, True),
+    ("fix2: a comment line ending in a backslash inside a continued line", {"run": "echo a \\\n# c \\\ncargo build"}, True),
+    ("fix2: a comment line ending in a backslash that is not continued", {"run": "# c \\\necho ok"}, True),
+    ("fix2: an unterminated double quote", {"run": 'echo "a; cargo build'}, True),
+    ("fix2: an unterminated single quote", {"run": "echo 'a; cargo build"}, True),
+    ("fix2: a quoted word then a hash comment", {"run": "echo ok # fine"}, True),
+    ("fix2: a separator after a redirection", {"run": "echo x >&2 && cargo build"}, True),
+    ("fix2: an ampersand between redirections", {"run": "echo x 2>&1 & cargo build"}, True),
+    ("fix2: a pipe in a wrapped substitution", {"run": 'X="$(echo hi | cargo build)"'}, True),
+    ("fix2: a redirect to stderr", {"run": "echo x >&2"}, False),
+    ("fix2: stderr to stdout", {"run": "echo x 2>&1"}, False),
+    ("fix2: a quoted separator", {"run": 'echo "a;b"'}, False),
+    ("fix2: an escaped separator", {"run": "echo a\\;b"}, False),
+    ("fix2: a quoted pipe and ampersand", {"run": "echo 'a | b && c'"}, False),
+    ("fix2: a comment line before a command", {"run": "# a note\necho ok"}, False),
+    ("fix2: a wrapped substitution with a pipeline", {"run": 'X="$(echo hi | jq .)"'}, False),
     ("moon setup", {"run": "moon setup"}, False),
     ("proto install release-plz", {"run": "proto install release-plz"}, False),
     ("release-plz release-pr", {"run": "release-plz release-pr --output json"}, False),
@@ -4519,7 +4572,7 @@ _SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
     ("a comment line with separators", {"run": "# a | b; c && d\necho ok"}, False),
 )
 # Deleting a row must red: the table is the only pin on each shape.
-_SMA684_V18_CASE_COUNT = 75
+_SMA684_V18_CASE_COUNT = 93
 
 
 def _sma684_v18_allowlist_bites() -> str | None:
@@ -4546,6 +4599,14 @@ def _sma684_v18_allowlist_bites() -> str | None:
     # A reusable-workflow call has no steps: it must still red.
     if not ungated_job_violations({"jobs": {"release-pr": {"uses": "./.github/workflows/x.yml"}}}, "fixture"):
         return "a job-level `uses:` with no steps read clean"
+    # T7-R5: V13's workflow-level silence for a different secret, pinned where a substring match
+    # cannot hide it. The SMA-658 FIXTURES row for this shape now expects V18's refusal instead.
+    other = {"env": {"T": "${{ secrets.PAIGASUS_BOT_APP_ID }}"}, "jobs": {}}
+    if credential_scope_violations(other, "f") != []:
+        return "V13 fired on a workflow-level env: that reads a secret other than DOCKERHUB_TOKEN"
+    scoped = {"env": {"T": "${{ secrets.DOCKERHUB_TOKEN }}"}, "jobs": {}}
+    if not credential_scope_violations(scoped, "f"):
+        return "V13 stayed silent on a workflow-level env: that reads DOCKERHUB_TOKEN"
     # Scope: V18 applies to UNGATED_JOBS members only.
     if ungated_job_violations({"jobs": {"build": {"steps": [{"run": "cargo build"}]}}}, "fixture"):
         return "V18 fired on a job outside UNGATED_JOBS"

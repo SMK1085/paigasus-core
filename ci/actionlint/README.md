@@ -445,7 +445,8 @@ to `PUBLISH_MARKERS` with a fixture row.
 row leaves the suite green (SMA-603).** This is the pre-existing shape L4 and L15 already name
 for other tables. It is shared by ALL TWENTY-THREE registered helpers, not by two (the prose said
 sixteen while the tuple held twenty-two; SMA-684 counted it again when it added
-`_sma684_v18_allowlist_bites`). SMA-603 added nine of them (`_v8d_pre_approval_callee_publish`, `_v8d_sneak_shape`,
+`_sma684_v18_allowlist_bites`). SMA-603 added nine of them
+(`_v8d_pre_approval_callee_publish`, `_v8d_sneak_shape`,
 `_v8d_unverifiable_remote_uses`, `_v8d_unverifiable_nested_local_callee`,
 `_v8d_dedup_shared_callee`, `_v8d_dedup_shared_nested_target`, `_v8d_approval_gate_self_case`,
 `_v8d_missing_local_callee_direct` and `_v8_fix4_dry_run_boundary_cases`) alongside the two that
@@ -635,26 +636,30 @@ a normal pipe size, stays undetected. The gate has no watchdog timer.
 **L43 — V18 is an allowlist over command words, not a shell parser (SMA-684).** V18 holds every
 `UNGATED_JOBS` member (today only `release-pr`) to three actions and a short list of command
 words and exact command prefixes, because every step of that job can read the App private key
-from the runner. Shell keywords (`if`, `then`, `else`, `elif`, `fi`, `!`) are stripped and the
-next word is checked; a command substitution after the command word or inside an assignment
-value is refused; `<(` and `>(` are refused; a single `&` splits a segment; a `#` starts a comment
-only at the start of a word, and a substitution in the text after it is refused; text after the
-closing `)` of a leading substitution is refused. `shell:`, `container:`, `services:`,
-`defaults:`, a job-level `env:` or `uses:`, and a workflow-level `env:` are refused. A step may
-use only the keys `name`, `id`, `if`, `uses`, `with`, `env`, `run` and `working-directory`. Its
-`env:` names are limited to `APP_ID_SET`, `GIT_TOKEN`, `PR_JSON` and `GH_TOKEN_FOR_PUSH`, its
-`working-directory:` to `rs`, and its `with:` keys to a list per action, with
-`persist-credentials: false` on the checkout. Eight residuals.
-`command_segments` does not parse quotes (L20), so a command inside a quoted string is not seen,
-and a separator inside quotes splits a segment: the real job's `jq '.prs | length'` read as a
-command word `length')"`, so SMA-684 rewrote it as two `jq` calls. V18 cannot see inside an
-allowed program: `bash ci/version-lockstep/run.sh --write` is guarded by that script's own
-self-tests (the napi-glue writer, the `run_write` pins and the changed-path check), and
-`moon setup` by one measurement (spec F8, run 37113088606), not by a gate. An allowed word can
-still do harm that a person writes into the workflow itself, for example `echo` with a redirect
-into `.git/hooks`; a reviewer sees that in the diff, V18 does not. And the three allowed actions
-and the tools in the spec's §4.1 can read the key; V18 removes the compile and the install, not
-that trust.
+from the runner. V18 reads a `run:` block like this. A `#` is allowed only as the first
+non-blank character of a physical line that does not continue the line before it, and that comment
+line must not end in a backslash. Any other `#` is refused, quotes included, so a `#` can never
+hide a separator. A small splitter of its own (not `command_segments`) tracks single quotes,
+double quotes and backslash escapes. It splits on unquoted `;`, `&`, `|`, `&&`, `||` and `|&`,
+and it does not split the `&` of a redirection (`>&2`, `2>&1`, `&>`). A line with an unterminated
+quote is refused. `$(`, a backtick, `<(` and `>(` are refused anywhere on a line, quotes
+included, except that a whole line of the form `NAME="$(...)"` is unwrapped and its inside is
+checked as a command line. Shell keywords (`if`, `then`, `else`, `elif`, `fi`, `!`) are stripped and
+the next word is checked. `shell:`, `container:`, `services:`, `defaults:`, a job-level `env:` or
+`uses:`, and a workflow-level `env:` or `defaults:` (when the file has an `UNGATED_JOBS` member)
+are refused. A step may use only the keys `name`, `id`, `if`, `uses`, `with`, `env`, `run` and
+`working-directory`. Its `env:` names are limited to `APP_ID_SET`, `GIT_TOKEN`, `PR_JSON` and
+`GH_TOKEN_FOR_PUSH`, its `working-directory:` to `rs`, and its `with:` keys to a list per action,
+with `persist-credentials: false` on the checkout. Residuals follow.
+
+V18 cannot see inside an allowed program: `bash ci/version-lockstep/run.sh --write` is guarded
+by that script's own self-tests (the napi-glue writer, the `run_write` pins and the changed-path
+check), and `moon setup` by one measurement (spec F8, run 37113088606), not by a gate. An allowed
+word can still do harm that a person writes into the workflow itself, for example `echo` with a
+redirect into `.git/hooks`; a reviewer sees that in the diff, V18 does not. And the three allowed
+actions and the tools in the spec's section 4.1 can read the key; V18 removes the compile and the
+install, not that trust. The splitter knows no heredoc, no `$(( ))` and no brace group, so a
+heredoc body is read as command lines.
 
 The other residuals, by name (controller ruling T7-R3). (a) Git subcommands and options that
 run code are allowed, because `git` is an allowed word: `git -c alias.x='!…'`,
@@ -664,8 +669,9 @@ allowed word can write `$GITHUB_ENV` or `$GITHUB_PATH`, for example `echo "BASH_
 prefix are not checked: `release-plz release-pr --config …`, `proto install release-plz <tool>`
 and `bash ci/version-lockstep/run.sh --write --other`. (d) An allowed action is allowed at any
 ref, including an imposter SHA that exists only in the fork network of the action's repository.
-(e) The check fails closed, so it has false positives: `echo '$(x)'` and `$((1+1))` read as a
-command substitution and red.
+(e) The check fails closed, so it has false positives: `echo '$(x)'`, `$((1+1))` and a `#` inside
+a quoted string read as refused. The real job's two `jq` calls (instead of `jq '.prs | length'`)
+date from the time when the splitter did not read quotes. They are still allowed.
 
 ## Cost
 
