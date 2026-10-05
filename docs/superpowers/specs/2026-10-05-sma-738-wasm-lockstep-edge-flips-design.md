@@ -322,6 +322,12 @@ the `name version` form.
 unlocked non-family ref refuses with `R-EDGE`. The old claim "the normalisation is scoped to
 FAMILY names" is no longer true.
 
+The two family-form rows of `_ref_rows` change too. The rows "reference form `name version` to a
+family package" and "reference form `name version (source)` to a family package" change from
+`PASS` to `R-EDGE`. The reason: in a lock that passes `R-DUPLICATE`, a family name has one version,
+so cargo writes the bare name only. The two longer forms are then not canonical, and checks 2 and 3
+of 4.2 refuse them. The row "reference form `name` to a family package" stays `PASS`.
+
 ### 5.3 The negative control on the real lock
 
 New rows in `negative_control`, on HEAD's lock:
@@ -422,31 +428,38 @@ scratch-only workflow, not the reviewed file.
 1. Make `feature/sma-738-m5-scratch` from the feature branch. It never merges, and no PR is
    opened for it.
 2. On the scratch branch only, add `.github/workflows/wasm-lockstep-m5.yml`: a copy of the
-   reviewed `wasm-lockstep.yml` with the `ref` step and the whole `propose` job deleted, and with
-   the trigger `workflow_dispatch` only. It has no `environment`, no secret and no App token, so
-   it cannot push to `deps/wasm-bindgen-lockstep`. Record the exact `diff` against the reviewed
-   file in the README M5 section.
+   reviewed `wasm-lockstep.yml` with the `ref` step and the whole `propose` job deleted. Its only
+   trigger is `push`, with a block-form `branches:` list that holds only
+   `feature/sma-738-m5-scratch`. It has no `workflow_dispatch`: GitHub runs `workflow_dispatch`
+   only for a workflow file that exists on the default branch, and this file never reaches
+   `main`. M0 used a push trigger for the same reason. Each push to the scratch branch starts one
+   run, so each run is one push of one complete commit. It has no `environment`, no secret and no
+   App token, so it cannot push to `deps/wasm-bindgen-lockstep`. Record the exact `diff` against
+   the reviewed file in the README M5 section.
 3. In the scratch branch's `rs/Cargo.lock`, replace the seven family entries with the 0.2.128
    entries of `c9df6f09` and the family refs of the other packages with the refs of `c9df6f09`.
    Why a hand edit and not `cargo update --precise`: a downgrade can flip the edges itself, and
    the old lock then shows no flip. Check locally with cargo 1.95.0 that the four-package
    `cargo update -p` then moves the seven family packages, flips the five edges, and gives exit 0
-   with the new checker.
-4. **Positive run.** Push the branch and run
-   `gh workflow run wasm-lockstep-m5.yml --ref feature/sma-738-m5-scratch`. Expected: the run
-   ends green. The `lock` step prints seven `family-moved` lines, five `edge-moved` lines and a
+   with the new checker. Commit the scratch workflow and the scratch lock together, and do not
+   push before step 4.
+4. **Positive run.** Push the branch. The push starts the run. Find it with
+   `gh run list --workflow wasm-lockstep-m5.yml --branch feature/sma-738-m5-scratch` and match its
+   `headSha` to the pushed commit. Expected: the run ends green. The `lock` step prints seven `family-moved` lines, five `edge-moved` lines and a
    `lock-sha256` line. The `stage` step prints the `same:` line with the same hash. Record the
    hash, and the SHA-256 of the work lock after run 2, in the README. This answers the open
    question: does run 2 write the lock?
 5. **Negative run.** On the scratch branch only, add one line at the end of the `build` case of
-   `container.sh`: `printf '\n' >> rs/Cargo.lock`. Run the workflow again. Expected: the `stage`
+   `container.sh`: `printf '\n' >> rs/Cargo.lock`. Commit it and push it. The push starts the
+   second run; match it by `headSha` in the same way. Expected: the `stage`
    step refuses with `R-RUN2`, and `upload` does not run. This proves the refusal on the real
    mount, owner and paths, which the self-test cannot do.
 6. Record both run URLs and the values in the README under "M5".
 7. Delete the remote scratch branch, check with `git ls-remote` that it is gone, and delete the
    local branch with `git branch -D`.
 
-Steps 4, 5 and 7 push to GitHub and start workflows. They need Sven's approval when they run.
+Steps 4, 5 and 7 push to GitHub. The pushes of steps 4 and 5 start the workflow runs. They need
+Sven's approval when they run.
 
 ### 5.6 The gates
 
