@@ -177,3 +177,35 @@ tool wrote. It does not prove what the code uses, but `-O` adds no entry to it.
 - S4a: PASS. The install and the run work as uid 65534 with no capabilities.
 - S5: PASS, with the method limit. Among the detectable features, `-O` adds none. The
   `target_features` sections of both binaries list the same eight features.
+
+## AC 7 — affected selection
+
+Command: `moon query tasks --affected`, with the file `ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs`
+on stdin. The list holds one target for each `tasks[project][task]`. Moon 2.5.3, Task 2.
+
+Before the `test` input exists (the script file was not yet in the tree):
+
+```
+paigasus-kernel-ts:generate-wasm
+repo:actionlint
+repo:input-liveness
+repo:next-public-free
+ts:fmt
+ts:lint
+```
+
+`paigasus-kernel-ts:test` is not in the list.
+
+After the line `- 'scripts/optimize-wasm.mjs'` is in the `test` inputs of `moon.yml`:
+
+```
+paigasus-kernel-ts:generate-wasm
+paigasus-kernel-ts:test
+repo:actionlint
+repo:input-liveness
+repo:next-public-free
+ts:fmt
+ts:lint
+```
+
+`paigasus-kernel-ts:test` is now in the list. An edit to the script alone selects the test task.

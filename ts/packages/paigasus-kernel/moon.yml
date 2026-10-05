@@ -148,6 +148,10 @@ tasks:
     inputs:
       - 'src/**/*'
       - 'tests/**/*'
+      # SMA-435: tests/optimize-wasm.test.ts imports this script. Checks 5 and 7 of
+      # tests/committed-wasm.test.ts will use its helpers. On Moon 2.5.3 only inputs select a task.
+      # Without this line, an edit to the script alone runs no test in CI.
+      - 'scripts/optimize-wasm.mjs'
       # Check 3 of tests/committed-napi-glue.test.ts reads this file.
       - 'moon.yml'
       - 'vitest.config.ts'
