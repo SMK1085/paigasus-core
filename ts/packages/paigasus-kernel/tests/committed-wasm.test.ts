@@ -8,8 +8,8 @@
 //   2. the committed binary has the same import and export lists as the fresh one, and that list is
 //      the REAL kernel interface, not an empty pair of lists;
 //   3. the committed glue and binary instantiate together and replay all six parity corpora;
-//   5. the committed binary has exactly one `paigasus.wasm-opt` marker, its payload is the one the
-//      nested binaryen pin demands, and it has no `name` section (SMA-435).
+//   5. the committed binary has exactly one `paigasus.wasm-opt` marker (SMA-435). The payload of
+//      the marker is the one that the nested binaryen pin demands. The binary has no `name` section.
 //
 // Check 4 (the pnpm-installed copy) is NOT here: Moon's hasher ignores node_modules, so a cached
 // pass would replay while the installed copy is another branch's. It lives in the setupFiles of the
@@ -146,7 +146,7 @@ describe('the committed wasm artifacts agree with the Rust source', () => {
     for (const [name, count] of Object.entries(result.checked)) expect(count, `the ${name} corpus is empty`).toBeGreaterThan(0);
   });
 
-  // Check 5 runs in this process. It counts sections and imports nothing, so the child-process
+  // Check 5 runs in this process. It counts sections and imports nothing. So the child-process
   // reason of checks 2 and 3 (SMA-634 spec F11) does not apply. It uses the same function as the
   // `verify` mode of scripts/optimize-wasm.mjs, so the two cannot disagree.
   it('check 5: the committed binary was optimized one time, by the pinned binaryen', () => {

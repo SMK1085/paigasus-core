@@ -249,11 +249,11 @@ tasks:
   # SMA-435: `optimize-wasm.mjs optimize` runs between wasm-pack and `--post`. wasm-pack keeps
   # `wasm-opt = false` (rs/crates/bindings/paigasus-wasm/Cargo.toml), because its own optimizer
   # downloads a binaryen release that no file pins. The script installs the binaryen that
-  # rs/crates/bindings/paigasus-wasm/.prototools pins (the first run downloads it, so this task
-  # needs network access), runs `wasm-opt -O` on the scratch binary, and appends the
-  # `paigasus.wasm-opt` marker that check 5 of tests/committed-wasm.test.ts reads. `--post` then
-  # runs its identity check on the optimized binary, which is the binary that is committed. The
-  # glue does not change: wasm-pack writes it before wasm-opt runs.
+  # rs/crates/bindings/paigasus-wasm/.prototools pins. The first run downloads it, so this task
+  # needs network access. The script runs `wasm-opt -O` on the scratch binary. Then it appends
+  # the `paigasus.wasm-opt` marker. Check 5 of tests/committed-wasm.test.ts reads that marker.
+  # `--post` then runs its identity check on the optimized binary, which is the binary that is
+  # committed. The glue does not change: wasm-pack writes it before wasm-opt runs.
   generate-wasm:
     script: |
       set -euo pipefail
@@ -284,8 +284,8 @@ tasks:
       - '/rs/rust-toolchain.toml'
       - '/.prototools'
       - '/rs/.cargo/config.toml'
-      # SMA-435: the binaryen pin and its plugin. The task is `cache: false`, and A5 and A7 check
-      # only that their required inputs are present, so these two lines are for a human reader.
+      # SMA-435: the binaryen pin and its plugin. The task is `cache: false`. A5 and A7 check
+      # only that their required inputs are present. These two lines are for a human reader.
       - '/rs/crates/bindings/paigasus-wasm/.prototools'
       - '/.proto/plugins/binaryen.toml'
     options:
