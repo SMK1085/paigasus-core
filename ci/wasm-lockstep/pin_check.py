@@ -74,6 +74,9 @@ UPLOAD_PATH = "${{ runner.temp }}/stage/"
 RUNNER_TEMP_ASSIGN = re.compile(r"\bRUNNER_TEMP(?:[:+])?=")
 # P25: LOCK_SHA256 holds the hash that the lock step judged. Only the stage env may set it.
 LOCK_SHA_ASSIGN = re.compile(r"\bLOCK_SHA256(?:[:+])?=")
+# P25: the start of the message of the stage exit rule. A self-test row matches this text, not
+# only the code, because the exact pin of STAGE_RUN gives P25 for the same mutation.
+EXIT_RULE = "P25 the stage step may use no exit command"
 # P25: the whole `run:` text of the build steps `lock` and `stage`, as PyYAML loads it from the
 # workflow. A deny-list of shell forms cannot close the class (a quoted name, an indirect name,
 # `set -n`), so the two scripts are pinned exactly. Change these constants WITH the workflow.
@@ -640,7 +643,7 @@ def _build_violations(build: dict) -> list[str]:
     # An exit before the same command would skip the compare. The copy loop uses `exit 1` only.
     stage_exits = [c for c in commands(str(stage.get("run", "")))[0] if c[0] == "exit" and c != ["exit", "1"]]
     if stage_exits:
-        out.append(f"P25 the stage step may use no exit command except `exit 1`, not {stage_exits}")
+        out.append(f"{EXIT_RULE} except `exit 1`, not {stage_exits}")
     if stage.get("env") != STAGE_ENV:
         out.append(f"P25 the stage env must be exactly {STAGE_ENV}, not {stage.get('env')!r}")
     upload = by_id.get("upload", {})
@@ -1031,6 +1034,14 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("set -o noexec before the same command", ((f"          {SAME_LINE}\n", f"          set -o noexec\n          {SAME_LINE}\n"),), "P25"),
     ("set -neuo pipefail as the first line of the stage step", (("          set -euo pipefail\n          src=", "          set -neuo pipefail\n          src="),), "P25"),
     ("a changed comment-free line in the stage script", (("          dst=\"$RUNNER_TEMP/stage\"\n", "          dst=\"$RUNNER_TEMP/stage\" # x\n"),), "P25"),
+    # Final review: the exact pin of STAGE_RUN also refuses the stage rows above. These rows prove
+    # each deny rule on its own: on the UNPINNED update step, or by the exact message of the rule.
+    ("a shell assignment of LOCK_SHA256 in the unpinned update step", ((BUILD_RUN, BUILD_RUN + '          LOCK_SHA256="$(cat x)"\n'),), "P25"),
+    ("read -r LOCK_SHA256 in the unpinned update step", ((BUILD_RUN, BUILD_RUN + "          read -r LOCK_SHA256 < x\n"),), "P25"),
+    ("a shell assignment RUNNER_TEMP=/tmp in the unpinned update step", ((BUILD_RUN, BUILD_RUN + "          RUNNER_TEMP=/tmp\n"),), "P25"),
+    ("read -r RUNNER_TEMP in the unpinned update step", ((BUILD_RUN, BUILD_RUN + "          read -r RUNNER_TEMP < x\n"),), "P25"),
+    ("exit 0 before the same command, by the message of the exit rule", ((f"          {SAME_LINE}\n", f"          exit 0\n          {SAME_LINE}\n"),), EXIT_RULE),
+    ("a bare exit before the same command, by the message of the exit rule", ((f"          {SAME_LINE}\n", f"          exit\n          {SAME_LINE}\n"),), EXIT_RULE),
 )
 
 
@@ -1053,7 +1064,9 @@ def self_test() -> int:
             failures += 1
             continue
         got = _rules_of(text)
-        ok = not got if want == "PASS" else any(v.startswith(want + " ") for v in got)
+        # A `want` with a space is the start of one exact message; else it is a rule id.
+        prefix = want if " " in want else want + " "
+        ok = not got if want == "PASS" else any(v.startswith(prefix) for v in got)
         if ok:
             print(f"  ok    {label}: {want}")
         else:

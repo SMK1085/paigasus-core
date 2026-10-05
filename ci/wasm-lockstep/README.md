@@ -54,7 +54,7 @@ code of each row, so a row cannot pass because a different check refused it.
 | `R-INPLACE` | A family entry kept its version and changed its checksum. |
 | `R-ABSENT` | The new lock holds no `wasm-bindgen` entry. `current` gives the same code for a lock without it. |
 | `R-DANGLING` | A remaining package still refers to a family name that the new lock does not hold. |
-| `R-RUN2` | (`same` only) The staged `rs/Cargo.lock` does not have the SHA-256 that the `lock` step printed, or it is a symlink, not a regular file, or over 8 MiB. Container run 2 changed the lock (SMA-738). |
+| `R-RUN2` | (`same` only) The staged `rs/Cargo.lock` does not have the SHA-256 that the `lock` step printed. Or it is a symlink, it is not a regular file, or it is over 8 MiB. Container run 2 changed the lock (SMA-738). |
 
 `R-EDGE` refuses in five cases:
 
@@ -83,20 +83,24 @@ shows when cargo re-points edges again. `artifact` prints the same lines, and th
 second table, "Dependency edges that moved".
 
 `lock` prints `lock-sha256 <64 hex>` on exit 0 only. The value is the SHA-256 of exactly the bytes
-that the verdict judged. The reader makes one read, in binary mode, with no newline translation.
+that the verdict judged. The reader reads the file once, in binary mode, with no newline
+translation. `artifact` also prints `lock-sha256` for the downloaded lock. A reviewer can then match
+the three values (`lock`, `same`, `artifact`) in the job logs.
+
 `same --sha256 <64 hex> --file <path>` compares the bytes of one file with that value. It refuses
-with `R-RUN2` when they differ. A malformed or empty `--sha256` exits 2. A missing or unreadable
-file exits 2. A flag that appears two times exits 2. `artifact` also prints `lock-sha256` for the
-downloaded lock. A reviewer can then match the three values (`lock`, `same`, `artifact`) in the job
-logs.
+with `R-RUN2` when they differ. These cases exit 2:
+
+- a malformed or empty `--sha256`;
+- a missing or unreadable file;
+- a flag that appears two times.
 
 `artifact` adds `R-LAYOUT`, `R-SYMLINK` and `R-SIZE` (the tree holds `rs/Cargo.lock` and a subset of
 the five artifact files, all regular files of 8 MiB or less), `R-NOCHANGE` (the family did not
 move; the two locks can differ in dependency edges only) and `R-TITLE` (the commit title is over
-100 characters). It writes the PR title and body files only after every check passed. `status` (`R-STATUS`) checks `git status --porcelain`
-after the copy. `current` checks the family invariant on one lock; the real run of the gate runs it
-on `HEAD:rs/Cargo.lock`, so a PR that puts a second `wasm-bindgen` into the lock goes red at once,
-not on the next Tuesday.
+100 characters). It writes the PR title and body files only after every check passed. `status`
+(`R-STATUS`) checks `git status --porcelain` after the copy. `current` checks the family invariant
+on one lock; the real run of the gate runs it on `HEAD:rs/Cargo.lock`, so a PR that puts a second
+`wasm-bindgen` into the lock goes red at once, not on the next Tuesday.
 
 ## The pin rules (`pin_check.py`)
 
@@ -127,7 +131,36 @@ not on the next Tuesday.
 | P22 | `propose` runs only these `gh` commands: `api`, `pr list`, `pr create`, `pr edit` and `pr close`. Any other one (`gh pr merge`, `gh workflow run`, `gh repo`, `gh secret`) is refused. |
 | P23 | Every `gh pr list` passes `--head deps/wasm-bindgen-lockstep`. A step that runs `gh pr close` or `gh pr edit` must also run such a list. The check does not follow the number from the list to the close. It requires the list in the same step. |
 | P24 | No expression in the workflow reads the outputs of the build steps `update` or `build` (the container runs), in any case or index form. |
-| P25 | The `build` step ids are exactly `reclaim, checkout, ref, copy, update, lock, build, stage, upload`. The `if:` of `build`, `stage` and `upload` is exactly `steps.lock.outputs.changed == 'true'`. The whole `run:` text of the `lock` step and of the `stage` step equals the pinned text of `LOCK_RUN` and `STAGE_RUN` in `pin_check.py`. A person who edits one of these two scripts must change `pin_check.py` in the same commit. The pin refuses every form of shell code that sets `LOCK_SHA256`, skips the compare or stops bash from running it. The workflow `env:` holds only `LOCKSTEP_IMAGE`. The `build` job has no `env:`. So no inherited variable (`PATH`, `PYTHONPATH`, `LD_PRELOAD`) can change how the `stage` step runs `python3`. Three more checks give clearer messages. The `lock` step runs one checker command only: `python3 ci/wasm-lockstep/lockstep_check.py lock --old "$RUNNER_TEMP/old.lock" --new "$RUNNER_TEMP/work/rs/Cargo.lock"`. The `stage` step runs one checker command only: `python3 ci/wasm-lockstep/lockstep_check.py same --sha256 "$LOCK_SHA256" --file "$RUNNER_TEMP/stage/rs/Cargo.lock"`. The `env:` of the `stage` step is exactly `LOCK_SHA256: ${{ steps.lock.outputs.lock_sha256 }}`. No other `env:` key, at any level, is named `LOCK_SHA256`. `upload.with.path` is exactly `${{ runner.temp }}/stage/`. No script and no `env:` key at any level sets `RUNNER_TEMP` (SMA-738). |
+| P25 | The `build` job around the run-1 lock compare (SMA-738). The checks are in the list below the table. |
+
+P25 holds these checks:
+
+1. The `build` step ids are exactly `reclaim, checkout, ref, copy, update, lock, build, stage, upload`.
+2. The `if:` of `build`, `stage` and `upload` is exactly `steps.lock.outputs.changed == 'true'`.
+3. The exact pin. The whole `run:` text of the `lock` step equals `LOCK_RUN` in `pin_check.py`.
+   The whole `run:` text of the `stage` step equals `STAGE_RUN`. If you edit one of these two
+   scripts, change `pin_check.py` in the same commit. The pin refuses every change to the two
+   scripts. So no shell code in them can set `LOCK_SHA256`, skip the compare or stop bash from
+   running it.
+4. The env allow-list. The workflow `env:` holds only `LOCKSTEP_IMAGE`. The `build` job has no
+   `env:`. So no `env:` key at these two levels can set `PATH`, `PYTHONPATH` or `LD_PRELOAD` for
+   the `stage` step. This covers `env:` keys only. The list "What the checks do not prove" names
+   two other ways to set a variable for the `stage` step.
+5. The `lock` step runs one checker command only:
+   `python3 ci/wasm-lockstep/lockstep_check.py lock --old "$RUNNER_TEMP/old.lock" --new "$RUNNER_TEMP/work/rs/Cargo.lock"`.
+6. The `stage` step runs one checker command only:
+   `python3 ci/wasm-lockstep/lockstep_check.py same --sha256 "$LOCK_SHA256" --file "$RUNNER_TEMP/stage/rs/Cargo.lock"`.
+7. The `env:` of the `stage` step is exactly `LOCK_SHA256: ${{ steps.lock.outputs.lock_sha256 }}`.
+8. No other `env:` key, at any level, is named `LOCK_SHA256`.
+9. `upload.with.path` is exactly `${{ runner.temp }}/stage/`.
+10. No script and no `env:` key at any level sets `RUNNER_TEMP`.
+
+Checks 5 and 6 only repeat the exact pin. They give a clearer message. Checks 4 and 7 to 10 carry
+control on their own, because the pin of check 3 reads only the `run:` text. On the `lock` and
+`stage` steps, three more rules and the script part of check 10 also repeat the pin. The three
+rules are the `lock_sha256` output line, the `exit` rule of `stage` and the `LOCK_SHA256` script
+rule. The two script rules also apply to the unpinned build steps. Self-test rows prove them on
+the `update` step.
 
 The P6 rule pins the action NAME and a full SHA, not one specific SHA, so a dependabot action bump
 does not turn this gate red. A new action, or a tag in place of a SHA, does.
@@ -149,15 +182,19 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
   output, before container run 2. The value is the SHA-256 of the exact bytes that the verdict
   judged. A step output cannot change after its step ends, and no file holds it. The last command
   of the `stage` step is `lockstep_check.py same`. It refuses a staged `rs/Cargo.lock` with other
-  bytes (`R-RUN2`), so `upload` and `propose` do not run. An edge move or a family entry that
-  reaches `propose` can then come only from `cargo update` in run 1. That run executes no build
-  script. This control is in `build` only. `propose` cannot check it again, because that needs a
-  second job output (P9). It depends on `pin_check.py` (P18, P25) and on the build runner host. P25
-  pins the whole `run:` text of the `lock` step and of the `stage` step. A person changes
-  `pin_check.py` together with the workflow. The workflow `env:` holds only `LOCKSTEP_IMAGE`, and
-  the `build` job has no `env:`. So no inherited variable can change how the `stage` step runs
-  `python3`. A container escape in run 2 can reach the runner and
-  defeat it. This is the same residual as the cache scope (Q7).
+  bytes (`R-RUN2`), so `upload` and `propose` do not run.
+  - An edge move or a family entry that reaches `propose` can then come only from `cargo update`
+    in run 1. That run executes no build script.
+  - This control is in `build` only. `propose` cannot check it again, because that needs a second
+    job output (P9).
+  - It depends on `pin_check.py` (P18, P25) and on the build runner host. P25 pins the whole
+    `run:` text of the `lock` step and of the `stage` step. A person changes `pin_check.py`
+    together with the workflow.
+  - The workflow `env:` holds only `LOCKSTEP_IMAGE`, and the `build` job has no `env:`. So no
+    `env:` key can change how the `stage` step runs `python3`. Two other ways are not covered.
+    "What the checks do not prove" names them.
+  - A container escape in run 2 can reach the runner and defeat the compare. This is the same
+    residual as the cache scope (Q7).
 - **`propose`** holds the App key for the whole job (environment `release-pr`, main-only branch
   policy). The control is that no step executes artifact content: no toolchain, no cargo, no pnpm,
   no moon, and no script from the artifact. A refusal fails the `verify` step, so the token step
@@ -192,6 +229,15 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
 - The `GIT_CONFIG_COUNT` environment variable, `gh alias set` and `gh extension exec` pass the
   `propose` allowlist.
 - P19 does not see an indirect form, such as `${!f}`.
+- An earlier build step can write the runner env files indirectly. Two examples are `${!m}` on
+  `GITHUB_ENV` and a write to `$RUNNER_TEMP/_runner_file_commands/*`. Such a write can set
+  `PATH` or `PYTHONPATH` for the `stage` step. P19 does not see it. Only a workflow author can
+  write it: run 2 cannot reach these files without a container escape. PR review is the control.
+- A SHA-pinned `uses:` action before `stage` can export variables for the later steps. The
+  checks trust each pinned action (P6).
+- In the `propose` step `verify`, an `exit 0` or a `set -n` before the `lockstep_check.py artifact`
+  command passes `pin_check.py`. The gap existed before SMA-738 and is outside G6. A follow-up issue
+  tracks it.
 - A bundled short flag, such as `gh api -iXPOST`, passes P20.
 - P21 matches the jq `select` with a regular expression. It does not parse the jq.
 - The build container downloads rustup and the Rust 1.95.0 toolchain at run time through proto.

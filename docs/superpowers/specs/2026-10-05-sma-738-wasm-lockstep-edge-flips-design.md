@@ -457,6 +457,12 @@ scratch-only workflow, not the reviewed file.
    `lock-sha256` line. The `stage` step prints the `same:` line with the same hash. Record the
    hash, and the SHA-256 of the work lock after run 2, in the README. This answers the open
    question: does run 2 write the lock?
+   **Note (2026-10-05, MEASURED, steps 3 and 4).** The expectation of five flipped edges in steps 3
+   and 4 is wrong. A real family bump from the 0.2.128 lock moves only the seven family packages.
+   With cargo 1.95.0, the result is byte-identical to the lock on `main` (equal SHA-256), so the
+   bump flips no edge. The five edge flips appear only on the no-op update of a current family. So M5
+   expects seven `family-moved` lines, 0 `edge-moved` lines and one `lock-sha256` line. M5 proves
+   G6, the stage compare on a runner. The self-test and the reproduction of 5.4 prove the edge path.
 5. **Negative run.** On the scratch branch only, add one line at the end of the `build` case of
    `container.sh`: `printf '\n' >> rs/Cargo.lock`. Commit it and push it. The push starts the
    second run; match it by `headSha` in the same way. Expected: the `stage`

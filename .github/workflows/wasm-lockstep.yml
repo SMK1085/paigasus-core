@@ -108,9 +108,9 @@ jobs:
 
       # The early exit, in the runbook's order: a refusal stops the job before any compile. For the
       # lock VERDICT this is not the control: propose runs the same checker again on the downloaded
-      # bytes. It IS the only control that run 2 did not change the lock (SMA-738): on exit 0 it
-      # writes lock_sha256, the SHA-256 of the bytes it judged, and the stage step compares the
-      # staged lock with it. The host writes `changed` and `lock_sha256` here, before the compile,
+      # bytes. This step IS the only control that run 2 did not change the lock (SMA-738). On
+      # exit 0 it writes lock_sha256, the SHA-256 of the bytes it judged. The stage step compares
+      # the staged lock with that value. The host writes `changed` and `lock_sha256` here, before the compile,
       # so third-party code cannot set them.
       - name: Check the lock change on the host
         id: lock
