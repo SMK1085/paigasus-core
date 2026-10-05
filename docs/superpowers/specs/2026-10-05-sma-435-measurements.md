@@ -209,3 +209,28 @@ ts:lint
 ```
 
 `paigasus-kernel-ts:test` is now in the list. An edit to the script alone selects the test task.
+
+## Task 3 — regeneration and check 5
+
+Output of `moon run paigasus-kernel-ts:generate-wasm` (`stdout.log`):
+
+```text
+generate-wasm: wasm-pack 0.15.0, sources touched
+optimize-wasm: /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-435-binaryen/rs/crates/bindings/paigasus-wasm/.wasmpack-regen-out/paigasus_wasm_bg.wasm: 50950 -> 35560 bytes, wasm-opt version 133, flags -O, proto 0.60.2
+generate-wasm: wrote 5 files into rs/crates/bindings/paigasus-wasm/
+generate-wasm: commit all five, and run `rm -rf ts/node_modules && pnpm -C ts install` if a git operation replaced them
+```
+
+The log holds four lines, not three. The last line is the existing reminder of the task. The `--post` identity check passed. The committed binary is 50902 bytes before and 35560 bytes after. The four glue files did not change. The local proto binary is 0.60.2.
+
+Check 5 failed on the raw binary (`has 0 paigasus.wasm-opt sections, not 1`). It passed after the regeneration, together with check 2 (390 of 390 tests).
+
+A change of `rs/crates/bindings/paigasus-wasm/.prototools` selects these tasks:
+
+```text
+paigasus-kernel-ts:generate-wasm
+paigasus-kernel-ts:test
+repo:actionlint
+repo:input-liveness
+repo:publish-metadata
+```
