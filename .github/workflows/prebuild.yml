@@ -21,6 +21,12 @@ on:
       - '.github/workflows/prebuild.yml'
       - '.prototools'
       - '.moon/**'                           # `moon setup` needs workspace.yml as well as toolchains.yml
+      - '.proto/plugins/binaryen.toml'       # SMA-435: the plugin of the binaryen that the wasm build runs
+      # SMA-435: an exception to the "no ts/ path" rule above. That rule is about the weekly npm
+      # lockfile PR. These two files are on the release path of @paigasus/wasm.
+      # One file optimizes the published binary. The other file checks it.
+      - 'ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs'
+      - 'ts/packages/paigasus-kernel/tests/wasm-probe.mjs'
 
   # PRE-merge verification of the BUILD INPUTS, which all live in ts/. @napi-rs/cli is
   # `catalog:` in the kernel package.json, resolved from ts/pnpm-workspace.yaml and pinned in
@@ -45,6 +51,12 @@ on:
       # `rs/**` on this trigger would put a macOS job on most PRs in the repo:
       - 'rs/.cargo/config.toml'              # the -undefined dynamic_lookup flags the cdylib needs
       - 'rs/crates/bindings/paigasus-node-bindings/package.json'   # napi binaryName + target list
+      # SMA-435: the binaryen pin, its plugin, and the two release-path files of @paigasus/wasm.
+      # The glob `rs/**` covers the pin on push only.
+      - '.proto/plugins/binaryen.toml'
+      - 'rs/crates/bindings/paigasus-wasm/.prototools'
+      - 'ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs'
+      - 'ts/packages/paigasus-kernel/tests/wasm-probe.mjs'
 
 # Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
 # GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
@@ -335,6 +347,12 @@ jobs:
       # this needs its own name so a concurrent moon ci cannot race it. The wasm32-unknown-unknown
       # target is already provisioned by the "Install Moon-managed toolchains" step above (declared
       # in .moon/toolchains.yml's rust.targets), so no `rustup target add` is needed here.
+      #
+      # SMA-435: then optimize with the proto-pinned binaryen. wasm-pack keeps `wasm-opt = false`.
+      # Its own optimizer downloads a binaryen that no file pins. optimize-wasm.mjs runs
+      # `wasm-opt -O` as its own step. It also appends the marker that the verify step below checks.
+      # It installs the binaryen pinned in rs/crates/bindings/paigasus-wasm/.prototools itself.
+      # So this job needs no `proto install wasm-opt` step. An exit 1 or 2 fails this step.
       - name: Build the wasm distribution
         run: |
           set -euo pipefail
@@ -343,6 +361,7 @@ jobs:
             --out-dir .wasmpack-release-out --out-name paigasus_wasm
           test -s .wasmpack-release-out/paigasus_wasm_bg.wasm \
             || { echo "::error::wasm-pack produced no binary"; exit 1; }
+          node "$GITHUB_WORKSPACE/ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs" optimize .wasmpack-release-out
 
       # STAGE INTO A NON-HIDDEN DIRECTORY, and do not "simplify" this away.
       # `actions/upload-artifact` excludes hidden files by default (`include-hidden-files: false`),
@@ -371,6 +390,22 @@ jobs:
           test -s wasm-dist/package.json \
             || { echo "::error::no package.json staged for upload"; exit 1; }
           ls -la wasm-dist
+
+      # SMA-435: the lasting check on the binary that ships, before the upload.
+      # `verify` needs no proto and no network. It requires exactly one `paigasus.wasm-opt` marker
+      # with the pinned payload. It also requires that the binary has no `name` section.
+      # The two probe runs are the drift gate's own (tests/wasm-probe.mjs). They check the
+      # interface lists, and all six parity corpora through the staged glue and binary.
+      # The directory wasm-dist holds a package.json with "type": "module". So the probe can
+      # import the glue there.
+      - name: Verify the staged wasm distribution
+        run: |
+          set -euo pipefail
+          kernel="$GITHUB_WORKSPACE/ts/packages/paigasus-kernel"
+          dist="$GITHUB_WORKSPACE/rs/crates/bindings/paigasus-wasm/wasm-dist"
+          node "$kernel/scripts/optimize-wasm.mjs" verify "$dist"
+          node "$kernel/tests/wasm-probe.mjs" --interfaces "$dist"
+          node "$kernel/tests/wasm-probe.mjs" --corpus "$dist"
 
       - name: Upload the wasm distribution
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
