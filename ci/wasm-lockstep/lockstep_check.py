@@ -26,12 +26,21 @@ import re
 import stat
 import sys
 import tempfile
+from collections import Counter
+from typing import NamedTuple
+
 import tomllib
 
 RC_OK = 0
 RC_INFRA = 2
 RC_REFUSE = 3
 RC_NO_CHANGE = 4
+
+# A package key (name, version, source); a family row (name, old or '-', new or '-'); an edge row
+# (package, package version, dependency, old version, new version). SMA-738 spec 4.3.
+Key = tuple[str, str, str]
+FamilyRow = tuple[str, str, str]
+EdgeRow = tuple[str, str, str, str, str]
 
 # The seven packages the four-package `cargo update -p` moved at SMA-683 M0 (spec F1).
 FAMILY = frozenset({
@@ -64,6 +73,8 @@ ALLOWED_DIRS = frozenset({"rs", "rs/crates", "rs/crates/bindings", ARTIFACT_DIR}
 SIZE_CAP = 8 * 1024 * 1024
 TITLE_MAX = 100
 RUNBOOK = 'rs/CLAUDE.md, "The wasm-bindgen family does not move through dependabot"'
+# The heading of the second table of the PR body (SMA-738 spec 4.3).
+EDGE_HEADING = "### Dependency edges that moved"
 
 
 class RefusalError(Exception):
@@ -79,7 +90,20 @@ class InfraError(Exception):
 
 
 class NoChangeError(Exception):
-    """The lock did not change. Maps to RC_NO_CHANGE."""
+    """The wasm-bindgen family did not move. Maps to RC_NO_CHANGE. It carries the edge rows,
+    because cargo can re-point a dependency edge also when no family package moves (SMA-738)."""
+
+    def __init__(self, message: str, edges: list[EdgeRow] | None = None) -> None:
+        super().__init__(message)
+        self.edges = list(edges or [])
+
+
+class LockResult(NamedTuple):
+    """The verdict when the family moved. `family`: one row per moved family package. `edges`: one
+    row per re-pointed non-family edge, with every value from the old lock. Both sorted."""
+
+    family: list[FamilyRow]
+    edges: list[EdgeRow]
 
 
 def parse_lock_text(text: str, label: str) -> dict:
@@ -118,11 +142,12 @@ def key_of(entry: dict) -> tuple[str, str, str]:
 
 def normalise_ref(ref: str) -> str:
     """Cargo writes a dependency reference in three forms: `name`, `name version` and
-    `name version (source)`. A FAMILY reference becomes the bare name, so a family version move
-    does not count as a change of the package that refers to it. Any other reference stays
-    exactly as written."""
-    name = ref.split(" ", 1)[0]
-    return name if name in FAMILY else ref
+    `name version (source)`. Every reference becomes its bare name (the text before the first
+    space), so R-NONFAMILY compares only which names a package depends on, in their order, with
+    their count. Which version a reference points to is checked by edge_verdict (R-EDGE). Cargo
+    sorts the references by the full string, and a space sorts before every character that a crate
+    name can hold, so a version change never changes the order of the bare names (SMA-738 4.1)."""
+    return ref.split(" ", 1)[0]
 
 
 def normalised(entry: dict) -> dict:
@@ -148,9 +173,74 @@ def check_semver(entry: dict, label: str) -> None:
         raise RefusalError("R-SEMVER", f"{label}: {entry['name']} has the version {version!r}, which is not a strict X.Y.Z")
 
 
-def lock_verdict(old: dict, new: dict) -> list[tuple[str, str, str]]:
-    """The AC4.2 verdict. Returns (name, old version or '-', new version or '-') per moved family
-    package, sorted. Raises RefusalError or NoChangeError."""
+def ref_table(by_key: dict[Key, dict]) -> dict[str, Key]:
+    """Cargo's canonical (minimal) reference for every package of one lock (SMA-738 spec 4.2):
+    `name` when the lock holds one package of that name, `name version` when it holds one package
+    with that name and version, else `name version (source)`. The version is the text of the
+    `version` field, so build metadata and a pre-release need no parser."""
+    names = Counter(key[0] for key in by_key)
+    pairs = Counter((key[0], key[1]) for key in by_key)
+    table: dict[str, Key] = {}
+    for key in by_key:
+        name, version, source = key
+        if names[name] == 1:
+            table[name] = key
+        elif pairs[(name, version)] == 1:
+            table[f"{name} {version}"] = key
+        else:
+            table[f"{name} {version} ({source})"] = key
+    return table
+
+
+def edge_verdict(old_by_key: dict[Key, dict], new_by_key: dict[Key, dict]) -> list[EdgeRow]:
+    """R-EDGE (SMA-738 spec 4.2). It runs after R-NONFAMILY passed, so the non-family key sets of
+    the two locks are equal, and each non-family package has the same bare-name list in both.
+    Four checks, each R-EDGE: (1) a non-family dependencies list of the new lock holds one
+    reference two times; (2) an added reference is not a key of the new lock's ref_table; (3) a
+    removed reference is not a key of the old lock's ref_table; (4) one (package, dependency name)
+    has more than one removed or more than one added reference. A reference to a family name gets
+    checks 1 to 3 and gives no edge row. Returns the edge rows, sorted, with every value from the
+    old lock (the new dependency key is also in the old lock, because the key sets are equal)."""
+    old_table, new_table = ref_table(old_by_key), ref_table(new_by_key)
+    for key, entry in new_by_key.items():
+        if key[0] in FAMILY:
+            continue
+        for ref, count in Counter(entry.get("dependencies", [])).items():
+            if count > 1:
+                raise RefusalError("R-EDGE", f"{key[0]} {key[1]} lists the dependency reference {ref!r} {count} times; cargo never writes this")
+    rows: list[EdgeRow] = []
+    for key in sorted(k for k in old_by_key if k[0] not in FAMILY):
+        old_deps = Counter(old_by_key[key].get("dependencies", []))
+        new_deps = Counter(new_by_key[key].get("dependencies", []))
+        removed = sorted((old_deps - new_deps).elements())
+        added = sorted((new_deps - old_deps).elements())
+        label = f"{key[0]} {key[1]}"
+        for ref in added:
+            if ref not in new_table:
+                raise RefusalError("R-EDGE", f"{label}: the added dependency reference {ref!r} is not the reference that cargo writes for a package of the new lock")
+        for ref in removed:
+            if ref not in old_table:
+                raise RefusalError("R-EDGE", f"{label}: the removed dependency reference {ref!r} is not the reference that cargo writes for a package of the old lock")
+        by_name: dict[str, tuple[list[str], list[str]]] = {}
+        for ref in removed:
+            by_name.setdefault(normalise_ref(ref), ([], []))[0].append(ref)
+        for ref in added:
+            by_name.setdefault(normalise_ref(ref), ([], []))[1].append(ref)
+        for dep, (gone, came) in sorted(by_name.items()):
+            if dep in FAMILY:
+                continue
+            if len(gone) != 1 or len(came) != 1:
+                raise RefusalError("R-EDGE", f"{label}: {dep!r} has {len(gone)} removed and {len(came)} added references, so the old and the new reference cannot be paired")
+            rows.append((key[0], key[1], dep, old_table[gone[0]][1], new_table[came[0]][1]))
+    return sorted(rows)
+
+
+def lock_verdict(old: dict, new: dict) -> LockResult:
+    """The AC4.2 verdict, with the SMA-738 edge rule. Returns a LockResult: `family` holds
+    (name, old version or '-', new version or '-') per moved family package, `edges` holds
+    (package, package version, dependency, old version, new version) per re-pointed non-family
+    edge, both sorted. Raises RefusalError, or NoChangeError (with the edge rows) when no family
+    package moved. Order: R-FORMAT, R-SHAPE, R-NONFAMILY, R-EDGE, then the family checks."""
     old_top = {k: v for k, v in old.items() if k != "package"}
     new_top = {k: v for k, v in new.items() if k != "package"}
     if old_top != new_top:
@@ -165,14 +255,18 @@ def lock_verdict(old: dict, new: dict) -> list[tuple[str, str, str]]:
                 raise RefusalError("R-SHAPE", f"{label}: {key_of(entry)} appears twice")
             by_key[key_of(entry)] = entry
 
-    # Non-family packages must be identical after the family references are normalised. This
-    # also refuses an ADDED or REMOVED non-family package: a new transitive dependency.
+    # Non-family packages must be identical after every dependency reference is reduced to its bare
+    # name. This also refuses an ADDED or REMOVED non-family package (a new transitive dependency)
+    # and a new or removed dependency NAME. Which version a reference points to is R-EDGE's check,
+    # directly below, before the family checks and before the no-change decision.
     old_rest = {k: normalised(v) for k, v in old_by_key.items() if k[0] not in FAMILY}
     new_rest = {k: normalised(v) for k, v in new_by_key.items() if k[0] not in FAMILY}
     if old_rest != new_rest:
         changed = sorted({k[0] for k in set(old_rest) ^ set(new_rest)}
                          | {k[0] for k in set(old_rest) & set(new_rest) if old_rest[k] != new_rest[k]})
         raise RefusalError("R-NONFAMILY", f"a package outside the wasm-bindgen family changed, was added or was removed: {changed}")
+
+    edges = edge_verdict(old_by_key, new_by_key)
 
     for label, by_key in (("old lock", old_by_key), ("new lock", new_by_key)):
         for k, entry in by_key.items():
@@ -208,13 +302,13 @@ def lock_verdict(old: dict, new: dict) -> list[tuple[str, str, str]]:
             raise RefusalError("R-INPLACE", f"{k[0]} {k[1]} kept its version but changed its checksum")
 
     if not removed and not added:
-        raise NoChangeError("the wasm-bindgen family did not move")
+        raise NoChangeError("the wasm-bindgen family did not move", edges)
     rows: dict[str, list[str]] = {}
     for k in removed:
         rows.setdefault(k[0], ["-", "-"])[0] = k[1]
     for k in added:
         rows.setdefault(k[0], ["-", "-"])[1] = k[1]
-    return sorted((name, pair[0], pair[1]) for name, pair in rows.items())
+    return LockResult(sorted((name, pair[0], pair[1]) for name, pair in rows.items()), edges)
 
 
 def current_verdict(lock: dict) -> list[tuple[str, str]]:
@@ -285,7 +379,7 @@ def title_for(changes: list[tuple[str, str, str]]) -> str:
     return title
 
 
-def body_for(changes: list[tuple[str, str, str]]) -> str:
+def body_for(changes: list[FamilyRow], edges: list[EdgeRow] | None = None) -> str:
     lines = [
         "This pull request moves the wasm-bindgen family in lockstep and regenerates the committed wasm artifacts.",
         "The scheduled `wasm-lockstep` workflow made it (SMA-693).",
@@ -294,6 +388,18 @@ def body_for(changes: list[tuple[str, str, str]]) -> str:
         "|---|---|---|",
     ]
     lines += [f"| `{name}` | `{old}` | `{new}` |" for name, old, new in changes]
+    if edges:
+        # SMA-738 spec 4.3. Every value is text from the old lock (the checked-out main).
+        lines += [
+            "",
+            EDGE_HEADING,
+            "",
+            "Each package below now refers to another version of the dependency. Both versions were already in the lock (SMA-738).",
+            "",
+            "| Package | Dependency | Old | New |",
+            "|---|---|---|---|",
+        ]
+        lines += [f"| `{package} {version}` | `{dep}` | `{old}` | `{new}` |" for package, version, dep, old, new in edges]
     lines += [
         "",
         "**The artifacts come from a build that ran third-party code** (the new proc-macros, build scripts,",
@@ -302,7 +408,7 @@ def body_for(changes: list[tuple[str, str, str]]) -> str:
         "",
         "Reviewer checklist:",
         "",
-        "- [ ] Read the `rs/Cargo.lock` diff. Every changed entry is a family package from crates.io.",
+        "- [ ] Read the `rs/Cargo.lock` diff. Every changed package entry is a family package from crates.io. Another entry may change only a dependency edge, to a version that is already in the lock (the second table). The checker does not read the manifests: `cargo-lock-integrity` in `CI` refuses an edge that a manifest does not allow.",
         "- [ ] Confirm that `CI` is green, `committed-wasm.test.ts` included.",
         "- [ ] Expect a binary diff in `paigasus_wasm_bg.wasm`: a Linux build makes different bytes than a macOS build (SMA-634 F12).",
         "- [ ] Do not push to this branch. The next run refuses a branch that a person changed.",
@@ -330,21 +436,22 @@ def status_verdict(text: str) -> None:
             raise RefusalError("R-STATUS", f"git status shows {path!r}, which is not one of the six allowed files")
 
 
-def run_artifact(directory: str, old_path: str, body_file: str | None, title_file: str | None) -> list[tuple[str, str, str]]:
+def run_artifact(directory: str, old_path: str, body_file: str | None, title_file: str | None) -> LockResult:
     artifact_tree(directory)
     try:
-        changes = lock_verdict(load_lock(old_path), load_lock(os.path.join(directory, LOCK_PATH)))
+        result = lock_verdict(load_lock(old_path), load_lock(os.path.join(directory, LOCK_PATH)))
     except NoChangeError as exc:
-        raise RefusalError("R-NOCHANGE", "the artifact lock equals the checked-out lock, so there is nothing to propose") from exc
-    title = title_for(changes)
-    body = body_for(changes)
+        # SMA-738: the two locks can differ in dependency edges only, so "equal" is no longer true.
+        raise RefusalError("R-NOCHANGE", "the wasm-bindgen family did not move, so there is nothing to propose") from exc
+    title = title_for(result.family)
+    body = body_for(result.family, result.edges)
     # Written ONLY here, after every version string passed check_semver and every refusal had
     # its chance. A refusal above leaves both files absent.
     if title_file:
         write_file(title_file, title + "\n")
     if body_file:
         write_file(body_file, body)
-    return changes
+    return result
 
 
 # ---- the self-test --------------------------------------------------------------------------
@@ -392,22 +499,130 @@ def _verdict(old_text: str, new_text: str):
 
 
 def _ref_rows() -> list[tuple[str, object, str]]:
-    """The three Cargo reference forms, each in a non-family package's dependencies list. The
-    family move must not count as a change of that package. The negative twins prove the
-    normalisation is scoped to FAMILY names: the same forms on a non-family name still refuse."""
+    """A family reference in a non-family package. In a lock that passes R-DUPLICATE, a family
+    name has one version, so cargo writes the bare name only. A family move then does not move the
+    reference, and the bare-name row stays PASS. The `name version` and `name version (source)`
+    forms are not what cargo writes for such a lock, so a move of them refuses with R-EDGE
+    (SMA-738 spec 4.2 and 5.2). The last row proves that an unlocked NON-family reference refuses
+    with R-EDGE: 1.0.99 is not in the lock (SMA-738 spec 5.2)."""
     rows = []
     forms = (
-        ("name", "wasm-bindgen", "wasm-bindgen"),
-        ("name version", "wasm-bindgen 0.2.128", "wasm-bindgen 0.2.129"),
-        ("name version (source)", f"wasm-bindgen 0.2.128 ({CRATES_IO})", f"wasm-bindgen 0.2.129 ({CRATES_IO})"),
+        ("name", "wasm-bindgen", "wasm-bindgen", "PASS"),
+        ("name version", "wasm-bindgen 0.2.128", "wasm-bindgen 0.2.129", "R-EDGE"),
+        ("name version (source)", f"wasm-bindgen 0.2.128 ({CRATES_IO})", f"wasm-bindgen 0.2.129 ({CRATES_IO})", "R-EDGE"),
     )
-    for label, old_ref, new_ref in forms:
+    for label, old_ref, new_ref, want in forms:
         old = _lock(rest=REST + _pkg("consumer", "1.0.0", deps=(old_ref,)))
         new = _lock(NEW_FAMILY, rest=REST + _pkg("consumer", "1.0.0", deps=(new_ref,)))
-        rows.append((f"reference form `{label}` to a family package", _verdict(old, new), "PASS"))
+        rows.append((f"reference form `{label}` to a family package", _verdict(old, new), want))
     twin_old = _lock(rest=REST + _pkg("consumer", "1.0.0", deps=("anyhow 1.0.98",)))
     twin_new = _lock(NEW_FAMILY, rest=REST + _pkg("consumer", "1.0.0", deps=("anyhow 1.0.99",)))
-    rows.append(("reference form `name version` to a NON-family package", _verdict(twin_old, twin_new), "R-NONFAMILY"))
+    rows.append(("an unlocked `name version` reference to a NON-family package", _verdict(twin_old, twin_new), "R-EDGE"))
+    return rows
+
+
+# ---- SMA-738: the edge rows (spec 5.1) ---------------------------------------------------------
+
+# The real case of SMA-738: two windows-sys versions, and five packages whose one reference to
+# windows-sys moved from 0.61.2 to 0.52.0. Two versions of the name are in the lock, so cargo
+# writes each reference in the `name version` form.
+WINDOWS_SYS = _pkg("windows-sys", "0.52.0", checksum="c" * 64) + _pkg("windows-sys", "0.61.2", checksum="d" * 64)
+FOUR_WINDOWS_SYS = _pkg("windows-sys", "0.45.0", checksum="1" * 64) + _pkg("windows-sys", "0.48.0", checksum="2" * 64) + WINDOWS_SYS
+FLIP = (("errno", "0.3.14"), ("quinn-udp", "0.5.15"), ("rustix", "1.1.5"), ("tempfile", "3.27.0"), ("winapi-util", "0.1.11"))
+FLIP_EDGES = [(name, version, "windows-sys", "0.61.2", "0.52.0") for name, version in FLIP]
+CHANGED_REST = REST.replace('version = "1.0.98"', 'version = "1.0.99"')
+
+
+def _flip_rest(target: str = "0.61.2", errno_deps: tuple[str, ...] | None = None, base: str = REST, extra: str = WINDOWS_SYS) -> str:
+    """`base`, the windows-sys entries in `extra`, and the five packages of the real case. Each of
+    the five refers to `windows-sys <target>`. `errno_deps` replaces the dependencies of errno."""
+    out = base + extra
+    for name, version in FLIP:
+        deps = errno_deps if name == "errno" and errno_deps is not None else (f"windows-sys {target}",)
+        out += _pkg(name, version, checksum="e" * 64, deps=deps)
+    return out
+
+
+def _expect_edges(old: dict, new: dict, want: list[EdgeRow]):
+    """A row that proves the edge rows, not only the outcome. A wrong list raises R-SELFTEST. A
+    NoChangeError with the right rows is raised again, so the row outcome is NOCHANGE."""
+    def check() -> None:
+        try:
+            result = lock_verdict(old, new)
+        except NoChangeError as exc:
+            if exc.edges != want:
+                raise RefusalError("R-SELFTEST", f"the NoChangeError carries {exc.edges}, want {want}") from exc
+            raise
+        if result.edges != want:
+            raise RefusalError("R-SELFTEST", f"the verdict holds the edge rows {result.edges}, want {want}")
+    return check
+
+
+def _edges_check(old_text: str, new_text: str, want: list[EdgeRow]):
+    return _expect_edges(parse_lock_text(old_text, "old"), parse_lock_text(new_text, "new"), want)
+
+
+def _edge_rows() -> list[tuple[str, object, str]]:
+    old = _flip_rest()
+    flipped = _flip_rest("0.52.0")
+    unlocked = _flip_rest(errno_deps=("windows-sys 0.60.0",))
+    git_source = "git+https://github.com/example/windows-sys#" + "f" * 40
+    same_pair = WINDOWS_SYS + _pkg("windows-sys", "0.52.0", source=git_source, checksum=None)
+    toml_datetime = _pkg("toml_datetime", "0.6.11", checksum="7" * 64) + _pkg("toml_datetime", "1.1.1+spec-1.1.0", checksum="8" * 64)
+    return [
+        # The code rows.
+        ("an edge flip and a version change of a non-family package", _verdict(_lock(rest=old), _lock(NEW_FAMILY, rest=_flip_rest("0.52.0", base=CHANGED_REST))), "R-NONFAMILY"),
+        ("an edge flip and a new dependency name", _verdict(_lock(rest=old), _lock(NEW_FAMILY, rest=_flip_rest("0.52.0", errno_deps=("anyhow", "windows-sys 0.52.0")))), "R-NONFAMILY"),
+        ("an added reference to an unlocked version, with a family move", _verdict(_lock(rest=old), _lock(NEW_FAMILY, rest=unlocked)), "R-EDGE"),
+        ("an added reference to an unlocked version, no family move", _verdict(_lock(rest=old), _lock(rest=unlocked)), "R-EDGE"),
+        ("an added reference to an unlocked version, and a family version that fails R-SEMVER", _verdict(_lock(rest=old), _lock((("wasm-bindgen", "0.2.129-rc.1"),), rest=unlocked)), "R-EDGE"),
+        ("an added reference with a Markdown payload after a valid reference", _verdict(_lock(rest=old), _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=("windows-sys 0.52.0 [x](http://evil)",)))), "R-EDGE"),
+        ("an added bare-name reference when two versions of the name are in the lock", _verdict(_lock(rest=old), _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=("windows-sys",)))), "R-EDGE"),
+        ("a `name version (source)` reference with a source that is not in the lock", _verdict(_lock(rest=_flip_rest(extra=same_pair)), _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=("windows-sys 0.52.0 (registry+https://evil.example/index)",), extra=same_pair))), "R-EDGE"),
+        ("a removed reference that is not in the old lock's table", _verdict(_lock(rest=_flip_rest(errno_deps=("windows-sys",))), _lock(NEW_FAMILY, rest=_flip_rest())), "R-EDGE"),
+        ("a new dependencies list with the same reference two times", _verdict(_lock(rest=_flip_rest(errno_deps=("windows-sys 0.52.0", "windows-sys 0.52.0"))), _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=("windows-sys 0.52.0", "windows-sys 0.52.0")))), "R-EDGE"),
+        ("two moved references of one dependency name on one side of one package", _verdict(_lock(rest=_flip_rest(errno_deps=("windows-sys 0.45.0", "windows-sys 0.48.0"), extra=FOUR_WINDOWS_SYS)), _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=("windows-sys 0.52.0", "windows-sys 0.61.2"), extra=FOUR_WINDOWS_SYS))), "R-EDGE"),
+        ("an added family reference with a payload after the family name", _verdict(_lock(rest=REST + _pkg("consumer", "1.0.0", deps=("wasm-bindgen",))), _lock(NEW_FAMILY, rest=REST + _pkg("consumer", "1.0.0", deps=("wasm-bindgen [x](http://evil)",)))), "R-EDGE"),
+        # The value rows.
+        ("the real five-package edge flip, with a family move", _edges_check(_lock(rest=old), _lock(NEW_FAMILY, rest=flipped), FLIP_EDGES), "PASS"),
+        ("the real five-package edge flip, no family move", _edges_check(_lock(rest=old), _lock(rest=flipped), FLIP_EDGES), "NOCHANGE"),
+        ("a `name version (source)` reference when two packages share the name and version: the correct source", _edges_check(
+            _lock(rest=_flip_rest(extra=same_pair)),
+            _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=(f"windows-sys 0.52.0 ({CRATES_IO})",), extra=same_pair)),
+            [("errno", "0.3.14", "windows-sys", "0.61.2", "0.52.0")]), "PASS"),
+        ("a reference with build metadata moved between two locked versions", _edges_check(
+            _lock(rest=REST + toml_datetime + _pkg("toml_edit", "0.22.27", checksum="9" * 64, deps=("toml_datetime 0.6.11",))),
+            _lock(NEW_FAMILY, rest=REST + toml_datetime + _pkg("toml_edit", "0.22.27", checksum="9" * 64, deps=("toml_datetime 1.1.1+spec-1.1.0",))),
+            [("toml_edit", "0.22.27", "toml_datetime", "0.6.11", "1.1.1+spec-1.1.0")]), "PASS"),
+        # Review Focus 3: a package that depends on two versions of one name, and one of them moves.
+        ("one of two references to one name moves", _edges_check(
+            _lock(rest=_flip_rest(errno_deps=("windows-sys 0.52.0", "windows-sys 0.61.2"), extra=FOUR_WINDOWS_SYS)),
+            _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=("windows-sys 0.48.0", "windows-sys 0.52.0"), extra=FOUR_WINDOWS_SYS)),
+            [("errno", "0.3.14", "windows-sys", "0.61.2", "0.48.0")]), "PASS"),
+    ]
+
+
+def _edge_body_rows(tmp: str) -> list[tuple[str, object, str]]:
+    """The PR body after a pass: the second table with exactly the edge rows, or no second table."""
+    old_path = os.path.join(tmp, "edge-old.lock")
+    write_file(old_path, _lock(rest=_flip_rest()))
+    rows = []
+    for label, new_rest, want_rows in (("with the five-package flip", _flip_rest("0.52.0"), 5), ("with no edge flip", _flip_rest(), 0)):
+        root = os.path.join(tmp, f"edge-body-{want_rows}")
+        _write_tree(root, {LOCK_PATH: _lock(NEW_FAMILY, rest=new_rest).encode()})
+        body = os.path.join(tmp, f"edge-body-{want_rows}.md")
+
+        def check(root=root, body=body, want_rows=want_rows) -> None:
+            run_artifact(root, old_path, body, None)
+            with open(body, encoding="utf-8") as handle:
+                text = handle.read()
+            # An edge row has five pipes; a family row has four.
+            found = [ln for ln in text.splitlines() if ln.startswith("| `") and ln.count("|") == 5]
+            if (EDGE_HEADING in text) != bool(want_rows) or len(found) != want_rows:
+                raise RefusalError("R-SELFTEST", f"the body holds heading={EDGE_HEADING in text} and {len(found)} edge rows, want {want_rows}")
+            if want_rows and "| `errno 0.3.14` | `windows-sys` | `0.61.2` | `0.52.0` |" not in found:
+                raise RefusalError("R-SELFTEST", f"the body has no errno edge row: {found}")
+        rows.append((f"the PR body after a pass {label}", check, "PASS"))
     return rows
 
 
@@ -536,10 +751,12 @@ def self_test() -> int:
         ("title: an over-long version", lambda: title_for([("wasm-bindgen", "0.2.128", "0." + "9" * 80 + ".0")]), "R-TITLE"),
     ]
     rows += _ref_rows()
+    rows += _edge_rows()
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
         rows += _artifact_rows(tmp)
         rows += _files_rows(tmp)
+        rows += _edge_body_rows(tmp)
         for label, fn, want in rows:
             got = _outcome(fn)
             if got == want:
@@ -551,10 +768,58 @@ def self_test() -> int:
     return RC_REFUSE if failures else RC_OK
 
 
+def _bump_family(lock: dict) -> None:
+    """Every family patch version +1, with a new checksum: a synthetic family move."""
+    for entry in lock["package"]:
+        if entry["name"] in FAMILY:
+            major, minor, patch = entry["version"].split(".")
+            entry["version"] = f"{major}.{minor}.{int(patch) + 1}"
+            entry["checksum"] = "d" * 64
+
+
+def _all_refs_canonical(lock: dict) -> None:
+    """Every dependency reference that cargo wrote into the lock is a key of ref_table (Review
+    Focus 2). If not, the canonical-form rule differs from cargo, and every run refuses."""
+    entries = packages(lock, "lock")
+    table = ref_table({key_of(e): e for e in entries})
+    bad = [(e["name"], ref) for e in entries for ref in e.get("dependencies", []) if ref not in table]
+    if bad:
+        raise RefusalError("R-EDGE", f"{len(bad)} references of the lock are not canonical, for example {bad[:5]}")
+
+
+def _edge_target(lock: dict) -> tuple[Key, str, str, Key, Key]:
+    """SMA-738 spec 5.3: the first non-family package in lock order with a reference to a name that
+    has two or more versions in the lock, where the package does not already refer to the other
+    version. The other version is the first one in lock order that the package does not refer to.
+    Returns (package key, old reference, new reference, old dependency key, new dependency key)."""
+    entries = packages(lock, "lock")
+    by_key = {key_of(e): e for e in entries}
+    table = ref_table(by_key)
+    canonical = {key: ref for ref, key in table.items()}
+    versions: dict[str, list[Key]] = {}
+    for key in by_key:
+        versions.setdefault(key[0], []).append(key)
+    for entry in entries:
+        if entry["name"] in FAMILY:
+            continue
+        deps = entry.get("dependencies", [])
+        for ref in deps:
+            dep_key = table.get(ref)
+            if dep_key is None or len(versions[dep_key[0]]) < 2:
+                continue
+            for other in versions[dep_key[0]]:
+                if other != dep_key and canonical[other] not in deps:
+                    return key_of(entry), ref, canonical[other], dep_key, other
+    raise InfraError("the lock holds no non-family package with a reference to a name with two or more versions; the target finder is broken")
+
+
 def negative_control(lock_path: str) -> int:
     """The real `lock` verdict on HEAD's rs/Cargo.lock (the caller writes it with `git show`, F15):
-    the lock against itself is NOCHANGE; one non-family version changed is R-NONFAMILY; a
-    synthetic move of the real wasm-bindgen entries passes."""
+    the lock against itself is NOCHANGE with no edge row; every reference is canonical; one
+    non-family version changed is R-NONFAMILY; a synthetic move of the real wasm-bindgen entries
+    passes. SMA-738 spec 5.3: one real reference re-pointed to another locked version is NOCHANGE,
+    or PASS with a family move, each with exactly one edge row; re-pointed to an unlocked version
+    it is R-EDGE."""
     try:
         with open(lock_path, encoding="utf-8") as handle:
             text = handle.read()
@@ -573,7 +838,8 @@ def negative_control(lock_path: str) -> int:
             print(f"  FAIL  {label}: want {want}, got {got}", file=sys.stderr)
             failures += 1
 
-    expect("HEAD's lock against itself", lambda: lock_verdict(real, real), "NOCHANGE")
+    expect("HEAD's lock against itself, with no edge row", _expect_edges(real, real, []), "NOCHANGE")
+    expect("every dependency reference of HEAD's lock is a canonical reference", lambda: _all_refs_canonical(real), "PASS")
     first = next((p for p in packages(real, "lock") if p["name"] not in FAMILY and "source" in p), None)
     if first is None:
         raise InfraError(f"{lock_path} holds no non-family package with a source to mutate")
@@ -583,17 +849,43 @@ def negative_control(lock_path: str) -> int:
             entry["version"] = "999.0.0"
     expect(f"HEAD's lock with {first['name']} moved", lambda: lock_verdict(real, mutated), "R-NONFAMILY")
     bumped = parse_lock_text(text, lock_path)
-    for entry in bumped["package"]:
-        if entry["name"] in FAMILY:
-            major, minor, patch = entry["version"].split(".")
-            entry["version"] = f"{major}.{minor}.{int(patch) + 1}"
-            entry["checksum"] = "d" * 64
+    _bump_family(bumped)
     expect("HEAD's lock with every family patch version moved", lambda: lock_verdict(real, bumped), "PASS")
+
+    package, old_ref, new_ref, dep_key, other_key = _edge_target(real)
+    want = [(package[0], package[1], dep_key[0], dep_key[1], other_key[1])]
+
+    def repointed(ref: str, bump: bool = False) -> dict:
+        out = parse_lock_text(text, lock_path)
+        for entry in out["package"]:
+            if key_of(entry) == package:
+                deps = entry["dependencies"]
+                deps[deps.index(old_ref)] = ref
+        if bump:
+            _bump_family(out)
+        return out
+
+    moved = f"{package[0]} {package[1]}: {old_ref!r} re-pointed to {new_ref!r}"
+    expect(f"HEAD's lock with {moved}", _expect_edges(real, repointed(new_ref), want), "NOCHANGE")
+    expect(f"HEAD's lock with {moved} and every family patch version moved", _expect_edges(real, repointed(new_ref, bump=True), want), "PASS")
+    unlocked = f"{dep_key[0]} 999.0.0"
+    expect(f"HEAD's lock with {package[0]} {package[1]}: {old_ref!r} re-pointed to {unlocked!r}", lambda: lock_verdict(real, repointed(unlocked)), "R-EDGE")
     print(f"lockstep_check negative control: wasm-bindgen {dict(family)['wasm-bindgen']} on HEAD, {failures} failed")
     return RC_REFUSE if failures else RC_OK
 
 
 # ---- the command line -----------------------------------------------------------------------
+
+def _print_family(rows: list[FamilyRow]) -> None:
+    for name, old, new in rows:
+        print(f"family-moved {name} {old} {new}")
+
+
+def _print_edges(rows: list[EdgeRow]) -> None:
+    """One line per edge row, after the family lines, also on exit 4 (SMA-738 spec 4.3)."""
+    for package, version, dep, old, new in rows:
+        print(f"edge-moved {package} {version} {dep} {old} {new}")
+
 
 def _options(argv: list[str], names: tuple[str, ...], required: tuple[str, ...]) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -621,19 +913,20 @@ def main(argv: list[str]) -> int:
     if command == "lock":
         opts = _options(rest, ("--old", "--new"), ("--old", "--new"))
         try:
-            changes = lock_verdict(load_lock(opts["--old"]), load_lock(opts["--new"]))
-        except NoChangeError:
+            result = lock_verdict(load_lock(opts["--old"]), load_lock(opts["--new"]))
+        except NoChangeError as exc:
             for name, version in current_verdict(load_lock(opts["--new"])):
                 print(f"family-current {name} {version}")
+            _print_edges(exc.edges)
             return RC_NO_CHANGE
-        for name, old, new in changes:
-            print(f"family-moved {name} {old} {new}")
+        _print_family(result.family)
+        _print_edges(result.edges)
         return RC_OK
     if command == "artifact":
         opts = _options(rest, ("--dir", "--old", "--body-file", "--title-file"), ("--dir", "--old"))
-        changes = run_artifact(opts["--dir"], opts["--old"], opts.get("--body-file"), opts.get("--title-file"))
-        for name, old, new in changes:
-            print(f"family-moved {name} {old} {new}")
+        result = run_artifact(opts["--dir"], opts["--old"], opts.get("--body-file"), opts.get("--title-file"))
+        _print_family(result.family)
+        _print_edges(result.edges)
         return RC_OK
     if command == "status":
         opts = _options(rest, ("--file",), ("--file",))

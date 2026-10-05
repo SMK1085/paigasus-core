@@ -252,6 +252,11 @@ package install. Two subcommands and two test modes:
   - Every non-family package is identical in both locks, after the checker normalises a family
     reference in `dependencies`. Cargo writes a reference in three forms: `"name"`,
     `"name version"` and `"name version (source)"`. The checker handles all three.
+    SMA-738 note (2026-10-05): this invariant is replaced. `R-NONFAMILY` now compares the
+    dependency references of a non-family package by bare name, in order. The new refusal `R-EDGE`
+    accepts a moved reference only when the old and the new reference are each the exact form that
+    cargo writes for a package of its lock. See
+    `docs/superpowers/specs/2026-10-05-sma-738-wasm-lockstep-edge-flips-design.md`.
   - The top-level `version` of the lock format is unchanged, and no `[patch]`/`[metadata]` table
     changed.
   - R and A empty: exit 4 ("no change").

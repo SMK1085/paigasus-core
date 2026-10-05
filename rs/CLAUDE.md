@@ -192,10 +192,15 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   makes the next run refuse. If a run refuses, close the pull request or delete the branch. To
   start a run now: `gh workflow run wasm-lockstep.yml --ref main`. `ci/wasm-lockstep/README.md`
   holds the trust model and the refusal codes.
-  Use the manual runbook below only when the workflow cannot help: it refuses the lock change (a
-  new transitive dependency, or a newer `syn`), its build fails because the pinned `wasm-pack`
-  does not support the new 0.2.z, or the `reqwest` case below. Use a normal
-  `feature/sma-NNN-<slug>` PR.
+  Use the manual runbook below only when the workflow cannot help: it refuses the lock change
+  (a new transitive dependency, a newer `syn`, or `R-EDGE`, see below), its build fails because
+  the pinned `wasm-pack` does not support the new 0.2.z, or the `reqwest` case below. Use a
+  normal `feature/sma-NNN-<slug>` PR.
+  **`R-EDGE` with no family move (SMA-738).** The lock on `main` holds a reference that cargo now
+  writes in another form, or the run made a reference that is not in the lock. Run the
+  four-package `cargo update -p` locally and read the edge diff. If it only re-points edges
+  between versions that are already in the lock, commit the lock in a normal
+  `feature/sma-NNN-<slug>` PR. Otherwise open an issue.
   Before you start:
   - Put the proto shims on `PATH`.
   - In a fresh worktree, run `proto install` and `pnpm -C ts install`.
@@ -204,7 +209,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   - Unlock 1Password for commit signing.
   ```bash
   ( cd rs && cargo update -p wasm-bindgen -p js-sys -p web-sys -p wasm-bindgen-futures )
-  git diff -- rs/Cargo.lock   # the family entries (seven at M0) plus any new dep, crates.io only
+  git diff -- rs/Cargo.lock   # the family entries (seven at M0) plus any new dep, crates.io only, and dependency edges re-pointed between locked versions
   moon run paigasus-kernel-ts:generate-wasm
   moon run paigasus-kernel-ts:test   # the drift gate, before the push
   git add rs/Cargo.lock .prototools rs/crates/bindings/paigasus-wasm/paigasus_wasm*

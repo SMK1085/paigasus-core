@@ -44,7 +44,8 @@ code of each row, so a row cannot pass because a different check refused it.
 |---|---|
 | `R-FORMAT` | The lock format version or a top-level table (`[patch]`, `[metadata]`) changed. |
 | `R-SHAPE` | A `[[package]]` entry has no string name and version, or a key appears twice. |
-| `R-NONFAMILY` | A package outside the family changed, was added or was removed. Cargo writes a dependency reference in three forms (`name`, `name version`, `name version (source)`); a reference to a family package becomes the bare name before the comparison. |
+| `R-NONFAMILY` | A package outside the family was added or removed, or it changed its version, source, checksum or the names it depends on. The check compares the dependency references of a non-family package by bare name, in order, with their count (SMA-738). The check of `R-EDGE` decides which version a reference points to. |
+| `R-EDGE` | A dependency reference moved in a way that cargo does not write (SMA-738). Four cases refuse. (1) One `dependencies` list of the new lock holds a reference two times. (2) An added reference is not the exact form that cargo writes for a package of the new lock. (3) A removed reference is not that form in the old lock. (4) One package has more than one removed or more than one added reference to one name. The form is `name` when the lock holds one package of that name. It is `name version` when the lock holds one package with that name and version. Otherwise it is `name version (source)`. A moved reference to a family name gets the same checks. `R-EDGE` runs before the family checks and before the no-change decision. |
 | `R-SEMVER` | A family version is not a strict `X.Y.Z`: no pre-release, no build metadata, no leading zero, ASCII digits only, no trailing newline. |
 | `R-TWICE` | A family name has more than one removed or more than one added entry. |
 | `R-DUPLICATE` | The new lock holds two versions of one family name side by side. |
@@ -57,9 +58,17 @@ code of each row, so a row cannot pass because a different check refused it.
 No change exits 4. The count of seven is NOT asserted: a family release can drop a package (pass) or
 bring a new transitive dependency (`R-NONFAMILY`, so the manual runbook applies).
 
+**Moved edges (SMA-738).** `cargo update` can re-point a dependency edge of a non-family package
+to another version that is already in the lock. Each such edge is an edge row: the package, its
+version, the dependency, and the old and the new version, all from the old lock. `lock` prints one
+`edge-moved <package> <package version> <dependency> <old> <new>` line per row, after the
+`family-moved` lines. On exit 4 it prints them after the `family-current` lines, so the weekly log
+shows when cargo keeps flipping edges. `artifact` prints the same lines, and the PR body then has a
+second table, "Dependency edges that moved".
+
 `artifact` adds `R-LAYOUT`, `R-SYMLINK` and `R-SIZE` (the tree holds `rs/Cargo.lock` and a subset of
-the five artifact files, all regular files of 8 MiB or less), `R-NOCHANGE` (the artifact lock equals
-the checked-out lock) and `R-TITLE` (the commit title is over 100 characters). It writes the PR title
+the five artifact files, all regular files of 8 MiB or less), `R-NOCHANGE` (the family did not
+move; the two locks can differ in dependency edges only) and `R-TITLE` (the commit title is over 100 characters). It writes the PR title
 and body files only after every check passed. `status` (`R-STATUS`) checks `git status --porcelain`
 after the copy. `current` checks the family invariant on one lock; the real run of the gate runs it
 on `HEAD:rs/Cargo.lock`, so a PR that puts a second `wasm-bindgen` into the lock goes red at once,
@@ -125,6 +134,10 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
 
 - The artifacts come from a build that ran third-party code. The checks prove paths and the lock
   shape, not content. A person reads the lock diff, not the five files.
+- `cargo update` in container run 1 can re-point a non-family dependency edge to another version
+  that is already in the lock. This can change which code a target compiles. No new package enters
+  the lock. The reviewer reads the edge table of the PR body. `cargo-lock-integrity` in `CI`
+  catches only an edge outside the range that a manifest allows (SMA-738).
 - Nothing enforces the review. The `main` ruleset has no `pull_request` rule. The PR's own `CI`
   runs the unreviewed code before any review, in the PR cache scope, with no secrets: the same
   exposure as a dependabot PR.
