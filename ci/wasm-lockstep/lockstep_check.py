@@ -60,7 +60,7 @@ ARTIFACT_FILES = (
 )
 ALLOWED_FILES = frozenset({LOCK_PATH} | {f"{ARTIFACT_DIR}/{name}" for name in ARTIFACT_FILES})
 ALLOWED_DIRS = frozenset({"rs", "rs/crates", "rs/crates/bindings", ARTIFACT_DIR})
-# 8 MiB per file. The committed paigasus_wasm_bg.wasm is 50,950 bytes (2026-10-02).
+# 8 MiB per file. The committed paigasus_wasm_bg.wasm is 35,560 bytes after wasm-opt -O (SMA-435).
 SIZE_CAP = 8 * 1024 * 1024
 TITLE_MAX = 100
 RUNBOOK = 'rs/CLAUDE.md, "The wasm-bindgen family does not move through dependabot"'

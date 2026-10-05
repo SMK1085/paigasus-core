@@ -124,10 +124,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm` and its four glue files are **committed**,
   because pnpm links the crate before any build task runs. `moon run
   paigasus-kernel-ts:generate-wasm` is their only writer: run it after a Rust kernel or wasm-binding
-  edit, and commit all five. `paigasus-kernel-ts:test` holds them to the source with four checks —
-  the committed glue equals a fresh build, the binary's import and export lists equal a fresh
-  build's, the committed pair replays all six parity corpora, and (in the console vitest
-  `setupFiles`) the pnpm-installed copy equals the committed files. **No check compares the binary
+  edit, and commit all five. `paigasus-kernel-ts:test` holds them to the source with seven checks —
+  the committed glue, import/export lists, parity corpora, and pnpm copy are verified against a
+  fresh build. Additionally, the committed binary carries the binaryen `paigasus.wasm-opt` marker,
+  the fresh build is raw, and `wasm-opt = false` stays set (checks 5-7, SMA-435; see `rs/CLAUDE.md`).
+  **No check compares the binary
   bytes**: they differ on macOS, Linux arm64 and Linux amd64, while the glue and the interface do
   not. After a `git checkout`, a rebase or a branch switch that replaces those files, run `rm -rf
   ts/node_modules && pnpm -C ts install`: pnpm hard-links a `file:` dependency and does not repair a

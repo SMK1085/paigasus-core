@@ -102,7 +102,8 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
 
 - **`build`** has no environment and reads no secret. Its `GITHUB_TOKEN` is `contents: read`. Every
   step that runs third-party code (cargo, build scripts, proc-macros, `wasm-pack`,
-  `wasm-bindgen-cli`, pnpm packages) runs inside `docker run`, as the user `nobody`, over a copy of
+  `wasm-bindgen-cli`, binaryen's `wasm-opt` since SMA-435, pnpm packages) runs inside
+  `docker run`, as the user `nobody`, over a copy of
   the tree without `.git`. The container gets no runner environment: no `CI`, no `GITHUB_ACTIONS`,
   no `ACTIONS_RUNTIME_TOKEN`, no `GITHUB_TOKEN`, no `GITHUB_OUTPUT`. So that code cannot write a
   cache entry in the `refs/heads/main` scope or an artifact (spec F11, AC3).
