@@ -1,7 +1,8 @@
 # SMA-738 — wasm-lockstep: accept a dependency-edge flip between locked versions
 
 Linear: SMA-738. Related: SMA-693 (the workflow and its gate).
-Status: revised after the adversarial challenge, 2026-10-05.
+Status: revised after the adversarial challenge, 2026-10-05. Sven folded in the run-1 lock
+compare (4.5) at Gate 1.
 
 ## 1. Problem
 
@@ -39,17 +40,21 @@ Goals:
   Otherwise the check refuses with `R-EDGE`.
 - G5. The reviewer of a bump PR sees every moved edge. The log of a no-change run shows every
   moved edge too.
+- G6. The lock that `propose` checks is byte-identical to the lock that `cargo update` wrote in
+  container run 1. Code that runs in container run 2 cannot change the lock (4.5).
 
 Non-goals:
 
-- No change to `container.sh`, `.github/workflows/wasm-lockstep.yml` or `pin_check.py`.
+- No change to `container.sh`.
 - No change to the exit codes.
+- No change to the `propose` job.
 - No separate commit of the canonical lock (option 2). The edge flips reach `main` only inside a
   merged bump PR.
 
 ## 4. Design
 
-All code changes are in `ci/wasm-lockstep/lockstep_check.py`.
+Sections 4.1 to 4.4 change `ci/wasm-lockstep/lockstep_check.py` only. Section 4.5 also changes
+`.github/workflows/wasm-lockstep.yml` and `ci/wasm-lockstep/pin_check.py`.
 
 ### 4.1 The comparison
 
@@ -142,8 +147,8 @@ stage step:      cp work/rs/Cargo.lock    -> the artifact
 propose:         lockstep_check artifact  -> the same verdict, the PR title and body files
 ```
 
-**This change weakens one property of the trust model.** The stage step copies `rs/Cargo.lock`
-AFTER container run 2. Run 2 executes build scripts, proc-macros, pnpm packages and `wasm-pack`.
+**Without 4.5, this change weakens one property of the trust model.** 4.5 removes the weakness.
+The stage step copies `rs/Cargo.lock` AFTER container run 2. Run 2 executes build scripts, proc-macros, pnpm packages and `wasm-pack`.
 Before this change, the exact comparison in `verify` refused any change that run-2 code made to a
 non-family entry. After this change, run-2 code can re-point any non-family edge to another
 version that is already in the lock, and `verify` passes. "Already in the lock" does not mean
@@ -161,9 +166,65 @@ What limits this:
 
 The text that reaches the PR body is still only package names and versions from the old lock.
 
-A follow-up issue (proposed, not part of this change) restores the old property: the host keeps a
-copy of the run-1 lock outside `/work`, and the stage step refuses when `cmp` shows that run 2
-changed the lock. That is a workflow change and needs a `pin_check.py` P5 allowlist change.
+The same gap exists on `main` today for the family entries: run-2 code can change a family entry
+to another crates.io version with a valid checksum, and `verify` accepts it, because `verify`
+compares only with the old lock. 4.5 closes both gaps.
+
+### 4.5 The run-1 lock compare
+
+**The snapshot.** `lockstep_check.py lock` gets an optional `--snapshot <path>`. The `lock`
+command reads the new lock ONCE as bytes, decodes and parses those bytes, and runs the verdict.
+On exit 0 only, it writes the same bytes to `<path>`. On exit 4, 3 or 2 it writes no file. So the
+snapshot is exactly the bytes of the verdict: there is no second read and no `cp` between the
+check and the copy. A write error is exit 2.
+
+The `lock` step of the build job passes `--snapshot "$RUNNER_TEMP/run1.lock"`. The volume of both
+container runs is `$RUNNER_TEMP/work:/work`, so container run 2 cannot reach
+`$RUNNER_TEMP/run1.lock`.
+
+**The compare.** A new subcommand `lockstep_check.py same --a <path> --b <path>` reads both files
+as bytes. Equal bytes: exit 0, and it prints `same: the lock did not change after the lock
+verdict`. Different bytes: `R-RUN2` (exit 3), with the two sizes and the SHA-256 of each file in
+the message. A file that cannot be read: exit 2. It compares bytes, not parsed TOML, so a
+whitespace or comment change refuses too.
+
+The `stage` step of the build job runs, as its LAST whole command, after the copy loop:
+
+```
+python3 ci/wasm-lockstep/lockstep_check.py same --a "$RUNNER_TEMP/run1.lock" --b "$dst/rs/Cargo.lock"
+```
+
+It compares the STAGED copy, which is the file that `upload` sends to `propose`. A refusal fails
+the `stage` step, so `upload` and `propose` do not run. The words `python3` and the checker path
+are already on the build allowlist (`pin_check.py:97`), so P5 does not change.
+
+**Why `same` is in the checker and not `cmp`.** `cmp` is not on the build allowlist. A
+subcommand keeps the compare inside the self-tested checker, and P18 then guards it.
+
+**The pin rules (`pin_check.py`).**
+
+- `same` is added to `CHECKER_SUBS`. So P18 applies: the `same` command must be the last whole
+  command of its step, with no `||`, `&&`, `;`, pipe or open `if` around it.
+- New rule P25:
+  - The build steps with the ids `update`, `lock`, `build`, `stage` and `upload` exist and come
+    in that order.
+  - The `lock` step runs `python3 ci/wasm-lockstep/lockstep_check.py lock` with
+    `--snapshot "$RUNNER_TEMP/run1.lock"`.
+  - The `stage` step runs `python3 ci/wasm-lockstep/lockstep_check.py same` with
+    `--a "$RUNNER_TEMP/run1.lock"` and `--b "$dst/rs/Cargo.lock"`.
+  - No other step of either job names `run1.lock`. So no step can write the snapshot again
+    between `lock` and `stage`.
+- `FIXTURE` in `pin_check.py` gets the `--snapshot` option on its `lock` step and new `build` and
+  `stage` steps, so the fixture passes P25.
+
+**What 4.5 restores.** With 4.5, an edge move can come only from `cargo update` in container
+run 1. `container.sh` states that run 1 runs no build script. The weakness in 4.4 then goes
+away, and the family-entry gap on `main` closes too. The edge table in the PR body stays: it
+shows what cargo's resolution did.
+
+**What 4.5 does not cover.** Run 1 itself (`cargo update`) still runs in the container with
+`/work` writable. Its output is the input of the verdict, as before. A compromised cargo or
+crates.io index is out of scope, as before.
 
 ## 5. Testing
 
@@ -242,7 +303,58 @@ The `workflow_dispatch` run on `main` after the merge is the final proof (issue 
 The `propose` job needs the `release-pr` environment, which only `main` can use, so a run on the
 feature branch cannot prove the whole workflow.
 
-### 5.5 The gates
+### 5.5 Tests for 4.5
+
+`lockstep_check.py` self-test rows:
+
+| Row | Expected |
+|---|---|
+| `same` on two equal files | `PASS` |
+| `same` on two files that differ by one byte | `R-RUN2` |
+| `same` on two files that differ only in a trailing newline | `R-RUN2` |
+| `same` with a missing file | `INFRA` |
+| `lock --snapshot` on a pass | the snapshot exists and is byte-equal to the new lock |
+| `lock --snapshot` on a refusal, and on no change | no snapshot file exists |
+
+`lockstep_check.py --negative-control` rows on HEAD's lock: `same` of the lock and itself is
+`PASS`; `same` of the lock and the lock with the first `version` changed is `R-RUN2`.
+
+`pin_check.py` mutation rows (each must give exactly its rule code):
+
+| Mutation | Expected |
+|---|---|
+| The `stage` step without the `same` command | P25 |
+| The `same` command with `\|\| true` joined to it | P18 |
+| The `same` command not the last command of the step | P18 |
+| The `lock` step without `--snapshot` | P25 |
+| `--snapshot` to another path | P25 |
+| The `stage` step before the `build` step | P25 |
+| Another step that writes `run1.lock` (`cp x "$RUNNER_TEMP/run1.lock"` in the `build` step) | P25 |
+| The `--b` argument names the work copy in place of the staged copy | P25 |
+
+`pin_check.py --negative-control` on the real workflow passes, and the existing rule rows stay.
+
+**The scratch-branch run (M5, before the PR).** The stage step runs only when `changed=true`, and
+the family on `main` is current. So the real proof is a scratch-branch run in the pattern of M0:
+
+1. Make `feature/sma-738-m5-scratch` from the feature branch. It never merges.
+2. In its `rs/Cargo.lock`, replace the seven family entries with the 0.2.128 entries of
+   `c9df6f09` and the family refs of the other packages with the refs of `c9df6f09`. Check
+   locally with cargo 1.95.0 that the four-package `cargo update -p` then moves the seven family
+   packages, flips the five edges, and gives exit 0 with the new checker.
+3. Push the branch and run `gh workflow run wasm-lockstep.yml --ref feature/sma-738-m5-scratch`.
+4. Expected: the `build` job passes. The `lock` step prints seven `family-moved` and five
+   `edge-moved` lines. The `stage` step prints the `same:` line. `propose` does not run its steps,
+   because the `release-pr` environment allows only `main`.
+5. Record the run URL and the values in the README under "M5".
+6. Delete the scratch branch after the run.
+
+A negative proof of `R-RUN2` on a runner needs a hostile run 2. That is not done: the self-test
+and the negative control prove the refusal, and P25 proves the wiring.
+
+Steps 3 and 6 push to GitHub and start a workflow. They need Sven's approval when they run.
+
+### 5.6 The gates
 
 `./ci/wasm-lockstep/run.sh --self-test`, `--negative-control` and the real run must pass.
 `repo:ruff-ci` must pass on the changed Python file.
@@ -251,13 +363,17 @@ feature branch cannot prove the whole workflow.
 
 - `ci/wasm-lockstep/README.md`:
   - The `R-NONFAMILY` row: dependency refs are compared by bare name, in order.
-  - A new `R-EDGE` row.
+  - A new `R-EDGE` row and a new `R-RUN2` row (for `same`).
+  - The P25 row in the pin-rules table, and `same` in the P18 row.
+  - The trust model: the host snapshots the lock after the verdict, and the stage step refuses a
+    lock that run 2 changed.
+  - A new measurement section "M5" with the scratch-branch run.
   - A sentence on the `edge-moved` output (also on exit 4) and the second PR-body table.
-  - "The trust model": the lock that `propose` checks is copied after container run 2 (4.4).
-  - "What the checks do not prove": run-2 code or cargo can re-point a non-family edge to another
-    version that is already in the lock. This can change which code a target compiles. No new
-    package enters the lock. The reviewer reads the edge table. `cargo-lock-integrity` catches
-    only an edge outside the manifest range.
+  - "What the checks do not prove": `cargo update` in run 1 can re-point a non-family edge to
+    another version that is already in the lock. This can change which code a target compiles.
+    No new package enters the lock. The reviewer reads the edge table. `cargo-lock-integrity`
+    catches only an edge outside the manifest range. A negative proof of `R-RUN2` on a runner
+    was not done.
 - `rs/CLAUDE.md`, the runbook "The wasm-bindgen family does not move through dependabot":
   - The diff comment `# the family entries (seven at M0) plus any new dep` adds "and dependency
     edges re-pointed between locked versions".
@@ -273,12 +389,15 @@ feature branch cannot prove the whole workflow.
 
 ## 7. Risks and rollback
 
-- The check is weaker: an edge flip between locked versions passes, also when run-2 code made it
-  (4.4). The PR body lists every flip.
+- The check is weaker: an edge flip between locked versions that `cargo update` made passes. The
+  PR body lists every flip. With 4.5, run-2 code cannot make such a flip.
+- The stage compare (4.5) runs on a runner only when the family moves. M5 proves it once on a
+  scratch branch. The next real proof comes with the next wasm-bindgen release.
 - A future cargo can write a ref in another form. That ref then is not in the canonical ref table
   and gives `R-EDGE`. This fails closed, and the runbook in `rs/CLAUDE.md` applies.
 - Open question (not measured): which cargo version wrote the edges on `main`. If Dependabot's
   cargo writes `0.61.2` again, the flips come back every week. The `edge-moved` lines on exit 4
   make this visible in the log.
 - Rollback: revert the PR. The weekly run then refuses with `R-NONFAMILY` again, which is the
-  known state before this change.
+  known state before this change. The workflow and `pin_check.py` change in the same commit, so
+  a revert keeps them consistent.
