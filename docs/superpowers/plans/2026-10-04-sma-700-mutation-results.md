@@ -18,7 +18,9 @@ Every mutation below compiled and failed at least one test. No mutation survived
   A failing integration test prints `TRY n FAIL`. The count includes these lines. A test that passed on a retry is not counted.
 - The test `gateway adapters::iam::client::tests::connect_succeeds_for_default_tls_system_trust` is excluded from the battery.
   It fails after 15 seconds in a full run on this host, also on the clean tree. It passes alone in 7.7 seconds.
-  The cause is most probably a slow load of the system trust store under load. SMA-700 does not touch that file.
+  Task 17 found the cause. The directory `rs/target/debug/deps` of this worktree held 2.9 million entries (89 GB).
+  macOS dyld stalled when it loaded the test binary from that directory, and the test reached its 15 s timeout.
+  The same binary passed from any other directory and from a fresh target directory. SMA-700 does not touch that file.
   The controller accepted this exclusion for the battery only. The full gate run of Task 17 still runs the test.
 - Three mutations did not compile in the form of the brief. The table shows the compiling form:
   - W11 (`CHALLENGE_BARE` was then unused): the arm is now `{ let _ = CHALLENGE_BARE; CHALLENGE_INVALID_TOKEN }`. The id is W11c.
