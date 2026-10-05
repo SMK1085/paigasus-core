@@ -45,7 +45,7 @@ code of each row, so a row cannot pass because a different check refused it.
 | `R-FORMAT` | The lock format version or a top-level table (`[patch]`, `[metadata]`) changed. |
 | `R-SHAPE` | A `[[package]]` entry has no string name and version, or a key appears twice. |
 | `R-NONFAMILY` | A package outside the family was added or removed, or it changed its version, source, checksum or the names it depends on. The check compares the dependency references of a non-family package by bare name, in order, with their count (SMA-738). The check of `R-EDGE` decides which version a reference points to. |
-| `R-EDGE` | A dependency reference moved in a way that cargo does not write (SMA-738). Four cases refuse. (1) One `dependencies` list of the new lock holds a reference two times. (2) An added reference is not the exact form that cargo writes for a package of the new lock. (3) A removed reference is not that form in the old lock. (4) One package has more than one removed or more than one added reference to one name. The form is `name` when the lock holds one package of that name. It is `name version` when the lock holds one package with that name and version. Otherwise it is `name version (source)`. A moved reference to a family name gets the same checks. `R-EDGE` runs before the family checks and before the no-change decision. |
+| `R-EDGE` | A dependency reference moved in a way that cargo does not write, or moved to another source only (SMA-738). The five cases are in the list below the table. |
 | `R-SEMVER` | A family version is not a strict `X.Y.Z`: no pre-release, no build metadata, no leading zero, ASCII digits only, no trailing newline. |
 | `R-TWICE` | A family name has more than one removed or more than one added entry. |
 | `R-DUPLICATE` | The new lock holds two versions of one family name side by side. |
@@ -55,6 +55,21 @@ code of each row, so a row cannot pass because a different check refused it.
 | `R-ABSENT` | The new lock holds no `wasm-bindgen` entry. `current` gives the same code for a lock without it. |
 | `R-DANGLING` | A remaining package still refers to a family name that the new lock does not hold. |
 | `R-RUN2` | (`same` only) The staged `rs/Cargo.lock` does not have the SHA-256 that the `lock` step printed, or it is a symlink, not a regular file, or over 8 MiB. Container run 2 changed the lock (SMA-738). |
+
+`R-EDGE` refuses in five cases:
+
+1. One `dependencies` list of the new lock holds a reference two times.
+2. An added reference is not the exact form that cargo writes for a package of the new lock.
+3. A removed reference is not that form in the old lock.
+4. One package has more than one removed or more than one added reference to one name.
+5. The old and the new reference point to the same name and version, with another source. An
+   example is a move from crates.io to git. An edge row cannot show this move. The message prints
+   both references. This case was added after the final review (2026-10-05).
+
+The form that cargo writes is `name` when the lock holds one package of that name. It is
+`name version` when the lock holds one package with that name and version. Otherwise it is
+`name version (source)`. A moved reference to a family name gets cases 1 to 3. `R-EDGE` runs
+before the family checks and before the no-change decision.
 
 No change exits 4. The count of seven is NOT asserted: a family release can drop a package (pass) or
 bring a new transitive dependency (`R-NONFAMILY`, so the manual runbook applies).

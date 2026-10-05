@@ -246,12 +246,14 @@ def ref_table(by_key: dict[Key, dict]) -> dict[str, Key]:
 def edge_verdict(old_by_key: dict[Key, dict], new_by_key: dict[Key, dict]) -> list[EdgeRow]:
     """R-EDGE (SMA-738 spec 4.2). It runs after R-NONFAMILY passed, so the non-family key sets of
     the two locks are equal, and each non-family package has the same bare-name list in both.
-    Four checks, each R-EDGE: (1) a non-family dependencies list of the new lock holds one
+    Five checks, each R-EDGE: (1) a non-family dependencies list of the new lock holds one
     reference two times; (2) an added reference is not a key of the new lock's ref_table; (3) a
     removed reference is not a key of the old lock's ref_table; (4) one (package, dependency name)
-    has more than one removed or more than one added reference. A reference to a family name gets
-    checks 1 to 3 and gives no edge row. Returns the edge rows, sorted, with every value from the
-    old lock (the new dependency key is also in the old lock, because the key sets are equal)."""
+    has more than one removed or more than one added reference; (5) the old and the new resolved
+    key have the same name and version, so only the source moved (added after the final review,
+    2026-10-05). A reference to a family name gets checks 1 to 3 and gives no edge row. Returns
+    the edge rows, sorted, with every value from the old lock (the new dependency key is also in
+    the old lock, because the key sets are equal). The dependency column is the resolved key name."""
     old_table, new_table = ref_table(old_by_key), ref_table(new_by_key)
     for key, entry in new_by_key.items():
         if key[0] in FAMILY:
@@ -282,7 +284,10 @@ def edge_verdict(old_by_key: dict[Key, dict], new_by_key: dict[Key, dict]) -> li
                 continue
             if len(gone) != 1 or len(came) != 1:
                 raise RefusalError("R-EDGE", f"{label}: {dep!r} has {len(gone)} removed and {len(came)} added references, so the old and the new reference cannot be paired")
-            rows.append((key[0], key[1], dep, old_table[gone[0]][1], new_table[came[0]][1]))
+            old_dep, new_dep = old_table[gone[0]], new_table[came[0]]
+            if old_dep[:2] == new_dep[:2]:
+                raise RefusalError("R-EDGE", f"{label}: the reference to {old_dep[0]} {old_dep[1]} moved to another source only ({gone[0]!r} to {came[0]!r}); an edge row cannot show that")
+            rows.append((key[0], key[1], old_dep[0], old_dep[1], new_dep[1]))
     return sorted(rows)
 
 
@@ -648,6 +653,11 @@ def _edge_rows() -> list[tuple[str, object, str]]:
         ("a new dependencies list with the same reference two times", _verdict(_lock(rest=_flip_rest(errno_deps=("windows-sys 0.52.0", "windows-sys 0.52.0"))), _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=("windows-sys 0.52.0", "windows-sys 0.52.0")))), "R-EDGE"),
         ("two moved references of one dependency name on one side of one package", _verdict(_lock(rest=_flip_rest(errno_deps=("windows-sys 0.45.0", "windows-sys 0.48.0"), extra=FOUR_WINDOWS_SYS)), _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=("windows-sys 0.52.0", "windows-sys 0.61.2"), extra=FOUR_WINDOWS_SYS))), "R-EDGE"),
         ("an added family reference with a payload after the family name", _verdict(_lock(rest=REST + _pkg("consumer", "1.0.0", deps=("wasm-bindgen",))), _lock(NEW_FAMILY, rest=REST + _pkg("consumer", "1.0.0", deps=("wasm-bindgen [x](http://evil)",)))), "R-EDGE"),
+        # Check 5 (final review): the same name and version, another source. An edge row would
+        # show `0.52.0 | 0.52.0` and hide the source change, so the move refuses.
+        ("a reference re-pointed from crates.io to git, same name and version", _verdict(
+            _lock(rest=_flip_rest(errno_deps=(f"windows-sys 0.52.0 ({CRATES_IO})",), extra=same_pair)),
+            _lock(NEW_FAMILY, rest=_flip_rest(errno_deps=(f"windows-sys 0.52.0 ({git_source})",), extra=same_pair))), "R-EDGE"),
         # The value rows.
         ("the real five-package edge flip, with a family move", _edges_check(_lock(rest=old), _lock(NEW_FAMILY, rest=flipped), FLIP_EDGES), "PASS"),
         ("the real five-package edge flip, no family move", _edges_check(_lock(rest=old), _lock(rest=flipped), FLIP_EDGES), "NOCHANGE"),
@@ -689,6 +699,40 @@ def _edge_body_rows(tmp: str) -> list[tuple[str, object, str]]:
                 raise RefusalError("R-SELFTEST", f"the body has no errno edge row: {found}")
         rows.append((f"the PR body after a pass {label}", check, "PASS"))
     return rows
+
+
+def _edge_print_rows(tmp: str) -> list[tuple[str, object, str]]:
+    """The `edge-moved` lines of `lock` and of `artifact` (SMA-738 spec 4.3, final review). Each
+    row compares the WHOLE printed output, so the order of the lines is checked too."""
+    old_path = os.path.join(tmp, "print-old.lock")
+    write_file(old_path, _lock(rest=_flip_rest()))
+    edge_lines = [f"edge-moved {p} {v} {d} {o} {n}" for p, v, d, o, n in FLIP_EDGES]
+    current_lines = [f"family-current {n} {v}" for n, v in sorted(OLD_FAMILY)]
+    moved_lines = [f"family-moved {n} {o} {v}" for (n, o), (_n, v) in sorted(zip(OLD_FAMILY, NEW_FAMILY, strict=True))]
+    no_move = os.path.join(tmp, "print-no-move.lock")
+    write_file(no_move, _lock(rest=_flip_rest("0.52.0")))
+    move_bytes = _lock(NEW_FAMILY, rest=_flip_rest("0.52.0")).encode()
+    move = os.path.join(tmp, "print-move.lock")
+    with open(move, "wb") as handle:
+        handle.write(move_bytes)
+    sha_line = f"lock-sha256 {hashlib.sha256(move_bytes).hexdigest()}"
+    only_edges = os.path.join(tmp, "print-only-edges")
+    _write_tree(only_edges, {LOCK_PATH: _lock(rest=_flip_rest("0.52.0")).encode()})
+
+    def whole(argv: list[str], want_rc: int, want_lines: list[str]):
+        def check() -> None:
+            rc, out = _main_capture(argv)
+            if rc != want_rc or out.splitlines() != want_lines:
+                raise RefusalError("R-SELFTEST", f"{argv[0]} returned {rc} and printed {out.splitlines()}, want {want_rc} and {want_lines}")
+        return check
+
+    return [
+        ("lock: the five-edge flip, no family move: exit 4, the edge lines after the family-current lines",
+         whole(["lock", "--old", old_path, "--new", no_move], RC_NO_CHANGE, current_lines + edge_lines), "PASS"),
+        ("lock: the five-edge flip, with a family move: exit 0, the edge lines after the family-moved lines",
+         whole(["lock", "--old", old_path, "--new", move], RC_OK, moved_lines + edge_lines + [sha_line]), "PASS"),
+        ("artifact: a lock that moves only edges", lambda: run_artifact(only_edges, old_path, None, None), "R-NOCHANGE"),
+    ]
 
 
 # ---- SMA-738: the run-1 lock compare (spec 5.5) -------------------------------------------------
@@ -909,6 +953,7 @@ def self_test() -> int:
         rows += _artifact_rows(tmp)
         rows += _files_rows(tmp)
         rows += _edge_body_rows(tmp)
+        rows += _edge_print_rows(tmp)
         rows += _hash_rows(tmp)
         for label, fn, want in rows:
             got = _outcome(fn)

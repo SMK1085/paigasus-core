@@ -98,6 +98,14 @@ Refs to a family name are included (see below).
 3. A removed ref is not a key of the old lock's canonical ref table.
 4. One (package, dependency name) has more than one removed or more than one added ref. The
    pairing of old and new refs is then not defined.
+5. The old and the new resolved key of a paired ref have the same name and version. Only the
+   source moved, for example from crates.io to git. An edge row would show `0.52.0 | 0.52.0` and
+   hide the source change. The message prints both refs with `!r`. (Added after the final review,
+   2026-10-05. The four-package update never makes a source-only move, so this check fails
+   closed.)
+
+The dependency column of an edge row is the name of the resolved key, not the text of the ref
+(added after the final review, 2026-10-05). The two are equal for a canonical ref.
 
 The message names the package as `name version` and prints the ref with `!r`, so control
 characters are visible.
