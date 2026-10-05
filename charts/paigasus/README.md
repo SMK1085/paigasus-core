@@ -71,7 +71,7 @@ with its own message, rather than letting a bad values file produce broken Kuber
   refuses `zones.iam.backend.dpop.enabled` that is not a boolean, `enabled: true` with an empty
   `forwardedBaseUrls`, and an entry that IAM would refuse at boot: not `https` (or `http` on
   `localhost`, `127.x.x.x` or `[::1]`), or with a query, a fragment or user info. It also refuses a
-  character outside printable ASCII, a space, `"` and `\`. It checks the entries also while DPoP is
+  character outside printable ASCII, a space, `"`, `$` and `\`. It checks the entries also while DPoP is
   off.
 
 - **A bad `httpRoute` block (SMA-694).** `paigasus.validateHttpRoute` in

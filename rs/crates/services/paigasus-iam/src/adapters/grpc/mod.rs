@@ -174,8 +174,8 @@ mod tests {
         let production = MAIN.split("\n#[cfg(test)]").next().expect("main.rs must have a production part");
         let production = production.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
         assert!(
-            production.contains(".http2_max_header_list_size(grpc::grpc_max_header_list_size("),
-            "main.rs must size the production gRPC header list with grpc_max_header_list_size"
+            production.contains(".http2_max_header_list_size(grpc::grpc_max_header_list_size(max_token_bytes))"),
+            "main.rs must size the production gRPC header list with grpc_max_header_list_size(max_token_bytes)"
         );
     }
 
