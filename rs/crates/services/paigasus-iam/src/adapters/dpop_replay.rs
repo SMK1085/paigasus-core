@@ -306,4 +306,41 @@ mod tests {
         // A redeemed entry still blocks a replay of the proof.
         assert_eq!(store.record(proof(1, 1, 1, 160, 160), 103), RecordOutcome::Replayed);
     }
+
+    /// Runs `op` on two threads that start together, and returns both results.
+    fn race<T: Send>(store: &InMemoryReplayStore, op: impl Fn(&InMemoryReplayStore) -> T + Sync) -> (T, T) {
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let run = || {
+                barrier.wait();
+                op(store)
+            };
+            let first = scope.spawn(run);
+            let second = scope.spawn(run);
+            (first.join().unwrap(), second.join().unwrap())
+        })
+    }
+
+    #[test]
+    fn two_threads_that_record_the_same_proof_get_one_fresh_and_one_replayed() {
+        for _ in 0..200 {
+            let store = roomy();
+            let (a, b) = race(&store, |s| s.record(proof(1, 1, 1, 160, 160), 100));
+            let fresh = [a, b].iter().filter(|o| **o == RecordOutcome::Fresh).count();
+            let replayed = [a, b].iter().filter(|o| **o == RecordOutcome::Replayed).count();
+            assert_eq!((fresh, replayed), (1, 1), "got {a:?} and {b:?}");
+        }
+    }
+
+    #[test]
+    fn two_threads_that_redeem_the_same_ticket_get_one_redeemed_and_one_refused() {
+        for _ in 0..200 {
+            let store = roomy();
+            assert_eq!(store.record(proof(1, 1, 1, 160, 160), 100), RecordOutcome::Fresh);
+            let (a, b) = race(&store, |s| s.redeem_follow_up(ProofKey([1; 16]), [1; 32], 101));
+            let redeemed = [a, b].iter().filter(|o| **o == RedeemOutcome::Redeemed).count();
+            let refused = [a, b].iter().filter(|o| **o == RedeemOutcome::Refused).count();
+            assert_eq!((redeemed, refused), (1, 1), "got {a:?} and {b:?}");
+        }
+    }
 }

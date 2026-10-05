@@ -288,6 +288,9 @@ two values into `IAM_AUTHN__DPOP__ENABLED` and `IAM_AUTHN__DPOP__FORWARDED_BASE_
 - **On.** `forwardedBaseUrls` lists the public URLs at which clients reach the gateway, each with
   any path prefix that a proxy removes. Each URL is quoted with `%q` in the figment inline form.
   One YAML comment renders above the two entries.
+- **Needs an IAM image that has the proof check.** The `0.2.1` image does not have it. With that image,
+  the two variables have no effect. Use the IAM image of the first release after SMA-700. The release
+  pull request moves the Cargo version and the chart tag together.
 - **The gateway is not deployed by the chart.** Set `GATEWAY_DPOP__ENABLED=true` on the gateway
   after IAM runs with DPoP on.
 - **One IAM replica.** The replay store is in memory. The IAM Deployment is pinned to one replica;

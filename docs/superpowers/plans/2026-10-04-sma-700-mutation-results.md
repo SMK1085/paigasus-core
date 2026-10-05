@@ -5,6 +5,7 @@ Tree under test: commit `eb056528`.
 Command for every mutation (the same for each row):
 
 ```
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run --locked --no-fail-fast -p paigasus-iam -p paigasus-gateway \
   -E 'kind(lib) | binary(grpc_authn) | binary(grpc_whoami) | binary(http_authn) | binary(chat_proxy)'
 ```
@@ -97,6 +98,11 @@ Each of these survived a first run. A test was added, and the whole battery was 
 
 ## keycloak_e2e
 
-Command: `cd rs && PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run --locked -p paigasus-iam --test keycloak_e2e`
+Command:
+
+```
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd rs && PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run --locked -p paigasus-iam --test keycloak_e2e
+```
 
 keycloak_e2e: PASS on `eb056528`.
