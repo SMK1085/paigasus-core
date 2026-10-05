@@ -54,6 +54,7 @@ code of each row, so a row cannot pass because a different check refused it.
 | `R-INPLACE` | A family entry kept its version and changed its checksum. |
 | `R-ABSENT` | The new lock holds no `wasm-bindgen` entry. `current` gives the same code for a lock without it. |
 | `R-DANGLING` | A remaining package still refers to a family name that the new lock does not hold. |
+| `R-RUN2` | (`same` only) The staged `rs/Cargo.lock` does not have the SHA-256 that the `lock` step printed, or it is a symlink, not a regular file, or over 8 MiB. Container run 2 changed the lock (SMA-738). |
 
 No change exits 4. The count of seven is NOT asserted: a family release can drop a package (pass) or
 bring a new transitive dependency (`R-NONFAMILY`, so the manual runbook applies).
@@ -65,6 +66,14 @@ version, the dependency, and the old and the new version, all from the old lock.
 `family-moved` lines. On exit 4 it prints them after the `family-current` lines, so the weekly log
 shows when cargo re-points edges again. `artifact` prints the same lines, and the PR body then has a
 second table, "Dependency edges that moved".
+
+`lock` prints `lock-sha256 <64 hex>` on exit 0 only. The value is the SHA-256 of exactly the bytes
+that the verdict judged. The reader makes one read, in binary mode, with no newline translation.
+`same --sha256 <64 hex> --file <path>` compares the bytes of one file with that value. It refuses
+with `R-RUN2` when they differ. A malformed or empty `--sha256` exits 2. A missing or unreadable
+file exits 2. A flag that appears two times exits 2. `artifact` also prints `lock-sha256` for the
+downloaded lock. A reviewer can then match the three values (`lock`, `same`, `artifact`) in the job
+logs.
 
 `artifact` adds `R-LAYOUT`, `R-SYMLINK` and `R-SIZE` (the tree holds `rs/Cargo.lock` and a subset of
 the five artifact files, all regular files of 8 MiB or less), `R-NOCHANGE` (the family did not
@@ -96,13 +105,14 @@ not on the next Tuesday.
 | P15 | No step `if:` calls `always()`, `failure()` or `cancelled()`. |
 | P16 | The token step uses `actions/create-github-app-token` with exactly `client-id`, `private-key`, `permission-contents: write` and `permission-pull-requests: write`. |
 | P17 | Every checkout sets `persist-credentials: false`. |
-| P18 | The `verify` and `status` commands of `lockstep_check.py` are whole commands: the last command of the step, with no `\|\|`, `;`, pipe, `&&` guard, `if` or later `exit` joined to them. A refusal then fails the step. |
+| P18 | The `artifact`, `status` and `same` commands of `lockstep_check.py` are whole commands, in every job: the last command of the step, with no `\|\|`, `;`, pipe, `&&` guard, `if` or later `exit` joined to them. A refusal then fails the step. The `lock` command is not one of them: its step keeps `\|\| rc=$?`. |
 | P19 | No step sets `working-directory`. No `env:` key at any level (workflow, job or step) is `BASH_ENV`, `ENV` or `ACTIONS_ALLOW_UNSECURE_COMMANDS`. No script names `GITHUB_ENV` or `GITHUB_PATH`. |
 | P20 | `propose` makes no `gh api` call other than GET: no `-X` or `--method` with another verb, no `-f`, `-F`, `--field`, `--raw-field` or `--input`, and no `graphql`. No `git` call takes `-c` or `--config-env`. |
 | P21 | The `gh pr list --head` call passes `--json` and `--jq` that name `isCrossRepository`, and the jq selects `select(.isCrossRepository \| not)`. The App token then never edits a pull request from a fork. |
 | P22 | `propose` runs only these `gh` commands: `api`, `pr list`, `pr create`, `pr edit` and `pr close`. Any other one (`gh pr merge`, `gh workflow run`, `gh repo`, `gh secret`) is refused. |
 | P23 | Every `gh pr list` passes `--head deps/wasm-bindgen-lockstep`. A step that runs `gh pr close` or `gh pr edit` must also run such a list. The check does not follow the number from the list to the close. It requires the list in the same step. |
 | P24 | No expression in the workflow reads the outputs of the build steps `update` or `build` (the container runs), in any case or index form. |
+| P25 | The `build` step ids are exactly `reclaim, checkout, ref, copy, update, lock, build, stage, upload`. The `if:` of `build`, `stage` and `upload` is exactly `steps.lock.outputs.changed == 'true'`. The whole `run:` text of the `lock` step and of the `stage` step equals the pinned text of `LOCK_RUN` and `STAGE_RUN` in `pin_check.py`. A person who edits one of these two scripts must change `pin_check.py` in the same commit. The pin refuses every form of shell code that sets `LOCK_SHA256`, skips the compare or stops bash from running it. The workflow `env:` holds only `LOCKSTEP_IMAGE`. The `build` job has no `env:`. So no inherited variable (`PATH`, `PYTHONPATH`, `LD_PRELOAD`) can change how the `stage` step runs `python3`. Three more checks give clearer messages. The `lock` step runs one checker command only: `python3 ci/wasm-lockstep/lockstep_check.py lock --old "$RUNNER_TEMP/old.lock" --new "$RUNNER_TEMP/work/rs/Cargo.lock"`. The `stage` step runs one checker command only: `python3 ci/wasm-lockstep/lockstep_check.py same --sha256 "$LOCK_SHA256" --file "$RUNNER_TEMP/stage/rs/Cargo.lock"`. The `env:` of the `stage` step is exactly `LOCK_SHA256: ${{ steps.lock.outputs.lock_sha256 }}`. No other `env:` key, at any level, is named `LOCK_SHA256`. `upload.with.path` is exactly `${{ runner.temp }}/stage/`. No script and no `env:` key at any level sets `RUNNER_TEMP` (SMA-738). |
 
 The P6 rule pins the action NAME and a full SHA, not one specific SHA, so a dependabot action bump
 does not turn this gate red. A new action, or a tag in place of a SHA, does.
@@ -118,7 +128,21 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
   cache entry in the `refs/heads/main` scope or an artifact (spec F11, AC3).
 - After the compile, the host runs no file of the work copy and no `git` command on it. It checks
   each path component for a symlink, then copies the six files with `cp`.
-- The host writes `changed` BEFORE the compile, so third-party code cannot set it.
+- The host writes `changed` and `lock_sha256` BEFORE the compile, so third-party code cannot set
+  them.
+- **The run-1 lock compare (SMA-738).** On exit 0 the `lock` step writes `lock_sha256` as a STEP
+  output, before container run 2. The value is the SHA-256 of the exact bytes that the verdict
+  judged. A step output cannot change after its step ends, and no file holds it. The last command
+  of the `stage` step is `lockstep_check.py same`. It refuses a staged `rs/Cargo.lock` with other
+  bytes (`R-RUN2`), so `upload` and `propose` do not run. An edge move or a family entry that
+  reaches `propose` can then come only from `cargo update` in run 1. That run executes no build
+  script. This control is in `build` only. `propose` cannot check it again, because that needs a
+  second job output (P9). It depends on `pin_check.py` (P18, P25) and on the build runner host. P25
+  pins the whole `run:` text of the `lock` step and of the `stage` step. A person changes
+  `pin_check.py` together with the workflow. The workflow `env:` holds only `LOCKSTEP_IMAGE`, and
+  the `build` job has no `env:`. So no inherited variable can change how the `stage` step runs
+  `python3`. A container escape in run 2 can reach the runner and
+  defeat it. This is the same residual as the cache scope (Q7).
 - **`propose`** holds the App key for the whole job (environment `release-pr`, main-only branch
   policy). The control is that no step executes artifact content: no toolchain, no cargo, no pnpm,
   no moon, and no script from the artifact. A refusal fails the `verify` step, so the token step
@@ -162,8 +186,7 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
 - The branch-owner check uses `.author.login`. GitHub takes that value from the author email. The
   check guards against a mistake. It does not stop an attacker with push access.
 - `pin_check.py` does not detect the removal of the per-component symlink loop of the stage step.
-  It does not detect an upload of `$RUNNER_TEMP/work/` in place of the stage directory. The
-  `propose` re-check of the layout (`R-LAYOUT`, `R-SYMLINK`) catches a wrong layout, not the
+  The `propose` re-check of the layout (`R-LAYOUT`, `R-SYMLINK`) catches a wrong layout, not the
   removal of the loop.
 - `propose` runs for the first time at M3. It cannot run on a scratch branch, because of the
   `release-pr` environment (main-only branch policy).

@@ -16,6 +16,9 @@
 #     no artifact content: no toolchain, no cargo, no pnpm, no moon, no script from the artifact.
 #   * `needs.build.outputs` appears in `propose` only in `if:` values. Every value that reaches a
 #     command comes from lockstep_check.py's output on the downloaded bytes.
+#   * The `lock` step writes `lock_sha256`, the SHA-256 of the lock bytes it judged, as a STEP
+#     output before container run 2. The `stage` step refuses a staged lock with other bytes
+#     (R-RUN2). This control is in `build` only: `propose` cannot check it again (SMA-738).
 # repo:wasm-lockstep (ci/wasm-lockstep/pin_check.py) asserts these rules on every PR that edits
 # this file. A refusal of the checker stays red until a person runs the manual runbook in
 # rs/CLAUDE.md (SMA-693 Q10).
@@ -103,9 +106,12 @@ jobs:
           set -euo pipefail
           docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh update
 
-      # The early exit, in the runbook's order: a refusal stops the job before any compile. This
-      # is not the control: propose runs the same checker again on the downloaded bytes. The host
-      # writes `changed` here, before the compile, so third-party code cannot set it.
+      # The early exit, in the runbook's order: a refusal stops the job before any compile. For the
+      # lock VERDICT this is not the control: propose runs the same checker again on the downloaded
+      # bytes. It IS the only control that run 2 did not change the lock (SMA-738): on exit 0 it
+      # writes lock_sha256, the SHA-256 of the bytes it judged, and the stage step compares the
+      # staged lock with it. The host writes `changed` and `lock_sha256` here, before the compile,
+      # so third-party code cannot set them.
       - name: Check the lock change on the host
         id: lock
         run: |
@@ -114,7 +120,9 @@ jobs:
           python3 ci/wasm-lockstep/lockstep_check.py lock --old "$RUNNER_TEMP/old.lock" --new "$RUNNER_TEMP/work/rs/Cargo.lock" > "$RUNNER_TEMP/lock-verdict.txt" || rc=$?
           cat "$RUNNER_TEMP/lock-verdict.txt"
           if [ "$rc" -eq 0 ]; then
+            sha="$(sed -n 's/^lock-sha256 \([0-9a-f]\{64\}\)$/\1/p' "$RUNNER_TEMP/lock-verdict.txt")"
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "lock_sha256=${sha}" >> "$GITHUB_OUTPUT"
           elif [ "$rc" -eq 4 ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             version="$(sed -n 's/^family-current wasm-bindgen \([0-9.]*\)$/\1/p' "$RUNNER_TEMP/lock-verdict.txt")"
@@ -138,10 +146,14 @@ jobs:
           docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh build
 
       # Copy only. The host executes no file of the work copy. Every path component is checked for
-      # a symlink, so a symlinked file or parent directory cannot make cp read a host file.
+      # a symlink, so a symlinked file or parent directory cannot make cp read a host file. The last
+      # command compares the STAGED lock with the lock_sha256 of the lock step: a lock that run 2
+      # changed refuses with R-RUN2, and upload does not run (SMA-738). P18 and P25 pin it.
       - name: Stage the six files
         id: stage
         if: steps.lock.outputs.changed == 'true'
+        env:
+          LOCK_SHA256: ${{ steps.lock.outputs.lock_sha256 }}
         run: |
           set -euo pipefail
           src="$RUNNER_TEMP/work"
@@ -161,6 +173,7 @@ jobs:
             test -f "$src/$f"
             cp "$src/$f" "$dst/$f"
           done
+          python3 ci/wasm-lockstep/lockstep_check.py same --sha256 "$LOCK_SHA256" --file "$RUNNER_TEMP/stage/rs/Cargo.lock"
 
       # ONE path, so the artifact root is the stage directory and the download holds rs/... (F13).
       - name: Upload the artifact

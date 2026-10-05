@@ -2,7 +2,7 @@
 """The pin check of .github/workflows/wasm-lockstep.yml (SMA-693 spec 5.4).
 
 A PyYAML parse, never a text scan: SMA-593 measured fourteen bypasses of a text scan, a YAML
-alias among them. The rules (P0-P24) are the trust model of spec 5.1 and 5.2 in checkable form.
+alias among them. The rules (P0-P25) are the trust model of spec 5.1 and 5.2 in checkable form.
 ci/wasm-lockstep/README.md lists each rule and what it does not prove.
 
   pin_check.py <workflow.yml>                       the rules on one workflow
@@ -54,7 +54,7 @@ IMAGE_ASSIGN = re.compile(r"\bLOCKSTEP_IMAGE(?:[:+])?=")
 RUNNER_FILES = re.compile(r"GITHUB_(?:ENV|PATH)\b")
 IF_PATH = re.compile(r"\$\.jobs\.[^.\[]+(?:\.steps\[\d+\])?\.if")
 EXEC_ENV_KEYS = frozenset({"BASH_ENV", "ENV"})
-CHECKER_SUBS = frozenset({"artifact", "status"})
+CHECKER_SUBS = frozenset({"artifact", "status", "same"})
 GH_BODY_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
 # P19: this variable turns the deprecated ::set-env:: and ::add-path:: commands back on.
 UNSECURE_KEY = "ACTIONS_ALLOW_UNSECURE_COMMANDS"
@@ -63,6 +63,63 @@ GH_ALLOWED = (["api"], ["pr", "list"], ["pr", "create"], ["pr", "edit"], ["pr", 
 BOT_HEAD = ["--head", "deps/wasm-bindgen-lockstep"]
 # P24: the step ids of the container runs in build. Their outputs hold data of the untrusted build.
 CONTAINER_STEP_OUTPUTS = re.compile(r"\bsteps\b\s*(?:\.\s*|\[\s*['\"])(?:update|build)\b", re.IGNORECASE)
+# P25 (SMA-738): the build job's structure around the run-1 lock compare.
+BUILD_ORDER = ("reclaim", "checkout", "ref", "copy", "update", "lock", "build", "stage", "upload")
+BUILD_IF = "steps.lock.outputs.changed == 'true'"
+LOCK_CMD = ["python3", "ci/wasm-lockstep/lockstep_check.py", "lock", "--old", "$RUNNER_TEMP/old.lock", "--new", "$RUNNER_TEMP/work/rs/Cargo.lock"]
+LOCK_OUTPUT_LINE = 'echo "lock_sha256=${sha}" >> "$GITHUB_OUTPUT"'
+SAME_CMD = ["python3", "ci/wasm-lockstep/lockstep_check.py", "same", "--sha256", "$LOCK_SHA256", "--file", "$RUNNER_TEMP/stage/rs/Cargo.lock"]
+STAGE_ENV = {"LOCK_SHA256": "${{ steps.lock.outputs.lock_sha256 }}"}
+UPLOAD_PATH = "${{ runner.temp }}/stage/"
+RUNNER_TEMP_ASSIGN = re.compile(r"\bRUNNER_TEMP(?:[:+])?=")
+# P25: LOCK_SHA256 holds the hash that the lock step judged. Only the stage env may set it.
+LOCK_SHA_ASSIGN = re.compile(r"\bLOCK_SHA256(?:[:+])?=")
+# P25: the whole `run:` text of the build steps `lock` and `stage`, as PyYAML loads it from the
+# workflow. A deny-list of shell forms cannot close the class (a quoted name, an indirect name,
+# `set -n`), so the two scripts are pinned exactly. Change these constants WITH the workflow.
+LOCK_RUN = "\n".join((
+    'set -euo pipefail',
+    'rc=0',
+    'python3 ci/wasm-lockstep/lockstep_check.py lock --old "$RUNNER_TEMP/old.lock" --new "$RUNNER_TEMP/work/rs/Cargo.lock" > "$RUNNER_TEMP/lock-verdict.txt" || rc=$?',
+    'cat "$RUNNER_TEMP/lock-verdict.txt"',
+    'if [ "$rc" -eq 0 ]; then',
+    '  sha="$(sed -n \'s/^lock-sha256 \\([0-9a-f]\\{64\\}\\)$/\\1/p\' "$RUNNER_TEMP/lock-verdict.txt")"',
+    '  echo "changed=true" >> "$GITHUB_OUTPUT"',
+    '  echo "lock_sha256=${sha}" >> "$GITHUB_OUTPUT"',
+    'elif [ "$rc" -eq 4 ]; then',
+    '  echo "changed=false" >> "$GITHUB_OUTPUT"',
+    '  version="$(sed -n \'s/^family-current wasm-bindgen \\([0-9.]*\\)$/\\1/p\' "$RUNNER_TEMP/lock-verdict.txt")"',
+    '  echo "::notice::The wasm-bindgen family is current at ${version}. No pull request is needed."',
+    '  echo "The wasm-bindgen family is current at ${version}." >> "$GITHUB_STEP_SUMMARY"',
+    'elif [ "$rc" -eq 3 ]; then',
+    '  echo "::error::lockstep_check refused the lock change (see the line above). Follow the manual runbook in rs/CLAUDE.md, \\"The wasm-bindgen family does not move through dependabot\\"."',
+    '  exit 1',
+    'else',
+    '  echo "::error::lockstep_check could not run (exit ${rc}). This is an infrastructure error, not a verdict."',
+    '  exit 1',
+    'fi',
+)) + "\n"
+STAGE_RUN = "\n".join((
+    'set -euo pipefail',
+    'src="$RUNNER_TEMP/work"',
+    'dst="$RUNNER_TEMP/stage"',
+    'for d in rs rs/crates rs/crates/bindings rs/crates/bindings/paigasus-wasm; do',
+    '  if test -L "$src/$d"; then',
+    '    echo "::error::$d in the work copy is a symlink."',
+    '    exit 1',
+    '  fi',
+    'done',
+    'mkdir -p "$dst/rs/crates/bindings/paigasus-wasm"',
+    'for f in rs/Cargo.lock rs/crates/bindings/paigasus-wasm/paigasus_wasm.js rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm; do',
+    '  if test -L "$src/$f"; then',
+    '    echo "::error::$f in the work copy is a symlink."',
+    '    exit 1',
+    '  fi',
+    '  test -f "$src/$f"',
+    '  cp "$src/$f" "$dst/$f"',
+    'done',
+    'python3 ci/wasm-lockstep/lockstep_check.py same --sha256 "$LOCK_SHA256" --file "$RUNNER_TEMP/stage/rs/Cargo.lock"',
+)) + "\n"
 
 EXPECTED_JOBS = frozenset({"build", "propose"})
 EXPECTED_TRIGGERS = frozenset({"schedule", "workflow_dispatch"})
@@ -244,7 +301,7 @@ def _substitutions(text: str) -> tuple[str, list[str], list[str]]:
 
 def commands(script: str) -> tuple[list[list[str]], list[str]]:
     """Every simple command of a `run:` script as [word, args...], and the problems found."""
-    outer, inner, problems = _substitutions(script.replace("\\\n", " "))
+    outer, inner, problems = _substitutions(script.replace("\\\n", ""))
     found: list[list[str]] = []
     for text in inner:
         sub, sub_problems = commands(text)
@@ -358,15 +415,17 @@ def _tokens(line: str) -> list[str] | None:
 
 
 def _checker_tail(script: str, where: str) -> list[str]:
-    """A `lockstep_check.py artifact|status` command must be the LAST command of its step, whole,
-    with no `||`, `&&`, `;`, `|` or `&` joined to it and no open if/for/while around it. Else a
-    refusal (exit 3) can be ignored: `... || true`, `... || rc=$?`, `if false; then ...; fi`."""
+    """A `lockstep_check.py artifact|status|same` command must be the LAST command of its step,
+    whole, with no `||`, `&&`, `;`, `|` or `&` joined to it and no open if/for/while around it. Else
+    a refusal (exit 3) can be ignored: `... || true`, `... || rc=$?`, `if false; then ...; fi`. This
+    applies to every job (SMA-738): `same` is the last command of the build step `stage`. The `lock`
+    subcommand is not in CHECKER_SUBS, so the `lock` step keeps its `|| rc=$?`."""
     found, _problems = commands(script)
     hits = [c for c in found if c[:2] == ["python3", CHECKER] and c[2:3] and c[2] in CHECKER_SUBS]
     if not hits:
         return []
     msg = [f"P18 {where}: the checker command must be the last whole command of its step, with nothing joined to it"]
-    outer = _substitutions(script.replace("\\\n", " "))[0]
+    outer = _substitutions(script.replace("\\\n", ""))[0]
     lines = [ln for ln in outer.splitlines() if ln.strip() and not ln.strip().startswith("#")]
     tokens = _tokens(lines[-1]) if lines else None
     if len(hits) != 1 or tokens is None or tokens[:3] != hits[0][:3]:
@@ -387,12 +446,20 @@ def command_violations(job: str, script: str, where: str) -> list[str]:
         out.append(f"P4 {where}: a run script assigns LOCKSTEP_IMAGE, which would replace the pinned image")
     if RUNNER_FILES.search(script):
         out.append(f"P19 {where}: a run script names GITHUB_ENV or GITHUB_PATH, which change the later steps of the job")
+    if LOCK_SHA_ASSIGN.search(script):
+        out.append(f"P25 {where}: a run script assigns LOCK_SHA256, which would replace the hash that the lock step judged")
+    if RUNNER_TEMP_ASSIGN.search(script):
+        out.append(f"P25 {where}: a run script assigns RUNNER_TEMP, which would move the paths that the stage compare and the upload use")
     allowed = JOB_WORDS[job]
     lists_bot = any(c[1:3] == ["pr", "list"] and any(c[i:i + 2] == BOT_HEAD for i in range(3, len(c))) for c in found)
     if not lists_bot and any(c[0] == "gh" and c[1:3] in (["pr", "close"], ["pr", "edit"]) for c in found):
         out.append(f"P23 {where}: a step that closes or edits a pull request must list with --head deps/wasm-bindgen-lockstep")
     for cmd in found:
         word = cmd[0]
+        if "LOCK_SHA256" in cmd[1:]:
+            out.append(f"P25 {where}: {word!r} names LOCK_SHA256 as an argument, so it can set the variable")
+        if "RUNNER_TEMP" in cmd[1:]:
+            out.append(f"P25 {where}: {word!r} names RUNNER_TEMP as an argument, so it can set the variable")
         if word != "docker" and IMAGE_TOKEN[1:] in cmd[1:]:
             out.append(f"P4 {where}: {word!r} names LOCKSTEP_IMAGE as an argument, so it can set the variable")
         if word == "git" and any(a == "-c" or a.startswith("-c") or a.startswith("--config-env") for a in cmd[1:]):
@@ -420,7 +487,7 @@ def command_violations(job: str, script: str, where: str) -> list[str]:
     return out
 
 
-def _env_violations(env, where: str, image_ok: bool = False) -> list[str]:
+def _env_violations(env, where: str, image_ok: bool = False, lock_ok: bool = False) -> list[str]:
     if env is None:
         return []
     if not isinstance(env, dict):
@@ -433,6 +500,10 @@ def _env_violations(env, where: str, image_ok: bool = False) -> list[str]:
             out.append(f"P19 {where}: env sets {key}, which makes bash run a file before a step")
         if key == UNSECURE_KEY:
             out.append(f"P19 {where}: env sets {key}, which turns on the set-env and add-path workflow commands")
+        if key == "LOCK_SHA256" and not lock_ok:
+            out.append(f"P25 {where}: env sets LOCK_SHA256 outside the env of the build step stage")
+        if key == "RUNNER_TEMP":
+            out.append(f"P25 {where}: env sets RUNNER_TEMP, which would move the paths that the stage compare and the upload use")
     return out
 
 
@@ -466,11 +537,10 @@ def step_violations(job: str, steps: list[dict]) -> list[str]:
                     out.append(f"P17 {where}: a checkout must set persist-credentials: false")
         if "run" in step:
             out += command_violations(job, str(step["run"]), where)
-            if job == "propose":
-                out += _checker_tail(str(step["run"]), where)
+            out += _checker_tail(str(step["run"]), where)
         if "working-directory" in step:
             out.append(f"P19 {where}: working-directory moves a step into the work copy or a runner path")
-        out += _env_violations(step.get("env"), where)
+        out += _env_violations(step.get("env"), where, lock_ok=job == "build" and step.get("id") == "stage")
         if step.get("shell", "bash") != "bash":
             out.append(f"P13 {where}: shell must be bash, not {step.get('shell')!r}")
         if step.get("continue-on-error", False) not in (False, "false"):
@@ -492,6 +562,9 @@ def violations(doc: dict) -> list[str]:
     out += [f"P3 {w} reads the secrets context outside the jobs" for w in _reads(top, SECRETS_CTX)]
     out += _env_violations(doc.get("env"), "the workflow", image_ok=True)
     env = doc.get("env") if isinstance(doc.get("env"), dict) else {}
+    # P25: an inherited variable (PATH, PYTHONPATH, LD_PRELOAD) can change how the stage step runs
+    # python3, and run 2 can write into the work copy. So the workflow env is an allow-list of one.
+    out += [f"P25 the workflow env holds {key!r}; only LOCKSTEP_IMAGE is allowed" for key in env if key != "LOCKSTEP_IMAGE"]
     if not IMAGE_PIN.fullmatch(str(env.get("LOCKSTEP_IMAGE", ""))):
         out.append("P4 env.LOCKSTEP_IMAGE must be docker.io/library/rust:<version>-bookworm@sha256:<64 hex>")
     jobs = doc.get("jobs")
@@ -516,11 +589,14 @@ def violations(doc: dict) -> list[str]:
         out += step_violations(name, _steps(job, name))
     build, propose = jobs.get("build"), jobs.get("propose")
     if isinstance(build, dict):
+        if "env" in build:
+            out.append("P25 the build job declares env")
         if "environment" in build:
             out.append("P3 build declares an environment")
         out += [f"P3 {w} reads the secrets context in build" for w in _reads(build, SECRETS_CTX, "$.jobs.build")]
         if build.get("outputs") != BUILD_OUTPUTS:
             out.append(f"P9 build outputs are {build.get('outputs')!r}, expected {BUILD_OUTPUTS}")
+        out += _build_violations(build)
     if isinstance(propose, dict):
         out += _propose_violations(propose)
     out += _push_violations(jobs)
@@ -529,6 +605,48 @@ def violations(doc: dict) -> list[str]:
             for where, _key, text in _strings(doc)
             if any(CONTAINER_STEP_OUTPUTS.search(span) for span in EXPR_SPAN.findall(text))
             or (_key == "if" and CONTAINER_STEP_OUTPUTS.search(text))]
+    return out
+
+
+def _build_violations(build: dict) -> list[str]:
+    """P25 (SMA-738 spec 4.5). The lock step writes the SHA-256 of the lock bytes it judged as a
+    step output before container run 2; the stage step compares the STAGED lock with it; upload
+    sends exactly the stage directory. The exact token lists also refuse a repeated flag."""
+    out = []
+    steps = _steps(build, "build")
+    ids = tuple(str(s.get("id")) for s in steps)
+    if ids != BUILD_ORDER:
+        out.append(f"P25 the build step order is {list(ids)}, expected {list(BUILD_ORDER)}")
+    by_id = {str(s.get("id")): s for s in steps}
+    for step_id in ("build", "stage", "upload"):
+        if by_id.get(step_id, {}).get("if") != BUILD_IF:
+            out.append(f"P25 the if: of build step {step_id} must be exactly {BUILD_IF}")
+    for step_id, pinned in (("lock", LOCK_RUN), ("stage", STAGE_RUN)):
+        text = str(by_id.get(step_id, {}).get("run", ""))
+        if text != pinned:
+            got, want = text.split("\n"), pinned.split("\n")
+            line = next((n + 1 for n in range(min(len(got), len(want))) if got[n] != want[n]), min(len(got), len(want)) + 1)
+            out.append(f"P25 the {step_id} step script differs from the pinned text, first at line {line}")
+    lock_run = str(by_id.get("lock", {}).get("run", ""))
+    lock_cmds = [c for c in commands(lock_run)[0] if c[:2] == ["python3", CHECKER]]
+    if lock_cmds != [LOCK_CMD]:
+        out.append(f"P25 the lock step must run exactly one checker command, {' '.join(LOCK_CMD)}, not {lock_cmds}")
+    if LOCK_OUTPUT_LINE not in [line.strip() for line in lock_run.splitlines()]:
+        out.append(f"P25 the lock step must hold the line {LOCK_OUTPUT_LINE}")
+    stage = by_id.get("stage", {})
+    stage_cmds = [c for c in commands(str(stage.get("run", "")))[0] if c[:2] == ["python3", CHECKER]]
+    if stage_cmds != [SAME_CMD]:
+        out.append(f"P25 the stage step must run exactly one checker command, {' '.join(SAME_CMD)}, not {stage_cmds}")
+    # An exit before the same command would skip the compare. The copy loop uses `exit 1` only.
+    stage_exits = [c for c in commands(str(stage.get("run", "")))[0] if c[0] == "exit" and c != ["exit", "1"]]
+    if stage_exits:
+        out.append(f"P25 the stage step may use no exit command except `exit 1`, not {stage_exits}")
+    if stage.get("env") != STAGE_ENV:
+        out.append(f"P25 the stage env must be exactly {STAGE_ENV}, not {stage.get('env')!r}")
+    upload = by_id.get("upload", {})
+    with_block = upload.get("with") if isinstance(upload.get("with"), dict) else {}
+    if with_block.get("path") != UPLOAD_PATH:
+        out.append(f"P25 upload.with.path must be exactly {UPLOAD_PATH}, not {with_block.get('path')!r}")
     return out
 
 
@@ -592,6 +710,42 @@ def _push_violations(jobs: dict) -> list[str]:
 
 # ---- the self-test (T3) -----------------------------------------------------------------------
 
+# SMA-738 P25: the build steps of the fixture, as pieces, so that the mutation rows can name them.
+LOCK_SHA_LINE = 'echo "lock_sha256=${sha}" >> "$GITHUB_OUTPUT"'
+SAME_LINE = 'python3 ci/wasm-lockstep/lockstep_check.py same --sha256 "$LOCK_SHA256" --file "$RUNNER_TEMP/stage/rs/Cargo.lock"'
+
+
+def _indent(text: str) -> str:
+    """A pinned script as the literal block of a fixture step: ten spaces, every line."""
+    return "".join(f"          {line}\n" for line in text.splitlines())
+
+
+LOCK_STEP = "      - id: lock\n        run: |\n" + _indent(LOCK_RUN)
+BUILD_JOB_STEP = "".join((
+    "      - id: build\n",
+    "        if: steps.lock.outputs.changed == 'true'\n",
+    "        run: |\n",
+    '          docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh build\n',
+))
+STAGE_IF = "      - id: stage\n        if: steps.lock.outputs.changed == 'true'\n"
+STAGE_ENV_LINE = "          LOCK_SHA256: ${{ steps.lock.outputs.lock_sha256 }}\n"
+STAGE_STEP = "".join((
+    STAGE_IF,
+    "        env:\n",
+    STAGE_ENV_LINE,
+    "        run: |\n",
+    _indent(STAGE_RUN),
+))
+UPLOAD_HEAD = "      - id: upload\n"
+UPLOAD_PATH_LINE = "          path: ${{ runner.temp }}/stage/\n"
+UPLOAD_STEP = "".join((
+    UPLOAD_HEAD,
+    "        if: steps.lock.outputs.changed == 'true'\n",
+    "        uses: actions/upload-artifact@" + "2" * 40 + "\n",
+    "        with:\n",
+    UPLOAD_PATH_LINE,
+))
+
 FIXTURE = """\
 name: wasm-lockstep
 on:
@@ -610,23 +764,20 @@ jobs:
     outputs:
       changed: ${{ steps.lock.outputs.changed }}
     steps:
+      - id: reclaim
+        run: df -h /
       - id: checkout
         uses: actions/checkout@""" + "1" * 40 + """
         with:
           persist-credentials: false
+      - id: ref
+        run: test "$GITHUB_REF" = refs/heads/main
+      - id: copy
+        run: mkdir -p "$RUNNER_TEMP/work" "$RUNNER_TEMP/stage"
       - id: update
         run: |
           docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE" bash ci/wasm-lockstep/container.sh update
-      - id: lock
-        run: |
-          rc=0
-          python3 ci/wasm-lockstep/lockstep_check.py lock --old a --new b > "$RUNNER_TEMP/v.txt" || rc=$?
-          if [ "$rc" -eq 0 ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-      - id: upload
-        if: steps.lock.outputs.changed == 'true'
-        uses: actions/upload-artifact@""" + "2" * 40 + """
+""" + LOCK_STEP + BUILD_JOB_STEP + STAGE_STEP + UPLOAD_STEP + """\
   propose:
     needs: build
     if: needs.build.result == 'success'
@@ -700,7 +851,7 @@ VERIFY_STEP = """      - id: verify
 PR_LIST = "gh pr list --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'"
 BUILD_STEP_ANCHOR = "      - id: update\n"
 PROPOSE_RUN = "        run: cp a b\n"
-BUILD_RUN = "          rc=0\n"
+BUILD_RUN = "container.sh update\n"  # the update step: it is not pinned by P25
 
 # (label, (old, new) replacements on FIXTURE, rule id that must appear or "PASS")
 SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
@@ -833,6 +984,53 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("steps['build'].outputs in a with: of propose", (("          persist-credentials: false\n      - id: download", "          persist-credentials: false\n          ref: ${{ steps['build'].outputs.v }}\n      - id: download"),), "P24"),
     ("continue-on-error: true on the build job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n"),), "P14"),
     ('continue-on-error: "true" on the propose job', (("    environment: release-pr\n", "    environment: release-pr\n    continue-on-error: \"true\"\n"),), "P14"),
+    # ---- SMA-738: P18 for every job, and P25 ----
+    ("the stage step without the same command", ((f"          {SAME_LINE}\n", ""),), "P25"),
+    ("the same command joined with || true", ((SAME_LINE, SAME_LINE + " || true"),), "P18"),
+    ("the same command not the last command of the stage step", ((f"          {SAME_LINE}\n", f"          {SAME_LINE}\n          echo done\n"),), "P18"),
+    ("a second --file on the same command", ((SAME_LINE, SAME_LINE + ' --file "$RUNNER_TEMP/work/rs/Cargo.lock"'),), "P25"),
+    ("--file names the work copy", ((SAME_LINE, SAME_LINE.replace("/stage/rs/", "/work/rs/")),), "P25"),
+    ("the stage env reads another step output", ((STAGE_ENV_LINE, STAGE_ENV_LINE.replace("outputs.lock_sha256", "outputs.changed")),), "P25"),
+    ("the lock step without the lock_sha256 line", ((f"            {LOCK_SHA_LINE}\n", ""),), "P25"),
+    ("lock after build", ((LOCK_STEP + BUILD_JOB_STEP, BUILD_JOB_STEP + LOCK_STEP),), "P25"),
+    ("a new step between stage and upload", ((UPLOAD_HEAD, "      - id: extra\n        run: echo extra\n" + UPLOAD_HEAD),), "P25"),
+    ("the stage if: changed to != 'false'", ((STAGE_IF, STAGE_IF.replace("== 'true'", "!= 'false'")),), "P25"),
+    ("upload.with.path names the work copy", ((UPLOAD_PATH_LINE, UPLOAD_PATH_LINE.replace("/stage/", "/work/")),), "P25"),
+    ("a step env sets RUNNER_TEMP", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          RUNNER_TEMP: /tmp\n"),), "P25"),
+    ("a shell assignment RUNNER_TEMP=/tmp in the stage step", ((f"          {SAME_LINE}\n", f"          RUNNER_TEMP=/tmp\n          {SAME_LINE}\n"),), "P25"),
+    # SMA-738 fix round 1: a new value for LOCK_SHA256, and an exit that skips the compare.
+    ("a shell assignment of LOCK_SHA256 in the stage step", ((f"          {SAME_LINE}\n", f'          LOCK_SHA256="$(cat x)"\n          {SAME_LINE}\n'),), "P25"),
+    ("read -r LOCK_SHA256 in the stage step", ((f"          {SAME_LINE}\n", f'          read -r LOCK_SHA256 < x\n          {SAME_LINE}\n'),), "P25"),
+    ("for LOCK_SHA256 in the stage step", ((f"          {SAME_LINE}\n", f'          for LOCK_SHA256 in "$(cat x)"; do true; done\n          {SAME_LINE}\n'),), "P25"),
+    ("printf -v LOCK_SHA256 in the stage step", ((f"          {SAME_LINE}\n", f"          printf -v LOCK_SHA256 %s x\n          {SAME_LINE}\n"),), "P25"),
+    ("export LOCK_SHA256=x in the stage step", ((f"          {SAME_LINE}\n", f"          export LOCK_SHA256=x\n          {SAME_LINE}\n"),), "P25"),
+    ("a job-level env key LOCK_SHA256", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      LOCK_SHA256: x\n"),), "P25"),
+    ("a workflow-level env key LOCK_SHA256", (("env:\n", "env:\n  LOCK_SHA256: x\n"),), "P25"),
+    ("a step env key LOCK_SHA256 on another step", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          LOCK_SHA256: x\n"),), "P25"),
+    ("exit 0 before the same command", ((f"          {SAME_LINE}\n", f"          exit 0\n          {SAME_LINE}\n"),), "P25"),
+    ("a bare exit before the same command", ((f"          {SAME_LINE}\n", f"          exit\n          {SAME_LINE}\n"),), "P25"),
+    ("if ...; then exit 0; fi before the same command", ((f"          {SAME_LINE}\n", f'          if test -f x; then exit 0; fi\n          {SAME_LINE}\n'),), "P25"),
+    # SMA-738 fix round 3: no inherited variable may change how the stage step runs python3.
+    ("workflow env PATH", (("env:\n", "env:\n  PATH: /x\n"),), "P25"),
+    ("workflow env PYTHONPATH", (("env:\n", "env:\n  PYTHONPATH: /x\n"),), "P25"),
+    ("workflow env PYTHONHOME", (("env:\n", "env:\n  PYTHONHOME: /x\n"),), "P25"),
+    ("workflow env LD_PRELOAD", (("env:\n", "env:\n  LD_PRELOAD: /x\n"),), "P25"),
+    ("build job env PYTHONPATH", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      PYTHONPATH: /x\n"),), "P25"),
+    ("build job env LD_PRELOAD", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      LD_PRELOAD: /x\n"),), "P25"),
+    ("build job env as an empty mapping", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env: {}\n"),), "P25"),
+    # SMA-738 fix round 2: the exact pin of the lock and stage scripts closes the class.
+    ("read -r $'LOCK_SHA256' in the stage step", ((f"          {SAME_LINE}\n", f"          read -r $'LOCK_SHA256' < x\n          {SAME_LINE}\n"),), "P25"),
+    ("printf -v $'LOCK_SHA256' in the stage step", ((f"          {SAME_LINE}\n", f"          printf -v $'LOCK_SHA256' %s x\n          {SAME_LINE}\n"),), "P25"),
+    ("read -r \"$n\" with n=LOCK_SHA256", ((f"          {SAME_LINE}\n", f'          n=LOCK_SHA256; read -r "$n" < x\n          {SAME_LINE}\n'),), "P25"),
+    ("read -r \"${n}256\" with n=LOCK_SHA", ((f"          {SAME_LINE}\n", f'          n=LOCK_SHA; read -r "${{n}}256" < x\n          {SAME_LINE}\n'),), "P25"),
+    ("read -aLOCK_SHA256 in the stage step", ((f"          {SAME_LINE}\n", f"          read -aLOCK_SHA256 < x\n          {SAME_LINE}\n"),), "P25"),
+    ("printf -vLOCK_SHA256 in the stage step", ((f"          {SAME_LINE}\n", f"          printf -vLOCK_SHA256 %s x\n          {SAME_LINE}\n"),), "P25"),
+    ("read -r \"LOCK_SHA256[0]\" in the stage step", ((f"          {SAME_LINE}\n", f'          read -r "LOCK_SHA256[0]" < x\n          {SAME_LINE}\n'),), "P25"),
+    ("read -r LOCK_SHA<backslash-newline>256", ((f"          {SAME_LINE}\n", f"          read -r LOCK_SHA\\\n          256 < x\n          {SAME_LINE}\n"),), "P25"),
+    ("set -n before the same command", ((f"          {SAME_LINE}\n", f"          set -n\n          {SAME_LINE}\n"),), "P25"),
+    ("set -o noexec before the same command", ((f"          {SAME_LINE}\n", f"          set -o noexec\n          {SAME_LINE}\n"),), "P25"),
+    ("set -neuo pipefail as the first line of the stage step", (("          set -euo pipefail\n          src=", "          set -neuo pipefail\n          src="),), "P25"),
+    ("a changed comment-free line in the stage script", (("          dst=\"$RUNNER_TEMP/stage\"\n", "          dst=\"$RUNNER_TEMP/stage\" # x\n"),), "P25"),
 )
 
 
@@ -902,7 +1100,24 @@ def negative_control(path: str) -> int:
         if step.get("id") == "apply":
             step.setdefault("env", {})["C"] = "${{ needs.build.outputs.changed }}"
     expect("needs.build.outputs read in an env of propose", output, "P9")
-    print(f"pin_check negative control: 4 mutations, {failures} failed")
+    # SMA-738: three mutations of the REAL build job. The fixture rows prove the rule; only these
+    # prove that it bites on the real structure.
+    def build_run(step_id: str, change) -> dict:
+        mutated = copy.deepcopy(real)
+        for step in mutated["jobs"]["build"]["steps"]:
+            if step.get("id") == step_id:
+                step["run"] = "".join(change(line) for line in str(step["run"]).splitlines(keepends=True))
+        return mutated
+
+    expect("the same line deleted from the stage step", build_run("stage", lambda ln: "" if " same --sha256 " in ln else ln), "P25")
+    expect("|| true appended to the same line", build_run("stage", lambda ln: ln.rstrip("\n") + " || true\n" if " same --sha256 " in ln else ln), "P18")
+    expect("the lock_sha256 line deleted from the lock step", build_run("lock", lambda ln: "" if "lock_sha256=" in ln else ln), "P25")
+    expect("LOCK_SHA256 assigned before the same line", build_run("stage", lambda ln: 'LOCK_SHA256="$(cat "$src/rs/h")"\n' + ln if " same --sha256 " in ln else ln), "P25")
+    expect("set -n inserted before the same line", build_run("stage", lambda ln: "set -n\n" + ln if " same --sha256 " in ln else ln), "P25")
+    path_env = copy.deepcopy(real)
+    path_env["env"]["PYTHONPATH"] = "/tmp"
+    expect("PYTHONPATH added to the workflow env", path_env, "P25")
+    print(f"pin_check negative control: 10 mutations, {failures} failed")
     return RC_ASSERT if failures else RC_OK
 
 
@@ -918,7 +1133,7 @@ def main(argv: list[str]) -> int:
         print(f"pin_check: {line}", file=sys.stderr)
     if found:
         return RC_ASSERT
-    print(f"pin_check: {argv[0]} satisfies P0-P24")
+    print(f"pin_check: {argv[0]} satisfies P0-P25")
     return RC_OK
 
 

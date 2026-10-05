@@ -6,6 +6,7 @@ Stdlib only (tomllib, Python 3.11+). The `propose` job runs this file with the r
 
   lockstep_check.py lock --old <lock> --new <lock>
   lockstep_check.py artifact --dir <dir> --old <lock> [--body-file <f>] [--title-file <f>]
+  lockstep_check.py same --sha256 <64 hex> --file <path>
   lockstep_check.py status --file <git-status-porcelain-file>
   lockstep_check.py current --lock <lock>
   lockstep_check.py --self-test
@@ -21,6 +22,10 @@ cannot pass because a different check happened to refuse it.
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import hashlib
+import io
 import os
 import re
 import stat
@@ -57,6 +62,8 @@ CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 # in a Python pattern also matches before a trailing newline.
 SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 CHECKSUM = re.compile(r"[0-9a-f]{64}")
+# The `same --sha256` value (SMA-738 spec 4.5): lower-case only, used with fullmatch().
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 LOCK_PATH = "rs/Cargo.lock"
 ARTIFACT_DIR = "rs/crates/bindings/paigasus-wasm"
 ARTIFACT_FILES = (
@@ -112,13 +119,58 @@ def parse_lock_text(text: str, label: str) -> dict:
         raise InfraError(f"{label} is not valid TOML: {exc}") from exc
 
 
-def load_lock(path: str) -> dict:
+def read_file(path: str, *, regular_only: bool = False) -> tuple[bytes, str]:
+    """The ONE reader of a lock file (SMA-738 spec 4.5): `lock`, `artifact` and `same` all read
+    through it. It reads the raw bytes in chunks, with no newline translation, and hashes each
+    chunk as it reads. Returns (the bytes, their SHA-256 in lower-case hex).
+
+    regular_only (the `same` subcommand): the file is opened with O_NOFOLLOW and O_NONBLOCK, so a
+    symlink and a FIFO do not get followed or block. A symlink, a file that is not a regular file,
+    or a file over SIZE_CAP refuses with R-RUN2. Every other OSError is InfraError (exit 2)."""
+    flags = os.O_RDONLY
+    if regular_only:
+        flags |= os.O_NOFOLLOW | os.O_NONBLOCK
     try:
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
-    except (OSError, UnicodeDecodeError) as exc:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if regular_only and exc.errno == errno.ELOOP:
+            raise RefusalError("R-RUN2", f"{path} is a symlink") from exc
         raise InfraError(f"cannot read {path}: {exc}") from exc
-    return parse_lock_text(text, path)
+    digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    try:
+        info = os.fstat(fd)
+        if regular_only and not stat.S_ISREG(info.st_mode):
+            raise RefusalError("R-RUN2", f"{path} is not a regular file")
+        if regular_only and info.st_size > SIZE_CAP:
+            raise RefusalError("R-RUN2", f"{path} is {info.st_size} bytes, over the {SIZE_CAP}-byte cap")
+        size = 0
+        while chunk := os.read(fd, 1 << 16):
+            size += len(chunk)
+            if regular_only and size > SIZE_CAP:
+                raise RefusalError("R-RUN2", f"{path} grew over the {SIZE_CAP}-byte cap while it was read")
+            digest.update(chunk)
+            chunks.append(chunk)
+    except OSError as exc:
+        raise InfraError(f"cannot read {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+    return b"".join(chunks), digest.hexdigest()
+
+
+def read_lock(path: str) -> tuple[dict, str]:
+    """A lock read ONCE: the parsed dict and the SHA-256 of exactly the bytes that were parsed.
+    Strict UTF-8, no newline translation (SMA-738 spec 4.5)."""
+    data, digest = read_file(path)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InfraError(f"cannot read {path}: {exc}") from exc
+    return parse_lock_text(text, path), digest
+
+
+def load_lock(path: str) -> dict:
+    return read_lock(path)[0]
 
 
 def packages(lock: dict, label: str) -> list[dict]:
@@ -435,10 +487,12 @@ def status_verdict(text: str) -> None:
             raise RefusalError("R-STATUS", f"git status shows {path!r}, which is not one of the six allowed files")
 
 
-def run_artifact(directory: str, old_path: str, body_file: str | None, title_file: str | None) -> LockResult:
+def run_artifact(directory: str, old_path: str, body_file: str | None, title_file: str | None) -> tuple[LockResult, str]:
+    """Returns the verdict and the SHA-256 of the artifact lock bytes that it judged."""
     artifact_tree(directory)
+    new, digest = read_lock(os.path.join(directory, LOCK_PATH))
     try:
-        result = lock_verdict(load_lock(old_path), load_lock(os.path.join(directory, LOCK_PATH)))
+        result = lock_verdict(load_lock(old_path), new)
     except NoChangeError as exc:
         # SMA-738: the two locks can differ in dependency edges only, so "equal" is no longer true.
         raise RefusalError("R-NOCHANGE", "the wasm-bindgen family did not move, so there is nothing to propose") from exc
@@ -450,7 +504,19 @@ def run_artifact(directory: str, old_path: str, body_file: str | None, title_fil
         write_file(title_file, title + "\n")
     if body_file:
         write_file(body_file, body)
-    return result
+    return result, digest
+
+
+def run_same(expected: str, path: str) -> str:
+    """`same` (SMA-738 spec 4.5): the bytes of `path` must have the SHA-256 that `lock` printed
+    before container run 2. It compares bytes, not parsed TOML, so a whitespace or comment change
+    refuses too. No byte of the file goes to the log."""
+    if not SHA256_HEX.fullmatch(expected):
+        raise InfraError(f"usage: --sha256 must be 64 lower-case hex characters, got {expected!r}")
+    data, actual = read_file(path, regular_only=True)
+    if actual != expected:
+        raise RefusalError("R-RUN2", f"{LOCK_PATH} changed after the lock verdict: the lock step judged sha256 {expected}, {path} has sha256 {actual} ({len(data)} bytes)")
+    return actual
 
 
 # ---- the self-test --------------------------------------------------------------------------
@@ -625,6 +691,93 @@ def _edge_body_rows(tmp: str) -> list[tuple[str, object, str]]:
     return rows
 
 
+# ---- SMA-738: the run-1 lock compare (spec 5.5) -------------------------------------------------
+
+def _main_capture(argv: list[str]) -> tuple[int, str]:
+    """main(argv) with its stdout captured. main() RETURNS 0 or 4, and _outcome maps any return
+    to PASS, so a row that needs the return code or a printed line reads them here."""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        rc = main(argv)
+    return rc, buffer.getvalue()
+
+
+def _hash_rows(tmp: str) -> list[tuple[str, object, str]]:
+    def put(name: str, data: bytes) -> str:
+        path = os.path.join(tmp, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    old = put("hash-old.lock", _lock().encode())
+    new_bytes = _lock(NEW_FAMILY).encode()
+    crlf_bytes = _lock(NEW_FAMILY).replace("\n", "\r\n").encode()
+    new = put("hash-new.lock", new_bytes)
+    crlf = put("hash-crlf.lock", crlf_bytes)
+    unchanged = put("hash-unchanged.lock", _lock().encode())
+    refused = put("hash-refused.lock", _lock(NEW_FAMILY, rest=REST + _pkg("evil", "1.0.0")).encode())
+    sha = hashlib.sha256(new_bytes).hexdigest()
+    one_byte = put("same-one-byte.lock", new_bytes.replace(b"0.2.129", b"0.2.130", 1))
+    trailing = put("same-trailing.lock", new_bytes + b"\n")
+    link = os.path.join(tmp, "same-link.lock")
+    os.symlink(new, link)
+    big = put("same-big.lock", b"")
+    os.truncate(big, SIZE_CAP + 1)  # sparse: one byte over 8 MiB costs no disk
+    big_sha = hashlib.sha256(bytes(SIZE_CAP + 1)).hexdigest()
+    fifo = os.path.join(tmp, "same-fifo")
+    os.mkfifo(fifo)
+    directory = os.path.join(tmp, "same-dir")
+    os.makedirs(directory)
+    missing = os.path.join(tmp, "same-missing.lock")
+    artifact = os.path.join(tmp, "hash-artifact")
+    _write_tree(artifact, {LOCK_PATH: new_bytes})
+
+    def printed(argv: list[str], want_rc: int, want_lines: list[str], prefix: str):
+        def check() -> None:
+            rc, out = _main_capture(argv)
+            got = [ln for ln in out.splitlines() if ln.startswith(prefix)]
+            if rc != want_rc or got != want_lines:
+                raise RefusalError("R-SELFTEST", f"{argv[0]} returned {rc} and printed {got}, want {want_rc} and {want_lines}")
+        return check
+
+    def refused_without_hash() -> None:
+        buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer):
+                main(["lock", "--old", old, "--new", refused])
+        except RefusalError:
+            if "lock-sha256" in buffer.getvalue():
+                raise RefusalError("R-SELFTEST", "lock printed a lock-sha256 line before its refusal") from None
+            raise
+        raise RefusalError("R-SELFTEST", "lock did not refuse a lock with an added package")
+
+    def same(sha_value: str, path: str) -> list[str]:
+        return ["same", "--sha256", sha_value, "--file", path]
+
+    same_line = f"same: {LOCK_PATH} sha256 {sha} did not change after the lock verdict"
+    return [
+        ("lock: a pass prints the SHA-256 of the raw file bytes", printed(["lock", "--old", old, "--new", new], RC_OK, [f"lock-sha256 {sha}"], "lock-sha256 "), "PASS"),
+        ("lock: a pass on a lock with CRLF line ends hashes the raw bytes", printed(["lock", "--old", old, "--new", crlf], RC_OK, [f"lock-sha256 {hashlib.sha256(crlf_bytes).hexdigest()}"], "lock-sha256 "), "PASS"),
+        ("lock: no change returns 4 and prints no lock-sha256 line", printed(["lock", "--old", old, "--new", unchanged], RC_NO_CHANGE, [], "lock-sha256 "), "PASS"),
+        ("lock: a refusal prints no lock-sha256 line", refused_without_hash, "R-NONFAMILY"),
+        ("same: the correct hash", printed(same(sha, new), RC_OK, [same_line], "same: "), "PASS"),
+        ("same: a file that differs by one byte", lambda: main(same(sha, one_byte)), "R-RUN2"),
+        ("same: a file that differs only in a trailing newline", lambda: main(same(sha, trailing)), "R-RUN2"),
+        ("same: a symlink to a file with the correct hash", lambda: main(same(sha, link)), "R-RUN2"),
+        ("same: a sparse file over SIZE_CAP, with its own hash", lambda: main(same(big_sha, big)), "R-RUN2"),
+        ("same: a FIFO returns at once (proves the non-blocking open only; the directory row proves the regular-file check)", lambda: main(same(sha, fifo)), "R-RUN2"),
+        ("same: a directory", lambda: main(same(sha, directory)), "R-RUN2"),
+        ("same: a missing file", lambda: main(same(sha, missing)), "INFRA"),
+        ("same: an empty --sha256", lambda: main(same("", new)), "INFRA"),
+        ("same: an upper-case --sha256", lambda: main(same(sha.upper(), new)), "INFRA"),
+        ("same: a 63-character --sha256", lambda: main(same(sha[:63], new)), "INFRA"),
+        ("same: --file given two times", lambda: main([*same(sha, new), "--file", new]), "INFRA"),
+        ("same: no --sha256", lambda: main(["same", "--file", new]), "INFRA"),
+        ("same: no --file", lambda: main(["same", "--sha256", sha]), "INFRA"),
+        ("artifact: a pass prints the SHA-256 of the artifact lock", printed(["artifact", "--dir", artifact, "--old", old], RC_OK, [f"lock-sha256 {sha}"], "lock-sha256 "), "PASS"),
+    ]
+
+
 def _write_tree(root: str, files: dict[str, bytes], links: dict[str, str] | None = None) -> None:
     for rel, data in files.items():
         path = os.path.join(root, rel)
@@ -756,6 +909,7 @@ def self_test() -> int:
         rows += _artifact_rows(tmp)
         rows += _files_rows(tmp)
         rows += _edge_body_rows(tmp)
+        rows += _hash_rows(tmp)
         for label, fn, want in rows:
             got = _outcome(fn)
             if got == want:
@@ -819,10 +973,10 @@ def negative_control(lock_path: str) -> int:
     passes. SMA-738 spec 5.3: one real reference re-pointed to another locked version is NOCHANGE,
     or PASS with a family move, each with exactly one edge row; re-pointed to an unlocked version
     it is R-EDGE."""
+    data, digest = read_file(lock_path)
     try:
-        with open(lock_path, encoding="utf-8") as handle:
-            text = handle.read()
-    except (OSError, UnicodeDecodeError) as exc:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise InfraError(f"cannot read {lock_path}: {exc}") from exc
     real = parse_lock_text(text, lock_path)
     family = current_verdict(real)
@@ -869,6 +1023,25 @@ def negative_control(lock_path: str) -> int:
     expect(f"HEAD's lock with {moved} and every family patch version moved", _expect_edges(real, repointed(new_ref, bump=True), want), "PASS")
     unlocked = f"{dep_key[0]} 999.0.0"
     expect(f"HEAD's lock with {package[0]} {package[1]}: {old_ref!r} re-pointed to {unlocked!r}", lambda: lock_verdict(real, repointed(unlocked)), "R-EDGE")
+    # SMA-738 spec 5.5: `same` on HEAD's real lock bytes, through main(), the production path.
+    with tempfile.TemporaryDirectory() as tmp:
+        copy_path = os.path.join(tmp, "Cargo.lock")
+        with open(copy_path, "wb") as handle:
+            handle.write(data)
+        changed_text = re.sub(r'^version = "[^"]*"', 'version = "999.0.0"', text, count=1, flags=re.M)
+        if changed_text == text:
+            raise InfraError(f"{lock_path} holds no package version line to change")
+        changed_path = os.path.join(tmp, "changed.lock")
+        with open(changed_path, "wb") as handle:
+            handle.write(changed_text.encode("utf-8"))
+
+        def same_rc(path: str) -> None:
+            rc, _out = _main_capture(["same", "--sha256", digest, "--file", path])
+            if rc != RC_OK:
+                raise RefusalError("R-SELFTEST", f"same returned {rc}, want 0")
+
+        expect("same: HEAD's lock against its own sha256", lambda: same_rc(copy_path), "PASS")
+        expect("same: a copy of HEAD's lock with its first package version changed", lambda: same_rc(changed_path), "R-RUN2")
     print(f"lockstep_check negative control: wasm-bindgen {dict(family)['wasm-bindgen']} on HEAD, {failures} failed")
     return RC_REFUSE if failures else RC_OK
 
@@ -893,6 +1066,9 @@ def _options(argv: list[str], names: tuple[str, ...], required: tuple[str, ...])
         flag = rest.pop(0)
         if flag not in names or not rest:
             raise InfraError(f"usage: unknown flag or missing value at {flag!r}")
+        if flag in out:
+            # SMA-738: `same --file A --file B` must not compare another file than the one P25 pins.
+            raise InfraError(f"usage: {flag} is given more than once")
         out[flag] = rest.pop(0)
     for name in required:
         if name not in out:
@@ -907,25 +1083,35 @@ def main(argv: list[str]) -> int:
         opts = _options(argv[1:], ("--lock",), ("--lock",))
         return negative_control(opts["--lock"])
     if not argv:
-        raise InfraError("usage: lockstep_check.py lock|artifact|status|current ... | --self-test | --negative-control --lock <path>")
+        raise InfraError("usage: lockstep_check.py lock|artifact|same|status|current ... | --self-test | --negative-control --lock <path>")
     command, rest = argv[0], argv[1:]
     if command == "lock":
         opts = _options(rest, ("--old", "--new"), ("--old", "--new"))
+        # The new lock is read ONCE (SMA-738 spec 4.5). The verdict, the no-change path and the
+        # printed hash all use these bytes.
+        new, digest = read_lock(opts["--new"])
         try:
-            result = lock_verdict(load_lock(opts["--old"]), load_lock(opts["--new"]))
+            result = lock_verdict(load_lock(opts["--old"]), new)
         except NoChangeError as exc:
-            for name, version in current_verdict(load_lock(opts["--new"])):
+            for name, version in current_verdict(new):
                 print(f"family-current {name} {version}")
             _print_edges(exc.edges)
             return RC_NO_CHANGE
         _print_family(result.family)
         _print_edges(result.edges)
+        print(f"lock-sha256 {digest}")
         return RC_OK
     if command == "artifact":
         opts = _options(rest, ("--dir", "--old", "--body-file", "--title-file"), ("--dir", "--old"))
-        result = run_artifact(opts["--dir"], opts["--old"], opts.get("--body-file"), opts.get("--title-file"))
+        result, digest = run_artifact(opts["--dir"], opts["--old"], opts.get("--body-file"), opts.get("--title-file"))
         _print_family(result.family)
         _print_edges(result.edges)
+        print(f"lock-sha256 {digest}")
+        return RC_OK
+    if command == "same":
+        opts = _options(rest, ("--sha256", "--file"), ("--sha256", "--file"))
+        digest = run_same(opts["--sha256"], opts["--file"])
+        print(f"same: {LOCK_PATH} sha256 {digest} did not change after the lock verdict")
         return RC_OK
     if command == "status":
         opts = _options(rest, ("--file",), ("--file",))
