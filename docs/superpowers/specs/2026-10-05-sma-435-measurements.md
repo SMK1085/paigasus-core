@@ -252,7 +252,7 @@ Mutation 1, after the undo and the second `generate-wasm`: the log line was `opt
 
 ### Which wasm-opt wasm-pack ran (mutations 2 and 3)
 
-In both mutations the wasm-pack log said `found wasm-opt at "/Users/smaschek/.proto/shims/wasm-opt"`. So wasm-pack used the pinned binary through the proto shim on `PATH`. It did not download binaryen. The `~/Library/Caches/.wasm-pack` listing was the same before and after both runs: five `wasm-bindgen-cargo-install-*` entries (0.2.125 to 0.2.129) and no `wasm-opt-*` entry. Nothing needed removal.
+In both mutations the wasm-pack log said `found wasm-opt at "/Users/smaschek/.proto/shims/wasm-opt"`. So wasm-pack used the pinned binary through the proto shim on `PATH`. It did not download binaryen. This holds because the proto shim was on `PATH`. A host without the shim on `PATH` was not measured. There, wasm-pack may download its own binaryen. The `~/Library/Caches/.wasm-pack` listing was the same before and after both runs: five `wasm-bindgen-cargo-install-*` entries (0.2.125 to 0.2.129) and no `wasm-opt-*` entry. Nothing needed removal.
 
 This means that, on a host with the shim on `PATH`, check 7 is the only guard that sees mutation 3. Check 6 passes there, because `-g` keeps the `name` section. In mutation 2, check 6 fails because the shim `wasm-opt` runs with the default flags.
 
@@ -281,7 +281,7 @@ The Linux binary is 48 bytes smaller than the macOS binary. The raw input is 509
 
 | Gate | Moon result under bash 3.2 | Direct result under bash 5.3.20 |
 | -- | -- | -- |
-| `repo:version-lockstep` | fail: `line 62: kernel: unbound variable` | rc 0, `all 20 version-lockstep sites agree` |
+| `repo:version-lockstep` | fail: `line 62: kernel: unbound variable`. The script declares associative arrays with `declare -A` at `ci/version-lockstep/run.sh:62` and `:73`. Bash 3.2 lacks `declare -A`. | rc 0, `all 20 version-lockstep sites agree` |
 | `repo:publish-metadata` | fail: `declare: -A: invalid option` | rc 0, `all checks passed` |
 | `repo:ruff-ci` | fail: `mapfile: command not found` | rc 0, `15 files clean` |
 | `repo:next-public-free` | fail: 7 self-test rows, `expected rc 0, got 1` | rc 0, `763 tracked ts/ files free of NEXT_PUBLIC_` |
