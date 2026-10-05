@@ -213,6 +213,8 @@ Steps 1 to 6b do not change. Step 7 depends on the scheme:
 2. Form: three base64url parts with no padding. Decode the header and the payload as raw
    `serde_json::Map`. Else `Malformed`. (`decode_header` is not used: it fails on
    `alg: none` before check 4 can name it.)
+   A header with a `crit` member gives `Malformed` (RFC 7515 § 4.1.11). IAM supports no JOSE
+   extension.
 3. Header `typ` (D16). Else `Typ`.
 4. Header `alg` is the string `ES256` or `RS256` (D8). Else `Alg`. This refuses `none` and
    every HMAC algorithm.
@@ -730,3 +732,9 @@ None. Sven decided the scope, the replay store, the switches, the authz step and
 | Q: how is a DPoP-only client provisioned? | QUESTION | The precondition in § 2 and AC 1. |
 | Q: does service-info advertise DPoP? | QUESTION | Non-goal (§ 2). |
 | Q: what memory limit do operators give IAM? | QUESTION | The chart sets none. § 4.5 states the budget; R8. |
+
+### Local review (2026-10-05)
+
+| Finding | Severity | Action |
+|---|---|---|
+| CodeRabbit: the checker ignores a `crit` header, but RFC 7515 § 4.1.11 requires a recipient to refuse a JWS with an extension it does not understand. | MINOR | Folded in: § 4.4 check 2, mutation C2c. |

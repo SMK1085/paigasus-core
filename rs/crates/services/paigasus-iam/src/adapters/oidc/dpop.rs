@@ -59,6 +59,7 @@ struct WireProofClaims {
 impl DpopProofChecker for JoseDpopProofChecker {
     fn check(&self, proof: &str, token: &str, jkt: &Jkt) -> Result<ProofClaims, ProofDefect> {
         let raw = parse(proof)?; // checks 1 and 2
+        check_crit(&raw.header)?; // check 2 (RFC 7515 section 4.1.11)
         check_typ(&raw.header)?; // check 3
         let alg = check_alg(&raw.header)?; // check 4
         let key = check_jwk(&raw.header, alg)?; // check 5
@@ -153,6 +154,15 @@ impl<'de> Deserialize<'de> for UniqueObject {
 
         deserializer.deserialize_map(UniqueMembers).map(UniqueObject)
     }
+}
+
+/// RFC 7515 section 4.1.11: a recipient refuses a JWS whose `crit` header names an extension it
+/// does not understand. IAM supports no JOSE extension, so any `crit` member is refused.
+fn check_crit(header: &Map<String, Value>) -> Result<(), ProofDefect> {
+    if header.contains_key("crit") {
+        return Err(ProofDefect::Malformed);
+    }
+    Ok(())
 }
 
 /// Check 3 (D16).
@@ -494,6 +504,20 @@ VJ6/mtjJ4EykrVcTEdQoCQC7J3NFUpOXZ2aaYOHgLSddm2Med29SXc8=
         ] {
             assert_eq!(check(&proof, &es_jkt(&key)), Err(ProofDefect::Malformed), "{name}");
         }
+    }
+
+    #[test]
+    fn a_crit_header_is_malformed() {
+        // RFC 7515 section 4.1.11: IAM supports no JOSE extension, so any `crit` member is refused.
+        let key = es_key();
+        for (name, crit) in [("crit names exp", json!(["exp"])), ("crit is empty", json!([]))] {
+            let mut hdr = header("ES256", es_jwk(&key));
+            hdr["crit"] = crit;
+            let proof = sign(&hdr, &payload(), &key.sign, Algorithm::ES256);
+            assert_eq!(check(&proof, &es_jkt(&key)), Err(ProofDefect::Malformed), "{name}");
+        }
+        // The same proof without `crit` passes.
+        check(&es_proof(&key, &payload()), &es_jkt(&key)).expect("a proof without crit");
     }
 
     #[test]
