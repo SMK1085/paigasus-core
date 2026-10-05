@@ -225,8 +225,10 @@ pub enum ProvisioningDefect {
     EmailConflict,
 }
 
-/// The largest DPoP proof, in bytes, that IAM and the gateway accept (SMA-700 § 4.1, § 4.4). A
-/// larger proof is `ProofDefect::Malformed`. The checker and the gateway share this one value.
+/// The largest DPoP proof, in bytes, that IAM accepts (SMA-700 § 4.1, § 4.4). A larger proof is
+/// `ProofDefect::Malformed`. Only IAM uses this value. The gateway does not depend on this crate
+/// and does not limit the size of the proof. It forwards a proof of any size, and IAM refuses a
+/// proof over the limit as `Malformed`.
 pub const MAX_PROOF_BYTES: usize = 8192;
 
 /// Why a DPoP proof was refused (SMA-700 § 4.4, § 4.8): one variant for each check. Every defect
