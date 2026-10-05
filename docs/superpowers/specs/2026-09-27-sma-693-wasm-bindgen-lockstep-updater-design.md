@@ -254,8 +254,8 @@ package install. Two subcommands and two test modes:
     `"name version"` and `"name version (source)"`. The checker handles all three.
     SMA-738 note (2026-10-05): this invariant is replaced. `R-NONFAMILY` now compares the
     dependency references of a non-family package by bare name, in order. The new refusal `R-EDGE`
-    accepts a moved reference only when the old and the new reference are each the exact form that
-    cargo writes for a package of its lock. See
+    accepts a moved reference in one case only. The old and the new reference must each be the
+    exact form that cargo writes for a package of its lock. See
     `docs/superpowers/specs/2026-10-05-sma-738-wasm-lockstep-edge-flips-design.md`.
   - The top-level `version` of the lock format is unchanged, and no `[patch]`/`[metadata]` table
     changed.

@@ -63,13 +63,13 @@ to another version that is already in the lock. Each such edge is an edge row: t
 version, the dependency, and the old and the new version, all from the old lock. `lock` prints one
 `edge-moved <package> <package version> <dependency> <old> <new>` line per row, after the
 `family-moved` lines. On exit 4 it prints them after the `family-current` lines, so the weekly log
-shows when cargo keeps flipping edges. `artifact` prints the same lines, and the PR body then has a
+shows when cargo re-points edges again. `artifact` prints the same lines, and the PR body then has a
 second table, "Dependency edges that moved".
 
 `artifact` adds `R-LAYOUT`, `R-SYMLINK` and `R-SIZE` (the tree holds `rs/Cargo.lock` and a subset of
 the five artifact files, all regular files of 8 MiB or less), `R-NOCHANGE` (the family did not
-move; the two locks can differ in dependency edges only) and `R-TITLE` (the commit title is over 100 characters). It writes the PR title
-and body files only after every check passed. `status` (`R-STATUS`) checks `git status --porcelain`
+move; the two locks can differ in dependency edges only) and `R-TITLE` (the commit title is over
+100 characters). It writes the PR title and body files only after every check passed. `status` (`R-STATUS`) checks `git status --porcelain`
 after the copy. `current` checks the family invariant on one lock; the real run of the gate runs it
 on `HEAD:rs/Cargo.lock`, so a PR that puts a second `wasm-bindgen` into the lock goes red at once,
 not on the next Tuesday.

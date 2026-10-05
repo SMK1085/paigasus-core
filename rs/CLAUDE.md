@@ -196,11 +196,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   (a new transitive dependency, a newer `syn`, or `R-EDGE`, see below), its build fails because
   the pinned `wasm-pack` does not support the new 0.2.z, or the `reqwest` case below. Use a
   normal `feature/sma-NNN-<slug>` PR.
-  **`R-EDGE` with no family move (SMA-738).** The lock on `main` holds a reference that cargo now
-  writes in another form, or the run made a reference that is not in the lock. Run the
-  four-package `cargo update -p` locally and read the edge diff. If it only re-points edges
-  between versions that are already in the lock, commit the lock in a normal
-  `feature/sma-NNN-<slug>` PR. Otherwise open an issue.
+  **`R-EDGE` with no family move (SMA-738).** Two causes are possible. The lock on `main` holds a
+  reference that cargo now writes in another form. Or the run made a reference that is not in
+  the lock. Run the four-package `cargo update -p` locally and read the edge diff. Check if it
+  only re-points edges between versions that are already in the lock. If it does, commit the lock
+  in a normal `feature/sma-NNN-<slug>` PR. If it does not, open an issue.
   Before you start:
   - Put the proto shims on `PATH`.
   - In a fresh worktree, run `proto install` and `pnpm -C ts install`.

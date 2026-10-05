@@ -26,10 +26,9 @@ import re
 import stat
 import sys
 import tempfile
+import tomllib
 from collections import Counter
 from typing import NamedTuple
-
-import tomllib
 
 RC_OK = 0
 RC_INFRA = 2
