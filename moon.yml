@@ -50,6 +50,9 @@ tasks:
       # SMA-513 PR 2b — the same for repo:helm-render's own uv project; it is in
       # ci/osv/run.sh's LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
       - 'ci/helm-render/uv.lock'
+      # SMA-693 — the same for repo:wasm-lockstep's own uv project; it is in ci/osv/run.sh's
+      # LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
+      - 'ci/wasm-lockstep/uv.lock'
       - '.prototools'
       - '.proto/plugins/osv-scanner.toml'
 
@@ -275,6 +278,12 @@ tasks:
       # 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to
       # keep narrow globs rather than collapse them into the broad one.
       - 'ci/next-env/**/*'
+      # SMA-693 — this task pins load-bearing lines inside ci/wasm-lockstep/run.sh
+      # (WASM_LOCKSTEP_SH_CALL_SITES), so a change under ci/wasm-lockstep/ MUST re-key it. The
+      # broad 'ci/**/*' entry already covers it for SCHEDULING; the narrow entry is kept because
+      # check 8e in ci/actionlint/run.sh floors this array's length and the file's own policy is to
+      # keep narrow globs rather than collapse them into the broad one.
+      - 'ci/wasm-lockstep/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -692,7 +701,10 @@ tasks:
       bash ci/version-lockstep/run.sh --negative-control
       bash ci/version-lockstep/run.sh
     toolchain: 'system'
-    # Every file that CARRIES a version in either family, plus the script itself. Narrower than
+    # Every file that CARRIES a version in either family, plus the script itself, plus the uv
+    # workspace pyproject files that --check's static uv metadata assertion reads (SMA-684): the
+    # workspace root as a literal path, and every member as a glob, because that check discovers
+    # members at runtime from the members glob. Narrower than
     # publish-metadata's `rs/crates/**/*` because the site list here is STATIC (declared in run.sh's
     # SITES array), not discovered at runtime — so a per-file list cannot go stale behind a new
     # crate the way a runtime-discovered set would. Each entry must match a tracked file or
@@ -715,6 +727,8 @@ tasks:
       - 'py/uv.lock'
       - 'py/packages/paigasus-kernel/pyproject.toml'
       - 'py/packages/paigasus-proto/pyproject.toml'
+      - 'py/pyproject.toml'
+      - 'py/packages/*/pyproject.toml'
 
   actionlint:
     description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree, every branches: entry names a real branch, and the self-test/mutation-battery invocations that guard all of it cannot be silently deleted (SMA-525, SMA-540, SMA-542).'
@@ -1098,3 +1112,31 @@ tasks:
       - 'CLAUDE.md'
       - '.prototools'
       - 'ci/moon-diagnosis/**/*'
+
+  wasm-lockstep:
+    description: 'Check the wasm-lockstep workflow against its trust model, and the family invariant on HEAD rs/Cargo.lock (SMA-693).'
+    # WHY THIS EXISTS — .github/workflows/wasm-lockstep.yml runs third-party build code in one job
+    # and holds the App key in the other. pin_check.py asserts the rules that keep the two apart
+    # (no secret in build, the docker form, the command-word allowlists, the step order, the push
+    # refspec, the output rule). lockstep_check.py is the checker both jobs run; its self-test and
+    # control run here, and its `current` verdict on HEAD's lock reds a PR that breaks the family
+    # invariant before the next scheduled run does (ci/wasm-lockstep/README.md).
+    #
+    # INPUTS. The workflow is what pin_check.py reads. rs/Cargo.lock is what the real run reads
+    # through `git show HEAD:` (spec F15: never the working tree). .prototools pins the `uv` the
+    # gate shells out to. SELF_TASK_EXPECTED_GLOBS pins these four.
+    #
+    # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`
+    # is REQUIRED: Moon takes a `script:` block's status from its LAST command, so without it a
+    # failing control is masked by the passing real run. SELF_SCHEDULED_GATES pins these four lines.
+    script: |
+      set -euo pipefail
+      bash ci/wasm-lockstep/run.sh --self-test
+      bash ci/wasm-lockstep/run.sh --negative-control
+      bash ci/wasm-lockstep/run.sh
+    toolchain: 'system'
+    inputs:
+      - 'ci/wasm-lockstep/**/*'
+      - '.github/workflows/wasm-lockstep.yml'
+      - 'rs/Cargo.lock'
+      - '.prototools'

@@ -57,8 +57,14 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `rs/deny.toml` `[licenses] exceptions` or a dev-only
   `[advisories] ignore` (Rust); an npm/pip advisory needs a version bump — a pnpm-workspace
   `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`
-  waiver; a dep consumed only by a later commit needs a temporary
+  waiver (a waiver whose reason depends on "no shipped package reaches it" also needs a
+  `SHIPPED_FREE_WAIVERS` entry in `ci/osv/shipped_reachability.py`, SMA-733); a dep consumed
+  only by a later commit needs a temporary
   `[package.metadata.cargo-machete] ignored` allowlist (prune once consumed).
+- A new ts workspace dependency needs matching inputs on every `tsc` task of the package and of
+  its dependents. A new `file:` binding also needs the preflight
+  `node ../../../ts/scripts/check-installed-bindings.mjs &&` before `tsc`. If either is missing,
+  A12 in `repo:affected-smoke` reds (SMA-536, `ci/affected-graph/README.md`).
 - **Standing rule: A `{ workspace = true }` in-tree dep needs a hand-written `dependsOn`; a
   `path =` dep needs none. Neither `dependsOn` nor `^:build` selects a downstream — only task
   `inputs` confer affectedness.**

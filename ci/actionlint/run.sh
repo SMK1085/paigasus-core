@@ -2169,6 +2169,10 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   # editing ci/next-env/** does not schedule repo:affected-smoke, and neither the
   # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
   'ci/next-env/**/*'
+  # SMA-693 — floors the input that makes WASM_LOCKSTEP_SH_CALL_SITES reachable. Without it, a PR
+  # editing ci/wasm-lockstep/** does not schedule repo:affected-smoke, and neither the
+  # SELF_SCHEDULED_GATES nor the SELF_TASK_EXPECTED_GLOBS pin for that gate can fire.
+  'ci/wasm-lockstep/**/*'
   'CLAUDE.md'
   '.prototools'
 )
@@ -4612,7 +4616,7 @@ release_guard_self_test() {
 
   n="$(release_guard_py --fixture-count)" || infra "check 10: release_guard.py --fixture-count failed"
   case "$n" in ''|*[!0-9]*) infra "check 10: --fixture-count printed '$n', expected an integer" ;; esac
-  [ "$n" -ge 162 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 162"
+  [ "$n" -ge 170 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 170"
 
   release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken
       verdict. The release guard is not deciding what it is documented to decide."; rc=1; }

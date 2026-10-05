@@ -51,6 +51,10 @@ ACCEPTED_GATE_FORMS = frozenset({GATE_EXPR, "${{ " + GATE_EXPR + " }}"})
 # publish DETECTOR to every member of this set: a member may skip the gate, but must never
 # contain a publish step. The exemption's premise ("release-pr cannot reach a registry") is now
 # asserted rather than assumed.
+#
+# SMA-684: V18 (ungated_job_violations) also holds every member to an allowlist of actions,
+# command words and command prefixes, because such a job runs with the App private key on the
+# runner. A new member inherits V18 too.
 UNGATED_JOBS = frozenset({"release-pr"})
 
 # V8: the approval gate is the ONE human checkpoint in release.yml, and everything downstream of
@@ -1577,6 +1581,343 @@ def chain_download_violations(jobs: dict, name: str) -> list[str]:
     return out
 
 
+# V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
+# the runner receives every secret a job references when the job starts, so code in ANY step of
+# the job can read it, not only a step with a token in its env:. So no step of such a job may
+# compile, or run a build script, a proc macro, or an npm or pip lifecycle or install script
+# (spec A1). This is an ALLOWLIST (spec D4): a new tool reds until someone adds it here, with a
+# reason, after the job's trust in it is reviewed. The spec's §4.1 lists the tools it trusts.
+UNGATED_JOB_ACTIONS = frozenset({
+    "actions/create-github-app-token",
+    "actions/checkout",
+    "moonrepo/setup-toolchain",
+})
+UNGATED_JOB_COMMANDS = frozenset({"set", "echo", "printf", "[", "exit", "jq", "git"})
+# Shell keywords are NOT command words. They are stripped, and the word after them is checked:
+# as allowed words, `if cargo build; then` and `then cargo build` passed (plan Review Focus 2).
+UNGATED_JOB_KEYWORDS = frozenset({"if", "then", "else", "elif", "fi", "!"})
+UNGATED_JOB_PREFIXES = (
+    "proto install release-plz",
+    "moon setup",
+    "release-plz release-pr",
+    "bash ci/version-lockstep/run.sh --write",
+)
+# Job keys that run code (container:, services:) or change how every run: step runs (defaults:).
+UNGATED_JOB_BANNED_KEYS = ("container", "services", "defaults", "env", "uses")
+V18_HINT = ("The release-pr job can read the App private key, so it may run only the tools on "
+            "V18's allowlist (docs/superpowers/specs/2026-10-04-sma-684-release-pr-stamp-token-"
+            "isolation-design.md, section 5.6).")
+
+
+# Bash breaks lines only on \n and treats only space and tab as blanks. Python reads many more
+# characters as line breaks or blanks, so V18 refuses any run: block that holds one (T7-R6).
+# T7-R7: that is every str.isspace() character other than space, tab and newline (U+3000,
+# U+2000-U+200A, U+205F, U+1680 and more). U+FEFF is not isspace() and bash reads it as a word
+# character, the same as V18 now does, but it is invisible in a diff, so V18 refuses it too.
+# Other non-ASCII text stays allowed: the real job's echo text holds an em dash.
+_V18_CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f\x85\xa0\\u2028\\u2029\\ufeff]")
+_V18_BLANKS = " \t"
+
+
+def _v18_bad_char(run_text: str) -> str | None:
+    """The first character of `run_text` that bash and Python read differently, if any."""
+    for c in run_text:
+        if _V18_CONTROL_RE.match(c) or (c.isspace() and c not in " \t\n"):
+            return c
+    return None
+
+
+def _v18_logical_lines(run_text: str) -> tuple[list[str], str | None]:
+    r"""The run: text as V18 reads it, and a reason to refuse it, if any (controller rulings T7-R4
+    T7-R6 and T7-R7). The text is split on `\n` only. A control character other than tab and
+    newline, every other str.isspace() character, and U+FEFF are refused: bash blanks are only
+    space and tab, so bash and Python disagree on them.
+    A `#` is allowed only as the first blank-stripped character of a physical line that does NOT
+    continue the line before it, and such a comment line must not end in a backslash. Any other
+    `#` is refused, quotes included. A comment line is dropped. A line joins the next one only
+    when it ends in an ODD number of backslashes, and then the two join with NOTHING between
+    them, as in bash (`$\` newline `(x)` is `$(x)`)."""
+    bad = _v18_bad_char(run_text)
+    if bad is not None:
+        return [], (f"the run text holds the character U+{ord(bad):04X}, which bash and Python "
+                    f"read differently (bash blanks are only space and tab)")
+    out: list[str] = []
+    buf = ""
+    continued = False
+    for raw in run_text.split("\n"):
+        if not continued and raw.lstrip(" \t").startswith("#"):
+            if raw.rstrip(" \t").endswith("\\"):
+                return [], f"the comment line {raw.strip(_V18_BLANKS)!r} ends in a backslash"
+            continue
+        if "#" in raw:
+            return [], (f"the line {raw.strip(_V18_BLANKS)!r} has a `#` that is not the start "
+                        f"of a comment line; V18 does not read comments inside a command")
+        trailing = len(raw) - len(raw.rstrip("\\"))
+        continued = trailing % 2 == 1
+        if continued:
+            buf += raw[:-1]
+            continue
+        out.append(buf + raw)
+        buf = ""
+    if buf:
+        out.append(buf)
+    return out, None
+
+
+# A whole line that is exactly `NAME="$(...)"` (controller ruling T7-R6), for example
+# `OUT="$(release-plz release-pr --output json)"`. Its inside is checked as a command line.
+_V18_WRAP_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*="\$\((.*)\)"')
+# A leading `NAME=value` word as bash reads it (T7-R7). Bash blanks are only space and tab, so a
+# value ends at `[ \t]`, never at `\s`. A backslash may escape a `"` inside double quotes, so the
+# double-quoted form skips `\.`; an unquoted value may not hold a backslash at all (`A=x\ echo`
+# is ONE word to bash), so that shape does not match and its command word `A=x\` reds.
+_V18_ASSIGN_RE = re.compile(
+    r"""[A-Za-z_][A-Za-z0-9_]*=("(?:[^"\\]|\\.)*"|'[^']*'|[^ \t"'\\]*)(?=[ \t]|$)""")
+_V18_DOLLAR_QUOTES = ("$'", '$"')
+# The words `set` may take in an UNGATED_JOBS member: short flags from e, u, o, x and v, and the
+# `-o` names that match them. `set -euo pipefail` is what the real job runs.
+_V18_SET_WORD_RE = re.compile(r"[-+][euoxv]+|pipefail|errexit|nounset|xtrace|verbose")
+_V18_WORD_SPLIT_RE = re.compile(r"[ \t]+")
+_V18_SUBST_MARKERS = ("$(", "`", "<(", ">(")
+
+
+def v18_split(text: str) -> tuple[list[str], str | None]:
+    """Split one logical line into command segments on UNQUOTED `;`, `&`, `|`, `&&`, `||` and
+    `|&`. Tracks single quotes, double quotes and backslash escapes. An `&` that belongs to a
+    redirection (`>&2`, `2>&1`, `<&`, `&>`) does not split. A line with an unterminated quote is
+    refused. Not a shell parser: it knows no heredoc, no `$(( ))` and no brace group."""
+    segs: list[str] = []
+    cur: list[str] = []
+    quote = ""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            cur.append(c)
+            if c == "'":
+                quote = ""
+            i += 1
+            continue
+        if c == "\\":
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote == '"':
+            cur.append(c)
+            if c == '"':
+                quote = ""
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            cur.append(c)
+            i += 1
+            continue
+        if c in ";|&":
+            if c == "&" and ((i > 0 and text[i - 1] in "<>") or text[i + 1:i + 2] == ">"):
+                cur.append(c)
+                i += 1
+                continue
+            width = 2 if text[i:i + 2] in ("&&", "||", "|&") else 1
+            segs.append("".join(cur))
+            cur = []
+            i += width
+            continue
+        cur.append(c)
+        i += 1
+    if quote:
+        return [], "the line has an unterminated quote"
+    segs.append("".join(cur))
+    return [seg for seg in segs if seg.strip(_V18_BLANKS)], None
+
+
+def _v18_unquoted_paren(text: str) -> bool:
+    """True when `text` holds a `(` or `)` outside single and double quotes. A `)` there could
+    close the opening `$(` early, so the last `)` of the line would not be the matching one."""
+    quote = ""
+    for c in text:
+        if quote:
+            if c == quote:
+                quote = ""
+        elif c in "'\"":
+            quote = c
+        elif c in "()":
+            return True
+    return False
+
+
+def v18_line_segments(line: str) -> tuple[list[str], str | None]:
+    """The command segments of one logical line for V18, and a reason to refuse the line, if any.
+    command_segments is not used (see README L43). A line that is one `NAME="$(...)"` is
+    unwrapped first. Then `$(`, a backtick, `<(` and `>(` are refused anywhere, quotes included:
+    fail closed, so `echo '$(x)'` reds."""
+    text = line.strip(_V18_BLANKS)
+    # T7-R8: v18_split does not parse ANSI-C (`$'...'`) or locale (`$"..."`) quoting. Inside
+    # `$'...'` bash reads `\'` as a quote character, so a `;` that V18 sees as quoted can be a
+    # real separator. Fail closed, like `$(`: refuse both anywhere on the line, quotes included.
+    for mark in _V18_DOLLAR_QUOTES:
+        if mark in line:
+            return [], (f"ANSI-C or locale quoting ({mark!r}), which V18 does not parse, so "
+                        f"it refuses it")
+    m = _V18_WRAP_RE.fullmatch(text)
+    if m:
+        text = m.group(1)
+        if "\\" in text:
+            return [], "a backslash inside a wrapped command substitution"
+        if _v18_unquoted_paren(text):
+            return [], "an unquoted parenthesis inside a wrapped command substitution"
+    for mark in _V18_SUBST_MARKERS:
+        if mark in text:
+            return [], f"a substitution ({mark!r})"
+    return v18_split(text)
+
+
+def v18_segment_verdict(segment: str) -> str | None:
+    """None when one command segment may run in an UNGATED_JOBS member, else the reason it may
+    not. Leading variable assignments are removed; then shell keywords; then the rest must start
+    with an allowed command prefix or an allowed command word. Substitutions never reach here:
+    v18_line_segments refuses them. Not a shell parser: see README L43.
+
+    An assignment before a command word puts the variable into that command's environment, so
+    `BASH_ENV=./x.sh bash ci/version-lockstep/run.sh --write` and `GIT_EXTERNAL_DIFF=./x git diff`
+    run code. Such a segment is refused; a segment of assignments only stays allowed. `set` may
+    use only the flags in _V18_SET_WORD_RE: `-a` (allexport) and `-k` export later assignments."""
+    s = segment.strip(_V18_BLANKS)
+    assigned = False
+    while True:
+        m = _V18_ASSIGN_RE.match(s)
+        if not m:
+            break
+        assigned = True
+        s = s[m.end():].lstrip(_V18_BLANKS)
+    words = [w for w in _V18_WORD_SPLIT_RE.split(s) if w]
+    if assigned and words:
+        return (f"an assignment before the command word {words[0]!r} puts the variable into that "
+                f"command's environment")
+    while words and words[0] in UNGATED_JOB_KEYWORDS:
+        words = words[1:]
+    if not words:
+        return None
+    if words[0] == "set":
+        for w in words[1:]:
+            if not _V18_SET_WORD_RE.fullmatch(w):
+                return (f"`set` with {w!r}, which is not on the allowlist (`-a`, `-o allexport` and "
+                        f"`-k` export later assignments)")
+    rest = " ".join(words)
+    for prefix in UNGATED_JOB_PREFIXES:
+        if rest == prefix or rest.startswith(prefix + " "):
+            return None
+    if words[0] in UNGATED_JOB_COMMANDS:
+        return None
+    return f"the command word {words[0]!r} is not on the allowlist"
+
+
+# Step keys, env names and per-action `with:` keys that V18 lets through: derived from the real
+# release-pr job (controller ruling T7-R1). Anything else can change what runs (BASH_ENV,
+# NODE_OPTIONS, LD_PRELOAD, RUSTC_WRAPPER, a checkout of another repository), so it reds.
+UNGATED_JOB_STEP_KEYS = frozenset({"name", "id", "if", "uses", "with", "env", "run", "working-directory"})
+UNGATED_JOB_ENV_NAMES = frozenset({"APP_ID_SET", "GIT_TOKEN", "PR_JSON", "GH_TOKEN_FOR_PUSH"})
+UNGATED_JOB_WORKDIRS = frozenset({"rs"})
+UNGATED_JOB_WITH_KEYS = {
+    "actions/create-github-app-token": frozenset({"client-id", "private-key", "permission-contents",
+                                                  "permission-pull-requests"}),
+    "actions/checkout": frozenset({"fetch-depth", "persist-credentials"}),
+    "moonrepo/setup-toolchain": frozenset({"cache"}),
+}
+
+
+def _v18_step_config_violations(step: dict, action: str | None) -> list[str]:
+    """Reasons (without the location prefix) that a step's keys, env, workdir or `with:` are not
+    allowed. `action` is the step's `uses:` path, or None."""
+    out: list[str] = []
+    for key in step:
+        if key not in UNGATED_JOB_STEP_KEYS and key != "shell":
+            out.append(f"sets the step key `{key}:`, which is not on the allowlist")
+    env = step.get("env")
+    if "env" in step:
+        if not isinstance(env, dict):
+            out.append("sets an `env:` that is not a mapping")
+        else:
+            for k in env:
+                if k not in UNGATED_JOB_ENV_NAMES:
+                    out.append(f"sets the env name {k!r}, which is not on the allowlist "
+                               f"{sorted(UNGATED_JOB_ENV_NAMES)}")
+    if "working-directory" in step and step["working-directory"] not in UNGATED_JOB_WORKDIRS:
+        out.append(f"sets `working-directory:` to {step['working-directory']!r}, "
+                   f"not one of {sorted(UNGATED_JOB_WORKDIRS)}")
+    if "with" in step:
+        with_ = step["with"]
+        allowed = UNGATED_JOB_WITH_KEYS.get(action or "")
+        if not isinstance(with_, dict):
+            out.append("sets a `with:` that is not a mapping")
+        elif allowed is None:
+            out.append("sets `with:` on a step that is not an allowed action")
+        else:
+            for k in with_:
+                if k not in allowed:
+                    out.append(f"sets the `with:` key {k!r} of {action!r}, which is not on the allowlist "
+                               f"{sorted(allowed)}")
+    if action == "actions/checkout":
+        with_ = step.get("with")
+        persist = with_.get("persist-credentials") if isinstance(with_, dict) else None
+        if str(persist).lower() != "false":
+            out.append("does not set `persist-credentials: false` on the checkout")
+    return out
+
+
+def ungated_job_violations(doc: dict, name: str) -> list[str]:
+    """V18 (SMA-684). Every step of every UNGATED_JOBS member must match the allowlist above.
+    Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles."""
+    out: list[str] = []
+    jobs = doc["jobs"]
+    for key in ("defaults", "env"):
+        if key in doc and any(isinstance(jobs.get(jid), dict) for jid in UNGATED_JOBS):
+            out.append(f"{name}: V18: the workflow sets `{key}:`, which reaches every step of an "
+                       f"UNGATED_JOBS member. {V18_HINT}")
+    for jid in sorted(UNGATED_JOBS):
+        job = jobs.get(jid)
+        if not isinstance(job, dict):
+            continue
+        for key in UNGATED_JOB_BANNED_KEYS:
+            if key in job:
+                out.append(f"{name}: V18: job '{jid}' sets `{key}:`, which runs code or changes how "
+                           f"its steps run. {V18_HINT}")
+        for i, step in enumerate(steps_of(job, f"{name}: job '{jid}'")):
+            if not isinstance(step, dict):
+                out.append(f"{name}: V18: job '{jid}' step #{i + 1} is not a mapping. {V18_HINT}")
+                continue
+            where = f"{name}: V18: job '{jid}' step '{step.get('name') or f'#{i + 1}'}'"
+            if "shell" in step:
+                out.append(f"{where} sets `shell:`, so its `run:` text is not read as bash. {V18_HINT}")
+            uses, run = step.get("uses"), step.get("run")
+            if uses is None and run is None:
+                out.append(f"{where} has neither `uses:` nor `run:`. {V18_HINT}")
+            action = None
+            if uses is not None:
+                action = str(uses).split("@", 1)[0]
+                if action not in UNGATED_JOB_ACTIONS:
+                    out.append(f"{where} uses the action {action!r}, which is not on the allowlist "
+                               f"{sorted(UNGATED_JOB_ACTIONS)}. {V18_HINT}")
+            for why in _v18_step_config_violations(step, action):
+                out.append(f"{where} {why}. {V18_HINT}")
+            if run is not None:
+                lines, refused = _v18_logical_lines(str(run))
+                if refused:
+                    out.append(f"{where}: {refused}. {V18_HINT}")
+                for line in lines:
+                    segs, refused = v18_line_segments(line)
+                    if refused:
+                        out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not "
+                                   f"allowed: {refused}. {V18_HINT}")
+                        continue
+                    for seg in segs:
+                        why = v18_segment_verdict(seg)
+                        if why:
+                            out.append(f"{where}: the segment {seg.strip(_V18_BLANKS)!r} is "
+                                       f"not allowed: {why}. {V18_HINT}")
+    return out
+
+
 def plan_run_segments(run_text: str) -> list[str]:
     """Every non-empty command segment of a `run:` block, comments already stripped."""
     return [seg.strip()
@@ -1743,8 +2084,8 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
 
 
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5, V7, V8a-c, V8e, V9 and V13-V17 over the release workflow (V16a-c runs from
-    main()). V16e is one of the V13-V17 group. V6 applies to CALLED workflows (see
+    """V1-V5, V7, V8a-c, V8e, V9 and V13-V18 over the release workflow (V16a-c runs from
+    main()). V16e is one of the V13-V18 group. V6 applies to CALLED workflows (see
     check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
     need the filesystem, which this function, driven purely off a parsed doc, deliberately does
     not touch."""
@@ -1859,6 +2200,9 @@ def check_main(doc: dict, name: str) -> list[str]:
     out += chain_service_violations(jobs, name)
     out += chain_version_env_violations(jobs, name)
     out += chain_download_violations(jobs, name)
+    # SMA-684. V18: once, outside the per-job loop, like V8 above. The loop's `continue` for an
+    # UNGATED_JOBS member would otherwise skip it for exactly the job it exists for.
+    out += ungated_job_violations(doc, name)
     return out
 
 
@@ -3248,11 +3592,15 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     # to SCOPED_SECRET, not to "any secret at all". Widening the check above from
     # `if SCOPED_SECRET in names:` to `if names:` would red this row too, so this is the fixture
     # that tells the two apart.
-    ("SMA-658 a different secret in the workflow-level env: stays clean", "main",
+    # SMA-684: a workflow-level env: reaches release-pr, so V18 now refuses it. This row used to
+    # expect a clean file, to show that V13 ignores a non-Docker Hub secret there. A substring
+    # match cannot show an ABSENT V13 line, so that half now lives in
+    # `_sma684_v18_allowlist_bites`, which calls credential_scope_violations directly.
+    ("SMA-658 a different secret in the workflow-level env: V18 refuses it", "main",
      _OK_IMAGES_MAIN.replace(
          "      - main\njobs:\n  release-pr:",
          "      - main\nenv:\n  T: ${{ secrets.PAIGASUS_BOT_APP_ID }}\njobs:\n  release-pr:"),
-     None),
+     "V18: the workflow sets `env:`"),
     ("SMA-658 a publish hidden inside a script", "main",
      _OK_IMAGES_MAIN.replace("    steps: [{run: crane push layout ghcr.io/smk1085/paigasus-iam:x}]",
                              "    steps: [{run: ci/images/run.sh publish}]"),
@@ -3344,6 +3692,17 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      _OK_CONSOLE_MAIN.replace("        with: {name: image-iam-console-amd64, path: in}",
                               "        with: {path: in}"),
      "V17: job 'publish-images-iam-console' downloads artifacts without a `name:`"),
+    # SMA-684 V18 (spec V-3): each shape, end to end through check_main, in the release-pr job.
+    ("SMA-684 V18 pnpm install in release-pr", "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]",
+                      "steps: [{run: pnpm --dir ts install --frozen-lockfile}]", 1),
+     "the command word 'pnpm' is not on the allowlist"),
+    ("SMA-684 V18 napi build in release-pr", "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]", "steps: [{run: napi build --platform}]", 1),
+     "the command word 'napi' is not on the allowlist"),
+    ("SMA-684 V18 actions/setup-node in release-pr", "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]", "steps: [{uses: actions/setup-node@v4}]", 1),
+     "uses the action 'actions/setup-node'"),
 ]
 
 
@@ -4186,6 +4545,228 @@ def _sma658_new_publish_markers_bite() -> str | None:
     return None
 
 
+# SMA-684 V18. One case per step shape, driven straight at ungated_job_violations(), the way
+# _SMA658_MARKER_CASES drives job_publishes(): a FIXTURES row buries one rejected shape under every
+# other violation the same file produces, where this table reds on that one shape alone. Rows are
+# (label, step, want_red): first the spec's rejected shapes (§5.6), then the shapes the plan's
+# Review Focus added, then the clean controls. A step may be a non-mapping on purpose.
+SHA_CO = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+_SMA684_V18_CASES: tuple[tuple[str, object, bool], ...] = (
+    ("pnpm install", {"run": "pnpm --dir ts install --frozen-lockfile"}, True),
+    ("napi build", {"run": "napi build"}, True),
+    ("node", {"run": "node x.js"}, True),
+    ("cargo build", {"run": "cargo build"}, True),
+    ("cargo b", {"run": "cargo b"}, True),
+    ("cargo with a toolchain", {"run": "cargo +1.95.0 build"}, True),
+    ("cargo publish --dry-run", {"run": "cargo publish --dry-run"}, True),
+    ("uvx", {"run": "uvx foo"}, True),
+    ("make", {"run": "make"}, True),
+    ("bash other.sh", {"run": "bash other.sh"}, True),
+    ("a chain after the allowed write", {"run": "bash ci/version-lockstep/run.sh --write && bash other.sh"}, True),
+    ("cargo update -w as a direct step", {"run": "cargo update -w"}, True),
+    ("uses setup-node", {"uses": "actions/setup-node@v4"}, True),
+    ("uses maturin-action", {"uses": "PyO3/maturin-action@v1"}, True),
+    ("uses pnpm action-setup", {"uses": "pnpm/action-setup@v4"}, True),
+    ("uses a local action", {"uses": "./local-action"}, True),
+    ("if as a prefix", {"run": "if cargo build; then\n  echo ok\nfi"}, True),
+    ("then as a prefix", {"run": 'if [ -n "$X" ]; then cargo build; fi'}, True),
+    ("a substitution after an allowed word", {"run": 'echo "$(cargo build)"'}, True),
+    ("a backtick substitution after an allowed word", {"run": "echo `cargo build`"}, True),
+    ("a substitution inside an assignment value", {"run": 'X="a$(cargo build)"'}, True),
+    ("an assignment and then a command", {"run": "X=1 cargo build"}, True),
+    ("a shell override", {"run": "echo hi", "shell": "python {0}"}, True),
+    ("neither uses nor run", {"name": "empty"}, True),
+    ("a docker action", {"uses": "docker://rust:1.95"}, True),
+    ("a longer flag than the allowed prefix", {"run": "bash ci/version-lockstep/run.sh --writex"}, True),
+    ("a pipe inside a quoted jq program (the splitter reads quotes now)", {"run": "PR_COUNT=\"$(printf '%s' \"$PR_JSON\" | jq '.prs | length')\""}, False),
+    ("elif as a prefix", {"run": 'if [ -n "$X" ]; then\n  echo a\nelif cargo build; then\n  echo b\nfi'}, True),
+    ("a negation as a prefix", {"run": "! cargo build"}, True),
+    ("a near-prefix of checkout", {"uses": "actions/checkout-evil@3d3c42e5aac5ba805825da76410c181273ba90b1"}, True),
+    ("a near-prefix of setup-toolchain", {"uses": "moonrepo/setup-toolchain-x@261c62cb5b0f580c7be7c8cd0f023a2e96756095"}, True),
+    ("a step that is not a mapping", "cargo build", True),
+    ("fix1: text after a leading substitution", {"run": "$(echo cargo) build"}, True),
+    ("fix1: a quoted substitution then a command", {"run": 'X="$(echo hi)" cargo build'}, True),
+    ("fix1: a captured release-plz call then a command", {"run": 'OUT="$(release-plz release-pr)" cargo build'}, True),
+    ("fix1: a substitution closed in a later pipeline segment", {"run": 'X="$(echo hi | jq .)" cargo build'}, True),
+    ("fix1: a mid-word hash hides a substitution", {"run": "echo x#$(cargo build)"}, True),
+    ("fix1: a mid-word hash hides a backtick", {"run": "echo x#`cargo build`"}, True),
+    ("fix1: a quote hides the start of a comment", {"run": 'echo "a #b" $(cargo build)'}, True),
+    ("fix1: a single ampersand", {"run": "echo hi & cargo build"}, True),
+    ("fix1: a process substitution <(", {"run": "echo <(cargo build)"}, True),
+    ("fix1: a process substitution >(", {"run": "echo hi > >(sh)"}, True),
+    ("fix1: a comment that ends in a backslash", {"run": "# note \\\ncargo build"}, True),
+    ("fix1: an escaped backslash at the line end", {"run": "echo a\\\\\ncargo build"}, True),
+    ("fix1: a step env BASH_ENV", {"run": "echo hi", "env": {"BASH_ENV": "evil.sh"}}, True),
+    ("fix1: a step env NODE_OPTIONS", {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1", "env": {"NODE_OPTIONS": "--require ./x.js"}}, True),
+    ("fix1: a step env LD_PRELOAD", {"run": "echo hi", "env": {"LD_PRELOAD": "./x.so"}}, True),
+    ("fix1: a step env RUSTC_WRAPPER", {"run": "release-plz release-pr", "env": {"RUSTC_WRAPPER": "./x"}}, True),
+    ("fix1: an env that is not a mapping", {"run": "echo hi", "env": "BASH_ENV=x"}, True),
+    ("fix1: a working-directory outside rs", {"run": "bash ci/version-lockstep/run.sh --write", "working-directory": "evil"}, True),
+    ("fix1: an unlisted step key", {"run": "echo hi", "continue-on-error": True}, True),
+    ("fix1: a checkout of another repository", {"uses": "actions/checkout@" + SHA_CO, "with": {"repository": "evil/repo", "persist-credentials": False}}, True),
+    ("fix1: a checkout that keeps credentials", {"uses": "actions/checkout@" + SHA_CO, "with": {"persist-credentials": True}}, True),
+    ("fix1: a checkout without persist-credentials", {"uses": "actions/checkout@" + SHA_CO}, True),
+    ("fix1: an unlisted with key on the app token", {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1", "with": {"owner": "evil"}}, True),
+    ("fix1: an unlisted with key on setup-toolchain", {"uses": "moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095", "with": {"auto-install": True}}, True),
+    ("fix1: with on a run step", {"run": "echo hi", "with": {"a": "b"}}, True),
+    ("fix1: a with that is not a mapping", {"uses": "actions/checkout@" + SHA_CO, "with": "x"}, True),
+    ("fix1: working-directory rs", {"run": "echo hi", "working-directory": "rs"}, False),
+    ("fix1: the allowed env names", {"run": "echo hi", "env": {"APP_ID_SET": "x", "GIT_TOKEN": "x", "PR_JSON": "x", "GH_TOKEN_FOR_PUSH": "x"}}, False),
+    ("fix1: a checkout with the string false", {"uses": "actions/checkout@" + SHA_CO, "with": {"persist-credentials": "false"}}, False),
+    ("fix1: a substitution closed in a later segment", {"run": 'X="$(echo hi | jq .)"'}, False),
+    ("fix2: a quoted hash hides a separator", {"run": 'echo "a #b"; cargo build'}, True),
+    ("fix2: a single-quoted hash hides a separator", {"run": "echo 'a #b' && cargo build"}, True),
+    ("fix2: an escaped space before a hash", {"run": "echo a\\ #b; cargo build"}, True),
+    ("fix2: a comment line ending in a backslash inside a continued line", {"run": "echo a \\\n# c \\\ncargo build"}, True),
+    ("fix2: a comment line ending in a backslash that is not continued", {"run": "# c \\\necho ok"}, True),
+    ("fix2: an unterminated double quote", {"run": 'echo "a; cargo build'}, True),
+    ("fix2: an unterminated single quote", {"run": "echo 'a; cargo build"}, True),
+    ("fix2: a quoted word then a hash comment", {"run": "echo ok # fine"}, True),
+    ("fix2: a separator after a redirection", {"run": "echo x >&2 && cargo build"}, True),
+    ("fix2: an ampersand between redirections", {"run": "echo x 2>&1 & cargo build"}, True),
+    ("fix2: a pipe in a wrapped substitution", {"run": 'X="$(echo hi | cargo build)"'}, True),
+    ("fix2: a redirect to stderr", {"run": "echo x >&2"}, False),
+    ("fix2: stderr to stdout", {"run": "echo x 2>&1"}, False),
+    ("fix2: a quoted separator", {"run": 'echo "a;b"'}, False),
+    ("fix2: an escaped separator", {"run": "echo a\\;b"}, False),
+    ("fix2: a quoted pipe and ampersand", {"run": "echo 'a | b && c'"}, False),
+    ("fix2: a comment line before a command", {"run": "# a note\necho ok"}, False),
+    ("fix2: a wrapped substitution with a pipeline", {"run": 'X="$(echo hi | jq .)"'}, False),
+    ("fix3: a carriage return before a hash", {"run": "echo ok\r# x; cargo build"}, True),
+    ("fix3: a vertical tab before a hash", {"run": "echo ok\x0b# x; cargo build"}, True),
+    ("fix3: a form feed before a hash", {"run": "echo ok\x0c# x; cargo build"}, True),
+    ("fix3: a file separator before a hash", {"run": "echo ok\x1c# x; cargo build"}, True),
+    ("fix3: U+0085 before a hash", {"run": "echo ok\x85# x; cargo build"}, True),
+    ("fix3: U+2028 before a hash", {"run": "echo ok\u2028# x; cargo build"}, True),
+    ("fix3: U+2029 before a hash", {"run": "echo ok\u2029# x; cargo build"}, True),
+    ("fix3: a no-break space before a hash", {"run": "\xa0# x || cargo build"}, True),
+    ("fix3: a vertical tab as the first blank", {"run": "\x0b# x || cargo build"}, True),
+    ("fix3: a NUL byte", {"run": "echo ok\x00"}, True),
+    ("fix3: a substitution closed early by a backslash paren", {"run": "$(echo cargo) build\\)"}, True),
+    ("fix3: a substitution closed early with a quoted argument", {"run": "$(echo bash) -c 'cargo build' \\)"}, True),
+    ("fix3: text after a wrapped substitution", {"run": 'NAME="$(a)" b'}, True),
+    ("fix3: a substitution with no NAME", {"run": '"$(echo a)"'}, True),
+    ("fix3: an unquoted wrapped substitution", {"run": "NAME=$(echo a)"}, True),
+    ("fix3: two substitutions in one wrapped value", {"run": 'NAME="$(echo a) $(echo b)"'}, True),
+    ("fix3: a backslash inside a wrapped substitution", {"run": 'NAME="$(echo \\) )"'}, True),
+    ("fix3: an unquoted paren inside a wrapped substitution", {"run": 'NAME="$(echo a) ; (echo b)"'}, True),
+    ("fix3: a join that makes a substitution", {"run": "echo $\\\n(cargo build)"}, True),
+    ("fix3: a trailing space after a backslash is not a join", {"run": "echo a\\ \ncargo build"}, True),
+    ("fix3: a parameter expansion with a hash", {"run": 'echo "${#X}"'}, True),
+    ("fix3: a wrapped substitution with a quoted paren", {"run": 'NAME="$(echo \'a)\')"'}, False),
+    ("fix3: a wrapped substitution", {"run": 'NAME="$(echo a)"'}, False),
+    ("fix3: a continued echo joins with nothing between", {"run": "echo a\\\nb"}, False),
+    ("fix3: a quote hides the true close of the substitution", {"run": 'NAME="$(echo a)"; cargo build; echo "x)"'}, True),
+    ("fix3: a backslash inside a wrapped substitution, no paren", {"run": 'NAME="$(echo a\\b)"'}, True),
+    # T7-R7: bash blanks are only space and tab. Each row below read CLEAN before, and bash ran
+    # cargo for each one (measured with a stub cargo under bash 3.2).
+    ("fix4: U+3000 inside an assignment value", {"run": "A=x\u3000echo cargo build"}, True),
+    ("fix4: U+3000 after a quoted assignment value", {"run": 'A="x"\u3000echo cargo build'}, True),
+    ("fix4: U+2003 inside an assignment value", {"run": "A=x\u2003echo cargo build"}, True),
+    ("fix4: U+2009 inside an assignment value", {"run": "A=x\u2009echo cargo build"}, True),
+    ("fix4: U+205F inside an assignment value", {"run": "A=x\u205fecho cargo build"}, True),
+    ("fix4: U+3000 inside a wrapped substitution", {"run": 'NAME="$(A=x\u3000echo cargo build)"'}, True),
+    ("fix4: U+1680 inside an assignment value", {"run": "A=x\u1680echo cargo build"}, True),
+    ("fix4: U+FEFF inside an assignment value", {"run": "A=x\ufeffecho cargo build"}, True),
+    ("fix4: an escaped space inside an assignment value", {"run": "A=x\\ echo cargo build"}, True),
+    ("fix4: an escaped tab inside an assignment value", {"run": "A=x\\\techo cargo build"}, True),
+    ("fix4: an escaped quote inside a double-quoted value", {"run": 'A="x\\" echo " cargo build'}, True),
+    ("fix4: an em dash inside an echo string", {"run": 'echo "Release PR \u2014 no changes"'}, False),
+    ("fix4: a tab between two assignments", {"run": "A=x\tB=y"}, False),
+    ("fix4: an escaped quote inside a double-quoted value", {"run": 'A="x\\"y"'}, False),
+    # Final review M1: an assignment before an allowed command word reaches its environment.
+    ("final: BASH_ENV before the allowed write", {"run": "BASH_ENV=./x.sh bash ci/version-lockstep/run.sh --write"}, True),
+    ("final: GIT_EXTERNAL_DIFF before git diff", {"run": "GIT_EXTERNAL_DIFF=./x.sh git diff"}, True),
+    ("final: an assignment before echo", {"run": "A=x echo ok"}, True),
+    ("final: set -a", {"run": "set -a"}, True),
+    ("final: set -o allexport", {"run": "set -o allexport"}, True),
+    ("final: set -k", {"run": "set -k"}, True),
+    ("final: set -ea in a cluster", {"run": "set -euoa pipefail"}, True),
+    ("final: set -euo pipefail", {"run": "set -euo pipefail"}, False),
+    ("final: two standalone assignments", {"run": 'A=1 B="two words"'}, False),
+    # T7-R8: ANSI-C and locale quoting. The first row read CLEAN before, and bash ran cargo.
+    ("fix5: an escaped quote inside ANSI-C quoting", {"run": "echo $'\\'' ; cargo build ; echo \\'"}, True),
+    ("fix5: ANSI-C quoting", {"run": "echo $'a'"}, True),
+    ("fix5: locale quoting", {"run": 'echo $"a"'}, True),
+    ("fix5: ANSI-C quoting inside a wrapped substitution", {"run": "NAME=\"$(echo $'a')\""}, True),
+    ("fix5: a plain parameter expansion", {"run": "echo $HOME"}, False),
+    ("moon setup", {"run": "moon setup"}, False),
+    ("proto install release-plz", {"run": "proto install release-plz"}, False),
+    ("release-plz release-pr", {"run": "release-plz release-pr --output json"}, False),
+    ("the branch push", {"run": 'git push "$AUTH_REMOTE" "HEAD:$BRANCH"'}, False),
+    ("a captured release-plz call", {"run": 'OUT="$(release-plz release-pr --output json)"'}, False),
+    ("a continued echo", {"run": 'echo "a" \\\n     "b (c) d"'}, False),
+    ("pinned checkout", {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "with": {"fetch-depth": 0, "persist-credentials": False}}, False),
+    ("pinned setup-toolchain", {"uses": "moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095"}, False),
+    ("pinned app token", {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"}, False),
+    ("two jq calls", {"run": "PR_COUNT=\"$(printf '%s' \"$PR_JSON\" | jq '.prs' | jq 'length')\""}, False),
+    ("a plain assignment", {"run": 'AUTH_REMOTE="https://x-access-token:${GH_TOKEN_FOR_PUSH}@github.com/${GITHUB_REPOSITORY}.git"'}, False),
+    ("if, exit and fi", {"run": 'if [ "$PR_COUNT" -eq 0 ]; then\n  exit 0\nfi'}, False),
+    ("a comment line with separators", {"run": "# a | b; c && d\necho ok"}, False),
+)
+# Deleting a row must red: the table is the only pin on each shape.
+_SMA684_V18_CASE_COUNT = 147
+
+
+def _sma684_v18_allowlist_bites() -> str | None:
+    if len(_SMA684_V18_CASES) != _SMA684_V18_CASE_COUNT:
+        return f"_SMA684_V18_CASES holds {len(_SMA684_V18_CASES)} rows, expected {_SMA684_V18_CASE_COUNT}"
+    for label, step, want_red in _SMA684_V18_CASES:
+        found = ungated_job_violations({"jobs": {"release-pr": {"steps": [step]}}}, "fixture")
+        if bool(found) != want_red:
+            return f"{label}: expected {'a V18 violation' if want_red else 'clean'}, got {found or '(clean)'}"
+        if not all(": V18: " in v for v in found):
+            return f"{label}: a violation does not name V18: {found}"
+    # The keys that run code or change how every step of the job runs.
+    for key, value in (("container", "ubuntu:24.04"), ("services", {"db": {"image": "postgres"}}),
+                       ("defaults", {"run": {"shell": "python {0}"}}),
+                       ("env", {"BASH_ENV": "evil.sh"}), ("uses", "./.github/workflows/x.yml")):
+        if not ungated_job_violations({"jobs": {"release-pr": {key: value, "steps": [{"run": "echo hi"}]}}}, "fixture"):
+            return f"a job-level `{key}:` on release-pr read clean"
+    if not ungated_job_violations({"defaults": {"run": {"shell": "python {0}"}},
+                                   "jobs": {"release-pr": {"steps": [{"run": "echo hi"}]}}}, "fixture"):
+        return "a workflow-level `defaults:` read clean"
+    if not ungated_job_violations({"env": {"BASH_ENV": "evil.sh"},
+                                   "jobs": {"release-pr": {"steps": [{"run": "echo hi"}]}}}, "fixture"):
+        return "a workflow-level `env:` read clean"
+    # A reusable-workflow call has no steps: it must still red.
+    if not ungated_job_violations({"jobs": {"release-pr": {"uses": "./.github/workflows/x.yml"}}}, "fixture"):
+        return "a job-level `uses:` with no steps read clean"
+    # T7-R6: a control character reaches V18 through a YAML double-quoted scalar, so prove the
+    # refusal through yaml.safe_load, not only through a Python string.
+    for esc in ("\\r", "\\x0b", "\\x0c", "\\x85", "\\u2028"):
+        loaded = yaml.safe_load(
+            'jobs:\n  release-pr:\n    steps:\n      - run: "echo ok' + esc + '# x; cargo build"\n')
+        if not ungated_job_violations(loaded, "fixture"):
+            return f"a YAML-loaded run: with {esc} before a hash read clean"
+    # T7-R7: raw UTF-8 U+3000 in a literal block scalar needs no escape, so prove that path too.
+    loaded = yaml.safe_load("jobs:\n  release-pr:\n    steps:\n      - run: |\n"
+                            "          A=x\u3000echo cargo build\n")
+    if "\u3000" not in loaded["jobs"]["release-pr"]["steps"][0]["run"]:
+        return "the YAML literal block scalar lost its U+3000"
+    if not ungated_job_violations(loaded, "fixture"):
+        return "a YAML-loaded literal block with a raw U+3000 read clean"
+    # T7-R5: V13's workflow-level silence for a different secret, pinned where a substring match
+    # cannot hide it. The SMA-658 FIXTURES row for this shape now expects V18's refusal instead.
+    other = {"env": {"T": "${{ secrets.PAIGASUS_BOT_APP_ID }}"}, "jobs": {}}
+    if credential_scope_violations(other, "f") != []:
+        return "V13 fired on a workflow-level env: that reads a secret other than DOCKERHUB_TOKEN"
+    scoped = {"env": {"T": "${{ secrets.DOCKERHUB_TOKEN }}"}, "jobs": {}}
+    if not credential_scope_violations(scoped, "f"):
+        return "V13 stayed silent on a workflow-level env: that reads DOCKERHUB_TOKEN"
+    # Scope: V18 applies to UNGATED_JOBS members only.
+    if ungated_job_violations({"jobs": {"build": {"steps": [{"run": "cargo build"}]}}}, "fixture"):
+        return "V18 fired on a job outside UNGATED_JOBS"
+    # The real job is the clean control the spec names (§5.6). check 10 runs this from the root.
+    real = Path(".github/workflows/release.yml")
+    if not real.is_file():
+        return f"{real} is not readable from {Path.cwd()}; run the self-test from the repository root"
+    found = ungated_job_violations(load_workflow(real), real.name)
+    if found:
+        return f"the real release-pr job fails V18: {found}"
+    return None
+
+
 def self_test() -> int:
     rc = 0
     for name, kind, text, want in FIXTURES:
@@ -4233,6 +4814,8 @@ def self_test() -> int:
         ("sma-658 fix round 1, I3: V13's cross-workflow sweep", _v13_cross_workflow_sweep),
         ("f7 non-list steps: fails closed", _non_list_steps_fails_closed),
         ("pr2 review i4: UNGATED_JOBS is pinned by strict equality", _ungated_jobs_pinned),
+        ("sma-684 V18 allowlist: every rejected shape reds, every control is clean",
+         _sma684_v18_allowlist_bites),
     ):
         err = fn()
         if err:

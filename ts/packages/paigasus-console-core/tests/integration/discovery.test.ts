@@ -21,7 +21,7 @@ import { serviceInfoHandlers } from '../support/msw';
 const IAM_HTTP = 'http://iam.msw.test';
 const server = setupServer();
 
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => {
   server.resetHandlers();
 });

@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# expect: 3 shipped-path
+# The path to braces runs through a `file:` dependency, in the shape of the real
+# '@paigasus/node-bindings' entry of packages/paigasus-kernel.
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  apps/iam-console:
+    dependencies:
+      '@paigasus/kernel':
+        specifier: workspace:*
+        version: link:../../packages/paigasus-kernel
+
+  packages/paigasus-kernel:
+    dependencies:
+      '@paigasus/node-bindings':
+        specifier: file:../../../rs/crates/bindings/paigasus-node-bindings
+        version: file:../rs/crates/bindings/paigasus-node-bindings
+
+snapshots:
+
+  '@paigasus/node-bindings@file:../rs/crates/bindings/paigasus-node-bindings':
+    dependencies:
+      '@next/eslint-plugin-next': 16.3.6(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
+
+  '@next/eslint-plugin-next@16.3.6(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))':
+    dependencies:
+      fast-glob: 3.3.1
+    transitivePeerDependencies:
+      - eslint
+
+  braces@3.0.3:
+    dependencies:
+      fill-range: 7.1.1
+
+  fast-glob@3.3.1:
+    dependencies:
+      micromatch: 4.0.8
+
+  fill-range@7.1.1: {}
+
+  micromatch@4.0.8:
+    dependencies:
+      braces: 3.0.3
+      picomatch: 2.3.2
+
+  picomatch@2.3.2: {}
+
+  typescript@6.0.3: {}

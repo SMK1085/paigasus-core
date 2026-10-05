@@ -31,6 +31,10 @@
 # A11 (SMA-663) reads the same `members` list and reds on any glob character in it, because a
 # glob can match napi's `.<crate>.napi-stage-<random>` staging directory.
 #
+# A12 (SMA-536) is about ts `tsc` tasks: A12a asserts that each one keys on its package.json
+# dependency closure, and A12b that each one whose closure holds a `file:` binding runs the
+# installed-typings preflight before `tsc`. It reads package.json files from disk.
+#
 # usage: cargo_moon_parity.py [--self-test]
 import collections
 import fnmatch
@@ -457,7 +461,7 @@ ALLOW_UNLOCKED_CARGO_SCRIPT = {
         "MEASURED unreachable from the Moon task (SMA-599 §2.4): repo:version-lockstep runs "
         "run.sh --self-test, --negative-control and bare, while this line is inside "
         "run_write(), reached only by `--write`. `--locked` would defeat the function, whose "
-        "PURPOSE is to regenerate the lock after writing the nine version sites it owns "
+        "PURPOSE is to regenerate the lock after writing the ten version sites it owns "
         "(SMA-685). The "
         "scan is path-insensitive and cannot see this (L1), so the waiver stands in for it; "
         "check_version_lockstep_no_write below is what keeps the premise honest."
@@ -2099,6 +2103,361 @@ def check_wrapper_upstream_inputs(projects, root, floor=REQUIRED_WRAPPER_CLOSURE
             for entry in sorted(want - observed):
                 a7.append(f"{pid}:{task} inputs omit {entry}")
     return a7
+
+
+# SMA-536 — A12. Every ts task that runs `tsc` must key on what `tsc` reads through its package.json
+# dependency closure (A12a), and must run the installed-typings preflight before `tsc` when that
+# closure holds a `file:` binding (A12b). See
+# docs/superpowers/specs/2026-10-04-sma-536-ts-typecheck-upstream-inputs-design.md.
+#
+# `tsc` as a bounded token, optionally behind `pnpm exec`. Bounded, so `tsc-alias`, `tscheck` and
+# the `.d.ts` in `--dts index.fresh.d.ts` never match. A `tsc` behind a wrapper script is invisible
+# (spec R3); the floor catches the loss of a known task, not a new wrapper.
+TSC_TOKEN_RE = re.compile(r"(^|[\s;&|(])(pnpm\s+exec\s+)?tsc(\s|$)")
+PREFLIGHT_SCRIPT = "ts/scripts/check-installed-bindings.mjs"
+# `node <relative prefix>ts/scripts/check-installed-bindings.mjs` as a whole word. moon reports a
+# script-form task with `command` set to the script's first word, so the joined blob reads
+# `node node ../../../ts/...`. The leading-separator group finds the second `node`.
+PREFLIGHT_RE = re.compile(r"(?:^|[\s;&|(])node\s+(?:\S*/)?ts/scripts/check-installed-bindings\.mjs(?=$|[\s;&|)])")
+TS_BASE_TSCONFIG = "ts/tsconfig.base.json"
+PROTO_PACKAGE = "@paigasus/proto"
+# A DIRECT task dep, because contracts:generate deletes ts/packages/paigasus-proto/src/generated
+# before it rewrites it. Direct matches repo policy (iam-console/moon.yml) and what moon_projects()
+# records for each task.
+PROTO_GENERATE_DEP = "contracts:generate"
+TS_DEP_FIELDS = ("dependencies", "devDependencies", "peerDependencies")
+TS_PACKAGE_GLOBS = ("ts/packages/*/package.json", "ts/apps/*/package.json")
+
+# A12's anti-vacuity floors. A12 asserts CONTAINMENT, and a containment check whose `want` set
+# empties passes having asserted nothing (A7's lesson). The task floor catches a derivation that
+# stops matching a known task. The closure floor catches a package.json walk that stops deriving.
+REQUIRED_TSC_TASKS = (
+    "paigasus-kernel-ts:build",
+    "paigasus-kernel-ts:typecheck",
+    "paigasus-console-core-ts:typecheck",
+    "iam-console-ts:typecheck",
+    "gateway-console-ts:typecheck",
+)
+REQUIRED_TS_CLOSURE = {
+    "@paigasus/kernel": {"@paigasus/node-bindings", "@paigasus/wasm"},
+    "@paigasus/console-core": {"@paigasus/kernel"},
+}
+
+
+def derive_tsc_tasks(projects):
+    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation runs `tsc`.
+
+    Shared by A12a and A12b. Raises MoonOutputError if a task exposes none of a command, a script,
+    or any args, exactly as derive_ffi_tasks does.
+    """
+    matched = set()
+    for pid in sorted(projects):
+        proj = projects[pid]
+        if proj.get("language") != "typescript":
+            continue
+        invocations = proj.get("invocations") or {}
+        for name in sorted(invocations):
+            blob = invocations[name]
+            if blob is None:
+                raise MoonOutputError(
+                    f"{pid}:{name} reported none of a `command`, a `script`, or any `args` — "
+                    f"moon's output shape changed, so the tsc derivation cannot be evaluated"
+                )
+            if TSC_TOKEN_RE.search(blob):
+                matched.add(f"{pid}:{name}")
+    return matched
+
+
+def _read_package_json(root, rel_dir, rows):
+    """Parse `<root>/<rel_dir>/package.json`. On any failure, append a row and return None.
+
+    A row, never an infrastructure error and never a skip (spec §3.3): a broken manifest is an
+    authoring mistake in this repo, and the row names the file.
+    """
+    rel = f"{rel_dir}/package.json"
+    try:
+        data = json.loads((root / rel).read_text())
+    except FileNotFoundError:
+        rows.append(f"{rel} is missing")
+        return None
+    except OSError as exc:
+        rows.append(f"{rel} cannot be read ({exc})")
+        return None
+    except ValueError as exc:
+        rows.append(f"{rel} is not valid JSON ({exc})")
+        return None
+    if not isinstance(data, dict):
+        rows.append(f"{rel} is not a JSON object")
+        return None
+    return data
+
+
+def ts_workspace_packages(root, rows):
+    """{package name: workspace-relative dir} for every ts/packages/* and ts/apps/* package."""
+    names = {}
+    for pattern in TS_PACKAGE_GLOBS:
+        for path in sorted(root.glob(pattern)):
+            rel_dir = path.parent.relative_to(root).as_posix()
+            data = _read_package_json(root, rel_dir, rows)
+            if data is None:
+                continue
+            name = data.get("name")
+            if not isinstance(name, str) or not name:
+                rows.append(f"{rel_dir}/package.json has no `name`, so no `workspace:` specifier can reach it")
+                continue
+            if name in names:
+                rows.append(f"{name} is declared by both {names[name]} and {rel_dir}")
+                continue
+            names[name] = rel_dir
+    return names
+
+
+def ts_closure(root, own_dir, names, rows):
+    """Transitive `workspace:` and `file:` closure of the package at `own_dir`.
+
+    Returns {name: (kind, dir)} with kind "workspace" or "file". Walks `dependencies`,
+    `devDependencies` and `peerDependencies` of every member, upstream devDependencies included:
+    the apps reach @paigasus/proto through console-core's devDependency, because `tsc` reads
+    console-core/testing/fake-iam.ts. The own package is excluded at every depth, and a visited
+    set ends a cycle. Each fail-closed case appends a row to `rows`.
+    """
+    closure = {}
+    seen = {own_dir}
+    stack = [own_dir]
+    while stack:
+        cur = stack.pop()
+        data = _read_package_json(root, cur, rows)
+        if data is None:
+            continue
+        for field in TS_DEP_FIELDS:
+            deps = data.get(field)
+            if deps is None:
+                continue
+            if not isinstance(deps, dict):
+                rows.append(f"{cur}/package.json `{field}` is not an object")
+                continue
+            for name in sorted(deps):
+                spec = deps[name]
+                if not isinstance(spec, str):
+                    rows.append(f"{cur}/package.json: {name} has a specifier that is not a string")
+                    continue
+                if spec.startswith("link:"):
+                    rows.append(
+                        f"{cur}/package.json: {name} uses a `link:` specifier ({spec}); A12 has no "
+                        f"rule for it, so handle it on purpose (SMA-536)"
+                    )
+                    continue
+                if spec.startswith("workspace:"):
+                    target = names.get(name)
+                    if target is None:
+                        rows.append(
+                            f"{cur}/package.json: the `workspace:` dependency {name} maps to no package "
+                            f"directory under ts/packages or ts/apps"
+                        )
+                        continue
+                    kind = "workspace"
+                elif spec.startswith("file:"):
+                    target = os.path.normpath(os.path.join(cur, spec[len("file:"):]))
+                    if not (root / target).is_dir():
+                        rows.append(f"{cur}/package.json: {name} points at `{spec}`, which does not exist")
+                        continue
+                    kind = "file"
+                else:
+                    continue
+                if target in seen:
+                    continue
+                seen.add(target)
+                closure[name] = (kind, target)
+                stack.append(target)
+    return closure
+
+
+def _export_leaves(node, where, rows):
+    """The string leaves of an `exports` value. A condition object is walked; a null is ignored."""
+    if node is None:
+        return []
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        leaves = []
+        for key in sorted(node):
+            leaves += _export_leaves(node[key], where, rows)
+        return leaves
+    rows.append(
+        f"{where}: `exports` holds a {type(node).__name__}, which A12 cannot read (it walks strings, "
+        f"condition objects and null only)"
+    )
+    return []
+
+
+def tsc_required_inputs(root, closure, rows):
+    """Return (want, has_binding): the inputs one `tsc` task must declare for its closure (spec §3.3)."""
+    want = {TS_BASE_TSCONFIG}
+    has_binding = False
+    for name in sorted(closure):
+        kind, pkg_dir = closure[name]
+        if kind == "file":
+            has_binding = True
+        want.add(f"{pkg_dir}/package.json")
+        data = _read_package_json(root, pkg_dir, rows)
+        if data is None:
+            continue
+        if kind == "workspace":
+            want.add(f"{pkg_dir}/src/**/*")
+            for leaf in _export_leaves(data.get("exports"), f"{pkg_dir}/package.json", rows):
+                if not leaf.startswith("./"):
+                    rows.append(f"{pkg_dir}/package.json: the `exports` target {leaf!r} does not start with `./`")
+                    continue
+                rel = leaf[2:]
+                if rel.startswith("src/"):
+                    continue
+                head, sep, _ = rel.partition("/")
+                want.add(f"{pkg_dir}/{head}/**/*" if sep else f"{pkg_dir}/{rel}")
+            continue
+        files = data.get("files") or []
+        if not isinstance(files, list):
+            rows.append(f"{pkg_dir}/package.json `files` is not a list")
+            continue
+        for entry in files:
+            if isinstance(entry, str) and entry.endswith(".d.ts"):
+                want.add(f"{pkg_dir}/{entry}")
+    if has_binding:
+        want.add(PREFLIGHT_SCRIPT)
+    return want, has_binding
+
+
+def ts_tsc_analysis(projects, root):
+    """The derivation A12a and A12b share.
+
+    Returns (tasks, per_task, names, walk_rows). `per_task[target]` holds `own_name` (the task's
+    own package name or None), `closure`, `want` and `binding` (the closure holds a `file:`
+    binding). `walk_rows` holds every fail-closed row from reading package.json files.
+    """
+    walk_rows = []
+    tasks = derive_tsc_tasks(projects)
+    names = ts_workspace_packages(root, walk_rows)
+    per_task = {}
+    for target in sorted(tasks):
+        pid, _, _task = target.partition(":")
+        own = projects[pid]["source_dir"]
+        own_pkg = _read_package_json(root, own, walk_rows)
+        closure = ts_closure(root, own, names, walk_rows)
+        want, binding = tsc_required_inputs(root, closure, walk_rows)
+        per_task[target] = {
+            "own_name": own_pkg.get("name") if own_pkg else None,
+            "closure": closure,
+            "want": want,
+            "binding": binding,
+        }
+    return tasks, per_task, names, list(dict.fromkeys(walk_rows))
+
+
+def check_ts_tsc_inputs(projects, root, floor=REQUIRED_TSC_TASKS, closure_floor=REQUIRED_TS_CLOSURE):
+    """Return the A12a violation list: `tsc` tasks that do not key on their package.json closure.
+
+    CONTAINMENT, per task, over both input buckets — the shape of A7. The lists are hand-written
+    and correctly hold other entries, so strict equality would be wrong. A task that reports no
+    input bucket is a violation, never a skip.
+
+    `root` is POSITIONAL AND REQUIRED, never defaulted, for the reason in A7's docstring (SMA-560
+    I3): the package.json walk is the whole assertion, and a `root=None` default would make it
+    opt-in.
+    """
+    tasks, per_task, names, walk_rows = ts_tsc_analysis(projects, root)
+    rows = []
+    for target in sorted(set(floor or ()) - tasks):
+        rows.append(
+            f"FLOOR: {target} is not matched by the `tsc` token, so A12 asserts nothing about it "
+            f"(see TSC_TOKEN_RE; a `tsc` behind a wrapper script is invisible)"
+        )
+    for pkg, required in sorted((closure_floor or {}).items()):
+        pkg_dir = names.get(pkg)
+        if pkg_dir is None:
+            rows.append(
+                f"FLOOR: {pkg} is not a package under ts/packages or ts/apps, so its closure cannot "
+                f"be derived"
+            )
+            continue
+        derived = ts_closure(root, pkg_dir, names, walk_rows)
+        for missing in sorted(set(required) - set(derived)):
+            rows.append(
+                f"FLOOR: the closure of {pkg} no longer derives {missing} — the package.json walk "
+                f"is broken, so A12 asserts nothing"
+            )
+    rows += walk_rows
+    for target in sorted(tasks):
+        pid, _, task = target.partition(":")
+        proj = projects[pid]
+        info = per_task[target]
+        files = (proj.get("task_inputs") or {}).get(task)
+        globs = (proj.get("task_input_globs") or {}).get(task)
+        if files is None or globs is None:
+            rows.append(
+                f"{target} reported no `inputFiles`/`inputGlobs` — moon's output shape changed, so "
+                f"this assertion cannot be evaluated (treated as a violation, never skipped)"
+            )
+        else:
+            observed = set(files) | set(globs)
+            for entry in sorted(info["want"] - observed):
+                rows.append(f"{target} inputs omit {entry}")
+        reads_proto = info["own_name"] == PROTO_PACKAGE or PROTO_PACKAGE in info["closure"]
+        deps = (proj.get("tasks") or {}).get(task) or []
+        if reads_proto and PROTO_GENERATE_DEP not in deps:
+            rows.append(
+                f"{target} deps omit {PROTO_GENERATE_DEP} — it reads @paigasus/proto's generated "
+                f"tree, so it must run after the generator for a deterministic cache key"
+            )
+    return list(dict.fromkeys(rows))
+
+
+# The joins between the preflight and `tsc` that let `tsc` run after a failed preflight. `||` is
+# checked before `|`, because it contains it. `&&` is removed first, so a lone `&` is a background job.
+_PREFLIGHT_BAD_JOINS = (("||", "`||`"), (";", "`;`"), ("\n", "a newline"), ("|", "`|`"), ("&", "`&`"))
+
+
+def preflight_order_verdict(blob):
+    """None if `blob` runs the preflight before its first `tsc`, joined only with `&&`; else why not."""
+    tsc = TSC_TOKEN_RE.search(blob)
+    if tsc is None:
+        return "runs no `tsc` token"
+    pre = PREFLIGHT_RE.search(blob)
+    if pre is None:
+        return f"does not run {PREFLIGHT_SCRIPT} before `tsc`, so `tsc` can read stale installed typings"
+    if pre.start() > tsc.start():
+        return f"runs {PREFLIGHT_SCRIPT} after `tsc`, so `tsc` can read stale installed typings first"
+    # Up to the END of the separator group, so the character just before `tsc` (a newline, a `;`)
+    # is part of what is checked.
+    leftover = blob[pre.end():tsc.end(1)].replace("&&", "")
+    for op, shown in _PREFLIGHT_BAD_JOINS:
+        if op in leftover:
+            return (
+                f"joins {PREFLIGHT_SCRIPT} to `tsc` with {shown}, not `&&`, so a failed preflight "
+                f"does not stop `tsc`"
+            )
+    return None
+
+
+def check_ts_tsc_preflight(projects, root, floor=REQUIRED_TSC_TASKS):
+    """Return the A12b violation list: binding `tsc` tasks that do not run the preflight first.
+
+    Examines every task A12 derives whose closure holds a `file:` binding. The package.json walk
+    rows are A12a's to report; A12b drops them, so one broken manifest does not print under two
+    titles. `root` is positional and required, as in A12a.
+    """
+    tasks, per_task, _names, _walk_rows = ts_tsc_analysis(projects, root)
+    examined = {target for target in tasks if per_task[target]["binding"]}
+    rows = []
+    for target in sorted(set(floor or ()) - examined):
+        rows.append(
+            f"FLOOR: {target} is in the A12 floor, but A12b does not examine it — it runs no `tsc` "
+            f"token, or its package closure no longer holds a `file:` binding"
+        )
+    for target in sorted(examined):
+        pid, _, task = target.partition(":")
+        verdict = preflight_order_verdict(projects[pid]["invocations"][task])
+        if verdict:
+            rows.append(f"{target} {verdict}")
+    return rows
 
 
 def moon_projects():
@@ -4351,12 +4710,349 @@ def self_test():
     if not CONFIG_SENSITIVE_VERBS:
         failures.append("CONFIG_SENSITIVE_VERBS is empty — A10 would examine nothing")
 
+    # A12 (SMA-536). Two halves, like A7-h: a package.json tree written to a tmp root, and moon's
+    # resolved view of the `tsc` tasks. The package names are the real ones, so the shapes match
+    # what REQUIRED_TS_CLOSURE names.
+    if not REQUIRED_TSC_TASKS:
+        failures.append("REQUIRED_TSC_TASKS is empty — A12's task floor would assert nothing")
+    if not REQUIRED_TS_CLOSURE:
+        failures.append("REQUIRED_TS_CLOSURE is empty — A12's closure floor would assert nothing")
+
+    # The tsc token, exercised directly (A10's `_var_sensitive` lesson): through the check, a blob
+    # the regex rejects is simply not derived, so a missing row proves nothing about the regex.
+    for blob, want in (
+        ("pnpm exec tsc -p tsconfig.json --noEmit", True),
+        ("tsc --noEmit", True),
+        ("touch a && pnpm exec tsc -p tsconfig.json", True),
+        ("(tsc -p x)", True),
+        ("pnpm exec tsc-alias -p x", False),
+        ("pnpm exec napi build --dts index.fresh.d.ts", False),
+        ("pnpm exec vitest run", False),
+        ("node scripts/tscheck.mjs", False),
+    ):
+        if bool(TSC_TOKEN_RE.search(blob)) is not want:
+            failures.append(
+                f"TSC_TOKEN_RE on {blob!r} is {not want} — the tsc token is wrong in the "
+                f"{'false-negative' if want else 'false-positive'} direction"
+            )
+
+    a12_tree = {
+        "ts/packages/kernel": {
+            "name": "@paigasus/kernel",
+            "dependencies": {"@paigasus/node-bindings": "file:../../../rs/crates/bindings/nb"},
+            "exports": {".": "./src/wasm.ts", "./napi": {"types": "./src/index.ts", "default": None}},
+        },
+        "ts/packages/core": {
+            "name": "@paigasus/console-core",
+            "dependencies": {"@paigasus/kernel": "workspace:*"},
+            "devDependencies": {"@paigasus/proto": "workspace:*"},
+            "exports": {
+                ".": "./src/index.ts",
+                "./testing": "./testing/index.ts",
+                "./fakes": {
+                    "import": {"types": "./fakes/index.d.ts", "default": "./fakes/index.js"},
+                    "require": None,
+                },
+            },
+        },
+        "ts/packages/proto": {"name": "@paigasus/proto", "exports": {".": "./src/index.ts"}},
+        "ts/packages/nc": {
+            "name": "@paigasus/next-config",
+            "exports": {".": "./src/index.ts", "./tsconfig-app": "./tsconfig.app.json"},
+        },
+        "ts/apps/app": {
+            "name": "@paigasus/app",
+            "dependencies": {"@paigasus/console-core": "workspace:*", "@paigasus/next-config": "workspace:*"},
+        },
+        "rs/crates/bindings/nb": {"name": "@paigasus/node-bindings", "files": ["index.js", "index.d.ts"]},
+    }
+    a12_pre = "node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit"
+    a12_tsc = "pnpm exec tsc -p tsconfig.json --noEmit"
+    a12_nb = ["rs/crates/bindings/nb/index.d.ts", "rs/crates/bindings/nb/package.json", PREFLIGHT_SCRIPT]
+    a12_core_files = [TS_BASE_TSCONFIG, "ts/packages/kernel/package.json", "ts/packages/proto/package.json", *a12_nb]
+    a12_core_globs = ["ts/packages/kernel/src/**/*", "ts/packages/proto/src/**/*"]
+
+    def _a12_ts(source_dir, tasks, language="typescript"):
+        # tasks: {name: (invocation, deps, inputFiles, inputGlobs)}
+        return {
+            "source_dir": source_dir, "deps": {}, "language": language,
+            "tasks": {n: list(t[1]) for n, t in tasks.items()},
+            "task_inputs": {n: sorted(set(t[2])) for n, t in tasks.items()},
+            "task_input_globs": {n: sorted(set(t[3])) for n, t in tasks.items()},
+            "invocations": {n: t[0] for n, t in tasks.items()},
+        }
+
+    a12 = {
+        "k-ts": _a12_ts("ts/packages/kernel", {
+            # Script form: moon reports `command` as the script's first word, so the joined blob
+            # repeats it.
+            "typecheck": ("node " + a12_pre, [], [TS_BASE_TSCONFIG, *a12_nb], []),
+            # Not a tsc task. Its inputs are empty, so an over-matching derivation reds the clean row.
+            "test": ("pnpm exec vitest run", [], [], []),
+        }),
+        "c-ts": _a12_ts("ts/packages/core", {
+            "build": (a12_pre, [PROTO_GENERATE_DEP], a12_core_files, a12_core_globs),
+            "typecheck": (a12_pre, [PROTO_GENERATE_DEP], a12_core_files, a12_core_globs),
+        }),
+        "p-ts": _a12_ts("ts/packages/proto", {
+            "typecheck": (a12_tsc, [PROTO_GENERATE_DEP], [TS_BASE_TSCONFIG], []),
+        }),
+        "n-ts": _a12_ts("ts/packages/nc", {"typecheck": (a12_tsc, [], [TS_BASE_TSCONFIG], [])}),
+        "app-ts": _a12_ts("ts/apps/app", {
+            "typecheck": (
+                a12_pre, [PROTO_GENERATE_DEP],
+                [*a12_core_files, "ts/packages/core/package.json", "ts/packages/nc/package.json",
+                 "ts/packages/nc/tsconfig.app.json"],
+                [*a12_core_globs, "ts/packages/core/src/**/*", "ts/packages/core/testing/**/*",
+                 "ts/packages/core/fakes/**/*", "ts/packages/nc/src/**/*"],
+            ),
+        }),
+        # A tsc invocation in a NON-typescript project, under-declared on purpose. A12 must not
+        # examine it. A clean project here would make the row vacuous (A7-c's lesson).
+        "x-py": _a12_ts("py/x", {"typecheck": (a12_tsc, [], [], [])}, language="python"),
+    }
+    a12_floor = ("k-ts:typecheck", "c-ts:typecheck", "app-ts:typecheck")
+    a12_closure_floor = {
+        "@paigasus/kernel": {"@paigasus/node-bindings"},
+        "@paigasus/console-core": {"@paigasus/kernel"},
+    }
+
+    def _a12_copy(obj):
+        return json.loads(json.dumps(obj))
+
+    def _a12_run(check_fn, fixture, tree, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for rel, data in tree.items():
+                (base / rel).mkdir(parents=True, exist_ok=True)
+                if data is not None:
+                    text = data if isinstance(data, str) else json.dumps(data)
+                    (base / rel / "package.json").write_text(text)
+            return check_fn(fixture, base, **kw)
+
+    def _a12a(fixture=None, tree=None, **kw):
+        kw.setdefault("floor", a12_floor)
+        kw.setdefault("closure_floor", a12_closure_floor)
+        return _a12_run(
+            check_ts_tsc_inputs, a12 if fixture is None else fixture,
+            a12_tree if tree is None else tree, **kw,
+        )
+
+    rows = _a12a()
+    if rows != []:
+        failures.append(f"A12a reported violations on a complete fixture: {rows}")
+
+    # A12a-a: an upstream package's src glob, read PER TASK. `build` keeps the glob, so a union
+    # across the project's tasks would hide the shortfall (A7-g's lesson).
+    broken = _a12_copy(a12)
+    broken["c-ts"]["task_input_globs"]["typecheck"] = ["ts/packages/proto/src/**/*"]
+    rows = _a12a(broken)
+    if "c-ts:typecheck inputs omit ts/packages/kernel/src/**/*" not in rows:
+        failures.append("A12a did not fire on a tsc task missing an upstream package's src glob")
+    if any(row.startswith("c-ts:build ") for row in rows):
+        failures.append("A12a blamed `build` for a shortfall that lives on `typecheck`")
+
+    # A12a-b: the binding half — a `.d.ts` from the binding's `files` list.
+    broken = _a12_copy(a12)
+    broken["k-ts"]["task_inputs"]["typecheck"].remove("rs/crates/bindings/nb/index.d.ts")
+    if "k-ts:typecheck inputs omit rs/crates/bindings/nb/index.d.ts" not in _a12a(broken):
+        failures.append("A12a did not demand a binding's .d.ts from its `files` list")
+
+    # A12a-c: the base tsconfig, demanded of every tsc task.
+    broken = _a12_copy(a12)
+    broken["p-ts"]["task_inputs"]["typecheck"] = []
+    if f"p-ts:typecheck inputs omit {TS_BASE_TSCONFIG}" not in _a12a(broken):
+        failures.append("A12a did not demand ts/tsconfig.base.json")
+
+    # A12a-d: the preflight script, demanded where the closure holds a binding. p-ts and n-ts
+    # declare no preflight input, so the clean row above proves it is not demanded elsewhere.
+    broken = _a12_copy(a12)
+    broken["k-ts"]["task_inputs"]["typecheck"].remove(PREFLIGHT_SCRIPT)
+    if f"k-ts:typecheck inputs omit {PREFLIGHT_SCRIPT}" not in _a12a(broken):
+        failures.append("A12a did not demand the preflight script of a task with a binding")
+
+    # A12a-e: an `exports` target in a subdirectory is satisfied by `<dir>/**/*`.
+    broken = _a12_copy(a12)
+    broken["app-ts"]["task_input_globs"]["typecheck"].remove("ts/packages/core/testing/**/*")
+    if "app-ts:typecheck inputs omit ts/packages/core/testing/**/*" not in _a12a(broken):
+        failures.append("A12a did not demand the directory glob of a subdirectory `exports` target")
+
+    # A12a-f: a condition object is walked to its string leaves (two levels deep, with a null).
+    broken = _a12_copy(a12)
+    broken["app-ts"]["task_input_globs"]["typecheck"].remove("ts/packages/core/fakes/**/*")
+    if "app-ts:typecheck inputs omit ts/packages/core/fakes/**/*" not in _a12a(broken):
+        failures.append("A12a did not walk a conditional `exports` object")
+
+    # A12a-g: an `exports` target at the package root is demanded as the file itself.
+    broken = _a12_copy(a12)
+    broken["app-ts"]["task_inputs"]["typecheck"].remove("ts/packages/nc/tsconfig.app.json")
+    if "app-ts:typecheck inputs omit ts/packages/nc/tsconfig.app.json" not in _a12a(broken):
+        failures.append("A12a did not demand a root-level `exports` target")
+
+    # A12a-h: an `exports` shape A12 cannot read reds, and so does a target without `./`.
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/core"]["exports"]["./bad"] = ["./bad/a.js"]
+    if not any("ts/packages/core/package.json: `exports` holds a list" in r for r in _a12a(tree=tree)):
+        failures.append("A12a accepted an `exports` shape it cannot read")
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/core"]["exports"]["./raw"] = "raw/index.ts"
+    if not any("does not start with `./`" in r for r in _a12a(tree=tree)):
+        failures.append("A12a accepted an `exports` target that does not start with ./")
+
+    # A12a-i: a missing DIRECT contracts:generate, for a closure reader and for proto itself. n-ts
+    # has no proto in its closure and declares no deps, so the clean row proves no over-demand.
+    broken = _a12_copy(a12)
+    broken["app-ts"]["tasks"]["typecheck"] = []
+    broken["p-ts"]["tasks"]["typecheck"] = []
+    rows = _a12a(broken)
+    for target in ("app-ts:typecheck", "p-ts:typecheck"):
+        if not any(r.startswith(f"{target} deps omit {PROTO_GENERATE_DEP}") for r in rows):
+            failures.append(f"A12a did not demand {PROTO_GENERATE_DEP} of {target}")
+
+    # A12a-j: the task floor. No task matches `tsc`, so the derived set is empty and every
+    # per-task row goes quiet by itself. The row must name THIS branch's message.
+    broken = _a12_copy(a12)
+    for proj in broken.values():
+        proj["invocations"] = dict.fromkeys(proj["invocations"], "pnpm exec vitest run")
+    if not any(
+        r.startswith("FLOOR:") and "k-ts:typecheck is not matched by the `tsc` token" in r
+        for r in _a12a(broken)
+    ):
+        failures.append("A12a's task floor did not fire when no task matches `tsc`")
+
+    # A12a-k: the closure floor. The kernel loses its binding edge, and a floor package is absent.
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/kernel"]["dependencies"] = {}
+    if not any(
+        r.startswith("FLOOR:") and "closure of @paigasus/kernel no longer derives @paigasus/node-bindings" in r
+        for r in _a12a(tree=tree)
+    ):
+        failures.append("A12a's closure floor did not fire on a broken package.json walk")
+    if not any(
+        r.startswith("FLOOR:") and "@paigasus/ghost is not a package" in r
+        for r in _a12a(closure_floor={"@paigasus/ghost": {"@paigasus/kernel"}})
+    ):
+        failures.append("A12a's closure floor did not fire on a package that does not exist")
+
+    # A12a-l to A12a-o: the fail-closed walk. Each case is a row, never a skip.
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/core"]["devDependencies"]["@paigasus/ghost"] = "workspace:*"
+    if not any("@paigasus/ghost maps to no package directory" in r for r in _a12a(tree=tree)):
+        failures.append("A12a skipped a `workspace:` name with no package")
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/core"]["dependencies"]["@paigasus/linked"] = "link:../linked"
+    if not any("@paigasus/linked uses a `link:` specifier" in r for r in _a12a(tree=tree)):
+        failures.append("A12a skipped a `link:` specifier")
+    tree = _a12_copy(a12_tree)
+    tree["rs/crates/bindings/nb"] = None
+    if not any("rs/crates/bindings/nb/package.json is missing" in r for r in _a12a(tree=tree)):
+        failures.append("A12a skipped a missing package.json")
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/proto"] = "{"
+    if not any("ts/packages/proto/package.json is not valid JSON" in r for r in _a12a(tree=tree)):
+        failures.append("A12a skipped an unparseable package.json")
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/kernel"]["dependencies"]["@paigasus/node-bindings"] = "file:../../../rs/crates/bindings/ghost"
+    if not any("which does not exist" in r for r in _a12a(tree=tree)):
+        failures.append("A12a skipped a `file:` path that does not exist")
+
+    # A12a-p: a task with no input bucket is a violation, never a skip.
+    broken = _a12_copy(a12)
+    del broken["c-ts"]["task_input_globs"]["typecheck"]
+    if not any(
+        r.startswith("c-ts:typecheck reported no `inputFiles`/`inputGlobs`") and "moon's output shape changed" in r
+        for r in _a12a(broken)
+    ):
+        failures.append("A12a skipped a task that reported no input bucket")
+
+    # A12a-q: a workspace cycle back to the task's own package. The own package is excluded at
+    # every depth, so core is not asked to key on itself, and the walk ends.
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/proto"]["devDependencies"] = {"@paigasus/console-core": "workspace:*"}
+    if any(r.startswith("c-ts:") for r in _a12a(tree=tree)):
+        failures.append("A12a demanded a package's own files through a workspace cycle")
+
+    # A12a-r: a None invocation is moon telling us nothing. That is infra, exactly as in A5.
+    broken = _a12_copy(a12)
+    broken["k-ts"]["invocations"]["typecheck"] = None
+    try:
+        derive_tsc_tasks(broken)
+    except MoonOutputError:
+        pass
+    else:
+        failures.append("derive_tsc_tasks accepted a task with no command, script or args")
+
+    def _a12b(fixture=None, tree=None, **kw):
+        kw.setdefault("floor", a12_floor)
+        return _a12_run(
+            check_ts_tsc_preflight, a12 if fixture is None else fixture,
+            a12_tree if tree is None else tree, **kw,
+        )
+
+    rows = _a12b()
+    if rows != []:
+        failures.append(f"A12b reported violations on a complete fixture: {rows}")
+
+    # The order verdict, exercised directly. `None` means no violation; a string must appear in the
+    # verdict. Row 2 is moon's joined form of a script task (the first word repeats).
+    for blob, want in (
+        ("node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit", None),
+        ("node node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit", None),
+        ("touch a && pnpm exec napi build && node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p x", None),
+        ("node ts/scripts/check-installed-bindings.mjs && tsc", None),
+        ("pnpm exec tsc -p x", "does not run"),
+        ("node ../../../ts/scripts/check-installed-bindings.mjsx && pnpm exec tsc -p x", "does not run"),
+        ("echo ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p x", "does not run"),
+        ("pnpm exec tsc -p x && node ts/scripts/check-installed-bindings.mjs", "after `tsc`"),
+        ("node ts/scripts/check-installed-bindings.mjs; pnpm exec tsc -p x", "with `;`"),
+        ("node ts/scripts/check-installed-bindings.mjs || pnpm exec tsc -p x", "with `||`"),
+        ("node ts/scripts/check-installed-bindings.mjs | pnpm exec tsc -p x", "with `|`"),
+        ("node ts/scripts/check-installed-bindings.mjs & pnpm exec tsc -p x", "with `&`"),
+        ("node ts/scripts/check-installed-bindings.mjs\npnpm exec tsc -p x", "with a newline"),
+    ):
+        got = preflight_order_verdict(blob)
+        if (want is None and got is not None) or (want is not None and (got is None or want not in got)):
+            failures.append(
+                f"preflight_order_verdict({blob!r}) is {got!r}, expected "
+                f"{'no violation' if want is None else repr(want)}"
+            )
+
+    # A12b-a: a binding task with no preflight.
+    broken = _a12_copy(a12)
+    broken["k-ts"]["invocations"]["typecheck"] = a12_tsc
+    if not any(r.startswith("k-ts:typecheck does not run") for r in _a12b(broken)):
+        failures.append("A12b did not fire on a binding task with no preflight")
+
+    # A12b-b: a preflight after `tsc`, read PER TASK (c-ts:build keeps the right order).
+    broken = _a12_copy(a12)
+    broken["c-ts"]["invocations"]["typecheck"] = a12_tsc + " && node ../../../ts/scripts/check-installed-bindings.mjs"
+    rows = _a12b(broken)
+    if not any(r.startswith("c-ts:typecheck runs") and "after `tsc`" in r for r in rows):
+        failures.append("A12b did not fire on a preflight after `tsc`")
+    if any(r.startswith("c-ts:build ") for r in rows):
+        failures.append("A12b blamed `build` for a script that lives on `typecheck`")
+
+    # A12b-c: a preflight joined with `;`.
+    broken = _a12_copy(a12)
+    broken["app-ts"]["invocations"]["typecheck"] = a12_pre.replace(" && ", "; ", 1)
+    if not any(r.startswith("app-ts:typecheck joins") and "with `;`" in r for r in _a12b(broken)):
+        failures.append("A12b did not fire on a preflight joined with `;`")
+
+    # A12b-d: the floor. A floor task with no binding in its closure is not examined, and so is
+    # every task when the kernel loses its binding edge. Both must red, with THIS branch's prefix.
+    if not any(r.startswith("FLOOR:") and "p-ts:typecheck" in r for r in _a12b(floor=("p-ts:typecheck",))):
+        failures.append("A12b's floor did not fire on a floor task it does not examine")
+    tree = _a12_copy(a12_tree)
+    tree["ts/packages/kernel"]["dependencies"] = {}
+    if not any(r.startswith("FLOOR:") and "k-ts:typecheck" in r for r in _a12b(tree=tree)):
+        failures.append("A12b's floor did not fire when a floor task's closure lost its binding")
+
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all eleven assertions fire on synthetic violations")
+    print("  OK   [parity] all twelve assertions fire on synthetic violations")
     return 0
 
 
@@ -4373,7 +5069,7 @@ def self_test():
 # rather than a bare count.
 #
 # Adding a check means adding its key here AND its tuple there, in the same order.
-EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11")
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12a", "a12b")
 
 
 def collect_findings(projects, crates, root):
@@ -4512,6 +5208,26 @@ def collect_findings(projects, crates, root):
              "    Every concurrent `cargo metadata` then fails with exit 101 (SMA-663).\n"
              "    Fix: list each crate directory as its own literal entry. A9 reds if one is\n"
              "    missing."),
+        ("a12a", check_ts_tsc_inputs(projects, root),
+             "A ts task that runs `tsc` does not key on a file `tsc` reads through its package.json\n"
+             "    dependency closure, so a change there SELECTS NOTHING for that task and Moon\n"
+             "    serves a cached PASS (SMA-536).\n"
+             "    Fix: add the missing entry to that task's `inputs` in its own moon.yml. For each\n"
+             "    workspace package in the closure: `/<dir>/src/**/*`, `/<dir>/package.json` and each\n"
+             "    `exports` target outside src/. For each `file:` binding: `/<dir>/package.json` and\n"
+             "    each `.d.ts` in its `files`. Always `/ts/tsconfig.base.json`, and\n"
+             "    `/ts/scripts/check-installed-bindings.mjs` when the closure holds a binding. A\n"
+             "    `deps omit contracts:generate` row needs `deps: ['contracts:generate']` on that task.\n"
+             "    Extra inputs are ALLOWED (this is containment, like A7).\n"
+             "    A `FLOOR:` row, or a row about an unreadable package.json, means the check itself\n"
+             "    cannot be trusted — fix that first."),
+        ("a12b", check_ts_tsc_preflight(projects, root),
+             "A ts `tsc` task whose package closure holds a `file:` binding does not run the\n"
+             "    installed-typings preflight before `tsc`, so `tsc` can read stale typings through\n"
+             "    ts/node_modules and pass (SMA-536).\n"
+             "    Fix: make the task a script that starts\n"
+             "    `node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc ...`.\n"
+             "    A `FLOOR:` row means A12b examines less than the A12 floor — fix that first."),
     ]
 
     return findings
@@ -4538,7 +5254,9 @@ def main():
             f"Rust crates it builds, every cargo-resolving task passes --locked, and every "
             f"workspace crate is reachable through Dependabot's member expansion, and "
             f"every compiling cargo task inside rs/ keys on .cargo/config.toml, and every "
-            f"workspace members entry is a literal path"
+            f"workspace members entry is a literal path, and every ts tsc task keys on its "
+            f"package.json closure and runs the installed-typings preflight first when that "
+            f"closure holds a binding"
         )
         return 0
 

@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# expect: 3 shipped-path
+# The only path to braces uses an optionalDependencies block in a snapshot.
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  apps/iam-console:
+    dependencies:
+      '@csstools/css-syntax-patches-for-csstree':
+        specifier: 'catalog:'
+        version: 1.1.14(css-tree@3.2.1)
+
+snapshots:
+
+  '@csstools/css-syntax-patches-for-csstree@1.1.14(css-tree@3.2.1)':
+    optionalDependencies:
+      micromatch: 4.0.8
+
+  braces@3.0.3:
+    dependencies:
+      fill-range: 7.1.1
+
+  fill-range@7.1.1: {}
+
+  micromatch@4.0.8:
+    dependencies:
+      braces: 3.0.3
+      picomatch: 2.3.2
+
+  picomatch@2.3.2: {}
+
+  typescript@6.0.3: {}
