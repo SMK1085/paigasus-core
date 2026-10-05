@@ -234,3 +234,57 @@ repo:actionlint
 repo:input-liveness
 repo:publish-metadata
 ```
+
+## Mutation battery (Task 7)
+
+**Date:** 2026-10-05. Command for the rows 2, 3, 5 and 6: `moon run paigasus-kernel-ts:test`, with the proto shims first on `PATH`. Each undo was the exact reverse edit. The tree was clean after every undo.
+
+| # | Edit | Observed red | Undo |
+| -- | -- | -- | -- |
+| 3 | `wasm-opt = ['-O', '-g']` in the release profile of `paigasus-wasm/Cargo.toml` | Check 7 failed: `check 7: Cargo.toml keeps wasm-opt = false in the wasm-pack release profile`. Check 6 passed. 1 failed, 392 passed. | `wasm-opt = false` |
+| 2 | Delete `wasm-opt = false` from the release profile | Check 6 failed: `check 6: the fresh build is a raw wasm-pack output` (`The fresh build has no name section, so wasm-pack optimized it`). Check 7 failed. 2 failed, 391 passed. | Insert `wasm-opt = false` again |
+| 4 | Delete the step-8 block of `optimize-wasm.mjs` | `vitest run tests/optimize-wasm.test.ts` failed 3 tests: `the output keeps a name section`, `the output is not valid wasm`, `the output drops an export`. 40 passed. | Insert the block again |
+| 5 | Delete the version comparison of `resolveWasmOpt` (the `if (version.status !== 0 \|\| actual !== expected)` block) | Moon ran the task (hash `d9e7b9a5`, not a cache hit). It failed `exits 1 on another wasm-opt version and names both`. 1 failed, 392 passed. | Insert the block again |
+| 6 | Pin `wasm-opt = "132.0.0"` in the nested `.prototools` | Check 5 failed: `paigasus_wasm_bg.wasm carries "binaryen=133;flags=-O", and .../.prototools demands "binaryen=132;flags=-O"`. 1 failed, 392 passed. | `wasm-opt = "133.0.0"` |
+| 1 | Delete the `optimize-wasm.mjs optimize` line of `generate-wasm`, run `generate-wasm` | Binary 50950 bytes, no marker. Check 5 failed: `paigasus_wasm_bg.wasm has 0 paigasus.wasm-opt sections, not 1`. | Insert the line, run `generate-wasm` again |
+
+Mutation 1, after the undo and the second `generate-wasm`: the log line was `optimize-wasm: ...: 50950 -> 35560 bytes, wasm-opt version 133, flags -O, proto 0.60.2`. `git status --porcelain` was empty. The five files are byte-identical to HEAD, so the regeneration is deterministic on this host. Then `moon run paigasus-kernel-ts:test` passed (16 files, 393 tests).
+
+### Which wasm-opt wasm-pack ran (mutations 2 and 3)
+
+In both mutations the wasm-pack log said `found wasm-opt at "/Users/smaschek/.proto/shims/wasm-opt"`. So wasm-pack used the pinned binary through the proto shim on `PATH`. It did not download binaryen. The `~/Library/Caches/.wasm-pack` listing was the same before and after both runs: five `wasm-bindgen-cargo-install-*` entries (0.2.125 to 0.2.129) and no `wasm-opt-*` entry. Nothing needed removal.
+
+This means that, on a host with the shim on `PATH`, check 7 is the only guard that sees mutation 3. Check 6 passes there, because `-g` keeps the `name` section. In mutation 2, check 6 fails because the shim `wasm-opt` runs with the default flags.
+
+## S4b — the full container run
+
+**Date:** 2026-10-05. Command: `bash ci/wasm-lockstep/container.sh build` in the lockstep image, with the flags of `wasm-lockstep.yml` (`--cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534`) plus `--platform linux/amd64`. The input was a `git archive` of HEAD, owned by uid 65534. The container exited 0.
+
+```text
+generate-wasm: wasm-pack 0.15.0, sources touched
+optimize-wasm: /work/rs/crates/bindings/paigasus-wasm/.wasmpack-regen-out/paigasus_wasm_bg.wasm: 50902 -> 35512 bytes, wasm-opt version 133, flags -O, proto 0.60.2
+generate-wasm: wrote 5 files into rs/crates/bindings/paigasus-wasm/
+glue paigasus_wasm.js: identical
+glue paigasus_wasm_bg.js: identical
+glue paigasus_wasm.d.ts: identical
+glue paigasus_wasm_bg.wasm.d.ts: identical
+binary: 35512 bytes (Linux) vs 35560 bytes (committed)
+optimize-wasm: .../paigasus_wasm_bg.wasm carries binaryen=133;flags=-O
+verify rc=0
+```
+
+The Linux binary is 48 bytes smaller than the macOS binary. The raw input is 50902 bytes on Linux and 50950 bytes on macOS. The four glue files are byte-identical on both hosts. The container needs network access for the proto install of binaryen. S4b passes.
+
+## Local gate
+
+**Date:** 2026-10-05. Command: the `ci-targets` list of the root `CLAUDE.md` with `--base origin/main --include-relations`, in one `moon ci` call. PATH had a shim directory with only `bash -> /bin/bash` (bash 3.2.57) first. `PROTO_REPORTER=text` was set. Result: 67 completed (8 cached), 5 failed. All five failures are bash-version artifacts of this host. Each gate passed when run directly under Homebrew bash 5.3.20.
+
+| Gate | Moon result under bash 3.2 | Direct result under bash 5.3.20 |
+| -- | -- | -- |
+| `repo:version-lockstep` | fail: `line 62: kernel: unbound variable` | rc 0, `all 20 version-lockstep sites agree` |
+| `repo:publish-metadata` | fail: `declare: -A: invalid option` | rc 0, `all checks passed` |
+| `repo:ruff-ci` | fail: `mapfile: command not found` | rc 0, `15 files clean` |
+| `repo:next-public-free` | fail: 7 self-test rows, `expected rc 0, got 1` | rc 0, `763 tracked ts/ files free of NEXT_PUBLIC_` |
+| `repo:actionlint` | fail: two false `cargo-lock-step` rows | rc 0, preflight `pipe capacity 65536 bytes (floor 8192)` |
+
+Every other task passed, among them `repo:affected-smoke` (31 s), `repo:wasm-lockstep` (cached), `repo:input-liveness`, `paigasus-kernel-ts:test`, `paigasus-wasm-rs:test`, both `test-e2e` tasks of the consoles and `paigasus-console-core-ts:test-e2e`.
