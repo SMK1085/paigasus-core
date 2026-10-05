@@ -124,10 +124,14 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm` and its four glue files are **committed**,
   because pnpm links the crate before any build task runs. `moon run
   paigasus-kernel-ts:generate-wasm` is their only writer: run it after a Rust kernel or wasm-binding
-  edit, and commit all five. `paigasus-kernel-ts:test` holds them to the source with seven checks —
-  the committed glue, import/export lists, parity corpora, and pnpm copy are verified against a
-  fresh build. Additionally, the committed binary carries the binaryen `paigasus.wasm-opt` marker,
-  the fresh build is raw, and `wasm-opt = false` stays set (checks 5-7, SMA-435; see `rs/CLAUDE.md`).
+  edit, and commit all five. `paigasus-kernel-ts:test` holds them to the source with seven checks.
+  Check 1: the committed glue equals the glue of a fresh build.
+  Check 2: the binary's import and export lists equal those of a fresh build.
+  Check 3: the committed pair replays all six parity corpora.
+  Check 4: in the console vitest `setupFiles`, the pnpm-installed copy equals the committed files.
+  Check 5: the committed binary carries the marker of the pinned binaryen version and has no `name` section.
+  Check 6: a raw wasm-pack output (the fresh test build) has one `name` section and no marker.
+  Check 7: `rs/crates/bindings/paigasus-wasm/Cargo.toml` keeps `wasm-opt = false` under the release and profiling profiles.
   **No check compares the binary
   bytes**: they differ on macOS, Linux arm64 and Linux amd64, while the glue and the interface do
   not. After a `git checkout`, a rebase or a branch switch that replaces those files, run `rm -rf
