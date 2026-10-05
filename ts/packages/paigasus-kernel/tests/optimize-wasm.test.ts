@@ -359,7 +359,7 @@ describe('optimize-wasm.mjs', { timeout: 60_000 }, () => {
       expectUntouched(f);
     });
 
-    // Review Focus 1.
+    // A string comparison of the paths would skip main() here.
     it('runs when it is started through a symlinked path', () => {
       // Node resolves import.meta.url through symlinks but keeps process.argv[1] as given. A naive
       // entry-point check then never runs main(), and the script exits 0 having done nothing.
@@ -370,14 +370,14 @@ describe('optimize-wasm.mjs', { timeout: 60_000 }, () => {
       expectOptimized(f, r);
     });
 
-    // Review Focus 2.
+    // A killed run leaves this file. The next run must not fail on it.
     it('replaces a temporary file that a killed run left behind', () => {
       const f = fixture();
       writeFileSync(f.temp, 'left over');
       expectOptimized(f, run(f, ['optimize', f.out], optimizedOutput(f)));
     });
 
-    // Review Focus 3.
+    // The Moon task passes a relative out-dir.
     it('resolves a relative out-dir against the working directory', () => {
       const f = fixture();
       const r = run(f, ['optimize', '.wasmpack-regen-out'], optimizedOutput(f), { cwd: f.crate });
@@ -385,7 +385,7 @@ describe('optimize-wasm.mjs', { timeout: 60_000 }, () => {
       expect(wasmOptArgv(f)[0]).toBe(f.input);
     });
 
-    // Review Focus 4.
+    // An empty out-dir is a usage error, not a finding.
     it('exits 2 when the out-dir holds no binary', () => {
       const f = fixture();
       rmSync(f.input);
@@ -394,7 +394,21 @@ describe('optimize-wasm.mjs', { timeout: 60_000 }, () => {
       expect(existsSync(f.temp)).toBe(false);
     });
 
-    // Review Focus 5.
+    // A rename over the crate copy breaks the pnpm hard link (SMA-634 F14).
+    it('exits 2 on the crate directory itself, and names generate-wasm', () => {
+      const f = fixture();
+      const crateInput = join(f.crate, 'paigasus_wasm_bg.wasm');
+      writeFileSync(crateInput, RAW);
+      const r = run(f, ['optimize', f.crate], optimizedOutput(f));
+      expect(r.status, r.stderr).toBe(2);
+      expect(r.stderr).toMatch(/moon run paigasus-kernel-ts:generate-wasm/);
+      expect(readFileSync(crateInput).equals(RAW)).toBe(true);
+      expect(protoCalls(f)).toEqual([]);
+      expect(existsSync(f.argv)).toBe(false);
+      expect(existsSync(join(f.crate, '.optimize-wasm.tmp'))).toBe(false);
+    });
+
+    // Wrong arguments must change nothing.
     it.each<[string[]]>([[[]], [['optimize']], [['optimise', 'OUT']], [['optimize', 'OUT', 'extra']]])('refuses the arguments %j with exit 2', (args) => {
       const f = fixture();
       const r = run(

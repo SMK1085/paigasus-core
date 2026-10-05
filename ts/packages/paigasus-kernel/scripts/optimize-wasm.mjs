@@ -302,6 +302,14 @@ function exportNames(bytes, label) {
 
 /** @param {string} outDir an absolute path */
 function optimize(outDir) {
+  // The crate copy needs an in-place write, because pnpm hard-links the installed copy to it
+  // (SMA-634 F14). Step 9 renames. So refuse the crate directory before any proto call or write.
+  if (existsSync(outDir) && realpathSync(outDir) === realpathSync(CRATE_DIR)) {
+    throw infra(
+      `${outDir} is the crate directory. A rename there breaks the pnpm hard link to the committed binary. ` +
+        'Run `moon run paigasus-kernel-ts:generate-wasm` to update the committed binary. Use `optimize` on a scratch wasm-pack out-dir only.',
+    );
+  }
   const major = readPin();
   const wasmOpt = resolveWasmOpt(major);
   const input = resolve(outDir, BINARY);
@@ -374,7 +382,9 @@ export function assertOptimized(bytes, file) {
   const expected = expectedMarker();
   const payloads = customSectionPayloads(bytes, MARKER_SECTION);
   if (payloads.length !== 1) {
-    throw finding(`${file} has ${payloads.length} ${MARKER_SECTION} sections, not 1. Run \`node scripts/optimize-wasm.mjs optimize\` on a fresh wasm-pack output exactly once.`);
+    throw finding(
+      `${file} has ${payloads.length} ${MARKER_SECTION} sections, not 1. Run \`moon run paigasus-kernel-ts:generate-wasm\` to update the committed binary. Use \`optimize\` on a scratch wasm-pack out-dir only, never the crate directory.`,
+    );
   }
   if (payloads[0] !== expected) {
     throw finding(`${file} carries ${JSON.stringify(payloads[0])}, and ${fileURLToPath(PROTOTOOLS)} demands ${JSON.stringify(expected)}.`);
