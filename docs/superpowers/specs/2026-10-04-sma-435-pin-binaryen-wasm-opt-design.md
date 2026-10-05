@@ -2,8 +2,8 @@
 
 - Linear: SMA-435. Related: SMA-427 (L3, the `wasm-opt = false` line), SMA-375 (proto pinning),
   SMA-634 (the five committed artifacts and the drift gate), SMA-693 (the wasm-lockstep workflow).
-- Status: design approved in chat on 2026-10-04. Challenged once (APPROVE WITH CHANGES); all
-  findings folded in (§12). The written spec waits for review.
+- Status: APPROVED on 2026-10-05. Challenged once (APPROVE WITH CHANGES); all findings folded in
+  (§12).
 - History: a first draft from 2026-09-27 was lost with its session scratchpad. This spec starts
   again from new measurements (§1.1). It keeps four ideas of that draft: the unit tests with a
   stub `wasm-opt`, the mutation battery, the Linux container measurement and the
@@ -422,7 +422,7 @@ If S1 or S4 fails, stop and report before any other task.
 - The wasm-lockstep bot PR opened on 2026-10-04 (SMA-693 M3) holds a raw binary. After this merge
   it fails check 5 until the workflow runs again.
 - Rollback is a revert of the PR. No data or state changes.
-- Commit type: decided at the spec gate (§12, open question).
+- Commit type: `perf(rs)`. No changelog line for `@paigasus/wasm` (decided at the spec gate).
 
 ## 12. Decisions and challenge log
 
@@ -456,9 +456,8 @@ Challenge (Opus, APPROVE WITH CHANGES), folded in:
 | Q: shim rewrite on first install | QUESTION | measured in S2 |
 | Q: binaryen `producers` marker | QUESTION | not needed: own marker |
 | Q: `PROTO_WASM_OPT_VERSION` | QUESTION | §5.4.2 step 1 deletes it |
-| Q: commit type and changelog | QUESTION | open for the spec gate |
+| Q: commit type and changelog | QUESTION | decided at the spec gate: `perf(rs)`, no changelog line |
 
 Rejected: none.
 
-Open question for the spec gate: the conventional-commit type (`perf(rs)` proposed, because the
-user-visible effect is a 30% smaller binary), and whether `@paigasus/wasm` gets a changelog line.
+Spec gate (2026-10-05): approved. Commit type `perf(rs)`; no changelog line for `@paigasus/wasm`.
