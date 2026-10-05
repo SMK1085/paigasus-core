@@ -468,6 +468,9 @@ VJ6/mtjJ4EykrVcTEdQoCQC7J3NFUpOXZ2aaYOHgLSddm2Med29SXc8=
             ("an empty part", format!(".{rest}")),
             // An empty signature must be Malformed here, not a Signature defect from check 6.
             ("an empty signature part", format!("{}.", good.rsplit_once('.').unwrap().0)),
+            // `parse` never decodes the signature, so its alphabet check is the only guard here.
+            ("padding in the signature", format!("{good}=")),
+            ("a character outside base64url in the signature", format!("{good}+")),
             ("a header that is not JSON", format!("{}.{rest}", b64_json("not json"))),
             ("a header that is a JSON array", format!("{}.{rest}", b64_json("[1,2]"))),
         ];
