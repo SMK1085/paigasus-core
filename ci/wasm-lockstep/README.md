@@ -99,8 +99,8 @@ the five artifact files, all regular files of 8 MiB or less), `R-NOCHANGE` (the 
 move; the two locks can differ in dependency edges only) and `R-TITLE` (the commit title is over
 100 characters). It writes the PR title and body files only after every check passed. `status`
 (`R-STATUS`) checks `git status --porcelain` after the copy. `current` checks the family invariant
-on one lock; the real run of the gate runs it on `HEAD:rs/Cargo.lock`, so a PR that puts a second
-`wasm-bindgen` into the lock goes red at once, not on the next Tuesday.
+on one lock. The real run of the gate runs it on `HEAD:rs/Cargo.lock`. So a PR that puts a second
+`wasm-bindgen` into the lock fails at once. It does not wait for the next Tuesday.
 
 ## The pin rules (`pin_check.py`)
 
@@ -155,12 +155,17 @@ P25 holds these checks:
 9. `upload.with.path` is exactly `${{ runner.temp }}/stage/`.
 10. No script and no `env:` key at any level sets `RUNNER_TEMP`.
 
-Checks 5 and 6 only repeat the exact pin. They give a clearer message. Checks 4 and 7 to 10 carry
-control on their own, because the pin of check 3 reads only the `run:` text. On the `lock` and
-`stage` steps, three more rules and the script part of check 10 also repeat the pin. The three
-rules are the `lock_sha256` output line, the `exit` rule of `stage` and the `LOCK_SHA256` script
-rule. The two script rules also apply to the unpinned build steps. Self-test rows prove them on
-the `update` step.
+Checks 5 and 6 only repeat the exact pin. They give a clearer message. Checks 4, 7, 9 and the `env:`
+part of check 10 carry control on their own, because the pin of check 3 reads only the `run:` text.
+Check 8 does not carry control on its own. Check 4 already forbids a `LOCK_SHA256` key at the
+workflow and job level, and the `env:` of another step does not reach the `stage` step. So check 8
+only keeps the name unique.
+
+On the `lock` and `stage` steps, three more rules also repeat the pin. They are the `lock_sha256`
+output line, the `exit` rule of `stage` and the `LOCK_SHA256` script rule. The script part of check 10
+is the `RUNNER_TEMP` script rule, and it also repeats the pin. The `LOCK_SHA256` script rule and the
+`RUNNER_TEMP` script rule also apply to the unpinned build steps. Self-test rows prove them on the
+`update` step.
 
 The P6 rule pins the action NAME and a full SHA, not one specific SHA, so a dependabot action bump
 does not turn this gate red. A new action, or a tag in place of a SHA, does.
@@ -236,7 +241,7 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
 - A SHA-pinned `uses:` action before `stage` can export variables for the later steps. The
   checks trust each pinned action (P6).
 - In the `propose` step `verify`, an `exit 0` or a `set -n` before the `lockstep_check.py artifact`
-  command passes `pin_check.py`. The gap existed before SMA-738 and is outside G6. A follow-up issue
+  command passes `pin_check.py`. The gap existed before SMA-738 and is outside G6. SMA-739
   tracks it.
 - A bundled short flag, such as `gh api -iXPOST`, passes P20.
 - P21 matches the jq `select` with a regular expression. It does not parse the jq.
@@ -360,3 +365,260 @@ M3 creates the bot branch. So M3 does not answer Q11: whether a force-push acros
 ### M4 — a second run with an open bot PR
 
 Not measured yet. This run starts while the bot PR from M3 is open and `main` has moved. It shows whether the force-push, the branch-owner check and the PR update work on an existing bot branch (Q11).
+
+### M5 — the run-1 lock compare on a runner (SMA-738)
+
+This measurement checks the `stage` compare of SMA-738 on a real GitHub runner. A positive run shows that container run 2 does not change the lock. A negative run shows that the compare refuses a lock that run 2 changed. The positive run answers the open question of spec section 4.5.
+
+The runs used the scratch branch `feature/sma-738-m5-scratch`. The branch was deleted after the runs. The scratch workflow `.github/workflows/wasm-lockstep-m5.yml` is a copy of the reviewed file. It has no `ref` step and no `propose` job. It has a `push` trigger on the scratch branch only, because GitHub dispatches `workflow_dispatch` only for a workflow file on the default branch. M0 also used `push`. It has its own concurrency group `wasm-lockstep-m5`. It has no environment, no secret and no App token. This is the recorded `diff` of the scratch workflow against the reviewed file:
+
+```diff
+--- .github/workflows/wasm-lockstep.yml	2026-10-05 21:50:57
++++ .github/workflows/wasm-lockstep-m5.yml	2026-10-05 22:22:28
+@@ -1,5 +1,9 @@
+ # SPDX-License-Identifier: Apache-2.0
+ #
++# SMA-738 M5 SCRATCH copy of wasm-lockstep.yml, on feature/sma-738-m5-scratch ONLY. NEVER merge it.
++# Changes: no `ref` step, no `propose` job (no environment, no secret, no App token), a push
++# trigger on this branch only, and its own concurrency group. Each push to the branch starts one run.
++#
+ # wasm-lockstep — propose the wasm-bindgen family bump as ONE pull request (SMA-693).
+ #
+ # js-sys, web-sys and wasm-bindgen-futures pin wasm-bindgen with `=`, so dependabot cannot move the
+@@ -22,21 +26,18 @@
+ # repo:wasm-lockstep (ci/wasm-lockstep/pin_check.py) asserts these rules on every PR that edits
+ # this file. A refusal of the checker stays red until a person runs the manual runbook in
+ # rs/CLAUDE.md (SMA-693 Q10).
+-name: wasm-lockstep
++name: wasm-lockstep-m5
+ 
+ on:
+-  schedule:
+-    # Tuesday 06:17 UTC (SMA-693 Q3): after the Monday 06:00 UTC dependabot run, and not on a round
+-    # minute, where GitHub delays or drops scheduled runs. GitHub sends the failure mail of a
+-    # scheduled run to the person who last changed this cron line (spec section 9).
+-    - cron: '17 6 * * 2'
+-  workflow_dispatch:
++  push:
++    branches:
++      - feature/sma-738-m5-scratch
+ 
+ permissions:
+   contents: read
+ 
+ concurrency:
+-  group: wasm-lockstep
++  group: wasm-lockstep-m5
+   cancel-in-progress: false
+ 
+ env:
+@@ -70,18 +71,6 @@
+           fetch-depth: 1
+           persist-credentials: false
+ 
+-      # A convenience check, not the boundary. The boundary is the main-only branch policy of the
+-      # release-pr environment, which refuses the propose job on any other ref.
+-      - name: Refuse a ref other than main
+-        id: ref
+-        env:
+-          REF: ${{ github.ref }}
+-        run: |
+-          if [ "$REF" != "refs/heads/main" ]; then
+-            echo "::error::wasm-lockstep runs on refs/heads/main only, not on $REF."
+-            exit 1
+-          fi
+-
+       # The container gets this copy and nothing else. It has no .git, and the host runs no git
+       # command and no file from it after this step: a git call can run a hook or an fsmonitor
+       # command from .git/config. The old lock comes from git show, not from the copy.
+@@ -185,171 +174,3 @@
+           path: ${{ runner.temp }}/stage/
+           if-no-files-found: error
+           retention-days: 7
+-
+-  propose:
+-    name: check the artifact and propose the pull request
+-    needs: build
+-    if: needs.build.result == 'success'
+-    runs-on: ubuntu-latest
+-    timeout-minutes: 15
+-    # The credential boundary, the same one release.yml uses (SMA-580): PAIGASUS_BOT_* are
+-    # environment secrets on release-pr, whose deployment branch policy is main-only.
+-    environment: release-pr
+-    permissions:
+-      contents: read
+-    steps:
+-      - name: Checkout the commit the build ran on
+-        id: checkout
+-        if: needs.build.outputs.changed == 'true'
+-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+-        with:
+-          ref: ${{ github.sha }}
+-          persist-credentials: false
+-
+-      - name: Download the artifact
+-        id: download
+-        if: needs.build.outputs.changed == 'true'
+-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+-        with:
+-          name: wasm-lockstep
+-          path: ${{ runner.temp }}/lockstep
+-
+-      # AC4.1 and AC4.2, from the checked-out github.sha (trusted), on the downloaded bytes. A
+-      # refusal exits 3 and fails this step, so no later step runs and no token is minted.
+-      - name: Check the artifact and the lock
+-        id: verify
+-        if: needs.build.outputs.changed == 'true'
+-        run: |
+-          set -euo pipefail
+-          python3 ci/wasm-lockstep/lockstep_check.py artifact --dir "$RUNNER_TEMP/lockstep" --old rs/Cargo.lock --body-file "$RUNNER_TEMP/pr-body.md" --title-file "$RUNNER_TEMP/pr-title.txt"
+-
+-      - name: Apply the files to the checkout
+-        id: apply
+-        if: needs.build.outputs.changed == 'true'
+-        run: |
+-          set -euo pipefail
+-          for f in rs/Cargo.lock rs/crates/bindings/paigasus-wasm/paigasus_wasm.js rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm; do
+-            if test -f "$RUNNER_TEMP/lockstep/$f"; then
+-              cp "$RUNNER_TEMP/lockstep/$f" "$f"
+-            fi
+-          done
+-          git status --porcelain --untracked-files=all > "$RUNNER_TEMP/status.txt"
+-          cat "$RUNNER_TEMP/status.txt"
+-          python3 ci/wasm-lockstep/lockstep_check.py status --file "$RUNNER_TEMP/status.txt"
+-
+-      # Runs on both paths: changed == 'true' needs it to push, changed == 'false' to close an
+-      # obsolete pull request. The two permissions are explicit, as in release.yml (zizmor
+-      # github-app): without them the token carries every permission of the installation.
+-      - name: Mint the App installation token
+-        id: token
+-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+-        with:
+-          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+-          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+-          permission-contents: write
+-          permission-pull-requests: write
+-
+-      # The identity of release.yml: the App's bot user in the resolvable <id>+<login>@ form. The
+-      # message is the checker's title only, with no body (the commitlint footer trap).
+-      - name: Commit as the bot
+-        id: commit
+-        if: needs.build.outputs.changed == 'true'
+-        run: |
+-          set -euo pipefail
+-          git config user.name "paigasusbot[bot]"
+-          git config user.email "285361405+paigasusbot[bot]@users.noreply.github.com"
+-          git add -- rs/Cargo.lock rs/crates/bindings/paigasus-wasm
+-          git commit -F "$RUNNER_TEMP/pr-title.txt"
+-
+-      # AC4.3, immediately before the push. It branches on the exit status of gh api, never on an
+-      # `|| echo` fallback: gh api prints a 404 body on stdout (.github/CLAUDE.md). A moved main is
+-      # a GREEN notice (SMA-693 Q8): the next run proposes on the new base.
+-      - name: Check that main did not move
+-        id: base
+-        if: needs.build.outputs.changed == 'true'
+-        env:
+-          GH_TOKEN: ${{ github.token }}
+-          BUILT_ON: ${{ github.sha }}
+-        run: |
+-          set -euo pipefail
+-          rc=0
+-          gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha > "$RUNNER_TEMP/main-sha.txt" || rc=$?
+-          if [ "$rc" -ne 0 ]; then
+-            cat "$RUNNER_TEMP/main-sha.txt"
+-            echo "::error::gh api could not read refs/heads/main (exit ${rc})."
+-            exit 1
+-          fi
+-          now="$(cat "$RUNNER_TEMP/main-sha.txt")"
+-          if [ "${#now}" -ne 40 ]; then
+-            echo "::error::gh api returned '${now}', not a commit SHA."
+-            exit 1
+-          fi
+-          if [ "$now" != "$BUILT_ON" ]; then
+-            echo "moved=true" >> "$GITHUB_OUTPUT"
+-            echo "::notice::main moved from ${BUILT_ON} to ${now}. Nothing was pushed; the next run proposes on the new base."
+-          else
+-            echo "moved=false" >> "$GITHUB_OUTPUT"
+-          fi
+-
+-      # The branch-owner check, then ONE push with a lease on the SHA read here. The refspec is
+-      # fixed text; repo:wasm-lockstep pins it. An absent branch leases on the empty value, so the
+-      # push fails if the branch appears in between.
+-      - name: Check the bot branch owner and push
+-        id: push
+-        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'
+-        env:
+-          GH_TOKEN: ${{ steps.token.outputs.token }}
+-          PUSH_TOKEN: ${{ steps.token.outputs.token }}
+-        run: |
+-          set -euo pipefail
+-          rc=0
+-          gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/deps/wasm-bindgen-lockstep" --jq .object.sha > "$RUNNER_TEMP/branch-sha.txt" || rc=$?
+-          if [ "$rc" -eq 0 ]; then
+-            lease="$(cat "$RUNNER_TEMP/branch-sha.txt")"
+-            author="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${lease}" --jq .author.login)"
+-            # .author.login comes from the commit's author EMAIL, which a pusher can set. This check
+-            # guards against a mistake (a person pushed to the bot branch), not against an attacker
+-            # with push access.
+-            if [ "$author" != "paigasusbot[bot]" ]; then
+-              echo "::error::A person pushed to the bot branch (head ${lease} by '${author}'). Merge or close that pull request, or delete the branch deps/wasm-bindgen-lockstep, first."
+-              exit 1
+-            fi
+-          elif grep -qF '"status":"404"' "$RUNNER_TEMP/branch-sha.txt"; then
+-            lease=""
+-          else
+-            cat "$RUNNER_TEMP/branch-sha.txt"
+-            echo "::error::gh api could not read the bot branch (exit ${rc})."
+-            exit 1
+-          fi
+-          git push --force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}" "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/deps/wasm-bindgen-lockstep
+-
+-      # The App token opens the pull request, so its CI runs (a GITHUB_TOKEN event starts no
+-      # workflow). `--head` matches the branch NAME only, so the list keeps same-repository pull
+-      # requests (isCrossRepository false): a fork pull request from a branch with this name must
+-      # not be edited or closed (P21).
+-      - name: Open or update the pull request
+-        id: pr
+-        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'
+-        env:
+-          GH_TOKEN: ${{ steps.token.outputs.token }}
+-        run: |
+-          set -euo pipefail
+-          gh pr list --repo "$GITHUB_REPOSITORY" --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number' > "$RUNNER_TEMP/open-prs.txt"
+-          number="$(sed -n 1p "$RUNNER_TEMP/open-prs.txt")"
+-          if [ -z "$number" ]; then
+-            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head deps/wasm-bindgen-lockstep --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body-file "$RUNNER_TEMP/pr-body.md"
+-          else
+-            gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body-file "$RUNNER_TEMP/pr-body.md"
+-          fi
+-
+-      - name: Close an obsolete pull request
+-        id: close
+-        if: needs.build.outputs.changed == 'false'
+-        env:
+-          GH_TOKEN: ${{ steps.token.outputs.token }}
+-        run: |
+-          set -euo pipefail
+-          gh pr list --repo "$GITHUB_REPOSITORY" --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number' > "$RUNNER_TEMP/open-prs.txt"
+-          while read -r number; do
+-            gh pr close "$number" --repo "$GITHUB_REPOSITORY" --comment "The wasm-bindgen family is current on main. This proposal is obsolete."
+-          done < "$RUNNER_TEMP/open-prs.txt"
+```
+
+The scratch lock holds the seven family entries of `c9df6f09` (0.2.128) in the lock of `main`. A local pre-check used cargo 1.95.0. The four-package `cargo update -p` locked 7 packages. It gave a lock that is byte-identical to the lock of `main` (sha256 `08afa11169edf7ad8f9176baddaf9029e702bb69fc9bf795a9b9991183f0bcfb`). It flipped no dependency edge. The five edge flips of SMA-738 appear only on the no-op update of a current family.
+
+| Item | Value |
+|---|---|
+| Date | 2026-10-05 |
+| Positive run | https://github.com/SMK1085/paigasus-core/actions/runs/37369513364 (head `f3cdd188`) |
+| Attempts 1 to 3 | Failed with "The job was not acquired by Runner of type hosted even after multiple attempts" during a GitHub incident. No step ran. |
+| Attempt 4 | Success. All steps passed. |
+| `lock` step output | Seven `family-moved` lines (js-sys and web-sys 0.3.105 to 0.3.106; wasm-bindgen, wasm-bindgen-macro, wasm-bindgen-macro-support and wasm-bindgen-shared 0.2.128 to 0.2.129; wasm-bindgen-futures 0.4.78 to 0.4.79), zero `edge-moved` lines, and `lock-sha256 08afa11169edf7ad8f9176baddaf9029e702bb69fc9bf795a9b9991183f0bcfb` |
+| `stage` step output | `same: rs/Cargo.lock sha256 08afa11169edf7ad8f9176baddaf9029e702bb69fc9bf795a9b9991183f0bcfb did not change after the lock verdict` |
+| Result | Container run 2 did not write the lock. The `upload` step ran. |
+| Negative run | https://github.com/SMK1085/paigasus-core/actions/runs/37375594364 (head `ba9a3da2`) |
+| Negative change | One scratch-only line at the end of the `build` case of `container.sh`: `printf '\n' >> rs/Cargo.lock` |
+| Negative result | The step "Stage the six files" failed. The step "Upload the artifact" was skipped. The run conclusion was failure. |
+| Negative log | `lockstep_check: REFUSED R-RUN2: rs/Cargo.lock changed after the lock verdict: the lock step judged sha256 08afa11169edf7ad8f9176baddaf9029e702bb69fc9bf795a9b9991183f0bcfb, /home/runner/work/_temp/stage/rs/Cargo.lock has sha256 863dd98a6018757d6a60a9aa8337254dca0e7ac1d876ac9005bd53b035d9ea3b (157605 bytes). …` |
+
+The negative run proves the refusal on the real mount, with the real owner and the real paths.

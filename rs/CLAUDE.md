@@ -197,14 +197,18 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
     `R-RUN2` (see below).
   - The build fails because the pinned `wasm-pack` does not support the new 0.2.z.
   - The `reqwest` case below.
+
   Use a normal `feature/sma-NNN-<slug>` PR.
+
   **`R-EDGE` with no family move (SMA-738).** Three causes are possible:
   - The lock on `main` holds a reference that cargo now writes in another form.
   - The run made a reference that is not in the lock.
   - The run moved a reference to another source only, with the same name and version.
+
   Run the four-package `cargo update -p` locally and read the edge diff. Check if it only
   re-points edges between versions that are already in the lock. If it does, commit the lock in a
   normal `feature/sma-NNN-<slug>` PR. If it does not, open an issue.
+
   **`R-RUN2` (SMA-738).** Container run 2 changed `rs/Cargo.lock` after the `lock` step judged
   it. The `stage` step compares the staged lock with the `lock_sha256` output of the `lock` step.
   To find the change:
@@ -213,6 +217,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   - A benign change is, for example, a lock repair by `wasm-pack`. For a benign change, open an
     issue. Then use the manual runbook below for the bump.
   - If the change is not benign, treat the family release as hostile. Do not merge it.
+
   Before you start:
   - Put the proto shims on `PATH`.
   - In a fresh worktree, run `proto install` and `pnpm -C ts install`.
