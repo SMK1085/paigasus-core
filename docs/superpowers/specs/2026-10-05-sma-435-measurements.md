@@ -254,7 +254,7 @@ Mutation 1, after the undo and the second `generate-wasm`: the log line was `opt
 
 In both mutations the wasm-pack log said `found wasm-opt at "/Users/smaschek/.proto/shims/wasm-opt"`. So wasm-pack used the pinned binary through the proto shim on `PATH`. It did not download binaryen. This holds because the proto shim was on `PATH`. A host without the shim on `PATH` was not measured. There, wasm-pack may download its own binaryen. The `~/Library/Caches/.wasm-pack` listing was the same before and after both runs: five `wasm-bindgen-cargo-install-*` entries (0.2.125 to 0.2.129) and no `wasm-opt-*` entry. Nothing needed removal.
 
-This means that, on a host with the shim on `PATH`, check 7 is the only guard that sees mutation 3. Check 6 passes there, because `-g` keeps the `name` section. In mutation 2, check 6 fails because the shim `wasm-opt` runs with the default flags.
+This means that, on a host with the shim on `PATH`, check 7 is the only guard that sees mutation 3. Check 6 passes there, because `-g` keeps the `name` section. In mutation 2, check 6 fails because the shim `wasm-opt` removes the `name` section (flags not recorded).
 
 ## S4b — the full container run
 

@@ -264,6 +264,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   - Never remove `wasm-opt = false` from the `release` or the `profiling` profile in
     `paigasus-wasm/Cargo.toml`. wasm-pack then downloads a binaryen that no file pins. Checks 6
     and 7 fail.
+  - The first `proto install wasm-opt` adds `~/.proto/shims/wasm-opt` to the shim-first `PATH` of the
+    developer. Outside this crate directory the shim has no configured version. So another wasm-pack
+    project on the same host can find this shim instead of its own binaryen.
 
 ## Container images
 

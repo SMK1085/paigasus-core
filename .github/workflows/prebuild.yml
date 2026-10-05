@@ -394,8 +394,8 @@ jobs:
       # SMA-435: the lasting check on the binary that ships, before the upload.
       # `verify` needs no proto and no network. It requires exactly one `paigasus.wasm-opt` marker
       # with the pinned payload. It also requires that the binary has no `name` section.
-      # The two probe runs are the drift gate's own (tests/wasm-probe.mjs). They check the
-      # interface lists, and all six parity corpora through the staged glue and binary.
+      # The two probe runs are the drift gate's own (tests/wasm-probe.mjs). The first run compiles
+      # the binary and prints its interface lists. The second run replays all six corpora.
       # The directory wasm-dist holds a package.json with "type": "module". So the probe can
       # import the glue there.
       - name: Verify the staged wasm distribution

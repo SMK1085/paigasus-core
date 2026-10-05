@@ -148,8 +148,8 @@ tasks:
     inputs:
       - 'src/**/*'
       - 'tests/**/*'
-      # SMA-435: tests/optimize-wasm.test.ts imports this script. Checks 5 and 7 of
-      # tests/committed-wasm.test.ts will use its helpers. On Moon 2.5.3 only inputs select a task.
+      # SMA-435: tests/optimize-wasm.test.ts imports this script. Checks 5, 6 and 7 of
+      # tests/committed-wasm.test.ts use its helpers. On Moon 2.5.3 only inputs select a task.
       # Without this line, an edit to the script alone runs no test in CI.
       - 'scripts/optimize-wasm.mjs'
       # SMA-435: check 5 reads the nested binaryen pin, so a pin bump must select this task.
