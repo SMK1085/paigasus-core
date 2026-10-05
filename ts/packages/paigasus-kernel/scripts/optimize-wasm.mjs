@@ -221,7 +221,7 @@ export function wasmOptDisabled(toml, section) {
 
 // The child environment of every proto call. PROTO_REPORTER=text: proto otherwise prints NDJSON in
 // an agent environment and still exits 0 (SMA-609). PROTO_WASM_OPT_VERSION is deleted: proto reads
-// it before any .prototools file, so a stale export would beat the pin.
+// it before any .prototools file, so a stale export would override the pin.
 function protoEnv() {
   const env = { ...process.env, PROTO_REPORTER: 'text' };
   delete env.PROTO_WASM_OPT_VERSION;
@@ -315,7 +315,11 @@ function optimize(outDir) {
   }
   if (customSectionCount(before, 'name') === 0) {
     throw finding(
-      `${input} has no \`name\` section, so it is not a raw wasm-pack release output. There are three causes: (1) wasm-pack optimized it itself: check that rs/crates/bindings/paigasus-wasm/Cargo.toml keeps \`wasm-opt = false\`; (2) another tool optimized it; (3) a rustc, wasm-bindgen or \`strip\` change removed the section (SMA-435 spec R2). For cause 3, remove the \`name\` half of this guard. The ${MARKER_SECTION} marker stays the real guard.`,
+      `${input} has no \`name\` section, so it is not a raw wasm-pack release output. There are three possible causes. ` +
+        `Cause 1: wasm-pack optimized the file itself. Check that rs/crates/bindings/paigasus-wasm/Cargo.toml keeps \`wasm-opt = false\`. ` +
+        `Cause 2: another tool optimized the file. ` +
+        `Cause 3: a change in rustc, wasm-bindgen or \`strip\` removed the section (SMA-435 spec R2). For cause 3, remove the \`name\` half of this guard. ` +
+        `The ${MARKER_SECTION} marker stays the real guard.`,
     );
   }
   const inputExports = exportNames(before, input);
@@ -344,8 +348,8 @@ function optimize(outDir) {
       throw finding(`the wasm-opt output exports [${outputExports.join(', ')}] and the input exports [${inputExports.join(', ')}]. wasm-opt must keep every export.`);
     }
 
-    // Step 9. A rename is correct here: the input is in a scratch out-dir, and no pnpm hard link
-    // points at it (the SMA-634 F14 rule applies to the crate copy only).
+    // Step 9. A rename is correct here. The input is in a scratch out-dir, and no pnpm hard link
+    // points at it. The SMA-634 F14 rule applies to the crate copy only.
     const marked = appendCustomSection(after, MARKER_SECTION, markerFor(major));
     writeFileSync(temp, marked);
     renameSync(temp, input);

@@ -2,14 +2,16 @@
 //
 // Unit tests for scripts/optimize-wasm.mjs (SMA-435 spec § 8). No test downloads anything.
 //
-// Each command-line test builds a fixture tree in a temporary directory: a COPY of the script at
-// <tmp>/ts/packages/paigasus-kernel/scripts/, a <tmp>/rs/crates/bindings/paigasus-wasm/.prototools,
-// and two stubs first on PATH. The script finds its crate directory from its own location, so the
-// copy reads the fixture pin and not the real one. That copy is the only seam. Production has none.
+// Each command-line test builds a fixture tree in a temporary directory. The tree holds a COPY of
+// the script at <tmp>/ts/packages/paigasus-kernel/scripts/. It holds a
+// <tmp>/rs/crates/bindings/paigasus-wasm/.prototools. Two stubs are first on PATH.
+// The script finds its crate directory from its own location. So the copy reads the fixture pin and
+// not the real one. That copy is the only seam. Production has none.
 //
 //   stub `proto`     logs each call (argv, cwd, two env values); `bin wasm-opt` prints the stub path
-//   stub `wasm-opt`  `--version` prints a configurable version; otherwise it logs its argv, copies a
-//                    configurable file (default: its input) to the `-o` path, then exits STUB_RC
+//   stub `wasm-opt`  `--version` prints a configurable version.
+//                    Otherwise it logs its argv and copies a configurable file to the `-o` path.
+//                    The default file is its input. Then it exits with STUB_RC.
 //
 // The input is a tiny wasm module, built from the bytes below, with a `name` section like a raw
 // wasm-pack release output. `inspect` reads a binary with V8 in a child process, which is an
@@ -286,7 +288,7 @@ describe('optimize-wasm.mjs', { timeout: 60_000 }, () => {
       expectOptimized(f, run(f, ['optimize', f.out], { ...optimizedOutput(f), STUB_NDJSON: '1' }));
     });
 
-    it('hides PROTO_WASM_OPT_VERSION from proto, which would beat the pin', () => {
+    it('hides PROTO_WASM_OPT_VERSION from proto, which would override the pin', () => {
       const f = fixture();
       expectOptimized(f, run(f, ['optimize', f.out], { ...optimizedOutput(f), PROTO_WASM_OPT_VERSION: '1.0.0' }));
       const calls = protoCalls(f);
