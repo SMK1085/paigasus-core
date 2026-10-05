@@ -165,6 +165,20 @@ mod tests {
         assert_eq!(super::grpc_max_header_list_size(usize::MAX), u32::MAX);
     }
 
+    /// SMA-700 § 4.8: production builds its own `Server` in `main.rs`, so the transport test, which
+    /// drives `router()`, never reaches that call. This test reads `main.rs` and pins the header
+    /// list size call there. Comment lines are removed first, so a comment cannot satisfy it.
+    #[test]
+    fn production_sets_the_header_list_size_from_the_token_limit() {
+        const MAIN: &str = include_str!("../../main.rs");
+        let production = MAIN.split("\n#[cfg(test)]").next().expect("main.rs must have a production part");
+        let production = production.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(
+            production.contains(".http2_max_header_list_size(grpc::grpc_max_header_list_size("),
+            "main.rs must size the production gRPC header list with grpc_max_header_list_size"
+        );
+    }
+
     /// SMA-571 D8: service registration must live at exactly ONE site. tonic's `Router` keeps its
     /// `Routes` private, so production's deferred path (`adapters::boot`) cannot reuse `router()` —
     /// it consumes `routes()` instead. If a future service is added to `router()` directly, it
