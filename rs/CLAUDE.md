@@ -199,7 +199,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   Before you start:
   - Put the proto shims on `PATH`.
   - In a fresh worktree, run `proto install` and `pnpm -C ts install`.
-  - Check network access (`wasm-pack` downloads `wasm-bindgen-cli`).
+  - Check network access (`wasm-pack` downloads `wasm-bindgen-cli`, and the first `generate-wasm`
+    run downloads binaryen through proto).
   - Unlock 1Password for commit signing.
   ```bash
   ( cd rs && cargo update -p wasm-bindgen -p js-sys -p web-sys -p wasm-bindgen-futures )
@@ -246,6 +247,26 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `rm -rf ts/node_modules && pnpm -C ts install` after (ts/CLAUDE.md rule).
   Finish before the next Monday 06:00 UTC dependabot run (INFERRED). A new run can supersede a
   grouped PR.
+- **binaryen's `wasm-opt` is pinned in the crate, not in the root `.prototools` (SMA-435).** The
+  pin is `rs/crates/bindings/paigasus-wasm/.prototools`, and the plugin is
+  `.proto/plugins/binaryen.toml`. proto reads `.prototools` files upwards from the working
+  directory. So the bare `proto install` of `ci.yml` at the repository root does not read the pin.
+  CI does not download the 111 MB Linux tarball. `ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs`
+  runs every `proto` call from the crate directory, runs `wasm-opt -O`, and appends a
+  `paigasus.wasm-opt` marker section. `generate-wasm` (the committed binary) and `prebuild.yml`
+  (the published binary) call it.
+  - To bump binaryen: change the version in the nested `.prototools`, run
+    `moon run paigasus-kernel-ts:generate-wasm`, and commit the five artifacts. Check 5 of
+    `tests/committed-wasm.test.ts` fails until you do.
+  - Never optimize a binary two times. `wasm-opt -O` is deterministic but not idempotent: a second
+    run changes the bytes again. The script refuses an input that has the marker or that has no
+    `name` section.
+  - Never remove `wasm-opt = false` from the `release` or the `profiling` profile in
+    `paigasus-wasm/Cargo.toml`. wasm-pack then downloads a binaryen that no file pins. Checks 6
+    and 7 fail.
+  - The first `proto install wasm-opt` adds `~/.proto/shims/wasm-opt` to the shim-first `PATH` of the
+    developer. Outside this crate directory the shim has no configured version. So another wasm-pack
+    project on the same host can find this shim instead of its own binaryen.
 
 ## Container images
 
