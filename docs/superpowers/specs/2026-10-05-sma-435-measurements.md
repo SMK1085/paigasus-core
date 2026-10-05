@@ -102,10 +102,14 @@ The input was the committed `paigasus_wasm_bg.wasm` (raw, 50902 bytes) and its `
 
 **Deviation from the plan script, one line.** The first run used `--all-features
 --strip-target-features` to make the stripped copy. It failed the `all-declared` control for both
-binaries with `[parse exception: compact imports not supported (at 0:219)]`. The cause:
-`--all-features` also enables `compact-imports`, so the stripped copy used a compact import
-section that the later `--mvp-features` run cannot read. The fix: the strip step uses
-`--mvp-features` plus the eight declared `--enable-*` flags instead. Both controls then held.
+binaries with `[parse exception: compact imports not supported (at 0:219)]`. Fix round 1 repeated
+it on `raw.wasm`. `wasm-opt raw.wasm --all-features --strip-target-features -o chk-nf.wasm` gave
+rc=0. Validating `chk-nf.wasm` with `--mvp-features` and the eight `--enable-*` flags gave
+`[parse exception: compact imports not supported (at 0:219)]` and `Fatal: error parsing wasm`,
+rc=1. The same validation with `--enable-compact-imports` added gave rc=0. So `--all-features`
+makes the output use compact imports, and a reader without that feature cannot parse them. The
+fix: the strip step uses `--mvp-features` plus the eight declared `--enable-*` flags instead.
+Both controls then held.
 
 **Method limit (coordinator ruling).** The leave-one-out method cannot separate implied
 features. A feature that another enabled feature implies stays on when the method switches it
@@ -145,10 +149,25 @@ opt bulk-memory-opt unused
 opt call-indirect-overlong unused
 ```
 
-The `-O` binary needs no feature that the raw binary does not need. Both binaries need the same
-four features: `nontrapping-float-to-int`, `sign-ext`, `reference-types` and `multivalue`. The
-list is the same for both, so the `-O` pass adds no browser-floor requirement. This result is
-limited by the method limit above.
+Among the features that the method can detect, the `-O` binary needs no feature that the raw
+binary does not need. Both binaries need the same four: `nontrapping-float-to-int`, `sign-ext`,
+`reference-types` and `multivalue`. The method cannot see implied features. These are
+`bulk-memory`, `bulk-memory-opt`, `call-indirect-overlong` and `mutable-globals`. The table does
+not prove that `-O` adds none of them.
+
+**Direct check of the `target_features` section (fix round 1).** Command: `$SP/s5b.sh`, which
+runs `$SP/tf.mjs`. The script reads `WebAssembly.Module.customSections(m, 'target_features')` of
+`s5/raw.wasm` and `s5/opt.wasm` and decodes it. Output (the hex is the section payload):
+
+```
+raw 8 +bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext
+opt 8 +mutable-globals +nontrapping-fptoint +bulk-memory +sign-ext +reference-types +multivalue +bulk-memory-opt +call-indirect-overlong
+```
+
+Both binaries declare the same eight features. The order differs, so the section bytes are not
+identical. The set is identical. This backs the phrase "eight declared features". It also shows
+that `-O` adds no declared feature, including the implied ones. The section declares what the
+tool wrote. It does not prove what the code uses, but `-O` adds no entry to it.
 
 ## Verdict of Task 1
 
@@ -156,4 +175,5 @@ limited by the method limit above.
 - S2a: PASS. Three Moon commands gave rc 0, the project count stayed 35, and no `wasm-opt` install started.
 - S2b: PASS (recorded fact). The first install rewrites `shims/registry.json` only. No other tool shim changed.
 - S4a: PASS. The install and the run work as uid 65534 with no capabilities.
-- S5: PASS, with the method limit. The `-O` binary uses no feature that the raw binary does not use.
+- S5: PASS, with the method limit. Among the detectable features, `-O` adds none. The
+  `target_features` sections of both binaries list the same eight features.

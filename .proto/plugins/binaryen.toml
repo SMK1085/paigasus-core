@@ -6,18 +6,18 @@
 # rationale as cargo-machete and release-plz: a static schema over official release assets.
 #
 # THE PIN IS NOT IN THE ROOT .prototools. It is in rs/crates/bindings/paigasus-wasm/.prototools.
-# proto reads .prototools files upwards from the working directory, so the bare `proto install`
-# of ci.yml at the repository root does not see the pin and does not download binaryen (111 MB on
-# Linux) for a tool that no ci.yml task runs. Only ts/packages/paigasus-kernel/scripts/
-# optimize-wasm.mjs uses this tool, and it runs every proto call from that crate directory.
+# proto reads .prototools files upwards from the working directory. The bare `proto install` of
+# ci.yml runs at the repository root, so it does not see the pin. It does not download binaryen
+# (111 MB on Linux). No ci.yml task runs this tool. Only ts/packages/paigasus-kernel/scripts/
+# optimize-wasm.mjs uses it. That script runs every proto call from the crate directory.
 #
 # Tag convention: `version_<N>` (for example version_133), with no minor and no patch.
-# version-pattern maps the tag to the semantic version <N>.0.0, and {versionMajor} builds the
-# file name back. exe-path is required: the tarball nests the binary at
-# binaryen-version_<N>/bin/wasm-opt. proto keeps the whole tree, so on macOS bin/wasm-opt finds
+# version-pattern maps the tag to the semantic version <N>.0.0. {versionMajor} builds the file
+# name back. exe-path is required. The tarball nests the binary at
+# binaryen-version_<N>/bin/wasm-opt. proto keeps the whole tree. On macOS, bin/wasm-opt finds
 # lib/libbinaryen.dylib through @rpath.
-# The arch names differ per OS: Linux assets use x86_64 and aarch64, macOS assets use x86_64 and
-# arm64. So the macOS block remaps aarch64 to arm64. There is no Windows block: no job and no
+# The arch names differ per OS. Linux assets use x86_64 and aarch64. macOS assets use x86_64 and
+# arm64. So the macOS block remaps aarch64 to arm64. There is no Windows block. No job and no
 # developer runs this tool on Windows.
 
 name = "wasm-opt"
