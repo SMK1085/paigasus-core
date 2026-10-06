@@ -2,7 +2,7 @@
 """The pin check of .github/workflows/wasm-lockstep.yml (SMA-693 spec 5.4).
 
 A PyYAML parse, never a text scan: SMA-593 measured fourteen bypasses of a text scan, a YAML
-alias among them. The rules (P0-P25) are the trust model of spec 5.1 and 5.2 in checkable form.
+alias among them. The rules (P0-P26) are the trust model of spec 5.1 and 5.2 in checkable form.
 ci/wasm-lockstep/README.md lists each rule and what it does not prove.
 
   pin_check.py <workflow.yml>                       the rules on one workflow
@@ -143,6 +143,12 @@ APPLY_RUN = "\n".join((
     'python3 ci/wasm-lockstep/lockstep_check.py status --file "$RUNNER_TEMP/status.txt"',
 )) + "\n"
 PROPOSE_IF = "needs.build.outputs.changed == 'true'"
+PROPOSE_PINNED = {
+    "checkout": {"id": "checkout", "if": PROPOSE_IF, "with": {"ref": "${{ github.sha }}", "persist-credentials": False}},
+    "download": {"id": "download", "if": PROPOSE_IF, "with": {"name": "wasm-lockstep", "path": "${{ runner.temp }}/lockstep"}},
+    "verify": {"id": "verify", "if": PROPOSE_IF, "run": VERIFY_RUN},
+    "apply": {"id": "apply", "if": PROPOSE_IF, "run": APPLY_RUN},
+}
 
 EXPECTED_JOBS = frozenset({"build", "propose"})
 EXPECTED_TRIGGERS = frozenset({"schedule", "workflow_dispatch"})
@@ -631,6 +637,12 @@ def violations(doc: dict) -> list[str]:
     return out
 
 
+def _first_diff_line(got: str, want: str) -> int:
+    """The 1-based number of the first line where two scripts differ (P25, P26)."""
+    a, b = got.split("\n"), want.split("\n")
+    return next((n + 1 for n in range(min(len(a), len(b))) if a[n] != b[n]), min(len(a), len(b)) + 1)
+
+
 def _build_violations(build: dict) -> list[str]:
     """P25 (SMA-738 spec 4.5). The lock step writes the SHA-256 of the lock bytes it judged as a
     step output before container run 2; the stage step compares the STAGED lock with it; upload
@@ -647,9 +659,7 @@ def _build_violations(build: dict) -> list[str]:
     for step_id, pinned in (("lock", LOCK_RUN), ("stage", STAGE_RUN)):
         text = str(by_id.get(step_id, {}).get("run", ""))
         if text != pinned:
-            got, want = text.split("\n"), pinned.split("\n")
-            line = next((n + 1 for n in range(min(len(got), len(want))) if got[n] != want[n]), min(len(got), len(want)) + 1)
-            out.append(f"P25 the {step_id} step script differs from the pinned text, first at line {line}")
+            out.append(f"P25 the {step_id} step script differs from the pinned text, first at line {_first_diff_line(text, pinned)}")
     lock_run = str(by_id.get("lock", {}).get("run", ""))
     lock_cmds = [c for c in commands(lock_run)[0] if c[:2] == ["python3", CHECKER]]
     if lock_cmds != [LOCK_CMD]:
@@ -670,6 +680,34 @@ def _build_violations(build: dict) -> list[str]:
     with_block = upload.get("with") if isinstance(upload.get("with"), dict) else {}
     if with_block.get("path") != UPLOAD_PATH:
         out.append(f"P25 upload.with.path must be exactly {UPLOAD_PATH}, not {with_block.get('path')!r}")
+    return out
+
+
+def _propose_pin_violations(propose: dict) -> list[str]:
+    """P26 (SMA-739 spec 4.4). The propose steps up to the last checker are pinned whole, without
+    `name` (and without `uses` for the action steps, which P6 checks). A pin of `run:` alone is not
+    enough: `if: false` or `env: {SHELLOPTS: noexec}` also skips the checker, and a checkout `ref:`
+    change runs a checker from a different tree. The propose job may not declare env."""
+    out = []
+    if "env" in propose:
+        out.append("P26 the propose job declares env")
+    by_id = {str(s.get("id")): s for s in _steps(propose, "propose")}
+    for step_id, want in PROPOSE_PINNED.items():
+        if step_id not in by_id:
+            out.append(f"P26 the propose step {step_id} is missing")
+            continue
+        drop = ("name", "uses") if "with" in want else ("name",)
+        got = {str(k): v for k, v in by_id[step_id].items() if k not in drop}
+        if sorted(got) != sorted(want):
+            out.append(f"P26 the propose step {step_id} has keys {sorted(got)}, expected {sorted(want)}")
+            continue
+        for key, value in want.items():
+            if got[key] == value:
+                continue
+            if key == "run":
+                out.append(f"P26 the {step_id} step script differs from the pinned text, first at line {_first_diff_line(str(got[key]), value)}")
+            else:
+                out.append(f"P26 the {key} of propose step {step_id} must be exactly {value!r}, not {got[key]!r}")
     return out
 
 
@@ -700,6 +738,7 @@ def _propose_violations(propose: dict) -> list[str]:
         out += [f"P3 {w} reads the secrets context outside the token step" for w in reads]
     rest = {k: v for k, v in propose.items() if k != "steps"}
     out += [f"P3 {w} reads the secrets context in propose" for w in _reads(rest, SECRETS_CTX, "$.jobs.propose")]
+    out += _propose_pin_violations(propose)
     return out
 
 
@@ -886,6 +925,7 @@ BUILD_RUN = "container.sh update\n"  # the update step: it is not pinned by P25
 # exactly once in FIXTURE, and self_test checks it.
 _A = f"          {ARTIFACT_LINE}\n"
 _S = f"          {STATUS_LINE}\n"
+EARLY_EXITS = ("exit 0", "exit", "set -n", "set -o noexec")
 ANCHORED_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("verify joined with || true", ((_A, f"          {ARTIFACT_LINE} || true\n"),), "P18"),
     ("verify joined with || rc=$?", ((_A, f"          {ARTIFACT_LINE} || rc=$?\n"),), "P18"),
@@ -897,6 +937,25 @@ ANCHORED_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("status joined with || true", ((_S, f"          {STATUS_LINE} || true\n"),), "P18"),
     ("continue-on-error: true on verify", ((VERIFY_HEAD, VERIFY_HEAD + "        continue-on-error: true\n"),), "P14"),
     ('continue-on-error: "true" (a string) on verify', ((VERIFY_HEAD, VERIFY_HEAD + '        continue-on-error: "true"\n'),), "P14"),
+    # SMA-739 P26: an early exit before the checker, and the other keys that skip it.
+    *((f"{form} before the artifact command", ((_A, f"          {form}\n{_A}"),), "P26") for form in EARLY_EXITS),
+    *((f"{form} before the status command", ((_S, f"          {form}\n{_S}"),), "P26") for form in EARLY_EXITS),
+    ("a changed --title-file path on verify", ((_A, _A.replace("pr-title.txt", "pr-titel.txt")),), "P26"),
+    ("a changed status --file path on apply", ((_S, _S.replace("status.txt", "statuz.txt")),), "P26"),
+    ("run: |- on verify", ((VERIFY_HEAD + "        run: |\n", VERIFY_HEAD + "        run: |-\n"),), "P26"),
+    ("exit 0 before the artifact command, by the exact message", ((_A, f"          exit 0\n{_A}"),), "P26 the verify step script differs from the pinned text, first at line 2"),
+    ("if: false on verify", ((VERIFY_HEAD, "      - id: verify\n        if: false\n"),), "P26"),
+    ("if: false on apply", ((APPLY_HEAD, "      - id: apply\n        if: false\n"),), "P26"),
+    ("env SHELLOPTS: noexec on verify", ((VERIFY_HEAD, VERIFY_HEAD + "        env:\n          SHELLOPTS: noexec\n"),), "P26"),
+    ("shell: bash added on apply", ((APPLY_HEAD, APPLY_HEAD + "        shell: bash\n"),), "P26"),
+    ("an on: key on the apply step", ((APPLY_HEAD, APPLY_HEAD + "        on: x\n"),), "P26"),
+    ("the apply step missing", ((APPLY_STEP, ""),), "P26 the propose step apply is missing"),
+    ("a propose job env PATH", (("  propose:\n", "  propose:\n    env:\n      PATH: /x\n"),), "P26"),
+    ("checkout ref names a pull request head", (("          ref: ${{ github.sha }}\n", "          ref: refs/pull/1/head\n"),), "P26"),
+    ("checkout repository added", (("          ref: ${{ github.sha }}\n", "          ref: ${{ github.sha }}\n          repository: someone/fork\n"),), "P26"),
+    ("persist-credentials as the string false", (("          persist-credentials: false\n      - id: download", "          persist-credentials: 'false'\n      - id: download"),), "P26"),
+    ("download path into the workspace", (("          path: ${{ runner.temp }}/lockstep\n", "          path: ${{ github.workspace }}\n"),), "P26"),
+    ("a dependabot SHA bump of the propose checkout", ((PROPOSE_CHECKOUT_USES, PROPOSE_CHECKOUT_USES.replace("1" * 40, "5" * 40)),), "PASS"),
 )
 ANCHORED_LABELS = frozenset(label for label, _r, _w in ANCHORED_ROWS)
 
@@ -1185,7 +1244,7 @@ def main(argv: list[str]) -> int:
         print(f"pin_check: {line}", file=sys.stderr)
     if found:
         return RC_ASSERT
-    print(f"pin_check: {argv[0]} satisfies P0-P25")
+    print(f"pin_check: {argv[0]} satisfies P0-P26")
     return RC_OK
 
 
