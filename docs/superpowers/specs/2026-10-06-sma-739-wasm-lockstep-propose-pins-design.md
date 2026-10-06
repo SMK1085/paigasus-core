@@ -259,7 +259,8 @@ exit codes stay: 0 pass, 3 assertion, 2 infrastructure.
   then fails on the missing `pr-title.txt`. A second edit in `commit` is needed. Option (a) is to
   pin all seven `propose` `run:` texts. Option (a) is stronger, but it changes the base form of
   every P8, P20 and P21 row and roughly doubles this change. This spec takes option (b): it states
-  the residual in the README, and a new Linear issue tracks option (a). Sven decides at GATE 1.
+  the residual in the README, and SMA-740 tracks option (a). Sven approved option (b) at GATE 1
+  on 2026-10-06.
 - **Residual R1 (README):** "Steps after `apply` can change the tree after the checks. P26 proves
   that the two checkers run. It does not prove that the pushed tree is the checked tree."
 - **Residual R2 (README):** P6 accepts any 40-hex SHA for an action. GitHub can resolve a commit
