@@ -1065,6 +1065,7 @@ fn zitadel_config(issuer: &str, project_id: &str, markers: &[&str]) -> IamConfig
                 audiences: vec![project_id.to_string()],
                 jit_provisioning: true,
                 id_token_marker_claims: markers.iter().map(|name| (*name).to_string()).collect(),
+                access_token_required_claims: Vec::new(),
             }],
         },
         authz: AuthzConfig::default(),

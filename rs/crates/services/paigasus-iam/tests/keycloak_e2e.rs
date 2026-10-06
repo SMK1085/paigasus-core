@@ -368,6 +368,7 @@ fn keycloak_config(issuer: &str) -> IamConfig {
                 audiences: vec!["paigasus".to_string(), "paigasus-cli".to_string()],
                 jit_provisioning: true,
                 id_token_marker_claims: Vec::new(),
+                access_token_required_claims: Vec::new(),
             }],
         },
         authz: AuthzConfig::default(),
