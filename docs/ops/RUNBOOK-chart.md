@@ -546,9 +546,10 @@ Keycloak item is measured.
     no measured Zitadel ID token has it. The two settings work together. The marker claims refuse
     a token that has an ID-token claim. The required claim refuses a token that does not have an
     access-token claim. If a future Zitadel version drops `at_hash` and `azp` from its ID token,
-    the required claim still refuses the ID token. If it drops `jti` from its access token, every
-    login fails, and the IAM log shows `missing claim jti`. Then remove the value, and check the
-    new token shapes before you set a new name.
+    the required claim still refuses the ID token. If it drops `jti` from its access token, the
+    Zitadel login still completes, but IAM refuses every access token of this issuer with a 401,
+    and the IAM log shows `missing claim jti`. Then remove the value, and check the new token
+    shapes before you set a new name.
   - The audience. Option 1, for an install with machine clients: set `oidc.audience` to the
     project id. Each machine client must request the scope
     `urn:zitadel:iam:org:project:id:<project id>:aud`. Without this scope, a machine token has

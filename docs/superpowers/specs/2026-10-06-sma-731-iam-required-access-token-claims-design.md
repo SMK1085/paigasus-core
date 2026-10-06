@@ -247,11 +247,13 @@ Doc comments change with the code:
 - The Zitadel bullet adds `oidc.accessTokenRequiredClaims: ["jti"]`, next to the marker claims,
   labelled "measured with Login v1: code flow, refresh grant, client-credentials grant". The
   "decode before you set" list (`RUNBOOK-chart.md:506-507`) adds the JWT-profile grant, which is
-  not measured and is a usual Zitadel machine flow. It says why both settings: the marker claims refuse a token that has an ID-token claim, and the required
-  claim refuses a token that lacks an access-token claim. If a future Zitadel version drops
-  `at_hash` and `azp` from its ID token, the required claim still refuses the ID token. If it
-  drops `jti` from the access token, every login fails with `missing claim jti`; then remove the
-  value, and check the new token shapes before you set a new name.
+  not measured and is a usual Zitadel machine flow. It says why both settings: the marker claims
+  refuse a token that has an ID-token claim, and the required claim refuses a token that lacks an
+  access-token claim. If a future Zitadel version drops `at_hash` and `azp` from its ID token, the
+  required claim still refuses the ID token. If it drops `jti` from the access token, the Zitadel
+  login still completes, but IAM refuses every access token of the issuer with a 401 and
+  `missing claim jti`; then remove the value, and check the new token shapes before you set a new
+  name.
 - The Keycloak bullet records the measurement of D8:
   - If the Keycloak ID token has no `jti` and the access token has `jti`: give the recipe
     `["jti"]` as a second defence next to the `typ` check, labelled with the Keycloak version.
@@ -377,8 +379,8 @@ Existing `IssuerConfig { … }` literals (`validator.rs`, `tests/support/mod.rs`
 
 ## 6. Error handling and failure modes
 
-- The IdP stops putting a required claim in its access token. IAM refuses every login of that
-  issuer, with the log line of D4. This fails closed, and it is the purpose of the setting.
+- The IdP stops putting a required claim in its access token. The IdP login still completes, but
+  IAM refuses every access token of that issuer, with the log line of D4. This fails closed, and it is the purpose of the setting.
 - The operator configures a claim that the IdP's access token does not carry for one grant type
   (for example a machine flow). IAM refuses that grant type only. The runbook tells the operator to
   decode an access token for each grant type first.
