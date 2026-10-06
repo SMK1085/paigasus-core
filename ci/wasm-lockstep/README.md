@@ -174,8 +174,8 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
 P26 holds these checks:
 
 1. The exact pin. The steps `checkout`, `download`, `verify` and `apply` of `propose` equal
-   `PROPOSE_PINNED` in `pin_check.py`, key by key. `name:` is not compared. `uses:` of `checkout`
-   and `download` is not compared, because P6 checks it, so a dependabot bump stays green. The
+   `PROPOSE_PINNED` in `pin_check.py`, key by key. `name:` is not compared. For `checkout` and `download`, only the action
+   name in `uses:` is compared, not the SHA. P6 checks the SHA, so a dependabot bump stays green. The
    `run:` text of `verify` equals `VERIFY_RUN`, and of `apply` equals `APPLY_RUN`. If you edit one
    of these four steps, change `pin_check.py` in the same commit.
 2. An extra key on these steps is refused. So `env:` (for example `SHELLOPTS: noexec`), `shell:`,
@@ -263,7 +263,7 @@ clearer message. P14 and P13 on these two steps also only repeat it.
   checks trust each pinned action (P6).
 - The steps after `apply` (`commit`, `base`, `push`, `pr`, `close`) are not pinned. They can
   change the tree after the checks: write `rs/Cargo.lock` again, `git add` another path, or run
-  `git commit --amend`. P26 proves that the two checkers run. It does not prove that the pushed
+  `git commit --amend`. P26 proves that the workflow text runs the two checkers unchanged. It does not prove that the pushed
   tree is the checked tree. SMA-740 tracks it.
 - P6 accepts any 40-hex SHA for an allowlisted action. GitHub can resolve a commit SHA from a fork
   of the action repository (an "impostor commit"). `checkout` and `download` run before `verify`.

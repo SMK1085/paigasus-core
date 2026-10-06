@@ -143,6 +143,7 @@ APPLY_RUN = "\n".join((
     'python3 ci/wasm-lockstep/lockstep_check.py status --file "$RUNNER_TEMP/status.txt"',
 )) + "\n"
 PROPOSE_IF = "needs.build.outputs.changed == 'true'"
+PROPOSE_ACTIONS = {"checkout": "actions/checkout", "download": "actions/download-artifact"}
 PROPOSE_PINNED = {
     "checkout": {"id": "checkout", "if": PROPOSE_IF, "with": {"ref": "${{ github.sha }}", "persist-credentials": False}},
     "download": {"id": "download", "if": PROPOSE_IF, "with": {"name": "wasm-lockstep", "path": "${{ runner.temp }}/lockstep"}},
@@ -701,6 +702,9 @@ def _propose_pin_violations(propose: dict) -> list[str]:
         if sorted(got) != sorted(want):
             out.append(f"P26 the propose step {step_id} has keys {sorted(got)}, expected {sorted(want)}")
             continue
+        action = PROPOSE_ACTIONS.get(step_id)
+        if action is not None and str(by_id[step_id].get("uses", "")).partition("@")[0] != action:
+            out.append(f"P26 the propose step {step_id} must use {action}, not {by_id[step_id].get('uses')!r}")
         for key, value in want.items():
             if got[key] == value:
                 continue
@@ -956,6 +960,8 @@ ANCHORED_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("persist-credentials as the string false", (("          persist-credentials: false\n      - id: download", "          persist-credentials: 'false'\n      - id: download"),), "P26"),
     ("download path into the workspace", (("          path: ${{ runner.temp }}/lockstep\n", "          path: ${{ github.workspace }}\n"),), "P26"),
     ("a dependabot SHA bump of the propose checkout", ((PROPOSE_CHECKOUT_USES, PROPOSE_CHECKOUT_USES.replace("1" * 40, "5" * 40)),), "PASS"),
+    ("the propose checkout step runs download-artifact", ((PROPOSE_CHECKOUT_USES, PROPOSE_CHECKOUT_USES.replace("actions/checkout@", "actions/download-artifact@")),), "P26"),
+    ("the propose download step runs checkout", (("        uses: actions/download-artifact@" + "3" * 40 + "\n", "        uses: actions/checkout@" + "3" * 40 + "\n"),), "P26"),
 )
 ANCHORED_LABELS = frozenset(label for label, _r, _w in ANCHORED_ROWS)
 
