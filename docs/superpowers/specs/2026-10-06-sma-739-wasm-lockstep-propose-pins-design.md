@@ -180,7 +180,7 @@ New rows. Each insertion row inserts a line directly before the checker line:
 | 5-8 | `apply` | insert `exit 0`, `exit`, `set -n`, `set -o noexec` | P26 |
 | 9 | `verify` | change one character in the `--title-file` path | P26 |
 | 10 | `apply` | change one character in the `status --file` path | P26 |
-| 11 | `verify` | `run: |` → `run: |-` | P26 |
+| 11 | `verify` | `run: \|` → `run: \|-` | P26 |
 | 12 | `verify` | the exact message `P26 the verify step script differs from the pinned text, first at line 2` for the `exit 0` insertion | exact message |
 | 13 | `verify` | `if: false` | P26 |
 | 14 | `apply` | `if: false` | P26 |
@@ -280,7 +280,7 @@ exit codes stay: 0 pass, 3 assertion, 2 infrastructure.
 | No row checks the line-number helper | MINOR | Folded in: row 12. |
 | The mutation count is a literal | MINOR | Folded in: counted (4.7). |
 | The README location was wrong | MINOR | Folded in: exact lines in 4.8. |
-| No `|-` row | MINOR | Folded in: row 11. |
+| No `\|-` row | MINOR | Folded in: row 11. |
 | P6 impostor commits | MINOR | Folded in as README residual R2. Not fixed: outside scope. |
 | `runs-on:` not pinned | QUESTION | Rejected: fails closed for a GitHub-hosted label (section 3). |
 | `BASH_FUNC_python3%%` accepted by GitHub? | QUESTION | Not measured. The step-mapping pin refuses it in any case. |
