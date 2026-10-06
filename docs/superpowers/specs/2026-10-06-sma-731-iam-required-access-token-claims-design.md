@@ -1,7 +1,8 @@
 # SMA-731: IAM refuses a token that does not carry a configured claim
 
 - Linear: SMA-731 (follows SMA-703, PR 361).
-- Status: design approved by Sven in chat (2026-10-06). Written spec awaits review.
+- Status: design approved by Sven in chat (2026-10-06). Spec challenge folded in (§ 11). Written
+  spec awaits review.
 - Path: architectural (a change to what IAM accepts from the IdP, and a new chart value).
 - Template: `2026-10-02-sma-703-zitadel-id-token-marker-claims-design.md`. This spec copies its
   shape. Where this spec does not say otherwise, the SMA-703 decision applies.
@@ -44,9 +45,12 @@ Non-goals:
 From `2026-10-02-sma-703-zitadel-measurements.md` (Zitadel v4.15.3, M1-M8) and SMA-703 § 3 F8:
 
 - F1. `jti` and `nbf` are on every Zitadel access token and on no Zitadel ID token. This holds for
-  the human flow, the refresh grant and the machine flow.
-- F2. The homelab rollout on 2026-10-03 confirmed `jti` on a live access token. It did not report
-  on `jti` in the ID token.
+  the human flow (Login v1, public PKCE app), the refresh grant and the client-credentials grant.
+  The measurement file calls the split "INFERRED to be stable; seen in all 20+ tokens"
+  (`2026-10-02-sma-703-zitadel-measurements.md:961`). Not measured: Login v2, the JWT-profile
+  grant, token exchange.
+- F2. The homelab rollout on 2026-10-03 (a confidential app with Login v2) confirmed `jti` on a
+  live access token. It did not report on `jti` in the ID token.
 - F3. Not measured: whether other IdPs follow this split. Keycloak 26.4 is measured by this issue
   (D8, T20). The result goes into this section as F4 when the plan's first task has run.
 
@@ -100,6 +104,8 @@ The empty, whitespace, reserved and duplicate rules are the same for both lists.
 function in `config.rs` validates one list, with the field name and the reserved-name message as
 parameters. Thus the two lists cannot drift apart. The SMA-703 messages for
 `id_token_marker_claims` do not change, so the existing tests keep their assertions.
+`RESERVED_MARKER_CLAIMS` (`config.rs:271`) becomes `RESERVED_CLAIM_NAMES`, because it now covers
+both lists. Its doc comment and the chart comment that refers to it change with it.
 
 When the list of an issuer is not empty, `OidcAuthenticator::new` writes one `info` line at boot,
 with the issuer and its configured names. It is written there and not in `validate`, because
@@ -133,25 +139,58 @@ duplicate top-level member then fails as `Malformed` (SMA-703 D3). So `{"jti":"x
 cannot pass, and `{"jti":null,"jti":"x"}` cannot pass. When both lists are empty, the validator
 calls `decode::<WireClaims>` as today, so G2 keeps the current code path exactly.
 
-`ConfiguredIssuer` gets the list, so the request path does not read `IssuerConfig` again.
+**A value object for the two rules.** `ConfiguredIssuer` does not get a second loose list. A new
+private type `ClaimRules { id_token_markers: Vec<String>, required: Vec<String> }` in the oidc
+adapter holds both lists. It has two methods:
+
+- `needs_strict_decode(&self) -> bool`: true when either list is not empty.
+- `refusal(&self, members: &Map<String, Value>) -> Option<RefusalDetail<'_>>`: step 6b, then step
+  6c. It returns `Claim(name)` for the first marker that is present, else `MissingClaim(name)` for
+  the first required name that is missing, else `None`.
+
+`authenticate` calls these two methods, so it gets one branch for both steps, not two. The rules
+can be unit-tested on a plain map, without JWT signing. The request path does not read
+`IssuerConfig` again.
+
+The check is in `OidcAuthenticator::authenticate`, so it applies to both schemes: `Bearer` and,
+since SMA-700, `Dpop` (`authenticate_token.rs:203` and `:317`). The API-key path is not a JWT path.
+The gateway keeps no cache of introspection results.
 
 ### D4. The log line
 
-The refusal uses the existing `log_refusal` with `TokenDefect::NotAnAccessToken`. The marker text is
-`missing claim <name>`, for example `missing claim jti`. A new `RefusalDetail` variant (for example
-`MissingClaim(&str)`) carries the name. The message text `NOT_AN_ACCESS_TOKEN_MESSAGE` does not
-change. The name is a configured value, so the log never shows token material. The rate limit (one
-line for each issuer and defect in 10 seconds) applies, and it is shared with the other
-`NotAnAccessToken` refusals of the issuer.
+The refusal uses the existing `log_refusal` with `TokenDefect::NotAnAccessToken`. A new
+`RefusalDetail` variant `MissingClaim(&str)` carries the name. The marker text is
+`missing claim <name>`, for example `missing claim jti`.
+
+The `MissingClaim` arm has its own message text: "refused a bearer token: it does not carry a claim
+that the issuer configuration requires". `NOT_AN_ACCESS_TOKEN_MESSAGE` ("a verified marker shows it
+is not an access token") is wrong for the fail-closed case, where the refused tokens ARE access
+tokens. With that text an operator can look for a client bug and miss the IdP upgrade. The defect
+and the rate-limit key stay the same.
+
+The name is a configured value, so the log never shows token material. The rate limit (one line for
+each issuer and defect in 10 seconds) applies, and it is shared with the other `NotAnAccessToken`
+refusals of the issuer. The level stays `info`, like every other token refusal. An ID token that a
+client presents also gives this line, so `warn` would warn about client errors too (§ 11, Q-c).
 
 No new metric (none exists for refusals today). No change to the HTTP or gRPC response: a 401 with
 `invalid-token`, and the defect is not exposed.
 
+Doc comments change with the code:
+
+- `TokenDefect::NotAnAccessToken` (`paigasus-iam-core/src/authn.rs:209-211`) names the SMA-686
+  `typ` check only. It gets the SMA-703 marker claims and the SMA-731 required claims.
+- The `validator.rs` module doc (lines 3-16, "Four refusals are logged") and the `log_refusal`
+  doc get the new refusal.
+
 ### D5. The chart
 
-- New optional value `oidc.accessTokenRequiredClaims`, default `[]`. It is documented in
-  `charts/paigasus/values.yaml` and `charts/paigasus/README.md`, next to
-  `oidc.idTokenMarkerClaims`.
+- New optional value `oidc.accessTokenRequiredClaims`, default `[]`. In
+  `charts/paigasus/values.yaml` it goes AFTER `oidc.scopes`, not directly after
+  `oidc.idTokenMarkerClaims`. The `env.sh` M8 row deletes the lines from `idTokenMarkerClaims:` to
+  `scopes:` (`env.sh:792`). A new key in that range would be deleted too, and M8 would then test a
+  chart with neither key. Its comment refers to `oidc.idTokenMarkerClaims`. `README.md` documents
+  it next to `oidc.idTokenMarkerClaims`.
 - `templates/backend-deployment.yaml` adds `,access_token_required_claims=[…]` to the one issuer
   entry of `IAM_AUTHN__ISSUERS` only when the list is not empty. Each item is quoted with `%q`.
   With the default, the rendered value is byte-identical to today. An extra comment line renders
@@ -168,10 +207,14 @@ No new metric (none exists for refusals today). No change to the HTTP or gRPC re
   - the list has a duplicate;
   - an item is also in `oidc.idTokenMarkerClaims`.
 - The first five rules are shared with `oidc.idTokenMarkerClaims`. The SMA-703 template
-  `paigasus.validateIdTokenMarkerClaims` becomes one parameterized template (value path and
-  reserved-name text as parameters), called once for each list. The SMA-703 messages do not
-  change, so the existing `refusals.sh` rows keep passing. The overlap rule is a separate check.
-  All of it stays in `templates/_iam-backend.tpl`, not in `_helpers.tpl` (SMA-703 D5).
+  `paigasus.validateIdTokenMarkerClaims` becomes one parameterized template, called once for each
+  list. Its argument is a `dict` with: the root context, the `dig` key (`idTokenMarkerClaims`),
+  the display path (`oidc.idTokenMarkerClaims`), the example text for the "not a list" message
+  (`["at_hash", "azp"]` or `["jti"]`, see `_iam-backend.tpl:145`), and the reserved-name text. The
+  SMA-703 messages do not change, so the existing `refusals.sh` rows keep passing.
+- The overlap rule is a separate check. It runs after both lists pass their own checks, and it
+  treats a nil value as `[]`.
+- All of it stays in `templates/_iam-backend.tpl`, not in `_helpers.tpl` (SMA-703 D5).
 - A change of the value changes the IAM pod template, so IAM restarts with a short gap. The
   runbook § 5 restart table gets a row.
 - No new required value. So `helm_render.py` `STUB_VALUES`, the chart scripts' required-value
@@ -188,14 +231,18 @@ No new metric (none exists for refusals today). No change to the HTTP or gRPC re
   - Use a name only when the IdP puts it in every access token and in no ID token. Decode one
     access token for each grant type in use, and one ID token, before you set it.
   - The check fails closed. If the IdP stops putting the claim in its access token, IAM refuses
-    every login of that issuer with a 401. The IAM log has the line
-    "refused a bearer token: a verified marker shows it is not an access token" with the marker
-    `missing claim <name>`. The log is rate-limited, so one line can stand for many refusals.
+    every request of that issuer with a 401 `invalid-token`. The IAM log has the line
+    "refused a bearer token: it does not carry a claim that the issuer configuration requires"
+    with the marker `missing claim <name>`, at `info` level. The log is rate-limited, so one line
+    can stand for many refusals. If the IAM log level is above `info`, the line does not show.
+    What the console shows a user in this case is not measured; the runbook says so.
   - The boot `info` line shows the setting. A missing boot line means the setting is not on.
   - The chart refusals of D5, and the overlap rule.
   - A change restarts IAM. To remove the value, use `[]` or `--set-json`, not `{}` (SMA-703 § 8).
-- The Zitadel bullet adds `oidc.accessTokenRequiredClaims: ["jti"]`, next to the marker claims. It
-  says why both: the marker claims refuse a token that has an ID-token claim, and the required
+- The Zitadel bullet adds `oidc.accessTokenRequiredClaims: ["jti"]`, next to the marker claims,
+  labelled "measured with Login v1: code flow, refresh grant, client-credentials grant". The
+  "decode before you set" list (`RUNBOOK-chart.md:506-507`) adds the JWT-profile grant, which is
+  not measured and is a usual Zitadel machine flow. It says why both settings: the marker claims refuse a token that has an ID-token claim, and the required
   claim refuses a token that lacks an access-token claim. If a future Zitadel version drops
   `at_hash` and `azp` from its ID token, the required claim still refuses the ID token. If it
   drops `jti` from the access token, every login fails with `missing claim jti`; then remove the
@@ -217,15 +264,25 @@ No Notion ADR, like SMA-703 D8. The change adds one opt-in refusal and one optio
 
 ### D8. The Keycloak measurement
 
-`tests/keycloak_e2e.rs` already decodes the ID token and the access token of one response
-(`keycloak_e2e.rs:152-156`, Keycloak `26.4`). The plan's first task adds a temporary print of
-`has_claim(…, "jti")` for both tokens, runs the test, and records the result as F4 in § 3. The
-test then asserts the measured result, so a Keycloak image bump that changes it fails the test.
-The temporary print does not stay in the code.
+`tests/keycloak_e2e.rs` already decodes the ID token and the access token of the password grant
+(`keycloak_e2e.rs:152-156`, Keycloak `26.4`), and gets a DPoP-bound access token (`:196-201`). The
+config turns DPoP on (`:321-325`). The plan's first task measures `jti` on four tokens:
 
-If the split holds, the test also runs IAM with `["jti"]` and checks that the access token still
-passes and the ID token is refused. If it does not hold, the test asserts the measured presence
-only.
+- the ID token and the access token of the password grant;
+- the DPoP-bound access token;
+- the ID token and the access token of one refresh grant (a new request in the test, with the
+  `refresh_token` of the password grant).
+
+It adds a temporary print of `has_claim(…, "jti")` for each token, runs the test, and records the
+result as F4 in § 3. The test then asserts the measured result, so a Keycloak image bump that
+changes it fails the test. The temporary print does not stay in the code.
+
+The Keycloak ID token carries `typ: ID` (`keycloak_e2e.rs:154`), so step 6 refuses it before step
+6c. Thus a Keycloak ID-token refusal does NOT prove step 6c, and the test does not claim it. If the
+split holds on all measured tokens, the test runs IAM with `["jti"]` and checks that the password
+access token, the refreshed access token and the DPoP-bound token (on the `Dpop` scheme, with a
+valid proof) still pass. The runbook recipe is then labelled with the version and the measured
+grants. If the split does not hold, the test asserts the measured presence only.
 
 ### D9. Acceptance criteria mapping
 
@@ -264,6 +321,10 @@ otherwise.
 - T13. The refusal log line names the issuer and `missing claim jti`. It does not contain a claim
   value, the subject or the email. Repeated refusals log one line.
 - T14. The boot line names the issuer and the required names, and is absent for an empty list.
+- T14a. On the `Dpop` scheme, a correctly bound token (`cnf.jkt` and a valid proof) without `jti`
+  is refused as `NotAnAccessToken`. The same token with `jti` passes.
+- T14b. `ClaimRules` unit tests on a plain map: `needs_strict_decode` for the four empty/non-empty
+  combinations, and `refusal` for marker-first order, the `null` rule and case-sensitivity.
 
 Config tests in `config.rs`:
 
@@ -284,9 +345,18 @@ End-to-end tests:
   the required claim refuses the ID tokens by itself. The human and the refreshed access token
   resolve to the human principal, and the machine access token passes the authenticator (then
   `MissingEmail`, as in SMA-703 § 12).
-- T20. `keycloak_e2e.rs`: the measured `jti` presence on both tokens (D8).
+- T19a. `zitadel_e2e.rs`: one more `AppState` with the full recipe (markers `["at_hash", "azp"]`
+  and required `["jti"]`). The three access tokens pass the authenticator. This is the setup that
+  the runbook tells operators to use.
+- T20. `keycloak_e2e.rs`: the measured `jti` presence on the four tokens of D8, and, if the split
+  holds, the pass of the three access tokens with `["jti"]`.
 - T21. The existing SMA-703 assertions and the empty-list control of `zitadel_e2e.rs` do not
   change.
+
+Mutation proof (as SMA-703 § 12): the plan deletes step 6c (the `MissingClaim` branch of
+`ClaimRules::refusal`) and checks that T1, T4, T14a and T19 fail. Under `-D warnings` the mutation
+must still compile, so the plan runs it with `--no-fail-fast` and checks for test failures, not a
+compile error.
 
 Chart rows:
 
@@ -328,4 +398,31 @@ restarts IAM once. A rollback is the removal of the value, with one more restart
 
 ## 9. Open questions
 
-None. Sven decided the defect (`NotAnAccessToken`) and the Keycloak scope (measure) on 2026-10-06.
+None that block. Sven decided the defect (`NotAnAccessToken`) and the Keycloak scope (measure) on
+2026-10-06. § 11 lists three challenger questions that this spec answers with a default.
+
+## 10. Follow-ups
+
+- Measure what the console shows a user when IAM refuses every access token (§ 11, Q-a). This also
+  applies to SMA-703.
+
+## 11. Spec challenge (2026-10-06)
+
+Verdict: APPROVE WITH CHANGES. No BLOCKER. The coordinator checked the evidence of the MAJOR
+finding and of the chart findings against the files before folding them in.
+
+| Finding | Severity | Outcome |
+|---|---|---|
+| The Keycloak branch cannot prove step 6c, and one grant is too narrow for a recipe | MAJOR | Folded in: D8 measures four tokens (password, DPoP, refresh); no claim that the ID-token refusal proves 6c; T20. |
+| No unit test on the `Dpop` scheme | MINOR | Folded in: D3, T14a. |
+| The "not a list" message has a fixed example | MINOR | Folded in: D5 `dict` argument with the example text; overlap check after both lists, nil as `[]`. |
+| `env.sh` M8 would delete the new key too | MINOR | Folded in: D5 puts the key after `oidc.scopes`. |
+| The log message is wrong for the fail-closed case | MINOR | Folded in: D4 own text for `MissingClaim`; D6. |
+| The `NotAnAccessToken` doc is out of date | MINOR | Folded in: D4 doc-comment list. |
+| The `jti` facts are weaker than F1 says | MINOR | Folded in: F1, F2, D6 label and the JWT-profile grant. |
+| No mutation proof | MINOR | Folded in: § 5 mutation proof. |
+| `authenticate` grows ad-hoc branches | MINOR | Folded in: D3 `ClaimRules`, T14b; `RESERVED_CLAIM_NAMES` (D2). |
+| No e2e test of the full recipe | MINOR | Folded in: T19a. |
+| Q-a. What does the console show in the fail-closed case? | QUESTION | Not measured. The runbook says so (D6). Follow-up in § 10. |
+| Q-b. A report-only mode for the first rollout? | QUESTION | Rejected for now: a rollback is the removal of one value, and the runbook requires a decode of each grant type first. A report-only mode adds a second setting and a state that protects nothing. Sven can override. |
+| Q-c. Log the `MissingClaim` refusal at `warn`? | QUESTION | Rejected for now: every other token refusal is `info`, and a client that presents an ID token gives the same line. D6 tells the operator about the log level. Sven can override. |
