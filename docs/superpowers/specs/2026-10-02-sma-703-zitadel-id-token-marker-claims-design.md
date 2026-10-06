@@ -356,6 +356,12 @@ Sven approved the spec on 2026-10-02 with no answer to Q1-Q3. So Q1 and Q2 take 
 - Q3. M4 suggests that a refreshed Zitadel access token keeps the original `iat` and `exp`. If true,
   a console session cannot extend its access token. Out of scope here. Should I open a Linear issue
   to measure it?
+  - Answer (SMA-732, 2026-10-06): MEASURED, Zitadel v4.15.3. A refresh gives an access token with
+    `exp` = refresh time + lifetime, before and after the first `exp`. M4 showed equal `iat` and
+    `exp` because its refresh came about 10 ms after the login. Limits: Login v1, a confidential
+    web app, JWT access tokens, a lifetime of 10 s. The 12 h default, Login v2 and opaque tokens
+    use the same code path, but that is code reading, not a measurement. See
+    `2026-10-05-sma-732-zitadel-refresh-exp-measurements.md`.
 
 ## 10. Follow-ups
 
@@ -392,7 +398,7 @@ against the code and the measurement file before folding them in.
 | Two names or four? | QUESTION | Q1. |
 | What is `393381921700315139`? | QUESTION | Marked INFERRED (F2). Whether other apps of P add their client ids is not measured; the runbook makes no claim about it. |
 | Login v2 label | QUESTION | Folded in: the runbook label names Login v1. |
-| Refreshed access token keeps `iat`/`exp` | QUESTION | Q3. |
+| Refreshed access token keeps `iat`/`exp` | QUESTION | Q3. Answered by SMA-732: a refresh extends `exp` (measured, see the Q3 answer). |
 | T12: which defect? | QUESTION | `Malformed`. |
 
 ## 12. Addendum (2026-10-03): Zitadel end-to-end test
