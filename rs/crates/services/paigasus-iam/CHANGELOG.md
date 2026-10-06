@@ -32,8 +32,8 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 - Each `[[authn.issuers]]` entry has a new setting, `access_token_required_claims`. It is a list
   of claim names that the IdP puts into every access token and into no ID token. For Zitadel, use
   `["jti"]`. The default is an empty list, and then IAM adds no new check. IAM refuses the same
-  names as for `id_token_marker_claims`, and a name that is in both lists. IAM does not boot with
-  such a list (SMA-731).
+  names as for `id_token_marker_claims`, and a name that is in both lists. IAM does not boot when
+  a list breaks one of these rules (SMA-731).
 - IAM refuses a verified token that does not carry a configured claim, or carries it with the
   value `null`. The refusal is `NotAnAccessToken`. IAM logs it at `info` with the issuer, the
   marker `missing claim <name>` and its own message, "refused a bearer token: it does not carry a

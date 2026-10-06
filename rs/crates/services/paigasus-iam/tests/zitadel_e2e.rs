@@ -23,9 +23,10 @@
 //! - `jti` is on every access token and on no ID token (SMA-731 spec § 3, F1).
 //! - IAM with `access_token_required_claims = ["jti"]` and an EMPTY marker list refuses each ID
 //!   token as `NotAnAccessToken`, so the required claim refuses them by itself. The access tokens
-//!   still pass.
-//! - IAM with the full runbook recipe (both settings) refuses each ID token and passes each
-//!   access token.
+//!   pass the authenticator.
+//! - IAM with the full runbook recipe (both settings) refuses each ID token as
+//!   `NotAnAccessToken`. The access tokens pass the authenticator, but the machine
+//!   access token then fails JIT provisioning with `MissingEmail`.
 //!
 //! Docker gating is the single policy of `tests/support/docker.rs`'s `start_or_skip` (SMA-538).
 //! The SMA-703 test starts three containers: IAM's own Postgres, a second Postgres for Zitadel,
