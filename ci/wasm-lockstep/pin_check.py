@@ -1183,8 +1183,11 @@ def negative_control(path: str) -> int:
         print(f"  FAIL  the real workflow does not pass, so no mutation can prove anything: {base}", file=sys.stderr)
         return RC_ASSERT
 
+    checked = 0
+
     def expect(label: str, mutated: dict, want: str) -> None:
-        nonlocal failures
+        nonlocal failures, checked
+        checked += 1
         got = violations(mutated)
         if any(v.startswith(want + " ") for v in got):
             print(f"  ok    {label}: {want}")
@@ -1211,24 +1214,36 @@ def negative_control(path: str) -> int:
         if step.get("id") == "apply":
             step.setdefault("env", {})["C"] = "${{ needs.build.outputs.changed }}"
     expect("needs.build.outputs read in an env of propose", output, "P9")
-    # SMA-738: three mutations of the REAL build job. The fixture rows prove the rule; only these
+    # SMA-738: mutations of the REAL build job. The fixture rows prove the rule; only these
     # prove that it bites on the real structure.
-    def build_run(step_id: str, change) -> dict:
+    def step_run(job: str, step_id: str, change) -> dict:
         mutated = copy.deepcopy(real)
-        for step in mutated["jobs"]["build"]["steps"]:
+        for step in mutated["jobs"][job]["steps"]:
             if step.get("id") == step_id:
                 step["run"] = "".join(change(line) for line in str(step["run"]).splitlines(keepends=True))
         return mutated
 
-    expect("the same line deleted from the stage step", build_run("stage", lambda ln: "" if " same --sha256 " in ln else ln), "P25")
-    expect("|| true appended to the same line", build_run("stage", lambda ln: ln.rstrip("\n") + " || true\n" if " same --sha256 " in ln else ln), "P18")
-    expect("the lock_sha256 line deleted from the lock step", build_run("lock", lambda ln: "" if "lock_sha256=" in ln else ln), "P25")
-    expect("LOCK_SHA256 assigned before the same line", build_run("stage", lambda ln: 'LOCK_SHA256="$(cat "$src/rs/h")"\n' + ln if " same --sha256 " in ln else ln), "P25")
-    expect("set -n inserted before the same line", build_run("stage", lambda ln: "set -n\n" + ln if " same --sha256 " in ln else ln), "P25")
+    expect("the same line deleted from the stage step", step_run("build", "stage", lambda ln: "" if " same --sha256 " in ln else ln), "P25")
+    expect("|| true appended to the same line", step_run("build", "stage", lambda ln: ln.rstrip("\n") + " || true\n" if " same --sha256 " in ln else ln), "P18")
+    expect("the lock_sha256 line deleted from the lock step", step_run("build", "lock", lambda ln: "" if "lock_sha256=" in ln else ln), "P25")
+    expect("LOCK_SHA256 assigned before the same line", step_run("build", "stage", lambda ln: 'LOCK_SHA256="$(cat "$src/rs/h")"\n' + ln if " same --sha256 " in ln else ln), "P25")
+    expect("set -n inserted before the same line", step_run("build", "stage", lambda ln: "set -n\n" + ln if " same --sha256 " in ln else ln), "P25")
     path_env = copy.deepcopy(real)
     path_env["env"]["PYTHONPATH"] = "/tmp"
     expect("PYTHONPATH added to the workflow env", path_env, "P25")
-    print(f"pin_check negative control: 10 mutations, {failures} failed")
+    # SMA-739: P26 on the REAL propose job. The fixture rows prove the rule; these prove it bites on
+    # the real steps.
+    expect("exit 0 inserted before the artifact line of verify", step_run("propose", "verify", lambda ln: "exit 0\n" + ln if " artifact --dir " in ln else ln), "P26")
+    expect("set -n inserted before the status line of apply", step_run("propose", "apply", lambda ln: "set -n\n" + ln if " status --file " in ln else ln), "P26")
+    skipped = copy.deepcopy(real)
+    for step in skipped["jobs"]["propose"]["steps"]:
+        if step.get("id") == "verify":
+            step["if"] = False
+    expect("if: false on the verify step", skipped, "P26")
+    noexec = copy.deepcopy(real)
+    noexec["jobs"]["propose"]["env"] = {"SHELLOPTS": "noexec"}
+    expect("SHELLOPTS: noexec in the propose job env", noexec, "P26")
+    print(f"pin_check negative control: {checked} mutations, {failures} failed")
     return RC_ASSERT if failures else RC_OK
 
 
