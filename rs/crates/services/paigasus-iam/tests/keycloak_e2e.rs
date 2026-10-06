@@ -14,6 +14,10 @@
 //! SMA-690: the test also gets a DPoP-bound token from the same client and asserts that IAM
 //! refuses it as SenderConstrained.
 //!
+//! SMA-731 (spec D8, T20): the test also runs one refresh grant, and pins whether `jti` is on the
+//! ID token and the access token of the password grant, of the refresh grant, and on the
+//! DPoP-bound access token.
+//!
 //! Docker gating is the single policy owned by `tests/support/docker.rs`'s `start_or_skip`
 //! (SMA-538), not restated here — notably, this suite's 240-second Keycloak startup timeout is
 //! now a hard failure locally too, not the fast skip it used to be: a container failure against
@@ -173,6 +177,22 @@ async fn keycloak_end_to_end_config_only_oidc() {
     // SMA-690 AC 2: Keycloak's plain Bearer access token has no `cnf`.
     assert!(access_claims.get("cnf").is_none(), "keycloak Bearer access token must carry no cnf: {access_claims}");
 
+    // SMA-731 D8: one refresh grant with the refresh token of the password grant. Keycloak returns
+    // a new ID token and a new access token. The failure message prints the body: an OAuth error
+    // body has no token.
+    let refresh_token = token_body["refresh_token"].as_str().expect("refresh_token in token response").to_string();
+    let refresh_response = http
+        .post(&token_url)
+        .form(&[("grant_type", "refresh_token"), ("client_id", "paigasus-cli"), ("refresh_token", refresh_token.as_str())])
+        .send()
+        .await
+        .expect("refresh request");
+    let refresh_status = refresh_response.status();
+    let refresh_body: Value = refresh_response.json().await.expect("refresh response json");
+    assert!(refresh_status.is_success(), "refresh grant failed ({refresh_status}): {refresh_body}\n{}", dump_logs(&keycloak).await);
+    let refreshed_access = refresh_body["access_token"].as_str().expect("access_token in refresh response").to_string();
+    let refreshed_id = refresh_body["id_token"].as_str().expect("id_token in refresh response (scope=openid)").to_string();
+
     // SMA-690 AC 1: a DPoP-bound token from the SAME client. Keycloak binds a token when the
     // client sends a DPoP proof, with no client setting (measurement M2).
     let (dpop_key, dpop_x, dpop_y) = dpop_keypair();
@@ -199,6 +219,19 @@ async fn keycloak_end_to_end_config_only_oidc() {
     let dpop_claims = jwt_payload(&dpop_token);
     assert_eq!(dpop_claims["typ"], "DPoP", "keycloak DPoP-bound access token must carry typ=DPoP");
     assert_eq!(dpop_claims["cnf"]["jkt"], jwk_thumbprint(&dpop_x, &dpop_y), "cnf.jkt must be the RFC 7638 thumbprint of the proof key");
+    // SMA-731 F4 (T20): measured on Keycloak 26.4, 2026-10-06. `jti` does not separate the
+    // Keycloak ID token from the access token, so `access_token_required_claims` does not help
+    // for Keycloak, and the `typ` check (SMA-686) stays the Keycloak defence. The values below are
+    // the measured ones. A Keycloak image bump that changes one fails here.
+    for (label, token, carries_jti) in [
+        ("password ID token", &id_token, true),
+        ("password access token", &access_token, true),
+        ("refreshed ID token", &refreshed_id, true),
+        ("refreshed access token", &refreshed_access, true),
+        ("DPoP access token", &dpop_token, true),
+    ] {
+        assert_eq!(has_claim(&jwt_payload(token), "jti"), carries_jti, "{label}: the jti presence changed (SMA-731 F4)");
+    }
 
     // Config-only: point the wired service at the container's issuer. `accept_invalid_tls` is
     // the sole concession to the self-signed dev cert — it is still a plain config flag.
@@ -357,6 +390,12 @@ fn aud_contains(claims: &Value, audience: &str) -> bool {
         Value::Array(auds) => auds.iter().any(|aud| aud == audience),
         _ => false,
     }
+}
+
+/// True when the payload has a top-level member `name` whose value is not JSON `null` (the
+/// presence rule of SMA-731 D3).
+fn has_claim(claims: &Value, name: &str) -> bool {
+    claims.get(name).is_some_and(|value| !value.is_null())
 }
 
 /// Decodes a JWT's payload segment WITHOUT verifying it — test inspection only.

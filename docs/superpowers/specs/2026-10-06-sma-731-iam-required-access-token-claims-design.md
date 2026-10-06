@@ -53,6 +53,11 @@ From `2026-10-02-sma-703-zitadel-measurements.md` (Zitadel v4.15.3, M1-M8) and S
   live access token. It did not report on `jti` in the ID token.
 - F3. Not measured: whether other IdPs follow this split. Keycloak 26.4 is measured by this issue
   (D8, T20). The result goes into this section as F4 when the plan's first task has run.
+- F4. Keycloak 26.4 (measured 2026-10-06 by `tests/keycloak_e2e.rs`): `jti` is on the ID token
+  and the access token of the password grant, on the ID token and the access token of the
+  refresh grant, and on the DPoP-bound access token. So `jti` does not separate the Keycloak
+  tokens. The runbook gives no Keycloak recipe, and the `typ` check (SMA-686) stays the Keycloak
+  defence (D6, D8). T20 asserts these five values.
 
 `nbf` is not part of the recipe. One name keeps the recipe small, and `jti` is the claim that
 RFC 9068 (JWT access token profile) lists as required. `nbf` is optional in RFC 9068.
