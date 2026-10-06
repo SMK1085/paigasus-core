@@ -306,6 +306,47 @@ expect_fail "markers duplicate" "oidc.idTokenMarkerClaims[2] \"at_hash\" is alre
 expect_render "markers Zitadel recipe" \
   --set "$MARKERS={at_hash,azp}"
 
+# SMA-731 (spec D5). oidc.accessTokenRequiredClaims goes through the same template as
+# oidc.idTokenMarkerClaims (paigasus.validateClaimNameList), with its own path, example and
+# reserved-name reason. One more rule: a name must not be in both lists. Each needle carries the
+# key path and the index.
+REQUIRED=oidc.accessTokenRequiredClaims
+expect_fail "required not a list" "oidc.accessTokenRequiredClaims must be a list of claim names, for example [\"jti\"]" \
+  --set "$REQUIRED=jti"
+expect_fail "required item a number" "oidc.accessTokenRequiredClaims[0] must be a string" \
+  --set "$REQUIRED={123}"
+# `--set x={}` does not clear a list: helm 3.22.0 makes it [""].
+expect_fail "required set to {}" "oidc.accessTokenRequiredClaims[0] is empty. IamConfig::validate refuses an empty name, and IAM does not boot. To remove the value, use [] in a values file or --set-json 'oidc.accessTokenRequiredClaims=[]'" \
+  --set "$REQUIRED={}"
+expect_fail "required item with a space" "oidc.accessTokenRequiredClaims[1] is \" nbf\"" \
+  --set "$REQUIRED={jti, nbf}"
+expect_fail "required item with a control character" "oidc.accessTokenRequiredClaims[0] is \"a\\x01b\"" \
+  --set-string "$REQUIRED[0]=$(printf 'a\001b')"
+expect_fail "required item with a quote" "oidc.accessTokenRequiredClaims[0] is \"a\\\"b\"" \
+  --set-string "$REQUIRED[0]=a\"b"
+expect_fail "required item not ASCII" "oidc.accessTokenRequiredClaims[0] is \"jti" \
+  --set-string "$REQUIRED[0]=$(printf 'jti\303\251')"
+REQUIRED_BS="$(mktemp)"
+printf 'oidc:\n  accessTokenRequiredClaims: ['"'"'a\\b'"'"']\n' >"$REQUIRED_BS"
+expect_fail "required item with a backslash" "oidc.accessTokenRequiredClaims[0] is \"a\\\\b\"" \
+  -f "$REQUIRED_BS"
+rm -f "$REQUIRED_BS"
+for reserved in iss sub aud exp; do
+  expect_fail "required reserved name $reserved" "oidc.accessTokenRequiredClaims[1] is \"$reserved\": every token that IAM accepts carries this claim, so the name has no effect" \
+    --set "$REQUIRED={jti,$reserved}"
+done
+expect_fail "required duplicate" "oidc.accessTokenRequiredClaims[2] \"jti\" is already in oidc.accessTokenRequiredClaims[0]" \
+  --set "$REQUIRED={jti,nbf,jti}"
+expect_fail "required name also a marker" "oidc.accessTokenRequiredClaims[1] \"azp\" is also in oidc.idTokenMarkerClaims[1]" \
+  --set "$MARKERS={at_hash,azp}" --set "$REQUIRED={jti,azp}"
+expect_render "required Zitadel recipe" \
+  --set "$REQUIRED={jti}"
+expect_render "required and markers, Zitadel recipe" \
+  --set "$MARKERS={at_hash,azp}" --set "$REQUIRED={jti}"
+# Review Focus 2. Names compare exactly, as in IAM: JTI and jti are two names.
+expect_render "required JTI and marker jti" \
+  --set "$MARKERS={jti}" --set "$REQUIRED={JTI}"
+
 # SMA-700 (spec § 4.11). zones.iam.backend.dpop copies the IamConfig::validate rules for the URL
 # list, because a refused boot stops the one IAM replica. Each needle carries the key path.
 DPOP=zones.iam.backend.dpop

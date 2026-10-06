@@ -134,8 +134,15 @@ spec:
 {{- if include "paigasus.iamIdTokenMarkerClaims" $root }}
             # oidc.idTokenMarkerClaims is set: IAM refuses a token that carries one of these claims.
 {{- end }}
+{{- /*
+  oidc.accessTokenRequiredClaims (SMA-731). The same pattern: "" for the default [], and the
+  comment line only inside the `if`, so the default render stays byte-identical.
+*/}}
+{{- if include "paigasus.iamAccessTokenRequiredClaims" $root }}
+            # oidc.accessTokenRequiredClaims is set: IAM refuses a token that lacks one of these claims.
+{{- end }}
             - name: IAM_AUTHN__ISSUERS
-              value: {{ printf "[{issuer=%q,audiences=[%q]%s}]" $root.Values.oidc.issuer (include "paigasus.iamAudience" $root) (include "paigasus.iamIdTokenMarkerClaims" $root) | quote }}
+              value: {{ printf "[{issuer=%q,audiences=[%q]%s%s}]" $root.Values.oidc.issuer (include "paigasus.iamAudience" $root) (include "paigasus.iamIdTokenMarkerClaims" $root) (include "paigasus.iamAccessTokenRequiredClaims" $root) | quote }}
             # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
             # than 32 decoded bytes. See zones.iam.backend.apiKeysPepperSecret in values.yaml.
             - name: IAM_API_KEYS__PEPPER
