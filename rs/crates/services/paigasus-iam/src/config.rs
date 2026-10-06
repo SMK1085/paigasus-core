@@ -187,6 +187,11 @@ pub struct IssuerConfig {
     /// refused as `NotAnAccessToken`. For Zitadel, use `["at_hash", "azp"]` (spec § 3, F6).
     #[serde(default)]
     pub id_token_marker_claims: Vec<String>,
+    /// Claim names that every accepted token of this issuer must carry (SMA-731). Empty by default.
+    /// A verified token that does not carry one of them, or carries it with the value JSON `null`,
+    /// is refused as `NotAnAccessToken`. For Zitadel, use `["jti"]` (SMA-731 spec § 3, F1).
+    #[serde(default)]
+    pub access_token_required_claims: Vec<String>,
 }
 
 fn default_jit_provisioning() -> bool {
@@ -264,11 +269,36 @@ fn check_forwarded_base_url(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Claim names that every token IAM accepts carries (SMA-703 D2). A marker list that names one
-/// would make IAM refuse every token of that issuer, so `IamConfig::validate` refuses it.
-/// Keep this list equal to the reserved names in `paigasus.validateIdTokenMarkerClaims` in
+/// Claim names that every token IAM accepts carries (SMA-703 D2, SMA-731 D2). In
+/// `id_token_marker_claims` such a name would make IAM refuse every token of the issuer. In
+/// `access_token_required_claims` it would have no effect. So `IamConfig::validate` refuses it in
+/// both lists. Keep this list equal to the reserved names in `paigasus.validateClaimNameList` in
 /// `charts/paigasus/templates/_iam-backend.tpl`.
-const RESERVED_MARKER_CLAIMS: [&str; 4] = ["iss", "sub", "aud", "exp"];
+const RESERVED_CLAIM_NAMES: [&str; 4] = ["iss", "sub", "aud", "exp"];
+
+/// The boot rules for one claim-name list of an issuer (SMA-703 D2, SMA-731 D2): no empty name, no
+/// leading or trailing whitespace, no name of `RESERVED_CLAIM_NAMES`, and no name twice. `field`
+/// is the `IssuerConfig` field name, and `reserved_reason` ends the reserved-name message. Both
+/// lists use this one function, so their rules cannot drift apart. Names compare exactly: JSON
+/// member names are case-sensitive.
+fn validate_claim_names(issuer: &str, field: &str, names: &[String], reserved_reason: &str) -> Result<(), String> {
+    let mut seen = HashSet::with_capacity(names.len());
+    for name in names {
+        if name.is_empty() {
+            return Err(format!("authn.issuers[{issuer}].{field} contains an empty name"));
+        }
+        if name.trim() != name {
+            return Err(format!("authn.issuers[{issuer}].{field} has a name with leading or trailing whitespace: {name:?}"));
+        }
+        if RESERVED_CLAIM_NAMES.contains(&name.as_str()) {
+            return Err(format!("authn.issuers[{issuer}].{field} must not contain {name:?}: {reserved_reason}"));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(format!("authn.issuers[{issuer}].{field} contains the name {name:?} twice"));
+        }
+    }
+    Ok(())
+}
 
 /// Cedar authorization config (SMA-444 Task 21, spec §7/§11) — mirrors `AuthnConfig`'s
 /// shape/style: the in-process [`PolicySnapshot`](crate::adapters::authz::PolicySnapshot)
@@ -1116,7 +1146,9 @@ impl IamConfig {
     /// key. Also (SMA-558): `authn.accept_invalid_tls` and `authn.extra_ca_bundle_path` are
     /// mutually exclusive, and the latter is non-empty when present. Also (SMA-703 D2): each
     /// `id_token_marker_claims` name is not empty, has no leading or trailing whitespace, is not
-    /// `iss`/`sub`/`aud`/`exp`, and occurs once in its list. Also (SMA-700): the `[authn.dpop]`
+    /// `iss`/`sub`/`aud`/`exp`, and occurs once in its list. Also (SMA-731 D2): the same rules
+    /// for each `access_token_required_claims` name, and no name in both lists of one issuer.
+    /// Also (SMA-700): the `[authn.dpop]`
     /// rules: a non-empty URL list when enabled, each URL https (or http on a loopback host) with
     /// no query, fragment or user info, a window of 1 to 300 s, and quotas from 1 to the capacity.
     pub fn validate(&self) -> Result<(), String> {
@@ -1140,23 +1172,25 @@ impl IamConfig {
             if let Err(e) = Issuer::parse(&issuer_cfg.issuer) {
                 return Err(format!("authn.issuers[{trimmed}] is not a valid issuer: {e}"));
             }
-            // SMA-703 D2. Names compare exactly: JSON member names are case-sensitive.
-            let mut seen_markers = HashSet::with_capacity(issuer_cfg.id_token_marker_claims.len());
-            for name in &issuer_cfg.id_token_marker_claims {
-                if name.is_empty() {
-                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims contains an empty name"));
-                }
-                if name.trim() != name {
-                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims has a name with leading or trailing whitespace: {name:?}"));
-                }
-                if RESERVED_MARKER_CLAIMS.contains(&name.as_str()) {
-                    return Err(format!(
-                        "authn.issuers[{trimmed}].id_token_marker_claims must not contain {name:?}: every token that IAM accepts carries it, so IAM would refuse every token of this issuer"
-                    ));
-                }
-                if !seen_markers.insert(name.as_str()) {
-                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims contains the name {name:?} twice"));
-                }
+            // SMA-703 D2 and SMA-731 D2: one shared function for both lists.
+            validate_claim_names(
+                trimmed,
+                "id_token_marker_claims",
+                &issuer_cfg.id_token_marker_claims,
+                "every token that IAM accepts carries it, so IAM would refuse every token of this issuer",
+            )?;
+            validate_claim_names(
+                trimmed,
+                "access_token_required_claims",
+                &issuer_cfg.access_token_required_claims,
+                "every token that IAM accepts carries it, so the name has no effect",
+            )?;
+            // SMA-731 D2: a name in both lists makes IAM refuse every token of the issuer. A token
+            // with the claim is an ID token by the marker rule, and a token without it misses it.
+            if let Some(name) = issuer_cfg.access_token_required_claims.iter().find(|name| issuer_cfg.id_token_marker_claims.contains(name)) {
+                return Err(format!(
+                    "authn.issuers[{trimmed}].access_token_required_claims and authn.issuers[{trimmed}].id_token_marker_claims both contain {name:?}: IAM would refuse every token of this issuer"
+                ));
             }
         }
 
@@ -1721,6 +1755,114 @@ mod tests {
             let mut cfg = load_minimal_config();
             cfg.authn.issuers[0].id_token_marker_claims = names.iter().map(|name| (*name).to_string()).collect();
             assert!(cfg.validate().is_ok(), "{names:?} must pass validation: {:?}", cfg.validate());
+        }
+    }
+
+    #[test]
+    fn issuers_env_in_the_chart_form_parses_access_token_required_claims() {
+        // SMA-731 T17: the exact strings that charts/paigasus renders into IAM_AUTHN__ISSUERS
+        // (env.sh rows R3 and R4), and the same string without the key (row R1).
+        let issuer = "https://idp.example.test/realms/paigasus";
+        let cases: [(String, Vec<&str>, Vec<&str>); 3] = [
+            (
+                format!(r#"[{{issuer="{issuer}",audiences=["paigasus-console"],access_token_required_claims=["jti"]}}]"#),
+                vec![],
+                vec!["jti"],
+            ),
+            (
+                format!(r#"[{{issuer="{issuer}",audiences=["paigasus-console"],id_token_marker_claims=["at_hash","azp"],access_token_required_claims=["jti"]}}]"#),
+                vec!["at_hash", "azp"],
+                vec!["jti"],
+            ),
+            (format!(r#"[{{issuer="{issuer}",audiences=["paigasus-console"]}}]"#), vec![], vec![]),
+        ];
+        for (issuers, markers, required) in cases {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+                jail.set_env("IAM_AUTHN__ISSUERS", &issuers);
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert_eq!(cfg.authn.issuers.len(), 1);
+                assert_eq!(cfg.authn.issuers[0].id_token_marker_claims, markers, "{issuers}");
+                assert_eq!(cfg.authn.issuers[0].access_token_required_claims, required, "{issuers}");
+                assert!(cfg.validate().is_ok(), "the chart's issuer string must pass validation: {issuers}");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn a_misspelled_required_claims_key_is_ignored() {
+        // SMA-731 § 6: IssuerConfig ignores an unknown key, so a typo gives an empty list and no
+        // error. The missing boot line is the only sign (the runbook says so).
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+            jail.set_env(
+                "IAM_AUTHN__ISSUERS",
+                r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["paigasus-console"],access_token_required_claim=["jti"]}]"#,
+            );
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.authn.issuers[0].access_token_required_claims.is_empty());
+            assert!(cfg.validate().is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_refuses_bad_access_token_required_claims() {
+        // SMA-731 T15: each D2 rule fails validate, and the message names the issuer and the field.
+        let cases: [(&[&str], &str); 9] = [
+            (&[""], "contains an empty name"),
+            (&[" jti"], "leading or trailing whitespace"),
+            (&["jti\n"], "leading or trailing whitespace"),
+            (&[" "], "leading or trailing whitespace"),
+            (&["iss"], "must not contain \"iss\": every token that IAM accepts carries it, so the name has no effect"),
+            (&["sub"], "must not contain \"sub\""),
+            (&["aud"], "must not contain \"aud\""),
+            (&["exp"], "must not contain \"exp\""),
+            (&["jti", "nbf", "jti"], "contains the name \"jti\" twice"),
+        ];
+        for (names, want) in cases {
+            let mut cfg = load_minimal_config();
+            cfg.authn.issuers[0].access_token_required_claims = names.iter().map(|name| (*name).to_string()).collect();
+            let err = cfg.validate().expect_err("a bad required list must fail validation");
+            assert!(
+                err.contains("authn.issuers[https://idp.example.com/realms/acme].access_token_required_claims"),
+                "{names:?}: the message names the issuer and the key: {err}"
+            );
+            assert!(err.contains(want), "{names:?}: want {want:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn validate_refuses_a_name_in_both_claim_lists() {
+        // SMA-731 T15 (D2): IAM would refuse every token of the issuer. The message names both
+        // fields and the name.
+        let mut cfg = load_minimal_config();
+        cfg.authn.issuers[0].id_token_marker_claims = vec!["at_hash".to_string(), "azp".to_string()];
+        cfg.authn.issuers[0].access_token_required_claims = vec!["jti".to_string(), "azp".to_string()];
+        let err = cfg.validate().expect_err("an overlap must fail validation");
+        for want in [
+            "authn.issuers[https://idp.example.com/realms/acme].access_token_required_claims",
+            "authn.issuers[https://idp.example.com/realms/acme].id_token_marker_claims",
+            "\"azp\"",
+            "IAM would refuse every token of this issuer",
+        ] {
+            assert!(err.contains(want), "want {want:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_required_claims_and_compares_names_exactly() {
+        // SMA-731 D2 / Review Focus 2: the Zitadel recipe passes alone and with the markers; names
+        // that differ only in case are two names, also across the two lists.
+        let cases: [(&[&str], &[&str]); 5] = [(&[], &["jti"]), (&["at_hash", "azp"], &["jti"]), (&["jti"], &["JTI"]), (&[], &["ISS", "jti", "JTI"]), (&[], &[])];
+        for (markers, required) in cases {
+            let mut cfg = load_minimal_config();
+            cfg.authn.issuers[0].id_token_marker_claims = markers.iter().map(|name| (*name).to_string()).collect();
+            cfg.authn.issuers[0].access_token_required_claims = required.iter().map(|name| (*name).to_string()).collect();
+            assert!(cfg.validate().is_ok(), "{markers:?} / {required:?} must pass validation: {:?}", cfg.validate());
         }
     }
 

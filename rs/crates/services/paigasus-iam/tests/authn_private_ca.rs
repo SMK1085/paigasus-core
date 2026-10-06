@@ -37,6 +37,7 @@ fn authenticator_for(issuer: &str, extra_bundle: Option<&str>) -> impl Authentic
             audiences: vec!["paigasus".to_string()],
             jit_provisioning: true,
             id_token_marker_claims: Vec::new(),
+            access_token_required_claims: Vec::new(),
         }],
         provider,
         60,

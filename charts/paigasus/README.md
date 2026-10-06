@@ -262,7 +262,7 @@ list into the one issuer entry of `IAM_AUTHN__ISSUERS` in `templates/backend-dep
   repeated name at boot, and the IAM Deployment has one replica with `maxSurge: 0`, so the chart
   refuses these first. The character rule is a chart rule only: it keeps the rendered env value
   readable for IAM. The checks
-  are in `paigasus.validateIdTokenMarkerClaims` in `templates/_iam-backend.tpl`. They are not in
+  are in `paigasus.validateClaimNameList` in `templates/_iam-backend.tpl`. They are not in
   `_helpers.tpl`, so its fixture copies do not change.
 - **To remove the value,** set `[]` in a values file, or use
   `--set-json 'oidc.idTokenMarkerClaims=[]'`. With `helm upgrade --reuse-values`, deleting the key
@@ -274,6 +274,34 @@ list into the one issuer entry of `IAM_AUTHN__ISSUERS` in `templates/backend-dep
 `tests/env.sh` holds the rows `M1 default`, `M2 reuse-values-no-key`, `M3 set`,
 `M4 empty-list-in-file`, `M5 with-audience`, `M6 restart-scope`, `M7 empty-list-set-json` and
 `M8 reuse-values-nil-guard`. A sixth row counter checks them. `tests/refusals.sh` holds one row for each refusal and one valid render. See
+`docs/ops/RUNBOOK-chart.md` § 6 for the IdP setup.
+
+## The required access-token claims (`oidc.accessTokenRequiredClaims`)
+
+IAM can refuse a token that does not carry a claim which the IdP puts into every access token
+and into no ID token (SMA-731). It is the fail-closed partner of `oidc.idTokenMarkerClaims`. The
+chart renders the list into the one issuer entry of `IAM_AUTHN__ISSUERS`, after the marker list.
+
+- **Empty or absent (the default).** The chart adds nothing. The render is byte-identical to a
+  chart without the value. A nil value from `--reuse-values` counts as an empty list.
+- **Set.** The entry gets `,access_token_required_claims=["jti"]` after `audiences` and after the
+  marker list. Each name is quoted with `%q`. One more YAML comment line renders above
+  `IAM_AUTHN__ISSUERS`:
+  `# oidc.accessTokenRequiredClaims is set: IAM refuses a token that lacks one of these claims.`
+- **The render fails** for the same values as for `oidc.idTokenMarkerClaims`. The two lists use
+  one template, `paigasus.validateClaimNameList` in `templates/_iam-backend.tpl`. A `dict`
+  argument gives each list its own path, example and reserved-name reason in the messages. The
+  render also fails when a name is in both lists (`paigasus.validateClaimListOverlap`), because
+  IAM refuses that at boot: it would refuse every token of the issuer. Names compare exactly, so
+  `JTI` and `jti` are two names.
+- **To remove the value,** set `[]` in a values file, or use
+  `--set-json 'oidc.accessTokenRequiredClaims=[]'`. Do not use
+  `--set oidc.accessTokenRequiredClaims={}`: Helm makes it a list with one empty name, and the
+  render fails.
+- A change of the value restarts the IAM pod and no console pod.
+
+`tests/env.sh` holds the rows `R1 default` to `R8 nil-markers-with-required`, with a row counter.
+`tests/refusals.sh` holds one row for each refusal and three valid renders. See
 `docs/ops/RUNBOOK-chart.md` § 6 for the IdP setup.
 
 ## DPoP on the gateway path (`zones.iam.backend.dpop`)
