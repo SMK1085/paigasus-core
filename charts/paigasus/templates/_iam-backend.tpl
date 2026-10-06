@@ -38,8 +38,9 @@ trim a subject, and the match is exact.
 {{- end -}}
 
 {{/*
-paigasus.validateIamBackend: the refusals for the two values, and for oidc.idTokenMarkerClaims
-(SMA-703, paigasus.validateIdTokenMarkerClaims below) and zones.iam.backend.dpop (SMA-700,
+paigasus.validateIamBackend: the refusals for the two values, for oidc.idTokenMarkerClaims and
+oidc.accessTokenRequiredClaims (SMA-703, SMA-731: paigasus.validateClaimNameList and
+paigasus.validateClaimListOverlap below), and for zones.iam.backend.dpop (SMA-700,
 paigasus.validateIamDpop below). paigasus.validate calls it.
 
 bootstrapAdmins mirrors IamConfig::validate (config.rs, the bootstrap_admins loop): an https
@@ -102,67 +103,127 @@ Issuer::parse trims.
 {{- end -}}
 {{- $_ := set $seen $e.name $i -}}
 {{- end -}}
-{{- include "paigasus.validateIdTokenMarkerClaims" . -}}
+{{- include "paigasus.validateClaimNameList" (dict "root" . "key" "idTokenMarkerClaims" "path" "oidc.idTokenMarkerClaims" "example" "[\"at_hash\", \"azp\"]" "reserved" "every access token carries this claim, so IAM would refuse every token") -}}
+{{- include "paigasus.validateClaimNameList" (dict "root" . "key" "accessTokenRequiredClaims" "path" "oidc.accessTokenRequiredClaims" "example" "[\"jti\"]" "reserved" "every token that IAM accepts carries this claim, so the name has no effect") -}}
+{{- include "paigasus.validateClaimListOverlap" . -}}
 {{- include "paigasus.validateIamDpop" . -}}
 {{- end -}}
 
 {{/*
-paigasus.iamIdTokenMarkerClaims: the suffix ,id_token_marker_claims=[...] for the one issuer entry
-of IAM_AUTHN__ISSUERS (SMA-703), or "" when oidc.idTokenMarkerClaims is empty, absent or nil. An
-absent key comes from `helm upgrade --reuse-values` on a release made before the key; dig then
+paigasus.iamIssuerClaimList: the suffix ,<field>=[...] for the one issuer entry of
+IAM_AUTHN__ISSUERS, or "" when the list is empty, absent or nil (SMA-703, SMA-731). The argument
+is a dict:
+  root   the root context
+  key    the key under oidc, read with dig (idTokenMarkerClaims)
+  field  the IssuerConfig field name (id_token_marker_claims)
+An absent key comes from `helm upgrade --reuse-values` on a release made before the key; dig then
 gives the default. Each name is quoted with %q, like the audience. figment reads the inline form
-(the test issuers_env_in_the_chart_form_parses_id_token_marker_claims in
-rs/crates/services/paigasus-iam/src/config.rs). paigasus.validateIdTokenMarkerClaims has already
+(the tests issuers_env_in_the_chart_form_parses_id_token_marker_claims and
+issuers_env_in_the_chart_form_parses_access_token_required_claims in
+rs/crates/services/paigasus-iam/src/config.rs). paigasus.validateClaimNameList has already
 refused every name that %q would escape.
 */}}
-{{- define "paigasus.iamIdTokenMarkerClaims" -}}
-{{- $names := dig "idTokenMarkerClaims" list .Values.oidc -}}
+{{- define "paigasus.iamIssuerClaimList" -}}
+{{- $names := dig .key list .root.Values.oidc -}}
 {{- if and (kindIs "slice" $names) $names -}}
 {{- $quoted := list -}}
 {{- range $names -}}
 {{- $quoted = append $quoted (printf "%q" .) -}}
 {{- end -}}
-{{- printf ",id_token_marker_claims=[%s]" (join "," $quoted) -}}
+{{- printf ",%s=[%s]" .field (join "," $quoted) -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
-paigasus.validateIdTokenMarkerClaims: the refusals for oidc.idTokenMarkerClaims (SMA-703 D5). A
-bad name stops IAM at boot (IamConfig::validate), and the IAM Deployment has one replica with
+paigasus.iamIdTokenMarkerClaims: the suffix for oidc.idTokenMarkerClaims (SMA-703). Takes the
+ROOT context.
+*/}}
+{{- define "paigasus.iamIdTokenMarkerClaims" -}}
+{{- include "paigasus.iamIssuerClaimList" (dict "root" . "key" "idTokenMarkerClaims" "field" "id_token_marker_claims") -}}
+{{- end -}}
+
+{{/*
+paigasus.iamAccessTokenRequiredClaims: the suffix for oidc.accessTokenRequiredClaims (SMA-731).
+Takes the ROOT context.
+*/}}
+{{- define "paigasus.iamAccessTokenRequiredClaims" -}}
+{{- include "paigasus.iamIssuerClaimList" (dict "root" . "key" "accessTokenRequiredClaims" "field" "access_token_required_claims") -}}
+{{- end -}}
+
+{{/*
+paigasus.validateClaimNameList: the refusals for one claim-name list under oidc (SMA-703 D5,
+SMA-731 D5). paigasus.validateIamBackend calls it once for oidc.idTokenMarkerClaims and once for
+oidc.accessTokenRequiredClaims. The argument is a dict:
+  root      the root context
+  key       the key under oidc, read with dig (idTokenMarkerClaims)
+  path      the value path that each message names (oidc.idTokenMarkerClaims)
+  example   the example list of the "not a list" message (["at_hash", "azp"])
+  reserved  the reason of the reserved-name message
+A bad name stops IAM at boot (IamConfig::validate), and the IAM Deployment has one replica with
 maxSurge 0, so the old pod stops before the new pod fails. So the chart copies the boot rules and
 fails the render instead. The character rule is stricter than IAM: printable ASCII only, with no
 space, no " and no \. Go's %q writes other characters as escapes (\t, \x01) that figment does not
 read. The rule also refuses leading and trailing whitespace. A nil value counts as an empty list.
-The nil case happens when a release from before SMA-703 has no key and the user passes
---set oidc.idTokenMarkerClaims=null. Then Helm keeps a nil value in the user values.
+The nil case happens when a release from before the key has no key and the user passes
+--set oidc.<key>=null. Then Helm keeps a nil value in the user values.
 */}}
-{{- define "paigasus.validateIdTokenMarkerClaims" -}}
-{{- $names := dig "idTokenMarkerClaims" list .Values.oidc -}}
+{{- define "paigasus.validateClaimNameList" -}}
+{{- $path := .path -}}
+{{- $reserved := .reserved -}}
+{{- $names := dig .key list .root.Values.oidc -}}
 {{- if kindIs "invalid" $names -}}
 {{- $names = list -}}
 {{- end -}}
 {{- if not (kindIs "slice" $names) -}}
-{{- fail "oidc.idTokenMarkerClaims must be a list of claim names, for example [\"at_hash\", \"azp\"]" -}}
+{{- fail (printf "%s must be a list of claim names, for example %s" $path .example) -}}
 {{- end -}}
 {{- $seen := dict -}}
 {{- range $i, $n := $names -}}
 {{- if not (kindIs "string" $n) -}}
-{{- fail (printf "oidc.idTokenMarkerClaims[%d] must be a string. Quote the name in a values file, or use --set-string" $i) -}}
+{{- fail (printf "%s[%d] must be a string. Quote the name in a values file, or use --set-string" $path $i) -}}
 {{- end -}}
 {{- if not $n -}}
-{{- fail (printf "oidc.idTokenMarkerClaims[%d] is empty. IamConfig::validate refuses an empty name, and IAM does not boot. To remove the value, use [] in a values file or --set-json 'oidc.idTokenMarkerClaims=[]', not --set oidc.idTokenMarkerClaims={}" $i) -}}
+{{- fail (printf "%s[%d] is empty. IamConfig::validate refuses an empty name, and IAM does not boot. To remove the value, use [] in a values file or --set-json '%s=[]', not --set %s={}" $path $i $path $path) -}}
 {{- end -}}
 {{- if not (regexMatch `^[!#-\[\]-~]+$` $n) -}}
-{{- fail (printf "oidc.idTokenMarkerClaims[%d] is %q: use printable ASCII only, with no space, no \" and no \\. IAM cannot read another character from IAM_AUTHN__ISSUERS" $i $n) -}}
+{{- fail (printf "%s[%d] is %q: use printable ASCII only, with no space, no \" and no \\. IAM cannot read another character from IAM_AUTHN__ISSUERS" $path $i $n) -}}
 {{- end -}}
-{{- /* Keep this list equal to RESERVED_MARKER_CLAIMS in rs/crates/services/paigasus-iam/src/config.rs. */ -}}
+{{- /* Keep this list equal to RESERVED_CLAIM_NAMES in rs/crates/services/paigasus-iam/src/config.rs. */ -}}
 {{- if has $n (list "iss" "sub" "aud" "exp") -}}
-{{- fail (printf "oidc.idTokenMarkerClaims[%d] is %q: every access token carries this claim, so IAM would refuse every token. IamConfig::validate refuses it, and IAM does not boot" $i $n) -}}
+{{- fail (printf "%s[%d] is %q: %s. IamConfig::validate refuses it, and IAM does not boot" $path $i $n $reserved) -}}
 {{- end -}}
 {{- if hasKey $seen $n -}}
-{{- fail (printf "oidc.idTokenMarkerClaims[%d] %q is already in oidc.idTokenMarkerClaims[%d]. IamConfig::validate refuses a duplicate, and IAM does not boot" $i $n (index $seen $n)) -}}
+{{- fail (printf "%s[%d] %q is already in %s[%d]. IamConfig::validate refuses a duplicate, and IAM does not boot" $path $i $n $path (index $seen $n)) -}}
 {{- end -}}
 {{- $_ := set $seen $n $i -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+paigasus.validateClaimListOverlap: a name in both oidc.idTokenMarkerClaims and
+oidc.accessTokenRequiredClaims (SMA-731 D2, D5). IAM would then refuse every token of the issuer:
+a token with the claim is refused as an ID token, and a token without it as missing it.
+IamConfig::validate refuses it, and IAM does not boot. It runs after both lists passed
+paigasus.validateClaimNameList, so every item is a string. A nil list counts as empty. Names
+compare exactly (case-sensitive), as in IAM.
+*/}}
+{{- define "paigasus.validateClaimListOverlap" -}}
+{{- $markers := dig "idTokenMarkerClaims" list .Values.oidc -}}
+{{- if kindIs "invalid" $markers -}}
+{{- $markers = list -}}
+{{- end -}}
+{{- $required := dig "accessTokenRequiredClaims" list .Values.oidc -}}
+{{- if kindIs "invalid" $required -}}
+{{- $required = list -}}
+{{- end -}}
+{{- $markerAt := dict -}}
+{{- range $i, $n := $markers -}}
+{{- $_ := set $markerAt $n $i -}}
+{{- end -}}
+{{- range $i, $n := $required -}}
+{{- if hasKey $markerAt $n -}}
+{{- fail (printf "oidc.accessTokenRequiredClaims[%d] %q is also in oidc.idTokenMarkerClaims[%d]. IAM would refuse every token of this issuer: a token with the claim is refused as an ID token, and a token without it as missing it. IamConfig::validate refuses it, and IAM does not boot" $i $n (index $markerAt $n)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

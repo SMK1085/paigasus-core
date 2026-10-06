@@ -701,7 +701,7 @@ fi
 #   M2 reuse-values-no-key
 #                   `--set oidc.idTokenMarkerClaims=null` on this chart. Helm deletes the key
 #                   and dig gives the default, so this row does NOT reach the nil guard in
-#                   paigasus.validateIdTokenMarkerClaims. The value does not change (spec T20).
+#                   paigasus.validateClaimNameList. The value does not change (spec T20).
 #   M3 set          The Zitadel recipe. Each name is quoted with %q, in values order, after the
 #                   audiences. config.rs parses this exact form in
 #                   issuers_env_in_the_chart_form_parses_id_token_marker_claims.
@@ -721,7 +721,7 @@ fi
 #                   A copy of the chart without the idTokenMarkerClaims key in values.yaml, and
 #                   `--set oidc.idTokenMarkerClaims=null`. This is a release from before SMA-703
 #                   with --reuse-values. Helm keeps a nil value, so the row reaches the nil guard
-#                   in paigasus.validateIdTokenMarkerClaims. The render must succeed with the
+#                   in paigasus.validateClaimNameList. The render must succeed with the
 #                   default value.
 # A sixth row counter reds the script when an M row call line is deleted.
 MARKER_ROWS=0
@@ -791,7 +791,8 @@ fi
 # Remove the key line and the comment lines that follow it, up to the next key (scopes).
 sed -e '/^  idTokenMarkerClaims:/,/^  scopes:/{/^  scopes:/!d;}' "$TMP/chart-no-markers/values.yaml" >"$TMP/values-no-markers.yaml"
 cp "$TMP/values-no-markers.yaml" "$TMP/chart-no-markers/values.yaml"
-if grep -q 'idTokenMarkerClaims' "$TMP/chart-no-markers/values.yaml"; then
+# Match the key line only: the comment of oidc.accessTokenRequiredClaims names this key too (SMA-731).
+if grep -q '^  idTokenMarkerClaims:' "$TMP/chart-no-markers/values.yaml"; then
   echo "FAIL [M8 setup]: the chart copy still has idTokenMarkerClaims in values.yaml"; ec=1
 fi
 
@@ -807,6 +808,123 @@ check_markers "M8 reuse-values-nil-guard" -                paigasus-console   ab
 
 if [ "$MARKER_ROWS" -lt "$MARKER_ROWS_WANT" ]; then
   echo "FAIL [marker rows]: $MARKER_ROWS marker row(s) ran, want $MARKER_ROWS_WANT"; ec=1
+fi
+
+# oidc.accessTokenRequiredClaims (SMA-731). Renders go to a file, as for check_markers. One row per
+# property:
+#   R1 default      IAM_AUTHN__ISSUERS is the value from before SMA-731, and the
+#                   "oidc.accessTokenRequiredClaims is set" comment line is absent.
+#   R2 reuse-values-no-key
+#                   `--set oidc.accessTokenRequiredClaims=null` on this chart. Helm deletes the key,
+#                   and dig gives the default. The value does not change.
+#   R3 set          The Zitadel recipe ["jti"], quoted with %q, after the audiences. config.rs
+#                   parses this exact form in
+#                   issuers_env_in_the_chart_form_parses_access_token_required_claims.
+#   R4 both-lists   Both lists set (the runbook recipe for Zitadel). The marker list comes first,
+#                   then the required list, and both comment lines render.
+#   R5 empty-list-set-json
+#                   `--set-json 'oidc.accessTokenRequiredClaims=[]'` renders the default value. It
+#                   is the removal form that the runbook gives for --reuse-values.
+#   R6 restart-scope
+#                   A change of the value changes the IAM pod template and no console pod template.
+#   R7 reuse-values-nil-guard
+#                   A copy of the chart without the two claim-list keys in values.yaml, and both
+#                   values set to null. This is a release from before SMA-703 with --reuse-values.
+#                   Helm keeps the nil values, so the row reaches the nil guards of
+#                   paigasus.validateClaimNameList and paigasus.validateClaimListOverlap.
+#   R8 nil-markers-with-required
+#                   The same chart copy, oidc.idTokenMarkerClaims=null and the required list set.
+#                   The overlap check reads the nil marker list as [] (Review Focus 4).
+# A row counter reds the script when an R row call line is deleted.
+REQUIRED_ROWS=0
+REQUIRED_ROWS_WANT=8
+
+# check_required <label> <want suffix or -> <marker comment present|absent>
+#                <required comment present|absent> [helm args...]
+# REQUIRED_CHART, when set, is the chart directory to render instead of $CHART.
+check_required() {
+  local label="$1" suffix="$2" markers="$3" required="$4"; shift 4
+  local out
+  REQUIRED_ROWS=$((REQUIRED_ROWS + 1))
+  if ! helm template paigasus "${REQUIRED_CHART:-$CHART}" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/required.yaml" 2>"$TMP/required.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/required.err"; ec=1; return 0
+  fi
+  if ! out="$(SUFFIX="$suffix" MARKERS="$markers" REQUIRED="$required" python3 -c '
+import os, sys, yaml
+suffix = "" if os.environ["SUFFIX"] == "-" else os.environ["SUFFIX"]
+want = "[{issuer=\"https://idp.example.test/realms/paigasus\",audiences=[\"paigasus-console\"]" + suffix + "}]"
+comments = {
+    "MARKERS": "            # oidc.idTokenMarkerClaims is set: IAM refuses a token that carries one of these claims.",
+    "REQUIRED": "            # oidc.accessTokenRequiredClaims is set: IAM refuses a token that lacks one of these claims.",
+}
+with open(sys.argv[1]) as fh:
+    raw = fh.read()
+docs = [d for d in yaml.safe_load_all(raw) if d]
+problems = []
+deps = [d for d in docs if d.get("kind") == "Deployment"
+        and d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name") == "iam-backend"]
+if len(deps) != 1:
+    problems.append(str(len(deps)) + " iam-backend Deployment(s), want 1")
+else:
+    env = deps[0]["spec"]["template"]["spec"]["containers"][0].get("env") or []
+    issuers = [e for e in env if e.get("name") == "IAM_AUTHN__ISSUERS"]
+    if len(issuers) != 1:
+        problems.append(str(len(issuers)) + " IAM_AUTHN__ISSUERS entries, want 1")
+    elif issuers[0].get("value") != want:
+        problems.append("IAM_AUTHN__ISSUERS is " + repr(issuers[0].get("value")) + ", want " + repr(want))
+for name, line in comments.items():
+    count = raw.splitlines().count(line)
+    want_count = 1 if os.environ[name] == "present" else 0
+    if count != want_count:
+        problems.append("the " + name.lower() + " comment line renders " + str(count) + " time(s), want " + str(want_count))
+print("|".join(problems) if problems else "OK")' "$TMP/required.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+# check_required_restart <label>: the value changes the IAM pod template only. It reuses
+# check_boot_restart, so it also counts as a B row; the B floor check ran above, as for M6.
+check_required_restart() {
+  local label="$1"
+  REQUIRED_ROWS=$((REQUIRED_ROWS + 1))
+  check_boot_restart "$label" --set 'oidc.accessTokenRequiredClaims={jti}'
+}
+
+printf 'oidc:\n  idTokenMarkerClaims: ["at_hash", "azp"]\n  accessTokenRequiredClaims: ["jti"]\n' >"$TMP/required-both.yaml"
+REQUIRED_SUFFIX=',access_token_required_claims=["jti"]'
+BOTH_SUFFIX=',id_token_marker_claims=["at_hash","azp"],access_token_required_claims=["jti"]'
+
+# R7/R8 chart copy: no idTokenMarkerClaims and no accessTokenRequiredClaims key in values.yaml.
+# The copy goes in $TMP, which the EXIT trap removes. The script reds when a key stays.
+cp -R "$CHART" "$TMP/chart-no-claim-lists"
+if ! grep -q '^  accessTokenRequiredClaims:' "$TMP/chart-no-claim-lists/values.yaml"; then
+  echo "FAIL [R7 setup]: values.yaml has no accessTokenRequiredClaims line to remove"; ec=1
+fi
+# Remove each key line and the comment lines that follow it, up to the next key.
+sed -e '/^  idTokenMarkerClaims:/,/^  scopes:/{/^  scopes:/!d;}' \
+  -e '/^  accessTokenRequiredClaims:/,/^  authorizationAudience:/{/^  authorizationAudience:/!d;}' \
+  "$TMP/chart-no-claim-lists/values.yaml" >"$TMP/values-no-claim-lists.yaml"
+cp "$TMP/values-no-claim-lists.yaml" "$TMP/chart-no-claim-lists/values.yaml"
+if grep -q '^  idTokenMarkerClaims:\|^  accessTokenRequiredClaims:' "$TMP/chart-no-claim-lists/values.yaml"; then
+  echo "FAIL [R7 setup]: the chart copy still has a claim-list key in values.yaml"; ec=1
+fi
+
+check_required "R1 default"                   -                  absent  absent
+check_required "R2 reuse-values-no-key"       -                  absent  absent  --set oidc.accessTokenRequiredClaims=null
+check_required "R3 set"                       "$REQUIRED_SUFFIX" absent  present --set 'oidc.accessTokenRequiredClaims={jti}'
+check_required "R4 both-lists"                "$BOTH_SUFFIX"     present present -f "$TMP/required-both.yaml"
+check_required "R5 empty-list-set-json"       -                  absent  absent  --set-json 'oidc.accessTokenRequiredClaims=[]'
+check_required_restart "R6 restart-scope"
+REQUIRED_CHART="$TMP/chart-no-claim-lists" \
+check_required "R7 reuse-values-nil-guard"    -                  absent  absent \
+  --set oidc.idTokenMarkerClaims=null --set oidc.accessTokenRequiredClaims=null
+REQUIRED_CHART="$TMP/chart-no-claim-lists" \
+check_required "R8 nil-markers-with-required" "$REQUIRED_SUFFIX" absent  present \
+  --set oidc.idTokenMarkerClaims=null --set 'oidc.accessTokenRequiredClaims={jti}'
+
+if [ "$REQUIRED_ROWS" -lt "$REQUIRED_ROWS_WANT" ]; then
+  echo "FAIL [required rows]: $REQUIRED_ROWS required row(s) ran, want $REQUIRED_ROWS_WANT"; ec=1
 fi
 
 # zones.iam.backend.dpop (SMA-700). Renders go to a file, as for check_boot. One row per property:

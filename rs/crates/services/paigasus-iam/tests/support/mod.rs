@@ -503,6 +503,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
                     audiences: vec!["paigasus".to_string()],
                     jit_provisioning: *jit_provisioning,
                     id_token_marker_claims: Vec::new(),
+                    access_token_required_claims: Vec::new(),
                 })
                 .collect(),
         },

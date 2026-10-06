@@ -29,6 +29,23 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   - A quota is 0, or is above the capacity.
 - The Helm chart has two new values: `zones.iam.backend.dpop.enabled` and
   `zones.iam.backend.dpop.forwardedBaseUrls`. The default render does not change (SMA-700).
+- Each `[[authn.issuers]]` entry has a new setting, `access_token_required_claims`. It is a list
+  of claim names that the IdP puts into every access token and into no ID token. For Zitadel, use
+  `["jti"]`. The default is an empty list, and then IAM adds no new check. IAM refuses the same
+  names as for `id_token_marker_claims`, and a name that is in both lists. IAM does not boot when
+  a list breaks one of these rules (SMA-731).
+- IAM refuses a verified token that does not carry a configured claim, or carries it with the
+  value `null`. The refusal is `NotAnAccessToken`. IAM logs it at `info` with the issuer, the
+  marker `missing claim <name>` and its own message, "refused a bearer token: it does not carry a
+  claim that the issuer configuration requires". The line does not show a claim value. The check
+  fails closed (SMA-731).
+- An issuer with only `access_token_required_claims` also uses the strict decode of SMA-703. IAM
+  then refuses a token with a repeated top-level member as `Malformed` (SMA-731).
+- At boot, IAM writes one `info` line for each issuer that has configured required claims. The
+  line names the issuer and the claim names (SMA-731).
+- The Helm chart has a new value, `oidc.accessTokenRequiredClaims`. It renders the list into
+  `IAM_AUTHN__ISSUERS`. The default is `[]`, and the render does not change. A change of the value
+  restarts the IAM pod (SMA-731).
 
 ## [0.2.1] - 2026-10-03
 

@@ -8,12 +8,15 @@
 //! an ID token or a logout token: a Keycloak payload `typ` (`ID`, `Logout`) or a standard
 //! back-channel logout marker (header `typ: logout+jwt`, the `events` member). After those
 //! markers, it refuses a token that carries a claim the operator named for the issuer in
-//! `id_token_marker_claims` (SMA-703); for such an issuer the payload is also decoded as a map
-//! that refuses a repeated top-level member (`StrictPayload`). The
+//! `id_token_marker_claims` (SMA-703). Then it refuses a token that does not carry a claim the
+//! operator named for the issuer in `access_token_required_claims` (SMA-731). For an issuer with
+//! either list, the payload is also decoded as a map that refuses a repeated top-level member
+//! (`StrictPayload`); `ClaimRules` holds the two lists. The
 //! sender-constraint check (SMA-690) refuses a token bound to a key (a `cnf` claim, or a Keycloak
 //! payload `typ: DPoP`), because IAM cannot check the binding on that scheme. On the DPoP scheme (SMA-700) step 7 instead requires a `cnf.jkt` binding and returns it; the proof check is the caller's job (`application::dpop`).
-//! Four refusals are logged, rate-limited (`log_refusal`). Never logs token or claim material (`TokenDefect` itself carries
-//! no payload).
+//! Four defects are logged, rate-limited (`log_refusal`); `NotAnAccessToken` has two messages, one
+//! for a marker and one for a missing required claim. Never logs token or claim material
+//! (`TokenDefect` itself carries no payload).
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -57,7 +60,8 @@ const LOGOUT_TOKEN_HEADER_TYPES: [&str; 2] = ["logout+jwt", "application/logout+
 const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
 
 /// What a refusal log line names besides the issuer (SMA-686 D8, D11). Static or configured
-/// values only — never a token claim.
+/// values only — never a token claim. `Debug` and `PartialEq` serve the `ClaimRules` unit tests.
+#[derive(Debug, PartialEq, Eq)]
 enum RefusalDetail<'a> {
     /// The static marker that shows a verified token is not an access token.
     Marker(&'static str),
@@ -68,6 +72,9 @@ enum RefusalDetail<'a> {
     /// The CONFIGURED claim name that shows a verified token is not an access token (SMA-703
     /// D4). Logged as the marker `claim <name>`.
     Claim(&'a str),
+    /// The CONFIGURED claim name that a verified token does not carry (SMA-731 D4). Logged as the
+    /// marker `missing claim <name>`, with its own message.
+    MissingClaim(&'a str),
     /// The DPoP scheme with a token that is not bound to exactly one key (SMA-700 § 4.3). Its own
     /// static message, with no marker.
     NotKeyBound,
@@ -79,8 +86,37 @@ enum RefusalDetail<'a> {
 struct ConfiguredIssuer {
     issuer: Issuer,
     audiences: Vec<String>,
-    /// SMA-703 D1: the configured claim names. Empty keeps the SMA-686 decode path unchanged.
-    id_token_marker_claims: Vec<String>,
+    /// SMA-703 D1 and SMA-731 D1: the configured claim lists. Both empty keep the SMA-686 decode
+    /// path unchanged.
+    claim_rules: ClaimRules,
+}
+
+/// The configured claim rules of one issuer (SMA-731 D3): the SMA-703 marker claims and the
+/// SMA-731 required claims. `authenticate` asks it two things: which decode to run, and whether
+/// the verified payload is refused. The request path does not read `IssuerConfig` again.
+struct ClaimRules {
+    /// `id_token_marker_claims`: a token that carries one of them is refused (step 6b).
+    id_token_markers: Vec<String>,
+    /// `access_token_required_claims`: a token that does not carry one of them is refused (step 6c).
+    required: Vec<String>,
+}
+
+impl ClaimRules {
+    /// True when either list is not empty. Then the payload is decoded as a `StrictPayload`, so a
+    /// repeated top-level member is `Malformed` (SMA-703 D3). Both empty keep the plain decode (G2).
+    fn needs_strict_decode(&self) -> bool {
+        !self.id_token_markers.is_empty() || !self.required.is_empty()
+    }
+
+    /// Step 6b, then step 6c, on the verified top-level members: `Claim` for the first configured
+    /// marker that is present, else `MissingClaim` for the first required name that is missing,
+    /// else `None`. A claim is present when its member exists and is not JSON `null`.
+    fn refusal(&self, members: &serde_json::Map<String, serde_json::Value>) -> Option<RefusalDetail<'_>> {
+        if let Some(name) = configured_marker(members, &self.id_token_markers) {
+            return Some(RefusalDetail::Claim(name));
+        }
+        missing_required_claim(members, &self.required).map(RefusalDetail::MissingClaim)
+    }
 }
 
 /// The `Authenticator` v1 implementation: validates a presented bearer token against a
@@ -102,7 +138,8 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
     /// defect, mirroring the `redis_url` guard in `AppState::new`.
     ///
     /// Writes one `info` line for each issuer with configured `id_token_marker_claims` (SMA-703
-    /// D2). `AppState::new` calls this once at boot, after `paigasus_logging::init`;
+    /// D2), and one for each issuer with configured `access_token_required_claims` (SMA-731 D2).
+    /// `AppState::new` calls this once at boot, after `paigasus_logging::init`;
     /// `IamConfig::validate` runs before the logger exists, so the line cannot live there.
     pub fn new(issuers: Vec<IssuerConfig>, provider: JwksProvider<F, K, C>, leeway_secs: u64, max_token_bytes: usize) -> Result<Self, AuthnError> {
         let issuers = issuers
@@ -116,10 +153,20 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
                         "IAM refuses a verified token of this issuer that carries one of the configured ID-token marker claims"
                     );
                 }
+                if !cfg.access_token_required_claims.is_empty() {
+                    tracing::info!(
+                        issuer = issuer.as_str(),
+                        access_token_required_claims = ?cfg.access_token_required_claims,
+                        "IAM refuses a verified token of this issuer that does not carry every configured required claim"
+                    );
+                }
                 Ok(ConfiguredIssuer {
                     issuer,
                     audiences: cfg.audiences,
-                    id_token_marker_claims: cfg.id_token_marker_claims,
+                    claim_rules: ClaimRules {
+                        id_token_markers: cfg.id_token_marker_claims,
+                        required: cfg.access_token_required_claims,
+                    },
                 })
             })
             .collect::<Result<Vec<_>, AuthnError>>()?;
@@ -145,6 +192,8 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
     /// D8; SMA-700 § 4.3): only `NotAnAccessToken`, `AudienceMismatch`, `SenderConstrained` and `NotKeyBound`, each reachable
     /// only for a correctly signed token from a configured issuer, and each rate-limited per
     /// (issuer, defect). Logs the issuer and a static or configured detail — never a token claim.
+    /// A missing required claim (SMA-731 D4) is a `NotAnAccessToken` refusal with its own
+    /// message; it shares the rate limit of the other `NotAnAccessToken` refusals of the issuer.
     fn log_refusal(&self, issuer: &Issuer, defect: TokenDefect, detail: RefusalDetail<'_>) {
         let Some(suppressed) = self.refusal_log.admit_at(issuer.as_str(), defect, Instant::now()) else {
             return;
@@ -170,6 +219,12 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
                 let marker = format!("claim {name}");
                 tracing::info!(issuer = issuer.as_str(), marker = marker.as_str(), suppressed, "{}", NOT_AN_ACCESS_TOKEN_MESSAGE);
             }
+            RefusalDetail::MissingClaim(name) => {
+                // Its own message (SMA-731 D4): the refused token can be a real access token after
+                // an IdP change, so "not an access token" would point the operator at the client.
+                let marker = format!("missing claim {name}");
+                tracing::info!(issuer = issuer.as_str(), marker = marker.as_str(), suppressed, "{}", MISSING_CLAIM_MESSAGE);
+            }
             RefusalDetail::NotKeyBound => {
                 tracing::info!(
                     issuer = issuer.as_str(),
@@ -182,8 +237,12 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
 }
 
 /// The log message of a `NotAnAccessToken` refusal. The `Marker` and `Claim` arms of
-/// `log_refusal` both use it, so an operator greps one text.
+/// `log_refusal` both use it, so an operator greps one text. The `MissingClaim` arm uses
+/// `MISSING_CLAIM_MESSAGE` (SMA-731 D4).
 const NOT_AN_ACCESS_TOKEN_MESSAGE: &str = "refused a bearer token: a verified marker shows it is not an access token";
+
+/// The log message of a `NotAnAccessToken` refusal for a missing required claim (SMA-731 D4).
+const MISSING_CLAIM_MESSAGE: &str = "refused a bearer token: it does not carry a claim that the issuer configuration requires";
 
 /// Manual, not derived: a `#[derive(Debug)]` here would require `F`/`K`/`C` (and in turn
 /// `JwksProvider`) to implement `Debug` too. This exists solely so
@@ -315,6 +374,14 @@ fn configured_marker<'a>(members: &serde_json::Map<String, serde_json::Value>, n
     names.iter().find(|name| members.get(name.as_str()).is_some_and(|value| !value.is_null())).map(String::as_str)
 }
 
+/// The first configured required claim name that the verified payload does not carry, or `None`
+/// (SMA-731 D3). A member with the value JSON `null` counts as missing. Any other value counts as
+/// present: a string, a number, `false`, an object, an array, an empty string. Names compare
+/// exactly. The list order decides which name a log line shows.
+fn missing_required_claim<'a>(members: &serde_json::Map<String, serde_json::Value>, names: &'a [String]) -> Option<&'a str> {
+    names.iter().find(|name| members.get(name.as_str()).is_none_or(serde_json::Value::is_null)).map(String::as_str)
+}
+
 /// Maps a `jsonwebtoken` decode/validation failure to a `TokenDefect` (spec §4.1). Every
 /// kind this validator doesn't specifically distinguish (bad base64, malformed JSON, a
 /// wrong-shaped claim, an unhandled `ErrorKind`) collapses to `Malformed`. A missing `aud`
@@ -431,16 +498,16 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
             }
             err
         };
-        // SMA-703 D3: an issuer with no marker claims keeps the SMA-686 decode exactly (G2). One
-        // with marker claims decodes the same verified bytes as a `StrictPayload`; the signature
-        // is checked once either way.
-        let (verified_header, claims, claim_marker) = if issuer_config.id_token_marker_claims.is_empty() {
+        // SMA-703 D3 and SMA-731 D3: an issuer with no claim rules keeps the SMA-686 decode
+        // exactly (G2). One with a marker list or a required list decodes the same verified bytes
+        // as a `StrictPayload`; the signature is checked once either way.
+        let (verified_header, claims, claim_refusal) = if !issuer_config.claim_rules.needs_strict_decode() {
             let token_data = decode::<WireClaims>(token, &decoding_key, &validation).map_err(on_decode_error)?;
             (token_data.header, token_data.claims, None)
         } else {
             let token_data = decode::<StrictPayload>(token, &decoding_key, &validation).map_err(on_decode_error)?;
-            let marker = configured_marker(&token_data.claims.members, &issuer_config.id_token_marker_claims);
-            (token_data.header, token_data.claims.claims, marker)
+            let refusal = issuer_config.claim_rules.refusal(&token_data.claims.members);
+            (token_data.header, token_data.claims.claims, refusal)
         };
 
         // 6. Token-type check on the verified token (SMA-686): an ID token or a logout token.
@@ -448,9 +515,11 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
             self.log_refusal(&issuer, TokenDefect::NotAnAccessToken, RefusalDetail::Marker(marker));
             return Err(invalid(TokenDefect::NotAnAccessToken));
         }
-        // 6b. A configured marker claim (SMA-703 D3), after the SMA-686 markers.
-        if let Some(name) = claim_marker {
-            self.log_refusal(&issuer, TokenDefect::NotAnAccessToken, RefusalDetail::Claim(name));
+        // 6b. A configured marker claim (SMA-703 D3), then 6c. a missing required claim (SMA-731
+        // D3), after the SMA-686 markers and before the key binding. `ClaimRules::refusal` keeps
+        // the 6b-then-6c order.
+        if let Some(detail) = claim_refusal {
+            self.log_refusal(&issuer, TokenDefect::NotAnAccessToken, detail);
             return Err(invalid(TokenDefect::NotAnAccessToken));
         }
 
@@ -644,6 +713,7 @@ mod tests {
             audiences: audiences.iter().map(|a| (*a).to_string()).collect(),
             jit_provisioning: true,
             id_token_marker_claims: Vec::new(),
+            access_token_required_claims: Vec::new(),
         }
     }
 
@@ -1746,5 +1816,353 @@ mod tests {
         let (logs, _guard) = capture_logs();
         let _without = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
         assert!(!logs.text().contains(MARKER_BOOT_LINE), "no boot line for an empty list:\n{}", logs.text());
+    }
+
+    // ---- SMA-731: configured required claims ------------------------------------------------
+    //
+    // The fixtures are the SMA-703 Zitadel fixtures above (M1, M4a, M5b). Every Zitadel access
+    // token has `jti`, and no Zitadel ID token has it (SMA-731 spec § 3, F1).
+
+    /// The runbook recipe for Zitadel (SMA-731 spec D6).
+    const REQUIRED_JTI: [&str; 1] = ["jti"];
+    /// The SMA-731 refusal message (spec D4). It differs from `NOT_ACCESS_TOKEN_REFUSAL`.
+    const MISSING_CLAIM_REFUSAL: &str = "it does not carry a claim that the issuer configuration requires";
+    /// The SMA-731 boot line (spec D2).
+    const REQUIRED_BOOT_LINE: &str = "does not carry every configured required claim";
+
+    fn issuer_with_rules(issuer: &str, audiences: &[&str], markers: &[&str], required: &[&str]) -> IssuerConfig {
+        IssuerConfig {
+            access_token_required_claims: required.iter().map(|name| (*name).to_string()).collect(),
+            ..issuer_with_markers(issuer, audiences, markers)
+        }
+    }
+
+    /// Signs `claims` with a fresh key and authenticates it on `scheme` against `ISSUER`,
+    /// configured with the audience `ZITADEL_PROJECT_ID`, the marker claims `markers` and the
+    /// required claims `required`.
+    async fn authenticate_rules_as(markers: &[&str], required: &[&str], claims: &serde_json::Value, scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError> {
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let token = sign(&encoding_key, Some(&kid), claims);
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_with_rules(ISSUER, &[ZITADEL_PROJECT_ID], markers, required)], 60, 16_384);
+        authenticator.authenticate(&token, scheme).await
+    }
+
+    async fn authenticate_rules(markers: &[&str], required: &[&str], claims: &serde_json::Value) -> Result<ValidatedClaims, AuthnError> {
+        authenticate_rules_as(markers, required, claims, TokenScheme::Bearer).await
+    }
+
+    /// Authenticates a raw payload (the usual test fields, then `members` verbatim) against
+    /// `ISSUER` with the audience `aud`, the marker claims `markers` and the required claims
+    /// `required`. A raw payload can repeat a member name.
+    async fn authenticate_raw_rules(markers: &[&str], required: &[&str], members: &str) -> Result<ValidatedClaims, AuthnError> {
+        let exp = Utc::now().timestamp() + 3600;
+        let payload = format!(r#"{{"iss":"{ISSUER}","sub":"sub-1","aud":"aud","exp":{exp},"email":"alice@example.com",{members}}}"#);
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let token = sign_raw_payload(&encoding_key, &kid, &payload);
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_with_rules(ISSUER, &["aud"], markers, required)], 60, 16_384);
+        authenticator.authenticate(&token, TokenScheme::Bearer).await
+    }
+
+    #[tokio::test]
+    async fn required_claim_refuses_zitadel_id_tokens() {
+        // SMA-731 T1: with ["jti"] and NO marker claims, each Zitadel ID token is refused.
+        for (name, claims) in [("M1 ID token", zitadel_m1_id_token()), ("M4 ID token", zitadel_m4_id_token()), ("M5b ID token", zitadel_m5b_id_token())] {
+            assert_not_an_access_token(authenticate_rules(&[], &REQUIRED_JTI, &claims).await, name);
+        }
+    }
+
+    #[tokio::test]
+    async fn required_claim_accepts_zitadel_access_tokens() {
+        // SMA-731 T2.
+        for (name, claims, subject) in [
+            ("M1 access token", zitadel_m1_access_token(), ZITADEL_HUMAN_SUB),
+            ("M4 access token", zitadel_m4_access_token(), ZITADEL_HUMAN_SUB),
+            ("M5b access token", zitadel_m5b_access_token(), ZITADEL_MACHINE_SUB),
+        ] {
+            let validated = authenticate_rules(&[], &REQUIRED_JTI, &claims)
+                .await
+                .unwrap_or_else(|err| panic!("{name}: must be accepted, got {err:?}"));
+            assert_eq!(validated.subject, subject, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn null_required_claim_is_missing_and_any_other_value_is_present() {
+        // SMA-731 T3 (D3): the SMA-703 null rule with the opposite result.
+        let null = merged(zitadel_m1_access_token(), serde_json::json!({ "jti": null }));
+        assert_not_an_access_token(authenticate_rules(&[], &REQUIRED_JTI, &null).await, "jti: null");
+        for value in [serde_json::json!(""), serde_json::json!(0), serde_json::json!(false), serde_json::json!({}), serde_json::json!([])] {
+            let claims = merged(zitadel_m1_access_token(), serde_json::json!({ "jti": value.clone() }));
+            authenticate_rules(&[], &REQUIRED_JTI, &claims)
+                .await
+                .unwrap_or_else(|err| panic!("jti: {value} must count as present, got {err:?}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_missing_required_claim_is_logged() {
+        // SMA-731 T4: with ["jti", "nbf"], a token with `jti` and no `nbf` is refused, and the log
+        // names `nbf`.
+        let (logs, _guard) = capture_logs();
+        let claims = without(zitadel_m1_access_token(), "nbf");
+        assert_not_an_access_token(authenticate_rules(&[], &["jti", "nbf"], &claims).await, "no nbf");
+        let text = logs.text();
+        assert!(text.contains("missing claim nbf"), "the log names the missing claim:\n{text}");
+        assert!(!text.contains("missing claim jti"), "jti is present:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn required_claim_names_are_case_sensitive() {
+        // SMA-731 T5 (D2): `JTI` is not `jti`.
+        let claims = merged(without(zitadel_m1_access_token(), "jti"), serde_json::json!({ "JTI": "x" }));
+        assert_not_an_access_token(authenticate_rules(&[], &REQUIRED_JTI, &claims).await, "JTI only");
+    }
+
+    #[tokio::test]
+    async fn empty_claim_lists_accept_the_zitadel_id_token() {
+        // SMA-731 T6 (G2): with both lists empty, nothing changes. This is the open state.
+        authenticate_rules(&[], &[], &zitadel_m1_id_token())
+            .await
+            .expect("with both lists empty the M1 ID token is accepted (open state)");
+    }
+
+    #[tokio::test]
+    async fn decode_defects_come_before_the_required_claim_check() {
+        // SMA-731 T7 (D3): the decode runs before step 6c.
+        let expired = merged(zitadel_m1_id_token(), serde_json::json!({ "exp": Utc::now().timestamp() - 120 }));
+        let err = authenticate_rules(&[], &REQUIRED_JTI, &expired).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)), "got {err:?}");
+        let wrong_aud = merged(zitadel_m1_id_token(), serde_json::json!({ "aud": ["other-project"] }));
+        let err = authenticate_rules(&[], &REQUIRED_JTI, &wrong_aud).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn keycloak_typ_marker_runs_before_the_required_claims() {
+        // SMA-731 T8: step 6 runs first, so a Keycloak `typ: ID` token without `jti` logs `ID`.
+        let (logs, _guard) = capture_logs();
+        let claims = merged(without(zitadel_m1_access_token(), "jti"), serde_json::json!({ "typ": "ID" }));
+        assert_not_an_access_token(authenticate_rules(&[], &REQUIRED_JTI, &claims).await, "typ ID without jti");
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(NOT_ACCESS_TOKEN_REFUSAL)).collect();
+        assert_eq!(lines.len(), 1, "exactly one refusal line expected, got:\n{text}");
+        assert!(lines[0].contains("\"ID\"") || lines[0].contains("=ID"), "the marker is ID: {}", lines[0]);
+        assert!(!text.contains("missing claim"), "step 6c must not run:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn marker_claim_runs_before_the_required_claim() {
+        // SMA-731 T9: with both settings, the M1 ID token logs `claim at_hash` (step 6b), not
+        // `missing claim jti`, and the M1 access token passes.
+        let (logs, _guard) = capture_logs();
+        assert_not_an_access_token(authenticate_rules(&ZITADEL_MARKERS, &REQUIRED_JTI, &zitadel_m1_id_token()).await, "M1 ID token");
+        let text = logs.text();
+        assert!(text.contains("claim at_hash"), "step 6b names the marker claim:\n{text}");
+        assert!(!text.contains("missing claim jti"), "step 6c must not run:\n{text}");
+        authenticate_rules(&ZITADEL_MARKERS, &REQUIRED_JTI, &zitadel_m1_access_token())
+            .await
+            .expect("the M1 access token passes the full recipe");
+    }
+
+    #[tokio::test]
+    async fn required_claim_runs_before_the_sender_constraint_check() {
+        // SMA-731 T10: a bound token without `jti` is NotAnAccessToken, not SenderConstrained.
+        let (logs, _guard) = capture_logs();
+        let claims = merged(without(zitadel_m1_access_token(), "jti"), serde_json::json!({ "cnf": { "jkt": JKT } }));
+        assert_not_an_access_token(authenticate_rules(&[], &REQUIRED_JTI, &claims).await, "cnf without jti");
+        let text = logs.text();
+        assert!(text.contains("missing claim jti"), "step 6c names the claim:\n{text}");
+        assert!(!text.contains(BINDING_REFUSAL), "the binding refusal must not run:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn duplicate_required_claim_member_is_malformed() {
+        // SMA-731 T11 (D3): the required list alone moves the issuer onto the strict decode, so a
+        // `null` copy cannot hide or fake the claim. Both orders are Malformed.
+        for members in [r#""jti":null,"jti":"x""#, r#""jti":"x","jti":null"#] {
+            let err = authenticate_raw_rules(&[], &REQUIRED_JTI, members).await.unwrap_err();
+            assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Malformed)), "{members}: got {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unread_duplicate_member_is_malformed_once_a_required_claim_is_set() {
+        // Review Focus 3: a repeated member that IAM does not read passes the plain decode. With
+        // only the required list set, the strict decode refuses it as Malformed.
+        authenticate_raw_rules(&[], &[], r#""jti":"x","foo":1,"foo":2"#)
+            .await
+            .expect("the plain path ignores a repeated unread member");
+        let err = authenticate_raw_rules(&[], &REQUIRED_JTI, r#""jti":"x","foo":1,"foo":2"#).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Malformed)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn required_claims_are_per_issuer() {
+        // SMA-731 T12: one issuer with ["jti"], one with an empty list, one key for both.
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(
+            StubFetcher::new(jwk),
+            vec![
+                issuer_with_rules(ISSUER, &[ZITADEL_PROJECT_ID], &[], &REQUIRED_JTI),
+                issuer_config(SECOND_ISSUER, &[ZITADEL_PROJECT_ID]),
+            ],
+            60,
+            16_384,
+        );
+        let first = sign(&encoding_key, Some(&kid), &zitadel_m1_id_token());
+        assert_not_an_access_token(authenticator.authenticate(&first, TokenScheme::Bearer).await, "ID token of the first issuer");
+        let second = sign(&encoding_key, Some(&kid), &merged(zitadel_m1_id_token(), serde_json::json!({ "iss": SECOND_ISSUER })));
+        let validated = authenticator.authenticate(&second, TokenScheme::Bearer).await.expect("the second issuer has no required claims");
+        assert_eq!(validated.issuer.as_str(), SECOND_ISSUER);
+    }
+
+    #[tokio::test]
+    async fn missing_claim_refusal_logs_its_own_message_issuer_and_name_only() {
+        // SMA-731 T13 (D4): its own message, the issuer and `missing claim jti`; no claim value,
+        // subject or email; one line for three refusals.
+        let (logs, _guard) = capture_logs();
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_with_rules(ISSUER, &[ZITADEL_PROJECT_ID], &[], &REQUIRED_JTI)], 60, 16_384);
+        let claims = merged(zitadel_m1_id_token(), serde_json::json!({ "email": "alice@example.com" }));
+        for _ in 0..3 {
+            let token = sign(&encoding_key, Some(&kid), &claims);
+            assert_not_an_access_token(authenticator.authenticate(&token, TokenScheme::Bearer).await, "M1 ID token");
+        }
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(MISSING_CLAIM_REFUSAL)).collect();
+        assert_eq!(lines.len(), 1, "exactly one refusal line expected, got:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("INFO"), "the refusal logs at info: {line}");
+        assert!(line.contains(ISSUER), "the refusal names the issuer: {line}");
+        assert!(line.contains("missing claim jti"), "the refusal names the missing claim: {line}");
+        assert!(!text.contains(NOT_ACCESS_TOKEN_REFUSAL), "the MissingClaim arm has its own message:\n{text}");
+        for secret in [
+            "FFPzlMOE6pZPHZWKKJOObg",
+            ZITADEL_HUMAN_SUB,
+            ZITADEL_CLIENT_ID,
+            "58e866bad23abebb",
+            "V1_393381929921019907",
+            "alice@example.com",
+        ] {
+            assert!(!text.contains(secret), "the log must not contain {secret:?}:\n{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_claim_shares_the_rate_limit_of_the_marker_refusals() {
+        // Review Focus 1 (D4): the rate-limit key is (issuer, NotAnAccessToken) for steps 6, 6b and
+        // 6c. A marker refusal and then a missing-claim refusal within 10 s give ONE line, the
+        // first. The runbook tells the operator that one line can stand for many refusals.
+        let (logs, _guard) = capture_logs();
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(
+            StubFetcher::new(jwk),
+            vec![issuer_with_rules(ISSUER, &[ZITADEL_PROJECT_ID], &ZITADEL_MARKERS, &REQUIRED_JTI)],
+            60,
+            16_384,
+        );
+        let id_token = sign(&encoding_key, Some(&kid), &zitadel_m1_id_token());
+        assert_not_an_access_token(authenticator.authenticate(&id_token, TokenScheme::Bearer).await, "M1 ID token");
+        let no_jti = sign(&encoding_key, Some(&kid), &without(zitadel_m1_access_token(), "jti"));
+        assert_not_an_access_token(authenticator.authenticate(&no_jti, TokenScheme::Bearer).await, "access token without jti");
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(NOT_ACCESS_TOKEN_REFUSAL) || line.contains(MISSING_CLAIM_REFUSAL)).collect();
+        assert_eq!(lines.len(), 1, "one line for the two refusals, got:\n{text}");
+        assert!(lines[0].contains("claim at_hash"), "the first refusal is the logged one: {}", lines[0]);
+    }
+
+    #[test]
+    fn boot_line_names_the_issuer_and_the_required_claims() {
+        // SMA-731 T14 (D2): one info line for an issuer with required claims; none for an empty
+        // list. The SMA-703 boot line does not show for an empty marker list.
+        let (logs, _guard) = capture_logs();
+        let (_encoding_key, jwk, _kid) = es256_keypair();
+        let _with = make_authenticator(
+            StubFetcher::new(jwk.clone()),
+            vec![issuer_with_rules(ISSUER, &["aud"], &[], &REQUIRED_JTI), issuer_config(SECOND_ISSUER, &["aud"])],
+            60,
+            16_384,
+        );
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(REQUIRED_BOOT_LINE)).collect();
+        assert_eq!(lines.len(), 1, "exactly one boot line expected, got:\n{text}");
+        let line = lines[0];
+        assert!(line.contains("INFO"), "the boot line logs at info: {line}");
+        assert!(line.contains(ISSUER), "the boot line names the issuer: {line}");
+        assert!(line.contains("jti"), "the boot line names the claims: {line}");
+        assert!(!line.contains(SECOND_ISSUER), "the boot line names only the issuer with claims: {line}");
+        assert!(!text.contains(MARKER_BOOT_LINE), "no marker boot line for an empty marker list:\n{text}");
+
+        let (logs, _guard) = capture_logs();
+        let _without = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+        assert!(!logs.text().contains(REQUIRED_BOOT_LINE), "no boot line for an empty list:\n{}", logs.text());
+    }
+
+    #[tokio::test]
+    async fn dpop_scheme_refuses_a_bound_token_without_the_required_claim() {
+        // SMA-731 T14a (D3): the check is in `authenticate`, so it applies to the Dpop scheme too.
+        // The validator does not see the proof: the caller checks it after `authenticate` returns
+        // the binding (`application::dpop`), so a refusal here comes before any proof check.
+        let bound = merged(zitadel_m1_access_token(), serde_json::json!({ "cnf": { "jkt": JKT } }));
+        assert_not_an_access_token(
+            authenticate_rules_as(&[], &REQUIRED_JTI, &without(bound.clone(), "jti"), TokenScheme::Dpop).await,
+            "bound token without jti",
+        );
+        let validated = authenticate_rules_as(&[], &REQUIRED_JTI, &bound, TokenScheme::Dpop)
+            .await
+            .expect("a bound token with jti passes the Dpop scheme");
+        assert_eq!(validated.key_binding, Some(Jkt::new(JKT)));
+    }
+
+    fn claim_rules(markers: &[&str], required: &[&str]) -> ClaimRules {
+        ClaimRules {
+            id_token_markers: markers.iter().map(|name| (*name).to_string()).collect(),
+            required: required.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    fn members(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        value.as_object().expect("members are a JSON object").clone()
+    }
+
+    #[test]
+    fn claim_rules_need_a_strict_decode_when_either_list_is_set() {
+        // SMA-731 T14b (D3).
+        assert!(!claim_rules(&[], &[]).needs_strict_decode());
+        assert!(claim_rules(&["at_hash"], &[]).needs_strict_decode());
+        assert!(claim_rules(&[], &["jti"]).needs_strict_decode());
+        assert!(claim_rules(&["at_hash"], &["jti"]).needs_strict_decode());
+    }
+
+    #[test]
+    fn claim_rules_refusal_checks_markers_first_then_the_required_names() {
+        // SMA-731 T14b (D3): marker-first order, the null rule and case-sensitivity, on a plain map.
+        let rules = claim_rules(&["at_hash", "azp"], &["jti", "nbf"]);
+        let cases = [
+            ("a marker wins over a missing name", serde_json::json!({ "at_hash": "x" }), Some(RefusalDetail::Claim("at_hash"))),
+            (
+                "the first configured marker",
+                serde_json::json!({ "azp": "c", "at_hash": "x", "jti": "j", "nbf": 1 }),
+                Some(RefusalDetail::Claim("at_hash")),
+            ),
+            ("the first missing name", serde_json::json!({}), Some(RefusalDetail::MissingClaim("jti"))),
+            ("the second missing name", serde_json::json!({ "jti": "j" }), Some(RefusalDetail::MissingClaim("nbf"))),
+            ("a null marker is absent", serde_json::json!({ "at_hash": null, "jti": "j", "nbf": 1 }), None),
+            (
+                "a null required claim is missing",
+                serde_json::json!({ "jti": null, "nbf": 1 }),
+                Some(RefusalDetail::MissingClaim("jti")),
+            ),
+            ("any other value is present", serde_json::json!({ "jti": "", "nbf": false }), None),
+            (
+                "names are case-sensitive",
+                serde_json::json!({ "AT_HASH": "x", "JTI": "j", "nbf": 1 }),
+                Some(RefusalDetail::MissingClaim("jti")),
+            ),
+        ];
+        for (name, value, want) in cases {
+            assert_eq!(rules.refusal(&members(value)), want, "{name}");
+        }
+        assert_eq!(claim_rules(&[], &[]).refusal(&members(serde_json::json!({ "at_hash": "x" }))), None, "no rules, no refusal");
     }
 }
