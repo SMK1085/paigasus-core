@@ -71,10 +71,14 @@ filter = 'package(=paigasus-iam) and binary(keycloak_e2e)'
 retries = 1
 
 [[profile.default.overrides]]
-# SMA-703: zitadel_e2e starts Zitadel and its own Postgres. A failing start waits for the Postgres
-# check (60 s), two readiness polls of 180 attempts each (discovery, then the management API) and
-# the PAT read (30 s). So one failing attempt can take about 7.5 minutes, and the general block's
-# three attempts about 22.5 minutes, against ci.yml's 45-minute budget. One retry is kept for a transient container start.
+# SMA-703 and SMA-732: zitadel_e2e holds two tests. Each test starts its own Zitadel and its own
+# Postgres, because the SMA-732 test sets a different access token lifetime (SMA-732 spec D2).
+# nextest runs the two tests as parallel processes, so two `start-from-init` runs share the
+# runner. A failing start waits for the Postgres check (60 s), two readiness polls of 180
+# attempts each (discovery, then the management API) and the PAT read (30 s). So one failing
+# attempt can take about 7.5 minutes, and the general block's three attempts about 22.5 minutes,
+# against ci.yml's 45-minute budget. One retry is kept for a transient container start. A timing
+# flake in the SMA-732 test then shows as FLAKY, which is visible (SMA-732 spec D8).
 # Scoped to the whole binary, for the same reason as keycloak_e2e above. Does NOT set
 # `test-group`; it inherits `docker-containers` from the general block below.
 filter = 'package(=paigasus-iam) and binary(zitadel_e2e)'
