@@ -2,7 +2,7 @@
 """The pin check of .github/workflows/wasm-lockstep.yml (SMA-693 spec 5.4).
 
 A PyYAML parse, never a text scan: SMA-593 measured fourteen bypasses of a text scan, a YAML
-alias among them. The rules (P0-P25) are the trust model of spec 5.1 and 5.2 in checkable form.
+alias among them. The rules (P0-P26) are the trust model of spec 5.1 and 5.2 in checkable form.
 ci/wasm-lockstep/README.md lists each rule and what it does not prove.
 
   pin_check.py <workflow.yml>                       the rules on one workflow
@@ -47,7 +47,7 @@ EXPR_SPAN = re.compile(r"\$\{\{((?:'[^']*'|\"[^\"]*\"|(?!\}\}).)*+)\}\}", re.S)
 STRING_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
 SECRETS_CTX = re.compile(r"(?<![\w.-])secrets(?![\w-])", re.IGNORECASE)
 NEEDS_CTX = re.compile(r"(?<![\w.-])needs(?![\w-])", re.IGNORECASE)
-STATUS_FN = re.compile(r"(?<![\w.-])(always|failure|cancelled)\s*\(", re.IGNORECASE)
+STATUS_FN = re.compile(r"(?<![\w.-])(always|success|failure|cancelled)\s*\(", re.IGNORECASE)
 SHA_PIN = re.compile(r"[0-9a-f]{40}")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
 IMAGE_ASSIGN = re.compile(r"\bLOCKSTEP_IMAGE(?:[:+])?=")
@@ -123,6 +123,33 @@ STAGE_RUN = "\n".join((
     'done',
     'python3 ci/wasm-lockstep/lockstep_check.py same --sha256 "$LOCK_SHA256" --file "$RUNNER_TEMP/stage/rs/Cargo.lock"',
 )) + "\n"
+# P26 (SMA-739): the propose steps up to the last checker, as PyYAML loads them from the workflow.
+# A pin of `run:` alone is not enough: `if: false` or `env: {SHELLOPTS: noexec}` also skips the
+# checker. So each step is pinned whole, without `name` (and without `uses` for the two action
+# steps, which P6 checks, so that a dependabot bump stays green). Change these WITH the workflow.
+VERIFY_RUN = "\n".join((
+    'set -euo pipefail',
+    'python3 ci/wasm-lockstep/lockstep_check.py artifact --dir "$RUNNER_TEMP/lockstep" --old rs/Cargo.lock --body-file "$RUNNER_TEMP/pr-body.md" --title-file "$RUNNER_TEMP/pr-title.txt"',
+)) + "\n"
+APPLY_RUN = "\n".join((
+    'set -euo pipefail',
+    'for f in rs/Cargo.lock rs/crates/bindings/paigasus-wasm/paigasus_wasm.js rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.js rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm; do',
+    '  if test -f "$RUNNER_TEMP/lockstep/$f"; then',
+    '    cp "$RUNNER_TEMP/lockstep/$f" "$f"',
+    '  fi',
+    'done',
+    'git status --porcelain --untracked-files=all > "$RUNNER_TEMP/status.txt"',
+    'cat "$RUNNER_TEMP/status.txt"',
+    'python3 ci/wasm-lockstep/lockstep_check.py status --file "$RUNNER_TEMP/status.txt"',
+)) + "\n"
+PROPOSE_IF = "needs.build.outputs.changed == 'true'"
+PROPOSE_ACTIONS = {"checkout": "actions/checkout", "download": "actions/download-artifact"}
+PROPOSE_PINNED = {
+    "checkout": {"id": "checkout", "if": PROPOSE_IF, "with": {"ref": "${{ github.sha }}", "persist-credentials": False}},
+    "download": {"id": "download", "if": PROPOSE_IF, "with": {"name": "wasm-lockstep", "path": "${{ runner.temp }}/lockstep"}},
+    "verify": {"id": "verify", "if": PROPOSE_IF, "run": VERIFY_RUN},
+    "apply": {"id": "apply", "if": PROPOSE_IF, "run": APPLY_RUN},
+}
 
 EXPECTED_JOBS = frozenset({"build", "propose"})
 EXPECTED_TRIGGERS = frozenset({"schedule", "workflow_dispatch"})
@@ -549,7 +576,7 @@ def step_violations(job: str, steps: list[dict]) -> list[str]:
         if step.get("continue-on-error", False) not in (False, "false"):
             out.append(f"P14 {where}: continue-on-error must be absent or false")
         if STATUS_FN.search(str(step.get("if", ""))):
-            out.append(f"P15 {where}: an if: with always(), failure() or cancelled() runs after a refusal")
+            out.append(f"P15 {where}: an if: with a status function (always(), success(), failure() or cancelled()) can run after a refusal")
     return out
 
 
@@ -611,6 +638,12 @@ def violations(doc: dict) -> list[str]:
     return out
 
 
+def _first_diff_line(got: str, want: str) -> int:
+    """The 1-based number of the first line where two scripts differ (P25, P26)."""
+    a, b = got.split("\n"), want.split("\n")
+    return next((n + 1 for n in range(min(len(a), len(b))) if a[n] != b[n]), min(len(a), len(b)) + 1)
+
+
 def _build_violations(build: dict) -> list[str]:
     """P25 (SMA-738 spec 4.5). The lock step writes the SHA-256 of the lock bytes it judged as a
     step output before container run 2; the stage step compares the STAGED lock with it; upload
@@ -627,9 +660,7 @@ def _build_violations(build: dict) -> list[str]:
     for step_id, pinned in (("lock", LOCK_RUN), ("stage", STAGE_RUN)):
         text = str(by_id.get(step_id, {}).get("run", ""))
         if text != pinned:
-            got, want = text.split("\n"), pinned.split("\n")
-            line = next((n + 1 for n in range(min(len(got), len(want))) if got[n] != want[n]), min(len(got), len(want)) + 1)
-            out.append(f"P25 the {step_id} step script differs from the pinned text, first at line {line}")
+            out.append(f"P25 the {step_id} step script differs from the pinned text, first at line {_first_diff_line(text, pinned)}")
     lock_run = str(by_id.get("lock", {}).get("run", ""))
     lock_cmds = [c for c in commands(lock_run)[0] if c[:2] == ["python3", CHECKER]]
     if lock_cmds != [LOCK_CMD]:
@@ -650,6 +681,37 @@ def _build_violations(build: dict) -> list[str]:
     with_block = upload.get("with") if isinstance(upload.get("with"), dict) else {}
     if with_block.get("path") != UPLOAD_PATH:
         out.append(f"P25 upload.with.path must be exactly {UPLOAD_PATH}, not {with_block.get('path')!r}")
+    return out
+
+
+def _propose_pin_violations(propose: dict) -> list[str]:
+    """P26 (SMA-739 spec 4.4). The propose steps up to the last checker are pinned whole, without
+    `name` (and without `uses` for the action steps, which P6 checks). A pin of `run:` alone is not
+    enough: `if: false` or `env: {SHELLOPTS: noexec}` also skips the checker, and a checkout `ref:`
+    change runs a checker from a different tree. The propose job may not declare env."""
+    out = []
+    if "env" in propose:
+        out.append("P26 the propose job declares env")
+    by_id = {str(s.get("id")): s for s in _steps(propose, "propose")}
+    for step_id, want in PROPOSE_PINNED.items():
+        if step_id not in by_id:
+            out.append(f"P26 the propose step {step_id} is missing")
+            continue
+        drop = ("name", "uses") if "with" in want else ("name",)
+        got = {str(k): v for k, v in by_id[step_id].items() if k not in drop}
+        if sorted(got) != sorted(want):
+            out.append(f"P26 the propose step {step_id} has keys {sorted(got)}, expected {sorted(want)}")
+            continue
+        action = PROPOSE_ACTIONS.get(step_id)
+        if action is not None and str(by_id[step_id].get("uses", "")).partition("@")[0] != action:
+            out.append(f"P26 the propose step {step_id} must use {action}, not {by_id[step_id].get('uses')!r}")
+        for key, value in want.items():
+            if got[key] == value:
+                continue
+            if key == "run":
+                out.append(f"P26 the {step_id} step script differs from the pinned text, first at line {_first_diff_line(str(got[key]), value)}")
+            else:
+                out.append(f"P26 the {key} of propose step {step_id} must be exactly {value!r}, not {got[key]!r}")
     return out
 
 
@@ -680,6 +742,7 @@ def _propose_violations(propose: dict) -> list[str]:
         out += [f"P3 {w} reads the secrets context outside the token step" for w in reads]
     rest = {k: v for k, v in propose.items() if k != "steps"}
     out += [f"P3 {w} reads the secrets context in propose" for w in _reads(rest, SECRETS_CTX, "$.jobs.propose")]
+    out += _propose_pin_violations(propose)
     return out
 
 
@@ -749,6 +812,15 @@ UPLOAD_STEP = "".join((
     UPLOAD_PATH_LINE,
 ))
 
+# SMA-739 P26: the pinned propose steps of the fixture, as pieces, so that the rows can name them.
+ARTIFACT_LINE = VERIFY_RUN.split("\n")[1]
+STATUS_LINE = APPLY_RUN.split("\n")[-2]
+VERIFY_HEAD = f"      - id: verify\n        if: {PROPOSE_IF}\n"
+APPLY_HEAD = f"      - id: apply\n        if: {PROPOSE_IF}\n"
+VERIFY_STEP = VERIFY_HEAD + "        run: |\n" + _indent(VERIFY_RUN)
+APPLY_STEP = APPLY_HEAD + "        run: |\n" + _indent(APPLY_RUN)
+PROPOSE_CHECKOUT_USES = f"        if: {PROPOSE_IF}\n        uses: actions/checkout@" + "1" * 40 + "\n"
+
 FIXTURE = """\
 name: wasm-lockstep
 on:
@@ -793,16 +865,15 @@ jobs:
         if: needs.build.outputs.changed == 'true'
         uses: actions/checkout@""" + "1" * 40 + """
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - id: download
         if: needs.build.outputs.changed == 'true'
         uses: actions/download-artifact@""" + "3" * 40 + """
-      - id: verify
-        if: needs.build.outputs.changed == 'true'
-        run: python3 ci/wasm-lockstep/lockstep_check.py artifact --dir d --old rs/Cargo.lock
-      - id: apply
-        if: needs.build.outputs.changed == 'true'
-        run: cp a b
+        with:
+          name: wasm-lockstep
+          path: ${{ runner.temp }}/lockstep
+""" + VERIFY_STEP + APPLY_STEP + """\
       - id: token
         uses: actions/create-github-app-token@""" + "4" * 40 + """
         with:
@@ -846,15 +917,53 @@ TOKEN_STEP = "      - id: token\n        uses: actions/create-github-app-token@"
           permission-contents: write
           permission-pull-requests: write
 """
-VERIFY_RUN = "        run: python3 ci/wasm-lockstep/lockstep_check.py artifact --dir d --old rs/Cargo.lock\n"
-VERIFY_STEP = """      - id: verify
-        if: needs.build.outputs.changed == 'true'
-        run: python3 ci/wasm-lockstep/lockstep_check.py artifact --dir d --old rs/Cargo.lock
-"""
 PR_LIST = "gh pr list --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'"
 BUILD_STEP_ANCHOR = "      - id: update\n"
-PROPOSE_RUN = "        run: cp a b\n"
+# The general propose rows run on the UNPINNED commit step. The pinned steps (P26) would add a P26
+# message to every row, and a PASS row would fail.
+UNPINNED_PROPOSE_RUN = '        run: git commit -F "$RUNNER_TEMP/pr-title.txt"\n'
 BUILD_RUN = "container.sh update\n"  # the update step: it is not pinned by P25
+
+# Rows on the pinned propose steps. `self_test` replaces only the FIRST match, and some lines of
+# the pinned steps also occur in LOCK_RUN or STAGE_RUN. So every `old` of these rows must occur
+# exactly once in FIXTURE, and self_test checks it.
+_A = f"          {ARTIFACT_LINE}\n"
+_S = f"          {STATUS_LINE}\n"
+EARLY_EXITS = ("exit 0", "exit", "set -n", "set -o noexec")
+ANCHORED_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
+    ("verify joined with || true", ((_A, f"          {ARTIFACT_LINE} || true\n"),), "P18"),
+    ("verify joined with || rc=$?", ((_A, f"          {ARTIFACT_LINE} || rc=$?\n"),), "P18"),
+    ("verify followed by ; true", ((_A, f"          {ARTIFACT_LINE} ; true\n"),), "P18"),
+    ("verify piped into cat", ((_A, f"          {ARTIFACT_LINE} | cat\n"),), "P18"),
+    ("verify behind an && guard", ((_A, f"          test -f x && {ARTIFACT_LINE}\n"),), "P18"),
+    ("verify inside a skipped if", ((_A, f"          if false; then\n            {ARTIFACT_LINE}\n          fi\n"),), "P18"),
+    ("verify followed by exit 0", ((_A, f"{_A}          exit 0\n"),), "P18"),
+    ("status joined with || true", ((_S, f"          {STATUS_LINE} || true\n"),), "P18"),
+    ("continue-on-error: true on verify", ((VERIFY_HEAD, VERIFY_HEAD + "        continue-on-error: true\n"),), "P14"),
+    ('continue-on-error: "true" (a string) on verify', ((VERIFY_HEAD, VERIFY_HEAD + '        continue-on-error: "true"\n'),), "P14"),
+    # SMA-739 P26: an early exit before the checker, and the other keys that skip it.
+    *((f"{form} before the artifact command", ((_A, f"          {form}\n{_A}"),), "P26") for form in EARLY_EXITS),
+    *((f"{form} before the status command", ((_S, f"          {form}\n{_S}"),), "P26") for form in EARLY_EXITS),
+    ("a changed --title-file path on verify", ((_A, _A.replace("pr-title.txt", "pr-titel.txt")),), "P26"),
+    ("a changed status --file path on apply", ((_S, _S.replace("status.txt", "statuz.txt")),), "P26"),
+    ("run: |- on verify", ((VERIFY_HEAD + "        run: |\n", VERIFY_HEAD + "        run: |-\n"),), "P26"),
+    ("exit 0 before the artifact command, by the exact message", ((_A, f"          exit 0\n{_A}"),), "P26 the verify step script differs from the pinned text, first at line 2"),
+    ("if: false on verify", ((VERIFY_HEAD, "      - id: verify\n        if: false\n"),), "P26"),
+    ("if: false on apply", ((APPLY_HEAD, "      - id: apply\n        if: false\n"),), "P26"),
+    ("env SHELLOPTS: noexec on verify", ((VERIFY_HEAD, VERIFY_HEAD + "        env:\n          SHELLOPTS: noexec\n"),), "P26"),
+    ("shell: bash added on apply", ((APPLY_HEAD, APPLY_HEAD + "        shell: bash\n"),), "P26"),
+    ("an on: key on the apply step", ((APPLY_HEAD, APPLY_HEAD + "        on: x\n"),), "P26"),
+    ("the apply step missing", ((APPLY_STEP, ""),), "P26 the propose step apply is missing"),
+    ("a propose job env PATH", (("  propose:\n", "  propose:\n    env:\n      PATH: /x\n"),), "P26"),
+    ("checkout ref names a pull request head", (("          ref: ${{ github.sha }}\n", "          ref: refs/pull/1/head\n"),), "P26"),
+    ("checkout repository added", (("          ref: ${{ github.sha }}\n", "          ref: ${{ github.sha }}\n          repository: someone/fork\n"),), "P26"),
+    ("persist-credentials as the string false", (("          persist-credentials: false\n      - id: download", "          persist-credentials: 'false'\n      - id: download"),), "P26"),
+    ("download path into the workspace", (("          path: ${{ runner.temp }}/lockstep\n", "          path: ${{ github.workspace }}\n"),), "P26"),
+    ("a dependabot SHA bump of the propose checkout", ((PROPOSE_CHECKOUT_USES, PROPOSE_CHECKOUT_USES.replace("1" * 40, "5" * 40)),), "PASS"),
+    ("the propose checkout step runs download-artifact", ((PROPOSE_CHECKOUT_USES, PROPOSE_CHECKOUT_USES.replace("actions/checkout@", "actions/download-artifact@")),), "P26"),
+    ("the propose download step runs checkout", (("        uses: actions/download-artifact@" + "3" * 40 + "\n", "        uses: actions/checkout@" + "3" * 40 + "\n"),), "P26"),
+)
+ANCHORED_LABELS = frozenset(label for label, _r, _w in ANCHORED_ROWS)
 
 # (label, (old, new) replacements on FIXTURE, rule id that must appear or "PASS")
 SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
@@ -870,7 +979,7 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("a YAML alias injects a secrets read into build", (
         ("permissions:\n  contents: read\nenv:\n", "permissions:\n  contents: read\nx-leak: &leak ${{ secrets.X }}\nenv:\n"),
         (BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          X: *leak\n")), "P3"),
-    ("a secrets read in propose outside the token step", ((PROPOSE_RUN, PROPOSE_RUN + "        env:\n          K: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"),), "P3"),
+    ("a secrets read in propose outside the token step", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        env:\n          K: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"),), "P3"),
     ("an environment on build", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    environment: release-pr\n"),), "P3"),
     ("a third job with environment release-pr", (("jobs:\n", "jobs:\n  third:\n    runs-on: x\n    environment: release-pr\n    permissions:\n      contents: read\n    steps:\n      - run: echo\n"),), "P1"),
     ("a job-level uses with secrets: inherit in build", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    uses: ./.github/workflows/x.yml\n    secrets: inherit\n    runs-on: ubuntu-latest\n"),), "P12"),
@@ -889,21 +998,20 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("cargo on the build host", ((BUILD_RUN, BUILD_RUN + "          ( cd rs && cargo build )\n"),), "P5"),
     ("a bare ! test -L on the build host", ((BUILD_RUN, BUILD_RUN + '          ! test -L "$RUNNER_TEMP/work/rs"\n'),), "P5"),
     ("a work-copy script on the build host", ((BUILD_RUN, BUILD_RUN + '          bash "$RUNNER_TEMP/work/x.sh"\n'),), "P5"),
-    ("the token step before the checker step", ((VERIFY_STEP + "      - id: apply\n        if: needs.build.outputs.changed == 'true'\n        run: cp a b\n" + TOKEN_STEP,
-                                                  TOKEN_STEP + VERIFY_STEP + "      - id: apply\n        if: needs.build.outputs.changed == 'true'\n        run: cp a b\n"),), "P7"),
-    ("a cargo command in propose", ((PROPOSE_RUN, "        run: cargo update -p wasm-bindgen\n"),), "P5"),
-    ("cargo inside $(...) in propose", ((PROPOSE_RUN, '        run: echo "$(cargo metadata)"\n'),), "P5"),
-    ("a backtick in propose", ((PROPOSE_RUN, "        run: echo `id`\n"),), "P5"),
-    ("bash -c in propose", ((PROPOSE_RUN, "        run: bash -c 'cargo build'\n"),), "P5"),
-    ("python3 -c in propose", ((PROPOSE_RUN, "        run: python3 -c 'print(1)'\n"),), "P5"),
-    ("env as a command wrapper in propose", ((PROPOSE_RUN, "        run: env cargo build\n"),), "P5"),
-    ("cargo after a pipe in propose", ((PROPOSE_RUN, "        run: cat a | cargo build\n"),), "P5"),
+    ("the token step before the checker step", ((VERIFY_STEP + APPLY_STEP + TOKEN_STEP, TOKEN_STEP + VERIFY_STEP + APPLY_STEP),), "P7"),
+    ("a cargo command in propose", ((UNPINNED_PROPOSE_RUN, "        run: cargo update -p wasm-bindgen\n"),), "P5"),
+    ("cargo inside $(...) in propose", ((UNPINNED_PROPOSE_RUN, '        run: echo "$(cargo metadata)"\n'),), "P5"),
+    ("a backtick in propose", ((UNPINNED_PROPOSE_RUN, "        run: echo `id`\n"),), "P5"),
+    ("bash -c in propose", ((UNPINNED_PROPOSE_RUN, "        run: bash -c 'cargo build'\n"),), "P5"),
+    ("python3 -c in propose", ((UNPINNED_PROPOSE_RUN, "        run: python3 -c 'print(1)'\n"),), "P5"),
+    ("env as a command wrapper in propose", ((UNPINNED_PROPOSE_RUN, "        run: env cargo build\n"),), "P5"),
+    ("cargo after a pipe in propose", ((UNPINNED_PROPOSE_RUN, "        run: cat a | cargo build\n"),), "P5"),
     ("a push refspec to refs/heads/main", ((PUSH_LINE, PUSH_LINE.replace("HEAD:refs/heads/deps/wasm-bindgen-lockstep", "HEAD:refs/heads/main")),), "P8"),
     ("a push with --force", ((PUSH_LINE, PUSH_LINE.replace('--force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}"', "--force")),), "P8"),
-    ("a second git push", ((PROPOSE_RUN, "        run: git push origin HEAD:refs/heads/x\n"),), "P8"),
-    ("needs.build.outputs.x in a run in propose", ((PROPOSE_RUN, '        run: echo "${{ needs.build.outputs.changed }}"\n'),), "P9"),
-    ("needs['build'] in an env in propose", ((PROPOSE_RUN, PROPOSE_RUN + "        env:\n          C: ${{ needs['build'].outputs.changed }}\n"),), "P9"),
-    ("NEEDS in another case in a with: in propose", (("          persist-credentials: false\n      - id: download", "          persist-credentials: false\n          ref: ${{ NEEDS.build.outputs.changed }}\n      - id: download"),), "P9"),
+    ("a second git push", ((UNPINNED_PROPOSE_RUN, "        run: git push origin HEAD:refs/heads/x\n"),), "P8"),
+    ("needs.build.outputs.x in a run in propose", ((UNPINNED_PROPOSE_RUN, '        run: echo "${{ needs.build.outputs.changed }}"\n'),), "P9"),
+    ("needs['build'] in an env in propose", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        env:\n          C: ${{ needs['build'].outputs.changed }}\n"),), "P9"),
+    ("NEEDS in another case in a with: in propose", (("          persist-credentials: false\n      - id: download", "          persist-credentials: false\n          repository: ${{ NEEDS.build.outputs.changed }}\n      - id: download"),), "P9"),
     ("a second build output", (("      changed: ${{ steps.lock.outputs.changed }}\n", "      changed: ${{ steps.lock.outputs.changed }}\n      version: x\n"),), "P9"),
     ("the bare on: key replaced by a null value", (("on:\n  schedule:\n    - cron: '17 6 * * 2'\n  workflow_dispatch:\n", "on:\n"),), "P2"),
     ("a quoted on key adds push next to the bare one", (("permissions:\n  contents: read\nenv:", "'on': push\npermissions:\n  contents: read\nenv:"),), "P2"),
@@ -911,34 +1019,27 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("a job widens permissions", (("    environment: release-pr\n    permissions:\n      contents: read\n", "    environment: release-pr\n    permissions:\n      contents: write\n"),), "P10"),
     ("top-level write-all", (("permissions:\n  contents: read\nenv:", "permissions: write-all\nenv:"),), "P10"),
     ("propose without the release-pr environment", (("    environment: release-pr\n", ""),), "P11"),
-    ("continue-on-error: true on verify", ((VERIFY_STEP, VERIFY_STEP + "        continue-on-error: true\n"),), "P14"),
-    ('continue-on-error: "true" (a string) on verify', ((VERIFY_STEP, VERIFY_STEP + '        continue-on-error: "true"\n'),), "P14"),
     ("if: always() on the push step", (("      - id: push\n        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'\n", "      - id: push\n        if: always()\n"),), "P15"),
-    ("shell: python on a propose step", ((PROPOSE_RUN, PROPOSE_RUN + "        shell: python\n"),), "P13"),
-    ("persist-credentials: true on a checkout", (("        with:\n          persist-credentials: false\n      - id: download", "        with:\n          persist-credentials: true\n      - id: download"),), "P17"),
+    ("if: success() || true on the token step", (("      - id: token\n", "      - id: token\n        if: success() || true\n"),), "P15"),
+    ("if: ${{ !success() }} on the token step", (("      - id: token\n", "      - id: token\n        if: ${{ !success() }}\n"),), "P15"),
+    ("if: SUCCESS() || true on the push step", (("      - id: push\n        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'\n", "      - id: push\n        if: SUCCESS() || true\n"),), "P15"),
+    ("shell: python on a propose step", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        shell: python\n"),), "P13"),
+    ("persist-credentials: true on a checkout", (("          persist-credentials: false\n      - id: download", "          persist-credentials: true\n      - id: download"),), "P17"),
     ("the token asks for workflows: write", (("          permission-pull-requests: write\n", "          permission-pull-requests: write\n          permission-workflows: write\n"),), "P16"),
     ("an unlisted action in propose", (("actions/download-artifact@" + "3" * 40, "evil/action@" + "3" * 40),), "P6"),
     ("an action pinned to a tag", (("actions/download-artifact@" + "3" * 40, "actions/download-artifact@v8"),), "P6"),
     ("a merge key", (("    outputs:\n", "    <<: {timeout-minutes: 5}\n    outputs:\n"),), "P0"),
     ("a duplicate key", (("    environment: release-pr\n", "    environment: release-pr\n    environment: other\n"),), "P0"),
     # ---- fix round 1: bypasses that passed the first rule set ----
-    ("verify joined with || true", ((VERIFY_RUN, VERIFY_RUN[:-1] + " || true\n"),), "P18"),
-    ("verify joined with || rc=$?", ((VERIFY_RUN, VERIFY_RUN[:-1] + " || rc=$?\n"),), "P18"),
-    ("verify followed by ; true", ((VERIFY_RUN, VERIFY_RUN[:-1] + " ; true\n"),), "P18"),
-    ("verify piped into cat", ((VERIFY_RUN, VERIFY_RUN[:-1] + " | cat\n"),), "P18"),
-    ("verify behind an && guard", ((VERIFY_RUN, "        run: test -f x && " + VERIFY_RUN.split("run: ", 1)[1]),), "P18"),
-    ("verify inside a skipped if", ((VERIFY_RUN, "        run: |\n          if false; then\n            " + VERIFY_RUN.split("run: ", 1)[1].rstrip("\n") + "\n          fi\n"),), "P18"),
-    ("verify followed by exit 0", ((VERIFY_RUN, "        run: |\n          " + VERIFY_RUN.split("run: ", 1)[1].rstrip("\n") + "\n          exit 0\n"),), "P18"),
-    ("status joined with || true", ((PROPOSE_RUN, "        run: python3 ci/wasm-lockstep/lockstep_check.py status --file s || true\n"),), "P18"),
-    ("status as a whole last command", ((PROPOSE_RUN, "        run: |\n          set -euo pipefail\n          git status > s\n          python3 ci/wasm-lockstep/lockstep_check.py status --file s\n"),), "PASS"),
+    ("status as a whole last command", ((UNPINNED_PROPOSE_RUN, "        run: |\n          set -euo pipefail\n          git status > s\n          python3 ci/wasm-lockstep/lockstep_check.py status --file s\n"),), "PASS"),
     ("LOCKSTEP_IMAGE assigned in front of docker run", ((DOCKER_LINE, "LOCKSTEP_IMAGE=docker.io/evil/x:latest " + DOCKER_LINE),), "P4"),
     ("LOCKSTEP_IMAGE in a step env of build", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          LOCKSTEP_IMAGE: docker.io/evil/x:latest\n"),), "P4"),
     ("LOCKSTEP_IMAGE in a job env of build", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      LOCKSTEP_IMAGE: docker.io/evil/x:latest\n"),), "P4"),
     ("LOCKSTEP_IMAGE set with read", ((BUILD_RUN, BUILD_RUN + "          read -r LOCKSTEP_IMAGE < x\n"),), "P4"),
-    ("a process substitution in propose: cat <(...)", ((PROPOSE_RUN, "        run: cat <(cargo build)\n"),), "P5"),
-    ("a process substitution in propose: > >(...)", ((PROPOSE_RUN, "        run: echo x > >(cargo build)\n"),), "P5"),
+    ("a process substitution in propose: cat <(...)", ((UNPINNED_PROPOSE_RUN, "        run: cat <(cargo build)\n"),), "P5"),
+    ("a process substitution in propose: > >(...)", ((UNPINNED_PROPOSE_RUN, "        run: echo x > >(cargo build)\n"),), "P5"),
     ("working-directory on a build step", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        working-directory: /tmp\n"),), "P19"),
-    ("working-directory on a propose step", ((PROPOSE_RUN, PROPOSE_RUN + "        working-directory: /tmp\n"),), "P19"),
+    ("working-directory on a propose step", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        working-directory: /tmp\n"),), "P19"),
     ("defaults.run.working-directory on a job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        working-directory: /tmp\n"),), "P12"),
     ("defaults.run.working-directory on the workflow", (("permissions:\n  contents: read\nenv:", "permissions:\n  contents: read\ndefaults:\n  run:\n    working-directory: /tmp\nenv:"),), "P13"),
     ("BASH_ENV in a step env", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          BASH_ENV: /x\n"),), "P19"),
@@ -947,44 +1048,44 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("a write to GITHUB_ENV", ((BUILD_RUN, BUILD_RUN + '          echo "BASH_ENV=x" >> "$GITHUB_ENV"\n'),), "P19"),
     ("a write to GITHUB_PATH in brace form", ((BUILD_RUN, BUILD_RUN + "          echo /x >>${GITHUB_PATH}\n"),), "P19"),
     ("a write to GITHUB_ENV, unquoted", ((BUILD_RUN, BUILD_RUN + "          echo x > $GITHUB_ENV\n"),), "P19"),
-    ("gh api -X POST in propose", ((PROPOSE_RUN, "        run: gh api repos/x/y -X POST\n"),), "P20"),
-    ("gh api --method=DELETE in propose", ((PROPOSE_RUN, "        run: gh api repos/x/y --method=DELETE\n"),), "P20"),
-    ("gh api -XPUT in propose", ((PROPOSE_RUN, "        run: gh api repos/x/y -XPUT\n"),), "P20"),
-    ("gh api -f in propose (an implicit POST)", ((PROPOSE_RUN, "        run: gh api repos/x/y -f a=b\n"),), "P20"),
-    ("gh api graphql in propose", ((PROPOSE_RUN, "        run: gh api graphql\n"),), "P20"),
-    ("gh api --method GET in propose", ((PROPOSE_RUN, "        run: gh api repos/x/y --method GET\n"),), "PASS"),
-    ("git -c before the subcommand in propose", ((PROPOSE_RUN, "        run: git -c core.fsmonitor=x status\n"),), "P20"),
-    ("git -ckey=value in propose", ((PROPOSE_RUN, "        run: git -ccore.pager=x log\n"),), "P20"),
+    ("gh api -X POST in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y -X POST\n"),), "P20"),
+    ("gh api --method=DELETE in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y --method=DELETE\n"),), "P20"),
+    ("gh api -XPUT in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y -XPUT\n"),), "P20"),
+    ("gh api -f in propose (an implicit POST)", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y -f a=b\n"),), "P20"),
+    ("gh api graphql in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api graphql\n"),), "P20"),
+    ("gh api --method GET in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y --method GET\n"),), "PASS"),
+    ("git -c before the subcommand in propose", ((UNPINNED_PROPOSE_RUN, "        run: git -c core.fsmonitor=x status\n"),), "P20"),
+    ("git -ckey=value in propose", ((UNPINNED_PROPOSE_RUN, "        run: git -ccore.pager=x log\n"),), "P20"),
     ("git -c in build", ((BUILD_RUN, BUILD_RUN + "          git -c core.x=y archive HEAD\n"),), "P20"),
     ("sudo chown of the work copy to nobody in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 65534:65534 "$RUNNER_TEMP/work"\n'),), "PASS"),
     ("sudo chown of another path in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 65534:65534 /etc\n'),), "P5"),
     ("sudo chown to root in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 0:0 "$RUNNER_TEMP/work"\n'),), "P5"),
     ("sudo bash in build", ((BUILD_RUN, BUILD_RUN + '          sudo bash x.sh\n'),), "P5"),
-    ("sudo chown in propose", ((PROPOSE_RUN, '        run: sudo chown -R 65534:65534 "$RUNNER_TEMP/work"\n'),), "P5"),
+    ("sudo chown in propose", ((UNPINNED_PROPOSE_RUN, '        run: sudo chown -R 65534:65534 "$RUNNER_TEMP/work"\n'),), "P5"),
     ("gh pr list --head without the cross-repo filter", ((PR_LIST, "gh pr list --head deps/wasm-bindgen-lockstep --state open --json number --jq '.[].number'"),), "P21"),
     ("gh pr list with --json but a jq that does not select", ((PR_LIST, PR_LIST.replace("select(.isCrossRepository | not) | ", "")),), "P21"),
     ("gh pr list that selects the fork pull requests", ((PR_LIST, PR_LIST.replace("| not)", ")")),), "P21"),
     ("docker run without --cap-drop=ALL", ((DOCKER_LINE, DOCKER_LINE.replace(" --cap-drop=ALL", "")),), "P4"),
     ("docker run without --security-opt=no-new-privileges", ((DOCKER_LINE, DOCKER_LINE.replace(" --security-opt=no-new-privileges", "")),), "P4"),
     ("docker run with --cap-drop=NET_RAW only", ((DOCKER_LINE, DOCKER_LINE.replace("--cap-drop=ALL", "--cap-drop=NET_RAW")),), "P4"),
-    ("needs in an env key named if in propose", ((PROPOSE_RUN, PROPOSE_RUN + "        env:\n          if: ${{ needs.build.outputs.changed }}\n"),), "P9"),
+    ("needs in an env key named if in propose", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        env:\n          if: ${{ needs.build.outputs.changed }}\n"),), "P9"),
     ("ACTIONS_ALLOW_UNSECURE_COMMANDS in the workflow env", (("env:\n", "env:\n  ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
     ("ACTIONS_ALLOW_UNSECURE_COMMANDS in the build job env", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
     ("ACTIONS_ALLOW_UNSECURE_COMMANDS in a step env", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
-    ("gh pr merge in propose", ((PROPOSE_RUN, '        run: gh pr merge "$number" --squash --auto\n'),), "P22"),
-    ("gh workflow run in propose", ((PROPOSE_RUN, "        run: gh workflow run x.yml\n"),), "P22"),
-    ("gh repo delete in propose", ((PROPOSE_RUN, "        run: gh repo delete x\n"),), "P22"),
-    ("gh secret set in propose", ((PROPOSE_RUN, "        run: gh secret set X\n"),), "P22"),
+    ("gh pr merge in propose", ((UNPINNED_PROPOSE_RUN, '        run: gh pr merge "$number" --squash --auto\n'),), "P22"),
+    ("gh workflow run in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh workflow run x.yml\n"),), "P22"),
+    ("gh repo delete in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh repo delete x\n"),), "P22"),
+    ("gh secret set in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh secret set X\n"),), "P22"),
     ("gh pr list without --head", ((PR_LIST, PR_LIST.replace(" --head deps/wasm-bindgen-lockstep", "")),), "P23"),
     ("gh pr list --head of another branch", ((PR_LIST, PR_LIST.replace("deps/wasm-bindgen-lockstep", "main")),), "P23"),
     ("a close step without a --head list", (("      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n",
                                               "      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          gh pr close 1\n"),), "P23"),
     ("a close step that lists with --head", (("      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n",
                                                "      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n          gh pr close 1\n"),), "PASS"),
-    ("steps.build.outputs in a host step of propose", ((PROPOSE_RUN, '        run: echo "${{ steps.build.outputs.v }}"\n'),), "P24"),
-    ("steps.update.outputs in an env of propose", ((PROPOSE_RUN, PROPOSE_RUN + "        env:\n          V: ${{ steps.update.outputs.v }}\n"),), "P24"),
-    ("STEPS.Update.Outputs in another case in propose", ((PROPOSE_RUN, '        run: echo "${{ STEPS.Update.Outputs.v }}"\n'),), "P24"),
-    ("steps['build'].outputs in a with: of propose", (("          persist-credentials: false\n      - id: download", "          persist-credentials: false\n          ref: ${{ steps['build'].outputs.v }}\n      - id: download"),), "P24"),
+    ("steps.build.outputs in a host step of propose", ((UNPINNED_PROPOSE_RUN, '        run: echo "${{ steps.build.outputs.v }}"\n'),), "P24"),
+    ("steps.update.outputs in an env of propose", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        env:\n          V: ${{ steps.update.outputs.v }}\n"),), "P24"),
+    ("STEPS.Update.Outputs in another case in propose", ((UNPINNED_PROPOSE_RUN, '        run: echo "${{ STEPS.Update.Outputs.v }}"\n'),), "P24"),
+    ("steps['build'].outputs in a with: of propose", (("          persist-credentials: false\n      - id: download", "          persist-credentials: false\n          repository: ${{ steps['build'].outputs.v }}\n      - id: download"),), "P24"),
     ("continue-on-error: true on the build job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n"),), "P14"),
     ('continue-on-error: "true" on the propose job', (("    environment: release-pr\n", "    environment: release-pr\n    continue-on-error: \"true\"\n"),), "P14"),
     # ---- SMA-738: P18 for every job, and P25 ----
@@ -1042,6 +1143,7 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("read -r RUNNER_TEMP in the unpinned update step", ((BUILD_RUN, BUILD_RUN + "          read -r RUNNER_TEMP < x\n"),), "P25"),
     ("exit 0 before the same command, by the message of the exit rule", ((f"          {SAME_LINE}\n", f"          exit 0\n          {SAME_LINE}\n"),), EXIT_RULE),
     ("a bare exit before the same command, by the message of the exit rule", ((f"          {SAME_LINE}\n", f"          exit\n          {SAME_LINE}\n"),), EXIT_RULE),
+    *ANCHORED_ROWS,
 )
 
 
@@ -1057,6 +1159,11 @@ def self_test() -> int:
     for label, replacements, want in SELF_TEST_ROWS:
         text = FIXTURE
         drift = [old for old, _new in replacements if old not in text]
+        shared = [old for old, _new in replacements if label in ANCHORED_LABELS and FIXTURE.count(old) != 1]
+        if shared:
+            print(f"  FAIL  {label}: the anchor {shared[0]!r} occurs {FIXTURE.count(shared[0])} times in the fixture, not once", file=sys.stderr)
+            failures += 1
+            continue
         for old, new in replacements:
             text = text.replace(old, new, 1)
         if drift:
@@ -1085,8 +1192,11 @@ def negative_control(path: str) -> int:
         print(f"  FAIL  the real workflow does not pass, so no mutation can prove anything: {base}", file=sys.stderr)
         return RC_ASSERT
 
+    checked = 0
+
     def expect(label: str, mutated: dict, want: str) -> None:
-        nonlocal failures
+        nonlocal failures, checked
+        checked += 1
         got = violations(mutated)
         if any(v.startswith(want + " ") for v in got):
             print(f"  ok    {label}: {want}")
@@ -1113,24 +1223,36 @@ def negative_control(path: str) -> int:
         if step.get("id") == "apply":
             step.setdefault("env", {})["C"] = "${{ needs.build.outputs.changed }}"
     expect("needs.build.outputs read in an env of propose", output, "P9")
-    # SMA-738: three mutations of the REAL build job. The fixture rows prove the rule; only these
+    # SMA-738: mutations of the REAL build job. The fixture rows prove the rule; only these
     # prove that it bites on the real structure.
-    def build_run(step_id: str, change) -> dict:
+    def step_run(job: str, step_id: str, change) -> dict:
         mutated = copy.deepcopy(real)
-        for step in mutated["jobs"]["build"]["steps"]:
+        for step in mutated["jobs"][job]["steps"]:
             if step.get("id") == step_id:
                 step["run"] = "".join(change(line) for line in str(step["run"]).splitlines(keepends=True))
         return mutated
 
-    expect("the same line deleted from the stage step", build_run("stage", lambda ln: "" if " same --sha256 " in ln else ln), "P25")
-    expect("|| true appended to the same line", build_run("stage", lambda ln: ln.rstrip("\n") + " || true\n" if " same --sha256 " in ln else ln), "P18")
-    expect("the lock_sha256 line deleted from the lock step", build_run("lock", lambda ln: "" if "lock_sha256=" in ln else ln), "P25")
-    expect("LOCK_SHA256 assigned before the same line", build_run("stage", lambda ln: 'LOCK_SHA256="$(cat "$src/rs/h")"\n' + ln if " same --sha256 " in ln else ln), "P25")
-    expect("set -n inserted before the same line", build_run("stage", lambda ln: "set -n\n" + ln if " same --sha256 " in ln else ln), "P25")
+    expect("the same line deleted from the stage step", step_run("build", "stage", lambda ln: "" if " same --sha256 " in ln else ln), "P25")
+    expect("|| true appended to the same line", step_run("build", "stage", lambda ln: ln.rstrip("\n") + " || true\n" if " same --sha256 " in ln else ln), "P18")
+    expect("the lock_sha256 line deleted from the lock step", step_run("build", "lock", lambda ln: "" if "lock_sha256=" in ln else ln), "P25")
+    expect("LOCK_SHA256 assigned before the same line", step_run("build", "stage", lambda ln: 'LOCK_SHA256="$(cat "$src/rs/h")"\n' + ln if " same --sha256 " in ln else ln), "P25")
+    expect("set -n inserted before the same line", step_run("build", "stage", lambda ln: "set -n\n" + ln if " same --sha256 " in ln else ln), "P25")
     path_env = copy.deepcopy(real)
     path_env["env"]["PYTHONPATH"] = "/tmp"
     expect("PYTHONPATH added to the workflow env", path_env, "P25")
-    print(f"pin_check negative control: 10 mutations, {failures} failed")
+    # SMA-739: P26 on the REAL propose job. The fixture rows prove the rule; these prove it bites on
+    # the real steps.
+    expect("exit 0 inserted before the artifact line of verify", step_run("propose", "verify", lambda ln: "exit 0\n" + ln if " artifact --dir " in ln else ln), "P26")
+    expect("set -n inserted before the status line of apply", step_run("propose", "apply", lambda ln: "set -n\n" + ln if " status --file " in ln else ln), "P26")
+    skipped = copy.deepcopy(real)
+    for step in skipped["jobs"]["propose"]["steps"]:
+        if step.get("id") == "verify":
+            step["if"] = False
+    expect("if: false on the verify step", skipped, "P26")
+    noexec = copy.deepcopy(real)
+    noexec["jobs"]["propose"]["env"] = {"SHELLOPTS": "noexec"}
+    expect("SHELLOPTS: noexec in the propose job env", noexec, "P26")
+    print(f"pin_check negative control: {checked} mutations, {failures} failed")
     return RC_ASSERT if failures else RC_OK
 
 
@@ -1146,7 +1268,7 @@ def main(argv: list[str]) -> int:
         print(f"pin_check: {line}", file=sys.stderr)
     if found:
         return RC_ASSERT
-    print(f"pin_check: {argv[0]} satisfies P0-P25")
+    print(f"pin_check: {argv[0]} satisfies P0-P26")
     return RC_OK
 
 
