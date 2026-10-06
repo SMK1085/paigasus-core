@@ -71,9 +71,15 @@
 # audiences = ["paigasus"]
 # jit_provisioning = true             # default shown
 # id_token_marker_claims = ["at_hash", "azp"]   # default: none. Zitadel recipe shown.
+# access_token_required_claims = ["jti"]        # default: none. Zitadel recipe shown.
 #
 # id_token_marker_claims lists claim names that the IdP puts into its ID token and never into its
 # access token. IAM refuses a verified token that carries one of them with a value other than null.
+#
+# access_token_required_claims lists claim names that the IdP puts into every access token and
+# into no ID token. IAM refuses a verified token that does not carry one of them, or carries it
+# with the value null. This check fails closed: if the IdP stops putting the claim into its access
+# token, IAM refuses every token of the issuer. A name must not be in both lists.
 #
 # jit_provisioning = false closes the user set of this issuer. IAM creates an identity only by
 # just-in-time provisioning. No API links an issuer and a subject to a user. With false, only

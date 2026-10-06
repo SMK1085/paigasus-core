@@ -52,7 +52,7 @@ From `2026-10-02-sma-703-zitadel-measurements.md` (Zitadel v4.15.3, M1-M8) and S
 - F2. The homelab rollout on 2026-10-03 (a confidential app with Login v2) confirmed `jti` on a
   live access token. It did not report on `jti` in the ID token.
 - F3. Not measured: whether other IdPs follow this split. Keycloak 26.4 is measured by this issue
-  (D8, T20). The result goes into this section as F4 when the plan's first task has run.
+  (D8, T20). Keycloak 26.4 is measured in F4.
 - F4. Keycloak 26.4 (measured 2026-10-06 by `tests/keycloak_e2e.rs`): `jti` is on the ID token
   and the access token of the password grant, on the ID token and the access token of the
   refresh grant, and on the DPoP-bound access token. So `jti` does not separate the Keycloak
@@ -419,7 +419,7 @@ finding and of the chart findings against the files before folding them in.
 
 | Finding | Severity | Outcome |
 |---|---|---|
-| The Keycloak branch cannot prove step 6c, and one grant is too narrow for a recipe | MAJOR | Folded in: D8 measures four tokens (password, DPoP, refresh); no claim that the ID-token refusal proves 6c; T20. |
+| The Keycloak branch cannot prove step 6c, and one grant is too narrow for a recipe | MAJOR | Folded in: D8 measures five tokens (password, DPoP, refresh); no claim that the ID-token refusal proves 6c; T20. |
 | No unit test on the `Dpop` scheme | MINOR | Folded in: D3, T14a. |
 | The "not a list" message has a fixed example | MINOR | Folded in: D5 `dict` argument with the example text; overlap check after both lists, nil as `[]`. |
 | `env.sh` M8 would delete the new key too | MINOR | Folded in: D5 puts the key after `oidc.scopes`. |
