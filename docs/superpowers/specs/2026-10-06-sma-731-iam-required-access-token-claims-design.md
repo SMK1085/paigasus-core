@@ -266,7 +266,7 @@ No Notion ADR, like SMA-703 D8. The change adds one opt-in refusal and one optio
 
 `tests/keycloak_e2e.rs` already decodes the ID token and the access token of the password grant
 (`keycloak_e2e.rs:152-156`, Keycloak `26.4`), and gets a DPoP-bound access token (`:196-201`). The
-config turns DPoP on (`:321-325`). The plan's first task measures `jti` on four tokens:
+config turns DPoP on (`:321-325`). The plan's first task measures `jti` on five tokens:
 
 - the ID token and the access token of the password grant;
 - the DPoP-bound access token;
@@ -348,15 +348,16 @@ End-to-end tests:
 - T19a. `zitadel_e2e.rs`: one more `AppState` with the full recipe (markers `["at_hash", "azp"]`
   and required `["jti"]`). The three access tokens pass the authenticator. This is the setup that
   the runbook tells operators to use.
-- T20. `keycloak_e2e.rs`: the measured `jti` presence on the four tokens of D8, and, if the split
+- T20. `keycloak_e2e.rs`: the measured `jti` presence on the five tokens of D8, and, if the split
   holds, the pass of the three access tokens with `["jti"]`.
 - T21. The existing SMA-703 assertions and the empty-list control of `zitadel_e2e.rs` do not
   change.
 
-Mutation proof (as SMA-703 § 12): the plan deletes step 6c (the `MissingClaim` branch of
-`ClaimRules::refusal`) and checks that T1, T4, T14a and T19 fail. Under `-D warnings` the mutation
-must still compile, so the plan runs it with `--no-fail-fast` and checks for test failures, not a
-compile error.
+Mutation proof (as SMA-703 § 12): the plan disables step 6c (the `MissingClaim` branch of
+`ClaimRules::refusal`) and checks that T1, T4, T14a and T19 fail. A deleted branch leaves dead
+code, and the workspace sets `warnings = "deny"`, so the mutation must disable the branch in a form
+that compiles (the plan uses `.filter(|_| false)`). The plan runs it with `--no-fail-fast` and
+checks for test failures, not a compile error.
 
 Chart rows:
 
