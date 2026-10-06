@@ -69,6 +69,18 @@ zones:
       # Example: [{name: RUST_LOG, value: "paigasus_iam=debug,info"}]. The chart refuses a name
       # that it sets itself (see docs/ops/RUNBOOK-chart.md). A change rolls the IAM pod.
       extraEnv: []
+      # NOT required. The DPoP proof check of the gateway path (SMA-700). With enabled true, IAM
+      # checks the DPoP proof (RFC 9449) that the gateway forwards. The gateway needs
+      # GATEWAY_DPOP__ENABLED too; the chart does not deploy the gateway. Turn DPoP on in IAM first.
+      #   forwardedBaseUrls  REQUIRED when enabled: the public URLs at which clients reach the
+      #                      gateway, each with any path prefix that a proxy removes. https only, or
+      #                      http on localhost, 127.x.x.x or [::1]. No query, fragment or user info.
+      #                      Printable ASCII with no space, " or \.
+      # The replay store is in memory, so IAM must stay at one replica (it is pinned). A change
+      # restarts the IAM pod. See docs/ops/RUNBOOK-chart.md § 6.
+      dpop:
+        enabled: false
+        forwardedBaseUrls: []
   gateway:
     enabled: false
     basePath: /gateway

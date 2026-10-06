@@ -46,6 +46,10 @@ impl IntoResponse for AuthnApiError {
             // not read as a generic service-down code alongside the gateway's `iam-unavailable`
             // and `upstream-unavailable`, which name different failures (ADR-0019 A1.3).
             AuthnError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "authn-unavailable", "authentication backend unavailable"),
+            // SMA-700. No IAM HTTP route produces these today (IAM's own API refuses the DPoP
+            // scheme), but the funnel is exhaustive.
+            AuthnError::InvalidDpopProof(_) => (StatusCode::UNAUTHORIZED, "invalid-dpop-proof", "invalid DPoP proof"),
+            AuthnError::DpopQuotaExceeded { .. } => (StatusCode::TOO_MANY_REQUESTS, "dpop-quota-exceeded", "too many DPoP proofs"),
             AuthnError::Backend(_) => {
                 // Debug carries the boxed repository/infra source (never token or claim
                 // material by `AuthnError`'s own contract) — logged here, never surfaced.
@@ -62,6 +66,9 @@ impl IntoResponse for AuthnApiError {
         if matches!(self.0, AuthnError::InvalidToken(_)) {
             // RFC 6750 §3.1 standardises this value. NOT ours to rename — only the body's code is.
             response.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static(BEARER_CHALLENGE));
+        }
+        if let AuthnError::DpopQuotaExceeded { retry_after_secs } = self.0 {
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(retry_after_secs.max(1)));
         }
         response
     }
@@ -144,6 +151,7 @@ mod tests {
             TokenDefect::BadSignature,
             TokenDefect::NotAnAccessToken,
             TokenDefect::SenderConstrained,
+            TokenDefect::NotKeyBound,
         ] {
             let (status, challenge, body) = rendered(AuthnError::InvalidToken(defect)).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -179,6 +187,29 @@ mod tests {
         assert_eq!(challenge, None);
         assert_eq!(body["error"]["code"], "authn-unavailable");
         assert_eq!(body["error"]["message"], "authentication backend unavailable");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_dpop_proof_is_401_with_no_bearer_challenge() {
+        // SMA-700: no IAM HTTP route accepts the DPoP scheme, but the funnel is exhaustive. The
+        // Bearer challenge belongs to `invalid-token` only.
+        let (status, challenge, body) = rendered(AuthnError::InvalidDpopProof(paigasus_iam_core::ProofDefect::Signature)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge, None);
+        assert_eq!(body["error"]["code"], "invalid-dpop-proof");
+        assert_eq!(body["error"]["message"], "invalid DPoP proof");
+    }
+
+    #[tokio::test]
+    async fn a_dpop_quota_refusal_is_429_with_retry_after() {
+        let response = AuthnApiError(AuthnError::DpopQuotaExceeded { retry_after_secs: 9 }).into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "9");
+        assert_eq!(response.headers()["paigasus-retryable"], "true");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "dpop-quota-exceeded");
+        assert_eq!(body["error"]["message"], "too many DPoP proofs");
     }
 
     /// AC 1: every code this funnel can emit is in the canonical registry.

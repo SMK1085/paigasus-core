@@ -44,6 +44,27 @@
 # dedicated instance, TLS (`rediss://`, supported via rustls) + AUTH — a writable JWKS
 # cache is an auth bypass. `memory` stays the default for exactly this reason.
 
+# --- DPoP proof check on the gateway path (SMA-700) ---
+#
+# Off by default. With enabled = true, IAM checks the DPoP proof (RFC 9449) that the gateway
+# forwards in Introspect, and accepts the one IsAuthorized follow-up of the gateway. IAM's own
+# API keeps refusing the DPoP scheme. The replay store is in memory: run ONE IAM replica.
+# [authn.dpop]
+# enabled = false                       # default shown
+# forwarded_base_urls = []              # REQUIRED when enabled: the public URLs at which clients
+#                                       # reach the gateway, each with any path prefix that a proxy
+#                                       # removes, e.g. ["https://gw.example.com", "https://edge.example.com/api"].
+#                                       # https only, or http on localhost/127.0.0.0/8/::1. No query,
+#                                       # fragment or user info.
+# iat_window_secs = 60                  # allowed |now - iat| of a proof, 1-300 - default shown
+# replay_capacity = 200000              # global replay-store entries; full -> 503 - default shown
+# per_key_quota = 1000                  # live entries per proof key; full -> 429 - default shown
+# per_subject_quota = 2000              # live entries per user - default shown
+#
+# An entry lives up to 2 x iat_window_secs, so with the defaults one key can make about 8 proofs a
+# second and one user about 16. Env: IAM_AUTHN__DPOP__ENABLED, IAM_AUTHN__DPOP__FORWARDED_BASE_URLS
+# (inline form: ["https://gw.example.com"]), IAM_AUTHN__DPOP__IAT_WINDOW_SECS, ...
+
 # REQUIRED — no default. At least one issuer:
 # [[authn.issuers]]
 # issuer = "https://idp.example.com/realms/acme"

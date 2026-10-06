@@ -5,7 +5,7 @@
 
 use crate::api_key::{ApiKey, ApiKeyId};
 use crate::audit::{AuditEntry, AuditFilter};
-use crate::authn::{AuthnError, ExternalIdentity, Issuer, ValidatedClaims};
+use crate::authn::{AuthnError, ExternalIdentity, Issuer, Jkt, ProofDefect, TokenScheme, ValidatedClaims};
 use crate::authz::model::RoleGrant;
 use crate::domain_event::DomainEvent;
 use crate::principal::{Principal, PrincipalKind, PrincipalStatus};
@@ -339,11 +339,97 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
-/// Verifies a presented bearer token and extracts its claims.
+/// Verifies a presented access token and extracts its claims.
 #[async_trait]
 pub trait Authenticator: Send + Sync {
-    /// The pluggable port (ADR-0015). OIDC validator is the v1 impl.
-    async fn authenticate(&self, token: &str) -> Result<ValidatedClaims, AuthnError>;
+    /// The pluggable port (ADR-0015). OIDC validator is the v1 impl. `scheme` decides the
+    /// key-binding rule (SMA-700 § 4.3): `Bearer` refuses a bound token, `Dpop` requires one and
+    /// returns its `cnf.jkt` in `ValidatedClaims::key_binding`.
+    async fn authenticate(&self, token: &str, scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError>;
+}
+
+/// The claims of a DPoP proof that passed checks 1-9 of SMA-700 § 4.4. `htu` stays a string: the
+/// URL parse is in the application service, so this crate needs no `url` dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofClaims {
+    pub jti: String,
+    pub iat: i64,
+    pub htm: String,
+    pub htu: String,
+}
+
+/// The `jti` and `ath` of a follow-up proof, read with no signature check (SMA-700 § 4.8). The
+/// follow-up relies on the digest of the bytes that `Introspect` verified, not on the signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowUpClaims {
+    pub jti: String,
+    pub ath: String,
+}
+
+/// The stateless checks of a DPoP proof (SMA-700 D2). The JOSE code is in the adapter
+/// (`adapters/oidc/dpop.rs`), so the application service needs no JOSE crate.
+pub trait DpopProofChecker: Send + Sync {
+    /// Checks 1-9 of SMA-700 § 4.4 against the access token and the token's `cnf.jkt`.
+    fn check(&self, proof: &str, token: &str, jkt: &Jkt) -> Result<ProofClaims, ProofDefect>;
+    /// Checks 1 and 2 and the `jti` and `ath` part of check 7, with no signature check.
+    fn follow_up_claims(&self, proof: &str) -> Result<FollowUpClaims, ProofDefect>;
+    /// Check 8: `ath` is base64url, with no padding, of SHA-256 over the token's ASCII bytes.
+    fn ath_matches(&self, ath: &str, token: &str) -> bool;
+}
+
+/// The replay key of one proof: the first 16 bytes of `blake3(jkt || 0x00 || jti)` (SMA-700
+/// § 4.5). The application service derives it; the core has no hash dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProofKey(pub [u8; 16]);
+
+/// One accepted proof for [`ReplayStore::record`] (SMA-700 § 4.5). `subject` and `jkt` are
+/// 16-byte hashes, so the store holds no claim value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewProof {
+    pub key: ProofKey,
+    /// The first 16 bytes of `blake3(issuer || 0x00 || sub)`.
+    pub subject: [u8; 16],
+    /// The first 16 bytes of `blake3(jkt)`.
+    pub jkt: [u8; 16],
+    /// `iat + iat_window_secs`: the entry is live while `now <= expires_at`.
+    pub expires_at: i64,
+    /// `max(expires_at, now + 30)`: the follow-up ticket is live while `now <= follow_up_deadline`.
+    pub follow_up_deadline: i64,
+    /// `blake3` of the whole proof string, as received, with no trim.
+    pub follow_up_digest: [u8; 32],
+}
+
+/// The answer of [`ReplayStore::record`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordOutcome {
+    Fresh,
+    Replayed,
+    /// A `jkt` or subject quota is full. `retry_after_secs` is the time until the oldest entry of
+    /// that `jkt` or subject is removed (at least 1).
+    QuotaExceeded {
+        retry_after_secs: u32,
+    },
+    /// The global capacity is full. `entries` is the occupancy, for the `warn` line (D12).
+    CapacityFull {
+        entries: usize,
+    },
+}
+
+/// The answer of [`ReplayStore::redeem_follow_up`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedeemOutcome {
+    Redeemed,
+    Refused,
+}
+
+/// The DPoP replay store (SMA-700 D3, § 4.5). Synchronous: the one adapter is in memory, and a
+/// shared (Redis) adapter would change the port to async with it. Time comes only from `now`
+/// (Unix seconds from the `Clock` port).
+pub trait ReplayStore: Send + Sync {
+    fn record(&self, entry: NewProof, now: i64) -> RecordOutcome;
+    /// `Redeemed` only when the ticket of `key` is live, not used, and `proof_digest` equals the
+    /// recorded digest. It then marks the ticket as used. A digest mismatch does not use it.
+    fn redeem_follow_up(&self, key: ProofKey, proof_digest: [u8; 32], now: i64) -> RedeemOutcome;
 }
 
 /// Hashes and verifies API-key secrets. Non-async — a pure keyed-hash computation, not I/O.
@@ -564,6 +650,10 @@ mod tests {
         _: &dyn Authenticator,
     ) {
     }
+
+    // Compile-time proof the SMA-700 ports are object-safe (`AppState` holds them as `Arc<dyn …>`).
+    #[allow(dead_code)]
+    fn dpop_ports_are_object_safe(_: &dyn DpopProofChecker, _: &dyn ReplayStore) {}
 
     #[test]
     fn new_repos_are_object_safe() {

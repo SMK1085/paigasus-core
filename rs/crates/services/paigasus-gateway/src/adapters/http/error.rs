@@ -61,6 +61,9 @@ pub enum GatewayError {
     MissingBearer,
     /// The credential was rejected by IAM (invalid/expired/revoked/inactive) → 401.
     InvalidCredential,
+    /// SMA-700: the DPoP proof is missing or invalid, at the gateway or by IAM's
+    /// `invalid-dpop-proof` → 401. The middleware adds the `WWW-Authenticate: DPoP` challenge.
+    InvalidDpopProof,
     /// IAM authorized the caller's identity but denied the action → 403 (IAM audited the denial).
     AuthzDenied,
     /// The introspection succeeded but returned no scope PRN — a plumbing bug, surfaced as a
@@ -170,6 +173,7 @@ impl GatewayError {
                 "Missing bearer credentials in the Authorization header.",
             ),
             GatewayError::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid_request_error", Some("invalid-api-key"), None, "Invalid credential."),
+            GatewayError::InvalidDpopProof => (StatusCode::UNAUTHORIZED, "invalid_request_error", Some("invalid-dpop-proof"), None, "Invalid DPoP proof."),
             GatewayError::AuthzDenied => (
                 StatusCode::FORBIDDEN,
                 "invalid_request_error",
@@ -274,6 +278,7 @@ impl GatewayError {
             Self::Internal | Self::MissingScope => Retryable::Unknown,
             Self::MissingBearer
             | Self::InvalidCredential
+            | Self::InvalidDpopProof
             | Self::AuthzDenied
             | Self::BadRequestBody
             | Self::InvalidRequestSchema
@@ -283,6 +288,12 @@ impl GatewayError {
             | Self::OrgRequired
             | Self::BudgetExhausted { .. } => Retryable::No,
         }
+    }
+
+    /// The bound HTTP status of this case (the first element of `parts`).
+    #[must_use]
+    pub fn status(self) -> StatusCode {
+        self.parts().0
     }
 }
 
@@ -434,10 +445,27 @@ mod tests {
         }
     }
 
+    /// SMA-700 § 4.10: the envelope of a refused DPoP proof. `status()` is what the middleware
+    /// reads to decide on the challenge.
+    #[tokio::test]
+    async fn an_invalid_dpop_proof_is_a_401_envelope() {
+        let resp = GatewayError::InvalidDpopProof.into_response();
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
+        assert!(resp.headers().get("www-authenticate").is_none(), "IntoResponse adds no challenge; the middleware does");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "invalid-dpop-proof");
+        assert_eq!(body["error"]["message"], "Invalid DPoP proof.");
+        assert!(body["error"]["param"].is_null());
+        assert_eq!(GatewayError::InvalidDpopProof.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(GatewayError::RateLimited { retry_after_secs: 1 }.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
     #[tokio::test]
     async fn each_case_maps_to_its_bound_status() {
         assert_eq!(GatewayError::MissingBearer.into_response().status(), StatusCode::UNAUTHORIZED);
         assert_eq!(GatewayError::InvalidCredential.into_response().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(GatewayError::InvalidDpopProof.into_response().status(), StatusCode::UNAUTHORIZED);
         assert_eq!(GatewayError::AuthzDenied.into_response().status(), StatusCode::FORBIDDEN);
         assert_eq!(GatewayError::MissingScope.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(GatewayError::IamUnavailable.into_response().status(), StatusCode::SERVICE_UNAVAILABLE);

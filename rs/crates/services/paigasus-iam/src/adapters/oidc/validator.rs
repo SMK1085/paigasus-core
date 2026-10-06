@@ -11,8 +11,8 @@
 //! `id_token_marker_claims` (SMA-703); for such an issuer the payload is also decoded as a map
 //! that refuses a repeated top-level member (`StrictPayload`). The
 //! sender-constraint check (SMA-690) refuses a token bound to a key (a `cnf` claim, or a Keycloak
-//! payload `typ: DPoP`), because IAM cannot check the binding. Three refusals are logged,
-//! rate-limited (`log_refusal`). Never logs token or claim material (`TokenDefect` itself carries
+//! payload `typ: DPoP`), because IAM cannot check the binding on that scheme. On the DPoP scheme (SMA-700) step 7 instead requires a `cnf.jkt` binding and returns it; the proof check is the caller's job (`application::dpop`).
+//! Four refusals are logged, rate-limited (`log_refusal`). Never logs token or claim material (`TokenDefect` itself carries
 //! no payload).
 
 use async_trait::async_trait;
@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::jwk::{AlgorithmParameters, Jwk};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use paigasus_iam_core::{Authenticator, AuthnError, Clock, Issuer, TokenDefect, ValidatedClaims};
+use paigasus_iam_core::{Authenticator, AuthnError, Clock, Issuer, Jkt, TokenDefect, TokenScheme, ValidatedClaims};
 use serde::Deserialize;
 use std::time::Instant;
 
@@ -68,6 +68,9 @@ enum RefusalDetail<'a> {
     /// The CONFIGURED claim name that shows a verified token is not an access token (SMA-703
     /// D4). Logged as the marker `claim <name>`.
     Claim(&'a str),
+    /// The DPoP scheme with a token that is not bound to exactly one key (SMA-700 § 4.3). Its own
+    /// static message, with no marker.
+    NotKeyBound,
 }
 
 /// One configured issuer, parsed once at construction — replacing the per-request
@@ -139,7 +142,7 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
     }
 
     /// The one place that decides which refusals are logged (SMA-686 D8, D11, D14, D15; SMA-690
-    /// D8): only `NotAnAccessToken`, `AudienceMismatch` and `SenderConstrained`, each reachable
+    /// D8; SMA-700 § 4.3): only `NotAnAccessToken`, `AudienceMismatch`, `SenderConstrained` and `NotKeyBound`, each reachable
     /// only for a correctly signed token from a configured issuer, and each rate-limited per
     /// (issuer, defect). Logs the issuer and a static or configured detail — never a token claim.
     fn log_refusal(&self, issuer: &Issuer, defect: TokenDefect, detail: RefusalDetail<'_>) {
@@ -166,6 +169,13 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
                 // SMA-686 and SMA-703.
                 let marker = format!("claim {name}");
                 tracing::info!(issuer = issuer.as_str(), marker = marker.as_str(), suppressed, "{}", NOT_AN_ACCESS_TOKEN_MESSAGE);
+            }
+            RefusalDetail::NotKeyBound => {
+                tracing::info!(
+                    issuer = issuer.as_str(),
+                    suppressed,
+                    "refused a DPoP request: the token is not bound to a key, or is also bound to a certificate"
+                );
             }
         }
     }
@@ -368,9 +378,21 @@ fn sender_constraint_marker(claims: &WireClaims) -> Option<&'static str> {
     SENDER_CONSTRAINED_TYPES.iter().any(|marker| typ.eq_ignore_ascii_case(marker)).then_some("typ DPoP")
 }
 
+/// The `cnf.jkt` of a signature-verified token on the DPoP scheme (SMA-700 § 4.3), or `None` when
+/// the token is not bound to exactly one key: `cnf` must be a JSON object with a `jkt` member that
+/// is a non-empty string, and no `x5t#S256` member (an mTLS binding stays refused, D4).
+fn dpop_key_binding(claims: &WireClaims) -> Option<Jkt> {
+    let cnf = claims.cnf.as_ref()?.as_object()?;
+    if cnf.contains_key("x5t#S256") {
+        return None;
+    }
+    let jkt = cnf.get("jkt")?.as_str()?;
+    (!jkt.is_empty()).then(|| Jkt::new(jkt))
+}
+
 #[async_trait]
 impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator<F, K, C> {
-    async fn authenticate(&self, token: &str) -> Result<ValidatedClaims, AuthnError> {
+    async fn authenticate(&self, token: &str, scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError> {
         // 1. Length cap — before any parsing at all.
         if token.len() > self.max_token_bytes {
             return Err(invalid(TokenDefect::Oversized));
@@ -432,11 +454,25 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
             return Err(invalid(TokenDefect::NotAnAccessToken));
         }
 
-        // 7. Sender-constraint check on the verified token (SMA-690): IAM cannot check a binding.
-        if let Some(marker) = sender_constraint_marker(&claims) {
-            self.log_refusal(&issuer, TokenDefect::SenderConstrained, RefusalDetail::Binding(marker));
-            return Err(invalid(TokenDefect::SenderConstrained));
-        }
+        // 7. The key binding (SMA-690, SMA-700 § 4.3). Bearer: a bound token is refused, because
+        //    IAM cannot check the binding on that scheme (D7). DPoP: the token must be bound to
+        //    exactly one key, and the caller checks the proof against `key_binding`.
+        let key_binding = match scheme {
+            TokenScheme::Bearer => {
+                if let Some(marker) = sender_constraint_marker(&claims) {
+                    self.log_refusal(&issuer, TokenDefect::SenderConstrained, RefusalDetail::Binding(marker));
+                    return Err(invalid(TokenDefect::SenderConstrained));
+                }
+                None
+            }
+            TokenScheme::Dpop => match dpop_key_binding(&claims) {
+                Some(jkt) => Some(jkt),
+                None => {
+                    self.log_refusal(&issuer, TokenDefect::NotKeyBound, RefusalDetail::NotKeyBound);
+                    return Err(invalid(TokenDefect::NotKeyBound));
+                }
+            },
+        };
 
         let expires_at = i64::try_from(claims.exp)
             .ok()
@@ -454,6 +490,7 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
             name: claims.name,
             locale: claims.locale,
             zoneinfo: claims.zoneinfo,
+            key_binding,
         })
     }
 }
@@ -642,7 +679,10 @@ mod tests {
         let fetcher = StubFetcher::new(jwk);
         let authenticator = make_authenticator(fetcher, vec![issuer_config(issuer, &["my-aud"])], 60, 16_384);
 
-        let validated = authenticator.authenticate(&token).await.expect("a well-formed, correctly signed token must authenticate");
+        let validated = authenticator
+            .authenticate(&token, TokenScheme::Bearer)
+            .await
+            .expect("a well-formed, correctly signed token must authenticate");
 
         assert_eq!(validated.issuer.as_str(), issuer);
         assert_eq!(validated.subject, "sub-1");
@@ -662,11 +702,11 @@ mod tests {
         let authenticator = make_authenticator(fetcher, vec![issuer_config("https://idp.example.com", &["aud"])], 60, 16_384);
 
         let none_token = manual_token(r#"{"alg":"none","typ":"JWT"}"#);
-        let err = authenticator.authenticate(&none_token).await.unwrap_err();
+        let err = authenticator.authenticate(&none_token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(_)), "an alg=none token must be rejected");
 
         let hs256_token = manual_token(r#"{"alg":"HS256","typ":"JWT","kid":"whatever"}"#);
-        let err = authenticator.authenticate(&hs256_token).await.unwrap_err();
+        let err = authenticator.authenticate(&hs256_token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::UnsupportedAlg)), "an alg=HS256 token must be UnsupportedAlg");
 
         assert_eq!(calls.load(Ordering::SeqCst), 0, "a rejected alg must never reach the JWKS fetcher");
@@ -683,7 +723,7 @@ mod tests {
         // Configured issuer is a DIFFERENT issuer than the token's `iss`.
         let authenticator = make_authenticator(fetcher, vec![issuer_config("https://other-idp.example.com", &["aud"])], 60, 16_384);
 
-        let err = authenticator.authenticate(&token).await.unwrap_err();
+        let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::IssuerNotConfigured)));
         assert_eq!(calls.load(Ordering::SeqCst), 0, "an unconfigured issuer must never reach the JWKS fetcher");
     }
@@ -698,7 +738,7 @@ mod tests {
         let fetcher = StubFetcher::new(jwk);
         let authenticator = make_authenticator(fetcher, vec![issuer_config(issuer, &["expected-aud"])], 60, 16_384);
 
-        let err = authenticator.authenticate(&token).await.unwrap_err();
+        let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)));
     }
 
@@ -711,12 +751,15 @@ mod tests {
         let (encoding_key, jwk, kid) = es256_keypair();
         let ok_token = sign(&encoding_key, Some(&kid), &bare_claims(issuer, "aud", now - 30));
         let ok_authenticator = make_authenticator(StubFetcher::new(jwk.clone()), vec![issuer_config(issuer, &["aud"])], 60, 16_384);
-        ok_authenticator.authenticate(&ok_token).await.expect("a 30s-expired token within a 60s leeway must be accepted");
+        ok_authenticator
+            .authenticate(&ok_token, TokenScheme::Bearer)
+            .await
+            .expect("a 30s-expired token within a 60s leeway must be accepted");
 
         // Expired 120s ago -> beyond the same 60s leeway, must be rejected.
         let expired_token = sign(&encoding_key, Some(&kid), &bare_claims(issuer, "aud", now - 120));
         let expired_authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(issuer, &["aud"])], 60, 16_384);
-        let err = expired_authenticator.authenticate(&expired_token).await.unwrap_err();
+        let err = expired_authenticator.authenticate(&expired_token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)));
     }
 
@@ -731,7 +774,7 @@ mod tests {
         let calls = fetcher.calls.clone();
         let authenticator = make_authenticator(fetcher, vec![issuer_config(issuer, &["aud"])], 60, token.len() - 1);
 
-        let err = authenticator.authenticate(&token).await.unwrap_err();
+        let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Oversized)));
         assert_eq!(calls.load(Ordering::SeqCst), 0, "an oversized token must be rejected before any key lookup");
     }
@@ -747,7 +790,7 @@ mod tests {
         let calls = fetcher.calls.clone();
         let authenticator = make_authenticator(fetcher, vec![issuer_config(issuer, &["aud"])], 60, 16_384);
 
-        let err = authenticator.authenticate(&token).await.unwrap_err();
+        let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::UnknownKid)));
         assert_eq!(calls.load(Ordering::SeqCst), 0, "a missing kid must be rejected before any key lookup");
     }
@@ -764,14 +807,17 @@ mod tests {
         ok_claims.nbf = Some(now + 30);
         let ok_token = sign(&encoding_key, Some(&kid), &ok_claims);
         let ok_authenticator = make_authenticator(StubFetcher::new(jwk.clone()), vec![issuer_config(issuer, &["aud"])], 60, 16_384);
-        ok_authenticator.authenticate(&ok_token).await.expect("an nbf 30s in the future within a 60s leeway must be accepted");
+        ok_authenticator
+            .authenticate(&ok_token, TokenScheme::Bearer)
+            .await
+            .expect("an nbf 30s in the future within a 60s leeway must be accepted");
 
         // `nbf` 120s in the future -> beyond the same 60s leeway, must be rejected.
         let mut future_claims = bare_claims(issuer, "aud", now + 3600);
         future_claims.nbf = Some(now + 120);
         let future_token = sign(&encoding_key, Some(&kid), &future_claims);
         let future_authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(issuer, &["aud"])], 60, 16_384);
-        let err = future_authenticator.authenticate(&future_token).await.unwrap_err();
+        let err = future_authenticator.authenticate(&future_token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotYetValid)));
     }
 
@@ -790,7 +836,7 @@ mod tests {
         let fetcher = StubFetcher::new(jwk_b);
         let authenticator = make_authenticator(fetcher, vec![issuer_config(issuer, &["aud"])], 60, 16_384);
 
-        let err = authenticator.authenticate(&token).await.unwrap_err();
+        let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::BadSignature)));
     }
 
@@ -805,7 +851,7 @@ mod tests {
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config("https://idp.example.com", &["aud"])], 60, 16_384);
 
         let token = manual_token(&format!(r#"{{"alg":"RS256","typ":"JWT","kid":"{kid}"}}"#));
-        let err = authenticator.authenticate(&token).await.unwrap_err();
+        let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::UnsupportedAlg)));
     }
 
@@ -833,7 +879,7 @@ mod tests {
         let token = sign(&encoding_key, Some(&kid), &claims);
 
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(issuer, &["expected-aud"])], 60, 16_384);
-        let err = authenticator.authenticate(&token).await.unwrap_err();
+        let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)));
     }
 
@@ -859,7 +905,7 @@ mod tests {
         let (encoding_key, jwk, kid) = es256_keypair();
         let token = sign(&encoding_key, Some(&kid), claims);
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
-        authenticator.authenticate(&token).await
+        authenticator.authenticate(&token, TokenScheme::Bearer).await
     }
 
     #[tokio::test]
@@ -975,7 +1021,7 @@ mod tests {
             ("cnf null then object", r#""cnf":null,"cnf":{"jkt":"abc"}"#),
         ] {
             let token = token_with_duplicate_cnf(&encoding_key, &kid, cnf_fields);
-            let err = authenticator.authenticate(&token).await.unwrap_err();
+            let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
             // Observed today: TokenDefect::Malformed (the duplicate key fails serde before the
             // sender-constraint check ever runs).
             assert!(matches!(err, AuthnError::InvalidToken(_)), "{name}: must never authenticate, got {err:?}");
@@ -995,6 +1041,98 @@ mod tests {
         assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "typ": "dpop" }))), Some("typ DPoP"));
         assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "cnf": null }))), None);
         assert_eq!(sender_constraint_marker(&wire_claims(serde_json::json!({ "typ": "Bearer" }))), None);
+    }
+
+    // ---- SMA-700: step 7 on the DPoP scheme ------------------------------------------------
+
+    const JKT: &str = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+
+    /// Signs `claims` with a fresh ES256 key and runs the full pipeline on the given scheme.
+    async fn authenticate_json_as(claims: &serde_json::Value, scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError> {
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let token = sign(&encoding_key, Some(&kid), claims);
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
+        authenticator.authenticate(&token, scheme).await
+    }
+
+    #[tokio::test]
+    async fn dpop_scheme_accepts_a_jkt_bound_token_and_returns_the_binding() {
+        // Spec § 5.1 validator case 1: the Keycloak shape (typ DPoP plus cnf.jkt), and cnf.jkt alone.
+        for extra in [serde_json::json!({ "typ": "DPoP", "cnf": { "jkt": JKT } }), serde_json::json!({ "cnf": { "jkt": JKT } })] {
+            let validated = authenticate_json_as(&claims_with(extra.clone()), TokenScheme::Dpop)
+                .await
+                .unwrap_or_else(|err| panic!("{extra}: a jkt-bound token must pass the DPoP scheme, got {err:?}"));
+            assert_eq!(validated.key_binding, Some(Jkt::new(JKT)), "{extra}");
+            assert_eq!(validated.subject, "sub-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn dpop_scheme_refuses_a_token_that_is_not_bound_to_exactly_one_key() {
+        // Spec § 5.1 validator cases 2-5 (§ 4.3): cnf with no jkt, jkt plus x5t#S256, typ DPoP
+        // only, no binding, and the shapes of a jkt that is not a non-empty string.
+        let cases = [
+            ("cnf with no jkt", serde_json::json!({ "cnf": { "jwk": { "kty": "EC" } } })),
+            ("cnf empty object", serde_json::json!({ "cnf": {} })),
+            ("jkt and x5t#S256", serde_json::json!({ "cnf": { "jkt": JKT, "x5t#S256": "abc" } })),
+            ("x5t#S256 only", serde_json::json!({ "cnf": { "x5t#S256": "abc" } })),
+            ("typ DPoP only", serde_json::json!({ "typ": "DPoP" })),
+            ("no binding", serde_json::json!({})),
+            ("cnf null", serde_json::json!({ "cnf": null })),
+            ("cnf a string", serde_json::json!({ "cnf": JKT })),
+            ("jkt empty", serde_json::json!({ "cnf": { "jkt": "" } })),
+            ("jkt a number", serde_json::json!({ "cnf": { "jkt": 1 } })),
+            ("jkt null", serde_json::json!({ "cnf": { "jkt": null } })),
+        ];
+        for (name, extra) in cases {
+            let err = authenticate_json_as(&claims_with(extra), TokenScheme::Dpop).await.unwrap_err();
+            assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotKeyBound)), "{name}: want NotKeyBound, got {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bearer_scheme_still_refuses_a_bound_token_and_binds_nothing() {
+        // D7: with DPoP on, the Bearer scheme does not change.
+        let err = authenticate_json_as(&claims_with(serde_json::json!({ "typ": "DPoP", "cnf": { "jkt": JKT } })), TokenScheme::Bearer)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::SenderConstrained)), "got {err:?}");
+        let plain = authenticate_json_as(&claims_with(serde_json::json!({})), TokenScheme::Bearer)
+            .await
+            .expect("a plain token passes Bearer");
+        assert_eq!(plain.key_binding, None);
+    }
+
+    #[tokio::test]
+    async fn the_dpop_scheme_keeps_the_earlier_defects_first() {
+        // Steps 1-6b do not change (§ 4.3): an ID token stays NotAnAccessToken, an expired bound
+        // token stays Expired.
+        let id = authenticate_json_as(&claims_with(serde_json::json!({ "typ": "ID", "cnf": { "jkt": JKT } })), TokenScheme::Dpop)
+            .await
+            .unwrap_err();
+        assert!(matches!(id, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)), "got {id:?}");
+        let expired = claims_with(serde_json::json!({ "cnf": { "jkt": JKT }, "exp": Utc::now().timestamp() - 120 }));
+        let err = authenticate_json_as(&expired, TokenScheme::Dpop).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::Expired)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_not_key_bound_refusal_logs_its_own_static_message_and_no_claim() {
+        let (logs, _guard) = capture_logs();
+        let err = authenticate_json_as(&claims_with(serde_json::json!({ "cnf": { "jkt": JKT, "x5t#S256": "cert-thumb" } })), TokenScheme::Dpop)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotKeyBound)));
+        let text = logs.text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("refused a DPoP request: the token is not bound to a key, or is also bound to a certificate"))
+            .collect();
+        assert_eq!(lines.len(), 1, "exactly one NotKeyBound line expected, got:\n{text}");
+        assert!(lines[0].contains("INFO") && lines[0].contains(ISSUER), "{}", lines[0]);
+        for secret in [JKT, "cert-thumb", "sub-1", "alice@example.com"] {
+            assert!(!text.contains(secret), "the log must not contain {secret:?}:\n{text}");
+        }
     }
 
     #[tokio::test]
@@ -1048,7 +1186,7 @@ mod tests {
         let token = sign(&signing_key, Some(&kid), &claims_with(serde_json::json!({ "aud": "token-aud-xyz" })));
         let authenticator = make_authenticator(StubFetcher::new(served_jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
 
-        let err = authenticator.authenticate(&token).await.unwrap_err();
+        let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::BadSignature)), "got {err:?}");
         assert!(!logs.text().contains("accepted audiences"), "a forged token must not reach the audience log:\n{}", logs.text());
     }
@@ -1058,7 +1196,7 @@ mod tests {
         let (encoding_key, jwk, kid) = es256_keypair();
         let token = sign_with_header_typ(&encoding_key, &kid, header_typ, claims);
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
-        authenticator.authenticate(&token).await
+        authenticator.authenticate(&token, TokenScheme::Bearer).await
     }
 
     #[tokio::test]
@@ -1129,12 +1267,12 @@ mod tests {
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
         for _ in 0..3 {
             let token = sign(&encoding_key, Some(&kid), &claims_with(serde_json::json!({ "typ": "ID" })));
-            let err = authenticator.authenticate(&token).await.unwrap_err();
+            let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
             assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)));
         }
         for _ in 0..2 {
             let token = sign(&encoding_key, Some(&kid), &claims_with(serde_json::json!({ "aud": "other" })));
-            let err = authenticator.authenticate(&token).await.unwrap_err();
+            let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
             assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)));
         }
         let text = logs.text();
@@ -1190,7 +1328,7 @@ mod tests {
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(ISSUER, &["aud"])], 60, 16_384);
         for _ in 0..3 {
             let token = sign(&encoding_key, Some(&kid), &claims_with(serde_json::json!({ "cnf": { "jkt": "abc" } })));
-            let err = authenticator.authenticate(&token).await.unwrap_err();
+            let err = authenticator.authenticate(&token, TokenScheme::Bearer).await.unwrap_err();
             assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::SenderConstrained)));
         }
         let text = logs.text();
@@ -1329,7 +1467,7 @@ mod tests {
         let (encoding_key, jwk, kid) = es256_keypair();
         let token = sign(&encoding_key, Some(&kid), claims);
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_with_markers(ISSUER, &[ZITADEL_PROJECT_ID], markers)], 60, 16_384);
-        authenticator.authenticate(&token).await
+        authenticator.authenticate(&token, TokenScheme::Bearer).await
     }
 
     fn assert_not_an_access_token(result: Result<ValidatedClaims, AuthnError>, name: &str) {
@@ -1451,7 +1589,7 @@ mod tests {
         let claims = merged(zitadel_m1_id_token(), serde_json::json!({ "email": "alice@example.com" }));
         for _ in 0..3 {
             let token = sign(&encoding_key, Some(&kid), &claims);
-            assert_not_an_access_token(authenticator.authenticate(&token).await, "M1 ID token");
+            assert_not_an_access_token(authenticator.authenticate(&token, TokenScheme::Bearer).await, "M1 ID token");
         }
         let text = logs.text();
         let lines: Vec<&str> = text.lines().filter(|line| line.contains(NOT_ACCESS_TOKEN_REFUSAL)).collect();
@@ -1495,7 +1633,7 @@ mod tests {
         let (encoding_key, jwk, kid) = es256_keypair();
         let token = sign_raw_payload(&encoding_key, &kid, payload);
         let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_with_markers(ISSUER, &["aud"], markers)], 60, 16_384);
-        authenticator.authenticate(&token).await
+        authenticator.authenticate(&token, TokenScheme::Bearer).await
     }
 
     /// Authenticates a payload of the usual test fields (`ISSUER`, aud `aud`, one hour) followed
@@ -1578,9 +1716,9 @@ mod tests {
             16_384,
         );
         let first = sign(&encoding_key, Some(&kid), &zitadel_m1_id_token());
-        assert_not_an_access_token(authenticator.authenticate(&first).await, "ID token of the first issuer");
+        assert_not_an_access_token(authenticator.authenticate(&first, TokenScheme::Bearer).await, "ID token of the first issuer");
         let second = sign(&encoding_key, Some(&kid), &merged(zitadel_m1_id_token(), serde_json::json!({ "iss": SECOND_ISSUER })));
-        let validated = authenticator.authenticate(&second).await.expect("the second issuer has no marker claims");
+        let validated = authenticator.authenticate(&second, TokenScheme::Bearer).await.expect("the second issuer has no marker claims");
         assert_eq!(validated.issuer.as_str(), SECOND_ISSUER);
     }
 

@@ -67,6 +67,13 @@ with its own message, rather than letting a bad values file produce broken Kuber
   not `oidc.issuer`, which IAM never matches. It refuses an `extraEnv` name that the chart sets
   itself. See `docs/ops/RUNBOOK-chart.md` § 9.
 
+- **A bad DPoP setting (SMA-700).** `paigasus.validateIamDpop` in `templates/_iam-backend.tpl`
+  refuses `zones.iam.backend.dpop.enabled` that is not a boolean, `enabled: true` with an empty
+  `forwardedBaseUrls`, and an entry that IAM would refuse at boot: not `https` (or `http` on
+  `localhost`, `127.x.x.x` or `[::1]`), or with a query, a fragment or user info. It also refuses a
+  character outside printable ASCII, a space, `"`, `$` and `\`. It checks the entries also while DPoP is
+  off.
+
 - **A bad `httpRoute` block (SMA-694).** `paigasus.validateHttpRoute` in
   `templates/_httproute.tpl` refuses:
   - `httpRoute` that is not a map: `httpRoute must be a map`;
@@ -269,6 +276,33 @@ list into the one issuer entry of `IAM_AUTHN__ISSUERS` in `templates/backend-dep
 `M8 reuse-values-nil-guard`. A sixth row counter checks them. `tests/refusals.sh` holds one row for each refusal and one valid render. See
 `docs/ops/RUNBOOK-chart.md` § 6 for the IdP setup.
 
+## DPoP on the gateway path (`zones.iam.backend.dpop`)
+
+IAM can check a DPoP proof (RFC 9449) that the gateway forwards (SMA-700). The chart renders the
+two values into `IAM_AUTHN__DPOP__ENABLED` and `IAM_AUTHN__DPOP__FORWARDED_BASE_URLS` in
+`templates/backend-deployment.yaml`, only when `enabled` is true.
+
+- **Off (the default).** The chart adds nothing. The render is byte-identical to a chart without
+  the value. Under `helm upgrade --reuse-values` from an older release, the key is absent, and DPoP
+  stays off.
+- **On.** `forwardedBaseUrls` lists the public URLs at which clients reach the gateway, each with
+  any path prefix that a proxy removes. Each URL is quoted with `%q` in the figment inline form.
+  One YAML comment renders above the two entries.
+- **Needs an IAM image that has the proof check.** The `0.2.1` image does not have it. With that image,
+  the two variables have no effect. Use the IAM image of the first release after SMA-700. The release
+  pull request moves the Cargo version and the chart tag together.
+- **The gateway is not deployed by the chart.** Set `GATEWAY_DPOP__ENABLED=true` on the gateway
+  after IAM runs with DPoP on.
+- **One IAM replica.** The replay store is in memory. The IAM Deployment is pinned to one replica;
+  the pin comment in `templates/backend-deployment.yaml` names this reason too.
+- A change of the value restarts the IAM pod and no console pod.
+
+`tests/env.sh` holds the rows `D1 default`, `D2 on`, `D3 reuse-values-no-key`, `D4 off-with-urls`
+and `D5 restart-scope`, with a row counter. Row `B6 reserved` turns DPoP on, so the
+reserved env list includes the two names. `tests/refusals.sh` holds one row for each refusal and
+four valid renders. `tests/golden/iam-dpop.yaml` pins the projection. See
+`docs/ops/RUNBOOK-chart.md` § 6.
+
 ## The console authorization request (`oidc.scopes`, `oidc.authorizationAudience`)
 
 Two values change what both consoles request from the IdP (SMA-692). Both values are empty by
@@ -335,8 +369,9 @@ the local Helm binary's default Kubernetes version. They are pinned to **Helm v3
 (`docs/superpowers/specs/2026-09-19-sma-513-measurements.md`, M2) — a Helm upgrade may change
 unrelated rendering details (indentation, key order) and would need a deliberate re-baseline, not
 a silent regeneration.
+`tests/golden/iam-dpop.yaml` pins the DPoP projection of SMA-700 (DPoP on with two URLs).
 
-`tests/render.sh --update` re-baselines all three files from the current chart. This is a deliberate
+`tests/render.sh --update` re-baselines all four files from the current chart. This is a deliberate
 act, done by a human reviewing the resulting diff, never a mechanical step to clear a red. A
 golden-file change is the reviewable artifact of a chart change: read the diff before committing
 it.

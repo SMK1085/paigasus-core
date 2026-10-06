@@ -20,6 +20,12 @@ metadata:
 {{- end }}
 spec:
 {{- if eq $id "iam" }}
+{{- /*
+  SMA-700 (D3, R2): one more reason for this pin. With zones.iam.backend.dpop on, the DPoP replay
+  store is in memory, so a second replica would accept one proof once on each, and an IsAuthorized
+  follow-up could reach another pod than its Introspect. A template comment, so the golden files
+  do not change.
+*/}}
   replicas: 1
   strategy:
     type: RollingUpdate
@@ -148,6 +154,14 @@ spec:
             # platform_admin at Root to each (issuer, subject) after its first login.
             - name: IAM_AUTHZ__BOOTSTRAP_ADMINS
               value: {{ . | quote }}
+{{- end }}
+{{- if include "paigasus.iamDpopEnabled" $root }}
+            # zones.iam.backend.dpop (SMA-700): authn.dpop. IAM checks the DPoP proof that the
+            # gateway forwards, against these public gateway URLs.
+            - name: IAM_AUTHN__DPOP__ENABLED
+              value: "true"
+            - name: IAM_AUTHN__DPOP__FORWARDED_BASE_URLS
+              value: {{ include "paigasus.iamDpopForwardedBaseUrls" $root | quote }}
 {{- end }}
 {{- with dig "extraEnv" list $z.backend }}
             # zones.iam.backend.extraEnv (SMA-697), appended after the chart's own entries.

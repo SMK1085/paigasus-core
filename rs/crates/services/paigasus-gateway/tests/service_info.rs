@@ -30,7 +30,7 @@ use tonic_types::{ErrorDetails, StatusExt};
 use tower::ServiceExt; // for `oneshot`
 
 use paigasus_gateway::adapters::http::{AppState, router};
-use paigasus_gateway::adapters::iam::{Iam, IamError};
+use paigasus_gateway::adapters::iam::{CallerCredential, DpopContext, Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
 use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
@@ -103,13 +103,13 @@ impl Iam for FakeIam {
         }
     }
 
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         match self.authz {
             AuthzOutcome::Unreachable => panic!("discovery must never call is_authorized_self — it performs no authorization"),
         }
     }
 
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         match self.token {
             TokenOutcome::Active => Ok(IntrospectResponse {
                 principal_prn: CONSOLE_PRINCIPAL.to_owned(),
@@ -159,6 +159,7 @@ fn app_for(fake: FakeIam, stream_enabled: bool) -> Router {
         max_request_bytes: 1_048_576,
         capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: stream_enabled },
         limits: None,
+        dpop_enabled: false,
     };
     router(state)
 }

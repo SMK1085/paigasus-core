@@ -43,6 +43,58 @@ pub fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
     Some(token.to_string())
 }
 
+/// The `DPoP` scheme's token (SMA-700 § 4.8): `Authorization: DPoP <token>`, scheme
+/// ASCII-case-insensitive, token trimmed and not empty. Only `AuthEnforce` reads it, and only for
+/// the `IsAuthorized` follow-up while DPoP is on. `bearer_from_headers` keeps refusing the scheme,
+/// so every other gRPC route and every HTTP route refuse it as before.
+pub fn dpop_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("DPoP") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+/// The `dpop` request header (gRPC metadata) of the follow-up. `Debug` prints no proof.
+pub enum DpopProofHeader {
+    One(String),
+    Missing,
+    /// Two or more entries, a value that is not visible ASCII, or an empty value.
+    Invalid,
+}
+
+impl std::fmt::Debug for DpopProofHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            DpopProofHeader::One(_) => "One(..)",
+            DpopProofHeader::Missing => "Missing",
+            DpopProofHeader::Invalid => "Invalid",
+        })
+    }
+}
+
+/// The `dpop` header: exactly one entry (§ 4.8).
+pub fn dpop_proof_from_headers(headers: &HeaderMap) -> DpopProofHeader {
+    let mut values = headers.get_all("dpop").iter();
+    let Some(first) = values.next() else {
+        return DpopProofHeader::Missing;
+    };
+    if values.next().is_some() {
+        return DpopProofHeader::Invalid;
+    }
+    match first.to_str() {
+        Ok(proof) if !proof.is_empty() => DpopProofHeader::One(proof.to_string()),
+        _ => DpopProofHeader::Invalid,
+    }
+}
+
+/// Marks a request that `AuthEnforce` admitted as the DPoP `IsAuthorized` follow-up (SMA-700
+/// § 4.8). `grpc::authz::is_authorized` then requires a self-query.
+#[derive(Debug, Clone, Copy)]
+pub struct DpopFollowUp;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +123,35 @@ mod tests {
         assert_eq!(bearer_from_headers(&headers(Some("Basic dXNlcjpwdw=="))), None, "non-Bearer scheme");
         assert_eq!(bearer_from_headers(&headers(Some("Bearer "))), None, "empty credential");
         assert_eq!(bearer_from_headers(&headers(Some("Bearer \t "))), None, "whitespace-only credential");
+    }
+
+    fn with_dpop(authorization: Option<&str>, proofs: &[&[u8]]) -> HeaderMap {
+        let mut headers = headers(authorization);
+        for proof in proofs {
+            headers.append("dpop", HeaderValue::from_bytes(proof).unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn dpop_token_needs_the_dpop_scheme_in_any_case() {
+        assert_eq!(dpop_token_from_headers(&headers(Some("DPoP abc"))).as_deref(), Some("abc"));
+        assert_eq!(dpop_token_from_headers(&headers(Some("dpop abc"))).as_deref(), Some("abc"));
+        assert_eq!(dpop_token_from_headers(&headers(Some("Bearer abc"))), None);
+        assert_eq!(dpop_token_from_headers(&headers(Some("DPoP "))), None);
+        assert_eq!(dpop_token_from_headers(&headers(Some("DPoPabc"))), None);
+        assert_eq!(dpop_token_from_headers(&headers(None)), None);
+        // The shared Bearer parser keeps refusing DPoP, so IAM's HTTP routes do too (§ 4.8).
+        assert_eq!(bearer_from_headers(&headers(Some("DPoP abc"))), None);
+    }
+
+    #[test]
+    fn the_proof_header_must_be_exactly_one_visible_ascii_value() {
+        assert!(matches!(dpop_proof_from_headers(&with_dpop(None, &[b"a.b.c"])), DpopProofHeader::One(p) if p == "a.b.c"));
+        assert!(matches!(dpop_proof_from_headers(&with_dpop(None, &[])), DpopProofHeader::Missing));
+        assert!(matches!(dpop_proof_from_headers(&with_dpop(None, &[b"a.b.c", b"d.e.f"])), DpopProofHeader::Invalid));
+        assert!(matches!(dpop_proof_from_headers(&with_dpop(None, &[b"a.\xffb.c"])), DpopProofHeader::Invalid));
+        assert!(matches!(dpop_proof_from_headers(&with_dpop(None, &[b""])), DpopProofHeader::Invalid));
+        assert_eq!(format!("{:?}", DpopProofHeader::One("secret".into())), "One(..)");
     }
 }

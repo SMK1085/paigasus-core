@@ -18,6 +18,8 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `zones.iam.backend.apiKeysSecretVersion` | no | Change it after you rotate the pepper Secret, so the IAM pod restarts |
 | `zones.iam.backend.bootstrapAdmins` | no | A list of `{issuer, subject}`. IAM grants `platform_admin` at Root to each identity after its first login. Default `[]`: no user can do anything (§ 9) |
 | `zones.iam.backend.extraEnv` | no | More env entries (Kubernetes `EnvVar`) for the IAM container, for example `RUST_LOG`. Default `[]` (§ 9) |
+| `zones.iam.backend.dpop.enabled` | no | Default `false`. `true`: IAM checks the DPoP proof that the gateway sends (SMA-700). Turn it on in IAM first. Then set `GATEWAY_DPOP__ENABLED=true` on the gateway (§ 6) |
+| `zones.iam.backend.dpop.forwardedBaseUrls` | when `dpop.enabled` is true | The public URLs at which clients reach the gateway. Add any path prefix that a proxy removes. Use `https`, or `http` on `localhost`, `127.x.x.x` or `[::1]`. No query, fragment or user info (§ 6) |
 | `zones.gateway.backend.url` | when `gateway` is on | The base URL of an existing gateway backend. The chart does not deploy it |
 | `ingress.enabled` | no | Default `true`. `false`: the chart renders no Ingress. Then set `httpRoute.enabled`, or route the traffic yourself (§ 11). It must be a boolean |
 | `ingress.host` | yes, also when `ingress.enabled` is false | The one public host. `PAIGASUS_PUBLIC_ORIGIN` is `https://<host>`. A bare host name: no scheme, no path, no port |
@@ -134,6 +136,7 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | the contents of the CA ConfigMap | nothing, until you change `oidc.caBundle.version` | Node and IAM read the file once, at start |
 | `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). IAM is not available during the restart. |
 | `zones.iam.backend.bootstrapAdmins` or `zones.iam.backend.extraEnv` | the IAM pod, not the consoles | it changes the env in the IAM pod template (`tests/env.sh` rows B7a and B7b). IAM is not available during the restart, as for `oidc.audience` |
+| `zones.iam.backend.dpop` | the IAM pod, not the consoles | it changes the env in the IAM pod template (`tests/env.sh` row D5). IAM is not available during the restart, as for `oidc.audience`. The restart also clears the DPoP replay store |
 | `oidc.acknowledgeClientIdAudience` | nothing | it changes only the IAM Deployment's `metadata` annotation and the NOTES, not a pod template (`tests/env.sh` row W14) |
 | `oidc.idTokenMarkerClaims` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template (`tests/env.sh` row M6). IAM is not available during the restart, as for `oidc.audience` |
 | `oidc.scopes` or `oidc.authorizationAudience` | both consoles, not IAM | it changes the `console-env` ConfigMap and so `checksum/console-env` (`tests/env.sh` rows O5 and O6) |
@@ -236,20 +239,89 @@ of these markers:
 IAM cannot check the binding of such a token. So it does not accept the token as a bearer token.
 
 Keycloak binds an access token when the client sends a `DPoP` header to the token endpoint. The
-client needs no DPoP setting for this. So a client that calls Paigasus must not send a `DPoP`
-header to the token endpoint. A bound login stays bound when the client refreshes the token. A
-client that got a bound token must log in again without a `DPoP` header.
+client needs no DPoP setting for this. A bound login stays bound when the client refreshes the
+token. **With DPoP off (the default),** a client that calls Paigasus must not send a `DPoP` header
+to the token endpoint. A client that got a bound token must log in again without one. **With DPoP
+on (SMA-700, below),** a bound token works on the protected routes of the gateway. The client
+uses the `DPoP` scheme and a proof. The `Bearer` scheme still refuses a bound token. The API of
+IAM never accepts the `DPoP` scheme.
 
-Do not set the Keycloak client attribute `dpop.bound.access.tokens` on a client that calls
-Paigasus. A Keycloak client policy can also require DPoP. Do not use such a policy for this
-client (not measured).
+With DPoP off, do not set the Keycloak client attribute `dpop.bound.access.tokens` on a client
+that calls Paigasus. A Keycloak client policy can also require DPoP. With DPoP off, do not use
+such a policy for this client (not measured).
 
 The console does not send a `DPoP` header. The SDKs do not get tokens. They send the token that
-you give them. If you use an SDK, do not turn on DPoP in your own OIDC library.
+you give them. With DPoP off, do not turn on DPoP in your own OIDC library. With DPoP on, make
+a new proof for each attempt (see "A new proof for each attempt" below).
 
 The IAM log shows the refusal at `info`: "it is bound to a key, and IAM cannot check the
 binding". The line gives the issuer and the marker `cnf` or `typ DPoP`. The same rate limit
 applies as for the refusal of a token that is not an access token.
+
+**DPoP on the gateway path (SMA-700).** IAM and the gateway can accept a DPoP-bound token
+(RFC 9449) on the protected routes of the gateway: `POST /v1/chat/completions` and
+`GET /v1/service-info`. The client sends `Authorization: DPoP <token>` and one `DPoP` header with
+a proof for the request. The gateway sends the proof, the method and the path to IAM. IAM checks
+the proof, then the identity.
+
+To turn it on:
+
+1. Set `zones.iam.backend.dpop.enabled: true` and `zones.iam.backend.dpop.forwardedBaseUrls`. List
+   each public URL at which clients reach the gateway. Add any path prefix that a proxy removes.
+   Example: a client calls `https://api.example.com/llm/v1/chat/completions`. The proxy removes
+   `/llm`. Then the entry is `https://api.example.com/llm`. TLS must end in front of the
+   gateway. A wrong entry makes IAM refuse DPoP requests. It does not make IAM accept a wrong
+   request.
+2. Wait until the IAM pod runs with the new values. Then set `GATEWAY_DPOP__ENABLED=true` on the
+   gateway. With the other order, IAM refuses the DPoP context while it is off.
+
+The chart is stricter than IAM for these URLs. The chart refuses these:
+
+- An `xn--` host.
+- An IPv6 literal, except `[::1]`.
+- A `$`.
+- A port outside 1 to 65535.
+- An IPv4 address with an invalid octet.
+- A host with a numeric or hexadecimal last label.
+
+Use a plain DNS name or a valid IPv4 address.
+
+Rules for clients and operators:
+
+- **The identity must exist.** A DPoP-only client cannot make its own identity, because the API
+  of IAM refuses the `DPoP` scheme. Link the identity (ADR-0024). Or let the user log in to a
+  console once with the same subject.
+- **A new proof for each attempt.** Make the proof in a hook that runs for each attempt. An SDK
+  retry that sends the same headers again is refused as a replay (401 `invalid-dpop-proof`).
+- **The quota.** An entry lives up to 2 × `iat_window_secs` (120 s with the defaults). With the
+  defaults, one key can make about 8 proofs a second, and one user about 16. A client over its
+  quota gets 429 `rate-limited` with `Retry-After`. To change a quota, set its name in
+  `extraEnv`. The chart has no value for these four names:
+
+  - `IAM_AUTHN__DPOP__PER_KEY_QUOTA`
+  - `IAM_AUTHN__DPOP__PER_SUBJECT_QUOTA`
+  - `IAM_AUTHN__DPOP__IAT_WINDOW_SECS`
+  - `IAM_AUTHN__DPOP__REPLAY_CAPACITY`
+- **A full replay store.** When the store holds `replay_capacity` entries, IAM answers DPoP
+  requests with `Unavailable` (gateway 503) until entries expire. The IAM log shows the `warn`
+  line "the DPoP replay store is full" with the entry count. Raise
+  `IAM_AUTHN__DPOP__REPLAY_CAPACITY` in `extraEnv`. The chart sets no IAM memory limit. The
+  default capacity is 200 000 entries. Measured memory at that capacity:
+
+  | Shape of the entries | Bytes per entry | Memory |
+  |---|---|---|
+  | 1000 keys, 500 subjects | 178 | 34 MiB |
+  | A distinct key, 500 subjects | 253 | 48 MiB |
+  | A distinct key and subject for each entry (the worst case) | 328 | 62 MiB |
+
+  Use the worst case (328 bytes for each entry) to size the memory of the IAM pod.
+- **Restarts.** A restart clears the store. A proof that the client used before the restart can
+  be used again until it expires. With the defaults this is up to 120 s after the restart.
+- **The challenge.** With gateway DPoP on, every 401 of the gateway carries one
+  `WWW-Authenticate: DPoP` line. The gateway uses no server nonce.
+- **The log.** IAM logs each refused proof at `info`: "refused a DPoP proof". The line gives the
+  issuer and a defect name. The same rate limit applies as for the other refusal lines. The line
+  never shows the proof, the token or the path.
 
 By default the console requests the scopes `openid profile email offline_access`. Set
 `oidc.scopes` to request a different list. The list must contain `openid`. Keep `offline_access`,
@@ -651,10 +723,11 @@ grant heals at the next login.
 `RUST_LOG`, which IAM reads at start (`paigasus_logging::env_filter`). The chart refuses a name
 that it sets itself: `IAM_HTTP_ADDR`, `IAM_GRPC_ADDR`, `IAM_MIGRATION__LOCK_WAIT_SECS`,
 `IAM_DATABASE_URL`, `IAM_AUTHN__ISSUERS`, `IAM_API_KEYS__PEPPER`,
-`IAM_AUTHN__EXTRA_CA_BUNDLE_PATH` and `IAM_AUTHZ__BOOTSTRAP_ADMINS`. It also refuses a name that
-starts with one of these names and `__`. Set those values through their chart values. The list is
-`paigasus.iamReservedEnv` in `templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it
-equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
+`IAM_AUTHN__EXTRA_CA_BUNDLE_PATH`, `IAM_AUTHZ__BOOTSTRAP_ADMINS`, `IAM_AUTHN__DPOP__ENABLED` and
+`IAM_AUTHN__DPOP__FORWARDED_BASE_URLS`. It also refuses a name that starts with one of these
+names and `__`. Set those values through their chart values. The other `IAM_AUTHN__DPOP__*`
+names stay settable through `extraEnv`. The list is `paigasus.iamReservedEnv` in
+`templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
 `IAM_AUTHZ__ENFORCE_TENANCY`. The chart does not check those values; IAM checks them at boot.
 
 ## 10. Console pods stay NotReady (SMA-705)
