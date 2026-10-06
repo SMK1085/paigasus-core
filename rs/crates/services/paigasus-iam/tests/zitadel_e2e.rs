@@ -92,104 +92,15 @@ async fn zitadel_id_tokens_are_refused_by_the_marker_claims() {
         return;
     };
 
-    // Zitadel's own Postgres, on a network of its own. The suffix keeps parallel runs apart.
-    let suffix = format!("{:016x}", rand::random::<u64>());
-    let network = format!("zitadel-e2e-{suffix}");
-    let pg_host = format!("zitadel-e2e-pg-{suffix}");
-    let zitadel_pg_image = Postgres::default().with_tag("16-alpine").with_network(&network).with_container_name(&pg_host);
-    let Some(zitadel_pg) = support::docker::start_or_skip(zitadel_pg_image, "zitadel_e2e postgres").await else {
+    // Zitadel and its own Postgres (see `start_zitadel`). This test keeps the instance defaults.
+    let Some(zitadel) = start_zitadel(&[]).await else {
         return;
     };
-    // The Postgres module reports ready on its first log line, while the init server (unix
-    // socket only) still runs. Zitadel stops at once when its first connection fails, so wait
-    // for a TCP connection, which only the real server accepts.
-    wait_for_postgres(&zitadel_pg).await;
-
-    // A runtime self-signed cert for Zitadel's TLS listener, copied into the container.
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
-    let cert_pem = cert.cert.pem().into_bytes();
-    let key_pem = cert.signing_key.serialize_pem().into_bytes();
-
-    let image = GenericImage::new(ZITADEL_IMAGE, ZITADEL_TAG)
-        .with_exposed_port(HTTPS_PORT.tcp())
-        .with_network(&network)
-        // The image user cannot write to a directory that `with_copy_to` makes (root owns it),
-        // and Zitadel must write the admin PAT there.
-        .with_user("0")
-        .with_env_var("ZITADEL_MASTERKEY", "MasterkeyNeedsToHave32Characters")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_HOST", &pg_host)
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_PORT", "5432")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_DATABASE", "zitadel")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_USERNAME", "zitadel")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_PASSWORD", "zitadel")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE", "disable")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME", "postgres")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD", "postgres")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE", "disable")
-        // See the module doc: the host of `iss` comes from here, the port from the request.
-        .with_env_var("ZITADEL_EXTERNALDOMAIN", "127.0.0.1")
-        .with_env_var("ZITADEL_EXTERNALPORT", HTTPS_PORT.to_string())
-        .with_env_var("ZITADEL_EXTERNALSECURE", "true")
-        .with_env_var("ZITADEL_TLS_ENABLED", "true")
-        .with_env_var("ZITADEL_TLS_CERTPATH", format!("{STATE_DIR}/tls.crt"))
-        .with_env_var("ZITADEL_TLS_KEYPATH", format!("{STATE_DIR}/tls.key"))
-        .with_env_var("ZITADEL_FIRSTINSTANCE_PATPATH", format!("{STATE_DIR}/admin.pat"))
-        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME", "e2e-admin")
-        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME", "e2e-admin")
-        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE", "2099-01-01T00:00:00Z")
-        // The measurement used Login v1. This keeps the instance on it.
-        .with_env_var("ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED", "false")
-        .with_copy_to(format!("{STATE_DIR}/tls.crt"), cert_pem)
-        .with_copy_to(format!("{STATE_DIR}/tls.key"), key_pem)
-        .with_cmd(["start-from-init", "--masterkeyFromEnv", "--tlsMode", "enabled"])
-        .with_startup_timeout(Duration::from_secs(240));
-
-    let Some(zitadel) = support::docker::start_or_skip(image, "zitadel_e2e").await else {
-        return;
-    };
-    let https_port = support::docker::mapped_port(&zitadel, HTTPS_PORT, "zitadel https").await;
-    let issuer = format!("https://127.0.0.1:{https_port}");
-
-    // One client for every call of the test. It never follows a redirect, because the login
-    // flow must read each `Location` header, and the last one points at a server that does not
-    // exist.
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20))
-        .build()
-        .expect("reqwest client");
-
-    // Poll discovery until Zitadel serves, then pin the issuer form (see the module doc).
-    let discovery_url = format!("{issuer}/.well-known/openid-configuration");
-    let mut discovery = None;
-    for _ in 0..READINESS_ATTEMPTS {
-        if let Ok(response) = http.get(&discovery_url).send().await
-            && response.status().is_success()
-            && let Ok(body) = response.json::<Value>().await
-        {
-            discovery = Some(body);
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let Some(discovery) = discovery else {
-        panic!("zitadel discovery never became ready at {discovery_url}\n{}", dump_logs(&zitadel).await);
-    };
-    assert_eq!(discovery["issuer"], issuer, "zitadel must derive the issuer from the request Host: {discovery}");
-
-    let pat = read_admin_pat(&zitadel).await;
-    let zitadel_api = ZitadelApi {
-        http: &http,
-        base: &issuer,
-        pat: &pat,
-    };
-    // MEASURED: discovery answers before the management API does. The REST gateway first
-    // returns 503 `dial tcp [::1]:8080: connect: connection refused` for a few seconds.
-    if !zitadel_api.wait_until_ready().await {
-        panic!("the zitadel management API never became ready\n{}", dump_logs(&zitadel).await);
-    }
-    let setup = setup_zitadel(&zitadel_api).await;
+    // Owned copies, so that the rest of this test is unchanged. A `reqwest::Client` clone shares
+    // the same connection pool.
+    let http = zitadel.http.clone();
+    let issuer = zitadel.issuer.clone();
+    let setup = setup_zitadel(&zitadel.api()).await;
 
     // The human flow: code + PKCE through Login v1, then the code exchange with HTTP Basic.
     let human = human_login(&http, &issuer, &setup).await;
@@ -381,6 +292,136 @@ impl ZitadelApi<'_> {
         assert!(status.is_success(), "zitadel {method} {path} failed ({status}): {text}");
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("zitadel {method} {path}: response is not JSON ({e}): {text}"))
     }
+}
+
+/// A running Zitadel with its own Postgres, and the client, issuer and admin PAT to call it.
+/// The containers stop when this value is dropped, so a test keeps it alive to its end.
+struct ZitadelInstance {
+    /// Never read. It is here only so that the Postgres container lives as long as Zitadel.
+    _zitadel_pg: ContainerAsync<Postgres>,
+    zitadel: ContainerAsync<GenericImage>,
+    /// One client for every call of a test. It never follows a redirect, because the login
+    /// flow must read each `Location` header, and the last one points at a server that does not
+    /// exist.
+    http: reqwest::Client,
+    /// `https://127.0.0.1:{mapped port}` (see the module doc).
+    issuer: String,
+    /// The first-instance admin PAT.
+    pat: String,
+}
+
+impl ZitadelInstance {
+    /// The management API of this instance.
+    fn api(&self) -> ZitadelApi<'_> {
+        ZitadelApi {
+            http: &self.http,
+            base: &self.issuer,
+            pat: &self.pat,
+        }
+    }
+}
+
+/// Starts Zitadel's own Postgres and Zitadel on a Docker network of their own, waits until
+/// discovery and the management API answer, and reads the admin PAT. `extra_env` adds env vars
+/// to the Zitadel container after the fixed ones (an empty slice keeps the defaults). Returns
+/// `None` when `start_or_skip` skips (no Docker, per `tests/support/docker.rs`).
+async fn start_zitadel(extra_env: &[(&str, &str)]) -> Option<ZitadelInstance> {
+    // Zitadel's own Postgres, on a network of its own. The suffix keeps parallel runs apart.
+    let suffix = format!("{:016x}", rand::random::<u64>());
+    let network = format!("zitadel-e2e-{suffix}");
+    let pg_host = format!("zitadel-e2e-pg-{suffix}");
+    let zitadel_pg_image = Postgres::default().with_tag("16-alpine").with_network(&network).with_container_name(&pg_host);
+    let zitadel_pg = support::docker::start_or_skip(zitadel_pg_image, "zitadel_e2e postgres").await?;
+    // The Postgres module reports ready on its first log line, while the init server (unix
+    // socket only) still runs. Zitadel stops at once when its first connection fails, so wait
+    // for a TCP connection, which only the real server accepts.
+    wait_for_postgres(&zitadel_pg).await;
+
+    // A runtime self-signed cert for Zitadel's TLS listener, copied into the container.
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
+    let cert_pem = cert.cert.pem().into_bytes();
+    let key_pem = cert.signing_key.serialize_pem().into_bytes();
+
+    let mut image = GenericImage::new(ZITADEL_IMAGE, ZITADEL_TAG)
+        .with_exposed_port(HTTPS_PORT.tcp())
+        .with_network(&network)
+        // The image user cannot write to a directory that `with_copy_to` makes (root owns it),
+        // and Zitadel must write the admin PAT there.
+        .with_user("0")
+        .with_env_var("ZITADEL_MASTERKEY", "MasterkeyNeedsToHave32Characters")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_HOST", &pg_host)
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_PORT", "5432")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_DATABASE", "zitadel")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_USERNAME", "zitadel")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_PASSWORD", "zitadel")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE", "disable")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME", "postgres")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD", "postgres")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE", "disable")
+        // See the module doc: the host of `iss` comes from here, the port from the request.
+        .with_env_var("ZITADEL_EXTERNALDOMAIN", "127.0.0.1")
+        .with_env_var("ZITADEL_EXTERNALPORT", HTTPS_PORT.to_string())
+        .with_env_var("ZITADEL_EXTERNALSECURE", "true")
+        .with_env_var("ZITADEL_TLS_ENABLED", "true")
+        .with_env_var("ZITADEL_TLS_CERTPATH", format!("{STATE_DIR}/tls.crt"))
+        .with_env_var("ZITADEL_TLS_KEYPATH", format!("{STATE_DIR}/tls.key"))
+        .with_env_var("ZITADEL_FIRSTINSTANCE_PATPATH", format!("{STATE_DIR}/admin.pat"))
+        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME", "e2e-admin")
+        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME", "e2e-admin")
+        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE", "2099-01-01T00:00:00Z")
+        // The measurement used Login v1. This keeps the instance on it.
+        .with_env_var("ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED", "false")
+        .with_copy_to(format!("{STATE_DIR}/tls.crt"), cert_pem)
+        .with_copy_to(format!("{STATE_DIR}/tls.key"), key_pem)
+        .with_cmd(["start-from-init", "--masterkeyFromEnv", "--tlsMode", "enabled"])
+        .with_startup_timeout(Duration::from_secs(240));
+    for (name, value) in extra_env {
+        image = image.with_env_var(*name, *value);
+    }
+
+    let zitadel = support::docker::start_or_skip(image, "zitadel_e2e").await?;
+    let https_port = support::docker::mapped_port(&zitadel, HTTPS_PORT, "zitadel https").await;
+    let issuer = format!("https://127.0.0.1:{https_port}");
+
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(20))
+        .build()
+        .expect("reqwest client");
+
+    // Poll discovery until Zitadel serves, then pin the issuer form (see the module doc).
+    let discovery_url = format!("{issuer}/.well-known/openid-configuration");
+    let mut discovery = None;
+    for _ in 0..READINESS_ATTEMPTS {
+        if let Ok(response) = http.get(&discovery_url).send().await
+            && response.status().is_success()
+            && let Ok(body) = response.json::<Value>().await
+        {
+            discovery = Some(body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let Some(discovery) = discovery else {
+        panic!("zitadel discovery never became ready at {discovery_url}\n{}", dump_logs(&zitadel).await);
+    };
+    assert_eq!(discovery["issuer"], issuer, "zitadel must derive the issuer from the request Host: {discovery}");
+
+    let pat = read_admin_pat(&zitadel).await;
+    let instance = ZitadelInstance {
+        _zitadel_pg: zitadel_pg,
+        zitadel,
+        http,
+        issuer,
+        pat,
+    };
+    // MEASURED: discovery answers before the management API does. The REST gateway first
+    // returns 503 `dial tcp [::1]:8080: connect: connection refused` for a few seconds.
+    if !instance.api().wait_until_ready().await {
+        panic!("the zitadel management API never became ready\n{}", dump_logs(&instance.zitadel).await);
+    }
+    Some(instance)
 }
 
 /// Creates, through the management API: project P; the confidential web app A of the paigasus
