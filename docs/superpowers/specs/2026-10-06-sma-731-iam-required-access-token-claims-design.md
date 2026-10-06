@@ -1,8 +1,8 @@
 # SMA-731: IAM refuses a token that does not carry a configured claim
 
 - Linear: SMA-731 (follows SMA-703, PR 361).
-- Status: design approved by Sven in chat (2026-10-06). Spec challenge folded in (§ 11). Written
-  spec awaits review.
+- Status: approved by Sven (2026-10-06), after the spec challenge in § 11. Q-a to Q-c take their
+  defaults.
 - Path: architectural (a change to what IAM accepts from the IdP, and a new chart value).
 - Template: `2026-10-02-sma-703-zitadel-id-token-marker-claims-design.md`. This spec copies its
   shape. Where this spec does not say otherwise, the SMA-703 decision applies.
