@@ -518,6 +518,8 @@ ID token:
 
 Result: the refresh response returns an ID token and an access token. `client_id` is present on the refreshed access token and equals A's client id. The refreshed ID token keeps the original `nonce`, `auth_time`, `sid` and `iat`, with a new `at_hash`. The refreshed access token also keeps the original `iat`/`exp`/`nbf`; only `jti` changes.
 
+SMA-732 (2026-10-06): the equal `iat`/`exp` above is not general. A refresh 7 s and 13 s after the login gives a new `exp` = refresh time + lifetime (`2026-10-05-sma-732-zitadel-refresh-exp-measurements.md`).
+
 ## M5. Client credentials, machine user, JWT access token
 
 First attempt with scope `openid` returned HTTP 400 `Errors.User.Machine.Secret.NotExisting` (the secret was used less than a second after it was created; the next two calls succeeded). `measure.py` now retries. The `openid` call was repeated separately with a fresh secret (`m5.py`) and gave the block below. This block is ABBREVIATED by hand: the times and some values are replaced with placeholders, and the ID token header shows no `kid`. Use M5b and M5c for the full machine-flow token shapes.
