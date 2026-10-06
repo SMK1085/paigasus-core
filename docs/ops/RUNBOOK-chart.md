@@ -569,7 +569,10 @@ Keycloak item is measured.
   - A change of the value restarts IAM (§ 5).
   - After each Zitadel upgrade, decode the tokens again. If a new version puts `azp` or `at_hash`
     into the access token, IAM refuses every token, and the log line names the claim. If a new
-    version removes both claims from the ID token, the protection stops, and nothing warns.
+    version removes both claims from the ID token, `oidc.accessTokenRequiredClaims: ["jti"]` still
+    refuses the ID token while the ID token has no `jti`. The protection stops, and nothing warns,
+    only when the ID token has neither `at_hash` nor `azp` and also has `jti`. Without
+    `oidc.accessTokenRequiredClaims`, the protection stops when the two marker claims are gone.
 
 **Keycloak example 1: the kind job's setup. This setup shows the warning.** Keycloak does not put
 the client id into the access token's `aud` by default. The kind job adds an audience mapper to
