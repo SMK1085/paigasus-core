@@ -19,6 +19,14 @@
 //! - A control: with an EMPTY list, IAM does not refuse any of the three ID tokens as
 //!   `NotAnAccessToken`. So the setting, not another check, does the refusal.
 //!
+//! SMA-731 adds, for the same tokens:
+//! - `jti` is on every access token and on no ID token (SMA-731 spec § 3, F1).
+//! - IAM with `access_token_required_claims = ["jti"]` and an EMPTY marker list refuses each ID
+//!   token as `NotAnAccessToken`, so the required claim refuses them by itself. The access tokens
+//!   still pass.
+//! - IAM with the full runbook recipe (both settings) refuses each ID token and passes each
+//!   access token.
+//!
 //! Docker gating is the single policy of `tests/support/docker.rs`'s `start_or_skip` (SMA-538).
 //! The SMA-703 test starts three containers: IAM's own Postgres, a second Postgres for Zitadel,
 //! and Zitadel. The SMA-732 test starts the two Zitadel containers only. The two Zitadel
@@ -85,6 +93,8 @@ const USER_EMAIL: &str = "zitadel-e2e@example.com";
 const USER_PASSWORD: &str = "E2e-Passw0rd!x";
 /// The IAM setting under test (spec D1, the runbook recipe).
 const MARKER_CLAIMS: [&str; 2] = ["at_hash", "azp"];
+/// The SMA-731 setting under test (SMA-731 spec D6, the runbook recipe).
+const REQUIRED_CLAIMS: [&str; 1] = ["jti"];
 /// The v1 Action of the reference install. It adds `email` to the access token of a human user.
 /// This script must stay equal to the script in the Zitadel bullet of
 /// `docs/ops/RUNBOOK-chart.md` section 6. Change both files together.
@@ -180,6 +190,19 @@ async fn zitadel_id_tokens_are_refused_by_the_marker_claims() {
         }
         assert!(aud_contains(&claims, &setup.project_id), "{label} aud must contain the project id: {claims}");
     }
+    // SMA-731 F1 (T18): `jti` on every access token, on no ID token.
+    for (label, token) in id_tokens {
+        let claims = jwt_payload(token);
+        for name in REQUIRED_CLAIMS {
+            assert!(!has_claim(&claims, name), "{label} must NOT carry {name} (SMA-731 F1): {claims}");
+        }
+    }
+    for (label, token) in access_tokens {
+        let claims = jwt_payload(token);
+        for name in REQUIRED_CLAIMS {
+            assert!(has_claim(&claims, name), "{label} must carry {name} (SMA-731 F1): {claims}");
+        }
+    }
     // The Action works: the human access tokens carry the user's email. The machine user is not
     // human, so the Action adds nothing to its token.
     assert_eq!(jwt_payload(&human_access)["email"], USER_EMAIL, "the addEmailClaim Action must add email to the access token");
@@ -273,6 +296,63 @@ async fn zitadel_id_tokens_are_refused_by_the_marker_claims() {
     assert!(
         matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)),
         "with an empty marker list, the machine ID token must fail JIT only for the missing email, got {err:?}"
+    );
+
+    // --- SMA-731: IAM with the required claim ---
+
+    // T19: `["jti"]` with an EMPTY marker list. Each ID token is refused by step 6c alone, and
+    // the wire answer is the same 401 `invalid-token` (Review Focus 5). The human and the
+    // refreshed access token resolve to the human principal. The machine access token passes the
+    // authenticator and fails JIT only for the missing email (SMA-703 § 12).
+    let required_cfg = zitadel_config_with_rules(&issuer, &setup.project_id, &[], &REQUIRED_CLAIMS);
+    let required_state = AppState::new(state.db.clone(), &required_cfg).await.expect("AppState::new (required claims)");
+    let required_app = router(required_state.clone());
+    for (label, token) in id_tokens {
+        let err = required_state.authn.resolve(token, Provisioning::Disabled).await.expect_err("an ID token must not authenticate");
+        assert!(
+            matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)),
+            "with the required claim only, the {label} must be refused as NotAnAccessToken, got {err:?}"
+        );
+        let (status, body) = send(&required_app, "POST", "/v1/organizations", Some(json!({ "slug": "nojti", "name": "No jti" })), Some(token)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+        assert_eq!(body["error"]["code"], "invalid-token", "{label}: {body}");
+    }
+    for (label, token) in [("human access token", &human_access), ("refreshed access token", &refreshed_access)] {
+        let principal = required_state
+            .authn
+            .resolve(token, Provisioning::Disabled)
+            .await
+            .unwrap_or_else(|err| panic!("with the required claim, IAM must accept the {label}, got {err:?}"));
+        assert_eq!(principal.principal_id.canonical(), principal_prn, "the {label} must resolve to the human principal");
+    }
+    let err = required_state.authn.resolve(&machine_access, Provisioning::Enabled).await.expect_err("JIT needs an email");
+    assert!(
+        matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)),
+        "with the required claim, the machine access token must fail JIT only for the missing email, got {err:?}"
+    );
+
+    // T19a: the full runbook recipe, the marker claims and the required claim together.
+    let recipe_cfg = zitadel_config_with_rules(&issuer, &setup.project_id, &MARKER_CLAIMS, &REQUIRED_CLAIMS);
+    let recipe_state = AppState::new(state.db.clone(), &recipe_cfg).await.expect("AppState::new (full recipe)");
+    for (label, token) in id_tokens {
+        let err = recipe_state.authn.resolve(token, Provisioning::Disabled).await.expect_err("an ID token must not authenticate");
+        assert!(
+            matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)),
+            "with the full recipe, the {label} must be refused as NotAnAccessToken, got {err:?}"
+        );
+    }
+    for (label, token) in [("human access token", &human_access), ("refreshed access token", &refreshed_access)] {
+        let principal = recipe_state
+            .authn
+            .resolve(token, Provisioning::Disabled)
+            .await
+            .unwrap_or_else(|err| panic!("with the full recipe, IAM must accept the {label}, got {err:?}"));
+        assert_eq!(principal.principal_id.canonical(), principal_prn, "the {label} must resolve to the human principal");
+    }
+    let err = recipe_state.authn.resolve(&machine_access, Provisioning::Enabled).await.expect_err("JIT needs an email");
+    assert!(
+        matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)),
+        "with the full recipe, the machine access token must fail JIT only for the missing email, got {err:?}"
     );
 }
 
@@ -1039,6 +1119,11 @@ async fn wait_for_postgres(pg: &ContainerAsync<Postgres>) {
 /// on, `accept_invalid_tls` for the self-signed cert, and the marker claims under test. Standard
 /// test defaults otherwise, as in keycloak_e2e.
 fn zitadel_config(issuer: &str, project_id: &str, markers: &[&str]) -> IamConfig {
+    zitadel_config_with_rules(issuer, project_id, markers, &[])
+}
+
+/// `zitadel_config` with the required claims `required` too (SMA-731 T19, T19a).
+fn zitadel_config_with_rules(issuer: &str, project_id: &str, markers: &[&str], required: &[&str]) -> IamConfig {
     IamConfig {
         http_addr: "127.0.0.1:0".parse().unwrap(),
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
@@ -1065,7 +1150,7 @@ fn zitadel_config(issuer: &str, project_id: &str, markers: &[&str]) -> IamConfig
                 audiences: vec![project_id.to_string()],
                 jit_provisioning: true,
                 id_token_marker_claims: markers.iter().map(|name| (*name).to_string()).collect(),
-                access_token_required_claims: Vec::new(),
+                access_token_required_claims: required.iter().map(|name| (*name).to_string()).collect(),
             }],
         },
         authz: AuthzConfig::default(),
