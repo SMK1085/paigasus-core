@@ -206,8 +206,11 @@ pub enum TokenDefect {
     IssuerNotConfigured,
     AudienceMismatch,
     Oversized,
-    /// The payload `typ` claim marks the token as a Keycloak ID token or back-channel logout
-    /// token, not an access token (SMA-686).
+    /// The verified token is not an access token, or it does not carry a claim that the issuer
+    /// configuration requires of an access token. Three checks give this defect: a payload `typ`
+    /// of a Keycloak ID token or logout token, or a back-channel logout marker (SMA-686); a claim
+    /// named in the issuer's `id_token_marker_claims` (SMA-703); a missing claim named in the
+    /// issuer's `access_token_required_claims` (SMA-731).
     NotAnAccessToken,
     /// The token is bound to a key: it has a `cnf` claim (RFC 7800), or a Keycloak payload
     /// `typ` of `DPoP`. IAM cannot check the binding, so it does not accept the token as a
