@@ -47,7 +47,7 @@ EXPR_SPAN = re.compile(r"\$\{\{((?:'[^']*'|\"[^\"]*\"|(?!\}\}).)*+)\}\}", re.S)
 STRING_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
 SECRETS_CTX = re.compile(r"(?<![\w.-])secrets(?![\w-])", re.IGNORECASE)
 NEEDS_CTX = re.compile(r"(?<![\w.-])needs(?![\w-])", re.IGNORECASE)
-STATUS_FN = re.compile(r"(?<![\w.-])(always|failure|cancelled)\s*\(", re.IGNORECASE)
+STATUS_FN = re.compile(r"(?<![\w.-])(always|success|failure|cancelled)\s*\(", re.IGNORECASE)
 SHA_PIN = re.compile(r"[0-9a-f]{40}")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
 IMAGE_ASSIGN = re.compile(r"\bLOCKSTEP_IMAGE(?:[:+])?=")
@@ -575,7 +575,7 @@ def step_violations(job: str, steps: list[dict]) -> list[str]:
         if step.get("continue-on-error", False) not in (False, "false"):
             out.append(f"P14 {where}: continue-on-error must be absent or false")
         if STATUS_FN.search(str(step.get("if", ""))):
-            out.append(f"P15 {where}: an if: with always(), failure() or cancelled() runs after a refusal")
+            out.append(f"P15 {where}: an if: with a status function (always(), success(), failure() or cancelled()) can run after a refusal")
     return out
 
 
@@ -1014,6 +1014,9 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("top-level write-all", (("permissions:\n  contents: read\nenv:", "permissions: write-all\nenv:"),), "P10"),
     ("propose without the release-pr environment", (("    environment: release-pr\n", ""),), "P11"),
     ("if: always() on the push step", (("      - id: push\n        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'\n", "      - id: push\n        if: always()\n"),), "P15"),
+    ("if: success() || true on the token step", (("      - id: token\n", "      - id: token\n        if: success() || true\n"),), "P15"),
+    ("if: ${{ !success() }} on the token step", (("      - id: token\n", "      - id: token\n        if: ${{ !success() }}\n"),), "P15"),
+    ("if: SUCCESS() || true on the push step", (("      - id: push\n        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'\n", "      - id: push\n        if: SUCCESS() || true\n"),), "P15"),
     ("shell: python on a propose step", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        shell: python\n"),), "P13"),
     ("persist-credentials: true on a checkout", (("          persist-credentials: false\n      - id: download", "          persist-credentials: true\n      - id: download"),), "P17"),
     ("the token asks for workflows: write", (("          permission-pull-requests: write\n", "          permission-pull-requests: write\n          permission-workflows: write\n"),), "P16"),

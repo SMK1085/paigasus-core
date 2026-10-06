@@ -121,7 +121,7 @@ on one lock. The real run of the gate runs it on `HEAD:rs/Cargo.lock`. So a PR t
 | P12 | No job declares `container`, `services`, `uses`, `secrets` or `defaults`. |
 | P13 | No step sets a shell other than `bash`, and the workflow has no `defaults:`. |
 | P14 | No step and no job sets `continue-on-error` to anything but false. |
-| P15 | No step `if:` calls `always()`, `failure()` or `cancelled()`. |
+| P15 | No step `if:` calls a status function: `always()`, `success()`, `failure()` or `cancelled()`. GitHub adds the default `success()` check only to an `if:` that has no status function, so an explicit one can run a step after a refusal. |
 | P16 | The token step uses `actions/create-github-app-token` with exactly `client-id`, `private-key`, `permission-contents: write` and `permission-pull-requests: write`. |
 | P17 | Every checkout sets `persist-credentials: false`. |
 | P18 | The `artifact`, `status` and `same` commands of `lockstep_check.py` are whole commands, in every job: the last command of the step, with no `\|\|`, `;`, pipe, `&&` guard, `if` or later `exit` joined to them. A refusal then fails the step. The `lock` command is not one of them: its step keeps `\|\| rc=$?`. |
@@ -223,8 +223,8 @@ clearer message. P14 and P13 on these two steps also only repeat it.
 - **`propose`** holds the App key for the whole job (environment `release-pr`, main-only branch
   policy). The control is that no step executes artifact content: no toolchain, no cargo, no pnpm,
   no moon, and no script from the artifact. A refusal fails the `verify` step, so the token step
-  never runs. This depends on P26, which pins the steps up to the last checker, and on the P25
-  workflow `env:` allow-list.
+  never runs. This depends on P26, which pins the steps up to the last checker, on P15, which refuses a status
+  function in a step `if:`, and on the P25 workflow `env:` allow-list.
 - **The output rule.** `propose` reads `needs.build.outputs.changed` only in `if:` values. Every
   value that reaches a command (the versions, the PR title and body) comes from `lockstep_check.py`
   on the downloaded bytes, through a file or `env:`.
