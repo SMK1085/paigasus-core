@@ -80,7 +80,7 @@ The mutation runs use nextest `retries = 1`, so each failing log holds two attem
   A8: outcome "refuses after exp" (spec D5): refresh 2 (T2) failed (400 Bad Request): {"error":"invalid_request","error_description":"Errors.OIDCSession.RefreshTokenInvalid"}
   ```
 
-  The "refuses after exp" label in this message comes from the mutation: R0 was already used, so the refusal is the K3 rotation check, not the `exp` check.
+  The "refuses after exp" label in this message comes from the mutation: R0 was already used, so the refusal is the K3 rotation check, not the `exp` check. Evidence: the unmutated runs refreshed with R1 at the same point in time and succeeded, so the refusal comes from the reuse of R0 (inference).
 - After the last restore, the whole binary passed: `Summary [  26.346s] 2 tests run: 2 passed, 0 skipped` (`after-mutations.log`).
 
 ## Limits
@@ -89,12 +89,12 @@ The mutation runs use nextest `retries = 1`, so each failing log holds two attem
 - The production default of `L` is 12 h. A deployment can use Login v2 or opaque access tokens.
   The code path for these is the same (K1), but that is code reading, not a measurement.
 - The waits use host time; every check uses Zitadel token times only (spec § 4.2).
-- `--no-capture` runs the two tests one at a time. The parallel run of Task 4 is the CI case.
+- `--no-capture` runs the two tests one at a time. A parallel run of this binary also passed: `Summary [  18.921s] 2 tests run: 2 passed, 0 skipped`. It showed no FLAKY. In CI, up to 8 container tests of paigasus-iam run at one time, and `moon ci` runs other tasks too, so the load is higher.
 
 ## Observation: `paigasus-auth` (K5)
 
 `ts/packages/paigasus-auth` never decodes the access token. It sets the session expiry to
 `Date.now() + expires_in` (`src/core/single-flight.ts:325-331`, `src/http/routes.ts:380`). This run
-shows that a refresh gives a new `expires_in` near `L`, so a refresh extends the session as
-expected. No test of the package covers a refresh whose `expires_in` does not increase. The F7
+measured `expires_in=9` on the refreshed tokens. So a refresh extends the session as
+expected (code reading, spec K5). No test of the package covers a refresh whose `expires_in` does not increase (code reading, spec K5). The F7
 floor raises a TTL below 31 s to 31 s. This is an observation only (spec D4); no change is made.

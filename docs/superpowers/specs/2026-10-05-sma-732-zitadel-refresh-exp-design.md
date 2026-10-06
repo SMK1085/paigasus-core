@@ -1,7 +1,7 @@
 # SMA-732: does a Zitadel refresh extend the access token `exp`? (design)
 
 - Linear: SMA-732. Related: SMA-703 (spec § 9 Q3).
-- Status: draft, revised after the spec challenge, 2026-10-05.
+- Status: approved at Gate 1, 2026-10-05 (revised after the spec challenge).
 - Zitadel version under test: `ghcr.io/zitadel/zitadel:v4.15.3` (the pin of `zitadel_e2e.rs`).
 
 ## 1. Problem
@@ -68,7 +68,7 @@ measurement. This issue exists to replace them with a measurement.
 - D5. The outcome is defined by value:
   - "extends": A3 and A4 pass.
   - "keeps": `exp1 == exp0` or `exp2 == exp0`.
-  - "refuses after exp": the step-6 refresh returns an error.
+  - "refuses after exp": the step-5 refresh returns an error.
 
   Only "keeps" and "refuses after exp" stop the work. The coordinator then asks Sven for the fix
   scope. No fix is made without that decision. Any other red assertion is a defect in the test.

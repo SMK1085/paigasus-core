@@ -359,8 +359,8 @@ Sven approved the spec on 2026-10-02 with no answer to Q1-Q3. So Q1 and Q2 take 
   - Answer (SMA-732, 2026-10-06): MEASURED, Zitadel v4.15.3. A refresh gives an access token with
     `exp` = refresh time + lifetime, before and after the first `exp`. M4 probably showed equal
     `iat` and `exp` because its refresh came about 10 ms after the login (an inference from the
-    `jti` values, K4). This run measured an immediate refresh (Tq) 7 ms and 6 ms after the login,
-    and it showed the same equal `iat` and `exp`. Limits: Login v1, a confidential
+    `jti` values, SMA-732 spec K4). This run measured an immediate refresh (Tq) 7 ms and 6 ms after the login,
+    and it showed the same `iat` and `exp` as T0. Limits: Login v1, a confidential
     web app, JWT access tokens, a lifetime of 10 s. The 12 h default, Login v2 and opaque tokens
     use the same code path, but that is code reading, not a measurement. See
     `2026-10-05-sma-732-zitadel-refresh-exp-measurements.md`.

@@ -40,7 +40,7 @@
 //! access token lifetime `L` to 10 s with an env var, and the SMA-703 test must keep the defaults
 //! (spec D2, D6). Its panic message names the outcome of spec D5: "keeps" when `exp` did not move,
 //! "refuses after exp" when the refresh after the first `exp` fails. Both outcomes stop the work
-//! until Sven decides the fix scope. Any other red check is a defect in the test.
+//! until a maintainer decides the fix scope. Any other red check needs a check of the printed values first.
 
 mod support;
 
@@ -101,7 +101,7 @@ const ADD_EMAIL_CLAIM_SCRIPT: &str = r#"function addEmailClaim(ctx, api) {
 /// (`cmd/defaults.yaml:1302` of Zitadel v4.15.3, spec D6).
 const ACCESS_TOKEN_LIFETIME_ENV: &str = "ZITADEL_DEFAULTINSTANCE_OIDCSETTINGS_ACCESSTOKENLIFETIME";
 /// SMA-732: the access token lifetime `L` of the refresh test's own instance, in seconds (spec D3).
-/// If `iat1 < exp0` reds under load, the fix is a larger `L`, and only after Sven agrees.
+/// If `iat1 < exp0` reds under load, the fix is a larger `L`, and only after a maintainer decision.
 const REFRESH_LIFETIME_SECS: i64 = 10;
 /// SMA-732: the tolerance of A1 and A2 for the gap between two clock reads in one request (K1, K2).
 const CLOCK_READ_TOLERANCE_SECS: i64 = 2;
@@ -381,7 +381,7 @@ async fn zitadel_refresh_extends_access_token_exp() {
     let late_refresh_1 = later1.iat >= t0.exp;
     if late_refresh_1 {
         failures.push(format!(
-            "A5: iat1 {} >= exp0 {}: refresh 1 came after the first exp. Spec D3: do not remove this check; a larger L needs Sven's decision.",
+            "A5: iat1 {} >= exp0 {}: refresh 1 came after the first exp. Spec D3: do not remove this check; a larger L needs a recorded maintainer decision.",
             later1.iat, t0.exp
         ));
     }
@@ -403,11 +403,11 @@ async fn zitadel_refresh_extends_access_token_exp() {
     }
 
     let verdict = if keeps {
-        "Outcome \"keeps\" (spec D5): Zitadel did not extend exp. STOP: report to the coordinator; do not change L or the scope."
+        "Outcome \"keeps\" (spec D5): Zitadel did not extend exp. Do not change L or the checks. Open an issue with these values."
     } else if late_refresh_1 {
-        "iat1 >= exp0 (spec D3): the step-4 refresh was too slow. STOP: report to the coordinator; do not change L."
+        "iat1 >= exp0 (spec D3): the step-4 refresh was too slow. Do not change L or the checks. Open an issue with these values."
     } else {
-        "No D5 outcome matched: a red check here is a defect in the test (spec D5)."
+        "No D5 outcome matched (spec D5). An A1 or A2 failure can come from a long gap between the two clock reads in one request on a loaded runner (spec K1, K2). Read the printed exp-iat and expires_in values first. If they are not the cause, the test has a defect."
     };
     assert!(
         failures.is_empty(),
