@@ -438,3 +438,18 @@ input. With `contents: read`, that token can only read the public repository. V2
 other grant.
 
 Changes: D8 in §2, A3, §5.2, §5.5, §5.6 and a new residual row in §7.
+
+## 14. Measurement record
+
+### M2 — release-plz 0.3.158 with `--no-verify` (2026-10-09)
+
+A one-crate fixture with a sentinel in `build.rs`, a local forge stub that answers 404, and
+`RELEASE_PLZ_LOG=debug release-plz release --dry-run`. Script: the plan, Task 1.
+
+| Run | rc | `build.rs` ran | `cargo publish` argv in the debug log |
+|---|---|---|---|
+| A, `--no-verify` | 0 | no | `cargo publish --color always --manifest-path <…>/Cargo.toml --package sma735-m2-probe-<n> --dry-run --no-verify` |
+| B, control | 0 | yes | `cargo publish --color always --manifest-path <…>/Cargo.toml --package sma735-m2-probe-<n> --dry-run` |
+| C, `publish_no_verify = false` key and `--no-verify` flag | 0 | no | `cargo publish --color always --manifest-path <…>/Cargo.toml --package sma735-m2-probe-<n> --dry-run --no-verify` |
+
+Result: the `--no-verify` flag reaches cargo and no build script runs, also when the package key is `false`.
