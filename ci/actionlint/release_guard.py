@@ -1830,6 +1830,12 @@ def _required_flag_verdict(text: str, tail: list[str], lead: tuple[str, ...], fl
     return None
 
 
+# SMA-735 N1. A row with `redirects` refuses every assignment to a GITHUB_* name. An assignment such
+# as `GITHUB_OUTPUT=$GITHUB_ENV` makes the allowed `>> "$GITHUB_OUTPUT"` write to another file.
+_GITHUB_ASSIGN_WHY = ("an assignment to a GITHUB_* name. It can make a write to $GITHUB_OUTPUT go to "
+                      "$GITHUB_ENV, $GITHUB_PATH or a file")
+
+
 def segment_verdict(segment: str, row: StepAllowlist) -> str | None:
     """None when one command segment may run in a job of `row`, else the reason it may not.
     Leading variable assignments are removed; then the row's shell keywords; then the rest must
@@ -1847,6 +1853,8 @@ def segment_verdict(segment: str, row: StepAllowlist) -> str | None:
         if not m:
             break
         assigned = True
+        if row.redirects is not None and s.startswith("GITHUB_"):
+            return _GITHUB_ASSIGN_WHY
         s = s[m.end():].lstrip(_V18_BLANKS)
     if row.redirects is not None and any(c in s for c in "<>"):
         tail = next((r for r in row.redirects if s.endswith(r)), "")
@@ -1996,6 +2004,11 @@ def allowlist_job_violations(doc: dict, name: str, row: StepAllowlist) -> list[s
                     out.append(f"{where}: {refused}. {row.hint}")
                 for line in lines:
                     seps: list[str] = []
+                    if (row.redirects is not None and line.strip(_V18_BLANKS).startswith("GITHUB_")
+                            and _V18_WRAP_RE.fullmatch(line.strip(_V18_BLANKS))):
+                        out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not allowed: "
+                                   f"{_GITHUB_ASSIGN_WHY}. {row.hint}")
+                        continue
                     segs, refused = v18_line_segments(line, seps)
                     if refused:
                         out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not "
@@ -2158,7 +2171,7 @@ _CRATES_IO_AUTH_ACTION = "rust-lang/crates-io-auth-action"
 # `release-plz -v release` and `release-plz 'release'` count. The echo text
 # `release-plz: no release PR needed` does not count: its word is `release-plz:`.
 _LIVENESS_BLANKS_RE = re.compile(r"""['"\\$(){}`;&|<>]""")
-_RELEASE_PLZ_ACTION_PREFIX = "release-plz/"
+_RELEASE_PLZ_ACTION_PREFIXES = ("release-plz/", "marcoieni/release-plz-action")
 
 
 def _runs_release_plz_release(run_text: str) -> bool:
@@ -2187,7 +2200,7 @@ def release_job_violations(doc: dict, name: str) -> list[str]:
             if not isinstance(step, dict):
                 continue
             live_action = str(step.get("uses") or "").split("@", 1)[0].lower()
-            if (live_action == _CRATES_IO_AUTH_ACTION or live_action.startswith(_RELEASE_PLZ_ACTION_PREFIX)
+            if (live_action == _CRATES_IO_AUTH_ACTION or live_action.startswith(_RELEASE_PLZ_ACTION_PREFIXES)
                     or _runs_release_plz_release(str(step.get("run") or ""))):
                 out.append(f"{name}: V19: job '{jid}' authenticates with crates.io or runs "
                            f"`release-plz release` (or uses a release-plz/ action), but it is not in RELEASE_JOBS "
@@ -5324,13 +5337,18 @@ _SMA735_V19_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
     ("a second job with release-plz -v release", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz -v release"}]}, True),
     ("a second job with a quoted release", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz 'release'"}]}, True),
     ("proto install release-plz with a version and --pin", "release", "step", {"run": "proto install release-plz 0.0.1 --pin"}, True),
+    ("GITHUB_OUTPUT set to $GITHUB_ENV", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT=$GITHUB_ENV\necho "BASH_ENV=/tmp/x" >> "$GITHUB_OUTPUT"'), True),
+    ("GITHUB_OUTPUT set to $GITHUB_PATH on one line", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT=$GITHUB_PATH; echo "/tmp/evil" >> "$GITHUB_OUTPUT"'), True),
+    ("GITHUB_OUTPUT set to a cargo config file", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT=.cargo/config.toml\necho "[x]" >> "$GITHUB_OUTPUT"'), True),
+    ("GITHUB_OUTPUT set in the wrap form", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT="$(echo .cargo/config.toml)"\necho "[x]" >> "$GITHUB_OUTPUT"'), True),
+    ("a second job with the old MarcoIeni action", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"uses": "MarcoIeni/release-plz-action@v0.5", "with": {"command": "release"}}]}, True),
     ("the release-pr echo text in another job", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": 'echo "release-plz: no release PR needed"'}]}, False),
     ("the target shape", "release", "none", None, False),
     ("the flags in another order", "release", "run",
      (_V19_STEP, 'set -euo pipefail\nOUT="$(release-plz release --no-verify --output json)"\necho "$OUT"\necho "json=$OUT" >> "$GITHUB_OUTPUT"'), False),
     ("release-plz release-pr in the release-pr job", "release-pr", "step", {"run": "release-plz release-pr --output json"}, False),
 )
-_SMA735_V19_CASE_COUNT = 49
+_SMA735_V19_CASE_COUNT = 54
 
 
 def _sma735_v19_bites() -> str | None:
