@@ -72,6 +72,11 @@ render_one "iam-and-gateway-httproute" --set zones.gateway.enabled=true \
   --set 'httpRoute.parentRefs[0].sectionName=https' \
   --set httpRoute.timeouts.backendRequest=30s \
   --set 'httpRoute.annotations.example\.test/owner=platform'
+# SMA-700. A byte pin of the DPoP projection: two URLs, %q-quoted, and the comment line.
+render_one "iam-dpop" --set zones.gateway.enabled=false \
+  --set zones.iam.backend.dpop.enabled=true \
+  --set 'zones.iam.backend.dpop.forwardedBaseUrls[0]=https://gw.example.test' \
+  --set 'zones.iam.backend.dpop.forwardedBaseUrls[1]=https://edge.example.test/api'
 
 if [ "$ec" -eq 0 ]; then echo "== chart render OK =="; fi
 exit "$ec"

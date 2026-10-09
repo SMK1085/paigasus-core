@@ -69,6 +69,18 @@ zones:
       # Example: [{name: RUST_LOG, value: "paigasus_iam=debug,info"}]. The chart refuses a name
       # that it sets itself (see docs/ops/RUNBOOK-chart.md). A change rolls the IAM pod.
       extraEnv: []
+      # NOT required. The DPoP proof check of the gateway path (SMA-700). With enabled true, IAM
+      # checks the DPoP proof (RFC 9449) that the gateway forwards. The gateway needs
+      # GATEWAY_DPOP__ENABLED too; the chart does not deploy the gateway. Turn DPoP on in IAM first.
+      #   forwardedBaseUrls  REQUIRED when enabled: the public URLs at which clients reach the
+      #                      gateway, each with any path prefix that a proxy removes. https only, or
+      #                      http on localhost, 127.x.x.x or [::1]. No query, fragment or user info.
+      #                      Printable ASCII with no space, " or \.
+      # The replay store is in memory, so IAM must stay at one replica (it is pinned). A change
+      # restarts the IAM pod. See docs/ops/RUNBOOK-chart.md § 6.
+      dpop:
+        enabled: false
+        forwardedBaseUrls: []
   gateway:
     enabled: false
     basePath: /gateway
@@ -196,6 +208,19 @@ oidc:
                          # user out at each access-token expiry. Read the oauthError field of
                          # the session.refresh_failed log after a change. A change restarts both
                          # consoles, not IAM. See RUNBOOK-chart.md § 6.
+  accessTokenRequiredClaims: []   # NOT required. Claim names that the IdP puts into every
+                                  # access token and into no ID token (SMA-731). IAM refuses a
+                                  # token that does not carry one of them, or carries it with the
+                                  # value null. Empty: no such check. Zitadel: ["jti"]. Use it with
+                                  # oidc.idTokenMarkerClaims, and never name a claim in both lists
+                                  # (the render fails). This check fails closed: if the IdP stops
+                                  # putting the claim into its access token, IAM refuses every
+                                  # token of the IdP. Each name is printable ASCII with no space,
+                                  # " or \, and not iss, sub, aud or exp. A change restarts IAM. To
+                                  # remove it, set [] in a values file or use
+                                  # --set-json 'oidc.accessTokenRequiredClaims=[]', not {}. With
+                                  # --reuse-values, deleting the key from a values file does not
+                                  # remove the old list. See RUNBOOK-chart.md § 6.
   authorizationAudience: ""   # NOT required. The audience parameter that both consoles send in
                               # the authorization request (SMA-692). Empty: no audience
                               # parameter. Auth0 needs it to issue an access token for an API.

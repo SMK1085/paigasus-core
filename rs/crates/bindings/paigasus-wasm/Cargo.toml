@@ -29,8 +29,16 @@ paigasus-kernel.workspace = true
 ignored = ["wasm-bindgen"]
 
 [package.metadata.wasm-pack.profile.release]
-# Placeholder kernel — skip wasm-opt so no unpinned binaryen is downloaded at build (SMA-427 L3).
-# Re-enabling optimization later must pin binaryen via a proto plugin (tracked follow-up).
+# wasm-pack must never run wasm-opt itself: it would download a binaryen release that no file in
+# this repository pins (SMA-427 L3). ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs runs the
+# proto-pinned `wasm-opt -O` on wasm-pack's output instead (SMA-435). Check 7 of
+# ts/packages/paigasus-kernel/tests/committed-wasm.test.ts fails if this line or the one below
+# changes.
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.profiling]
+# `wasm-pack build --profiling` runs wasm-opt by default. The same rule applies. The `dev` profile
+# does not run wasm-opt.
 wasm-opt = false
 
 [lints]

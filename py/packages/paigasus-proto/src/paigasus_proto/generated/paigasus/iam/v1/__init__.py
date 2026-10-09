@@ -41,6 +41,7 @@ __all__ = (
     "DetachMembershipResponse",
     "DiscardDeadLetterRequest",
     "DiscardDeadLetterResponse",
+    "DpopContext",
     "ExternalIdentity",
     "FindUserByEmailRequest",
     "FindUserByEmailResponse",
@@ -808,6 +809,33 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class DpopContext(betterproto2.Message):
+    """
+    The DPoP context of a client request that the gateway authenticates (RFC 9449, SMA-700).
+    IAM checks the proof against authn.dpop.forwarded_base_urls.
+    """
+
+    proof: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+    """
+    The value of the client's `DPoP` header: one JWS in compact form. At most 8192 bytes.
+    """
+
+    method: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    The HTTP method of the client's request, for example "POST". At most 16 bytes.
+    """
+
+    path: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+    """
+    The path of the client's request as the gateway received it, with no query. It starts
+    with "/". At most 2048 bytes.
+    """
+
+
+default_message_pool.register_message("paigasus.iam.v1", "DpopContext", DpopContext)
+
+
+@dataclass(eq=False, repr=False)
 class ExternalIdentity(betterproto2.Message):
     id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
     """
@@ -1020,6 +1048,13 @@ default_message_pool.register_message(
 @dataclass(eq=False, repr=False)
 class IntrospectRequest(betterproto2.Message):
     token: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    dpop: "DpopContext | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True
+    )
+    """
+    Present when the client used the DPoP scheme (SMA-700). Absent: the Bearer scheme.
+    """
 
 
 default_message_pool.register_message(
@@ -2354,6 +2389,12 @@ class AuthorizationServiceStub(betterproto2_grpclib.ServiceStub):
         deadline: "Deadline | None" = None,
         metadata: "MetadataLike | None" = None,
     ) -> "IsAuthorizedResponse":
+        """
+        Bearer-enforced. SMA-700: when IAM has DPoP on, this RPC alone also accepts a one-time
+        follow-up of an Introspect with a DPoP context: the metadata `authorization: DPoP <token>`
+        plus `dpop: <proof>`, with the same token and the same proof bytes. IAM accepts it once,
+        only as a self-query (principal_prn is the caller), and only before the ticket deadline.
+        """
 
         return await self._unary_unary(
             "/paigasus.iam.v1.AuthorizationService/IsAuthorized",

@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The drift gate for the five committed wasm artifacts (SMA-634 spec § 5.4). Three checks, all
-// host-independent, so they hold in CI although the binary bytes differ per host (spec F12):
+// The drift gate for the five committed wasm artifacts (SMA-634 spec § 5.4, SMA-435 spec § 5.6).
+// Every check here is host-independent, so it holds in CI although the binary bytes differ per
+// host (SMA-634 spec F12):
 //
 //   1. the committed glue equals the glue of the fresh build this task already makes;
 //   2. the committed binary has the same import and export lists as the fresh one, and that list is
 //      the REAL kernel interface, not an empty pair of lists;
-//   3. the committed glue and binary instantiate together and replay all six parity corpora.
+//   3. the committed glue and binary instantiate together and replay all six parity corpora;
+//   5. the committed binary has exactly one `paigasus.wasm-opt` marker (SMA-435). The payload of
+//      the marker is the one that the nested binaryen pin demands. The binary has no `name` section;
+//   6. the fresh build has one `name` section and no marker. So wasm-pack did not optimize it, and it
+//      is the raw input that scripts/optimize-wasm.mjs requires. This is the control for check 5;
+//   7. rs/crates/bindings/paigasus-wasm/Cargo.toml keeps `wasm-opt = false` in the wasm-pack
+//      `release` and `profiling` profiles. Check 6 cannot see `wasm-opt = ['-O', '-g']`, because
+//      `-g` keeps the `name` section.
 //
 // Check 4 (the pnpm-installed copy) is NOT here: Moon's hasher ignores node_modules, so a cached
 // pass would replay while the installed copy is another branch's. It lives in the setupFiles of the
@@ -18,6 +26,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { assertOptimized, customSectionCount, MARKER_SECTION, wasmOptDisabled } from '../scripts/optimize-wasm.mjs';
 
 const CRATE = new URL('../../../../rs/crates/bindings/paigasus-wasm/', import.meta.url);
 const FRESH = new URL('.wasmpack-test-out/', CRATE);
@@ -140,5 +149,36 @@ describe('the committed wasm artifacts agree with the Rust source', () => {
     // wasm-probe.mjs also rejects an empty corpus, so this is the second control on the same thing.
     expect(Object.keys(result.checked).sort()).toEqual(['prn_canonical', 'prn_cedar', 'prn_fields', 'prn_parse', 'sum', 'uuid7']);
     for (const [name, count] of Object.entries(result.checked)) expect(count, `the ${name} corpus is empty`).toBeGreaterThan(0);
+  });
+
+  // Check 5 runs in this process. It counts sections and imports nothing. So the child-process
+  // reason of checks 2 and 3 (SMA-634 spec F11) does not apply. It uses the same function as the
+  // `verify` mode of scripts/optimize-wasm.mjs, so the two cannot disagree.
+  it('check 5: the committed binary was optimized one time, by the pinned binaryen', () => {
+    const bytes = readFileSync(new URL('paigasus_wasm_bg.wasm', CRATE));
+    try {
+      assertOptimized(bytes, 'paigasus_wasm_bg.wasm');
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)} The binary was not optimized, another binaryen optimized it, or the pin moved without a regeneration. ${REGENERATE}`, {
+        cause: error,
+      });
+    }
+  });
+
+  it('check 6: the fresh build is a raw wasm-pack output', () => {
+    const bytes = readFileSync(new URL('paigasus_wasm_bg.wasm', FRESH));
+    expect(
+      customSectionCount(bytes, 'name'),
+      'The fresh build has no `name` section, so wasm-pack optimized it. Restore `wasm-opt = false` under [package.metadata.wasm-pack.profile.release] in rs/crates/bindings/paigasus-wasm/Cargo.toml. If that line is in place, a rustc, wasm-bindgen or `strip` change removed the section: read SMA-435 spec R2.',
+    ).toBe(1);
+    expect(customSectionCount(bytes, MARKER_SECTION), `The fresh build has a ${MARKER_SECTION} section. Only scripts/optimize-wasm.mjs writes it, and the test task does not run it.`).toBe(0);
+  });
+
+  it.each(['release', 'profiling'])('check 7: Cargo.toml keeps wasm-opt = false in the wasm-pack %s profile', (profile) => {
+    const section = `package.metadata.wasm-pack.profile.${profile}`;
+    expect(
+      wasmOptDisabled(readFileSync(new URL('Cargo.toml', CRATE), 'utf8'), section),
+      `rs/crates/bindings/paigasus-wasm/Cargo.toml must hold \`wasm-opt = false\` under [${section}]. Otherwise wasm-pack runs its own wasm-opt and downloads a binaryen release that no file pins (SMA-427 L3, SMA-435). scripts/optimize-wasm.mjs optimizes with the pinned binary.`,
+    ).toBe(true);
   });
 });

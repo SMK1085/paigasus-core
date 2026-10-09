@@ -5,4 +5,4 @@
 
 pub mod client;
 
-pub use client::{Iam, IamClient, IamError};
+pub use client::{CallerCredential, DpopContext, Iam, IamClient, IamError};

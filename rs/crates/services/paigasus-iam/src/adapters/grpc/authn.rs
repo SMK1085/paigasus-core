@@ -17,12 +17,15 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use paigasus_iam_core::{AuthnError, AuthnPrincipal, Credential, TokenDefect};
+use crate::application::dpop::DpopRequest;
+use paigasus_iam_core::{AuthnError, AuthnPrincipal, Credential, ProofDefect, TokenDefect};
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::authn_service_server::AuthnService;
+use paigasus_proto::paigasus::iam::v1::authorization_service_server;
 use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyRequest, IntrospectApiKeyResponse, IntrospectRequest, IntrospectResponse, WhoAmIRequest, WhoAmIResponse};
 use tonic::body::Body;
 use tonic::codegen::http;
@@ -30,9 +33,9 @@ use tonic::{Request, Response, Status};
 use tower::{Layer, Service};
 
 use super::convert;
-use crate::adapters::auth::{AuthContext, bearer_from_headers};
+use crate::adapters::auth::{AuthContext, DpopFollowUp, DpopProofHeader, bearer_from_headers, dpop_proof_from_headers, dpop_token_from_headers};
 use crate::adapters::http::AppState;
-use crate::application::authenticate_token::Provisioning;
+use crate::application::authenticate_token::{DpopInput, Provisioning};
 
 /// The `AuthnService` gRPC server — a thin adapter over the same `AppState.authn` use case
 /// the HTTP `/v1/authn/introspect` handler drives.
@@ -51,13 +54,26 @@ impl AuthnService for AuthnGrpc {
     /// `Introspect` (spec §7.2): the full `PrincipalContext` for a presented token. READ-ONLY
     /// (D10) — `AuthenticateToken::introspect` resolves with `Provisioning::Disabled`, so an
     /// unknown identity is `PermissionDenied` and this exempt RPC never has a user-creation
-    /// side effect. The token IS the credential (in the request body, never the metadata):
+    /// side effect. SMA-700: a `dpop` context runs the DPoP scheme (`introspect_dpop`). The token IS the credential (in the request body, never the metadata):
     /// nothing here logs it, and errors funnel through `authn_status` (static messages only).
     async fn introspect(&self, request: Request<IntrospectRequest>) -> Result<Response<IntrospectResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<IntrospectResponse>, Status> = async {
-            let token = request.into_inner().token;
-            let ctx = self.state.authn.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
+            let request = request.into_inner();
+            // SMA-700 § 4.8: no `dpop` context is the Bearer scheme, as before (D7). A context
+            // is the DPoP scheme; with DPoP off it is refused as a malformed token (D11).
+            let resolved = match request.dpop {
+                None => self.state.authn.introspect(&request.token).await,
+                Some(dpop) => {
+                    let context = DpopRequest {
+                        proof: dpop.proof,
+                        method: dpop.method,
+                        path: dpop.path,
+                    };
+                    self.state.authn.introspect_dpop(&request.token, context).await
+                }
+            };
+            let ctx = resolved.map_err(|e| convert::authn_status(&e))?;
             Ok(Response::new(convert::to_introspect_response(&ctx)))
         }
         .await;
@@ -146,6 +162,10 @@ impl<S> Layer<S> for AuthLayer {
 /// (JIT-provisioning an unknown identity, mirroring the HTTP middleware), and either forwards
 /// with an [`AuthContext`] extension attached or short-circuits with a trailers-only gRPC
 /// error WITHOUT calling the inner service.
+///
+/// SMA-700: with DPoP on, `IsAuthorized` alone also accepts the one-time follow-up
+/// (`authorization: DPoP <token>` plus `dpop: <proof>`), resolved with
+/// `resolve_dpop(.., FollowUp, Disabled)` and marked with a `DpopFollowUp` extension.
 #[derive(Clone)]
 pub struct AuthEnforce<S> {
     inner: S,
@@ -182,6 +202,10 @@ fn is_exempt(path: &str) -> bool {
     path.starts_with("/grpc.health.v1.Health/") || path == "/paigasus.iam.v1.AuthnService/Introspect" || path == "/paigasus.iam.v1.AuthnService/IntrospectApiKey"
 }
 
+/// The one gRPC path that accepts the DPoP follow-up (SMA-700 § 4.8). tonic generates only the
+/// service name, so the method is appended here; `the_is_authorized_path_is_pinned` pins it.
+pub static IS_AUTHORIZED_PATH: LazyLock<String> = LazyLock::new(|| format!("/{}/IsAuthorized", authorization_service_server::SERVICE_NAME));
+
 impl<S> Service<http::Request<Body>> for AuthEnforce<S>
 where
     S: Service<http::Request<Body>, Response = http::Response<Body>> + Clone + Send + 'static,
@@ -206,9 +230,36 @@ where
             if is_exempt(req.uri().path()) {
                 return inner.call(req).await;
             }
-            // A missing or malformed `authorization` header is treated exactly like a rejected
-            // token (D12): both are `Unauthenticated`.
             let Some(token) = bearer_from_headers(req.headers()) else {
+                // SMA-700 § 4.8: the DPoP scheme only for the IsAuthorized follow-up while DPoP is
+                // on. It never reaches the API-key branch or the bootstrap seeder, and it resolves
+                // with Provisioning::Disabled: Introspect required the identity on the chat path.
+                if state.authn.dpop_enabled()
+                    && req.uri().path() == IS_AUTHORIZED_PATH.as_str()
+                    && let Some(token) = dpop_token_from_headers(req.headers())
+                {
+                    let proof = match dpop_proof_from_headers(req.headers()) {
+                        DpopProofHeader::One(proof) => proof,
+                        DpopProofHeader::Missing => return Ok(reject(&AuthnError::InvalidDpopProof(ProofDefect::Missing))),
+                        DpopProofHeader::Invalid => return Ok(reject(&AuthnError::InvalidDpopProof(ProofDefect::Malformed))),
+                    };
+                    return match state.authn.resolve_dpop(&token, DpopInput::FollowUp(proof), Provisioning::Disabled).await {
+                        Ok(principal) => {
+                            req.extensions_mut().insert(AuthContext {
+                                principal_id: principal.principal_id,
+                                kind: principal.kind,
+                                status: principal.status,
+                                credential: principal.credential,
+                            });
+                            req.extensions_mut().insert(DpopFollowUp);
+                            inner.call(req).await
+                        }
+                        Err(err) => Ok(reject(&err)),
+                    };
+                }
+                // A missing or malformed `authorization` header is treated exactly like a rejected
+                // token (D12): both are `Unauthenticated`. The DPoP scheme on any other path, or
+                // with DPoP off, lands here too (§ 4.8, D11).
                 return Ok(reject(&AuthnError::InvalidToken(TokenDefect::Malformed)));
             };
             // Credential router (SMA-445 Task 19), mirroring the HTTP `require_bearer`
@@ -254,6 +305,13 @@ fn reject(err: &AuthnError) -> http::Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SMA-700 § 4.8: tonic generates only the service name, so the path is built once and pinned
+    /// here. A rename of the service or the RPC reds this test, not the follow-up in production.
+    #[test]
+    fn the_is_authorized_path_is_pinned() {
+        assert_eq!(IS_AUTHORIZED_PATH.as_str(), "/paigasus.iam.v1.AuthorizationService/IsAuthorized");
+    }
 
     /// SMA-632's mechanism, asserted directly. WhoAmI provisions its caller ONLY because
     /// enforcement covers it; adding it to `is_exempt` would make console login fail with

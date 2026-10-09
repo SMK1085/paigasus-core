@@ -116,7 +116,7 @@ async fn who_am_i_provisions_a_new_identity() {
     let mut client = AuthnServiceClient::new(ch);
 
     // 1. Introspect refuses an identity IAM has never seen — read-only, never provisions (D10).
-    let err = client.introspect(IntrospectRequest { token: token.clone() }).await.unwrap_err();
+    let err = client.introspect(IntrospectRequest { token: token.clone(), dpop: None }).await.unwrap_err();
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
     assert_eq!(reason_of(&err), "identity-not-provisioned", "{err:?}");
 
@@ -129,7 +129,7 @@ async fn who_am_i_provisions_a_new_identity() {
     assert_eq!(who.subject, "grpc-whoami-new");
 
     // 3. Introspect now succeeds, because step 2 provisioned — same principal.
-    let ctx = client.introspect(IntrospectRequest { token }).await.unwrap().into_inner();
+    let ctx = client.introspect(IntrospectRequest { token, dpop: None }).await.unwrap().into_inner();
     assert_eq!(ctx.principal_prn, who.principal_prn);
 
     server.abort();

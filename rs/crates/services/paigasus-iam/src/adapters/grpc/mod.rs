@@ -108,6 +108,17 @@ pub async fn routes(state: AppState) -> tonic::service::Routes {
     routes
 }
 
+/// Room for the headers other than the token and the proof (SMA-700 § 4.8).
+pub const HEADER_LIST_MARGIN_BYTES: usize = 4096;
+
+/// The HTTP/2 header-list limit of IAM's gRPC server (SMA-700 § 4.8): the DPoP follow-up carries
+/// the token (`max_token_bytes`) and the proof (`MAX_PROOF_BYTES`) in metadata, plus
+/// [`HEADER_LIST_MARGIN_BYTES`] for the other headers. The hyper default (16 KiB) is too small.
+#[must_use]
+pub fn grpc_max_header_list_size(max_token_bytes: usize) -> u32 {
+    u32::try_from(max_token_bytes.saturating_add(paigasus_iam_core::MAX_PROOF_BYTES).saturating_add(HEADER_LIST_MARGIN_BYTES)).unwrap_or(u32::MAX)
+}
+
 /// A tonic `Server` router built from [`routes`] (SMA-571 D8; see that function's doc for the
 /// full service inventory), with [`CorrelationLayer`] (SMA-504) and `AuthLayer` both wrapping
 /// the whole server, `CorrelationLayer` applied FIRST so it is outermost among our two — a
@@ -131,6 +142,7 @@ pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRoute
     let routes = routes(state.clone()).await;
     let mut server = Server::builder()
         .timeout(timeout)
+        .http2_max_header_list_size(grpc_max_header_list_size(state.grpc_max_token_bytes))
         // SMA-504: applied BEFORE `AuthLayer`, so it is outermost among OUR layers and a bearer
         // rejection still carries ids. It is NOT outermost overall: tonic wraps the whole user
         // stack in RecoverError/LoadShed/ConcurrencyLimit/GrpcTimeout, so a `Server::timeout`
@@ -143,6 +155,30 @@ pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRoute
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_header_list_fits_a_maximal_token_and_proof() {
+        // SMA-700 § 4.8: the follow-up carries the token AND the proof in metadata.
+        assert_eq!(
+            super::grpc_max_header_list_size(16_384),
+            u32::try_from(16_384 + paigasus_iam_core::MAX_PROOF_BYTES + super::HEADER_LIST_MARGIN_BYTES).unwrap()
+        );
+        assert_eq!(super::grpc_max_header_list_size(usize::MAX), u32::MAX);
+    }
+
+    /// SMA-700 § 4.8: production builds its own `Server` in `main.rs`, so the transport test, which
+    /// drives `router()`, never reaches that call. This test reads `main.rs` and pins the header
+    /// list size call there. Comment lines are removed first, so a comment cannot satisfy it.
+    #[test]
+    fn production_sets_the_header_list_size_from_the_token_limit() {
+        const MAIN: &str = include_str!("../../main.rs");
+        let production = MAIN.split("\n#[cfg(test)]").next().expect("main.rs must have a production part");
+        let production = production.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(
+            production.contains(".http2_max_header_list_size(grpc::grpc_max_header_list_size(max_token_bytes))"),
+            "main.rs must size the production gRPC header list with grpc_max_header_list_size(max_token_bytes)"
+        );
+    }
+
     /// SMA-571 D8: service registration must live at exactly ONE site. tonic's `Router` keeps its
     /// `Routes` private, so production's deferred path (`adapters::boot`) cannot reuse `router()` —
     /// it consumes `routes()` instead. If a future service is added to `router()` directly, it
