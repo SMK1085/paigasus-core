@@ -2742,4 +2742,14 @@ The planner measured M1, M2 and M3 on a scratch copy with the code of this plan;
   ```
 
   The alias lists are shortened here. The full text is in the run output. The copy was deleted. The `git status --short` run after the deletion showed only ` M ci/affected-graph/cargo_moon_parity.py`, the Task 6 change, and no copy.
-- **M5:** not yet run on the branch (Task 9 Step 9 writes it).
+- **M5:** Task 9 Step 4 output (`rebaseline.py`, 42 cases). The 36 other cases showed `ADDED=-` and `REMOVED=-`. Every `REMOVED` is empty. The measurement equals the Step 5 prediction. `napi-glue-dts->kernel-test` did not change.
+
+  ```text
+474	auth->auth-tasks	ADDED=paigasus-console-core-ts:test-e2e	REMOVED=-
+495	proto->sdk	ADDED=paigasus-app-shell-ts:test,paigasus-console-core-ts:test-e2e,paigasus-discovery-ts:test-e2e	REMOVED=-
+523	proto-iam->sdk	ADDED=paigasus-app-shell-ts:test,paigasus-console-core-ts:test-e2e,paigasus-discovery-ts:test-e2e	REMOVED=-
+609	sdk->iam-console	ADDED=paigasus-console-core-ts:test-e2e	REMOVED=-
+611	sdk-errors->iam-console	ADDED=paigasus-console-core-ts:test-e2e	REMOVED=-
+773	napi-glue-js->vitest	ADDED=gateway-console-ts:test,iam-console-ts:test,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e	REMOVED=-
+  ```
+
