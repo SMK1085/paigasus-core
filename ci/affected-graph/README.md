@@ -338,16 +338,16 @@ It also runs several checks that the per-case project sets structurally **cannot
   `--root`; a `cd` before the vitest call outside a subshell; an `extends` that is not a relative
   path; a binding with no `files` list; a config that no input of `repo:affected-smoke` matches.
   The floors are `REQUIRED_VITEST_TASKS`, `REQUIRED_VITEST_ALIASES` and a self-test pin of what the
-  parser reads in every tracked `vitest*.config.*` file. A13 does not print again a `package.json`
-  walk row that A12a prints.
+  parser reads in every tracked `vitest*.config.*` file. A13 omits a `package.json`
+  walk row that A12a already prints.
   Known limits: A13 works per package, not per imported file. This is an over-approximation, and it
   is the accepted R2 cost (spec D6). For example, an edit to auth, sdk or proto selects
   `paigasus-console-core-ts:test-e2e`, and the console tests key on the napi glue that they never
   load. A stale pnpm-installed binding copy on a developer host is out of scope (N7). CI installs
   fresh. A vitest call behind a wrapper script is invisible. Only the task floor catches the loss
   of a known task. Own-package files other than the config and `tsconfig.json` (`tests/**`,
-  `setupFiles`, in-package aliases) stay with the hand-written lists. A regex literal that holds a
-  quote reds the parser. The parser does not read it.
+  `setupFiles`, in-package aliases) stay with the hand-written lists. A regex literal that does not close on
+  its line is a row. The parser cannot scan that file.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
