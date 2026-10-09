@@ -705,10 +705,13 @@ date from the time when the splitter did not read quotes. They are still allowed
 one table, `StepAllowlist`. Each row holds the allowlist of its own jobs. The engine never merges
 two rows. So what L43 says about V18 applies to V19 and V20 too. The engine reads a `run:` block
 as command words, and it is not a shell parser. It does not read a command inside a quoted
-string. V19 closes one case of this for its own rule. A `release-plz release` command with a
-quote, a backslash or a `$` reds. So `--no-verify` cannot hide in a string or a variable. V19
-allows only the redirection `>> "$GITHUB_OUTPUT"`. A write to `$GITHUB_ENV`, `$GITHUB_PATH` or a
-file reds. V18 does not have this rule.
+string.
+
+V19 closes some cases of this for its own rule. A `release-plz release` command with a quote, a
+backslash or a `$` reds. So `--no-verify` cannot hide in a string or a variable. V19 allows only
+the redirection `>> "$GITHUB_OUTPUT"`. A write to `$GITHUB_ENV`, `$GITHUB_PATH` or a file reds.
+An assignment to a `GITHUB_*` name also reds, so `GITHUB_OUTPUT` cannot point to another file.
+V18 does not have these rules.
 
 V19 and V20 run only when the checked file is `release.yml` (spec D7), the same scope as V11.
 Their tests are direct calls (`_SMA735_V19_CASES`, `_SMA735_V20_CASES`), not `FIXTURES` rows. So
