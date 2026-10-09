@@ -552,19 +552,29 @@ jobs:
             dist/paigasus_proto-*.tar.gz
           if-no-files-found: error
 
-  # THE VERIFY BUILD (SMA-735). The `release` job below runs `release-plz release --no-verify`, so
-  # it compiles nothing while it holds the crates.io token and the App credentials. This job does
-  # the build instead: one `cargo publish --dry-run --locked` for each publish group, through
-  # `ci/publish-metadata/run.sh --verify-publish-groups` (Check 0 and Check 2 only). It runs before
-  # `approve-release`, so a crate that does not build stops the run in the reversible stage.
+  # THE VERIFY BUILD (SMA-735). The `release` job below runs `release-plz release --no-verify`.
+  # So it compiles nothing while it holds the crates.io token and the App credentials. This job
+  # does the build instead. It runs `ci/publish-metadata/run.sh --verify-publish-groups`, which
+  # is Check 0 and Check 2 only: one `cargo publish --dry-run --locked` for each publish group.
+  # It runs before `approve-release`. So a crate that does not build stops the run in the
+  # reversible stage.
   #
-  # The build runs third-party build scripts and proc macros, so this job holds NO secret and NO
-  # write token: no `environment:`, no `secrets` and no `${{ }}` expression at all. Its
-  # `permissions:` block is exactly `contents: read` (spec D8). actions/checkout gets the job
-  # token as its default `token` input, and with this grant the token can only read the
-  # repository. M1 measured that cargo through the runner's rustup, python3 and bash are enough,
-  # so the job has no proto and no Moon step.
-  # release_guard.py V20 pins all of this. A transient network fault exits 2: re-run the job.
+  # The build runs third-party build scripts and proc macros. So this job holds no secret and no
+  # write token. It has no `environment:`, no `secrets` reference and no `${{ }}` expression.
+  # Its `permissions:` block is exactly `contents: read` (spec D8). actions/checkout gets the
+  # job token as its default `token` input. With this grant, the token can only read the
+  # repository.
+  #
+  # TOOLS (spec §14, M1). M1 ran this mode in an ubuntu:24.04 container that installed bash,
+  # python3, git, a C toolchain and rustup. So M1 does not prove that the hosted runner has them.
+  # The live releases before SMA-735 built the crates in the `release` job through the runner's
+  # rustup, with no step that installs Rust. python3 and bash 4 or later on the hosted image are
+  # INFERRED. The first hosted run (spec §10, V-6 or V-7) is the proof. If a tool is missing,
+  # this job fails before `approve-release`, and nothing irreversible runs.
+  #
+  # release_guard.py V20 pins the steps, the secrets, the expressions, the `permissions:` block
+  # and the path to `approve-release`. It does not pin `runs-on` or `timeout-minutes`.
+  # A transient network fault exits 2: re-run the job.
   verify-crates:
     name: verify the crates.io packages
     needs: [plan]
@@ -654,13 +664,13 @@ jobs:
         run: proto install release-plz
 
       # THIS JOB COMPILES NOTHING (SMA-735). Every step can read the crates.io token and the App
-      # credentials, and release-plz passes CARGO_REGISTRY_TOKEN to `cargo publish`. So
-      # `--no-verify` is LOAD-BEARING: release-plz passes it to every `cargo publish`, and cargo
-      # then packages and uploads without a build, a build script or a proc macro. The verify
-      # build runs in `verify-crates`, before the approval. release_guard.py V19 holds the steps
-      # of this job to an allowlist and reds when `--no-verify` is gone. The tools this job still
-      # trusts are listed in docs/superpowers/specs/2026-10-09-sma-735-release-job-no-compile-design.md
-      # section 4.1.
+      # credentials. release-plz passes CARGO_REGISTRY_TOKEN to `cargo publish`. So `--no-verify`
+      # is REQUIRED. release-plz passes it to every `cargo publish`. cargo then packages and
+      # uploads with no build, no build script and no proc macro. The verify build runs in
+      # `verify-crates`, before the approval. release_guard.py V19 holds the steps of this job to
+      # an allowlist, and it reds when `--no-verify` is gone. Section 4.1 of
+      # docs/superpowers/specs/2026-10-09-sma-735-release-job-no-compile-design.md lists the
+      # tools that this job still trusts.
       - name: Release
         id: rel
         working-directory: rs
@@ -977,9 +987,8 @@ jobs:
       # and by version — a bare ENEEDAUTH later is the least recoverable failure in this
       # repository. prebuild.yml's `assemble` job carries the identical assertion, and it runs
       # BEFORE `release`: `release` needs [wheels, prebuild, proto-dist, verify-crates,
-      # approve-release], so a
-      # wrong npm reds while everything is still reversible. This copy is the backstop for the
-      # case where only this job's PATH is wrong.
+      # approve-release], so a wrong npm reds while everything is still reversible. This copy is
+      # the backstop for the case where only this job's PATH is wrong.
       #
       # The comparison is PURE SHELL on purpose (SMA-602 fix round 4, F11). The earlier form
       # was `printf … | sort -V | head -n1` under `set -euo pipefail`: `head` closes the pipe
