@@ -352,7 +352,7 @@ occurs more than once still fails.
   a normal character, bash can see one line where P26 sees two. Nobody measured the GitHub parser.
   A cheap measure is a P0 check that refuses U+0085, U+2028 and U+2029 in the raw workflow text.
   This spec does not include it. Sven approved the spec as written at GATE 1 on 2026-10-09. The check is out of scope for SMA-740.
-  No follow-up issue exists yet.
+  SMA-741 tracks the check.
 - **Q2. Runners.** The SMA-739 reason for an unpinned `runs-on:` assumes only GitHub-hosted
   runners. If the repository has a self-hosted runner or a larger runner with a custom image,
   `runs-on:` can select a different system `git` configuration for `git add`. Sven gave no answer
