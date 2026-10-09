@@ -2536,8 +2536,9 @@ def _scan_js(text, where, rows):
     character is one of `( , = : [ ! & | ? { } ; + - * % < > ~ ^` (`>` covers `=>`), when the text
     starts there, or when the previous word is `return`, `typeof`, `in`, `of`, `case`, `void`,
     `delete`, `throw`, `new`, `yield`, `await`, `instanceof`, `else` or `do`. Any other `/` is a
-    division. A division that this rule reads as a regex ends in an unterminated-regex row, which is
-    the safe direction. A `//` or `/*` right after a backslash in code state is a row. The regex state honours `\\` escapes and `[...]`
+    division. After `++` or `--` a `/` is a division, because a postfix operator ends an operand. A division
+    that this rule reads as a regex in a rarer form can still hide an alias with no row. The
+    real-corpus pin locks the result for today's configs. A `//` or `/*` right after a backslash in code state is a row. The regex state honours `\\` escapes and `[...]`
     classes (a `/` inside a class does not close it), closes at the next unescaped `/`, and skips the
     flag letters. Its content is masked like a string, so it opens no comment and no string. A newline
     before the close is a row. Without this state, `/^https?:\\/\\//` read as a comment and dropped
@@ -2610,7 +2611,8 @@ def _scan_js(text, where, rows):
             prev = ch
             i = j + 1
             continue
-        if ch == "/" and (prev == "" or prev in _JS_REGEX_PREV or _JS_REGEX_KEYWORD_RE.search(text[max(0, i - 16):i])):
+        if ch == "/" and (prev == "" or prev in _JS_REGEX_PREV or _JS_REGEX_KEYWORD_RE.search(text[max(0, i - 16):i])) \
+                and not text[max(0, i - 40):i].rstrip().endswith(("++", "--")):
             j, in_class = i + 1, False
             while j < n and text[j] != "\n":
                 c = text[j]
@@ -5843,6 +5845,10 @@ def self_test():
         ("a regex after `=>`", "export default { test: { filter: (u) => /^https?:\\/\\//.test(u) }, resolve: { alias: { a: './a' } } };\n",
          a13_ok_alias, False, None),
         ("a regex after `typeof`", "const t = typeof /a\\/\\//; export default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a division after `++`", "export default { n: i++ / 2, resolve: { alias: { a: k } }, m: 3 / 4 };\nconst k = './a';\n",
+         a13_ok_alias, False, None),
+        ("a division after `--`", "export default { n: i-- / 2, resolve: { alias: { a: k } }, m: 3 / 4 };\nconst k = './a';\n",
          a13_ok_alias, False, None),
         ("a regex after `+`", "const t = 'x' + /^https?:\\/\\//.source; export default { resolve: { alias: { a: './a' } } };\n",
          a13_ok_alias, False, None),

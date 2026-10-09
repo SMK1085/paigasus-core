@@ -348,8 +348,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   of a known task. Own-package files other than the config and `tsconfig.json` (`tests/**`,
   `setupFiles`, in-package aliases) stay with the hand-written lists.
   The scanner reads a `/` as the start of a regex after `( , = : [ ! & | ? { } ; + - * % < > ~ ^`
-  and after a keyword such as `return` or `typeof`. It reads any other `/` as a division. A division
-  that it reads as a regex has no closing `/` on its line. That is a row, so the error is safe. A
+  and after a keyword such as `return` or `typeof`. It reads any other `/` as a division. After `++` or `--`
+  it reads a `/` as a division. It can still misread a division in a rarer form, and then it can
+  hide an alias with no row. The real-corpus pin locks the result for today's configs. A
   regex literal that does not close on its line is a row. A comment marker (`//` or `/*`) right
   after a backslash is a row. The parser cannot scan that file.
   A13 sees `tsconfig: false` anywhere in the code of a config. An unrelated option with that value
