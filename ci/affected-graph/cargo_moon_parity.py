@@ -2511,7 +2511,9 @@ _JS_KEY_COLON_RE = re.compile(r"\s*:")
 _JS_COLON_RE = re.compile(r"\s*:\s*")
 _JS_TSCONFIG_OFF_RE = re.compile(r"(?<![\w$])tsconfig\s*:\s*false(?![\w$])")
 _JS_PROJECTS_RE = re.compile(r"(?<![\w$])projects\s*:\s*")
-_JS_REGEX_PREV = "(,=:[!&|?{};"
+_JS_REGEX_PREV = "(,=:[!&|?{};+-*%<>~^"
+# A keyword before a `/` means an expression starts there, so the `/` opens a regex literal.
+_JS_REGEX_KEYWORD_RE = re.compile(r"(?<![\w$.])(?:return|typeof|in|of|case|void|delete|throw|new|yield|await|instanceof|else|do)\s*$")
 _JS_OPEN = "([{"
 _JS_CLOSE = ")]}"
 
@@ -2531,8 +2533,11 @@ def _scan_js(text, where, rows):
     of each `'` or `"` opening quote to (end, value): `end` is the offset after the closing quote.
 
     A `/` in code state that does not start a comment opens a regex literal when the previous code
-    character is one of `( , = : [ ! & | ? { } ;`, when the text starts there, or when the previous
-    word is `return`. Any other `/` is a division. The regex state honours `\\` escapes and `[...]`
+    character is one of `( , = : [ ! & | ? { } ; + - * % < > ~ ^` (`>` covers `=>`), when the text
+    starts there, or when the previous word is `return`, `typeof`, `in`, `of`, `case`, `void`,
+    `delete`, `throw`, `new`, `yield`, `await`, `instanceof`, `else` or `do`. Any other `/` is a
+    division. A division that this rule reads as a regex ends in an unterminated-regex row, which is
+    the safe direction. A `//` or `/*` right after a backslash in code state is a row. The regex state honours `\\` escapes and `[...]`
     classes (a `/` inside a class does not close it), closes at the next unescaped `/`, and skips the
     flag letters. Its content is masked like a string, so it opens no comment and no string. A newline
     before the close is a row. Without this state, `/^https?:\\/\\//` read as a comment and dropped
@@ -2567,6 +2572,9 @@ def _scan_js(text, where, rows):
                     masked[i] = "_"
                 i += 1
             continue
+        if ch == "/" and nxt != "" and nxt in "/*" and text[i - 1:i] == "\\":
+            rows.append(f"{where}: a comment marker after a backslash at line {text.count(chr(10), 0, i) + 1}; A13 cannot scan it")
+            return None
         if ch == "/" and nxt == "/":
             end = text.find("\n", i)
             end = n if end == -1 else end
@@ -2602,11 +2610,13 @@ def _scan_js(text, where, rows):
             prev = ch
             i = j + 1
             continue
-        if ch == "/" and (prev == "" or prev in _JS_REGEX_PREV or re.search(r"(?<![\w$.])return\s*$", text[max(0, i - 12):i])):
+        if ch == "/" and (prev == "" or prev in _JS_REGEX_PREV or _JS_REGEX_KEYWORD_RE.search(text[max(0, i - 16):i])):
             j, in_class = i + 1, False
             while j < n and text[j] != "\n":
                 c = text[j]
                 if c == "\\":
+                    if text[j + 1:j + 2] == "\n":
+                        break
                     j += 2
                     continue
                 if in_class:
@@ -2752,6 +2762,9 @@ def vitest_config_facts(text, config_rel, rows):
     bindings = _js_bindings(masked, literals, config_dir)
     key_ends = [m.end() for m in _JS_ALIAS_WORD_RE.finditer(masked)]
     key_ends += [end for end, value in literals.values() if value == "alias" and _JS_KEY_COLON_RE.match(masked, end)]
+    for off, (end, value) in literals.items():
+        if value == "alias" and masked[:off].rstrip().endswith("[") and masked[end:].lstrip().startswith("]"):
+            rows.append(f"{config_rel}: a computed key ['alias'] holds an alias object, which A13 cannot read")
     aliases = []
     for key_end in sorted(key_ends):
         colon = _JS_COLON_RE.match(masked, key_end)
@@ -2788,7 +2801,7 @@ def vitest_config_facts(text, config_rel, rows):
                 rows.append(f"{config_rel}: the alias {key} has no `:` value, which A13 cannot read")
                 continue
             kind, value = _alias_value(masked, literals, bindings, sep.end(), e)
-            if kind == "lit" and value.startswith(("./", "../")):
+            if kind == "lit" and value.startswith(("./", "../", "/")):
                 kind, value = "path", os.path.normpath(os.path.join(config_dir, value))
             if kind == "path":
                 aliases.append((key, value))
@@ -2808,6 +2821,8 @@ VITEST_CONFIG_NAMES = tuple(f"{stem}.config.{ext}" for stem in ("vitest", "vite"
 _VITEST_SPAN_END_RE = re.compile(r"&&|\|\||;|\||\n")
 # `cd` or `pushd` as a command word. `--cwd` is an argument of another tool and does not match.
 _VITEST_CD_RE = re.compile(r"(?:^|[\s;&|(])(?:cd|pushd)(?=\s|$)")
+# `pnpm -C <dir>`, `pnpm --dir <dir>` and `pnpm --dir=<dir>` change the directory like `cd` does.
+_VITEST_PNPM_DIR_RE = re.compile(r"(?:^|[\s;&|(])pnpm\s+(?:[^\s;&|]+\s+)*?(?:-C|--dir)(?:=|\s|$)")
 # A balanced `( ... )` group: a subshell or a `$( ... )`. A `cd` inside one ends with the group,
 # so it does not move the vitest call that follows. The real paigasus-kernel-ts:test has this shape.
 _SUBSHELL_RE = re.compile(r"\([^()]*\)")
@@ -2840,7 +2855,7 @@ def vitest_invocation_configs(target, blob, root, own, rows):
             if stripped == prefix:
                 break
             prefix = stripped
-        if _VITEST_CD_RE.search(prefix):
+        if _VITEST_CD_RE.search(prefix) or _VITEST_PNPM_DIR_RE.search(prefix):
             rows.append(f"{target} changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads")
             continue
         end = _VITEST_SPAN_END_RE.search(blob, m.end())
@@ -2849,7 +2864,7 @@ def vitest_invocation_configs(target, blob, root, own, rows):
         i = 0
         while i < len(words):
             word = words[i]
-            if word in ("--root", "-r") or word.startswith("--root="):
+            if word in ("--root", "-r") or word.startswith(("--root=", "-r=")):
                 rows.append(f"{target} runs vitest with {word.split('=', 1)[0]}, so A13 cannot tell which config vitest reads")
                 refused = True
                 break
@@ -2861,8 +2876,8 @@ def vitest_invocation_configs(target, blob, root, own, rows):
                 explicit.append(words[i + 1])
                 i += 2
                 continue
-            if word.startswith("--config="):
-                explicit.append(word[len("--config="):])
+            if word.startswith(("--config=", "-c=")):
+                explicit.append(word.split("=", 1)[1])
             i += 1
         if refused:
             continue
@@ -5825,6 +5840,18 @@ def self_test():
          a13_ok_alias, False, None),
         ("an unterminated regex", "export default { test: { exclude: [/abc] } };\n",
          None, None, f"{a13_cfg}: an unterminated regex literal at line 1, so A13 cannot scan it"),
+        ("a regex after `=>`", "export default { test: { filter: (u) => /^https?:\\/\\//.test(u) }, resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a regex after `typeof`", "const t = typeof /a\\/\\//; export default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a regex after `+`", "const t = 'x' + /^https?:\\/\\//.source; export default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a comment marker after a backslash", "const t = a \\// b;\nexport default { resolve: { alias: { a: './a' } } };\n",
+         None, None, f"{a13_cfg}: a comment marker after a backslash at line 1; A13 cannot scan it"),
+        ("a backslash before a newline in a regex", "const r = /a\\\n/;\nexport default { resolve: { alias: { a: './a' } } };\n",
+         None, None, f"{a13_cfg}: an unterminated regex literal at line 1, so A13 cannot scan it"),
+        ("a computed ['alias'] key", "export default { resolve: { ['alias']: { a: './a' } } };\n",
+         None, None, f"{a13_cfg}: a computed key ['alias'] holds an alias object, which A13 cannot read"),
         ("a relative require", "const base = require('./base');\nexport default base;\n",
          None, None, f"{a13_cfg}: imports './base'; A13 cannot read a config that is split across files"),
         ("an unclosed string", "const s = 'abc\nexport default {};\n",
@@ -5900,6 +5927,15 @@ def self_test():
              "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
             ("touch a && ( cd ../x && wasm-pack build . --out-dir o ) && pnpm exec vitest run", a13_k,
              ["ts/packages/k/vitest.config.ts"], None),
+            ("pnpm exec vitest run -c=vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("pnpm exec vitest run -r=sub", a13_k, [],
+             "t:test runs vitest with -r, so A13 cannot tell which config vitest reads"),
+            ("pnpm -C sub exec vitest run", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            ("pnpm --dir=sub exec vitest run", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            ("pnpm --dir sub exec vitest run", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
             ("pnpm exec vitest run --config $CFG", a13_k, [], a13_rel_row),
             # A `cd` right after `(` is in the same subshell as the vitest call: a row.
             ("(cd sub && pnpm exec vitest run)", a13_k, [],
@@ -6145,6 +6181,13 @@ def self_test():
     ) not in _a13(files=files):
         failures.append("A13 accepted an alias to a @paigasus/ package outside the closure")
 
+    # T4b. An alias target that leaves the repository: a relative path with too many `..`, and an
+    # absolute string value.
+    for a13_label, a13_value in (("a relative path that leaves the root", "../../../../../x.js"), ("an absolute path", "/etc/x.js")):
+        files = dict(a13_files)
+        files["ts/packages/core/vitest.config.ts"] = f"export default {{ resolve: {{ alias: {{ '@paigasus/kernel': '{a13_value}' }} }} }};\n"
+        if not any(r.endswith("which is outside the repository") for r in _a13(files=files)):
+            failures.append(f"A13 did not report {a13_label} as outside the repository")
     # T7. The proto dep, for a closure reader and for proto itself.
     broken = _a12_copy(a13)
     broken["app-ts"]["tasks"]["test"] = []
@@ -6310,10 +6353,13 @@ def self_test():
         ("ts/packages/paigasus-ui/vitest.config.ts", (), False),
     )
     a13_corpus_root = Path(__file__).resolve().parents[2]
-    a13_corpus_paths = sorted(
-        p for p in task_inputs.tracked_files(a13_corpus_root)
-        if re.search(r"(^|/)vitest[^/]*\.config\.[^/]+$", p)
-    )
+    try:
+        a13_corpus_tracked = task_inputs.tracked_files(a13_corpus_root)
+    except INFRA_ERRORS as exc:
+        # Mirror main(): a broken `git` is an infrastructure error (rc 2), not a graph regression.
+        print(f"FATAL [parity] could not list the tracked files: {exc}", file=sys.stderr)
+        return 2
+    a13_corpus_paths = sorted(p for p in a13_corpus_tracked if re.search(r"(^|/)vitest[^/]*\.config\.[^/]+$", p))
     if a13_corpus_paths != [cfg for cfg, _aliases, _off in a13_corpus]:
         failures.append(
             f"the tracked vitest configs are {a13_corpus_paths}, but the A13 corpus pin lists "

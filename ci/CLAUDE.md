@@ -69,8 +69,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   that runs vitest) of the package and of its dependents. That is the A12 set, plus each `files`
   entry of a binding that is not a `.d.ts`, plus the `tsconfig.json` of the own package and of
   each workspace package, with the `extends` chain of each. A13 skips the tsconfig files when the
-  task has at least one config and every config sets `tsconfig: false`. A new vitest config needs its own file as an input. A new alias needs
-  its tracked target. If one is missing, A13 reds (SMA-736). A config that no input of
+  task has at least one config and every config sets `tsconfig: false`. A new vitest config needs
+  its own file as an input. A new alias needs its tracked target. If one is missing, A13 reds
+  (SMA-736). A config that no input of
   `repo:affected-smoke` matches reds A13 too. Add its glob to `moon.yml` and to
   `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`.
   `repo:affected-smoke` keys on the vitest configs and tsconfig files: `ts/packages/*/vitest*.config.*`,

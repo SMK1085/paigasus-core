@@ -346,8 +346,17 @@ It also runs several checks that the per-case project sets structurally **cannot
   load. A stale pnpm-installed binding copy on a developer host is out of scope (N7). CI installs
   fresh. A vitest call behind a wrapper script is invisible. Only the task floor catches the loss
   of a known task. Own-package files other than the config and `tsconfig.json` (`tests/**`,
-  `setupFiles`, in-package aliases) stay with the hand-written lists. A regex literal that does not close on
-  its line is a row. The parser cannot scan that file.
+  `setupFiles`, in-package aliases) stay with the hand-written lists.
+  The scanner reads a `/` as the start of a regex after `( , = : [ ! & | ? { } ; + - * % < > ~ ^`
+  and after a keyword such as `return` or `typeof`. It reads any other `/` as a division. A division
+  that it reads as a regex has no closing `/` on its line. That is a row, so the error is safe. A
+  regex literal that does not close on its line is a row. A comment marker (`//` or `/*`) right
+  after a backslash is a row. The parser cannot scan that file.
+  A13 sees `tsconfig: false` anywhere in the code of a config. An unrelated option with that value
+  also turns off the tsconfig requirement. The self-test pin of the real configs locks today's files.
+  A13 reads `-c=<f>` like `-c <f>`. A `-r`, `-r=<dir>`, `--root=<dir>`, `pnpm -C <dir>` or
+  `pnpm --dir <dir>` before the vitest call is a row. An alias value that is an absolute path is a
+  row, and so is a computed `['alias']` key.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
