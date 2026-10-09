@@ -2144,11 +2144,11 @@ REQUIRED_TS_CLOSURE = {
 }
 
 
-def derive_tsc_tasks(projects):
-    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation runs `tsc`.
+def _derive_ts_tasks(projects, token_re, label):
+    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation matches `token_re`.
 
-    Shared by A12a and A12b. Raises MoonOutputError if a task exposes none of a command, a script,
-    or any args, exactly as derive_ffi_tasks does.
+    Raises MoonOutputError if a task exposes none of a command, a script, or any args. `label`
+    names the derivation in the message.
     """
     matched = set()
     for pid in sorted(projects):
@@ -2161,11 +2161,20 @@ def derive_tsc_tasks(projects):
             if blob is None:
                 raise MoonOutputError(
                     f"{pid}:{name} reported none of a `command`, a `script`, or any `args` — "
-                    f"moon's output shape changed, so the tsc derivation cannot be evaluated"
+                    f"moon's output shape changed, so the {label} derivation cannot be evaluated"
                 )
-            if TSC_TOKEN_RE.search(blob):
+            if token_re.search(blob):
                 matched.add(f"{pid}:{name}")
     return matched
+
+
+def derive_tsc_tasks(projects):
+    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation runs `tsc`.
+
+    Shared by A12a and A12b. Raises MoonOutputError if a task exposes none of a command, a script,
+    or any args, exactly as derive_ffi_tasks does.
+    """
+    return _derive_ts_tasks(projects, TSC_TOKEN_RE, "tsc")
 
 
 def _read_package_json(root, rel_dir, rows):
@@ -2777,6 +2786,92 @@ def vitest_config_facts(text, config_rel, rows):
             else:
                 rows.append(f"{config_rel}: the alias {key} has a value A13 cannot resolve")
     return sorted(set(aliases)), bool(_JS_TSCONFIG_OFF_RE.search(masked))
+
+
+# `vitest` as a bounded token, optionally behind `pnpm exec`. The boundaries are TSC_TOKEN_RE's, so
+# `vitest.config.ts`, `vitest-environment-x` and `@vitest/coverage-v8` never match. A vitest call
+# behind a wrapper script is invisible (spec N3); the task floor catches the loss of a known task.
+VITEST_TOKEN_RE = re.compile(r"(^|[\s;&|(])(pnpm\s+exec\s+)?vitest(\s|$)")
+# vitest 5.0.3's own lookup order when no `--config` is given (spec §2 item 4).
+VITEST_CONFIG_NAMES = tuple(f"{stem}.config.{ext}" for stem in ("vitest", "vite") for ext in ("ts", "mts", "cts", "js", "mjs", "cjs"))
+_VITEST_SPAN_END_RE = re.compile(r"&&|\|\||;|\||\n")
+# `cd` or `pushd` as a command word. `--cwd` is an argument of another tool and does not match.
+_VITEST_CD_RE = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)(?=\s|$)")
+# A balanced `( ... )` group: a subshell or a `$( ... )`. A `cd` inside one ends with the group,
+# so it does not move the vitest call that follows. The real paigasus-kernel-ts:test has this shape.
+_SUBSHELL_RE = re.compile(r"\([^()]*\)")
+_VITEST_CONFIG_BAD_CHARS = frozenset("$*?[]{}'\"`")
+
+
+def derive_vitest_tasks(projects):
+    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation runs vitest.
+
+    Raises MoonOutputError if a task exposes none of a command, a script, or any args, exactly as
+    derive_tsc_tasks does.
+    """
+    return _derive_ts_tasks(projects, VITEST_TOKEN_RE, "vitest")
+
+
+def vitest_invocation_configs(target, blob, root, own, rows):
+    """The config files that the vitest calls in `blob` read, as repository-relative paths (spec §4.2).
+
+    For each vitest call, the words after the token up to the next `&&`, `||`, `;`, `|` or newline
+    are read. `--config <f>`, `--config=<f>` and `-c <f>` name a config relative to `own`, the task's
+    source directory. With no flag, vitest's own lookup applies in `own`; no file there means no
+    config, which is not a row. `--root`, `-r`, a `cd` before the call outside a subshell, and a
+    config path with `$`, a glob character or a quote are rows, never skips.
+    """
+    configs = []
+    for m in VITEST_TOKEN_RE.finditer(blob):
+        prefix = blob[:m.start()]
+        while True:
+            stripped = _SUBSHELL_RE.sub(" ", prefix)
+            if stripped == prefix:
+                break
+            prefix = stripped
+        if _VITEST_CD_RE.search(prefix):
+            rows.append(f"{target} changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads")
+            continue
+        end = _VITEST_SPAN_END_RE.search(blob, m.end())
+        words = blob[m.end():end.start() if end else len(blob)].split()
+        explicit, refused = [], False
+        i = 0
+        while i < len(words):
+            word = words[i]
+            if word in ("--root", "-r") or word.startswith("--root="):
+                rows.append(f"{target} runs vitest with {word.split('=', 1)[0]}, so A13 cannot tell which config vitest reads")
+                refused = True
+                break
+            if word in ("--config", "-c"):
+                if i + 1 == len(words):
+                    rows.append(f"{target} runs vitest with {word} and no path")
+                    refused = True
+                    break
+                explicit.append(words[i + 1])
+                i += 2
+                continue
+            if word.startswith("--config="):
+                explicit.append(word[len("--config="):])
+            i += 1
+        if refused:
+            continue
+        for raw in explicit:
+            rel = os.path.normpath(os.path.join(own, raw))
+            if any(c in _VITEST_CONFIG_BAD_CHARS for c in raw) or os.path.isabs(raw) or rel.startswith("../"):
+                rows.append(
+                    f"{target} runs vitest with the config path {raw}, which A13 cannot resolve (it holds `$`, "
+                    f"a glob character or a quote, or it leaves the repository)"
+                )
+            elif not (root / rel).is_file():
+                rows.append(f"{target} runs vitest with {rel}, which does not exist")
+            else:
+                configs.append(rel)
+        if not explicit:
+            for name in VITEST_CONFIG_NAMES:
+                if (root / own / name).is_file():
+                    configs.append(f"{own}/{name}")
+                    break
+    return list(dict.fromkeys(configs))
 
 
 def moon_projects():
@@ -5462,6 +5557,75 @@ def self_test():
             failures.append(f"A13 parser, {a13_label}: aliases {a13_aliases}, expected {a13_want_aliases}")
         if a13_want_off is not None and a13_off is not a13_want_off:
             failures.append(f"A13 parser, {a13_label}: tsconfig_off is {a13_off}, expected {a13_want_off}")
+    # A13 (SMA-736) — the vitest token, exercised directly (A10's `_var_sensitive` lesson).
+    for a13_blob, a13_want in (
+        ("pnpm exec vitest run", True),
+        ("vitest run --passWithNoTests", True),
+        ("pnpm exec vitest", True),
+        ("set set -euo pipefail\npnpm exec vitest run --config vitest.containers.config.ts\n", True),
+        ("touch a && ( cd b && wasm-pack build ) && pnpm exec vitest run", True),
+        ("node vitest.config.ts", False),
+        ("pnpm exec vitest-environment-x", False),
+        ("pnpm add -D @vitest/coverage-v8", False),
+        ("pnpm exec tsc -p tsconfig.json --noEmit", False),
+    ):
+        if bool(VITEST_TOKEN_RE.search(a13_blob)) is not a13_want:
+            failures.append(
+                f"VITEST_TOKEN_RE on {a13_blob!r} is {not a13_want} — the vitest token is wrong in the "
+                f"{'false-negative' if a13_want else 'false-positive'} direction"
+            )
+
+    # Moon reports a script-form task with `command` set to the script's first word, so the joined
+    # blob repeats it (see PREFLIGHT_RE). The rows with `set set` model that.
+    # A13 — config lookup from the invocation (spec T6). Each row is (invocation, source dir,
+    # expected configs, the one expected row or None for "no rows at all").
+    a13_k = "ts/packages/k"
+    a13_rel_row = (
+        "t:test runs vitest with the config path $CFG, which A13 cannot resolve (it holds `$`, a glob "
+        "character or a quote, or it leaves the repository)"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        a13_root = Path(tmp)
+        for a13_rel in (
+            "ts/packages/k/vitest.config.ts",
+            "ts/packages/k/vitest.e2e.config.ts",
+            "ts/packages/m/vitest.config.mts",
+            "ts/packages/v/vite.config.ts",
+            "ts/packages/v/vitest.config.js",
+        ):
+            (a13_root / a13_rel).parent.mkdir(parents=True, exist_ok=True)
+            (a13_root / a13_rel).write_text("export default {};\n")
+        (a13_root / "ts/packages/n").mkdir(parents=True)
+        a13_e2e = ["ts/packages/k/vitest.e2e.config.ts"]
+        for a13_blob, a13_own, a13_configs, a13_row in (
+            ("pnpm exec vitest run --config vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("pnpm exec vitest run --config=vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("pnpm exec vitest run -c vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("pnpm exec vitest run --config ./vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("set set -euo pipefail\npnpm exec vitest run\npnpm exec vitest run --config vitest.e2e.config.ts\n", a13_k,
+             ["ts/packages/k/vitest.config.ts", *a13_e2e], None),
+            ("pnpm exec vitest run --config vitest.ghost.config.ts", a13_k, [],
+             "t:test runs vitest with ts/packages/k/vitest.ghost.config.ts, which does not exist"),
+            ("pnpm exec vitest run --passWithNoTests", "ts/packages/n", [], None),
+            ("pnpm exec vitest run", "ts/packages/m", ["ts/packages/m/vitest.config.mts"], None),
+            ("pnpm exec vitest run", "ts/packages/v", ["ts/packages/v/vitest.config.js"], None),
+            ("pnpm exec vitest run --root sub", a13_k, [],
+             "t:test runs vitest with --root, so A13 cannot tell which config vitest reads"),
+            ("pnpm exec vitest run -r sub", a13_k, [],
+             "t:test runs vitest with -r, so A13 cannot tell which config vitest reads"),
+            ("cd sub && pnpm exec vitest run", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            ("touch a && ( cd ../x && wasm-pack build . --out-dir o ) && pnpm exec vitest run", a13_k,
+             ["ts/packages/k/vitest.config.ts"], None),
+            ("pnpm exec vitest run --config $CFG", a13_k, [], a13_rel_row),
+        ):
+            a13_rows = []
+            a13_got = vitest_invocation_configs("t:test", a13_blob, a13_root, a13_own, a13_rows)
+            if a13_got != a13_configs or (a13_row is None and a13_rows) or (a13_row is not None and a13_row not in a13_rows):
+                failures.append(
+                    f"vitest_invocation_configs({a13_blob!r}, {a13_own!r}) gave {a13_got} and rows {a13_rows}, expected "
+                    f"{a13_configs} and {'no row' if a13_row is None else repr(a13_row)}"
+                )
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
