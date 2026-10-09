@@ -1603,6 +1603,8 @@ class StepAllowlist:
     workdirs: frozenset[str]
     with_keys: dict[str, frozenset[str]]
     hint: str
+    # SMA-735 V20. A segment whose words equal one of these tuples exactly is allowed.
+    exact: tuple[tuple[str, ...], ...] = ()
 
 
 # V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
@@ -1827,6 +1829,8 @@ def segment_verdict(segment: str, row: StepAllowlist) -> str | None:
             if not _V18_SET_WORD_RE.fullmatch(w):
                 return (f"`set` with {w!r}, which is not on the allowlist (`-a`, `-o allexport` and "
                         f"`-k` export later assignments)")
+    if tuple(words) in row.exact:
+        return None
     rest = " ".join(words)
     for prefix in row.prefixes:
         if rest == prefix or rest.startswith(prefix + " "):
@@ -1966,6 +1970,100 @@ def ungated_job_violations(doc: dict, name: str) -> list[str]:
     Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles. Since
     SMA-735 this is the V18_ROW of the table-driven engine."""
     return allowlist_job_violations(doc, name, V18_ROW)
+
+
+# V20 (SMA-735). release.yml's `verify-crates` job builds every publishable crate with
+# `cargo publish --dry-run` before `approve-release`, because the `release` job runs
+# `release-plz release --no-verify` and so builds nothing. The build runs third-party build
+# scripts and proc macros, so the job may hold no secret and no write token, and it may run only
+# the verify command. Two parts: the engine row below, and the job rules in
+# verify_job_violations. Scoped to RELEASE_WORKFLOW_NAME, the same as V11 (spec D7).
+VERIFY_JOB = "verify-crates"
+VERIFY_COMMAND = ("bash", "ci/publish-metadata/run.sh", "--verify-publish-groups")
+# The one `permissions:` value that V20 accepts (spec D8). actions/checkout gets the job token as
+# its default `token` input. With exactly this grant, the token can only read the repository.
+V20_PERMISSIONS = {"contents": "read"}
+V20_HINT = ("The verify-crates job builds third-party code before the approval, so it may hold no "
+            "secret, its `permissions:` must be exactly `contents: read`, and it may run only the "
+            "verify command "
+            "(docs/superpowers/specs/2026-10-09-sma-735-release-job-no-compile-design.md, "
+            "section 5.5).")
+V20_ROW = StepAllowlist(
+    rule="V20",
+    subject="the verify-crates job",
+    jobs=(VERIFY_JOB,),
+    actions=frozenset({"actions/checkout"}),
+    commands=frozenset(),
+    keywords=frozenset(),
+    prefixes=(),
+    step_keys=frozenset({"name", "id", "uses", "with", "run"}),
+    env_names=frozenset(),
+    workdirs=frozenset(),
+    with_keys={"actions/checkout": frozenset({"persist-credentials"})},
+    hint=V20_HINT,
+    exact=(VERIFY_COMMAND,),
+)
+# A bare `if:` is an expression without the `${{ }}` wrapper, so `if: github.token != ''`
+# reads the github context with no span to find.
+_GITHUB_CTX = re.compile(r"(?<![\w.-])github(?![\w-])", re.IGNORECASE)
+
+
+def _job_strings(node: object, key: object = None) -> list[tuple[str, bool]]:
+    """Every string in `node` (keys and values, at any depth), with True when it is the value
+    of an `if:` key, which GitHub reads as an expression."""
+    out: list[tuple[str, bool]] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out += _job_strings(k)
+            out += _job_strings(v, k)
+    elif isinstance(node, list):
+        for v in node:
+            out += _job_strings(v)
+    elif isinstance(node, str):
+        out.append((node, key == "if"))
+    return out
+
+
+def verify_job_violations(doc: dict, name: str) -> list[str]:
+    """V20 (SMA-735): the `verify-crates` job exists, is on the needs: path of the approval job,
+    holds no secret, sets `permissions:` to exactly `contents: read`, and runs the verify command
+    exactly once and nothing else."""
+    if name != RELEASE_WORKFLOW_NAME:
+        return []
+    jobs = doc["jobs"]
+    job = jobs.get(VERIFY_JOB)
+    if not isinstance(job, dict):
+        return [f"{name}: V20: no job named '{VERIFY_JOB}' exists, so nothing builds the crates "
+                f"before the approval. {V20_HINT}"]
+    out = allowlist_job_violations(doc, name, V20_ROW)
+    where = f"{name}: V20: job '{VERIFY_JOB}'"
+    if VERIFY_JOB not in gated_path_jobs(APPROVAL_JOB, jobs):
+        out.append(f"{where} is not on the needs: path of '{APPROVAL_JOB}', so a person can "
+                   f"approve the release before the verify build passed. {V20_HINT}")
+    if "environment" in job:
+        out.append(f"{where} sets `environment:`. The job must hold no credential. {V20_HINT}")
+    granted = job.get("permissions")
+    if granted != V20_PERMISSIONS:
+        shown = "no `permissions:` key" if "permissions" not in job else f"`permissions:` {granted!r}"
+        out.append(f"{where} has {shown}. It must set exactly `contents: read`, so that the job "
+                   f"token, which actions/checkout gets, can only read the repository. {V20_HINT}")
+    for text, bare in _job_strings(job):
+        names, unresolved = secret_refs(text, bare_expression=bare)
+        if names or unresolved:
+            out.append(f"{where} reads the secrets context in {text!r}. {V20_HINT}")
+        elif "${{" in text or (bare and _GITHUB_CTX.search(_STRING_LITERAL.sub("", text))):
+            out.append(f"{where} holds the expression {text!r}. The job may hold none: "
+                       f"`github.token` or `toJSON(github)` gives it a token. {V20_HINT}")
+    steps = [s for s in steps_of(job, where) if isinstance(s, dict)]
+    for step in steps:
+        if str(step.get("uses") or "").split("@", 1)[0].lower() == _APP_TOKEN_ACTION:
+            out.append(f"{where} mints an App token. {V20_HINT}")
+    verify_runs = [s for s in steps if tuple(w for w in _V18_WORD_SPLIT_RE.split(
+        str(s.get("run") or "").strip(_V18_BLANKS)) if w) == VERIFY_COMMAND]
+    if len(verify_runs) != 1:
+        out.append(f"{where} runs `{' '.join(VERIFY_COMMAND)}` in {len(verify_runs)} steps; "
+                   f"exactly one step must run it. {V20_HINT}")
+    return out
 
 
 def plan_run_segments(run_text: str) -> list[str]:
@@ -4817,6 +4915,219 @@ def _sma684_v18_allowlist_bites() -> str | None:
     return None
 
 
+# SMA-735. The target shape of the release path, used by V19, V20 and the cross-row tests. It
+# copies the real `release` job and the new `verify-crates` job (spec §5.1, §5.2, measured M1).
+_SMA735_DOC_YAML = """
+on:
+  push:
+    branches:
+      - main
+permissions:
+  contents: read
+jobs:
+  plan:
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo plan
+  release-pr:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo propose
+  verify-crates:
+    needs: [plan]
+    if: needs.plan.outputs.nothing_to_release != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify every publish group
+        run: bash ci/publish-metadata/run.sh --verify-publish-groups
+  approve-release:
+    needs: [verify-crates]
+    runs-on: ubuntu-latest
+    environment: release-approval
+    steps:
+      - run: echo approved
+  release:
+    needs: [verify-crates, approve-release]
+    runs-on: ubuntu-latest
+    environment: release-publish
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Authenticate with crates.io
+        id: cratesio
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+      - name: Mint the App installation token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095
+        with:
+          cache: false
+      - name: Install pinned release-plz CLI
+        run: proto install release-plz
+      - name: Release
+        id: rel
+        working-directory: rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+          GIT_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          OUT="$(release-plz release --output json --no-verify)"
+          echo "$OUT"
+          echo "json=$OUT" >> "$GITHUB_OUTPUT"
+"""
+
+
+def _sma735_doc() -> dict:
+    return yaml.safe_load(_SMA735_DOC_YAML)
+
+
+def _sma735_step(job: dict, step_name: str) -> dict:
+    hits = [s for s in job["steps"] if isinstance(s, dict) and s.get("name") == step_name]
+    if len(hits) != 1:
+        raise AssertionError(f"the SMA-735 fixture has {len(hits)} steps named {step_name!r}")
+    return hits[0]
+
+
+def _sma735_apply(doc: dict, job_id: str, op: str, arg: object) -> dict:
+    """Apply one SMA-735 test change to `doc` and return it. `job_id` names the job the change
+    is about (for `add-job`, the new job's id)."""
+    jobs = doc["jobs"]
+    if op == "none":
+        pass
+    elif op == "doc-key":
+        key, value = arg
+        doc[key] = value
+    elif op == "add-job":
+        jobs[job_id] = arg
+    elif op in ("drop", "rename"):
+        job = jobs.pop(job_id)
+        if op == "rename":
+            jobs[arg] = job
+        for other in jobs.values():
+            if isinstance(other.get("needs"), list):
+                other["needs"] = [arg if (op == "rename" and n == job_id) else n
+                                  for n in other["needs"] if op == "rename" or n != job_id]
+    elif op == "job-key":
+        key, value = arg
+        if value is None:
+            jobs[job_id].pop(key, None)
+        else:
+            jobs[job_id][key] = value
+    elif op == "step":
+        jobs[job_id]["steps"].append(arg)
+    elif op == "steps":
+        jobs[job_id]["steps"] = arg
+    elif op == "run":
+        step_name, text = arg
+        _sma735_step(jobs[job_id], step_name)["run"] = text
+    elif op == "step-key":
+        step_name, key, value = arg
+        step = _sma735_step(jobs[job_id], step_name)
+        if value is None:
+            step.pop(key, None)
+        else:
+            step[key] = value
+    else:
+        raise AssertionError(f"unknown SMA-735 test op {op!r}")
+    return doc
+
+
+def _sma735_cases_bite(cases: tuple, count: int, fn, rule: str) -> str | None:
+    """Every row of `cases` reds `fn` or reads clean as its last field says, and every message
+    names `rule`. Deleting a row must red: the strict count is the only pin on each shape."""
+    if len(cases) != count:
+        return f"the {rule} case table holds {len(cases)} rows, expected {count}"
+    for label, job_id, op, arg, want_red in cases:
+        found = fn(_sma735_apply(_sma735_doc(), job_id, op, arg), RELEASE_WORKFLOW_NAME)
+        if bool(found) != want_red:
+            return f"{label}: expected {'a ' + rule + ' violation' if want_red else 'clean'}, got {found or '(clean)'}"
+        if not all(f": {rule}: " in v for v in found):
+            return f"{label}: a violation does not name {rule}: {found}"
+    return None
+
+
+_V20_STEP = "Verify every publish group"
+_SMA735_V20_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
+    ("the job is missing", "verify-crates", "drop", None, True),
+    ("the path to approve-release is removed", "approve-release", "job-key", ("needs", ["plan"]), True),
+    ("no permissions key", "verify-crates", "job-key", ("permissions", None), True),
+    ("permissions id-token write in place of contents read", "verify-crates", "job-key", ("permissions", {"id-token": "write"}), True),
+    ("permissions contents write", "verify-crates", "job-key", ("permissions", {"contents": "write"}), True),
+    ("permissions contents read plus id-token write", "verify-crates", "job-key", ("permissions", {"contents": "read", "id-token": "write"}), True),
+    ("permissions contents read plus actions read", "verify-crates", "job-key", ("permissions", {"contents": "read", "actions": "read"}), True),
+    ("an empty permissions mapping", "verify-crates", "job-key", ("permissions", {}), True),
+    ("permissions read-all", "verify-crates", "job-key", ("permissions", "read-all"), True),
+    ("permissions write-all", "verify-crates", "job-key", ("permissions", "write-all"), True),
+    ("permissions as a string, not a mapping", "verify-crates", "job-key", ("permissions", "contents: read"), True),
+    ("environment release-publish", "verify-crates", "job-key", ("environment", "release-publish"), True),
+    ("an App mint with no permission input", "verify-crates", "step",
+     {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+      "with": {"client-id": "${{ secrets.PAIGASUS_BOT_APP_ID }}",
+               "private-key": "${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}"}}, True),
+    ("a step env that names secrets.X", "verify-crates", "step-key", (_V20_STEP, "env", {"T": "${{ secrets.X }}"}), True),
+    ("a github.token reference", "verify-crates", "step-key", (_V20_STEP, "env", {"T": "${{ github.token }}"}), True),
+    ("toJSON(github) in a step name", "verify-crates", "step-key", ("Checkout", "name", "${{ toJSON(github) }}"), True),
+    ("github.token in a bare job if", "verify-crates", "job-key", ("if", "github.token != ''"), True),
+    ("a checkout without with", "verify-crates", "step-key", ("Checkout", "with", None), True),
+    ("a checkout with persist-credentials true", "verify-crates", "step-key", ("Checkout", "with", {"persist-credentials": True}), True),
+    ("a checkout of another ref", "verify-crates", "step-key", ("Checkout", "with", {"persist-credentials": False, "ref": "other"}), True),
+    ("the verify step with &", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups &"), True),
+    ("the verify step with a second command", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups; echo done"), True),
+    ("the verify step with a second line", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups\necho done"), True),
+    ("the verify command twice", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups; bash ci/publish-metadata/run.sh --verify-publish-groups"), True),
+    ("the verify step with an extra argument", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups --negative-control"), True),
+    ("the negative control before the mode", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --negative-control --verify-publish-groups"), True),
+    ("a quoted script path", "verify-crates", "run", (_V20_STEP, 'bash "ci/publish-metadata/run.sh" --verify-publish-groups'), True),
+    ("sh in place of bash", "verify-crates", "run", (_V20_STEP, "sh ci/publish-metadata/run.sh --verify-publish-groups"), True),
+    ("the verify step replaced by echo", "verify-crates", "run", (_V20_STEP, "echo skipped"), True),
+    ("a step if false", "verify-crates", "step-key", (_V20_STEP, "if", False), True),
+    ("a step shell", "verify-crates", "step-key", (_V20_STEP, "shell", "bash"), True),
+    ("a step env BASH_ENV", "verify-crates", "step-key", (_V20_STEP, "env", {"BASH_ENV": "evil.sh"}), True),
+    ("a step working-directory", "verify-crates", "step-key", (_V20_STEP, "working-directory", "rs"), True),
+    ("a step continue-on-error", "verify-crates", "step-key", (_V20_STEP, "continue-on-error", True), True),
+    ("the verify step is removed", "verify-crates", "steps",
+     [{"name": "Checkout", "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+       "with": {"persist-credentials": False}}], True),
+    ("a cargo build step", "verify-crates", "step", {"run": "cargo build"}, True),
+    ("a setup-toolchain step", "verify-crates", "step",
+     {"uses": "moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095", "with": {"cache": False}}, True),
+    ("a moon setup step", "verify-crates", "step", {"run": "moon setup"}, True),
+    ("a job container", "verify-crates", "job-key", ("container", "ubuntu:24.04"), True),
+    ("a job env", "verify-crates", "job-key", ("env", {"BASH_ENV": "evil.sh"}), True),
+    ("a workflow env", "verify-crates", "doc-key", ("env", {"BASH_ENV": "evil.sh"}), True),
+    ("the target shape", "verify-crates", "none", None, False),
+    ("the verify step with extra blanks", "verify-crates", "run", (_V20_STEP, "  bash ci/publish-metadata/run.sh   --verify-publish-groups  "), False),
+)
+_SMA735_V20_CASE_COUNT = 43
+
+
+def _sma735_v20_bites() -> str | None:
+    if VERIFY_JOB != "verify-crates" or V20_ROW.jobs != (VERIFY_JOB,):
+        return f"V20 checks {V20_ROW.jobs!r} (VERIFY_JOB {VERIFY_JOB!r}), expected exactly ('verify-crates',)"
+    return _sma735_cases_bite(_SMA735_V20_CASES, _SMA735_V20_CASE_COUNT, verify_job_violations, "V20")
+
+
 def self_test() -> int:
     rc = 0
     for name, kind, text, want in FIXTURES:
@@ -4866,6 +5177,8 @@ def self_test() -> int:
         ("pr2 review i4: UNGATED_JOBS is pinned by strict equality", _ungated_jobs_pinned),
         ("sma-684 V18 allowlist: every rejected shape reds, every control is clean",
          _sma684_v18_allowlist_bites),
+        ("sma-735 V20 verify-crates: every rejected shape reds, the target shape is clean",
+         _sma735_v20_bites),
     ):
         err = fn()
         if err:
