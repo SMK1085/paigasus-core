@@ -123,10 +123,11 @@ STAGE_RUN = "\n".join((
     'done',
     'python3 ci/wasm-lockstep/lockstep_check.py same --sha256 "$LOCK_SHA256" --file "$RUNNER_TEMP/stage/rs/Cargo.lock"',
 )) + "\n"
-# P26 (SMA-739): the propose steps up to the last checker, as PyYAML loads them from the workflow.
-# A pin of `run:` alone is not enough: `if: false` or `env: {SHELLOPTS: noexec}` also skips the
-# checker. So each step is pinned whole, without `name` (and without `uses` for the two action
-# steps, which P6 checks, so that a dependabot bump stays green). Change these WITH the workflow.
+# P26 (SMA-739, SMA-740): every propose step, as PyYAML loads it from the workflow. A pin of `run:`
+# alone is not enough: `if: false` or `env: {SHELLOPTS: noexec}` also skips a checker, and a step
+# after the checkers can change the tree again (`git add` of another path, `git commit --amend`).
+# So each step is pinned whole, without `name` (and without `uses` for the three action steps,
+# which P6 checks, so that a dependabot bump stays green). Change these WITH the workflow.
 VERIFY_RUN = "\n".join((
     'set -euo pipefail',
     'python3 ci/wasm-lockstep/lockstep_check.py artifact --dir "$RUNNER_TEMP/lockstep" --old rs/Cargo.lock --body-file "$RUNNER_TEMP/pr-body.md" --title-file "$RUNNER_TEMP/pr-title.txt"',
@@ -142,13 +143,99 @@ APPLY_RUN = "\n".join((
     'cat "$RUNNER_TEMP/status.txt"',
     'python3 ci/wasm-lockstep/lockstep_check.py status --file "$RUNNER_TEMP/status.txt"',
 )) + "\n"
+COMMIT_RUN = "\n".join((
+    'set -euo pipefail',
+    'git config user.name "paigasusbot[bot]"',
+    'git config user.email "285361405+paigasusbot[bot]@users.noreply.github.com"',
+    'git add -- rs/Cargo.lock rs/crates/bindings/paigasus-wasm',
+    'git commit -F "$RUNNER_TEMP/pr-title.txt"',
+)) + "\n"
+BASE_RUN = "\n".join((
+    'set -euo pipefail',
+    'rc=0',
+    'gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha > "$RUNNER_TEMP/main-sha.txt" || rc=$?',
+    'if [ "$rc" -ne 0 ]; then',
+    '  cat "$RUNNER_TEMP/main-sha.txt"',
+    '  echo "::error::gh api could not read refs/heads/main (exit ${rc})."',
+    '  exit 1',
+    'fi',
+    'now="$(cat "$RUNNER_TEMP/main-sha.txt")"',
+    'if [ "${#now}" -ne 40 ]; then',
+    '  echo "::error::gh api returned \'${now}\', not a commit SHA."',
+    '  exit 1',
+    'fi',
+    'if [ "$now" != "$BUILT_ON" ]; then',
+    '  echo "moved=true" >> "$GITHUB_OUTPUT"',
+    '  echo "::notice::main moved from ${BUILT_ON} to ${now}. Nothing was pushed; the next run proposes on the new base."',
+    'else',
+    '  echo "moved=false" >> "$GITHUB_OUTPUT"',
+    'fi',
+)) + "\n"
+PUSH_RUN = "\n".join((
+    'set -euo pipefail',
+    'rc=0',
+    'gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/deps/wasm-bindgen-lockstep" --jq .object.sha > "$RUNNER_TEMP/branch-sha.txt" || rc=$?',
+    'if [ "$rc" -eq 0 ]; then',
+    '  lease="$(cat "$RUNNER_TEMP/branch-sha.txt")"',
+    '  author="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${lease}" --jq .author.login)"',
+    "  # .author.login comes from the commit's author EMAIL, which a pusher can set. This check",
+    '  # guards against a mistake (a person pushed to the bot branch), not against an attacker',
+    '  # with push access.',
+    '  if [ "$author" != "paigasusbot[bot]" ]; then',
+    '    echo "::error::A person pushed to the bot branch (head ${lease} by \'${author}\'). Merge or close that pull request, or delete the branch deps/wasm-bindgen-lockstep, first."',
+    '    exit 1',
+    '  fi',
+    'elif grep -qF \'"status":"404"\' "$RUNNER_TEMP/branch-sha.txt"; then',
+    '  lease=""',
+    'else',
+    '  cat "$RUNNER_TEMP/branch-sha.txt"',
+    '  echo "::error::gh api could not read the bot branch (exit ${rc})."',
+    '  exit 1',
+    'fi',
+    'git push --force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}" "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/deps/wasm-bindgen-lockstep',
+)) + "\n"
+PR_RUN = "\n".join((
+    'set -euo pipefail',
+    'gh pr list --repo "$GITHUB_REPOSITORY" --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq \'.[] | select(.isCrossRepository | not) | .number\' > "$RUNNER_TEMP/open-prs.txt"',
+    'number="$(sed -n 1p "$RUNNER_TEMP/open-prs.txt")"',
+    'if [ -z "$number" ]; then',
+    '  gh pr create --repo "$GITHUB_REPOSITORY" --base main --head deps/wasm-bindgen-lockstep --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body-file "$RUNNER_TEMP/pr-body.md"',
+    'else',
+    '  gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body-file "$RUNNER_TEMP/pr-body.md"',
+    'fi',
+)) + "\n"
+CLOSE_RUN = "\n".join((
+    'set -euo pipefail',
+    'gh pr list --repo "$GITHUB_REPOSITORY" --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq \'.[] | select(.isCrossRepository | not) | .number\' > "$RUNNER_TEMP/open-prs.txt"',
+    'while read -r number; do',
+    '  gh pr close "$number" --repo "$GITHUB_REPOSITORY" --comment "The wasm-bindgen family is current on main. This proposal is obsolete."',
+    'done < "$RUNNER_TEMP/open-prs.txt"',
+)) + "\n"
 PROPOSE_IF = "needs.build.outputs.changed == 'true'"
-PROPOSE_ACTIONS = {"checkout": "actions/checkout", "download": "actions/download-artifact"}
+PUSH_IF = "needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'"
+TOKEN_OUT = "${{ steps.token.outputs.token }}"
+TOKEN_WITH = {
+    "client-id": "${{ secrets.PAIGASUS_BOT_APP_ID }}",
+    "private-key": "${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}",
+    "permission-contents": "write",
+    "permission-pull-requests": "write",
+}
+# P26 (SMA-740): the keys that the propose job may declare. A new key (concurrency:, strategy:,
+# outputs:, or a key that GitHub adds later) fails closed. The values of name:, runs-on: and
+# timeout-minutes: are not pinned. P10 and P11 check the values of the other keys.
+PROPOSE_JOB_KEYS = frozenset({"name", "needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"})
+PROPOSE_ACTIONS = {"checkout": "actions/checkout", "download": "actions/download-artifact", "token": "actions/create-github-app-token"}
 PROPOSE_PINNED = {
     "checkout": {"id": "checkout", "if": PROPOSE_IF, "with": {"ref": "${{ github.sha }}", "persist-credentials": False}},
     "download": {"id": "download", "if": PROPOSE_IF, "with": {"name": "wasm-lockstep", "path": "${{ runner.temp }}/lockstep"}},
     "verify": {"id": "verify", "if": PROPOSE_IF, "run": VERIFY_RUN},
     "apply": {"id": "apply", "if": PROPOSE_IF, "run": APPLY_RUN},
+    "token": {"id": "token", "with": TOKEN_WITH},
+    "commit": {"id": "commit", "if": PROPOSE_IF, "run": COMMIT_RUN},
+    "base": {"id": "base", "if": PROPOSE_IF, "env": {"GH_TOKEN": "${{ github.token }}", "BUILT_ON": "${{ github.sha }}"}, "run": BASE_RUN},
+    "push": {"id": "push", "if": PUSH_IF, "env": {"GH_TOKEN": TOKEN_OUT, "PUSH_TOKEN": TOKEN_OUT}, "run": PUSH_RUN},
+    "pr": {"id": "pr", "if": PUSH_IF, "env": {"GH_TOKEN": TOKEN_OUT}, "run": PR_RUN},
+    "close": {"id": "close", "if": "needs.build.outputs.changed == 'false'", "env": {"GH_TOKEN": TOKEN_OUT}, "run": CLOSE_RUN},
 }
 
 EXPECTED_JOBS = frozenset({"build", "propose"})
@@ -160,12 +247,6 @@ ALLOWED_ACTIONS = {
 }
 PROPOSE_ORDER = ("checkout", "download", "verify", "apply", "token", "commit", "base", "push", "pr", "close")
 BUILD_OUTPUTS = {"changed": "${{ steps.lock.outputs.changed }}"}
-TOKEN_WITH = {
-    "client-id": "${{ secrets.PAIGASUS_BOT_APP_ID }}",
-    "private-key": "${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}",
-    "permission-contents": "write",
-    "permission-pull-requests": "write",
-}
 REFSPEC = "HEAD:refs/heads/deps/wasm-bindgen-lockstep"
 LEASE_PREFIX = "--force-with-lease=refs/heads/deps/wasm-bindgen-lockstep:"
 PUSH_REMOTE = "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -685,13 +766,13 @@ def _build_violations(build: dict) -> list[str]:
 
 
 def _propose_pin_violations(propose: dict) -> list[str]:
-    """P26 (SMA-739 spec 4.4). The propose steps up to the last checker are pinned whole, without
-    `name` (and without `uses` for the action steps, which P6 checks). A pin of `run:` alone is not
-    enough: `if: false` or `env: {SHELLOPTS: noexec}` also skips the checker, and a checkout `ref:`
-    change runs a checker from a different tree. The propose job may not declare env."""
-    out = []
-    if "env" in propose:
-        out.append("P26 the propose job declares env")
+    """P26 (SMA-739 spec 4.4, SMA-740 spec 4.3). Every propose step is pinned whole, without `name`
+    (and without `uses` for the action steps, which P6 checks), and the job keys are an allow-list.
+    A pin of `run:` alone is not enough: `if: false` or `env: {SHELLOPTS: noexec}` also skips a
+    checker, a checkout `ref:` change runs a checker from a different tree, and a step after the
+    checkers can change the tree again. The propose job declares only the keys in PROPOSE_JOB_KEYS."""
+    # str(): a bare `on:` key loads as True, and sorted() refuses a mix of bool and str.
+    out = [f"P26 the propose job declares {key}" for key in sorted(map(str, propose)) if key not in PROPOSE_JOB_KEYS]
     by_id = {str(s.get("id")): s for s in _steps(propose, "propose")}
     for step_id, want in PROPOSE_PINNED.items():
         if step_id not in by_id:
@@ -820,6 +901,38 @@ APPLY_HEAD = f"      - id: apply\n        if: {PROPOSE_IF}\n"
 VERIFY_STEP = VERIFY_HEAD + "        run: |\n" + _indent(VERIFY_RUN)
 APPLY_STEP = APPLY_HEAD + "        run: |\n" + _indent(APPLY_RUN)
 PROPOSE_CHECKOUT_USES = f"        if: {PROPOSE_IF}\n        uses: actions/checkout@" + "1" * 40 + "\n"
+# SMA-740 P26: the other six propose steps, built from the pin constants, so that the base fixture
+# equals the pin. Plain strings, not f-strings, hold the `${{ }}` lines: an f-string reads `{{` as `{`.
+TOKEN_HEAD = "      - id: token\n"
+TOKEN_USES = "        uses: actions/create-github-app-token@" + "4" * 40 + "\n"
+TOKEN_STEP = TOKEN_HEAD + TOKEN_USES + """\
+        with:
+          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+"""
+GH_TOKEN_OUT_LINE = "          GH_TOKEN: " + TOKEN_OUT + "\n"
+COMMIT_RUN_BLOCK = "        run: |\n" + _indent(COMMIT_RUN)
+COMMIT_STEP = f"      - id: commit\n        if: {PROPOSE_IF}\n" + COMMIT_RUN_BLOCK
+BUILT_ON_LINE = "          BUILT_ON: ${{ github.sha }}\n"
+BASE_STEP = "".join((
+    f"      - id: base\n        if: {PROPOSE_IF}\n",
+    "        env:\n",
+    "          GH_TOKEN: ${{ github.token }}\n",
+    BUILT_ON_LINE,
+    "        run: |\n",
+    _indent(BASE_RUN),
+))
+PUSH_HEAD = f"      - id: push\n        if: {PUSH_IF}\n"
+PUSH_TOKEN_LINE = "          PUSH_TOKEN: " + TOKEN_OUT + "\n"
+PUSH_STEP = PUSH_HEAD + "        env:\n" + GH_TOKEN_OUT_LINE + PUSH_TOKEN_LINE + "        run: |\n" + _indent(PUSH_RUN)
+PR_HEAD = f"      - id: pr\n        if: {PUSH_IF}\n"
+PR_STEP = PR_HEAD + "        env:\n" + GH_TOKEN_OUT_LINE + "        run: |\n" + _indent(PR_RUN)
+CLOSE_IF_LINE = "        if: needs.build.outputs.changed == 'false'\n"
+CLOSE_HEAD = "      - id: close\n" + CLOSE_IF_LINE
+CLOSE_RUN_BLOCK = "        run: |\n" + _indent(CLOSE_RUN)
+CLOSE_STEP = CLOSE_HEAD + "        env:\n" + GH_TOKEN_OUT_LINE + CLOSE_RUN_BLOCK
 
 FIXTURE = """\
 name: wasm-lockstep
@@ -873,56 +986,19 @@ jobs:
         with:
           name: wasm-lockstep
           path: ${{ runner.temp }}/lockstep
-""" + VERIFY_STEP + APPLY_STEP + """\
-      - id: token
-        uses: actions/create-github-app-token@""" + "4" * 40 + """
-        with:
-          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
-          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-      - id: commit
-        if: needs.build.outputs.changed == 'true'
-        run: git commit -F "$RUNNER_TEMP/pr-title.txt"
-      - id: base
-        if: needs.build.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          now="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
-          echo "moved=false" >> "$GITHUB_OUTPUT"
-      - id: push
-        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'
-        env:
-          PUSH_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          git push --force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}" "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/deps/wasm-bindgen-lockstep
-      - id: pr
-        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'
-        run: |
-          gh pr list --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'
-          gh pr create --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body "run cargo update"
-      - id: close
-        if: needs.build.outputs.changed == 'false'
-        run: |
-          gh pr list --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'
-"""
+""" + VERIFY_STEP + APPLY_STEP + TOKEN_STEP + COMMIT_STEP + BASE_STEP + PUSH_STEP + PR_STEP + CLOSE_STEP
 
 PUSH_LINE = 'git push --force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}" "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/deps/wasm-bindgen-lockstep'
 DOCKER_LINE = 'docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE"'
-TOKEN_STEP = "      - id: token\n        uses: actions/create-github-app-token@" + "4" * 40 + """
-        with:
-          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
-          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-"""
-PR_LIST = "gh pr list --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'"
+# The gh pr list command of the pr and close steps, without its redirect. self_test replaces only
+# the FIRST match, so the PR_LIST rows change the pr step. They stay outside ANCHORED_ROWS.
+PR_LIST = "gh pr list --repo \"$GITHUB_REPOSITORY\" --head deps/wasm-bindgen-lockstep --state open --json number,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | .number'"
 BUILD_STEP_ANCHOR = "      - id: update\n"
-# The general propose rows run on the UNPINNED commit step. The pinned steps (P26) would add a P26
-# message to every row, and a PASS row would fail.
-UNPINNED_PROPOSE_RUN = '        run: git commit -F "$RUNNER_TEMP/pr-title.txt"\n'
 BUILD_RUN = "container.sh update\n"  # the update step: it is not pinned by P25
+# SMA-740: lines of the pinned steps that occur once in FIXTURE, with their fixture indentation.
+GIT_ADD_LINE = "          " + COMMIT_RUN.split("\n")[3] + "\n"
+BASE_API_LINE = "          " + BASE_RUN.split("\n")[2] + "\n"
+PR_CREATE_LINE = "          " + PR_RUN.split("\n")[4] + "\n"
 
 # Rows on the pinned propose steps. `self_test` replaces only the FIRST match, and some lines of
 # the pinned steps also occur in LOCK_RUN or STAGE_RUN. So every `old` of these rows must occur
@@ -962,14 +1038,73 @@ ANCHORED_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("a dependabot SHA bump of the propose checkout", ((PROPOSE_CHECKOUT_USES, PROPOSE_CHECKOUT_USES.replace("1" * 40, "5" * 40)),), "PASS"),
     ("the propose checkout step runs download-artifact", ((PROPOSE_CHECKOUT_USES, PROPOSE_CHECKOUT_USES.replace("actions/checkout@", "actions/download-artifact@")),), "P26"),
     ("the propose download step runs checkout", (("        uses: actions/download-artifact@" + "3" * 40 + "\n", "        uses: actions/checkout@" + "3" * 40 + "\n"),), "P26"),
+    # SMA-740: the general propose rows, moved from SELF_TEST_ROWS. They run on the pinned commit step.
+    ("a secrets read in propose outside the token step", ((COMMIT_RUN_BLOCK, COMMIT_RUN_BLOCK + "        env:\n          K: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"),), "P3"),
+    ("a cargo command in propose", ((COMMIT_RUN_BLOCK, "        run: cargo update -p wasm-bindgen\n"),), "P5"),
+    ("cargo inside $(...) in propose", ((COMMIT_RUN_BLOCK, '        run: echo "$(cargo metadata)"\n'),), "P5"),
+    ("a backtick in propose", ((COMMIT_RUN_BLOCK, "        run: echo `id`\n"),), "P5"),
+    ("bash -c in propose", ((COMMIT_RUN_BLOCK, "        run: bash -c 'cargo build'\n"),), "P5"),
+    ("python3 -c in propose", ((COMMIT_RUN_BLOCK, "        run: python3 -c 'print(1)'\n"),), "P5"),
+    ("env as a command wrapper in propose", ((COMMIT_RUN_BLOCK, "        run: env cargo build\n"),), "P5"),
+    ("cargo after a pipe in propose", ((COMMIT_RUN_BLOCK, "        run: cat a | cargo build\n"),), "P5"),
+    ("a second git push", ((COMMIT_RUN_BLOCK, "        run: git push origin HEAD:refs/heads/x\n"),), "P8"),
+    ("needs.build.outputs.x in a run in propose", ((COMMIT_RUN_BLOCK, '        run: echo "${{ needs.build.outputs.changed }}"\n'),), "P9"),
+    ("needs['build'] in an env in propose", ((COMMIT_RUN_BLOCK, COMMIT_RUN_BLOCK + "        env:\n          C: ${{ needs['build'].outputs.changed }}\n"),), "P9"),
+    ("shell: python on a propose step", ((COMMIT_RUN_BLOCK, COMMIT_RUN_BLOCK + "        shell: python\n"),), "P13"),
+    ("status as a whole last command", ((COMMIT_RUN_BLOCK, "        run: |\n          set -euo pipefail\n          git status > s\n          python3 ci/wasm-lockstep/lockstep_check.py status --file s\n"),), "ONLY P26 the commit step script differs"),
+    ("a process substitution in propose: cat <(...)", ((COMMIT_RUN_BLOCK, "        run: cat <(cargo build)\n"),), "P5"),
+    ("a process substitution in propose: > >(...)", ((COMMIT_RUN_BLOCK, "        run: echo x > >(cargo build)\n"),), "P5"),
+    ("working-directory on a propose step", ((COMMIT_RUN_BLOCK, COMMIT_RUN_BLOCK + "        working-directory: /tmp\n"),), "P19"),
+    ("gh api -X POST in propose", ((COMMIT_RUN_BLOCK, "        run: gh api repos/x/y -X POST\n"),), "P20"),
+    ("gh api --method=DELETE in propose", ((COMMIT_RUN_BLOCK, "        run: gh api repos/x/y --method=DELETE\n"),), "P20"),
+    ("gh api -XPUT in propose", ((COMMIT_RUN_BLOCK, "        run: gh api repos/x/y -XPUT\n"),), "P20"),
+    ("gh api -f in propose (an implicit POST)", ((COMMIT_RUN_BLOCK, "        run: gh api repos/x/y -f a=b\n"),), "P20"),
+    ("gh api graphql in propose", ((COMMIT_RUN_BLOCK, "        run: gh api graphql\n"),), "P20"),
+    ("gh api --method GET in propose", ((COMMIT_RUN_BLOCK, "        run: gh api repos/x/y --method GET\n"),), "ONLY P26 the commit step script differs"),
+    ("git -c before the subcommand in propose", ((COMMIT_RUN_BLOCK, "        run: git -c core.fsmonitor=x status\n"),), "P20"),
+    ("git -ckey=value in propose", ((COMMIT_RUN_BLOCK, "        run: git -ccore.pager=x log\n"),), "P20"),
+    ("sudo chown in propose", ((COMMIT_RUN_BLOCK, '        run: sudo chown -R 65534:65534 "$RUNNER_TEMP/work"\n'),), "P5"),
+    ("needs in an env key named if in propose", ((COMMIT_RUN_BLOCK, COMMIT_RUN_BLOCK + "        env:\n          if: ${{ needs.build.outputs.changed }}\n"),), "P9"),
+    ("gh pr merge in propose", ((COMMIT_RUN_BLOCK, '        run: gh pr merge "$number" --squash --auto\n'),), "P22"),
+    ("gh workflow run in propose", ((COMMIT_RUN_BLOCK, "        run: gh workflow run x.yml\n"),), "P22"),
+    ("gh repo delete in propose", ((COMMIT_RUN_BLOCK, "        run: gh repo delete x\n"),), "P22"),
+    ("gh secret set in propose", ((COMMIT_RUN_BLOCK, "        run: gh secret set X\n"),), "P22"),
+    ("steps.build.outputs in a host step of propose", ((COMMIT_RUN_BLOCK, '        run: echo "${{ steps.build.outputs.v }}"\n'),), "P24"),
+    ("steps.update.outputs in an env of propose", ((COMMIT_RUN_BLOCK, COMMIT_RUN_BLOCK + "        env:\n          V: ${{ steps.update.outputs.v }}\n"),), "P24"),
+    ("STEPS.Update.Outputs in another case in propose", ((COMMIT_RUN_BLOCK, '        run: echo "${{ STEPS.Update.Outputs.v }}"\n'),), "P24"),
+    # SMA-740: rows on the steps after apply. All ten propose steps are pinned now, so a mutation of
+    # the wrong step also gives a P26 message. The count check of self_test keeps each row on its step.
+    ("a PR body text that says cargo update", ((PR_CREATE_LINE, PR_CREATE_LINE.replace('--body-file "$RUNNER_TEMP/pr-body.md"', '--body "run cargo update"')),), "ONLY P26 the pr step script differs"),
+    ("a boolean if: false on a step", ((CLOSE_HEAD, "      - id: close\n        if: false\n"),), "ONLY P26 the if of propose step close"),
+    ("a close step without a --head list", ((CLOSE_RUN_BLOCK, "        run: |\n          gh pr close 1\n"),), "P23"),
+    ("a close step that lists with --head", ((CLOSE_RUN_BLOCK, "        run: |\n          " + PR_LIST + "\n          gh pr close 1\n"),), "ONLY P26 the close step script differs"),
+    ("echo into rs/Cargo.lock before git add in commit", ((GIT_ADD_LINE, "          echo x > rs/Cargo.lock\n" + GIT_ADD_LINE),), "P26"),
+    ("git add -- . in commit", ((GIT_ADD_LINE, "          git add -- .\n"),), "P26"),
+    ("echo into rs/Cargo.lock before git add, by the exact message", ((GIT_ADD_LINE, "          echo x > rs/Cargo.lock\n" + GIT_ADD_LINE),), "P26 the commit step script differs from the pinned text, first at line 4"),
+    ("git commit --amend before the gh api call of base", ((BASE_API_LINE, "          git commit --amend --no-edit\n" + BASE_API_LINE),), "P26"),
+    ("BUILT_ON reads github.event.after in base", ((BUILT_ON_LINE, "          BUILT_ON: ${{ github.event.after }}\n"),), "P26"),
+    ("git commit --amend before the push line", ((f"          {PUSH_LINE}\n", f"          git commit --amend --no-edit\n          {PUSH_LINE}\n"),), "P26"),
+    ("PUSH_TOKEN reads github.token in push", ((PUSH_TOKEN_LINE, "          PUSH_TOKEN: ${{ github.token }}\n"),), "P26"),
+    ("the pr if: without the moved condition", ((PR_HEAD, f"      - id: pr\n        if: {PROPOSE_IF}\n"),), "P26"),
+    ("env GIT_DIR on close", ((CLOSE_IF_LINE + "        env:\n", CLOSE_IF_LINE + "        env:\n          GIT_DIR: /x\n"),), "P26"),
+    ("if: false on token", ((TOKEN_HEAD, TOKEN_HEAD + "        if: false\n"),), "P26"),
+    ("env NODE_OPTIONS on token", ((TOKEN_HEAD, TOKEN_HEAD + "        env:\n          NODE_OPTIONS: --require ./x.js\n"),), "P26"),
+    ("a dependabot SHA bump of the token action", ((TOKEN_USES, TOKEN_USES.replace("4" * 40, "6" * 40)),), "PASS"),
+    ("run: |- on push", ((PUSH_TOKEN_LINE + "        run: |\n", PUSH_TOKEN_LINE + "        run: |-\n"),), "P26"),
+    ("the token step runs checkout", ((TOKEN_USES, "        uses: actions/checkout@" + "4" * 40 + "\n"),), "P26 the propose step token must use actions/create-github-app-token"),
+    ("concurrency on the propose job", (("    environment: release-pr\n", "    environment: release-pr\n    concurrency: x\n"),), "P26 the propose job declares concurrency"),
+    ("strategy on the propose job", (("    environment: release-pr\n", "    environment: release-pr\n    strategy:\n      matrix:\n        n: [1, 2]\n"),), "P26 the propose job declares strategy"),
+    ("an on: key on the propose job", (("    environment: release-pr\n", "    environment: release-pr\n    on: x\n"),), "P26 the propose job declares True"),
 )
 ANCHORED_LABELS = frozenset(label for label, _r, _w in ANCHORED_ROWS)
 
-# (label, (old, new) replacements on FIXTURE, rule id that must appear or "PASS")
+# (label, (old, new) replacements on FIXTURE, want). The want has one of three kinds:
+#   PASS                      no rule fires.
+#   ONLY <P26 message start>  every message is P26, and one message starts with this text.
+#   a rule id, or the start of one exact message (a want with a space): one message starts with it.
 SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
-    ("the fixture passes, its PR body text says cargo update", (), "PASS"),
+    ("the fixture passes", (), "PASS"),
     ("needs as a list", (("    needs: build\n", "    needs: [build]\n"),), "PASS"),
-    ("a boolean if: false on a step", (("      - id: close\n        if: needs.build.outputs.changed == 'false'\n", "      - id: close\n        if: false\n"),), "PASS"),
     ("secrets.X read in build", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          X: ${{ secrets.X }}\n"),), "P3"),
     ("secrets['X'] read in build", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          X: ${{ secrets['X'] }}\n"),), "P3"),
     ("toJSON(secrets) read in build", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          X: ${{ toJSON(secrets) }}\n"),), "P3"),
@@ -979,7 +1114,6 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("a YAML alias injects a secrets read into build", (
         ("permissions:\n  contents: read\nenv:\n", "permissions:\n  contents: read\nx-leak: &leak ${{ secrets.X }}\nenv:\n"),
         (BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          X: *leak\n")), "P3"),
-    ("a secrets read in propose outside the token step", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        env:\n          K: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}\n"),), "P3"),
     ("an environment on build", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    environment: release-pr\n"),), "P3"),
     ("a third job with environment release-pr", (("jobs:\n", "jobs:\n  third:\n    runs-on: x\n    environment: release-pr\n    permissions:\n      contents: read\n    steps:\n      - run: echo\n"),), "P1"),
     ("a job-level uses with secrets: inherit in build", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    uses: ./.github/workflows/x.yml\n    secrets: inherit\n    runs-on: ubuntu-latest\n"),), "P12"),
@@ -999,18 +1133,8 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("a bare ! test -L on the build host", ((BUILD_RUN, BUILD_RUN + '          ! test -L "$RUNNER_TEMP/work/rs"\n'),), "P5"),
     ("a work-copy script on the build host", ((BUILD_RUN, BUILD_RUN + '          bash "$RUNNER_TEMP/work/x.sh"\n'),), "P5"),
     ("the token step before the checker step", ((VERIFY_STEP + APPLY_STEP + TOKEN_STEP, TOKEN_STEP + VERIFY_STEP + APPLY_STEP),), "P7"),
-    ("a cargo command in propose", ((UNPINNED_PROPOSE_RUN, "        run: cargo update -p wasm-bindgen\n"),), "P5"),
-    ("cargo inside $(...) in propose", ((UNPINNED_PROPOSE_RUN, '        run: echo "$(cargo metadata)"\n'),), "P5"),
-    ("a backtick in propose", ((UNPINNED_PROPOSE_RUN, "        run: echo `id`\n"),), "P5"),
-    ("bash -c in propose", ((UNPINNED_PROPOSE_RUN, "        run: bash -c 'cargo build'\n"),), "P5"),
-    ("python3 -c in propose", ((UNPINNED_PROPOSE_RUN, "        run: python3 -c 'print(1)'\n"),), "P5"),
-    ("env as a command wrapper in propose", ((UNPINNED_PROPOSE_RUN, "        run: env cargo build\n"),), "P5"),
-    ("cargo after a pipe in propose", ((UNPINNED_PROPOSE_RUN, "        run: cat a | cargo build\n"),), "P5"),
     ("a push refspec to refs/heads/main", ((PUSH_LINE, PUSH_LINE.replace("HEAD:refs/heads/deps/wasm-bindgen-lockstep", "HEAD:refs/heads/main")),), "P8"),
     ("a push with --force", ((PUSH_LINE, PUSH_LINE.replace('--force-with-lease="refs/heads/deps/wasm-bindgen-lockstep:${lease}"', "--force")),), "P8"),
-    ("a second git push", ((UNPINNED_PROPOSE_RUN, "        run: git push origin HEAD:refs/heads/x\n"),), "P8"),
-    ("needs.build.outputs.x in a run in propose", ((UNPINNED_PROPOSE_RUN, '        run: echo "${{ needs.build.outputs.changed }}"\n'),), "P9"),
-    ("needs['build'] in an env in propose", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        env:\n          C: ${{ needs['build'].outputs.changed }}\n"),), "P9"),
     ("NEEDS in another case in a with: in propose", (("          persist-credentials: false\n      - id: download", "          persist-credentials: false\n          repository: ${{ NEEDS.build.outputs.changed }}\n      - id: download"),), "P9"),
     ("a second build output", (("      changed: ${{ steps.lock.outputs.changed }}\n", "      changed: ${{ steps.lock.outputs.changed }}\n      version: x\n"),), "P9"),
     ("the bare on: key replaced by a null value", (("on:\n  schedule:\n    - cron: '17 6 * * 2'\n  workflow_dispatch:\n", "on:\n"),), "P2"),
@@ -1023,7 +1147,6 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("if: success() || true on the token step", (("      - id: token\n", "      - id: token\n        if: success() || true\n"),), "P15"),
     ("if: ${{ !success() }} on the token step", (("      - id: token\n", "      - id: token\n        if: ${{ !success() }}\n"),), "P15"),
     ("if: SUCCESS() || true on the push step", (("      - id: push\n        if: needs.build.outputs.changed == 'true' && steps.base.outputs.moved == 'false'\n", "      - id: push\n        if: SUCCESS() || true\n"),), "P15"),
-    ("shell: python on a propose step", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        shell: python\n"),), "P13"),
     ("persist-credentials: true on a checkout", (("          persist-credentials: false\n      - id: download", "          persist-credentials: true\n      - id: download"),), "P17"),
     ("the token asks for workflows: write", (("          permission-pull-requests: write\n", "          permission-pull-requests: write\n          permission-workflows: write\n"),), "P16"),
     ("an unlisted action in propose", (("actions/download-artifact@" + "3" * 40, "evil/action@" + "3" * 40),), "P6"),
@@ -1031,15 +1154,11 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("a merge key", (("    outputs:\n", "    <<: {timeout-minutes: 5}\n    outputs:\n"),), "P0"),
     ("a duplicate key", (("    environment: release-pr\n", "    environment: release-pr\n    environment: other\n"),), "P0"),
     # ---- fix round 1: bypasses that passed the first rule set ----
-    ("status as a whole last command", ((UNPINNED_PROPOSE_RUN, "        run: |\n          set -euo pipefail\n          git status > s\n          python3 ci/wasm-lockstep/lockstep_check.py status --file s\n"),), "PASS"),
     ("LOCKSTEP_IMAGE assigned in front of docker run", ((DOCKER_LINE, "LOCKSTEP_IMAGE=docker.io/evil/x:latest " + DOCKER_LINE),), "P4"),
     ("LOCKSTEP_IMAGE in a step env of build", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          LOCKSTEP_IMAGE: docker.io/evil/x:latest\n"),), "P4"),
     ("LOCKSTEP_IMAGE in a job env of build", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      LOCKSTEP_IMAGE: docker.io/evil/x:latest\n"),), "P4"),
     ("LOCKSTEP_IMAGE set with read", ((BUILD_RUN, BUILD_RUN + "          read -r LOCKSTEP_IMAGE < x\n"),), "P4"),
-    ("a process substitution in propose: cat <(...)", ((UNPINNED_PROPOSE_RUN, "        run: cat <(cargo build)\n"),), "P5"),
-    ("a process substitution in propose: > >(...)", ((UNPINNED_PROPOSE_RUN, "        run: echo x > >(cargo build)\n"),), "P5"),
     ("working-directory on a build step", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        working-directory: /tmp\n"),), "P19"),
-    ("working-directory on a propose step", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        working-directory: /tmp\n"),), "P19"),
     ("defaults.run.working-directory on a job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        working-directory: /tmp\n"),), "P12"),
     ("defaults.run.working-directory on the workflow", (("permissions:\n  contents: read\nenv:", "permissions:\n  contents: read\ndefaults:\n  run:\n    working-directory: /tmp\nenv:"),), "P13"),
     ("BASH_ENV in a step env", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          BASH_ENV: /x\n"),), "P19"),
@@ -1048,43 +1167,22 @@ SELF_TEST_ROWS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("a write to GITHUB_ENV", ((BUILD_RUN, BUILD_RUN + '          echo "BASH_ENV=x" >> "$GITHUB_ENV"\n'),), "P19"),
     ("a write to GITHUB_PATH in brace form", ((BUILD_RUN, BUILD_RUN + "          echo /x >>${GITHUB_PATH}\n"),), "P19"),
     ("a write to GITHUB_ENV, unquoted", ((BUILD_RUN, BUILD_RUN + "          echo x > $GITHUB_ENV\n"),), "P19"),
-    ("gh api -X POST in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y -X POST\n"),), "P20"),
-    ("gh api --method=DELETE in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y --method=DELETE\n"),), "P20"),
-    ("gh api -XPUT in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y -XPUT\n"),), "P20"),
-    ("gh api -f in propose (an implicit POST)", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y -f a=b\n"),), "P20"),
-    ("gh api graphql in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api graphql\n"),), "P20"),
-    ("gh api --method GET in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh api repos/x/y --method GET\n"),), "PASS"),
-    ("git -c before the subcommand in propose", ((UNPINNED_PROPOSE_RUN, "        run: git -c core.fsmonitor=x status\n"),), "P20"),
-    ("git -ckey=value in propose", ((UNPINNED_PROPOSE_RUN, "        run: git -ccore.pager=x log\n"),), "P20"),
     ("git -c in build", ((BUILD_RUN, BUILD_RUN + "          git -c core.x=y archive HEAD\n"),), "P20"),
     ("sudo chown of the work copy to nobody in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 65534:65534 "$RUNNER_TEMP/work"\n'),), "PASS"),
     ("sudo chown of another path in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 65534:65534 /etc\n'),), "P5"),
     ("sudo chown to root in build", ((BUILD_RUN, BUILD_RUN + '          sudo chown -R 0:0 "$RUNNER_TEMP/work"\n'),), "P5"),
     ("sudo bash in build", ((BUILD_RUN, BUILD_RUN + '          sudo bash x.sh\n'),), "P5"),
-    ("sudo chown in propose", ((UNPINNED_PROPOSE_RUN, '        run: sudo chown -R 65534:65534 "$RUNNER_TEMP/work"\n'),), "P5"),
     ("gh pr list --head without the cross-repo filter", ((PR_LIST, "gh pr list --head deps/wasm-bindgen-lockstep --state open --json number --jq '.[].number'"),), "P21"),
     ("gh pr list with --json but a jq that does not select", ((PR_LIST, PR_LIST.replace("select(.isCrossRepository | not) | ", "")),), "P21"),
     ("gh pr list that selects the fork pull requests", ((PR_LIST, PR_LIST.replace("| not)", ")")),), "P21"),
     ("docker run without --cap-drop=ALL", ((DOCKER_LINE, DOCKER_LINE.replace(" --cap-drop=ALL", "")),), "P4"),
     ("docker run without --security-opt=no-new-privileges", ((DOCKER_LINE, DOCKER_LINE.replace(" --security-opt=no-new-privileges", "")),), "P4"),
     ("docker run with --cap-drop=NET_RAW only", ((DOCKER_LINE, DOCKER_LINE.replace("--cap-drop=ALL", "--cap-drop=NET_RAW")),), "P4"),
-    ("needs in an env key named if in propose", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        env:\n          if: ${{ needs.build.outputs.changed }}\n"),), "P9"),
     ("ACTIONS_ALLOW_UNSECURE_COMMANDS in the workflow env", (("env:\n", "env:\n  ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
     ("ACTIONS_ALLOW_UNSECURE_COMMANDS in the build job env", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    env:\n      ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
     ("ACTIONS_ALLOW_UNSECURE_COMMANDS in a step env", ((BUILD_STEP_ANCHOR, BUILD_STEP_ANCHOR + "        env:\n          ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'\n"),), "P19"),
-    ("gh pr merge in propose", ((UNPINNED_PROPOSE_RUN, '        run: gh pr merge "$number" --squash --auto\n'),), "P22"),
-    ("gh workflow run in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh workflow run x.yml\n"),), "P22"),
-    ("gh repo delete in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh repo delete x\n"),), "P22"),
-    ("gh secret set in propose", ((UNPINNED_PROPOSE_RUN, "        run: gh secret set X\n"),), "P22"),
     ("gh pr list without --head", ((PR_LIST, PR_LIST.replace(" --head deps/wasm-bindgen-lockstep", "")),), "P23"),
     ("gh pr list --head of another branch", ((PR_LIST, PR_LIST.replace("deps/wasm-bindgen-lockstep", "main")),), "P23"),
-    ("a close step without a --head list", (("      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n",
-                                              "      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          gh pr close 1\n"),), "P23"),
-    ("a close step that lists with --head", (("      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n",
-                                               "      - id: close\n        if: needs.build.outputs.changed == 'false'\n        run: |\n          " + PR_LIST + "\n          gh pr close 1\n"),), "PASS"),
-    ("steps.build.outputs in a host step of propose", ((UNPINNED_PROPOSE_RUN, '        run: echo "${{ steps.build.outputs.v }}"\n'),), "P24"),
-    ("steps.update.outputs in an env of propose", ((UNPINNED_PROPOSE_RUN, UNPINNED_PROPOSE_RUN + "        env:\n          V: ${{ steps.update.outputs.v }}\n"),), "P24"),
-    ("STEPS.Update.Outputs in another case in propose", ((UNPINNED_PROPOSE_RUN, '        run: echo "${{ STEPS.Update.Outputs.v }}"\n'),), "P24"),
     ("steps['build'].outputs in a with: of propose", (("          persist-credentials: false\n      - id: download", "          persist-credentials: false\n          repository: ${{ steps['build'].outputs.v }}\n      - id: download"),), "P24"),
     ("continue-on-error: true on the build job", (("  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n"),), "P14"),
     ('continue-on-error: "true" on the propose job', (("    environment: release-pr\n", "    environment: release-pr\n    continue-on-error: \"true\"\n"),), "P14"),
@@ -1171,9 +1269,15 @@ def self_test() -> int:
             failures += 1
             continue
         got = _rules_of(text)
-        # A `want` with a space is the start of one exact message; else it is a rule id.
-        prefix = want if " " in want else want + " "
-        ok = not got if want == "PASS" else any(v.startswith(prefix) for v in got)
+        if want.startswith("ONLY "):
+            # ONLY <P26 message start>: the deny rules stay silent (every message is P26), and the
+            # mutation reached the step that the row names (one message starts with the text).
+            start = want.removeprefix("ONLY ")
+            ok = bool(got) and all(v.startswith("P26 ") for v in got) and any(v.startswith(start) for v in got)
+        else:
+            # A `want` with a space is the start of one exact message; else it is a rule id.
+            prefix = want if " " in want else want + " "
+            ok = not got if want == "PASS" else any(v.startswith(prefix) for v in got)
         if ok:
             print(f"  ok    {label}: {want}")
         else:
