@@ -2472,6 +2472,275 @@ def check_ts_tsc_preflight(projects, root, floor=REQUIRED_TSC_TASKS):
     return rows
 
 
+# SMA-736 — A13. Every ts task that runs vitest must key on what vitest reads: its config files, the
+# package.json closure that A12 walks, the runtime files of each `file:` binding, the tsconfig.json
+# `extends` chains, and each alias target outside its own package. See
+# docs/superpowers/specs/2026-10-09-sma-736-vitest-upstream-inputs-design.md.
+#
+# The config parser below is deliberately narrow (spec §4.4). It reads the alias forms the real
+# configs use. Any other form that can carry an alias is a row, never a skip.
+_JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+_JS_IMPORT_RE = re.compile(r"(?<![\w$.])(?:from|import)\s*\(?\s*(?=['\"])")
+_JS_SPLIT_CONFIG_RE = re.compile(r"(?<![\w$])(mergeConfig|extends)(?![\w$])")
+_JS_CONST_STRING_RE = re.compile(r"(?<![\w$])const\s+([A-Za-z_$][\w$]*)\s*=\s*(?=['\"])")
+_JS_CONST_URL_RE = re.compile(r"(?<![\w$])const\s+([A-Za-z_$][\w$]*)\s*=\s*fileURLToPath\(\s*new\s+URL\(\s*(?=['\"])")
+_JS_URL_TAIL_RE = re.compile(r"\s*,\s*import\.meta\.url\s*\)\s*\)")
+_JS_STATEMENT_END_RE = re.compile(r"[ \t]*(?:;|\n|$)")
+_JS_ALIAS_WORD_RE = re.compile(r"(?<![\w$])alias(?![\w$])")
+_JS_KEY_COLON_RE = re.compile(r"\s*:")
+_JS_COLON_RE = re.compile(r"\s*:\s*")
+_JS_TSCONFIG_OFF_RE = re.compile(r"(?<![\w$])tsconfig\s*:\s*false(?![\w$])")
+_JS_PROJECTS_RE = re.compile(r"(?<![\w$])projects\s*:\s*")
+_JS_OPEN = "([{"
+_JS_CLOSE = ")]}"
+
+
+def _scan_js(text, where, rows):
+    """One pass over a JS, TS or JSONC text. Return (code, masked, literals), or None after a row.
+
+    The scanner has one state at a time: code, `'...'`, `"..."`, a template literal, `// ...` and
+    `/* ... */`. A comment opens only in code state, so a quote inside a comment opens no string and
+    a `//` inside a string opens no comment. A template literal's `${...}` returns to code state until
+    its matching `}`; a stack holds the nesting. This is the defect class ts/CLAUDE.md records for
+    `stripComments` (SMA-639), so the self-test covers each state.
+
+    `code` is `text` with each comment replaced by spaces (newlines kept), so every offset stays the
+    same. `masked` is `code` with the contents of each string and template literal replaced by `_`
+    (quotes kept), so a regex over `masked` never matches inside a string. `literals` maps the offset
+    of each `'` or `"` opening quote to (end, value): `end` is the offset after the closing quote.
+
+    Limit: a regex literal is not a state. `/\\.node$/` reads as code and is harmless; a regex that
+    holds a quote opens a string and fails closed with a row.
+    """
+    code = list(text)
+    masked = list(text)
+    literals = {}
+    stack = [["code", 0]]
+    i, n = 0, len(text)
+    while i < n:
+        mode = stack[-1]
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if mode[0] == "tpl":
+            if ch == "\\":
+                for k in (i, i + 1):
+                    if k < n and text[k] != "\n":
+                        masked[k] = "_"
+                i += 2
+            elif ch == "`":
+                stack.pop()
+                i += 1
+            elif ch == "$" and nxt == "{":
+                stack.append(["code", 0])
+                i += 2
+            else:
+                if ch != "\n":
+                    masked[i] = "_"
+                i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            end = text.find("\n", i)
+            end = n if end == -1 else end
+            for k in range(i, end):
+                code[k] = masked[k] = " "
+            i = end
+            continue
+        if ch == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end == -1:
+                rows.append(f"{where}: a `/*` comment is not closed, so A13 cannot read the file")
+                return None
+            for k in range(i, end + 2):
+                if text[k] != "\n":
+                    code[k] = masked[k] = " "
+            i = end + 2
+            continue
+        if ch in "'\"":
+            j, value = i + 1, []
+            while j < n and text[j] not in (ch, "\n"):
+                if text[j] == "\\" and j + 1 < n:
+                    value.append(text[j + 1])
+                    j += 2
+                    continue
+                value.append(text[j])
+                j += 1
+            if j >= n or text[j] != ch:
+                rows.append(f"{where}: a {ch} string is not closed on its line, so A13 cannot read the file")
+                return None
+            for k in range(i + 1, j):
+                masked[k] = "_"
+            literals[i] = (j + 1, "".join(value))
+            i = j + 1
+            continue
+        if ch == "`":
+            stack.append(["tpl", 0])
+        elif ch == "{":
+            mode[1] += 1
+        elif ch == "}":
+            if len(stack) > 1 and mode[1] == 0:
+                stack.pop()
+            else:
+                mode[1] -= 1
+        i += 1
+    if len(stack) > 1:
+        rows.append(f"{where}: a template literal is not closed, so A13 cannot read the file")
+        return None
+    return "".join(code), "".join(masked), literals
+
+
+def _matching_close(masked, open_idx):
+    """The offset of the bracket that closes the one at `open_idx`, or None if it never closes."""
+    depth = 0
+    for k in range(open_idx, len(masked)):
+        ch = masked[k]
+        if ch in _JS_OPEN:
+            depth += 1
+        elif ch in _JS_CLOSE:
+            depth -= 1
+            if depth == 0:
+                return k
+    return None
+
+
+def _top_level_entries(masked, start, end):
+    """The (start, end) spans of the comma-separated entries in masked[start:end], trimmed.
+
+    Only a comma at bracket depth 0 splits. An empty entry is returned as a span with start == end.
+    """
+    spans, depth, s = [], 0, start
+    for k in range(start, end):
+        ch = masked[k]
+        if ch in _JS_OPEN:
+            depth += 1
+        elif ch in _JS_CLOSE:
+            depth -= 1
+        elif ch == "," and depth == 0:
+            spans.append((s, k))
+            s = k + 1
+    spans.append((s, end))
+    trimmed = []
+    for a, b in spans:
+        while a < b and masked[a].isspace():
+            a += 1
+        while b > a and masked[b - 1].isspace():
+            b -= 1
+        trimmed.append((a, b))
+    return trimmed
+
+
+def _js_bindings(masked, literals, config_dir):
+    """`const` bindings an alias value may name (spec §4.4 step 3).
+
+    `const <id> = '<lit>'` gives ("lit", lit). `const <id> = fileURLToPath(new URL('<lit>',
+    import.meta.url))` gives ("path", <lit> resolved against the config's directory). Any other
+    `const` is not a binding, so an alias that names it is unresolvable.
+    """
+    bindings = {}
+    for m in _JS_CONST_STRING_RE.finditer(masked):
+        lit = literals.get(m.end())
+        if lit and _JS_STATEMENT_END_RE.match(masked, lit[0]):
+            bindings[m.group(1)] = ("lit", lit[1])
+    for m in _JS_CONST_URL_RE.finditer(masked):
+        lit = literals.get(m.end())
+        if lit is None or not _JS_URL_TAIL_RE.match(masked, lit[0]):
+            continue
+        if lit[1].startswith("/") or ":" in lit[1]:
+            continue
+        bindings[m.group(1)] = ("path", os.path.normpath(os.path.join(config_dir, lit[1])))
+    return bindings
+
+
+def _alias_value(masked, literals, bindings, vs, ve):
+    """Classify the alias value in masked[vs:ve]: ("lit", s), ("path", p), or (None, None)."""
+    if vs < ve and masked[vs] in "'\"" and literals.get(vs, (None,))[0] == ve:
+        return ("lit", literals[vs][1])
+    ident = masked[vs:ve]
+    if _JS_IDENT_RE.fullmatch(ident) and ident in bindings:
+        return bindings[ident]
+    return (None, None)
+
+
+def vitest_config_facts(text, config_rel, rows):
+    """Return (aliases, tsconfig_off) for one vitest config file (spec §4.4).
+
+    `aliases` is a sorted list of (key, target) pairs, `target` relative to the repository root and
+    normalized (it can start with `..` when it leaves the root; the caller reports that). An alias
+    whose value is a bare package name adds nothing. `tsconfig_off` is True when the code holds
+    `tsconfig: false` as a whole property. Each form outside the grammar appends a row to `rows`.
+    """
+    scanned = _scan_js(text, config_rel, rows)
+    if scanned is None:
+        return [], False
+    _code, masked, literals = scanned
+    config_dir = os.path.dirname(config_rel)
+    for m in _JS_IMPORT_RE.finditer(masked):
+        lit = literals.get(m.end())
+        if lit and lit[1].startswith(("./", "../")):
+            rows.append(f"{config_rel}: imports {lit[1]!r}; A13 cannot read a config that is split across files")
+    for m in _JS_SPLIT_CONFIG_RE.finditer(masked):
+        rows.append(f"{config_rel}: uses `{m.group(1)}`; A13 cannot read a config that is split across files")
+    for m in _JS_PROJECTS_RE.finditer(masked):
+        start = m.end()
+        end = _matching_close(masked, start) if masked[start:start + 1] == "[" else None
+        if end is None:
+            rows.append(f"{config_rel}: the `projects` value is not an array literal A13 can read")
+            continue
+        for s, e in _top_level_entries(masked, start + 1, end):
+            if s < e and masked[s] in "'\"`":
+                rows.append(
+                    f"{config_rel}: `projects` holds a string entry; vitest loads it as another config or "
+                    f"a glob, which A13 does not follow"
+                )
+    bindings = _js_bindings(masked, literals, config_dir)
+    key_ends = [m.end() for m in _JS_ALIAS_WORD_RE.finditer(masked)]
+    key_ends += [end for end, value in literals.values() if value == "alias" and _JS_KEY_COLON_RE.match(masked, end)]
+    aliases = []
+    for key_end in sorted(key_ends):
+        colon = _JS_COLON_RE.match(masked, key_end)
+        if colon is None:
+            rows.append(f"{config_rel}: `alias` is used without a `:` value (a shorthand or a variable), which A13 cannot read")
+            continue
+        open_idx = colon.end()
+        close_idx = _matching_close(masked, open_idx) if masked[open_idx:open_idx + 1] == "{" else None
+        if close_idx is None:
+            rows.append(f"{config_rel}: an `alias` value is not an object literal, so A13 cannot read it")
+            continue
+        entries = _top_level_entries(masked, open_idx + 1, close_idx)
+        for idx, (s, e) in enumerate(entries):
+            if s == e:
+                if idx != len(entries) - 1:
+                    rows.append(f"{config_rel}: an `alias` object holds an empty entry")
+                continue
+            if masked.startswith("...", s):
+                rows.append(f"{config_rel}: an `alias` object holds a spread entry, which A13 cannot read")
+                continue
+            if masked[s] == "[":
+                rows.append(f"{config_rel}: an `alias` object holds a computed key, which A13 cannot read")
+                continue
+            if masked[s] in "'\"" and s in literals:
+                key_end_idx, key = literals[s]
+            else:
+                km = _JS_IDENT_RE.match(masked, s)
+                if km is None:
+                    rows.append(f"{config_rel}: an `alias` entry has a key A13 cannot read")
+                    continue
+                key, key_end_idx = km.group(0), km.end()
+            sep = _JS_COLON_RE.match(masked, key_end_idx)
+            if sep is None or sep.end() > e:
+                rows.append(f"{config_rel}: the alias {key} has no `:` value, which A13 cannot read")
+                continue
+            kind, value = _alias_value(masked, literals, bindings, sep.end(), e)
+            if kind == "lit" and value.startswith(("./", "../")):
+                kind, value = "path", os.path.normpath(os.path.join(config_dir, value))
+            if kind == "path":
+                aliases.append((key, value))
+            elif kind == "lit" and not key.startswith("@paigasus/"):
+                continue
+            else:
+                rows.append(f"{config_rel}: the alias {key} has a value A13 cannot resolve")
+    return sorted(set(aliases)), bool(_JS_TSCONFIG_OFF_RE.search(masked))
+
+
 def moon_projects():
     """Moon's own resolved graph. Never parse moon.yml — Moon already resolved it.
 
@@ -5079,6 +5348,70 @@ def self_test():
     workspace_package_inputs("ts/packages/core", {"exports": {".": "src/index.ts"}}, rows)
     if rows != ["ts/packages/core/package.json: the `exports` target 'src/index.ts' does not start with `./`"]:
         failures.append(f"workspace_package_inputs accepted an `exports` target without `./`: {rows}")
+    # A13 (SMA-736) — the config parser, called directly (spec T5). Each row is (a13_label, config text,
+    # expected aliases or None to skip the check, expected tsconfig_off or None, the one expected row
+    # or None for "no rows at all"). The comment, string and template rows are the SMA-639 defect
+    # class: a scanner that opens a string inside a comment, or a comment inside a string, loses or
+    # invents an alias.
+    a13_cfg = "ts/packages/k/vitest.config.ts"
+    a13_ok_alias = [("a", "ts/packages/k/a")]
+    for a13_label, a13_text, a13_want_aliases, a13_want_off, a13_want_row in (
+        ("an `alias` array", "export default { resolve: { alias: [{ find: 'a', replacement: './a' }] } };\n",
+         None, None, f"{a13_cfg}: an `alias` value is not an object literal, so A13 cannot read it"),
+        ("a shorthand `alias`", "const alias = { a: './a' };\nexport default { resolve: { alias } };\n",
+         None, None, f"{a13_cfg}: `alias` is used without a `:` value (a shorthand or a variable), which A13 cannot read"),
+        ("a quoted 'alias' key", "export default { resolve: { 'alias': { '@paigasus/x': '../x/src/index.ts' } } };\n",
+         [("@paigasus/x", "ts/packages/x/src/index.ts")], False, None),
+        ("a call as a @paigasus/ value", "export default { resolve: { alias: { '@paigasus/x': path.resolve('x') } } };\n",
+         None, None, f"{a13_cfg}: the alias @paigasus/x has a value A13 cannot resolve"),
+        ("a package name as a @paigasus/ value", "export default { resolve: { alias: { '@paigasus/x': 'other-pkg' } } };\n",
+         None, None, f"{a13_cfg}: the alias @paigasus/x has a value A13 cannot resolve"),
+        ("an unbound identifier value", "export default { resolve: { alias: { 'server-only': stub } } };\n",
+         None, None, f"{a13_cfg}: the alias server-only has a value A13 cannot resolve"),
+        ("a package name as a plain value", "export default { resolve: { alias: { react: 'preact/compat' } } };\n",
+         [], False, None),
+        ("a spread entry", "export default { resolve: { alias: { ...base } } };\n",
+         None, None, f"{a13_cfg}: an `alias` object holds a spread entry, which A13 cannot read"),
+        ("a computed key", "export default { resolve: { alias: { [k]: './a' } } };\n",
+         None, None, f"{a13_cfg}: an `alias` object holds a computed key, which A13 cannot read"),
+        ("a trailing comma", "export default { resolve: { alias: { a: './a', } } };\n", a13_ok_alias, False, None),
+        ("a `//` comment", "// alias: { '@paigasus/x': stub }\nexport default {};\n", [], False, None),
+        ("a `/* */` comment", "/* alias: { '@paigasus/x': stub } */\nexport default {};\n", [], False, None),
+        ("`//` inside a string", "const u = 'http://x'; export default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("quotes inside comments", "// it's \"a\" `b`\n/* it's \"a\" `b` */\nexport default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a template literal",
+         "const m = `x \\` ${ {a: 1}.a } alias: { '@paigasus/y': 1 }`;\nexport default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a regex literal", "export default { test: { server: { deps: { external: [/\\.node$/] } } }, resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a relative import", "import base from './base.config';\nexport default base;\n",
+         None, None, f"{a13_cfg}: imports './base.config'; A13 cannot read a config that is split across files"),
+        ("mergeConfig", "import { mergeConfig } from 'vitest/config';\nexport default {};\n",
+         None, None, f"{a13_cfg}: uses `mergeConfig`; A13 cannot read a config that is split across files"),
+        ("a string `projects` entry", "export default { test: { projects: ['packages/*'] } };\n",
+         None, None, f"{a13_cfg}: `projects` holds a string entry; vitest loads it as another config or a glob, which A13 does not follow"),
+        ("object `projects` entries", "export default { test: { projects: [{ test: { include: ['a.test.ts'] } }] } };\n", [], False, None),
+        ("`tsconfig: false`", "const oxc = { tsconfig: false } as const;\nexport default { oxc };\n", [], True, None),
+        ("`tsconfig: false` in a comment", "// tsconfig: false\nexport default {};\n", [], False, None),
+        ("a fileURLToPath binding",
+         "const d = fileURLToPath(new URL('../../../rs/crates/bindings/nb/index.js', import.meta.url));\n"
+         "export default { resolve: { alias: { '@paigasus/node-bindings': d } } };\n",
+         [("@paigasus/node-bindings", "rs/crates/bindings/nb/index.js")], False, None),
+        ("an unclosed string", "const s = 'abc\nexport default {};\n",
+         None, None, f"{a13_cfg}: a ' string is not closed on its line, so A13 cannot read the file"),
+    ):
+        a13_rows = []
+        a13_aliases, a13_off = vitest_config_facts(a13_text, a13_cfg, a13_rows)
+        if a13_want_row is None and a13_rows:
+            failures.append(f"A13 parser, {a13_label}: unexpected rows {a13_rows}")
+        if a13_want_row is not None and a13_want_row not in a13_rows:
+            failures.append(f"A13 parser, {a13_label}: expected the row {a13_want_row!r}, got {a13_rows}")
+        if a13_want_aliases is not None and a13_aliases != a13_want_aliases:
+            failures.append(f"A13 parser, {a13_label}: aliases {a13_aliases}, expected {a13_want_aliases}")
+        if a13_want_off is not None and a13_off is not a13_want_off:
+            failures.append(f"A13 parser, {a13_label}: tsconfig_off is {a13_off}, expected {a13_want_off}")
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
