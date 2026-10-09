@@ -1,3 +1,6 @@
+<!-- moon-diagnosis:ok -->
+<!-- The marker above is for check 12 of repo:actionlint: Task 4 names the ciReport token when it
+quotes Step 0 of the moon-diagnosis procedure in CLAUDE.md, so this file needs the marker. -->
 # SMA-725 Deprecate the Six Single-Field PRN Accessors — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
