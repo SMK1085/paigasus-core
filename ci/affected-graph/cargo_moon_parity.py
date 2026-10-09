@@ -2480,7 +2480,7 @@ def check_ts_tsc_preflight(projects, root, floor=REQUIRED_TSC_TASKS):
 # The config parser below is deliberately narrow (spec §4.4). It reads the alias forms the real
 # configs use. Any other form that can carry an alias is a row, never a skip.
 _JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
-_JS_IMPORT_RE = re.compile(r"(?<![\w$.])(?:from|import)\s*\(?\s*(?=['\"])")
+_JS_IMPORT_RE = re.compile(r"(?<![\w$.])(?:from|import|require)\s*\(?\s*(?=['\"])")
 _JS_SPLIT_CONFIG_RE = re.compile(r"(?<![\w$])(mergeConfig|extends)(?![\w$])")
 _JS_CONST_STRING_RE = re.compile(r"(?<![\w$])const\s+([A-Za-z_$][\w$]*)\s*=\s*(?=['\"])")
 _JS_CONST_URL_RE = re.compile(r"(?<![\w$])const\s+([A-Za-z_$][\w$]*)\s*=\s*fileURLToPath\(\s*new\s+URL\(\s*(?=['\"])")
@@ -2491,6 +2491,7 @@ _JS_KEY_COLON_RE = re.compile(r"\s*:")
 _JS_COLON_RE = re.compile(r"\s*:\s*")
 _JS_TSCONFIG_OFF_RE = re.compile(r"(?<![\w$])tsconfig\s*:\s*false(?![\w$])")
 _JS_PROJECTS_RE = re.compile(r"(?<![\w$])projects\s*:\s*")
+_JS_REGEX_PREV = "(,=:[!&|?{};"
 _JS_OPEN = "([{"
 _JS_CLOSE = ")]}"
 
@@ -2498,8 +2499,8 @@ _JS_CLOSE = ")]}"
 def _scan_js(text, where, rows):
     """One pass over a JS, TS or JSONC text. Return (code, masked, literals), or None after a row.
 
-    The scanner has one state at a time: code, `'...'`, `"..."`, a template literal, `// ...` and
-    `/* ... */`. A comment opens only in code state, so a quote inside a comment opens no string and
+    The scanner has one state at a time: code, `'...'`, `"..."`, a template literal, a regex literal,
+    `// ...` and `/* ... */`. A comment opens only in code state, so a quote inside a comment opens no string and
     a `//` inside a string opens no comment. A template literal's `${...}` returns to code state until
     its matching `}`; a stack holds the nesting. This is the defect class ts/CLAUDE.md records for
     `stripComments` (SMA-639), so the self-test covers each state.
@@ -2509,13 +2510,19 @@ def _scan_js(text, where, rows):
     (quotes kept), so a regex over `masked` never matches inside a string. `literals` maps the offset
     of each `'` or `"` opening quote to (end, value): `end` is the offset after the closing quote.
 
-    Limit: a regex literal is not a state. `/\\.node$/` reads as code and is harmless; a regex that
-    holds a quote opens a string and fails closed with a row.
+    A `/` in code state that does not start a comment opens a regex literal when the previous code
+    character is one of `( , = : [ ! & | ? { } ;`, when the text starts there, or when the previous
+    word is `return`. Any other `/` is a division. The regex state honours `\\` escapes and `[...]`
+    classes (a `/` inside a class does not close it), closes at the next unescaped `/`, and skips the
+    flag letters. Its content is masked like a string, so it opens no comment and no string. A newline
+    before the close is a row. Without this state, `/^https?:\\/\\//` read as a comment and dropped
+    an alias with no row.
     """
     code = list(text)
     masked = list(text)
     literals = {}
     stack = [["code", 0]]
+    prev = ""
     i, n = 0, len(text)
     while i < n:
         mode = stack[-1]
@@ -2529,9 +2536,11 @@ def _scan_js(text, where, rows):
                 i += 2
             elif ch == "`":
                 stack.pop()
+                prev = "`"
                 i += 1
             elif ch == "$" and nxt == "{":
                 stack.append(["code", 0])
+                prev = "{"
                 i += 2
             else:
                 if ch != "\n":
@@ -2570,7 +2579,34 @@ def _scan_js(text, where, rows):
             for k in range(i + 1, j):
                 masked[k] = "_"
             literals[i] = (j + 1, "".join(value))
+            prev = ch
             i = j + 1
+            continue
+        if ch == "/" and (prev == "" or prev in _JS_REGEX_PREV or re.search(r"(?<![\w$.])return\s*$", text[max(0, i - 12):i])):
+            j, in_class = i + 1, False
+            while j < n and text[j] != "\n":
+                c = text[j]
+                if c == "\\":
+                    j += 2
+                    continue
+                if in_class:
+                    in_class = c != "]"
+                elif c == "[":
+                    in_class = True
+                elif c == "/":
+                    break
+                j += 1
+            if j >= n or text[j] != "/":
+                rows.append(f"{where}: an unterminated regex literal at line {text.count(chr(10), 0, i) + 1}, so A13 cannot scan it")
+                return None
+            j += 1
+            while j < n and (text[j].isalpha()):
+                j += 1
+            for k in range(i + 1, j):
+                if text[k] != "\n":
+                    masked[k] = "_"
+            prev = "/"
+            i = j
             continue
         if ch == "`":
             stack.append(["tpl", 0])
@@ -2581,6 +2617,8 @@ def _scan_js(text, where, rows):
                 stack.pop()
             else:
                 mode[1] -= 1
+        if not ch.isspace():
+            prev = ch
         i += 1
     if len(stack) > 1:
         rows.append(f"{where}: a template literal is not closed, so A13 cannot read the file")
@@ -5399,6 +5437,18 @@ def self_test():
          "const d = fileURLToPath(new URL('../../../rs/crates/bindings/nb/index.js', import.meta.url));\n"
          "export default { resolve: { alias: { '@paigasus/node-bindings': d } } };\n",
          [("@paigasus/node-bindings", "rs/crates/bindings/nb/index.js")], False, None),
+        ("a regex literal with `//`", "export default { test: { exclude: [/^https?:\\/\\//] }, resolve: { alias: { '@paigasus/x': stub } } };\nconst stub = './x';\n",
+         [("@paigasus/x", "ts/packages/k/x")], False, None),
+        ("a regex literal with `/*`", "const r = /a\\/*b/;\nconst stub = './x';\nexport default { resolve: { alias: { '@paigasus/x': stub } } };\n// */\n",
+         [("@paigasus/x", "ts/packages/k/x")], False, None),
+        ("a division", "const d = a / b / c; export default { resolve: { alias: { a: './a' } } };\n// it's\n",
+         a13_ok_alias, False, None),
+        ("a regex class with `/`", "export default { test: { exclude: [/[/]/] }, resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("an unterminated regex", "export default { test: { exclude: [/abc] } };\n",
+         None, None, f"{a13_cfg}: an unterminated regex literal at line 1, so A13 cannot scan it"),
+        ("a relative require", "const base = require('./base');\nexport default base;\n",
+         None, None, f"{a13_cfg}: imports './base'; A13 cannot read a config that is split across files"),
         ("an unclosed string", "const s = 'abc\nexport default {};\n",
          None, None, f"{a13_cfg}: a ' string is not closed on its line, so A13 cannot read the file"),
     ):
