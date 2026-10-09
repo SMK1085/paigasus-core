@@ -23,7 +23,7 @@ export type { PrnParseResult };
 
 // SMA-725: the six single-field accessors are deprecated. Each one parses the PRN again. Each is
 // the raw binding function under a JSDoc-tagged `const`, so the behaviour does not change. The six
-// blocks are the same in src/index.ts; tests/deprecated-accessors.test.ts holds the two in step.
+// blocks are the same in src/wasm.ts; tests/deprecated-accessors.test.ts holds the two in step.
 // `paigasus/no-single-field-prn-accessor` (@paigasus/next-config/eslint) stops new callers.
 
 /**

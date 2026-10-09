@@ -426,22 +426,45 @@ function nameOf(node) {
 }
 
 /**
+ * The name a member or property key names. A key that is not computed is an Identifier (or a
+ * string Literal). A computed key gives a name only when it is a constant: a string Literal or a
+ * template literal with no expression. Any other computed key gives `undefined`.
+ *
+ * @param {any} key
+ * @param {boolean} computed
+ * @returns {string | undefined}
+ */
+function keyName(key, computed) {
+  if (!computed) return nameOf(key);
+  if (key?.type === 'Literal') return nameOf(key);
+  if (key?.type === 'TemplateLiteral' && key.expressions.length === 0) return key.quasis[0].value.cooked ?? undefined;
+  return undefined;
+}
+
+/**
  * `paigasus/no-single-field-prn-accessor` (SMA-725 spec § 4.2).
  *
  * The six single-field PRN accessors of @paigasus/kernel are deprecated. Each one parses the PRN
  * again, and `prnParse` returns every field in ONE kernel call. This rule reports, for a watched
  * module: a named import of one of the six (value or type, aliased or not), a named re-export of
- * one, and a use of one through a namespace import (`k.prnService`, `k['prnOrg']`,
- * `const { prnRegion } = k`). It allows a namespace import itself, `export *`, and a dynamic
- * `import()` (spec D4, L1).
+ * one, and a use of one through a namespace import. It allows a namespace import itself,
+ * `export *`, and a dynamic `import()` (spec D4, L1).
  *
  * WHY A CUSTOM RULE. The core `no-restricted-imports` already carries the boundary rules, and a
  * second block for the same files REPLACES their options. `@typescript-eslint/no-restricted-imports`
  * is deprecated since typescript-eslint 8.64.0 and points to the core rule (spec § 2, D3).
  *
  * The namespace check follows the import binding through ESLint's scope analysis. So a parameter or
- * a local variable that shadows the namespace name is not reported (spec limit L2 records what the
- * check does not follow).
+ * a local variable that shadows the namespace name is not reported.
+ *
+ * What the rule follows (spec L2): a member access (`k.x`, `k?.x`, `k['x']`, k[`x`] with no
+ * expression), and a destructuring in a declaration or an assignment (`const { x } = k`,
+ * `({ x: o } = k)`) with an identifier key, a string-literal key or a computed string-literal key.
+ *
+ * What the rule does not follow: a type position (`typeof k.x`), because it reads a type only and
+ * calls nothing at runtime; a computed key that is not a constant; a namespace that is assigned to
+ * another variable or passed to a function (spec L2). CommonJS `require()` and `import x =
+ * require()` are not followed (spec L1).
  *
  * @type {import('eslint').Rule.RuleModule}
  */
@@ -474,10 +497,15 @@ export const noSingleFieldPrnAccessor = {
             // `k.prnService` names the property; `k['prnOrg']` names it with a string literal. A
             // computed key that is a variable (`k[n]`) names nothing we can know, so it is skipped.
             const property = parent.property;
-            report(property, parent.computed ? (property.type === 'Literal' ? nameOf(property) : undefined) : nameOf(property));
-          } else if (parent?.type === 'VariableDeclarator' && parent.init === id && parent.id.type === 'ObjectPattern') {
-            for (const property of parent.id.properties) {
-              if (property.type === 'Property' && !property.computed) report(property.key, nameOf(property.key));
+            report(property, keyName(property, parent.computed));
+          } else if (
+            (parent?.type === 'VariableDeclarator' && parent.init === id && parent.id.type === 'ObjectPattern') ||
+            (parent?.type === 'AssignmentExpression' && parent.right === id && parent.left.type === 'ObjectPattern')
+          ) {
+            // A declaration (`const { x } = k`) or an assignment (`({ x: o } = k)`).
+            const pattern = parent.type === 'VariableDeclarator' ? parent.id : parent.left;
+            for (const property of pattern.properties) {
+              if (property.type === 'Property') report(property.key, keyName(property.key, property.computed));
             }
           }
         }

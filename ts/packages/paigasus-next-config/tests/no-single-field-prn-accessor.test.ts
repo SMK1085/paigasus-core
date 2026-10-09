@@ -55,6 +55,10 @@ ruleTester.run('paigasus/no-single-field-prn-accessor', noSingleFieldPrnAccessor
     // like an accessor: its value is what counts, not its name.
     valid("import * as k from '@paigasus/kernel';\ndeclare const n: string;\nk[n];"),
     valid("import * as k from '@paigasus/kernel';\nconst prnService = 'prnParse';\nk[prnService];"),
+    // A template literal WITH an expression cannot be judged either.
+    valid("import * as k from '@paigasus/kernel';\ndeclare const x: string;\nk[`prn${x}`];"),
+    // L2: a type position reads a type only and calls nothing at runtime, so it is not followed.
+    valid("import * as k from '@paigasus/kernel';\ntype F = typeof k.prnService;"),
   ],
   invalid: [
     // Each of the six names, from each of the four exact specifiers (24 cases).
@@ -76,6 +80,15 @@ ruleTester.run('paigasus/no-single-field-prn-accessor', noSingleFieldPrnAccessor
     invalid("import * as k from '@paigasus/kernel';\nk['prnOrg']('p');", ['prnOrg']),
     invalid("import * as k from '@paigasus/kernel';\nconst { prnRegion } = k;", ['prnRegion']),
     invalid("import * as k from '@paigasus/kernel';\nconst { prnResourceId: id, prnParse } = k;", ['prnResourceId']),
+    // A constant key: a template literal without an expression, or a computed string literal.
+    invalid("import * as k from '@paigasus/kernel';\nk[`prnOrg`]('p');", ['prnOrg']),
+    invalid("import * as k from '@paigasus/kernel';\nconst { ['prnOrg']: o } = k;", ['prnOrg']),
+    // Destructuring in an assignment.
+    invalid("import * as k from '@paigasus/kernel';\nlet o;\n({ prnOrg: o } = k);", ['prnOrg']),
+    // An optional chain, and the type-only and string-literal re-exports.
+    invalid("import * as k from '@paigasus/kernel';\nk?.prnService('p');", ['prnService']),
+    invalid("export type { prnRegion } from '@paigasus/kernel';", ['prnRegion']),
+    invalid("export { 'prnService' } from '@paigasus/kernel';", ['prnService']),
   ],
 });
 
