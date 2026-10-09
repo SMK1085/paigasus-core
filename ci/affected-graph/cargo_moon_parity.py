@@ -2860,7 +2860,9 @@ def vitest_invocation_configs(target, blob, root, own, rows):
         if _VITEST_CD_RE.search(prefix) or _VITEST_PNPM_DIR_RE.search(prefix):
             rows.append(f"{target} changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads")
             continue
-        end = _VITEST_SPAN_END_RE.search(blob, m.end())
+        # The span search starts at the separator group (group 3). A newline after a bare `vitest`
+        # token then ends the span, and the words of the next command are not flags of this call.
+        end = _VITEST_SPAN_END_RE.search(blob, m.start(3))
         words = blob[m.end():end.start() if end else len(blob)].split()
         explicit, refused = [], False
         i = 0
@@ -5920,6 +5922,9 @@ def self_test():
             ("pnpm exec vitest run --config ./vitest.e2e.config.ts", a13_k, a13_e2e, None),
             ("set set -euo pipefail\npnpm exec vitest run\npnpm exec vitest run --config vitest.e2e.config.ts\n", a13_k,
              ["ts/packages/k/vitest.config.ts", *a13_e2e], None),
+            # A newline after a bare `vitest` ends its span: the next call's flags are not its flags.
+            ("pnpm exec vitest\npnpm exec vitest run --config vitest.e2e.config.ts\n", a13_k,
+             ["ts/packages/k/vitest.config.ts", *a13_e2e], None),
             ("pnpm exec vitest run --config vitest.ghost.config.ts", a13_k, [],
              "t:test runs vitest with ts/packages/k/vitest.ghost.config.ts, which does not exist"),
             ("pnpm exec vitest run --passWithNoTests", "ts/packages/n", [], None),
@@ -5957,6 +5962,11 @@ def self_test():
                     f"vitest_invocation_configs({a13_blob!r}, {a13_own!r}) gave {a13_got} and rows {a13_rows}, expected "
                     f"{a13_configs} and {'no row' if a13_row is None else repr(a13_row)}"
                 )
+        # ...and a `--root` on the line after a bare `vitest` makes one row, for the second call only.
+        a13_rows = []
+        a13_got = vitest_invocation_configs("t:test", "pnpm exec vitest\npnpm exec vitest run --root x\n", a13_root, a13_k, a13_rows)
+        if a13_got != ["ts/packages/k/vitest.config.ts"] or len(a13_rows) != 1:
+            failures.append(f"vitest_invocation_configs on a bare vitest before a --root line gave {a13_got} and rows {a13_rows}, expected the default config and one row")
     # A13 (SMA-736 §4.5) — the tracked-file plumbing that main() uses. tracked_files raises
     # task_inputs' OWN MoonOutputError, a different class from this file's. It must be in
     # INFRA_ERRORS, or a failed `git ls-files` exits 1 with a traceback instead of rc 2.
@@ -5972,10 +5982,11 @@ def self_test():
             )
         else:
             failures.append("tracked_files outside a repository returned a set instead of raising")
-    # ...and the git call must ignore an inherited GIT_DIR and GIT_INDEX_FILE (a git hook sets them).
+    # ...and the git call must ignore an inherited GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE (a git hook sets them).
     a13_repo_root = Path(__file__).resolve().parents[2]
-    a13_saved_env = {k: os.environ.get(k) for k in ("GIT_DIR", "GIT_INDEX_FILE")}
+    a13_saved_env = {k: os.environ.get(k) for k in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")}
     os.environ["GIT_DIR"] = "/nonexistent/sma-736-git-dir"
+    os.environ["GIT_WORK_TREE"] = "/nonexistent/sma-736-work-tree"
     os.environ["GIT_INDEX_FILE"] = "/nonexistent/sma-736-index"
     try:
         a13_tracked_real = task_inputs.tracked_files(a13_repo_root)
