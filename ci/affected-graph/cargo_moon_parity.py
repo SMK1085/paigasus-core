@@ -2796,7 +2796,7 @@ VITEST_TOKEN_RE = re.compile(r"(^|[\s;&|(])(pnpm\s+exec\s+)?vitest(\s|$)")
 VITEST_CONFIG_NAMES = tuple(f"{stem}.config.{ext}" for stem in ("vitest", "vite") for ext in ("ts", "mts", "cts", "js", "mjs", "cjs"))
 _VITEST_SPAN_END_RE = re.compile(r"&&|\|\||;|\||\n")
 # `cd` or `pushd` as a command word. `--cwd` is an argument of another tool and does not match.
-_VITEST_CD_RE = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)(?=\s|$)")
+_VITEST_CD_RE = re.compile(r"(?:^|[\s;&|(])(?:cd|pushd)(?=\s|$)")
 # A balanced `( ... )` group: a subshell or a `$( ... )`. A `cd` inside one ends with the group,
 # so it does not move the vitest call that follows. The real paigasus-kernel-ts:test has this shape.
 _SUBSHELL_RE = re.compile(r"\([^()]*\)")
@@ -5584,8 +5584,8 @@ def self_test():
         "t:test runs vitest with the config path $CFG, which A13 cannot resolve (it holds `$`, a glob "
         "character or a quote, or it leaves the repository)"
     )
-    with tempfile.TemporaryDirectory() as tmp:
-        a13_root = Path(tmp)
+    with tempfile.TemporaryDirectory() as a13_tmp:
+        a13_root = Path(a13_tmp)
         for a13_rel in (
             "ts/packages/k/vitest.config.ts",
             "ts/packages/k/vitest.e2e.config.ts",
@@ -5618,6 +5618,12 @@ def self_test():
             ("touch a && ( cd ../x && wasm-pack build . --out-dir o ) && pnpm exec vitest run", a13_k,
              ["ts/packages/k/vitest.config.ts"], None),
             ("pnpm exec vitest run --config $CFG", a13_k, [], a13_rel_row),
+            # A `cd` right after `(` is in the same subshell as the vitest call: a row.
+            ("(cd sub && pnpm exec vitest run)", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            # A closed group that holds the first vitest call is removed only for the later call.
+            ("( cd sub && pnpm exec vitest run ) && pnpm exec vitest run", a13_k, ["ts/packages/k/vitest.config.ts"],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
         ):
             a13_rows = []
             a13_got = vitest_invocation_configs("t:test", a13_blob, a13_root, a13_own, a13_rows)
