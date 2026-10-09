@@ -10,11 +10,11 @@ name: release
 # then and is false now that `plan` exists). The authoritative statement is the "THE `plan` JOB
 # DECIDES WHETHER TO BUILD" note below; this is its summary:
 #   * `plan` ALONE carries `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'` literally.
-#   * Every other gated job — `wheels`, `prebuild`, `proto-dist`, `approve-release`, `release`,
-#     `publish-pypi` and `publish-npm` — carries NO `if:` on the flag itself. They are gated
-#     TRANSITIVELY, through an unbroken `needs:` chain back to `plan`: `wheels`, `prebuild` and
-#     `proto-dist` depend on `plan` directly (and also skip on `plan`'s `nothing_to_release`
-#     output), and the rest depend on those.
+#   * Every other gated job — `wheels`, `prebuild`, `proto-dist`, `verify-crates`,
+#     `approve-release`, `release`, `publish-pypi` and `publish-npm` — carries NO `if:` on the
+#     flag itself. They are gated TRANSITIVELY, through an unbroken `needs:` chain back to
+#     `plan`: `wheels`, `prebuild`, `proto-dist` and `verify-crates` depend on `plan` directly
+#     (and also skip on `plan`'s `nothing_to_release` output), and the rest depend on those.
 #   * `release-pr` is not gated on the FLAG, by design — it must keep proposing the release PR
 #     while the flag is off. That is only safe because it cannot reach a registry, which
 #     `ci/actionlint/release_guard.py`'s V7 now ASSERTS (it is in that guard's `UNGATED_JOBS`,
@@ -94,7 +94,12 @@ permissions:
 # JOB ORDER IS LOAD-BEARING, and it is the reverse of the obvious one (SMA-578 review B3).
 # Everything REVERSIBLE runs before the first IRREVERSIBLE step:
 #
-#   {wheels, prebuild, proto-dist} -> release -> {publish-pypi, publish-npm}
+#   {wheels, prebuild, proto-dist, verify-crates} -> approve-release -> release
+#       -> {publish-pypi, publish-npm}
+#
+# SMA-735: `release` COMPILES NOTHING. It publishes with `release-plz release --no-verify`, and
+# `verify-crates` does the verify build before the approval, in a job with no secret and only a
+# `contents: read` token.
 #
 # The draft this replaced ran `release` FIRST, so release-plz published to crates.io and cut six
 # tags before a single wheel was built. A zig regression or a runner-image change in the 12-leg
@@ -168,8 +173,9 @@ permissions:
 #
 # What replaced it is `ci/release-plan/`, which decides on TAG EXISTENCE instead — the same thing
 # release-plz itself short-circuits on before it touches a registry or runs cargo. The `plan` job
-# below is the ONLY holder of the literal flag gate; `wheels`, `prebuild` and `proto-dist` gate on
-# it transitively through `needs: [plan]` AND on its `nothing_to_release` output, and
+# below is the ONLY holder of the literal flag gate; `wheels`, `prebuild`, `proto-dist` and
+# `verify-crates` gate on it transitively through `needs: [plan]` AND on its
+# `nothing_to_release` output, and
 # `approve-release`/`release`/`publish-pypi`/`publish-npm` are gated only TRANSITIVELY through
 # their own `needs:` chain. Do not "fix" this by reintroducing a dry-run-based decision — the
 # `releases`-array blindness above is not specific to the derive crate and would recur.
@@ -416,8 +422,8 @@ jobs:
   # "a release is pending". Reading it would silently skip every kernel-group release. Do not
   # reintroduce it.
   #
-  # This job is the ONLY holder of the literal flag gate now. `wheels`, `prebuild` and
-  # `proto-dist` gate transitively through `needs: [plan]` — with the flag off this job skips,
+  # This job is the ONLY holder of the literal flag gate now. `wheels`, `prebuild`, `proto-dist`
+  # and `verify-crates` gate transitively through `needs: [plan]` — with the flag off this job skips,
   # and a job whose needs: dependency skipped is itself skipped.
   plan:
     name: decide whether anything is releasable
@@ -546,6 +552,38 @@ jobs:
             dist/paigasus_proto-*.tar.gz
           if-no-files-found: error
 
+  # THE VERIFY BUILD (SMA-735). The `release` job below runs `release-plz release --no-verify`, so
+  # it compiles nothing while it holds the crates.io token and the App credentials. This job does
+  # the build instead: one `cargo publish --dry-run --locked` for each publish group, through
+  # `ci/publish-metadata/run.sh --verify-publish-groups` (Check 0 and Check 2 only). It runs before
+  # `approve-release`, so a crate that does not build stops the run in the reversible stage.
+  #
+  # The build runs third-party build scripts and proc macros, so this job holds NO secret and NO
+  # write token: no `environment:`, no `secrets` and no `${{ }}` expression at all. Its
+  # `permissions:` block is exactly `contents: read` (spec D8). actions/checkout gets the job
+  # token as its default `token` input, and with this grant the token can only read the
+  # repository. M1 measured that cargo through the runner's rustup, python3 and bash are enough,
+  # so the job has no proto and no Moon step.
+  # release_guard.py V20 pins all of this. A transient network fault exits 2: re-run the job.
+  verify-crates:
+    name: verify the crates.io packages
+    needs: [plan]
+    # FAIL-SAFE POLARITY, the same as `wheels`: anything but the literal 'true' builds.
+    # release_guard.py V9b pins the accepted forms.
+    if: needs.plan.outputs.nothing_to_release != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify every publish group
+        run: bash ci/publish-metadata/run.sh --verify-publish-groups
+
   # The ONE place a human approval can be inserted, by adding required reviewers to the
   # `release-approval` environment in repo settings. It must NOT go on the publishing jobs:
   # GitHub pauses EACH job entering an environment, so reviewers on release-publish would stop
@@ -554,7 +592,7 @@ jobs:
   # above exists to prevent. SMA-580: add reviewers HERE, never to release-publish.
   approve-release:
     name: approve the release
-    needs: [wheels, prebuild, proto-dist]
+    needs: [wheels, prebuild, proto-dist, verify-crates]
     runs-on: ubuntu-latest
     environment: release-approval
     steps:
@@ -562,7 +600,7 @@ jobs:
 
   release:
     name: publish to crates.io and cut tags
-    needs: [wheels, prebuild, proto-dist, approve-release]
+    needs: [wheels, prebuild, proto-dist, verify-crates, approve-release]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: release-publish
@@ -615,6 +653,14 @@ jobs:
       - name: Install pinned release-plz CLI
         run: proto install release-plz
 
+      # THIS JOB COMPILES NOTHING (SMA-735). Every step can read the crates.io token and the App
+      # credentials, and release-plz passes CARGO_REGISTRY_TOKEN to `cargo publish`. So
+      # `--no-verify` is LOAD-BEARING: release-plz passes it to every `cargo publish`, and cargo
+      # then packages and uploads without a build, a build script or a proc macro. The verify
+      # build runs in `verify-crates`, before the approval. release_guard.py V19 holds the steps
+      # of this job to an allowlist and reds when `--no-verify` is gone. The tools this job still
+      # trusts are listed in docs/superpowers/specs/2026-10-09-sma-735-release-job-no-compile-design.md
+      # section 4.1.
       - name: Release
         id: rel
         working-directory: rs
@@ -623,7 +669,7 @@ jobs:
           GIT_TOKEN: ${{ steps.app_token.outputs.token }}
         run: |
           set -euo pipefail
-          OUT="$(release-plz release --output json)"
+          OUT="$(release-plz release --output json --no-verify)"
           echo "$OUT"
           echo "json=$OUT" >> "$GITHUB_OUTPUT"
 
@@ -930,7 +976,8 @@ jobs:
       # so the assertion cannot live in the step that performs the install. It must FAIL LOUDLY
       # and by version — a bare ENEEDAUTH later is the least recoverable failure in this
       # repository. prebuild.yml's `assemble` job carries the identical assertion, and it runs
-      # BEFORE `release`: `release` needs [wheels, prebuild, proto-dist, approve-release], so a
+      # BEFORE `release`: `release` needs [wheels, prebuild, proto-dist, verify-crates,
+      # approve-release], so a
       # wrong npm reds while everything is still reversible. This copy is the backstop for the
       # case where only this job's PATH is wrong.
       #

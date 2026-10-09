@@ -2332,8 +2332,9 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
 
 
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5, V7, V8a-c, V8e, V9 and V13-V18 over the release workflow (V16a-c runs from
-    main()). V16e is one of the V13-V18 group. V6 applies to CALLED workflows (see
+    """V1-V5, V7, V8a-c, V8e, V9, V13-V18, V19 and V20 over the release workflow (V16a-c runs
+    from main()). V16e is one of the V13-V18 group. V19 (the `release` job) and V20 (the
+    `verify-crates` job) run only when `name` is RELEASE_WORKFLOW_NAME. V6 applies to CALLED workflows (see
     check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
     need the filesystem, which this function, driven purely off a parsed doc, deliberately does
     not touch."""
@@ -2451,6 +2452,10 @@ def check_main(doc: dict, name: str) -> list[str]:
     # SMA-684. V18: once, outside the per-job loop, like V8 above. The loop's `continue` for an
     # UNGATED_JOBS member would otherwise skip it for exactly the job it exists for.
     out += ungated_job_violations(doc, name)
+    # SMA-735. V19 and V20: once each, outside the per-job loop, like V18. Both are scoped to
+    # RELEASE_WORKFLOW_NAME inside the functions (spec D7), the same as V11.
+    out += release_job_violations(doc, name)
+    out += verify_job_violations(doc, name)
     return out
 
 
@@ -5311,6 +5316,34 @@ def _sma735_cross_row_and_scope() -> str | None:
     return None
 
 
+def _sma735_real_workflow() -> str | None:
+    """The real release.yml is the clean control for V19 and V20 (spec §5.6), and check_main is
+    their production call site: a fixture table proves the verdict functions, not that
+    check_main calls them. Run from the repository root, like check 10."""
+    real = Path(".github/workflows/release.yml")
+    if not real.is_file():
+        return f"{real} is not readable from {Path.cwd()}; run the self-test from the repository root"
+    for rule, fn in (("V19", release_job_violations), ("V20", verify_job_violations)):
+        found = fn(load_workflow(real), real.name)
+        if found:
+            return f"the real release.yml fails {rule}: {found}"
+    bad = [v for v in check_main(load_workflow(real), real.name) if ": V19: " in v or ": V20: " in v]
+    if bad:
+        return f"check_main reports V19 or V20 on the real release.yml: {bad}"
+    doc = load_workflow(real)
+    rel = [s for s in doc["jobs"]["release"]["steps"] if isinstance(s, dict) and s.get("name") == "Release"]
+    if len(rel) != 1 or " --no-verify" not in str(rel[0].get("run")):
+        return "the real release job has no single `Release` step that runs --no-verify"
+    rel[0]["run"] = str(rel[0]["run"]).replace(" --no-verify", "")
+    if not any(": V19: " in v for v in check_main(doc, real.name)):
+        return "check_main did not report V19 when the real Release step lost --no-verify"
+    doc = load_workflow(real)
+    doc["jobs"][APPROVAL_JOB]["needs"] = [n for n in needs_of(doc["jobs"][APPROVAL_JOB]) if n != VERIFY_JOB]
+    if not any(": V20: " in v for v in check_main(doc, real.name)):
+        return "check_main did not report V20 when approve-release lost verify-crates"
+    return None
+
+
 def self_test() -> int:
     rc = 0
     for name, kind, text, want in FIXTURES:
@@ -5366,6 +5399,8 @@ def self_test() -> int:
          _sma735_v19_bites),
         ("sma-735 cross-row and scope: each row is silent outside its own jobs and files",
          _sma735_cross_row_and_scope),
+        ("sma-735 V19 and V20 run on the real release.yml through check_main",
+         _sma735_real_workflow),
     ):
         err = fn()
         if err:
