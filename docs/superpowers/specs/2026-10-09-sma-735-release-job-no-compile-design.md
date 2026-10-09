@@ -333,6 +333,9 @@ The message names the job and the failed condition, and points to this spec.
 | Any tool in §4.1 is compromised. | It can read the credentials from the runner. | Residual of D1. |
 | A change to `rs/.cargo/config.toml` or `rs/rust-toolchain.toml`. | cargo in `release` can run a chosen program (a credential provider, a toolchain path). | Residual. No gate pins these files; code review is the only control. |
 | The engine's splitter does not see a command inside a quoted string. | A hidden command passes V19 or V20. | Residual, already an L-entry for V18; the new L-entry extends it to V19 and V20. |
+| V18 still accepts a redirection in `release-pr`. | A write to `$GITHUB_ENV`, `$GITHUB_PATH` or a file can change what a later command runs in that job. | Residual. V19 and V20 refuse such a redirection. V18 does not, because V18 must not change. Recommend a follow-up. |
+| V19 and V20 do not pin `runs-on` or `timeout-minutes`. | A change can move the job to another runner or lengthen its time limit. | Residual. Code review is the only control. |
+| The V19 liveness rule does not detect a `release-plz` name in a variable (`RP=release-plz; $RP release`). | A second job can run `release-plz release` and not red V19 liveness. | Residual. The liveness rule reads the words of a line. It does not expand variables. |
 | **`publish-npm`** holds `environment: release-publish` and `id-token: write` (`release.yml:840-850`) and runs `pnpm --dir ts install --frozen-lockfile` (line 975). | Install scripts run in a job that can request an OIDC token. INFERRED, not measured: crates.io and PyPI trusted publishing bind the repository, the workflow file and the environment, not the job. If so, such a script can publish to all three registries. | Narrower than it looks: pnpm 11 runs a dependency build script only when `allowBuilds` allows it, and only `sharp` is allowed (F16). The workspace's own lifecycle scripts still run. Not closed by this spec. Follow-up in §9, with the same priority as this issue. |
 
 ## 8. Rejected approaches
@@ -476,6 +479,6 @@ Decision (spec §5.2): `verify-crates` keeps only `Checkout` and the verify step
 
 Assumption: this decision holds only if the hosted GitHub `ubuntu-24.04` image has bash, python3,
 git, a C toolchain and rustup preinstalled. The container did not have them. The container
-installed git, build-essential and rustup itself. This is a proxy, not a measurement of the
+installed python3, git, build-essential and rustup itself. This is a proxy, not a measurement of the
 hosted runner. V-6 (if Sven agrees) or V-7 (the first release after the merge) confirms the
 assumption on a real runner.

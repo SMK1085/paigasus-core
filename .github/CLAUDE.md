@@ -301,9 +301,11 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   moved to the `verify-crates` job. That job runs before `approve-release` and holds no secret.
   Its `permissions:` block is exactly `contents: read` (spec D8). It runs
   `bash ci/publish-metadata/run.sh --verify-publish-groups`, which is Check 0 and Check 2 only.
-  `release_guard.py` V19 holds the `release` job to an allowlist and requires `--no-verify`. V20
-  holds `verify-crates` to the verify command, refuses every secret and every `${{ }}`
-  expression in it, and refuses every `permissions:` value other than exactly `contents: read`.
+  `release_guard.py` V19 holds the `release` job to an allowlist and requires `--no-verify`.
+  V20 holds `verify-crates` to the verify command. It refuses every secret and every `${{ }}`
+  expression in that job. It refuses every `permissions:` value other than exactly
+  `contents: read`. The job relies on the hosted runner image for bash, python3, git, a C
+  toolchain and rustup (spec M1). The first hosted run proves it.
   V18, V19 and V20 are rows of one engine (`StepAllowlist`).
   Residuals (spec §7): the read token of `verify-crates` stays on the runner while the crates
   build. It can read only this public repository. The registry index can change between the

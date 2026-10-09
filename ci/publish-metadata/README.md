@@ -148,15 +148,20 @@ before the upload.
 - The mode runs `check_publish_group` once for each group from `publish_groups`, then
   `assert_check2_covered_everything`.
 - The mode does not load the category snapshot. A stale snapshot cannot stop a release.
-- Exit codes: 0 every group passed; 1 a defect (for example "could not compile"); 2 an
-  infrastructure fault (for example a network error) or a bad invocation. The mode takes no
-  further argument and exits 2 when it gets one.
+- Exit code 0: every group passed. Exit code 1: a defect, for example "could not compile".
+  Exit code 2: an infrastructure fault, for example a network error, or a bad invocation. The
+  mode takes no further argument. It exits 2 when it gets one.
+- The job relies on the hosted runner image for bash, python3, git, a C toolchain and rustup
+  (spec M1). The first hosted run proves it.
 - When `verify-crates` fails with rc 2, a re-run of the job is safe: nothing irreversible ran.
 - `--negative-control` runs the real dispatch with a `cargo` stub first on `PATH`. The stub
   records each argv and scripts the answer of `cargo publish`. `cargo metadata` goes to the real
-  cargo. The rows assert both groups with `--dry-run --locked`, rc 1 for "could not compile", rc 2
-  for "spurious network error", rc 2 for an extra argument, and rc 1 with no `cargo publish` for a
-  publishable crate outside `EXPECTED_PUBLISHABLE`.
+  cargo. The rows assert these results:
+  - both groups run with `--dry-run --locked`;
+  - "could not compile" gives rc 1;
+  - "spurious network error" gives rc 2;
+  - an extra argument gives rc 2, and no `cargo publish` runs;
+  - a publishable crate outside `EXPECTED_PUBLISHABLE` gives rc 1, and no `cargo publish` runs.
 
 ### Check 5 — Rule R1, symmetric `changelog_include` in each version group
 

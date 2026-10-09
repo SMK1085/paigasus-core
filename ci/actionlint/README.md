@@ -703,18 +703,27 @@ date from the time when the splitter did not read quotes. They are still allowed
 
 **L44 — V19 and V20 share V18's engine and its limits (SMA-735).** V18, V19 and V20 are rows of
 one table, `StepAllowlist`. Each row holds the allowlist of its own jobs. The engine never merges
-two rows. So what L43 says about V18 applies to V19 and V20 too: the engine reads a `run:` block
+two rows. So what L43 says about V18 applies to V19 and V20 too. The engine reads a `run:` block
 as command words, and it is not a shell parser. It does not read a command inside a quoted
-string. V19 closes one case of this for its own rule: a `release-plz release` command that holds
-a quote, a backslash or a `$` reds, so `--no-verify` cannot hide in a string or a variable. V19
-and V20 run only when the checked file is `release.yml` (spec D7), the same scope as V11. Their
-tests are direct calls (`_SMA735_V19_CASES`, `_SMA735_V20_CASES`), not `FIXTURES` rows, so the
-fixture floor did not change. The `contents: read` job token of `verify-crates` stays on the
+string. V19 closes one case of this for its own rule. A `release-plz release` command with a
+quote, a backslash or a `$` reds. So `--no-verify` cannot hide in a string or a variable. V19
+allows only the redirection `>> "$GITHUB_OUTPUT"`. A write to `$GITHUB_ENV`, `$GITHUB_PATH` or a
+file reds. V18 does not have this rule.
+
+V19 and V20 run only when the checked file is `release.yml` (spec D7), the same scope as V11.
+Their tests are direct calls (`_SMA735_V19_CASES`, `_SMA735_V20_CASES`), not `FIXTURES` rows. So
+the fixture floor did not change. The `contents: read` job token of `verify-crates` stays on the
 runner while the crates build (spec D8). V20 refuses every wider grant. The token can read only
-this public repository. These residuals have no gate: a change to `rs/.cargo/config.toml`
-or `rs/rust-toolchain.toml` can change what cargo runs in the `release` job; the `publish-npm`
-job runs `pnpm install` while it can request an OIDC token; and nothing pins the rule "no build
-downstream of `release`" in the `release.yml` header.
+this public repository.
+
+No gate covers these residuals:
+
+- `rs/.cargo/config.toml` or `rs/rust-toolchain.toml`;
+- `publish-npm` runs `pnpm install` while it can request an OIDC token;
+- nothing pins "no build downstream of `release`";
+- V19 and V20 do not pin `runs-on` or `timeout-minutes`;
+- the liveness rule does not detect a `release-plz` name in a variable;
+- V18 still accepts a redirection in `release-pr`.
 
 ## Cost
 
