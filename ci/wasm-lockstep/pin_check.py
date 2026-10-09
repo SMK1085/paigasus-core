@@ -1356,6 +1356,20 @@ def negative_control(path: str) -> int:
     noexec = copy.deepcopy(real)
     noexec["jobs"]["propose"]["env"] = {"SHELLOPTS": "noexec"}
     expect("SHELLOPTS: noexec in the propose job env", noexec, "P26")
+    # SMA-740: P26 on the REAL steps after apply, one mutation for each step.
+    def propose_step(step_id: str, change) -> dict:
+        mutated = copy.deepcopy(real)
+        for step in mutated["jobs"]["propose"]["steps"]:
+            if step.get("id") == step_id:
+                change(step)
+        return mutated
+
+    expect("echo into rs/Cargo.lock before the git add line of commit", step_run("propose", "commit", lambda ln: "echo x > rs/Cargo.lock\n" + ln if ln.startswith("git add ") else ln), "P26")
+    expect("git commit --amend before the gh api line of base", step_run("propose", "base", lambda ln: "git commit --amend --no-edit\n" + ln if "/git/ref/heads/main" in ln else ln), "P26")
+    expect("git commit --amend before the git push line", step_run("propose", "push", lambda ln: "git commit --amend --no-edit\n" + ln if ln.startswith("git push ") else ln), "P26")
+    expect("the moved condition removed from the pr if:", propose_step("pr", lambda s: s.update({"if": PROPOSE_IF})), "P26")
+    expect("env GIT_DIR added to the close step", propose_step("close", lambda s: s.setdefault("env", {}).update({"GIT_DIR": "/x"})), "P26")
+    expect("if: false on the token step", propose_step("token", lambda s: s.update({"if": False})), "P26")
     print(f"pin_check negative control: {checked} mutations, {failures} failed")
     return RC_ASSERT if failures else RC_OK
 
