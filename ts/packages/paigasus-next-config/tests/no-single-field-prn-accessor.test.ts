@@ -36,11 +36,7 @@ const invalid = (code: string, names: readonly string[]) => ({
 ruleTester.run('paigasus/no-single-field-prn-accessor', noSingleFieldPrnAccessor, {
   valid: [
     // The replacement and the other kernel exports, from every watched specifier.
-    ...SPECIFIERS.flatMap((s) => [
-      valid(`import { prnParse } from '${s}';`),
-      valid(`import { prnBuild } from '${s}';`),
-      valid(`import { prnCanonicalize } from '${s}';`),
-    ]),
+    ...SPECIFIERS.flatMap((s) => [valid(`import { prnParse } from '${s}';`), valid(`import { prnBuild } from '${s}';`), valid(`import { prnCanonicalize } from '${s}';`)]),
     // D4: a namespace import is allowed, and so is a use of a name that is not deprecated.
     valid("import * as k from '@paigasus/kernel';\nk.prnParse('p');"),
     valid("export * from '@paigasus/kernel';"),

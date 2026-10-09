@@ -500,7 +500,6 @@ export const noSingleFieldPrnAccessor = {
   },
 };
 
-
 /** @type {import('eslint').ESLint.Plugin} */
 const paigasusPlugin = {
   meta: { name: '@paigasus/next-config/eslint' },
