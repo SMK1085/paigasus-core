@@ -2734,5 +2734,12 @@ The planner measured M1, M2 and M3 on a scratch copy with the code of this plan;
   ```
 
   The 65 Task 8 rows, per target: `gateway-console-ts:test` 2, `iam-console-ts:test` 2, `paigasus-app-shell-ts:test` 12 plus the `deps` row, `paigasus-auth-ts:test` 2, `paigasus-auth-ts:test-e2e` 2, `paigasus-console-core-ts:test` 9, `paigasus-console-core-ts:test-e2e` 14, `paigasus-discovery-ts:test` 4, `paigasus-discovery-ts:test-e2e` 5, `paigasus-kernel-ts:test` 2, `paigasus-next-config-ts:test` 2, `paigasus-proto-ts:test` 2, `paigasus-sdk-ts:test` 4, `paigasus-ui-ts:test` 2.
-- **M4:** not yet run on the branch (Task 6 Step 4 writes it).
+- **M4:** measured on the branch at commit ff143294, 2026-10-10, with an untracked copy in the same directory (`ci/affected-graph/_mutant_parity.py`), as in M1. The copy changed the last line of `vitest_config_facts` to `return sorted(set(aliases)), False`. `rc=1`. The count of `the A13 parser reads` is `2`, one row per app config. The `tsconfig: false` parser-table row also reds (`A13 parser, \`tsconfig: false\`: tsconfig_off is False, expected True`). The two corpus rows:
+
+  ```
+  FAIL the A13 parser reads ts/apps/gateway-console/vitest.config.ts as aliases [... 3 aliases ...], tsconfig_off False, rows []; the corpus pin says aliases [... 3 aliases ...], tsconfig_off True, no rows
+  FAIL the A13 parser reads ts/apps/iam-console/vitest.config.ts as aliases [... 3 aliases ...], tsconfig_off False, rows []; the corpus pin says aliases [... 3 aliases ...], tsconfig_off True, no rows
+  ```
+
+  The alias lists are shortened here. The full text is in the run output. The copy was deleted. The `git status --short` run after the deletion showed only ` M ci/affected-graph/cargo_moon_parity.py`, the Task 6 change, and no copy.
 - **M5:** not yet run on the branch (Task 9 Step 9 writes it).
