@@ -50,5 +50,8 @@ tasks:
       - 'vitest.containers.config.ts'
       - 'package.json'
       - '/ts/pnpm-lock.yaml'
+      # SMA-736 (A13): vite's oxc transform reads this package's tsconfig chain.
+      - 'tsconfig.json'
+      - '/ts/tsconfig.base.json'
     options:
       cache: false
