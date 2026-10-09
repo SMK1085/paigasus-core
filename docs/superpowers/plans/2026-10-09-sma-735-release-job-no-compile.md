@@ -376,8 +376,13 @@ STUB
   fi
 
   # Review Focus 5: the mode must never load the category snapshot, so a stale snapshot can
-  # never stop a release. Structural, because the snapshot path is fixed in this file.
-  if grep -qE 'metadata_checks|SNAPSHOT|categories' < <(declare -f verify_publish_groups); then
+  # never stop a release. Structural, because the snapshot path is fixed in this file. The
+  # function must exist first: `declare -f` of a missing function prints nothing, and an empty
+  # text would pass the grep below without a check.
+  if ! declare -F verify_publish_groups >/dev/null; then
+    echo "NEGATIVE CONTROL FAILED: --verify-publish-groups — no function verify_publish_groups to inspect" >&2
+    failures=$((failures + 1))
+  elif grep -qE 'metadata_checks|SNAPSHOT|categories' < <(declare -f verify_publish_groups); then
     echo "NEGATIVE CONTROL FAILED: --verify-publish-groups reads the category snapshot or metadata_checks" >&2
     failures=$((failures + 1))
   else
@@ -389,7 +394,7 @@ STUB
 - [ ] **Step 3: Run the control to see it fail**
 
 Run: `/opt/homebrew/bin/bash ci/publish-metadata/run.sh --negative-control; echo rc=$?`
-Expected: `rc=1` and the last line `negative control: 9 check(s) failed to bite`. The nine `FAILED` lines are the five `publishable_set` rows (`got rc 127`: the function does not exist yet), `--verify-publish-groups (stub: every group passes) — expected rc 0, got rc 2` (the dispatch prints `unknown arg`), `did not run exactly the two publish groups`, `(stub: could not compile is a defect) — expected rc 1, got rc 2` and `(stub: a publishable crate outside EXPECTED_PUBLISHABLE) — expected rc 1, got rc 2`. The network row, the extra-argument rows and the snapshot row pass already, because `unknown arg` also exits 2 and `declare -f` of a missing function prints nothing. Task 2 Step 10 (M1, M3) proves those rows bite against the real mode. (Measured on a scratch clone while this plan was written.)
+Expected: `rc=1` and the last line `negative control: 10 check(s) failed to bite`. The ten `FAILED` lines are the five `publishable_set` rows (`got rc 127`: the function does not exist yet), `--verify-publish-groups (stub: every group passes) — expected rc 0, got rc 2` (the dispatch prints `unknown arg`), `did not run exactly the two publish groups`, `(stub: could not compile is a defect) — expected rc 1, got rc 2`, `(stub: a publishable crate outside EXPECTED_PUBLISHABLE) — expected rc 1, got rc 2` and `no function verify_publish_groups to inspect`. The network row and the extra-argument rows pass already, because `unknown arg` also exits 2. Task 2 Step 10 (M1, M3) proves those rows bite against the real mode. (Measured on a scratch copy of the tree for the pre-flight scan, 2026-10-09.)
 
 - [ ] **Step 4: Create the module**
 
@@ -613,9 +618,11 @@ Run:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project py ruff check --config py/pyproject.toml ci/publish-metadata/publishable.py
+git add ci/publish-metadata/publishable.py
 mkdir -p "$SCRATCH/bashshim" && ln -sf /bin/bash "$SCRATCH/bashshim/bash"
 PATH="$SCRATCH/bashshim:$PATH" moon run repo:affected-smoke repo:input-liveness --force
 ```
+The `git add` comes first: `repo:input-liveness` reads `git ls-files`, and it reds a declared input file that git does not track (`ci/affected-graph/task_inputs.py`, function `check`).
 Expected: `All checks passed!` from ruff; both Moon tasks pass. If `repo:affected-smoke` reports `repo:publish-metadata` input drift, the two edits above disagree: fix them.
 
 - [ ] **Step 9: Commit**
@@ -1062,7 +1069,7 @@ Expected: `Files … differ` and `rc=1`; then no diff after the restore.
 - Modify: `ci/actionlint/release_guard.py` (`StepAllowlist` gets `exact`; `segment_verdict`; new V20 block after `ungated_job_violations`; new test code after `_sma684_v18_allowlist_bites`; one row in `self_test`'s tuple)
 
 **Interfaces:**
-- Consumes: `StepAllowlist`, `allowlist_job_violations`, `segment_verdict` (Task 4); `gated_path_jobs`, `secret_refs`, `steps_of`, `APPROVAL_JOB`, `RELEASE_WORKFLOW_NAME`, `_APP_TOKEN_ACTION`, `_STRING_LITERAL`, `_V18_WORD_SPLIT_RE`, `_V18_BLANKS`, `SHA_CO`.
+- Consumes: `StepAllowlist`, `allowlist_job_violations`, `segment_verdict` (Task 4); `gated_path_jobs`, `secret_refs`, `steps_of`, `APPROVAL_JOB`, `RELEASE_WORKFLOW_NAME`, `_APP_TOKEN_ACTION`, `_STRING_LITERAL`, `_V18_WORD_SPLIT_RE`, `_V18_BLANKS`.
 - Produces: `StepAllowlist.exact: tuple[tuple[str, ...], ...] = ()`; `VERIFY_JOB = "verify-crates"`; `VERIFY_COMMAND = ("bash", "ci/publish-metadata/run.sh", "--verify-publish-groups")`; `V20_PERMISSIONS = {"contents": "read"}`; `V20_HINT: str`; `V20_ROW: StepAllowlist`; `verify_job_violations(doc: dict, name: str) -> list[str]` (empty unless `name == RELEASE_WORKFLOW_NAME`).
 - Produces (tests): `_SMA735_DOC_YAML: str` (the target shape of `plan`, `release-pr`, `verify-crates`, `approve-release`, `release`); `_sma735_doc() -> dict`; `_sma735_apply(doc: dict, job_id: str, op: str, arg: object) -> dict` with ops `none`, `doc-key`, `add-job`, `drop`, `rename`, `job-key`, `step`, `steps`, `run`, `step-key`; `_sma735_cases_bite(cases, count, fn, rule) -> str | None`; `_SMA735_V20_CASES`, `_SMA735_V20_CASE_COUNT = 43`, `_sma735_v20_bites() -> str | None`. Task 6 reuses all of these.
 - Not wired into `check_main` yet: Task 7 does that together with the workflow change, so every commit stays green.
@@ -1284,7 +1291,7 @@ def _sma735_v20_bites() -> str | None:
     return _sma735_cases_bite(_SMA735_V20_CASES, _SMA735_V20_CASE_COUNT, verify_job_violations, "V20")
 ```
 
-In `self_test`, in the tuple of `(check_name, fn)` pairs, after the row `("sma-684 V18 allowlist: every rejected shape reds, every control is clean", _sma684_v18_allowlist_bites),` add:
+In `self_test`, in the tuple of `(check_name, fn)` pairs, after the row `("sma-684 V18 allowlist: every rejected shape reds, every control is clean", _sma684_v18_allowlist_bites),` add the lines below. In the file that row is two lines, and its second line is `         _sma684_v18_allowlist_bites),`:
 ```python
         ("sma-735 V20 verify-crates: every rejected shape reds, the target shape is clean",
          _sma735_v20_bites),
