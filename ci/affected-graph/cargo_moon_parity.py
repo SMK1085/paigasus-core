@@ -2290,6 +2290,27 @@ def _export_leaves(node, where, rows):
     return []
 
 
+def workspace_package_inputs(pkg_dir, data, rows):
+    """The inputs one workspace package `pkg_dir` adds to a task that reads it through its closure.
+
+    `pkg_dir/package.json`, `pkg_dir/src/**/*`, and each `exports` target outside `src/`:
+    `pkg_dir/<head>/**/*` for a target in a subdirectory, `pkg_dir/<file>` for a file at the package
+    root. `data` is the parsed package.json. A12a (`tsc`) and A13 (vitest) both call this, so the two
+    rules cannot drift (SMA-736 spec §4.3 item 3). An `exports` shape it cannot read is a row.
+    """
+    want = {f"{pkg_dir}/package.json", f"{pkg_dir}/src/**/*"}
+    for leaf in _export_leaves(data.get("exports"), f"{pkg_dir}/package.json", rows):
+        if not leaf.startswith("./"):
+            rows.append(f"{pkg_dir}/package.json: the `exports` target {leaf!r} does not start with `./`")
+            continue
+        rel = leaf[2:]
+        if rel.startswith("src/"):
+            continue
+        head, sep, _ = rel.partition("/")
+        want.add(f"{pkg_dir}/{head}/**/*" if sep else f"{pkg_dir}/{rel}")
+    return want
+
+
 def tsc_required_inputs(root, closure, rows):
     """Return (want, has_binding): the inputs one `tsc` task must declare for its closure (spec §3.3)."""
     want = {TS_BASE_TSCONFIG}
@@ -2303,16 +2324,7 @@ def tsc_required_inputs(root, closure, rows):
         if data is None:
             continue
         if kind == "workspace":
-            want.add(f"{pkg_dir}/src/**/*")
-            for leaf in _export_leaves(data.get("exports"), f"{pkg_dir}/package.json", rows):
-                if not leaf.startswith("./"):
-                    rows.append(f"{pkg_dir}/package.json: the `exports` target {leaf!r} does not start with `./`")
-                    continue
-                rel = leaf[2:]
-                if rel.startswith("src/"):
-                    continue
-                head, sep, _ = rel.partition("/")
-                want.add(f"{pkg_dir}/{head}/**/*" if sep else f"{pkg_dir}/{rel}")
+            want |= workspace_package_inputs(pkg_dir, data, rows)
             continue
         files = data.get("files") or []
         if not isinstance(files, list):
@@ -5047,6 +5059,26 @@ def self_test():
     if not any(r.startswith("FLOOR:") and "k-ts:typecheck" in r for r in _a12b(tree=tree)):
         failures.append("A12b's floor did not fire when a floor task's closure lost its binding")
 
+    # SMA-736 T12 — the A12/A13 shared helper, called directly. A12a's rows above already pass
+    # through it; this row pins the helper's own contract, so a change to it reds here first.
+    rows = []
+    got = workspace_package_inputs("ts/packages/core", {
+        "exports": {
+            ".": "./src/index.ts",
+            "./testing": "./testing/index.ts",
+            "./preset": {"import": "./preset.json", "require": None},
+        },
+    }, rows)
+    want = {
+        "ts/packages/core/package.json", "ts/packages/core/src/**/*",
+        "ts/packages/core/testing/**/*", "ts/packages/core/preset.json",
+    }
+    if got != want or rows:
+        failures.append(f"workspace_package_inputs gave {sorted(got)} and rows {rows}, expected {sorted(want)} and no rows")
+    rows = []
+    workspace_package_inputs("ts/packages/core", {"exports": {".": "src/index.ts"}}, rows)
+    if rows != ["ts/packages/core/package.json: the `exports` target 'src/index.ts' does not start with `./`"]:
+        failures.append(f"workspace_package_inputs accepted an `exports` target without `./`: {rows}")
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
