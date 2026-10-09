@@ -1999,6 +1999,13 @@ def allowlist_job_violations(doc: dict, name: str, row: StepAllowlist) -> list[s
             for why in step_config_violations(step, action, row):
                 out.append(f"{where} {why}. {row.hint}")
             if run is not None:
+                # SMA-735: GitHub replaces a `${{ }}` expression in `run:` text BEFORE bash parses
+                # it, so `echo "${{ github.event.head_commit.message }}"` lets a commit message
+                # inject a command. V18 keeps its rules; V19 and V20 refuse the expression.
+                if row.redirects is not None and "${{" in str(run):
+                    out.append(f"{where} holds a `${{{{ }}}}` expression in its `run:` text. GitHub "
+                               f"puts the value into the script before bash reads it, so the value "
+                               f"can add a command. Pass it through `env:` instead. {row.hint}")
                 lines, refused = _v18_logical_lines(str(run))
                 if refused:
                     out.append(f"{where}: {refused}. {row.hint}")
@@ -5342,13 +5349,14 @@ _SMA735_V19_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
     ("GITHUB_OUTPUT set to a cargo config file", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT=.cargo/config.toml\necho "[x]" >> "$GITHUB_OUTPUT"'), True),
     ("GITHUB_OUTPUT set in the wrap form", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT="$(echo .cargo/config.toml)"\necho "[x]" >> "$GITHUB_OUTPUT"'), True),
     ("a second job with the old MarcoIeni action", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"uses": "MarcoIeni/release-plz-action@v0.5", "with": {"command": "release"}}]}, True),
+    ("an echo of a commit message expression", "release", "step", {"run": 'echo "${{ github.event.head_commit.message }}"'}, True),
     ("the release-pr echo text in another job", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": 'echo "release-plz: no release PR needed"'}]}, False),
     ("the target shape", "release", "none", None, False),
     ("the flags in another order", "release", "run",
      (_V19_STEP, 'set -euo pipefail\nOUT="$(release-plz release --no-verify --output json)"\necho "$OUT"\necho "json=$OUT" >> "$GITHUB_OUTPUT"'), False),
     ("release-plz release-pr in the release-pr job", "release-pr", "step", {"run": "release-plz release-pr --output json"}, False),
 )
-_SMA735_V19_CASE_COUNT = 54
+_SMA735_V19_CASE_COUNT = 55
 
 
 def _sma735_v19_bites() -> str | None:

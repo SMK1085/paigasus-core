@@ -713,7 +713,8 @@ backslash or a `$` reds. So `--no-verify` cannot hide in a string or a variable.
 V19 allows only
 the redirection `>> "$GITHUB_OUTPUT"`. A write to `$GITHUB_ENV`, `$GITHUB_PATH` or a file reds.
 An assignment to a `GITHUB_*` name also reds, so `GITHUB_OUTPUT` cannot point to another file.
-V18 does not have these rules.
+A `${{ }}` expression in `run:` text also reds. GitHub puts its value into the script before bash
+reads the script, so the value can add a command. V18 does not have these rules.
 
 V19 and V20 run only when the checked file is `release.yml` (spec D7), the same scope as V11.
 Their tests are direct calls (`_SMA735_V19_CASES`, `_SMA735_V20_CASES`), not `FIXTURES` rows. So
