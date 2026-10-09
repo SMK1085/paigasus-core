@@ -218,6 +218,26 @@ async fn present_but_malformed_authorization_keeps_error_challenge() {
 }
 
 #[tokio::test]
+async fn the_dpop_scheme_is_still_refused_on_http_with_dpop_on() {
+    // SMA-700 § 4.8: IAM's own HTTP API keeps refusing the DPoP scheme; only the gRPC
+    // IsAuthorized follow-up accepts it.
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = start_mock_idp().await;
+    let (app, state) = support::app_with_config(db, &support::test_config_dpop(&idp)).await;
+    support::provision_platform_admin(&state, &idp.bearer("http-dpop", Some("http-dpop@example.com"), "paigasus", 3600)).await;
+    let token = idp.bound_bearer("http-dpop", Some("http-dpop@example.com"), "paigasus", 3600, &support::DpopKey::generate().jkt());
+    let response = send_raw_parts(&app, "GET", "/v1/organizations", Some(&format!("DPoP {token}")), None, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let challenge = response.headers().get("www-authenticate").expect("WWW-Authenticate header").to_str().unwrap();
+    assert_eq!(challenge, "Bearer error=\"invalid_token\"");
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid-token");
+}
+
+#[tokio::test]
 async fn protected_route_with_invalid_token_is_401_with_www_authenticate() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;

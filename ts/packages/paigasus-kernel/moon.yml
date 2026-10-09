@@ -41,10 +41,10 @@ tasks:
   # SMA-634: this task no longer runs wasm-pack and no longer writes the crate directory. The five
   # wasm artifacts are committed, and `paigasus-kernel-ts:generate-wasm` is their only writer. The
   # wasm inputs stay: `napi build` keeps this an FFI task, so A7 demands the dependsOn closure's
-  # sources and manifests, and `tsc` reads the committed paigasus_wasm.d.ts through
-  # src/binding-parity.types.ts.
+  # sources and manifests. `tsc` reads paigasus_wasm.d.ts through src/binding-parity.types.ts, from
+  # the installed copy, which the preflight holds equal to the committed file (SMA-536).
   build:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts --no-dts-cache && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts --no-dts-cache && node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -68,16 +68,22 @@ tasks:
       # ...and the binding's manifests, so a napi-config (package.json) or dependency (Cargo.toml)
       # change re-keys the build even without a Rust src diff (cache-input completeness, CodeRabbit).
       # This task writes the glue to the scratch files index.fresh.js and index.fresh.d.ts only
-      # (SMA-667). The committed index.js and index.d.ts are not its outputs. They are not listed as
-      # inputs, but the `tsc` of this task does read the committed index.d.ts through the
-      # ts/node_modules hard link (src/binding-parity.types.ts). That is safe. The test gate holds
-      # the committed file equal to the generator output, and the generator depends only on inputs
-      # that this task declares. Do not add the two files here "for completeness".
+      # (SMA-667). The committed index.js and index.d.ts are not its outputs.
       - '/rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
       - '/rs/crates/bindings/paigasus-node-bindings/package.json'
+      # SMA-536. The `tsc` of this task reads the INSTALLED copy of index.d.ts and of the two wasm
+      # typings through ts/node_modules (src/binding-parity.types.ts). The preflight
+      # ts/scripts/check-installed-bindings.mjs runs first and fails unless the installed copies
+      # equal the committed files. So `tsc` reads bytes equal to the committed files, and the
+      # committed files are real inputs here. The committed index.js stays out: `tsc` does not read
+      # it. ci/affected-graph/cargo_moon_parity.py A12 asserts these lines.
+      - '/rs/crates/bindings/paigasus-node-bindings/index.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/ts/scripts/check-installed-bindings.mjs'
       # wasm binding: same cache-input completeness as the napi crate — a kernel or wasm-binding src
-      # edit (the wasm-pack build also recompiles the kernel) or a manifest change must re-key this
-      # task. The generated paigasus_wasm* glue is this task's OUTPUT, not an input.
+      # edit or a manifest change must re-key this task. Since SMA-634 this task does not build the
+      # wasm glue; `generate-wasm` is its only writer.
       - '/rs/crates/bindings/paigasus-wasm/src/**/*'
       - '/rs/crates/bindings/paigasus-wasm/Cargo.toml'
       - '/rs/crates/bindings/paigasus-wasm/package.json'
@@ -110,6 +116,26 @@ tasks:
       # declared output exists on EVERY host — a hardcoded triple fails Moon's output check on Linux.
       # Cross-platform prebuild matrix + publish still deferred (ADR-0006 / SMA-376/407).
       - '/rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.*.node'
+  # SMA-536. Overrides the inherited `typecheck`. The default merge keeps its inputs
+  # (@group(sources), tsconfig.json, package.json, /ts/tsconfig.base.json, /ts/pnpm-lock.yaml).
+  # `tsc` reads both binding typings through src/binding-parity.types.ts, from the INSTALLED copy
+  # under ts/node_modules. The preflight runs first and fails, with the repair command, unless that
+  # copy equals the committed files. So the committed typings are real inputs here.
+  # No `deps: ['^:build']`: `tsc` reads only committed files, so a Rust build orders nothing here
+  # and does not confer affectedness (SMA-528). tests/**/* and vitest.config.ts are here because
+  # tsconfig.json `include` names them. ci/affected-graph/cargo_moon_parity.py A12 asserts the
+  # binding lines and the preflight.
+  typecheck:
+    script: 'node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc -p tsconfig.json --noEmit'
+    inputs:
+      - 'tests/**/*'
+      - 'vitest.config.ts'
+      - '/rs/crates/bindings/paigasus-node-bindings/index.d.ts'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
+      - '/ts/scripts/check-installed-bindings.mjs'
   # Rebuild the .node fresh (cache-bust on a Rust edit, review F4), THEN run vitest. The py
   # analog (`uv sync --reinstall-package … && pytest`) refreshes the INSTALLED artifact; here the
   # freshness fix is split: `napi build` rewrites the crate-dir .node, and vitest.config.ts aliases
@@ -148,6 +174,12 @@ tasks:
     inputs:
       - 'src/**/*'
       - 'tests/**/*'
+      # SMA-435: tests/optimize-wasm.test.ts imports this script. Checks 5, 6 and 7 of
+      # tests/committed-wasm.test.ts use its helpers. On Moon 2.5.3 only inputs select a task.
+      # Without this line, an edit to the script alone runs no test in CI.
+      - 'scripts/optimize-wasm.mjs'
+      # SMA-435: check 5 reads the nested binaryen pin, so a pin bump must select this task.
+      - '/rs/crates/bindings/paigasus-wasm/.prototools'
       # Check 3 of tests/committed-napi-glue.test.ts reads this file.
       - 'moon.yml'
       - 'vitest.config.ts'
@@ -239,6 +271,15 @@ tasks:
   # workflow runs this task inside a container that has no CI variable, so Moon does not drop it
   # there (SMA-693 spec F2). cache: false — the task writes tracked files, and a cached replay
   # would write nothing.
+  #
+  # SMA-435: `optimize-wasm.mjs optimize` runs between wasm-pack and `--post`. wasm-pack keeps
+  # `wasm-opt = false` (rs/crates/bindings/paigasus-wasm/Cargo.toml), because its own optimizer
+  # downloads a binaryen release that no file pins. The script installs the binaryen that
+  # rs/crates/bindings/paigasus-wasm/.prototools pins. The first run downloads it, so this task
+  # needs network access. The script runs `wasm-opt -O` on the scratch binary. Then it appends
+  # the `paigasus.wasm-opt` marker. Check 5 of tests/committed-wasm.test.ts reads that marker.
+  # `--post` then runs its identity check on the optimized binary, which is the binary that is
+  # committed. The glue does not change: wasm-pack writes it before wasm-opt runs.
   generate-wasm:
     script: |
       set -euo pipefail
@@ -247,6 +288,7 @@ tasks:
       remap="$(node scripts/generate-wasm.mjs --remap)"
       case "$remap" in '['*--remap-path-prefix=*']') ;; *) echo "generate-wasm: --remap produced \"$remap\", not a rustflags array. Refusing to build a binary that would hold absolute host paths." >&2; exit 2 ;; esac
       ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-regen-out --out-name paigasus_wasm -- --config "target.wasm32-unknown-unknown.rustflags=$remap" --locked )
+      node scripts/optimize-wasm.mjs optimize ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-regen-out
       node scripts/generate-wasm.mjs --post
     deps: ['^:build']
     # A5 demands the five workspace inputs on every FFI task, and A7 the sources and manifests of
@@ -268,6 +310,10 @@ tasks:
       - '/rs/rust-toolchain.toml'
       - '/.prototools'
       - '/rs/.cargo/config.toml'
+      # SMA-435: the binaryen pin and its plugin. The task is `cache: false`. A5 and A7 check
+      # only that their required inputs are present. These two lines are for a human reader.
+      - '/rs/crates/bindings/paigasus-wasm/.prototools'
+      - '/.proto/plugins/binaryen.toml'
     options:
       runInCI: false
       cache: false
@@ -281,7 +327,8 @@ tasks:
   # change in ts/pnpm-lock.yaml, or after a `napi` or `napi-derive` change in rs/Cargo.lock. The
   # `napi-rs` crates and `@napi-rs/cli` each have their own Dependabot group. Then commit both files. tests/committed-napi-glue.test.ts reds until the
   # committed files agree with the generator. Run it as its OWN command, not in the same `moon run`
-  # as `test`: the two tasks have no order, and `test` can hash its inputs before this task writes.
+  # as `test`, `build` or `typecheck` (SMA-536): this task has no order with them, and each of them
+  # hashes index.d.ts, so it can hash its inputs before this task writes.
   #
   # It builds into the scratch files, like `build` and `test`, and then `cp`s them over the
   # committed files. `napi build` writes by rename, which replaces the inode and breaks the pnpm

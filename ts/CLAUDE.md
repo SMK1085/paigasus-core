@@ -124,10 +124,15 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm` and its four glue files are **committed**,
   because pnpm links the crate before any build task runs. `moon run
   paigasus-kernel-ts:generate-wasm` is their only writer: run it after a Rust kernel or wasm-binding
-  edit, and commit all five. `paigasus-kernel-ts:test` holds them to the source with four checks —
-  the committed glue equals a fresh build, the binary's import and export lists equal a fresh
-  build's, the committed pair replays all six parity corpora, and (in the console vitest
-  `setupFiles`) the pnpm-installed copy equals the committed files. **No check compares the binary
+  edit, and commit all five. `paigasus-kernel-ts:test` holds them to the source with seven checks.
+  Check 1: the committed glue equals the glue of a fresh build.
+  Check 2: the binary's import and export lists equal those of a fresh build.
+  Check 3: the committed pair replays all six parity corpora.
+  Check 4: in the console vitest `setupFiles`, the pnpm-installed copy equals the committed files.
+  Check 5: the committed binary carries the marker of the pinned binaryen version and has no `name` section.
+  Check 6: a raw wasm-pack output (the fresh test build) has one `name` section and no marker.
+  Check 7: `rs/crates/bindings/paigasus-wasm/Cargo.toml` keeps `wasm-opt = false` under the release and profiling profiles.
+  **No check compares the binary
   bytes**: they differ on macOS, Linux arm64 and Linux amd64, while the glue and the interface do
   not. After a `git checkout`, a rebase or a branch switch that replaces those files, run `rm -rf
   ts/node_modules && pnpm -C ts install`: pnpm hard-links a `file:` dependency and does not repair a
@@ -148,12 +153,18 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   Run `generate-napi-glue` after a napi binding or kernel export change. Run it also after a
   `@napi-rs/cli` change in `ts/pnpm-lock.yaml`, or after a `napi` or `napi-derive` change in
   `rs/Cargo.lock`. Commit both files. Run it as its own command, not in the same `moon run` as
-  `test`.
+  `test`, `build` or `typecheck`. Each of them hashes `index.d.ts`.
 
-  The `build` task runs `tsc`, and `tsc` reads the installed copy of `index.d.ts` through
-  `ts/node_modules`. A rename-write breaks the pnpm hard link of that copy. After a checkout or a
-  rebase that replaces `index.d.ts`, run `rm -rf ts/node_modules && pnpm -C ts install`, as in the
-  wasm paragraph above.
+  The `build` and `typecheck` tasks run `tsc`, and `tsc` reads the installed copy of the binding
+  typings through `ts/node_modules`. A rename-write breaks the pnpm hard link of that copy. Since
+  SMA-536, `ts/scripts/check-installed-bindings.mjs` runs before `tsc` in every `tsc` task whose
+  package closure holds a binding. The app `build` (`next build`) and the vitest `test` tasks do
+  not run it. It compares the installed typings with the committed files. If they differ, the task
+  fails and prints `rm -rf ts/node_modules && pnpm -C ts install`, as in the wasm paragraph above.
+  Before SMA-536 such a task passed against the stale typings.
+  `repo:affected-smoke`'s A12 asserts the inputs and the preflight of these tasks.
+  After a checkout or a rebase that replaces a binding typings file, run that command before the
+  next `tsc` task.
 
   `@napi-rs/cli` (npm) and the `napi`, `napi-derive` and `napi-build` crates (cargo) each have their
   own Dependabot group. On such a PR, run `generate-napi-glue` and push the result to the PR

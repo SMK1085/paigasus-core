@@ -49,6 +49,40 @@ impl fmt::Display for Issuer {
     }
 }
 
+/// Which `Authorization` scheme presented an access token (SMA-700). The validator's key-binding
+/// rule depends on it (spec § 4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TokenScheme {
+    /// `Authorization: Bearer`. A token bound to a key is refused (SMA-690 D9, SMA-700 D7).
+    Bearer,
+    /// The DPoP scheme (RFC 9449). The token must carry `cnf.jkt` and no certificate binding.
+    Dpop,
+}
+
+/// The RFC 7638 thumbprint of the key that a token is bound to: the token's `cnf.jkt` claim
+/// (RFC 9449 § 6.1), as the base64url string the token carries. `Debug` does not print the value,
+/// so a log line that prints a `ValidatedClaims` cannot carry it (SMA-700 § 4.8).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Jkt(String);
+
+impl Jkt {
+    #[must_use]
+    pub fn new(thumbprint: impl Into<String>) -> Self {
+        Jkt(thumbprint.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Jkt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Jkt(..)")
+    }
+}
+
 /// The claims extracted from a verified access token, after signature/expiry/audience checks
 /// have already passed (spec §3.2). Optional profile fields are best-effort — the IdP may
 /// omit any of them.
@@ -62,6 +96,9 @@ pub struct ValidatedClaims {
     pub name: Option<String>,
     pub locale: Option<String>,
     pub zoneinfo: Option<String>,
+    /// The `cnf.jkt` of the token. `Some` only on the `Dpop` scheme (SMA-700 § 4.3); always
+    /// `None` on the `Bearer` scheme, which refuses a bound token.
+    pub key_binding: Option<Jkt>,
 }
 
 /// The credential that authenticated a request: either a validated OIDC token (M2) or an
@@ -169,13 +206,19 @@ pub enum TokenDefect {
     IssuerNotConfigured,
     AudienceMismatch,
     Oversized,
-    /// The payload `typ` claim marks the token as a Keycloak ID token or back-channel logout
-    /// token, not an access token (SMA-686).
+    /// The verified token is not an access token, or it does not carry a claim that the issuer
+    /// configuration requires of an access token. Three checks give this defect: a payload `typ`
+    /// of a Keycloak ID token or logout token, or a back-channel logout marker (SMA-686); a claim
+    /// named in the issuer's `id_token_marker_claims` (SMA-703); a missing claim named in the
+    /// issuer's `access_token_required_claims` (SMA-731).
     NotAnAccessToken,
     /// The token is bound to a key: it has a `cnf` claim (RFC 7800), or a Keycloak payload
     /// `typ` of `DPoP`. IAM cannot check the binding, so it does not accept the token as a
     /// bearer token (SMA-690).
     SenderConstrained,
+    /// The `Dpop` scheme with a token that has no `cnf.jkt`, or that is also bound to a
+    /// certificate (`cnf.x5t#S256`, RFC 8705). SMA-700 § 4.3.
+    NotKeyBound,
 }
 
 /// Why just-in-time provisioning of a new identity failed.
@@ -183,6 +226,76 @@ pub enum TokenDefect {
 pub enum ProvisioningDefect {
     MissingEmail,
     EmailConflict,
+}
+
+/// The largest DPoP proof, in bytes, that IAM accepts (SMA-700 § 4.1, § 4.4). A larger proof is
+/// `ProofDefect::Malformed`. Only IAM uses this value. The gateway does not depend on this crate
+/// and does not limit the size of the proof. It forwards a proof of any size, and IAM refuses a
+/// proof over the limit as `Malformed`.
+pub const MAX_PROOF_BYTES: usize = 8192;
+
+/// Why a DPoP proof was refused (SMA-700 § 4.4, § 4.8): one variant for each check. Every defect
+/// has the one wire reason `invalid-dpop-proof` (D9). `as_str` is the static name that a refusal
+/// log line carries; the line never carries the proof, the token, the `jti` or the `jkt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProofDefect {
+    /// No proof (an empty `proof`, or no `dpop` metadata on the follow-up).
+    Missing,
+    /// Too large, not three base64url parts, not a JSON object, a repeated member, or a missing or
+    /// wrong-typed claim (checks 1, 2 and 7), or a bad forwarded request (§ 4.8).
+    Malformed,
+    Typ,
+    Alg,
+    Jwk,
+    Signature,
+    Htm,
+    Htu,
+    Iat,
+    Ath,
+    Thumbprint,
+    Replayed,
+    /// The `IsAuthorized` follow-up ticket is unknown, used, expired, for other proof bytes, or the
+    /// follow-up is not a self-query (§ 4.8).
+    FollowUp,
+}
+
+impl ProofDefect {
+    /// Every variant, for exhaustive tests and the log-name check.
+    pub const ALL: [ProofDefect; 13] = [
+        ProofDefect::Missing,
+        ProofDefect::Malformed,
+        ProofDefect::Typ,
+        ProofDefect::Alg,
+        ProofDefect::Jwk,
+        ProofDefect::Signature,
+        ProofDefect::Htm,
+        ProofDefect::Htu,
+        ProofDefect::Iat,
+        ProofDefect::Ath,
+        ProofDefect::Thumbprint,
+        ProofDefect::Replayed,
+        ProofDefect::FollowUp,
+    ];
+
+    /// The static defect name of a refusal log line.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProofDefect::Missing => "missing",
+            ProofDefect::Malformed => "malformed",
+            ProofDefect::Typ => "typ",
+            ProofDefect::Alg => "alg",
+            ProofDefect::Jwk => "jwk",
+            ProofDefect::Signature => "signature",
+            ProofDefect::Htm => "htm",
+            ProofDefect::Htu => "htu",
+            ProofDefect::Iat => "iat",
+            ProofDefect::Ath => "ath",
+            ProofDefect::Thumbprint => "thumbprint",
+            ProofDefect::Replayed => "replayed",
+            ProofDefect::FollowUp => "follow_up",
+        }
+    }
 }
 
 /// Authentication use-case errors. `Display` never includes token or claim values —
@@ -199,6 +312,13 @@ pub enum AuthnError {
     PrincipalInactive,
     #[error("authentication backend unavailable")]
     Unavailable,
+    /// A DPoP proof failed a check (SMA-700). gRPC `Unauthenticated`, reason `invalid-dpop-proof`.
+    #[error("invalid DPoP proof: {0:?}")]
+    InvalidDpopProof(ProofDefect),
+    /// The replay store refused the proof because a key or subject quota is full (SMA-700 D10).
+    /// gRPC `ResourceExhausted`, reason `dpop-quota-exceeded`, with `RetryInfo`.
+    #[error("DPoP proof quota exceeded")]
+    DpopQuotaExceeded { retry_after_secs: u32 },
     #[error("backend error")]
     Backend(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -271,5 +391,43 @@ mod tests {
         for bad in ["https://idp.example .com", "https://idp.example.com/realms acme", "https://idp.example.com/realms\tacme"] {
             assert!(Issuer::parse(bad).is_err(), "expected {bad:?} rejected");
         }
+    }
+
+    #[test]
+    fn jkt_debug_never_prints_the_thumbprint() {
+        // SMA-700 § 4.8: logs never contain the jkt. A `{:?}` of a `ValidatedClaims` must not leak it.
+        let jkt = Jkt::new("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I");
+        assert_eq!(format!("{jkt:?}"), "Jkt(..)");
+        assert_eq!(jkt.as_str(), "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I");
+    }
+
+    #[test]
+    fn every_proof_defect_has_one_distinct_static_name() {
+        let names: std::collections::HashSet<&str> = ProofDefect::ALL.iter().map(|d| d.as_str()).collect();
+        assert_eq!(names.len(), ProofDefect::ALL.len(), "two defects share a log name");
+        // Exhaustiveness guard: no wildcard arm, so a new variant must be added to ALL by hand.
+        for defect in ProofDefect::ALL {
+            match defect {
+                ProofDefect::Missing
+                | ProofDefect::Malformed
+                | ProofDefect::Typ
+                | ProofDefect::Alg
+                | ProofDefect::Jwk
+                | ProofDefect::Signature
+                | ProofDefect::Htm
+                | ProofDefect::Htu
+                | ProofDefect::Iat
+                | ProofDefect::Ath
+                | ProofDefect::Thumbprint
+                | ProofDefect::Replayed
+                | ProofDefect::FollowUp => {}
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_authn_errors_display_no_detail() {
+        assert_eq!(AuthnError::DpopQuotaExceeded { retry_after_secs: 7 }.to_string(), "DPoP proof quota exceeded");
+        assert_eq!(AuthnError::InvalidDpopProof(ProofDefect::Htu).to_string(), "invalid DPoP proof: Htu");
     }
 }

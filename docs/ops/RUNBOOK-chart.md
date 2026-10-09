@@ -18,6 +18,8 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `zones.iam.backend.apiKeysSecretVersion` | no | Change it after you rotate the pepper Secret, so the IAM pod restarts |
 | `zones.iam.backend.bootstrapAdmins` | no | A list of `{issuer, subject}`. IAM grants `platform_admin` at Root to each identity after its first login. Default `[]`: no user can do anything (§ 9) |
 | `zones.iam.backend.extraEnv` | no | More env entries (Kubernetes `EnvVar`) for the IAM container, for example `RUST_LOG`. Default `[]` (§ 9) |
+| `zones.iam.backend.dpop.enabled` | no | Default `false`. `true`: IAM checks the DPoP proof that the gateway sends (SMA-700). Turn it on in IAM first. Then set `GATEWAY_DPOP__ENABLED=true` on the gateway (§ 6) |
+| `zones.iam.backend.dpop.forwardedBaseUrls` | when `dpop.enabled` is true | The public URLs at which clients reach the gateway. Add any path prefix that a proxy removes. Use `https`, or `http` on `localhost`, `127.x.x.x` or `[::1]`. No query, fragment or user info (§ 6) |
 | `zones.gateway.backend.url` | when `gateway` is on | The base URL of an existing gateway backend. The chart does not deploy it |
 | `ingress.enabled` | no | Default `true`. `false`: the chart renders no Ingress. Then set `httpRoute.enabled`, or route the traffic yourself (§ 11). It must be a boolean |
 | `ingress.host` | yes, also when `ingress.enabled` is false | The one public host. `PAIGASUS_PUBLIC_ORIGIN` is `https://<host>`. A bare host name: no scheme, no path, no port |
@@ -34,6 +36,7 @@ addenda. `charts/paigasus/README.md` holds the developer detail.
 | `oidc.audience` | no | The access-token audience IAM accepts. Default: `oidc.clientId`. Recommended: a dedicated API audience. Follow the migration order in § 6 |
 | `oidc.acknowledgeClientIdAudience` | no | Set it to the value of `oidc.clientId` to remove the audience warning (§ 6). It does not change what IAM accepts |
 | `oidc.idTokenMarkerClaims` | no | Claim names that the IdP puts into its ID token and never into its access token. IAM refuses a token that carries one of them. Default `[]`: no such check. Zitadel: `["at_hash", "azp"]` (§ 6) |
+| `oidc.accessTokenRequiredClaims` | no | Claim names that the IdP puts into every access token and into no ID token. IAM refuses a token that does not carry one of them. Default `[]`: no such check. Zitadel: `["jti"]`. The check fails closed (§ 6) |
 | `oidc.scopes` | no | The scopes that both consoles request. Empty: `openid profile email offline_access`. The list must contain `openid`, or the render fails. Keep `offline_access`, except on Keycloak when you want SSO (§ 6, "Keycloak: online tokens and session length"). Without it, Entra ID, Auth0 and Okta issue no refresh token. When set, the consoles also send it on each refresh. Entra ID needs it (§ 6) |
 | `oidc.authorizationAudience` | no | The `audience` parameter that both consoles send in the authorization request. Empty: no `audience` parameter. It must equal `oidc.audience`, or the render fails. Auth0 needs it (§ 6) |
 | `oidc.existingSecret` | yes | A Secret with keys `oidc-client-secret` and `session-redis-url` |
@@ -134,8 +137,10 @@ pods, not for the old pods to go. The kind job waits for both (`ci/kind/run.sh`,
 | the contents of the CA ConfigMap | nothing, until you change `oidc.caBundle.version` | Node and IAM read the file once, at start |
 | `oidc.audience` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template. IAM has one replica and `maxSurge: 0` (`templates/backend-deployment.yaml`). IAM is not available during the restart. |
 | `zones.iam.backend.bootstrapAdmins` or `zones.iam.backend.extraEnv` | the IAM pod, not the consoles | it changes the env in the IAM pod template (`tests/env.sh` rows B7a and B7b). IAM is not available during the restart, as for `oidc.audience` |
+| `zones.iam.backend.dpop` | the IAM pod, not the consoles | it changes the env in the IAM pod template (`tests/env.sh` row D5). IAM is not available during the restart, as for `oidc.audience`. The restart also clears the DPoP replay store |
 | `oidc.acknowledgeClientIdAudience` | nothing | it changes only the IAM Deployment's `metadata` annotation and the NOTES, not a pod template (`tests/env.sh` row W14) |
 | `oidc.idTokenMarkerClaims` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template (`tests/env.sh` row M6). IAM is not available during the restart, as for `oidc.audience` |
+| `oidc.accessTokenRequiredClaims` | the IAM pod, not the consoles | it changes `IAM_AUTHN__ISSUERS` in the IAM pod template (`tests/env.sh` row R6). IAM is not available during the restart, as for `oidc.audience` |
 | `oidc.scopes` or `oidc.authorizationAudience` | both consoles, not IAM | it changes the `console-env` ConfigMap and so `checksum/console-env` (`tests/env.sh` rows O5 and O6) |
 
 A change of `oidc.caBundle.version` restarts every pod that mounts the bundle: both consoles and
@@ -225,6 +230,44 @@ these claims, with any value except `null`. The default is `[]`, and IAM then do
   `--set oidc.idTokenMarkerClaims={}`: Helm makes it a list with one empty name, and the chart
   refuses it.
 
+**IAM refuses a token that does not carry a claim that you configure (SMA-731).** Set
+`oidc.accessTokenRequiredClaims` to a list of claim names. IAM then refuses a token that does
+not carry one of these claims, or carries it with the value `null`. The default is `[]`, and IAM
+then does no such check. The marker claims above refuse a token that has an ID-token claim. This
+setting refuses a token that does not have an access-token claim. Use both when your IdP has
+such claims.
+
+- Use a name only when the IdP puts it into every access token and into no ID token. Before you
+  set the value, decode one access token for each grant type in use. Each access token must have
+  the claim. Decode one ID token. It must not have the claim.
+- The check fails closed. If the IdP stops putting the claim into its access token, for example
+  after an IdP upgrade, IAM refuses every request of that issuer with a `401` and the reason
+  `invalid-token`. The IAM log then has this line at `info` level:
+  "refused a bearer token: it does not carry a claim that the issuer configuration requires".
+  The line has the issuer and the marker `missing claim <name>`, for example
+  `missing claim jti`. It does not show a claim value. What the console shows a user in this
+  case is not measured.
+- The rate limit above applies. Every `NotAnAccessToken` refusal of the issuer shares one
+  rate-limit key. These refusals are an ID token, a logout token, a marker claim and a missing
+  required claim. So one line can stand for many refusals, and a line about a marker claim can
+  hide a line about a missing claim for 10 seconds. If the IAM log level hides `info`, the line
+  does not show.
+- To recover from a fail-closed refusal, remove the value (see the last item). Then decode the
+  new tokens before you set a new name.
+- At start, IAM writes one `info` line with the issuer and the configured names. When the log
+  level includes `info` and the line is not in the IAM log, IAM does not use the setting.
+- The chart refuses the same names as for `oidc.idTokenMarkerClaims`: an empty name, a name with
+  a character outside printable ASCII, a space, `"` or `\`, the names `iss`, `sub`, `aud` and
+  `exp`, and a name that occurs two times. It also refuses a name that is in both lists, because
+  IAM would then refuse every token of the issuer. Names compare exactly: `jti` and `JTI` are
+  two names.
+- A change of the value restarts IAM (§ 5).
+- To remove the setting, set it to `[]` in a values file, or use
+  `--set-json 'oidc.accessTokenRequiredClaims=[]'`. With `helm upgrade --reuse-values`, deleting
+  the key from a values file does not remove the old list. Do not use
+  `--set oidc.accessTokenRequiredClaims={}`: Helm makes it a list with one empty name, and the
+  chart refuses it.
+
 **IAM refuses a sender-constrained token (SMA-690).** IAM refuses an access token that has one
 of these markers:
 
@@ -236,20 +279,89 @@ of these markers:
 IAM cannot check the binding of such a token. So it does not accept the token as a bearer token.
 
 Keycloak binds an access token when the client sends a `DPoP` header to the token endpoint. The
-client needs no DPoP setting for this. So a client that calls Paigasus must not send a `DPoP`
-header to the token endpoint. A bound login stays bound when the client refreshes the token. A
-client that got a bound token must log in again without a `DPoP` header.
+client needs no DPoP setting for this. A bound login stays bound when the client refreshes the
+token. **With DPoP off (the default),** a client that calls Paigasus must not send a `DPoP` header
+to the token endpoint. A client that got a bound token must log in again without one. **With DPoP
+on (SMA-700, below),** a bound token works on the protected routes of the gateway. The client
+uses the `DPoP` scheme and a proof. The `Bearer` scheme still refuses a bound token. The API of
+IAM never accepts the `DPoP` scheme.
 
-Do not set the Keycloak client attribute `dpop.bound.access.tokens` on a client that calls
-Paigasus. A Keycloak client policy can also require DPoP. Do not use such a policy for this
-client (not measured).
+With DPoP off, do not set the Keycloak client attribute `dpop.bound.access.tokens` on a client
+that calls Paigasus. A Keycloak client policy can also require DPoP. With DPoP off, do not use
+such a policy for this client (not measured).
 
 The console does not send a `DPoP` header. The SDKs do not get tokens. They send the token that
-you give them. If you use an SDK, do not turn on DPoP in your own OIDC library.
+you give them. With DPoP off, do not turn on DPoP in your own OIDC library. With DPoP on, make
+a new proof for each attempt (see "A new proof for each attempt" below).
 
 The IAM log shows the refusal at `info`: "it is bound to a key, and IAM cannot check the
 binding". The line gives the issuer and the marker `cnf` or `typ DPoP`. The same rate limit
 applies as for the refusal of a token that is not an access token.
+
+**DPoP on the gateway path (SMA-700).** IAM and the gateway can accept a DPoP-bound token
+(RFC 9449) on the protected routes of the gateway: `POST /v1/chat/completions` and
+`GET /v1/service-info`. The client sends `Authorization: DPoP <token>` and one `DPoP` header with
+a proof for the request. The gateway sends the proof, the method and the path to IAM. IAM checks
+the proof, then the identity.
+
+To turn it on:
+
+1. Set `zones.iam.backend.dpop.enabled: true` and `zones.iam.backend.dpop.forwardedBaseUrls`. List
+   each public URL at which clients reach the gateway. Add any path prefix that a proxy removes.
+   Example: a client calls `https://api.example.com/llm/v1/chat/completions`. The proxy removes
+   `/llm`. Then the entry is `https://api.example.com/llm`. TLS must end in front of the
+   gateway. A wrong entry makes IAM refuse DPoP requests. It does not make IAM accept a wrong
+   request.
+2. Wait until the IAM pod runs with the new values. Then set `GATEWAY_DPOP__ENABLED=true` on the
+   gateway. With the other order, IAM refuses the DPoP context while it is off.
+
+The chart is stricter than IAM for these URLs. The chart refuses these:
+
+- An `xn--` host.
+- An IPv6 literal, except `[::1]`.
+- A `$`.
+- A port outside 1 to 65535.
+- An IPv4 address with an invalid octet.
+- A host with a numeric or hexadecimal last label.
+
+Use a plain DNS name or a valid IPv4 address.
+
+Rules for clients and operators:
+
+- **The identity must exist.** A DPoP-only client cannot make its own identity, because the API
+  of IAM refuses the `DPoP` scheme. Link the identity (ADR-0024). Or let the user log in to a
+  console once with the same subject.
+- **A new proof for each attempt.** Make the proof in a hook that runs for each attempt. An SDK
+  retry that sends the same headers again is refused as a replay (401 `invalid-dpop-proof`).
+- **The quota.** An entry lives up to 2 × `iat_window_secs` (120 s with the defaults). With the
+  defaults, one key can make about 8 proofs a second, and one user about 16. A client over its
+  quota gets 429 `rate-limited` with `Retry-After`. To change a quota, set its name in
+  `extraEnv`. The chart has no value for these four names:
+
+  - `IAM_AUTHN__DPOP__PER_KEY_QUOTA`
+  - `IAM_AUTHN__DPOP__PER_SUBJECT_QUOTA`
+  - `IAM_AUTHN__DPOP__IAT_WINDOW_SECS`
+  - `IAM_AUTHN__DPOP__REPLAY_CAPACITY`
+- **A full replay store.** When the store holds `replay_capacity` entries, IAM answers DPoP
+  requests with `Unavailable` (gateway 503) until entries expire. The IAM log shows the `warn`
+  line "the DPoP replay store is full" with the entry count. Raise
+  `IAM_AUTHN__DPOP__REPLAY_CAPACITY` in `extraEnv`. The chart sets no IAM memory limit. The
+  default capacity is 200 000 entries. Measured memory at that capacity:
+
+  | Shape of the entries | Bytes per entry | Memory |
+  |---|---|---|
+  | 1000 keys, 500 subjects | 178 | 34 MiB |
+  | A distinct key, 500 subjects | 253 | 48 MiB |
+  | A distinct key and subject for each entry (the worst case) | 328 | 62 MiB |
+
+  Use the worst case (328 bytes for each entry) to size the memory of the IAM pod.
+- **Restarts.** A restart clears the store. A proof that the client used before the restart can
+  be used again until it expires. With the defaults this is up to 120 s after the restart.
+- **The challenge.** With gateway DPoP on, every 401 of the gateway carries one
+  `WWW-Authenticate: DPoP` line. The gateway uses no server nonce.
+- **The log.** IAM logs each refused proof at `info`: "refused a DPoP proof". The line gives the
+  issuer and a defect name. The same rate limit applies as for the other refusal lines. The line
+  never shows the proof, the token or the path.
 
 By default the console requests the scopes `openid profile email offline_access`. Set
 `oidc.scopes` to request a different list. The list must contain `openid`. Keep `offline_access`,
@@ -347,13 +459,17 @@ passes IAM's audience check, and nothing warns. Decode a real ID token. Its `aud
 contain the value of `oidc.audience`.
 
 **Per IdP. Not measured.** These lines state what each IdP offers. This chart did not measure
-them. The Zitadel item is measured, except where it says otherwise.
+them. The Zitadel item is measured, except where it says otherwise. The `jti` sentence of the
+Keycloak item is measured.
 
 - **Keycloak.** Add an "Audience" protocol mapper to the console client, or to a client scope of
   that client. Set "Included Custom Audience" to the API audience. Set "Add to access token" on
   and "Add to ID token" off. The mapper adds a value to `aud`. It does not replace `aud`. Keycloak
   example 2 below shows the mapper. IAM also refuses a Keycloak ID token by its `typ` claim
-  (SMA-686).
+  (SMA-686). `oidc.accessTokenRequiredClaims: ["jti"]` does not help for Keycloak. Measured on
+  Keycloak 26.4 (SMA-731): the ID token and the access token both have `jti`, for the password
+  grant, the refresh grant and a DPoP-bound access token. So the `typ` check stays the Keycloak
+  defence.
 - **Okta.** Use a custom authorization server whose audience is the API identifier. See the Okta
   example below.
 - **Auth0.** Auth0 issues an access token for an API only when the authorization request has the
@@ -388,6 +504,7 @@ them. The Zitadel item is measured, except where it says otherwise.
   - `oidc.idTokenMarkerClaims: ["c_hash"]` refuses a Dex ID token from the code flow only.
   - A refreshed Dex ID token has no claim that the access token does not also have.
   - So SMA-686 residual R1 stays open for Dex (SMA-686 § 2).
+  - `oidc.accessTokenRequiredClaims` is not measured for Dex.
 - **Zitadel. Measured, Zitadel v4.15.3 with Login v1, 2026-10-02 (SMA-703). The Docker measurement
   used a public PKCE web app. One decoded session from the reference install, a confidential web
   app (HTTP Basic client authentication, Login v2), showed the same split: `at_hash` and `azp` on
@@ -424,6 +541,15 @@ them. The Zitadel item is measured, except where it says otherwise.
     - A machine user has no `email`. The Action adds nothing to a machine token.
   - Set `oidc.idTokenMarkerClaims: ["at_hash", "azp"]`. Every measured Zitadel ID token has both
     claims. No measured Zitadel access token has one of them.
+  - Also set `oidc.accessTokenRequiredClaims: ["jti"]`. Measured with Login v1: code flow, refresh
+    grant, client-credentials grant (SMA-731). Every measured Zitadel access token has `jti`, and
+    no measured Zitadel ID token has it. The two settings work together. The marker claims refuse
+    a token that has an ID-token claim. The required claim refuses a token that does not have an
+    access-token claim. If a future Zitadel version drops `at_hash` and `azp` from its ID token,
+    the required claim still refuses the ID token. If it drops `jti` from its access token, the
+    Zitadel login still completes, but IAM refuses every access token of this issuer with a 401,
+    and the IAM log shows `missing claim jti`. Then remove the value, and check the new token
+    shapes before you set a new name.
   - The audience. Option 1, for an install with machine clients: set `oidc.audience` to the
     project id. Each machine client must request the scope
     `urn:zitadel:iam:org:project:id:<project id>:aud`. Without this scope, a machine token has
@@ -432,8 +558,10 @@ them. The Zitadel item is measured, except where it says otherwise.
     install with the console only: keep the client id as the audience, and set
     `oidc.acknowledgeClientIdAudience`.
   - Before the switch: decode one access token for each grant type in use (authorization code,
-    refresh token, client credentials). No access token can have `at_hash` or `azp`. Decode one
-    ID token. It must have both claims. This check stays required. The paigasus console is
+    refresh token, client credentials, and the JWT-profile grant). The JWT-profile grant is a
+    usual Zitadel machine flow, and it is not measured. No access token can have `at_hash` or
+    `azp`, and each access token must have `jti`. Decode one ID token. It must have `at_hash` and
+    `azp`, and it must not have `jti`. This check stays required. The paigasus console is
     a confidential client. The reference install gave one confidential sample only. One sample is
     not proof for every install.
   - After the switch: send an ID token to IAM. Expect a `401` and the IAM log line with
@@ -441,7 +569,10 @@ them. The Zitadel item is measured, except where it says otherwise.
   - A change of the value restarts IAM (§ 5).
   - After each Zitadel upgrade, decode the tokens again. If a new version puts `azp` or `at_hash`
     into the access token, IAM refuses every token, and the log line names the claim. If a new
-    version removes both claims from the ID token, the protection stops, and nothing warns.
+    version removes both claims from the ID token, `oidc.accessTokenRequiredClaims: ["jti"]` still
+    refuses the ID token while the ID token has no `jti`. The protection stops, and nothing warns,
+    only when the ID token has neither `at_hash` nor `azp` and also has `jti`. Without
+    `oidc.accessTokenRequiredClaims`, the protection stops when the two marker claims are gone.
 
 **Keycloak example 1: the kind job's setup. This setup shows the warning.** Keycloak does not put
 the client id into the access token's `aud` by default. The kind job adds an audience mapper to
@@ -651,10 +782,11 @@ grant heals at the next login.
 `RUST_LOG`, which IAM reads at start (`paigasus_logging::env_filter`). The chart refuses a name
 that it sets itself: `IAM_HTTP_ADDR`, `IAM_GRPC_ADDR`, `IAM_MIGRATION__LOCK_WAIT_SECS`,
 `IAM_DATABASE_URL`, `IAM_AUTHN__ISSUERS`, `IAM_API_KEYS__PEPPER`,
-`IAM_AUTHN__EXTRA_CA_BUNDLE_PATH` and `IAM_AUTHZ__BOOTSTRAP_ADMINS`. It also refuses a name that
-starts with one of these names and `__`. Set those values through their chart values. The list is
-`paigasus.iamReservedEnv` in `templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it
-equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
+`IAM_AUTHN__EXTRA_CA_BUNDLE_PATH`, `IAM_AUTHZ__BOOTSTRAP_ADMINS`, `IAM_AUTHN__DPOP__ENABLED` and
+`IAM_AUTHN__DPOP__FORWARDED_BASE_URLS`. It also refuses a name that starts with one of these
+names and `__`. Set those values through their chart values. The other `IAM_AUTHN__DPOP__*`
+names stay settable through `extraEnv`. The list is `paigasus.iamReservedEnv` in
+`templates/_iam-backend.tpl`, and `tests/env.sh` row B6 keeps it equal to the rendered names. `extraEnv` can set other `IAM_*` keys, for example
 `IAM_AUTHZ__ENFORCE_TENANCY`. The chart does not check those values; IAM checks them at boot.
 
 ## 10. Console pods stay NotReady (SMA-705)

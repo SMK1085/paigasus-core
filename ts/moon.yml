@@ -23,6 +23,10 @@ fileGroups:
     # SMA-634: paigasus-kernel/scripts/generate-wasm.mjs. Without this, ts:lint and ts:fmt do not
     # key on packages/*/scripts and an edit there serves a cached pass.
     - 'packages/*/scripts/**/*'
+    # SMA-536: ts/scripts/ holds plain Node scripts (check-config-only.mjs, the installed-typings
+    # preflight). Without this, ts:lint and ts:fmt do not key on ts/scripts and an edit there serves
+    # a cached pass.
+    - 'scripts/**/*'
     - 'tooling/**/*' # SMA-406 parity helpers; lint/fmt lint the whole tree, so the cache must track these too
   tests:
     - 'packages/*/tests/**/*'
@@ -32,8 +36,8 @@ fileGroups:
 # .moon/tasks/typescript-project.yml, so they never attach to this configuration root. This
 # replaces the SMA-394 `workspace.inheritedTasks.exclude: ['build', 'typecheck']`, now redundant
 # under layer routing (the root has no tsconfig.json, so a root tsc would fail TS5058; routing
-# simply never gives it the task). ts `test` also routes per-project (no central vitest config).
-# The root owns only the whole-tree lint/fmt. (SMA-401)
+# simply never gives it the task). One exception: the `test` task below runs the node tests of
+# ts/scripts/ (SMA-536). The root owns only the whole-tree lint/fmt. (SMA-401)
 
 # Commit-message validation for CI (SMA-371 AC-E parity gate). Lives here because the
 # pinned commitlint binary + @paigasus/commitlint-config are installed under ts/. Invoked
@@ -59,3 +63,13 @@ tasks:
     inputs: []
     options:
       cache: false
+  # SMA-536. The unit tests of scripts/check-installed-bindings.mjs, the installed-typings
+  # preflight that runs before `tsc` in every task whose package closure holds a `file:` binding.
+  # `node --test`, not vitest: the script is plain Node ESM with no dependencies, and this
+  # configuration root has no vitest config. The name is `test` so that ci.yml's `:test` target
+  # selects it; another name would never run in CI. The inputs are the script and its test only.
+  test:
+    command: 'node --test scripts/check-installed-bindings.test.mjs'
+    inputs:
+      - 'scripts/check-installed-bindings.mjs'
+      - 'scripts/check-installed-bindings.test.mjs'

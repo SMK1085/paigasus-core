@@ -4,10 +4,10 @@
 //! `to_page`) every `TenancyGrpc` method uses: parse -> service call -> convert, no business
 //! logic in this layer (task-16 brief).
 //!
-//! `iam_status` (SMA-504) is the single construction point every IAM gRPC error must go
-//! through: it is the only place that builds `ErrorDetails::with_error_info`, so no call site
-//! can forget the machine-readable `(domain, reason, metadata)` triple. `status_to_grpc` and
-//! `authn_status` are themselves thin `iam_status` callers, not independent constructors.
+//! `iam_status_with_retry` (SMA-504, SMA-700) is the single construction point every IAM gRPC
+//! error goes through: it is the only place that builds `ErrorDetails`, so no call site can
+//! forget the machine-readable `(domain, reason, metadata)` triple. `iam_status`,
+//! `status_to_grpc` and `authn_status` are thin callers of it, not independent constructors.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -42,7 +42,7 @@ use crate::application::pagination::Page;
 static MISSING_AUTH_CONTEXT: LazyLock<String> = LazyLock::new(|| ErrorReason::MissingAuthContext.as_wire_reason().expect("a declared reason is never the sentinel"));
 static CAPABILITY_DISABLED: LazyLock<String> = LazyLock::new(|| ErrorReason::CapabilityDisabled.as_wire_reason().expect("a declared reason is never the sentinel"));
 
-/// `authn_status`'s six reasons, same registry-derived pattern as the two statics above
+/// `authn_status`'s reasons, same registry-derived pattern as the two statics above
 /// (D8): every one of these already exists in the registry (spec §6.3), so — per the human's
 /// ruling on review finding #2 — they are derived, not hardcoded, even though the brief handed
 /// them to us as string literals.
@@ -52,6 +52,8 @@ static PROVISIONING_FAILED: LazyLock<String> = LazyLock::new(|| ErrorReason::Pro
 static PRINCIPAL_INACTIVE: LazyLock<String> = LazyLock::new(|| ErrorReason::PrincipalInactive.as_wire_reason().expect("a declared reason is never the sentinel"));
 static AUTHN_UNAVAILABLE: LazyLock<String> = LazyLock::new(|| ErrorReason::AuthnUnavailable.as_wire_reason().expect("a declared reason is never the sentinel"));
 static AUTHN_INTERNAL: LazyLock<String> = LazyLock::new(|| ErrorReason::Internal.as_wire_reason().expect("a declared reason is never the sentinel"));
+static INVALID_DPOP_PROOF: LazyLock<String> = LazyLock::new(|| ErrorReason::InvalidDpopProof.as_wire_reason().expect("a declared reason is never the sentinel"));
+static DPOP_QUOTA_EXCEEDED: LazyLock<String> = LazyLock::new(|| ErrorReason::DpopQuotaExceeded.as_wire_reason().expect("a declared reason is never the sentinel"));
 
 /// The `ErrorInfo.metadata` every IAM gRPC error carries.
 ///
@@ -75,9 +77,18 @@ fn error_metadata(retryable: Retryable, extra: &[(&str, &str)]) -> HashMap<Strin
 }
 
 /// Builds a `Status` carrying `google.rpc.ErrorInfo` in the `grpc-status-details-bin` trailer.
-/// The single construction point for every IAM gRPC error, so no site can forget the details.
+/// Every IAM gRPC error goes through [`iam_status_with_retry`], so no site can forget the details.
 pub fn iam_status(code: Code, reason: &str, message: impl Into<String>, retryable: Retryable, extra: &[(&str, &str)]) -> Status {
-    let details = ErrorDetails::with_error_info(reason, &*IAM_DOMAIN, error_metadata(retryable, extra));
+    iam_status_with_retry(code, reason, message, retryable, extra, None)
+}
+
+/// [`iam_status`], plus `google.rpc.RetryInfo` when `retry_after` is `Some` (SMA-700: the
+/// `dpop-quota-exceeded` refusal). The single place that builds `ErrorDetails`.
+fn iam_status_with_retry(code: Code, reason: &str, message: impl Into<String>, retryable: Retryable, extra: &[(&str, &str)], retry_after: Option<std::time::Duration>) -> Status {
+    let mut details = ErrorDetails::with_error_info(reason, &*IAM_DOMAIN, error_metadata(retryable, extra));
+    if let Some(delay) = retry_after {
+        details.set_retry_info(Some(delay));
+    }
     Status::with_error_details(code, message, details)
 }
 
@@ -138,12 +149,20 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
 /// ever reaches the wire. What IS new is the machine-readable reason: the gateway previously had
 /// to accept a bare `PermissionDenied`, which collapsed three variants (ADR-0020 D4's tripwire).
 pub fn authn_status(err: &AuthnError) -> Status {
+    let mut retry_after = None;
     let (code, reason, message) = match err {
         AuthnError::InvalidToken(_) => (Code::Unauthenticated, INVALID_TOKEN.as_str(), "invalid bearer token"),
         AuthnError::IdentityNotProvisioned => (Code::PermissionDenied, IDENTITY_NOT_PROVISIONED.as_str(), "identity not provisioned"),
         AuthnError::ProvisioningFailed(_) => (Code::PermissionDenied, PROVISIONING_FAILED.as_str(), "provisioning failed"),
         AuthnError::PrincipalInactive => (Code::PermissionDenied, PRINCIPAL_INACTIVE.as_str(), "principal inactive"),
         AuthnError::Unavailable => (Code::Unavailable, AUTHN_UNAVAILABLE.as_str(), "authentication backend unavailable"),
+        // SMA-700 D9: every proof defect is one reason. The defect is never on the wire.
+        AuthnError::InvalidDpopProof(_) => (Code::Unauthenticated, INVALID_DPOP_PROOF.as_str(), "invalid DPoP proof"),
+        // SMA-700 D10: a rate limit of one client, not an outage. Never a zero delay.
+        AuthnError::DpopQuotaExceeded { retry_after_secs } => {
+            retry_after = Some(std::time::Duration::from_secs(u64::from((*retry_after_secs).max(1))));
+            (Code::ResourceExhausted, DPOP_QUOTA_EXCEEDED.as_str(), "too many DPoP proofs")
+        }
         AuthnError::Backend(_) => {
             // `Debug` carries the boxed repository/infra source (never token or claim
             // material, by `AuthnError`'s own contract) — logged here, never surfaced.
@@ -151,7 +170,7 @@ pub fn authn_status(err: &AuthnError) -> Status {
             (Code::Internal, AUTHN_INTERNAL.as_str(), "internal error")
         }
     };
-    iam_status(code, reason, message, authn_retryable(err), &[])
+    iam_status_with_retry(code, reason, message, authn_retryable(err), &[], retry_after)
 }
 
 /// Parses a wire PRN, requiring the `"iam"` service and an `expect`ed resource type. Returns
@@ -881,10 +900,10 @@ mod tests {
         assert!(!info.metadata.contains_key("field"), "metadata: {:?}", info.metadata);
     }
 
-    /// AC 6 for the authn funnel: five codes, all registry-resolvable, messages unchanged.
+    /// AC 6 for the authn funnel: the authn codes, all registry-resolvable, messages unchanged.
     #[test]
     fn every_authn_status_carries_a_registered_reason_and_its_original_message() {
-        use paigasus_iam_core::{ProvisioningDefect, TokenDefect};
+        use paigasus_iam_core::{ProofDefect, ProvisioningDefect, TokenDefect};
         use paigasus_proto::paigasus::common::v1::ErrorReason;
         use tonic_types::StatusExt;
 
@@ -900,6 +919,14 @@ mod tests {
             ),
             (AuthnError::PrincipalInactive, Code::PermissionDenied, "principal-inactive", "principal inactive"),
             (AuthnError::Unavailable, Code::Unavailable, "authn-unavailable", "authentication backend unavailable"),
+            (AuthnError::InvalidDpopProof(ProofDefect::Htu), Code::Unauthenticated, "invalid-dpop-proof", "invalid DPoP proof"),
+            (
+                AuthnError::DpopQuotaExceeded { retry_after_secs: 7 },
+                Code::ResourceExhausted,
+                "dpop-quota-exceeded",
+                "too many DPoP proofs",
+            ),
+            (AuthnError::InvalidToken(TokenDefect::NotKeyBound), Code::Unauthenticated, "invalid-token", "invalid bearer token"),
             (AuthnError::Backend("secret db detail".into()), Code::Internal, "internal", "internal error"),
         ];
         for (err, code, reason, message) in cases {
@@ -912,6 +939,27 @@ mod tests {
             assert_eq!(info.reason, reason);
             assert!(!format!("{:?}", info.metadata).contains("secret db detail"), "metadata must never carry backend text");
         }
+    }
+
+    /// SMA-700 D10: the quota refusal carries `google.rpc.RetryInfo`, so the gateway can send
+    /// `Retry-After`. It is retryable, and no other authn status carries RetryInfo.
+    #[test]
+    fn the_dpop_quota_refusal_carries_retry_info_and_is_retryable() {
+        use tonic_types::StatusExt;
+
+        let status = authn_status(&AuthnError::DpopQuotaExceeded { retry_after_secs: 7 });
+        let details = status.get_error_details();
+        let retry = details.retry_info().expect("RetryInfo");
+        assert_eq!(retry.retry_delay, Some(std::time::Duration::from_secs(7)));
+        assert_eq!(details.error_info().expect("ErrorInfo").metadata.get("retryable").map(String::as_str), Some("true"));
+
+        // A zero is never sent: a client would retry at once.
+        let zero = authn_status(&AuthnError::DpopQuotaExceeded { retry_after_secs: 0 });
+        assert_eq!(zero.get_error_details().retry_info().expect("RetryInfo").retry_delay, Some(std::time::Duration::from_secs(1)));
+
+        let proof = authn_status(&AuthnError::InvalidDpopProof(paigasus_iam_core::ProofDefect::Replayed));
+        assert!(proof.get_error_details().retry_info().is_none());
+        assert_eq!(proof.get_error_details().error_info().expect("ErrorInfo").metadata.get("retryable").map(String::as_str), Some("false"));
     }
 
     /// AC 6 for the six sites that build a bare `Status` — the gap SMA-498's HTTP-only sweep

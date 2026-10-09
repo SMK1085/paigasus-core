@@ -17,7 +17,7 @@ pub mod error;
 pub mod service_info;
 pub mod usage;
 
-pub use auth::{require_authenticated, require_iam_auth};
+pub use auth::{AuthState, require_authenticated, require_iam_auth};
 pub use dto::ChatCompletionRequest;
 pub use error::GatewayError;
 
@@ -58,6 +58,8 @@ pub struct AppState {
     /// SMA-677: the rate limit and token budget, or `None` when `[limits]` is absent — then the
     /// handler skips them entirely and behaves exactly as before (A6).
     pub limits: Option<Arc<Limits>>,
+    /// SMA-700: `GatewayConfig::dpop.enabled`. The auth middlewares read it through `AuthState`.
+    pub dpop_enabled: bool,
 }
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
@@ -85,10 +87,13 @@ pub struct AppState {
 /// deliberately NOT part of this router: it is merged in by `main` (or served on its own
 /// listener) AFTER this function returns, so a scrape never inflates its own request metrics.
 pub fn router(state: AppState) -> Router {
-    // The auth middleware's state is the IAM port alone (`Arc<dyn Iam>`), captured here BEFORE the
-    // final `with_state`, and independent of the handler's `AppState` — so this clone is just the
-    // port, not the whole state.
-    let auth = axum::middleware::from_fn_with_state(state.iam.clone(), require_iam_auth);
+    // The auth middlewares' state is the IAM port and the DPoP switch (`AuthState`), captured here
+    // BEFORE the final `with_state`, and independent of the handler's `AppState`.
+    let auth_state = AuthState {
+        iam: state.iam.clone(),
+        dpop_enabled: state.dpop_enabled,
+    };
+    let auth = axum::middleware::from_fn_with_state(auth_state.clone(), require_iam_auth);
     // The body-size limit: an over-limit body fails the handler's `EnvelopeBytes` extractor with
     // a `413` rendered inside the OpenAI envelope (SMA-588), not axum's plain text.
     // Note (M0): auth runs BEFORE the 413 (the limit is enforced at body extraction, after the
@@ -100,7 +105,7 @@ pub fn router(state: AppState) -> Router {
     // SMA-505: its own group, because discovery authenticates but does not authorize, and needs
     // no body limit (it is a GET). `route_layer` keeps the middleware off unmatched paths, so a
     // 404 is still a 404 rather than a credential challenge.
-    let discovery_auth = axum::middleware::from_fn_with_state(state.iam.clone(), require_authenticated);
+    let discovery_auth = axum::middleware::from_fn_with_state(auth_state, require_authenticated);
     let discovery = Router::new().route(paigasus_service_info::ROUTE, get(service_info::get_service_info)).route_layer(discovery_auth);
 
     Router::new()
@@ -168,6 +173,7 @@ fn iam_not_ready() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::iam::{CallerCredential, DpopContext};
     use crate::config::OpenAiConfig;
     use axum::body::Body;
     use axum::http::Request;
@@ -189,10 +195,10 @@ mod tests {
         async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
             unreachable!("this route must never call IAM")
         }
-        async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+        async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
             unreachable!("this route must never call IAM")
         }
-        async fn introspect_token(&self, _token: &str) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
+        async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
             unreachable!("this route must never call IAM")
         }
     }
@@ -227,10 +233,10 @@ mod tests {
                 Probe::UnreachableConnect => Err(IamError::Connect("channel build failed".to_string())),
             }
         }
-        async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+        async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
             unreachable!("the readiness probe never authorizes")
         }
-        async fn introspect_token(&self, _token: &str) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
+        async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
             unreachable!("the readiness probe never introspects a token")
         }
     }
@@ -254,6 +260,7 @@ mod tests {
             max_request_bytes: 1_048_576,
             capabilities: crate::service_info::Capabilities { chat_stream: true },
             limits: None,
+            dpop_enabled: false,
         }
     }
 
