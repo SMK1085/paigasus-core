@@ -45,7 +45,7 @@ mod users;
 
 use async_trait::async_trait;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use paigasus_iam_core::{Authenticator, AuthnError, Authorizer, Issuer, ValidatedClaims};
+use paigasus_iam_core::{Authenticator, AuthnError, Authorizer, Issuer, TokenScheme, ValidatedClaims};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -59,7 +59,9 @@ use crate::adapters::authz::{
     MemoryDecisionCache, PolicySnapshot, RedisDecisionCache, SliceCache, TracingAuditSink,
 };
 use crate::adapters::clock::SystemClock;
+use crate::adapters::dpop_replay::InMemoryReplayStore;
 use crate::adapters::id::KernelIdGenerator;
+use crate::adapters::oidc::dpop::JoseDpopProofChecker;
 use crate::adapters::oidc::jwks::{HttpJwksFetcher, IdpTls, InMemoryJwksCache, JwksProvider};
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
@@ -77,6 +79,7 @@ use crate::application::bootstrap;
 use crate::application::bootstrap_admin::{BootstrapAdminSeeder, BootstrapAdminSeederDeps};
 use crate::application::create_user::{CreateUser, CreateUserDeps};
 use crate::application::dead_letters::{DeadLetterDeps, DeadLetterService};
+use crate::application::dpop::DpopProofVerifier;
 use crate::application::memberships::{MembershipService, MembershipServiceDeps};
 use crate::application::organizations::{OrganizationService, OrganizationServiceDeps};
 use crate::application::policies::{PolicyService, PolicyServiceDeps};
@@ -148,10 +151,10 @@ pub enum WiredAuthenticator {
 
 #[async_trait]
 impl Authenticator for WiredAuthenticator {
-    async fn authenticate(&self, token: &str) -> Result<ValidatedClaims, AuthnError> {
+    async fn authenticate(&self, token: &str, scheme: TokenScheme) -> Result<ValidatedClaims, AuthnError> {
         match self {
-            WiredAuthenticator::Memory(inner) => inner.authenticate(token).await,
-            WiredAuthenticator::Redis(inner) => inner.authenticate(token).await,
+            WiredAuthenticator::Memory(inner) => inner.authenticate(token, scheme).await,
+            WiredAuthenticator::Redis(inner) => inner.authenticate(token, scheme).await,
         }
     }
 }
@@ -188,6 +191,9 @@ pub struct AppState {
     /// Route-level body cap for `POST /v1/authn/introspect` (H1): `max_token_bytes` +
     /// [`INTROSPECT_BODY_OVERHEAD_BYTES`], computed once at wiring time.
     pub introspect_body_limit: usize,
+    /// `authn.max_token_bytes`, for the gRPC header-list limit of the test router (SMA-700);
+    /// `main.rs` reads the config directly.
+    pub grpc_max_token_bytes: usize,
     /// Role-grant CRUD use case (SMA-444 Task 18) — the `/v1/authz/role-grants` HTTP routes
     /// call through this, mirroring `orgs`/`teams`/etc.'s posture.
     pub roles: RoleSvc,
@@ -803,6 +809,28 @@ impl AppState {
             SystemClock,
             JitPolicy::from_issuers(&jit_flags),
         );
+        // SMA-700: ONE replay store for the whole process, shared by every `AppState` clone through
+        // the verifier's `Arc` (D3). Correct only with one IAM replica (R2).
+        let authn = if authn_cfg.dpop.enabled {
+            let dpop = &authn_cfg.dpop;
+            let verifier = DpopProofVerifier::new(
+                Arc::new(JoseDpopProofChecker),
+                Arc::new(InMemoryReplayStore::new(dpop.replay_capacity, dpop.per_key_quota, dpop.per_subject_quota)),
+                Arc::new(SystemClock),
+                &dpop.forwarded_base_urls,
+                dpop.iat_window_secs,
+            )
+            .map_err(|e| AuthnError::Backend(e.into()))?;
+            tracing::info!(
+                forwarded_base_urls = dpop.forwarded_base_urls.len(),
+                iat_window_secs = dpop.iat_window_secs,
+                replay_capacity = dpop.replay_capacity,
+                "DPoP is on: Introspect checks a forwarded DPoP proof, and IsAuthorized accepts the one follow-up"
+            );
+            authn.with_dpop(Arc::new(verifier))
+        } else {
+            authn
+        };
 
         // SMA-712: the operator identity-link calls. The issuer set is the one `jit_flags`
         // parsed from `authn.issuers` above, so a link can only name an issuer that IAM accepts
@@ -835,6 +863,7 @@ impl AppState {
             authz,
             snapshot,
             introspect_body_limit: cfg.authn.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
+            grpc_max_token_bytes: cfg.authn.max_token_bytes,
             roles,
             policies,
             authorize,
@@ -1153,6 +1182,7 @@ mod tests {
             max_token_bytes: 16384,
             accept_invalid_tls,
             extra_ca_bundle_path: extra_ca_bundle_path.map(str::to_string),
+            dpop: crate::config::DpopConfig::default(),
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,

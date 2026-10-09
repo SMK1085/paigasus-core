@@ -152,6 +152,10 @@ pub struct AuthnConfig {
     /// `accept_invalid_tls` fallback (SMA-558 § 9).
     #[serde(default)]
     pub extra_ca_bundle_path: Option<String>,
+    /// The DPoP proof check of the gateway path (SMA-700). Off by default; an absent
+    /// `[authn.dpop]` table is valid config.
+    #[serde(default)]
+    pub dpop: DpopConfig,
     pub jwks_cache: JwksCacheConfig,
     pub issuers: Vec<IssuerConfig>,
 }
@@ -183,17 +187,118 @@ pub struct IssuerConfig {
     /// refused as `NotAnAccessToken`. For Zitadel, use `["at_hash", "azp"]` (spec § 3, F6).
     #[serde(default)]
     pub id_token_marker_claims: Vec<String>,
+    /// Claim names that every accepted token of this issuer must carry (SMA-731). Empty by default.
+    /// A verified token that does not carry one of them, or carries it with the value JSON `null`,
+    /// is refused as `NotAnAccessToken`. For Zitadel, use `["jti"]` (SMA-731 spec § 3, F1).
+    #[serde(default)]
+    pub access_token_required_claims: Vec<String>,
 }
 
 fn default_jit_provisioning() -> bool {
     true
 }
 
-/// Claim names that every token IAM accepts carries (SMA-703 D2). A marker list that names one
-/// would make IAM refuse every token of that issuer, so `IamConfig::validate` refuses it.
-/// Keep this list equal to the reserved names in `paigasus.validateIdTokenMarkerClaims` in
+/// `[authn.dpop]` (SMA-700 section 4.9). IAM checks the DPoP proof that the gateway forwards in
+/// `Introspect`, and accepts the one `IsAuthorized` follow-up. Every field has a default, so a
+/// partial table, or a single `IAM_AUTHN__DPOP__*` env var, is valid. The `MigrationConfig`
+/// pattern, with a container-level `#[serde(default)]`.
+///
+/// An entry lives up to `2 x iat_window_secs` (a proof with `iat = now + window` expires at
+/// `now + 2 x window`), so with the defaults a key can make about `1000 / 120 = 8` proofs a second,
+/// and a subject about 16, with no quota hit.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DpopConfig {
+    pub enabled: bool,
+    /// The public base URLs at which clients reach the gateway, each with any path prefix that a
+    /// proxy removes (D5, D6). IAM checks `htu` against these, never against a request header.
+    pub forwarded_base_urls: Vec<String>,
+    /// The allowed `|now - iat|` of a proof, in seconds. 1 to 300. Its own setting: it does not add
+    /// `authn.leeway_secs` (D20).
+    pub iat_window_secs: u64,
+    /// The global entry cap of the replay store. A full store answers `Unavailable` (D10).
+    pub replay_capacity: usize,
+    /// The live entries allowed for one `jkt`. A full quota answers `dpop-quota-exceeded` (429).
+    pub per_key_quota: usize,
+    /// The live entries allowed for one `(issuer, subject)`.
+    pub per_subject_quota: usize,
+}
+
+impl Default for DpopConfig {
+    fn default() -> Self {
+        DpopConfig {
+            enabled: false,
+            forwarded_base_urls: Vec::new(),
+            iat_window_secs: 60,
+            replay_capacity: 200_000,
+            per_key_quota: 1_000,
+            per_subject_quota: 2_000,
+        }
+    }
+}
+
+/// The loopback hosts on which `http` is allowed for a `forwarded_base_urls` entry.
+fn is_loopback_host(host: Option<url::Host<&str>>) -> bool {
+    match host {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// One `forwarded_base_urls` entry, checked as `validate()` requires (SMA-700 section 4.9).
+fn check_forwarded_base_url(raw: &str) -> Result<(), String> {
+    if raw.trim() != raw {
+        return Err(format!("authn.dpop.forwarded_base_urls entry {raw:?} has leading or trailing whitespace"));
+    }
+    let url = url::Url::parse(raw).map_err(|e| format!("authn.dpop.forwarded_base_urls entry {raw:?} is not an absolute URL: {e}"))?;
+    if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("authn.dpop.forwarded_base_urls entry {raw:?} must have no query, fragment or user info"));
+    }
+    let allowed = match url.scheme() {
+        "https" => url.host().is_some(),
+        "http" => is_loopback_host(url.host()),
+        _ => false,
+    };
+    if !allowed {
+        return Err(format!(
+            "authn.dpop.forwarded_base_urls entry {raw:?} must use https, or http on a loopback host (localhost, 127.0.0.0/8, ::1)"
+        ));
+    }
+    Ok(())
+}
+
+/// Claim names that every token IAM accepts carries (SMA-703 D2, SMA-731 D2). In
+/// `id_token_marker_claims` such a name would make IAM refuse every token of the issuer. In
+/// `access_token_required_claims` it would have no effect. So `IamConfig::validate` refuses it in
+/// both lists. Keep this list equal to the reserved names in `paigasus.validateClaimNameList` in
 /// `charts/paigasus/templates/_iam-backend.tpl`.
-const RESERVED_MARKER_CLAIMS: [&str; 4] = ["iss", "sub", "aud", "exp"];
+const RESERVED_CLAIM_NAMES: [&str; 4] = ["iss", "sub", "aud", "exp"];
+
+/// The boot rules for one claim-name list of an issuer (SMA-703 D2, SMA-731 D2): no empty name, no
+/// leading or trailing whitespace, no name of `RESERVED_CLAIM_NAMES`, and no name twice. `field`
+/// is the `IssuerConfig` field name, and `reserved_reason` ends the reserved-name message. Both
+/// lists use this one function, so their rules cannot drift apart. Names compare exactly: JSON
+/// member names are case-sensitive.
+fn validate_claim_names(issuer: &str, field: &str, names: &[String], reserved_reason: &str) -> Result<(), String> {
+    let mut seen = HashSet::with_capacity(names.len());
+    for name in names {
+        if name.is_empty() {
+            return Err(format!("authn.issuers[{issuer}].{field} contains an empty name"));
+        }
+        if name.trim() != name {
+            return Err(format!("authn.issuers[{issuer}].{field} has a name with leading or trailing whitespace: {name:?}"));
+        }
+        if RESERVED_CLAIM_NAMES.contains(&name.as_str()) {
+            return Err(format!("authn.issuers[{issuer}].{field} must not contain {name:?}: {reserved_reason}"));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(format!("authn.issuers[{issuer}].{field} contains the name {name:?} twice"));
+        }
+    }
+    Ok(())
+}
 
 /// Cedar authorization config (SMA-444 Task 21, spec §7/§11) — mirrors `AuthnConfig`'s
 /// shape/style: the in-process [`PolicySnapshot`](crate::adapters::authz::PolicySnapshot)
@@ -1041,7 +1146,11 @@ impl IamConfig {
     /// key. Also (SMA-558): `authn.accept_invalid_tls` and `authn.extra_ca_bundle_path` are
     /// mutually exclusive, and the latter is non-empty when present. Also (SMA-703 D2): each
     /// `id_token_marker_claims` name is not empty, has no leading or trailing whitespace, is not
-    /// `iss`/`sub`/`aud`/`exp`, and occurs once in its list.
+    /// `iss`/`sub`/`aud`/`exp`, and occurs once in its list. Also (SMA-731 D2): the same rules
+    /// for each `access_token_required_claims` name, and no name in both lists of one issuer.
+    /// Also (SMA-700): the `[authn.dpop]`
+    /// rules: a non-empty URL list when enabled, each URL https (or http on a loopback host) with
+    /// no query, fragment or user info, a window of 1 to 300 s, and quotas from 1 to the capacity.
     pub fn validate(&self) -> Result<(), String> {
         if self.authn.issuers.is_empty() {
             return Err("authn.issuers must contain at least one issuer".to_string());
@@ -1063,23 +1172,25 @@ impl IamConfig {
             if let Err(e) = Issuer::parse(&issuer_cfg.issuer) {
                 return Err(format!("authn.issuers[{trimmed}] is not a valid issuer: {e}"));
             }
-            // SMA-703 D2. Names compare exactly: JSON member names are case-sensitive.
-            let mut seen_markers = HashSet::with_capacity(issuer_cfg.id_token_marker_claims.len());
-            for name in &issuer_cfg.id_token_marker_claims {
-                if name.is_empty() {
-                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims contains an empty name"));
-                }
-                if name.trim() != name {
-                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims has a name with leading or trailing whitespace: {name:?}"));
-                }
-                if RESERVED_MARKER_CLAIMS.contains(&name.as_str()) {
-                    return Err(format!(
-                        "authn.issuers[{trimmed}].id_token_marker_claims must not contain {name:?}: every token that IAM accepts carries it, so IAM would refuse every token of this issuer"
-                    ));
-                }
-                if !seen_markers.insert(name.as_str()) {
-                    return Err(format!("authn.issuers[{trimmed}].id_token_marker_claims contains the name {name:?} twice"));
-                }
+            // SMA-703 D2 and SMA-731 D2: one shared function for both lists.
+            validate_claim_names(
+                trimmed,
+                "id_token_marker_claims",
+                &issuer_cfg.id_token_marker_claims,
+                "every token that IAM accepts carries it, so IAM would refuse every token of this issuer",
+            )?;
+            validate_claim_names(
+                trimmed,
+                "access_token_required_claims",
+                &issuer_cfg.access_token_required_claims,
+                "every token that IAM accepts carries it, so the name has no effect",
+            )?;
+            // SMA-731 D2: a name in both lists makes IAM refuse every token of the issuer. A token
+            // with the claim is an ID token by the marker rule, and a token without it misses it.
+            if let Some(name) = issuer_cfg.access_token_required_claims.iter().find(|name| issuer_cfg.id_token_marker_claims.contains(name)) {
+                return Err(format!(
+                    "authn.issuers[{trimmed}].access_token_required_claims and authn.issuers[{trimmed}].id_token_marker_claims both contain {name:?}: IAM would refuse every token of this issuer"
+                ));
             }
         }
 
@@ -1440,6 +1551,35 @@ impl IamConfig {
             ));
         }
 
+        // --- SMA-700: `[authn.dpop]` ------------------------------------------------------------
+        // A refused boot leaves no IAM pod (one replica, maxSurge 0), so the chart copies the
+        // forwarded_base_urls rules (`paigasus.validateIamDpop`). Entries are checked also when
+        // DPoP is off (decision P8).
+        let dpop = &self.authn.dpop;
+        if dpop.enabled && dpop.forwarded_base_urls.is_empty() {
+            return Err("authn.dpop.enabled is true and authn.dpop.forwarded_base_urls is empty: list the public URLs at which clients reach the gateway".to_string());
+        }
+        for raw in &dpop.forwarded_base_urls {
+            check_forwarded_base_url(raw)?;
+        }
+        if !(1..=300).contains(&dpop.iat_window_secs) {
+            return Err(format!("authn.dpop.iat_window_secs must be between 1 and 300 (got {})", dpop.iat_window_secs));
+        }
+        for (name, value) in [
+            ("replay_capacity", dpop.replay_capacity),
+            ("per_key_quota", dpop.per_key_quota),
+            ("per_subject_quota", dpop.per_subject_quota),
+        ] {
+            if value == 0 {
+                return Err(format!("authn.dpop.{name} must be at least 1"));
+            }
+        }
+        for (name, value) in [("per_key_quota", dpop.per_key_quota), ("per_subject_quota", dpop.per_subject_quota)] {
+            if value > dpop.replay_capacity {
+                return Err(format!("authn.dpop.{name} ({value}) must not exceed authn.dpop.replay_capacity ({})", dpop.replay_capacity));
+            }
+        }
+
         Ok(())
     }
 }
@@ -1619,6 +1759,114 @@ mod tests {
     }
 
     #[test]
+    fn issuers_env_in_the_chart_form_parses_access_token_required_claims() {
+        // SMA-731 T17: the exact strings that charts/paigasus renders into IAM_AUTHN__ISSUERS
+        // (env.sh rows R3 and R4), and the same string without the key (row R1).
+        let issuer = "https://idp.example.test/realms/paigasus";
+        let cases: [(String, Vec<&str>, Vec<&str>); 3] = [
+            (
+                format!(r#"[{{issuer="{issuer}",audiences=["paigasus-console"],access_token_required_claims=["jti"]}}]"#),
+                vec![],
+                vec!["jti"],
+            ),
+            (
+                format!(r#"[{{issuer="{issuer}",audiences=["paigasus-console"],id_token_marker_claims=["at_hash","azp"],access_token_required_claims=["jti"]}}]"#),
+                vec!["at_hash", "azp"],
+                vec!["jti"],
+            ),
+            (format!(r#"[{{issuer="{issuer}",audiences=["paigasus-console"]}}]"#), vec![], vec![]),
+        ];
+        for (issuers, markers, required) in cases {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+                jail.set_env("IAM_AUTHN__ISSUERS", &issuers);
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert_eq!(cfg.authn.issuers.len(), 1);
+                assert_eq!(cfg.authn.issuers[0].id_token_marker_claims, markers, "{issuers}");
+                assert_eq!(cfg.authn.issuers[0].access_token_required_claims, required, "{issuers}");
+                assert!(cfg.validate().is_ok(), "the chart's issuer string must pass validation: {issuers}");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn a_misspelled_required_claims_key_is_ignored() {
+        // SMA-731 § 6: IssuerConfig ignores an unknown key, so a typo gives an empty list and no
+        // error. The missing boot line is the only sign (the runbook says so).
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+            jail.set_env(
+                "IAM_AUTHN__ISSUERS",
+                r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["paigasus-console"],access_token_required_claim=["jti"]}]"#,
+            );
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.authn.issuers[0].access_token_required_claims.is_empty());
+            assert!(cfg.validate().is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_refuses_bad_access_token_required_claims() {
+        // SMA-731 T15: each D2 rule fails validate, and the message names the issuer and the field.
+        let cases: [(&[&str], &str); 9] = [
+            (&[""], "contains an empty name"),
+            (&[" jti"], "leading or trailing whitespace"),
+            (&["jti\n"], "leading or trailing whitespace"),
+            (&[" "], "leading or trailing whitespace"),
+            (&["iss"], "must not contain \"iss\": every token that IAM accepts carries it, so the name has no effect"),
+            (&["sub"], "must not contain \"sub\""),
+            (&["aud"], "must not contain \"aud\""),
+            (&["exp"], "must not contain \"exp\""),
+            (&["jti", "nbf", "jti"], "contains the name \"jti\" twice"),
+        ];
+        for (names, want) in cases {
+            let mut cfg = load_minimal_config();
+            cfg.authn.issuers[0].access_token_required_claims = names.iter().map(|name| (*name).to_string()).collect();
+            let err = cfg.validate().expect_err("a bad required list must fail validation");
+            assert!(
+                err.contains("authn.issuers[https://idp.example.com/realms/acme].access_token_required_claims"),
+                "{names:?}: the message names the issuer and the key: {err}"
+            );
+            assert!(err.contains(want), "{names:?}: want {want:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn validate_refuses_a_name_in_both_claim_lists() {
+        // SMA-731 T15 (D2): IAM would refuse every token of the issuer. The message names both
+        // fields and the name.
+        let mut cfg = load_minimal_config();
+        cfg.authn.issuers[0].id_token_marker_claims = vec!["at_hash".to_string(), "azp".to_string()];
+        cfg.authn.issuers[0].access_token_required_claims = vec!["jti".to_string(), "azp".to_string()];
+        let err = cfg.validate().expect_err("an overlap must fail validation");
+        for want in [
+            "authn.issuers[https://idp.example.com/realms/acme].access_token_required_claims",
+            "authn.issuers[https://idp.example.com/realms/acme].id_token_marker_claims",
+            "\"azp\"",
+            "IAM would refuse every token of this issuer",
+        ] {
+            assert!(err.contains(want), "want {want:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_required_claims_and_compares_names_exactly() {
+        // SMA-731 D2 / Review Focus 2: the Zitadel recipe passes alone and with the markers; names
+        // that differ only in case are two names, also across the two lists.
+        let cases: [(&[&str], &[&str]); 5] = [(&[], &["jti"]), (&["at_hash", "azp"], &["jti"]), (&["jti"], &["JTI"]), (&[], &["ISS", "jti", "JTI"]), (&[], &[])];
+        for (markers, required) in cases {
+            let mut cfg = load_minimal_config();
+            cfg.authn.issuers[0].id_token_marker_claims = markers.iter().map(|name| (*name).to_string()).collect();
+            cfg.authn.issuers[0].access_token_required_claims = required.iter().map(|name| (*name).to_string()).collect();
+            assert!(cfg.validate().is_ok(), "{markers:?} / {required:?} must pass validation: {:?}", cfg.validate());
+        }
+    }
+
+    #[test]
     fn bootstrap_admins_env_in_the_chart_form_parses() {
         // SMA-697: the exact string that charts/paigasus renders into IAM_AUTHZ__BOOTSTRAP_ADMINS
         // for zones.iam.backend.bootstrapAdmins. It is the same inline form as IAM_AUTHN__ISSUERS.
@@ -1674,6 +1922,199 @@ mod tests {
                 Ok(())
             });
         }
+    }
+
+    // ---- SMA-700: `[authn.dpop]` ---------------------------------------------------------------
+
+    fn dpop_on(urls: &[&str]) -> DpopConfig {
+        DpopConfig {
+            enabled: true,
+            forwarded_base_urls: urls.iter().map(|url| (*url).to_string()).collect(),
+            ..DpopConfig::default()
+        }
+    }
+
+    #[test]
+    fn dpop_defaults_are_off_and_land_with_no_dpop_table() {
+        let cfg = load_minimal_config();
+        assert_eq!(
+            cfg.authn.dpop,
+            DpopConfig {
+                enabled: false,
+                forwarded_base_urls: Vec::new(),
+                iat_window_secs: 60,
+                replay_capacity: 200_000,
+                per_key_quota: 1_000,
+                per_subject_quota: 2_000,
+            }
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn every_dpop_key_reads_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+            jail.create_file("iam.toml", minimal_issuer_toml())?;
+            jail.set_env("IAM_AUTHN__DPOP__ENABLED", "true");
+            jail.set_env("IAM_AUTHN__DPOP__FORWARDED_BASE_URLS", r#"["https://gw.example.test"]"#);
+            jail.set_env("IAM_AUTHN__DPOP__IAT_WINDOW_SECS", "30");
+            jail.set_env("IAM_AUTHN__DPOP__REPLAY_CAPACITY", "5000");
+            jail.set_env("IAM_AUTHN__DPOP__PER_KEY_QUOTA", "50");
+            jail.set_env("IAM_AUTHN__DPOP__PER_SUBJECT_QUOTA", "100");
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(
+                cfg.authn.dpop,
+                DpopConfig {
+                    enabled: true,
+                    forwarded_base_urls: vec!["https://gw.example.test".to_string()],
+                    iat_window_secs: 30,
+                    replay_capacity: 5_000,
+                    per_key_quota: 50,
+                    per_subject_quota: 100,
+                }
+            );
+            assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn dpop_env_in_the_chart_form_parses() {
+        // The exact strings that charts/paigasus renders for zones.iam.backend.dpop (Task 14,
+        // `tests/env.sh` row D2): each URL quoted with %q, joined by a comma, in brackets.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("IAM_API_KEYS__PEPPER", valid_pepper_b64());
+            jail.set_env("IAM_AUTHN__ISSUERS", r#"[{issuer="https://idp.example.test/realms/paigasus",audiences=["paigasus-console"]}]"#);
+            jail.set_env("IAM_AUTHN__DPOP__ENABLED", "true");
+            jail.set_env("IAM_AUTHN__DPOP__FORWARDED_BASE_URLS", r#"["https://gw.example.test","https://edge.example.test/api"]"#);
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.authn.dpop.enabled);
+            assert_eq!(
+                cfg.authn.dpop.forwarded_base_urls,
+                vec!["https://gw.example.test".to_string(), "https://edge.example.test/api".to_string()]
+            );
+            assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_refuses_each_bad_dpop_value_and_names_the_key() {
+        let cases: Vec<(&str, DpopConfig, &str)> = vec![
+            ("on with no URL", dpop_on(&[]), "authn.dpop.enabled is true and authn.dpop.forwarded_base_urls is empty"),
+            (
+                "not a URL",
+                dpop_on(&["gw.example.test"]),
+                "authn.dpop.forwarded_base_urls entry \"gw.example.test\" is not an absolute URL",
+            ),
+            ("a query", dpop_on(&["https://gw.example.test/?a=1"]), "must have no query, fragment or user info"),
+            ("an empty query", dpop_on(&["https://gw.example.test/?"]), "must have no query, fragment or user info"),
+            ("a fragment", dpop_on(&["https://gw.example.test/#x"]), "must have no query, fragment or user info"),
+            ("user info", dpop_on(&["https://user@gw.example.test"]), "must have no query, fragment or user info"),
+            ("a password", dpop_on(&["https://user:pw@gw.example.test"]), "must have no query, fragment or user info"),
+            ("http, not loopback", dpop_on(&["http://gw.example.test"]), "must use https, or http on a loopback host"),
+            (
+                "http on a name that starts with 127",
+                dpop_on(&["http://127.evil.example"]),
+                "must use https, or http on a loopback host",
+            ),
+            ("ftp", dpop_on(&["ftp://gw.example.test"]), "must use https, or http on a loopback host"),
+            ("padding", dpop_on(&[" https://gw.example.test"]), "has leading or trailing whitespace"),
+            (
+                "off, but a bad entry (P8)",
+                DpopConfig {
+                    enabled: false,
+                    ..dpop_on(&["http://gw.example.test"])
+                },
+                "must use https, or http on a loopback host",
+            ),
+            (
+                "window 0",
+                DpopConfig {
+                    iat_window_secs: 0,
+                    ..dpop_on(&["https://gw.example.test"])
+                },
+                "authn.dpop.iat_window_secs must be between 1 and 300",
+            ),
+            (
+                "window 301",
+                DpopConfig {
+                    iat_window_secs: 301,
+                    ..dpop_on(&["https://gw.example.test"])
+                },
+                "authn.dpop.iat_window_secs must be between 1 and 300",
+            ),
+            (
+                "capacity 0",
+                DpopConfig {
+                    replay_capacity: 0,
+                    per_key_quota: 0,
+                    per_subject_quota: 0,
+                    ..dpop_on(&["https://gw.example.test"])
+                },
+                "authn.dpop.replay_capacity must be at least 1",
+            ),
+            (
+                "key quota 0",
+                DpopConfig {
+                    per_key_quota: 0,
+                    ..dpop_on(&["https://gw.example.test"])
+                },
+                "authn.dpop.per_key_quota must be at least 1",
+            ),
+            (
+                "subject quota 0",
+                DpopConfig {
+                    per_subject_quota: 0,
+                    ..dpop_on(&["https://gw.example.test"])
+                },
+                "authn.dpop.per_subject_quota must be at least 1",
+            ),
+            (
+                "key quota above capacity",
+                DpopConfig {
+                    replay_capacity: 10,
+                    per_key_quota: 11,
+                    per_subject_quota: 10,
+                    ..dpop_on(&["https://gw.example.test"])
+                },
+                "authn.dpop.per_key_quota (11) must not exceed authn.dpop.replay_capacity (10)",
+            ),
+            (
+                "subject quota above capacity",
+                DpopConfig {
+                    replay_capacity: 10,
+                    per_key_quota: 10,
+                    per_subject_quota: 11,
+                    ..dpop_on(&["https://gw.example.test"])
+                },
+                "authn.dpop.per_subject_quota (11) must not exceed authn.dpop.replay_capacity (10)",
+            ),
+        ];
+        for (name, dpop, want) in cases {
+            let mut cfg = load_minimal_config();
+            cfg.authn.dpop = dpop;
+            let err = cfg.validate().expect_err(name);
+            assert!(err.contains(want), "{name}: want {want:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_the_loopback_forms() {
+        // Review Focus 5: a local gateway on IPv6 loopback, and the other loopback forms.
+        let mut cfg = load_minimal_config();
+        cfg.authn.dpop = dpop_on(&[
+            "http://localhost:8088",
+            "http://LOCALHOST",
+            "http://127.0.0.1:8088",
+            "http://127.9.8.7",
+            "http://[::1]:8088",
+            "https://gw.example.test/api/",
+        ]);
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
     }
 
     #[test]

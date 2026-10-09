@@ -1,0 +1,108 @@
+# SMA-700 mutation results (spec 5.3)
+
+Tree under test: commit `eb056528`.
+
+Command for every mutation (the same for each row):
+
+```
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd rs && PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run --locked --no-fail-fast -p paigasus-iam -p paigasus-gateway \
+  -E 'kind(lib) | binary(grpc_authn) | binary(grpc_whoami) | binary(http_authn) | binary(chat_proxy)'
+```
+
+Before each mutation the tree was clean. After each mutation the edit was reversed and the diff was empty.
+Every mutation below compiled and failed at least one test. No mutation survived the final run.
+
+## How to read the table
+
+- The test list is the set of tests that failed on their last attempt. The nextest config retries a failed test.
+  A failing integration test prints `TRY n FAIL`. The count includes these lines. A test that passed on a retry is not counted.
+- The test `gateway adapters::iam::client::tests::connect_succeeds_for_default_tls_system_trust` is excluded from the battery.
+  It fails after 15 seconds in a full run on this host, also on the clean tree. It passes alone in 7.7 seconds.
+  Task 17 found the cause. The directory `rs/target/debug/deps` of this worktree held 2.9 million entries (89 GB).
+  macOS dyld stalled when it loaded the test binary from that directory, and the test reached its 15 s timeout.
+  The same binary passed from any other directory and from a fresh target directory. SMA-700 does not touch that file.
+  The controller accepted this exclusion for the battery only. The full gate run of Task 17 still runs the test.
+- Three mutations did not compile in the form of the brief. The table shows the compiling form:
+  - W11 (`CHALLENGE_BARE` was then unused): the arm is now `{ let _ = CHALLENGE_BARE; CHALLENGE_INVALID_TOKEN }`. The id is W11c.
+  - D11 (the import `TokenDefect` was then unused): the else body also holds `let _ = TokenDefect::Malformed;`.
+  - PF-C9b (the function `is_base64url` was then unused): the check is `|b| is_base64url(b) || true`.
+- G-iv changes `dpop_context` to use `req.uri()`. No gateway route is nested today, so `req.uri()` and `OriginalUri` are equal
+  for every route-level test. At route level the mutation is equivalent today. A unit test pins the contract:
+  `the_dpop_context_path_is_the_original_uri_not_the_nested_one` sets an `OriginalUri` by hand. That test killed G-iv.
+- The ids T7-dot and T8-guard are the hardening checks of Tasks 7 and 8. T8-redeem deletes the redeem call in the `FollowUp` arm.
+
+## Results
+
+| Id | File:line | Edit | Tests that failed |
+|---|---|---|---|
+| C1 | `paigasus-iam/src/adapters/oidc/dpop.rs:97` | `if proof.len() > MAX_PROOF_BYTES {` becomes `if proof.len() > MAX_PROOF_BYTES && false {` | `iam adapters::oidc::dpop::tests::check_1_an_oversized_proof_is_malformed`<br>`iam adapters::oidc::dpop::tests::check_1_boundary_exactly_max_proof_bytes_passes_the_size_check` |
+| C2 | `paigasus-iam/src/adapters/oidc/dpop.rs:144` | `if members.contains_key(&name) {` becomes `if members.contains_key(&name) && false {` | `iam adapters::oidc::dpop::tests::a_repeated_member_name_is_malformed` |
+| C2c | `paigasus-iam/src/adapters/oidc/dpop.rs:62` | `check_crit(&raw.header)?;` becomes `let _ = check_crit(&raw.header);` | `iam adapters::oidc::dpop::tests::a_crit_header_is_malformed` |
+| C3 | `paigasus-iam/src/adapters/oidc/dpop.rs:162` | `_ => Err(ProofDefect::Typ),` becomes `None => Ok(()),         Some(_) => Err(ProofDefect::Typ),` | `iam adapters::oidc::dpop::tests::check_3_the_typ_must_be_dpop_jwt_in_either_form_and_any_case` |
+| C4 | `paigasus-iam/src/adapters/oidc/dpop.rs:170` | `Some("RS256") => Ok(Algorithm::RS256),         _ => Err(ProofDefect::Alg),` becomes `Some("RS256") => Ok(Algorithm::RS256),         _ => Ok(Algorithm::ES256),` | `iam adapters::oidc::dpop::tests::check_4_only_es256_and_rs256_are_allowed` |
+| C5a | `paigasus-iam/src/adapters/oidc/dpop.rs:179` | `if PRIVATE_JWK_MEMBERS.iter().any(\|member\| jwk.contains_key(*member)) {` becomes `if PRIVATE_JWK_MEMBERS.iter().any(\|member\| jwk.contains_key(*member)) && false {` | `iam adapters::oidc::dpop::tests::check_5_the_jwk_must_be_a_public_key_of_the_header_alg` |
+| C5b | `paigasus-iam/src/adapters/oidc/dpop.rs:186` | `if member("kty")? != "EC" \|\| member("crv")? != "P-256" {` becomes `if member("kty")? != "EC" {` | `iam adapters::oidc::dpop::tests::check_5_the_jwk_must_be_a_public_key_of_the_header_alg` |
+| C5c | `paigasus-iam/src/adapters/oidc/dpop.rs:206` | `if !RSA_BITS.contains(&bits) {` becomes `if !RSA_BITS.contains(&bits) && false {` | `iam adapters::oidc::dpop::tests::check_5_rsa_bounds` |
+| C6 | `paigasus-iam/src/adapters/oidc/dpop.rs:246` | `Ok(true) => Ok(()),         _ => Err(ProofDefect::Signature),` becomes `Ok(true) => Ok(()),         _ => Ok(()),` | `iam adapters::oidc::dpop::tests::check_1_boundary_exactly_max_proof_bytes_passes_the_size_check`<br>`iam adapters::oidc::dpop::tests::check_5_rsa_bounds`<br>`iam adapters::oidc::dpop::tests::check_6_the_signature_must_verify_with_the_header_jwk` |
+| C7 | `paigasus-iam/src/adapters/oidc/dpop.rs:254` | `jti: read_jti(payload)?,` becomes `jti: read_jti(payload).unwrap_or_else(\|_\| "jti".to_owned()),` | `iam adapters::oidc::dpop::tests::check_7_each_claim_must_be_present_and_of_its_type` |
+| C8 | `paigasus-iam/src/adapters/oidc/dpop.rs:67` | `if claims.ath != ath_of(token) {` becomes `if claims.ath != ath_of(token) && false {` | `iam adapters::oidc::dpop::tests::check_8_ath_must_hash_this_token` |
+| C9 | `paigasus-iam/src/adapters/oidc/dpop.rs:70` | `if thumbprint(&key) != jkt.as_str() {` becomes `if thumbprint(&key) != jkt.as_str() && false {` | `iam adapters::oidc::dpop::tests::check_9_the_thumbprint_must_equal_the_token_jkt` |
+| C10 | `paigasus-iam/src/application/dpop.rs:190` | `if proof.htm != request.method {` becomes `if proof.htm != request.method && false {` | `iam application::dpop::tests::check_10_htm_is_exact`<br>`iam application::dpop::tests::check_13_a_second_use_is_a_replay_and_a_failed_check_uses_no_jti` |
+| C11 | `paigasus-iam/src/application/dpop.rs:193` | `if !self.htu_matches(&proof.htu, &request.path) {` becomes `if !self.htu_matches(&proof.htu, &request.path) && false {` | `iam application::dpop::tests::a_path_that_moves_the_authority_never_matches_the_htu_it_builds`<br>`iam application::dpop::tests::a_refusal_logs_the_issuer_and_the_static_defect_only`<br>`iam application::dpop::tests::check_11_htu_rules`<br>`iam::grpc_authn a_proof_for_a_base_url_that_is_not_configured_is_refused`<br>`iam::grpc_authn an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof` |
+| C12 | `paigasus-iam/src/application/dpop.rs:263` | `(skew <= self.iat_window_secs)` becomes `(skew <= self.iat_window_secs \|\| true)` | `iam application::dpop::tests::check_12_iat_window_edges` |
+| C13 | `paigasus-iam/src/application/dpop.rs:210` | `RecordOutcome::Replayed => Err(self.refuse(issuer, ProofDefect::Replayed)),` becomes `RecordOutcome::Replayed => Ok(()),` | `iam application::dpop::tests::check_13_a_second_use_is_a_replay_and_a_failed_check_uses_no_jti`<br>`iam::grpc_authn a_dpop_gateway_sequence_passes_once_and_never_again` |
+| W1 | `paigasus-iam/src/application/authenticate_token.rs:319` | `DpopInput::Introspect(request) => verifier.verify(&claims, token, request)?,` becomes `DpopInput::Introspect(_) => {}` | `iam application::authenticate_token::tests::an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof`<br>`iam application::authenticate_token::tests::no_identity_lookup_runs_before_the_proof_check`<br>`iam::grpc_authn a_dpop_gateway_sequence_passes_once_and_never_again`<br>`iam::grpc_authn a_large_token_and_a_large_proof_pass_the_transport`<br>`iam::grpc_authn a_proof_for_a_base_url_that_is_not_configured_is_refused`<br>`iam::grpc_authn an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof` |
+| W2 | `paigasus-iam/src/adapters/grpc/authn.rs:68`<br>`paigasus-iam/src/adapters/grpc/authn.rs:73` | `let context = DpopRequest { / self.state.authn.introspect_dpop(&request.token, context).await` becomes `let _context = DpopRequest { / self.state.authn.introspect(&request.token).await` | `iam::grpc_authn a_dpop_gateway_sequence_passes_once_and_never_again`<br>`iam::grpc_authn a_follow_up_for_another_principal_is_refused`<br>`iam::grpc_authn a_follow_up_on_another_rpc_is_an_invalid_token`<br>`iam::grpc_authn a_follow_up_with_another_token_of_the_same_key_is_refused`<br>`iam::grpc_authn a_large_token_and_a_large_proof_pass_the_transport`<br>`iam::grpc_authn a_proof_for_a_base_url_that_is_not_configured_is_refused`<br>`iam::grpc_authn an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof` |
+| W3 | `paigasus-iam/src/application/authenticate_token.rs:317` | `let claims = self.authenticator.authenticate(token, TokenScheme::Dpop).await?;         match &input {             DpopIn` becomes `let claims = self.authenticator.authenticate(token, TokenScheme::Dpop).await?;         let principal = self.resolve_claims(claims.clone(), p` | `iam application::authenticate_token::tests::a_refused_follow_up_redeem_makes_no_identity_call`<br>`iam application::authenticate_token::tests::an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof`<br>`iam application::authenticate_token::tests::no_identity_lookup_runs_before_the_proof_check`<br>`iam::grpc_authn an_unprovisioned_identity_with_a_bad_proof_is_an_invalid_proof` |
+| W4 | `paigasus-iam/src/adapters/dpop_replay.rs:164` | `_ => RedeemOutcome::Refused,` becomes `_ => RedeemOutcome::Redeemed,` | `iam adapters::dpop_replay::tests::a_follow_up_is_redeemed_once_and_only_with_the_same_digest`<br>`iam adapters::dpop_replay::tests::the_30_s_floor_keeps_the_entry_until_the_later_deadline`<br>`iam adapters::dpop_replay::tests::the_follow_up_has_30_s_when_recorded_at_expires_at`<br>`iam application::authenticate_token::tests::a_refused_follow_up_redeem_makes_no_identity_call`<br>`iam application::dpop::tests::the_follow_up_floor_is_thirty_seconds_after_the_record`<br>`iam application::dpop::tests::the_follow_up_redeems_once_with_the_same_proof_bytes`<br>`iam application::dpop::tests::the_follow_up_ticket_expires`<br>`iam::grpc_authn a_dpop_gateway_sequence_passes_once_and_never_again`<br>`iam::grpc_authn a_follow_up_with_no_introspect_is_refused` |
+| W5 | `paigasus-iam/src/application/dpop.rs:235` | `if !self.checker.ath_matches(&follow_up.ath, token) {` becomes `if !self.checker.ath_matches(&follow_up.ath, token) && false {` | `iam application::dpop::tests::the_follow_up_checks_ath_and_the_proof_shape`<br>`iam::grpc_authn a_follow_up_with_another_token_of_the_same_key_is_refused` |
+| W6 | `paigasus-iam/src/adapters/grpc/authn.rs:238` | `&& req.uri().path() == IS_AUTHORIZED_PATH.as_str()` becomes `&& !IS_AUTHORIZED_PATH.is_empty()` | `iam::grpc_authn a_follow_up_on_another_rpc_is_an_invalid_token` |
+| W7 | `paigasus-iam/src/adapters/grpc/authz.rs:115` | `follow_up_self_query(is_follow_up, &actor, &principal)?;` becomes `follow_up_self_query(is_follow_up && false, &actor, &principal)?;` | `iam::grpc_authn a_follow_up_for_another_principal_is_refused` |
+| W8 | `paigasus-iam/src/application/dpop.rs:173` | `} else if !path_is_well_formed(&request.path) {` becomes `} else if !path_is_well_formed(&request.path) && false {` | `iam application::authenticate_token::tests::a_bad_request_is_refused_before_the_token_is_verified`<br>`iam application::dpop::tests::the_forwarded_path_must_not_move_the_origin` |
+| W9 | `paigasus-gateway/src/adapters/http/auth.rs:175` | `iam.introspect_token(&token, Some(context)).await` becomes `iam.introspect_token(&token, Some(context).filter(\|_\| false)).await` | `gateway adapters::http::auth::tests::a_dpop_request_forwards_its_context_skips_the_key_leg_and_self_queries_with_dpop`<br>`gateway adapters::http::auth::tests::a_query_string_is_not_forwarded_in_the_path`<br>`gateway::chat_proxy one_dpop_request_end_to_end` |
+| W10 | `paigasus-gateway/src/adapters/http/auth.rs:169` | `Some(Credentials::Dpop { token, proof }) => {             // D15:` becomes `Some(Credentials::Dpop { token, proof }) => {             let _ = iam.introspect_api_key(&token).await;             // D15:` | `gateway adapters::http::auth::tests::a_dpop_request_forwards_its_context_skips_the_key_leg_and_self_queries_with_dpop`<br>`gateway adapters::http::auth::tests::a_missing_or_doubled_proof_is_401_with_no_iam_call`<br>`gateway::chat_proxy one_dpop_request_end_to_end` |
+| W11c | `paigasus-gateway/src/adapters/http/auth.rs:116` | `(SchemeUsed::Bearer \| SchemeUsed::None, _) => CHALLENGE_BARE,` becomes `(SchemeUsed::Bearer \| SchemeUsed::None, _) => {             let _ = CHALLENGE_BARE;             CHALLENGE_INVALID_TOKEN         }` | `gateway adapters::http::auth::tests::a_bearer_or_absent_credential_gets_the_bare_challenge_when_dpop_is_on`<br>`gateway adapters::http::auth::tests::the_dpop_challenge_table` |
+| W12 | `paigasus-iam/src/adapters/grpc/mod.rs:145` | `.http2_max_header_list_size(grpc_max_header_list_size(state.grpc_max_token_bytes))` becomes `(line deleted)` | `iam::grpc_authn a_large_token_and_a_large_proof_pass_the_transport` |
+| W12b | `paigasus-iam/src/main.rs:237` | `.http2_max_header_list_size(grpc::grpc_max_header_list_size(max_token_bytes))` becomes `(line deleted)` | `iam adapters::grpc::tests::production_sets_the_header_list_size_from_the_token_limit` |
+| W12c | `paigasus-iam/src/main.rs:237` | `.http2_max_header_list_size(grpc::grpc_max_header_list_size(max_token_bytes))` becomes `.http2_max_header_list_size(grpc::grpc_max_header_list_size(0))` | `iam adapters::grpc::tests::production_sets_the_header_list_size_from_the_token_limit` |
+| W13 | `paigasus-gateway/src/adapters/http/auth.rs:526` | `if is_dpop_quota(status) {         GatewayError::RateLimited` becomes `if is_dpop_quota(status) && false {         GatewayError::RateLimited` | `gateway adapters::http::auth::tests::an_iam_dpop_quota_refusal_is_429_with_retry_after_labelled_denied_and_no_warning` |
+| D7 | `paigasus-iam/src/adapters/oidc/validator.rs:462` | `if let Some(marker) = sender_constraint_marker(&claims) {` becomes `if let Some(marker) = sender_constraint_marker(&claims) && false {` | `iam adapters::oidc::validator::tests::bearer_scheme_still_refuses_a_bound_token_and_binds_nothing`<br>`iam adapters::oidc::validator::tests::dpop_typ_refusal_logs_canonical_marker`<br>`iam adapters::oidc::validator::tests::refuses_sender_constrained_tokens`<br>`iam adapters::oidc::validator::tests::repeated_sender_constrained_refusals_log_once`<br>`iam adapters::oidc::validator::tests::sender_constrained_refusal_logs_issuer_and_cnf_marker_only`<br>`iam::grpc_authn a_bound_token_with_no_dpop_context_is_an_invalid_token` |
+| D11 | `paigasus-iam/src/application/authenticate_token.rs:311` | `let Some(verifier) = &self.dpop else {             return Err(AuthnError::InvalidToken(TokenDefect::Malformed));        ` becomes `let Some(verifier) = &self.dpop else {             let _ = TokenDefect::Malformed;             let claims = self.authenticator.authenticate(` | `iam application::authenticate_token::tests::with_dpop_off_a_dpop_context_is_a_malformed_token`<br>`iam::grpc_authn with_dpop_off_a_dpop_context_is_an_invalid_token` |
+| PF-C9a | `paigasus-iam/src/adapters/oidc/dpop.rs:103` | `part.is_empty() \|\| !part.bytes().all(is_base64url)` becomes `!part.bytes().all(is_base64url)` | `iam adapters::oidc::dpop::tests::check_2_a_proof_that_is_not_three_base64url_json_objects_is_malformed` |
+| PF-C9b | `paigasus-iam/src/adapters/oidc/dpop.rs:103` | `part.is_empty() \|\| !part.bytes().all(is_base64url)` becomes `part.is_empty() \|\| !part.bytes().all(\|b\| is_base64url(b) \|\| true)` | `iam adapters::oidc::dpop::tests::check_2_a_proof_that_is_not_three_base64url_json_objects_is_malformed` |
+| PF-C3 | `paigasus-iam/src/application/dpop.rs:205` | `follow_up_deadline: expires_at.max(now.saturating_add(MIN_FOLLOW_UP_SECS)),` becomes `follow_up_deadline: { let _ = MIN_FOLLOW_UP_SECS; expires_at },` | `iam application::dpop::tests::the_follow_up_floor_is_thirty_seconds_after_the_record` |
+| PF-C4 | `paigasus-iam/src/application/dpop.rs:74` | `(url.scheme() == self.scheme && url.host_str() == Some(self.host.as_str()) && url.port() == self.port).then_some(url)` becomes `(true \|\| (url.scheme() == self.scheme && url.host_str() == Some(self.host.as_str()) && url.port() == self.port)).then_some(url)` | `iam application::dpop::tests::the_post_parse_check_refuses_a_path_that_moves_the_authority` |
+| T7-dot | `paigasus-iam/src/application/dpop.rs:90` | `&& !path.split('/').any(is_dot_segment)` becomes `&& !path.split('/').any(\|s\| is_dot_segment(s) && false)` | `iam application::dpop::tests::htu_matches_refuses_a_malformed_path`<br>`iam application::dpop::tests::the_forwarded_path_must_not_move_the_origin` |
+| T8-guard | `paigasus-iam/src/application/dpop.rs:249` | `fn htu_matches(&self, htu: &str, path: &str) -> bool {         if !path_is_well_formed(path) {` becomes `fn htu_matches(&self, htu: &str, path: &str) -> bool {         if !path_is_well_formed(path) && false {` | `iam application::dpop::tests::htu_matches_refuses_a_malformed_path` |
+| T8-redeem | `paigasus-iam/src/application/authenticate_token.rs:320` | `DpopInput::FollowUp(proof) => verifier.redeem(&claims, token, proof)?,` becomes `DpopInput::FollowUp(_) => {}` | `iam application::authenticate_token::tests::a_refused_follow_up_redeem_makes_no_identity_call`<br>`iam::grpc_authn a_dpop_gateway_sequence_passes_once_and_never_again`<br>`iam::grpc_authn a_follow_up_with_another_token_of_the_same_key_is_refused`<br>`iam::grpc_authn a_follow_up_with_no_introspect_is_refused` |
+| G-i | `paigasus-gateway/src/adapters/http/auth.rs:501` | `status.code() == Code::ResourceExhausted && iam_reason_quiet(status).as_deref() == Some(DPOP_QUOTA_EXCEEDED.as_str())` becomes `status.code() == Code::ResourceExhausted && iam_reason(status).as_deref() == Some(DPOP_QUOTA_EXCEEDED.as_str())` | `gateway adapters::http::auth::tests::a_detail_less_resource_exhausted_is_an_iam_failure_and_writes_no_warning` |
+| G-ii-a | `paigasus-gateway/src/adapters/http/auth.rs:510` | `.map_or(1, \|delay\| u32::try_from(delay.as_secs()).unwrap_or(u32::MAX).max(1))` becomes `.map_or(0, \|delay\| u32::try_from(delay.as_secs()).unwrap_or(u32::MAX).max(1))` | `gateway adapters::http::auth::tests::retry_after_is_whole_seconds_and_at_least_one` |
+| G-ii-b | `paigasus-gateway/src/adapters/http/auth.rs:510` | `.map_or(1, \|delay\| u32::try_from(delay.as_secs()).unwrap_or(u32::MAX).max(1))` becomes `.map_or(1, \|delay\| u32::try_from(delay.as_secs()).unwrap_or(u32::MAX))` | `gateway adapters::http::auth::tests::retry_after_is_whole_seconds_and_at_least_one` |
+| G-iii | `paigasus-gateway/src/adapters/http/auth.rs:692` | `Code::Unauthenticated => unauthenticated_error(&status),             Code::ResourceExhausted => resource_exhausted_error` becomes `Code::Unauthenticated => GatewayError::InvalidCredential,             Code::ResourceExhausted => resource_exhausted_error(&status),         ` | `gateway adapters::http::auth::tests::the_authz_leg_keeps_an_invalid_dpop_proof_apart_from_a_rejected_credential` |
+| G-iv | `paigasus-gateway/src/adapters/http/auth.rs:144` | `let uri = req.extensions().get::<OriginalUri>().map_or(req.uri(), \|original\| &original.0);` becomes `let _ = req.extensions().get::<OriginalUri>();     let uri = req.uri();` | `gateway adapters::http::auth::tests::the_dpop_context_path_is_the_original_uri_not_the_nested_one` |
+
+## Mutations that survived an earlier run and the tests that killed them
+
+Each of these survived a first run. A test was added, and the whole battery was run again.
+
+- PF-C9a: case "an empty signature part" in `check_2_a_proof_that_is_not_three_base64url_json_objects_is_malformed`.
+- PF-C9b: cases "padding in the signature" and "a character outside base64url in the signature" in the same test.
+  `parse` does not decode the signature, so its alphabet check is the only guard.
+- T8-guard: an assertion in `htu_matches_refuses_a_malformed_path`.
+  The URL parser folds `/v1/../chat/completions` to `/chat/completions`, so only the guard refuses this pair.
+- G-i: `a_detail_less_resource_exhausted_is_an_iam_failure_and_writes_no_warning`.
+- G-ii-a and G-ii-b: `retry_after_is_whole_seconds_and_at_least_one`.
+- G-iii: `the_authz_leg_keeps_an_invalid_dpop_proof_apart_from_a_rejected_credential`.
+- G-iv: `the_dpop_context_path_is_the_original_uri_not_the_nested_one`.
+
+## keycloak_e2e
+
+Command:
+
+```
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd rs && PAIGASUS_REQUIRE_DOCKER=1 cargo nextest run --locked -p paigasus-iam --test keycloak_e2e
+```
+
+keycloak_e2e: PASS on `eb056528`.

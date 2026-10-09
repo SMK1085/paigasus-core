@@ -207,6 +207,14 @@ enum ErrorReason {
   // (issuer, subject) pair.
   ERROR_REASON_EXTERNAL_IDENTITY_EXISTS = 45;
 
+  // ---- IAM: DPoP (1-299) ---------------------------------------------------
+  // SMA-700. Emitted by Introspect when the replay store refuses a proof.
+
+  // "dpop-quota-exceeded" — the caller sent more DPoP proofs than its quota allows inside the
+  // proof window. Retry after the RetryInfo delay. The gateway answers with its own
+  // "rate-limited".
+  ERROR_REASON_DPOP_QUOTA_EXCEEDED = 46;
+
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
   // keeps its OpenAI semantics.
@@ -298,4 +306,8 @@ enum ErrorReason {
   // is ERROR_REASON_INVALID_UUID instead. HTTP-only on the same terms as
   // 907, and held by the same source scan (SMA-588).
   ERROR_REASON_INVALID_PATH_SEGMENT = 908;
+  // In the shared range (900-999). Emitted by IAM and by the gateway (SMA-700 D19).
+  // "invalid-dpop-proof" — the DPoP proof is missing, malformed, or does not match the
+  // request or the token.
+  ERROR_REASON_INVALID_DPOP_PROOF = 909;
 }

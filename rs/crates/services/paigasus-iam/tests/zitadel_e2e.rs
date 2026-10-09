@@ -19,9 +19,19 @@
 //! - A control: with an EMPTY list, IAM does not refuse any of the three ID tokens as
 //!   `NotAnAccessToken`. So the setting, not another check, does the refusal.
 //!
+//! SMA-731 adds, for the same tokens:
+//! - `jti` is on every access token and on no ID token (SMA-731 spec § 3, F1).
+//! - IAM with `access_token_required_claims = ["jti"]` and an EMPTY marker list refuses each ID
+//!   token as `NotAnAccessToken`, so the required claim refuses them by itself. The access tokens
+//!   pass the authenticator.
+//! - IAM with the full runbook recipe (both settings) refuses each ID token as
+//!   `NotAnAccessToken`. The access tokens pass the authenticator, but the machine
+//!   access token then fails JIT provisioning with `MissingEmail`.
+//!
 //! Docker gating is the single policy of `tests/support/docker.rs`'s `start_or_skip` (SMA-538).
-//! Three containers start: IAM's own Postgres, a second Postgres for Zitadel, and Zitadel. The
-//! two Zitadel containers share a Docker network, so Zitadel reaches its Postgres by name.
+//! The SMA-703 test starts three containers: IAM's own Postgres, a second Postgres for Zitadel,
+//! and Zitadel. The SMA-732 test starts the two Zitadel containers only. The two Zitadel
+//! containers share a Docker network, so Zitadel reaches its Postgres by name.
 //!
 //! The issuer. MEASURED (2026-10-03, v4.15.3): Zitadel takes the HOST of `iss` from
 //! `ZITADEL_EXTERNALDOMAIN`, and refuses a request whose `Host` header has a different host
@@ -29,6 +39,17 @@
 //! `ZITADEL_EXTERNALPORT`. So the test uses the port that Docker maps, and every call (the test's
 //! own calls and IAM's JWKS fetch) uses the same `127.0.0.1:{mapped}` form. The readiness check
 //! asserts that the discovery `issuer` is exactly that value.
+//!
+//! SMA-732: `zitadel_refresh_extends_access_token_exp` measures whether a refresh gives an access
+//! token with a new `exp` (spec `2026-10-05-sma-732-zitadel-refresh-exp-design.md`). It pins, as
+//! measured facts for the pinned version: `exp - iat` is `L` or up to 2 s less, and `nbf == iat`
+//! (K1: two clock reads); `expires_in` is in the same range (K2); a refresh 7 s and 13 s after the
+//! login moves `iat` and `exp` by at least 6 s each, before and after the first `exp`; each
+//! refresh issues a new refresh token (K3). It has its own Zitadel instance, because it sets the
+//! access token lifetime `L` to 10 s with an env var, and the SMA-703 test must keep the defaults
+//! (spec D2, D6). Its panic message names the outcome of spec D5: "keeps" when `exp` did not move,
+//! "refuses after exp" when the refresh after the first `exp` fails. Both outcomes stop the work
+//! until a maintainer decides the fix scope. Any other red check needs a check of the printed values first.
 
 mod support;
 
@@ -38,18 +59,19 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::entities::user;
 use paigasus_iam::application::authenticate_token::Provisioning;
-use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
+use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, DpopConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
 use paigasus_iam_core::{AuthnError, ProvisioningDefect, TokenDefect};
 use reqwest::header::{COOKIE, LOCATION, SET_COOKIE};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use sha2::Digest;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use support::{provision_platform_admin, send, start_migrated_postgres};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::IntoContainerPort;
 use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 const ZITADEL_IMAGE: &str = "ghcr.io/zitadel/zitadel";
@@ -72,6 +94,8 @@ const USER_EMAIL: &str = "zitadel-e2e@example.com";
 const USER_PASSWORD: &str = "E2e-Passw0rd!x";
 /// The IAM setting under test (spec D1, the runbook recipe).
 const MARKER_CLAIMS: [&str; 2] = ["at_hash", "azp"];
+/// The SMA-731 setting under test (SMA-731 spec D6, the runbook recipe).
+const REQUIRED_CLAIMS: [&str; 1] = ["jti"];
 /// The v1 Action of the reference install. It adds `email` to the access token of a human user.
 /// This script must stay equal to the script in the Zitadel bullet of
 /// `docs/ops/RUNBOOK-chart.md` section 6. Change both files together.
@@ -84,6 +108,22 @@ const ADD_EMAIL_CLAIM_SCRIPT: &str = r#"function addEmailClaim(ctx, api) {
   // to JavaScript as an object, not as a primitive string, so convert it.
   api.v1.claims.setClaim('email', String(user.human.email));
 }"#;
+/// SMA-732: the env var that sets the access token lifetime of the default instance
+/// (`cmd/defaults.yaml:1302` of Zitadel v4.15.3, spec D6).
+const ACCESS_TOKEN_LIFETIME_ENV: &str = "ZITADEL_DEFAULTINSTANCE_OIDCSETTINGS_ACCESSTOKENLIFETIME";
+/// SMA-732: the access token lifetime `L` of the refresh test's own instance, in seconds (spec D3).
+/// If `iat1 < exp0` reds under load, the fix is a larger `L`, and only after a maintainer decision.
+const REFRESH_LIFETIME_SECS: i64 = 10;
+/// SMA-732: the tolerance of A1 and A2 for the gap between two clock reads in one request (K1, K2).
+const CLOCK_READ_TOLERANCE_SECS: i64 = 2;
+/// SMA-732: the lower bound of A3 and A4, in seconds of Zitadel time.
+const MIN_REFRESH_STEP_SECS: i64 = 6;
+/// SMA-732 step 4: refresh 1 starts this long after the login response.
+const REFRESH_1_AT: Duration = Duration::from_secs(7);
+/// SMA-732 step 5: refresh 2 starts at the later of this time after the login response …
+const REFRESH_2_AT: Duration = Duration::from_secs(13);
+/// … and this time after the refresh 1 response.
+const REFRESH_2_AFTER_REFRESH_1: Duration = Duration::from_secs(6);
 
 #[tokio::test]
 async fn zitadel_id_tokens_are_refused_by_the_marker_claims() {
@@ -92,104 +132,15 @@ async fn zitadel_id_tokens_are_refused_by_the_marker_claims() {
         return;
     };
 
-    // Zitadel's own Postgres, on a network of its own. The suffix keeps parallel runs apart.
-    let suffix = format!("{:016x}", rand::random::<u64>());
-    let network = format!("zitadel-e2e-{suffix}");
-    let pg_host = format!("zitadel-e2e-pg-{suffix}");
-    let zitadel_pg_image = Postgres::default().with_tag("16-alpine").with_network(&network).with_container_name(&pg_host);
-    let Some(zitadel_pg) = support::docker::start_or_skip(zitadel_pg_image, "zitadel_e2e postgres").await else {
+    // Zitadel and its own Postgres (see `start_zitadel`). This test keeps the instance defaults.
+    let Some(zitadel) = start_zitadel(&[]).await else {
         return;
     };
-    // The Postgres module reports ready on its first log line, while the init server (unix
-    // socket only) still runs. Zitadel stops at once when its first connection fails, so wait
-    // for a TCP connection, which only the real server accepts.
-    wait_for_postgres(&zitadel_pg).await;
-
-    // A runtime self-signed cert for Zitadel's TLS listener, copied into the container.
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
-    let cert_pem = cert.cert.pem().into_bytes();
-    let key_pem = cert.signing_key.serialize_pem().into_bytes();
-
-    let image = GenericImage::new(ZITADEL_IMAGE, ZITADEL_TAG)
-        .with_exposed_port(HTTPS_PORT.tcp())
-        .with_network(&network)
-        // The image user cannot write to a directory that `with_copy_to` makes (root owns it),
-        // and Zitadel must write the admin PAT there.
-        .with_user("0")
-        .with_env_var("ZITADEL_MASTERKEY", "MasterkeyNeedsToHave32Characters")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_HOST", &pg_host)
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_PORT", "5432")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_DATABASE", "zitadel")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_USERNAME", "zitadel")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_PASSWORD", "zitadel")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE", "disable")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME", "postgres")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD", "postgres")
-        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE", "disable")
-        // See the module doc: the host of `iss` comes from here, the port from the request.
-        .with_env_var("ZITADEL_EXTERNALDOMAIN", "127.0.0.1")
-        .with_env_var("ZITADEL_EXTERNALPORT", HTTPS_PORT.to_string())
-        .with_env_var("ZITADEL_EXTERNALSECURE", "true")
-        .with_env_var("ZITADEL_TLS_ENABLED", "true")
-        .with_env_var("ZITADEL_TLS_CERTPATH", format!("{STATE_DIR}/tls.crt"))
-        .with_env_var("ZITADEL_TLS_KEYPATH", format!("{STATE_DIR}/tls.key"))
-        .with_env_var("ZITADEL_FIRSTINSTANCE_PATPATH", format!("{STATE_DIR}/admin.pat"))
-        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME", "e2e-admin")
-        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME", "e2e-admin")
-        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE", "2099-01-01T00:00:00Z")
-        // The measurement used Login v1. This keeps the instance on it.
-        .with_env_var("ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED", "false")
-        .with_copy_to(format!("{STATE_DIR}/tls.crt"), cert_pem)
-        .with_copy_to(format!("{STATE_DIR}/tls.key"), key_pem)
-        .with_cmd(["start-from-init", "--masterkeyFromEnv", "--tlsMode", "enabled"])
-        .with_startup_timeout(Duration::from_secs(240));
-
-    let Some(zitadel) = support::docker::start_or_skip(image, "zitadel_e2e").await else {
-        return;
-    };
-    let https_port = support::docker::mapped_port(&zitadel, HTTPS_PORT, "zitadel https").await;
-    let issuer = format!("https://127.0.0.1:{https_port}");
-
-    // One client for every call of the test. It never follows a redirect, because the login
-    // flow must read each `Location` header, and the last one points at a server that does not
-    // exist.
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20))
-        .build()
-        .expect("reqwest client");
-
-    // Poll discovery until Zitadel serves, then pin the issuer form (see the module doc).
-    let discovery_url = format!("{issuer}/.well-known/openid-configuration");
-    let mut discovery = None;
-    for _ in 0..READINESS_ATTEMPTS {
-        if let Ok(response) = http.get(&discovery_url).send().await
-            && response.status().is_success()
-            && let Ok(body) = response.json::<Value>().await
-        {
-            discovery = Some(body);
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let Some(discovery) = discovery else {
-        panic!("zitadel discovery never became ready at {discovery_url}\n{}", dump_logs(&zitadel).await);
-    };
-    assert_eq!(discovery["issuer"], issuer, "zitadel must derive the issuer from the request Host: {discovery}");
-
-    let pat = read_admin_pat(&zitadel).await;
-    let zitadel_api = ZitadelApi {
-        http: &http,
-        base: &issuer,
-        pat: &pat,
-    };
-    // MEASURED: discovery answers before the management API does. The REST gateway first
-    // returns 503 `dial tcp [::1]:8080: connect: connection refused` for a few seconds.
-    if !zitadel_api.wait_until_ready().await {
-        panic!("the zitadel management API never became ready\n{}", dump_logs(&zitadel).await);
-    }
-    let setup = setup_zitadel(&zitadel_api).await;
+    // Owned copies, so that the rest of this test is unchanged. A `reqwest::Client` clone shares
+    // the same connection pool.
+    let http = zitadel.http.clone();
+    let issuer = zitadel.issuer.clone();
+    let setup = setup_zitadel(&zitadel.api()).await;
 
     // The human flow: code + PKCE through Login v1, then the code exchange with HTTP Basic.
     let human = human_login(&http, &issuer, &setup).await;
@@ -239,6 +190,19 @@ async fn zitadel_id_tokens_are_refused_by_the_marker_claims() {
             assert!(!has_claim(&claims, marker), "{label} must NOT carry {marker} (spec F6): {claims}");
         }
         assert!(aud_contains(&claims, &setup.project_id), "{label} aud must contain the project id: {claims}");
+    }
+    // SMA-731 F1 (T18): `jti` on every access token, on no ID token.
+    for (label, token) in id_tokens {
+        let claims = jwt_payload(token);
+        for name in REQUIRED_CLAIMS {
+            assert!(!has_claim(&claims, name), "{label} must NOT carry {name} (SMA-731 F1): {claims}");
+        }
+    }
+    for (label, token) in access_tokens {
+        let claims = jwt_payload(token);
+        for name in REQUIRED_CLAIMS {
+            assert!(has_claim(&claims, name), "{label} must carry {name} (SMA-731 F1): {claims}");
+        }
     }
     // The Action works: the human access tokens carry the user's email. The machine user is not
     // human, so the Action adds nothing to its token.
@@ -334,6 +298,205 @@ async fn zitadel_id_tokens_are_refused_by_the_marker_claims() {
         matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)),
         "with an empty marker list, the machine ID token must fail JIT only for the missing email, got {err:?}"
     );
+
+    // --- SMA-731: IAM with the required claim ---
+
+    // T19: `["jti"]` with an EMPTY marker list. Each ID token is refused by step 6c alone, and
+    // the wire answer is the same 401 `invalid-token` (Review Focus 5). The human and the
+    // refreshed access token resolve to the human principal. The machine access token passes the
+    // authenticator and fails JIT only for the missing email (SMA-703 § 12).
+    let required_cfg = zitadel_config_with_rules(&issuer, &setup.project_id, &[], &REQUIRED_CLAIMS);
+    let required_state = AppState::new(state.db.clone(), &required_cfg).await.expect("AppState::new (required claims)");
+    let required_app = router(required_state.clone());
+    for (label, token) in id_tokens {
+        let err = required_state.authn.resolve(token, Provisioning::Disabled).await.expect_err("an ID token must not authenticate");
+        assert!(
+            matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)),
+            "with the required claim only, the {label} must be refused as NotAnAccessToken, got {err:?}"
+        );
+        let (status, body) = send(&required_app, "POST", "/v1/organizations", Some(json!({ "slug": "nojti", "name": "No jti" })), Some(token)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+        assert_eq!(body["error"]["code"], "invalid-token", "{label}: {body}");
+    }
+    for (label, token) in [("human access token", &human_access), ("refreshed access token", &refreshed_access)] {
+        let principal = required_state
+            .authn
+            .resolve(token, Provisioning::Disabled)
+            .await
+            .unwrap_or_else(|err| panic!("with the required claim, IAM must accept the {label}, got {err:?}"));
+        assert_eq!(principal.principal_id.canonical(), principal_prn, "the {label} must resolve to the human principal");
+    }
+    let err = required_state.authn.resolve(&machine_access, Provisioning::Enabled).await.expect_err("JIT needs an email");
+    assert!(
+        matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)),
+        "with the required claim, the machine access token must fail JIT only for the missing email, got {err:?}"
+    );
+
+    // T19a: the full runbook recipe, the marker claims and the required claim together.
+    let recipe_cfg = zitadel_config_with_rules(&issuer, &setup.project_id, &MARKER_CLAIMS, &REQUIRED_CLAIMS);
+    let recipe_state = AppState::new(state.db.clone(), &recipe_cfg).await.expect("AppState::new (full recipe)");
+    for (label, token) in id_tokens {
+        let err = recipe_state.authn.resolve(token, Provisioning::Disabled).await.expect_err("an ID token must not authenticate");
+        assert!(
+            matches!(err, AuthnError::InvalidToken(TokenDefect::NotAnAccessToken)),
+            "with the full recipe, the {label} must be refused as NotAnAccessToken, got {err:?}"
+        );
+    }
+    for (label, token) in [("human access token", &human_access), ("refreshed access token", &refreshed_access)] {
+        let principal = recipe_state
+            .authn
+            .resolve(token, Provisioning::Disabled)
+            .await
+            .unwrap_or_else(|err| panic!("with the full recipe, IAM must accept the {label}, got {err:?}"));
+        assert_eq!(principal.principal_id.canonical(), principal_prn, "the {label} must resolve to the human principal");
+    }
+    let err = recipe_state.authn.resolve(&machine_access, Provisioning::Enabled).await.expect_err("JIT needs an email");
+    assert!(
+        matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)),
+        "with the full recipe, the machine access token must fail JIT only for the missing email, got {err:?}"
+    );
+}
+
+/// SMA-732: does a refresh give an access token with a new `exp`? See the module doc and the
+/// spec `2026-10-05-sma-732-zitadel-refresh-exp-design.md` (§ 4.2: the steps and A1-A8).
+#[tokio::test]
+async fn zitadel_refresh_extends_access_token_exp() {
+    // Step 1: an instance of its own, with L = 10 s (spec D2, D6). No IAM Postgres (spec D7).
+    let lifetime = format!("{REFRESH_LIFETIME_SECS}s");
+    let Some(zitadel) = start_zitadel(&[(ACCESS_TOKEN_LIFETIME_ENV, lifetime.as_str())]).await else {
+        return;
+    };
+    let setup = setup_zitadel(&zitadel.api()).await;
+    let http = &zitadel.http;
+    let issuer = zitadel.issuer.as_str();
+
+    // Step 2: the login gives T0 and R0. `start` is the host base of every wait.
+    let login = human_login(http, issuer, &setup).await;
+    let start = Instant::now();
+    let (t0, r0) = TokenTimes::read("T0", &login, start, None);
+    println!("SMA-732 {t0}");
+
+    // Step 3: an immediate refresh (K4: the M4a case of SMA-703). Only A1, A2, A6 and A7 read Tq.
+    let tq_response = refresh(http, issuer, &setup, &r0)
+        .await
+        .unwrap_or_else(|(status, body)| panic!("the immediate refresh (Tq) failed ({status}): {body}\n{t0}"));
+    let (tq, rq) = TokenTimes::read("Tq", &tq_response, start, Some(&r0));
+    println!("SMA-732 {tq}");
+
+    // Step 4: refresh 1, before the first exp.
+    sleep_until(start + REFRESH_1_AT, "refresh 1 (before exp0)").await;
+    let t1_response = refresh(http, issuer, &setup, &rq)
+        .await
+        .unwrap_or_else(|(status, body)| panic!("refresh 1 (T1) failed ({status}): {body}\n{t0}\n{tq}"));
+    let t1_arrived = Instant::now();
+    let (t1, r1) = TokenTimes::read("T1", &t1_response, start, Some(&rq));
+    println!("SMA-732 {t1}");
+
+    // Step 5: refresh 2, after the first exp. The wait is relative to t1 too, so A4 is a lower
+    // bound under any load. Mutation M3 replaces `&r1` with `&r0` in the next call.
+    sleep_until((start + REFRESH_2_AT).max(t1_arrived + REFRESH_2_AFTER_REFRESH_1), "refresh 2 (after exp0)").await;
+    let t2_response = refresh(http, issuer, &setup, &r1)
+        .await
+        .unwrap_or_else(|(status, body)| panic!("A8: outcome \"refuses after exp\" (spec D5): refresh 2 (T2) failed ({status}): {body}\n{t0}\n{tq}\n{t1}"));
+    let (t2, _) = TokenTimes::read("T2", &t2_response, start, Some(&r1));
+    println!("SMA-732 {t2}");
+
+    // Step 6: the checks. Each failure is collected, so one run shows every red check.
+    let tokens = [&t0, &tq, &t1, &t2];
+    let report = tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n");
+    let mut failures: Vec<String> = Vec::new();
+
+    // A1 (K1). Mutation M1 inserts ` + 3` after `REFRESH_LIFETIME_SECS` on the next line.
+    let a1_lifetime = REFRESH_LIFETIME_SECS;
+    for t in tokens {
+        let lifetime = t.exp - t.iat;
+        if !(a1_lifetime - CLOCK_READ_TOLERANCE_SECS..=a1_lifetime).contains(&lifetime) {
+            failures.push(format!(
+                "A1: {}: exp - iat = {lifetime}, expected {}..={a1_lifetime} (spec K1)",
+                t.label,
+                a1_lifetime - CLOCK_READ_TOLERANCE_SECS
+            ));
+        }
+        if t.nbf != t.iat {
+            failures.push(format!("A1: {}: nbf {} != iat {} (spec K1)", t.label, t.nbf, t.iat));
+        }
+    }
+
+    // A2 (K2).
+    for t in tokens {
+        if !(REFRESH_LIFETIME_SECS - CLOCK_READ_TOLERANCE_SECS..=REFRESH_LIFETIME_SECS).contains(&t.expires_in) {
+            failures.push(format!(
+                "A2: {}: expires_in = {}, expected {}..={REFRESH_LIFETIME_SECS} (spec K2)",
+                t.label,
+                t.expires_in,
+                REFRESH_LIFETIME_SECS - CLOCK_READ_TOLERANCE_SECS
+            ));
+        }
+    }
+
+    // A3-A5 compare T1 and T2 with T0. Mutation M2 inserts `.map(|_| &t0)` after `[&t1, &t2]`.
+    let [later1, later2] = [&t1, &t2];
+    let keeps = later1.exp == t0.exp || later2.exp == t0.exp;
+    let keeps_note = if keeps { " Outcome \"keeps\" (spec D5): exp did not move." } else { "" };
+
+    // A3.
+    if later1.iat - t0.iat < MIN_REFRESH_STEP_SECS || later1.exp - t0.exp < MIN_REFRESH_STEP_SECS {
+        failures.push(format!(
+            "A3: {} vs T0: iat +{}, exp +{}, expected both >= {MIN_REFRESH_STEP_SECS}.{keeps_note}",
+            later1.label,
+            later1.iat - t0.iat,
+            later1.exp - t0.exp
+        ));
+    }
+    // A4.
+    if later2.iat - later1.iat < MIN_REFRESH_STEP_SECS || later2.exp - later1.exp < MIN_REFRESH_STEP_SECS {
+        failures.push(format!(
+            "A4: {} vs {}: iat +{}, exp +{}, expected both >= {MIN_REFRESH_STEP_SECS}.{keeps_note}",
+            later2.label,
+            later1.label,
+            later2.iat - later1.iat,
+            later2.exp - later1.exp
+        ));
+    }
+    // A5.
+    let late_refresh_1 = later1.iat >= t0.exp;
+    if late_refresh_1 {
+        failures.push(format!(
+            "A5: iat1 {} >= exp0 {}: refresh 1 came after the first exp. Spec D3: do not remove this check; a larger L needs a recorded maintainer decision.",
+            later1.iat, t0.exp
+        ));
+    }
+    if later2.iat <= t0.exp {
+        failures.push(format!("A5: iat2 {} <= exp0 {}: refresh 2 came before the first exp.{keeps_note}", later2.iat, t0.exp));
+    }
+
+    // A6.
+    let jtis: BTreeSet<&str> = tokens.iter().map(|t| t.jti.as_str()).collect();
+    if jtis.len() != tokens.len() {
+        failures.push(format!("A6: the jti values are not all different: {jtis:?}"));
+    }
+
+    // A7 (K3: rotation). Printed as booleans, never as tokens.
+    for t in [&tq, &t1, &t2] {
+        if t.refresh_rotated != Some(true) {
+            failures.push(format!("A7: {}: refresh_rotated = {:?}, expected Some(true) (spec K3)", t.label, t.refresh_rotated));
+        }
+    }
+
+    let verdict = if keeps {
+        "Outcome \"keeps\" (spec D5): Zitadel did not extend exp. Do not change L or the checks. Open an issue with these values."
+    } else if late_refresh_1 {
+        "iat1 >= exp0 (spec D3): the step-4 refresh was too slow. Do not change L or the checks. Open an issue with these values."
+    } else {
+        "No D5 outcome matched (spec D5). An A1 or A2 failure can come from a long gap between the two clock reads in one request on a loaded runner (spec K1, K2). Read the printed exp-iat and expires_in values first. If they are not the cause, the test has a defect."
+    };
+    assert!(
+        failures.is_empty(),
+        "SMA-732: {} check(s) failed. {verdict}\n{}\n--- tokens ---\n{report}",
+        failures.len(),
+        failures.join("\n")
+    );
+    println!("SMA-732 outcome: \"extends\" (spec D5): A1-A8 pass");
 }
 
 /// The ids and secrets that [`setup_zitadel`] creates.
@@ -381,6 +544,238 @@ impl ZitadelApi<'_> {
         assert!(status.is_success(), "zitadel {method} {path} failed ({status}): {text}");
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("zitadel {method} {path}: response is not JSON ({e}): {text}"))
     }
+}
+
+/// A running Zitadel with its own Postgres, and the client, issuer and admin PAT to call it.
+/// The containers stop when this value is dropped, so a test keeps it alive to its end.
+struct ZitadelInstance {
+    /// Never read. It is here only so that the Postgres container lives as long as Zitadel.
+    _zitadel_pg: ContainerAsync<Postgres>,
+    zitadel: ContainerAsync<GenericImage>,
+    /// One client for every call of a test. It never follows a redirect, because the login
+    /// flow must read each `Location` header, and the last one points at a server that does not
+    /// exist.
+    http: reqwest::Client,
+    /// `https://127.0.0.1:{mapped port}` (see the module doc).
+    issuer: String,
+    /// The first-instance admin PAT.
+    pat: String,
+}
+
+impl ZitadelInstance {
+    /// The management API of this instance.
+    fn api(&self) -> ZitadelApi<'_> {
+        ZitadelApi {
+            http: &self.http,
+            base: &self.issuer,
+            pat: &self.pat,
+        }
+    }
+}
+
+/// Starts Zitadel's own Postgres and Zitadel on a Docker network of their own, waits until
+/// discovery and the management API answer, and reads the admin PAT. `extra_env` adds env vars
+/// to the Zitadel container after the fixed ones (an empty slice keeps the defaults). Returns
+/// `None` when `start_or_skip` skips (no Docker, per `tests/support/docker.rs`).
+async fn start_zitadel(extra_env: &[(&str, &str)]) -> Option<ZitadelInstance> {
+    // Zitadel's own Postgres, on a network of its own. The suffix keeps parallel runs apart.
+    let suffix = format!("{:016x}", rand::random::<u64>());
+    let network = format!("zitadel-e2e-{suffix}");
+    let pg_host = format!("zitadel-e2e-pg-{suffix}");
+    let zitadel_pg_image = Postgres::default().with_tag("16-alpine").with_network(&network).with_container_name(&pg_host);
+    let zitadel_pg = support::docker::start_or_skip(zitadel_pg_image, "zitadel_e2e postgres").await?;
+    // The Postgres module reports ready on its first log line, while the init server (unix
+    // socket only) still runs. Zitadel stops at once when its first connection fails, so wait
+    // for a TCP connection, which only the real server accepts.
+    wait_for_postgres(&zitadel_pg).await;
+
+    // A runtime self-signed cert for Zitadel's TLS listener, copied into the container.
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
+    let cert_pem = cert.cert.pem().into_bytes();
+    let key_pem = cert.signing_key.serialize_pem().into_bytes();
+
+    let mut image = GenericImage::new(ZITADEL_IMAGE, ZITADEL_TAG)
+        .with_exposed_port(HTTPS_PORT.tcp())
+        .with_network(&network)
+        // The image user cannot write to a directory that `with_copy_to` makes (root owns it),
+        // and Zitadel must write the admin PAT there.
+        .with_user("0")
+        .with_env_var("ZITADEL_MASTERKEY", "MasterkeyNeedsToHave32Characters")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_HOST", &pg_host)
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_PORT", "5432")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_DATABASE", "zitadel")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_USERNAME", "zitadel")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_PASSWORD", "zitadel")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE", "disable")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME", "postgres")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD", "postgres")
+        .with_env_var("ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE", "disable")
+        // See the module doc: the host of `iss` comes from here, the port from the request.
+        .with_env_var("ZITADEL_EXTERNALDOMAIN", "127.0.0.1")
+        .with_env_var("ZITADEL_EXTERNALPORT", HTTPS_PORT.to_string())
+        .with_env_var("ZITADEL_EXTERNALSECURE", "true")
+        .with_env_var("ZITADEL_TLS_ENABLED", "true")
+        .with_env_var("ZITADEL_TLS_CERTPATH", format!("{STATE_DIR}/tls.crt"))
+        .with_env_var("ZITADEL_TLS_KEYPATH", format!("{STATE_DIR}/tls.key"))
+        .with_env_var("ZITADEL_FIRSTINSTANCE_PATPATH", format!("{STATE_DIR}/admin.pat"))
+        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME", "e2e-admin")
+        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME", "e2e-admin")
+        .with_env_var("ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE", "2099-01-01T00:00:00Z")
+        // The measurement used Login v1. This keeps the instance on it.
+        .with_env_var("ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED", "false")
+        .with_copy_to(format!("{STATE_DIR}/tls.crt"), cert_pem)
+        .with_copy_to(format!("{STATE_DIR}/tls.key"), key_pem)
+        .with_cmd(["start-from-init", "--masterkeyFromEnv", "--tlsMode", "enabled"])
+        .with_startup_timeout(Duration::from_secs(240));
+    for (name, value) in extra_env {
+        image = image.with_env_var(*name, *value);
+    }
+
+    let zitadel = support::docker::start_or_skip(image, "zitadel_e2e").await?;
+    let https_port = support::docker::mapped_port(&zitadel, HTTPS_PORT, "zitadel https").await;
+    let issuer = format!("https://127.0.0.1:{https_port}");
+
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(20))
+        .build()
+        .expect("reqwest client");
+
+    // Poll discovery until Zitadel serves, then pin the issuer form (see the module doc).
+    let discovery_url = format!("{issuer}/.well-known/openid-configuration");
+    let mut discovery = None;
+    for _ in 0..READINESS_ATTEMPTS {
+        if let Ok(response) = http.get(&discovery_url).send().await
+            && response.status().is_success()
+            && let Ok(body) = response.json::<Value>().await
+        {
+            discovery = Some(body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let Some(discovery) = discovery else {
+        panic!("zitadel discovery never became ready at {discovery_url}\n{}", dump_logs(&zitadel).await);
+    };
+    assert_eq!(discovery["issuer"], issuer, "zitadel must derive the issuer from the request Host: {discovery}");
+
+    let pat = read_admin_pat(&zitadel).await;
+    let instance = ZitadelInstance {
+        _zitadel_pg: zitadel_pg,
+        zitadel,
+        http,
+        issuer,
+        pat,
+    };
+    // MEASURED: discovery answers before the management API does. The REST gateway first
+    // returns 503 `dial tcp [::1]:8080: connect: connection refused` for a few seconds.
+    if !instance.api().wait_until_ready().await {
+        panic!("the zitadel management API never became ready\n{}", dump_logs(&instance.zitadel).await);
+    }
+    Some(instance)
+}
+
+/// The times of one access token of the SMA-732 test, from its JWT and from its token response.
+/// It holds no token: only claims, `expires_in`, a host offset and a boolean.
+struct TokenTimes {
+    label: &'static str,
+    iat: i64,
+    nbf: i64,
+    exp: i64,
+    jti: String,
+    expires_in: i64,
+    /// Host milliseconds since the login response. Only the waits use host time; no check reads it.
+    offset_ms: u128,
+    /// True when the response's refresh token differs from the one that the request sent.
+    /// `None` for the login, which sent no refresh token.
+    refresh_rotated: Option<bool>,
+}
+
+impl TokenTimes {
+    /// Reads the access token times of `response`. Returns them with the response's refresh
+    /// token. The caller must never put that refresh token into a message.
+    fn read(label: &'static str, response: &Value, start: Instant, previous_refresh: Option<&str>) -> (Self, String) {
+        let access = secret_field(response, "access_token", label);
+        let refresh = secret_field(response, "refresh_token", label);
+        let claims = jwt_payload(&access);
+        let times = Self {
+            label,
+            iat: int_claim(&claims, "iat", label),
+            nbf: int_claim(&claims, "nbf", label),
+            exp: int_claim(&claims, "exp", label),
+            jti: claims["jti"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{label}: the access token has no string jti claim: {claims}"))
+                .to_string(),
+            expires_in: response["expires_in"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("{label}: the token response has no integer expires_in. Keys: {:?}", response_keys(response))),
+            offset_ms: start.elapsed().as_millis(),
+            refresh_rotated: previous_refresh.map(|previous| previous != refresh),
+        };
+        (times, refresh)
+    }
+}
+
+impl std::fmt::Display for TokenTimes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let rotated = match self.refresh_rotated {
+            Some(rotated) => rotated.to_string(),
+            None => "n/a".to_string(),
+        };
+        write!(
+            f,
+            "{}: iat={} nbf={} exp={} exp-iat={} expires_in={} jti={} offset_ms={} refresh_rotated={rotated}",
+            self.label,
+            self.iat,
+            self.nbf,
+            self.exp,
+            self.exp - self.iat,
+            self.expires_in,
+            self.jti,
+            self.offset_ms
+        )
+    }
+}
+
+/// One refresh grant of the console's confidential web app (HTTP Basic client auth).
+async fn refresh(http: &reqwest::Client, issuer: &str, setup: &ZitadelSetup, refresh_token: &str) -> Result<Value, (StatusCode, String)> {
+    token_request(
+        http,
+        issuer,
+        Some((&setup.client_id, &setup.client_secret)),
+        &[("grant_type", "refresh_token"), ("refresh_token", refresh_token)],
+    )
+    .await
+}
+
+/// Sleeps until `deadline` and prints how long it waits, so that the run output shows the real
+/// schedule. Returns at once when the deadline has passed.
+async fn sleep_until(deadline: Instant, what: &str) {
+    let wait = deadline.saturating_duration_since(Instant::now());
+    println!("SMA-732 waiting {} ms for {what}", wait.as_millis());
+    tokio::time::sleep_until(deadline).await;
+}
+
+/// A string field of a token response that holds a secret. The panic names the keys of the
+/// response, never the response, because the response holds tokens.
+fn secret_field(response: &Value, field: &str, label: &str) -> String {
+    response[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: no string {field} in the token response. Keys: {:?}", response_keys(response)))
+        .to_string()
+}
+
+/// An integer claim of a decoded access token payload. Claims hold no secret, so the panic
+/// prints them.
+fn int_claim(claims: &Value, name: &str, label: &str) -> i64 {
+    claims[name].as_i64().unwrap_or_else(|| panic!("{label}: the access token has no integer {name} claim: {claims}"))
+}
+
+/// The top-level keys of a JSON object, for the panic messages of `secret_field`.
+fn response_keys(response: &Value) -> Vec<String> {
+    response.as_object().map(|object| object.keys().cloned().collect()).unwrap_or_default()
 }
 
 /// Creates, through the management API: project P; the confidential web app A of the paigasus
@@ -725,6 +1120,11 @@ async fn wait_for_postgres(pg: &ContainerAsync<Postgres>) {
 /// on, `accept_invalid_tls` for the self-signed cert, and the marker claims under test. Standard
 /// test defaults otherwise, as in keycloak_e2e.
 fn zitadel_config(issuer: &str, project_id: &str, markers: &[&str]) -> IamConfig {
+    zitadel_config_with_rules(issuer, project_id, markers, &[])
+}
+
+/// `zitadel_config` with the required claims `required` too (SMA-731 T19, T19a).
+fn zitadel_config_with_rules(issuer: &str, project_id: &str, markers: &[&str], required: &[&str]) -> IamConfig {
     IamConfig {
         http_addr: "127.0.0.1:0".parse().unwrap(),
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
@@ -738,6 +1138,7 @@ fn zitadel_config(issuer: &str, project_id: &str, markers: &[&str]) -> IamConfig
             max_token_bytes: 16384,
             accept_invalid_tls: true,
             extra_ca_bundle_path: None,
+            dpop: DpopConfig::default(),
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,
@@ -750,6 +1151,7 @@ fn zitadel_config(issuer: &str, project_id: &str, markers: &[&str]) -> IamConfig
                 audiences: vec![project_id.to_string()],
                 jit_provisioning: true,
                 id_token_marker_claims: markers.iter().map(|name| (*name).to_string()).collect(),
+                access_token_required_claims: required.iter().map(|name| (*name).to_string()).collect(),
             }],
         },
         authz: AuthzConfig::default(),

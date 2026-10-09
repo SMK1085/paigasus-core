@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 68 keys rather than 67.
+// demanding an entry for it would make the table 70 keys rather than 69.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -65,6 +65,9 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.INVALID_SUBJECT]: 'from-transport',
   [ErrorReason.CANNOT_UNLINK_OWN_IDENTITY]: 'from-transport',
   [ErrorReason.EXTERNAL_IDENTITY_EXISTS]: 'from-transport',
+  // SMA-700. IAM's own DPoP quota refusal (gRPC RESOURCE_EXHAUSTED with RetryInfo). The transport
+  // table already presents it as rate-limited ("try again soon").
+  [ErrorReason.DPOP_QUOTA_EXCEEDED]: 'from-transport',
   [ErrorReason.MISSING_AUTHORIZATION]: 'from-transport',
   [ErrorReason.INVALID_API_KEY]: 'from-transport',
   [ErrorReason.INSUFFICIENT_PERMISSIONS]: 'from-transport',
@@ -93,6 +96,8 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.INVALID_REQUEST_SCHEMA]: 'invalid-input',
   [ErrorReason.INVALID_QUERY_PARAMETER]: 'from-transport',
   [ErrorReason.INVALID_PATH_SEGMENT]: 'from-transport',
+  // SMA-700. A 401 from both services; the transport table already presents it as relogin.
+  [ErrorReason.INVALID_DPOP_PROOF]: 'from-transport',
 };
 
 /**

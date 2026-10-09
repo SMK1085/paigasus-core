@@ -20,7 +20,7 @@ use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::oidc::jwks::{HttpJwksFetcher, IdpTls, InMemoryJwksCache, JwksProvider};
 use paigasus_iam::adapters::oidc::validator::OidcAuthenticator;
 use paigasus_iam::config::IssuerConfig;
-use paigasus_iam_core::{Authenticator, AuthnError};
+use paigasus_iam_core::{Authenticator, AuthnError, TokenScheme};
 use std::io::Write;
 use std::time::Duration;
 
@@ -37,6 +37,7 @@ fn authenticator_for(issuer: &str, extra_bundle: Option<&str>) -> impl Authentic
             audiences: vec!["paigasus".to_string()],
             jit_provisioning: true,
             id_token_marker_claims: Vec::new(),
+            access_token_required_claims: Vec::new(),
         }],
         provider,
         60,
@@ -56,7 +57,7 @@ async fn private_ca_issuer_validates_with_extra_ca_bundle() {
     let authn = authenticator_for(&idp.issuer, Some(bundle.path().to_str().unwrap()));
     let token = idp.bearer("sub-alice", Some("alice@example.com"), "paigasus", 3600);
 
-    let claims = authn.authenticate(&token).await.expect("a private-CA issuer must validate when its CA is trusted");
+    let claims = authn.authenticate(&token, TokenScheme::Bearer).await.expect("a private-CA issuer must validate when its CA is trusted");
     assert_eq!(claims.subject, "sub-alice");
 }
 
@@ -80,7 +81,10 @@ async fn self_signed_leaf_in_the_bundle_also_validates() {
     let authn = authenticator_for(&idp.issuer, Some(bundle.path().to_str().unwrap()));
     let token = idp.bearer("sub-alice", Some("alice@example.com"), "paigasus", 3600);
 
-    let claims = authn.authenticate(&token).await.expect("a self-signed leaf must validate when its own cert is trusted");
+    let claims = authn
+        .authenticate(&token, TokenScheme::Bearer)
+        .await
+        .expect("a self-signed leaf must validate when its own cert is trusted");
     assert_eq!(claims.subject, "sub-alice");
 }
 
@@ -94,7 +98,7 @@ async fn private_ca_issuer_fails_without_extra_ca_bundle() {
     let authn = authenticator_for(&idp.issuer, None);
     let token = idp.bearer("sub-alice", Some("alice@example.com"), "paigasus", 3600);
 
-    let err = authn.authenticate(&token).await.expect_err("an untrusted private CA must not validate");
+    let err = authn.authenticate(&token, TokenScheme::Bearer).await.expect_err("an untrusted private CA must not validate");
     assert!(
         matches!(err, AuthnError::Unavailable),
         "a TLS trust failure surfaces as Unavailable (the JWKS fetch failed), got {err:?}"
@@ -121,7 +125,7 @@ async fn private_ca_issuer_fails_with_the_wrong_ca_bundle() {
     let authn = authenticator_for(&idp_a.issuer, Some(bundle.path().to_str().unwrap()));
     let token = idp_a.bearer("sub-alice", Some("alice@example.com"), "paigasus", 3600);
 
-    let err = authn.authenticate(&token).await.expect_err("a bundle holding an unrelated CA must not validate");
+    let err = authn.authenticate(&token, TokenScheme::Bearer).await.expect_err("a bundle holding an unrelated CA must not validate");
     assert!(
         matches!(err, AuthnError::Unavailable),
         "a TLS trust failure surfaces as Unavailable (the JWKS fetch failed), got {err:?}"

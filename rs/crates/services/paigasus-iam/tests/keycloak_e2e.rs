@@ -14,6 +14,10 @@
 //! SMA-690: the test also gets a DPoP-bound token from the same client and asserts that IAM
 //! refuses it as SenderConstrained.
 //!
+//! SMA-731 (spec D8, T20): the test also runs one refresh grant, and pins whether `jti` is on the
+//! ID token and the access token of the password grant, of the refresh grant, and on the
+//! DPoP-bound access token.
+//!
 //! Docker gating is the single policy owned by `tests/support/docker.rs`'s `start_or_skip`
 //! (SMA-538), not restated here — notably, this suite's 240-second Keycloak startup timeout is
 //! now a hard failure locally too, not the fast skip it used to be: a container failure against
@@ -43,8 +47,9 @@ use p256::pkcs8::{EncodePrivateKey, LineEnding};
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::entities::user;
 use paigasus_iam::application::authenticate_token::Provisioning;
-use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
-use paigasus_iam_core::{AuthnError, TokenDefect};
+use paigasus_iam::application::dpop::DpopRequest;
+use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, DpopConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
+use paigasus_iam_core::{AuthnError, ProofDefect, TokenDefect};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use sha2::Digest;
@@ -172,12 +177,28 @@ async fn keycloak_end_to_end_config_only_oidc() {
     // SMA-690 AC 2: Keycloak's plain Bearer access token has no `cnf`.
     assert!(access_claims.get("cnf").is_none(), "keycloak Bearer access token must carry no cnf: {access_claims}");
 
+    // SMA-731 D8: one refresh grant with the refresh token of the password grant. Keycloak returns
+    // a new ID token and a new access token. The failure message prints the body: an OAuth error
+    // body has no token.
+    let refresh_token = token_body["refresh_token"].as_str().expect("refresh_token in token response").to_string();
+    let refresh_response = http
+        .post(&token_url)
+        .form(&[("grant_type", "refresh_token"), ("client_id", "paigasus-cli"), ("refresh_token", refresh_token.as_str())])
+        .send()
+        .await
+        .expect("refresh request");
+    let refresh_status = refresh_response.status();
+    let refresh_body: Value = refresh_response.json().await.expect("refresh response json");
+    assert!(refresh_status.is_success(), "refresh grant failed ({refresh_status}): {refresh_body}\n{}", dump_logs(&keycloak).await);
+    let refreshed_access = refresh_body["access_token"].as_str().expect("access_token in refresh response").to_string();
+    let refreshed_id = refresh_body["id_token"].as_str().expect("id_token in refresh response (scope=openid)").to_string();
+
     // SMA-690 AC 1: a DPoP-bound token from the SAME client. Keycloak binds a token when the
     // client sends a DPoP proof, with no client setting (measurement M2).
     let (dpop_key, dpop_x, dpop_y) = dpop_keypair();
     let dpop_response = http
         .post(&token_url)
-        .header("DPoP", dpop_proof(&dpop_key, &dpop_x, &dpop_y, "POST", &token_url))
+        .header("DPoP", dpop_proof(&dpop_key, &dpop_x, &dpop_y, "POST", &token_url, None))
         .form(&[
             ("grant_type", "password"),
             ("client_id", "paigasus-cli"),
@@ -198,6 +219,19 @@ async fn keycloak_end_to_end_config_only_oidc() {
     let dpop_claims = jwt_payload(&dpop_token);
     assert_eq!(dpop_claims["typ"], "DPoP", "keycloak DPoP-bound access token must carry typ=DPoP");
     assert_eq!(dpop_claims["cnf"]["jkt"], jwk_thumbprint(&dpop_x, &dpop_y), "cnf.jkt must be the RFC 7638 thumbprint of the proof key");
+    // SMA-731 F4 (T20): measured on Keycloak 26.4, 2026-10-06. `jti` does not separate the
+    // Keycloak ID token from the access token, so `access_token_required_claims` does not help
+    // for Keycloak, and the `typ` check (SMA-686) stays the Keycloak defence. The values below are
+    // the measured ones. A Keycloak image bump that changes one fails here.
+    for (label, token, carries_jti) in [
+        ("password ID token", &id_token, true),
+        ("password access token", &access_token, true),
+        ("refreshed ID token", &refreshed_id, true),
+        ("refreshed access token", &refreshed_access, true),
+        ("DPoP access token", &dpop_token, true),
+    ] {
+        assert_eq!(has_claim(&jwt_payload(token), "jti"), carries_jti, "{label}: the jti presence changed (SMA-731 F4)");
+    }
 
     // Config-only: point the wired service at the container's issuer. `accept_invalid_tls` is
     // the sole concession to the self-signed dev cert — it is still a plain config flag.
@@ -278,6 +312,24 @@ async fn keycloak_end_to_end_config_only_oidc() {
     assert_eq!(second["principal_prn"], principal_prn, "principal_prn must be stable across introspect calls");
     assert_eq!(second["issuer"], issuer);
     assert_eq!(second["subject"], subject);
+
+    // SMA-700 AC 1 with a real Keycloak token: alice is provisioned now (above). The same bound
+    // token and a NEW proof for the gateway URL pass Introspect with a DPoP context. The Bearer
+    // refusals above still hold with DPoP on (D7).
+    let proof = dpop_proof(&dpop_key, &dpop_x, &dpop_y, "POST", "https://gw.example.test/v1/chat/completions", Some(&dpop_token));
+    let request = DpopRequest {
+        proof,
+        method: "POST".to_string(),
+        path: "/v1/chat/completions".to_string(),
+    };
+    let ctx = state
+        .authn
+        .introspect_dpop(&dpop_token, request.clone())
+        .await
+        .expect("a Keycloak DPoP-bound token with a valid proof passes Introspect");
+    assert_eq!(ctx.principal.principal_id.canonical(), principal_prn, "the bound token resolves to alice");
+    let err = state.authn.introspect_dpop(&dpop_token, request).await.expect_err("the same proof twice is a replay");
+    assert!(matches!(err, AuthnError::InvalidDpopProof(ProofDefect::Replayed)), "got {err:?}");
 }
 
 /// An `IamConfig` pointed at the running Keycloak: a single issuer (audiences `paigasus` and
@@ -298,6 +350,12 @@ fn keycloak_config(issuer: &str) -> IamConfig {
             max_token_bytes: 16384,
             accept_invalid_tls: true,
             extra_ca_bundle_path: None,
+            // SMA-700: DPoP on. The Bearer assertions below do not change (D7).
+            dpop: DpopConfig {
+                enabled: true,
+                forwarded_base_urls: vec!["https://gw.example.test".to_string()],
+                ..DpopConfig::default()
+            },
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,
@@ -310,6 +368,7 @@ fn keycloak_config(issuer: &str) -> IamConfig {
                 audiences: vec!["paigasus".to_string(), "paigasus-cli".to_string()],
                 jit_provisioning: true,
                 id_token_marker_claims: Vec::new(),
+                access_token_required_claims: Vec::new(),
             }],
         },
         authz: AuthzConfig::default(),
@@ -334,6 +393,12 @@ fn aud_contains(claims: &Value, audience: &str) -> bool {
     }
 }
 
+/// True when the payload has a top-level member `name` whose value is not JSON `null` (the
+/// presence rule of SMA-731 D3).
+fn has_claim(claims: &Value, name: &str) -> bool {
+    claims.get(name).is_some_and(|value| !value.is_null())
+}
+
 /// Decodes a JWT's payload segment WITHOUT verifying it — test inspection only.
 fn jwt_payload(token: &str) -> Value {
     let segment = token.split('.').nth(1).expect("jwt has a payload segment");
@@ -354,14 +419,18 @@ fn dpop_keypair() -> (EncodingKey, String, String) {
 }
 
 /// A DPoP proof (RFC 9449 § 4.2) for one request: header `typ: dpop+jwt`, `alg: ES256` and the
-/// public `jwk`; payload `jti`, `htm`, `htu` and `iat`.
-fn dpop_proof(key: &EncodingKey, x: &str, y: &str, htm: &str, htu: &str) -> String {
+/// public `jwk`; payload `jti`, `htm`, `htu`, `iat`, and `ath` when `token` is given (a proof that
+/// a resource server checks, SMA-700). The token endpoint gets no `ath`.
+fn dpop_proof(key: &EncodingKey, x: &str, y: &str, htm: &str, htu: &str, token: Option<&str>) -> String {
     let jwk: Jwk = serde_json::from_value(json!({ "kty": "EC", "crv": "P-256", "x": x, "y": y })).expect("public EC jwk");
     let mut header = Header::new(Algorithm::ES256);
     header.typ = Some("dpop+jwt".to_string());
     header.jwk = Some(jwk);
     let jti = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
-    let claims = json!({ "jti": jti, "htm": htm, "htu": htu, "iat": chrono::Utc::now().timestamp() });
+    let mut claims = json!({ "jti": jti, "htm": htm, "htu": htu, "iat": chrono::Utc::now().timestamp() });
+    if let Some(token) = token {
+        claims["ath"] = json!(URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(token.as_bytes())));
+    }
     jsonwebtoken::encode(&header, &claims, key).expect("sign the DPoP proof")
 }
 

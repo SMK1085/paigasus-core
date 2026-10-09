@@ -229,9 +229,12 @@ async fn serve() -> anyhow::Result<()> {
         // `AuthLayer` is deliberately NOT on this `Server`'s layer stack (unlike `grpc::router`):
         // it needs `AppState`, which does not exist yet, so it lives inside `boot::Serving`.
         let routes = boot::boot_grpc_routes(slot.clone(), health_server);
+        let max_token_bytes = config.authn.max_token_bytes;
         servers.spawn(async move {
             tonic::transport::Server::builder()
                 .timeout(request_timeout)
+                // SMA-700 § 4.8: room for the DPoP follow-up's token and proof metadata.
+                .http2_max_header_list_size(grpc::grpc_max_header_list_size(max_token_bytes))
                 .layer(paigasus_observability::CorrelationLayer)
                 .serve_with_incoming_shutdown(routes.prepare(), grpc_incoming, async move {
                     let _ = rx.changed().await;

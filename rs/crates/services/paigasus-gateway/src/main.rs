@@ -96,7 +96,11 @@ async fn serve() -> anyhow::Result<()> {
         max_request_bytes: config.max_request_bytes,
         capabilities: Capabilities::from_config(&config),
         limits: limits.limits,
+        dpop_enabled: config.dpop.enabled,
     };
+    if config.dpop.enabled {
+        tracing::info!("DPoP is on: the protected routes accept Authorization: DPoP with one DPoP proof header; IAM must have authn.dpop on");
+    }
 
     let app = router(state);
     // Same-port `/metrics`: merged onto the main router only when enabled AND no separate

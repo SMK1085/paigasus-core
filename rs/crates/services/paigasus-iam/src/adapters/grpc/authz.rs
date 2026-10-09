@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use paigasus_iam_core::authz::model::{ContextValue, PolicyKind};
-use paigasus_iam_core::{AccessRequest, Action, Effect, PolicyDocument, RequestContext};
+use paigasus_iam_core::{AccessRequest, Action, AuthnError, Effect, PolicyDocument, ProofDefect, RequestContext};
 use paigasus_kernel::Prn;
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::authorization_service_server::AuthorizationService;
@@ -39,6 +39,7 @@ use uuid::Uuid;
 
 use super::convert;
 use crate::adapters::auth::AuthContext;
+use crate::adapters::auth::DpopFollowUp;
 use crate::adapters::http::AppState;
 use crate::application::error::TenancyError;
 use crate::application::roles::ListRoleGrantsInput;
@@ -90,6 +91,15 @@ fn require_authz_admin(state: &AppState) -> Result<(), Status> {
     }
 }
 
+/// SMA-700 § 4.8: a DPoP follow-up answers only a self-query. The gateway always self-queries,
+/// so this costs nothing; it binds the one-time ticket to the question.
+fn follow_up_self_query(is_follow_up: bool, actor: &Prn, principal: &Prn) -> Result<(), Status> {
+    if is_follow_up && principal != actor {
+        return Err(convert::authn_status(&AuthnError::InvalidDpopProof(ProofDefect::FollowUp)));
+    }
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl AuthorizationService for AuthzGrpc {
     /// `IsAuthorized`: see the module docs for the self/admin exposure rule.
@@ -97,10 +107,12 @@ impl AuthorizationService for AuthzGrpc {
         let started = Instant::now();
         let result: Result<Response<IsAuthorizedResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
+            let is_follow_up = request.extensions().get::<DpopFollowUp>().is_some();
             let req = request.into_inner();
 
             let action = Action::parse(&req.action).ok_or_else(|| convert::status_to_grpc(TenancyError::InvalidAction(req.action.clone())))?;
             let principal = parse_prn(&req.principal_prn).map_err(convert::status_to_grpc)?;
+            follow_up_self_query(is_follow_up, &actor, &principal)?;
             let resource = parse_prn(&req.resource_prn).map_err(convert::status_to_grpc)?;
             let context = RequestContext(req.context.into_iter().map(|(k, v)| (k, ContextValue::Str(v))).collect());
             let access_req = AccessRequest { principal, action, resource, context };
@@ -281,5 +293,30 @@ impl AuthorizationService for AuthzGrpc {
         .await;
         record_grpc("Authorization", "RetireSystemPolicy", started, &result);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+    fn prn(id: u128) -> Prn {
+        Prn::build("iam", "", None, "principal", Uuid::from_u128(id)).unwrap()
+    }
+
+    #[test]
+    fn a_follow_up_must_be_a_self_query() {
+        // SMA-700 § 4.8 / § 5.1: a self-query passes, another principal_prn is refused.
+        assert!(follow_up_self_query(true, &prn(1), &prn(1)).is_ok());
+        let status = follow_up_self_query(true, &prn(1), &prn(2)).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        let details = tonic_types::StatusExt::get_error_details(&status);
+        assert_eq!(
+            details.error_info().expect("ErrorInfo").reason,
+            ErrorReason::InvalidDpopProof.as_wire_reason().expect("a declared reason")
+        );
+        // No follow-up: the exposure rule of `decide_gated` decides, as before.
+        assert!(follow_up_self_query(false, &prn(1), &prn(2)).is_ok());
     }
 }

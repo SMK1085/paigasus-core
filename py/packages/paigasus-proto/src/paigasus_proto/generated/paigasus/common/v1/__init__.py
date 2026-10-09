@@ -478,6 +478,16 @@ class ErrorReason(betterproto2.Enum):
     (issuer, subject) pair.
     """
 
+    DPOP_QUOTA_EXCEEDED = 46
+    """
+    ---- IAM: DPoP (1-299) ---------------------------------------------------
+    SMA-700. Emitted by Introspect when the replay store refuses a proof.
+
+    "dpop-quota-exceeded" — the caller sent more DPoP proofs than its quota allows inside the
+    proof window. Retry after the RetryInfo delay. The gateway answers with its own
+    "rate-limited".
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -634,6 +644,13 @@ class ErrorReason(betterproto2.Enum):
     907, and held by the same source scan (SMA-588).
     """
 
+    INVALID_DPOP_PROOF = 909
+    """
+    In the shared range (900-999). Emitted by IAM and by the gateway (SMA-700 D19).
+    "invalid-dpop-proof" — the DPoP proof is missing, malformed, or does not match the
+    request or the token.
+    """
+
     @classmethod
     def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
         return {
@@ -683,6 +700,7 @@ class ErrorReason(betterproto2.Enum):
             43: "ERROR_REASON_INVALID_SUBJECT",
             44: "ERROR_REASON_CANNOT_UNLINK_OWN_IDENTITY",
             45: "ERROR_REASON_EXTERNAL_IDENTITY_EXISTS",
+            46: "ERROR_REASON_DPOP_QUOTA_EXCEEDED",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -705,6 +723,7 @@ class ErrorReason(betterproto2.Enum):
             906: "ERROR_REASON_INVALID_REQUEST_SCHEMA",
             907: "ERROR_REASON_INVALID_QUERY_PARAMETER",
             908: "ERROR_REASON_INVALID_PATH_SEGMENT",
+            909: "ERROR_REASON_INVALID_DPOP_PROOF",
         }
 
     @classmethod
@@ -756,6 +775,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_INVALID_SUBJECT": 43,
             "ERROR_REASON_CANNOT_UNLINK_OWN_IDENTITY": 44,
             "ERROR_REASON_EXTERNAL_IDENTITY_EXISTS": 45,
+            "ERROR_REASON_DPOP_QUOTA_EXCEEDED": 46,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,
@@ -778,6 +798,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_INVALID_REQUEST_SCHEMA": 906,
             "ERROR_REASON_INVALID_QUERY_PARAMETER": 907,
             "ERROR_REASON_INVALID_PATH_SEGMENT": 908,
+            "ERROR_REASON_INVALID_DPOP_PROOF": 909,
         }
 
 
