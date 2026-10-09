@@ -1605,6 +1605,11 @@ class StepAllowlist:
     hint: str
     # SMA-735 V20. A segment whose words equal one of these tuples exactly is allowed.
     exact: tuple[tuple[str, ...], ...] = ()
+    # SMA-735 V19. ((leading words, flag), ...): a segment that starts with the leading words
+    # must carry the flag as one plain word (see _required_flag_verdict).
+    required_flags: tuple[tuple[tuple[str, ...], str], ...] = ()
+    # SMA-735. Refuse a lone `&`: the step can end before the background command does.
+    refuse_background: bool = False
 
 
 # V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
@@ -1707,11 +1712,12 @@ _V18_WORD_SPLIT_RE = re.compile(r"[ \t]+")
 _V18_SUBST_MARKERS = ("$(", "`", "<(", ">(")
 
 
-def v18_split(text: str) -> tuple[list[str], str | None]:
+def v18_split(text: str, seps: list[str] | None = None) -> tuple[list[str], str | None]:
     """Split one logical line into command segments on UNQUOTED `;`, `&`, `|`, `&&`, `||` and
     `|&`. Tracks single quotes, double quotes and backslash escapes. An `&` that belongs to a
     redirection (`>&2`, `2>&1`, `<&`, `&>`) does not split. A line with an unterminated quote is
-    refused. Not a shell parser: it knows no heredoc, no `$(( ))` and no brace group."""
+    refused. Not a shell parser: it knows no heredoc, no `$(( ))` and no brace group.
+    When seps is a list, each separator found is appended to it (SMA-735 V19 and V20 refuse a lone `&`)."""
     segs: list[str] = []
     cur: list[str] = []
     quote = ""
@@ -1745,6 +1751,8 @@ def v18_split(text: str) -> tuple[list[str], str | None]:
                 i += 1
                 continue
             width = 2 if text[i:i + 2] in ("&&", "||", "|&") else 1
+            if seps is not None:
+                seps.append(text[i:i + width])
             segs.append("".join(cur))
             cur = []
             i += width
@@ -1772,7 +1780,7 @@ def _v18_unquoted_paren(text: str) -> bool:
     return False
 
 
-def v18_line_segments(line: str) -> tuple[list[str], str | None]:
+def v18_line_segments(line: str, seps: list[str] | None = None) -> tuple[list[str], str | None]:
     """The command segments of one logical line for V18, and a reason to refuse the line, if any.
     command_segments is not used (see README L43). A line that is one `NAME="$(...)"` is
     unwrapped first. Then `$(`, a backtick, `<(` and `>(` are refused anywhere, quotes included:
@@ -1795,7 +1803,25 @@ def v18_line_segments(line: str) -> tuple[list[str], str | None]:
     for mark in _V18_SUBST_MARKERS:
         if mark in text:
             return [], f"a substitution ({mark!r})"
-    return v18_split(text)
+    return v18_split(text, seps)
+
+
+def _required_flag_verdict(text: str, tail: list[str], lead: tuple[str, ...], flag: str) -> str | None:
+    """SMA-735 V19. The reason a segment that runs `lead` does not pass `flag` as one plain word,
+    or None. Fail closed: a quote, a backslash or a `$` anywhere in such a segment can change
+    the words that bash passes, so the segment is refused rather than read. A word after `--`
+    is not a flag."""
+    cmd = " ".join(lead)
+    if any(c in text for c in "'\"\\$"):
+        return (f"`{cmd}` with a quote, a backslash or a `$` in the same command; write its flags "
+                f"as plain words, so the guard can read {flag}")
+    if "--" in tail:
+        tail = tail[:tail.index("--")]
+    if any(w.startswith(flag + "=") for w in tail):
+        return f"`{cmd}` with `{flag}=…`; only the plain word {flag} is accepted"
+    if flag not in tail:
+        return f"`{cmd}` without {flag}"
+    return None
 
 
 def segment_verdict(segment: str, row: StepAllowlist) -> str | None:
@@ -1829,6 +1855,11 @@ def segment_verdict(segment: str, row: StepAllowlist) -> str | None:
             if not _V18_SET_WORD_RE.fullmatch(w):
                 return (f"`set` with {w!r}, which is not on the allowlist (`-a`, `-o allexport` and "
                         f"`-k` export later assignments)")
+    for lead, flag in row.required_flags:
+        if tuple(words[:len(lead)]) == lead:
+            why = _required_flag_verdict(s, words[len(lead):], lead, flag)
+            if why:
+                return why
     if tuple(words) in row.exact:
         return None
     rest = " ".join(words)
@@ -1952,11 +1983,16 @@ def allowlist_job_violations(doc: dict, name: str, row: StepAllowlist) -> list[s
                 if refused:
                     out.append(f"{where}: {refused}. {row.hint}")
                 for line in lines:
-                    segs, refused = v18_line_segments(line)
+                    seps: list[str] = []
+                    segs, refused = v18_line_segments(line, seps)
                     if refused:
                         out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not "
                                    f"allowed: {refused}. {row.hint}")
                         continue
+                    if row.refuse_background and "&" in seps:
+                        out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not allowed: "
+                                   f"a lone `&` runs the command in the background, so the step "
+                                   f"can end before the command does. {row.hint}")
                     for seg in segs:
                         why = segment_verdict(seg, row)
                         if why:
@@ -2002,6 +2038,7 @@ V20_ROW = StepAllowlist(
     with_keys={"actions/checkout": frozenset({"persist-credentials"})},
     hint=V20_HINT,
     exact=(VERIFY_COMMAND,),
+    refuse_background=True,
 )
 # A bare `if:` is an expression without the `${{ }}` wrapper, so `if: github.token != ''`
 # reads the github context with no span to find.
@@ -2063,6 +2100,69 @@ def verify_job_violations(doc: dict, name: str) -> list[str]:
     if len(verify_runs) != 1:
         out.append(f"{where} runs `{' '.join(VERIFY_COMMAND)}` in {len(verify_runs)} steps; "
                    f"exactly one step must run it. {V20_HINT}")
+    return out
+
+
+# V19 (SMA-735). The `release` job holds CARGO_REGISTRY_TOKEN, the App installation token and the
+# App private key. So it may compile nothing (spec A1): `release-plz release` must carry
+# --no-verify, which release-plz passes to every `cargo publish` (spec F1, M2), and every step
+# must match the allowlist below. The verify build runs in `verify-crates` (V20) instead.
+# Liveness: the job must exist, and no other job may authenticate with crates.io or run
+# `release-plz release`, so a rename cannot switch V19 off. Scoped to RELEASE_WORKFLOW_NAME (D7).
+RELEASE_JOBS = frozenset({"release"})
+V19_HINT = ("The release job holds the crates.io token and the App credentials, so it may run only "
+            "the tools on V19's allowlist, and `release-plz release` must carry --no-verify "
+            "(docs/superpowers/specs/2026-10-09-sma-735-release-job-no-compile-design.md, "
+            "section 5.4).")
+V19_ROW = StepAllowlist(
+    rule="V19",
+    subject="the release job",
+    jobs=tuple(sorted(RELEASE_JOBS)),
+    actions=frozenset({"rust-lang/crates-io-auth-action", "actions/create-github-app-token",
+                       "actions/checkout", "moonrepo/setup-toolchain"}),
+    commands=frozenset({"set", "echo"}),
+    keywords=frozenset(),
+    prefixes=("proto install release-plz", "release-plz release"),
+    step_keys=frozenset({"name", "id", "uses", "with", "env", "run", "working-directory"}),
+    env_names=frozenset({"CARGO_REGISTRY_TOKEN", "GIT_TOKEN"}),
+    workdirs=frozenset({"rs"}),
+    with_keys={
+        "rust-lang/crates-io-auth-action": frozenset(),
+        "actions/create-github-app-token": frozenset({"client-id", "private-key", "permission-contents"}),
+        "actions/checkout": frozenset({"fetch-depth", "persist-credentials"}),
+        "moonrepo/setup-toolchain": frozenset({"cache"}),
+    },
+    hint=V19_HINT,
+    required_flags=((("release-plz", "release"), "--no-verify"),),
+    refuse_background=True,
+)
+_CRATES_IO_AUTH_ACTION = "rust-lang/crates-io-auth-action"
+_RELEASE_PLZ_RELEASE_RE = re.compile(r"release-plz\s+release(?![-\w])")
+
+
+def release_job_violations(doc: dict, name: str) -> list[str]:
+    """V19 (SMA-735): liveness, then the V19 row of the engine."""
+    if name != RELEASE_WORKFLOW_NAME:
+        return []
+    jobs = doc["jobs"]
+    out: list[str] = []
+    for jid in sorted(RELEASE_JOBS):
+        if not isinstance(jobs.get(jid), dict):
+            out.append(f"{name}: V19: no job named '{jid}' exists. V19 keys on that literal name, "
+                       f"so a rename switches it off. {V19_HINT}")
+    for jid, job in jobs.items():
+        if jid in RELEASE_JOBS or not isinstance(job, dict):
+            continue
+        for step in steps_of(job, f"{name}: job '{jid}'"):
+            if not isinstance(step, dict):
+                continue
+            live_action = str(step.get("uses") or "").split("@", 1)[0].lower()
+            if live_action == _CRATES_IO_AUTH_ACTION or _RELEASE_PLZ_RELEASE_RE.search(str(step.get("run") or "")):
+                out.append(f"{name}: V19: job '{jid}' authenticates with crates.io or runs "
+                           f"`release-plz release`, but it is not in RELEASE_JOBS "
+                           f"{sorted(RELEASE_JOBS)}. Only a V19 job may publish to crates.io. {V19_HINT}")
+                break
+    out += allowlist_job_violations(doc, name, V19_ROW)
     return out
 
 
@@ -5128,6 +5228,89 @@ def _sma735_v20_bites() -> str | None:
     return _sma735_cases_bite(_SMA735_V20_CASES, _SMA735_V20_CASE_COUNT, verify_job_violations, "V20")
 
 
+_V19_STEP = "Release"
+_SMA735_V19_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
+    ("no --no-verify", "release", "run", (_V19_STEP, 'set -euo pipefail\nOUT="$(release-plz release --output json)"\necho "$OUT"'), True),
+    ("--no-verify=false", "release", "run", (_V19_STEP, 'OUT="$(release-plz release --output json --no-verify=false)"'), True),
+    ("--no-verify=true", "release", "run", (_V19_STEP, 'OUT="$(release-plz release --output json --no-verify=true)"'), True),
+    ("--no-verify then --no-verify=false", "release", "run", (_V19_STEP, "release-plz release --no-verify --no-verify=false"), True),
+    ("--no-verify only in a comment", "release", "run", (_V19_STEP, "# release-plz release --no-verify\nrelease-plz release --output json"), True),
+    ("--no-verify inside a single-quoted string", "release", "run", (_V19_STEP, "release-plz release --output 'json --no-verify x'"), True),
+    ("--no-verify inside a double-quoted string", "release", "run", (_V19_STEP, 'release-plz release --output "json --no-verify x"'), True),
+    ("--no-verify after --", "release", "run", (_V19_STEP, "release-plz release --output json -- --no-verify"), True),
+    ("a variable after --no-verify", "release", "run", (_V19_STEP, "release-plz release --no-verify $EXTRA"), True),
+    ("a second release-plz release without the flag", "release", "run", (_V19_STEP, "release-plz release --no-verify\nrelease-plz release"), True),
+    ("cargo publish", "release", "step", {"run": "cargo publish"}, True),
+    ("cargo build", "release", "step", {"run": "cargo build"}, True),
+    ("cargo package", "release", "step", {"run": "cargo package"}, True),
+    ("moon setup", "release", "step", {"run": "moon setup"}, True),
+    ("pnpm install", "release", "step", {"run": "pnpm --dir ts install --frozen-lockfile"}, True),
+    ("release-plz release --no-verify && cargo build", "release", "run", (_V19_STEP, "release-plz release --no-verify && cargo build"), True),
+    ("release-plz release --no-verify &", "release", "run", (_V19_STEP, "release-plz release --no-verify &"), True),
+    ("release-plz release-pr in the release job", "release", "run", (_V19_STEP, "release-plz release-pr --output json"), True),
+    ("release-plz update", "release", "run", (_V19_STEP, "release-plz update"), True),
+    ("an if keyword", "release", "run", (_V19_STEP, "if true; then release-plz release --no-verify; fi"), True),
+    ("set -a", "release", "run", (_V19_STEP, "set -a\nrelease-plz release --no-verify"), True),
+    ("uses setup-node", "release", "step", {"uses": "actions/setup-node@v4"}, True),
+    ("uses a local action", "release", "step", {"uses": "./local-action"}, True),
+    ("an env name outside the set", "release", "step-key", (_V19_STEP, "env", {"CARGO_REGISTRY_TOKEN": "x", "RUSTC_WRAPPER": "./x"}), True),
+    ("a working-directory outside the set", "release", "step-key", (_V19_STEP, "working-directory", "ts"), True),
+    ("a step if", "release", "step-key", (_V19_STEP, "if", "always()"), True),
+    ("a step continue-on-error", "release", "step-key", (_V19_STEP, "continue-on-error", True), True),
+    ("a step shell", "release", "step-key", (_V19_STEP, "shell", "bash"), True),
+    ("a with key on crates-io-auth-action", "release", "step-key", ("Authenticate with crates.io", "with", {"audience": "x"}), True),
+    ("a checkout without persist-credentials false", "release", "step-key", ("Checkout", "with", {"fetch-depth": 0}), True),
+    ("a job container", "release", "job-key", ("container", "ubuntu:24.04"), True),
+    ("a job env", "release", "job-key", ("env", {"RUSTC_WRAPPER": "./x"}), True),
+    ("a workflow defaults", "release", "doc-key", ("defaults", {"run": {"shell": "python {0}"}}), True),
+    ("the job renamed", "release", "rename", "publish-crates", True),
+    ("a second job with crates-io-auth-action", "extra", "add-job",
+     {"runs-on": "ubuntu-latest", "steps": [{"uses": "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18"}]}, True),
+    ("a second job with an upper-case crates-io-auth-action path", "extra", "add-job",
+     {"runs-on": "ubuntu-latest", "steps": [{"uses": "Rust-Lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18"}]}, True),
+    ("a second job that runs release-plz release", "extra", "add-job",
+     {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz release --no-verify"}]}, True),
+    ("the target shape", "release", "none", None, False),
+    ("the flags in another order", "release", "run",
+     (_V19_STEP, 'set -euo pipefail\nOUT="$(release-plz release --no-verify --output json)"\necho "$OUT"\necho "json=$OUT" >> "$GITHUB_OUTPUT"'), False),
+    ("release-plz release-pr in the release-pr job", "release-pr", "step", {"run": "release-plz release-pr --output json"}, False),
+)
+_SMA735_V19_CASE_COUNT = 40
+
+
+def _sma735_v19_bites() -> str | None:
+    # RELEASE_JOBS is pinned by strict equality, the same style as _ungated_jobs_pinned: adding
+    # a job id would switch the V19 allowlist on for it, removing one switches V19 off.
+    if {"release"} != RELEASE_JOBS or V19_ROW.jobs != ("release",):
+        return f"RELEASE_JOBS is {sorted(RELEASE_JOBS)!r} (V19 checks {V19_ROW.jobs!r}), expected exactly ['release']"
+    return _sma735_cases_bite(_SMA735_V19_CASES, _SMA735_V19_CASE_COUNT, release_job_violations, "V19")
+
+
+def _sma735_cross_row_and_scope() -> str | None:
+    """Each row is silent outside its own jobs (spec §5.6 cross-row cases), and V19 and V20 are
+    silent outside the release workflow (D7)."""
+    checks = {"V18": ungated_job_violations, "V19": release_job_violations, "V20": verify_job_violations}
+    owner = {"release-pr": "V18", "release": "V19", "verify-crates": "V20"}
+    for job_id, rule in owner.items():
+        doc = _sma735_apply(_sma735_doc(), job_id, "step", {"run": "cargo build"})
+        for other, fn in checks.items():
+            found = fn(doc, RELEASE_WORKFLOW_NAME)
+            if other == rule and not found:
+                return f"{rule} stayed silent on `cargo build` in '{job_id}'"
+            if other != rule and found:
+                return f"{other} fired on '{job_id}', which only {rule} owns: {found}"
+    for rule, fn in (("V18", ungated_job_violations), ("V19", release_job_violations), ("V20", verify_job_violations)):
+        if fn(_sma735_doc(), RELEASE_WORKFLOW_NAME):
+            return f"{rule} fired on the clean target shape"
+    broken = _sma735_apply(_sma735_apply(_sma735_doc(), "release", "drop", None), "verify-crates", "drop", None)
+    for rule, fn in (("V19", release_job_violations), ("V20", verify_job_violations)):
+        if fn(broken, "fixture"):
+            return f"{rule} fired on a file that is not {RELEASE_WORKFLOW_NAME}"
+        if not fn(broken, RELEASE_WORKFLOW_NAME):
+            return f"{rule} stayed silent on {RELEASE_WORKFLOW_NAME} with its job dropped"
+    return None
+
+
 def self_test() -> int:
     rc = 0
     for name, kind, text, want in FIXTURES:
@@ -5179,6 +5362,10 @@ def self_test() -> int:
          _sma684_v18_allowlist_bites),
         ("sma-735 V20 verify-crates: every rejected shape reds, the target shape is clean",
          _sma735_v20_bites),
+        ("sma-735 V19 release: every rejected shape reds, the target shape is clean",
+         _sma735_v19_bites),
+        ("sma-735 cross-row and scope: each row is silent outside its own jobs and files",
+         _sma735_cross_row_and_scope),
     ):
         err = fn()
         if err:
