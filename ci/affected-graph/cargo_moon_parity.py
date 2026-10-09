@@ -6255,6 +6255,70 @@ def self_test():
     broken["c-ts"]["task_input_globs"]["typecheck"] = []
     if any(r.startswith("rs/crates/bindings/wb/package.json") for r in _a13(broken, files=files)):
         failures.append("A13 printed a broken manifest again that A12a already reports")
+
+    # A13 (SMA-736 §4.7, T11) — the real-corpus pin. Every tracked vitest config is parsed, and the
+    # result must equal this literal table of (config, sorted aliases, tsconfig_off). A parser change
+    # that alters what it finds in a real config reds here, and so does a new config file: add it to
+    # the table on purpose. Spec R1.
+    a13_corpus = (
+        ("ts/apps/gateway-console/vitest.config.ts", (
+            ("next/cache", "ts/apps/gateway-console/tests/support/next-cache.ts"),
+            ("next/headers", "ts/apps/gateway-console/tests/support/next-headers.ts"),
+            ("server-only", "ts/apps/gateway-console/tests/support/server-only-stub.ts"),
+        ), True),
+        ("ts/apps/iam-console/vitest.config.ts", (
+            ("next/cache", "ts/apps/iam-console/tests/support/next-cache.ts"),
+            ("next/headers", "ts/apps/iam-console/tests/support/next-headers.ts"),
+            ("server-only", "ts/apps/iam-console/tests/support/server-only-stub.ts"),
+        ), True),
+        ("ts/packages/paigasus-app-shell/vitest.config.ts", (), False),
+        ("ts/packages/paigasus-auth/vitest.config.ts", (
+            ("server-only", "ts/packages/paigasus-auth/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-auth/vitest.containers.config.ts", (
+            ("server-only", "ts/packages/paigasus-auth/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-console-core/vitest.config.ts", (
+            ("next/cache", "ts/packages/paigasus-console-core/tests/support/next-cache.ts"),
+            ("next/headers", "ts/packages/paigasus-console-core/tests/support/next-headers.ts"),
+            ("server-only", "ts/packages/paigasus-console-core/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-console-core/vitest.containers.config.ts", (
+            ("server-only", "ts/packages/paigasus-console-core/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-discovery/vitest.config.ts", (
+            ("server-only", "ts/packages/paigasus-discovery/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-discovery/vitest.containers.config.ts", (
+            ("server-only", "ts/packages/paigasus-discovery/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-kernel/vitest.config.ts", (
+            ("@paigasus/node-bindings", "rs/crates/bindings/paigasus-node-bindings/index.js"),
+            ("@paigasus/wasm", "rs/crates/bindings/paigasus-wasm/.wasmpack-test-out/paigasus_wasm.js"),
+        ), False),
+        ("ts/packages/paigasus-next-config/vitest.config.ts", (), False),
+        ("ts/packages/paigasus-sdk/vitest.config.ts", (), False),
+        ("ts/packages/paigasus-ui/vitest.config.ts", (), False),
+    )
+    a13_corpus_root = Path(__file__).resolve().parents[2]
+    a13_corpus_paths = sorted(
+        p for p in task_inputs.tracked_files(a13_corpus_root)
+        if re.search(r"(^|/)vitest[^/]*\.config\.[^/]+$", p)
+    )
+    if a13_corpus_paths != [cfg for cfg, _aliases, _off in a13_corpus]:
+        failures.append(
+            f"the tracked vitest configs are {a13_corpus_paths}, but the A13 corpus pin lists "
+            f"{[cfg for cfg, _aliases, _off in a13_corpus]} — add a new config to the pin on purpose"
+        )
+    for cfg, want_aliases, want_off in a13_corpus:
+        rows = []
+        path = a13_corpus_root / cfg
+        aliases, off = vitest_config_facts(path.read_text(), cfg, rows) if path.is_file() else ([], False)
+        if rows or tuple(aliases) != want_aliases or off is not want_off:
+            failures.append(
+                f"the A13 parser reads {cfg} as aliases {aliases}, tsconfig_off {off}, rows {rows}; the "
+                f"corpus pin says aliases {list(want_aliases)}, tsconfig_off {want_off}, no rows"
+            )
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
