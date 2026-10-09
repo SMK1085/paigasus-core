@@ -534,6 +534,38 @@ export const sourceRules = [
 ];
 
 /**
+ * The SMA-725 kernel-accessor block, as an ESLint flat-config array. `ts/eslint.config.js` spreads
+ * it after `sourceRules`, and `tests/kernel-accessor-rules.test.ts` pins that spread.
+ *
+ * WHY NOT INSIDE `boundaryRules`. The liveness test there derives a `BOUNDARY_SCOPES` key from every
+ * block's `files[0]`, and `**` is not a package directory.
+ *
+ * Scope: every linted source file, JS included, because the rule needs no type information.
+ * Exempt: the kernel's own entry files (they import the raw names to re-export them), the four
+ * kernel tests that test the deprecated accessors while they exist (spec D1), and the console-core
+ * delegation guard, which imports the six to prove that nobody calls them. A NEW kernel test is not
+ * exempt. The block registers its own plugin, so it depends on no other block.
+ *
+ * @type {import('eslint').Linter.Config[]}
+ */
+export const kernelAccessorRules = [
+  {
+    name: 'paigasus/kernel/no-single-field-prn-accessor',
+    files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    ignores: [
+      'packages/paigasus-kernel/src/**',
+      'packages/paigasus-kernel/tests/prn-fields.test.ts',
+      'packages/paigasus-kernel/tests/prn-fields.wasm.test.ts',
+      'packages/paigasus-kernel/tests/prn-canonical.test.ts',
+      'packages/paigasus-kernel/tests/prn-canonical.wasm.test.ts',
+      'packages/paigasus-console-core/tests/unit/prn-tenancy-delegation.test.ts',
+    ],
+    plugins: { paigasus: paigasusPlugin },
+    rules: { 'paigasus/no-single-field-prn-accessor': 'error' },
+  },
+];
+
+/**
  * One Next.js flat-config block per app (SMA-512).
  *
  * `settings.next.rootDir` must be PER APP so `no-html-link-for-pages` resolves each App Router at
