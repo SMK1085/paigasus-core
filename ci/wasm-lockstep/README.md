@@ -274,6 +274,7 @@ The workflow-level part of P19 repeats the P25 `env:` allow-list, not P26.
   `propose` allowlist.
 - In `propose`, P26 refuses each change in the four bullets above, because it pins every step.
   They stay limits of the rules themselves. The first two bullets still apply to `build`.
+  `git config <key>` and `GIT_CONFIG_COUNT` also pass on the unpinned `build` steps.
 - P19 does not see an indirect form, such as `${!f}`.
 - An earlier build step can write the runner env files indirectly. Two examples are `${!m}` on
   `GITHUB_ENV` and a write to `$RUNNER_TEMP/_runner_file_commands/*`. Such a write can set

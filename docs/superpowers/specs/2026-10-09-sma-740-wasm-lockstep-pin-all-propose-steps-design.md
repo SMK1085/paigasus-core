@@ -341,8 +341,8 @@ occurs more than once still fails.
   2026-10-09. The challenge added condition 3 (the message start) to the want. Without it, a row
   that changed the wrong step passed.
 - **D3. One rule id.** P26 gets wider. No P27.
-- **D4. An allow-list of the `propose` job keys.** Added after the challenge. Sven did not approve
-  it before GATE 1. Without it, `concurrency:`, `strategy:`, `outputs:` and a key that GitHub adds
+- **D4. An allow-list of the `propose` job keys.** Added after the challenge. Sven approved the spec
+  as written at GATE 1 on 2026-10-09, so D4 is in. Without it, `concurrency:`, `strategy:`, `outputs:` and a key that GitHub adds
   later pass in silence. The challenger found no route through these keys that changes the tree
   today, so this is a fail-closed measure, not a fix of a known attack.
 - **D5. The `name:` of `token` is not checked for a `secrets` read.** It is stated in the README.
@@ -351,11 +351,12 @@ occurs more than once still fails.
   PyYAML reads U+0085 (NEL) as a line break. YAML 1.2 does not. If the GitHub parser keeps NEL as
   a normal character, bash can see one line where P26 sees two. Nobody measured the GitHub parser.
   A cheap measure is a P0 check that refuses U+0085, U+2028 and U+2029 in the raw workflow text.
-  This spec does not include it. Sven decides at GATE 1: include it, or make a follow-up issue.
+  This spec does not include it. Sven approved the spec as written at GATE 1 on 2026-10-09. The check is out of scope for SMA-740.
+  No follow-up issue exists yet.
 - **Q2. Runners.** The SMA-739 reason for an unpinned `runs-on:` assumes only GitHub-hosted
   runners. If the repository has a self-hosted runner or a larger runner with a custom image,
-  `runs-on:` can select a different system `git` configuration for `git add`. Sven confirms at
-  GATE 1.
+  `runs-on:` can select a different system `git` configuration for `git add`. Sven gave no answer
+  at GATE 1. This question stays open.
 
 ## 9. Challenge changelog
 
