@@ -215,6 +215,15 @@ tasks:
       - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
+      # SMA-736 — A13 READS every vitest config and every tsconfig.json `extends` chain from disk,
+      # so an edit to one of these files alone must schedule this gate. Without these globs the
+      # assertion is real but unreachable on exactly the PR that adds an alias or moves a config.
+      # Plain globs, never a brace pattern: ci/affected-graph/task_inputs.py rejects braces.
+      - 'ts/packages/*/vitest*.config.*'
+      - 'ts/apps/*/vitest*.config.*'
+      - 'ts/packages/*/tsconfig*.json'
+      - 'ts/apps/*/tsconfig*.json'
+      - 'ts/tsconfig.base.json'
       # SMA-542 — this task now pins the call sites of repo:actionlint's self-tests and mutation
       # battery (ACTIONLINT_SH_CALL_SITES), so a change under ci/actionlint/ MUST re-key it.
       # Without this the pin is real but unreachable: the PR that deletes those lines does not

@@ -3131,8 +3131,11 @@ def check_ts_vitest_inputs(projects, root, tracked, floor=REQUIRED_VITEST_TASKS,
             )
         else:
             patterns = [_moon_glob_re(g) for g in smoke_globs if not g.startswith("!")]
+            # A negated glob removes a file from the inputs, even when a positive glob matches it.
+            excluded = [_moon_glob_re(g[1:]) for g in smoke_globs if g.startswith("!")]
             for cfg in sorted(configs_read):
-                if cfg not in smoke_files and not any(p.fullmatch(cfg) for p in patterns):
+                reached = cfg in smoke_files or any(p.fullmatch(cfg) for p in patterns)
+                if not reached or any(p.fullmatch(cfg) for p in excluded):
                     task_rows.append(
                         f"{cfg} matches no input of {AFFECTED_SMOKE_PROJECT}:{AFFECTED_SMOKE_TASK}, so an edit to it "
                         f"alone does not schedule the gate that reads it"
@@ -6237,6 +6240,12 @@ def self_test():
     for cfg in ("ts/packages/core/vitest.e2e.config.ts", "ts/apps/app/vitest.config.ts"):
         if f"{cfg} matches no input of repo:affected-smoke, so an edit to it alone does not schedule the gate that reads it" not in rows:
             failures.append(f"A13 did not report that {cfg} cannot schedule repo:affected-smoke")
+    # A negated glob excludes a config that a positive glob matches (coordinator ruling, SMA-736).
+    a13_neg_row = "ts/apps/app/vitest.config.ts matches no input of repo:affected-smoke, so an edit to it alone does not schedule the gate that reads it"
+    broken = _a12_copy(a13)
+    broken["repo"]["task_input_globs"]["affected-smoke"] = [*broken["repo"]["task_input_globs"]["affected-smoke"], "!ts/apps/app/vitest.config.ts"]
+    if a13_neg_row not in _a13(broken):
+        failures.append("A13 counted a config as reachable although a negated glob of repo:affected-smoke excludes it")
     broken = _a12_copy(a13)
     del broken["repo"]["task_input_globs"]["affected-smoke"]
     if not any(r.startswith("repo:affected-smoke reported no `inputGlobs`") for r in _a13(broken)):
@@ -6313,7 +6322,10 @@ def self_test():
     for cfg, want_aliases, want_off in a13_corpus:
         rows = []
         path = a13_corpus_root / cfg
-        aliases, off = vitest_config_facts(path.read_text(), cfg, rows) if path.is_file() else ([], False)
+        if not path.is_file():
+            failures.append(f"the A13 corpus pin lists {cfg}, but it is not a file in the tree, so the parser cannot read it")
+            continue
+        aliases, off = vitest_config_facts(path.read_text(), cfg, rows)
         if rows or tuple(aliases) != want_aliases or off is not want_off:
             failures.append(
                 f"the A13 parser reads {cfg} as aliases {aliases}, tsconfig_off {off}, rows {rows}; the "
@@ -6516,7 +6528,9 @@ def collect_findings(projects, crates, root, tracked):
              "    `/<dir>/package.json` and each `files` entry that is not a `.d.ts`; each\n"
              "    tsconfig.json with its `extends` chain, unless every config sets `tsconfig: false`;\n"
              "    each tracked alias target outside the own package. A `deps omit contracts:generate`\n"
-             "    row needs `deps: ['contracts:generate']` on that task. See ci/affected-graph/README.md (A13)."),
+             "    row needs `deps: ['contracts:generate']` on that task. For a \"matches no input of\n"
+             "    repo:affected-smoke\" row, add a glob that matches the config to the inputs of\n"
+             "    `repo:affected-smoke` in the root moon.yml. See ci/affected-graph/README.md (A13)."),
     ]
 
     return findings
