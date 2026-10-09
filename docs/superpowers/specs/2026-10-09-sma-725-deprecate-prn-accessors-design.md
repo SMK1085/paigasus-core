@@ -297,10 +297,14 @@ spread selects these tests.
 
 - L1. The rule does not see a dynamic `import()`. It does not follow a module that does
   `export * from '@paigasus/kernel'`: an importer of that module is not watched. The
-  `@deprecated` tag still shows a strikethrough in an editor in both cases.
-- L2. The rule follows a namespace import only through a direct member access or a destructuring of
-  the namespace identifier. It does not follow the namespace when it is assigned to another
-  variable or passed to a function.
+  `@deprecated` tag still shows a strikethrough in an editor in both cases. CommonJS `require()`
+  and `import x = require()` are not followed.
+- L2. The rule follows a namespace import through a member access (dot, optional chain, string
+  literal key, or a template literal key with no expression). It also follows a destructuring in a
+  declaration or an assignment (identifier key, string-literal key, or computed string-literal
+  key). It does not follow a type position (`typeof k.x`), because a `typeof` reads a type only and
+  calls nothing at runtime. It does not follow a computed key that is not a constant. It does not
+  follow the namespace when it is assigned to another variable or passed to a function.
 - L3. The raw binding packages `@paigasus/node-bindings` and `@paigasus/wasm` carry no
   `@deprecated` tag in their generated `.d.ts`. The rule covers their imports (§ 4.2).
 - L4. The Python accessors stay and carry no mark (SMA-673 Q1).
