@@ -1610,6 +1610,12 @@ class StepAllowlist:
     required_flags: tuple[tuple[tuple[str, ...], str], ...] = ()
     # SMA-735. Refuse a lone `&`: the step can end before the background command does.
     refuse_background: bool = False
+    # SMA-735 final review. None: the row does not check redirections (V18, unchanged). A tuple:
+    # a segment with `<` or `>` must end in one of these texts and hold no other `<` or `>`.
+    # A write to $GITHUB_ENV or $GITHUB_PATH changes what a later step runs (BASH_ENV, a
+    # `cargo` earlier on PATH), and a write to a file such as rs/.cargo/config.toml changes
+    # what cargo runs.
+    redirects: tuple[str, ...] | None = None
 
 
 # V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
@@ -1842,6 +1848,12 @@ def segment_verdict(segment: str, row: StepAllowlist) -> str | None:
             break
         assigned = True
         s = s[m.end():].lstrip(_V18_BLANKS)
+    if row.redirects is not None and any(c in s for c in "<>"):
+        tail = next((r for r in row.redirects if s.endswith(r)), "")
+        if not tail or any(c in s[:len(s) - len(tail)] for c in "<>"):
+            allowed = " or ".join(repr(r) for r in row.redirects) or "none"
+            return (f"a redirection; this row allows only {allowed}. A write to $GITHUB_ENV, "
+                    f"$GITHUB_PATH or a file can change what a later command runs")
     words = [w for w in _V18_WORD_SPLIT_RE.split(s) if w]
     if assigned and words:
         return (f"an assignment before the command word {words[0]!r} puts the variable into that "
@@ -2039,6 +2051,7 @@ V20_ROW = StepAllowlist(
     hint=V20_HINT,
     exact=(VERIFY_COMMAND,),
     refuse_background=True,
+    redirects=(),
 )
 # A bare `if:` is an expression without the `${{ }}` wrapper, so `if: github.token != ''`
 # reads the github context with no span to find.
@@ -2122,7 +2135,8 @@ V19_ROW = StepAllowlist(
                        "actions/checkout", "moonrepo/setup-toolchain"}),
     commands=frozenset({"set", "echo"}),
     keywords=frozenset(),
-    prefixes=("proto install release-plz", "release-plz release"),
+    prefixes=("release-plz release",),
+    exact=(("proto", "install", "release-plz"),),
     step_keys=frozenset({"name", "id", "uses", "with", "env", "run", "working-directory"}),
     env_names=frozenset({"CARGO_REGISTRY_TOKEN", "GIT_TOKEN"}),
     workdirs=frozenset({"rs"}),
@@ -2135,9 +2149,25 @@ V19_ROW = StepAllowlist(
     hint=V19_HINT,
     required_flags=((("release-plz", "release"), "--no-verify"),),
     refuse_background=True,
+    redirects=('>> "$GITHUB_OUTPUT"',),
 )
 _CRATES_IO_AUTH_ACTION = "rust-lang/crates-io-auth-action"
-_RELEASE_PLZ_RELEASE_RE = re.compile(r"release-plz\s+release(?![-\w])")
+# Fail closed (SMA-735 final review): quotes, `$`, parentheses, backticks and separators become
+# blanks, and a backslash-newline joins two lines. A line runs `release-plz release` when a word
+# whose last path part is `release-plz` has the word `release` anywhere after it on that line, so
+# `release-plz -v release` and `release-plz 'release'` count. The echo text
+# `release-plz: no release PR needed` does not count: its word is `release-plz:`.
+_LIVENESS_BLANKS_RE = re.compile(r"""['"\\$(){}`;&|<>]""")
+_RELEASE_PLZ_ACTION_PREFIX = "release-plz/"
+
+
+def _runs_release_plz_release(run_text: str) -> bool:
+    for line in run_text.replace("\\\n", " ").split("\n"):
+        words = _LIVENESS_BLANKS_RE.sub(" ", line).split()
+        for i, word in enumerate(words):
+            if word.rsplit("/", 1)[-1] == "release-plz" and "release" in words[i + 1:]:
+                return True
+    return False
 
 
 def release_job_violations(doc: dict, name: str) -> list[str]:
@@ -2157,9 +2187,10 @@ def release_job_violations(doc: dict, name: str) -> list[str]:
             if not isinstance(step, dict):
                 continue
             live_action = str(step.get("uses") or "").split("@", 1)[0].lower()
-            if live_action == _CRATES_IO_AUTH_ACTION or _RELEASE_PLZ_RELEASE_RE.search(str(step.get("run") or "")):
+            if (live_action == _CRATES_IO_AUTH_ACTION or live_action.startswith(_RELEASE_PLZ_ACTION_PREFIX)
+                    or _runs_release_plz_release(str(step.get("run") or ""))):
                 out.append(f"{name}: V19: job '{jid}' authenticates with crates.io or runs "
-                           f"`release-plz release`, but it is not in RELEASE_JOBS "
+                           f"`release-plz release` (or uses a release-plz/ action), but it is not in RELEASE_JOBS "
                            f"{sorted(RELEASE_JOBS)}. Only a V19 job may publish to crates.io. {V19_HINT}")
                 break
     out += allowlist_job_violations(doc, name, V19_ROW)
@@ -5230,7 +5261,17 @@ _SMA735_V20_CASE_COUNT = 43
 def _sma735_v20_bites() -> str | None:
     if VERIFY_JOB != "verify-crates" or V20_ROW.jobs != (VERIFY_JOB,):
         return f"V20 checks {V20_ROW.jobs!r} (VERIFY_JOB {VERIFY_JOB!r}), expected exactly ('verify-crates',)"
-    return _sma735_cases_bite(_SMA735_V20_CASES, _SMA735_V20_CASE_COUNT, verify_job_violations, "V20")
+    table = _sma735_cases_bite(_SMA735_V20_CASES, _SMA735_V20_CASE_COUNT, verify_job_violations, "V20")
+    if table is not None:
+        return table
+    # Transitivity: approve-release reaches verify-crates through a middle job.
+    doc = _sma735_doc()
+    doc["jobs"]["mid"] = {"needs": ["verify-crates"], "runs-on": "ubuntu-latest", "steps": [{"run": "echo mid"}]}
+    doc["jobs"]["approve-release"]["needs"] = ["mid"]
+    found = verify_job_violations(doc, RELEASE_WORKFLOW_NAME)
+    if found:
+        return f"V20 red on a transitive path approve-release -> mid -> verify-crates: {found}"
+    return None
 
 
 _V19_STEP = "Release"
@@ -5275,12 +5316,21 @@ _SMA735_V19_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
      {"runs-on": "ubuntu-latest", "steps": [{"uses": "Rust-Lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18"}]}, True),
     ("a second job that runs release-plz release", "extra", "add-job",
      {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz release --no-verify"}]}, True),
+    ("an echo to $GITHUB_ENV", "release", "step", {"run": 'echo "BASH_ENV=$GITHUB_WORKSPACE/x.sh" >> "$GITHUB_ENV"'}, True),
+    ("an echo to $GITHUB_PATH", "release", "step", {"run": 'echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"'}, True),
+    ("an echo to a cargo config file", "release", "step", {"run": "echo x > rs/.cargo/config.toml"}, True),
+    ("a second redirection before $GITHUB_OUTPUT", "release", "run", (_V19_STEP, 'OUT="$(release-plz release --output json --no-verify)"\necho "json=$OUT" > x >> "$GITHUB_OUTPUT"'), True),
+    ("a second job with a release-plz/ action", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"uses": "release-plz/action@v0.5", "with": {"command": "release"}}]}, True),
+    ("a second job with release-plz -v release", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz -v release"}]}, True),
+    ("a second job with a quoted release", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz 'release'"}]}, True),
+    ("proto install release-plz with a version and --pin", "release", "step", {"run": "proto install release-plz 0.0.1 --pin"}, True),
+    ("the release-pr echo text in another job", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": 'echo "release-plz: no release PR needed"'}]}, False),
     ("the target shape", "release", "none", None, False),
     ("the flags in another order", "release", "run",
      (_V19_STEP, 'set -euo pipefail\nOUT="$(release-plz release --no-verify --output json)"\necho "$OUT"\necho "json=$OUT" >> "$GITHUB_OUTPUT"'), False),
     ("release-plz release-pr in the release-pr job", "release-pr", "step", {"run": "release-plz release-pr --output json"}, False),
 )
-_SMA735_V19_CASE_COUNT = 40
+_SMA735_V19_CASE_COUNT = 49
 
 
 def _sma735_v19_bites() -> str | None:
