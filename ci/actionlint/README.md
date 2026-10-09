@@ -708,7 +708,9 @@ as command words, and it is not a shell parser. It does not read a command insid
 string.
 
 V19 closes some cases of this for its own rule. A `release-plz release` command with a quote, a
-backslash or a `$` reds. So `--no-verify` cannot hide in a string or a variable. V19 allows only
+backslash or a `$` reds. So `--no-verify` cannot hide in a string or a variable.
+
+V19 allows only
 the redirection `>> "$GITHUB_OUTPUT"`. A write to `$GITHUB_ENV`, `$GITHUB_PATH` or a file reds.
 An assignment to a `GITHUB_*` name also reds, so `GITHUB_OUTPUT` cannot point to another file.
 V18 does not have these rules.
