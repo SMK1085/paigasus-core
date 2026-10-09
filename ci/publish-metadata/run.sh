@@ -932,12 +932,16 @@ verify_publish_groups() { # takes no argument
 
   local meta_json expected_csv publishable groups
   local status=0
+  local meta_err
   meta_json="$(mktemp)"
-  if ! cargo metadata --format-version 1 --no-deps >"$meta_json" 2>/dev/null; then
-    rm -f "$meta_json"
+  meta_err="$(mktemp)"
+  if ! cargo metadata --format-version 1 --no-deps >"$meta_json" 2>"$meta_err"; then
+    cat "$meta_err" >&2
+    rm -f "$meta_json" "$meta_err"
     echo "FATAL: reading the workspace metadata failed in $RS_DIR — nothing could be verified." >&2
     return 2
   fi
+  rm -f "$meta_err"
   expected_csv="$(IFS=,; printf '%s' "${EXPECTED_PUBLISHABLE[*]}")"
 
   publishable="$(publishable_set "$meta_json" "$expected_csv")" || status=$?
