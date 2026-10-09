@@ -23,6 +23,7 @@ import re
 import sys
 import tempfile
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
@@ -1581,6 +1582,29 @@ def chain_download_violations(jobs: dict, name: str) -> list[str]:
     return out
 
 
+@dataclass(frozen=True)
+class StepAllowlist:
+    """One row of the step-allowlist engine (SMA-735 D5). A row names its jobs and the actions,
+    command words, shell keywords, command prefixes, step keys, env names, working directories
+    and `with:` keys that those jobs may use. The engine checks each row on its own and never
+    merges the sets of two rows. Every message starts with `<file>: <rule>: ` and ends with
+    `hint`. The rules for every row: no workflow-level `defaults:` or `env:`, no job key in
+    UNGATED_JOB_BANNED_KEYS, no step `shell:`. See README L43 and L44."""
+
+    rule: str
+    subject: str
+    jobs: tuple[str, ...]
+    actions: frozenset[str]
+    commands: frozenset[str]
+    keywords: frozenset[str]
+    prefixes: tuple[str, ...]
+    step_keys: frozenset[str]
+    env_names: frozenset[str]
+    workdirs: frozenset[str]
+    with_keys: dict[str, frozenset[str]]
+    hint: str
+
+
 # V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
 # the runner receives every secret a job references when the job starts, so code in ANY step of
 # the job can read it, not only a step with a token in its env:. So no step of such a job may
@@ -1772,11 +1796,11 @@ def v18_line_segments(line: str) -> tuple[list[str], str | None]:
     return v18_split(text)
 
 
-def v18_segment_verdict(segment: str) -> str | None:
-    """None when one command segment may run in an UNGATED_JOBS member, else the reason it may
-    not. Leading variable assignments are removed; then shell keywords; then the rest must start
-    with an allowed command prefix or an allowed command word. Substitutions never reach here:
-    v18_line_segments refuses them. Not a shell parser: see README L43.
+def segment_verdict(segment: str, row: StepAllowlist) -> str | None:
+    """None when one command segment may run in a job of `row`, else the reason it may not.
+    Leading variable assignments are removed; then the row's shell keywords; then the rest must
+    start with one of the row's command prefixes or command words. Substitutions never reach
+    here: v18_line_segments refuses them. Not a shell parser: see README L43.
 
     An assignment before a command word puts the variable into that command's environment, so
     `BASH_ENV=./x.sh bash ci/version-lockstep/run.sh --write` and `GIT_EXTERNAL_DIFF=./x git diff`
@@ -1794,7 +1818,7 @@ def v18_segment_verdict(segment: str) -> str | None:
     if assigned and words:
         return (f"an assignment before the command word {words[0]!r} puts the variable into that "
                 f"command's environment")
-    while words and words[0] in UNGATED_JOB_KEYWORDS:
+    while words and words[0] in row.keywords:
         words = words[1:]
     if not words:
         return None
@@ -1804,10 +1828,10 @@ def v18_segment_verdict(segment: str) -> str | None:
                 return (f"`set` with {w!r}, which is not on the allowlist (`-a`, `-o allexport` and "
                         f"`-k` export later assignments)")
     rest = " ".join(words)
-    for prefix in UNGATED_JOB_PREFIXES:
+    for prefix in row.prefixes:
         if rest == prefix or rest.startswith(prefix + " "):
             return None
-    if words[0] in UNGATED_JOB_COMMANDS:
+    if words[0] in row.commands:
         return None
     return f"the command word {words[0]!r} is not on the allowlist"
 
@@ -1826,12 +1850,30 @@ UNGATED_JOB_WITH_KEYS = {
 }
 
 
-def _v18_step_config_violations(step: dict, action: str | None) -> list[str]:
+# V18 as a row of the engine (SMA-735 D5). What V18 accepts does not change: the
+# _SMA684_V18_CASES table and its count of 147 pin it.
+V18_ROW = StepAllowlist(
+    rule="V18",
+    subject="an UNGATED_JOBS member",
+    jobs=tuple(sorted(UNGATED_JOBS)),
+    actions=UNGATED_JOB_ACTIONS,
+    commands=UNGATED_JOB_COMMANDS,
+    keywords=UNGATED_JOB_KEYWORDS,
+    prefixes=UNGATED_JOB_PREFIXES,
+    step_keys=UNGATED_JOB_STEP_KEYS,
+    env_names=UNGATED_JOB_ENV_NAMES,
+    workdirs=UNGATED_JOB_WORKDIRS,
+    with_keys=UNGATED_JOB_WITH_KEYS,
+    hint=V18_HINT,
+)
+
+
+def step_config_violations(step: dict, action: str | None, row: StepAllowlist) -> list[str]:
     """Reasons (without the location prefix) that a step's keys, env, workdir or `with:` are not
-    allowed. `action` is the step's `uses:` path, or None."""
+    allowed by `row`. `action` is the step's `uses:` path, or None."""
     out: list[str] = []
     for key in step:
-        if key not in UNGATED_JOB_STEP_KEYS and key != "shell":
+        if key not in row.step_keys and key != "shell":
             out.append(f"sets the step key `{key}:`, which is not on the allowlist")
     env = step.get("env")
     if "env" in step:
@@ -1839,15 +1881,15 @@ def _v18_step_config_violations(step: dict, action: str | None) -> list[str]:
             out.append("sets an `env:` that is not a mapping")
         else:
             for k in env:
-                if k not in UNGATED_JOB_ENV_NAMES:
+                if k not in row.env_names:
                     out.append(f"sets the env name {k!r}, which is not on the allowlist "
-                               f"{sorted(UNGATED_JOB_ENV_NAMES)}")
-    if "working-directory" in step and step["working-directory"] not in UNGATED_JOB_WORKDIRS:
+                               f"{sorted(row.env_names)}")
+    if "working-directory" in step and step["working-directory"] not in row.workdirs:
         out.append(f"sets `working-directory:` to {step['working-directory']!r}, "
-                   f"not one of {sorted(UNGATED_JOB_WORKDIRS)}")
+                   f"not one of {sorted(row.workdirs)}")
     if "with" in step:
         with_ = step["with"]
-        allowed = UNGATED_JOB_WITH_KEYS.get(action or "")
+        allowed = row.with_keys.get(action or "")
         if not isinstance(with_, dict):
             out.append("sets a `with:` that is not a mapping")
         elif allowed is None:
@@ -1865,57 +1907,65 @@ def _v18_step_config_violations(step: dict, action: str | None) -> list[str]:
     return out
 
 
-def ungated_job_violations(doc: dict, name: str) -> list[str]:
-    """V18 (SMA-684). Every step of every UNGATED_JOBS member must match the allowlist above.
-    Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles."""
+def allowlist_job_violations(doc: dict, name: str, row: StepAllowlist) -> list[str]:
+    """Every step of every job of `row` must match the row's allowlist, plus the rules for every
+    row (see StepAllowlist). Does not use the dry-run exemption (_dry_run_exempts): a dry run
+    still compiles."""
     out: list[str] = []
     jobs = doc["jobs"]
     for key in ("defaults", "env"):
-        if key in doc and any(isinstance(jobs.get(jid), dict) for jid in UNGATED_JOBS):
-            out.append(f"{name}: V18: the workflow sets `{key}:`, which reaches every step of an "
-                       f"UNGATED_JOBS member. {V18_HINT}")
-    for jid in sorted(UNGATED_JOBS):
+        if key in doc and any(isinstance(jobs.get(jid), dict) for jid in row.jobs):
+            out.append(f"{name}: {row.rule}: the workflow sets `{key}:`, which reaches every step of "
+                       f"{row.subject}. {row.hint}")
+    for jid in row.jobs:
         job = jobs.get(jid)
         if not isinstance(job, dict):
             continue
         for key in UNGATED_JOB_BANNED_KEYS:
             if key in job:
-                out.append(f"{name}: V18: job '{jid}' sets `{key}:`, which runs code or changes how "
-                           f"its steps run. {V18_HINT}")
+                out.append(f"{name}: {row.rule}: job '{jid}' sets `{key}:`, which runs code or changes how "
+                           f"its steps run. {row.hint}")
         for i, step in enumerate(steps_of(job, f"{name}: job '{jid}'")):
             if not isinstance(step, dict):
-                out.append(f"{name}: V18: job '{jid}' step #{i + 1} is not a mapping. {V18_HINT}")
+                out.append(f"{name}: {row.rule}: job '{jid}' step #{i + 1} is not a mapping. {row.hint}")
                 continue
-            where = f"{name}: V18: job '{jid}' step '{step.get('name') or f'#{i + 1}'}'"
+            where = f"{name}: {row.rule}: job '{jid}' step '{step.get('name') or f'#{i + 1}'}'"
             if "shell" in step:
-                out.append(f"{where} sets `shell:`, so its `run:` text is not read as bash. {V18_HINT}")
+                out.append(f"{where} sets `shell:`, so its `run:` text is not read as bash. {row.hint}")
             uses, run = step.get("uses"), step.get("run")
             if uses is None and run is None:
-                out.append(f"{where} has neither `uses:` nor `run:`. {V18_HINT}")
+                out.append(f"{where} has neither `uses:` nor `run:`. {row.hint}")
             action = None
             if uses is not None:
                 action = str(uses).split("@", 1)[0]
-                if action not in UNGATED_JOB_ACTIONS:
+                if action not in row.actions:
                     out.append(f"{where} uses the action {action!r}, which is not on the allowlist "
-                               f"{sorted(UNGATED_JOB_ACTIONS)}. {V18_HINT}")
-            for why in _v18_step_config_violations(step, action):
-                out.append(f"{where} {why}. {V18_HINT}")
+                               f"{sorted(row.actions)}. {row.hint}")
+            for why in step_config_violations(step, action, row):
+                out.append(f"{where} {why}. {row.hint}")
             if run is not None:
                 lines, refused = _v18_logical_lines(str(run))
                 if refused:
-                    out.append(f"{where}: {refused}. {V18_HINT}")
+                    out.append(f"{where}: {refused}. {row.hint}")
                 for line in lines:
                     segs, refused = v18_line_segments(line)
                     if refused:
                         out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not "
-                                   f"allowed: {refused}. {V18_HINT}")
+                                   f"allowed: {refused}. {row.hint}")
                         continue
                     for seg in segs:
-                        why = v18_segment_verdict(seg)
+                        why = segment_verdict(seg, row)
                         if why:
                             out.append(f"{where}: the segment {seg.strip(_V18_BLANKS)!r} is "
-                                       f"not allowed: {why}. {V18_HINT}")
+                                       f"not allowed: {why}. {row.hint}")
     return out
+
+
+def ungated_job_violations(doc: dict, name: str) -> list[str]:
+    """V18 (SMA-684). Every step of every UNGATED_JOBS member must match the allowlist above.
+    Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles. Since
+    SMA-735 this is the V18_ROW of the table-driven engine."""
+    return allowlist_job_violations(doc, name, V18_ROW)
 
 
 def plan_run_segments(run_text: str) -> list[str]:
