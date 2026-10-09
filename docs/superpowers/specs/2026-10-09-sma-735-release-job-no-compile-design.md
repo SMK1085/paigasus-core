@@ -457,12 +457,25 @@ Result: the `--no-verify` flag reaches cargo and no build script runs, also when
 ### M1 — what `verify-crates` needs, and a cold run (2026-10-09)
 
 Docker `ubuntu:24.04` (image `ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55`,
-x86_64, run under emulation on an arm64 host) with bash 5.2.21, python3 3.12.3, git, build-essential
-and rustup with no toolchain. No proto and no Moon. `CI=true bash ci/publish-metadata/run.sh
---verify-publish-groups` exited 0 after 55 seconds, including the rustup install of 1.95.0
-from `rs/rust-toolchain.toml` (cargo 1.95.0, rustc 1.95.0). Both groups passed. A first run took 60 seconds.
+x86_64) with bash 5.2.21, python3 3.12.3, git, build-essential and rustup with no toolchain. No
+proto and no Moon. `CI=true bash ci/publish-metadata/run.sh --verify-publish-groups` exited 0 after
+55 seconds, including the rustup install of 1.95.0 from `rs/rust-toolchain.toml` (cargo 1.95.0,
+rustc 1.95.0). Both groups passed. The container ran under x86_64 emulation on an arm64 host. The
+time is a proxy for a native runner.
+
+The normal log shows only the `group ... OK` lines, because `run.sh` prints the cargo output only
+when cargo fails. A second run in a fresh container (same digest) used a debug copy of `run.sh`
+inside the container only. The copy prints the cargo output on success too. It exited 0 after
+56 seconds. The log has `Packaging`, `Verifying` and `Compiling` lines for `paigasus-kernel`, for
+`paigasus-proto-derive` and for `paigasus-proto`. So the run was a real cold compile of both
+groups. The `Uploading` lines come from `cargo publish --dry-run`, and no upload happens. The log
+is `run3-debug.log` in the session scratchpad directory `m1-runner/`.
 
 Decision (spec §5.2): `verify-crates` keeps only `Checkout` and the verify step. It drops
-`moonrepo/setup-toolchain` and `moon setup`. `timeout-minutes: 30` stays. The container is a
-proxy: the hosted runner is x86_64 and has rustup and python3 in its image. V-6 (Sven's consent)
-or V-7 (the first release after the merge) measures the hosted runner.
+`moonrepo/setup-toolchain` and `moon setup`. `timeout-minutes: 30` stays.
+
+Assumption: this decision holds only if the hosted GitHub `ubuntu-24.04` image has bash, python3,
+git, a C toolchain and rustup preinstalled. The container did not have them. The container
+installed git, build-essential and rustup itself. This is a proxy, not a measurement of the
+hosted runner. V-6 (if Sven agrees) or V-7 (the first release after the merge) confirms the
+assumption on a real runner.
