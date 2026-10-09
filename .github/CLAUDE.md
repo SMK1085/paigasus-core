@@ -295,6 +295,23 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   real repository, so the marker is bounded with `(?![-\w])` (SMA-579).
   V7 is NOT the last check: the roster has since grown through V8 to V12 (SMA-602), so read
   `ci/actionlint/release_guard.py`'s `^# V` comments rather than this entry alone.
+- **The `release` job compiles nothing (SMA-735).** Its `Release` step runs
+  `release-plz release --output json --no-verify`. release-plz passes the flag to every
+  `cargo publish`, so cargo packages and uploads without a build (MEASURED, spec M2). The build
+  moved to the `verify-crates` job. That job runs before `approve-release` and holds no secret.
+  Its `permissions:` block is exactly `contents: read` (spec D8). It runs
+  `bash ci/publish-metadata/run.sh --verify-publish-groups`, which is Check 0 and Check 2 only.
+  `release_guard.py` V19 holds the `release` job to an allowlist and requires `--no-verify`. V20
+  holds `verify-crates` to the verify command, refuses every secret and every `${{ }}`
+  expression in it, and refuses every `permissions:` value other than exactly `contents: read`.
+  V18, V19 and V20 are rows of one engine (`StepAllowlist`).
+  Residuals (spec §7): the read token of `verify-crates` stays on the runner while the crates
+  build. It can read only this public repository. The registry index can change between the
+  verify build and the upload. In the merge-commit case release-plz publishes the release PR
+  head, which `verify-crates` did not build. `publish-npm` still runs `pnpm install` while it
+  holds `id-token: write`. No gate pins `rs/.cargo/config.toml` or `rs/rust-toolchain.toml`.
+  Do not add `publish_no_verify` to `rs/release-plz.toml`: the CLI flag is the one V19 can see
+  (spec D3).
 - `release.yml` must never gain a `pull_request` or `pull_request_target` trigger (SMA-579).
 - Each image releases through **its own chain** in `release.yml`: `images-build-<key>` →
   `approve-images-<key>` → `publish-images-<key>` → `tag-<key>`, for `iam`, `gateway`,
