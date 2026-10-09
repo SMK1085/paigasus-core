@@ -2690,8 +2690,49 @@ EOF
 
 The planner measured M1, M2 and M3 on a scratch copy with the code of this plan; the expected outputs in Task 5 are those measurements. The implementer replaces each entry below with the output of the real branch.
 
-- **M1:** not yet run on the branch (Task 5 Step 10 writes it).
-- **M2:** not yet run on the branch (Task 5 Step 11 writes it).
-- **M3:** not yet run on the branch (Task 5 Step 8 writes it).
+- **M1:** measured on the branch at commit 8da009a5, 2026-10-10. The implementer did not edit the committed file. The mutant was an untracked copy in the same directory (`ci/affected-graph/_mutant_parity.py`), so `Path(__file__).parents[2]` is still the repository root. The copy had the whole 14-line `a13` tuple removed from `collect_findings`. After the run, the implementer deleted the copy. `git diff --stat` and `git status --short` were empty. The output is equal to the Task 5 Step 10 expectation. `rc=1`:
+
+  ```text
+    FAIL the real run never calls check_ts_vitest_inputs — a check that is defined but not invoked asserts nothing (SMA-542)
+    FAIL collect_findings returned 14 entries, expected 15 — a check was added or dropped without updating EXPECTED_FINDING_KEYS
+    FAIL collect_findings reported ('a1', 'a2', 'a3', 'a4-lint', 'a4-fmt', 'a5', 'a6', 'a7', 'a8', 'a9', 'a10', 'a11', 'a12a', 'a12b'), expected ('a1', 'a2', 'a3', 'a4-lint', 'a4-fmt', 'a5', 'a6', 'a7', 'a8', 'a9', 'a10', 'a11', 'a12a', 'a12b', 'a13') — a check was dropped, added or reordered in the findings list
+  negative-control FAILED: the parity gate can pass vacuously
+  ```
+
+- **M2:** measured on the branch at commit 8da009a5, 2026-10-10, with the same sibling-copy method as M1. The copy had `return []` as the first statement of `check_ts_vitest_inputs`, after its docstring. `rc=1`. The `^  FAIL` count is `33`. `git diff --stat` and `git status --short` were empty after the copy was deleted. The first eleven lines are equal to the Task 5 Step 11 expectation:
+
+  ```text
+    FAIL A13 did not demand ts/pnpm-lock.yaml of c-ts:test
+    FAIL A13 did not demand ts/packages/core/vitest.config.ts of c-ts:test
+    FAIL A13 did not demand ts/packages/kernel/src/**/* of app-ts:test
+    FAIL A13 did not demand ts/packages/proto/package.json of c-ts:test
+    FAIL A13 did not demand ts/packages/core/testing/**/* of app-ts:test
+    FAIL A13 did not demand rs/crates/bindings/wb/wb_bg.wasm of c-ts:test
+    FAIL A13 did not demand rs/crates/bindings/wb/wb.js of c-ts:test
+    FAIL A13 did not demand ts/packages/kernel/tsconfig.json of c-ts:test
+    FAIL A13 did not demand ts/packages/kernel/tsconfig.json of k-ts:test
+    FAIL A13 did not demand ts/tsconfig.base.json of k-ts:test
+    FAIL A13 did not demand ts/packages/kernel/src/wasm.ts of c-ts:test
+  ```
+
+- **M3:** measured on the branch before commit 8da009a5, with the code of that commit, 2026-10-10. `python3 ci/affected-graph/cargo_moon_parity.py` (the real run) gave `rc=1`. The file holds 78 row lines (`^      `). The only title is the A13 title. The rows have three kinds: 64 `<target> inputs omit <path>` rows, 1 `deps omit contracts:generate` row (`paigasus-app-shell-ts:test`), and 13 `<config> matches no input of repo:affected-smoke` rows. 64 + 1 = 65 rows for Task 8, plus 13 rows for Task 7. This is equal to the Task 5 Step 8 expectation. The 13 configs are:
+
+  ```text
+  ts/apps/gateway-console/vitest.config.ts
+  ts/apps/iam-console/vitest.config.ts
+  ts/packages/paigasus-app-shell/vitest.config.ts
+  ts/packages/paigasus-auth/vitest.config.ts
+  ts/packages/paigasus-auth/vitest.containers.config.ts
+  ts/packages/paigasus-console-core/vitest.config.ts
+  ts/packages/paigasus-console-core/vitest.containers.config.ts
+  ts/packages/paigasus-discovery/vitest.config.ts
+  ts/packages/paigasus-discovery/vitest.containers.config.ts
+  ts/packages/paigasus-kernel/vitest.config.ts
+  ts/packages/paigasus-next-config/vitest.config.ts
+  ts/packages/paigasus-sdk/vitest.config.ts
+  ts/packages/paigasus-ui/vitest.config.ts
+  ```
+
+  The 65 Task 8 rows, per target: `gateway-console-ts:test` 2, `iam-console-ts:test` 2, `paigasus-app-shell-ts:test` 12 plus the `deps` row, `paigasus-auth-ts:test` 2, `paigasus-auth-ts:test-e2e` 2, `paigasus-console-core-ts:test` 9, `paigasus-console-core-ts:test-e2e` 14, `paigasus-discovery-ts:test` 4, `paigasus-discovery-ts:test-e2e` 5, `paigasus-kernel-ts:test` 2, `paigasus-next-config-ts:test` 2, `paigasus-proto-ts:test` 2, `paigasus-sdk-ts:test` 4, `paigasus-ui-ts:test` 2.
 - **M4:** not yet run on the branch (Task 6 Step 4 writes it).
 - **M5:** not yet run on the branch (Task 9 Step 9 writes it).
