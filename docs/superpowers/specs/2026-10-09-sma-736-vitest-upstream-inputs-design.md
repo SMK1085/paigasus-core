@@ -1,7 +1,7 @@
 # SMA-736 — A13: vitest tasks must key on their upstream inputs
 
 - Linear: SMA-736 (follow-up of SMA-536, non-goal N1)
-- Status: Draft, revision 2 (after the adversarial challenge, see section 10)
+- Status: Approved 2026-10-09, revision 2 (after the adversarial challenge, see section 10)
 - Date: 2026-10-09
 - Gate: `repo:affected-smoke` (`ci/affected-graph/cargo_moon_parity.py`)
 
@@ -355,9 +355,9 @@ plan.
   selections with the `run.sh` re-baseline.
 - **R3** The gate now calls git. A failure is rc 2, never a false green.
 
-## 9. Open question for approval
+## 9. Resolved question
 
-- **Q1** Accept the `test-e2e` over-approximation (R2), or narrow it? The alternative is a
+- **Q1 — resolved 2026-10-09: accept.** Sven accepted the extra selections of R2. The rejected alternative is a
   reviewed exception table that lets a `test-e2e` task omit named closure members, with a reason
   for each entry. The recommendation is to accept: the table needs per-file knowledge that A13
   cannot check (N2), so an entry can go stale and nothing reds.
@@ -383,4 +383,4 @@ Folded in:
   `own`, the reachability row, and the two count updates.
 - Section 2 item 5 and N7 record the installed-copy residual.
 
-Rejected: none. Section 9 asks one question for approval (the cost of R2).
+Rejected: none. Section 9 records the one question that needed approval (the cost of R2).
