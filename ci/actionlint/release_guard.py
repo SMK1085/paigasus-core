@@ -5338,7 +5338,14 @@ def _sma735_v19_bites() -> str | None:
     # a job id would switch the V19 allowlist on for it, removing one switches V19 off.
     if {"release"} != RELEASE_JOBS or V19_ROW.jobs != ("release",):
         return f"RELEASE_JOBS is {sorted(RELEASE_JOBS)!r} (V19 checks {V19_ROW.jobs!r}), expected exactly ['release']"
-    return _sma735_cases_bite(_SMA735_V19_CASES, _SMA735_V19_CASE_COUNT, release_job_violations, "V19")
+    table = _sma735_cases_bite(_SMA735_V19_CASES, _SMA735_V19_CASE_COUNT, release_job_violations, "V19")
+    if table is not None:
+        return table
+    # The liveness function itself: two shapes that the table rows do not reach.
+    for text in ("release-plz \\\nrelease", "~/.proto/bin/release-plz release"):
+        if not _runs_release_plz_release(text):
+            return f"V19 liveness missed {text!r}"
+    return None
 
 
 def _sma735_cross_row_and_scope() -> str | None:
