@@ -109,7 +109,7 @@ on one lock. The real run of the gate runs it on `HEAD:rs/Cargo.lock`. So a PR t
 | P0 | The file is one YAML mapping, with no duplicate key and no merge key (`<<:`). GitHub Actions does not merge a merge key. A YAML parse error is also a P0 refusal. |
 | P1 | The jobs are exactly `build` and `propose`. |
 | P2 | The triggers are exactly `schedule` and `workflow_dispatch` (a bare `on:` parses as `True`; both keys are read). |
-| P3 | `build` declares no environment and reads no `secrets` context. The workflow level reads none. `propose` reads it only in the step `token` (its `env:` and `if:` are not checked). |
+| P3 | `build` declares no environment and reads no `secrets` context. The workflow level reads none. `propose` reads it only in the step `token`. P26 refuses an `env:` or an `if:` on `token`. P3 skips the `token` step, and P26 does not compare `name:`. So nothing checks the `name:` of `token` for a `secrets` read. |
 | P4 | Every `docker run` uses exactly `--rm --cap-drop=ALL --security-opt=no-new-privileges --user 65534:65534 --volume "$RUNNER_TEMP/work:/work" --workdir /work "$LOCKSTEP_IMAGE"` and runs `bash ci/wasm-lockstep/container.sh update` or `build`. `LOCKSTEP_IMAGE` is a rust image pinned by a sha256 digest. No script and no `env:` key below the workflow level can set `LOCKSTEP_IMAGE`. |
 | P5 | Every command word of a `run:` script is on the job's allowlist. `python3` runs `lockstep_check.py` only. A `$(...)` is read too. A backtick, a here-document, an arithmetic expansion, a process substitution, `case` and a bare `!` negation are refused. |
 | P6 | Every `uses:` is an allowlisted action, pinned to a full 40-hex commit SHA. |
@@ -132,7 +132,7 @@ on one lock. The real run of the gate runs it on `HEAD:rs/Cargo.lock`. So a PR t
 | P23 | Every `gh pr list` passes `--head deps/wasm-bindgen-lockstep`. A step that runs `gh pr close` or `gh pr edit` must also run such a list. The check does not follow the number from the list to the close. It requires the list in the same step. |
 | P24 | No expression in the workflow reads the outputs of the build steps `update` or `build` (the container runs), in any case or index form. |
 | P25 | The `build` job around the run-1 lock compare (SMA-738). The checks are in the list below the table. |
-| P26 | The `propose` steps up to the last checker (SMA-739). The checks are in the list below the P25 list. |
+| P26 | Every `propose` step, and the `propose` job keys (SMA-739, SMA-740). The checks are in the list below the P25 list. |
 
 P25 holds these checks:
 
@@ -173,22 +173,39 @@ does not turn this gate red. A new action, or a tag in place of a SHA, does.
 
 P26 holds these checks:
 
-1. The exact pin. The steps `checkout`, `download`, `verify` and `apply` of `propose` equal
-   `PROPOSE_PINNED` in `pin_check.py`, key by key. `name:` is not compared. For `checkout` and `download`, only the action
-   name in `uses:` is compared, not the SHA. P6 checks the SHA, so a dependabot bump stays green. The
-   `run:` text of `verify` equals `VERIFY_RUN`, and of `apply` equals `APPLY_RUN`. If you edit one
-   of these four steps, change `pin_check.py` in the same commit.
-2. An extra key on these steps is refused. So `env:` (for example `SHELLOPTS: noexec`), `shell:`,
+1. The exact pin. The ten `propose` steps (`checkout`, `download`, `verify`, `apply`, `token`,
+   `commit`, `base`, `push`, `pr` and `close`) equal `PROPOSE_PINNED` in `pin_check.py`, key by
+   key. `name:` is not compared. For `checkout`, `download` and `token`, only the action name in
+   `uses:` is compared, not the SHA. P6 checks the SHA, so a dependabot bump stays green. The
+   `run:` text of each step equals its constant: `VERIFY_RUN`, `APPLY_RUN`, `COMMIT_RUN`,
+   `BASE_RUN`, `PUSH_RUN`, `PR_RUN` and `CLOSE_RUN`. The comment lines in the `push` script are
+   part of the text. If you edit a `propose` step, change `pin_check.py` in the same commit.
+2. An extra key on the ten steps is refused. So `env:` (for example `SHELLOPTS: noexec`), `shell:`,
    `if: false` and a changed `with:` (for example a checkout `ref:` of a pull request head) are
    refused.
-3. The `propose` job has no `env:`.
+3. The `propose` job has only the keys in `PROPOSE_JOB_KEYS`. So `env:`, `concurrency:` and
+   `strategy:` are refused. The values of `name:`, `runs-on:` and `timeout-minutes:` are not
+   checked. If you add a key to the `propose` job, change `pin_check.py` in the same commit.
 
 A pin of `run:` alone is not enough. `if: false` skips the step, and `SHELLOPTS=noexec` in the
 environment makes bash read the script without running it. This was measured in `ubuntu:24.04`:
 the script printed nothing and exited 0.
 
-On `verify` and `apply`, P7's `artifact` check and P18 only repeat the P26 pin. They give a
-clearer message. P14 and P13 on these two steps also only repeat it.
+On the ten `propose` steps, these step-level checks only repeat the P26 pin. They give a clearer
+message:
+
+- P5, P8 (the `propose` part), P13 (step `shell:`), P14 (step `continue-on-error:`), P15, P16
+  (`token`), P17 (`checkout`), P18, P19 (step keys and scripts), P20, P21, P22 and P23.
+
+These checks still carry a control of their own:
+
+- The P7 step order.
+- P13 on a workflow `defaults:`.
+- P14 on the job `continue-on-error:`, and P12. On `build`, only these rules refuse the keys. On
+  `propose`, the P26 job-key allow-list also refuses them.
+- P3, P9 and P24 on a step `name:` and on the job keys.
+
+The workflow-level part of P19 repeats the P25 `env:` allow-list, not P26.
 
 ## The trust model
 
@@ -223,8 +240,9 @@ clearer message. P14 and P13 on these two steps also only repeat it.
 - **`propose`** holds the App key for the whole job (environment `release-pr`, main-only branch
   policy). The control is that no step executes artifact content: no toolchain, no cargo, no pnpm,
   no moon, and no script from the artifact. A refusal fails the `verify` step, so the token step
-  never runs. This depends on P26, which pins the steps up to the last checker, on P15, which refuses a status
-  function in a step `if:`, and on the P25 workflow `env:` allow-list.
+  never runs. This depends on P26, which pins every `propose` step, and on the P25 workflow `env:`
+  allow-list. P15 refuses a status function in a step `if:`. On `propose`, P15 now only repeats
+  the P26 pin.
 - **The output rule.** `propose` reads `needs.build.outputs.changed` only in `if:` values. Every
   value that reaches a command (the versions, the PR title and body) comes from `lockstep_check.py`
   on the downloaded bytes, through a file or `env:`.
@@ -254,6 +272,8 @@ clearer message. P14 and P13 on these two steps also only repeat it.
 - `git config <key>` in `propose` acts like `git -c`. P20 does not refuse it.
 - The `GIT_CONFIG_COUNT` environment variable, `gh alias set` and `gh extension exec` pass the
   `propose` allowlist.
+- In `propose`, P26 refuses each change in the four bullets above, because it pins every step.
+  They stay limits of the rules themselves. The first two bullets still apply to `build`.
 - P19 does not see an indirect form, such as `${!f}`.
 - An earlier build step can write the runner env files indirectly. Two examples are `${!m}` on
   `GITHUB_ENV` and a write to `$RUNNER_TEMP/_runner_file_commands/*`. Such a write can set
@@ -261,15 +281,17 @@ clearer message. P14 and P13 on these two steps also only repeat it.
   write it: run 2 cannot reach these files without a container escape. PR review is the control.
 - A SHA-pinned `uses:` action before `stage` can export variables for the later steps. The
   checks trust each pinned action (P6).
-- The steps after `apply` (`commit`, `base`, `push`, `pr`, `close`) are not pinned. They can
-  change the tree after the checks: write `rs/Cargo.lock` again, `git add` another path, or run
-  `git commit --amend`. P26 proves that the workflow text runs the two checkers unchanged. It does not prove that the pushed
-  tree is the checked tree. SMA-740 tracks it.
+- P26 proves that the ten `propose` steps are the pinned text, except `name:` and the action SHA.
+  The pushed tree also depends on the code of the three actions (R2; `token` also receives the App
+  private key, after the checks), on the runner image (`runs-on:`), and on `lockstep_check.py` and
+  `.gitattributes` on `main`. PR review is the control for the last two.
 - P6 accepts any 40-hex SHA for an allowlisted action. GitHub can resolve a commit SHA from a fork
   of the action repository (an "impostor commit"). `checkout` and `download` run before `verify`.
   This gap existed before SMA-739.
 - A bundled short flag, such as `gh api -iXPOST`, passes P20.
 - P21 matches the jq `select` with a regular expression. It does not parse the jq.
+- In `propose`, P26 refuses each of these two changes, because it pins every step. They stay
+  limits of the rules themselves.
 - The build container downloads rustup and the Rust 1.95.0 toolchain at run time through proto.
   Nobody verified that proto checks the rustup download (M2 notes).
 - `container.sh` fetches `proto.sh` with `curl` and no checksum. This happens inside the

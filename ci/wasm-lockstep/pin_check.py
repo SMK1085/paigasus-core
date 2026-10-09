@@ -222,7 +222,8 @@ TOKEN_WITH = {
 }
 # P26 (SMA-740): the keys that the propose job may declare. A new key (concurrency:, strategy:,
 # outputs:, or a key that GitHub adds later) fails closed. The values of name:, runs-on: and
-# timeout-minutes: are not pinned. P10 and P11 check the values of the other keys.
+# timeout-minutes: are not pinned. P10 and P11 check permissions, environment, needs and if;
+# P7 and P26 check steps.
 PROPOSE_JOB_KEYS = frozenset({"name", "needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"})
 PROPOSE_ACTIONS = {"checkout": "actions/checkout", "download": "actions/download-artifact", "token": "actions/create-github-app-token"}
 PROPOSE_PINNED = {
