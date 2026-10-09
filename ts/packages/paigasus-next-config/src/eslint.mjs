@@ -397,10 +397,114 @@ export const noJsRelativeSpecifier = {
   },
 };
 
+/** The six single-field PRN accessors that SMA-725 deprecates. */
+const DEPRECATED_PRN_ACCESSORS = new Set(['prnErrorKind', 'prnService', 'prnRegion', 'prnOrg', 'prnResourceType', 'prnResourceId']);
+
+/** Module specifiers that export the six names: the two kernel entries and the two raw bindings. */
+const PRN_ACCESSOR_MODULES = new Set(['@paigasus/kernel', '@paigasus/kernel/napi', '@paigasus/node-bindings', '@paigasus/wasm']);
+
+/** The raw binding packages have no `exports` map, so a deep path into them also type-checks. */
+const PRN_ACCESSOR_MODULE_PREFIXES = ['@paigasus/node-bindings/', '@paigasus/wasm/'];
+
+/** @param {unknown} source */
+function isPrnAccessorModule(source) {
+  if (typeof source !== 'string') return false;
+  return PRN_ACCESSOR_MODULES.has(source) || PRN_ACCESSOR_MODULE_PREFIXES.some((prefix) => source.startsWith(prefix));
+}
+
+/**
+ * The name an import or export specifier names, or a property key names. An Identifier gives its
+ * `name`; a string Literal (`import { 'prnService' as s }`, `k['prnOrg']`) gives its `value`.
+ *
+ * @param {any} node
+ * @returns {string | undefined}
+ */
+function nameOf(node) {
+  if (node?.type === 'Identifier') return node.name;
+  if (node?.type === 'Literal' && typeof node.value === 'string') return node.value;
+  return undefined;
+}
+
+/**
+ * `paigasus/no-single-field-prn-accessor` (SMA-725 spec § 4.2).
+ *
+ * The six single-field PRN accessors of @paigasus/kernel are deprecated. Each one parses the PRN
+ * again, and `prnParse` returns every field in ONE kernel call. This rule reports, for a watched
+ * module: a named import of one of the six (value or type, aliased or not), a named re-export of
+ * one, and a use of one through a namespace import (`k.prnService`, `k['prnOrg']`,
+ * `const { prnRegion } = k`). It allows a namespace import itself, `export *`, and a dynamic
+ * `import()` (spec D4, L1).
+ *
+ * WHY A CUSTOM RULE. The core `no-restricted-imports` already carries the boundary rules, and a
+ * second block for the same files REPLACES their options. `@typescript-eslint/no-restricted-imports`
+ * is deprecated since typescript-eslint 8.64.0 and points to the core rule (spec § 2, D3).
+ *
+ * The namespace check follows the import binding through ESLint's scope analysis. So a parameter or
+ * a local variable that shadows the namespace name is not reported (spec limit L2 records what the
+ * check does not follow).
+ *
+ * @type {import('eslint').Rule.RuleModule}
+ */
+export const noSingleFieldPrnAccessor = {
+  meta: {
+    type: 'suggestion',
+    docs: {
+      description: 'Disallow the six deprecated single-field PRN accessors of @paigasus/kernel; use prnParse (SMA-725)',
+    },
+    schema: [],
+    messages: {
+      deprecatedAccessor: "'{{name}}' is deprecated (SMA-725). Use prnParse(prn): one kernel call returns every field or the error kind.",
+    },
+  },
+  create(context) {
+    /** @param {any} node @param {string | undefined} name */
+    const report = (node, name) => {
+      if (name !== undefined && DEPRECATED_PRN_ACCESSORS.has(name)) {
+        context.report({ node, messageId: 'deprecatedAccessor', data: { name } });
+      }
+    };
+
+    /** @param {any} namespaceSpecifier */
+    const checkNamespaceUses = (namespaceSpecifier) => {
+      for (const variable of context.sourceCode.getDeclaredVariables(namespaceSpecifier)) {
+        for (const reference of variable.references) {
+          const id = reference.identifier;
+          const parent = /** @type {any} */ (id).parent;
+          if (parent?.type === 'MemberExpression' && parent.object === id) {
+            // `k.prnService` names the property; `k['prnOrg']` names it with a string literal. A
+            // computed key that is a variable (`k[n]`) names nothing we can know, so it is skipped.
+            const property = parent.property;
+            report(property, parent.computed ? (property.type === 'Literal' ? nameOf(property) : undefined) : nameOf(property));
+          } else if (parent?.type === 'VariableDeclarator' && parent.init === id && parent.id.type === 'ObjectPattern') {
+            for (const property of parent.id.properties) {
+              if (property.type === 'Property' && !property.computed) report(property.key, nameOf(property.key));
+            }
+          }
+        }
+      }
+    };
+
+    return {
+      ImportDeclaration(node) {
+        if (!isPrnAccessorModule(node.source.value)) return;
+        for (const specifier of node.specifiers) {
+          if (specifier.type === 'ImportSpecifier') report(specifier, nameOf(specifier.imported));
+          else if (specifier.type === 'ImportNamespaceSpecifier') checkNamespaceUses(specifier);
+        }
+      },
+      ExportNamedDeclaration(node) {
+        if (node.source === null || node.source === undefined || !isPrnAccessorModule(node.source.value)) return;
+        for (const specifier of node.specifiers) report(specifier, nameOf(specifier.local));
+      },
+    };
+  },
+};
+
+
 /** @type {import('eslint').ESLint.Plugin} */
 const paigasusPlugin = {
   meta: { name: '@paigasus/next-config/eslint' },
-  rules: { 'no-js-relative-specifier': noJsRelativeSpecifier },
+  rules: { 'no-js-relative-specifier': noJsRelativeSpecifier, 'no-single-field-prn-accessor': noSingleFieldPrnAccessor },
 };
 
 /**
