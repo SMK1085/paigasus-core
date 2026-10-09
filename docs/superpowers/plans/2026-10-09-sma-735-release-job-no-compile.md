@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The `release` job in `.github/workflows/release.yml` compiles nothing while it holds the crates.io token and the App credentials. A new job without credentials, `verify-crates`, builds every publishable crate before `approve-release`, and the release guard reds when a change undoes either half.
+**Goal:** The `release` job in `.github/workflows/release.yml` compiles nothing while it holds the crates.io token and the App credentials. A new job without secrets and with only a `contents: read` token, `verify-crates`, builds every publishable crate before `approve-release`, and the release guard reds when a change undoes either half.
 
 **Architecture:** `ci/publish-metadata/run.sh` gets a mode `--verify-publish-groups` that runs only Check 0 and Check 2, with the publishable-set logic moved into a new module `ci/publish-metadata/publishable.py` so that the mode and `metadata_checks` share one copy. `ci/actionlint/release_guard.py` turns the V18 engine into a table of `StepAllowlist` rows (V18 unchanged), then adds a V20 row plus job rules for `verify-crates` and a V19 row plus liveness for `release`. `release.yml` gets the `verify-crates` job, `approve-release` and `release` need it, and the `Release` step runs `release-plz release --output json --no-verify`.
 
@@ -39,6 +39,7 @@
 3. **A second publish job that V19 does not see.** GitHub reads an action path without case, so `Rust-Lang/crates-io-auth-action` is the same action. A person expects V19 liveness to red for a renamed job and for any other job that uses that action or runs `release-plz release`. Pinned in Task 6 (rows "the job renamed", "a second job with crates-io-auth-action", "a second job with an upper-case crates-io-auth-action path", "a second job that runs release-plz release").
 4. **A publishable crate that is not in `EXPECTED_PUBLISHABLE`.** `publish_groups` reads only the listed names, so such a crate would skip the verify build and still be published by release-plz. A person expects the mode to exit 1 before any `cargo publish`. Pinned in Task 2 (stub mode `extra-crate`: rc 1 and no `publish` line in the stub log; mutation M4).
 5. **A stale category snapshot stops a release.** The snapshot load fails after 90 days. The mode must never load it. Pinned in Task 2 (the structural row "--verify-publish-groups does not read the category snapshot").
+6. **A token grant on `verify-crates` that is wider than `contents: read`.** `actions/checkout` gets the job token as its default `token` input, so the grant is what third-party build code can use. Spec D8 requires exactly `contents: read`. A person expects V20 to red for a missing block, `read-all`, `write-all`, `{}`, a second scope (also a `read` scope) and a value that is not a mapping. Pinned in Task 5 (the nine `permissions` rows of `_SMA735_V20_CASES`, and the mutation rows for `granted`).
 
 ---
 
@@ -492,10 +493,10 @@ publishable_set() { # $1 metadata.json  $2 expected-csv
 }
 
 # --verify-publish-groups (SMA-735) — Check 0 and Check 2 alone, for release.yml's
-# verify-crates job. That job holds no credential and runs before approve-release. The
-# release job publishes with `release-plz release --no-verify`, so this mode is the verify
-# build. It uses the same functions as main() and nothing else: it does not load the
-# category snapshot, so a stale snapshot can never stop a release.
+# verify-crates job. That job holds no secret, only a `contents: read` token, and runs
+# before approve-release. The release job publishes with `release-plz release --no-verify`,
+# so this mode is the verify build. It uses the same functions as main() and nothing else:
+# it does not load the category snapshot, so a stale snapshot can never stop a release.
 # Exit codes: 0 every group passed, 1 a defect, 2 infrastructure or a bad invocation.
 verify_publish_groups() { # takes no argument
   if [ "$#" -ne 0 ]; then  # the mode takes no argument
@@ -1062,8 +1063,8 @@ Expected: `Files … differ` and `rc=1`; then no diff after the restore.
 
 **Interfaces:**
 - Consumes: `StepAllowlist`, `allowlist_job_violations`, `segment_verdict` (Task 4); `gated_path_jobs`, `secret_refs`, `steps_of`, `APPROVAL_JOB`, `RELEASE_WORKFLOW_NAME`, `_APP_TOKEN_ACTION`, `_STRING_LITERAL`, `_V18_WORD_SPLIT_RE`, `_V18_BLANKS`, `SHA_CO`.
-- Produces: `StepAllowlist.exact: tuple[tuple[str, ...], ...] = ()`; `VERIFY_JOB = "verify-crates"`; `VERIFY_COMMAND = ("bash", "ci/publish-metadata/run.sh", "--verify-publish-groups")`; `V20_HINT: str`; `V20_ROW: StepAllowlist`; `verify_job_violations(doc: dict, name: str) -> list[str]` (empty unless `name == RELEASE_WORKFLOW_NAME`).
-- Produces (tests): `_SMA735_DOC_YAML: str` (the target shape of `plan`, `release-pr`, `verify-crates`, `approve-release`, `release`); `_sma735_doc() -> dict`; `_sma735_apply(doc: dict, job_id: str, op: str, arg: object) -> dict` with ops `none`, `doc-key`, `add-job`, `drop`, `rename`, `job-key`, `step`, `steps`, `run`, `step-key`; `_sma735_cases_bite(cases, count, fn, rule) -> str | None`; `_SMA735_V20_CASES`, `_SMA735_V20_CASE_COUNT = 37`, `_sma735_v20_bites() -> str | None`. Task 6 reuses all of these.
+- Produces: `StepAllowlist.exact: tuple[tuple[str, ...], ...] = ()`; `VERIFY_JOB = "verify-crates"`; `VERIFY_COMMAND = ("bash", "ci/publish-metadata/run.sh", "--verify-publish-groups")`; `V20_PERMISSIONS = {"contents": "read"}`; `V20_HINT: str`; `V20_ROW: StepAllowlist`; `verify_job_violations(doc: dict, name: str) -> list[str]` (empty unless `name == RELEASE_WORKFLOW_NAME`).
+- Produces (tests): `_SMA735_DOC_YAML: str` (the target shape of `plan`, `release-pr`, `verify-crates`, `approve-release`, `release`); `_sma735_doc() -> dict`; `_sma735_apply(doc: dict, job_id: str, op: str, arg: object) -> dict` with ops `none`, `doc-key`, `add-job`, `drop`, `rename`, `job-key`, `step`, `steps`, `run`, `step-key`; `_sma735_cases_bite(cases, count, fn, rule) -> str | None`; `_SMA735_V20_CASES`, `_SMA735_V20_CASE_COUNT = 43`, `_sma735_v20_bites() -> str | None`. Task 6 reuses all of these.
 - Not wired into `check_main` yet: Task 7 does that together with the workflow change, so every commit stays green.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1094,6 +1095,8 @@ jobs:
     needs: [plan]
     if: needs.plan.outputs.nothing_to_release != 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -1224,9 +1227,15 @@ _V20_STEP = "Verify every publish group"
 _SMA735_V20_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
     ("the job is missing", "verify-crates", "drop", None, True),
     ("the path to approve-release is removed", "approve-release", "job-key", ("needs", ["plan"]), True),
-    ("permissions id-token write", "verify-crates", "job-key", ("permissions", {"id-token": "write"}), True),
+    ("no permissions key", "verify-crates", "job-key", ("permissions", None), True),
+    ("permissions id-token write in place of contents read", "verify-crates", "job-key", ("permissions", {"id-token": "write"}), True),
     ("permissions contents write", "verify-crates", "job-key", ("permissions", {"contents": "write"}), True),
+    ("permissions contents read plus id-token write", "verify-crates", "job-key", ("permissions", {"contents": "read", "id-token": "write"}), True),
+    ("permissions contents read plus actions read", "verify-crates", "job-key", ("permissions", {"contents": "read", "actions": "read"}), True),
     ("an empty permissions mapping", "verify-crates", "job-key", ("permissions", {}), True),
+    ("permissions read-all", "verify-crates", "job-key", ("permissions", "read-all"), True),
+    ("permissions write-all", "verify-crates", "job-key", ("permissions", "write-all"), True),
+    ("permissions as a string, not a mapping", "verify-crates", "job-key", ("permissions", "contents: read"), True),
     ("environment release-publish", "verify-crates", "job-key", ("environment", "release-publish"), True),
     ("an App mint with no permission input", "verify-crates", "step",
      {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
@@ -1266,7 +1275,7 @@ _SMA735_V20_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
     ("the target shape", "verify-crates", "none", None, False),
     ("the verify step with extra blanks", "verify-crates", "run", (_V20_STEP, "  bash ci/publish-metadata/run.sh   --verify-publish-groups  "), False),
 )
-_SMA735_V20_CASE_COUNT = 37
+_SMA735_V20_CASE_COUNT = 43
 
 
 def _sma735_v20_bites() -> str | None:
@@ -1308,13 +1317,17 @@ Insert after the end of `ungated_job_violations`:
 # V20 (SMA-735). release.yml's `verify-crates` job builds every publishable crate with
 # `cargo publish --dry-run` before `approve-release`, because the `release` job runs
 # `release-plz release --no-verify` and so builds nothing. The build runs third-party build
-# scripts and proc macros, so the job may hold no credential, and it may run only the verify
-# command. Two parts: the engine row below, and the job rules in verify_job_violations.
-# Scoped to RELEASE_WORKFLOW_NAME, the same as V11 (spec D7).
+# scripts and proc macros, so the job may hold no secret and no write token, and it may run only
+# the verify command. Two parts: the engine row below, and the job rules in
+# verify_job_violations. Scoped to RELEASE_WORKFLOW_NAME, the same as V11 (spec D7).
 VERIFY_JOB = "verify-crates"
 VERIFY_COMMAND = ("bash", "ci/publish-metadata/run.sh", "--verify-publish-groups")
+# The one `permissions:` value that V20 accepts (spec D8). actions/checkout gets the job token as
+# its default `token` input. With exactly this grant, the token can only read the repository.
+V20_PERMISSIONS = {"contents": "read"}
 V20_HINT = ("The verify-crates job builds third-party code before the approval, so it may hold no "
-            "credential and may run only the verify command "
+            "secret, its `permissions:` must be exactly `contents: read`, and it may run only the "
+            "verify command "
             "(docs/superpowers/specs/2026-10-09-sma-735-release-job-no-compile-design.md, "
             "section 5.5).")
 V20_ROW = StepAllowlist(
@@ -1355,7 +1368,8 @@ def _job_strings(node: object, key: object = None) -> list[tuple[str, bool]]:
 
 def verify_job_violations(doc: dict, name: str) -> list[str]:
     """V20 (SMA-735): the `verify-crates` job exists, is on the needs: path of the approval job,
-    holds no credential, and runs the verify command exactly once and nothing else."""
+    holds no secret, sets `permissions:` to exactly `contents: read`, and runs the verify command
+    exactly once and nothing else."""
     if name != RELEASE_WORKFLOW_NAME:
         return []
     jobs = doc["jobs"]
@@ -1368,10 +1382,13 @@ def verify_job_violations(doc: dict, name: str) -> list[str]:
     if VERIFY_JOB not in gated_path_jobs(APPROVAL_JOB, jobs):
         out.append(f"{where} is not on the needs: path of '{APPROVAL_JOB}', so a person can "
                    f"approve the release before the verify build passed. {V20_HINT}")
-    for key in ("permissions", "environment"):
-        if key in job:
-            out.append(f"{where} sets `{key}:`. The job must hold no credential and use the "
-                       f"workflow default `contents: read`. {V20_HINT}")
+    if "environment" in job:
+        out.append(f"{where} sets `environment:`. The job must hold no credential. {V20_HINT}")
+    granted = job.get("permissions")
+    if granted != V20_PERMISSIONS:
+        shown = "no `permissions:` key" if "permissions" not in job else f"`permissions:` {granted!r}"
+        out.append(f"{where} has {shown}. It must set exactly `contents: read`, so that the job "
+                   f"token, which actions/checkout gets, can only read the repository. {V20_HINT}")
     for text, bare in _job_strings(job):
         names, unresolved = secret_refs(text, bare_expression=bare)
         if names or unresolved:
@@ -1416,7 +1433,10 @@ For each row: mutate, run `uv run --locked --project py python3 ci/actionlint/re
 | Anchor | New line | Expected `FAIL` names |
 |---|---|---|
 | `if VERIFY_JOB not in gated_path_jobs(APPROVAL_JOB, jobs):` | `if False:` | `the path to approve-release is removed: expected a V20 violation` |
-| `for key in ("permissions", "environment"):` | `for key in ():` | `permissions id-token write: expected a V20 violation` |
+| `    if "environment" in job:` | `if False:` | `environment release-publish: expected a V20 violation` |
+| `    if granted != V20_PERMISSIONS:` | `if False:` | `no permissions key: expected a V20 violation` |
+| `    granted = job.get("permissions")` | `granted = job.get("permissions", V20_PERMISSIONS)` | `no permissions key: expected a V20 violation` (the rule of spec revision 2, "no key is clean", comes back) |
+| `    if granted != V20_PERMISSIONS:` | `if not isinstance(granted, dict) or granted.get("contents") != "read":` | `permissions contents read plus id-token write: expected a V20 violation` (only "exactly" refuses a second scope) |
 | `elif "${{" in text or` | `elif False:` | `toJSON(github) in a step name: expected a V20 violation` (the `github.token` row stays red: its env name `T` is not on the allowlist) |
 | `if len(verify_runs) != 1:` | `if False:` | `the verify step with &: expected a V20 violation` (in Task 5; after Task 6 the `&` rule also reds it, and the first failing row is `the verify command twice`) |
 | `    if tuple(words) in row.exact:` | `if False:` | `the target shape: expected clean` |
@@ -1826,10 +1846,12 @@ In `.github/workflows/release.yml`, insert directly before the comment block tha
   # `ci/publish-metadata/run.sh --verify-publish-groups` (Check 0 and Check 2 only). It runs before
   # `approve-release`, so a crate that does not build stops the run in the reversible stage.
   #
-  # The build runs third-party build scripts and proc macros, so this job holds NO credential:
-  # no `environment:`, no `permissions:` key (the workflow default is `contents: read`), no
-  # `secrets` and no `${{ }}` expression at all. M1 measured that cargo through the runner's
-  # rustup, python3 and bash are enough, so the job has no proto and no Moon step.
+  # The build runs third-party build scripts and proc macros, so this job holds NO secret and NO
+  # write token: no `environment:`, no `secrets` and no `${{ }}` expression at all. Its
+  # `permissions:` block is exactly `contents: read` (spec D8). actions/checkout gets the job
+  # token as its default `token` input, and with this grant the token can only read the
+  # repository. M1 measured that cargo through the runner's rustup, python3 and bash are enough,
+  # so the job has no proto and no Moon step.
   # release_guard.py V20 pins all of this. A transient network fault exits 2: re-run the job.
   verify-crates:
     name: verify the crates.io packages
@@ -1838,6 +1860,8 @@ In `.github/workflows/release.yml`, insert directly before the comment block tha
     # release_guard.py V9b pins the accepted forms.
     if: needs.plan.outputs.nothing_to_release != 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -1924,7 +1948,8 @@ with:
 #       -> {publish-pypi, publish-npm}
 #
 # SMA-735: `release` COMPILES NOTHING. It publishes with `release-plz release --no-verify`, and
-# `verify-crates` does the verify build before the approval, in a job with no credential.
+# `verify-crates` does the verify build before the approval, in a job with no secret and only a
+# `contents: read` token.
 ```
 
 Replace lines 171-172:
@@ -2024,14 +2049,17 @@ In the section `## Workflow credentials and release guards`, after the bullet th
 - **The `release` job compiles nothing (SMA-735).** Its `Release` step runs
   `release-plz release --output json --no-verify`. release-plz passes the flag to every
   `cargo publish`, so cargo packages and uploads without a build (MEASURED, spec M2). The build
-  moved to the `verify-crates` job. That job runs before `approve-release` and holds no
-  credential. It runs `bash ci/publish-metadata/run.sh --verify-publish-groups`, which is Check 0
-  and Check 2 only. `release_guard.py` V19 holds the `release` job to an allowlist and requires
-  `--no-verify`. V20 holds `verify-crates` to the verify command and refuses every credential and
-  every `${{ }}` expression in it. V18, V19 and V20 are rows of one engine (`StepAllowlist`).
-  Residuals (spec §7): the registry index can change between the verify build and the upload. In
-  the merge-commit case release-plz publishes the release PR head, which `verify-crates` did not
-  build. `publish-npm` still runs `pnpm install` while it holds `id-token: write`. No gate pins
+  moved to the `verify-crates` job. That job runs before `approve-release` and holds no secret.
+  Its `permissions:` block is exactly `contents: read` (spec D8). It runs
+  `bash ci/publish-metadata/run.sh --verify-publish-groups`, which is Check 0 and Check 2 only.
+  `release_guard.py` V19 holds the `release` job to an allowlist and requires `--no-verify`. V20
+  holds `verify-crates` to the verify command, refuses every secret and every `${{ }}`
+  expression in it, and refuses every `permissions:` value other than exactly `contents: read`.
+  V18, V19 and V20 are rows of one engine (`StepAllowlist`).
+  Residuals (spec §7): the read token of `verify-crates` stays on the runner while the crates
+  build. It can read only this public repository. The registry index can change between the
+  verify build and the upload. In the merge-commit case release-plz publishes the release PR
+  head, which `verify-crates` did not build. `publish-npm` still runs `pnpm install` while it holds `id-token: write`. No gate pins
   `rs/.cargo/config.toml` or `rs/rust-toolchain.toml`. Do not add `publish_no_verify` to
   `rs/release-plz.toml`: the CLI flag is the one V19 can see (spec D3).
 ```
@@ -2044,7 +2072,7 @@ must match an allowlist of actions, command words and command prefixes, because 
 ```
 with:
 ```markdown
-must match an allowlist of actions, command words and command prefixes, because that job can read the App private key (L43). Since SMA-735 the verdict also includes V19 (the `release` job: an allowlist, and `release-plz release` must carry `--no-verify`) and V20 (the `verify-crates` job: the verify command only, on the `needs:` path of `approve-release`, and no credential). V18, V19 and V20 are rows of one table-driven engine (L44). Two parts:
+must match an allowlist of actions, command words and command prefixes, because that job can read the App private key (L43). Since SMA-735 the verdict also includes V19 (the `release` job: an allowlist, and `release-plz release` must carry `--no-verify`) and V20 (the `verify-crates` job: the verify command only, on the `needs:` path of `approve-release`, no secret, and `permissions:` exactly `contents: read`). V18, V19 and V20 are rows of one table-driven engine (L44). Two parts:
 ```
 
 Insert before the line `## Cost`:
@@ -2057,7 +2085,9 @@ string. V19 closes one case of this for its own rule: a `release-plz release` co
 a quote, a backslash or a `$` reds, so `--no-verify` cannot hide in a string or a variable. V19
 and V20 run only when the checked file is `release.yml` (spec D7), the same scope as V11. Their
 tests are direct calls (`_SMA735_V19_CASES`, `_SMA735_V20_CASES`), not `FIXTURES` rows, so the
-fixture floor did not change. These residuals have no gate: a change to `rs/.cargo/config.toml`
+fixture floor did not change. The `contents: read` job token of `verify-crates` stays on the
+runner while the crates build (spec D8). V20 refuses every wider grant. The token can read only
+this public repository. These residuals have no gate: a change to `rs/.cargo/config.toml`
 or `rs/rust-toolchain.toml` can change what cargo runs in the `release` job; the `publish-npm`
 job runs `pnpm install` while it can request an OIDC token; and nothing pins the rule "no build
 downstream of `release`" in the `release.yml` header.
@@ -2072,8 +2102,9 @@ Insert before the line `### Check 5 — Rule R1, symmetric \`changelog_include\`
 
 `bash ci/publish-metadata/run.sh --verify-publish-groups` runs Check 0 and Check 2 and nothing
 else. The `verify-crates` job in `.github/workflows/release.yml` calls it. That job holds no
-credential and runs before `approve-release`. The `release` job then publishes with
-`release-plz release --no-verify`, so this mode is the last build of the crates before the upload.
+secret, only a `contents: read` token, and runs before `approve-release`. The `release` job then
+publishes with `release-plz release --no-verify`, so this mode is the last build of the crates
+before the upload.
 
 - The publishable set comes from `ci/publish-metadata/publishable.py`, the same code that
   `metadata_checks` uses. A set that is not `EXPECTED_PUBLISHABLE` exits 1, so a crate outside
@@ -2197,13 +2228,24 @@ for job in doc["jobs"].values():
 d = out / "job-deleted"
 d.mkdir(parents=True, exist_ok=True)
 (d / "release.yml").write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+for case, perms in (("permissions-removed", None), ("permissions-write", {"contents": "write"})):
+    doc = yaml.safe_load(src)
+    if doc["jobs"]["verify-crates"].get("permissions") != {"contents": "read"}:
+        sys.exit(f"{case}: verify-crates does not set exactly contents: read")
+    if perms is None:
+        del doc["jobs"]["verify-crates"]["permissions"]
+    else:
+        doc["jobs"]["verify-crates"]["permissions"] = perms
+    d = out / case
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "release.yml").write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
 print("cases written")
 ```
 Run from the repository root:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 uv run --locked --project py python3 "$SCRATCH/v2/make_cases.py" "$SCRATCH/v2"
-for c in no-verify-removed approve-needs command-changed job-deleted; do
+for c in no-verify-removed approve-needs command-changed job-deleted permissions-removed permissions-write; do
   uv run --locked --project py python3 ci/actionlint/release_guard.py "$SCRATCH/v2/$c/release.yml" > "$SCRATCH/v2/$c.out" 2>&1
   echo "$c rc=$? V19=$(grep -c ': V19: ' "$SCRATCH/v2/$c.out") V20=$(grep -c ': V20: ' "$SCRATCH/v2/$c.out")"
 done
@@ -2215,6 +2257,8 @@ no-verify-removed rc=1 V19=1 V20=0
 approve-needs rc=1 V19=0 V20=1
 command-changed rc=1 V19=0 V20=2
 job-deleted rc=1 V19=0 V20=1
+permissions-removed rc=1 V19=0 V20=1
+permissions-write rc=1 V19=0 V20=1
 ```
 (`command-changed` gives two V20 lines: the engine refuses the words, and the exactly-one rule finds zero steps. Any count of 1 or more in the expected column is a pass; a 0 there is a failure.)
 

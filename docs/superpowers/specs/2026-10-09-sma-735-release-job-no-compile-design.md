@@ -3,7 +3,8 @@
 - Linear: SMA-735 (related: SMA-684, SMA-602, SMA-580)
 - Date: 2026-10-09
 - Status: draft for GATE 1. Sven approved approach A and design sections 1 and 2 on 2026-10-09.
-  Revision 2 folds in the spec challenge (§13).
+  Revision 2 folds in the spec challenge (§13). Revision 3 folds in decision D8 (Sven,
+  2026-10-09).
 
 ## 1. Problem
 
@@ -40,6 +41,7 @@ risk: the person approves a release, not the third-party code in the dependency 
 | D5 | New guards in `release_guard.py`: the V18 engine becomes table-driven with one row per job; V19 is the row for `release`, V20 is the row for `verify-crates` plus a job-level credential ban. | Sven, 2026-10-09 (section 2); V20 shape from the spec challenge |
 | D6 | Approach B (a separate tag job) and approach C (move only the App mint) are rejected. See §8. | Sven, 2026-10-09 |
 | D7 | V19 and V20 run only when the checked file is the release workflow (`RELEASE_WORKFLOW_NAME`), the same scope as V11. They are tested by direct calls, not by `FIXTURES` rows. So the `FIXTURES` count and the fixture floor in `ci/actionlint/run.sh` do not change. | spec challenge |
+| D8 | `verify-crates` sets exactly `permissions: contents: read`, and V20 enforces it. This replaces the earlier rule "no `permissions:` key". V20 refuses every other value (§5.5). | Sven chose option A, 2026-10-09 (§13 addendum) |
 
 ## 3. Goal and acceptance
 
@@ -49,7 +51,8 @@ risk: the person approves a release, not the third-party code in the dependency 
    out. For the merge-commit case, see §7 (row "a different commit").
 3. **A3.** A gate reds when a change removes `--no-verify`, adds a step to `release` that is
    outside the V19 allowlist, renames the job away from V19, removes the verify job, removes its
-   path to `approve-release`, changes its verify command, or gives it a credential.
+   path to `approve-release`, changes its verify command, gives it a credential, or gives it a
+   `permissions:` value other than exactly `contents: read`.
 4. **A4.** The release still publishes the same crates, cuts the same tags and makes the same
    GitHub releases.
 
@@ -123,6 +126,8 @@ verify-crates:
   needs: [plan]
   if: needs.plan.outputs.nothing_to_release != 'true'
   runs-on: ubuntu-latest
+  permissions:
+    contents: read
   timeout-minutes: 30
   steps:
     - name: Checkout
@@ -141,8 +146,10 @@ verify-crates:
       run: bash ci/publish-metadata/run.sh --verify-publish-groups
 ```
 
-- The job has no `environment:`, no `permissions:` key (the workflow default is
-  `contents: read`), no `secrets` reference, no `github.token` reference and no App token.
+- The job sets exactly `permissions: contents: read` (D8). It has no `environment:`, no
+  `secrets` reference, no `github.token` reference and no App token. `actions/checkout` gets the
+  job `GITHUB_TOKEN` as its default `token` input. With exactly `contents: read`, that token can
+  only read the repository. §7 records that the token stays on the runner during the build.
 - `approve-release` changes `needs:` to `[wheels, prebuild, proto-dist, verify-crates]`. A crate
   that does not build then stops the run before the human approval, in the reversible stage.
 - **The plan measures**, on a hosted runner or in an `ubuntu:24.04` container: which tools the new
@@ -222,7 +229,11 @@ V20 has two parts. It runs only for the release workflow (D7).
 2. **Job rules.**
    - A job named `verify-crates` exists.
    - `verify-crates` is on the transitive `needs:` path of `approve-release` (`gated_path_jobs`).
-   - The job has no `permissions:` key and no `environment:` key.
+   - The job-level `permissions:` value is a mapping with exactly one key, `contents`, and the
+     value of that key is the string `read` (D8). V20 refuses a missing `permissions:` key,
+     `read-all`, `write-all`, `{}`, `contents: write`, a second scope (also a `read` scope), and
+     every value that is not a mapping.
+   - The job has no `environment:` key.
    - The job has no `secrets` context reference (`secret_refs`, line 363) and no `github.token`
      reference, in any step or key.
    - The job has no `uses: actions/create-github-app-token` step, with or without `permission-*`
@@ -241,12 +252,14 @@ The message names the job and the failed condition, and points to this spec.
   `shell:`; a job `container:`; a job renamed so that it uses `crates-io-auth-action` outside the
   V19 set. Clean controls: the real `Release` step, `proto install release-plz`, and the real job.
 - **`_SMA735_V20_CASES`**, with a strict count. Red cases: the job is missing; the path to
-  `approve-release` is removed; `permissions: {id-token: write}`; `permissions: {contents: write}`;
-  `environment: release-publish`; an App mint with no `permission-*` input; a step env that names
-  `secrets.X`; a `github.token` reference; a checkout without `persist-credentials: false`; the
+  `approve-release` is removed; no `permissions:` key; `permissions: {id-token: write}`;
+  `permissions: {contents: write}`; `contents: read` plus `id-token: write`; `contents: read` plus
+  `actions: read`; `permissions: {}`; `permissions: read-all`; `permissions: write-all`; a
+  `permissions:` value that is a string, not a mapping; `environment: release-publish`; an App
+  mint with no `permission-*` input; a step env that names `secrets.X`; a `github.token` reference; a checkout without `persist-credentials: false`; the
   verify step with `&`; the verify step with a second command; the verify step with an extra
   argument; a step `if: false`; a step `shell:`; a step `env: BASH_ENV`. Clean control: the real
-  job.
+  job, with `permissions: contents: read`.
 - **Cross-row cases.** V18 is silent on `release` and on `verify-crates`. V19 is silent on
   `release-pr` and `verify-crates`. V20 is silent on `release-pr` and `release`.
 - **Scope cases.** V19 and V20 are silent when the file name is not the release workflow.
@@ -310,6 +323,7 @@ The message names the job and the failed condition, and points to this spec.
 | A change renames `release`, or moves the publish to a new job. | V19 checks nothing. | V19 liveness: the job set is pinned, and every job with `crates-io-auth-action` or `release-plz release` must be in it. |
 | A change removes `verify-crates`, its path to `approve-release`, or changes its command. | A broken crate reaches the irreversible step. | V20 reds. |
 | A credential enters `verify-crates`. | Third-party build code runs with it. | V20 job rules. The environments' branch policies are a second, external control (F15). |
+| The job `GITHUB_TOKEN` of `verify-crates`, with `contents: read`, stays on the runner while the crates build (D8). | Third-party build code can read the token. The token can read only this repository, and the repository is public. | Residual, accepted (D8). V20 refuses every grant other than exactly `contents: read`, so the token cannot write. |
 | The registry index changes between the verify and the upload. | A published crate can fail for consumers. | Residual (§6 Q2). `--locked` holds the workspace lock in the verify job. |
 | **A different commit:** the release PR is merged with a merge commit, and `main` has more commits than the release PR head. | release-plz publishes from the release PR head (F14), which `verify-crates` did not build. | Partial: PR CI ran Check 2 on that head, because the release PR changes `rs/crates/**` (F6). Residual: the registry window between that PR run and the upload. A squash merge avoids the case. This spec does not change the allowed merge methods. |
 | `verify-crates` checks every group, also a group that does not release in this run. | A fault in that group stops the release of the other group. | Accepted: the direction is safe (fail closed, before the approval). |
@@ -410,3 +424,17 @@ The challenger's verdict: APPROVE WITH CHANGES. All findings are folded in, exce
 | V20 path: direct or transitive? | QUESTION | Transitive (`gated_path_jobs`), §5.5. |
 | Which cargo does `verify-crates` run? | QUESTION | The plan measures it (M1). |
 | A cold run against `timeout-minutes: 30`? | QUESTION | The plan measures it (M1). |
+
+### Addendum: decision D8 (2026-10-09)
+
+After revision 2, the coordinator gave Sven options for the `permissions:` key of
+`verify-crates`. Option A: the job sets exactly `contents: read`, and V20 enforces it. Sven
+chose option A on 2026-10-09. Revision 2 had the rule "no `permissions:` key", with the
+workflow default `contents: read`. D8 replaces that rule.
+
+The reason below is the coordinator's recommendation, which Sven accepted. This spec records
+no other reason from Sven. `actions/checkout` gets the job `GITHUB_TOKEN` as its default `token`
+input. With `contents: read`, that token can only read the public repository. V20 refuses every
+other grant.
+
+Changes: D8 in §2, A3, §5.2, §5.5, §5.6 and a new residual row in §7.
