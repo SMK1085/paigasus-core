@@ -48,6 +48,10 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+# SMA-736: A13 reads git's tracked set through repo:input-liveness's own helper. Python puts this
+# script's directory (ci/affected-graph/) first on sys.path, so the sibling module imports directly.
+import task_inputs
+
 
 class MoonOutputError(RuntimeError):
     """Moon's query output did not have the shape this gate requires.
@@ -71,6 +75,9 @@ INFRA_ERRORS = (
     tomllib.TOMLDecodeError,
     OSError,
     MoonOutputError,
+    # SMA-736: task_inputs.tracked_files raises task_inputs' own MoonOutputError class.
+    task_inputs.MoonOutputError,
+    # SMA-736: task_inputs.tracked_files raises task_inputs' own MoonOutputError class.
 )
 
 # (consumer, upstream) -> why this hand-declared Moon edge has no Cargo backing.
@@ -5632,6 +5639,39 @@ def self_test():
                     f"vitest_invocation_configs({a13_blob!r}, {a13_own!r}) gave {a13_got} and rows {a13_rows}, expected "
                     f"{a13_configs} and {'no row' if a13_row is None else repr(a13_row)}"
                 )
+    # A13 (SMA-736 §4.5) — the tracked-file plumbing that main() uses. tracked_files raises
+    # task_inputs' OWN MoonOutputError, a different class from this file's. It must be in
+    # INFRA_ERRORS, or a failed `git ls-files` exits 1 with a traceback instead of rc 2.
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            task_inputs.tracked_files(Path(tmp))
+        except INFRA_ERRORS:
+            pass
+        except Exception as exc:
+            failures.append(
+                f"tracked_files outside a repository raised {type(exc).__name__}, which INFRA_ERRORS does "
+                f"not catch, so main() would exit 1 instead of rc 2"
+            )
+        else:
+            failures.append("tracked_files outside a repository returned a set instead of raising")
+    # ...and the git call must ignore an inherited GIT_DIR and GIT_INDEX_FILE (a git hook sets them).
+    a13_repo_root = Path(__file__).resolve().parents[2]
+    a13_saved_env = {k: os.environ.get(k) for k in ("GIT_DIR", "GIT_INDEX_FILE")}
+    os.environ["GIT_DIR"] = "/nonexistent/sma-736-git-dir"
+    os.environ["GIT_INDEX_FILE"] = "/nonexistent/sma-736-index"
+    try:
+        a13_tracked_real = task_inputs.tracked_files(a13_repo_root)
+    except Exception as exc:
+        a13_tracked_real = None
+        failures.append(f"tracked_files used an inherited GIT_DIR or GIT_INDEX_FILE: {exc}")
+    finally:
+        for k, v in a13_saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    if a13_tracked_real is not None and "ci/affected-graph/cargo_moon_parity.py" not in a13_tracked_real:
+        failures.append("tracked_files does not list this file, so it did not read this repository")
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:

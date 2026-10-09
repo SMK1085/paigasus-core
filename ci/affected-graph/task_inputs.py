@@ -9,6 +9,7 @@
 #
 # usage: task_inputs.py [--self-test]
 import json
+import os
 import re
 import subprocess
 import sys
@@ -261,10 +262,14 @@ def _git(args, root):
     A non-zero rc is rc 2 (infrastructure), never "no matches" and never a skip. Note this fires
     only when git is genuinely broken: a MALFORMED pattern exits 0 with no output (measured), which
     reads as `dead` — a false red, the safe direction. classify() is the real defense there.
+
+    `GIT_DIR` and `GIT_INDEX_FILE` are removed from the environment (SMA-736). A git hook sets them,
+    and an inherited value would make `ls-files` read another repository or index than `root`'s.
     """
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_INDEX_FILE")}
     proc = subprocess.run(
         ["git", "-c", "core.quotePath=false", *args],
-        cwd=root, capture_output=True, text=True,
+        cwd=root, capture_output=True, text=True, env=env,
     )
     if proc.returncode != 0:
         raise MoonOutputError(
