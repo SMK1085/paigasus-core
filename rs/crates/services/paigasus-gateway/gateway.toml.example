@@ -73,6 +73,17 @@
 #                                # unset (default) merges /metrics onto http_addr instead. MUST
 #                                # differ from http_addr (rejected by GatewayConfig::validate).
 
+# --- DPoP (SMA-700): proof-of-possession tokens on the protected routes ---
+#
+# Off by default. With enabled = true, a client may send `Authorization: DPoP <token>` with one
+# `DPoP` proof header (RFC 9449). The gateway forwards the proof, the method and the path to IAM,
+# which checks it against its authn.dpop.forwarded_base_urls. Turn DPoP on in IAM first.
+# A 401 then carries `WWW-Authenticate: DPoP algs="ES256 RS256"`. The API-key leg does not run for
+# the DPoP scheme. A client must make a NEW proof for each attempt: a retry that sends the same
+# proof again is refused as a replay.
+# [dpop]
+# enabled = false                       # default shown; env GATEWAY_DPOP__ENABLED
+
 # --- Limits (SMA-677): request rate and token budget on POST /v1/chat/completions ---
 #
 # Off unless this table exists. An unset key means no limit on that dimension. The value 0 is

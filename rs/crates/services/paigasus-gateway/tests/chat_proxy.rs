@@ -21,8 +21,8 @@
 
 mod support;
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
@@ -35,7 +35,7 @@ use tonic::Status;
 use tower::ServiceExt; // for `oneshot`
 
 use paigasus_gateway::adapters::http::{AppState, router};
-use paigasus_gateway::adapters::iam::{Iam, IamError};
+use paigasus_gateway::adapters::iam::{CallerCredential, DpopContext, Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
 use paigasus_logging::test_support::capture_logs_at;
@@ -104,14 +104,14 @@ impl Iam for FakeIam {
         }
     }
 
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(self.allow)
     }
 
     /// Since SMA-635 the chat path tries this leg after a rejected or inconclusive key leg. Real
     /// IAM answers `Unauthenticated` for a bearer that is not a JWT (`convert.rs:141`), which is
     /// every API key and every garbage credential here.
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         match self.introspect {
             Introspect::User => Ok(IntrospectResponse {
                 principal_prn: USER_PRN.to_owned(),
@@ -167,6 +167,7 @@ fn app_for_with_streaming(fake: FakeIam, base_url: String, max_request_bytes: us
         max_request_bytes,
         capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: stream_enabled },
         limits: None,
+        dpop_enabled: false,
     };
     router(state)
 }
@@ -612,4 +613,87 @@ async fn client_abort_cancels_upstream_request() {
 
     server.abort();
     drop(mock);
+}
+
+// ---- SMA-700: one DPoP request end to end ---------------------------------------------------
+
+/// A DPoP user. The API-key leg must not run (D15). `introspect_token` and `is_authorized_self`
+/// record what the gateway sent.
+#[derive(Default)]
+struct DpopIam {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl Iam for DpopIam {
+    async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
+        panic!("D15: the DPoP scheme skips the API-key leg")
+    }
+
+    async fn is_authorized_self(&self, caller: &CallerCredential, principal_prn: &str, _action: &str, resource_prn: &str) -> Result<bool, IamError> {
+        let caller = match caller {
+            CallerCredential::Dpop { token, proof } => format!("dpop {token} {proof}"),
+            other => format!("{other:?}"),
+        };
+        self.calls.lock().unwrap().push(format!("authorize {caller} {principal_prn} {resource_prn}"));
+        Ok(true)
+    }
+
+    async fn introspect_token(&self, token: &str, dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
+        let dpop = dpop.expect("a DPoP request forwards its context");
+        self.calls.lock().unwrap().push(format!("introspect {token} {} {} {}", dpop.method, dpop.path, dpop.proof));
+        Ok(IntrospectResponse {
+            principal_prn: USER_PRN.to_owned(),
+            status: "active".to_owned(),
+            issuer: "https://issuer.example.com".to_owned(),
+            subject: "user-1".to_owned(),
+            expires_at: None,
+            memberships: vec![Membership {
+                principal_prn: USER_PRN.to_owned(),
+                node_prn: USER_ORG_PRN.to_owned(),
+                ..Default::default()
+            }],
+            role_grants: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn one_dpop_request_end_to_end() {
+    let canned = r#"{"id":"chatcmpl-dpop","object":"chat.completion","choices":[{"index":0}]}"#;
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, canned).await;
+    let iam = DpopIam::default();
+    let calls = iam.calls.clone();
+    let cfg = OpenAiConfig {
+        base_url: mock.base_url.clone(),
+        api_key: SecretString::from(REAL_KEY.to_string()),
+        extra_ca_bundle_path: None,
+    };
+    let openai = OpenAiClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300)).expect("client builds");
+    let app = router(AppState {
+        iam: Arc::new(iam),
+        openai: Arc::new(openai),
+        max_request_bytes: ONE_MIB,
+        capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: true },
+        limits: None,
+        dpop_enabled: true,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("DPoP {USER_TOKEN}"))
+        .header("DPoP", "proof.for.chat")
+        .body(Body::from(NON_STREAM_BODY))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            format!("introspect {USER_TOKEN} POST /v1/chat/completions proof.for.chat"),
+            format!("authorize dpop {USER_TOKEN} proof.for.chat {USER_PRN} {USER_ORG_PRN}"),
+        ]
+    );
+    assert_eq!(mock.recorded().unwrap().body, Bytes::from(NON_STREAM_BODY), "the request reached the upstream");
 }

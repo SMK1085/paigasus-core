@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# binaryen's `wasm-opt`, pinned for the wasm kernel only (SMA-435). The pin is HERE and not in the
+# root .prototools. proto reads .prototools files upwards from the working directory. The bare
+# `proto install` of ci.yml runs at the repository root, so it never reads this file. CI then
+# does not download the 111 MB Linux tarball. No ci.yml task runs this tool. The `file://` path
+# below is relative to THIS file, not to the working directory.
+#
+# ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs runs every proto call from this directory
+# and reads the version line below. To bump binaryen: change the version, run
+# `moon run paigasus-kernel-ts:generate-wasm`, and commit the five artifacts. Check 5 of
+# ts/packages/paigasus-kernel/tests/committed-wasm.test.ts fails until you do.
+wasm-opt = "133.0.0"
+
+[plugins]
+wasm-opt = "file://../../../../.proto/plugins/binaryen.toml"

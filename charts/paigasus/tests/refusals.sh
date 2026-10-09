@@ -306,6 +306,105 @@ expect_fail "markers duplicate" "oidc.idTokenMarkerClaims[2] \"at_hash\" is alre
 expect_render "markers Zitadel recipe" \
   --set "$MARKERS={at_hash,azp}"
 
+# SMA-731 (spec D5). oidc.accessTokenRequiredClaims goes through the same template as
+# oidc.idTokenMarkerClaims (paigasus.validateClaimNameList), with its own path, example and
+# reserved-name reason. One more rule: a name must not be in both lists. Each needle carries the
+# key path and the index.
+REQUIRED=oidc.accessTokenRequiredClaims
+expect_fail "required not a list" "oidc.accessTokenRequiredClaims must be a list of claim names, for example [\"jti\"]" \
+  --set "$REQUIRED=jti"
+expect_fail "required item a number" "oidc.accessTokenRequiredClaims[0] must be a string" \
+  --set "$REQUIRED={123}"
+# `--set x={}` does not clear a list: helm 3.22.0 makes it [""].
+expect_fail "required set to {}" "oidc.accessTokenRequiredClaims[0] is empty. IamConfig::validate refuses an empty name, and IAM does not boot. To remove the value, use [] in a values file or --set-json 'oidc.accessTokenRequiredClaims=[]'" \
+  --set "$REQUIRED={}"
+expect_fail "required item with a space" "oidc.accessTokenRequiredClaims[1] is \" nbf\"" \
+  --set "$REQUIRED={jti, nbf}"
+expect_fail "required item with a control character" "oidc.accessTokenRequiredClaims[0] is \"a\\x01b\"" \
+  --set-string "$REQUIRED[0]=$(printf 'a\001b')"
+expect_fail "required item with a quote" "oidc.accessTokenRequiredClaims[0] is \"a\\\"b\"" \
+  --set-string "$REQUIRED[0]=a\"b"
+expect_fail "required item not ASCII" "oidc.accessTokenRequiredClaims[0] is \"jti" \
+  --set-string "$REQUIRED[0]=$(printf 'jti\303\251')"
+REQUIRED_BS="$(mktemp)"
+printf 'oidc:\n  accessTokenRequiredClaims: ['"'"'a\\b'"'"']\n' >"$REQUIRED_BS"
+expect_fail "required item with a backslash" "oidc.accessTokenRequiredClaims[0] is \"a\\\\b\"" \
+  -f "$REQUIRED_BS"
+rm -f "$REQUIRED_BS"
+for reserved in iss sub aud exp; do
+  expect_fail "required reserved name $reserved" "oidc.accessTokenRequiredClaims[1] is \"$reserved\": every token that IAM accepts carries this claim, so the name has no effect" \
+    --set "$REQUIRED={jti,$reserved}"
+done
+expect_fail "required duplicate" "oidc.accessTokenRequiredClaims[2] \"jti\" is already in oidc.accessTokenRequiredClaims[0]" \
+  --set "$REQUIRED={jti,nbf,jti}"
+expect_fail "required name also a marker" "oidc.accessTokenRequiredClaims[1] \"azp\" is also in oidc.idTokenMarkerClaims[1]" \
+  --set "$MARKERS={at_hash,azp}" --set "$REQUIRED={jti,azp}"
+expect_render "required Zitadel recipe" \
+  --set "$REQUIRED={jti}"
+expect_render "required and markers, Zitadel recipe" \
+  --set "$MARKERS={at_hash,azp}" --set "$REQUIRED={jti}"
+# Review Focus 2. Names compare exactly, as in IAM: JTI and jti are two names.
+expect_render "required JTI and marker jti" \
+  --set "$MARKERS={jti}" --set "$REQUIRED={JTI}"
+
+# SMA-700 (spec § 4.11). zones.iam.backend.dpop copies the IamConfig::validate rules for the URL
+# list, because a refused boot stops the one IAM replica. Each needle carries the key path.
+DPOP=zones.iam.backend.dpop
+expect_fail "dpop on with no URL" "zones.iam.backend.dpop.enabled is true and zones.iam.backend.dpop.forwardedBaseUrls is empty" \
+  --set "$DPOP.enabled=true"
+expect_fail "dpop enabled not a bool" "zones.iam.backend.dpop.enabled must be true or false" \
+  --set-string "$DPOP.enabled=yes"
+expect_fail "dpop URLs not a list" "zones.iam.backend.dpop.forwardedBaseUrls must be a list of URLs" \
+  --set "$DPOP.forwardedBaseUrls=https://gw.example.test"
+expect_fail "dpop URL http not loopback" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"http://gw.example.test\": use https" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://gw.example.test"
+expect_fail "dpop URL ftp" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"ftp://gw.example.test\": use https" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=ftp://gw.example.test"
+expect_fail "dpop URL with no scheme" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"gw.example.test\": use https" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=gw.example.test"
+expect_fail "dpop URL with user info" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://user@gw.example.test\": it must have no query, fragment or user info" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://user@gw.example.test"
+expect_fail "dpop URL with a fragment" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://gw.example.test/#x\": it must have no query, fragment or user info" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test/#x"
+# A query holds `=`, which --set reads as a second key. A values file carries it as written.
+DPOP_QUERY="$(mktemp)"
+printf 'zones:\n  iam:\n    backend:\n      dpop:\n        enabled: true\n        forwardedBaseUrls: ["https://gw.example.test/?a=1"]\n' >"$DPOP_QUERY"
+expect_fail "dpop URL with a query" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://gw.example.test/?a=1\": it must have no query, fragment or user info" \
+  -f "$DPOP_QUERY"
+rm -f "$DPOP_QUERY"
+expect_fail "dpop URL with a space" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"https://gw.example.test/a b\": use printable ASCII only" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test/a b"
+# Go's url.Parse is lenient where IAM's url::Url::parse is strict. The chart is stricter.
+expect_fail "dpop URL port above 65535" "forwardedBaseUrls[0] is \"https://gw.example.test:99999\": its port must be from 1 to 65535" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test:99999"
+expect_fail "dpop URL loopback octet above 255" "forwardedBaseUrls[0] is \"http://127.0.0.256\"" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://127.0.0.256"
+expect_fail "dpop URL IPv4 octet above 255" "forwardedBaseUrls[0] is \"https://999.1.1.1\": its IPv4 host has an octet above 255" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://999.1.1.1"
+expect_fail "dpop URL host with a numeric last label" "forwardedBaseUrls[0] is \"https://gw.1\": its host ends in a number" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.1"
+expect_fail "dpop URL host with a hex last label" "forwardedBaseUrls[0] is \"https://gw.0x1\": its host ends in a number" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.0x1"
+expect_fail "dpop URL host with an empty hex last label" "forwardedBaseUrls[0] is \"https://gw.0X\": its host ends in a number" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.0X"
+expect_fail "dpop URL host with a forbidden code point" "forwardedBaseUrls[0] is \"https://a<b.example\"" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://a<b.example"
+expect_fail "dpop URL with a dollar sign" "forwardedBaseUrls[0] is \"https://gw.example.test/\$(X)\": use printable ASCII only" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test/\$(X)"
+# Decision P8: a bad entry is refused also while DPoP is off.
+expect_fail "dpop off with a bad URL" "zones.iam.backend.dpop.forwardedBaseUrls[0] is \"http://gw.example.test\": use https" \
+  --set "$DPOP.forwardedBaseUrls[0]=http://gw.example.test"
+expect_fail "extraEnv sets the DPoP switch" "the chart sets IAM_AUTHN__DPOP__ENABLED itself" \
+  --set 'zones.iam.backend.extraEnv[0].name=IAM_AUTHN__DPOP__ENABLED' --set 'zones.iam.backend.extraEnv[0].value=true'
+expect_render "dpop https with a prefix" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=https://gw.example.test" --set "$DPOP.forwardedBaseUrls[1]=https://edge.example.test/api/"
+expect_render "dpop loopback http" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://localhost:8088" --set "$DPOP.forwardedBaseUrls[1]=http://127.0.0.1:8088"
+# Review Focus 5.
+expect_render "dpop IPv6 loopback http" \
+  --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://[::1]:8088"
+expect_render "dpop reuse-values-no-key" --set "$DPOP=null"
+
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088

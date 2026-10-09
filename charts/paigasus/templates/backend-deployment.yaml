@@ -20,6 +20,12 @@ metadata:
 {{- end }}
 spec:
 {{- if eq $id "iam" }}
+{{- /*
+  SMA-700 (D3, R2): one more reason for this pin. With zones.iam.backend.dpop on, the DPoP replay
+  store is in memory, so a second replica would accept one proof once on each, and an IsAuthorized
+  follow-up could reach another pod than its Introspect. A template comment, so the golden files
+  do not change.
+*/}}
   replicas: 1
   strategy:
     type: RollingUpdate
@@ -128,8 +134,15 @@ spec:
 {{- if include "paigasus.iamIdTokenMarkerClaims" $root }}
             # oidc.idTokenMarkerClaims is set: IAM refuses a token that carries one of these claims.
 {{- end }}
+{{- /*
+  oidc.accessTokenRequiredClaims (SMA-731). The same pattern: "" for the default [], and the
+  comment line only inside the `if`, so the default render stays byte-identical.
+*/}}
+{{- if include "paigasus.iamAccessTokenRequiredClaims" $root }}
+            # oidc.accessTokenRequiredClaims is set: IAM refuses a token that lacks one of these claims.
+{{- end }}
             - name: IAM_AUTHN__ISSUERS
-              value: {{ printf "[{issuer=%q,audiences=[%q]%s}]" $root.Values.oidc.issuer (include "paigasus.iamAudience" $root) (include "paigasus.iamIdTokenMarkerClaims" $root) | quote }}
+              value: {{ printf "[{issuer=%q,audiences=[%q]%s%s}]" $root.Values.oidc.issuer (include "paigasus.iamAudience" $root) (include "paigasus.iamIdTokenMarkerClaims" $root) (include "paigasus.iamAccessTokenRequiredClaims" $root) | quote }}
             # ApiKeyConfig::pepper decodes this at boot and IamConfig::validate rejects fewer
             # than 32 decoded bytes. See zones.iam.backend.apiKeysPepperSecret in values.yaml.
             - name: IAM_API_KEYS__PEPPER
@@ -148,6 +161,14 @@ spec:
             # platform_admin at Root to each (issuer, subject) after its first login.
             - name: IAM_AUTHZ__BOOTSTRAP_ADMINS
               value: {{ . | quote }}
+{{- end }}
+{{- if include "paigasus.iamDpopEnabled" $root }}
+            # zones.iam.backend.dpop (SMA-700): authn.dpop. IAM checks the DPoP proof that the
+            # gateway forwards, against these public gateway URLs.
+            - name: IAM_AUTHN__DPOP__ENABLED
+              value: "true"
+            - name: IAM_AUTHN__DPOP__FORWARDED_BASE_URLS
+              value: {{ include "paigasus.iamDpopForwardedBaseUrls" $root | quote }}
 {{- end }}
 {{- with dig "extraEnv" list $z.backend }}
             # zones.iam.backend.extraEnv (SMA-697), appended after the chart's own entries.

@@ -23,7 +23,7 @@ use secrecy::SecretString;
 use tower::ServiceExt; // for `oneshot`
 
 use paigasus_gateway::adapters::http::{AppState, router};
-use paigasus_gateway::adapters::iam::{Iam, IamError};
+use paigasus_gateway::adapters::iam::{CallerCredential, DpopContext, Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
 use paigasus_gateway::service_info::Capabilities;
@@ -46,10 +46,10 @@ impl Iam for UnusedIam {
     async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
         unreachable!("these tests never drive the protected route")
     }
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         unreachable!("these tests never drive the protected route")
     }
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         unreachable!("these tests never drive the protected route")
     }
 }
@@ -72,11 +72,11 @@ impl Iam for AllowedIam {
         })
     }
 
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(true)
     }
 
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         Ok(IntrospectResponse {
             principal_prn: CALLER_SA.to_owned(),
             status: "active".to_owned(),
@@ -106,6 +106,7 @@ fn unused_state() -> AppState {
         max_request_bytes: 1_048_576,
         capabilities: Capabilities { chat_stream: true },
         limits: None,
+        dpop_enabled: false,
     }
 }
 
@@ -159,6 +160,7 @@ async fn successful_proxied_request_records_iam_and_upstream_metrics() {
         max_request_bytes: 1_048_576,
         capabilities: Capabilities { chat_stream: true },
         limits: None,
+        dpop_enabled: false,
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
 
@@ -194,10 +196,10 @@ impl Iam for UserIam {
     async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
         Err(IamError::Rpc(Status::unauthenticated("not an API key")))
     }
-    async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(true)
     }
-    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+    async fn introspect_token(&self, _token: &str, _dpop: Option<DpopContext>) -> Result<IntrospectResponse, IamError> {
         Ok(IntrospectResponse {
             principal_prn: USER_PRN.to_owned(),
             status: "active".to_owned(),
@@ -232,6 +234,7 @@ async fn an_oidc_request_records_a_denied_key_leg_and_an_ok_token_leg() {
         max_request_bytes: 1_048_576,
         capabilities: Capabilities { chat_stream: true },
         limits: None,
+        dpop_enabled: false,
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
     let req = Request::builder()

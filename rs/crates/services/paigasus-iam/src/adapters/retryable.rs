@@ -18,13 +18,13 @@ pub(crate) fn tenancy_retryable(class: ErrorClass) -> Retryable {
     }
 }
 
-/// `Unavailable` is the one authn error that names a transient dependency failure. `Backend`
-/// is `Unknown` for the same reason `TenancyError::Internal` is.
+/// `Unavailable` names a transient dependency failure, and `DpopQuotaExceeded` a rate limit of one
+/// client (SMA-700 D10). `Backend` is `Unknown` for the same reason `TenancyError::Internal` is.
 pub(crate) fn authn_retryable(err: &AuthnError) -> Retryable {
     match err {
-        AuthnError::Unavailable => Retryable::Yes,
+        AuthnError::Unavailable | AuthnError::DpopQuotaExceeded { .. } => Retryable::Yes,
         AuthnError::Backend(_) => Retryable::Unknown,
-        AuthnError::InvalidToken(_) | AuthnError::IdentityNotProvisioned | AuthnError::ProvisioningFailed(_) | AuthnError::PrincipalInactive => Retryable::No,
+        AuthnError::InvalidToken(_) | AuthnError::IdentityNotProvisioned | AuthnError::ProvisioningFailed(_) | AuthnError::PrincipalInactive | AuthnError::InvalidDpopProof(_) => Retryable::No,
     }
 }
 
@@ -50,6 +50,8 @@ pub(crate) mod tests_support {
             AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail),
             AuthnError::PrincipalInactive,
             AuthnError::Unavailable,
+            AuthnError::InvalidDpopProof(paigasus_iam_core::ProofDefect::Malformed),
+            AuthnError::DpopQuotaExceeded { retry_after_secs: 1 },
             AuthnError::Backend("x".into()),
         ];
         // Exhaustiveness guard: no wildcard arm, so a new variant is a compile error here.
@@ -60,6 +62,8 @@ pub(crate) mod tests_support {
                 | AuthnError::ProvisioningFailed(_)
                 | AuthnError::PrincipalInactive
                 | AuthnError::Unavailable
+                | AuthnError::InvalidDpopProof(_)
+                | AuthnError::DpopQuotaExceeded { .. }
                 | AuthnError::Backend(_) => {}
             }
         }
@@ -86,11 +90,13 @@ mod tests {
         }
     }
 
+    /// SMA-700 D10: a quota hit is a rate limit, so it is retryable like `Unavailable`. A bad proof
+    /// is not: the same proof can never pass.
     #[test]
-    fn only_the_unavailable_authn_error_is_retryable() {
+    fn only_unavailable_and_the_dpop_quota_are_retryable() {
         for err in all_authn_errors() {
             let want = match &err {
-                AuthnError::Unavailable => Retryable::Yes,
+                AuthnError::Unavailable | AuthnError::DpopQuotaExceeded { .. } => Retryable::Yes,
                 AuthnError::Backend(_) => Retryable::Unknown,
                 _ => Retryable::No,
             };

@@ -41,14 +41,17 @@ use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::application::authenticate_token::Provisioning;
-use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
+use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, DpopConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
 use paigasus_iam_core::{
     ApiKey, ApiKeyStatus, Clock, GrantScope, IdGenerator, OrganizationId, Principal, PrincipalId, PrincipalKind, PrincipalStatus, RoleGrant, ServiceAccount, TenancyNodeRef, display_prefix,
 };
 use paigasus_kernel::Prn;
+use paigasus_proto::paigasus::common::v1::ErrorReason;
+use paigasus_proto::paigasus::iam::v1::{DpopContext, IntrospectRequest};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
@@ -179,6 +182,12 @@ impl MockIdp {
     /// optional `email` claim (JIT provisioning requires one, spec §6.2). Signs with the
     /// CURRENT keypair, so a token minted after [`rotate`](Self::rotate) carries the new `kid`.
     pub fn bearer(&self, sub: &str, email: Option<&str>, aud: &str, exp_offset_secs: i64) -> String {
+        self.bearer_with(sub, email, aud, exp_offset_secs, serde_json::json!({}))
+    }
+
+    /// [`bearer`](Self::bearer) plus the members of `extra` (an object) in the payload — SMA-700
+    /// uses it for `typ`, `cnf` and a size pad.
+    pub fn bearer_with(&self, sub: &str, email: Option<&str>, aud: &str, exp_offset_secs: i64, extra: Value) -> String {
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(self.kid.clone());
         let mut claims = serde_json::json!({
@@ -190,7 +199,15 @@ impl MockIdp {
         if let Some(email) = email {
             claims["email"] = Value::String(email.to_string());
         }
+        if let (Some(claims), Value::Object(extra)) = (claims.as_object_mut(), extra) {
+            claims.extend(extra);
+        }
         jsonwebtoken::encode(&header, &claims, &self.sign).expect("signing a test token")
+    }
+
+    /// A DPoP-bound token (SMA-700), in the Keycloak shape: `typ: DPoP` and `cnf.jkt`.
+    pub fn bound_bearer(&self, sub: &str, email: Option<&str>, aud: &str, exp_offset_secs: i64, jkt: &str) -> String {
+        self.bearer_with(sub, email, aud, exp_offset_secs, serde_json::json!({ "typ": "DPoP", "cnf": { "jkt": jkt } }))
     }
 
     /// Rotates the IdP's signing key: mints a fresh ES256 keypair under a NEW `kid`, swaps
@@ -474,6 +491,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
             max_token_bytes: 16384,
             accept_invalid_tls: true,
             extra_ca_bundle_path: None,
+            dpop: DpopConfig::default(),
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,
@@ -485,6 +503,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
                     audiences: vec!["paigasus".to_string()],
                     jit_provisioning: *jit_provisioning,
                     id_token_marker_claims: Vec::new(),
+                    access_token_required_claims: Vec::new(),
                 })
                 .collect(),
         },
@@ -495,6 +514,113 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
         metrics: MetricsConfig::default(),
         migration: MigrationConfig::default(),
     }
+}
+
+/// The public gateway origin that the DPoP tests configure in `forwarded_base_urls` (SMA-700).
+#[allow(dead_code)]
+pub const GATEWAY_BASE: &str = "https://gw.example.test";
+/// The `htu` of a chat request through [`GATEWAY_BASE`].
+#[allow(dead_code)]
+pub const CHAT_URL: &str = "https://gw.example.test/v1/chat/completions";
+/// The path that the gateway forwards for [`CHAT_URL`].
+#[allow(dead_code)]
+pub const CHAT_PATH: &str = "/v1/chat/completions";
+
+/// [`test_config`] with `[authn.dpop]` on for [`GATEWAY_BASE`] (SMA-700), the other DPoP values
+/// at their defaults.
+#[allow(dead_code)]
+pub fn test_config_dpop(idp: &MockIdp) -> IamConfig {
+    let mut cfg = test_config(idp);
+    cfg.authn.dpop = DpopConfig {
+        enabled: true,
+        forwarded_base_urls: vec![GATEWAY_BASE.to_string()],
+        ..DpopConfig::default()
+    };
+    cfg
+}
+
+/// A client's DPoP key (SMA-700): an ES256 key, its public JWK members and its RFC 7638
+/// thumbprint. The proof shape follows `keycloak_e2e.rs::dpop_proof`, plus `ath`.
+#[allow(dead_code)]
+pub struct DpopKey {
+    sign: EncodingKey,
+    x: String,
+    y: String,
+}
+
+#[allow(dead_code)]
+impl DpopKey {
+    pub fn generate() -> Self {
+        let secret = p256::SecretKey::generate();
+        let pem = secret.to_pkcs8_pem(LineEnding::LF).expect("valid pkcs8 pem");
+        let point = secret.public_key().to_sec1_point(false);
+        DpopKey {
+            sign: EncodingKey::from_ec_pem(pem.as_bytes()).expect("valid ec pem"),
+            x: URL_SAFE_NO_PAD.encode(point.x().expect("uncompressed point has x")),
+            y: URL_SAFE_NO_PAD.encode(point.y().expect("uncompressed point has y")),
+        }
+    }
+
+    /// The RFC 7638 thumbprint: the `cnf.jkt` of a token bound to this key.
+    pub fn jkt(&self) -> String {
+        let canonical = format!(r#"{{"crv":"P-256","kty":"EC","x":"{}","y":"{}"}}"#, self.x, self.y);
+        URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes()))
+    }
+
+    /// A signed proof for one request to `htu`, bound to `token` by `ath`, with `iat` now. The
+    /// members of `extra` (an object) join the payload, for a size pad.
+    pub fn proof(&self, htm: &str, htu: &str, token: &str, jti: &str, extra: Value) -> String {
+        let header = serde_json::json!({ "typ": "dpop+jwt", "alg": "ES256", "jwk": { "kty": "EC", "crv": "P-256", "x": self.x, "y": self.y } });
+        let mut payload = serde_json::json!({
+            "jti": jti,
+            "htm": htm,
+            "htu": htu,
+            "iat": chrono::Utc::now().timestamp(),
+            "ath": URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes())),
+        });
+        if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), extra) {
+            payload.extend(extra);
+        }
+        let message = format!("{}.{}", URL_SAFE_NO_PAD.encode(header.to_string()), URL_SAFE_NO_PAD.encode(payload.to_string()));
+        let signature = jsonwebtoken::crypto::sign(message.as_bytes(), &self.sign, Algorithm::ES256).expect("sign the DPoP proof");
+        format!("{message}.{signature}")
+    }
+}
+
+/// An `Introspect` request as the gateway sends it for `POST /v1/chat/completions` (SMA-700).
+#[allow(dead_code)]
+pub fn dpop_introspect(token: &str, proof: &str) -> IntrospectRequest {
+    IntrospectRequest {
+        token: token.to_string(),
+        dpop: Some(DpopContext {
+            proof: proof.to_string(),
+            method: "POST".to_string(),
+            path: CHAT_PATH.to_string(),
+        }),
+    }
+}
+
+/// The gateway's `IsAuthorized` follow-up metadata (SMA-700 § 4.8): `authorization: DPoP <token>`
+/// and `dpop: <proof>`.
+#[allow(dead_code)]
+pub fn dpop_follow_up<T>(message: T, token: &str, proof: &str) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    request.metadata_mut().insert("authorization", format!("DPoP {token}").parse().expect("ascii metadata"));
+    request.metadata_mut().insert("dpop", proof.parse().expect("ascii metadata"));
+    request
+}
+
+/// The `ErrorInfo` reason of an IAM status.
+#[allow(dead_code)]
+pub fn reason_of(status: &tonic::Status) -> String {
+    let details = tonic_types::StatusExt::get_error_details(status);
+    details.error_info().expect("every IAM status carries ErrorInfo").reason.clone()
+}
+
+/// The wire value of an `ErrorReason`, for comparison with [`reason_of`].
+#[allow(dead_code)]
+pub fn wire(reason: ErrorReason) -> String {
+    reason.as_wire_reason().expect("not the Unspecified sentinel")
 }
 
 /// A >=32-byte, base64-encoded API-key pepper for test-support `IamConfig`s (SMA-445 Task 19):

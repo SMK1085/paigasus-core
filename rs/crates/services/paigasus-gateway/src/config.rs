@@ -42,6 +42,10 @@ pub struct GatewayConfig {
     /// The `Defaults` layer has no `limits` entry on purpose.
     #[serde(default)]
     pub limits: Option<LimitsConfig>,
+    /// SMA-700: the DPoP scheme on the protected routes. Off by default (D4). The chart does not
+    /// deploy the gateway, so the operator sets `GATEWAY_DPOP__ENABLED`. Turn DPoP on in IAM first.
+    #[serde(default)]
+    pub dpop: GatewayDpopConfig,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -197,6 +201,15 @@ pub enum LimitsBackend {
     #[default]
     Memory,
     Redis,
+}
+
+/// `[dpop]` (SMA-700 § 4.10). With `enabled`, the gateway accepts `Authorization: DPoP <token>`
+/// with one `DPoP` proof header, forwards the proof to IAM, and sends a `WWW-Authenticate: DPoP`
+/// challenge on a 401. A misspelt key fails extraction.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GatewayDpopConfig {
+    pub enabled: bool,
 }
 
 /// D11/D23: `0` refuses every request (never what an operator means), and a value above the cap
@@ -897,6 +910,29 @@ mod tests {
                 (Some(60), Some(600), Some(5_000_000))
             );
             assert_eq!(limits.budget_period, BudgetPeriod::Daily);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn dpop_is_off_by_default_and_reads_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(!cfg.dpop.enabled, "D4: off by default");
+            jail.set_env("GATEWAY_DPOP__ENABLED", "true");
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.dpop.enabled);
+            assert!(cfg.validate().is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_misspelt_dpop_key_fails_extraction() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &format!("{}\n[dpop]\nenable = true\n", valid_toml()))?;
+            assert!(GatewayConfig::figment().extract::<GatewayConfig>().is_err(), "a typo must not leave DPoP silently off");
             Ok(())
         });
     }

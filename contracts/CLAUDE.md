@@ -57,3 +57,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - `wasm-pack` is **proto-pinned, not Moon-managed** — `moon setup` does not install it. Any job
   invoking `wasm-pack` needs an explicit `proto install wasm-pack` step first, the same class of
   gap the documented nextest trap already records for a different tool (SMA-579).
+- wasm-pack keeps `wasm-opt = false`. The pinned binaryen `wasm-opt -O` runs as its own step,
+  `ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs`, after wasm-pack in `generate-wasm`
+  and in `prebuild.yml` (SMA-435). Its pin is in `rs/crates/bindings/paigasus-wasm/.prototools`.
+  A job that optimizes needs no `proto install` step for it: the script installs the pin.

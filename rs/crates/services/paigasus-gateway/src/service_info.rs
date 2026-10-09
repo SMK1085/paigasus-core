@@ -111,6 +111,7 @@ mod tests {
                 metrics: MetricsConfig::default(),
                 stream_enabled,
                 limits: None,
+                dpop: crate::config::GatewayDpopConfig::default(),
             }
         }
 
