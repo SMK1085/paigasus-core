@@ -8,8 +8,14 @@ members = ["packages/*"]
 # 8.3.3), so `repo:osv` reds the lock. The constraint below states the invariant directly: uv
 # backtracks to a python-semantic-release that permits a fixed click. Remove it only when every
 # resolvable dependent allows click >= 8.3.3 on its own.
+#
+# multidict: GHSA-54p9-h82j-f925 (CVE-2026-104874), a reference leak in the CIMultiDict /
+# MultiDict items-view union and subtraction, affects 6.7.0 up to 6.9.1 and is fixed in 6.9.1.
+# multidict reaches the graph only through grpclib (betterproto2[grpclib] -> paigasus-proto),
+# and an existing lock does not move off 6.7.1 on its own, so the floor is stated here. Remove
+# it only when every resolvable dependent requires multidict >= 6.9.1 on its own.
 [tool.uv]
-constraint-dependencies = ["click>=8.3.3"]
+constraint-dependencies = ["click>=8.3.3", "multidict>=6.9.1"]
 
 # Python version lives in THREE places that must move together on a floor bump:
 # requires-python (per package), tool.basedpyright.pythonVersion, tool.ruff.target-version.
@@ -66,7 +72,7 @@ dev = [
     # [tool.uv] constraint-dependencies note at the top of this file.
     "python-semantic-release>=10.7.0,<11",
     "pyyaml==6.0.3",
-    "ruff>=0.16.9,<0.17",
+    "ruff>=0.16.10,<0.17",
     # SMA-539 — shellcheck for actionlint's `run:` blocks. Sourced from PyPI, not a proto plugin,
     # because shellcheck's own release ships 13 archives and NO checksums asset (re-measured
     # 2026-09-02), which SMA-525 D2 refused. shellcheck-py is checksummed on both supported
