@@ -203,6 +203,25 @@ check read the same run.
 whole job skip **green** when `PAIGASUS_BOT_APP_ID` is unreadable, so a botched migration looks
 identical to a healthy run in the checks list. Open the run and confirm the job executed.
 
+### 3.2 The App installation scope — a manual check, OPEN (SMA-735)
+
+Nobody has measured the scope of the Paigasus bot App installation. A user token cannot read it
+(`GET /user/installations` returns 403). Before each release, do this check by hand:
+
+1. Open GitHub **Settings → Applications → Installed GitHub Apps**, then **Configure** on the
+   Paigasus bot App.
+2. Confirm that **Repository access** is "Only select repositories" and lists only
+   `SMK1085/paigasus-core`.
+3. Confirm that the permissions are **Contents: Read and write**, **Pull requests: Read and
+   write** and the mandatory **Metadata: Read-only**, and no other permission.
+4. Write the date and the result below.
+
+If the access is "All repositories", or if there is another permission, stop and tell the
+maintainer. A wider scope gives more power to a stolen private key.
+
+| Date | Repository access | Permissions | Checked by |
+| --- | --- | --- | --- |
+
 ---
 
 ### 5.4 Credential cross-check — measured 2026-08-29
@@ -656,7 +675,8 @@ gh workflow run release.yml --ref main --repo SMK1085/paigasus-core
 gh run watch --repo SMK1085/paigasus-core
 ```
 
-`wheels`, `prebuild` and `proto-dist` build every artifact. Then `approve-release` enters the
+`wheels`, `prebuild` and `proto-dist` build every artifact, and `verify-crates` builds every
+crate with `cargo publish --dry-run` (SMA-735). Then `approve-release` enters the
 `release-approval` environment and **pauses**.
 
 **That is guaranteed here because step I is a `workflow_dispatch`.** Since SMA-603, `release.yml`

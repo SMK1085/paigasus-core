@@ -23,6 +23,7 @@ import re
 import sys
 import tempfile
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
@@ -1581,6 +1582,42 @@ def chain_download_violations(jobs: dict, name: str) -> list[str]:
     return out
 
 
+@dataclass(frozen=True)
+class StepAllowlist:
+    """One row of the step-allowlist engine (SMA-735 D5). A row names its jobs and the actions,
+    command words, shell keywords, command prefixes, step keys, env names, working directories
+    and `with:` keys that those jobs may use. The engine checks each row on its own and never
+    merges the sets of two rows. Every message starts with `<file>: <rule>: ` and ends with
+    `hint`. The rules for every row: no workflow-level `defaults:` or `env:`, no job key in
+    UNGATED_JOB_BANNED_KEYS, no step `shell:`. See README L43 and L44."""
+
+    rule: str
+    subject: str
+    jobs: tuple[str, ...]
+    actions: frozenset[str]
+    commands: frozenset[str]
+    keywords: frozenset[str]
+    prefixes: tuple[str, ...]
+    step_keys: frozenset[str]
+    env_names: frozenset[str]
+    workdirs: frozenset[str]
+    with_keys: dict[str, frozenset[str]]
+    hint: str
+    # SMA-735 V20. A segment whose words equal one of these tuples exactly is allowed.
+    exact: tuple[tuple[str, ...], ...] = ()
+    # SMA-735 V19. ((leading words, flag), ...): a segment that starts with the leading words
+    # must carry the flag as one plain word (see _required_flag_verdict).
+    required_flags: tuple[tuple[tuple[str, ...], str], ...] = ()
+    # SMA-735. Refuse a lone `&`: the step can end before the background command does.
+    refuse_background: bool = False
+    # SMA-735 final review. None: the row does not check redirections (V18, unchanged). A tuple:
+    # a segment with `<` or `>` must end in one of these texts and hold no other `<` or `>`.
+    # A write to $GITHUB_ENV or $GITHUB_PATH changes what a later step runs (BASH_ENV, a
+    # `cargo` earlier on PATH), and a write to a file such as rs/.cargo/config.toml changes
+    # what cargo runs.
+    redirects: tuple[str, ...] | None = None
+
+
 # V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
 # the runner receives every secret a job references when the job starts, so code in ANY step of
 # the job can read it, not only a step with a token in its env:. So no step of such a job may
@@ -1681,11 +1718,12 @@ _V18_WORD_SPLIT_RE = re.compile(r"[ \t]+")
 _V18_SUBST_MARKERS = ("$(", "`", "<(", ">(")
 
 
-def v18_split(text: str) -> tuple[list[str], str | None]:
+def v18_split(text: str, seps: list[str] | None = None) -> tuple[list[str], str | None]:
     """Split one logical line into command segments on UNQUOTED `;`, `&`, `|`, `&&`, `||` and
     `|&`. Tracks single quotes, double quotes and backslash escapes. An `&` that belongs to a
     redirection (`>&2`, `2>&1`, `<&`, `&>`) does not split. A line with an unterminated quote is
-    refused. Not a shell parser: it knows no heredoc, no `$(( ))` and no brace group."""
+    refused. Not a shell parser: it knows no heredoc, no `$(( ))` and no brace group.
+    When seps is a list, each separator found is appended to it (SMA-735 V19 and V20 refuse a lone `&`)."""
     segs: list[str] = []
     cur: list[str] = []
     quote = ""
@@ -1719,6 +1757,8 @@ def v18_split(text: str) -> tuple[list[str], str | None]:
                 i += 1
                 continue
             width = 2 if text[i:i + 2] in ("&&", "||", "|&") else 1
+            if seps is not None:
+                seps.append(text[i:i + width])
             segs.append("".join(cur))
             cur = []
             i += width
@@ -1746,7 +1786,7 @@ def _v18_unquoted_paren(text: str) -> bool:
     return False
 
 
-def v18_line_segments(line: str) -> tuple[list[str], str | None]:
+def v18_line_segments(line: str, seps: list[str] | None = None) -> tuple[list[str], str | None]:
     """The command segments of one logical line for V18, and a reason to refuse the line, if any.
     command_segments is not used (see README L43). A line that is one `NAME="$(...)"` is
     unwrapped first. Then `$(`, a backtick, `<(` and `>(` are refused anywhere, quotes included:
@@ -1769,14 +1809,38 @@ def v18_line_segments(line: str) -> tuple[list[str], str | None]:
     for mark in _V18_SUBST_MARKERS:
         if mark in text:
             return [], f"a substitution ({mark!r})"
-    return v18_split(text)
+    return v18_split(text, seps)
 
 
-def v18_segment_verdict(segment: str) -> str | None:
-    """None when one command segment may run in an UNGATED_JOBS member, else the reason it may
-    not. Leading variable assignments are removed; then shell keywords; then the rest must start
-    with an allowed command prefix or an allowed command word. Substitutions never reach here:
-    v18_line_segments refuses them. Not a shell parser: see README L43.
+def _required_flag_verdict(text: str, tail: list[str], lead: tuple[str, ...], flag: str) -> str | None:
+    """SMA-735 V19. The reason a segment that runs `lead` does not pass `flag` as one plain word,
+    or None. Fail closed: a quote, a backslash or a `$` anywhere in such a segment can change
+    the words that bash passes, so the segment is refused rather than read. A word after `--`
+    is not a flag."""
+    cmd = " ".join(lead)
+    if any(c in text for c in "'\"\\$"):
+        return (f"`{cmd}` with a quote, a backslash or a `$` in the same command; write its flags "
+                f"as plain words, so the guard can read {flag}")
+    if "--" in tail:
+        tail = tail[:tail.index("--")]
+    if any(w.startswith(flag + "=") for w in tail):
+        return f"`{cmd}` with `{flag}=…`; only the plain word {flag} is accepted"
+    if flag not in tail:
+        return f"`{cmd}` without {flag}"
+    return None
+
+
+# SMA-735 N1. A row with `redirects` refuses every assignment to a GITHUB_* name. An assignment such
+# as `GITHUB_OUTPUT=$GITHUB_ENV` makes the allowed `>> "$GITHUB_OUTPUT"` write to another file.
+_GITHUB_ASSIGN_WHY = ("an assignment to a GITHUB_* name. It can make a write to $GITHUB_OUTPUT go to "
+                      "$GITHUB_ENV, $GITHUB_PATH or a file")
+
+
+def segment_verdict(segment: str, row: StepAllowlist) -> str | None:
+    """None when one command segment may run in a job of `row`, else the reason it may not.
+    Leading variable assignments are removed; then the row's shell keywords; then the rest must
+    start with one of the row's command prefixes or command words. Substitutions never reach
+    here: v18_line_segments refuses them. Not a shell parser: see README L43.
 
     An assignment before a command word puts the variable into that command's environment, so
     `BASH_ENV=./x.sh bash ci/version-lockstep/run.sh --write` and `GIT_EXTERNAL_DIFF=./x git diff`
@@ -1789,12 +1853,20 @@ def v18_segment_verdict(segment: str) -> str | None:
         if not m:
             break
         assigned = True
+        if row.redirects is not None and s.startswith("GITHUB_"):
+            return _GITHUB_ASSIGN_WHY
         s = s[m.end():].lstrip(_V18_BLANKS)
+    if row.redirects is not None and any(c in s for c in "<>"):
+        tail = next((r for r in row.redirects if s.endswith(r)), "")
+        if not tail or any(c in s[:len(s) - len(tail)] for c in "<>"):
+            allowed = " or ".join(repr(r) for r in row.redirects) or "none"
+            return (f"a redirection; this row allows only {allowed}. A write to $GITHUB_ENV, "
+                    f"$GITHUB_PATH or a file can change what a later command runs")
     words = [w for w in _V18_WORD_SPLIT_RE.split(s) if w]
     if assigned and words:
         return (f"an assignment before the command word {words[0]!r} puts the variable into that "
                 f"command's environment")
-    while words and words[0] in UNGATED_JOB_KEYWORDS:
+    while words and words[0] in row.keywords:
         words = words[1:]
     if not words:
         return None
@@ -1803,11 +1875,18 @@ def v18_segment_verdict(segment: str) -> str | None:
             if not _V18_SET_WORD_RE.fullmatch(w):
                 return (f"`set` with {w!r}, which is not on the allowlist (`-a`, `-o allexport` and "
                         f"`-k` export later assignments)")
+    for lead, flag in row.required_flags:
+        if tuple(words[:len(lead)]) == lead:
+            why = _required_flag_verdict(s, words[len(lead):], lead, flag)
+            if why:
+                return why
+    if tuple(words) in row.exact:
+        return None
     rest = " ".join(words)
-    for prefix in UNGATED_JOB_PREFIXES:
+    for prefix in row.prefixes:
         if rest == prefix or rest.startswith(prefix + " "):
             return None
-    if words[0] in UNGATED_JOB_COMMANDS:
+    if words[0] in row.commands:
         return None
     return f"the command word {words[0]!r} is not on the allowlist"
 
@@ -1826,12 +1905,30 @@ UNGATED_JOB_WITH_KEYS = {
 }
 
 
-def _v18_step_config_violations(step: dict, action: str | None) -> list[str]:
+# V18 as a row of the engine (SMA-735 D5). What V18 accepts does not change: the
+# _SMA684_V18_CASES table and its count of 147 pin it.
+V18_ROW = StepAllowlist(
+    rule="V18",
+    subject="an UNGATED_JOBS member",
+    jobs=tuple(sorted(UNGATED_JOBS)),
+    actions=UNGATED_JOB_ACTIONS,
+    commands=UNGATED_JOB_COMMANDS,
+    keywords=UNGATED_JOB_KEYWORDS,
+    prefixes=UNGATED_JOB_PREFIXES,
+    step_keys=UNGATED_JOB_STEP_KEYS,
+    env_names=UNGATED_JOB_ENV_NAMES,
+    workdirs=UNGATED_JOB_WORKDIRS,
+    with_keys=UNGATED_JOB_WITH_KEYS,
+    hint=V18_HINT,
+)
+
+
+def step_config_violations(step: dict, action: str | None, row: StepAllowlist) -> list[str]:
     """Reasons (without the location prefix) that a step's keys, env, workdir or `with:` are not
-    allowed. `action` is the step's `uses:` path, or None."""
+    allowed by `row`. `action` is the step's `uses:` path, or None."""
     out: list[str] = []
     for key in step:
-        if key not in UNGATED_JOB_STEP_KEYS and key != "shell":
+        if key not in row.step_keys and key != "shell":
             out.append(f"sets the step key `{key}:`, which is not on the allowlist")
     env = step.get("env")
     if "env" in step:
@@ -1839,15 +1936,15 @@ def _v18_step_config_violations(step: dict, action: str | None) -> list[str]:
             out.append("sets an `env:` that is not a mapping")
         else:
             for k in env:
-                if k not in UNGATED_JOB_ENV_NAMES:
+                if k not in row.env_names:
                     out.append(f"sets the env name {k!r}, which is not on the allowlist "
-                               f"{sorted(UNGATED_JOB_ENV_NAMES)}")
-    if "working-directory" in step and step["working-directory"] not in UNGATED_JOB_WORKDIRS:
+                               f"{sorted(row.env_names)}")
+    if "working-directory" in step and step["working-directory"] not in row.workdirs:
         out.append(f"sets `working-directory:` to {step['working-directory']!r}, "
-                   f"not one of {sorted(UNGATED_JOB_WORKDIRS)}")
+                   f"not one of {sorted(row.workdirs)}")
     if "with" in step:
         with_ = step["with"]
-        allowed = UNGATED_JOB_WITH_KEYS.get(action or "")
+        allowed = row.with_keys.get(action or "")
         if not isinstance(with_, dict):
             out.append("sets a `with:` that is not a mapping")
         elif allowed is None:
@@ -1865,56 +1962,258 @@ def _v18_step_config_violations(step: dict, action: str | None) -> list[str]:
     return out
 
 
-def ungated_job_violations(doc: dict, name: str) -> list[str]:
-    """V18 (SMA-684). Every step of every UNGATED_JOBS member must match the allowlist above.
-    Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles."""
+def allowlist_job_violations(doc: dict, name: str, row: StepAllowlist) -> list[str]:
+    """Every step of every job of `row` must match the row's allowlist, plus the rules for every
+    row (see StepAllowlist). Does not use the dry-run exemption (_dry_run_exempts): a dry run
+    still compiles."""
     out: list[str] = []
     jobs = doc["jobs"]
     for key in ("defaults", "env"):
-        if key in doc and any(isinstance(jobs.get(jid), dict) for jid in UNGATED_JOBS):
-            out.append(f"{name}: V18: the workflow sets `{key}:`, which reaches every step of an "
-                       f"UNGATED_JOBS member. {V18_HINT}")
-    for jid in sorted(UNGATED_JOBS):
+        if key in doc and any(isinstance(jobs.get(jid), dict) for jid in row.jobs):
+            out.append(f"{name}: {row.rule}: the workflow sets `{key}:`, which reaches every step of "
+                       f"{row.subject}. {row.hint}")
+    for jid in row.jobs:
         job = jobs.get(jid)
         if not isinstance(job, dict):
             continue
         for key in UNGATED_JOB_BANNED_KEYS:
             if key in job:
-                out.append(f"{name}: V18: job '{jid}' sets `{key}:`, which runs code or changes how "
-                           f"its steps run. {V18_HINT}")
+                out.append(f"{name}: {row.rule}: job '{jid}' sets `{key}:`, which runs code or changes how "
+                           f"its steps run. {row.hint}")
         for i, step in enumerate(steps_of(job, f"{name}: job '{jid}'")):
             if not isinstance(step, dict):
-                out.append(f"{name}: V18: job '{jid}' step #{i + 1} is not a mapping. {V18_HINT}")
+                out.append(f"{name}: {row.rule}: job '{jid}' step #{i + 1} is not a mapping. {row.hint}")
                 continue
-            where = f"{name}: V18: job '{jid}' step '{step.get('name') or f'#{i + 1}'}'"
+            where = f"{name}: {row.rule}: job '{jid}' step '{step.get('name') or f'#{i + 1}'}'"
             if "shell" in step:
-                out.append(f"{where} sets `shell:`, so its `run:` text is not read as bash. {V18_HINT}")
+                out.append(f"{where} sets `shell:`, so its `run:` text is not read as bash. {row.hint}")
             uses, run = step.get("uses"), step.get("run")
             if uses is None and run is None:
-                out.append(f"{where} has neither `uses:` nor `run:`. {V18_HINT}")
+                out.append(f"{where} has neither `uses:` nor `run:`. {row.hint}")
             action = None
             if uses is not None:
                 action = str(uses).split("@", 1)[0]
-                if action not in UNGATED_JOB_ACTIONS:
+                if action not in row.actions:
                     out.append(f"{where} uses the action {action!r}, which is not on the allowlist "
-                               f"{sorted(UNGATED_JOB_ACTIONS)}. {V18_HINT}")
-            for why in _v18_step_config_violations(step, action):
-                out.append(f"{where} {why}. {V18_HINT}")
+                               f"{sorted(row.actions)}. {row.hint}")
+            for why in step_config_violations(step, action, row):
+                out.append(f"{where} {why}. {row.hint}")
             if run is not None:
+                # SMA-735: GitHub replaces a `${{ }}` expression in `run:` text BEFORE bash parses
+                # it, so `echo "${{ github.event.head_commit.message }}"` lets a commit message
+                # inject a command. V18 keeps its rules; V19 and V20 refuse the expression.
+                if row.redirects is not None and "${{" in str(run):
+                    out.append(f"{where} holds a `${{{{ }}}}` expression in its `run:` text. GitHub "
+                               f"puts the value into the script before bash reads it, so the value "
+                               f"can add a command. Pass it through `env:` instead. {row.hint}")
                 lines, refused = _v18_logical_lines(str(run))
                 if refused:
-                    out.append(f"{where}: {refused}. {V18_HINT}")
+                    out.append(f"{where}: {refused}. {row.hint}")
                 for line in lines:
-                    segs, refused = v18_line_segments(line)
+                    seps: list[str] = []
+                    if (row.redirects is not None and line.strip(_V18_BLANKS).startswith("GITHUB_")
+                            and _V18_WRAP_RE.fullmatch(line.strip(_V18_BLANKS))):
+                        out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not allowed: "
+                                   f"{_GITHUB_ASSIGN_WHY}. {row.hint}")
+                        continue
+                    segs, refused = v18_line_segments(line, seps)
                     if refused:
                         out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not "
-                                   f"allowed: {refused}. {V18_HINT}")
+                                   f"allowed: {refused}. {row.hint}")
                         continue
+                    if row.refuse_background and "&" in seps:
+                        out.append(f"{where}: the line {line.strip(_V18_BLANKS)!r} is not allowed: "
+                                   f"a lone `&` runs the command in the background, so the step "
+                                   f"can end before the command does. {row.hint}")
                     for seg in segs:
-                        why = v18_segment_verdict(seg)
+                        why = segment_verdict(seg, row)
                         if why:
                             out.append(f"{where}: the segment {seg.strip(_V18_BLANKS)!r} is "
-                                       f"not allowed: {why}. {V18_HINT}")
+                                       f"not allowed: {why}. {row.hint}")
+    return out
+
+
+def ungated_job_violations(doc: dict, name: str) -> list[str]:
+    """V18 (SMA-684). Every step of every UNGATED_JOBS member must match the allowlist above.
+    Does not use the dry-run exemption (_dry_run_exempts): a dry run still compiles. Since
+    SMA-735 this is the V18_ROW of the table-driven engine."""
+    return allowlist_job_violations(doc, name, V18_ROW)
+
+
+# V20 (SMA-735). release.yml's `verify-crates` job builds every publishable crate with
+# `cargo publish --dry-run` before `approve-release`, because the `release` job runs
+# `release-plz release --no-verify` and so builds nothing. The build runs third-party build
+# scripts and proc macros, so the job may hold no secret and no write token, and it may run only
+# the verify command. Two parts: the engine row below, and the job rules in
+# verify_job_violations. Scoped to RELEASE_WORKFLOW_NAME, the same as V11 (spec D7).
+VERIFY_JOB = "verify-crates"
+VERIFY_COMMAND = ("bash", "ci/publish-metadata/run.sh", "--verify-publish-groups")
+# The one `permissions:` value that V20 accepts (spec D8). actions/checkout gets the job token as
+# its default `token` input. With exactly this grant, the token can only read the repository.
+V20_PERMISSIONS = {"contents": "read"}
+V20_HINT = ("The verify-crates job builds third-party code before the approval, so it may hold no "
+            "secret, its `permissions:` must be exactly `contents: read`, and it may run only the "
+            "verify command "
+            "(docs/superpowers/specs/2026-10-09-sma-735-release-job-no-compile-design.md, "
+            "section 5.5).")
+V20_ROW = StepAllowlist(
+    rule="V20",
+    subject="the verify-crates job",
+    jobs=(VERIFY_JOB,),
+    actions=frozenset({"actions/checkout"}),
+    commands=frozenset(),
+    keywords=frozenset(),
+    prefixes=(),
+    step_keys=frozenset({"name", "id", "uses", "with", "run"}),
+    env_names=frozenset(),
+    workdirs=frozenset(),
+    with_keys={"actions/checkout": frozenset({"persist-credentials"})},
+    hint=V20_HINT,
+    exact=(VERIFY_COMMAND,),
+    refuse_background=True,
+    redirects=(),
+)
+# A bare `if:` is an expression without the `${{ }}` wrapper, so `if: github.token != ''`
+# reads the github context with no span to find.
+_GITHUB_CTX = re.compile(r"(?<![\w.-])github(?![\w-])", re.IGNORECASE)
+
+
+def _job_strings(node: object, key: object = None) -> list[tuple[str, bool]]:
+    """Every string in `node` (keys and values, at any depth), with True when it is the value
+    of an `if:` key, which GitHub reads as an expression."""
+    out: list[tuple[str, bool]] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out += _job_strings(k)
+            out += _job_strings(v, k)
+    elif isinstance(node, list):
+        for v in node:
+            out += _job_strings(v)
+    elif isinstance(node, str):
+        out.append((node, key == "if"))
+    return out
+
+
+def verify_job_violations(doc: dict, name: str) -> list[str]:
+    """V20 (SMA-735): the `verify-crates` job exists, is on the needs: path of the approval job,
+    holds no secret, sets `permissions:` to exactly `contents: read`, and runs the verify command
+    exactly once and nothing else."""
+    if name != RELEASE_WORKFLOW_NAME:
+        return []
+    jobs = doc["jobs"]
+    job = jobs.get(VERIFY_JOB)
+    if not isinstance(job, dict):
+        return [f"{name}: V20: no job named '{VERIFY_JOB}' exists, so nothing builds the crates "
+                f"before the approval. {V20_HINT}"]
+    out = allowlist_job_violations(doc, name, V20_ROW)
+    where = f"{name}: V20: job '{VERIFY_JOB}'"
+    if VERIFY_JOB not in gated_path_jobs(APPROVAL_JOB, jobs):
+        out.append(f"{where} is not on the needs: path of '{APPROVAL_JOB}', so a person can "
+                   f"approve the release before the verify build passed. {V20_HINT}")
+    if "environment" in job:
+        out.append(f"{where} sets `environment:`. The job must hold no credential. {V20_HINT}")
+    granted = job.get("permissions")
+    if granted != V20_PERMISSIONS:
+        shown = "no `permissions:` key" if "permissions" not in job else f"`permissions:` {granted!r}"
+        out.append(f"{where} has {shown}. It must set exactly `contents: read`, so that the job "
+                   f"token, which actions/checkout gets, can only read the repository. {V20_HINT}")
+    for text, bare in _job_strings(job):
+        names, unresolved = secret_refs(text, bare_expression=bare)
+        if names or unresolved:
+            out.append(f"{where} reads the secrets context in {text!r}. {V20_HINT}")
+        elif "${{" in text or (bare and _GITHUB_CTX.search(_STRING_LITERAL.sub("", text))):
+            out.append(f"{where} holds the expression {text!r}. The job may hold none: "
+                       f"`github.token` or `toJSON(github)` gives it a token. {V20_HINT}")
+    steps = [s for s in steps_of(job, where) if isinstance(s, dict)]
+    for step in steps:
+        if str(step.get("uses") or "").split("@", 1)[0].lower() == _APP_TOKEN_ACTION:
+            out.append(f"{where} mints an App token. {V20_HINT}")
+    verify_runs = [s for s in steps if tuple(w for w in _V18_WORD_SPLIT_RE.split(
+        str(s.get("run") or "").strip(_V18_BLANKS)) if w) == VERIFY_COMMAND]
+    if len(verify_runs) != 1:
+        out.append(f"{where} runs `{' '.join(VERIFY_COMMAND)}` in {len(verify_runs)} steps; "
+                   f"exactly one step must run it. {V20_HINT}")
+    return out
+
+
+# V19 (SMA-735). The `release` job holds CARGO_REGISTRY_TOKEN, the App installation token and the
+# App private key. So it may compile nothing (spec A1): `release-plz release` must carry
+# --no-verify, which release-plz passes to every `cargo publish` (spec F1, M2), and every step
+# must match the allowlist below. The verify build runs in `verify-crates` (V20) instead.
+# Liveness: the job must exist, and no other job may authenticate with crates.io or run
+# `release-plz release`, so a rename cannot switch V19 off. Scoped to RELEASE_WORKFLOW_NAME (D7).
+RELEASE_JOBS = frozenset({"release"})
+V19_HINT = ("The release job holds the crates.io token and the App credentials, so it may run only "
+            "the tools on V19's allowlist, and `release-plz release` must carry --no-verify "
+            "(docs/superpowers/specs/2026-10-09-sma-735-release-job-no-compile-design.md, "
+            "section 5.4).")
+V19_ROW = StepAllowlist(
+    rule="V19",
+    subject="the release job",
+    jobs=tuple(sorted(RELEASE_JOBS)),
+    actions=frozenset({"rust-lang/crates-io-auth-action", "actions/create-github-app-token",
+                       "actions/checkout", "moonrepo/setup-toolchain"}),
+    commands=frozenset({"set", "echo"}),
+    keywords=frozenset(),
+    prefixes=("release-plz release",),
+    exact=(("proto", "install", "release-plz"),),
+    step_keys=frozenset({"name", "id", "uses", "with", "env", "run", "working-directory"}),
+    env_names=frozenset({"CARGO_REGISTRY_TOKEN", "GIT_TOKEN"}),
+    workdirs=frozenset({"rs"}),
+    with_keys={
+        "rust-lang/crates-io-auth-action": frozenset(),
+        "actions/create-github-app-token": frozenset({"client-id", "private-key", "permission-contents"}),
+        "actions/checkout": frozenset({"fetch-depth", "persist-credentials"}),
+        "moonrepo/setup-toolchain": frozenset({"cache"}),
+    },
+    hint=V19_HINT,
+    required_flags=((("release-plz", "release"), "--no-verify"),),
+    refuse_background=True,
+    redirects=('>> "$GITHUB_OUTPUT"',),
+)
+_CRATES_IO_AUTH_ACTION = "rust-lang/crates-io-auth-action"
+# Fail closed (SMA-735 final review): quotes, `$`, parentheses, backticks and separators become
+# blanks, and a backslash-newline joins two lines. A line runs `release-plz release` when a word
+# whose last path part is `release-plz` has the word `release` anywhere after it on that line, so
+# `release-plz -v release` and `release-plz 'release'` count. The echo text
+# `release-plz: no release PR needed` does not count: its word is `release-plz:`.
+_LIVENESS_BLANKS_RE = re.compile(r"""['"\\$(){}`;&|<>]""")
+_RELEASE_PLZ_ACTION_PREFIXES = ("release-plz/", "marcoieni/release-plz-action")
+
+
+def _runs_release_plz_release(run_text: str) -> bool:
+    for line in run_text.replace("\\\n", " ").split("\n"):
+        words = _LIVENESS_BLANKS_RE.sub(" ", line).split()
+        for i, word in enumerate(words):
+            if word.rsplit("/", 1)[-1] == "release-plz" and "release" in words[i + 1:]:
+                return True
+    return False
+
+
+def release_job_violations(doc: dict, name: str) -> list[str]:
+    """V19 (SMA-735): liveness, then the V19 row of the engine."""
+    if name != RELEASE_WORKFLOW_NAME:
+        return []
+    jobs = doc["jobs"]
+    out: list[str] = []
+    for jid in sorted(RELEASE_JOBS):
+        if not isinstance(jobs.get(jid), dict):
+            out.append(f"{name}: V19: no job named '{jid}' exists. V19 keys on that literal name, "
+                       f"so a rename switches it off. {V19_HINT}")
+    for jid, job in jobs.items():
+        if jid in RELEASE_JOBS or not isinstance(job, dict):
+            continue
+        for step in steps_of(job, f"{name}: job '{jid}'"):
+            if not isinstance(step, dict):
+                continue
+            live_action = str(step.get("uses") or "").split("@", 1)[0].lower()
+            if (live_action == _CRATES_IO_AUTH_ACTION or live_action.startswith(_RELEASE_PLZ_ACTION_PREFIXES)
+                    or _runs_release_plz_release(str(step.get("run") or ""))):
+                out.append(f"{name}: V19: job '{jid}' authenticates with crates.io or runs "
+                           f"`release-plz release` (or uses a release-plz/ action), but it is not in RELEASE_JOBS "
+                           f"{sorted(RELEASE_JOBS)}. Only a V19 job may publish to crates.io. {V19_HINT}")
+                break
+    out += allowlist_job_violations(doc, name, V19_ROW)
     return out
 
 
@@ -2084,8 +2383,9 @@ def plan_contract_violations(jobs: dict, name: str) -> list[str]:
 
 
 def check_main(doc: dict, name: str) -> list[str]:
-    """V1-V5, V7, V8a-c, V8e, V9 and V13-V18 over the release workflow (V16a-c runs from
-    main()). V16e is one of the V13-V18 group. V6 applies to CALLED workflows (see
+    """V1-V5, V7, V8a-c, V8e, V9, V13-V18, V19 and V20 over the release workflow (V16a-c runs
+    from main()). V16e is one of the V13-V18 group. V19 (the `release` job) and V20 (the
+    `verify-crates` job) run only when `name` is RELEASE_WORKFLOW_NAME. V6 applies to CALLED workflows (see
     check_called) and V8d to every job's local callee (see callee_boundary_violations) — both
     need the filesystem, which this function, driven purely off a parsed doc, deliberately does
     not touch."""
@@ -2203,6 +2503,10 @@ def check_main(doc: dict, name: str) -> list[str]:
     # SMA-684. V18: once, outside the per-job loop, like V8 above. The loop's `continue` for an
     # UNGATED_JOBS member would otherwise skip it for exactly the job it exists for.
     out += ungated_job_violations(doc, name)
+    # SMA-735. V19 and V20: once each, outside the per-job loop, like V18. Both are scoped to
+    # RELEASE_WORKFLOW_NAME inside the functions (spec D7), the same as V11.
+    out += release_job_violations(doc, name)
+    out += verify_job_violations(doc, name)
     return out
 
 
@@ -4767,6 +5071,362 @@ def _sma684_v18_allowlist_bites() -> str | None:
     return None
 
 
+# SMA-735. The target shape of the release path, used by V19, V20 and the cross-row tests. It
+# copies the real `release` job and the new `verify-crates` job (spec §5.1, §5.2, measured M1).
+_SMA735_DOC_YAML = """
+on:
+  push:
+    branches:
+      - main
+permissions:
+  contents: read
+jobs:
+  plan:
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo plan
+  release-pr:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo propose
+  verify-crates:
+    needs: [plan]
+    if: needs.plan.outputs.nothing_to_release != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify every publish group
+        run: bash ci/publish-metadata/run.sh --verify-publish-groups
+  approve-release:
+    needs: [verify-crates]
+    runs-on: ubuntu-latest
+    environment: release-approval
+    steps:
+      - run: echo approved
+  release:
+    needs: [verify-crates, approve-release]
+    runs-on: ubuntu-latest
+    environment: release-publish
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Authenticate with crates.io
+        id: cratesio
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+      - name: Mint the App installation token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095
+        with:
+          cache: false
+      - name: Install pinned release-plz CLI
+        run: proto install release-plz
+      - name: Release
+        id: rel
+        working-directory: rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+          GIT_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          OUT="$(release-plz release --output json --no-verify)"
+          echo "$OUT"
+          echo "json=$OUT" >> "$GITHUB_OUTPUT"
+"""
+
+
+def _sma735_doc() -> dict:
+    return yaml.safe_load(_SMA735_DOC_YAML)
+
+
+def _sma735_step(job: dict, step_name: str) -> dict:
+    hits = [s for s in job["steps"] if isinstance(s, dict) and s.get("name") == step_name]
+    if len(hits) != 1:
+        raise AssertionError(f"the SMA-735 fixture has {len(hits)} steps named {step_name!r}")
+    return hits[0]
+
+
+def _sma735_apply(doc: dict, job_id: str, op: str, arg: object) -> dict:
+    """Apply one SMA-735 test change to `doc` and return it. `job_id` names the job the change
+    is about (for `add-job`, the new job's id)."""
+    jobs = doc["jobs"]
+    if op == "none":
+        pass
+    elif op == "doc-key":
+        key, value = arg
+        doc[key] = value
+    elif op == "add-job":
+        jobs[job_id] = arg
+    elif op in ("drop", "rename"):
+        job = jobs.pop(job_id)
+        if op == "rename":
+            jobs[arg] = job
+        for other in jobs.values():
+            if isinstance(other.get("needs"), list):
+                other["needs"] = [arg if (op == "rename" and n == job_id) else n
+                                  for n in other["needs"] if op == "rename" or n != job_id]
+    elif op == "job-key":
+        key, value = arg
+        if value is None:
+            jobs[job_id].pop(key, None)
+        else:
+            jobs[job_id][key] = value
+    elif op == "step":
+        jobs[job_id]["steps"].append(arg)
+    elif op == "steps":
+        jobs[job_id]["steps"] = arg
+    elif op == "run":
+        step_name, text = arg
+        _sma735_step(jobs[job_id], step_name)["run"] = text
+    elif op == "step-key":
+        step_name, key, value = arg
+        step = _sma735_step(jobs[job_id], step_name)
+        if value is None:
+            step.pop(key, None)
+        else:
+            step[key] = value
+    else:
+        raise AssertionError(f"unknown SMA-735 test op {op!r}")
+    return doc
+
+
+def _sma735_cases_bite(cases: tuple, count: int, fn, rule: str) -> str | None:
+    """Every row of `cases` reds `fn` or reads clean as its last field says, and every message
+    names `rule`. Deleting a row must red: the strict count is the only pin on each shape."""
+    if len(cases) != count:
+        return f"the {rule} case table holds {len(cases)} rows, expected {count}"
+    for label, job_id, op, arg, want_red in cases:
+        found = fn(_sma735_apply(_sma735_doc(), job_id, op, arg), RELEASE_WORKFLOW_NAME)
+        if bool(found) != want_red:
+            return f"{label}: expected {'a ' + rule + ' violation' if want_red else 'clean'}, got {found or '(clean)'}"
+        if not all(f": {rule}: " in v for v in found):
+            return f"{label}: a violation does not name {rule}: {found}"
+    return None
+
+
+_V20_STEP = "Verify every publish group"
+_SMA735_V20_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
+    ("the job is missing", "verify-crates", "drop", None, True),
+    ("the path to approve-release is removed", "approve-release", "job-key", ("needs", ["plan"]), True),
+    ("no permissions key", "verify-crates", "job-key", ("permissions", None), True),
+    ("permissions id-token write in place of contents read", "verify-crates", "job-key", ("permissions", {"id-token": "write"}), True),
+    ("permissions contents write", "verify-crates", "job-key", ("permissions", {"contents": "write"}), True),
+    ("permissions contents read plus id-token write", "verify-crates", "job-key", ("permissions", {"contents": "read", "id-token": "write"}), True),
+    ("permissions contents read plus actions read", "verify-crates", "job-key", ("permissions", {"contents": "read", "actions": "read"}), True),
+    ("an empty permissions mapping", "verify-crates", "job-key", ("permissions", {}), True),
+    ("permissions read-all", "verify-crates", "job-key", ("permissions", "read-all"), True),
+    ("permissions write-all", "verify-crates", "job-key", ("permissions", "write-all"), True),
+    ("permissions as a string, not a mapping", "verify-crates", "job-key", ("permissions", "contents: read"), True),
+    ("environment release-publish", "verify-crates", "job-key", ("environment", "release-publish"), True),
+    ("an App mint with no permission input", "verify-crates", "step",
+     {"uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+      "with": {"client-id": "${{ secrets.PAIGASUS_BOT_APP_ID }}",
+               "private-key": "${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}"}}, True),
+    ("a step env that names secrets.X", "verify-crates", "step-key", (_V20_STEP, "env", {"T": "${{ secrets.X }}"}), True),
+    ("a github.token reference", "verify-crates", "step-key", (_V20_STEP, "env", {"T": "${{ github.token }}"}), True),
+    ("toJSON(github) in a step name", "verify-crates", "step-key", ("Checkout", "name", "${{ toJSON(github) }}"), True),
+    ("github.token in a bare job if", "verify-crates", "job-key", ("if", "github.token != ''"), True),
+    ("a checkout without with", "verify-crates", "step-key", ("Checkout", "with", None), True),
+    ("a checkout with persist-credentials true", "verify-crates", "step-key", ("Checkout", "with", {"persist-credentials": True}), True),
+    ("a checkout of another ref", "verify-crates", "step-key", ("Checkout", "with", {"persist-credentials": False, "ref": "other"}), True),
+    ("the verify step with &", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups &"), True),
+    ("the verify step with a second command", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups; echo done"), True),
+    ("the verify step with a second line", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups\necho done"), True),
+    ("the verify command twice", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups; bash ci/publish-metadata/run.sh --verify-publish-groups"), True),
+    ("the verify step with an extra argument", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --verify-publish-groups --negative-control"), True),
+    ("the negative control before the mode", "verify-crates", "run", (_V20_STEP, "bash ci/publish-metadata/run.sh --negative-control --verify-publish-groups"), True),
+    ("a quoted script path", "verify-crates", "run", (_V20_STEP, 'bash "ci/publish-metadata/run.sh" --verify-publish-groups'), True),
+    ("sh in place of bash", "verify-crates", "run", (_V20_STEP, "sh ci/publish-metadata/run.sh --verify-publish-groups"), True),
+    ("the verify step replaced by echo", "verify-crates", "run", (_V20_STEP, "echo skipped"), True),
+    ("a step if false", "verify-crates", "step-key", (_V20_STEP, "if", False), True),
+    ("a step shell", "verify-crates", "step-key", (_V20_STEP, "shell", "bash"), True),
+    ("a step env BASH_ENV", "verify-crates", "step-key", (_V20_STEP, "env", {"BASH_ENV": "evil.sh"}), True),
+    ("a step working-directory", "verify-crates", "step-key", (_V20_STEP, "working-directory", "rs"), True),
+    ("a step continue-on-error", "verify-crates", "step-key", (_V20_STEP, "continue-on-error", True), True),
+    ("the verify step is removed", "verify-crates", "steps",
+     [{"name": "Checkout", "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+       "with": {"persist-credentials": False}}], True),
+    ("a cargo build step", "verify-crates", "step", {"run": "cargo build"}, True),
+    ("a setup-toolchain step", "verify-crates", "step",
+     {"uses": "moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095", "with": {"cache": False}}, True),
+    ("a moon setup step", "verify-crates", "step", {"run": "moon setup"}, True),
+    ("a job container", "verify-crates", "job-key", ("container", "ubuntu:24.04"), True),
+    ("a job env", "verify-crates", "job-key", ("env", {"BASH_ENV": "evil.sh"}), True),
+    ("a workflow env", "verify-crates", "doc-key", ("env", {"BASH_ENV": "evil.sh"}), True),
+    ("the target shape", "verify-crates", "none", None, False),
+    ("the verify step with extra blanks", "verify-crates", "run", (_V20_STEP, "  bash ci/publish-metadata/run.sh   --verify-publish-groups  "), False),
+)
+_SMA735_V20_CASE_COUNT = 43
+
+
+def _sma735_v20_bites() -> str | None:
+    if VERIFY_JOB != "verify-crates" or V20_ROW.jobs != (VERIFY_JOB,):
+        return f"V20 checks {V20_ROW.jobs!r} (VERIFY_JOB {VERIFY_JOB!r}), expected exactly ('verify-crates',)"
+    table = _sma735_cases_bite(_SMA735_V20_CASES, _SMA735_V20_CASE_COUNT, verify_job_violations, "V20")
+    if table is not None:
+        return table
+    # Transitivity: approve-release reaches verify-crates through a middle job.
+    doc = _sma735_doc()
+    doc["jobs"]["mid"] = {"needs": ["verify-crates"], "runs-on": "ubuntu-latest", "steps": [{"run": "echo mid"}]}
+    doc["jobs"]["approve-release"]["needs"] = ["mid"]
+    found = verify_job_violations(doc, RELEASE_WORKFLOW_NAME)
+    if found:
+        return f"V20 red on a transitive path approve-release -> mid -> verify-crates: {found}"
+    return None
+
+
+_V19_STEP = "Release"
+_SMA735_V19_CASES: tuple[tuple[str, str, str, object, bool], ...] = (
+    ("no --no-verify", "release", "run", (_V19_STEP, 'set -euo pipefail\nOUT="$(release-plz release --output json)"\necho "$OUT"'), True),
+    ("--no-verify=false", "release", "run", (_V19_STEP, 'OUT="$(release-plz release --output json --no-verify=false)"'), True),
+    ("--no-verify=true", "release", "run", (_V19_STEP, 'OUT="$(release-plz release --output json --no-verify=true)"'), True),
+    ("--no-verify then --no-verify=false", "release", "run", (_V19_STEP, "release-plz release --no-verify --no-verify=false"), True),
+    ("--no-verify only in a comment", "release", "run", (_V19_STEP, "# release-plz release --no-verify\nrelease-plz release --output json"), True),
+    ("--no-verify inside a single-quoted string", "release", "run", (_V19_STEP, "release-plz release --output 'json --no-verify x'"), True),
+    ("--no-verify inside a double-quoted string", "release", "run", (_V19_STEP, 'release-plz release --output "json --no-verify x"'), True),
+    ("--no-verify after --", "release", "run", (_V19_STEP, "release-plz release --output json -- --no-verify"), True),
+    ("a variable after --no-verify", "release", "run", (_V19_STEP, "release-plz release --no-verify $EXTRA"), True),
+    ("a second release-plz release without the flag", "release", "run", (_V19_STEP, "release-plz release --no-verify\nrelease-plz release"), True),
+    ("cargo publish", "release", "step", {"run": "cargo publish"}, True),
+    ("cargo build", "release", "step", {"run": "cargo build"}, True),
+    ("cargo package", "release", "step", {"run": "cargo package"}, True),
+    ("moon setup", "release", "step", {"run": "moon setup"}, True),
+    ("pnpm install", "release", "step", {"run": "pnpm --dir ts install --frozen-lockfile"}, True),
+    ("release-plz release --no-verify && cargo build", "release", "run", (_V19_STEP, "release-plz release --no-verify && cargo build"), True),
+    ("release-plz release --no-verify &", "release", "run", (_V19_STEP, "release-plz release --no-verify &"), True),
+    ("release-plz release-pr in the release job", "release", "run", (_V19_STEP, "release-plz release-pr --output json"), True),
+    ("release-plz update", "release", "run", (_V19_STEP, "release-plz update"), True),
+    ("an if keyword", "release", "run", (_V19_STEP, "if true; then release-plz release --no-verify; fi"), True),
+    ("set -a", "release", "run", (_V19_STEP, "set -a\nrelease-plz release --no-verify"), True),
+    ("uses setup-node", "release", "step", {"uses": "actions/setup-node@v4"}, True),
+    ("uses a local action", "release", "step", {"uses": "./local-action"}, True),
+    ("an env name outside the set", "release", "step-key", (_V19_STEP, "env", {"CARGO_REGISTRY_TOKEN": "x", "RUSTC_WRAPPER": "./x"}), True),
+    ("a working-directory outside the set", "release", "step-key", (_V19_STEP, "working-directory", "ts"), True),
+    ("a step if", "release", "step-key", (_V19_STEP, "if", "always()"), True),
+    ("a step continue-on-error", "release", "step-key", (_V19_STEP, "continue-on-error", True), True),
+    ("a step shell", "release", "step-key", (_V19_STEP, "shell", "bash"), True),
+    ("a with key on crates-io-auth-action", "release", "step-key", ("Authenticate with crates.io", "with", {"audience": "x"}), True),
+    ("a checkout without persist-credentials false", "release", "step-key", ("Checkout", "with", {"fetch-depth": 0}), True),
+    ("a job container", "release", "job-key", ("container", "ubuntu:24.04"), True),
+    ("a job env", "release", "job-key", ("env", {"RUSTC_WRAPPER": "./x"}), True),
+    ("a workflow defaults", "release", "doc-key", ("defaults", {"run": {"shell": "python {0}"}}), True),
+    ("the job renamed", "release", "rename", "publish-crates", True),
+    ("a second job with crates-io-auth-action", "extra", "add-job",
+     {"runs-on": "ubuntu-latest", "steps": [{"uses": "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18"}]}, True),
+    ("a second job with an upper-case crates-io-auth-action path", "extra", "add-job",
+     {"runs-on": "ubuntu-latest", "steps": [{"uses": "Rust-Lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18"}]}, True),
+    ("a second job that runs release-plz release", "extra", "add-job",
+     {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz release --no-verify"}]}, True),
+    ("an echo to $GITHUB_ENV", "release", "step", {"run": 'echo "BASH_ENV=$GITHUB_WORKSPACE/x.sh" >> "$GITHUB_ENV"'}, True),
+    ("an echo to $GITHUB_PATH", "release", "step", {"run": 'echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"'}, True),
+    ("an echo to a cargo config file", "release", "step", {"run": "echo x > rs/.cargo/config.toml"}, True),
+    ("a second redirection before $GITHUB_OUTPUT", "release", "run", (_V19_STEP, 'OUT="$(release-plz release --output json --no-verify)"\necho "json=$OUT" > x >> "$GITHUB_OUTPUT"'), True),
+    ("a second job with a release-plz/ action", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"uses": "release-plz/action@v0.5", "with": {"command": "release"}}]}, True),
+    ("a second job with release-plz -v release", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz -v release"}]}, True),
+    ("a second job with a quoted release", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": "release-plz 'release'"}]}, True),
+    ("proto install release-plz with a version and --pin", "release", "step", {"run": "proto install release-plz 0.0.1 --pin"}, True),
+    ("GITHUB_OUTPUT set to $GITHUB_ENV", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT=$GITHUB_ENV\necho "BASH_ENV=/tmp/x" >> "$GITHUB_OUTPUT"'), True),
+    ("GITHUB_OUTPUT set to $GITHUB_PATH on one line", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT=$GITHUB_PATH; echo "/tmp/evil" >> "$GITHUB_OUTPUT"'), True),
+    ("GITHUB_OUTPUT set to a cargo config file", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT=.cargo/config.toml\necho "[x]" >> "$GITHUB_OUTPUT"'), True),
+    ("GITHUB_OUTPUT set in the wrap form", "release", "run", (_V19_STEP, 'GITHUB_OUTPUT="$(echo .cargo/config.toml)"\necho "[x]" >> "$GITHUB_OUTPUT"'), True),
+    ("a second job with the old MarcoIeni action", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"uses": "MarcoIeni/release-plz-action@v0.5", "with": {"command": "release"}}]}, True),
+    ("an echo of a commit message expression", "release", "step", {"run": 'echo "${{ github.event.head_commit.message }}"'}, True),
+    ("the release-pr echo text in another job", "extra", "add-job", {"runs-on": "ubuntu-latest", "steps": [{"run": 'echo "release-plz: no release PR needed"'}]}, False),
+    ("the target shape", "release", "none", None, False),
+    ("the flags in another order", "release", "run",
+     (_V19_STEP, 'set -euo pipefail\nOUT="$(release-plz release --no-verify --output json)"\necho "$OUT"\necho "json=$OUT" >> "$GITHUB_OUTPUT"'), False),
+    ("release-plz release-pr in the release-pr job", "release-pr", "step", {"run": "release-plz release-pr --output json"}, False),
+)
+_SMA735_V19_CASE_COUNT = 55
+
+
+def _sma735_v19_bites() -> str | None:
+    # RELEASE_JOBS is pinned by strict equality, the same style as _ungated_jobs_pinned: adding
+    # a job id would switch the V19 allowlist on for it, removing one switches V19 off.
+    if {"release"} != RELEASE_JOBS or V19_ROW.jobs != ("release",):
+        return f"RELEASE_JOBS is {sorted(RELEASE_JOBS)!r} (V19 checks {V19_ROW.jobs!r}), expected exactly ['release']"
+    table = _sma735_cases_bite(_SMA735_V19_CASES, _SMA735_V19_CASE_COUNT, release_job_violations, "V19")
+    if table is not None:
+        return table
+    # The liveness function itself: two shapes that the table rows do not reach.
+    for text in ("release-plz \\\nrelease", "~/.proto/bin/release-plz release"):
+        if not _runs_release_plz_release(text):
+            return f"V19 liveness missed {text!r}"
+    return None
+
+
+def _sma735_cross_row_and_scope() -> str | None:
+    """Each row is silent outside its own jobs (spec §5.6 cross-row cases), and V19 and V20 are
+    silent outside the release workflow (D7)."""
+    checks = {"V18": ungated_job_violations, "V19": release_job_violations, "V20": verify_job_violations}
+    owner = {"release-pr": "V18", "release": "V19", "verify-crates": "V20"}
+    for job_id, rule in owner.items():
+        doc = _sma735_apply(_sma735_doc(), job_id, "step", {"run": "cargo build"})
+        for other, fn in checks.items():
+            found = fn(doc, RELEASE_WORKFLOW_NAME)
+            if other == rule and not found:
+                return f"{rule} stayed silent on `cargo build` in '{job_id}'"
+            if other != rule and found:
+                return f"{other} fired on '{job_id}', which only {rule} owns: {found}"
+    for rule, fn in (("V18", ungated_job_violations), ("V19", release_job_violations), ("V20", verify_job_violations)):
+        if fn(_sma735_doc(), RELEASE_WORKFLOW_NAME):
+            return f"{rule} fired on the clean target shape"
+    broken = _sma735_apply(_sma735_apply(_sma735_doc(), "release", "drop", None), "verify-crates", "drop", None)
+    for rule, fn in (("V19", release_job_violations), ("V20", verify_job_violations)):
+        if fn(broken, "fixture"):
+            return f"{rule} fired on a file that is not {RELEASE_WORKFLOW_NAME}"
+        if not fn(broken, RELEASE_WORKFLOW_NAME):
+            return f"{rule} stayed silent on {RELEASE_WORKFLOW_NAME} with its job dropped"
+    return None
+
+
+def _sma735_real_workflow() -> str | None:
+    """The real release.yml is the clean control for V19 and V20 (spec §5.6), and check_main is
+    their production call site: a fixture table proves the verdict functions, not that
+    check_main calls them. Run from the repository root, like check 10."""
+    real = Path(".github/workflows/release.yml")
+    if not real.is_file():
+        return f"{real} is not readable from {Path.cwd()}; run the self-test from the repository root"
+    for rule, fn in (("V19", release_job_violations), ("V20", verify_job_violations)):
+        found = fn(load_workflow(real), real.name)
+        if found:
+            return f"the real release.yml fails {rule}: {found}"
+    bad = [v for v in check_main(load_workflow(real), real.name) if ": V19: " in v or ": V20: " in v]
+    if bad:
+        return f"check_main reports V19 or V20 on the real release.yml: {bad}"
+    doc = load_workflow(real)
+    rel = [s for s in doc["jobs"]["release"]["steps"] if isinstance(s, dict) and s.get("name") == "Release"]
+    if len(rel) != 1 or " --no-verify" not in str(rel[0].get("run")):
+        return "the real release job has no single `Release` step that runs --no-verify"
+    rel[0]["run"] = str(rel[0]["run"]).replace(" --no-verify", "")
+    if not any(": V19: " in v for v in check_main(doc, real.name)):
+        return "check_main did not report V19 when the real Release step lost --no-verify"
+    doc = load_workflow(real)
+    doc["jobs"][APPROVAL_JOB]["needs"] = [n for n in needs_of(doc["jobs"][APPROVAL_JOB]) if n != VERIFY_JOB]
+    if not any(": V20: " in v for v in check_main(doc, real.name)):
+        return "check_main did not report V20 when approve-release lost verify-crates"
+    return None
+
+
 def self_test() -> int:
     rc = 0
     for name, kind, text, want in FIXTURES:
@@ -4816,6 +5476,14 @@ def self_test() -> int:
         ("pr2 review i4: UNGATED_JOBS is pinned by strict equality", _ungated_jobs_pinned),
         ("sma-684 V18 allowlist: every rejected shape reds, every control is clean",
          _sma684_v18_allowlist_bites),
+        ("sma-735 V20 verify-crates: every rejected shape reds, the target shape is clean",
+         _sma735_v20_bites),
+        ("sma-735 V19 release: every rejected shape reds, the target shape is clean",
+         _sma735_v19_bites),
+        ("sma-735 cross-row and scope: each row is silent outside its own jobs and files",
+         _sma735_cross_row_and_scope),
+        ("sma-735 V19 and V20 run on the real release.yml through check_main",
+         _sma735_real_workflow),
     ):
         err = fn()
         if err:
