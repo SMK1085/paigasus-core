@@ -238,7 +238,7 @@ jobs:
 
       # THE EARLY COPY of release.yml's npm floor (SMA-602 final review, Critical 1). This job
       # is upstream of the irreversible one: release.yml's `release` job declares
-      # `needs: [wheels, prebuild, proto-dist, approve-release]`, and `prebuild` is this
+      # `needs: [wheels, prebuild, proto-dist, verify-crates, approve-release]`, and `prebuild` is this
       # workflow.
       #
       # WHAT THIS COPY CAN AND CANNOT DETECT (SMA-602 fix round 4, F5). It asserts THIS job's

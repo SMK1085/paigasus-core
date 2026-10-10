@@ -185,32 +185,14 @@ except Exception as exc:
     sys.exit(2)
 
 
-def is_publishable(pkg):
-    # cargo metadata: null => publishable anywhere; [] => publish = false;
-    # non-empty list => publishable to those named registries.
-    value = pkg.get("publish")
-    return value is None or (isinstance(value, list) and len(value) > 0)
-
-
-pkgs = {p["name"]: p for p in meta.get("packages", []) if is_publishable(p)}
-found = sorted(pkgs)
-
 # --- Check 0: non-vacuity control -------------------------------------------------
-if not found:
-    print(
-        "FATAL: no publishable crate found. Either cargo metadata is broken or every "
-        "crate is publish = false. This gate must never pass over an empty set.",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-if found != expected:
-    print(
-        f"Check 0 FAILED: publishable set {found} != expected {expected}.\n"
-        "  Add the crate to EXPECTED_PUBLISHABLE in ci/publish-metadata/run.sh — "
-        "or you have just silently disabled this gate.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+# One copy in ci/publish-metadata/publishable.py, shared with --verify-publish-groups
+# (SMA-735). It exits 2 on an empty set and 1 when the set is not EXPECTED_PUBLISHABLE.
+# is_publishable is also what Check 5 below reads.
+from publishable import is_publishable, publishable_packages
+
+pkgs = publishable_packages(meta, expected)
+found = sorted(pkgs)
 
 errors = []
 
@@ -928,6 +910,69 @@ assert_check2_covered_everything() { # $@ the names the per-package loop enumera
   fi
 }
 
+# The publishable set and Check 0, from ci/publish-metadata/publishable.py: one copy for
+# metadata_checks and for --verify-publish-groups (SMA-735). Prints "<name>\t<manifest-dir>"
+# per publishable crate. Exit codes: 0, 1 (the set is not EXPECTED_PUBLISHABLE), 2.
+publishable_set() { # $1 metadata.json  $2 expected-csv
+  python3 "$REPO_ROOT/ci/publish-metadata/publishable.py" "$@"
+}
+
+# --verify-publish-groups (SMA-735) — Check 0 and Check 2 alone, for release.yml's
+# verify-crates job. That job holds no secret, only a `contents: read` token, and runs
+# before approve-release. The release job publishes with `release-plz release --no-verify`,
+# so this mode is the verify build. It uses the same functions as main() and nothing else:
+# it does not load the category snapshot, so a stale snapshot can never stop a release.
+# Exit codes: 0 every group passed, 1 a defect, 2 infrastructure or a bad invocation.
+verify_publish_groups() { # takes no argument
+  if [ "$#" -ne 0 ]; then  # the mode takes no argument
+    echo "usage: run.sh --verify-publish-groups (it takes no further argument; got: $*)" >&2
+    return 2
+  fi
+  cd "$RS_DIR"
+
+  local meta_json expected_csv publishable groups
+  local status=0
+  local meta_err
+  meta_json="$(mktemp)"
+  meta_err="$(mktemp)"
+  if ! cargo metadata --format-version 1 --no-deps >"$meta_json" 2>"$meta_err"; then
+    cat "$meta_err" >&2
+    rm -f "$meta_json" "$meta_err"
+    echo "FATAL: reading the workspace metadata failed in $RS_DIR — nothing could be verified." >&2
+    return 2
+  fi
+  rm -f "$meta_err"
+  expected_csv="$(IFS=,; printf '%s' "${EXPECTED_PUBLISHABLE[*]}")"
+
+  publishable="$(publishable_set "$meta_json" "$expected_csv")" || status=$?
+  if [ "$status" -ne 0 ]; then
+    rm -f "$meta_json"
+    return "$status"
+  fi
+  groups="$(publish_groups "$meta_json" "$expected_csv")" || status=$?
+  rm -f "$meta_json"
+  [ "$status" -eq 0 ] || return "$status"
+
+  local name dir enumerated=()
+  while IFS=$'\t' read -r -u 3 name dir; do
+    [ -n "$name" ] || continue
+    enumerated+=("$name")
+    PKG_DIR[$name]="$dir"
+  done 3< <(printf '%s\n' "$publishable")
+
+  local group_line group_pkgs
+  while IFS= read -r -u 3 group_line; do
+    [ -n "$group_line" ] || continue
+    IFS=$'\t' read -r -a group_pkgs < <(printf '%s\n' "$group_line")
+    status=0; check_publish_group "${group_pkgs[@]}" || status=$?
+    [ "$status" -eq 0 ] || return "$status"  # a failed publish group stops the mode
+  done 3< <(printf '%s\n' "$groups")
+
+  assert_check2_covered_everything "${enumerated[@]}" || return $?
+  echo "publish-metadata: --verify-publish-groups: every publish group passed (${#enumerated[@]} crates)"
+}
+
+
 # --negative-control — drive the SAME check code with deliberately broken fixtures and
 # assert each reports red. Without this, a refactor can quietly turn the gate vacuous and
 # every CI run stays green. Uses fixtures rather than mutating the repo, so it is fast,
@@ -1208,6 +1253,28 @@ PY
   _expect_rc 1 "Check 0 (unexpected publishable crate)" \
     metadata_checks "$tmp/wrong-name.json" "$good_rp" "paigasus-kernel" "$fix_snap"
 
+  # publishable_set (SMA-735) — the one copy of the publishable set and Check 0, which
+  # metadata_checks and --verify-publish-groups share. The same fixtures as the two Check 0
+  # rows above, through the function the mode calls.
+  _expect_rc 2 "publishable_set (empty publishable set)" \
+    publishable_set "$tmp/empty.json" "paigasus-kernel"
+  _expect_rc 1 "publishable_set (unexpected publishable crate)" \
+    publishable_set "$tmp/wrong-name.json" "paigasus-kernel"
+  _expect_rc 2 "publishable_set (unreadable metadata JSON)" \
+    publishable_set "$tmp/does-not-exist.json" "paigasus-kernel"
+  _expect_rc 2 "publishable_set (a missing argument)" \
+    publishable_set "$tmp/empty.json"
+  _meta "$tmp/ps-good.json" "$base"
+  local ps_out ps_rc=0
+  ps_out="$(publishable_set "$tmp/ps-good.json" "paigasus-kernel")" || ps_rc=$?
+  if [ "$ps_rc" -ne 0 ] || [ "$ps_out" != "$(printf 'paigasus-kernel\t/nowhere')" ]; then
+    echo "NEGATIVE CONTROL FAILED: publishable_set (clean fixture) — rc $ps_rc, output: $ps_out" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ok — publishable_set prints <name><TAB><manifest-dir> for a clean fixture"
+  fi
+
+
   # Check 1 — each rule, one fixture apiece.
   _meta "$tmp/no-desc.json" "$(printf '%s' "$base" | sed 's/"description":"d"/"description":""/')"
   _expect_rc 1 "Check 1 (empty description)" \
@@ -1473,6 +1540,95 @@ PY
   else
     echo "  ok — publish_groups separates independent crates and joins dependent ones"
   fi
+
+  # --- SMA-735: --verify-publish-groups through the REAL dispatch, with a cargo stub ----
+  # The stub records every argv and scripts the answer of `cargo publish`. Every other
+  # subcommand (`cargo metadata`) goes to the real cargo, so the publishable set and the
+  # groups come from the real workspace. CI=true keeps --allow-dirty out of the argv. The
+  # stub lives in $tmp, so the case does not change the tree.
+  local real_cargo="" stub_dir="$tmp/stub-bin" stub_log="$tmp/stub-cargo.log"
+  real_cargo="$(command -v cargo)" || real_cargo=""
+  if [ -z "$real_cargo" ]; then
+    echo "NEGATIVE CONTROL FAILED: --verify-publish-groups — no cargo on PATH for the stub to pass through to" >&2
+    failures=$((failures + 1))
+  else
+    mkdir -p "$stub_dir"
+    cat >"$stub_dir/cargo" <<'STUB'
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# A cargo stub for run.sh --negative-control (SMA-735). It records every argv, scripts the
+# answer of `cargo publish`, and passes every other subcommand to the real cargo.
+printf '%s\n' "$*" >>"$STUB_CARGO_LOG"
+if [ "${1:-}" = "metadata" ] && [ "$STUB_CARGO_MODE" = "extra-crate" ]; then
+  "$STUB_REAL_CARGO" "$@" | python3 -c 'import json, sys; m = json.load(sys.stdin); m["packages"].append({"name": "sma735-unlisted", "publish": None, "manifest_path": "/nowhere/Cargo.toml", "dependencies": []}); json.dump(m, sys.stdout)'
+  rcs=("${PIPESTATUS[@]}")
+  [ "${rcs[0]}" -eq 0 ] && [ "${rcs[1]}" -eq 0 ] || exit 1
+  exit 0
+fi
+if [ "${1:-}" = "publish" ]; then
+  case "$STUB_CARGO_MODE" in
+    ok) echo "   Packaging (stub)"; exit 0 ;;
+    compile) echo "error: could not compile \`stub\` (lib) due to 1 previous error" >&2; exit 101 ;;
+    network) echo "warning: spurious network error (3 tries remaining): [28] Timeout was reached" >&2; exit 101 ;;
+    *) echo "stub cargo: no scripted publish answer for mode '$STUB_CARGO_MODE'" >&2; exit 99 ;;
+  esac
+fi
+exec "$STUB_REAL_CARGO" "$@"
+STUB
+    chmod +x "$stub_dir/cargo"
+
+    _verify_with_stub() { # $1 stub mode, rest = extra arguments to run.sh after the mode
+      local mode="$1"; shift
+      : >"$stub_log"
+      CI=true PATH="$stub_dir:$PATH" STUB_CARGO_LOG="$stub_log" STUB_CARGO_MODE="$mode" \
+        STUB_REAL_CARGO="$real_cargo" \
+        "$BASH" "$REPO_ROOT/ci/publish-metadata/run.sh" --verify-publish-groups "$@"
+    }
+    _no_publish_in_stub_log() { # $1 label
+      if grep -q '^publish ' "$stub_log"; then
+        echo "NEGATIVE CONTROL FAILED: $1 — the mode ran a publish. Recorded:" >&2
+        cat "$stub_log" >&2
+        failures=$((failures + 1))
+      else
+        echo "  ok — $1: no publish ran"
+      fi
+    }
+
+    _expect_rc 0 "--verify-publish-groups (stub: every group passes)" _verify_with_stub ok
+    local n_publish
+    n_publish="$(grep -c '^publish ' "$stub_log" || true)"
+    if ! grep -qxF -- "publish --dry-run --locked -p paigasus-kernel" "$stub_log" \
+       || ! grep -qxF -- "publish --dry-run --locked -p paigasus-proto -p paigasus-proto-derive" "$stub_log" \
+       || [ "$n_publish" != "2" ]; then
+      echo "NEGATIVE CONTROL FAILED: --verify-publish-groups did not run exactly the two publish groups. Recorded:" >&2
+      cat "$stub_log" >&2
+      failures=$((failures + 1))
+    else
+      echo "  ok — --verify-publish-groups runs both publish groups with --dry-run --locked"
+    fi
+    _expect_rc 1 "--verify-publish-groups (stub: could not compile is a defect)" _verify_with_stub compile
+    _expect_rc 2 "--verify-publish-groups (stub: spurious network error is infrastructure)" _verify_with_stub network
+    _expect_rc 2 "--verify-publish-groups (an extra argument)" _verify_with_stub ok extra
+    _no_publish_in_stub_log "--verify-publish-groups with an extra argument"
+    _expect_rc 1 "--verify-publish-groups (stub: a publishable crate outside EXPECTED_PUBLISHABLE)" \
+      _verify_with_stub extra-crate
+    _no_publish_in_stub_log "--verify-publish-groups with a crate outside EXPECTED_PUBLISHABLE"
+  fi
+
+  # Review Focus 5: the mode must never load the category snapshot, so a stale snapshot can
+  # never stop a release. Structural, because the snapshot path is fixed in this file. The
+  # function must exist first: `declare -f` of a missing function prints nothing, and an empty
+  # text would pass the grep below without a check.
+  if ! declare -F verify_publish_groups >/dev/null; then
+    echo "NEGATIVE CONTROL FAILED: --verify-publish-groups — no function verify_publish_groups to inspect" >&2
+    failures=$((failures + 1))
+  elif grep -qE 'metadata_checks|SNAPSHOT|categories' < <(declare -f verify_publish_groups); then
+    echo "NEGATIVE CONTROL FAILED: --verify-publish-groups reads the category snapshot or metadata_checks" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ok — --verify-publish-groups does not read the category snapshot"
+  fi
+
 
   # Check 2b — a listing missing LICENSE, and one containing moon.yml.
   printf 'Cargo.toml\nREADME.md\nsrc/lib.rs\n' >"$tmp/missing-license.txt"
@@ -1903,6 +2059,7 @@ main() {
 case "${1:-}" in
   '') main "$@" ;;
   --negative-control) negative_control ;;
+  --verify-publish-groups) shift; verify_publish_groups "$@" ;;
   --check-categories-freshness)
     exec python3 "$REPO_ROOT/ci/publish-metadata/categories.py" \
       --check-freshness --snapshot "$SNAPSHOT" ;;
@@ -1910,8 +2067,8 @@ case "${1:-}" in
     exec python3 "$REPO_ROOT/ci/publish-metadata/categories.py" \
       --refresh --snapshot "$SNAPSHOT" ;;
   -h|--help)
-    echo "usage: run.sh [--negative-control | --check-categories-freshness |"
-    echo "               --refresh-categories | -h|--help]"
+    echo "usage: run.sh [--negative-control | --verify-publish-groups |"
+    echo "               --check-categories-freshness | --refresh-categories | -h|--help]"
     exit 0 ;;
   *) echo "unknown arg: $1" >&2; exit 2 ;;
 esac

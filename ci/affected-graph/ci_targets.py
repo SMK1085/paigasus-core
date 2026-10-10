@@ -302,6 +302,7 @@ SELF_TASK_EXPECTED_GLOBS = {
         ".gitignore",
         "ci/publish-metadata/categories.py",
         "ci/publish-metadata/crates-io-categories.txt",
+        "ci/publish-metadata/publishable.py",
         "ci/publish-metadata/run.sh",
         "rs/.cargo/config.toml",
         "rs/Cargo.lock",
