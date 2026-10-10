@@ -81,13 +81,18 @@ describe('kernelAccessorRules', () => {
 });
 
 describe('the workspace eslint config applies kernelAccessorRules', () => {
-  // A dead `import` satisfies a grep; only the exported array proves the spread.
-  it('carries every kernelAccessorRules entry in its EXPORTED array', async () => {
-    const shipped = (await import('../../../eslint.config.js')).default as Array<{ files?: string[]; ignores?: string[] }>;
-    for (const entry of kernelAccessorRules) {
-      expect(shipped, `ts/eslint.config.js dropped the ${entry.name} block`).toContainEqual(expect.objectContaining({ files: entry.files, ignores: entry.ignores }));
-    }
-  });
+  // A dead `import` satisfies a grep; only the exported array proves the spread. The first import
+  // of the shipped config took more than 5 s on a CI runner (PR 396), so it gets the same timeout.
+  it(
+    'carries every kernelAccessorRules entry in its EXPORTED array',
+    async () => {
+      const shipped = (await import('../../../eslint.config.js')).default as Array<{ files?: string[]; ignores?: string[] }>;
+      for (const entry of kernelAccessorRules) {
+        expect(shipped, `ts/eslint.config.js dropped the ${entry.name} block`).toContainEqual(expect.objectContaining({ files: entry.files, ignores: entry.ignores }));
+      }
+    },
+    REAL_CONFIG_TIMEOUT,
+  );
 
   // Review Focus 5: assert the config EXISTS before asserting the rule is absent. An undefined
   // config means ESLint does not lint the file at all, which would prove nothing.
