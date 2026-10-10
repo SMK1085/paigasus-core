@@ -57,6 +57,9 @@ tasks:
       - '/ts/packages/paigasus-proto/src/**/*'
       - 'vitest.config.ts'
       - 'README.md'
+      # SMA-736 (A13): the rest of @paigasus/proto's input set.
+      - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-proto/tsconfig.json'
   test-e2e:
     # `script` (not `command`): Moon's `command` setting rejects shell syntax outright.
     # `set -euo pipefail` mirrors every other `script:` task here — Moon does not enable errexit
@@ -82,6 +85,12 @@ tasks:
       - 'playwright.config.ts'
       - 'package.json'
       - '/ts/pnpm-lock.yaml'
+      # SMA-736 (A13): @paigasus/proto (the closure) and the tsconfig chain.
+      - 'tsconfig.json'
+      - '/ts/tsconfig.base.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-proto/tsconfig.json'
     options:
       # Real containers, real Chromium. A cached PASS would replay a green that tested nothing.
       cache: false

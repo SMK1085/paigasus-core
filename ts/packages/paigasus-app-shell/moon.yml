@@ -60,6 +60,9 @@ tasks:
       - '/ts/packages/paigasus-proto/src/**/*'
       - '/ts/packages/paigasus-proto/package.json'
   test:
+    # SMA-736 (A13): @paigasus/proto is in this package's closure (through discovery), so the task
+    # must run after the generator for a deterministic cache key.
+    deps: ['contracts:generate']
     # vitest.config.ts matches neither src/**/* nor tests/**/*, so without it an edit to the jsdom
     # environment or the exclude list serves a cached PASS.
     #
@@ -74,6 +77,18 @@ tasks:
       - '/ts/packages/paigasus-auth/package.json'
       - '/ts/packages/paigasus-discovery/src/**/*'
       - '/ts/packages/paigasus-discovery/package.json'
+      # SMA-736 (A13): the rest of the package.json closure, and the tsconfig chain of each
+      # workspace package in it. next-config is a direct dependency; proto comes through discovery.
+      - '/ts/packages/paigasus-next-config/src/**/*'
+      - '/ts/packages/paigasus-next-config/package.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.app.json'
+      - '/ts/packages/paigasus-next-config/tsconfig.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-proto/tsconfig.json'
+      - '/ts/packages/paigasus-ui/tsconfig.json'
+      - '/ts/packages/paigasus-auth/tsconfig.json'
+      - '/ts/packages/paigasus-discovery/tsconfig.json'
       - 'vitest.config.ts'
       - '!tests/e2e/fixture/.next/**'
   test-e2e:

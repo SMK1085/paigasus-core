@@ -2114,7 +2114,7 @@ affected_graph_wiring_verdict() {
 # MEASURED to match dot-prefixed paths, so a .github/-only PR does schedule it — and that
 # premise is itself now pinned, from ci_targets.py's SELF_TASK_EXPECTED_GLOBS["actionlint"].
 #
-# CONTAINMENT, not equality: the list is twenty-three entries and legitimately grows every time a
+# CONTAINMENT, not equality: the list is thirty-four entries and legitimately grows every time a
 # gate keys on a new directory, so an exact match would red on every honest addition. The set
 # below is the WHOLE current list rather than a judged subset — a floor, not a judgement call.
 # The first design draft picked seven by a stated principle and an adversarial review showed the
@@ -2141,6 +2141,13 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'rs/crates/*/*/package.json'
   'ts/packages/*/package.json'
   'ts/apps/*/package.json'
+  # SMA-736 — floors the inputs that make A13 reachable. Without them, a PR that edits only a
+  # vitest config or a tsconfig.json does not schedule repo:affected-smoke, and A13 cannot fire.
+  'ts/packages/*/vitest*.config.*'
+  'ts/apps/*/vitest*.config.*'
+  'ts/packages/*/tsconfig*.json'
+  'ts/apps/*/tsconfig*.json'
+  'ts/tsconfig.base.json'
   'ci/actionlint/**/*'
   'ci/release-parity/**/*'
   'ci/workflow-credentials/**/*'
