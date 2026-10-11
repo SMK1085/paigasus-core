@@ -1,7 +1,7 @@
 # SMA-730 — gateway: dispatch the last SSE record when a stream ends without a blank line
 
 - Linear: SMA-730 (follow-up of SMA-677, final review, Minor 6).
-- Status: draft, revised after the spec challenge (§ 7). Bounded change. Waits for approval.
+- Status: approved on 2026-10-11, after the spec challenge (§ 7). Bounded change.
 - Scope: the crate `paigasus-gateway` only (`rs/crates/services/paigasus-gateway`).
 
 ## 1. Problem
@@ -51,8 +51,9 @@ Reasons:
 - D2, no guard: when no guard exists (no `[limits]`), the scanner reads nothing today. That stays.
 - D3: when the client disconnects, the relay is dropped and no arm runs. The client did not
   receive a closed last record, and the gateway cannot know if more bytes of it were coming. The
-  estimate is the correct charge. A `Drop` on `Relay` that calls `finish()` is NOT allowed; test
-  R2 fails for it.
+  estimate is the correct charge. A `Drop` on `Relay` that calls `finish()` is NOT allowed; such a
+  `Drop` does not compile (E0509, because the relay closure destructures `Relay` by move), and test
+  R2 fails for any other way to finish on drop.
 - D5: YAGNI. A counter needs a new name in `names.rs`, priming and `repo:observability-drift`. The
   stream has no request ids (SMA-504 § 4.3), so a log line cannot be correlated. Open an issue if
   an operator asks for it.
