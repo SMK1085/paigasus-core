@@ -239,6 +239,19 @@ async fn crlf_records_are_counted_and_a_crlf_usage_record_is_read() {
     assert_eq!(stream_charged(&reported.base_url).await.1, vec![9]);
 }
 
+/// SMA-730 I1: an upstream that ends without a blank line after its usage record is charged the
+/// reported total, and the client gets the upstream bytes unchanged (A5). No `data: [DONE]`:
+/// after a record with no line terminator it would join the same line.
+#[tokio::test]
+async fn a_stream_whose_last_usage_record_has_no_blank_line_charges_the_reported_tokens() {
+    let upstream = vec![chunk("Hel", true), chunk("lo", true), usage_chunk(7).trim_end_matches('\n').to_owned()];
+    let mock = MockOpenAi::spawn_raw_sse(upstream.clone()).await;
+    let (sent, charges) = stream_charged(&mock.base_url).await;
+    assert_eq!(sent.status, StatusCode::OK);
+    assert_eq!(sent.body, upstream.concat().into_bytes(), "the client bytes are the upstream bytes");
+    assert_eq!(charges, vec![7]);
+}
+
 /// A4: a mid-stream upstream error charges exactly once (two records forwarded plus the estimate).
 #[tokio::test]
 async fn a_mid_stream_error_charges_exactly_once() {
