@@ -261,11 +261,22 @@ enum StreamState {
 
 /// The unfold state. The charge guard is a FIELD here, not a `Drop` on `StreamState`: the closure
 /// destructures the state by move, which a type with `Drop` forbids (E0509). When the stream ends,
-/// fails, or is dropped, this value drops once, and the guard with it (SMA-677 § 4.6).
+/// fails, or is dropped, this value drops once, and the guard with it (SMA-677 § 4.6). The clean
+/// end and the first error call `UsageScanner::finish()` first; a drop (client disconnect) does
+/// not, so a last record with no blank line counts only when the upstream ended (SMA-730 D3).
 struct Relay {
     phase: StreamState,
     scan: UsageScanner,
     guard: Option<ChargeGuard>,
+}
+
+/// SMA-730: the upstream ended or failed. A last record with no blank line after it still
+/// counts. Without a guard the scanner reads nothing, as in the chunk arm.
+fn finish_scan(scan: &mut UsageScanner, guard: &mut Option<ChargeGuard>) {
+    if let Some(guard) = guard.as_mut() {
+        scan.finish();
+        guard.set_stream_progress(scan.completion_records(), scan.reported_total());
+    }
 }
 
 /// Adapt an [`OpenAiByteStream`] into a body stream that forwards each upstream chunk UNBUFFERED
@@ -305,17 +316,24 @@ fn terminal_sse_error_stream(inner: OpenAiByteStream, guard: Option<ChargeGuard>
                         },
                     ))
                 }
-                // First upstream error: emit the terminal event, then end.
-                Some(Err(_)) => Some((
-                    Ok(Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes())),
-                    Relay {
-                        phase: StreamState::Done,
-                        scan,
-                        guard,
-                    },
-                )),
-                // Clean upstream end.
-                None => None,
+                // First upstream error: count the last record (the frame's leading blank line
+                // closes it for the client too), emit the terminal event, then end.
+                Some(Err(_)) => {
+                    finish_scan(&mut scan, &mut guard);
+                    Some((
+                        Ok(Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes())),
+                        Relay {
+                            phase: StreamState::Done,
+                            scan,
+                            guard,
+                        },
+                    ))
+                }
+                // Clean upstream end: count the last record, then drop the relay and the guard.
+                None => {
+                    finish_scan(&mut scan, &mut guard);
+                    None
+                }
             },
             StreamState::Done => None,
         }
@@ -387,6 +405,66 @@ mod tests {
         let code = parsed["error"]["code"].as_str().expect("a code");
         assert!(ErrorReason::from_wire_reason(code).is_some(), "{code} is not declared in common/v1/error.proto");
         assert_eq!(parsed["error"]["type"], "api_error", "the frame keeps the OpenAI envelope shape");
+    }
+
+    use crate::application::charge_guard::{ChargeGuard, NoTicket};
+    use crate::application::limits::Limits;
+    use crate::domain::limits::{BudgetPeriod, LimitDecision, LimitRules, LimitStoreError, LimitTicket};
+    use crate::test_support::{FixedClock, ORG_A, ScriptedStore, at};
+    use std::sync::Arc;
+
+    fn admit() -> Result<LimitDecision, LimitStoreError> {
+        Ok(LimitDecision::Admit(None))
+    }
+
+    /// A sent guard with a ticket and a request estimate of 1, charging into `store`.
+    fn sent_guard(store: &Arc<ScriptedStore>) -> ChargeGuard {
+        let now = at("2026-10-02T12:00:00Z");
+        let limits = Arc::new(Limits::new(LimitRules::default(), store.clone(), Arc::new(FixedClock(now))));
+        let ticket = LimitTicket {
+            org: ORG_A,
+            period: BudgetPeriod::Monthly.key_at(now),
+        };
+        let mut guard = ChargeGuard::new(limits, Some(ticket), Some(ORG_A), NoTicket::NoBudget);
+        guard.set_request_estimate(1);
+        guard.mark_sent();
+        guard
+    }
+
+    const UNTERMINATED_USAGE: &[u8] = b"data: {\"choices\":[],\"usage\":{\"total_tokens\":7}}";
+
+    /// SMA-730 R1 (spec D2): an upstream error after a usage record with no blank line charges
+    /// the reported total. The terminal frame closes that record for the client too.
+    #[tokio::test]
+    async fn an_error_after_an_unterminated_usage_record_charges_the_reported_tokens() {
+        let store = ScriptedStore::new(admit);
+        let inner = futures::stream::iter(vec![Ok(Bytes::from_static(UNTERMINATED_USAGE))])
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .boxed();
+        let out: Vec<Bytes> = terminal_sse_error_stream(inner, Some(sent_guard(&store))).map(|r| r.unwrap()).collect().await;
+        assert!(out.concat().ends_with(TERMINAL_SSE_ERROR.as_bytes()));
+        assert_eq!(store.charges(), vec![7]);
+    }
+
+    /// SMA-730 R2 (spec D3): a client that disconnects drops the relay. The unterminated record
+    /// does not count, and the guard charges the estimate.
+    #[tokio::test]
+    async fn a_dropped_relay_does_not_finish_the_last_record() {
+        let store = ScriptedStore::new(admit);
+        let inner = futures::stream::iter(vec![Ok(Bytes::from_static(UNTERMINATED_USAGE))]).chain(futures::stream::pending()).boxed();
+        let mut relay = Box::pin(terminal_sse_error_stream(inner, Some(sent_guard(&store))));
+        assert_eq!(relay.next().await.expect("one chunk").unwrap(), Bytes::from_static(UNTERMINATED_USAGE));
+        assert!(store.charges().is_empty(), "nothing is charged while the stream is open");
+        drop(relay);
+        assert_eq!(store.charges(), vec![1], "the request estimate only");
+    }
+
+    /// Review Focus 3: without a guard an unterminated tail is forwarded unchanged.
+    #[tokio::test]
+    async fn the_relay_forwards_an_unterminated_tail_unchanged_without_a_guard() {
+        let chunks = vec![Ok(Bytes::from_static(b"data: a\n\n")), Ok(Bytes::from_static(UNTERMINATED_USAGE))];
+        let out: Vec<Bytes> = terminal_sse_error_stream(futures::stream::iter(chunks).boxed(), None).map(|r| r.unwrap()).collect().await;
+        assert_eq!(out.concat(), [b"data: a\n\n".as_slice(), UNTERMINATED_USAGE].concat());
     }
 
     /// Produce a real `reqwest::Error` (there is no public constructor) by forcing a connection

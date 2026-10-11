@@ -78,7 +78,8 @@ pub fn non_stream_usage(body: &[u8]) -> BodyUsage {
 /// Reads a copy of a forwarded SSE stream (§ 4.6). Every complete `data:` record that is not
 /// `[DONE]` and holds no usage object adds one to the completion estimate (an OpenAI chunk
 /// usually carries one token). A record that holds `"usage":{` is parsed, and the last
-/// `usage.total_tokens` seen wins.
+/// `usage.total_tokens` seen wins. A blank line completes a record. At the end of the stream,
+/// `finish()` also completes the last record (SMA-730).
 #[derive(Debug, Default)]
 pub struct UsageScanner {
     /// The current partial line, bounded by `MAX_RECORD_BYTES`.
@@ -128,6 +129,12 @@ impl UsageScanner {
                 }
             }
         }
+    }
+
+    /// The upstream stream ended, or failed. Close a pending line and a pending record, as a
+    /// blank line does (SMA-730). A second call does nothing.
+    pub fn finish(&mut self) {
+        self.feed(b"\n\n");
     }
 
     pub fn completion_records(&self) -> u64 {
@@ -294,6 +301,74 @@ mod tests {
         scanner.feed(b"\n\n");
         scanner.feed(chunk("next", true).as_bytes());
         assert_eq!(scanner.completion_records(), 2, "the oversized record counts as one, and the next record still parses");
+    }
+
+    fn finished(chunks: &[&str]) -> UsageScanner {
+        let mut scanner = scan(chunks);
+        scanner.finish();
+        scanner
+    }
+
+    /// SMA-730 U1: a usage record with no blank line after it is read at the end of the stream,
+    /// with every line ending, also a lone CR in its own chunk.
+    #[test]
+    fn finish_reads_a_last_usage_record_without_a_blank_line() {
+        let record = usage_chunk(7);
+        let body = record.trim_end_matches('\n');
+        for ending in ["", "\n", "\r", "\r\n"] {
+            let input = format!("{body}{ending}");
+            assert_eq!(scan(&[input.as_str()]).reported_total(), None, "not read before finish: {input:?}");
+            assert_eq!(finished(&[input.as_str()]).reported_total(), Some(7), "{input:?}");
+            assert_eq!(finished(&[body, ending]).reported_total(), Some(7), "split: {input:?}");
+        }
+    }
+
+    /// SMA-730 U2: the tails that `finish()` closes, and what each one counts.
+    #[test]
+    fn finish_closes_every_kind_of_tail() {
+        let cut_usage = "data: {\"choices\":[],\"usage\":{\"total_tokens\":";
+        for (tail, records) in [
+            ("data: a", 1),
+            ("data: a\ndata: b", 1),
+            ("data: a\n: keep-alive", 1),
+            (": keep-alive", 0),
+            (cut_usage, 1),
+            ("data: [DO", 1),
+        ] {
+            let scanner = finished(&[tail]);
+            assert_eq!((scanner.completion_records(), scanner.reported_total()), (records, None), "{tail:?}");
+        }
+    }
+
+    /// SMA-730 U3: after a blank line `finish()` changes nothing, and a second call changes nothing.
+    #[test]
+    fn finish_is_a_no_op_after_a_blank_line_and_when_called_twice() {
+        let stream = format!("{}{}", chunk("a", true), usage_chunk(7));
+        let mut scanner = finished(&[stream.as_str()]);
+        assert_eq!((scanner.completion_records(), scanner.reported_total()), (1, Some(7)));
+        scanner.finish();
+        assert_eq!((scanner.completion_records(), scanner.reported_total()), (1, Some(7)));
+        let mut once = finished(&["data: a"]);
+        once.finish();
+        assert_eq!(once.completion_records(), 1, "a second finish does not count the record again");
+    }
+
+    /// Review Focus 1: an unterminated `[DONE]` after the usage record keeps the usage.
+    #[test]
+    fn finish_after_an_unterminated_done_keeps_the_usage() {
+        let stream = format!("{}data: [DONE]", usage_chunk(7));
+        let scanner = finished(&[stream.as_str()]);
+        assert_eq!((scanner.completion_records(), scanner.reported_total()), (0, Some(7)));
+    }
+
+    /// SMA-730 U4: an oversized partial record at the end counts once.
+    #[test]
+    fn finish_counts_an_oversized_partial_record_once() {
+        let mut scanner = UsageScanner::new();
+        scanner.feed(b"data: ");
+        scanner.feed(&vec![b'x'; MAX_RECORD_BYTES + 1]);
+        scanner.finish();
+        assert_eq!(scanner.completion_records(), 1);
     }
 
     /// Review Focus 4 and D14.
