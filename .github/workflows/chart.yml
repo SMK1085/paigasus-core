@@ -124,7 +124,7 @@ jobs:
       # kind v0.31.0 is the newest kind with a Kubernetes 1.31 node image (the golden files render
       # for 1.31.0); kubectl matches the node's minor. No cluster here: run.sh up makes it.
       - name: Install kind and kubectl
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
         with:
           install_only: true
           version: v0.31.0
@@ -197,7 +197,7 @@ jobs:
 
       - name: Upload evidence
         if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: kind-evidence
           path: ${{ runner.temp }}/paigasus-kind/diagnose
