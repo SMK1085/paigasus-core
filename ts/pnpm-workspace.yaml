@@ -109,22 +109,22 @@ catalog:
   # Runtime (React + Next)
   react: ^19.3.0
   react-dom: ^19.3.0
-  next: ^16.3.8
+  next: ^16.4.0
   # TypeScript + ESLint + Prettier
   typescript: ^6.0.3
   eslint: ^10.11.0
   '@eslint/js': ^10.0.1
-  '@eslint-react/eslint-plugin': ^5.23.3
+  '@eslint-react/eslint-plugin': ^5.24.10
   'eslint-plugin-react-hooks': ^7.1.1
   'eslint-plugin-jsx-a11y': ^6.10.2
-  'typescript-eslint': ^8.71.0
+  'typescript-eslint': ^8.71.1
   prettier: ^3.9.9
   # Test runner
   vitest: ^5.0.3
   # @paigasus/discovery's browser test harness (SMA-509) uses Vite PROGRAMMATICALLY to bundle and
   # SSR-render a real-Chromium fixture — pinned to the version vitest already resolves, so this
   # adds no new package to the lockfile, only a direct dependency edge onto one already there.
-  vite: ^8.3.1
+  vite: ^8.3.4
   # Runtime env validation for @paigasus/next-config (SMA-502). zod 4 semantics are assumed
   # throughout that package: unknown object keys are stripped by default, z.record takes
   # (keyType, valueType), and errors surface as error.issues[]. The runtime formats messages from
@@ -143,7 +143,7 @@ catalog:
   # the types can't drift ahead of the runtime (see .github/dependabot.yml).
   '@types/node': ^24.19.0
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
-  '@next/eslint-plugin-next': ^16.3.8
+  '@next/eslint-plugin-next': ^16.4.0
   '@tanstack/eslint-plugin-query': ^5.100.14
   # Commit tooling (SMA-371)
   '@commitlint/cli': ^21.2.2
@@ -191,7 +191,7 @@ catalog:
   redis: ^6.3.0
   # E2E tier for @paigasus/auth. A real browser is the only thing that can prove SameSite behaviour
   # on the cross-site redirect back from the IdP, and __Host- cookie-prefix enforcement.
-  '@playwright/test': ^1.63.0
+  '@playwright/test': ^1.64.0
   # Starts Keycloak and Redis for the E2E tier. The Rust side uses testcontainers-modules; this is
   # the TS equivalent. GitHub Actions `services:` cannot do the cert copy and realm import.
   testcontainers: ^12.2.0
@@ -210,7 +210,7 @@ catalog:
   # pins exactly ("1.1.23") where cmdk uses a caret ("^1.1.6"), so a bump past cmdk's range
   # splits them silently. @paigasus/ui therefore never composes across Radix copies (cmdk's
   # Command.Dialog is banned; see src/components/command.tsx).
-  radix-ui: ^1.6.7
+  radix-ui: ^1.7.0
   cmdk: ^1.1.1
   clsx: ^2.1.1
   'tailwind-merge': ^3.7.0
@@ -227,14 +227,14 @@ catalog:
   # FocusScope focuses its first item. The effect depends on test order inside one vitest file,
   # because jsdom's Window is shared per file. 5 paigasus-app-shell-ts tests failed. Bisected:
   # only this entry changed, 30.0.1 passes 186/186 and 30.1.0 fails 5. Re-check on a jsdom bump.
-  jsdom: 30.1.1
+  jsdom: 30.1.2
   '@testing-library/react': ^16.3.3
   '@testing-library/dom': ^10.4.2
   '@testing-library/user-event': ^14.6.7
   '@testing-library/jest-dom': ^7.0.1
-  'axe-core': ^4.13.0
+  'axe-core': ^4.14.0
   # Request interception for the iam-console vitest tier (SMA-511 spec § 9, AC 5). It intercepts
   # `fetch` — @paigasus/discovery's `GET /v1/service-info` probe. It cannot intercept the SDK's gRPC
   # calls over node:http2; an in-process fake server answers those. 2.15.0 was released 2026-07-08.
   # Pinned EXACTLY, not a caret range (the Global Constraints): a later 2.x must not install silently.
-  msw: 3.0.1
+  msw: 3.0.2
