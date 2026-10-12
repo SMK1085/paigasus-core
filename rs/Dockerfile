@@ -38,7 +38,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     cargo auditable build --release --locked -p "${BIN}" --bin "${BIN}" \
  && mkdir -p /out && cp "/src/target/release/${BIN}" /out/service
 
-FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS rootfs
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS rootfs
 ARG CHISEL_VERSION=v1.4.2
 # One pinned checksum PER ARCHITECTURE: the release publishes a distinct tarball and a distinct
 # sha384 per arch, so a single checksum would either break arm64 or silently drop the check.
