@@ -150,6 +150,14 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
   });
 
   await test.step('RSC check after hydration, before any click', async () => {
+    // Next 16.4.0 does not prefetch a link to the page that is open: the router keeps every
+    // segment whose route and params are unchanged, so the request has nothing to fetch (measured
+    // on a dynamic page; 16.3.8 still sent the request). On /iam/orgs the only same-zone NextLinks
+    // (the brand link and "Organizations") point to /iam/orgs, so no RSC request came. Open the
+    // same list as /iam/orgs?offset=0 (the first page, the same content): a link to /iam/orgs is
+    // then another page, and the router prefetches it. A hard load, not a click.
+    await page.goto('/iam/orgs?offset=0');
+    await waitForHydration(page);
     // The IAM nav's same-zone NextLinks prefetch after hydration. Wait for the recording to settle
     // first: a queued prefetch (for example a nested cross-zone one) may not have arrived, or may
     // still be in flight, at the first poll where the positive control already holds (final review).
