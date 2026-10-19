@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01TyFWus8Uz6WNnpg785XEnb",
+  "agent_id": "af257ecc5f79409dd",
+  "subagent_type": "general-purpose",
+  "task_description": "Triage PR 404 kind failure",
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 70922,
+    "cache_read_tokens": 188246,
+    "output_tokens": 45,
+    "api_call_count": 4
+  },
+  "started_at": "2026-10-12T20:51:01.395028+02:00",
+  "completed_at": "2026-10-12T20:51:30.613666+02:00"
+}

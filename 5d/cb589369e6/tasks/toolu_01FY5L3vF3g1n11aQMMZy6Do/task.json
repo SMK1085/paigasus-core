@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01FY5L3vF3g1n11aQMMZy6Do",
+  "agent_id": "a2f7bdf1f253c2a60",
+  "subagent_type": "general-purpose",
+  "task_description": "Triage PR 404 moon ci failure",
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 81287,
+    "cache_read_tokens": 269776,
+    "output_tokens": 1319,
+    "api_call_count": 5
+  },
+  "started_at": "2026-10-12T23:56:48.790755+02:00",
+  "completed_at": "2026-10-12T23:57:16.663888+02:00"
+}

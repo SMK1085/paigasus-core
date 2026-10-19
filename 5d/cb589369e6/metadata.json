@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "5dcb589369e6",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 17,
+  "files_touched": [
+    ".claude/worktrees/agent-a4f90b8e6a67e5514/ts/apps/iam-console/tests/cluster/journeys/zone-round-trip.spec.ts",
+    ".claude/worktrees/agent-a4f90b8e6a67e5514/ts/packages/paigasus-app-shell/tests/e2e/repro/app/dyn/page.tsx",
+    ".claude/worktrees/agent-a4f90b8e6a67e5514/ts/packages/paigasus-app-shell/tests/e2e/repro/app/other/page.tsx",
+    ".claude/worktrees/agent-a4f90b8e6a67e5514/ts/packages/paigasus-app-shell/tests/e2e/repro/probe.mjs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5d/cb589369e6/0/metadata.json",
+      "transcript": "/5d/cb589369e6/0/full.jsonl",
+      "compact_transcript": "/5d/cb589369e6/0/transcript.jsonl",
+      "content_hash": "/5d/cb589369e6/0/content_hash.txt",
+      "prompt": "/5d/cb589369e6/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 164,
+    "cache_creation_tokens": 100200,
+    "cache_read_tokens": 6944583,
+    "output_tokens": 20782,
+    "api_call_count": 69,
+    "subagent_tokens": {
+      "input_tokens": 152,
+      "cache_creation_tokens": 334741,
+      "cache_read_tokens": 8873137,
+      "output_tokens": 4745,
+      "api_call_count": 75
+    }
+  }
+}

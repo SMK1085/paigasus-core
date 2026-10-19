@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01XZ3ZZCGZbvf5J6e66FXBbH",
+  "agent_id": "a4f90b8e6a67e5514",
+  "subagent_type": "general-purpose",
+  "task_description": "Root-cause J2 RSC failure on PR 404",
+  "token_usage": {
+    "input_tokens": 130,
+    "cache_creation_tokens": 181203,
+    "cache_read_tokens": 8333828,
+    "output_tokens": 3378,
+    "api_call_count": 65
+  },
+  "started_at": "2026-10-12T21:07:11.606731+02:00",
+  "completed_at": "2026-10-19T09:09:05.748481+02:00"
+}
