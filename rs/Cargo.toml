@@ -133,7 +133,7 @@ base64 = "0.23"
 # stable-ABI wheel for CPython >=3.12 (matches the py workspace's requires-python); the
 # `extension-module` feature omits the libpython link so plain `cargo build` works without
 # an embedded interpreter. macOS needs the link flags in rs/.cargo/config.toml.
-pyo3 = { version = "0.29", features = ["abi3-py312", "extension-module"] }
+pyo3 = { version = "0.30", features = ["abi3-py312", "extension-module"] }
 # napi-rs — Rust↔Node FFI for the node binding crate (ADR-0005). napi/napi-derive are the
 # runtime + proc-macro (consumed via #[napi] macros); napi-build runs in build.rs to set up the
 # cdylib link. Node resolves N-API symbols at load (like CPython resolves PyO3's), so plain
