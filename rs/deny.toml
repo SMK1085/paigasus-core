@@ -22,9 +22,12 @@ ignore = [
   # p256/p384 0.13 -> jsonwebtoken 11 with the `rust_crypto` provider (paigasus-iam).
   # jsonwebtoken 11.1.0 is the newest release, so no lock update can clear it. The `aws_lc_rs`
   # provider needs a cmake/C toolchain the build environments do not carry (same reason as
-  # RUSTSEC-2023-0071). paigasus-iam only VERIFIES ECDSA JWT signatures with public IdP JWKS
-  # keys, so the code never processes secret data. Remove this entry when jsonwebtoken moves
-  # to the RustCrypto 0.14 crates.
+  # RUSTSEC-2023-0071). The production validator and the DPoP check accept RS256 and ES256.
+  # Their EC path only VERIFIES signatures with public JWKS / DPoP key material, so no secret
+  # integer reaches crypto-bigint in the shipped service. Private-key operations
+  # (`EncodingKey`, `p256::SecretKey`) occur only in `#[cfg(test)]` signing fixtures.
+  # Remove this entry only when the locked graph has no affected crypto-bigint version and
+  # `cargo deny check` passes without it. A new jsonwebtoken release alone is not enough.
   "RUSTSEC-2026-0387",
 ]
 
