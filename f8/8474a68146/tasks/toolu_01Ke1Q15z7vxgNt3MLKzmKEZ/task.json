@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01Ke1Q15z7vxgNt3MLKzmKEZ",
+  "agent_id": "afcb40ebe32eb0ac1",
+  "task_description": "Diagnose and fix PR 423",
+  "token_usage": {
+    "input_tokens": 32,
+    "cache_creation_tokens": 99875,
+    "cache_read_tokens": 1358875,
+    "output_tokens": 198,
+    "api_call_count": 16
+  },
+  "started_at": "2026-10-30T20:43:17.059003+01:00",
+  "completed_at": "2026-10-30T20:48:22.384874+01:00"
+}

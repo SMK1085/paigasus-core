@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.12.1",
+  "checkpoint_id": "f88474a68146",
+  "strategy": "manual-commit",
+  "branch": "feature/rustsec-2026-10-lock-advisories",
+  "checkpoints_count": 109,
+  "files_touched": [
+    "rs/deny.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f8/8474a68146/0/metadata.json",
+      "transcript": "/f8/8474a68146/0/full.jsonl",
+      "compact_transcript": "/f8/8474a68146/0/transcript.jsonl",
+      "content_hash": "/f8/8474a68146/0/content_hash.txt",
+      "prompt": "/f8/8474a68146/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 712,
+    "cache_creation_tokens": 426258,
+    "cache_read_tokens": 38021798,
+    "output_tokens": 50513,
+    "api_call_count": 253,
+    "subagent_tokens": {
+      "input_tokens": 158,
+      "cache_creation_tokens": 444966,
+      "cache_read_tokens": 6593832,
+      "output_tokens": 973,
+      "api_call_count": 78
+    }
+  },
+  "redaction": {
+    "replacements": 2,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 0,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}

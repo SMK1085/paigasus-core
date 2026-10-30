@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.12.1",
+  "checkpoint_id": "f88474a68146",
+  "session_id": "2f6f7589-18d7-407a-b34f-1598afe853d0",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-30T20:17:31.75261Z",
+  "branch": "feature/rustsec-2026-10-lock-advisories",
+  "checkpoints_count": 109,
+  "files_touched": [
+    "rs/deny.toml"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5-5",
+  "turn_id": "7d8eed95c3ac",
+  "checkpoint_transcript_start": 750,
+  "transcript_lines_at_start": 750,
+  "compact_transcript_start": 67,
+  "token_usage": {
+    "input_tokens": 712,
+    "cache_creation_tokens": 426258,
+    "cache_read_tokens": 38021798,
+    "output_tokens": 50513,
+    "api_call_count": 253,
+    "subagent_tokens": {
+      "input_tokens": 158,
+      "cache_creation_tokens": 444966,
+      "cache_read_tokens": 6593832,
+      "output_tokens": 973,
+      "api_call_count": 78
+    }
+  },
+  "redaction": {
+    "replacements": 2,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 0,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 118
+  }
+}

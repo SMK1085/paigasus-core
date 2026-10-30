@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01Q4uadW433G6GShQuLviJG1",
+  "agent_id": "a35354741070de2cb",
+  "task_description": "Fix RustSec advisories on main",
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 58311,
+    "cache_read_tokens": 511946,
+    "output_tokens": 101,
+    "api_call_count": 8
+  },
+  "started_at": "2026-10-30T20:48:29.053031+01:00",
+  "completed_at": "2026-10-30T20:50:59.970352+01:00"
+}
