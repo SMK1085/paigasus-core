@@ -120,19 +120,19 @@ catalog:
   next: ^16.4.2
   # TypeScript + ESLint + Prettier
   typescript: ^6.0.3
-  eslint: ^10.11.0
+  eslint: ^10.13.0
   '@eslint/js': ^10.0.1
-  '@eslint-react/eslint-plugin': ^5.27.3
+  '@eslint-react/eslint-plugin': ^5.28.6
   'eslint-plugin-react-hooks': ^7.1.1
   'eslint-plugin-jsx-a11y': ^6.10.2
-  'typescript-eslint': ^8.71.2
+  'typescript-eslint': ^8.72.0
   prettier: ^3.9.10
   # Test runner
   vitest: ^5.0.5
   # @paigasus/discovery's browser test harness (SMA-509) uses Vite PROGRAMMATICALLY to bundle and
   # SSR-render a real-Chromium fixture — pinned to the version vitest already resolves, so this
   # adds no new package to the lockfile, only a direct dependency edge onto one already there.
-  vite: ^8.3.4
+  vite: ^8.3.5
   # Runtime env validation for @paigasus/next-config (SMA-502). zod 4 semantics are assumed
   # throughout that package: unknown object keys are stripped by default, z.record takes
   # (keyType, valueType), and errors surface as error.issues[]. The runtime formats messages from
@@ -154,8 +154,8 @@ catalog:
   '@next/eslint-plugin-next': ^16.4.2
   '@tanstack/eslint-plugin-query': ^5.100.14
   # Commit tooling (SMA-371)
-  '@commitlint/cli': ^21.2.2
-  '@commitlint/config-conventional': ^21.2.2
+  '@commitlint/cli': ^21.2.4
+  '@commitlint/config-conventional': ^21.2.4
   # Release tooling (SMA-406 — dormant semantic-release + parity adapter)
   semantic-release: ^25.0.9
   '@semantic-release/commit-analyzer': ^13.0.1
@@ -192,7 +192,7 @@ catalog:
   openid-client: ^6.8.8
   # JOSE primitives. Used ONLY by tests, to mint a local JWKS and sign fixture tokens (AC 6).
   # Production token verification is openid-client's job; this is never imported from src/.
-  jose: ^6.2.12
+  jose: ^6.2.13
   # node-redis, the official client. v6 — its client API differs from v5, so check the installed
   # types rather than older examples. Chosen over ioredis because its redis:// DSN parsing matches
   # rs/crates/libs/paigasus-redis/src/lib.rs verbatim.
