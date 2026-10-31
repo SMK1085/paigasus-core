@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01HxjoskjM8TW7sc6aX81BAy",
+  "agent_id": "a7b90e80d7752c644",
+  "task_description": "Triage PR 422 moon ci failure",
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 76845,
+    "cache_read_tokens": 270497,
+    "output_tokens": 61,
+    "api_call_count": 5
+  },
+  "started_at": "2026-10-30T21:30:58.045536+01:00",
+  "completed_at": "2026-10-30T21:32:30.392674+01:00"
+}

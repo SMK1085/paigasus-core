@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01H7Qa94nVWCcpEvwY3r9Tg4",
+  "agent_id": "a421d67b8cd4fbc6d",
+  "subagent_type": "general-purpose",
+  "task_description": "Fix osv advisory scan failures",
+  "token_usage": {
+    "input_tokens": 60,
+    "cache_creation_tokens": 117275,
+    "cache_read_tokens": 2826496,
+    "output_tokens": 350,
+    "api_call_count": 30
+  },
+  "started_at": "2026-10-24T14:06:35.770749+02:00",
+  "completed_at": "2026-10-31T16:40:13.186482+01:00"
+}

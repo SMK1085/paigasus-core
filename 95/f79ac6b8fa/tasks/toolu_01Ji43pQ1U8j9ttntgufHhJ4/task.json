@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01Ji43pQ1U8j9ttntgufHhJ4",
+  "agent_id": "a997808d24a802836",
+  "subagent_type": "general-purpose",
+  "task_description": "Diagnose PR 413 kind failure",
+  "token_usage": {
+    "input_tokens": 14,
+    "cache_creation_tokens": 106754,
+    "cache_read_tokens": 376567,
+    "output_tokens": 101,
+    "api_call_count": 7
+  },
+  "started_at": "2026-10-19T09:10:34.121257+02:00",
+  "completed_at": "2026-10-31T16:40:12.68144+01:00"
+}
