@@ -271,7 +271,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # link a SECOND rustls CryptoProvider and panic at runtime with "no process-level
 # CryptoProvider available", as well as adding a native cmake build dep. `nkeys` backs the
 # `.creds` (JWT + nkey seed) auth `[outbox.publisher].credentials_file` allows.
-async-nats = { version = "0.50", default-features = false, features = [
+async-nats = { version = "0.51", default-features = false, features = [
   "jetstream", "ring", "server_2_10", "server_2_11", "nkeys",
 ] }
 # nkeys — NATS ed25519 key handling, a DIRECT dependency of `paigasus-iam` since SMA-493.
