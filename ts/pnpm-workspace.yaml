@@ -72,6 +72,16 @@ overrides:
   # GHSA-333x-w4r6-6crp / GHSA-w74x-v6f9-j3xg / GHSA-wjr9-j795-jxcr / GHSA-xhq7-xmqj-769h,
   # landed against 3.1.8 and is fixed in 3.1.9.
   'fast-uri@>=3.0.0 <3.1.9': '>=3.1.9 <4'
+  # GHSA-3g3m-2fjr-6pw4 (CVE-2026-118773) — glob: an AbortSignal cancellation bypass lets a
+  # traversal continue after the timeout. Vulnerable >= 9.0.0, <= 14.0.1; fixed in 14.0.2, and
+  # no 10.x release carries the fix. Reaches the graph only through archiver-utils (archiver ->
+  # testcontainers, devDependencies), which calls glob.sync. Deliberate cross-major rewrite.
+  'glob@>=9.0.0 <14.0.2': '>=14.0.2 <15'
+  # GHSA-g3hv-75wg-m249 (CVE-2026-118764) — minimatch: DoS through globparts amplification.
+  # Vulnerable >= 7.0.0, < 11.0.1; fixed in 11.0.1, and no 9.x or 10.x release carries the fix.
+  # Reaches the graph through eslint (@eslint/config-array) and through glob@10. Deliberate
+  # cross-major rewrite. 3.x and 5.x are outside the advisory range and stay as they are.
+  'minimatch@>=7.0.0 <11.0.1': '>=11.0.1 <12'
   # GHSA-8r5x-fm3f-whwj / GHSA-p8wg-vrv2-v86f / GHSA-xw65-4hp5-5hc7 — handlebars JavaScript
   # injection: AST type confusion in compile (a bypass of CVE-2026-33937), an own-property
   # check bypass, and unsafe inline embedding of precompiled templates. All three are fixed
