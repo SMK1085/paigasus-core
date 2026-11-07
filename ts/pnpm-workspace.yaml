@@ -127,18 +127,18 @@ catalog:
   # Runtime (React + Next)
   react: ^19.3.1
   react-dom: ^19.3.1
-  next: ^16.4.2
+  next: ^16.4.5
   # TypeScript + ESLint + Prettier
   typescript: ^6.0.3
-  eslint: ^10.13.0
+  eslint: ^10.14.0
   '@eslint/js': ^10.0.1
-  '@eslint-react/eslint-plugin': ^5.28.6
+  '@eslint-react/eslint-plugin': ^5.28.8
   'eslint-plugin-react-hooks': ^7.1.1
   'eslint-plugin-jsx-a11y': ^6.10.2
-  'typescript-eslint': ^8.72.0
+  'typescript-eslint': ^8.72.1
   prettier: ^3.9.10
   # Test runner
-  vitest: ^5.0.5
+  vitest: ^5.1.0
   # @paigasus/discovery's browser test harness (SMA-509) uses Vite PROGRAMMATICALLY to bundle and
   # SSR-render a real-Chromium fixture — pinned to the version vitest already resolves, so this
   # adds no new package to the lockfile, only a direct dependency edge onto one already there.
@@ -161,7 +161,7 @@ catalog:
   # the types can't drift ahead of the runtime (see .github/dependabot.yml).
   '@types/node': ^24.19.2
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
-  '@next/eslint-plugin-next': ^16.4.2
+  '@next/eslint-plugin-next': ^16.4.5
   '@tanstack/eslint-plugin-query': ^5.100.14
   # Commit tooling (SMA-371)
   '@commitlint/cli': ^21.2.4
@@ -183,8 +183,8 @@ catalog:
   # carets here are NOT what keeps them aligned; that exact peer requirement and the resolution
   # recorded in pnpm-lock.yaml are. connect-node's `@bufbuild/protobuf` peer range IS a range,
   # ^2.7.0, which the entry above satisfies.
-  '@connectrpc/connect': ^2.2.0
-  '@connectrpc/connect-node': ^2.2.0
+  '@connectrpc/connect': ^2.3.0
+  '@connectrpc/connect-node': ^2.3.0
   # napi-rs CLI — drives `napi build --platform` for the Node FFI binding (SMA-420).
   # It is a devDependency of @paigasus/node-bindings, but that crate is reached via a `file:`
   # specifier (not a workspace member), and pnpm does NOT install a dependency's devDeps — so
@@ -199,14 +199,14 @@ catalog:
   vite-plugin-wasm: ^3.6.0
   # OIDC relying party for @paigasus/auth (SMA-506). v6 is the line ADR-0017 decision 4 names.
   # Protocol handling — PKCE, state, nonce, discovery, JWKS, token exchange — stays in the library.
-  openid-client: ^6.8.8
+  openid-client: ^6.8.9
   # JOSE primitives. Used ONLY by tests, to mint a local JWKS and sign fixture tokens (AC 6).
   # Production token verification is openid-client's job; this is never imported from src/.
-  jose: ^6.2.13
+  jose: ^6.2.15
   # node-redis, the official client. v6 — its client API differs from v5, so check the installed
   # types rather than older examples. Chosen over ioredis because its redis:// DSN parsing matches
   # rs/crates/libs/paigasus-redis/src/lib.rs verbatim.
-  redis: ^6.3.0
+  redis: ^6.3.1
   # E2E tier for @paigasus/auth. A real browser is the only thing that can prove SameSite behaviour
   # on the cross-site redirect back from the IdP, and __Host- cookie-prefix enforcement.
   '@playwright/test': ^1.64.1
@@ -220,8 +220,8 @@ catalog:
   # @paigasus/ui foundation (SMA-503, ADR-0021). Tailwind v4 is CSS-first: there is no
   # tailwind.config.*, so `tailwindcss` is present for the `@theme`/`@source` syntax the
   # package's CSS uses and `@tailwindcss/postcss` is what the consuming Next app runs.
-  tailwindcss: ^4.3.3
-  '@tailwindcss/postcss': ^4.3.3
+  tailwindcss: ^4.3.4
+  '@tailwindcss/postcss': ^4.3.4
   # Radix as ONE package, not ten @radix-ui/react-* entries. cmdk pulls its own individual
   # @radix-ui/react-* deps, and the two deduplicate to ONE copy of each today — a single
   # @radix-ui/react-dialog@1.1.23 resolution in pnpm-lock.yaml, shared by both. But radix-ui
