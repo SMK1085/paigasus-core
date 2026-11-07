@@ -39,6 +39,7 @@ export default defineConfig({
             'tests/committed-wasm.test.ts',
             'tests/committed-napi-glue.test.ts',
             'tests/optimize-wasm.test.ts',
+            'tests/deprecated-accessors.test.ts',
           ],
           server: { deps: { external: [/\.node$/] } },
         },

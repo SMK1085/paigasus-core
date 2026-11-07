@@ -123,6 +123,15 @@ tasks:
       - '/ts/apps/*/vitest.config.ts'
       - '/ts/apps/*/tests/support/setup.ts'
       - '/ts/apps/*/package.json'
+      # SMA-736 (A13): the napi binding's runtime files (through the kernel) and the tsconfig chain
+      # of each workspace package in the closure.
+      - '/rs/crates/bindings/paigasus-node-bindings/index.js'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'
+      - '/ts/packages/paigasus-auth/tsconfig.json'
+      - '/ts/packages/paigasus-discovery/tsconfig.json'
+      - '/ts/packages/paigasus-kernel/tsconfig.json'
+      - '/ts/packages/paigasus-proto/tsconfig.json'
+      - '/ts/packages/paigasus-sdk/tsconfig.json'
   test-e2e:
     # SMA-648 § 4.4: the Docker-backed tier. It drives the REAL call site, descriptorCacheFor, against
     # a real Redis, because the defect lived in the client options that call site passes.
@@ -165,6 +174,23 @@ tasks:
       - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
       - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
       - '/rs/crates/bindings/paigasus-wasm/package.json'
+      # SMA-736 (A13): the rest of the package.json closure, the napi binding's runtime files and
+      # the tsconfig chain. So an auth, sdk or proto edit now selects this Docker tier (spec R2,
+      # accepted in spec section 9).
+      - '/ts/tsconfig.base.json'
+      - '/ts/packages/paigasus-auth/src/**/*'
+      - '/ts/packages/paigasus-auth/package.json'
+      - '/ts/packages/paigasus-auth/tsconfig.json'
+      - '/ts/packages/paigasus-sdk/src/**/*'
+      - '/ts/packages/paigasus-sdk/package.json'
+      - '/ts/packages/paigasus-sdk/tsconfig.json'
+      - '/ts/packages/paigasus-proto/src/**/*'
+      - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-proto/tsconfig.json'
+      - '/ts/packages/paigasus-discovery/tsconfig.json'
+      - '/ts/packages/paigasus-kernel/tsconfig.json'
+      - '/rs/crates/bindings/paigasus-node-bindings/index.js'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'
     options:
       # A real container. A cached PASS would replay a green that tested nothing.
       cache: false

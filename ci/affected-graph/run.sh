@@ -472,7 +472,7 @@ run_suite() {
   # same session and login flow, so its build, test and test-e2e each list
   # '/ts/packages/paigasus-auth/src/**/*' in their own `inputs`.
   run_task_case_ci "auth->auth-tasks" "ts/packages/paigasus-auth/src/config.ts" \
-    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck,paigasus-auth-ts:typecheck,paigasus-console-core-ts:typecheck"
+    "paigasus-app-shell-ts:build,paigasus-app-shell-ts:test,paigasus-app-shell-ts:test-e2e,paigasus-auth-ts:build,paigasus-auth-ts:test,paigasus-auth-ts:test-e2e,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:typecheck,paigasus-auth-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-console-core-ts:test-e2e"
   # SMA-508 — a @paigasus/proto SOURCE edit must select the SDK's build and test.
   # This is the ONLY control on ts/packages/paigasus-sdk/moon.yml's `inputs` list. Remove that
   # list and the SDK's suite stops running on the PR that changes the generated code it consumes,
@@ -493,7 +493,7 @@ run_suite() {
   # the generated protobuf-es code directly, so its build, test and test-e2e each list
   # '/ts/packages/paigasus-proto/src/**/*' in their own `inputs`.
   run_task_case_ci "proto->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts" \
-    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:build,paigasus-app-shell-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-discovery-ts:typecheck,paigasus-proto-ts:typecheck,paigasus-sdk-ts:typecheck"
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:build,paigasus-app-shell-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-discovery-ts:typecheck,paigasus-proto-ts:typecheck,paigasus-sdk-ts:typecheck,paigasus-app-shell-ts:test,paigasus-console-core-ts:test-e2e,paigasus-discovery-ts:test-e2e"
   # SMA-508 final review fix — the SECOND anchor, and it is not redundant. MEASURED: narrowing all
   # three of paigasus-sdk-ts's `inputs` globs from `/ts/packages/paigasus-proto/src/**/*` to
   # `/ts/packages/paigasus-proto/src/generated/paigasus/common/**/*` still yields `PASS proto->sdk`
@@ -521,7 +521,7 @@ run_suite() {
   # side of the two-anchor pair, so it is what proves that glob is not narrowable to
   # generated/paigasus/common for the new zone either.
   run_task_case_ci "proto-iam->sdk" "ts/packages/paigasus-proto/src/generated/paigasus/iam/v1/iam_pb.ts" \
-    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:build,paigasus-app-shell-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-discovery-ts:typecheck,paigasus-proto-ts:typecheck,paigasus-sdk-ts:typecheck"
+    "paigasus-proto-ts:build,paigasus-proto-ts:test,paigasus-sdk-ts:build,paigasus-sdk-ts:test,ts:lint,paigasus-discovery-ts:build,paigasus-discovery-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-app-shell-ts:build,paigasus-app-shell-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-discovery-ts:typecheck,paigasus-proto-ts:typecheck,paigasus-sdk-ts:typecheck,paigasus-app-shell-ts:test,paigasus-console-core-ts:test-e2e,paigasus-discovery-ts:test-e2e"
   # SMA-509 — a @paigasus/discovery SOURCE edit must select its own build/test AND the
   # Docker-backed `test-e2e` task, plus `ts:lint`. Nothing else asserts this package's tasks are
   # reachable from an edit to it: `repo:input-liveness` scans `repo:*` tasks only and proves
@@ -607,9 +607,9 @@ run_suite() {
   # be read as one edit, and neither would be reviewable. Rename them in a later, set-preserving
   # commit if it is worth the churn.
   run_task_case_ci "sdk->iam-console" "ts/packages/paigasus-sdk/src/iam.ts" \
-    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-sdk-ts:typecheck"
+    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-sdk-ts:typecheck,paigasus-console-core-ts:test-e2e"
   run_task_case_ci "sdk-errors->iam-console" "ts/packages/paigasus-sdk/src/errors/map-error.ts" \
-    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-sdk-ts:typecheck"
+    "paigasus-sdk-ts:build,paigasus-sdk-ts:test,iam-console-ts:build,iam-console-ts:test,iam-console-ts:test-e2e,gateway-console-ts:build,gateway-console-ts:test,gateway-console-ts:test-e2e,paigasus-console-core-ts:build,paigasus-console-core-ts:test,ts:lint,gateway-console-ts:typecheck,iam-console-ts:typecheck,paigasus-console-core-ts:typecheck,paigasus-sdk-ts:typecheck,paigasus-console-core-ts:test-e2e"
   # SMA-575 — an sdk TEST-file edit must select the sdk's own `build` (tsc over tests/, which holds
   # the expectTypeOf proof of AC 1) and `test`, plus `ts:lint`, and nothing downstream: a test file
   # is not a source of any consumer.
@@ -766,8 +766,12 @@ run_suite() {
   # dropped either input line would leave every other case green while a glue-only PR selected no
   # task that runs the gate. Expected sets MEASURED with the same no-flag
   # `moon query tasks --affected` traversal `_assert_task_case_impl` uses.
-  run_task_case_ci "napi-glue-js->kernel-test" "rs/crates/bindings/paigasus-node-bindings/index.js" \
-    "paigasus-kernel-ts:test"
+  # SMA-736: A13 makes every vitest task whose package closure holds the napi binding key on
+  # index.js, so a glue-only edit now also selects the console-core and app `test` tasks and
+  # console-core's `test-e2e` (spec D6, R2). This case is A13's behavioural control. It was named
+  # `napi-glue-js->kernel-test` until SMA-736.
+  run_task_case_ci "napi-glue-js->vitest" "rs/crates/bindings/paigasus-node-bindings/index.js" \
+    "paigasus-kernel-ts:test,gateway-console-ts:test,iam-console-ts:test,paigasus-console-core-ts:test,paigasus-console-core-ts:test-e2e"
   # SMA-536: index.d.ts is also an input of every `tsc` task whose package closure holds the napi
   # binding — the kernel's build and typecheck, console-core's build and typecheck, and each app's
   # typecheck — because the preflight holds the installed copy that `tsc` reads equal to this

@@ -382,6 +382,10 @@ tasks:
       - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm.d.ts'
       - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts'
       - '/rs/crates/bindings/paigasus-wasm/package.json'
+      # SMA-736 (A13). The kernel's package.json closure holds the napi binding, so every vitest
+      # task that reaches the kernel keys on the binding's runtime files (spec D6, R2).
+      - '/rs/crates/bindings/paigasus-node-bindings/index.js'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'
     options:
       merge: replace
 

@@ -309,11 +309,55 @@ It also runs several checks that the per-case project sets structurally **cannot
   also runs their `tsc` tasks; and app-shell keys on next-config and `@paigasus/proto`, although
   its `tsconfig.json` excludes the fixture that uses next-config and discovery's `./client` graph
   does not reach proto. A per-import closure would need a TypeScript resolver in the gate.
-  Limits: vitest `test` tasks are out of scope, because they resolve the bindings through
-  `vitest.config.ts` aliases (a follow-up issue holds them); `next build`'s own type check is not a
+  Limits: vitest tasks are not A12's; A13 (below) covers them. `next build`'s own type check is not a
   `tsc` task; own-package files outside `src/` (for example `tests/**/*`) are not asserted;
   relative reads that `package.json` does not declare are not seen; and a `tsc` behind a wrapper
   script is invisible (the floor catches only the loss of a known task).
+- **A13** (`check_ts_vitest_inputs` in `cargo_moon_parity.py`, SMA-736, findings key `a13`) covers
+  every task of a `language: typescript` project whose resolved invocation runs vitest
+  (`VITEST_TOKEN_RE`). This includes `test` and `test-e2e`. For each vitest call, A13 finds the
+  config files. It reads `--config`, `--config=` or `-c`. Else it uses the vitest lookup
+  (`vitest.config.*`, then `vite.config.*`) in the task directory. A task with no config file runs
+  with the vitest defaults. That is not a row.
+  A13 asserts CONTAINMENT, per task and over both input buckets, like A12a. A task must declare
+  `ts/pnpm-lock.yaml` and each config file. For each workspace package in the A12 `package.json`
+  closure, the task must declare the A12 set, from the shared `workspace_package_inputs`. For each
+  `file:` binding, the task must declare `package.json` and each `files` entry that is not a
+  `.d.ts`. Vitest runs the glue and the `.wasm`. It never reads a typing.
+  The task must also declare the `tsconfig.json` of its own package and of each workspace package.
+  It must declare each file of the relative `extends` chain. The reason is that the vite oxc
+  transform loads the nearest tsconfig. A task skips these files only when every config sets
+  `tsconfig: false` (the two apps).
+  A13 parses each config with a narrow single-pass scanner (`vitest_config_facts`). It demands each
+  tracked alias target outside the own package. An untracked alias target is valid only on an FFI
+  task (A5's `derive_ffi_tasks`) whose invocation builds it with a matching `--out-dir` (the
+  kernel's `.wasmpack-test-out`). A task that reads `@paigasus/proto` needs a direct
+  `contracts:generate` dep.
+  These cases are rows, never skips: a config split across files (a relative import,
+  `mergeConfig`, `extends`); a string `projects` entry; an alias form outside the grammar;
+  `--root`; a `cd` before the vitest call outside a subshell; an `extends` that is not a relative
+  path; a binding with no `files` list; a config that no input of `repo:affected-smoke` matches.
+  The floors are `REQUIRED_VITEST_TASKS`, `REQUIRED_VITEST_ALIASES` and a self-test pin of what the
+  parser reads in every tracked `vitest*.config.*` file. A13 omits a `package.json`
+  walk row that A12a already prints.
+  Known limits: A13 works per package, not per imported file. This is an over-approximation, and it
+  is the accepted R2 cost (spec D6). For example, an edit to auth, sdk or proto selects
+  `paigasus-console-core-ts:test-e2e`, and the console tests key on the napi glue that they never
+  load. A stale pnpm-installed binding copy on a developer host is out of scope (N7). CI installs
+  fresh. A vitest call behind a wrapper script is invisible. Only the task floor catches the loss
+  of a known task. Own-package files other than the config and `tsconfig.json` (`tests/**`,
+  `setupFiles`, in-package aliases) stay with the hand-written lists.
+  The scanner reads a `/` as the start of a regex after `( , = : [ ! & | ? { } ; + - * % < > ~ ^`
+  and after a keyword such as `return` or `typeof`. It reads any other `/` as a division. After `++` or `--`
+  it reads a `/` as a division. It can still misread a division in a rarer form, and then it can
+  hide an alias with no row. The real-corpus pin locks the result for today's configs. A
+  regex literal that does not close on its line is a row. A comment marker (`//` or `/*`) right
+  after a backslash is a row. The parser cannot scan that file.
+  A13 sees `tsconfig: false` anywhere in the code of a config. An unrelated option with that value
+  also turns off the tsconfig requirement. The self-test pin of the real configs locks today's files.
+  A13 reads `-c=<f>` like `-c <f>`. A `-r`, `-r=<dir>`, `--root=<dir>`, `pnpm -C <dir>` or
+  `pnpm --dir <dir>` before the vitest call is a row. An alias value that is an absolute path is a
+  row, and so is a computed `['alias']` key.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`

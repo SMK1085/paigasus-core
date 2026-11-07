@@ -397,10 +397,141 @@ export const noJsRelativeSpecifier = {
   },
 };
 
+/** The six single-field PRN accessors that SMA-725 deprecates. */
+const DEPRECATED_PRN_ACCESSORS = new Set(['prnErrorKind', 'prnService', 'prnRegion', 'prnOrg', 'prnResourceType', 'prnResourceId']);
+
+/** Module specifiers that export the six names: the two kernel entries and the two raw bindings. */
+const PRN_ACCESSOR_MODULES = new Set(['@paigasus/kernel', '@paigasus/kernel/napi', '@paigasus/node-bindings', '@paigasus/wasm']);
+
+/** The raw binding packages have no `exports` map, so a deep path into them also type-checks. */
+const PRN_ACCESSOR_MODULE_PREFIXES = ['@paigasus/node-bindings/', '@paigasus/wasm/'];
+
+/** @param {unknown} source */
+function isPrnAccessorModule(source) {
+  if (typeof source !== 'string') return false;
+  return PRN_ACCESSOR_MODULES.has(source) || PRN_ACCESSOR_MODULE_PREFIXES.some((prefix) => source.startsWith(prefix));
+}
+
+/**
+ * The name an import or export specifier names, or a property key names. An Identifier gives its
+ * `name`; a string Literal (`import { 'prnService' as s }`, `k['prnOrg']`) gives its `value`.
+ *
+ * @param {any} node
+ * @returns {string | undefined}
+ */
+function nameOf(node) {
+  if (node?.type === 'Identifier') return node.name;
+  if (node?.type === 'Literal' && typeof node.value === 'string') return node.value;
+  return undefined;
+}
+
+/**
+ * The name a member or property key names. A key that is not computed is an Identifier (or a
+ * string Literal). A computed key gives a name only when it is a constant: a string Literal or a
+ * template literal with no expression. Any other computed key gives `undefined`.
+ *
+ * @param {any} key
+ * @param {boolean} computed
+ * @returns {string | undefined}
+ */
+function keyName(key, computed) {
+  if (!computed) return nameOf(key);
+  if (key?.type === 'Literal') return nameOf(key);
+  if (key?.type === 'TemplateLiteral' && key.expressions.length === 0) return key.quasis[0].value.cooked ?? undefined;
+  return undefined;
+}
+
+/**
+ * `paigasus/no-single-field-prn-accessor` (SMA-725 spec § 4.2).
+ *
+ * The six single-field PRN accessors of @paigasus/kernel are deprecated. Each one parses the PRN
+ * again, and `prnParse` returns every field in ONE kernel call. This rule reports, for a watched
+ * module: a named import of one of the six (value or type, aliased or not), a named re-export of
+ * one, and a use of one through a namespace import. It allows a namespace import itself,
+ * `export *`, and a dynamic `import()` (spec D4, L1).
+ *
+ * WHY A CUSTOM RULE. The core `no-restricted-imports` already carries the boundary rules, and a
+ * second block for the same files REPLACES their options. `@typescript-eslint/no-restricted-imports`
+ * is deprecated since typescript-eslint 8.64.0 and points to the core rule (spec § 2, D3).
+ *
+ * The namespace check follows the import binding through ESLint's scope analysis. So a parameter or
+ * a local variable that shadows the namespace name is not reported.
+ *
+ * What the rule follows (spec L2): a member access (`k.x`, `k?.x`, `k['x']`, k[`x`] with no
+ * expression), and a destructuring in a declaration or an assignment (`const { x } = k`,
+ * `({ x: o } = k)`) with an identifier key, a string-literal key or a computed string-literal key.
+ *
+ * What the rule does not follow: a type position (`typeof k.x`), because it reads a type only and
+ * calls nothing at runtime; a computed key that is not a constant; a namespace that is assigned to
+ * another variable or passed to a function (spec L2). CommonJS `require()` and `import x =
+ * require()` are not followed (spec L1).
+ *
+ * @type {import('eslint').Rule.RuleModule}
+ */
+export const noSingleFieldPrnAccessor = {
+  meta: {
+    type: 'suggestion',
+    docs: {
+      description: 'Disallow the six deprecated single-field PRN accessors of @paigasus/kernel; use prnParse (SMA-725)',
+    },
+    schema: [],
+    messages: {
+      deprecatedAccessor: "'{{name}}' is deprecated (SMA-725). Use prnParse(prn): one kernel call returns every field or the error kind.",
+    },
+  },
+  create(context) {
+    /** @param {any} node @param {string | undefined} name */
+    const report = (node, name) => {
+      if (name !== undefined && DEPRECATED_PRN_ACCESSORS.has(name)) {
+        context.report({ node, messageId: 'deprecatedAccessor', data: { name } });
+      }
+    };
+
+    /** @param {any} namespaceSpecifier */
+    const checkNamespaceUses = (namespaceSpecifier) => {
+      for (const variable of context.sourceCode.getDeclaredVariables(namespaceSpecifier)) {
+        for (const reference of variable.references) {
+          const id = reference.identifier;
+          const parent = /** @type {any} */ (id).parent;
+          if (parent?.type === 'MemberExpression' && parent.object === id) {
+            // `k.prnService` names the property; `k['prnOrg']` names it with a string literal. A
+            // computed key that is a variable (`k[n]`) names nothing we can know, so it is skipped.
+            const property = parent.property;
+            report(property, keyName(property, parent.computed));
+          } else if (
+            (parent?.type === 'VariableDeclarator' && parent.init === id && parent.id.type === 'ObjectPattern') ||
+            (parent?.type === 'AssignmentExpression' && parent.right === id && parent.left.type === 'ObjectPattern')
+          ) {
+            // A declaration (`const { x } = k`) or an assignment (`({ x: o } = k)`).
+            const pattern = parent.type === 'VariableDeclarator' ? parent.id : parent.left;
+            for (const property of pattern.properties) {
+              if (property.type === 'Property') report(property.key, keyName(property.key, property.computed));
+            }
+          }
+        }
+      }
+    };
+
+    return {
+      ImportDeclaration(node) {
+        if (!isPrnAccessorModule(node.source.value)) return;
+        for (const specifier of node.specifiers) {
+          if (specifier.type === 'ImportSpecifier') report(specifier, nameOf(specifier.imported));
+          else if (specifier.type === 'ImportNamespaceSpecifier') checkNamespaceUses(specifier);
+        }
+      },
+      ExportNamedDeclaration(node) {
+        if (node.source === null || node.source === undefined || !isPrnAccessorModule(node.source.value)) return;
+        for (const specifier of node.specifiers) report(specifier, nameOf(specifier.local));
+      },
+    };
+  },
+};
+
 /** @type {import('eslint').ESLint.Plugin} */
 const paigasusPlugin = {
   meta: { name: '@paigasus/next-config/eslint' },
-  rules: { 'no-js-relative-specifier': noJsRelativeSpecifier },
+  rules: { 'no-js-relative-specifier': noJsRelativeSpecifier, 'no-single-field-prn-accessor': noSingleFieldPrnAccessor },
 };
 
 /**
@@ -427,6 +558,38 @@ export const sourceRules = [
     ignores: ['**/*.test.*', '**/tests/**'],
     plugins: { paigasus: paigasusPlugin },
     rules: { 'paigasus/no-js-relative-specifier': 'error' },
+  },
+];
+
+/**
+ * The SMA-725 kernel-accessor block, as an ESLint flat-config array. `ts/eslint.config.js` spreads
+ * it after `sourceRules`, and `tests/kernel-accessor-rules.test.ts` pins that spread.
+ *
+ * WHY NOT INSIDE `boundaryRules`. The liveness test there derives a `BOUNDARY_SCOPES` key from every
+ * block's `files[0]`, and `**` is not a package directory.
+ *
+ * Scope: every linted source file, JS included, because the rule needs no type information.
+ * Exempt: the kernel's own entry files (they import the raw names to re-export them), the four
+ * kernel tests that test the deprecated accessors while they exist (spec D1), and the console-core
+ * delegation guard, which imports the six to prove that nobody calls them. A NEW kernel test is not
+ * exempt. The block registers its own plugin, so it depends on no other block.
+ *
+ * @type {import('eslint').Linter.Config[]}
+ */
+export const kernelAccessorRules = [
+  {
+    name: 'paigasus/kernel/no-single-field-prn-accessor',
+    files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    ignores: [
+      'packages/paigasus-kernel/src/**',
+      'packages/paigasus-kernel/tests/prn-fields.test.ts',
+      'packages/paigasus-kernel/tests/prn-fields.wasm.test.ts',
+      'packages/paigasus-kernel/tests/prn-canonical.test.ts',
+      'packages/paigasus-kernel/tests/prn-canonical.wasm.test.ts',
+      'packages/paigasus-console-core/tests/unit/prn-tenancy-delegation.test.ts',
+    ],
+    plugins: { paigasus: paigasusPlugin },
+    rules: { 'paigasus/no-single-field-prn-accessor': 'error' },
   },
 ];
 

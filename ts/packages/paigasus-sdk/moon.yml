@@ -67,3 +67,6 @@ tasks:
       # frame — the same vacuity M11 measured for the error registry. The control on this line is
       # `run_task_case_ci "gateway->sdk"` in ci/affected-graph/run.sh.
       - '/rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs'
+      # SMA-736 (A13): the rest of @paigasus/proto's input set.
+      - '/ts/packages/paigasus-proto/package.json'
+      - '/ts/packages/paigasus-proto/tsconfig.json'

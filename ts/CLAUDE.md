@@ -114,6 +114,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `paigasus-discovery/tests/containers/support/ts-esm-loader.mjs`) retry an extensionless specifier
   as `.ts`, then `/index.ts`, because plain Node does not probe extensions. Vite, vitest, tsc and
   Playwright accept both forms, so only a Next build or these two controls notices a regression.
+  The rule `paigasus/no-single-field-prn-accessor` (SMA-725) ships as `kernelAccessorRules` from
+  `@paigasus/next-config/eslint`. It has its own name for the same reason. It reports the six
+  deprecated single-field accessors of `@paigasus/kernel`: use `prnParse`. A new kernel test must
+  use `prnParse` and must not be added to the `ignores` of the rule.
 - **`@paigasus/kernel` resolves to its WASM entry, on the server too** (SMA-634, ADR-0022). A Next
   server build cannot load the napi binding from an in-monorepo `file:` or `link:` dependency:
   pnpm installs a `file:` target once, at install time, by the package's `files` allowlist, and

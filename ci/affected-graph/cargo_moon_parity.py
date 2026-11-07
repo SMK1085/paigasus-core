@@ -35,6 +35,11 @@
 # dependency closure, and A12b that each one whose closure holds a `file:` binding runs the
 # installed-typings preflight before `tsc`. It reads package.json files from disk.
 #
+# A13 (SMA-736) is about ts vitest tasks: each one must key on its config files, its package.json
+# closure, the runtime files of each `file:` binding, the tsconfig.json `extends` chains and each
+# alias target outside its own package. It reads the vitest configs and tsconfig files from disk,
+# and it asks git which files it tracks.
+#
 # usage: cargo_moon_parity.py [--self-test]
 import collections
 import fnmatch
@@ -47,6 +52,10 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+
+# SMA-736: A13 reads git's tracked set through repo:input-liveness's own helper. Python puts this
+# script's directory (ci/affected-graph/) first on sys.path, so the sibling module imports directly.
+import task_inputs
 
 
 class MoonOutputError(RuntimeError):
@@ -71,6 +80,8 @@ INFRA_ERRORS = (
     tomllib.TOMLDecodeError,
     OSError,
     MoonOutputError,
+    # SMA-736: task_inputs.tracked_files raises task_inputs' own MoonOutputError class.
+    task_inputs.MoonOutputError,
 )
 
 # (consumer, upstream) -> why this hand-declared Moon edge has no Cargo backing.
@@ -2144,11 +2155,11 @@ REQUIRED_TS_CLOSURE = {
 }
 
 
-def derive_tsc_tasks(projects):
-    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation runs `tsc`.
+def _derive_ts_tasks(projects, token_re, label):
+    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation matches `token_re`.
 
-    Shared by A12a and A12b. Raises MoonOutputError if a task exposes none of a command, a script,
-    or any args, exactly as derive_ffi_tasks does.
+    Raises MoonOutputError if a task exposes none of a command, a script, or any args. `label`
+    names the derivation in the message.
     """
     matched = set()
     for pid in sorted(projects):
@@ -2161,11 +2172,20 @@ def derive_tsc_tasks(projects):
             if blob is None:
                 raise MoonOutputError(
                     f"{pid}:{name} reported none of a `command`, a `script`, or any `args` — "
-                    f"moon's output shape changed, so the tsc derivation cannot be evaluated"
+                    f"moon's output shape changed, so the {label} derivation cannot be evaluated"
                 )
-            if TSC_TOKEN_RE.search(blob):
+            if token_re.search(blob):
                 matched.add(f"{pid}:{name}")
     return matched
+
+
+def derive_tsc_tasks(projects):
+    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation runs `tsc`.
+
+    Shared by A12a and A12b. Raises MoonOutputError if a task exposes none of a command, a script,
+    or any args, exactly as derive_ffi_tasks does.
+    """
+    return _derive_ts_tasks(projects, TSC_TOKEN_RE, "tsc")
 
 
 def _read_package_json(root, rel_dir, rows):
@@ -2290,6 +2310,27 @@ def _export_leaves(node, where, rows):
     return []
 
 
+def workspace_package_inputs(pkg_dir, data, rows):
+    """The inputs one workspace package `pkg_dir` adds to a task that reads it through its closure.
+
+    `pkg_dir/package.json`, `pkg_dir/src/**/*`, and each `exports` target outside `src/`:
+    `pkg_dir/<head>/**/*` for a target in a subdirectory, `pkg_dir/<file>` for a file at the package
+    root. `data` is the parsed package.json. A12a (`tsc`) and A13 (vitest) both call this, so the two
+    rules cannot drift (SMA-736 spec §4.3 item 3). An `exports` shape it cannot read is a row.
+    """
+    want = {f"{pkg_dir}/package.json", f"{pkg_dir}/src/**/*"}
+    for leaf in _export_leaves(data.get("exports"), f"{pkg_dir}/package.json", rows):
+        if not leaf.startswith("./"):
+            rows.append(f"{pkg_dir}/package.json: the `exports` target {leaf!r} does not start with `./`")
+            continue
+        rel = leaf[2:]
+        if rel.startswith("src/"):
+            continue
+        head, sep, _ = rel.partition("/")
+        want.add(f"{pkg_dir}/{head}/**/*" if sep else f"{pkg_dir}/{rel}")
+    return want
+
+
 def tsc_required_inputs(root, closure, rows):
     """Return (want, has_binding): the inputs one `tsc` task must declare for its closure (spec §3.3)."""
     want = {TS_BASE_TSCONFIG}
@@ -2303,16 +2344,7 @@ def tsc_required_inputs(root, closure, rows):
         if data is None:
             continue
         if kind == "workspace":
-            want.add(f"{pkg_dir}/src/**/*")
-            for leaf in _export_leaves(data.get("exports"), f"{pkg_dir}/package.json", rows):
-                if not leaf.startswith("./"):
-                    rows.append(f"{pkg_dir}/package.json: the `exports` target {leaf!r} does not start with `./`")
-                    continue
-                rel = leaf[2:]
-                if rel.startswith("src/"):
-                    continue
-                head, sep, _ = rel.partition("/")
-                want.add(f"{pkg_dir}/{head}/**/*" if sep else f"{pkg_dir}/{rel}")
+            want |= workspace_package_inputs(pkg_dir, data, rows)
             continue
         files = data.get("files") or []
         if not isinstance(files, list):
@@ -2458,6 +2490,688 @@ def check_ts_tsc_preflight(projects, root, floor=REQUIRED_TSC_TASKS):
         if verdict:
             rows.append(f"{target} {verdict}")
     return rows
+
+
+# SMA-736 — A13. Every ts task that runs vitest must key on what vitest reads: its config files, the
+# package.json closure that A12 walks, the runtime files of each `file:` binding, the tsconfig.json
+# `extends` chains, and each alias target outside its own package. See
+# docs/superpowers/specs/2026-10-09-sma-736-vitest-upstream-inputs-design.md.
+#
+# The config parser below is deliberately narrow (spec §4.4). It reads the alias forms the real
+# configs use. Any other form that can carry an alias is a row, never a skip.
+_JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+_JS_IMPORT_RE = re.compile(r"(?<![\w$.])(?:from|import|require)\s*\(?\s*(?=['\"])")
+_JS_SPLIT_CONFIG_RE = re.compile(r"(?<![\w$])(mergeConfig|extends)(?![\w$])")
+_JS_CONST_STRING_RE = re.compile(r"(?<![\w$])const\s+([A-Za-z_$][\w$]*)\s*=\s*(?=['\"])")
+_JS_CONST_URL_RE = re.compile(r"(?<![\w$])const\s+([A-Za-z_$][\w$]*)\s*=\s*fileURLToPath\(\s*new\s+URL\(\s*(?=['\"])")
+_JS_URL_TAIL_RE = re.compile(r"\s*,\s*import\.meta\.url\s*\)\s*\)")
+_JS_STATEMENT_END_RE = re.compile(r"[ \t]*(?:;|\n|$)")
+_JS_ALIAS_WORD_RE = re.compile(r"(?<![\w$])alias(?![\w$])")
+_JS_KEY_COLON_RE = re.compile(r"\s*:")
+_JS_COLON_RE = re.compile(r"\s*:\s*")
+_JS_TSCONFIG_OFF_RE = re.compile(r"(?<![\w$])tsconfig\s*:\s*false(?![\w$])")
+_JS_PROJECTS_RE = re.compile(r"(?<![\w$])projects\s*:\s*")
+_JS_REGEX_PREV = "(,=:[!&|?{};+-*%<>~^"
+# A keyword before a `/` means an expression starts there, so the `/` opens a regex literal.
+_JS_REGEX_KEYWORD_RE = re.compile(r"(?<![\w$.])(?:return|typeof|in|of|case|void|delete|throw|new|yield|await|instanceof|else|do)\s*$")
+_JS_OPEN = "([{"
+_JS_CLOSE = ")]}"
+
+
+def _scan_js(text, where, rows):
+    """One pass over a JS, TS or JSONC text. Return (code, masked, literals), or None after a row.
+
+    The scanner has one state at a time: code, `'...'`, `"..."`, a template literal, a regex literal,
+    `// ...` and `/* ... */`. A comment opens only in code state, so a quote inside a comment opens no string and
+    a `//` inside a string opens no comment. A template literal's `${...}` returns to code state until
+    its matching `}`; a stack holds the nesting. This is the defect class ts/CLAUDE.md records for
+    `stripComments` (SMA-639), so the self-test covers each state.
+
+    `code` is `text` with each comment replaced by spaces (newlines kept), so every offset stays the
+    same. `masked` is `code` with the contents of each string and template literal replaced by `_`
+    (quotes kept), so a regex over `masked` never matches inside a string. `literals` maps the offset
+    of each `'` or `"` opening quote to (end, value): `end` is the offset after the closing quote.
+
+    A `/` in code state that does not start a comment opens a regex literal when the previous code
+    character is one of `( , = : [ ! & | ? { } ; + - * % < > ~ ^` (`>` covers `=>`), when the text
+    starts there, or when the previous word is `return`, `typeof`, `in`, `of`, `case`, `void`,
+    `delete`, `throw`, `new`, `yield`, `await`, `instanceof`, `else` or `do`. Any other `/` is a
+    division. After `++` or `--` a `/` is a division, because a postfix operator ends an operand. A division
+    that this rule reads as a regex in a rarer form can still hide an alias with no row. The
+    real-corpus pin locks the result for today's configs. A `//` or `/*` right after a backslash in code state is a row. The regex state honours `\\` escapes and `[...]`
+    classes (a `/` inside a class does not close it), closes at the next unescaped `/`, and skips the
+    flag letters. Its content is masked like a string, so it opens no comment and no string. A newline
+    before the close is a row. Without this state, `/^https?:\\/\\//` read as a comment and dropped
+    an alias with no row.
+    """
+    code = list(text)
+    masked = list(text)
+    literals = {}
+    stack = [["code", 0]]
+    prev = ""
+    i, n = 0, len(text)
+    while i < n:
+        mode = stack[-1]
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if mode[0] == "tpl":
+            if ch == "\\":
+                for k in (i, i + 1):
+                    if k < n and text[k] != "\n":
+                        masked[k] = "_"
+                i += 2
+            elif ch == "`":
+                stack.pop()
+                prev = "`"
+                i += 1
+            elif ch == "$" and nxt == "{":
+                stack.append(["code", 0])
+                prev = "{"
+                i += 2
+            else:
+                if ch != "\n":
+                    masked[i] = "_"
+                i += 1
+            continue
+        if ch == "/" and nxt != "" and nxt in "/*" and text[i - 1:i] == "\\":
+            rows.append(f"{where}: a comment marker after a backslash at line {text.count(chr(10), 0, i) + 1}; A13 cannot scan it")
+            return None
+        if ch == "/" and nxt == "/":
+            end = text.find("\n", i)
+            end = n if end == -1 else end
+            for k in range(i, end):
+                code[k] = masked[k] = " "
+            i = end
+            continue
+        if ch == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end == -1:
+                rows.append(f"{where}: a `/*` comment is not closed, so A13 cannot read the file")
+                return None
+            for k in range(i, end + 2):
+                if text[k] != "\n":
+                    code[k] = masked[k] = " "
+            i = end + 2
+            continue
+        if ch in "'\"":
+            j, value = i + 1, []
+            while j < n and text[j] not in (ch, "\n"):
+                if text[j] == "\\" and j + 1 < n:
+                    value.append(text[j + 1])
+                    j += 2
+                    continue
+                value.append(text[j])
+                j += 1
+            if j >= n or text[j] != ch:
+                rows.append(f"{where}: a {ch} string is not closed on its line, so A13 cannot read the file")
+                return None
+            for k in range(i + 1, j):
+                masked[k] = "_"
+            literals[i] = (j + 1, "".join(value))
+            prev = ch
+            i = j + 1
+            continue
+        if ch == "/" and (prev == "" or prev in _JS_REGEX_PREV or _JS_REGEX_KEYWORD_RE.search(text[max(0, i - 16):i])) \
+                and not text[max(0, i - 40):i].rstrip().endswith(("++", "--")):
+            j, in_class = i + 1, False
+            while j < n and text[j] != "\n":
+                c = text[j]
+                if c == "\\":
+                    if text[j + 1:j + 2] == "\n":
+                        break
+                    j += 2
+                    continue
+                if in_class:
+                    in_class = c != "]"
+                elif c == "[":
+                    in_class = True
+                elif c == "/":
+                    break
+                j += 1
+            if j >= n or text[j] != "/":
+                rows.append(f"{where}: an unterminated regex literal at line {text.count(chr(10), 0, i) + 1}, so A13 cannot scan it")
+                return None
+            j += 1
+            while j < n and (text[j].isalpha()):
+                j += 1
+            for k in range(i + 1, j):
+                if text[k] != "\n":
+                    masked[k] = "_"
+            prev = "/"
+            i = j
+            continue
+        if ch == "`":
+            stack.append(["tpl", 0])
+        elif ch == "{":
+            mode[1] += 1
+        elif ch == "}":
+            if len(stack) > 1 and mode[1] == 0:
+                stack.pop()
+            else:
+                mode[1] -= 1
+        if not ch.isspace():
+            prev = ch
+        i += 1
+    if len(stack) > 1:
+        rows.append(f"{where}: a template literal is not closed, so A13 cannot read the file")
+        return None
+    return "".join(code), "".join(masked), literals
+
+
+def _matching_close(masked, open_idx):
+    """The offset of the bracket that closes the one at `open_idx`, or None if it never closes."""
+    depth = 0
+    for k in range(open_idx, len(masked)):
+        ch = masked[k]
+        if ch in _JS_OPEN:
+            depth += 1
+        elif ch in _JS_CLOSE:
+            depth -= 1
+            if depth == 0:
+                return k
+    return None
+
+
+def _top_level_entries(masked, start, end):
+    """The (start, end) spans of the comma-separated entries in masked[start:end], trimmed.
+
+    Only a comma at bracket depth 0 splits. An empty entry is returned as a span with start == end.
+    """
+    spans, depth, s = [], 0, start
+    for k in range(start, end):
+        ch = masked[k]
+        if ch in _JS_OPEN:
+            depth += 1
+        elif ch in _JS_CLOSE:
+            depth -= 1
+        elif ch == "," and depth == 0:
+            spans.append((s, k))
+            s = k + 1
+    spans.append((s, end))
+    trimmed = []
+    for a, b in spans:
+        while a < b and masked[a].isspace():
+            a += 1
+        while b > a and masked[b - 1].isspace():
+            b -= 1
+        trimmed.append((a, b))
+    return trimmed
+
+
+def _js_bindings(masked, literals, config_dir):
+    """`const` bindings an alias value may name (spec §4.4 step 3).
+
+    `const <id> = '<lit>'` gives ("lit", lit). `const <id> = fileURLToPath(new URL('<lit>',
+    import.meta.url))` gives ("path", <lit> resolved against the config's directory). Any other
+    `const` is not a binding, so an alias that names it is unresolvable.
+    """
+    bindings = {}
+    for m in _JS_CONST_STRING_RE.finditer(masked):
+        lit = literals.get(m.end())
+        if lit and _JS_STATEMENT_END_RE.match(masked, lit[0]):
+            bindings[m.group(1)] = ("lit", lit[1])
+    for m in _JS_CONST_URL_RE.finditer(masked):
+        lit = literals.get(m.end())
+        if lit is None or not _JS_URL_TAIL_RE.match(masked, lit[0]):
+            continue
+        if lit[1].startswith("/") or ":" in lit[1]:
+            continue
+        bindings[m.group(1)] = ("path", os.path.normpath(os.path.join(config_dir, lit[1])))
+    return bindings
+
+
+def _alias_value(masked, literals, bindings, vs, ve):
+    """Classify the alias value in masked[vs:ve]: ("lit", s), ("path", p), or (None, None)."""
+    if vs < ve and masked[vs] in "'\"" and literals.get(vs, (None,))[0] == ve:
+        return ("lit", literals[vs][1])
+    ident = masked[vs:ve]
+    if _JS_IDENT_RE.fullmatch(ident) and ident in bindings:
+        return bindings[ident]
+    return (None, None)
+
+
+def vitest_config_facts(text, config_rel, rows):
+    """Return (aliases, tsconfig_off) for one vitest config file (spec §4.4).
+
+    `aliases` is a sorted list of (key, target) pairs, `target` relative to the repository root and
+    normalized (it can start with `..` when it leaves the root; the caller reports that). An alias
+    whose value is a bare package name adds nothing. `tsconfig_off` is True when the code holds
+    `tsconfig: false` as a whole property. Each form outside the grammar appends a row to `rows`.
+    """
+    scanned = _scan_js(text, config_rel, rows)
+    if scanned is None:
+        return [], False
+    _code, masked, literals = scanned
+    config_dir = os.path.dirname(config_rel)
+    for m in _JS_IMPORT_RE.finditer(masked):
+        lit = literals.get(m.end())
+        if lit and lit[1].startswith(("./", "../")):
+            rows.append(f"{config_rel}: imports {lit[1]!r}; A13 cannot read a config that is split across files")
+    for m in _JS_SPLIT_CONFIG_RE.finditer(masked):
+        rows.append(f"{config_rel}: uses `{m.group(1)}`; A13 cannot read a config that is split across files")
+    for m in _JS_PROJECTS_RE.finditer(masked):
+        start = m.end()
+        end = _matching_close(masked, start) if masked[start:start + 1] == "[" else None
+        if end is None:
+            rows.append(f"{config_rel}: the `projects` value is not an array literal A13 can read")
+            continue
+        for s, e in _top_level_entries(masked, start + 1, end):
+            if s < e and masked[s] in "'\"`":
+                rows.append(
+                    f"{config_rel}: `projects` holds a string entry; vitest loads it as another config or "
+                    f"a glob, which A13 does not follow"
+                )
+    bindings = _js_bindings(masked, literals, config_dir)
+    key_ends = [m.end() for m in _JS_ALIAS_WORD_RE.finditer(masked)]
+    key_ends += [end for end, value in literals.values() if value == "alias" and _JS_KEY_COLON_RE.match(masked, end)]
+    for off, (end, value) in literals.items():
+        if value == "alias" and masked[:off].rstrip().endswith("[") and masked[end:].lstrip().startswith("]"):
+            rows.append(f"{config_rel}: a computed key ['alias'] holds an alias object, which A13 cannot read")
+    aliases = []
+    for key_end in sorted(key_ends):
+        colon = _JS_COLON_RE.match(masked, key_end)
+        if colon is None:
+            rows.append(f"{config_rel}: `alias` is used without a `:` value (a shorthand or a variable), which A13 cannot read")
+            continue
+        open_idx = colon.end()
+        close_idx = _matching_close(masked, open_idx) if masked[open_idx:open_idx + 1] == "{" else None
+        if close_idx is None:
+            rows.append(f"{config_rel}: an `alias` value is not an object literal, so A13 cannot read it")
+            continue
+        entries = _top_level_entries(masked, open_idx + 1, close_idx)
+        for idx, (s, e) in enumerate(entries):
+            if s == e:
+                if idx != len(entries) - 1:
+                    rows.append(f"{config_rel}: an `alias` object holds an empty entry")
+                continue
+            if masked.startswith("...", s):
+                rows.append(f"{config_rel}: an `alias` object holds a spread entry, which A13 cannot read")
+                continue
+            if masked[s] == "[":
+                rows.append(f"{config_rel}: an `alias` object holds a computed key, which A13 cannot read")
+                continue
+            if masked[s] in "'\"" and s in literals:
+                key_end_idx, key = literals[s]
+            else:
+                km = _JS_IDENT_RE.match(masked, s)
+                if km is None:
+                    rows.append(f"{config_rel}: an `alias` entry has a key A13 cannot read")
+                    continue
+                key, key_end_idx = km.group(0), km.end()
+            sep = _JS_COLON_RE.match(masked, key_end_idx)
+            if sep is None or sep.end() > e:
+                rows.append(f"{config_rel}: the alias {key} has no `:` value, which A13 cannot read")
+                continue
+            kind, value = _alias_value(masked, literals, bindings, sep.end(), e)
+            if kind == "lit" and value.startswith(("./", "../", "/")):
+                kind, value = "path", os.path.normpath(os.path.join(config_dir, value))
+            if kind == "path":
+                aliases.append((key, value))
+            elif kind == "lit" and not key.startswith("@paigasus/"):
+                continue
+            else:
+                rows.append(f"{config_rel}: the alias {key} has a value A13 cannot resolve")
+    return sorted(set(aliases)), bool(_JS_TSCONFIG_OFF_RE.search(masked))
+
+
+# `vitest` as a bounded token, optionally behind `pnpm exec`. The boundaries are TSC_TOKEN_RE's, so
+# `vitest.config.ts`, `vitest-environment-x` and `@vitest/coverage-v8` never match. A vitest call
+# behind a wrapper script is invisible (spec N3); the task floor catches the loss of a known task.
+VITEST_TOKEN_RE = re.compile(r"(^|[\s;&|(])(pnpm\s+exec\s+)?vitest(\s|$)")
+# vitest 5.0.3's own lookup order when no `--config` is given (spec §2 item 4).
+VITEST_CONFIG_NAMES = tuple(f"{stem}.config.{ext}" for stem in ("vitest", "vite") for ext in ("ts", "mts", "cts", "js", "mjs", "cjs"))
+_VITEST_SPAN_END_RE = re.compile(r"&&|\|\||;|\||\n")
+# `cd` or `pushd` as a command word. `--cwd` is an argument of another tool and does not match.
+_VITEST_CD_RE = re.compile(r"(?:^|[\s;&|(])(?:cd|pushd)(?=\s|$)")
+# `pnpm -C <dir>`, `pnpm --dir <dir>` and `pnpm --dir=<dir>` change the directory like `cd` does.
+_VITEST_PNPM_DIR_RE = re.compile(r"(?:^|[\s;&|(])pnpm\s+(?:[^\s;&|]+\s+)*?(?:-C|--dir)(?:=|\s|$)")
+# A balanced `( ... )` group: a subshell or a `$( ... )`. A `cd` inside one ends with the group,
+# so it does not move the vitest call that follows. The real paigasus-kernel-ts:test has this shape.
+_SUBSHELL_RE = re.compile(r"\([^()]*\)")
+_VITEST_CONFIG_BAD_CHARS = frozenset("$*?[]{}'\"`")
+
+
+def derive_vitest_tasks(projects):
+    """Every `<pid>:<task>` of a `language: typescript` project whose resolved invocation runs vitest.
+
+    Raises MoonOutputError if a task exposes none of a command, a script, or any args, exactly as
+    derive_tsc_tasks does.
+    """
+    return _derive_ts_tasks(projects, VITEST_TOKEN_RE, "vitest")
+
+
+def vitest_invocation_configs(target, blob, root, own, rows):
+    """The config files that the vitest calls in `blob` read, as repository-relative paths (spec §4.2).
+
+    For each vitest call, the words after the token up to the next `&&`, `||`, `;`, `|` or newline
+    are read. `--config <f>`, `--config=<f>` and `-c <f>` name a config relative to `own`, the task's
+    source directory. With no flag, vitest's own lookup applies in `own`; no file there means no
+    config, which is not a row. `--root`, `-r`, a `cd` before the call outside a subshell, and a
+    config path with `$`, a glob character or a quote are rows, never skips.
+    """
+    configs = []
+    for m in VITEST_TOKEN_RE.finditer(blob):
+        prefix = blob[:m.start()]
+        while True:
+            stripped = _SUBSHELL_RE.sub(" ", prefix)
+            if stripped == prefix:
+                break
+            prefix = stripped
+        if _VITEST_CD_RE.search(prefix) or _VITEST_PNPM_DIR_RE.search(prefix):
+            rows.append(f"{target} changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads")
+            continue
+        # The span search starts at the separator group (group 3). A newline after a bare `vitest`
+        # token then ends the span, and the words of the next command are not flags of this call.
+        end = _VITEST_SPAN_END_RE.search(blob, m.start(3))
+        words = blob[m.end():end.start() if end else len(blob)].split()
+        explicit, refused = [], False
+        i = 0
+        while i < len(words):
+            word = words[i]
+            if word in ("--root", "-r") or word.startswith(("--root=", "-r=")):
+                rows.append(f"{target} runs vitest with {word.split('=', 1)[0]}, so A13 cannot tell which config vitest reads")
+                refused = True
+                break
+            if word in ("--config", "-c"):
+                if i + 1 == len(words):
+                    rows.append(f"{target} runs vitest with {word} and no path")
+                    refused = True
+                    break
+                explicit.append(words[i + 1])
+                i += 2
+                continue
+            if word.startswith(("--config=", "-c=")):
+                explicit.append(word.split("=", 1)[1])
+            i += 1
+        if refused:
+            continue
+        for raw in explicit:
+            rel = os.path.normpath(os.path.join(own, raw))
+            if any(c in _VITEST_CONFIG_BAD_CHARS for c in raw) or os.path.isabs(raw) or rel.startswith("../"):
+                rows.append(
+                    f"{target} runs vitest with the config path {raw}, which A13 cannot resolve (it holds `$`, "
+                    f"a glob character or a quote, or it leaves the repository)"
+                )
+            elif not (root / rel).is_file():
+                rows.append(f"{target} runs vitest with {rel}, which does not exist")
+            else:
+                configs.append(rel)
+        if not explicit:
+            for name in VITEST_CONFIG_NAMES:
+                if (root / own / name).is_file():
+                    configs.append(f"{own}/{name}")
+                    break
+    return list(dict.fromkeys(configs))
+
+
+TS_LOCKFILE = "ts/pnpm-lock.yaml"
+# The gate that reads the vitest configs. A13 asserts that each config it reads matches one of this
+# task's inputs, so a config with a new name or in a new place cannot hide from the gate (spec §4.6).
+AFFECTED_SMOKE_PROJECT = "repo"
+AFFECTED_SMOKE_TASK = "affected-smoke"
+_OUT_DIR_RE = re.compile(r"--out-dir(?:=|\s+)([^\s;&|)]+)")
+
+# A13's anti-vacuity floors (spec §4.7). A13 asserts CONTAINMENT, and a containment check whose
+# `want` set empties passes having asserted nothing (A7's lesson). The task floor catches a
+# derivation that stops matching a known task. The alias floor catches a parser that stops finding
+# the kernel's two binding aliases.
+REQUIRED_VITEST_TASKS = (
+    "paigasus-kernel-ts:test",
+    "paigasus-console-core-ts:test",
+    "iam-console-ts:test",
+    "gateway-console-ts:test",
+    "paigasus-auth-ts:test-e2e",
+)
+REQUIRED_VITEST_ALIASES = {"paigasus-kernel-ts:test": {"@paigasus/node-bindings", "@paigasus/wasm"}}
+
+
+def _binding_runtime_inputs(root, pkg_dir, data, rows):
+    """The files vitest loads from one `file:` binding: its package.json and each `files` entry that
+    is not a `.d.ts` (spec §4.3 item 4). vitest runs the glue and the `.wasm`; it never reads a `.d.ts`.
+    """
+    want = {f"{pkg_dir}/package.json"}
+    if "files" not in data:
+        rows.append(f"{pkg_dir}/package.json has no `files` key, so A13 cannot tell which files vitest loads from the binding")
+        return want
+    files = data["files"]
+    if not isinstance(files, list):
+        rows.append(f"{pkg_dir}/package.json `files` is not a list")
+        return want
+    for entry in files:
+        if not isinstance(entry, str):
+            rows.append(f"{pkg_dir}/package.json `files` holds an entry of type {type(entry).__name__}, not a string")
+            continue
+        if any(c in entry for c in "*?[]{}!"):
+            rows.append(f"{pkg_dir}/package.json `files` entry {entry!r} holds a glob character; A13 needs literal entries")
+            continue
+        rel = os.path.normpath(entry)
+        if rel.endswith(".d.ts"):
+            continue
+        if (root / pkg_dir / rel).is_dir():
+            rows.append(f"{pkg_dir}/package.json `files` entry {entry!r} is a directory; A13 needs file entries")
+            continue
+        want.add(f"{pkg_dir}/{rel}")
+    return want
+
+
+def _tsconfig_chain(root, pkg_dir, rows):
+    """`<pkg_dir>/tsconfig.json` and each file its relative `extends` chain reaches (spec §4.3 item 5).
+
+    A missing tsconfig.json adds nothing. The file is JSONC (the real kernel and ui tsconfig files
+    hold `//` comments), so `_scan_js` removes the comments before `json.loads`. An `extends` that is
+    not a relative path (a package specifier, an array) is a row, never a skip.
+    """
+    rel = f"{pkg_dir}/tsconfig.json"
+    if not (root / rel).is_file():
+        return []
+    chain = []
+    while rel not in chain:
+        chain.append(rel)
+        try:
+            text = (root / rel).read_text()
+        except OSError as exc:
+            rows.append(f"{rel} cannot be read ({exc})")
+            break
+        scanned = _scan_js(text, rel, rows)
+        if scanned is None:
+            break
+        try:
+            data = json.loads(scanned[0])
+        except ValueError as exc:
+            rows.append(f"{rel} is not valid JSON after its comments are removed ({exc})")
+            break
+        if not isinstance(data, dict):
+            rows.append(f"{rel} is not a JSON object")
+            break
+        ext = data.get("extends")
+        if ext is None:
+            break
+        if not isinstance(ext, str) or not ext.startswith(("./", "../")):
+            rows.append(f"{rel}: `extends` is {ext!r}; A13 follows only a relative path, so add a rule for this form on purpose (SMA-736)")
+            break
+        nxt = os.path.normpath(os.path.join(os.path.dirname(rel), ext))
+        if not (root / nxt).is_file():
+            rows.append(f"{rel}: `extends` points at {nxt}, which does not exist")
+            break
+        rel = nxt
+    return chain
+
+
+def vitest_required_inputs(root, own, closure, facts, rows):
+    """Items 1 to 5 of want(T) for one vitest task (spec §4.3). Item 6 (aliases) is the caller's.
+
+    `facts` is a list of (config, aliases, tsconfig_off), one per config file the task reads. The
+    tsconfig files are skipped only when there is at least one config and every config sets
+    `tsconfig: false`. With no config file, vitest runs with defaults and loads the tsconfig files.
+    """
+    want = {TS_LOCKFILE}
+    want.update(cfg for cfg, _aliases, _off in facts)
+    for name in sorted(closure):
+        kind, pkg_dir = closure[name]
+        data = _read_package_json(root, pkg_dir, rows)
+        if data is None:
+            want.add(f"{pkg_dir}/package.json")
+            continue
+        if kind == "workspace":
+            want |= workspace_package_inputs(pkg_dir, data, rows)
+        else:
+            want |= _binding_runtime_inputs(root, pkg_dir, data, rows)
+    if not (facts and all(off for _cfg, _aliases, off in facts)):
+        for pkg_dir in [own, *sorted(d for k, d in closure.values() if k == "workspace")]:
+            want.update(_tsconfig_chain(root, pkg_dir, rows))
+    return want
+
+
+def _builds_scratch_alias(target, blob, dest, ffi):
+    """D3: True when `target` is an FFI task whose invocation names `dest`'s directory as `--out-dir`.
+
+    The `--out-dir` value is relative to a `cd` inside the invocation, so it matches when it equals
+    the directory or is a whole-segment suffix of it (`.wasmpack-test-out` matches
+    `rs/crates/bindings/paigasus-wasm/.wasmpack-test-out`, `t-out` does not).
+    """
+    if target not in ffi:
+        return False
+    out_dir = os.path.dirname(dest)
+    for m in _OUT_DIR_RE.finditer(blob):
+        value = os.path.normpath(m.group(1).strip("'\""))
+        if out_dir == value or out_dir.endswith("/" + value):
+            return True
+    return False
+
+
+def _moon_glob_re(glob):
+    """A regex for one moon input glob: `**/` and `**` cross `/`, `*` and `?` do not, `{a,b}` is a choice."""
+    out, i = [], 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif glob.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif glob[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif glob[i] == "?":
+            out.append("[^/]")
+            i += 1
+        elif glob[i] == "{" and "}" in glob[i:]:
+            end = glob.index("}", i)
+            out.append("(?:" + "|".join(re.escape(p) for p in glob[i + 1:end].split(",")) + ")")
+            i = end + 1
+        else:
+            out.append(re.escape(glob[i]))
+            i += 1
+    return re.compile("".join(out))
+
+
+def check_ts_vitest_inputs(projects, root, tracked, floor=REQUIRED_VITEST_TASKS, alias_floor=REQUIRED_VITEST_ALIASES):
+    """Return the A13 violation list: vitest tasks that do not key on what vitest reads (SMA-736).
+
+    CONTAINMENT, per task, over both input buckets, as A7 and A12a. Over-declaration is allowed. A
+    declared glob that covers a wanted literal path does not satisfy it; the literal must be declared.
+
+    `root` and `tracked` are POSITIONAL AND REQUIRED, never defaulted, for the reason in A7's
+    docstring (SMA-560 I3). `tracked` is the set of git-tracked paths: an alias target that git does
+    not track is valid only under D3 (`_builds_scratch_alias`).
+
+    Row order: floor rows, then walk and parser rows, then per-task rows. A package.json walk row that
+    A12a already reports is dropped here, so one broken manifest prints under one title.
+    """
+    tasks = derive_vitest_tasks(projects)
+    ffi = derive_ffi_tasks(projects)
+    a12_walk = set(ts_tsc_analysis(projects, root)[3])
+    floor_rows, walk_rows, task_rows = [], [], []
+    names = ts_workspace_packages(root, walk_rows)
+    configs_read = set()
+    task_aliases = {}
+    for target in sorted(tasks):
+        pid, _, task = target.partition(":")
+        proj = projects[pid]
+        own = proj["source_dir"]
+        blob = proj["invocations"][task]
+        own_pkg = _read_package_json(root, own, walk_rows)
+        own_name = own_pkg.get("name") if own_pkg else None
+        closure = ts_closure(root, own, names, walk_rows)
+        facts = []
+        for cfg in vitest_invocation_configs(target, blob, root, own, task_rows):
+            try:
+                text = (root / cfg).read_text()
+            except OSError as exc:
+                walk_rows.append(f"{cfg} cannot be read ({exc})")
+                continue
+            aliases, tsconfig_off = vitest_config_facts(text, cfg, walk_rows)
+            facts.append((cfg, aliases, tsconfig_off))
+            configs_read.add(cfg)
+        task_aliases[target] = {key for _cfg, aliases, _off in facts for key, _dest in aliases}
+        want = vitest_required_inputs(root, own, closure, facts, walk_rows)
+        for cfg, aliases, _off in facts:
+            for key, dest in aliases:
+                if dest == own or dest.startswith(own + "/"):
+                    continue
+                if dest == ".." or dest.startswith("../") or os.path.isabs(dest):
+                    task_rows.append(f"{target} aliases {key} in {cfg} to {dest}, which is outside the repository")
+                    continue
+                if key.startswith("@paigasus/") and key not in closure and key != own_name:
+                    task_rows.append(f"{target} aliases {key} in {cfg}, but {key} is not in its package.json closure")
+                    continue
+                if dest in tracked:
+                    want.add(dest)
+                elif not _builds_scratch_alias(target, blob, dest, ffi):
+                    task_rows.append(
+                        f"{target} aliases {key} to the untracked path {dest}, but the task does not build it "
+                        f"there (no FFI build with --out-dir {os.path.dirname(dest)})"
+                    )
+        files = (proj.get("task_inputs") or {}).get(task)
+        globs = (proj.get("task_input_globs") or {}).get(task)
+        if files is None or globs is None:
+            task_rows.append(
+                f"{target} reported no `inputFiles`/`inputGlobs` — moon's output shape changed, so "
+                f"this assertion cannot be evaluated (treated as a violation, never skipped)"
+            )
+        else:
+            observed = set(files) | set(globs)
+            for entry in sorted(want - observed):
+                task_rows.append(f"{target} inputs omit {entry}")
+        deps = (proj.get("tasks") or {}).get(task) or []
+        if (own_name == PROTO_PACKAGE or PROTO_PACKAGE in closure) and PROTO_GENERATE_DEP not in deps:
+            task_rows.append(
+                f"{target} deps omit {PROTO_GENERATE_DEP} — it reads @paigasus/proto's generated "
+                f"tree, so it must run after the generator for a deterministic cache key"
+            )
+    if configs_read:
+        smoke = projects.get(AFFECTED_SMOKE_PROJECT) or {}
+        smoke_globs = (smoke.get("task_input_globs") or {}).get(AFFECTED_SMOKE_TASK)
+        smoke_files = (smoke.get("task_inputs") or {}).get(AFFECTED_SMOKE_TASK) or []
+        if smoke_globs is None:
+            task_rows.append(
+                f"{AFFECTED_SMOKE_PROJECT}:{AFFECTED_SMOKE_TASK} reported no `inputGlobs`, so A13 cannot check "
+                f"that an edit to a vitest config schedules it"
+            )
+        else:
+            patterns = [_moon_glob_re(g) for g in smoke_globs if not g.startswith("!")]
+            # A negated glob removes a file from the inputs, even when a positive glob matches it.
+            excluded = [_moon_glob_re(g[1:]) for g in smoke_globs if g.startswith("!")]
+            for cfg in sorted(configs_read):
+                reached = cfg in smoke_files or any(p.fullmatch(cfg) for p in patterns)
+                if not reached or any(p.fullmatch(cfg) for p in excluded):
+                    task_rows.append(
+                        f"{cfg} matches no input of {AFFECTED_SMOKE_PROJECT}:{AFFECTED_SMOKE_TASK}, so an edit to it "
+                        f"alone does not schedule the gate that reads it"
+                    )
+    for target in sorted(set(floor or ()) - tasks):
+        floor_rows.append(
+            f"FLOOR: {target} is not matched by the vitest token, so A13 asserts nothing about it "
+            f"(see VITEST_TOKEN_RE; a vitest call behind a wrapper script is invisible)"
+        )
+    for target, keys in sorted((alias_floor or {}).items()):
+        for key in sorted(set(keys) - task_aliases.get(target, set())):
+            floor_rows.append(
+                f"FLOOR: {target} no longer aliases {key} in a config A13 parses, so the alias rule "
+                f"asserts nothing for it"
+            )
+    walk_rows = [row for row in walk_rows if row not in a12_walk]
+    return list(dict.fromkeys(floor_rows + walk_rows + task_rows))
 
 
 def moon_projects():
@@ -2744,7 +3458,9 @@ def self_test():
         (tmp_rs / "Cargo.toml").write_text(
             f"""[workspace]\nmembers = [{", ".join(f'"{d}"' for d in member_dirs)}]\n"""
         )
-        collected = collect_findings(ok, crates, Path(tmp))
+        # SMA-736: A13 needs git's tracked set. This tmp root is not a repository, so the arity
+        # check passes an empty fixed set rather than calling git.
+        collected = collect_findings(ok, crates, Path(tmp), frozenset())
     if len(collected) != len(EXPECTED_FINDING_KEYS):
         failures.append(
             f"collect_findings returned {len(collected)} entries, expected "
@@ -5047,12 +5763,643 @@ def self_test():
     if not any(r.startswith("FLOOR:") and "k-ts:typecheck" in r for r in _a12b(tree=tree)):
         failures.append("A12b's floor did not fire when a floor task's closure lost its binding")
 
+    # SMA-736 T12 — the A12/A13 shared helper, called directly. A12a's rows above already pass
+    # through it; this row pins the helper's own contract, so a change to it reds here first.
+    rows = []
+    got = workspace_package_inputs("ts/packages/core", {
+        "exports": {
+            ".": "./src/index.ts",
+            "./testing": "./testing/index.ts",
+            "./preset": {"import": "./preset.json", "require": None},
+        },
+    }, rows)
+    want = {
+        "ts/packages/core/package.json", "ts/packages/core/src/**/*",
+        "ts/packages/core/testing/**/*", "ts/packages/core/preset.json",
+    }
+    if got != want or rows:
+        failures.append(f"workspace_package_inputs gave {sorted(got)} and rows {rows}, expected {sorted(want)} and no rows")
+    rows = []
+    workspace_package_inputs("ts/packages/core", {"exports": {".": "src/index.ts"}}, rows)
+    if rows != ["ts/packages/core/package.json: the `exports` target 'src/index.ts' does not start with `./`"]:
+        failures.append(f"workspace_package_inputs accepted an `exports` target without `./`: {rows}")
+    # A13 (SMA-736) — the config parser, called directly (spec T5). Each row is (a13_label, config text,
+    # expected aliases or None to skip the check, expected tsconfig_off or None, the one expected row
+    # or None for "no rows at all"). The comment, string and template rows are the SMA-639 defect
+    # class: a scanner that opens a string inside a comment, or a comment inside a string, loses or
+    # invents an alias.
+    a13_cfg = "ts/packages/k/vitest.config.ts"
+    a13_ok_alias = [("a", "ts/packages/k/a")]
+    for a13_label, a13_text, a13_want_aliases, a13_want_off, a13_want_row in (
+        ("an `alias` array", "export default { resolve: { alias: [{ find: 'a', replacement: './a' }] } };\n",
+         None, None, f"{a13_cfg}: an `alias` value is not an object literal, so A13 cannot read it"),
+        ("a shorthand `alias`", "const alias = { a: './a' };\nexport default { resolve: { alias } };\n",
+         None, None, f"{a13_cfg}: `alias` is used without a `:` value (a shorthand or a variable), which A13 cannot read"),
+        ("a quoted 'alias' key", "export default { resolve: { 'alias': { '@paigasus/x': '../x/src/index.ts' } } };\n",
+         [("@paigasus/x", "ts/packages/x/src/index.ts")], False, None),
+        ("a call as a @paigasus/ value", "export default { resolve: { alias: { '@paigasus/x': path.resolve('x') } } };\n",
+         None, None, f"{a13_cfg}: the alias @paigasus/x has a value A13 cannot resolve"),
+        ("a package name as a @paigasus/ value", "export default { resolve: { alias: { '@paigasus/x': 'other-pkg' } } };\n",
+         None, None, f"{a13_cfg}: the alias @paigasus/x has a value A13 cannot resolve"),
+        ("an unbound identifier value", "export default { resolve: { alias: { 'server-only': stub } } };\n",
+         None, None, f"{a13_cfg}: the alias server-only has a value A13 cannot resolve"),
+        ("a package name as a plain value", "export default { resolve: { alias: { react: 'preact/compat' } } };\n",
+         [], False, None),
+        ("a spread entry", "export default { resolve: { alias: { ...base } } };\n",
+         None, None, f"{a13_cfg}: an `alias` object holds a spread entry, which A13 cannot read"),
+        ("a computed key", "export default { resolve: { alias: { [k]: './a' } } };\n",
+         None, None, f"{a13_cfg}: an `alias` object holds a computed key, which A13 cannot read"),
+        ("a trailing comma", "export default { resolve: { alias: { a: './a', } } };\n", a13_ok_alias, False, None),
+        ("a `//` comment", "// alias: { '@paigasus/x': stub }\nexport default {};\n", [], False, None),
+        ("a `/* */` comment", "/* alias: { '@paigasus/x': stub } */\nexport default {};\n", [], False, None),
+        ("`//` inside a string", "const u = 'http://x'; export default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("quotes inside comments", "// it's \"a\" `b`\n/* it's \"a\" `b` */\nexport default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a template literal",
+         "const m = `x \\` ${ {a: 1}.a } alias: { '@paigasus/y': 1 }`;\nexport default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a regex literal", "export default { test: { server: { deps: { external: [/\\.node$/] } } }, resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a relative import", "import base from './base.config';\nexport default base;\n",
+         None, None, f"{a13_cfg}: imports './base.config'; A13 cannot read a config that is split across files"),
+        ("mergeConfig", "import { mergeConfig } from 'vitest/config';\nexport default {};\n",
+         None, None, f"{a13_cfg}: uses `mergeConfig`; A13 cannot read a config that is split across files"),
+        ("a string `projects` entry", "export default { test: { projects: ['packages/*'] } };\n",
+         None, None, f"{a13_cfg}: `projects` holds a string entry; vitest loads it as another config or a glob, which A13 does not follow"),
+        ("object `projects` entries", "export default { test: { projects: [{ test: { include: ['a.test.ts'] } }] } };\n", [], False, None),
+        ("`tsconfig: false`", "const oxc = { tsconfig: false } as const;\nexport default { oxc };\n", [], True, None),
+        ("`tsconfig: false` in a comment", "// tsconfig: false\nexport default {};\n", [], False, None),
+        ("a fileURLToPath binding",
+         "const d = fileURLToPath(new URL('../../../rs/crates/bindings/nb/index.js', import.meta.url));\n"
+         "export default { resolve: { alias: { '@paigasus/node-bindings': d } } };\n",
+         [("@paigasus/node-bindings", "rs/crates/bindings/nb/index.js")], False, None),
+        ("a regex literal with `//`", "export default { test: { exclude: [/^https?:\\/\\//] }, resolve: { alias: { '@paigasus/x': stub } } };\nconst stub = './x';\n",
+         [("@paigasus/x", "ts/packages/k/x")], False, None),
+        ("a regex literal with `/*`", "const r = /a\\/*b/;\nconst stub = './x';\nexport default { resolve: { alias: { '@paigasus/x': stub } } };\n// */\n",
+         [("@paigasus/x", "ts/packages/k/x")], False, None),
+        ("a division", "const d = a / b / c; export default { resolve: { alias: { a: './a' } } };\n// it's\n",
+         a13_ok_alias, False, None),
+        ("a regex class with `/`", "export default { test: { exclude: [/[/]/] }, resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("an unterminated regex", "export default { test: { exclude: [/abc] } };\n",
+         None, None, f"{a13_cfg}: an unterminated regex literal at line 1, so A13 cannot scan it"),
+        ("a regex after `=>`", "export default { test: { filter: (u) => /^https?:\\/\\//.test(u) }, resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a regex after `typeof`", "const t = typeof /a\\/\\//; export default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a division after `++`", "export default { n: i++ / 2, resolve: { alias: { a: k } }, m: 3 / 4 };\nconst k = './a';\n",
+         a13_ok_alias, False, None),
+        ("a division after `--`", "export default { n: i-- / 2, resolve: { alias: { a: k } }, m: 3 / 4 };\nconst k = './a';\n",
+         a13_ok_alias, False, None),
+        ("a regex after `+`", "const t = 'x' + /^https?:\\/\\//.source; export default { resolve: { alias: { a: './a' } } };\n",
+         a13_ok_alias, False, None),
+        ("a comment marker after a backslash", "const t = a \\// b;\nexport default { resolve: { alias: { a: './a' } } };\n",
+         None, None, f"{a13_cfg}: a comment marker after a backslash at line 1; A13 cannot scan it"),
+        ("a backslash before a newline in a regex", "const r = /a\\\n/;\nexport default { resolve: { alias: { a: './a' } } };\n",
+         None, None, f"{a13_cfg}: an unterminated regex literal at line 1, so A13 cannot scan it"),
+        ("a computed ['alias'] key", "export default { resolve: { ['alias']: { a: './a' } } };\n",
+         None, None, f"{a13_cfg}: a computed key ['alias'] holds an alias object, which A13 cannot read"),
+        ("a relative require", "const base = require('./base');\nexport default base;\n",
+         None, None, f"{a13_cfg}: imports './base'; A13 cannot read a config that is split across files"),
+        ("an unclosed string", "const s = 'abc\nexport default {};\n",
+         None, None, f"{a13_cfg}: a ' string is not closed on its line, so A13 cannot read the file"),
+    ):
+        a13_rows = []
+        a13_aliases, a13_off = vitest_config_facts(a13_text, a13_cfg, a13_rows)
+        if a13_want_row is None and a13_rows:
+            failures.append(f"A13 parser, {a13_label}: unexpected rows {a13_rows}")
+        if a13_want_row is not None and a13_want_row not in a13_rows:
+            failures.append(f"A13 parser, {a13_label}: expected the row {a13_want_row!r}, got {a13_rows}")
+        if a13_want_aliases is not None and a13_aliases != a13_want_aliases:
+            failures.append(f"A13 parser, {a13_label}: aliases {a13_aliases}, expected {a13_want_aliases}")
+        if a13_want_off is not None and a13_off is not a13_want_off:
+            failures.append(f"A13 parser, {a13_label}: tsconfig_off is {a13_off}, expected {a13_want_off}")
+    # A13 (SMA-736) — the vitest token, exercised directly (A10's `_var_sensitive` lesson).
+    for a13_blob, a13_want in (
+        ("pnpm exec vitest run", True),
+        ("vitest run --passWithNoTests", True),
+        ("pnpm exec vitest", True),
+        ("set set -euo pipefail\npnpm exec vitest run --config vitest.containers.config.ts\n", True),
+        ("touch a && ( cd b && wasm-pack build ) && pnpm exec vitest run", True),
+        ("node vitest.config.ts", False),
+        ("pnpm exec vitest-environment-x", False),
+        ("pnpm add -D @vitest/coverage-v8", False),
+        ("pnpm exec tsc -p tsconfig.json --noEmit", False),
+    ):
+        if bool(VITEST_TOKEN_RE.search(a13_blob)) is not a13_want:
+            failures.append(
+                f"VITEST_TOKEN_RE on {a13_blob!r} is {not a13_want} — the vitest token is wrong in the "
+                f"{'false-negative' if a13_want else 'false-positive'} direction"
+            )
+
+    # Moon reports a script-form task with `command` set to the script's first word, so the joined
+    # blob repeats it (see PREFLIGHT_RE). The rows with `set set` model that.
+    # A13 — config lookup from the invocation (spec T6). Each row is (invocation, source dir,
+    # expected configs, the one expected row or None for "no rows at all").
+    a13_k = "ts/packages/k"
+    a13_rel_row = (
+        "t:test runs vitest with the config path $CFG, which A13 cannot resolve (it holds `$`, a glob "
+        "character or a quote, or it leaves the repository)"
+    )
+    with tempfile.TemporaryDirectory() as a13_tmp:
+        a13_root = Path(a13_tmp)
+        for a13_rel in (
+            "ts/packages/k/vitest.config.ts",
+            "ts/packages/k/vitest.e2e.config.ts",
+            "ts/packages/m/vitest.config.mts",
+            "ts/packages/v/vite.config.ts",
+            "ts/packages/v/vitest.config.js",
+        ):
+            (a13_root / a13_rel).parent.mkdir(parents=True, exist_ok=True)
+            (a13_root / a13_rel).write_text("export default {};\n")
+        (a13_root / "ts/packages/n").mkdir(parents=True)
+        a13_e2e = ["ts/packages/k/vitest.e2e.config.ts"]
+        for a13_blob, a13_own, a13_configs, a13_row in (
+            ("pnpm exec vitest run --config vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("pnpm exec vitest run --config=vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("pnpm exec vitest run -c vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("pnpm exec vitest run --config ./vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("set set -euo pipefail\npnpm exec vitest run\npnpm exec vitest run --config vitest.e2e.config.ts\n", a13_k,
+             ["ts/packages/k/vitest.config.ts", *a13_e2e], None),
+            # A newline after a bare `vitest` ends its span: the next call's flags are not its flags.
+            ("pnpm exec vitest\npnpm exec vitest run --config vitest.e2e.config.ts\n", a13_k,
+             ["ts/packages/k/vitest.config.ts", *a13_e2e], None),
+            ("pnpm exec vitest run --config vitest.ghost.config.ts", a13_k, [],
+             "t:test runs vitest with ts/packages/k/vitest.ghost.config.ts, which does not exist"),
+            ("pnpm exec vitest run --passWithNoTests", "ts/packages/n", [], None),
+            ("pnpm exec vitest run", "ts/packages/m", ["ts/packages/m/vitest.config.mts"], None),
+            ("pnpm exec vitest run", "ts/packages/v", ["ts/packages/v/vitest.config.js"], None),
+            ("pnpm exec vitest run --root sub", a13_k, [],
+             "t:test runs vitest with --root, so A13 cannot tell which config vitest reads"),
+            ("pnpm exec vitest run -r sub", a13_k, [],
+             "t:test runs vitest with -r, so A13 cannot tell which config vitest reads"),
+            ("cd sub && pnpm exec vitest run", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            ("touch a && ( cd ../x && wasm-pack build . --out-dir o ) && pnpm exec vitest run", a13_k,
+             ["ts/packages/k/vitest.config.ts"], None),
+            ("pnpm exec vitest run -c=vitest.e2e.config.ts", a13_k, a13_e2e, None),
+            ("pnpm exec vitest run -r=sub", a13_k, [],
+             "t:test runs vitest with -r, so A13 cannot tell which config vitest reads"),
+            ("pnpm -C sub exec vitest run", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            ("pnpm --dir=sub exec vitest run", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            ("pnpm --dir sub exec vitest run", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            ("pnpm exec vitest run --config $CFG", a13_k, [], a13_rel_row),
+            # A `cd` right after `(` is in the same subshell as the vitest call: a row.
+            ("(cd sub && pnpm exec vitest run)", a13_k, [],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+            # A closed group that holds the first vitest call is removed only for the later call.
+            ("( cd sub && pnpm exec vitest run ) && pnpm exec vitest run", a13_k, ["ts/packages/k/vitest.config.ts"],
+             "t:test changes directory with `cd` before it runs vitest, so A13 cannot tell which config vitest reads"),
+        ):
+            a13_rows = []
+            a13_got = vitest_invocation_configs("t:test", a13_blob, a13_root, a13_own, a13_rows)
+            if a13_got != a13_configs or (a13_row is None and a13_rows) or (a13_row is not None and a13_row not in a13_rows):
+                failures.append(
+                    f"vitest_invocation_configs({a13_blob!r}, {a13_own!r}) gave {a13_got} and rows {a13_rows}, expected "
+                    f"{a13_configs} and {'no row' if a13_row is None else repr(a13_row)}"
+                )
+        # ...and a `--root` on the line after a bare `vitest` makes one row, for the second call only.
+        a13_rows = []
+        a13_got = vitest_invocation_configs("t:test", "pnpm exec vitest\npnpm exec vitest run --root x\n", a13_root, a13_k, a13_rows)
+        if a13_got != ["ts/packages/k/vitest.config.ts"] or len(a13_rows) != 1:
+            failures.append(f"vitest_invocation_configs on a bare vitest before a --root line gave {a13_got} and rows {a13_rows}, expected the default config and one row")
+    # A13 (SMA-736 §4.5) — the tracked-file plumbing that main() uses. tracked_files raises
+    # task_inputs' OWN MoonOutputError, a different class from this file's. It must be in
+    # INFRA_ERRORS, or a failed `git ls-files` exits 1 with a traceback instead of rc 2.
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            task_inputs.tracked_files(Path(tmp))
+        except INFRA_ERRORS:
+            pass
+        except Exception as exc:
+            failures.append(
+                f"tracked_files outside a repository raised {type(exc).__name__}, which INFRA_ERRORS does "
+                f"not catch, so main() would exit 1 instead of rc 2"
+            )
+        else:
+            failures.append("tracked_files outside a repository returned a set instead of raising")
+    # ...and the git call must ignore an inherited GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE (a git hook sets them).
+    a13_repo_root = Path(__file__).resolve().parents[2]
+    a13_saved_env = {k: os.environ.get(k) for k in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")}
+    os.environ["GIT_DIR"] = "/nonexistent/sma-736-git-dir"
+    os.environ["GIT_WORK_TREE"] = "/nonexistent/sma-736-work-tree"
+    os.environ["GIT_INDEX_FILE"] = "/nonexistent/sma-736-index"
+    try:
+        a13_tracked_real = task_inputs.tracked_files(a13_repo_root)
+    except Exception as exc:
+        a13_tracked_real = None
+        failures.append(f"tracked_files used an inherited GIT_DIR or GIT_INDEX_FILE: {exc}")
+    finally:
+        for k, v in a13_saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    if a13_tracked_real is not None and "ci/affected-graph/cargo_moon_parity.py" not in a13_tracked_real:
+        failures.append("tracked_files does not list this file, so it did not read this repository")
+    # A13 (SMA-736) — the whole check. Two halves, like A12: a file tree written to a tmp root, and
+    # moon's resolved view of the vitest tasks. `a13_tracked` stands in for `git ls-files`; the one
+    # path it leaves out, rs/crates/bindings/wb/.out/wb.js, is the kernel's scratch alias target (D3).
+    if not REQUIRED_VITEST_TASKS:
+        failures.append("REQUIRED_VITEST_TASKS is empty — A13's task floor would assert nothing")
+    if not REQUIRED_VITEST_ALIASES:
+        failures.append("REQUIRED_VITEST_ALIASES is empty — A13's alias floor would assert nothing")
+
+    a13_files = {
+        "ts/tsconfig.base.json": '{"compilerOptions": {"strict": true}}\n',
+        "ts/packages/kernel/package.json": json.dumps({
+            "name": "@paigasus/kernel",
+            "dependencies": {
+                "@paigasus/node-bindings": "file:../../../rs/crates/bindings/nb",
+                "@paigasus/wasm": "file:../../../rs/crates/bindings/wb",
+            },
+            "exports": {".": "./src/wasm.ts"},
+        }),
+        "ts/packages/kernel/src/wasm.ts": "export {};\n",
+        # JSONC, as the real kernel and ui tsconfig files are. A plain json.loads fails on it.
+        "ts/packages/kernel/tsconfig.json": '// JSONC, as in the real kernel package.\n{"extends": "../../tsconfig.base.json"}\n',
+        "ts/packages/kernel/vitest.config.ts": (
+            "import { fileURLToPath } from 'node:url';\n"
+            "import { defineConfig } from 'vitest/config';\n"
+            "const nb = fileURLToPath(new URL('../../../rs/crates/bindings/nb/index.js', import.meta.url));\n"
+            "const wb = fileURLToPath(new URL('../../../rs/crates/bindings/wb/.out/wb.js', import.meta.url));\n"
+            "export default defineConfig({\n"
+            "  test: { projects: [\n"
+            "    { resolve: { alias: { '@paigasus/node-bindings': nb } } },\n"
+            "    { resolve: { alias: { '@paigasus/wasm': wb } } },\n"
+            "  ] },\n"
+            "});\n"
+        ),
+        "rs/crates/bindings/nb/package.json": json.dumps({"name": "@paigasus/node-bindings", "files": ["index.js", "index.d.ts"]}),
+        "rs/crates/bindings/nb/index.js": "",
+        "rs/crates/bindings/nb/index.d.ts": "",
+        # `./wb.js` proves the normalization: the clean fixture declares `rs/crates/bindings/wb/wb.js`.
+        "rs/crates/bindings/wb/package.json": json.dumps({"name": "@paigasus/wasm", "files": ["./wb.js", "wb_bg.wasm", "wb.d.ts"]}),
+        "rs/crates/bindings/wb/wb.js": "",
+        "rs/crates/bindings/wb/wb_bg.wasm": "",
+        "rs/crates/bindings/wb/wb.d.ts": "",
+        # No tsconfig.json: a missing tsconfig adds nothing.
+        "ts/packages/proto/package.json": json.dumps({"name": "@paigasus/proto", "exports": {".": "./src/index.ts"}}),
+        "ts/packages/core/package.json": json.dumps({
+            "name": "@paigasus/console-core",
+            "dependencies": {"@paigasus/kernel": "workspace:*"},
+            "devDependencies": {"@paigasus/proto": "workspace:*"},
+            "exports": {".": "./src/index.ts", "./testing": "./testing/index.ts"},
+        }),
+        "ts/packages/core/tsconfig.json": '{"extends": "../../tsconfig.base.json"}\n',
+        # One alias inside the own package (adds nothing) and one tracked target outside it (demanded
+        # as a literal, although ts/packages/kernel/src/**/* covers it).
+        "ts/packages/core/vitest.config.ts": (
+            "import { defineConfig } from 'vitest/config';\n"
+            "export default defineConfig({\n"
+            "  resolve: { alias: { 'server-only': './tests/stub.ts', '@paigasus/kernel': '../kernel/src/wasm.ts' } },\n"
+            "});\n"
+        ),
+        "ts/packages/core/vitest.e2e.config.ts": (
+            "import { defineConfig } from 'vitest/config';\n"
+            "export default defineConfig({ test: { include: ['tests/e2e/**'] } });\n"
+        ),
+        "ts/apps/app/package.json": json.dumps({"name": "@paigasus/app", "dependencies": {"@paigasus/console-core": "workspace:*"}}),
+        # A package-specifier `extends` is a row, but only when A13 reads the file. The app config
+        # sets `tsconfig: false`, so the clean fixture never reads it.
+        "ts/apps/app/tsconfig.json": '{"extends": "@paigasus/next-config/tsconfig-app"}\n',
+        "ts/apps/app/vitest.config.ts": (
+            "import { defineConfig } from 'vitest/config';\n"
+            "const oxc = { tsconfig: false } as const;\n"
+            "export default defineConfig({ oxc });\n"
+        ),
+    }
+    a13_tracked = frozenset(a13_files)
+    a13_lock = TS_LOCKFILE
+    a13_nb = ["rs/crates/bindings/nb/package.json", "rs/crates/bindings/nb/index.js"]
+    a13_wb = ["rs/crates/bindings/wb/package.json", "rs/crates/bindings/wb/wb.js", "rs/crates/bindings/wb/wb_bg.wasm"]
+    a13_core_files = [
+        a13_lock, "ts/packages/kernel/package.json", "ts/packages/proto/package.json", *a13_nb, *a13_wb,
+        "ts/packages/core/tsconfig.json", "ts/packages/kernel/tsconfig.json", TS_BASE_TSCONFIG,
+    ]
+    a13_core_globs = ["ts/packages/kernel/src/**/*", "ts/packages/proto/src/**/*"]
+    # The real kernel test's shape: an FFI build, a `cd` inside a subshell, then vitest.
+    a13_ffi = (
+        "touch touch x && pnpm exec napi build --platform && "
+        "( cd ../../../rs/crates/bindings/wb && wasm-pack build . --out-dir .out ) && pnpm exec vitest run"
+    )
+    a13 = {
+        "k-ts": _a12_ts("ts/packages/kernel", {
+            "test": (a13_ffi, [], [
+                a13_lock, "ts/packages/kernel/vitest.config.ts", *a13_nb, *a13_wb,
+                "ts/packages/kernel/tsconfig.json", TS_BASE_TSCONFIG,
+            ], []),
+        }),
+        "c-ts": _a12_ts("ts/packages/core", {
+            "test": (
+                "pnpm exec vitest run --passWithNoTests", [PROTO_GENERATE_DEP],
+                [*a13_core_files, "ts/packages/core/vitest.config.ts", "ts/packages/kernel/src/wasm.ts"], a13_core_globs,
+            ),
+            "test-e2e": (
+                "set set -euo pipefail\npnpm exec vitest run --config vitest.e2e.config.ts\n", [PROTO_GENERATE_DEP],
+                [*a13_core_files, "ts/packages/core/vitest.e2e.config.ts"], a13_core_globs,
+            ),
+        }),
+        # No config file: vitest runs with defaults (as paigasus-proto-ts:test does).
+        "p-ts": _a12_ts("ts/packages/proto", {
+            "test": ("pnpm exec vitest run --passWithNoTests", [PROTO_GENERATE_DEP], [a13_lock], []),
+        }),
+        "app-ts": _a12_ts("ts/apps/app", {
+            "test": (
+                "pnpm exec vitest run", [PROTO_GENERATE_DEP],
+                [a13_lock, "ts/apps/app/vitest.config.ts", "ts/packages/core/package.json", "ts/packages/kernel/package.json",
+                 "ts/packages/proto/package.json", *a13_nb, *a13_wb],
+                [*a13_core_globs, "ts/packages/core/src/**/*", "ts/packages/core/testing/**/*"],
+            ),
+        }),
+        # A vitest call in a NON-typescript project, under-declared on purpose. A13 must not examine it.
+        "x-py": _a12_ts("py/x", {"test": ("pnpm exec vitest run", [], [], [])}, language="python"),
+        "repo": _a12_ts(".", {
+            "affected-smoke": ("true", [], [], ["ts/packages/*/vitest*.config.*", "ts/apps/*/vitest*.config.*"]),
+        }, language="bash"),
+    }
+    a13_floor = ("k-ts:test", "c-ts:test", "c-ts:test-e2e", "app-ts:test")
+    a13_alias_floor = {"k-ts:test": {"@paigasus/node-bindings", "@paigasus/wasm"}}
+
+    def _a13(fixture=None, files=None, tracked=None, **kw):
+        # `files` maps a path to its text; None deletes the path from the tree.
+        kw.setdefault("floor", a13_floor)
+        kw.setdefault("alias_floor", a13_alias_floor)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for rel, text in (a13_files if files is None else files).items():
+                if text is None:
+                    continue
+                (base / rel).parent.mkdir(parents=True, exist_ok=True)
+                (base / rel).write_text(text)
+            return check_ts_vitest_inputs(
+                a13 if fixture is None else fixture, base,
+                a13_tracked if tracked is None else tracked, **kw,
+            )
+
+    # T1. Clean. This also proves: the subshell `cd` in k-ts is not a row; the scratch alias with the
+    # matching --out-dir passes (D3); the in-package alias adds nothing; no `.d.ts` is demanded;
+    # `./wb.js` is normalized; the app's `tsconfig: false` skips its tsconfig; x-py is ignored.
+    rows = _a13()
+    if rows != []:
+        failures.append(f"A13 reported violations on a complete fixture: {rows}")
+
+    # T2. One mutation per part of `want`, each read PER TASK: c-ts:test-e2e keeps every entry that
+    # c-ts:test loses, so a union across the project's tasks would hide the shortfall (A7-g's lesson).
+    for pid, task, bucket, entry in (
+        ("c-ts", "test", "task_inputs", a13_lock),
+        ("c-ts", "test", "task_inputs", "ts/packages/core/vitest.config.ts"),
+        ("app-ts", "test", "task_input_globs", "ts/packages/kernel/src/**/*"),
+        ("c-ts", "test", "task_inputs", "ts/packages/proto/package.json"),
+        ("app-ts", "test", "task_input_globs", "ts/packages/core/testing/**/*"),
+        ("c-ts", "test", "task_inputs", "rs/crates/bindings/wb/wb_bg.wasm"),
+        ("c-ts", "test", "task_inputs", "rs/crates/bindings/wb/wb.js"),
+        ("c-ts", "test", "task_inputs", "ts/packages/kernel/tsconfig.json"),
+        ("k-ts", "test", "task_inputs", "ts/packages/kernel/tsconfig.json"),
+        ("k-ts", "test", "task_inputs", TS_BASE_TSCONFIG),
+        ("c-ts", "test", "task_inputs", "ts/packages/kernel/src/wasm.ts"),
+    ):
+        broken = _a12_copy(a13)
+        broken[pid][bucket][task].remove(entry)
+        rows = _a13(broken)
+        if f"{pid}:{task} inputs omit {entry}" not in rows:
+            failures.append(f"A13 did not demand {entry} of {pid}:{task}")
+        if pid == "c-ts" and any(r.startswith("c-ts:test-e2e ") for r in rows):
+            failures.append(f"A13 blamed c-ts:test-e2e for {entry}, a shortfall that lives on c-ts:test")
+
+    # T3. An untracked alias target: on a task that is not an FFI task, and on an FFI task that builds
+    # somewhere else. The FFI task WITH the matching --out-dir is the clean row above.
+    files = dict(a13_files)
+    files["ts/packages/core/vitest.config.ts"] = "export default { resolve: { alias: { '@paigasus/kernel': '../kernel/.out/k.js' } } };\n"
+    if (
+        "c-ts:test aliases @paigasus/kernel to the untracked path ts/packages/kernel/.out/k.js, but the task does not "
+        "build it there (no FFI build with --out-dir ts/packages/kernel/.out)"
+    ) not in _a13(files=files):
+        failures.append("A13 accepted an untracked alias target on a task that is not an FFI task")
+    broken = _a12_copy(a13)
+    broken["k-ts"]["invocations"]["test"] = a13_ffi.replace("--out-dir .out", "--out-dir other")
+    if (
+        "k-ts:test aliases @paigasus/wasm to the untracked path rs/crates/bindings/wb/.out/wb.js, but the task does "
+        "not build it there (no FFI build with --out-dir rs/crates/bindings/wb/.out)"
+    ) not in _a13(broken):
+        failures.append("A13 accepted an untracked alias target that the FFI task builds somewhere else")
+
+    # T4. An alias to a @paigasus/ package outside the closure. (An alias inside the own package is
+    # the clean row's `server-only`, which demands nothing.)
+    files = dict(a13_files)
+    files["ts/packages/core/vitest.config.ts"] = "export default { resolve: { alias: { '@paigasus/ghost': '../kernel/src/wasm.ts' } } };\n"
+    if (
+        "c-ts:test aliases @paigasus/ghost in ts/packages/core/vitest.config.ts, but @paigasus/ghost is not in its "
+        "package.json closure"
+    ) not in _a13(files=files):
+        failures.append("A13 accepted an alias to a @paigasus/ package outside the closure")
+
+    # T4b. An alias target that leaves the repository: a relative path with too many `..`, and an
+    # absolute string value.
+    for a13_label, a13_value in (("a relative path that leaves the root", "../../../../../x.js"), ("an absolute path", "/etc/x.js")):
+        files = dict(a13_files)
+        files["ts/packages/core/vitest.config.ts"] = f"export default {{ resolve: {{ alias: {{ '@paigasus/kernel': '{a13_value}' }} }} }};\n"
+        if not any(r.endswith("which is outside the repository") for r in _a13(files=files)):
+            failures.append(f"A13 did not report {a13_label} as outside the repository")
+    # T7. The proto dep, for a closure reader and for proto itself.
+    broken = _a12_copy(a13)
+    broken["app-ts"]["tasks"]["test"] = []
+    broken["p-ts"]["tasks"]["test"] = []
+    rows = _a13(broken)
+    for target in ("app-ts:test", "p-ts:test"):
+        if not any(r.startswith(f"{target} deps omit {PROTO_GENERATE_DEP}") for r in rows):
+            failures.append(f"A13 did not demand {PROTO_GENERATE_DEP} of {target}")
+    # T7. The task floor: no task matches vitest, so every per-task row goes quiet by itself.
+    broken = _a12_copy(a13)
+    for proj in broken.values():
+        proj["invocations"] = dict.fromkeys(proj["invocations"], "pnpm exec jest")
+    if not any(r.startswith("FLOOR: k-ts:test is not matched by the vitest token") for r in _a13(broken)):
+        failures.append("A13's task floor did not fire when no task matches vitest")
+    # T7. The alias floor: the kernel config loses one binding alias.
+    files = dict(a13_files)
+    files["ts/packages/kernel/vitest.config.ts"] = files["ts/packages/kernel/vitest.config.ts"].replace(
+        "{ resolve: { alias: { '@paigasus/node-bindings': nb } } },", "{},"
+    )
+    if not any(r.startswith("FLOOR: k-ts:test no longer aliases @paigasus/node-bindings") for r in _a13(files=files)):
+        failures.append("A13's alias floor did not fire when the kernel config lost an alias")
+    # T7. A task with no input bucket is a violation, never a skip.
+    broken = _a12_copy(a13)
+    del broken["c-ts"]["task_input_globs"]["test"]
+    if not any(r.startswith("c-ts:test reported no `inputFiles`/`inputGlobs`") for r in _a13(broken)):
+        failures.append("A13 skipped a task that reported no input bucket")
+    # T7. A None invocation is moon telling us nothing. That is infra, exactly as in A5 and A12.
+    broken = _a12_copy(a13)
+    broken["c-ts"]["invocations"]["test"] = None
+    try:
+        derive_vitest_tasks(broken)
+    except MoonOutputError:
+        pass
+    else:
+        failures.append("derive_vitest_tasks accepted a task with no command, script or args")
+
+    # T8. Binding `files` shapes. Each is a row, never a skip.
+    for wb_manifest, want_row in (
+        ({"name": "@paigasus/wasm"},
+         "rs/crates/bindings/wb/package.json has no `files` key, so A13 cannot tell which files vitest loads from the binding"),
+        ({"name": "@paigasus/wasm", "files": "wb.js"}, "rs/crates/bindings/wb/package.json `files` is not a list"),
+        ({"name": "@paigasus/wasm", "files": [1]},
+         "rs/crates/bindings/wb/package.json `files` holds an entry of type int, not a string"),
+        ({"name": "@paigasus/wasm", "files": ["*.js"]},
+         "rs/crates/bindings/wb/package.json `files` entry '*.js' holds a glob character; A13 needs literal entries"),
+    ):
+        files = dict(a13_files)
+        files["rs/crates/bindings/wb/package.json"] = json.dumps(wb_manifest)
+        if want_row not in _a13(files=files):
+            failures.append(f"A13 did not report {want_row!r}")
+    files = dict(a13_files)
+    files["rs/crates/bindings/wb/wb_bg.wasm"] = None
+    files["rs/crates/bindings/wb/wb_bg.wasm/inner"] = ""
+    if "rs/crates/bindings/wb/package.json `files` entry 'wb_bg.wasm' is a directory; A13 needs file entries" not in _a13(files=files):
+        failures.append("A13 accepted a `files` entry that is a directory")
+
+    # T9. tsconfig `extends` forms A13 does not follow are rows.
+    for extends, shown in (
+        ('"@paigasus/next-config/tsconfig-app"', "'@paigasus/next-config/tsconfig-app'"),
+        ('["../../tsconfig.base.json"]', "['../../tsconfig.base.json']"),
+    ):
+        files = dict(a13_files)
+        files["ts/packages/core/tsconfig.json"] = '{"extends": ' + extends + "}\n"
+        want_row = (
+            f"ts/packages/core/tsconfig.json: `extends` is {shown}; A13 follows only a relative path, so add a "
+            f"rule for this form on purpose (SMA-736)"
+        )
+        if want_row not in _a13(files=files):
+            failures.append(f"A13 did not report the `extends` form {extends}")
+    # T9. `tsconfig: false` is what skips the app tsconfig: without it, A13 reads the file.
+    files = dict(a13_files)
+    files["ts/apps/app/vitest.config.ts"] = "export default {};\n"
+    if not any(r.startswith("ts/apps/app/tsconfig.json: `extends` is '@paigasus/next-config/tsconfig-app'") for r in _a13(files=files)):
+        failures.append("A13 did not read the app tsconfig once its config stopped setting `tsconfig: false`")
+    # T9. EVERY config must set it: one of two is not enough.
+    files = dict(a13_files)
+    files["ts/apps/app/vitest.other.config.ts"] = "export default {};\n"
+    broken = _a12_copy(a13)
+    broken["app-ts"]["invocations"]["test"] = "pnpm exec vitest run && pnpm exec vitest run --config vitest.other.config.ts"
+    broken["app-ts"]["task_inputs"]["test"].append("ts/apps/app/vitest.other.config.ts")
+    if not any(r.startswith("ts/apps/app/tsconfig.json: `extends`") for r in _a13(broken, files=files)):
+        failures.append("A13 skipped the tsconfig of a task where only one of two configs sets `tsconfig: false`")
+    # T9. A task with NO config file still reads its tsconfig ("every config" is not vacuously true).
+    files = dict(a13_files)
+    files["ts/packages/proto/tsconfig.json"] = '{"extends": "../../tsconfig.base.json"}\n'
+    if "p-ts:test inputs omit ts/packages/proto/tsconfig.json" not in _a13(files=files):
+        failures.append("A13 skipped the tsconfig of a task that has no vitest config file")
+
+    # T10. The gate reachability check.
+    broken = _a12_copy(a13)
+    broken["repo"]["task_input_globs"]["affected-smoke"] = ["ts/packages/*/vitest.config.ts"]
+    rows = _a13(broken)
+    for cfg in ("ts/packages/core/vitest.e2e.config.ts", "ts/apps/app/vitest.config.ts"):
+        if f"{cfg} matches no input of repo:affected-smoke, so an edit to it alone does not schedule the gate that reads it" not in rows:
+            failures.append(f"A13 did not report that {cfg} cannot schedule repo:affected-smoke")
+    # A negated glob excludes a config that a positive glob matches (coordinator ruling, SMA-736).
+    a13_neg_row = "ts/apps/app/vitest.config.ts matches no input of repo:affected-smoke, so an edit to it alone does not schedule the gate that reads it"
+    broken = _a12_copy(a13)
+    broken["repo"]["task_input_globs"]["affected-smoke"] = [*broken["repo"]["task_input_globs"]["affected-smoke"], "!ts/apps/app/vitest.config.ts"]
+    if a13_neg_row not in _a13(broken):
+        failures.append("A13 counted a config as reachable although a negated glob of repo:affected-smoke excludes it")
+    broken = _a12_copy(a13)
+    del broken["repo"]["task_input_globs"]["affected-smoke"]
+    if not any(r.startswith("repo:affected-smoke reported no `inputGlobs`") for r in _a13(broken)):
+        failures.append("A13 skipped the reachability check when repo:affected-smoke reported no globs")
+
+    # T12. A broken manifest prints once. With no `tsc` task, A13 reports a broken binding manifest.
+    # With a `tsc` task whose closure reaches it, A12a reports it and A13 drops it.
+    files = dict(a13_files)
+    files["rs/crates/bindings/wb/package.json"] = "{"
+    if not any(r.startswith("rs/crates/bindings/wb/package.json is not valid JSON") for r in _a13(files=files)):
+        failures.append("A13 did not report a broken manifest that no `tsc` task reads")
+    broken = _a12_copy(a13)
+    broken["c-ts"]["invocations"]["typecheck"] = "pnpm exec tsc -p tsconfig.json --noEmit"
+    broken["c-ts"]["tasks"]["typecheck"] = [PROTO_GENERATE_DEP]
+    broken["c-ts"]["task_inputs"]["typecheck"] = []
+    broken["c-ts"]["task_input_globs"]["typecheck"] = []
+    if any(r.startswith("rs/crates/bindings/wb/package.json") for r in _a13(broken, files=files)):
+        failures.append("A13 printed a broken manifest again that A12a already reports")
+
+    # A13 (SMA-736 §4.7, T11) — the real-corpus pin. Every tracked vitest config is parsed, and the
+    # result must equal this literal table of (config, sorted aliases, tsconfig_off). A parser change
+    # that alters what it finds in a real config reds here, and so does a new config file: add it to
+    # the table on purpose. Spec R1.
+    a13_corpus = (
+        ("ts/apps/gateway-console/vitest.config.ts", (
+            ("next/cache", "ts/apps/gateway-console/tests/support/next-cache.ts"),
+            ("next/headers", "ts/apps/gateway-console/tests/support/next-headers.ts"),
+            ("server-only", "ts/apps/gateway-console/tests/support/server-only-stub.ts"),
+        ), True),
+        ("ts/apps/iam-console/vitest.config.ts", (
+            ("next/cache", "ts/apps/iam-console/tests/support/next-cache.ts"),
+            ("next/headers", "ts/apps/iam-console/tests/support/next-headers.ts"),
+            ("server-only", "ts/apps/iam-console/tests/support/server-only-stub.ts"),
+        ), True),
+        ("ts/packages/paigasus-app-shell/vitest.config.ts", (), False),
+        ("ts/packages/paigasus-auth/vitest.config.ts", (
+            ("server-only", "ts/packages/paigasus-auth/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-auth/vitest.containers.config.ts", (
+            ("server-only", "ts/packages/paigasus-auth/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-console-core/vitest.config.ts", (
+            ("next/cache", "ts/packages/paigasus-console-core/tests/support/next-cache.ts"),
+            ("next/headers", "ts/packages/paigasus-console-core/tests/support/next-headers.ts"),
+            ("server-only", "ts/packages/paigasus-console-core/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-console-core/vitest.containers.config.ts", (
+            ("server-only", "ts/packages/paigasus-console-core/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-discovery/vitest.config.ts", (
+            ("server-only", "ts/packages/paigasus-discovery/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-discovery/vitest.containers.config.ts", (
+            ("server-only", "ts/packages/paigasus-discovery/tests/support/server-only-stub.ts"),
+        ), False),
+        ("ts/packages/paigasus-kernel/vitest.config.ts", (
+            ("@paigasus/node-bindings", "rs/crates/bindings/paigasus-node-bindings/index.js"),
+            ("@paigasus/wasm", "rs/crates/bindings/paigasus-wasm/.wasmpack-test-out/paigasus_wasm.js"),
+        ), False),
+        ("ts/packages/paigasus-next-config/vitest.config.ts", (), False),
+        ("ts/packages/paigasus-sdk/vitest.config.ts", (), False),
+        ("ts/packages/paigasus-ui/vitest.config.ts", (), False),
+    )
+    a13_corpus_root = Path(__file__).resolve().parents[2]
+    try:
+        a13_corpus_tracked = task_inputs.tracked_files(a13_corpus_root)
+    except INFRA_ERRORS as exc:
+        # Mirror main(): a broken `git` is an infrastructure error (rc 2), not a graph regression.
+        print(f"FATAL [parity] could not list the tracked files: {exc}", file=sys.stderr)
+        return 2
+    a13_corpus_paths = sorted(p for p in a13_corpus_tracked if re.search(r"(^|/)vitest[^/]*\.config\.[^/]+$", p))
+    if a13_corpus_paths != [cfg for cfg, _aliases, _off in a13_corpus]:
+        failures.append(
+            f"the tracked vitest configs are {a13_corpus_paths}, but the A13 corpus pin lists "
+            f"{[cfg for cfg, _aliases, _off in a13_corpus]} — add a new config to the pin on purpose"
+        )
+    for cfg, want_aliases, want_off in a13_corpus:
+        rows = []
+        path = a13_corpus_root / cfg
+        if not path.is_file():
+            failures.append(f"the A13 corpus pin lists {cfg}, but it is not a file in the tree, so the parser cannot read it")
+            continue
+        aliases, off = vitest_config_facts(path.read_text(), cfg, rows)
+        if rows or tuple(aliases) != want_aliases or off is not want_off:
+            failures.append(
+                f"the A13 parser reads {cfg} as aliases {aliases}, tsconfig_off {off}, rows {rows}; the "
+                f"corpus pin says aliases {list(want_aliases)}, tsconfig_off {want_off}, no rows"
+            )
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all twelve assertions fire on synthetic violations")
+    print("  OK   [parity] all thirteen assertions fire on synthetic violations")
     return 0
 
 
@@ -5069,10 +6416,10 @@ def self_test():
 # rather than a bare count.
 #
 # Adding a check means adding its key here AND its tuple there, in the same order.
-EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12a", "a12b")
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12a", "a12b", "a13")
 
 
-def collect_findings(projects, crates, root):
+def collect_findings(projects, crates, root, tracked):
     """Every assertion's rows, as `(key, rows, title)`, in report order.
 
     ONE list, used for BOTH the pass/fail verdict and the report. Before SMA-542 the two were
@@ -5082,6 +6429,9 @@ def collect_findings(projects, crates, root):
 
     Raises the INFRA_ERRORS members its checks raise (`MoonOutputError` from the FFI derivation),
     so `main` keeps them inside its try and maps them to rc 2.
+
+    `tracked` is the set of git-tracked paths that A13 needs (SMA-736 §4.5). `main` builds it once
+    with `task_inputs.tracked_files`; the self-test passes a fixed set.
     """
     a1, a2, a3 = check(projects, crates)
     a5 = check_ffi_inputs(projects)
@@ -5228,6 +6578,22 @@ def collect_findings(projects, crates, root):
              "    Fix: make the task a script that starts\n"
              "    `node ../../../ts/scripts/check-installed-bindings.mjs && pnpm exec tsc ...`.\n"
              "    A `FLOOR:` row means A12b examines less than the A12 floor — fix that first."),
+        ("a13", check_ts_vitest_inputs(projects, root, tracked),
+             "A ts task that runs vitest does not key on a file vitest reads, so a change there\n"
+             "    SELECTS NOTHING for that task and Moon serves a cached PASS (SMA-736).\n"
+             "    Extra inputs are ALLOWED (this is containment, like A12a). A `FLOOR:` row, or a row\n"
+             "    about a config, a tsconfig or a package.json that A13 cannot read, means the check\n"
+             "    itself cannot be trusted — fix that first.\n"
+             "    Fix: add the missing entry to that task's `inputs` in its own moon.yml, or to the\n"
+             "    inherited `test` task in .moon/tasks/typescript-project.yml: `/ts/pnpm-lock.yaml`;\n"
+             "    each vitest config; per workspace package in the closure, `/<dir>/src/**/*`,\n"
+             "    `/<dir>/package.json` and each `exports` target outside src/; per `file:` binding,\n"
+             "    `/<dir>/package.json` and each `files` entry that is not a `.d.ts`; each\n"
+             "    tsconfig.json with its `extends` chain, unless every config sets `tsconfig: false`;\n"
+             "    each tracked alias target outside the own package. A `deps omit contracts:generate`\n"
+             "    row needs `deps: ['contracts:generate']` on that task. For a \"matches no input of\n"
+             "    repo:affected-smoke\" row, add a glob that matches the config to the inputs of\n"
+             "    `repo:affected-smoke` in the root moon.yml. See ci/affected-graph/README.md (A13)."),
     ]
 
     return findings
@@ -5238,7 +6604,8 @@ def main():
     try:
         projects = moon_projects()
         crates = cargo_crates(root)
-        findings = collect_findings(projects, crates, root)
+        tracked = task_inputs.tracked_files(root)
+        findings = collect_findings(projects, crates, root, tracked)
     except INFRA_ERRORS as exc:
         # Mirror run.sh's infra-vs-assertion split: a broken `moon` — or an unparseable Cargo.toml —
         # must never be mistaken for a graph regression. See INFRA_ERRORS.
@@ -5256,7 +6623,8 @@ def main():
             f"every compiling cargo task inside rs/ keys on .cargo/config.toml, and every "
             f"workspace members entry is a literal path, and every ts tsc task keys on its "
             f"package.json closure and runs the installed-typings preflight first when that "
-            f"closure holds a binding"
+            f"closure holds a binding, and every ts vitest task keys on its configs, its package.json "
+            f"closure, its tsconfig chain and its alias targets"
         )
         return 0
 

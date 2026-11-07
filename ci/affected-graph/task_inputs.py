@@ -9,6 +9,7 @@
 #
 # usage: task_inputs.py [--self-test]
 import json
+import os
 import re
 import subprocess
 import sys
@@ -250,6 +251,12 @@ def moon_tasks():
     return _repo_tasks(payload.get("tasks") or {})
 
 
+_GIT_LOCAL_ENV = (
+    "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
 def _git(args, root):
     """One git invocation, with the two settings that make its output trustworthy.
 
@@ -261,10 +268,16 @@ def _git(args, root):
     A non-zero rc is rc 2 (infrastructure), never "no matches" and never a skip. Note this fires
     only when git is genuinely broken: a MALFORMED pattern exits 0 with no output (measured), which
     reads as `dead` — a false red, the safe direction. classify() is the real defense there.
+
+    The repository-local git variables are removed from the environment (SMA-736). A git hook sets
+    some of them. An inherited value would make `ls-files` read another repository, index or work
+    tree than `root`'s. `GIT_WORK_TREE` would override `cwd=root`. The tuple is the list that
+    `git rev-parse --local-env-vars` prints.
     """
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCAL_ENV}
     proc = subprocess.run(
         ["git", "-c", "core.quotePath=false", *args],
-        cwd=root, capture_output=True, text=True,
+        cwd=root, capture_output=True, text=True, env=env,
     )
     if proc.returncode != 0:
         raise MoonOutputError(

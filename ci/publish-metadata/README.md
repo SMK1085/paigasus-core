@@ -134,6 +134,35 @@ fully would mean an external pin — `PUBLISH_METADATA_SH_CALL_SITES` in
 the PR that breaks it) — and that is deliberately deferred: pinning one check's call sites
 while this file's other five stay unpinned would misrepresent the coverage.
 
+### `--verify-publish-groups` — Check 0 and Check 2 only, for `release.yml` (SMA-735)
+
+`bash ci/publish-metadata/run.sh --verify-publish-groups` runs Check 0 and Check 2 and nothing
+else. The `verify-crates` job in `.github/workflows/release.yml` calls it. That job holds no
+secret, only a `contents: read` token, and runs before `approve-release`. The `release` job then
+publishes with `release-plz release --no-verify`, so this mode is the last build of the crates
+before the upload.
+
+- The publishable set comes from `ci/publish-metadata/publishable.py`, the same code that
+  `metadata_checks` uses. A set that is not `EXPECTED_PUBLISHABLE` exits 1, so a crate outside
+  the list cannot skip the verify build.
+- The mode runs `check_publish_group` once for each group from `publish_groups`, then
+  `assert_check2_covered_everything`.
+- The mode does not load the category snapshot. A stale snapshot cannot stop a release.
+- Exit code 0: every group passed. Exit code 1: a defect, for example "could not compile".
+  Exit code 2: an infrastructure fault, for example a network error, or a bad invocation. The
+  mode takes no further argument. It exits 2 when it gets one.
+- The job relies on the hosted runner image for bash, python3, git, a C toolchain and rustup
+  (spec M1). The first hosted run proves it.
+- When `verify-crates` fails with rc 2, a re-run of the job is safe: nothing irreversible ran.
+- `--negative-control` runs the real dispatch with a `cargo` stub first on `PATH`. The stub
+  records each argv and scripts the answer of `cargo publish`. `cargo metadata` goes to the real
+  cargo. The rows assert these results:
+  - both groups run with `--dry-run --locked`;
+  - "could not compile" gives rc 1;
+  - "spurious network error" gives rc 2;
+  - an extra argument gives rc 2, and no `cargo publish` runs;
+  - a publishable crate outside `EXPECTED_PUBLISHABLE` gives rc 1, and no `cargo publish` runs.
+
 ### Check 5 — Rule R1, symmetric `changelog_include` in each version group
 
 release-plz 0.3.158 appends a `changelog_include` package's own commits to the including

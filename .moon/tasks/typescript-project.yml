@@ -50,3 +50,7 @@ tasks:
       - '@group(tests)'
       - 'package.json'
       - '/ts/pnpm-lock.yaml'
+      # SMA-736 (A13). vite's oxc transform loads the nearest tsconfig.json of each file it
+      # transforms, and that file extends the base, so both change what vitest runs.
+      - 'tsconfig.json'
+      - '/ts/tsconfig.base.json'

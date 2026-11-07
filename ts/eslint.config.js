@@ -7,7 +7,7 @@ import reactPlugin from '@eslint-react/eslint-plugin';
 import reactHooks from 'eslint-plugin-react-hooks';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 import nextPlugin from '@next/eslint-plugin-next';
-import { boundaryRules, nextAppRules, sourceRules } from '@paigasus/next-config/eslint';
+import { boundaryRules, kernelAccessorRules, nextAppRules, sourceRules } from '@paigasus/next-config/eslint';
 
 const appsDir = path.join(import.meta.dirname, 'apps');
 
@@ -92,4 +92,8 @@ export default tseslint.config(
   // Turbopack does not resolve it to a `.ts` file. A SEPARATE export, never a boundaryRules block —
   // see its doc comment. paigasus-next-config-ts:test asserts this spread too.
   ...sourceRules,
+  // SMA-725: the six single-field PRN accessors of @paigasus/kernel are deprecated; use prnParse.
+  // A custom rule with its OWN name, never a second `no-restricted-imports` block, which would
+  // replace the boundary options above. paigasus-next-config-ts:test asserts this spread.
+  ...kernelAccessorRules,
 );
