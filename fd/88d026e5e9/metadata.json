@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.13.1",
+  "checkpoint_id": "fd88d026e5e9",
+  "strategy": "manual-commit",
+  "branch": "dependabot/npm_and_yarn/ts/npm-minor-patch-8f002095fc",
+  "checkpoints_count": 12,
+  "files_touched": [
+    ".moon/tasks/typescript.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fd/88d026e5e9/0/metadata.json",
+      "transcript": "/fd/88d026e5e9/0/full.jsonl",
+      "compact_transcript": "/fd/88d026e5e9/0/transcript.jsonl",
+      "content_hash": "/fd/88d026e5e9/0/content_hash.txt",
+      "prompt": "/fd/88d026e5e9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 90,
+    "cache_creation_tokens": 406151,
+    "cache_read_tokens": 6983647,
+    "output_tokens": 15682,
+    "api_call_count": 33,
+    "subagent_tokens": {
+      "input_tokens": 146,
+      "cache_creation_tokens": 365391,
+      "cache_read_tokens": 6004713,
+      "output_tokens": 44644,
+      "api_call_count": 73
+    }
+  },
+  "redaction": {
+    "replacements": 2,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 0,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}

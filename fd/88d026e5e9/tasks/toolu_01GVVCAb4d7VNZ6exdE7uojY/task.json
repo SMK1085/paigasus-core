@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01GVVCAb4d7VNZ6exdE7uojY",
+  "agent_id": "a4a8a113242defbf9",
+  "task_description": "Triage security-scan failures",
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 80654,
+    "cache_read_tokens": 354427,
+    "output_tokens": 6016,
+    "api_call_count": 6
+  },
+  "started_at": "2026-11-07T13:08:52.752563+01:00",
+  "completed_at": "2026-11-07T13:09:36.624583+01:00"
+}

@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01FmzA9iGxAycvAmshj4z3Mw",
+  "agent_id": "afba0efe19bf50f98",
+  "task_description": "Fix osv glob/minimatch advisories",
+  "token_usage": {
+    "input_tokens": 34,
+    "cache_creation_tokens": 93759,
+    "cache_read_tokens": 1329431,
+    "output_tokens": 8095,
+    "api_call_count": 17
+  },
+  "started_at": "2026-11-07T13:09:57.66899+01:00",
+  "completed_at": "2026-11-07T13:15:48.018621+01:00"
+}

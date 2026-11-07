@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01ScSMCPRNXYRnPPKvbUUfpa",
+  "agent_id": "ab2e3df7c9b6fb180",
+  "task_description": "Triage PR 432 and 434 failures",
+  "token_usage": {
+    "input_tokens": 26,
+    "cache_creation_tokens": 97066,
+    "cache_read_tokens": 970065,
+    "output_tokens": 13242,
+    "api_call_count": 13
+  },
+  "started_at": "2026-11-07T13:08:52.752711+01:00",
+  "completed_at": "2026-11-07T13:10:38.825285+01:00"
+}

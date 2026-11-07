@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_018nAfrQUVhUm73E7tdvAN4Y",
+  "agent_id": "aeab98ca1df303627",
+  "task_description": "Diagnose PR 434 ts:lint failure",
+  "token_usage": {
+    "input_tokens": 74,
+    "cache_creation_tokens": 93912,
+    "cache_read_tokens": 3350790,
+    "output_tokens": 17291,
+    "api_call_count": 37
+  },
+  "started_at": "2026-11-07T13:11:00.537755+01:00",
+  "completed_at": "2026-11-07T13:18:29.668139+01:00"
+}
