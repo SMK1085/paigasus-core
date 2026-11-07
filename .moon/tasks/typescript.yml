@@ -27,6 +27,12 @@ fileGroups:
 tasks:
   lint:
     command: 'pnpm exec eslint .'
+    # typescript-eslint 8.72.1 (#12988) builds one standalone Program per tsconfig in single-run
+    # mode (CI, non-TTY). That path reads `extends` through pnpm symlinks without a realpath
+    # (TS5012 on the next-config preset) and duplicates Program memory (upstream #13109, open).
+    # Forcing the project-service path restores the 8.72.0 behaviour. Remove once #13109 is fixed.
+    env:
+      TSESTREE_SINGLE_RUN: 'false'
     inputs:
       - '@group(sources)'
       - '@group(tests)'
