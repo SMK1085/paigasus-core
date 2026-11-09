@@ -142,7 +142,7 @@ catalog:
   # @paigasus/discovery's browser test harness (SMA-509) uses Vite PROGRAMMATICALLY to bundle and
   # SSR-render a real-Chromium fixture — pinned to the version vitest already resolves, so this
   # adds no new package to the lockfile, only a direct dependency edge onto one already there.
-  vite: ^8.3.5
+  vite: ^8.3.6
   # Runtime env validation for @paigasus/next-config (SMA-502). zod 4 semantics are assumed
   # throughout that package: unknown object keys are stripped by default, z.record takes
   # (keyType, valueType), and errors surface as error.issues[]. The runtime formats messages from
@@ -170,7 +170,7 @@ catalog:
   semantic-release: ^25.0.9
   '@semantic-release/commit-analyzer': ^13.0.1
   # Protobuf-ES v2 runtime (SMA-389)
-  '@bufbuild/protobuf': ^2.16.0
+  '@bufbuild/protobuf': ^2.17.0
   # Connect-ES v2 — the gRPC transport and typed clients @paigasus/sdk builds on (SMA-508,
   # ADR-0018). `@connectrpc/connect` is the protocol-independent client half (createClient,
   # ContextValues, Interceptor); `@connectrpc/connect-node` supplies createGrpcTransport, which is
@@ -209,7 +209,7 @@ catalog:
   redis: ^6.3.1
   # E2E tier for @paigasus/auth. A real browser is the only thing that can prove SameSite behaviour
   # on the cross-site redirect back from the IdP, and __Host- cookie-prefix enforcement.
-  '@playwright/test': ^1.64.1
+  '@playwright/test': ^1.65.0
   # Starts Keycloak and Redis for the E2E tier. The Rust side uses testcontainers-modules; this is
   # the TS equivalent. GitHub Actions `services:` cannot do the cert copy and realm import.
   testcontainers: ^12.2.1
@@ -255,4 +255,4 @@ catalog:
   # `fetch` — @paigasus/discovery's `GET /v1/service-info` probe. It cannot intercept the SDK's gRPC
   # calls over node:http2; an in-process fake server answers those. 2.15.0 was released 2026-07-08.
   # Pinned EXACTLY, not a caret range (the Global Constraints): a later 2.x must not install silently.
-  msw: 3.0.3
+  msw: 3.0.4
