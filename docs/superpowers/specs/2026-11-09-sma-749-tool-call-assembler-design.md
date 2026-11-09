@@ -2,14 +2,13 @@
 
 - Linear: SMA-749 (spec 1 of the SMA-747 umbrella, "Gateway tool-call interception").
 - ADR: ADR-0027 (Accepted 2026-11-08), decisions (a) one check point, (b) hold only tool
-  calls, (c) replace a blocked call with a notice, (e) evaluation in the gateway via kernel
-  types.
-- Status: draft, before the spec challenge.
-- Scope: a new lib crate `paigasus-gateway-core`, a few I/O-free types in `paigasus-kernel`,
-  and the wiring into `paigasus-gateway`'s `/v1/chat/completions` handler, off by default.
+  calls, (c) replace a blocked call with a notice, (e) evaluation in the gateway.
+- Status: revised after the spec challenge (§ 10). Awaiting GATE 1.
+- Scope: a new lib crate `paigasus-gateway-core` (a synchronous, I/O-free state machine), and
+  its wiring into `paigasus-gateway`'s `/v1/chat/completions` handler, off by default.
 - Out of scope: the policy decision itself (SMA-752), session history (SMA-753), detectors
   (SMA-754), the decision log (SMA-755), the Anthropic ingress route (SMA-750), MCP (SMA-756),
-  and any rewrite of the request body.
+  any rewrite of the request body, and the non-goals in § 2.
 
 ## 1. Problem
 
@@ -17,243 +16,453 @@ The gateway forwards model responses byte for byte. A response can contain tool 
 model asks the client's agent to run a function with some arguments. Today nothing between the
 model and the client can look at a tool call, decide on it, or remove it.
 
-ADR-0027 puts that check in the gateway. Every later spec (decisions, history, detectors, the
-decision log) needs the same foundation first:
+ADR-0027 puts that check in the gateway. Every later spec needs the same foundation first:
 
-1. find every tool call in a response, streaming or not, for both OpenAI Chat Completions and
+1. find every tool call in a response, streaming or not, for OpenAI Chat Completions and
    Anthropic Messages;
-2. hold a streaming tool call until its arguments are complete, while text keeps streaming;
+2. hold a streaming tool call until it is complete, while text keeps streaming;
 3. ask a decider about the complete calls;
-4. forward allowed calls unchanged and replace blocked ones with a notice, in a response the
-   client's SDK still parses.
+4. forward allowed calls and replace blocked ones with a notice, in a response the client's
+   SDK still parses.
 
 This spec builds that foundation with a decider that allows everything. It ships wired in and
-off by default, so the hot path is exercised in tests and can be turned on per deployment.
+off by default.
 
-## 2. Decisions
+## 2. Threat model and invariant
+
+**Adversaries.**
+
+- T1. **Model output is hostile**, always. Prompt injection can make the model emit any tool
+  call, any arguments, any text.
+- T2. **The upstream may be non-conforming or compromised.** `upstream.openai.base_url` and
+  `extra_ca_bundle_path` exist for self-hosted vLLM / LiteLLM (SMA-558). Such upstreams
+  interleave indices, emit odd framing, or can be made to emit arbitrary bytes. Nothing about
+  the upstream's framing or JSON is trusted.
+- T3. **The caller is not an adversary of its own agent** in this spec. Request-side
+  differentials (for example duplicate `tools` keys) are SMA-752's concern.
+
+**Invariant (I1).** For every supported client parser P (§ 8.2), every tool call that P
+accumulates from the bytes the gateway emits was decided `Allow`, with the same choice, kind,
+name and arguments that the decider saw. Anything the gateway cannot classify with certainty
+is not forwarded (or triggers `on_failure`).
+
+**Non-goals.** Tool calls encoded inside text content (ReAct / XML conventions, or a vLLM tool
+parser that fails and falls back to `content`); tools executed by the provider (Anthropic
+`server_tool_use`, `mcp_tool_use`); the OpenAI Responses API; request rewriting.
+
+## 3. Decisions
 
 | Id | Question | Decision |
 |----|----------|----------|
-| D1 | Where the code lives | Kernel: `ToolCall`, `ToolCallKind`, `Decision`, `DecisionId`. New crate `paigasus-gateway-core`: the format converters, `ToolTurn`, `ToolCallAssembler`, the rewriters, the `ToolCallDecider` trait and `AllowAll`. |
-| D2 | What counts as a tool call (OpenAI) | `choices[].delta.tool_calls[]` / `message.tool_calls[]` of type `function` or `custom`, AND the legacy `delta.function_call` / `message.function_call`. Unknown `type` values are tool calls of kind `Other`. |
-| D3 | What counts as a tool call (Anthropic) | `content_block` of type `tool_use`. `server_tool_use` (and its `*_tool_result` blocks) pass through untouched and are reported as `unenforceable`. |
-| D4 | Which records are parsed | Every SSE `data:` record, as JSON, when interception is on. No substring prefilter. |
-| D5 | A record that does not parse | Dropped (not forwarded) and counted. The literal `[DONE]` is not JSON and is handled as the end marker. |
-| D6 | A record over `max_record_bytes` | Never skipped. Triggers `on_failure` for the choice it belongs to, or for the stream when the choice is unknown. |
-| D7 | When an OpenAI call is complete | At the `finish_reason` of its choice, or at `[DONE]` / end of stream. Never at "the next index started". |
-| D8 | When an Anthropic call is complete | At `content_block_stop` for its block index. |
-| D9 | What is held | From the first tool-call frame of a choice (OpenAI) or the `content_block_start` of a `tool_use` block (Anthropic), every later frame of the stream, in order, until the decision. Text before that point is forwarded at once. |
-| D10 | Hold limits | `max_held_bytes` (default 1 MiB) and `max_hold_secs` (default 60) per hold. Over a limit → `on_failure`. |
-| D11 | Keep-alive while holding | A `: keep-alive\n\n` SSE comment every `keepalive_secs` (default 10) while any hold is open and nothing else was sent. |
-| D12 | `on_failure` | `"block"` (default) or `"allow"`. Applies on hold overflow, hold timeout, a decider error, an oversized record, and a 2xx non-stream body that does not parse. |
-| D13 | Upstream error mid-hold | Drop the held frames, emit the existing `TERMINAL_SSE_ERROR`. No partial tool call is ever forwarded. |
-| D14 | A blocked call, streaming OpenAI | Removed from the held frames. A synthesized `delta.content` chunk with the notice text is inserted. Allowed calls in the same choice are renumbered from 0. `finish_reason: "tool_calls"` becomes `"stop"` when no call remains. |
-| D15 | A blocked call, non-stream OpenAI | Removed from `message.tool_calls` (or `function_call` removed). The notice is appended to `message.content` (set when it is null). `finish_reason` fixed as in D14. |
-| D16 | A blocked call, Anthropic | The `tool_use` block becomes a `text` block at the same index (`content_block_start` / `text_delta` / `content_block_stop`, each with its `event:` line). `stop_reason: "tool_use"` becomes `"end_turn"` when no `tool_use` block remains. |
-| D17 | Reporting decisions | Streaming: an SSE comment `: paigasus-decision {json}` per decision, before the released frames. Non-stream: a `paigasus-tool-decisions` response header (JSON array). Tool names are sanitized (D25). |
-| D18 | Byte identity | With `AllowAll`, the concatenated bytes to the client equal the upstream bytes, minus nothing, plus only `:`-comment lines. Chunk boundaries may differ. |
-| D19 | Billing | `UsageScanner` and `ChargeGuard` keep reading the upstream bytes before the assembler. A dropped or rewritten frame does not change the charge. |
-| D20 | Cancellation | The assembler is a plain stream adapter inside the existing relay. Nothing is spawned. Client disconnect drops it, as today. |
-| D21 | Request side | Parse the request into `ToolTurn` (definitions, earlier calls, tool results) and hand it to the decider. No request rewrite. |
-| D22 | Config | `[tool_interception]` table, `enabled = false`. Only `/v1/chat/completions` is wired. The Anthropic converters are library code until SMA-750. |
-| D23 | Interception off | The relay is exactly today's relay. No parsing, no allocation, no extra frames. |
-| D24 | Fuzzing | `proptest` properties (random chunking, random mutation) instead of a `cargo-fuzz` target: the workspace is pinned to stable 1.95 and `cargo-fuzz` needs nightly. |
-| D25 | Sanitizing names in reports | Tool names in decision reports are truncated to 128 bytes and restricted to `[A-Za-z0-9_.:-]`; any other byte becomes `_`. |
+| D1 | Where the code lives | New crate `paigasus-gateway-core` (`publish = false`): types, SSE framing, JSON classification, assembly, rewrite, as a sans-IO state machine. `paigasus-gateway` drives it with tokio. No kernel change in this spec. |
+| D2 | SSE input framing | WHATWG line splitting (CR, LF, CRLF), with a CR held until the next byte. Strip one leading UTF-8 BOM. Multi-line `data:` joined with `\n`. |
+| D3 | SSE output framing | **Re-framed, not forwarded.** For every classified record, emit `data: <original payload bytes>\n\n` (Anthropic: preceded by `event: <validated name>\n`). Upstream comments, `id:`, `retry:` and unknown fields are dropped. |
+| D4 | End of stream | An unterminated last record is parsed and classified (as `UsageScanner::finish` does). Records after `[DONE]` are dropped and counted. |
+| D5 | JSON parsing | One strict parse for stream records and non-stream bodies. A record is **malformed** if it is not valid JSON, has a duplicate key at any depth, has a `__proto__` / `constructor` / `prototype` key, or has a key that case-folds to a classifier key without being byte-equal to it. |
+| D6 | Frame classification | Total, by a positive allowlist (§ 4.2): **tool-free** (forward), **tool-bearing** (hold), **malformed** (D7). Nothing else. |
+| D7 | A malformed record | Queue empty: dropped and counted (never forwarded). Queue non-empty: `on_failure` for the whole stream. |
+| D8 | Records over `max_record_bytes` | Never skipped. Stream-level `on_failure` (the choice cannot be known without parsing). |
+| D9 | Canonical assembly | Strict rules (§ 4.3). Any deviation is `on_failure` for the stream. Where client SDK accumulators disagree, the strict form makes them agree. |
+| D10 | When a hold completes (OpenAI) | At its choice's `finish_reason`. `[DONE]` or EOF with an open hold and no `finish_reason` = truncated → `on_failure`, never "complete". |
+| D11 | When a hold completes (Anthropic) | At `content_block_stop` of the block. `message_stop` / EOF with an open block = truncated → `on_failure`. |
+| D12 | Ordering and release | **One FIFO per stream.** Once any hold is open, every later frame is queued in order. Each queued frame carries the set of (choice, call) or (block) it touches. A frame is releasable when every member of its set is decided. Release pops from the head and stops at the first frame that is not releasable. Text before the first hold is forwarded at once. |
+| D13 | Held memory | `max_held_bytes` (default 4 MiB) is a **per-stream total** of the queue. Overflow → `on_failure` for every open hold. |
+| D14 | Time limits | `max_hold_secs` (default 300, equal to `stream_idle_timeout_secs`) from a hold's first frame to its completion; `decide_timeout_secs` (default 5) for the decider. Either → `on_failure` for that hold. |
+| D15 | Keep-alive | `: keep-alive\n\n` every `keepalive_secs` (default 10) while the queue is non-empty and nothing else was emitted. |
+| D16 | `on_failure` | `"block"` (default) or `"allow"` (observe mode, § 5.3). |
+| D17 | Upstream transport error | The state machine consumes `Result<Bytes, _>`. On `Err` it is aborted: the queue is dropped, then the existing `TERMINAL_SSE_ERROR` is emitted. An upstream `{"error":…}` record while a hold is open is treated the same. |
+| D18 | Decider contract | `decide(ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> BoxFuture<'static, Result<Vec<Decision>, DeciderError>>`. Called once per completed hold. A result whose length differs from `calls.len()` is a `DeciderError`. Release looks up each call's decision; a missing one is `Block`. |
+| D19 | Request side | Parse the request into `ToolTurn::Parsed { definitions, prior_calls, tool_results }`, including legacy `functions` and `role:"function"` messages. A parse failure gives `ToolTurn::Unavailable(reason)`, never an empty `Parsed`. No request rewrite. |
+| D20 | Rewrite rules | § 4.4. Blocked calls are removed per fragment; `role` is always kept; `logprobs` are stripped from rewritten frames; `finish_reason` / `stop_reason` are rewritten wherever they arrive, including after a hold closed by `on_failure`. |
+| D21 | Notice | Fixed text built from `BlockCode` and a sanitized name; never from argument or detector content (§ 4.5). |
+| D22 | Decision reporting | Streaming: `: paigasus-decision <ASCII-escaped JSON>` per decision, emitted just before the frames that hold released. Non-stream: `paigasus-tool-decisions` header, ASCII-escaped JSON, capped at 2 KiB with `"truncated":true`. Schema in § 4.6. |
+| D23 | Identity | With `AllowAll`, the sequence of emitted `data` payloads is byte-equal to the upstream's classified payloads; only gateway comments are added. Framing may differ (D3). |
+| D24 | Billing | `UsageScanner` and `ChargeGuard` keep reading the raw upstream bytes before the state machine; `non_stream_usage` reads the original body. A drop, a rewrite or the new 502 does not change the charge. |
+| D25 | Cancellation | Nothing is spawned. The decider future is owned by the relay's stream state. Client disconnect drops everything, as today. |
+| D26 | Config | `[tool_interception]`, `#[serde(default, deny_unknown_fields)]`, `enabled = false`. Only `/v1/chat/completions` is wired. Anthropic is library code until SMA-750. |
+| D27 | Interception off | The relay is exactly today's relay. The state machine is not constructed. |
+| D28 | Capability exposure | Not advertised in `service_info` in this spec. It reveals security posture and has no consumer yet. |
+| D29 | Property testing | `proptest` with grammar-based generators against a differential oracle (§ 8.1), not `cargo-fuzz` (stable 1.95 pin; `cargo-fuzz` needs nightly). |
 
 ### Reasons
 
-- **D1, kernel.** ADR-0005 keeps cross-language behaviour in the kernel. `ToolCall` and
-  `Decision` are the shapes the IAM side, the SDKs and the decision log (SMA-755) will share.
-  They are plain data with no I/O, so they fit the kernel's `uuid` + `thiserror` dependency
-  set. They are Rust-only for now; the PyO3/napi/wasm bindings do not export them until a
-  binding needs them. `Finding` (SMA-754) is not added before it has a user.
-- **D1, new crate.** The SSE and JSON handling is gateway-specific, too large for the
-  kernel, and must be testable without axum, reqwest or Redis. A lib crate keeps the service
-  crate's hexagonal shape: `paigasus-gateway` is the adapter, `paigasus-gateway-core` the
-  domain.
-- **D2, legacy `function_call`.** Clients that still send `functions` receive
-  `function_call`, not `tool_calls`. Missing it would let a whole client class bypass every
-  check.
-- **D3, server tools.** Anthropic runs server tools (web search, code execution) itself before
-  the gateway sees the event. Blocking them in the response is theatre: the call already ran.
-  They are reported so an operator can see them, and SMA-752 may refuse them on the request
-  side (by stripping the server-tool definition) instead.
-- **D4, no prefilter.** JSON allows `"tool_calls"`. A `contains("tool_calls")` shortcut
-  would miss it while every client JSON parser decodes it. Parsing every record costs one
-  `serde_json::from_slice` into a borrowed `RawValue` skeleton per record; the measurement is
-  part of the plan (§ 8, T-perf).
-- **D5, drop unparseable.** Python's `json` accepts `NaN` and `Infinity`; `serde_json` does
-  not. A record the gateway cannot parse but the client can is a channel for an unchecked
-  tool call. Dropping is safe because a well-formed upstream never sends such records. A
-  counter (`gateway_tool_interception_dropped_records_total{reason}`) makes it visible.
-- **D6, no skip.** `UsageScanner` skips records over 64 KiB because a missed usage record only
-  costs an estimate. Here a skipped record is a forwarded, unchecked record. The assembler
-  has its own `max_record_bytes` (default 1 MiB, equal to `max_held_bytes`).
-- **D7, no early release.** OpenAI itself sends a call's argument fragments in order, but
-  OpenAI-compatible upstreams (vLLM, LiteLLM, some routers) are known to interleave indices.
-  Releasing call 0 when index 1 starts would decide on partial arguments, and fragments of
-  call 0 arriving later would then reach the client unchecked. Deciding per choice at
-  `finish_reason` costs latency only for the first call of a parallel batch, which the client
-  cannot run before the turn ends anyway.
-- **D7, `n > 1`.** Holds are keyed by choice index. One choice holding does not hold another
-  choice's text.
-- **D9, hold everything after.** Frames after a tool-call frame can include text of the same
-  choice (some upstreams emit text after calls) and frames of other choices. Re-ordering
-  them would change what the client sees. Holding the tail in order keeps the stream's order
-  intact; the cost is that other choices' text pauses during a hold, which is accepted for
-  `n > 1` streams with calls (rare).
-- **D10, limits.** A hold is memory the client controls indirectly (by prompting a model into
-  huge arguments). The caps bound it. 60 s matches the default upstream read timeout.
-- **D11, keep-alive.** Holding a large call can take longer than a proxy or client idle
-  timeout. SSE comments are ignored by every conforming client.
-- **D12, default block.** Fail closed is the point of the feature. `"allow"` exists for an
-  operator who turns interception on first in observe mode.
-- **D14-D16, notice instead of error.** ADR-0027 (c): the agent loop keeps running, and the
-  model sees on its next turn that the call was refused. The rewrite keeps the response
-  valid for the official OpenAI and Anthropic SDKs: copied `id`, `created`, `model`,
-  `system_fingerprint`; contiguous tool-call indices; a `finish_reason` that matches the
-  content.
-- **D17, comments and header.** Neither changes the body schema. The header is sanitized
-  because tool names come from the model.
-- **D18, byte identity.** It is the strongest regression check available: if allow-all
-  changes a single byte of payload, something parses and re-serializes where it must not.
-  Only frames that a block rewrites are re-serialized.
-- **D19, billing.** The upstream produced and billed the tokens of a blocked call. The
-  charge follows the upstream, as SMA-677 and SMA-730 already decided.
-- **D21, request side.** The decider needs the tool definitions (to know a tool's declared
-  schema) and the earlier calls and results (for sequence rules in SMA-753). Rewriting the
-  request is SMA-752's job.
-- **D22, wired but off.** User decision 2026-11-09. Wiring now proves the integration and the
-  performance claim in D23; off by default means no deployment changes behaviour.
+- **D1, no kernel change.** The challenge found that `paigasus-kernel` is `publish = true` and
+  tied by `repo:version-lockstep` to the py and npm binding releases. Types no binding exports
+  would still force a kernel release. ADR-0027 (e) places evaluation in the gateway via the
+  kernel's `decide()`, which arrives with Cedar in SMA-752. The shared types move to the kernel
+  then, when they have a binding user. Until then they live in gateway-core with
+  `#[non_exhaustive]`. `DecisionId` is deferred to SMA-755, its only user.
+- **D1, sans-IO.** A runtime-free `Stream` that polls the upstream, a decider future and two
+  timers at once is the hardest shape to get right and to test. A synchronous machine with
+  explicit inputs and actions makes the properties in § 8 plain synchronous tests, and it
+  removes the self-referential-future problem of a borrowed decider call.
+- **D3, re-framing.** Any byte the gateway forwards without reading is a channel to a client
+  that reads it differently: a BOM-prefixed first line (`TextDecoder` strips the BOM, this
+  repo's own `chat-stream.ts` and `paigasus-sdk/src/chat.ts` use it), lax line-trimming
+  clients (`paigasus-sdk/src/chat.ts:108` trims), records after `[DONE]`, a JSON body
+  returned on a `stream:true` request. Re-framing closes the whole class. Payload bytes stay
+  untouched, so D23 still catches any accidental re-serialization.
+- **D5, strict JSON.** Records that parse everywhere but mean different things are worse than
+  records that fail. Duplicate keys: serde and JS keep the last, Go's `encoding/json` merges
+  struct-typed duplicates. Case-insensitive matching in Go and Newtonsoft makes
+  `"Tool_Calls"` a tool call to them. `__proto__` can change the accumulated object in
+  JavaScript. Rejecting all of these costs nothing on a conforming upstream.
+- **D6, positive allowlist.** "Has a `tool_calls` key" is wrong both ways. It misses
+  `tool_calls` as an object or string and `message.tool_calls` inside a chunk. It also holds
+  all text on upstreams that send `"tool_calls": []` on every delta (some vLLM versions).
+- **D9, canonical assembly.** The SDKs disagree. openai-python concatenates every string field
+  except `index` and `type`, so a second `name` fragment becomes `safe_` + `rm`. openai-node
+  replaces it. anthropic-python appends a block on start but applies deltas by index. The
+  decider must see what every client will run, and that is only knowable for the canonical
+  form.
+- **D10/D11, truncation.** The relay turns a transport error into a data record and a clean
+  end. An assembler placed after that conversion would see EOF and release a call cut off
+  mid-arguments. D17 moves the state machine in front of the conversion.
+- **D12, one FIFO.** Per-choice holds with a shared tail leak: releasing hold A would ship
+  frames of hold B sitting in A's tail. A frame can also carry several choices. Keeping the
+  stream order and releasing only fully decided frames is the simplest rule that never leaks.
+  The cost: other choices pause during a hold. `n > 1` with tool calls is rare.
+- **D13, per-stream total.** `n` is caller-controlled (up to 128 on OpenAI). A per-hold cap
+  multiplies by `n`.
+- **D14, 300 s.** A file-writing call with 40 KB of arguments takes about 200 s at 50 tok/s. A
+  60 s cap would block it. The decider timeout is separate because SMA-752 may add a remote
+  call.
+- **D18, owned arguments and length check.** A future decider that returns too few decisions
+  must not silently allow the rest. `DecisionContext` carries the caller (principal, scope,
+  org) and the request ids, captured in the handler. Inside the stream, `current_ids()` is
+  `None` (SMA-504 §4.3).
+- **D19, `Unavailable`.** An empty `Parsed` would make SMA-753's sequence rules fail open on a
+  request that did not parse.
+- **D21, closed notice text.** The model reads the notice on its next turn. Echoing detector
+  or argument content would reflect attacker text into the prompt.
+- **D22, header cap.** Many parallel calls can exceed nginx's default 4–8 KiB
+  `proxy_buffer_size`, and the proxy would turn the response into a 502. `HeaderValue`
+  rejects raw UTF-8.
+- **D24, billing.** The upstream produced and billed the tokens of a blocked call. The charge
+  follows the upstream, as SMA-677 and SMA-730 decided.
 
-## 3. Components
+## 4. Semantics
 
-### 3.1 Kernel (`rs/crates/libs/paigasus-kernel/src/tool_call.rs`)
+### 4.1 Types (`paigasus-gateway-core::types`, all `#[non_exhaustive]`)
 
 ```rust
-pub enum ToolCallKind { Function, Custom, LegacyFunctionCall, AnthropicToolUse, Other(String) }
+pub enum ToolCallKind { Function, Custom, LegacyFunctionCall, AnthropicToolUse, Other }
 
 pub struct ToolCall {
-    pub id: Option<String>,      // absent for legacy function_call
+    pub choice: u32,              // OpenAI choice index; 0 for Anthropic
+    pub position: u32,            // tool-call index (OpenAI) or block index (Anthropic)
+    pub id: Option<String>,       // absent for legacy function_call
     pub name: String,
     pub kind: ToolCallKind,
-    pub arguments: String,       // raw, exactly as assembled; not parsed here
+    pub arguments: String,        // see below
 }
 
-pub enum Decision {
-    Allow,
-    Block { code: BlockCode, reason: String },
+pub enum Decision { Allow, Block { code: BlockCode } }
+pub enum BlockCode { Policy, Detector, HoldLimit, Malformed, Truncated, DeciderError }
+pub enum Basis { Decider, OnFailure }   // how a decision was reached (§ 5.3)
+```
+
+`arguments` holds: the concatenated `function.arguments` string (Function, LegacyFunctionCall);
+`custom.input` (Custom); the concatenated `partial_json` (AnthropicToolUse); the raw JSON of the
+whole tool-call entry (Other).
+
+### 4.2 Classification
+
+**OpenAI stream chunk.** Tool-free if all of these hold:
+
+- the payload is a JSON object, and `choices` is absent or an array of objects;
+- every `choices[i].index` is a JSON integer literal in `0..=127`;
+- every `delta` is absent or an object, and no choice has a `message` key;
+- every `delta.tool_calls` is absent, `null` or `[]`, and every `delta.function_call` is
+  absent or `null`.
+
+Tool-bearing if the above holds except that some `delta.tool_calls` is a non-empty array of
+objects, or some `delta.function_call` is an object. Anything else is malformed.
+
+`{"error":…}` at the top level is an upstream error record (D17 when a hold is open;
+forwarded otherwise, as today).
+
+**OpenAI non-stream body.** The same rules applied to `choices[].message`.
+
+**Anthropic.** Dispatch on `data.type`; a present `event:` name that differs is malformed.
+These types are known: `message_start`, `message_delta`, `message_stop`, `ping`, `error`,
+`content_block_start`, `content_block_delta`, `content_block_stop`. Any other type is
+malformed. Block types:
+
+- `text`, `thinking`, `redacted_thinking`: tool-free content.
+- `server_tool_use`, `*_tool_result`, `mcp_tool_use`: tool-free, reported `unenforceable`.
+- `tool_use`: tool-bearing.
+- any other block type: tool-bearing, kind `Other` (fail closed).
+
+### 4.3 Canonical assembly (any deviation → stream-level `on_failure`, code `Malformed`)
+
+OpenAI, per choice:
+
+- tool-call `index` values first appear in order 0, 1, 2, …; interleaving after that is fine;
+- `id`, `type` and `function.name` (or `custom.name`) each appear in exactly one fragment;
+- `type` never changes, and `function` and `custom` never appear in the same entry;
+- `function.arguments` and `custom.input` are strings in every fragment;
+- a legacy `function_call` and `tool_calls` never appear in the same choice;
+- no fragment arrives for a call after its choice's `finish_reason`.
+
+Anthropic:
+
+- a block's `index` equals the number of earlier `content_block_start` events;
+- `tool_use.input` at `content_block_start` is `{}`;
+- `message_start.message.content` is `[]`;
+- no delta arrives for an unknown or stopped index;
+- `partial_json` is a string.
+
+### 4.4 Rewrite
+
+Only frames that contain a blocked call are re-serialized.
+
+**OpenAI streaming.** In every queued frame of a blocked call's choice:
+
+- Remove the blocked entries from `delta.tool_calls`. Renumber the remaining entries'
+  `index` from 0, in first-appearance order. Drop the key when it becomes empty.
+- Remove `delta.function_call` when the legacy call is blocked.
+- Keep `role`. Strip `logprobs`.
+- Drop a frame only when its delta becomes `{}` and it has no `finish_reason` and no `usage`.
+
+Insert the notice as one chunk, `{"delta":{"content":"<notice>"}}` for that choice, right
+before the frame that carries the choice's `finish_reason`. Copy `id`, `object`, `created`,
+`model` and `system_fingerprint` from that frame. When text already streamed for the choice,
+the notice starts with `\n\n`. `finish_reason` `"tool_calls"` or `"function_call"` becomes
+`"stop"` when no call of the choice remains. Per-choice state survives the decision, so a
+`finish_reason` that arrives after an `on_failure` close is rewritten too.
+
+**OpenAI non-stream.** The same per-choice rules applied to `message`. The notice is appended
+to `message.content` when it is a string, or set when it is `null`. When `content` is an
+array, the notice is appended as a text part.
+
+**Anthropic.** A blocked `tool_use` block becomes a `text` block at the same index:
+`content_block_start {type:text, text:""}`, one `text_delta` with the notice, and
+`content_block_stop`, each with its `event:` line. Its `input_json_delta` frames are dropped.
+`message_delta.stop_reason` `"tool_use"` becomes `"end_turn"` when no `tool_use` block remains.
+This applies wherever that frame arrives.
+
+### 4.5 Notice and names
+
+The notice reads `[paigasus] tool call "<name>" was blocked (<code>).`. `<code>` is the
+kebab-case `BlockCode`. `<name>` is truncated to 128 bytes, and any byte outside
+`[A-Za-z0-9_.:-]` becomes `_`.
+
+### 4.6 Decision report schema
+
+```json
+{"v":1,"choice":0,"position":1,"name":"<sanitized>","name_sha256_8":"<8 hex>",
+ "decision":"allow|block|unenforceable","basis":"decider|on_failure","code":"<kebab or null>"}
+```
+
+`name_sha256_8` disambiguates names that sanitize alike.
+
+## 5. Components and data flow
+
+### 5.1 `paigasus-gateway-core` (sans-IO)
+
+```rust
+pub struct Interceptor { /* per-stream state */ }
+impl Interceptor {
+    pub fn new(format: Format, limits: Limits, now: Instant) -> Self;
+    pub fn push(&mut self, chunk: &[u8], now: Instant) -> Vec<Action>;
+    pub fn decided(&mut self, hold: HoldId, r: Result<Vec<Decision>, DeciderError>, now: Instant) -> Vec<Action>;
+    pub fn tick(&mut self, now: Instant) -> Vec<Action>;
+    pub fn finish(&mut self, now: Instant) -> Vec<Action>;   // clean upstream end
+    pub fn abort(&mut self) -> Vec<Action>;                  // upstream error, D17
 }
-
-pub enum BlockCode { Policy, Detector, HoldLimit, Unparseable, DeciderError }
-
-pub struct DecisionId(/* dcs_<uuid7> */);
+pub enum Action { Emit(Bytes), Decide { hold: HoldId, calls: Vec<ToolCall> }, Wake(Instant), Count(Metric) }
+pub fn intercept_body(format: Format, body: &[u8]) -> Result<BodyPlan, Malformed>;  // non-stream
 ```
 
-`DecisionId` reuses the kernel's `uuid7` module and the resource-name prefix rules. No new
-dependency.
+The terminal error frame is a constructor argument, so the Anthropic path can pass its own.
+Modules: `sse`, `json` (strict parse, D5; skeletons use `Cow<str>` / `&RawValue`, never
+`&str`, because arguments always contain escapes), `openai`, `anthropic`, `turn`, `assembly`,
+`rewrite`, `report`, `types`. Dependencies: `serde`, `serde_json` (`raw_value`), `bytes`,
+`thiserror`, `sha2`. No tokio, futures, axum or reqwest.
 
-### 3.2 `paigasus-gateway-core`
+### 5.2 Gateway wiring
 
-| Module | Holds |
-|---|---|
-| `sse` | A byte-level SSE record splitter (CR, LF, CRLF; multi-line `data:` joined with `\n` per WHATWG; `event:` kept; comments and unknown fields kept verbatim for forwarding). Unlike `UsageScanner`, it has no skip path. |
-| `openai` | Request → `ToolTurn`; stream frame → frame events; non-stream body → calls; rewriters (D14, D15). |
-| `anthropic` | The same for Messages (D16). Library only. |
-| `turn` | `ToolTurn { definitions, prior_calls, tool_results }`. |
-| `assembler` | `ToolCallAssembler`: per-choice / per-block state machine, holds, limits, release. |
-| `decider` | Object-safe trait (held as `Arc<dyn ToolCallDecider>`): `fn decide<'a>(&'a self, turn: &'a ToolTurn, calls: &'a [ToolCall]) -> BoxFuture<'a, Result<Vec<Decision>, DeciderError>>`, one `Decision` per call, in order. `AllowAll`. |
-| `notice` | The notice text: `[paigasus] tool call "<sanitized name>" was blocked: <reason>`. |
-| `metrics` | Counter names only; the gateway registers them. |
+- `config.rs`: `ToolInterceptionConfig { enabled, max_record_bytes (1 MiB), max_held_bytes
+  (4 MiB), max_hold_secs (300), decide_timeout_secs (5), keepalive_secs (10), on_failure }`.
+  Validation: all non-zero, `max_record_bytes <= max_held_bytes`, `keepalive_secs <
+  max_hold_secs`.
+- `chat.rs`, streaming: the relay's upstream reader feeds raw bytes to `UsageScanner` first,
+  then to `Interceptor::push`. On `Err` it calls `abort()`, emits the actions, and then emits
+  `TERMINAL_SSE_ERROR` (owned by the interceptor when enabled). The relay state owns at most
+  one pending decider future and one `tokio::time::Sleep`. It polls them with the upstream
+  in `select!` (biased: decider, timer, upstream).
+- `chat.rs`, non-stream: `non_stream_usage` reads the original body. Then `intercept_body`
+  runs: allow-all returns the original bytes; a block re-serializes once. For a 2xx body that
+  is malformed, `block` returns 502 `tool-interception-malformed-response` (the charge is
+  settled as for the forwarded body); `allow` forwards it. Bodies over `max_held_bytes` are
+  malformed.
+- `AppState` gets `Arc<dyn ToolCallDecider>`, which is `AllowAll` for now.
+  `DecisionContext` is built in the handler from `CallerContext` and the request ids.
+- Metrics, in `paigasus-observability/src/names.rs` plus `ALL`:
+  - `gateway_tool_interception_records_dropped_total{reason}`: `malformed`, `after_done`,
+    `late_fragment`;
+  - `gateway_tool_interception_decisions_total{decision,basis}`;
+  - `gateway_tool_interception_on_failure_total{code}`;
+  - `gateway_tool_interception_hold_seconds` (histogram).
 
-Dependencies: `serde`, `serde_json` (with `raw_value`), `bytes`, `futures`, `thiserror`,
-`paigasus-kernel`. No tokio, axum or reqwest. Timers are injected (a `Clock` / sleep factory
-argument) so the crate stays runtime-free and tests are deterministic.
+### 5.3 Observe mode (`on_failure = "allow"`)
 
-### 3.3 Gateway wiring
+On overflow or hold timeout, the affected holds are released as they are. Later fragments of
+those calls are forwarded unheld. When such a call completes, the decider is still consulted,
+and the decision is reported with `basis: "on_failure"` and is not enforced. On a malformed
+record while the queue is non-empty, or a canonical-form deviation, the stream switches to
+pass-through: the rest is forwarded as received, and the switch
+is reported once. A decider error or timeout means allow, with `basis: "on_failure"`.
 
-- `config.rs`: `ToolInterceptionConfig { enabled, max_held_bytes, max_record_bytes,
-  max_hold_secs, keepalive_secs, on_failure }` with validation (all non-zero; `keepalive_secs
-  < max_hold_secs`).
-- `chat.rs`: when enabled, parse the request copy into `ToolTurn` (a parse failure here is not
-  a new error: the request is forwarded as today and the turn is empty). Streaming: the
-  relay's output stream goes through the assembler after `UsageScanner` has seen the upstream
-  bytes. Non-stream: the full body goes through the non-stream path before the response is
-  built.
-- `service_info.rs`: `Capabilities { chat_stream, tool_interception }`.
-- The decider is `Arc<dyn …>` in `AppState`, `AllowAll` for now.
+## 6. Error handling
 
-## 4. Data flow (streaming, OpenAI)
+| Case | `block` | `allow` |
+|---|---|---|
+| Malformed record while the queue is non-empty, or a canonical-form deviation | Every open and later hold is blocked (`Malformed`). Later tool-bearing frames are dropped. | Pass-through (§ 5.3). |
+| Record over `max_record_bytes` | As malformed. | As malformed. |
+| Queue over `max_held_bytes` | Open holds blocked (`HoldLimit`); their later fragments dropped. | § 5.3 |
+| Hold over `max_hold_secs` | That hold blocked (`HoldLimit`). | § 5.3 |
+| Decider error, timeout, wrong length | That hold blocked (`DeciderError`). | Allow, `basis: "on_failure"`. |
+| Truncated hold (D10/D11) | Blocked (`Truncated`), then the stream ends as received. | Released as is. |
+| Upstream transport error / error record mid-hold | D17. | D17. |
+| Non-2xx upstream | Forwarded as today, no interception. | Same. |
 
-```
-upstream bytes ──► UsageScanner (billing, unchanged)
-              └──► sse splitter ──► record
-                                     │ parse fails ─► drop + count
-                                     ▼
-                         frame events per choice
-          text-only, no hold open ─► forward original bytes
-          tool-call frame / hold open ─► append to hold (bytes + parsed)
-          finish_reason / [DONE] ─► hold complete ─► decider ─► release
-                                                               │
-                         all allow ─► original held bytes      │
-                         any block ─► rewritten frames + notice│
-                         + `: paigasus-decision` comments ◄────┘
-```
-
-Non-stream: parse body → calls → decider → allow-all returns the original bytes unchanged;
-any block re-serializes the body once.
-
-## 5. Error handling
-
-| Case | Behaviour |
-|---|---|
-| Unparseable record (stream) | Drop, count (D5). |
-| Record over `max_record_bytes` | `on_failure` (D6). With `block`: every open hold is blocked with `HoldLimit`; a record outside any hold is dropped. |
-| Hold over `max_held_bytes` / `max_hold_secs` | `on_failure` for that hold. With `block`, the calls are blocked with `HoldLimit` and later fragments of them are dropped (D7 late-fragment rule). |
-| Decider error | `on_failure`, code `DeciderError`. |
-| Upstream error mid-hold | D13. |
-| Non-stream 2xx body that does not parse | `on_failure`: `block` returns a 502 with a new registry error code `gateway.tool_interception.unparseable_response`; `allow` forwards it. |
-| Non-2xx upstream | Forwarded as today. No interception of error bodies. |
-| Late tool-call fragment after a decision | Dropped, counted (`reason="late_fragment"`). |
-
-## 6. Repo gates the new crate touches
+## 7. Repo gates the new crate touches
 
 - `rs/Cargo.toml` `members`: one literal line (SMA-663 A11).
-- `ci/affected-graph/run.sh`: the `lockfile->all-lint` set.
-- the crate's `moon.yml`: `fileGroups.upstreams` and `dependsOn` per the existing lib crates.
-- `contracts/` error registry `MANIFEST` for the new error code (ADR-0019).
-- Kernel: the new module follows the kernel's `[lints]` (Check 1c) and its publish metadata.
-- `paigasus-gateway-core` is `publish = false`.
-
-## 7. Acceptance criteria
-
-1. With `enabled = false`, every existing gateway test passes unchanged and the relay code
-   path does not call into `paigasus-gateway-core`.
-2. With `enabled = true` and `AllowAll`, D18 holds for every fixture in § 8 and for every
-   byte-boundary split of each.
-3. A blocked call never reaches the client: no byte of its arguments appears in the output,
-   for every fixture and split.
-4. Rewritten responses parse with the official `openai` (Python and Node) and `anthropic`
-   SDKs' stream parsers, and the SDK sees the notice as text and no tool call.
-5. Interleaved indices, `n > 1`, legacy `function_call`, text after calls, unicode-escaped
-   keys, `NaN` records, oversized records and upstream errors mid-hold each have a fixture.
-6. `proptest`: for arbitrary chunking and single-byte mutations of the fixtures, the
-   assembler never panics, never forwards an unparsed record, and never forwards a byte of a
-   blocked call.
-7. Hold limits and keep-alives are tested with an injected clock.
-8. The full gate graph from `CLAUDE.md` passes.
+- `ci/affected-graph/run.sh`: the `lockfile->all-lint` set, plus a new
+  `gateway-core->consumer-tasks` case (a gateway-core source edit selects the gateway's
+  build, test and lint, and `gateway-console-ts:test-e2e`).
+- The crate's `moon.yml`: `fileGroups.upstreams`, `dependsOn` as for the other lib crates. The
+  gateway's `moon.yml` gains the dependency.
+- Error code: `ERROR_REASON_TOOL_INTERCEPTION_MALFORMED_RESPONSE = 313` in
+  `contracts/proto/paigasus/common/v1/error.proto` (gateway range). This also needs:
+  - codegen drift for rs, py and ts;
+  - a `GatewayError` variant;
+  - the `ci/error-registry/check.py` MANIFEST row and its membership test;
+  - the `mapError` mapping in `ts/packages/paigasus-sdk/src/chat.ts`.
+- Metric names: `paigasus-observability` `names.rs` and `ALL` (observability drift).
+- `sha2` is already in `rs/Cargo.lock`; the plan picks the existing version so `:deny` and
+  `:osv` see no new crate.
 
 ## 8. Testing
 
-- Unit tests per module in `paigasus-gateway-core`, with recorded fixtures under
-  `tests/fixtures/{openai,anthropic}/` (real recordings where available; hand-built for
-  interleaving and malformed cases, labelled as such).
-- A split harness that feeds each fixture at every single split point and at random
-  multi-split points.
-- SDK conformance (AC 4): a small script under the crate's `tests/sdk/` run by a moon task in
-  the py and ts workspaces against the rewritten fixture bytes. No network.
-- Gateway integration tests through the real router against the existing mock upstream:
-  enabled/disabled, streaming/non-stream, allow-all identity, a test-only `BlockNamed`
-  decider.
-- T-perf: a criterion-free micro-benchmark (a `#[test] #[ignore]` timing loop) for a 1 MiB
-  text-only stream with interception on vs off, recorded in the PR. No CI threshold.
+### 8.1 Differential oracle (the security proof)
+
+`tests/oracle/` holds Rust models of these client accumulators:
+
+- openai-python `accumulate_delta` / `ChatCompletionStreamState`;
+- openai-node `ChatCompletionStream`;
+- LangChain's chunk merge;
+- anthropic-python `MessageStream`;
+- this repo's `chat-stream.ts` and `paigasus-sdk/src/chat.ts` parsers.
+
+Each model takes the emitted bytes and returns the tool calls that client would run. The
+models cover their framing and JSON quirks: BOM, trim, CR handling, dispatch after `[DONE]`,
+duplicate-key policy, and index handling. Each model cites the pinned SDK version and source
+location it reproduces.
+
+**Property P1 (I1).** For every generated upstream stream and every model M, every call M
+derives from the output equals a decision-`Allow` call by (choice, kind, name, arguments).
+
+**Property P2 (no panic, bounded memory).** The queue never exceeds `max_held_bytes` plus one
+record.
+
+**Generators** are grammar-based. They produce conforming streams and every shape named in
+§ 4.2 and § 4.3: interleaving, `n > 1`, multi-choice chunks, duplicate keys, case-folded keys,
+`__proto__`, float, bool and negative indices, a repeated `name`, BOM, trimmed and unknown
+fields, records after `[DONE]`, a missing final blank line, oversized records, `NaN`, and a
+JSON body on a stream. Each is run under allow-all, block-all and block-by-name deciders,
+with random chunking.
+
+### 8.2 SDK conformance
+
+The Rust models are checked against the real SDKs once, through golden files:
+
+- `paigasus-gateway-core` writes a small set of rewritten golden streams to
+  `tests/golden/*.sse`, gated by a drift test.
+- A pytest module in `py/` runs the pinned `openai` and `anthropic` packages (dev
+  dependencies) and asserts the calls and the notice text. Its moon task's `inputs` include
+  the golden directory, so a change to the golden files selects it.
+- The two first-party TS parsers are tested against the same golden files in their existing
+  vitest suites.
+- openai-node is covered by its Rust model only. It is not added as a dependency.
+
+### 8.3 Other tests
+
+- Unit tests per module. Fixtures go under `tests/fixtures/{openai,anthropic}/`: real
+  recordings where available, hand-built ones labelled as such.
+- Exhaustive single-split runs on fixtures of 4 KiB or less. Random multi-split runs on
+  larger ones.
+- Canary arguments: blocked calls use unique random argument strings. AC 3 checks that the
+  canary is absent from the output.
+- Gateway integration tests through the real router against the mock upstream:
+  enabled/disabled, streaming/non-stream, allow-all identity, the block-by-name decider,
+  upstream error mid-hold, the new 502, and billing unchanged on a block.
+- Time-based behaviour (limits, keep-alive) is tested synchronously through `tick(now)`.
+- T-perf: an `#[ignore]` timing test for 1 MiB of text-only stream, on versus off. The result
+  is recorded in the PR. No CI threshold.
+
+## 9. Acceptance criteria
+
+1. With `enabled = false`, every existing gateway test passes unchanged and the interceptor is
+   never constructed.
+2. With `AllowAll`, D23 holds for every conforming fixture and every split of it. The
+   malformed fixtures are excluded and covered by AC 5.
+3. A blocked call's canary arguments never appear in the output, for every fixture, split and
+   generated stream.
+4. P1 and P2 hold over at least 10 000 generated cases per format in CI.
+5. Each malformed and non-canonical shape in § 4.2 and § 4.3 has a fixture and the § 6
+   behaviour under both `on_failure` values.
+6. The golden files pass the pinned openai and anthropic Python SDKs and both first-party TS
+   parsers (§ 8.2).
+7. A decider returning the wrong number of decisions blocks every call of the hold.
+8. The full gate graph from `CLAUDE.md` passes.
+
+## 10. Spec challenge (2026-11-09) — changelog
+
+The verdict was **NEEDS REWORK**: 7 blockers, 9 majors, 9 minors and 5 questions. Everything
+was folded in except where noted.
+
+- **Blockers folded in:**
+  - the threat model and invariant (§ 2);
+  - the single FIFO with touch sets (D12);
+  - SSE re-framing (D2–D4, D23 redefined as payload identity);
+  - strict JSON (D5);
+  - total classification by a positive allowlist (D6, § 4.2);
+  - canonical assembly (D9, § 4.3);
+  - the decider length check (D18).
+- **Majors folded in:**
+  - the state machine sits before the error conversion, and truncation is not completion
+    (D10, D11, D17);
+  - per-fragment rewrite rules (D20, § 4.4);
+  - the per-stream memory cap (D13);
+  - 300 s plus a separate decider timeout (D14);
+  - the owned decider arguments, `DecisionContext` and `ToolTurn::Unavailable` (D18, D19);
+  - the sans-IO core (D1, § 5.1);
+  - the closed Anthropic allowlist and dispatch on `data.type` (§ 4.2);
+  - the differential oracle and canary-based ACs (§ 8.1, § 9);
+  - the SDK conformance mechanism (§ 8.2);
+  - the capped ASCII header and closed-set notice text (D21, D22).
+- **Kernel placement, changed.** The types stay in gateway-core with `#[non_exhaustive]`, and
+  `DecisionId` waits for SMA-755. This avoids a kernel release now (D1).
+- **Partly adopted: SDK conformance.** The real Python SDKs and the first-party TS parsers are
+  tested. openai-node is modelled in Rust and not added as a dependency, to keep a large npm
+  dependency out of the ts workspace for one test.
+- **Minors folded in:**
+  - the full gate list (§ 7);
+  - `deny_unknown_fields` (D26);
+  - stream-level handling of oversized records (D8);
+  - `Cow` / `RawValue` skeletons (§ 5.1);
+  - the non-stream order and billing (§ 5.2);
+  - the held trailing CR (D2);
+  - the `Other` payload (§ 4.1);
+  - `name_sha256_8` (§ 4.6);
+  - the SDK `mapError` mapping (§ 7).
+- **Questions, answered:**
+  - Observe mode is specified in § 5.3.
+  - The decider is called once per completed hold. SMA-753 orders by completion.
+  - The SDK targets are pinned in § 8.2. Canonical form makes the SDKs agree.
+  - The capability is not exposed (D28).
+  - The caller is not an adversary (T3), which leaves request-side differentials to SMA-752.
