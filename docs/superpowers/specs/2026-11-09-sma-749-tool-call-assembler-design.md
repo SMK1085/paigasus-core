@@ -3,7 +3,7 @@
 - Linear: SMA-749 (spec 1 of the SMA-747 umbrella, "Gateway tool-call interception").
 - ADR: ADR-0027 (Accepted 2026-11-08), decisions (a) one check point, (b) hold only tool
   calls, (c) replace a blocked call with a notice, (e) evaluation in the gateway.
-- Status: revised after the spec challenge (§ 10). Awaiting GATE 1.
+- Status: approved on 2026-11-09, after the spec challenge (§ 10).
 - Scope: a new lib crate `paigasus-gateway-core` (a synchronous, I/O-free state machine), and
   its wiring into `paigasus-gateway`'s `/v1/chat/completions` handler, off by default.
 - Out of scope: the policy decision itself (SMA-752), session history (SMA-753), detectors
