@@ -11,6 +11,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::json::{MAX_ANTHROPIC_INDEX, Malformed, opt_str};
+use crate::protocol::MAX_IDENTIFIER_BYTES;
 use crate::report::{ReportDecision, ReportEntry, notice_line};
 use crate::types::{BlockCode, ToolCall, ToolCallKind};
 
@@ -32,6 +33,7 @@ pub(crate) fn calls(v: &Value) -> Result<(Vec<ToolCall>, Vec<ReportEntry>), Malf
             "tool_use" => {
                 let id = opt_str(o.get("id"), "id")?;
                 let name = o.get("name").and_then(Value::as_str).ok_or(Malformed("name"))?.to_owned();
+                long_check(id.as_deref(), &name)?;
                 let Some(input @ Value::Object(_)) = o.get("input") else { return Err(Malformed("input")) };
                 calls.push(ToolCall {
                     choice: 0,
@@ -45,6 +47,7 @@ pub(crate) fn calls(v: &Value) -> Result<(Vec<ToolCall>, Vec<ReportEntry>), Malf
             _ => {
                 let id = opt_str(o.get("id"), "id")?;
                 let name = o.get("name").and_then(Value::as_str).unwrap_or(ty).to_owned();
+                long_check(id.as_deref(), &name)?;
                 calls.push(ToolCall {
                     choice: 0,
                     position,
@@ -57,6 +60,13 @@ pub(crate) fn calls(v: &Value) -> Result<(Vec<ToolCall>, Vec<ReportEntry>), Malf
         }
     }
     Ok((calls, reports))
+}
+
+fn long_check(id: Option<&str>, name: &str) -> Result<(), Malformed> {
+    if id.is_some_and(|s| s.len() > MAX_IDENTIFIER_BYTES) || name.len() > MAX_IDENTIFIER_BYTES {
+        return Err(Malformed("long_identifier"));
+    }
+    Ok(())
 }
 
 fn server(o: &Map<String, Value>, ty: &str, position: u32) -> ReportEntry {

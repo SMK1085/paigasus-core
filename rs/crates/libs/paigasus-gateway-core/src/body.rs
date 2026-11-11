@@ -312,6 +312,25 @@ mod tests {
     }
 
     #[test]
+    fn identifiers_over_1024_bytes_are_malformed_in_both_formats() {
+        let (ok, long) = ("a".repeat(1024), "a".repeat(1025));
+        let oa = |id: &str, name: &str| {
+            openai(
+                json!({"role":"assistant","content":null,"tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":"{}"}}]}),
+                "tool_calls",
+            )
+        };
+        let an = |id: &str, name: &str| anthropic(json!([{"type":"tool_use","id":id,"name":name,"input":{}}]));
+        let err = |f, b: Vec<u8>| parse_body(f, &b, 1 << 20).err().map(|e| e.0);
+        assert_eq!(err(Format::OpenAiChat, oa(&ok, &ok)), None);
+        assert_eq!(err(Format::AnthropicMessages, an(&ok, &ok)), None);
+        assert_eq!(err(Format::OpenAiChat, oa(&long, "x")), Some("long_identifier"));
+        assert_eq!(err(Format::OpenAiChat, oa("c", &long)), Some("long_identifier"));
+        assert_eq!(err(Format::AnthropicMessages, an(&long, "x")), Some("long_identifier"));
+        assert_eq!(err(Format::AnthropicMessages, an("t", &long)), Some("long_identifier"));
+    }
+
+    #[test]
     fn malformed_anthropic_bodies_are_rejected() {
         for bad in [
             json!({"content":null}),

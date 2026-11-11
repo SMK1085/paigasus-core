@@ -18,7 +18,7 @@ use bytes::Bytes;
 use serde_json::{Value, json};
 
 use crate::json::{MAX_ANTHROPIC_INDEX, Malformed, check_numbers, index_of, opt_str, parse_strict, parse_value_strict};
-use crate::protocol::{Deviation, Frame, Protocol, Step, StepError, Verdict, Verdicts, raw_len};
+use crate::protocol::{Deviation, Frame, MAX_IDENTIFIER_BYTES, Protocol, Step, StepError, Verdict, Verdicts, raw_len};
 use crate::report::{ReportDecision, ReportEntry, notice_line};
 use crate::sse::{self, Record};
 use crate::types::{HoldKey, ToolCall, ToolCallKind};
@@ -55,6 +55,14 @@ struct BlockState {
     /// An observed block outgrew the cap: it keeps nothing and is never decided (§ 5.3, D13).
     overflowed: bool,
     notice_done: bool,
+}
+
+/// A tool-call id or name over `MAX_IDENTIFIER_BYTES` is a deviation.
+fn long_check(id: Option<&str>, name: &str) -> Result<(), Deviation> {
+    if id.is_some_and(|s| s.len() > MAX_IDENTIFIER_BYTES) || name.len() > MAX_IDENTIFIER_BYTES {
+        return Err(Deviation("long_identifier"));
+    }
+    Ok(())
 }
 
 impl BlockState {
@@ -148,7 +156,7 @@ impl AnthropicStream {
         ToolCall {
             choice: 0,
             position: i,
-            id: b.id.clone(),
+            id: b.id.take(),
             name: b.name.clone(),
             kind,
             arguments,
@@ -229,16 +237,19 @@ impl Protocol for AnthropicStream {
                         }
                         b.id = opt_str(cb.get("id"), "id")?;
                         b.name = cb.get("name").and_then(Value::as_str).ok_or(Malformed("name"))?.to_owned();
+                        long_check(b.id.as_deref(), &b.name)?;
                     }
                     Kind::Other => {
                         b.id = opt_str(cb.get("id"), "id")?;
                         b.name = cb.get("name").and_then(Value::as_str).unwrap_or(bty).to_owned();
+                        long_check(b.id.as_deref(), &b.name)?;
                         let raw = Value::Object(cb.clone());
                         b.retained = raw_len(&raw);
                         b.raws.push(raw);
                     }
                     Kind::Server => {
                         let name = cb.get("name").and_then(Value::as_str).unwrap_or(bty).to_owned();
+                        long_check(opt_str(cb.get("id"), "id")?.as_deref(), &name)?;
                         reports.push(ReportEntry {
                             choice: 0,
                             position: i,
@@ -697,6 +708,39 @@ mod tests {
         let (out, _, _) = run(events, Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
         assert!(out.contains("data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"), "{out}");
         assert!(!out.contains("evil"), "{out}");
+    }
+
+    fn start_result(id: &str, name: &str) -> Result<(), &'static str> {
+        let mut p = AnthropicStream::default();
+        match p.step(rec(tool_start(0, id, name)), &Verdicts::new()) {
+            Ok(_) => Ok(()),
+            Err(StepError::Deviation(d)) => Err(d),
+            Err(StepError::Malformed) => Err("malformed"),
+        }
+    }
+
+    #[test]
+    fn identifiers_over_1024_bytes_are_a_deviation() {
+        let (ok, long) = ("a".repeat(1024), "a".repeat(1025));
+        assert_eq!(start_result(&ok, &ok), Ok(()));
+        assert_eq!(start_result(&long, "rm"), Err("long_identifier"));
+        assert_eq!(start_result("t", &long), Err("long_identifier"));
+        let mut p = AnthropicStream::default();
+        let other = json!({"type":"content_block_start","index":0,"content_block":{"type":"computer_v9","id":long,"name":"click"}});
+        assert!(matches!(p.step(rec(other), &Verdicts::new()), Err(StepError::Deviation("long_identifier"))));
+        let mut p = AnthropicStream::default();
+        let server = json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s","name":long,"input":{}}});
+        assert!(matches!(p.step(rec(server), &Verdicts::new()), Err(StepError::Deviation("long_identifier"))));
+    }
+
+    #[test]
+    fn a_completed_block_gives_up_its_id() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        p.step(rec(stop(0)), &v).ok().unwrap();
+        assert!(p.blocks[0].id.is_none());
+        assert_eq!(p.blocks[0].name, "rm");
     }
 
     #[test]

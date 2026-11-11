@@ -511,6 +511,12 @@ edited in place above (D12's reason, § 4.3, § 4.4, § 5.2).
   (`Malformed` in a body). `""` is presented to the decider as `"{}"`. Custom-tool input is
   free text and is not checked. Reason: LangChain and anthropic-python partial-parse truncated
   JSON, so the decider would see different arguments than the client runs.
+- **`long_identifier`.** A tool-call id or name over 1024 bytes is `Deviation("long_identifier")`
+  (`Malformed` in a body), in both protocols: OpenAI at the phase-1 check, Anthropic at
+  `content_block_start` for `tool_use`, server and other blocks. Real ids and names are under
+  100 bytes. A completed block keeps its name for the stream's life, so up to 4096 blocks of
+  near-record-cap names would be retained outside held-byte accounting. A completed Anthropic
+  block also moves its id out instead of cloning it.
 - **`second_finish`.** A second `finish_reason` for one choice is a deviation, for tool-free
   choices too.
 - **Arguments may be `null`** in a fragment (§ 4.3). It adds nothing, as in every SDK.

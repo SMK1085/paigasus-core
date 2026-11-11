@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use crate::json::{check_numbers, parse_value_strict};
 use crate::openai::classify::{Fragment, NameArgs};
-use crate::protocol::{Deviation, raw_len};
+use crate::protocol::{Deviation, MAX_IDENTIFIER_BYTES, raw_len};
 use crate::types::{ToolCall, ToolCallKind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,6 +68,14 @@ fn once(slot: &mut bool, present: bool, why: &'static str) -> Result<(), Deviati
     Ok(())
 }
 
+/// A tool-call id or name over `MAX_IDENTIFIER_BYTES` is a deviation (each arrives at most once).
+fn long_check(id: Option<&str>, name: Option<&str>) -> Result<(), Deviation> {
+    if id.is_some_and(|s| s.len() > MAX_IDENTIFIER_BYTES) || name.is_some_and(|s| s.len() > MAX_IDENTIFIER_BYTES) {
+        return Err(Deviation("long_identifier"));
+    }
+    Ok(())
+}
+
 impl Check {
     fn apply(&mut self, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<(), Deviation> {
         let mixes = (legacy.is_some() && (!frags.is_empty() || !self.calls.is_empty())) || (!frags.is_empty() && self.legacy.is_some());
@@ -75,6 +83,7 @@ impl Check {
             return Err(Deviation("legacy_and_tool_calls"));
         }
         if let Some(l) = legacy {
+            long_check(None, l.name.as_deref())?;
             once(self.legacy.get_or_insert(false), l.name.is_some(), "repeated_name")?;
         }
         for f in frags {
@@ -85,6 +94,7 @@ impl Check {
                 return Err(Deviation("index_gap"));
             }
             let b = &mut self.calls[pos];
+            long_check(f.id.as_deref(), f.function.as_ref().or(f.custom.as_ref()).and_then(|na| na.name.as_deref()))?;
             once(&mut b.id, f.id.is_some(), "repeated_id")?;
             if let Some(t) = &f.ty {
                 if b.ty.is_some() {
@@ -483,6 +493,21 @@ mod tests {
             }
             assert_eq!(got, Some(*want), "{seq:?}");
         }
+    }
+
+    #[test]
+    fn identifiers_over_1024_bytes_are_a_deviation() {
+        let (ok, long) = ("a".repeat(1024), "a".repeat(1025));
+        let one = |id: &str, name: &str| {
+            let mut a = ChoiceAssembly::default();
+            feed(&mut a, &tc(&format!(r#"{{"index":0,"id":"{id}","type":"function","function":{{"name":"{name}"}}}}"#))).map_err(|d| d.0)
+        };
+        assert_eq!(one(&ok, &ok), Ok(()));
+        assert_eq!(one(&long, "x"), Err("long_identifier"));
+        assert_eq!(one("c", &long), Err("long_identifier"));
+        let mut a = ChoiceAssembly::default();
+        let legacy = format!(r#"{{"choices":[{{"index":0,"delta":{{"function_call":{{"name":"{long}"}}}}}}]}}"#);
+        assert_eq!(feed(&mut a, &legacy).map_err(|d| d.0), Err("long_identifier"));
     }
 
     #[test]

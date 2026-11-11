@@ -15,6 +15,11 @@ use crate::types::{BlockCode, Decision, HoldKey, ToolCall};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Deviation(pub &'static str);
 
+/// The longest tool-call id or name accepted, in bytes. Real ids and names are under 100 bytes. A
+/// longer one is `Deviation("long_identifier")`: a completed block or call keeps its name for the
+/// stream's life, so an unbounded one would be retained outside the held-byte accounting.
+pub(crate) const MAX_IDENTIFIER_BYTES: usize = 1024;
+
 /// What a hold's calls are allowed to do once released.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
