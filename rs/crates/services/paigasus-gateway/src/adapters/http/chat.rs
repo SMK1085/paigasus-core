@@ -29,6 +29,7 @@
 //! upstream request (G8 proves this abort).
 
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Extension;
@@ -133,6 +134,16 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
         guard.mark_sent();
     }
 
+    // SMA-749: capture what the decider needs while the request ids still exist (SMA-504 § 4.3:
+    // inside the stream they are `None`). Parsed from the same raw bytes that go upstream.
+    // `None` when interception is off: nothing is parsed or constructed (D27).
+    let interception = state.tool_interception.clone().map(|ti| {
+        let turn = Arc::new(paigasus_gateway_core::parse_request(paigasus_gateway_core::Format::OpenAiChat, &body));
+        let request_id = paigasus_observability::current_ids().map(|ids| ids.request_id.to_string());
+        let ctx = Arc::new(paigasus_gateway_core::DecisionContext::new(caller.principal_prn.clone(), caller.scope_prn.clone(), request_id));
+        (ti, ctx, turn)
+    });
+
     let started = Instant::now();
     // EGRESS HYGIENE: only the raw body bytes cross the boundary — never the caller's headers.
     let result = state.openai.chat_completion(body, stream).await;
@@ -173,12 +184,19 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
                 // runs — hyper polls the `Body::from_stream` future (and therefore
                 // `terminal_sse_error_stream` below) AFTERWARDS, outside the scope. Anything
                 // added inside the stream adapter — a log line, a metric — will see no ids.
-                (
-                    status,
-                    [(header::CONTENT_TYPE, "text/event-stream")],
-                    Body::from_stream(terminal_sse_error_stream(stream, guard.take())),
-                )
-                    .into_response()
+                let body = match interception {
+                    // SMA-749: the interceptor owns the terminal frame from here on (D17).
+                    Some((ti, ctx, turn)) => Body::from_stream(super::interception::intercepted_stream(
+                        stream,
+                        guard.take(),
+                        ti,
+                        ctx,
+                        turn,
+                        Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes()),
+                    )),
+                    None => Body::from_stream(terminal_sse_error_stream(stream, guard.take())),
+                };
+                (status, [(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
             } else {
                 // Non-2xx `stream:true` request: OpenAI answers with a JSON error body (NOT SSE), so
                 // forward it as an error passthrough — no SSE terminal-error wrapping applies.
@@ -270,9 +288,19 @@ struct Relay {
     guard: Option<ChargeGuard>,
 }
 
+/// One upstream chunk, read for billing before anything else sees it (SMA-677, SMA-749 D24).
+/// Without a guard (no `[limits]`) nothing is parsed at all. Shared with the intercepting relay.
+pub(crate) fn feed_scan(scan: &mut UsageScanner, guard: &mut Option<ChargeGuard>, chunk: &[u8]) {
+    if let Some(guard) = guard.as_mut() {
+        scan.feed(chunk);
+        guard.set_stream_progress(scan.completion_records(), scan.reported_total());
+    }
+}
+
 /// SMA-730: the upstream ended or failed. A last record with no blank line after it still
-/// counts. Without a guard the scanner reads nothing, as in the chunk arm.
-fn finish_scan(scan: &mut UsageScanner, guard: &mut Option<ChargeGuard>) {
+/// counts. Without a guard the scanner reads nothing, as in the chunk arm. Shared with the
+/// intercepting relay (SMA-749 D24).
+pub(crate) fn finish_scan(scan: &mut UsageScanner, guard: &mut Option<ChargeGuard>) {
     if let Some(guard) = guard.as_mut() {
         scan.finish();
         guard.set_stream_progress(scan.completion_records(), scan.reported_total());
@@ -303,10 +331,7 @@ fn terminal_sse_error_stream(inner: OpenAiByteStream, guard: Option<ChargeGuard>
                 // Forward each chunk exactly as it arrived (unbuffered). The scanner reads a copy,
                 // and only when a guard exists (no `[limits]`: no parsing at all).
                 Some(Ok(chunk)) => {
-                    if let Some(guard) = guard.as_mut() {
-                        scan.feed(&chunk);
-                        guard.set_stream_progress(scan.completion_records(), scan.reported_total());
-                    }
+                    feed_scan(&mut scan, &mut guard, &chunk);
                     Some((
                         Ok(chunk),
                         Relay {

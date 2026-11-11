@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::limits::build_limits;
@@ -97,6 +98,13 @@ async fn serve() -> anyhow::Result<()> {
         capabilities: Capabilities::from_config(&config),
         limits: limits.limits,
         dpop_enabled: config.dpop.enabled,
+        tool_interception: config.tool_interception.enabled.then(|| {
+            tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
+            Arc::new(ToolInterception {
+                limits: config.tool_interception.limits(),
+                decider: Arc::new(paigasus_gateway_core::AllowAll),
+            })
+        }),
     };
     if config.dpop.enabled {
         tracing::info!("DPoP is on: the protected routes accept Authorization: DPoP with one DPoP proof header; IAM must have authn.dpop on");
