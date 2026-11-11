@@ -5,6 +5,7 @@
 //! upstream bytes, decisions and instants, and performs the [`Action`]s it returns.
 
 mod anthropic;
+mod body;
 mod interceptor;
 mod json;
 mod limits;
@@ -14,7 +15,9 @@ mod report;
 mod sse;
 mod types;
 
+pub use body::{BodyCalls, parse_body};
 pub use interceptor::{Action, DeciderError, Interceptor, Metric};
+pub use json::Malformed;
 pub use limits::{Limits, OnFailure};
 pub use report::{ReportDecision, ReportEntry, header_value, name_sha256_8, notice_line, sanitize_name};
 pub use types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall, ToolCallKind};

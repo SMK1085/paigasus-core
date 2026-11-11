@@ -101,6 +101,13 @@ fn delta(d: &Map<String, Value>) -> Result<(Vec<Fragment>, Option<NameArgs>, boo
 fn fragment(v: &Value) -> Result<Fragment, Malformed> {
     let Value::Object(e) = v else { return Err(Malformed("tool_call")) };
     let index = index_of(e.get("index"), MAX_OPENAI_INDEX)?;
+    fragment_at(v, index)
+}
+
+/// A tool-call entry at a known `index`. A non-stream body has no per-entry `index`, so its
+/// array position stands in (spec § 4.2).
+pub(crate) fn fragment_at(v: &Value, index: u32) -> Result<Fragment, Malformed> {
+    let Value::Object(e) = v else { return Err(Malformed("tool_call")) };
     let id = opt_str(e.get("id"), "id")?;
     let ty = opt_str(e.get("type"), "type")?;
     let function = opt_obj(e.get("function"), "function")?.map(|f| name_args(f, "arguments")).transpose()?;

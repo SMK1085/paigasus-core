@@ -17,7 +17,7 @@ use serde_json::{Map, Number, Value};
 /// it never reaches a metric label with a value from the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("malformed record: {0}")]
-pub(crate) struct Malformed(pub &'static str);
+pub struct Malformed(pub &'static str);
 
 pub(crate) const MAX_OPENAI_INDEX: u64 = 127;
 pub(crate) const MAX_ANTHROPIC_INDEX: u64 = 4095;
