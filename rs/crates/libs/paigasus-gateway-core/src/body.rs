@@ -29,6 +29,11 @@ pub fn parse_body(format: Format, body: &[u8], max_bytes: usize) -> Result<BodyC
         return Err(Malformed("too_large"));
     }
     let value = parse_strict(body)?;
+    // serde_json has no arbitrary_precision: an integer beyond u64/i64 becomes an f64 and is
+    // rounded, so the decider would see a different number than a client that keeps the exact int
+    // (I1). Rejecting every such number up front also makes the single re-serialization in
+    // `apply` exact for every number that remains, so the rewritten body cannot alter a value.
+    check_numbers(&value)?;
     let (calls, unenforceable) = match format {
         Format::OpenAiChat => (openai::body::calls(&value)?, Vec::new()),
         Format::AnthropicMessages => anthropic::body::calls(&value)?,
@@ -36,20 +41,35 @@ pub fn parse_body(format: Format, body: &[u8], max_bytes: usize) -> Result<BodyC
     Ok(BodyCalls { format, value, calls, unenforceable })
 }
 
+/// `Malformed("lossy_number")` for a number outside u64/i64 that is an integral f64 with magnitude of 2^53 or more.
+fn check_numbers(v: &Value) -> Result<(), Malformed> {
+    match v {
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if !n.is_u64() && !n.is_i64() && f.fract() == 0.0 && f.abs() >= 9_007_199_254_740_992.0 => Err(Malformed("lossy_number")),
+            _ => Ok(()),
+        },
+        Value::Array(a) => a.iter().try_for_each(check_numbers),
+        Value::Object(o) => o.values().try_for_each(check_numbers),
+        _ => Ok(()),
+    }
+}
+
 impl BodyCalls {
-    /// The block code of call `i`. A missing decision is a block (D18).
-    fn code(decisions: &[Decision], i: usize) -> Option<BlockCode> {
-        match decisions.get(i) {
-            Some(Decision::Block { code }) => Some(*code),
-            Some(_) => None,
-            None => Some(BlockCode::DeciderError),
+    /// The block code of call `i`. A decision vector of the wrong length blocks every call (D18).
+    fn code(&self, decisions: &[Decision], i: usize) -> Option<BlockCode> {
+        if decisions.len() != self.calls.len() {
+            return Some(BlockCode::DeciderError);
+        }
+        match decisions[i] {
+            Decision::Block { code } => Some(code),
+            _ => None,
         }
     }
 
     /// The rewritten body, or `None` when nothing is blocked and the original bytes go through.
     #[must_use]
     pub fn apply(self, decisions: &[Decision]) -> Option<Vec<u8>> {
-        let codes: Vec<Option<BlockCode>> = (0..self.calls.len()).map(|i| Self::code(decisions, i)).collect();
+        let codes: Vec<Option<BlockCode>> = (0..self.calls.len()).map(|i| self.code(decisions, i)).collect();
         if codes.iter().all(Option::is_none) {
             return None;
         }
@@ -69,7 +89,7 @@ impl BodyCalls {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let code = Self::code(decisions, i);
+                let code = self.code(decisions, i);
                 let decision = if code.is_some() { ReportDecision::Block } else { ReportDecision::Allow };
                 ReportEntry {
                     choice: c.choice,
@@ -329,5 +349,30 @@ mod tests {
             (h[0]["decision"].as_str(), h[1]["decision"].as_str(), h[1]["code"].as_str()),
             (Some("allow"), Some("block"), Some("policy"))
         );
+    }
+
+    #[test]
+    fn a_number_that_serde_would_round_is_malformed() {
+        let huge = r#"{"content":[{"type":"tool_use","id":"t","name":"a","input":{"id":123456789012345678901234567890}}]}"#;
+        assert_eq!(parse_body(Format::AnthropicMessages, huge.as_bytes(), MAX).err(), Some(Malformed("lossy_number")));
+        let other = r#"{"content":[{"type":"computer_call","payload":[1e300]}]}"#;
+        assert_eq!(parse_body(Format::AnthropicMessages, other.as_bytes(), MAX).err(), Some(Malformed("lossy_number")));
+        let ok = r#"{"content":[{"type":"tool_use","id":"t","name":"a","input":{"x":1.5,"n":42,"big":9007199254740993,"u":12345678901234567891}}]}"#;
+        let b = parse_body(Format::AnthropicMessages, ok.as_bytes(), MAX).unwrap();
+        assert!(b.calls[0].arguments.contains("1.5") && b.calls[0].arguments.contains("42"));
+    }
+
+    #[test]
+    fn a_wrong_length_decision_vector_blocks_every_call() {
+        for decisions in [vec![Decision::Allow], vec![Decision::Allow, Decision::Allow, Decision::Allow]] {
+            let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
+            let h: Vec<Value> = serde_json::from_str(&b.report(&decisions, Basis::OnFailure)).unwrap();
+            assert!(h.iter().all(|e| e["decision"] == "block" && e["code"] == "decider-error"), "{h:?}");
+            let out = String::from_utf8(b.apply(&decisions).unwrap()).unwrap();
+            let v: Value = serde_json::from_str(&out).unwrap();
+            let text = v["choices"][0]["message"]["content"].as_str().unwrap();
+            assert!(text.contains("\"read\" was blocked (decider-error)") && text.contains("\"rm\" was blocked (decider-error)"), "{text}");
+            assert!(v["choices"][0]["message"].get("tool_calls").is_none());
+        }
     }
 }
