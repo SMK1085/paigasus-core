@@ -71,7 +71,10 @@ def test_openai_stream_helper_sees_only_allowed_calls(case: Case) -> None:
     client = openai.OpenAI(api_key="x", base_url="http://gateway.test/v1", http_client=httpx2.Client(transport=_transport(body)))
     with client.chat.completions.stream(model="m", messages=[{"role": "user", "content": "hi"}]) as stream:
         final = stream.get_final_completion()
-    calls = sorted((ch.index, tc.function.name, tc.function.arguments) for ch in final.choices for tc in (ch.message.tool_calls or []) if tc.type == "function")
+    tool_calls = [(ch.index, tc) for ch in final.choices for tc in (ch.message.tool_calls or [])]
+    # Every golden call is a function call; a non-function call reaching the client is a leak.
+    assert all(tc.type == "function" for _, tc in tool_calls)
+    calls = sorted((index, tc.function.name, tc.function.arguments) for index, tc in tool_calls)
     assert calls == sorted((a["choice"], a["name"], a["arguments"]) for a in case["allowed"])
     # `choices` is positional in the SDK snapshot, so position == index here.
     texts = {pos: ch.message.content or "" for pos, ch in enumerate(final.choices)}
