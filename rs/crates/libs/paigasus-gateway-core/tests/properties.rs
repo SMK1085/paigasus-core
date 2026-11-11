@@ -87,9 +87,15 @@ proptest! {
         prop_assert!(o.finished);
         check_p1(Format::OpenAiChat, &bytes, &o)?;
         if !o.core_failed() {
-            let derived = support::oracle::run_openai_node(&o.out);
-            prop_assert!(derived.error.is_none(), "openai-node raised: {:?}", derived.error);
-            prop_assert_eq!(derived.calls.len(), o.decided.len(), "every decided call reaches the client");
+            for (model, run) in runners(Format::OpenAiChat) {
+                let derived = run(&o.out);
+                if derived.error.is_some() {
+                    // LangChain raises on any custom tool call, upstream bytes included.
+                    prop_assert!(run(&bytes).error.is_some(), "{} raised: {:?}", model, derived.error);
+                    continue;
+                }
+                prop_assert_eq!(derived.calls.len(), o.decided.len(), "{}: every decided call reaches the client", model);
+            }
         }
     }
 }

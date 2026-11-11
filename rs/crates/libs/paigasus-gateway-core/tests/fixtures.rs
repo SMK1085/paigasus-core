@@ -5,7 +5,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use paigasus_gateway_core::{Format, OnFailure};
+use paigasus_gateway_core::{Format, Metric, OnFailure};
 use support::driver::{DECIDERS, allow_all, block_named, drive, limits};
 use support::oracle::{check_i1, payloads};
 
@@ -113,41 +113,102 @@ fn every_split_point_gives_the_same_output() {
     }
 }
 
+/// One AC 5 row: what the output must and must not hold under each `on_failure`, and whether
+/// the shape is a stream-level failure (a malformed record mid-hold or a canonical-form deviation,
+/// § 6 row 1) rather than a record dropped while nothing is held.
+struct Row {
+    name: &'static str,
+    block_has: &'static [&'static str],
+    block_lacks: &'static [&'static str],
+    allow_has: &'static [&'static str],
+    allow_lacks: &'static [&'static str],
+    stream_failure: bool,
+}
+
+const fn row(
+    name: &'static str,
+    block_has: &'static [&'static str],
+    block_lacks: &'static [&'static str],
+    allow_has: &'static [&'static str],
+    allow_lacks: &'static [&'static str],
+    stream_failure: bool,
+) -> Row {
+    Row {
+        name,
+        block_has,
+        block_lacks,
+        allow_has,
+        allow_lacks,
+        stream_failure,
+    }
+}
+
+const PASS_THROUGH: &str = ": paigasus-interception pass-through";
+
 /// AC 5: each malformed shape shows the § 6 behaviour under both on_failure values.
+///
+/// Under `block`, a stream-level failure blocks every open and later hold (`(malformed)` notice
+/// where a hold was open) and drops later tool-bearing frames, and the stream still ends with its
+/// end marker. Under `allow` it switches to pass-through. A JSON body on a stream holds no SSE
+/// record, so nothing is classified and nothing is forwarded in either mode.
 #[test]
 fn malformed_shapes_follow_section_6() {
-    // (fixture, must appear with block, must appear with allow)
-    let openai: &[(&str, &[&str], &[&str])] = &[
-        ("nan_record", &["\"b\""], &["\"b\""]),
-        ("duplicate_key_mid_hold", &["(malformed)"], &[": paigasus-interception pass-through"]),
-        ("case_folded_key", &["\"ok\""], &["\"ok\""]),
-        ("proto_key", &["\"ok\""], &["\"ok\""]),
-        ("float_index", &["\"ok\""], &["\"ok\""]),
-        ("repeated_name", &["(malformed)"], &[": paigasus-interception pass-through"]),
-        ("oversized", &["(malformed)"], &[": paigasus-interception pass-through"]),
-        ("after_done", &["data: [DONE]"], &["data: [DONE]"]),
-        ("error_mid_hold", &["\"terminal\""], &["\"terminal\""]),
-        ("json_body", &[], &[]),
-        ("lax_line", &["\"ok\""], &["\"ok\""]),
+    let openai: &[Row] = &[
+        row("nan_record", &["\"b\""], &[], &["\"b\""], &[], false),
+        row("duplicate_key_mid_hold", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("case_folded_key", &["\"ok\""], &[], &["\"ok\""], &[], false),
+        row("proto_key", &["\"ok\""], &[], &["\"ok\""], &[], false),
+        row("float_index", &["\"ok\""], &[], &["\"ok\""], &[], false),
+        row("repeated_name", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("oversized", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("after_done", &["data: [DONE]"], &[], &["data: [DONE]"], &[], false),
+        row("error_mid_hold", &["\"terminal\""], &[], &["\"terminal\""], &[], false),
+        row("json_body", &[], &["data:", "blocked_json"], &[], &["data:", "blocked_json"], false),
+        row("lax_line", &["\"ok\""], &[], &["\"ok\""], &[], false),
     ];
-    let anthropic: &[(&str, &[&str], &[&str])] = &[
-        ("event_mismatch", &[], &[": paigasus-interception pass-through"]),
-        ("prefilled_input", &[], &[": paigasus-interception pass-through"]),
-        ("index_reuse", &["(malformed)"], &[": paigasus-interception pass-through"]),
-        ("prefilled_message", &[], &[": paigasus-interception pass-through"]),
+    let anthropic: &[Row] = &[
+        row(
+            "event_mismatch",
+            &["event: message_start", "event: message_stop"],
+            &["content_block", "blocked_hidden"],
+            &[PASS_THROUGH],
+            &[],
+            true,
+        ),
+        row(
+            "prefilled_input",
+            &["event: message_start", "event: message_stop"],
+            &["content_block", "blocked_hidden"],
+            &[PASS_THROUGH],
+            &[],
+            true,
+        ),
+        row("index_reuse", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        // The deviating `message_start` itself is dropped; the stream still ends.
+        row("prefilled_message", &["event: message_stop"], &["message_start", "blocked_hidden"], &[PASS_THROUGH], &[], true),
     ];
     for (format, rel, table) in [(Format::OpenAiChat, "openai/malformed", openai), (Format::AnthropicMessages, "anthropic/malformed", anthropic)] {
         let all = files(rel);
         assert_eq!(all.len(), table.len(), "every {rel} fixture has a row");
-        for (name, with_block, with_allow) in table {
+        for r in table {
+            let name = r.name;
             let bytes = &all.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no fixture {name}")).1;
-            let b = s(&drive(format, limits(OnFailure::Block), &[bytes], &block_named).out);
-            for want in *with_block {
+            let blocked = drive(format, limits(OnFailure::Block), &[bytes], &block_named);
+            let b = s(&blocked.out);
+            for want in r.block_has {
                 assert!(b.contains(want), "{rel}/{name} (block) lacks {want:?}:\n{b}");
             }
+            for bad in r.block_lacks {
+                assert!(!b.contains(bad), "{rel}/{name} (block) holds {bad:?}:\n{b}");
+            }
+            let failed = blocked.metrics.contains(&Metric::OnFailure("malformed"));
+            assert_eq!(failed, r.stream_failure, "{rel}/{name}: stream-level failure");
             let a = s(&drive(format, limits(OnFailure::Allow), &[bytes], &block_named).out);
-            for want in *with_allow {
+            for want in r.allow_has {
                 assert!(a.contains(want), "{rel}/{name} (allow) lacks {want:?}:\n{a}");
+            }
+            for bad in r.allow_lacks {
+                assert!(!a.contains(bad), "{rel}/{name} (allow) holds {bad:?}:\n{a}");
             }
         }
     }

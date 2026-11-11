@@ -5,9 +5,11 @@
 //! accumulation rules, including the quirks that made the canonical form necessary (spec D9).
 //!
 //! A model runs to the end of the stream or to the first point where its SDK raises
-//! (`Run::error`). A client whose SDK raises runs no call: every modelled SDK accumulates a
-//! snapshot and hands the calls over only at the end. `Run::calls` still holds the snapshot at the
-//! point of the raise, for diagnostics.
+//! (`Run::error`). `Run::calls` is the client's snapshot at that point. The SDKs surface calls
+//! while they stream, before any final result: openai-python and openai-node fire
+//! `tool_calls.function.arguments.done` events, and LangChain yields `tool_call_chunks`. So a
+//! client can act on a call before its SDK raises, and the snapshot at a raise is checked too
+//! ([`check_i1`]).
 //!
 //! JSON is parsed with serde_json in every model. serde_json and all four SDKs keep the last of
 //! two duplicate keys. serde_json rejects `NaN`, which Python's `json` accepts, so a Python model
@@ -26,8 +28,10 @@ pub struct ModelCall {
     /// `function`, `custom`, `legacy`, `tool_use`, or `other`.
     pub kind: &'static str,
     pub name: String,
-    /// The raw argument string; for `tool_use`, the compact JSON of the parsed input.
+    /// The raw argument string, or, when `parsed`, the compact JSON of the value the client parsed
+    /// from it (anthropic-python's `input`, LangChain's `args`).
     pub arguments: String,
+    pub parsed: bool,
 }
 
 /// What one client derives from a byte stream.
@@ -95,44 +99,76 @@ pub fn kind_of(k: ToolCallKind) -> &'static str {
 /// A decided call in the models' terms. A `tool_use` call's arguments are compared as parsed JSON,
 /// because anthropic-python hands the client the parsed `input`, not the string.
 pub fn as_model_call(c: &ToolCall) -> ModelCall {
-    let kind = kind_of(c.kind);
-    let arguments = if kind == "tool_use" {
-        serde_json::from_str::<Value>(&c.arguments).map(|v| v.to_string()).unwrap_or_else(|_| c.arguments.clone())
-    } else {
-        c.arguments.clone()
-    };
     ModelCall {
         choice: c.choice,
-        kind,
+        kind: kind_of(c.kind),
         name: c.name.clone(),
-        arguments,
+        arguments: c.arguments.clone(),
+        parsed: false,
     }
+}
+
+/// Whether `p`, a value parsed from a prefix of some JSON text, can be a prefix of `f`, the value
+/// of the whole text: strings and numbers may be cut short, objects and arrays may lack members.
+pub fn json_prefix(p: &Value, f: &Value) -> bool {
+    match (p, f) {
+        (Value::Object(a), Value::Object(b)) => a.iter().all(|(k, v)| b.get(k).is_some_and(|w| json_prefix(v, w))),
+        (Value::Array(a), Value::Array(b)) => a.len() <= b.len() && a.iter().zip(b).all(|(x, y)| json_prefix(x, y)),
+        (Value::String(a), Value::String(b)) => b.starts_with(a.as_str()),
+        (Value::Number(a), Value::Number(b)) => b.to_string().starts_with(&a.to_string()),
+        _ => p == f,
+    }
+}
+
+/// Whether a model call's arguments match a decided call's. The decider sees `{}` for empty
+/// function arguments (the core's rule), so a client's raw `""` matches it. A `parsed` model value
+/// is compared with the parsed decided string. With `partial` (the snapshot at a raise) the model
+/// may hold a prefix of the decided arguments: the client stopped reading inside the call.
+fn arguments_match(mc: &ModelCall, decided: &ModelCall, partial: bool) -> bool {
+    if mc.kind == "other" {
+        return true; // the decided form of kind Other is the raw entry
+    }
+    if mc.parsed {
+        let full = if decided.arguments.is_empty() {
+            Ok(json!({}))
+        } else {
+            serde_json::from_str::<Value>(&decided.arguments)
+        };
+        let (Ok(full), Ok(got)) = (full, serde_json::from_str::<Value>(&mc.arguments)) else {
+            return false;
+        };
+        return if partial { json_prefix(&got, &full) } else { got == full };
+    }
+    if partial {
+        return decided.arguments.starts_with(&mc.arguments);
+    }
+    mc.arguments == decided.arguments || (mc.arguments.is_empty() && decided.arguments == "{}")
 }
 
 /// Invariant I1 as property P1 states it (spec § 2, § 8.1). Every call a client model derives from
 /// `out` matches a distinct call the decider allowed, by choice, kind, name and arguments
 /// (arguments are not compared for kind `other`, whose decided form is the raw entry).
 ///
-/// A model that raises on `out` runs nothing, so it cannot break I1, but it is still an error
-/// unless the interceptor dropped a record or took an `on_failure` path (`core_failed`), or the
-/// client already raises on the upstream bytes `input`: a correct interceptor must not make a
-/// working client fail.
+/// A model that raises on `out` is an error unless the interceptor dropped a record or took an
+/// `on_failure` path (`core_failed`), or the client already raises on the upstream bytes `input`:
+/// a correct interceptor must not make a working client fail. An excused raise is still checked:
+/// the client may have acted on calls before it raised, so every call in its snapshot must be a
+/// decided, allowed call, of which it may hold only a prefix if it raised inside the call.
 pub fn check_i1(format: Format, input: &[u8], out: &[u8], decided: &[(ToolCall, Decision)], core_failed: bool) -> Result<(), String> {
     let allowed: Vec<ModelCall> = decided.iter().filter(|(_, d)| d.is_allow()).map(|(c, _)| as_model_call(c)).collect();
     let show = || String::from_utf8_lossy(out).into_owned();
     for (model, run) in runners(format) {
         let r = run(out);
-        if let Some(e) = &r.error {
-            if core_failed || run(input).error.is_some() {
-                continue;
-            }
-            return Err(format!("{model} raised on the output: {e}\n{}", show()));
-        }
+        let partial = match &r.error {
+            None => false,
+            Some(_) if core_failed || run(input).error.is_some() => true,
+            Some(e) => return Err(format!("{model} raised on the output: {e}\n{}", show())),
+        };
         let mut left = allowed.clone();
         for mc in r.calls {
             let hit = left
                 .iter()
-                .position(|a| a.choice == mc.choice && a.kind == mc.kind && a.name == mc.name && (mc.kind == "other" || a.arguments == mc.arguments));
+                .position(|a| a.choice == mc.choice && a.kind == mc.kind && a.name == mc.name && arguments_match(&mc, a, partial));
             match hit {
                 Some(i) => {
                     left.remove(i);
@@ -462,7 +498,13 @@ fn message_calls(choice: u32, m: &Map<String, Value>) -> Vec<ModelCall> {
             } else {
                 ("other", str_or_empty(e.get("type")), Value::Object(e.clone()).to_string())
             };
-            out.push(ModelCall { choice, kind, name, arguments });
+            out.push(ModelCall {
+                choice,
+                kind,
+                name,
+                arguments,
+                parsed: false,
+            });
         }
     }
     if let Some(Value::Object(fc)) = m.get("function_call") {
@@ -471,6 +513,7 @@ fn message_calls(choice: u32, m: &Map<String, Value>) -> Vec<ModelCall> {
             kind: "legacy",
             name: str_or_empty(fc.get("name")),
             arguments: str_or_empty(fc.get("arguments")),
+            parsed: false,
         });
     }
     out
@@ -717,6 +760,7 @@ pub fn run_openai_node(bytes: &[u8]) -> Run {
                     kind,
                     name: js_string(name),
                     arguments: arguments.clone(),
+                    parsed: false,
                 }),
                 None if error.is_none() => error = Some(format!("OpenAIError: missing tool_calls[].{kind}.name")),
                 None => {}
@@ -731,6 +775,7 @@ pub fn run_openai_node(bytes: &[u8]) -> Run {
                 kind: "legacy",
                 name: fc.get("name").map(js_string).unwrap_or_default(),
                 arguments: fc.get("arguments").filter(|a| !a.is_null()).map(js_string).unwrap_or_default(),
+                parsed: false,
             });
         }
     }
@@ -884,14 +929,22 @@ pub fn run_langchain(bytes: &[u8]) -> Run {
         Ok(())
     };
     let error = step().err();
+    // `AIMessageChunk.init_tool_calls`: empty args are `{}`, others go through
+    // `parse_partial_json`, and only a dict becomes a tool call; the rest are invalid_tool_calls,
+    // which nothing runs.
     let mut calls: Vec<ModelCall> = tcc
         .unwrap_or_default()
         .iter()
-        .map(|e| ModelCall {
-            choice: 0,
-            kind: "function",
-            name: str_or_empty(e.get("name")),
-            arguments: str_or_empty(e.get("args")),
+        .filter_map(|e| {
+            let raw = str_or_empty(e.get("args"));
+            let args = if raw.is_empty() { json!({}) } else { lc_parse_partial_json(&raw)? };
+            args.is_object().then(|| ModelCall {
+                choice: 0,
+                kind: "function",
+                name: str_or_empty(e.get("name")),
+                arguments: args.to_string(),
+                parsed: true,
+            })
         })
         .collect();
     if let Some(Value::Object(fc)) = kwargs.get("function_call") {
@@ -900,9 +953,65 @@ pub fn run_langchain(bytes: &[u8]) -> Run {
             kind: "legacy",
             name: str_or_empty(fc.get("name")),
             arguments: str_or_empty(fc.get("arguments")),
+            parsed: false,
         });
     }
     Run { calls, error }
+}
+
+/// LangChain `parse_partial_json`: a complete value as is; otherwise unterminated strings are
+/// closed and open brackets closed in order, then trailing characters are dropped until the text
+/// parses. A mismatched closing bracket gives `None`. Every candidate the SDK skips with its
+/// decoder-offset shortcut fails the same way, so dropping one character at a time is equivalent.
+/// SOURCE: langchain-core <not pinned: modelled only>, langchain_core/utils/json.py parse_partial_json.
+pub fn lc_parse_partial_json(s: &str) -> Option<Value> {
+    if let Ok(v) = serde_json::from_str(s) {
+        return Some(v);
+    }
+    let (mut new, mut stack): (Vec<String>, Vec<char>) = (Vec::new(), Vec::new());
+    let (mut inside, mut escaped) = (false, false);
+    for ch in s.chars() {
+        let mut out = ch.to_string();
+        if inside {
+            if ch == '"' && !escaped {
+                inside = false;
+            } else if ch == '\n' && !escaped {
+                out = "\\n".to_owned();
+            } else if ch == '\\' {
+                escaped = !escaped;
+            } else {
+                escaped = false;
+            }
+        } else if ch == '"' {
+            inside = true;
+            escaped = false;
+        } else if ch == '{' {
+            stack.push('}');
+        } else if ch == '[' {
+            stack.push(']');
+        } else if ch == '}' || ch == ']' {
+            if stack.last() == Some(&ch) {
+                stack.pop();
+            } else {
+                return None;
+            }
+        }
+        new.push(out);
+    }
+    if inside {
+        if escaped {
+            new.pop();
+        }
+        new.push("\"".to_owned());
+    }
+    let closing: String = stack.iter().rev().collect();
+    while !new.is_empty() {
+        if let Ok(v) = serde_json::from_str(&format!("{}{closing}", new.concat())) {
+            return Some(v);
+        }
+        new.pop();
+    }
+    None
 }
 
 // ---- anthropic-python --------------------------------------------------------------------------
@@ -1124,6 +1233,7 @@ pub fn run_anthropic_python(bytes: &[u8]) -> Run {
                 kind,
                 name: b.get("name").and_then(Value::as_str).unwrap_or(t).to_owned(),
                 arguments,
+                parsed: kind == "tool_use",
             })
         })
         .collect();

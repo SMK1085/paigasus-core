@@ -40,6 +40,11 @@ pub enum Quirk {
     DuplicateChoiceIndex,
     /// The choices are rendered in reverse order, so choice 1 appears first (P-10).
     ReverseChoices,
+    /// One function or legacy call of choice 0 loses the last character of its arguments, so they
+    /// are not one complete JSON value (`incomplete_arguments`).
+    TruncatedArgs,
+    /// One function or legacy call of choice 0 gets two JSON objects as arguments (`{..}{"b":2}`).
+    ConcatenatedObjects,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +132,8 @@ fn quirk_strategy() -> impl Strategy<Value = Quirk> {
         Just(Quirk::UnknownType),
         Just(Quirk::DuplicateChoiceIndex),
         Just(Quirk::ReverseChoices),
+        Just(Quirk::TruncatedArgs),
+        Just(Quirk::ConcatenatedObjects),
     ]
 }
 
@@ -159,9 +166,11 @@ fn has(s: &Scenario, q: Quirk) -> Option<usize> {
 
 /// The chunks of one choice. The first chunk carries `role` (openai-node's `finalChatCompletion`
 /// raises without one), as every real upstream sends it.
-fn choice_records(c: usize, ch: &Choice, interleave: bool, unknown_type: Option<usize>) -> Vec<Value> {
+fn choice_records(c: usize, ch: &Choice, interleave: bool, unknown_type: Option<usize>, bad_args: Option<(Quirk, usize)>) -> Vec<Value> {
     let mut out = vec![chunk(json!([{"index":c,"delta":{"role":"assistant","content":ch.before.clone().unwrap_or_default()}}]))];
     let odd_call = unknown_type.filter(|_| c == 0 && !ch.calls.is_empty()).map(|k| k % ch.calls.len());
+    let json_calls: Vec<usize> = (0..ch.calls.len()).filter(|i| ch.calls[*i].kind != CallKind::Custom).collect();
+    let bad = bad_args.filter(|_| c == 0 && !json_calls.is_empty()).map(|(q, k)| (q, json_calls[k % json_calls.len()]));
     // Fragments per call: the first carries id/type/name.
     let per_call: Vec<Vec<Value>> = ch
         .calls
@@ -176,7 +185,12 @@ fn choice_records(c: usize, ch: &Choice, interleave: bool, unknown_type: Option<
                 "function"
             };
             let (body, args_key) = if call.kind == CallKind::Custom { ("custom", "input") } else { ("function", "arguments") };
-            split(&call.args, call.pieces)
+            let args = match bad {
+                Some((Quirk::TruncatedArgs, b)) if b == i => call.args[..call.args.len() - 1].to_owned(),
+                Some((Quirk::ConcatenatedObjects, b)) if b == i => format!("{}{{\"b\":2}}", call.args),
+                _ => call.args.clone(),
+            };
+            split(&args, call.pieces)
                 .into_iter()
                 .enumerate()
                 .map(|(k, piece)| {
@@ -234,7 +248,13 @@ fn is_tool_bearing(rec: &Value) -> bool {
 
 pub fn render_openai(s: &Scenario) -> Vec<u8> {
     let interleave = has(s, Quirk::Interleave).is_some();
-    let mut per: Vec<Vec<Value>> = s.choices.iter().enumerate().map(|(i, c)| choice_records(i, c, interleave, has(s, Quirk::UnknownType))).collect();
+    let bad_args = s.quirks.iter().copied().find(|(q, _)| matches!(q, Quirk::TruncatedArgs | Quirk::ConcatenatedObjects));
+    let mut per: Vec<Vec<Value>> = s
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(i, c)| choice_records(i, c, interleave, has(s, Quirk::UnknownType), bad_args))
+        .collect();
     if has(s, Quirk::ReverseChoices).is_some() {
         per.reverse();
     }
@@ -286,7 +306,7 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
             Quirk::NaNRecord => insert(&mut lines, format!(r#"{{"x":NaN,"choices":[{{"index":0,"delta":{{"tool_calls":[{}]}}}}]}}"#, hidden_entry(json!(0)))),
             Quirk::EscapedKey => insert(
                 &mut lines,
-                r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_e","type":"function","function":{"name":"blocked_escaped","arguments":"CANARY-esc"}}]}}]}"#.to_owned(),
+                r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool\u005fcalls":[{"index":0,"id":"call_e","type":"function","function":{"name":"blocked_escaped","arguments":"CANARY-esc"}}]}}]}"#.to_owned(),
             ),
             Quirk::Oversized => insert(&mut lines, chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":format!("CANARY-big{}", "x".repeat(5000))}}]}}])).to_string()),
             Quirk::DuplicateChoiceIndex => insert(&mut lines, chunk(json!([{"index":0,"delta":{"content":"x"}},{"index":0,"delta":{"tool_calls":[hidden_entry(json!(0))]}}])).to_string()),
@@ -303,7 +323,7 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
             Quirk::EventLine => lines.insert(pos, "event: message\n".to_owned()),
             Quirk::Bom => prefix = "\u{feff}".to_owned(),
             Quirk::AfterDone => suffix = format!("data: {}\n\n", chunk(json!([{"index":0,"delta":{"tool_calls":[hidden_entry(json!(0))]}}]))),
-            Quirk::NoFinalBlank | Quirk::JsonBody | Quirk::Interleave | Quirk::DropObject | Quirk::MultiChoiceChunk | Quirk::UnknownType | Quirk::ReverseChoices => {}
+            Quirk::NoFinalBlank | Quirk::JsonBody | Quirk::Interleave | Quirk::DropObject | Quirk::MultiChoiceChunk | Quirk::UnknownType | Quirk::ReverseChoices | Quirk::TruncatedArgs | Quirk::ConcatenatedObjects => {}
         }
     }
     let mut body = format!("{prefix}{}data: [DONE]\n\n{suffix}", lines.concat());
