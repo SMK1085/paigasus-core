@@ -123,7 +123,7 @@ mod tests {
         openai(
             json!({"role":"assistant","content":null,"tool_calls":[
                 {"id":"c0","type":"function","function":{"name":"read","arguments":"{}"}},
-                {"id":"c1","type":"function","function":{"name":"rm","arguments":"SECRET"}}
+                {"id":"c1","type":"function","function":{"name":"rm","arguments":"\"SECRET\""}}
             ]}),
             "tool_calls",
         )
@@ -139,7 +139,7 @@ mod tests {
             b.calls.iter().map(|c| (c.position, c.name.as_str(), c.kind)).collect::<Vec<_>>(),
             [(0, "read", ToolCallKind::Function), (1, "rm", ToolCallKind::Function)]
         );
-        assert_eq!(b.calls[1].arguments, "SECRET");
+        assert_eq!(b.calls[1].arguments, "\"SECRET\"");
         assert_eq!(b.calls[1].id.as_deref(), Some("c1"));
     }
 
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn blocking_every_openai_call_sets_stop_and_appends_to_text() {
         let body = openai(
-            json!({"role":"assistant","content":"I will.","tool_calls":[{"id":"c0","type":"function","function":{"name":"rm","arguments":"SECRET"}}]}),
+            json!({"role":"assistant","content":"I will.","tool_calls":[{"id":"c0","type":"function","function":{"name":"rm","arguments":"\"SECRET\""}}]}),
             "tool_calls",
         );
         let out = parse_body(Format::OpenAiChat, &body, MAX).unwrap().apply(&[block()]).unwrap();
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn a_legacy_call_and_array_content_are_handled() {
         let body = openai(
-            json!({"role":"assistant","content":[{"type":"text","text":"x"}],"function_call":{"name":"f","arguments":"SECRET"}}),
+            json!({"role":"assistant","content":[{"type":"text","text":"x"}],"function_call":{"name":"f","arguments":"\"SECRET\""}}),
             "function_call",
         );
         let b = parse_body(Format::OpenAiChat, &body, MAX).unwrap();
@@ -376,7 +376,8 @@ mod tests {
         }
     }
 
-    /// F1: openai-python reads a body as a completion only when `object` says so.
+    /// F1: a body that carries tool calls must say it is a completion. A text-only body is not
+    /// checked, whatever its `finish_reason`.
     #[test]
     fn a_body_with_calls_or_a_finish_needs_the_completion_object() {
         let mut v: Value = serde_json::from_slice(&two_calls()).unwrap();
@@ -385,8 +386,18 @@ mod tests {
         v["object"] = "chat.completion.chunk".into();
         assert_eq!(err_of(Format::OpenAiChat, &v), Some("object"));
         let text = json!({"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]});
-        assert_eq!(err_of(Format::OpenAiChat, &text), Some("object"));
+        assert_eq!(err_of(Format::OpenAiChat, &text), None);
         let bare = json!({"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]});
         assert_eq!(err_of(Format::OpenAiChat, &bare), None);
+    }
+
+    /// Non-stream bodies follow the stream's argument rule through the same function.
+    #[test]
+    fn body_function_arguments_must_be_complete() {
+        let call = |args: &str| openai(json!({"tool_calls":[{"id":"c","type":"function","function":{"name":"rm","arguments":args}}]}), "tool_calls");
+        let v: Value = serde_json::from_slice(&call("{\"a\":")).unwrap();
+        assert_eq!(err_of(Format::OpenAiChat, &v), Some("incomplete_arguments"));
+        let b = parse_body(Format::OpenAiChat, &call(""), MAX).unwrap();
+        assert_eq!(b.calls[0].arguments, "{}");
     }
 }

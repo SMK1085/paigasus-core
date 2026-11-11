@@ -741,7 +741,7 @@ mod tests {
 
     #[test]
     fn done_with_an_open_hold_is_truncated_and_later_records_are_dropped() {
-        let chunks = vec![call(0, 0, "read", "CANARY"), "data: [DONE]\n\n".into(), call(0, 1, "late", "LATE")];
+        let chunks = vec![call(0, 0, "read", "\"CANARY\""), "data: [DONE]\n\n".into(), call(0, 1, "late", "\"LATE\"")];
         let r = run_with(limits(), &chunks, allow);
         assert!(!r.out.contains("CANARY") && !r.out.contains("LATE"));
         assert!(r.out.ends_with("data: [DONE]\n\n"), "{}", r.out);
@@ -754,7 +754,7 @@ mod tests {
         // not become a stream failure that rules on a hold the decider still owns.
         let t0 = Instant::now();
         let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
-        let mut acts = i.push(call(0, 0, "rm", "X1").as_bytes(), t0);
+        let mut acts = i.push(call(0, 0, "rm", "\"X1\"").as_bytes(), t0);
         acts.extend(i.push(finish(0).as_bytes(), t0));
         acts.extend(i.push(b"data: [DONE]\n\n", t0));
         acts.extend(i.push(args(0, 0, &"x".repeat(5000)).as_bytes(), t0));
@@ -789,7 +789,7 @@ mod tests {
     fn abort_drops_the_queue_and_emits_the_terminal_frame() {
         let t0 = Instant::now();
         let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
-        i.push(call(0, 0, "read", "CANARY").as_bytes(), t0);
+        i.push(call(0, 0, "read", "\"CANARY\"").as_bytes(), t0);
         let acts = i.abort();
         assert_eq!(acts, vec![Action::Emit(Bytes::from_static(TERMINAL))]);
         assert!(i.is_finished());
@@ -798,7 +798,7 @@ mod tests {
 
     #[test]
     fn an_upstream_error_record_mid_hold_aborts() {
-        let chunks = vec![call(0, 0, "read", "CANARY"), data(json!({"error":{"message":"boom"}}))];
+        let chunks = vec![call(0, 0, "read", "\"CANARY\""), data(json!({"error":{"message":"boom"}}))];
         let r = run_with(limits(), &chunks, allow);
         assert_eq!(r.out.as_bytes(), TERMINAL);
     }
@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn a_short_decision_vector_blocks_every_call() {
-        let chunks = vec![call(0, 0, "a", "X1"), call(0, 1, "b", "X2"), finish(0)];
+        let chunks = vec![call(0, 0, "a", "\"X1\""), call(0, 1, "b", "\"X2\""), finish(0)];
         let r = run_with(limits(), &chunks, |_| Some(Ok(vec![])));
         assert!(!r.out.contains("X1") && !r.out.contains("X2"), "{}", r.out);
         assert!(r.out.contains("(decider-error)"));
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn a_decider_error_follows_on_failure() {
-        let chunks = vec![call(0, 0, "a", "X1"), finish(0)];
+        let chunks = vec![call(0, 0, "a", "\"X1\""), finish(0)];
         let err = |_: &[ToolCall]| Some(Err(DeciderError { reason: "boom" }));
         let blocked = run_with(limits(), &chunks, err);
         assert!(!blocked.out.contains("X1"));
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn a_malformed_record_mid_hold_blocks_the_stream_or_passes_it_through() {
-        let chunks = vec![call(0, 0, "read", "X1"), "data: {\"a\":1,\"a\":2}\n\n".into(), call(0, 1, "late", "X2"), finish(0)];
+        let chunks = vec![call(0, 0, "read", "\"X1\""), "data: {\"a\":1,\"a\":2}\n\n".into(), call(0, 1, "late", "\"X2\""), finish(0)];
         let blocked = run_with(limits(), &chunks, allow);
         assert!(!blocked.out.contains("X1") && !blocked.out.contains("X2"), "{}", blocked.out);
         assert!(blocked.out.contains("(malformed)"));
@@ -895,7 +895,7 @@ mod tests {
     #[test]
     fn an_oversized_record_is_a_stream_failure() {
         let big = args(0, 0, &"x".repeat(5000));
-        let r = run_with(limits(), &[call(0, 0, "first", "X1"), big], allow);
+        let r = run_with(limits(), &[call(0, 0, "first", "\"X1\""), big], allow);
         assert!(r.counts.contains(&Metric::RecordDropped("oversized")));
         assert!(!r.out.contains("X1"));
     }
@@ -917,7 +917,7 @@ mod tests {
     fn a_hold_past_max_hold_is_blocked_on_tick() {
         let t0 = Instant::now();
         let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
-        i.push(call(0, 0, "read", "X1").as_bytes(), t0);
+        i.push(call(0, 0, "read", "\"X1\"").as_bytes(), t0);
         let acts = i.tick(t0 + Duration::from_secs(301));
         assert!(acts.contains(&Action::Count(Metric::OnFailure("hold_limit"))));
         let acts = i.push(finish(0).as_bytes(), t0 + Duration::from_secs(302));
@@ -929,7 +929,7 @@ mod tests {
     fn a_slow_decider_times_out_on_tick() {
         let t0 = Instant::now();
         let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
-        i.push(call(0, 0, "read", "X1").as_bytes(), t0);
+        i.push(call(0, 0, "read", "\"X1\"").as_bytes(), t0);
         i.push(finish(0).as_bytes(), t0);
         let out = emitted(&i.tick(t0 + Duration::from_secs(6)));
         assert!(out.contains("(decider-error)"), "{out}");

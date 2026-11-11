@@ -98,7 +98,7 @@ write(root / "openai" / "conforming" / "crlf_endings.sse", "".join(d(r) for r in
 write(root / "openai" / "conforming" / "bom_prefixed.sse", BOM + "".join(d(r) for r in one_blocked("CANARY-11")) + DONE)
 write(
     root / "openai" / "conforming" / "escaped_key.sse",
-    d('{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool\\u005fcalls":[{"index":0,"id":"call_e","type":"function","function":{"name":"blocked_rm","arguments":"CANARY-12"}}]}}]}') + d(fin(0)) + DONE,
+    d('{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool\\u005fcalls":[{"index":0,"id":"call_e","type":"function","function":{"name":"blocked_rm","arguments":"{\\"p\\":\\"CANARY-12\\"}"}}]}}]}') + d(fin(0)) + DONE,
 )
 write(root / "openai" / "malformed" / "after_done.sse", "".join(d(r) for r in OPENAI["one_call_allowed"]) + DONE + d(ch([{"index": 0, "delta": {"tool_calls": [HIDDEN]}}])))
 write(root / "openai" / "malformed" / "error_mid_hold.sse", d(call(0, 0, "blocked_rm", "CANARY-err")) + d({"error": {"message": "boom", "type": "server_error"}}))

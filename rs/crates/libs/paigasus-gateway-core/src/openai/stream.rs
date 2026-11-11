@@ -139,7 +139,7 @@ impl Protocol for OpenAiStream {
                     return Err(StepError::Deviation("second_finish"));
                 }
                 if (hold_open || tools) && undecided {
-                    after.as_ref().unwrap_or(asm.state()).finish()?;
+                    asm.check_finish(&cv.fragments, cv.legacy.as_ref(), after.as_ref().unwrap_or(asm.state()))?;
                 }
             }
             planned.push(after);
@@ -388,7 +388,7 @@ mod tests {
     fn blocking_every_call_rewrites_finish_reason_to_stop_and_keeps_role() {
         let records = vec![
             chunk(
-                json!([{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"c0","type":"function","function":{"name":"rm","arguments":"x"}}]},"finish_reason":null}]),
+                json!([{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"c0","type":"function","function":{"name":"rm","arguments":"\"x\""}}]},"finish_reason":null}]),
             ),
             chunk(json!([{"index":0,"delta":{},"finish_reason":"tool_calls"}])),
         ];
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn a_legacy_call_is_blocked_and_finish_reason_function_call_becomes_stop() {
         let records = vec![
-            chunk(json!([{"index":0,"delta":{"role":"assistant","content":"x","function_call":{"name":"f","arguments":"SECRET"}},"finish_reason":null}])),
+            chunk(json!([{"index":0,"delta":{"role":"assistant","content":"x","function_call":{"name":"f","arguments":"\"SECRET\""}},"finish_reason":null}])),
             chunk(json!([{"index":0,"delta":{},"finish_reason":"function_call"}])),
         ];
         let (out, _) = run(&records, |_| Verdict::BlockAll(BlockCode::Policy));

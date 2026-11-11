@@ -6,12 +6,12 @@
 //! the calls a client sees and the canonical rules cannot drift between the stream and the body.
 //! A `Deviation` there is `Malformed` here: a body has no earlier frame to release.
 //!
-//! A body with tool calls or a `finish_reason` must say `"object":"chat.completion"`, by the rule
-//! the stream applies to chunks (`classify::check_object`).
+//! A body with tool calls must say `"object":"chat.completion"`, by the rule the stream applies to
+//! chunks (`classify::check_object`). A text-only body is not checked: it carries no call.
 
 use serde_json::{Map, Value, json};
 
-use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of, opt_obj, opt_str};
+use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of, opt_obj};
 use crate::openai::assembly::{ChoiceAssembly, check_tool_choice};
 use crate::openai::classify::{BODY_OBJECT, Fragment, NameArgs, check_object, fragment_at, name_args};
 use crate::report::notice_line;
@@ -66,7 +66,6 @@ pub(crate) fn calls(v: &Value) -> Result<Vec<ToolCall>, Malformed> {
         seen.push(index);
         let Some(Value::Object(m)) = c.get("message") else { return Err(Malformed("message")) };
         let (frags, legacy) = message_parts(m)?;
-        carries |= opt_str(c.get("finish_reason"), "finish_reason")?.is_some();
         if frags.is_empty() && legacy.is_none() {
             continue;
         }

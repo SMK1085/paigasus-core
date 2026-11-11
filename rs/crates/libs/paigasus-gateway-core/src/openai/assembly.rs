@@ -12,9 +12,15 @@
 //!
 //! Every check runs on a small copy of the state ([`Check`]) before anything is changed, so a
 //! deviation leaves the assembly exactly as it was.
+//!
+//! A function call's arguments are what clients parse, so at completion they must be one complete
+//! JSON value ([`complete_arguments`]), as an Anthropic `tool_use` input must. LangChain
+//! partial-parses a truncated string (`{"cmd":"ls` runs as `{"cmd":"ls"}`) and openai-node can
+//! partial-parse it too, so the decider would see a string the client reads differently.
 
 use serde_json::Value;
 
+use crate::json::parse_strict;
 use crate::openai::classify::{Fragment, NameArgs};
 use crate::protocol::Deviation;
 use crate::types::{ToolCall, ToolCallKind};
@@ -172,6 +178,25 @@ pub(crate) fn check_tool_choice(choice: u32, position: usize, frags: &[Fragment]
     Ok(())
 }
 
+/// The arguments the decider sees for a completed call of `kind`. A function or legacy call's
+/// arguments must be one complete JSON value; an empty string is presented as `{}`, as an empty
+/// Anthropic input is. A custom tool's input is free-form text and is not checked; kind Other
+/// carries its raw entry.
+pub(crate) fn complete_arguments(kind: ToolCallKind, args: String) -> Result<String, Deviation> {
+    match kind {
+        ToolCallKind::Function | ToolCallKind::LegacyFunctionCall => {
+            if args.is_empty() {
+                Ok("{}".to_owned())
+            } else if parse_strict(args.as_bytes()).is_ok() {
+                Ok(args)
+            } else {
+                Err(Deviation("incomplete_arguments"))
+            }
+        }
+        _ => Ok(args),
+    }
+}
+
 impl ChoiceAssembly {
     /// The canonical-form state after these fragments, or the deviation they are. Changes nothing.
     pub(crate) fn check(&self, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<Check, Deviation> {
@@ -228,6 +253,30 @@ impl ChoiceAssembly {
         Ok(())
     }
 
+    /// Phase-1 form of [`ChoiceAssembly::finish`]: whether finishing would succeed once `frags` and
+    /// `legacy` (already accepted by [`ChoiceAssembly::check`], with result `after`) are applied.
+    /// Changes nothing.
+    pub(crate) fn check_finish(&self, frags: &[Fragment], legacy: Option<&NameArgs>, after: &Check) -> Result<(), Deviation> {
+        let kinds = after.finish()?;
+        let pending = |own: Option<&CallBuild>, more: &mut dyn Iterator<Item = &str>| -> String {
+            let mut a = own.map(|b| b.args.clone()).unwrap_or_default();
+            more.for_each(|x| a.push_str(x));
+            a
+        };
+        if after.legacy.is_some() {
+            let args = pending(self.legacy.as_ref(), &mut legacy.and_then(|l| l.args.as_deref()).into_iter());
+            return complete_arguments(ToolCallKind::LegacyFunctionCall, args).map(drop);
+        }
+        for (i, kind) in kinds.into_iter().enumerate() {
+            let mut more = frags
+                .iter()
+                .filter(|f| f.index as usize == i)
+                .filter_map(|f| f.function.as_ref().or(f.custom.as_ref()).and_then(|na| na.args.as_deref()));
+            complete_arguments(kind, pending(self.calls.get(i), &mut more))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn finish(&self, choice: u32) -> Result<Vec<ToolCall>, Deviation> {
         let kinds = self.check.finish()?;
         if let Some(b) = &self.legacy {
@@ -237,7 +286,7 @@ impl ChoiceAssembly {
                 id: None,
                 name: b.name.clone().unwrap_or_default(),
                 kind: ToolCallKind::LegacyFunctionCall,
-                arguments: b.args.clone(),
+                arguments: complete_arguments(ToolCallKind::LegacyFunctionCall, b.args.clone())?,
             }]);
         }
         let mut out = Vec::with_capacity(self.calls.len());
@@ -246,7 +295,7 @@ impl ChoiceAssembly {
                 let name = b.name.clone().or_else(|| b.ty.clone()).unwrap_or_else(|| "unknown".to_owned());
                 (name, serde_json::to_string(&b.raws).expect("a Value array always serializes"))
             } else {
-                (b.name.clone().unwrap_or_default(), b.args.clone())
+                (b.name.clone().unwrap_or_default(), complete_arguments(kind, b.args.clone())?)
             };
             let position = u32::try_from(i).expect("at most 128 calls per choice");
             out.push(ToolCall {
@@ -431,5 +480,53 @@ mod tests {
         assert_eq!(check_tool_choice(0, 2, &f, l.as_ref()).unwrap_err().0, "choice_position");
         // Both rules compose: a later choice at a later position is still a multi-choice call.
         assert_eq!(check_tool_choice(1, 1, &f, l.as_ref()).unwrap_err().0, "multi_choice_tool_calls");
+    }
+
+    #[test]
+    fn function_arguments_must_be_one_complete_json_value() {
+        let cases: &[(&[&str], Result<&str, &str>)] = &[
+            (&[""], Ok("{}")),
+            (&[r#"{\"p\":"#, "1}"], Ok(r#"{"p":1}"#)),
+            (&[r#"{\"p\":"#, "1"], Err("incomplete_arguments")),
+            (&[r#"{\"a\":1}"#, r#"{\"b\":2}"#], Err("incomplete_arguments")),
+            (&[r#"{\"a\":1,\"a\":2}"#], Err("incomplete_arguments")),
+        ];
+        for (pieces, want) in cases {
+            let mut a = ChoiceAssembly::default();
+            for (k, p) in pieces.iter().enumerate() {
+                let e = if k == 0 {
+                    format!(r#"{{"index":0,"id":"c","type":"function","function":{{"name":"x","arguments":"{p}"}}}}"#)
+                } else {
+                    format!(r#"{{"index":0,"function":{{"arguments":"{p}"}}}}"#)
+                };
+                feed(&mut a, &tc(&e)).unwrap();
+            }
+            let got = a.finish(0).map(|c| c[0].arguments.clone()).map_err(|d| d.0);
+            assert_eq!(got.as_deref().map_err(|e| *e), *want, "{pieces:?}");
+        }
+        // The legacy call follows the same rule; a custom tool's free-form input does not.
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, r#"{"choices":[{"index":0,"delta":{"function_call":{"name":"f","arguments":"{"}}}]}"#).unwrap();
+        assert_eq!(a.finish(0).unwrap_err().0, "incomplete_arguments");
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, r#"{"choices":[{"index":0,"delta":{"function_call":{"name":"f"}}}]}"#).unwrap();
+        assert_eq!(a.finish(0).unwrap()[0].arguments, "{}");
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c","type":"custom","custom":{"name":"sql","input":"SELECT ("}}"#)).unwrap();
+        assert_eq!(a.finish(0).unwrap()[0].arguments, "SELECT (");
+    }
+
+    #[test]
+    fn check_finish_agrees_with_finish() {
+        // Phase 1 of the stream step must reject exactly what finish rejects (F3).
+        for (first, last) in [(r#"{\"p\":"#, "1}"), (r#"{\"p\":"#, "1"), ("", ""), ("{}", "{}")] {
+            let mut a = ChoiceAssembly::default();
+            feed(&mut a, &tc(&format!(r#"{{"index":0,"id":"c","type":"function","function":{{"name":"x","arguments":"{first}"}}}}"#))).unwrap();
+            let (f, l) = frags(&tc(&format!(r#"{{"index":0,"function":{{"arguments":"{last}"}}}}"#)));
+            let after = a.check(&f, l.as_ref()).unwrap();
+            let phase1 = a.check_finish(&f, l.as_ref(), &after).map_err(|d| d.0);
+            a.commit(&f, l.as_ref(), after);
+            assert_eq!(phase1, a.finish(0).map(drop).map_err(|d| d.0), "{first:?} + {last:?}");
+        }
     }
 }
