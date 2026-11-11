@@ -6,6 +6,8 @@
 
 mod json;
 mod limits;
+mod openai;
+mod protocol;
 mod report;
 mod sse;
 mod types;
