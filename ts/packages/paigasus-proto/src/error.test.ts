@@ -33,7 +33,7 @@ describe('fromWireReason', () => {
 
   it('rejects malformed input rather than folding it', () => {
     // Parity with the Rust from_wire_reason_rejects_malformed_input test
-    // (rs/crates/libs/paigasus-proto/src/error.rs:289-304). The list is
+    // (rs/crates/libs/paigasus-proto/src/error.rs:304-319). The list is
     // identical, deliberately: a laxer TypeScript parser would accept codes the
     // service can never emit, and would weaken the consumed-side table test in
     // SMA-625.

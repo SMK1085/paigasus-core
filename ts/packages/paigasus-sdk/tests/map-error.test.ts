@@ -182,6 +182,8 @@ describe("arm 3 — the gateway's OpenAI envelope", () => {
     });
     expect(result.reason).toBe(ErrorReason.TOOL_INTERCEPTION_MALFORMED_RESPONSE);
     expect(result.presentation).toBe('degraded');
+    // No `paigasus-retryable` header: whether a retry helps is unknown.
+    expect(result.retryable).toBeNull();
   });
 
   // SMA-677. The gateway's own rate refusal keeps the transport table's `rate-limited`.
