@@ -97,6 +97,8 @@ impl Check {
             long_check(f.id.as_deref(), f.function.as_ref().or(f.custom.as_ref()).and_then(|na| na.name.as_deref()))?;
             once(&mut b.id, f.id.is_some(), "repeated_id")?;
             if let Some(t) = &f.ty {
+                // The type names a bodyless Other call, so it is bounded like an id or a name.
+                long_check(Some(t), None)?;
                 if b.ty.is_some() {
                     return Err(Deviation("repeated_type"));
                 }
@@ -508,6 +510,17 @@ mod tests {
         let mut a = ChoiceAssembly::default();
         let legacy = format!(r#"{{"choices":[{{"index":0,"delta":{{"function_call":{{"name":"{long}"}}}}}}]}}"#);
         assert_eq!(feed(&mut a, &legacy).map_err(|d| d.0), Err("long_identifier"));
+    }
+
+    #[test]
+    fn a_type_over_1024_bytes_is_a_deviation() {
+        let (ok, long) = ("a".repeat(1024), "a".repeat(1025));
+        let one = |ty: &str| {
+            let mut a = ChoiceAssembly::default();
+            feed(&mut a, &tc(&format!(r#"{{"index":0,"id":"c","type":"{ty}"}}"#))).map_err(|d| d.0)
+        };
+        assert_eq!(one(&ok), Ok(()));
+        assert_eq!(one(&long), Err("long_identifier"));
     }
 
     #[test]

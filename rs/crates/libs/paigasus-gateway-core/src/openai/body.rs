@@ -126,3 +126,16 @@ pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<BlockCo
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_bodyless_call_type_over_1024_bytes_is_malformed() {
+        let body = |ty: String| json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"tool_calls": [{"id": "c", "type": ty}]}}]});
+        assert!(calls(&body("a".repeat(1024))).is_ok());
+        assert!(matches!(calls(&body("a".repeat(1025))), Err(Malformed("long_identifier"))));
+    }
+}
