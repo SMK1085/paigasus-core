@@ -4,6 +4,7 @@
 //! A synchronous state machine with no I/O and no async runtime (spec D1). The gateway feeds it
 //! upstream bytes, decisions and instants, and performs the [`Action`]s it returns.
 
+mod anthropic;
 mod json;
 mod limits;
 mod openai;
