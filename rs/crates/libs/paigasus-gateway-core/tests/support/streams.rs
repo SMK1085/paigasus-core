@@ -417,7 +417,7 @@ fn ahas(s: &AnthropicScenario, q: AQuirk) -> Option<usize> {
 }
 
 pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
-    let mut evs: Vec<Value> = vec![json!({"type":"message_start","message":{"id":"msg_g","type":"message","role":"assistant","content":[],"model":"c"}})];
+    let mut evs: Vec<Value> = vec![json!({"type":"message_start","message":{"id":"msg_g","type":"message","role":"assistant","content":[],"model":"c","usage":{"input_tokens":1,"output_tokens":1}}})];
     let tools: Vec<usize> = s.blocks.iter().enumerate().filter(|(_, b)| matches!(b, Block::Tool { .. })).map(|(i, _)| i).collect();
     let truncated = ahas(s, AQuirk::TruncatedArgs).filter(|_| !tools.is_empty()).map(|k| tools[k % tools.len()]);
     // With Interleave, block k's stop is deferred until after block k+1's start.

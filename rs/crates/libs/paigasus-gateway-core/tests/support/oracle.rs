@@ -218,8 +218,8 @@ fn lines(bytes: &[u8]) -> (Vec<&[u8]>, &[u8]) {
 /// line decoded as strict UTF-8 (a bad byte raises), no BOM handling, a dispatch on a blank line
 /// whenever an event name, data, an id or a retry was seen (so `event:` without `data:` dispatches
 /// an empty data string), and no dispatch at the end of the stream without a blank line.
-/// SOURCE: openai-python <pinned in Task 18>, src/openai/_streaming.py SSEDecoder.decode and
-/// _SSELineDecoder; anthropic-python <pinned in Task 18>, src/anthropic/_streaming.py SSEDecoder.
+/// SOURCE: openai-python 3.40.0, src/openai/_streaming.py SSEDecoder.decode and
+/// _SSELineDecoder; anthropic-python 2.3.0, src/anthropic/_streaming.py SSEDecoder.
 pub fn py_events(bytes: &[u8]) -> Result<Vec<Sse>, String> {
     let (ls, rest) = lines(bytes);
     let mut out = Vec::new();
@@ -426,7 +426,7 @@ fn py_add_numbers(a: &Value, b: &Value) -> Option<Value> {
 /// openai-python `accumulate_delta`. `index` and `type` are replaced, strings and numbers added,
 /// dicts merged, indexed lists merged by `list[index]` (Python indexing, `insert` on IndexError).
 /// A value of a different type is kept, not replaced.
-/// SOURCE: openai-python <pinned in Task 18>, src/openai/lib/streaming/_deltas.py accumulate_delta.
+/// SOURCE: openai-python 3.40.0, src/openai/lib/streaming/_deltas.py accumulate_delta.
 fn accumulate_delta(acc: &mut Map<String, Value>, delta: &Map<String, Value>) -> Result<(), String> {
     for (k, dv) in delta {
         if acc.get(k).is_none_or(Value::is_null) {
@@ -541,7 +541,7 @@ fn tool_types(choice: &Value) -> Vec<Option<String>> {
 /// ASSIGNING `choices[choice.index]`; later choices are looked up by LIST POSITION
 /// (`choices[choice.index]`, appending on IndexError); deltas merge by `accumulate_delta`; then
 /// `message.tool_calls[tool_call_chunk.index]` is read for every fragment, outside the try.
-/// SOURCE: openai-python <pinned in Task 18>, src/openai/lib/streaming/chat/_completions.py
+/// SOURCE: openai-python 3.40.0, src/openai/lib/streaming/chat/_completions.py
 /// ChatCompletionStreamState._accumulate_chunk; src/openai/_streaming.py Stream.__stream__.
 pub fn run_openai_python(bytes: &[u8]) -> Run {
     let mut snap: Option<Vec<Value>> = None;
@@ -1153,11 +1153,15 @@ const NOT_RUN_BY_CLIENT: [&str; 5] = ["text", "thinking", "redacted_thinking", "
 /// `message.content` seeds the snapshot. `content_block_start` APPENDS a block whatever its index;
 /// deltas and stops look up `content[event.index]` by Python list indexing. An `input_json_delta`
 /// for a `tool_use` or `server_tool_use` block is appended to a buffer keyed by `event.index` and
-/// partial-parsed into `input`. Nothing stops at `message_stop`.
-/// SOURCE: anthropic-python <pinned in Task 18>, src/anthropic/lib/streaming/_messages.py
+/// partial-parsed into `input`. A `message_delta` writes `snapshot.usage.output_tokens`, so a
+/// `message_start` without a `usage` object makes it raise (checked against 2.3.0, SMA-749
+/// Task 18). Nothing stops at `message_stop`.
+/// SOURCE: anthropic-python 2.3.0, src/anthropic/lib/streaming/_messages.py
 /// accumulate_event; src/anthropic/_streaming.py Stream.__stream__.
 pub fn run_anthropic_python(bytes: &[u8]) -> Run {
     let mut snap: Option<Vec<Map<String, Value>>> = None;
+    // Whether `message_start.message.usage` was an object: the snapshot is built with `construct`, so a missing one is `None`.
+    let mut snap_has_usage = false;
     let mut bufs: BTreeMap<i64, String> = BTreeMap::new();
     let mut step = || -> Result<(), String> {
         for sse in py_events(bytes)? {
@@ -1180,7 +1184,8 @@ pub fn run_anthropic_python(bytes: &[u8]) -> Run {
                     Some(Value::Array(a)) => a.iter().map(|b| obj(Some(b), "content block").cloned()).collect::<Result<_, _>>()?,
                     Some(_) => return Err("TypeError: message.content".into()),
                 };
-                obj(v.get("message"), "event.message")?;
+                let message = obj(v.get("message"), "event.message")?;
+                snap_has_usage = matches!(message.get("usage"), Some(Value::Object(_)));
                 snap = Some(blocks);
                 continue;
             };
@@ -1208,6 +1213,10 @@ pub fn run_anthropic_python(bytes: &[u8]) -> Run {
                 "message_delta" => {
                     obj(v.get("delta"), "event.delta")?;
                     obj(v.get("usage"), "event.usage")?;
+                    // `current_snapshot.usage.output_tokens = event.usage.output_tokens`
+                    if !snap_has_usage {
+                        return Err("AttributeError: 'NoneType' object has no attribute 'output_tokens'".into());
+                    }
                 }
                 _ => {}
             }

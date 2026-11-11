@@ -110,7 +110,7 @@ def ev(v):
     return f"event: {v['type']}\ndata: {dump(v)}\n\n"
 
 
-START = {"type": "message_start", "message": {"id": "msg_fx", "type": "message", "role": "assistant", "content": [], "model": "claude-x", "stop_reason": None}}
+START = {"type": "message_start", "message": {"id": "msg_fx", "type": "message", "role": "assistant", "content": [], "model": "claude-x", "stop_reason": None, "usage": {"input_tokens": 1, "output_tokens": 1}}}
 STOP = {"type": "message_stop"}
 
 

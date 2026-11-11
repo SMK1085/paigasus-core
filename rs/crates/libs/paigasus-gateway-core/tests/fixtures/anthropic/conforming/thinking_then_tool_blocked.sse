@@ -1,5 +1,5 @@
 event: message_start
-data: {"type":"message_start","message":{"id":"msg_fx","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null}}
+data: {"type":"message_start","message":{"id":"msg_fx","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}
 
 event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}

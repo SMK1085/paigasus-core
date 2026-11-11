@@ -1,5 +1,5 @@
 event: message_start
-data: {"type":"message_start","message":{"id":"msg_fx","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null}}
+data: {"type":"message_start","message":{"id":"msg_fx","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}
 
 : paigasus-decision {"v":1,"choice":0,"position":0,"name":"read_file","name_sha256_8":"c9f8123b","decision":"allow","basis":"decider","code":null}
 
