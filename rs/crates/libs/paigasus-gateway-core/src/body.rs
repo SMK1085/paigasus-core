@@ -391,6 +391,30 @@ mod tests {
         assert_eq!(err_of(Format::OpenAiChat, &bare), None);
     }
 
+    /// Argument data is the application's (I-1): PascalCase and `constructor`/`prototype` keys in
+    /// OpenAI arguments or an Anthropic input are calls, not malformed bodies. A duplicate key or
+    /// `__proto__` inside them is still rejected.
+    #[test]
+    fn argument_keys_are_application_data_in_bodies() {
+        let call = |args: &str| openai(json!({"tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":args}}]}), "tool_calls");
+        for args in [r#"{"id":1}"#, r#"{"Id":1}"#, r#"{"Name":"Alice"}"#, r#"{"prototype":"x"}"#, r#"{"Type":"pdf","constructor":1}"#] {
+            let b = parse_body(Format::OpenAiChat, &call(args), MAX).unwrap_or_else(|e| panic!("{args}: {e}"));
+            assert_eq!(b.calls[0].arguments, args);
+        }
+        for args in [r#"{"a":1,"a":2}"#, r#"{"__proto__":1}"#] {
+            assert_eq!(parse_body(Format::OpenAiChat, &call(args), MAX).err().map(|e| e.0), Some("incomplete_arguments"), "{args}");
+        }
+        let anthropic =
+            |input: &str| format!(r#"{{"id":"msg","type":"message","role":"assistant","content":[{{"type":"tool_use","id":"t","name":"f","input":{input}}}],"stop_reason":"tool_use"}}"#).into_bytes();
+        for input in [r#"{"Name":"Alice","Id":1}"#, r#"{"constructor":{"Content":"x"},"prototype":2}"#] {
+            let b = parse_body(Format::AnthropicMessages, &anthropic(input), MAX).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(b.calls[0].arguments, input);
+        }
+        for input in [r#"{"a":1,"a":2}"#, r#"{"__proto__":1}"#] {
+            assert!(parse_body(Format::AnthropicMessages, &anthropic(input), MAX).is_err(), "{input}");
+        }
+    }
+
     /// Non-stream bodies follow the stream's argument rule through the same function.
     #[test]
     fn body_function_arguments_must_be_complete() {

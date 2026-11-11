@@ -20,7 +20,7 @@
 
 use serde_json::Value;
 
-use crate::json::parse_strict;
+use crate::json::parse_value_strict;
 use crate::openai::classify::{Fragment, NameArgs};
 use crate::protocol::Deviation;
 use crate::types::{ToolCall, ToolCallKind};
@@ -187,7 +187,7 @@ pub(crate) fn complete_arguments(kind: ToolCallKind, args: String) -> Result<Str
         ToolCallKind::Function | ToolCallKind::LegacyFunctionCall => {
             if args.is_empty() {
                 Ok("{}".to_owned())
-            } else if parse_strict(args.as_bytes()).is_ok() {
+            } else if parse_value_strict(args.as_bytes()).is_ok() {
                 Ok(args)
             } else {
                 Err(Deviation("incomplete_arguments"))
@@ -370,6 +370,20 @@ mod tests {
         feed(&mut a, r#"{"choices":[{"index":0,"delta":{"function_call":{"arguments":"}"}}}]}"#).unwrap();
         let calls = a.finish(0).unwrap();
         assert_eq!((calls[0].kind, calls[0].id.clone(), calls[0].arguments.as_str()), (ToolCallKind::LegacyFunctionCall, None, "{}"));
+    }
+
+    /// Argument keys are application data (I-1): PascalCase and `constructor` keys pass, while a
+    /// duplicate key or `__proto__` is still a deviation.
+    #[test]
+    fn argument_keys_are_application_data() {
+        for kind in [ToolCallKind::Function, ToolCallKind::LegacyFunctionCall] {
+            for ok in [r#"{"Id":1,"Name":"Alice","Type":"pdf"}"#, r#"{"constructor":"x","prototype":{"Content":1}}"#] {
+                assert_eq!(complete_arguments(kind, ok.to_owned()).as_deref(), Ok(ok), "{ok}");
+            }
+            for bad in [r#"{"a":1,"a":2}"#, r#"{"x":{"__proto__":1}}"#] {
+                assert_eq!(complete_arguments(kind, bad.to_owned()), Err(Deviation("incomplete_arguments")), "{bad}");
+            }
+        }
     }
 
     #[test]

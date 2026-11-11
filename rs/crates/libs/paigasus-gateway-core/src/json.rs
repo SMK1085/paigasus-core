@@ -83,24 +83,49 @@ fn check_key(k: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Parse one record strictly.
+/// Parse one record, body or request strictly. Envelope keys get every rule; the value of a
+/// `DATA_KEYS` key gets the `parse_value_strict` rules.
 pub(crate) fn parse_strict(bytes: &[u8]) -> Result<Value, Malformed> {
+    parse_with(bytes, Mode::Envelope)
+}
+
+/// Parse tool argument data strictly (spec D5): JSON validity, no non-finite number, no duplicate
+/// key and no `__proto__` key, at every depth. The envelope key rules (case-folded classifier keys,
+/// `constructor`, `prototype`) do not apply: the classifiers never read inside argument data, and
+/// a tool may well take an argument called `Id` or `constructor`.
+pub(crate) fn parse_value_strict(bytes: &[u8]) -> Result<Value, Malformed> {
+    parse_with(bytes, Mode::Data)
+}
+
+/// Keys whose value is tool argument or schema data, never envelope: an Anthropic `tool_use`
+/// `input`, a request's `tools[].function.parameters` (and legacy `functions[].parameters`), and an
+/// Anthropic `tools[].input_schema`. Below one of these keys, `parse_strict` applies the
+/// `parse_value_strict` rules. OpenAI arguments are JSON strings, so they never reach this list.
+const DATA_KEYS: &[&str] = &["input", "input_schema", "parameters"];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Envelope,
+    Data,
+}
+
+fn parse_with(bytes: &[u8], mode: Mode) -> Result<Value, Malformed> {
     let mut de = serde_json::Deserializer::from_slice(bytes);
-    let value = Strict.deserialize(&mut de).map_err(|_| Malformed("json"))?;
+    let value = Strict(mode).deserialize(&mut de).map_err(|_| Malformed("json"))?;
     de.end().map_err(|_| Malformed("trailing"))?;
     Ok(value)
 }
 
-struct Strict;
+struct Strict(Mode);
 
 impl<'de> DeserializeSeed<'de> for Strict {
     type Value = Value;
     fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
-        d.deserialize_any(StrictVisitor)
+        d.deserialize_any(StrictVisitor(self.0))
     }
 }
 
-struct StrictVisitor;
+struct StrictVisitor(Mode);
 
 impl<'de> Visitor<'de> for StrictVisitor {
     type Value = Value;
@@ -134,7 +159,7 @@ impl<'de> Visitor<'de> for StrictVisitor {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
         let mut out = Vec::new();
-        while let Some(v) = seq.next_element_seed(Strict)? {
+        while let Some(v) = seq.next_element_seed(Strict(self.0))? {
             out.push(v);
         }
         Ok(Value::Array(out))
@@ -143,11 +168,18 @@ impl<'de> Visitor<'de> for StrictVisitor {
         let mut out = Map::new();
         let mut seen = HashSet::new();
         while let Some(k) = map.next_key::<String>()? {
-            check_key(&k).map_err(de::Error::custom)?;
+            let child = match self.0 {
+                Mode::Envelope => {
+                    check_key(&k).map_err(de::Error::custom)?;
+                    if DATA_KEYS.contains(&k.as_str()) { Mode::Data } else { Mode::Envelope }
+                }
+                Mode::Data if k == "__proto__" => return Err(de::Error::custom("prototype_key")),
+                Mode::Data => Mode::Data,
+            };
             if !seen.insert(k.clone()) {
                 return Err(de::Error::custom("duplicate key"));
             }
-            let v = map.next_value_seed(Strict)?;
+            let v = map.next_value_seed(Strict(child))?;
             out.insert(k, v);
         }
         Ok(Value::Object(out))
@@ -248,6 +280,50 @@ mod tests {
         // There is no substring prefilter (spec D4): the escaped spelling IS the classifier key.
         let v = parse_strict(br#"{"tool\u005fcalls":[1]}"#).unwrap();
         assert_eq!(v, json!({"tool_calls":[1]}));
+    }
+
+    /// Tool argument data is the application's, not the envelope's: a PascalCase or
+    /// `constructor` key there is a legitimate argument, but a duplicate or `__proto__` is not.
+    #[test]
+    fn application_data_skips_the_envelope_key_rules_but_keeps_the_rest() {
+        for ok in [
+            r#"{"Id":1,"Name":"Alice","Type":"pdf","Content":"x","Input":1,"Index":0,"Role":"r","Message":"m"}"#,
+            r#"{"constructor":1,"prototype":{"Tool_Calls":[{"Id":2}]}}"#,
+        ] {
+            assert!(parse_value_strict(ok.as_bytes()).is_ok(), "{ok}");
+        }
+        for bad in [
+            r#"{"a":1,"a":2}"#,
+            r#"{"x":{"Id":1,"Id":2}}"#,
+            r#"{"__proto__":{}}"#,
+            r#"{"x":[{"\u005f_proto__":1}]}"#,
+            r#"{"a":NaN}"#,
+            r#"{"a":1"#,
+            "{} {}",
+        ] {
+            assert!(parse_value_strict(bad.as_bytes()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn argument_subtrees_of_an_envelope_skip_the_key_rules_but_keep_the_rest() {
+        for ok in [
+            r#"{"content":[{"type":"tool_use","input":{"Id":1,"constructor":{"Name":2,"input":{"Type":3}}}}]}"#,
+            r#"{"tools":[{"type":"function","function":{"name":"f","parameters":{"properties":{"Type":{}},"prototype":1}}}]}"#,
+            r#"{"tools":[{"name":"f","input_schema":{"Name":1,"constructor":2}}]}"#,
+        ] {
+            assert!(parse_strict(ok.as_bytes()).is_ok(), "{ok}");
+        }
+        for bad in [
+            r#"{"content":[{"input":{"a":1,"a":2}}]}"#,
+            r#"{"content":[{"input":{"x":{"__proto__":1}}}]}"#,
+            r#"{"tools":[{"input_schema":{"Name":1,"Name":2}}]}"#,
+            r#"{"Input":{}}"#,
+            r#"{"input":{},"constructor":1}"#,
+            r#"{"content":[{"Content":[]}]}"#,
+        ] {
+            assert!(parse_strict(bad.as_bytes()).is_err(), "{bad}");
+        }
     }
 
     #[test]

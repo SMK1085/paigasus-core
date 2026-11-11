@@ -7,7 +7,7 @@ use paigasus_gateway_core::{Format, OnFailure};
 use proptest::prelude::*;
 use support::driver::{DECIDERS, Outcome, allow_all, block_named, cut, drive, limits};
 use support::oracle::{check_i1, runners};
-use support::streams::{Quirk, anthropic_scenario, openai_scenario, render_anthropic, render_openai};
+use support::streams::{AQuirk, Quirk, anthropic_scenario, openai_scenario, render_anthropic, render_openai};
 
 fn show(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -81,13 +81,43 @@ proptest! {
     /// Allow-all with only framing quirks: the decider sees exactly the calls every model derives.
     #[test]
     fn allow_all_models_agree_with_the_decider(mut s in openai_scenario()) {
-        s.quirks.retain(|(q, _)| matches!(q, Quirk::Interleave | Quirk::Comments | Quirk::UnknownFields | Quirk::Bom));
+        s.quirks.retain(|(q, _)| matches!(q, Quirk::Interleave | Quirk::Comments | Quirk::UnknownFields | Quirk::Bom | Quirk::CapitalisedArgKeys));
         let bytes = render_openai(&s);
         let o = drive(Format::OpenAiChat, limits(OnFailure::Block), &cut(&bytes, &s.cuts), &allow_all);
         prop_assert!(o.finished);
         check_p1(Format::OpenAiChat, &bytes, &o)?;
         if !o.core_failed() {
             for (model, run) in runners(Format::OpenAiChat) {
+                let derived = run(&o.out);
+                if derived.error.is_some() {
+                    // LangChain raises on any custom tool call, upstream bytes included.
+                    prop_assert!(run(&bytes).error.is_some(), "{} raised: {:?}", model, derived.error);
+                    continue;
+                }
+                prop_assert_eq!(derived.calls.len(), o.decided.len(), "{}: every decided call reaches the client", model);
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    /// Argument keys are application data (I-1): PascalCase, `constructor` and `prototype` keys
+    /// in arguments never make the core fail, and every model derives exactly the decided calls.
+    #[test]
+    fn capitalised_argument_keys_are_conforming(mut s in openai_scenario(), mut a in anthropic_scenario()) {
+        s.quirks = vec![(Quirk::CapitalisedArgKeys, 0)];
+        for c in s.choices.iter_mut().skip(1) {
+            c.calls.clear(); // later choices' tool calls are unsupported while interception is on
+        }
+        a.quirks = vec![(AQuirk::CapitalisedArgKeys, 0)];
+        for (format, bytes, cuts) in [(Format::OpenAiChat, render_openai(&s), &s.cuts), (Format::AnthropicMessages, render_anthropic(&a), &a.cuts)] {
+            let o = drive(format, limits(OnFailure::Block), &cut(&bytes, cuts), &allow_all);
+            prop_assert!(o.finished);
+            prop_assert!(!o.core_failed(), "the core failed on capitalised argument keys:\n{}", show(&bytes));
+            check_p1(format, &bytes, &o)?;
+            for (model, run) in runners(format) {
                 let derived = run(&o.out);
                 if derived.error.is_some() {
                     // LangChain raises on any custom tool call, upstream bytes included.

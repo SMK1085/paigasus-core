@@ -45,6 +45,9 @@ pub enum Quirk {
     TruncatedArgs,
     /// One function or legacy call of choice 0 gets two JSON objects as arguments (`{..}{"b":2}`).
     ConcatenatedObjects,
+    /// Every call's arguments gain PascalCase, `constructor` and `prototype` keys. They are
+    /// application data, so the stream is conforming (I-1).
+    CapitalisedArgKeys,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +137,7 @@ fn quirk_strategy() -> impl Strategy<Value = Quirk> {
         Just(Quirk::ReverseChoices),
         Just(Quirk::TruncatedArgs),
         Just(Quirk::ConcatenatedObjects),
+        Just(Quirk::CapitalisedArgKeys),
     ]
 }
 
@@ -164,9 +168,17 @@ fn has(s: &Scenario, q: Quirk) -> Option<usize> {
     s.quirks.iter().find(|(x, _)| *x == q).map(|(_, at)| *at)
 }
 
+/// Arguments with keys that the envelope rules would reject (`Id`, `Name`, `constructor`, …).
+pub fn capitalise_args(args: &str) -> String {
+    match args.strip_prefix('{') {
+        Some(rest) => format!(r#"{{"Id":1,"Name":"n","constructor":{{"Type":"t"}},"prototype":[],{rest}"#),
+        None => args.to_owned(),
+    }
+}
+
 /// The chunks of one choice. The first chunk carries `role` (openai-node's `finalChatCompletion`
 /// raises without one), as every real upstream sends it.
-fn choice_records(c: usize, ch: &Choice, interleave: bool, unknown_type: Option<usize>, bad_args: Option<(Quirk, usize)>) -> Vec<Value> {
+fn choice_records(c: usize, ch: &Choice, interleave: bool, unknown_type: Option<usize>, bad_args: Option<(Quirk, usize)>, capitalise: bool) -> Vec<Value> {
     let mut out = vec![chunk(json!([{"index":c,"delta":{"role":"assistant","content":ch.before.clone().unwrap_or_default()}}]))];
     let odd_call = unknown_type.filter(|_| c == 0 && !ch.calls.is_empty()).map(|k| k % ch.calls.len());
     let json_calls: Vec<usize> = (0..ch.calls.len()).filter(|i| ch.calls[*i].kind != CallKind::Custom).collect();
@@ -185,10 +197,11 @@ fn choice_records(c: usize, ch: &Choice, interleave: bool, unknown_type: Option<
                 "function"
             };
             let (body, args_key) = if call.kind == CallKind::Custom { ("custom", "input") } else { ("function", "arguments") };
+            let args = if capitalise { capitalise_args(&call.args) } else { call.args.clone() };
             let args = match bad {
-                Some((Quirk::TruncatedArgs, b)) if b == i => call.args[..call.args.len() - 1].to_owned(),
-                Some((Quirk::ConcatenatedObjects, b)) if b == i => format!("{}{{\"b\":2}}", call.args),
-                _ => call.args.clone(),
+                Some((Quirk::TruncatedArgs, b)) if b == i => args[..args.len() - 1].to_owned(),
+                Some((Quirk::ConcatenatedObjects, b)) if b == i => format!("{args}{{\"b\":2}}"),
+                _ => args,
             };
             split(&args, call.pieces)
                 .into_iter()
@@ -253,7 +266,7 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
         .choices
         .iter()
         .enumerate()
-        .map(|(i, c)| choice_records(i, c, interleave, has(s, Quirk::UnknownType), bad_args))
+        .map(|(i, c)| choice_records(i, c, interleave, has(s, Quirk::UnknownType), bad_args, has(s, Quirk::CapitalisedArgKeys).is_some()))
         .collect();
     if has(s, Quirk::ReverseChoices).is_some() {
         per.reverse();
@@ -323,7 +336,7 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
             Quirk::EventLine => lines.insert(pos, "event: message\n".to_owned()),
             Quirk::Bom => prefix = "\u{feff}".to_owned(),
             Quirk::AfterDone => suffix = format!("data: {}\n\n", chunk(json!([{"index":0,"delta":{"tool_calls":[hidden_entry(json!(0))]}}]))),
-            Quirk::NoFinalBlank | Quirk::JsonBody | Quirk::Interleave | Quirk::DropObject | Quirk::MultiChoiceChunk | Quirk::UnknownType | Quirk::ReverseChoices | Quirk::TruncatedArgs | Quirk::ConcatenatedObjects => {}
+            Quirk::NoFinalBlank | Quirk::JsonBody | Quirk::Interleave | Quirk::DropObject | Quirk::MultiChoiceChunk | Quirk::UnknownType | Quirk::ReverseChoices | Quirk::TruncatedArgs | Quirk::ConcatenatedObjects | Quirk::CapitalisedArgKeys => {}
         }
     }
     let mut body = format!("{prefix}{}data: [DONE]\n\n{suffix}", lines.concat());
@@ -369,6 +382,9 @@ pub enum AQuirk {
     NegativeIndex,
     /// A delta for a block after its stop.
     DeltaAfterStop,
+    /// Every tool's input gains PascalCase, `constructor` and `prototype` keys (application data,
+    /// so conforming; I-1).
+    CapitalisedArgKeys,
 }
 
 pub fn anthropic_scenario() -> impl Strategy<Value = AnthropicScenario> {
@@ -403,6 +419,7 @@ pub fn anthropic_scenario() -> impl Strategy<Value = AnthropicScenario> {
         Just(AQuirk::TruncatedArgs),
         Just(AQuirk::NegativeIndex),
         Just(AQuirk::DeltaAfterStop),
+        Just(AQuirk::CapitalisedArgKeys),
     ];
     (
         prop::collection::vec(block, 0..5),
@@ -437,7 +454,8 @@ pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
                 if let Some(d) = deferred.take() {
                     evs.push(d);
                 }
-                let mut parts = split(args, *pieces);
+                let args = if ahas(s, AQuirk::CapitalisedArgKeys).is_some() { capitalise_args(args) } else { args.clone() };
+                let mut parts = split(&args, *pieces);
                 if truncated == Some(i) {
                     let last = parts.pop().unwrap_or_default();
                     parts.push(last[..last.len().saturating_sub(1)].to_owned());
@@ -527,7 +545,7 @@ pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
             ),
             AQuirk::Bom => prefix = "\u{feff}".to_owned(),
             AQuirk::AfterStop => suffix = format!("event: content_block_start\ndata: {}\n\n", hidden_start(s.blocks.len(), json!({}))),
-            AQuirk::NoEventLines | AQuirk::Interleave | AQuirk::TruncatedArgs => {}
+            AQuirk::NoEventLines | AQuirk::Interleave | AQuirk::TruncatedArgs | AQuirk::CapitalisedArgKeys => {}
         }
     }
     format!("{prefix}{}{suffix}", frames.concat()).into_bytes()

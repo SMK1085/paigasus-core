@@ -17,7 +17,7 @@
 use bytes::Bytes;
 use serde_json::{Value, json};
 
-use crate::json::{MAX_ANTHROPIC_INDEX, Malformed, index_of, opt_str, parse_strict};
+use crate::json::{MAX_ANTHROPIC_INDEX, Malformed, index_of, opt_str, parse_strict, parse_value_strict};
 use crate::protocol::{Deviation, Frame, Protocol, Step, StepError, Verdict, Verdicts};
 use crate::report::{ReportDecision, ReportEntry, notice_line};
 use crate::sse::{self, Record};
@@ -267,7 +267,7 @@ impl Protocol for AnthropicStream {
                 // Check before changing the block: a rejected stop leaves it open, so `closing`
                 // still owes its notice and stop frame.
                 let completes = b.is_hold() && !decided;
-                if completes && b.kind == Kind::ToolUse && !b.args.is_empty() && parse_strict(b.args.as_bytes()).is_err() {
+                if completes && b.kind == Kind::ToolUse && !b.args.is_empty() && parse_value_strict(b.args.as_bytes()).is_err() {
                     return Err(Deviation("incomplete_arguments").into());
                 }
                 b.open = false;
@@ -627,6 +627,14 @@ mod tests {
         assert_eq!(stop_arguments(&[]).unwrap(), "{}");
         assert_eq!(stop_arguments(&["{\"cmd\":\"ls\",\"dry_run\":tru"]), Err("incomplete_arguments"));
         assert_eq!(stop_arguments(&["{\"cmd\":", "\"ls\"}"]).unwrap(), "{\"cmd\":\"ls\"}");
+    }
+
+    #[test]
+    fn tool_use_argument_keys_are_application_data() {
+        let ok = r#"{"Name":"Alice","Id":1,"constructor":{"Type":"pdf"}}"#;
+        assert_eq!(stop_arguments(&[ok]).as_deref(), Ok(ok));
+        assert_eq!(stop_arguments(&[r#"{"a":1,"a":2}"#]), Err("incomplete_arguments"));
+        assert_eq!(stop_arguments(&[r#"{"__proto__":{}}"#]), Err("incomplete_arguments"));
     }
 
     #[test]

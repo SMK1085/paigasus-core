@@ -240,6 +240,25 @@ mod tests {
         assert_eq!(f.tool_results[0].call_id.as_deref(), Some("t1"));
     }
 
+    /// Schemas and prior inputs are application data (I-1): PascalCase and `constructor` keys in
+    /// them do not make the request unreadable. A duplicate key inside them still does.
+    #[test]
+    fn schema_and_input_keys_are_application_data() {
+        let openai = br#"{"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"Id":{"type":"string"},"constructor":{}}}}}],"functions":[{"name":"g","parameters":{"Name":1}}],"messages":[]}"#;
+        assert!(matches!(parse_request(Format::OpenAiChat, openai), ToolTurn::Parsed(f) if f.definitions.len() == 2));
+        let anthropic = br#"{"tools":[{"name":"f","input_schema":{"properties":{"Type":{},"prototype":{}}}}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{"Name":"Alice","constructor":1}}]}]}"#;
+        let ToolTurn::Parsed(f) = parse_request(Format::AnthropicMessages, anthropic) else {
+            panic!("unavailable")
+        };
+        assert_eq!(f.prior_calls[0].arguments, r#"{"Name":"Alice","constructor":1}"#);
+        for bad in [
+            &br#"{"tools":[{"name":"f","input_schema":{"a":1,"a":2}}]}"#[..],
+            br#"{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{"__proto__":1}}]}]}"#,
+        ] {
+            assert!(matches!(parse_request(Format::AnthropicMessages, bad), ToolTurn::Unavailable(_)), "{}", String::from_utf8_lossy(bad));
+        }
+    }
+
     #[test]
     fn a_malformed_request_is_unavailable_never_empty() {
         for bad in [&b"{"[..], br#"{"a":1,"a":2}"#, br#"{"messages":"x"}"#, br#"{"tools":[{"type":"function","function":{"name":1}}]}"#] {
