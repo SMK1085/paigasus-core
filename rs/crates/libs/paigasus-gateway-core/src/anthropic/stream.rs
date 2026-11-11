@@ -4,6 +4,15 @@
 //! The SDK selects records by the `event:` name and decodes them by `data.type`. The gateway
 //! dispatches on `data.type`, rejects a disagreeing `event:`, and always writes the event line
 //! itself, so every client reads the record the gateway classified.
+//!
+//! Blocks must not interleave: a `content_block_start` while an earlier block is still open is a
+//! `Deviation`. langchain-anthropic routes an `input_json_delta` to the most recent start, not to
+//! `event.index`, so an interleaved stream would split a call's arguments differently for the
+//! decider and for that client. Real Anthropic never interleaves.
+//!
+//! A `tool_use` block's arguments are what clients see at its stop: an empty buffer is `{}`, and a
+//! buffer that is not one complete JSON value is a `Deviation`, because anthropic-python
+//! partial-parses it and the client would see different arguments than the decider.
 #![allow(dead_code)] // Removed in Task 8, when the interceptor uses every item.
 
 use bytes::Bytes;
@@ -157,6 +166,9 @@ impl Protocol for AnthropicStream {
                 if i as usize != self.blocks.len() {
                     return Err(Deviation("block_index").into());
                 }
+                if self.blocks.iter().any(|b| b.open) {
+                    return Err(Deviation("block_interleave").into());
+                }
                 let cb = value.get("content_block").and_then(Value::as_object).ok_or(Malformed("content_block"))?;
                 let bty = cb.get("type").and_then(Value::as_str).ok_or(Malformed("block_type"))?;
                 let kind = match bty {
@@ -258,6 +270,13 @@ impl Protocol for AnthropicStream {
                 if b.is_hold() {
                     touches.push(key(i));
                     if !decided {
+                        if b.kind == Kind::ToolUse {
+                            if b.args.is_empty() {
+                                b.args = "{}".to_owned();
+                            } else if parse_strict(b.args.as_bytes()).is_err() {
+                                return Err(Deviation("incomplete_arguments").into());
+                            }
+                        }
                         completed.push((key(i), vec![Self::call_of(b, i)]));
                     }
                 }
@@ -303,7 +322,7 @@ impl Protocol for AnthropicStream {
                     _ => {
                         let Some(b) = self.blocks.get_mut(i as usize) else { return vec![original()] };
                         b.notice_done = true;
-                        vec![text_delta(i, &notice_line(&b.name, code)), original()]
+                        vec![text_delta(i, &notice_line(&b.name, code)), stop_frame(i)]
                     }
                 }
             }
@@ -564,5 +583,108 @@ mod tests {
         };
         let out = String::from_utf8(p.release(frame, &v).concat()).unwrap();
         assert_eq!(out, "event: ping\ndata: {\"type\":\"ping\"}\n\n");
+    }
+
+    fn tool_start(i: u32, id: &str, name: &str) -> Value {
+        json!({"type":"content_block_start","index":i,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}})
+    }
+    fn json_delta(i: u32, pj: &str) -> Value {
+        json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":pj}})
+    }
+    fn stop(i: u32) -> Value {
+        json!({"type":"content_block_stop","index":i})
+    }
+
+    #[test]
+    fn a_start_while_another_block_is_open_is_an_interleave() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        match p.step(rec(tool_start(1, "t1", "ls")), &v) {
+            Err(StepError::Deviation(d)) => assert_eq!(d, "block_interleave"),
+            _ => panic!("expected block_interleave"),
+        }
+    }
+
+    fn stop_arguments(deltas: &[&str]) -> Result<String, &'static str> {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        for d in deltas {
+            p.step(rec(json_delta(0, d)), &v).ok().unwrap();
+        }
+        match p.step(rec(stop(0)), &v) {
+            Ok(Step::Frame { completed, .. }) => Ok(completed[0].1[0].arguments.clone()),
+            Ok(_) => panic!("not a frame"),
+            Err(StepError::Deviation(d)) => Err(d),
+            Err(StepError::Malformed(m)) => Err(m),
+        }
+    }
+
+    #[test]
+    fn tool_use_arguments_follow_what_clients_see() {
+        assert_eq!(stop_arguments(&[]).unwrap(), "{}");
+        assert_eq!(stop_arguments(&["{\"cmd\":\"ls\",\"dry_run\":tru"]), Err("incomplete_arguments"));
+        assert_eq!(stop_arguments(&["{\"cmd\":", "\"ls\"}"]).unwrap(), "{\"cmd\":\"ls\"}");
+    }
+
+    #[test]
+    fn a_blocked_stop_is_the_synthesized_frame_without_upstream_extras() {
+        let mut stop_with_extra = stop(1);
+        stop_with_extra["evil"] = json!("x");
+        let mut events = tool_stream();
+        events[7] = stop_with_extra;
+        let (out, _, _) = run(events, Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
+        assert!(out.contains("data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"), "{out}");
+        assert!(!out.contains("evil"), "{out}");
+    }
+
+    #[test]
+    fn a_blocked_block_does_not_leak_its_id() {
+        let (out, _, _) = run(tool_stream(), Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
+        assert!(!out.contains("toolu_1"), "{out}");
+    }
+
+    #[test]
+    fn stop_reason_stays_tool_use_while_one_block_is_allowed() {
+        let events = vec![
+            tool_start(0, "t0", "ls"),
+            json_delta(0, "{}"),
+            stop(0),
+            tool_start(1, "t1", "rm"),
+            json_delta(1, "{}"),
+            stop(1),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":1}}),
+            json!({"type":"message_stop"}),
+        ];
+        let mut p = AnthropicStream::default();
+        let mut verdicts = Verdicts::new();
+        let mut frames = Vec::new();
+        for e in events {
+            match step_of(&mut p, e, &verdicts) {
+                Step::Frame { frame, completed, .. } => {
+                    for (k, _) in completed {
+                        verdicts.insert(k, if k == HoldKey::Block(1) { Verdict::BlockAll(BlockCode::Policy) } else { Verdict::AllowAll });
+                    }
+                    frames.push(frame);
+                }
+                Step::End(f) | Step::UpstreamError(f) => frames.push(f),
+            }
+        }
+        let out: String = frames.into_iter().flat_map(|f| p.release(f, &verdicts)).map(|b| String::from_utf8(b.to_vec()).unwrap()).collect();
+        assert!(out.contains("\"stop_reason\":\"tool_use\""), "{out}");
+    }
+
+    fn step_of(p: &mut AnthropicStream, e: Value, v: &Verdicts) -> Step {
+        p.step(rec(e), v).ok().expect("canonical event")
+    }
+
+    #[test]
+    fn a_delta_after_the_stop_is_rejected() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})), &v).ok().unwrap();
+        p.step(rec(stop(0)), &v).ok().unwrap();
+        assert!(p.step(rec(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}})), &v).is_err());
     }
 }
