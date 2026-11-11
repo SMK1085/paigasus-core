@@ -94,16 +94,11 @@ failing `--self-test` would be masked by a passing `--check`.
 
 ## The ALLOW table
 
-Four rows today, each stating its reason. Three are an extractor's own definition site:
+Three rows today, each stating its reason and each an extractor's own definition site:
 
 - `paigasus-iam/src/adapters/http/json.rs` — wraps `axum::Json` by construction.
 - `paigasus-iam/src/adapters/http/query.rs` — wraps `axum::Query` by construction.
 - `paigasus-gateway/src/adapters/http/bytes.rs` — wraps `axum::body::Bytes` by construction.
-
-The fourth, `paigasus-gateway/src/adapters/http/interception.rs` (SMA-749), is not a definition site. Its
-relay helpers pass `bytes::Bytes` values (a held body, the terminal frame) between layers. They are
-not request extractors, and no axum handler lives in that file. A handler that moves into it would
-escape this gate, so keep handlers in `chat.rs`.
 
 **ALLOW is per-FILE, not per-row.** An ALLOW row switches the gate off for the **whole file** it
 names — every enabled extractor, not just the one the row's reason mentions — so rows are named
@@ -122,7 +117,7 @@ Two files that are NOT in this table, on purpose:
   handler — a fail-open on the exact target this row was added for.
 
 There is deliberately **no stale-row red** (unlike `ci/error-registry/check.py`'s `MANIFEST`).
-Each of the three definition-site files produces zero parameter-span hits today — every mention of its wrapped
+Each of the three files produces zero parameter-span hits today — every mention of its wrapped
 type lives in an impl-block `where` clause, a turbofish call, or a match arm. Each row is
 *defensive*: the definition site legitimately has to be able to name its wrapped axum type
 anywhere, including in a future helper's parameters, and a gate that red on the file whose job is

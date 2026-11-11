@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! T-perf (spec § 8.3): 1 MiB of text-only stream, interception on, against a plain copy (off).
+//! "off" here is a per-chunk copy baseline; the real off path does no copy at all, so the ratio
+//! overstates the cost of interception. The absolute on-time and MiB/s are the numbers to read.
 //! `#[ignore]`: it measures, it does not gate. Run it and record the numbers in the PR:
 //! `cargo nextest run --release -p paigasus-gateway-core --test perf --run-ignored only --no-capture`
 
@@ -38,9 +40,10 @@ fn one_mib_of_text() {
     let on = t.elapsed();
 
     assert_eq!(copied, body.len());
-    assert!(emitted >= body.len());
+    assert_eq!(emitted, body.len());
+    let mib_s = (body.len() as f64 / (1 << 20) as f64) / on.as_secs_f64().max(1e-9);
     println!(
-        "T-perf: {n} records, {} bytes; off {:?}, on {:?}, ratio {:.1}x",
+        "T-perf: {n} records, {} bytes; off {:?}, on {:?} ({mib_s:.1} MiB/s), ratio {:.1}x",
         body.len(),
         off,
         on,

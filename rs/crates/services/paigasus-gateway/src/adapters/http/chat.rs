@@ -166,8 +166,8 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
             }
             // SMA-749 § 5.2: the guard read the ORIGINAL body above (D24); interception runs after.
             let outcome = match &interception {
-                Some((ti, ctx, turn)) if status.is_success() => super::interception::intercept_body(ti, Arc::clone(ctx), Arc::clone(turn), body).await,
-                _ => super::interception::BodyOutcome::Forward { body, report: None },
+                Some((ti, ctx, turn)) if status.is_success() => super::interception::intercept_body(ti, Arc::clone(ctx), Arc::clone(turn), &body).await,
+                _ => super::interception::BodyOutcome::Forward { rewritten: None, report: None },
             };
             match outcome {
                 super::interception::BodyOutcome::Refuse => {
@@ -175,7 +175,8 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
                     let status = resp.status();
                     (resp, status)
                 }
-                super::interception::BodyOutcome::Forward { body, report } => {
+                super::interception::BodyOutcome::Forward { rewritten, report } => {
+                    let body = rewritten.unwrap_or(body);
                     // Forward the upstream status + body VERBATIM (or rewritten by a block),
                     // including a non-2xx OpenAI error envelope.
                     let mut resp = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
@@ -206,14 +207,7 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
                 // added inside the stream adapter — a log line, a metric — will see no ids.
                 let body = match interception {
                     // SMA-749: the interceptor owns the terminal frame from here on (D17).
-                    Some((ti, ctx, turn)) => Body::from_stream(super::interception::intercepted_stream(
-                        stream,
-                        guard.take(),
-                        ti,
-                        ctx,
-                        turn,
-                        Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes()),
-                    )),
+                    Some((ti, ctx, turn)) => Body::from_stream(super::interception::intercepted_stream(stream, guard.take(), ti, ctx, turn, TERMINAL_SSE_ERROR.as_bytes())),
                     None => Body::from_stream(terminal_sse_error_stream(stream, guard.take())),
                 };
                 (status, [(header::CONTENT_TYPE, "text/event-stream")], body).into_response()

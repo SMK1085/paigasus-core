@@ -52,30 +52,28 @@ pub(crate) fn record(m: Metric) {
 
 /// What the non-stream path does with a body (spec § 5.2).
 pub(crate) enum BodyOutcome {
-    Forward {
-        body: Bytes,
-        report: Option<String>,
-    },
+    /// `rewritten` is `None` when the caller forwards the original body it still owns.
+    Forward { rewritten: Option<Bytes>, report: Option<String> },
     /// D16 block on a body that cannot be checked: the 502 `tool-interception-malformed-response`.
     Refuse,
 }
 
 /// Parse, decide and rewrite one complete 2xx body. The usage read happened on the ORIGINAL body
 /// before this runs (D24), so nothing here changes the charge.
-pub(crate) async fn intercept_body(ti: &ToolInterception, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, body: Bytes) -> BodyOutcome {
+pub(crate) async fn intercept_body(ti: &ToolInterception, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, body: &[u8]) -> BodyOutcome {
     // D15: the body cap is `max_held_bytes` (spec § 5.2).
-    let calls = match parse_body(Format::OpenAiChat, &body, ti.limits.max_held_bytes) {
+    let calls = match parse_body(Format::OpenAiChat, body, ti.limits.max_held_bytes) {
         Ok(c) => c,
         Err(_) => {
             record(Metric::OnFailure(BlockCode::Malformed.as_kebab()));
             return match ti.limits.on_failure {
                 OnFailure::Block => BodyOutcome::Refuse,
-                OnFailure::Allow => BodyOutcome::Forward { body, report: None },
+                OnFailure::Allow => BodyOutcome::Forward { rewritten: None, report: None },
             };
         }
     };
     if calls.calls.is_empty() && calls.unenforceable.is_empty() {
-        return BodyOutcome::Forward { body, report: None };
+        return BodyOutcome::Forward { rewritten: None, report: None };
     }
     let n = calls.calls.len();
     let (decisions, basis) = if n == 0 {
@@ -98,11 +96,8 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, ctx: Arc<DecisionConte
         record(Metric::Decision { decision, basis: basis.as_str() });
     }
     let report = calls.report(&decisions, basis);
-    let body = match calls.apply(&decisions) {
-        None => body,
-        Some(rewritten) => Bytes::from(rewritten),
-    };
-    BodyOutcome::Forward { body, report: Some(report) }
+    let rewritten = calls.apply(&decisions).map(Bytes::from);
+    BodyOutcome::Forward { rewritten, report: Some(report) }
 }
 
 /// The unfold state. It owns the upstream, the charge guard and the pending decision, so a
@@ -214,7 +209,7 @@ pub(crate) fn intercepted_stream(
     ti: Arc<ToolInterception>,
     ctx: Arc<DecisionContext>,
     turn: Arc<ToolTurn>,
-    terminal: Bytes,
+    terminal: &'static [u8],
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     relay(Format::OpenAiChat, inner, guard, ti, ctx, turn, terminal)
 }
@@ -230,10 +225,10 @@ fn relay(
     ti: Arc<ToolInterception>,
     ctx: Arc<DecisionContext>,
     turn: Arc<ToolTurn>,
-    terminal: Bytes,
+    terminal: &'static [u8],
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     let now = Instant::now();
-    let icpt = Interceptor::new(format, ti.limits, terminal, now);
+    let icpt = Interceptor::new(format, ti.limits, Bytes::from_static(terminal), now);
     let sleep = Box::pin(tokio::time::sleep(ti.limits.keepalive));
     let start = Relay {
         inner: Some(inner),
@@ -380,7 +375,7 @@ mod tests {
         let ti = Arc::new(ToolInterception { limits, decider });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
-        let out: Vec<Bytes> = relay(Format::AnthropicMessages, upstream, None, ti, ctx, turn, Bytes::from_static(TERMINAL))
+        let out: Vec<Bytes> = relay(Format::AnthropicMessages, upstream, None, ti, ctx, turn, TERMINAL)
             .map(|r| r.expect("infallible"))
             .collect()
             .await;
@@ -439,7 +434,7 @@ mod tests {
         });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
-        let out: Vec<Bytes> = intercepted_stream(upstream, Some(sent_guard(&store)), ti, ctx, turn, Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes()))
+        let out: Vec<Bytes> = intercepted_stream(upstream, Some(sent_guard(&store)), ti, ctx, turn, TERMINAL_SSE_ERROR.as_bytes())
             .map(|r| r.expect("infallible"))
             .collect()
             .await;
