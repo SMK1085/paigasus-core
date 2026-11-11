@@ -68,7 +68,7 @@ use crate::domain::{CallerContext, Credential};
 /// record; without the blank line the frame would join that partial record and no SSE parser
 /// could read it. After a clean record boundary the extra blank line is an empty record, which
 /// dispatches nothing, so a client that reads a clean boundary sees no change.
-const TERMINAL_SSE_ERROR: &str = "\n\ndata: {\"error\":{\"message\":\"upstream stream error\",\"type\":\"api_error\",\"param\":null,\"code\":\"upstream-error\"}}\n\n";
+pub(crate) const TERMINAL_SSE_ERROR: &str = "\n\ndata: {\"error\":{\"message\":\"upstream stream error\",\"type\":\"api_error\",\"param\":null,\"code\":\"upstream-error\"}}\n\n";
 
 /// Proxy a chat-completion request to the OpenAI upstream.
 ///

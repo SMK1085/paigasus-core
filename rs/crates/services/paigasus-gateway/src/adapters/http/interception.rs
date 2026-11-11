@@ -304,7 +304,7 @@ mod tests {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
-        record(Metric::RecordDropped("malformed"));
+        record(Metric::RecordDropped(BlockCode::Malformed.as_kebab()));
         record(Metric::Decision { decision: "block", basis: "decider" });
         record(Metric::OnFailure("hold_limit"));
         record(Metric::HoldSeconds(0.25));
@@ -328,7 +328,7 @@ mod tests {
                 (names::GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL.to_owned(), labels(&[("code", "hold_limit")]), DebugValue::Counter(1)),
                 (
                     names::GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL.to_owned(),
-                    labels(&[("reason", "malformed")]),
+                    labels(&[("reason", BlockCode::Malformed.as_kebab())]),
                     DebugValue::Counter(1)
                 ),
             ]
@@ -426,9 +426,9 @@ mod tests {
     /// frame is the only one.
     #[tokio::test]
     async fn a_transport_error_after_an_unterminated_usage_record_charges_the_reported_tokens() {
+        use crate::adapters::http::chat::TERMINAL_SSE_ERROR;
         use crate::adapters::http::chat::tests::{UNTERMINATED_USAGE, admit, make_reqwest_error, sent_guard};
         use crate::test_support::ScriptedStore;
-        const UPSTREAM_ERROR: &[u8] = b"\n\ndata: {\"error\":{\"code\":\"upstream-error\"}}\n\n";
         let store = ScriptedStore::new(admit);
         let upstream = futures::stream::iter(vec![Ok(Bytes::from_static(UNTERMINATED_USAGE))])
             .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
@@ -439,12 +439,12 @@ mod tests {
         });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
-        let out: Vec<Bytes> = intercepted_stream(upstream, Some(sent_guard(&store)), ti, ctx, turn, Bytes::from_static(UPSTREAM_ERROR))
+        let out: Vec<Bytes> = intercepted_stream(upstream, Some(sent_guard(&store)), ti, ctx, turn, Bytes::from_static(TERMINAL_SSE_ERROR.as_bytes()))
             .map(|r| r.expect("infallible"))
             .collect()
             .await;
         let text = String::from_utf8(out.concat()).expect("utf-8");
-        assert_eq!(text.matches("\"code\":\"upstream-error\"").count(), 1, "{text}");
+        assert_eq!(text.matches(TERMINAL_SSE_ERROR.trim()).count(), 1, "{text}");
         assert_eq!(store.charges(), vec![7]);
     }
 
@@ -474,7 +474,10 @@ mod tests {
         )
         .await
         .expect("the stream ends");
-        assert!(text.contains(r#""name":"hang_x","name_sha256_8""#) && text.contains(r#""code":"decider-error""#), "{text}");
+        assert!(
+            text.contains(r#""name":"hang_x","name_sha256_8""#) && text.contains(&format!(r#""code":"{}""#, BlockCode::DeciderError.as_kebab())),
+            "{text}"
+        );
         assert!(text.contains(r#""name":"read_file","name_sha256_8""#), "{text}");
         let read_file_report = text
             .lines()
