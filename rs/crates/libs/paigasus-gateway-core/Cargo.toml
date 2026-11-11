@@ -11,7 +11,8 @@ publish = false
 # `Bytes` is the body currency at the gateway boundary (`axum::body::Bytes` is this type).
 bytes = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# Rewritten frames keep the upstream key order, deterministic across builds.
+serde_json = { workspace = true, features = ["preserve_order"] }
 # `name_sha256_8` in decision reports (spec § 4.6). The same major as paigasus-iam-core's line,
 # already in rs/Cargo.lock.
 sha2 = "0.11"

@@ -429,12 +429,12 @@ mod tests {
         let (out, _, _) = run(tool_stream(), Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
         assert!(!out.contains("SECRET"), "{out}");
         assert!(!out.contains("\"type\":\"tool_use\""), "{out}");
-        assert!(out.contains(r#"{"content_block":{"text":"","type":"text"},"index":1,"type":"content_block_start"}"#), "{out}");
+        assert!(out.contains(r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#), "{out}");
         assert!(out.contains(r#"[paigasus] tool call \"rm\" was blocked (policy)."#));
         assert!(out.contains("\"stop_reason\":\"end_turn\""));
         // The notice delta comes before the block's stop.
         let notice = out.find("[paigasus]").unwrap();
-        let stop1 = out.find(r#"{"index":1,"type":"content_block_stop"}"#).unwrap();
+        let stop1 = out.find(r#"{"type":"content_block_stop","index":1}"#).unwrap();
         assert!(notice < stop1);
         for frame in out.split("\n\n").filter(|f| !f.is_empty()) {
             let mut lines = frame.lines();
