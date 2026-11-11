@@ -12,6 +12,9 @@ publish = false
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `name_sha256_8` in decision reports (spec § 4.6). The same major as paigasus-iam-core's line,
+# already in rs/Cargo.lock.
+sha2 = "0.11"
 thiserror = { workspace = true }
 
 [lints]
