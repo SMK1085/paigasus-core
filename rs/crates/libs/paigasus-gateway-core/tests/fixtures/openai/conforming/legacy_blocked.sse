@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-fx","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","system_fingerprint":"fp_fx","choices":[{"index":0,"delta":{"role":"assistant","content":null,"function_call":{"name":"blocked_rm","arguments":"{\"p\":\"CANARY-5\"}"}},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fx","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","system_fingerprint":"fp_fx","choices":[{"index":0,"delta":{},"finish_reason":"function_call"}]}
+
+data: [DONE]
+

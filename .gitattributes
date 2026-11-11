@@ -26,3 +26,9 @@ rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm.d.ts text eol=lf linguist
 # `moon run paigasus-kernel-ts:generate-napi-glue`, and commit its result.
 rs/crates/bindings/paigasus-node-bindings/index.js text eol=lf linguist-generated=true
 rs/crates/bindings/paigasus-node-bindings/index.d.ts text eol=lf linguist-generated=true
+#
+# SMA-749. The interceptor's SSE fixtures and goldens are compared byte-exact, and one fixture is
+# CRLF on purpose. With `core.autocrlf=input` git would commit it as LF and the CRLF case would
+# silently disappear, so neither directory gets any end-of-line conversion.
+rs/crates/libs/paigasus-gateway-core/tests/fixtures/**/*.sse -text
+rs/crates/libs/paigasus-gateway-core/tests/golden/** -text

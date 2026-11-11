@@ -18,5 +18,10 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 sha2 = "0.11"
 thiserror = { workspace = true }
 
+[dev-dependencies]
+# The differential oracle's hostile-stream generators (spec § 8.1). `bytes` and `serde_json` are
+# already normal dependencies, which integration tests can use.
+proptest = { workspace = true }
+
 [lints]
 workspace = true
