@@ -78,6 +78,8 @@ ALLOW = (
      "the extractor's own definition site — it wraps `axum::Query` by construction"),
     ("rs/crates/services/paigasus-gateway/src/adapters/http/bytes.rs",
      "the extractor's own definition site — it wraps `axum::body::Bytes` by construction"),
+    ("rs/crates/services/paigasus-gateway/src/adapters/http/interception.rs",
+     "SMA-749 relay helpers; `Bytes` is the body/terminal-frame value they pass between layers, not an axum extractor; no handler lives in this file"),
 )
 
 
