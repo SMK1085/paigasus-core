@@ -62,6 +62,7 @@ const PROTOTYPE_KEYS: &[&str] = &["__proto__", "constructor", "prototype"];
 fn fold(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {
+            '\u{0130}' | '\u{0131}' => 'i'.to_lowercase(),
             '\u{017F}' => 's'.to_lowercase(),
             '\u{212A}' => 'k'.to_lowercase(),
             c => c.to_lowercase(),
@@ -205,7 +206,18 @@ mod tests {
 
     #[test]
     fn case_folded_classifier_keys_are_malformed() {
-        for k in ["Tool_Calls", "TOOL_CALLS", "tool_callſ", "Delta", "Index", "\u{212A}ey_not_a_classifier_key"] {
+        for k in [
+            "Tool_Calls",
+            "TOOL_CALLS",
+            "tool_callſ",
+            "Delta",
+            "Index",
+            "ındex",
+            "İndex",
+            "tool_call_ıd",
+            "choıces",
+            "\u{212A}ey_not_a_classifier_key",
+        ] {
             let r = parse_strict(format!(r#"{{"{k}":1}}"#).as_bytes());
             if k.starts_with('\u{212A}') {
                 assert!(r.is_ok(), "{k} folds to no classifier key");
@@ -215,6 +227,14 @@ mod tests {
         }
         // An unrelated key with capitals is fine.
         assert!(parse_strict(br#"{"Model":"x","X-Extra":1}"#).is_ok());
+    }
+
+    #[test]
+    fn escaped_duplicates_and_escaped_prototype_keys_are_malformed() {
+        assert!(parse_strict(br#"{"tool_calls":[],"tool_calls":[{}]}"#).is_err());
+        assert!(parse_strict(br#"{"tool\u005fcalls":[],"tool_calls":[{}]}"#).is_err());
+        assert!(parse_strict(br#"{"__proto__":{}}"#).is_err());
+        assert!(parse_strict(br#"{"\u005f_proto__":{}}"#).is_err());
     }
 
     #[test]
