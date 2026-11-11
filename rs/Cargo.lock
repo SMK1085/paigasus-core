@@ -3219,6 +3219,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "paigasus-gateway-core"
+version = "0.0.0"
+
+[[package]]
 name = "paigasus-iam"
 version = "0.2.1"
 dependencies = [
