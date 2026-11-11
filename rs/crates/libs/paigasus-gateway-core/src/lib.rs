@@ -5,6 +5,7 @@
 //! upstream bytes, decisions and instants, and performs the [`Action`]s it returns.
 
 mod limits;
+mod sse;
 mod types;
 
 pub use limits::{Limits, OnFailure};
