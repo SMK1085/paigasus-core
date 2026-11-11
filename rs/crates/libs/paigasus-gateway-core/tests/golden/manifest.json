@@ -1,0 +1,65 @@
+[
+  {
+    "file": "openai/one_call_blocked.sse",
+    "format": "openai",
+    "allowed": [],
+    "notices": [
+      "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
+    ]
+  },
+  {
+    "file": "openai/parallel_mixed.sse",
+    "format": "openai",
+    "allowed": [
+      {
+        "name": "read_file",
+        "arguments": "{\"p\":1}"
+      }
+    ],
+    "notices": [
+      "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
+    ]
+  },
+  {
+    "file": "openai/n2_choices.sse",
+    "format": "openai",
+    "allowed": [
+      {
+        "name": "read_file",
+        "arguments": "{}"
+      }
+    ],
+    "notices": [
+      "[paigasus] tool call \"blocked_exfil\" was blocked (policy)."
+    ]
+  },
+  {
+    "file": "openai/text_after_calls.sse",
+    "format": "openai",
+    "allowed": [],
+    "notices": [
+      "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
+    ]
+  },
+  {
+    "file": "anthropic/tool_use_blocked.sse",
+    "format": "anthropic",
+    "allowed": [],
+    "notices": [
+      "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
+    ]
+  },
+  {
+    "file": "anthropic/two_tools_mixed.sse",
+    "format": "anthropic",
+    "allowed": [
+      {
+        "name": "read_file",
+        "arguments": "{\"p\":1}"
+      }
+    ],
+    "notices": [
+      "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
+    ]
+  }
+]
