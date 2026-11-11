@@ -4,6 +4,8 @@
 - ADR: ADR-0027 (Accepted 2026-11-08), decisions (a) one check point, (b) hold only tool
   calls, (c) replace a blocked call with a notice, (e) evaluation in the gateway.
 - Status: approved on 2026-11-09, after the spec challenge (§ 10).
+- Amended 2026-11-11: the implementation rulings are recorded in § 11, and the sentences they
+  changed are edited in place.
 - Scope: a new lib crate `paigasus-gateway-core` (a synchronous, I/O-free state machine), and
   its wiring into `paigasus-gateway`'s `/v1/chat/completions` handler, off by default.
 - Out of scope: the policy decision itself (SMA-752), session history (SMA-753), detectors
@@ -121,7 +123,9 @@ parser that fails and falls back to `content`); tools executed by the provider (
 - **D12, one FIFO.** Per-choice holds with a shared tail leak: releasing hold A would ship
   frames of hold B sitting in A's tail. A frame can also carry several choices. Keeping the
   stream order and releasing only fully decided frames is the simplest rule that never leaks.
-  The cost: other choices pause during a hold. `n > 1` with tool calls is rare.
+  The cost: other choices pause during a hold. Interception supports tool calls in choice 0
+  only (§ 11), so an `n > 1` request whose later choices call tools is not supported while
+  interception is on.
 - **D13, per-stream total.** `n` is caller-controlled (up to 128 on OpenAI). A per-hold cap
   multiplies by `n`.
 - **D14, 300 s.** A file-writing call with 40 KB of arguments takes about 200 s at 50 tok/s. A
@@ -201,7 +205,10 @@ OpenAI, per choice:
 - tool-call `index` values first appear in order 0, 1, 2, …; interleaving after that is fine;
 - `id`, `type` and `function.name` (or `custom.name`) each appear in exactly one fragment;
 - `type` never changes, and `function` and `custom` never appear in the same entry;
-- `function.arguments` and `custom.input` are strings in every fragment;
+- `function.arguments` and `custom.input` are strings or `null` in every fragment (`null` adds
+  nothing, as in every SDK);
+- at the call's completion, `function.arguments` (Function and legacy calls) is `""` or one
+  complete JSON value (§ 11, `incomplete_arguments`); `custom.input` is free text;
 - a legacy `function_call` and `tool_calls` never appear in the same choice;
 - no fragment arrives for a call after its choice's `finish_reason`.
 
@@ -223,11 +230,14 @@ Only frames that contain a blocked call are re-serialized.
   `index` from 0, in first-appearance order. Drop the key when it becomes empty.
 - Remove `delta.function_call` when the legacy call is blocked.
 - Keep `role`. Strip `logprobs`.
-- Drop a frame only when its delta becomes `{}` and it has no `finish_reason` and no `usage`.
+- Never drop a frame or a choice entry (§ 11, P-10): a choice entry whose blocked data is
+  removed stays, with its `index` and an emptied `delta`.
 
 Insert the notice as one chunk, `{"delta":{"content":"<notice>"}}` for that choice, right
-before the frame that carries the choice's `finish_reason`. Copy `id`, `object`, `created`,
-`model` and `system_fingerprint` from that frame. When text already streamed for the choice,
+before the frame that carries the choice's `finish_reason`. Copy `id`, `created`, `model` and
+`system_fingerprint` from that frame when they are strings or numbers, and set `object` to
+`chat.completion.chunk`. A notice owed at the end of the stream copies them from the last
+accepted record. When text already streamed for the choice,
 the notice starts with `\n\n`. `finish_reason` `"tool_calls"` or `"function_call"` becomes
 `"stop"` when no call of the choice remains. Per-choice state survives the decision, so a
 `finish_reason` that arrives after an `on_failure` close is rewritten too.
@@ -301,7 +311,7 @@ Modules: `sse`, `json` (strict parse, D5; skeletons use `Cow<str>` / `&RawValue`
   `DecisionContext` is built in the handler from `CallerContext` and the request ids.
 - Metrics, in `paigasus-observability/src/names.rs` plus `ALL`:
   - `gateway_tool_interception_records_dropped_total{reason}`: `malformed`, `after_done`,
-    `late_fragment`;
+    `late_fragment`, `oversized`;
   - `gateway_tool_interception_decisions_total{decision,basis}`;
   - `gateway_tool_interception_on_failure_total{code}`;
   - `gateway_tool_interception_hold_seconds` (histogram).
@@ -466,3 +476,85 @@ was folded in except where noted.
   - The SDK targets are pinned in § 8.2. Canonical form makes the SDKs agree.
   - The capability is not exposed (D28).
   - The caller is not an adversary (T3), which leaves request-side differentials to SMA-752.
+
+## 11. Implementation rulings (2026-11-11)
+
+The controller made these rulings during implementation. Each one changes or settles
+behaviour that §§ 3–6 left open, and each fails closed. The sentences they made stale are
+edited in place above (D12's reason, § 4.3, § 4.4, § 5.2).
+
+**OpenAI classification and canonical form.**
+
+- **`choice_order` (P-10 (a)).** A choice index seen for the first time must equal the number
+  of choices seen so far, or the record is `Deviation("choice_order")`. openai-python finds a
+  stream choice by list position, so choice 1 before choice 0 would merge two choices' calls.
+- **Choice-0-only tool data.** A tool-call fragment (`tool_calls` or `function_call`) in a
+  choice whose `index` is not 0 is `Deviation("multi_choice_tool_calls")`. Tool data in a
+  choice entry at array position other than 0 of its chunk is `Deviation("choice_position")`.
+  LangChain reads `choices[0]` of each chunk and ignores `choice.index`. **Limitation:** an
+  `n > 1` request whose later choices call tools is not supported while interception is on. It
+  gets `on_failure` (block, or pass-through in observe mode). The non-stream body applies the
+  same rules, as `Malformed`.
+- **Duplicate choice index.** A chunk that names one choice index twice is
+  `Malformed("duplicate_choice_index")`.
+- **The `object` rule.** Stream: a chunk that carries tool data or a `finish_reason` must have
+  `object` exactly `"chat.completion.chunk"`, or it is `Malformed("object")`; openai-python
+  skips any other chunk. Body: `object` must be `"chat.completion"` only when the body carries
+  tool calls.
+- **`type_shape_mismatch`.** A `type` that disagrees with the entry's body shape (`function` or
+  `custom`) is a deviation, never kind `Other`: clients ignore `type` and run the body. Kind
+  `Other` applies only when no `function` or `custom` body arrived.
+- **`incomplete_arguments`.** At completion, OpenAI function and legacy-function arguments
+  (stream and body) must be `""` or one complete JSON value; Anthropic `tool_use` input at
+  `content_block_stop` the same. Otherwise the call is `Deviation("incomplete_arguments")`
+  (`Malformed` in a body). `""` is presented to the decider as `"{}"`. Custom-tool input is
+  free text and is not checked. Reason: LangChain and anthropic-python partial-parse truncated
+  JSON, so the decider would see different arguments than the client runs.
+- **`second_finish`.** A second `finish_reason` for one choice is a deviation, for tool-free
+  choices too.
+- **Arguments may be `null`** in a fragment (§ 4.3). It adds nothing, as in every SDK.
+- **P-10 (b), never drop.** The rewrite never removes a choice entry and never drops a frame
+  (§ 4.4), so the gateway's own rewrite cannot shift openai-python's positions.
+- **Notice meta.** A notice chunk copies `id`, `created`, `model` and `system_fingerprint` only
+  when they are strings or numbers, and always says `"object":"chat.completion.chunk"`. Only
+  accepted records update the meta that the closing notice uses, so a dropped record cannot
+  name it.
+
+**Anthropic.**
+
+- **`block_interleave`.** A `content_block_start` while an earlier block is still open is a
+  deviation. LangChain routes `input_json_delta` to the most recent start, not to
+  `event.index`.
+- **Synthesized stop frame.** A blocked block's `content_block_stop` is re-emitted as the
+  synthesized `{"type":"content_block_stop","index":i}`, never the upstream payload.
+
+**Bodies and numbers.**
+
+- **`lossy_number`.** A body (either format) holding a number outside `u64`/`i64` that is an
+  integral `f64` with magnitude of 2^53 or more is `Malformed("lossy_number")`. serde_json would
+  round it, and the decider would see a different number than the client.
+- **`preserve_order`.** `paigasus-gateway-core` enables serde_json's `preserve_order`, so a
+  re-serialized frame or body keeps the upstream key order in every build.
+
+**Strict JSON scope (I-1).** The D5 envelope rules (case-folded classifier keys, `constructor`,
+`prototype`) apply to envelope keys only. Tool argument and schema data gets JSON validity,
+duplicate-key rejection at every depth, non-finite rejection and `__proto__` rejection, but not
+the case-fold or `constructor`/`prototype` checks: the classifiers never read inside it, and a
+tool may take an argument named `Id` or `constructor`. That data is OpenAI function and legacy
+arguments, Anthropic `tool_use` and `server_tool_use` `input`, a request's
+`tools[].function.parameters` and `functions[].parameters`, an Anthropic request's
+`tools[].input_schema`, and prior-call inputs in the request. In a whole-record, body or
+request parse, the value of an `input`, `parameters` or `input_schema` key gets these rules.
+
+**Interceptor and limits.**
+
+- **Wrong-length decision vectors.** A decision vector whose length differs from the calls'
+  blocks every call of the hold with `DeciderError` (stream and body), not only the missing ones.
+- **`after_done` before `oversized`.** After `[DONE]` (or `message_stop`) every record is
+  dropped and counted as `after_done`, an oversized one included. It never becomes a stream
+  failure.
+- **Oversized records** are always dropped and counted with the new `records_dropped` reason
+  `oversized` (§ 5.2), in both `on_failure` modes (P-3). With `allow` the stream then switches
+  to pass-through.
+- **86 400 s caps.** Every `[tool_interception]` `*_secs` value is capped at 86 400 by
+  validation; `Instant + Duration` would otherwise panic on overflow.
