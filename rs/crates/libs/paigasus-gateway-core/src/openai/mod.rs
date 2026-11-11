@@ -3,3 +3,4 @@
 
 pub(crate) mod assembly;
 pub(crate) mod classify;
+pub(crate) mod stream;
