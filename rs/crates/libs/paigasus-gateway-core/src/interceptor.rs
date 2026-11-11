@@ -95,8 +95,8 @@ impl Interceptor {
     #[must_use]
     pub fn new(format: Format, limits: Limits, terminal: Bytes, now: Instant) -> Self {
         let proto: Box<dyn Protocol> = match format {
-            Format::OpenAiChat => Box::new(OpenAiStream::default()),
-            Format::AnthropicMessages => Box::new(AnthropicStream::default()),
+            Format::OpenAiChat => Box::new(OpenAiStream::with_cap(limits.max_held_bytes)),
+            Format::AnthropicMessages => Box::new(AnthropicStream::with_cap(limits.max_held_bytes)),
         };
         Interceptor {
             proto,
@@ -214,6 +214,11 @@ impl Interceptor {
     #[must_use]
     pub fn queued_bytes(&self) -> usize {
         self.queued
+    }
+
+    #[cfg(test)]
+    fn retained_bytes(&self) -> usize {
+        self.proto.retained()
     }
 
     // ---- input ---------------------------------------------------------------------------------
@@ -1036,5 +1041,52 @@ mod tests {
         assert!(i.is_finished(), "{}", r.out);
         assert!(r.out.contains("(malformed)") && r.out.contains("{\"type\":\"content_block_stop\",\"index\":0}"), "{}", r.out);
         assert!(r.out.find("content_block_stop") < r.out.find("message_stop"), "{}", r.out);
+    }
+
+    /// § 5.3 and D13: an observed hold still assembles for the report, but never past the cap. A
+    /// call that outgrows it is not decided, and its frames still flow.
+    #[test]
+    fn a_long_observed_call_keeps_retained_state_bounded() {
+        let l = Limits {
+            on_failure: OnFailure::Allow,
+            ..limits()
+        };
+        let piece = "x".repeat(1000);
+        for format in [Format::OpenAiChat, Format::AnthropicMessages] {
+            let (open, more, close, end): (String, Box<dyn Fn() -> String>, Vec<String>, String) = match format {
+                Format::OpenAiChat => (
+                    call(0, 0, "write", "{\"a\":\""),
+                    Box::new(|| args(0, 0, &piece)),
+                    vec![args(0, 0, "\"}"), finish(0)],
+                    "data: [DONE]\n\n".into(),
+                ),
+                Format::AnthropicMessages => (
+                    tool_start(0, "write"),
+                    Box::new(|| json_delta(0, &piece)),
+                    vec![json_delta(0, "\"}"), block_stop(0)],
+                    ev(json!({"type":"message_stop"})),
+                ),
+            };
+            let t0 = Instant::now();
+            let mut i = Interceptor::new(format, l, Bytes::from_static(TERMINAL), t0);
+            let mut acts = i.push(open.as_bytes(), t0);
+            if format == Format::AnthropicMessages {
+                acts.extend(i.push(json_delta(0, "{\"a\":\"").as_bytes(), t0));
+            }
+            for _ in 0..200 {
+                acts.extend(i.push(more().as_bytes(), t0));
+                assert!(i.retained_bytes() <= l.max_held_bytes + l.max_record_bytes, "retained {}", i.retained_bytes());
+            }
+            for c in close {
+                acts.extend(i.push(c.as_bytes(), t0));
+            }
+            acts.extend(i.push(end.as_bytes(), t0));
+            acts.extend(i.finish(t0));
+            assert!(acts.iter().any(|a| matches!(a, Action::Count(Metric::OnFailure("hold_limit")))));
+            assert!(!acts.iter().any(|a| matches!(a, Action::Decide { .. })), "an overflowed observed call is not decided");
+            assert_eq!(emitted(&acts).matches(&piece).count(), 200, "every observed frame still flows");
+            assert!(i.is_finished());
+            assert_eq!(i.retained_bytes(), 0);
+        }
     }
 }

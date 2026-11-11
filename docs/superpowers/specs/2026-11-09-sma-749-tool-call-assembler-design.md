@@ -319,7 +319,8 @@ Modules: `sse`, `json` (strict parse, D5; skeletons use `Cow<str>` / `&RawValue`
 ### 5.3 Observe mode (`on_failure = "allow"`)
 
 On overflow or hold timeout, the affected holds are released as they are. Later fragments of
-those calls are forwarded unheld. When such a call completes, the decider is still consulted,
+those calls are forwarded unheld. When such a call completes, the decider is still consulted
+(unless it outgrew `max_held_bytes`, § 11),
 and the decision is reported with `basis: "on_failure"` and is not enforced. On a malformed
 record while the queue is non-empty, or a canonical-form deviation, the stream switches to
 pass-through: the rest is forwarded as received, and the switch
@@ -519,6 +520,10 @@ edited in place above (D12's reason, § 4.3, § 4.4, § 5.2).
   when they are strings or numbers, and always says `"object":"chat.completion.chunk"`. Only
   accepted records update the meta that the closing notice uses, so a dropped record cannot
   name it.
+- **Prior OpenAI calls.** A request's prior assistant `tool_calls` entry reads `function.name`
+  and `function.arguments`, or `custom.name` and `custom.input`. An entry with neither body,
+  with both, or with a body that disagrees with its `type` makes the turn
+  `Unavailable("malformed")`, as a `function` without a `name` does (D19).
 
 **Anthropic.**
 
@@ -532,7 +537,9 @@ edited in place above (D12's reason, § 4.3, § 4.4, § 5.2).
 
 - **`lossy_number`.** A body (either format) holding a number outside `u64`/`i64` that is an
   integral `f64` with magnitude of 2^53 or more is `Malformed("lossy_number")`. serde_json would
-  round it, and the decider would see a different number than the client.
+  round it, and the decider would see a different number than the client. The rule applies to
+  stream kind-Other calls too, in both protocols: their arguments are the parsed raw entries, so
+  a raw entry holding such a number makes the call's completion `Deviation("lossy_number")`.
 - **`preserve_order`.** `paigasus-gateway-core` enables serde_json's `preserve_order`, so a
   re-serialized frame or body keeps the upstream key order in every build.
 
@@ -556,5 +563,9 @@ request parse, the value of an `input`, `parameters` or `input_schema` key gets 
 - **Oversized records** are always dropped and counted with the new `records_dropped` reason
   `oversized` (§ 5.2), in both `on_failure` modes (P-3). With `allow` the stream then switches
   to pass-through.
+- **Observed holds are bounded (D13).** A hold under observe mode (§ 5.3) keeps assembling for
+  the report, but once it retains more than `max_held_bytes` of arguments and raw entries it
+  drops them and is never decided: no decision and no report entry, as for a pass-through
+  call. Its frames still flow. A completed hold keeps no arguments in either protocol.
 - **86 400 s caps.** Every `[tool_interception]` `*_secs` value is capped at 86 400 by
   validation; `Instant + Duration` would otherwise panic on overflow.

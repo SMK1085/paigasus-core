@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::json::{Malformed, parse_strict};
+use crate::json::{Malformed, check_numbers, parse_strict};
 use crate::report::{ReportDecision, ReportEntry, header_value};
 use crate::types::{Basis, BlockCode, Decision, Format, ToolCall};
 use crate::{anthropic, openai};
@@ -39,19 +39,6 @@ pub fn parse_body(format: Format, body: &[u8], max_bytes: usize) -> Result<BodyC
         Format::AnthropicMessages => anthropic::body::calls(&value)?,
     };
     Ok(BodyCalls { format, value, calls, unenforceable })
-}
-
-/// `Malformed("lossy_number")` for a number outside u64/i64 that is an integral f64 with magnitude of 2^53 or more.
-fn check_numbers(v: &Value) -> Result<(), Malformed> {
-    match v {
-        Value::Number(n) => match n.as_f64() {
-            Some(f) if !n.is_u64() && !n.is_i64() && f.fract() == 0.0 && f.abs() >= 9_007_199_254_740_992.0 => Err(Malformed("lossy_number")),
-            _ => Ok(()),
-        },
-        Value::Array(a) => a.iter().try_for_each(check_numbers),
-        Value::Object(o) => o.values().try_for_each(check_numbers),
-        _ => Ok(()),
-    }
 }
 
 impl BodyCalls {

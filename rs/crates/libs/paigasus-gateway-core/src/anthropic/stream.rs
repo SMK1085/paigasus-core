@@ -17,8 +17,8 @@
 use bytes::Bytes;
 use serde_json::{Value, json};
 
-use crate::json::{MAX_ANTHROPIC_INDEX, Malformed, index_of, opt_str, parse_strict, parse_value_strict};
-use crate::protocol::{Deviation, Frame, Protocol, Step, StepError, Verdict, Verdicts};
+use crate::json::{MAX_ANTHROPIC_INDEX, Malformed, check_numbers, index_of, opt_str, parse_strict, parse_value_strict};
+use crate::protocol::{Deviation, Frame, Protocol, Step, StepError, Verdict, Verdicts, raw_len};
 use crate::report::{ReportDecision, ReportEntry, notice_line};
 use crate::sse::{self, Record};
 use crate::types::{HoldKey, ToolCall, ToolCallKind};
@@ -50,6 +50,10 @@ struct BlockState {
     name: String,
     args: String,
     raws: Vec<Value>,
+    /// The bytes added to `args` and `raws` so far.
+    retained: usize,
+    /// An observed block outgrew the cap: it keeps nothing and is never decided (§ 5.3, D13).
+    overflowed: bool,
     notice_done: bool,
 }
 
@@ -57,11 +61,33 @@ impl BlockState {
     fn is_hold(&self) -> bool {
         matches!(self.kind, Kind::ToolUse | Kind::Other)
     }
+
+    /// Count `n` retained bytes. An observed block past `cap` drops its buffers for good: nothing
+    /// enforces it any more, and keeping the arguments would grow memory with the call.
+    fn retain(&mut self, n: usize, observed: bool, cap: usize) {
+        self.retained += n;
+        if observed && self.retained > cap {
+            self.overflowed = true;
+            self.drop_buffers();
+        }
+    }
+
+    fn drop_buffers(&mut self) {
+        self.args = String::new();
+        self.raws = Vec::new();
+    }
 }
 
-#[derive(Default)]
 pub(crate) struct AnthropicStream {
     blocks: Vec<BlockState>,
+    /// The most an observed block may retain (D13, § 5.3).
+    cap: usize,
+}
+
+impl Default for AnthropicStream {
+    fn default() -> Self {
+        Self::with_cap(crate::limits::Limits::defaults().max_held_bytes)
+    }
 }
 
 fn key(i: u32) -> HoldKey {
@@ -96,6 +122,10 @@ fn stop_frame(i: u32) -> Bytes {
 }
 
 impl AnthropicStream {
+    pub(crate) fn with_cap(cap: usize) -> Self {
+        AnthropicStream { blocks: Vec::new(), cap }
+    }
+
     fn holds(&self) -> Vec<HoldKey> {
         self.blocks
             .iter()
@@ -109,10 +139,11 @@ impl AnthropicStream {
         self.blocks.get_mut(i as usize).filter(|b| b.open).ok_or(StepError::Deviation("unknown_block"))
     }
 
-    fn call_of(b: &BlockState, i: u32) -> ToolCall {
+    /// The completed call. Moves the buffers out: a completed block keeps no arguments.
+    fn call_of(b: &mut BlockState, i: u32) -> ToolCall {
         let (kind, arguments) = match b.kind {
-            Kind::ToolUse => (ToolCallKind::AnthropicToolUse, b.args.clone()),
-            _ => (ToolCallKind::Other, serde_json::to_string(&b.raws).expect("a Value array always serializes")),
+            Kind::ToolUse => (ToolCallKind::AnthropicToolUse, std::mem::take(&mut b.args)),
+            _ => (ToolCallKind::Other, serde_json::to_string(&std::mem::take(&mut b.raws)).expect("a Value array always serializes")),
         };
         ToolCall {
             choice: 0,
@@ -185,6 +216,8 @@ impl Protocol for AnthropicStream {
                     name: String::new(),
                     args: String::new(),
                     raws: Vec::new(),
+                    retained: 0,
+                    overflowed: false,
                     notice_done: false,
                 };
                 let (mut touches, mut opened, mut reports) = (Vec::new(), Vec::new(), Vec::new());
@@ -200,7 +233,9 @@ impl Protocol for AnthropicStream {
                     Kind::Other => {
                         b.id = opt_str(cb.get("id"), "id")?;
                         b.name = cb.get("name").and_then(Value::as_str).unwrap_or(bty).to_owned();
-                        b.raws.push(Value::Object(cb.clone()));
+                        let raw = Value::Object(cb.clone());
+                        b.retained = raw_len(&raw);
+                        b.raws.push(raw);
                     }
                     Kind::Server => {
                         let name = cb.get("name").and_then(Value::as_str).unwrap_or(bty).to_owned();
@@ -237,20 +272,26 @@ impl Protocol for AnthropicStream {
                 let d = value.get("delta").and_then(Value::as_object).ok_or(Malformed("delta"))?.clone();
                 let dty = d.get("type").and_then(Value::as_str).ok_or(Malformed("delta_type"))?.to_owned();
                 let decided = matches!(verdicts.get(&key(i)), Some(v) if *v != Verdict::PassThrough);
+                let observed = verdicts.get(&key(i)) == Some(&Verdict::PassThrough);
+                let cap = self.cap;
                 let b = self.open_block(i)?;
                 let mut touches = Vec::new();
                 match (b.kind, dty.as_str()) {
                     (Kind::ToolUse, "input_json_delta") => {
                         let pj = d.get("partial_json").and_then(Value::as_str).ok_or(StepError::Deviation("partial_json"))?;
-                        if !decided {
+                        if !decided && !b.overflowed {
                             b.args.push_str(pj);
+                            b.retain(pj.len(), observed, cap);
                         }
                         touches.push(key(i));
                     }
                     (Kind::ToolUse, _) => return Err(StepError::Deviation("tool_delta_type")),
                     (Kind::Other, _) => {
-                        if !decided {
-                            b.raws.push(Value::Object(d));
+                        if !decided && !b.overflowed {
+                            let raw = Value::Object(d);
+                            let n = raw_len(&raw);
+                            b.raws.push(raw);
+                            b.retain(n, observed, cap);
                         }
                         touches.push(key(i));
                     }
@@ -266,9 +307,13 @@ impl Protocol for AnthropicStream {
                 let b = self.open_block(i)?;
                 // Check before changing the block: a rejected stop leaves it open, so `closing`
                 // still owes its notice and stop frame.
-                let completes = b.is_hold() && !decided;
+                let completes = b.is_hold() && !decided && !b.overflowed;
                 if completes && b.kind == Kind::ToolUse && !b.args.is_empty() && parse_value_strict(b.args.as_bytes()).is_err() {
                     return Err(Deviation("incomplete_arguments").into());
+                }
+                // The decider would read a rounded number where a client keeps the exact one (I1).
+                if completes && b.kind == Kind::Other && b.raws.iter().any(|r| check_numbers(r).is_err()) {
+                    return Err(Deviation("lossy_number").into());
                 }
                 b.open = false;
                 let (mut touches, mut completed) = (Vec::new(), Vec::new());
@@ -281,6 +326,7 @@ impl Protocol for AnthropicStream {
                         completed.push((key(i), vec![Self::call_of(b, i)]));
                     }
                 }
+                b.drop_buffers();
                 Ok(Step::Frame {
                     frame: Frame {
                         event: Some(ev),
@@ -373,6 +419,11 @@ impl Protocol for AnthropicStream {
 
     fn unframed(&self, rec: Record) -> Bytes {
         sse::frame(rec.event.as_deref(), &rec.data)
+    }
+
+    #[cfg(test)]
+    fn retained(&self) -> usize {
+        self.blocks.iter().map(|b| b.args.len() + crate::protocol::raws_len(&b.raws)).sum()
     }
 }
 
@@ -686,6 +737,88 @@ mod tests {
 
     fn step_of(p: &mut AnthropicStream, e: Value, v: &Verdicts) -> Step {
         p.step(rec(e), v).ok().expect("canonical event")
+    }
+
+    #[test]
+    fn a_completed_block_keeps_no_argument_buffers() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        let big = format!("{{\"a\":\"{}\"}}", "x".repeat(1000));
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        p.step(rec(json_delta(0, &big)), &v).ok().unwrap();
+        assert!(p.retained() >= 1000);
+        let Step::Frame { completed, .. } = p.step(rec(stop(0)), &v).ok().unwrap() else { panic!() };
+        assert_eq!(completed[0].1[0].arguments, big);
+        assert_eq!(p.retained(), 0, "a completed tool_use block keeps no arguments");
+        p.step(rec(json!({"type":"content_block_start","index":1,"content_block":{"type":"computer_v9","name":"click"}})), &v)
+            .ok()
+            .unwrap();
+        p.step(rec(json!({"type":"content_block_delta","index":1,"delta":{"type":"coords_delta","pad":"y".repeat(1000)}})), &v)
+            .ok()
+            .unwrap();
+        assert!(p.retained() >= 1000);
+        p.step(rec(stop(1)), &v).ok().unwrap();
+        assert_eq!(p.retained(), 0, "a completed Other block keeps no raws");
+    }
+
+    #[test]
+    fn an_observed_block_stops_retaining_past_the_cap_and_is_not_decided() {
+        let mut p = AnthropicStream::with_cap(256);
+        let mut v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        v.insert(HoldKey::Block(0), Verdict::PassThrough);
+        p.step(rec(json_delta(0, "{\"a\":\"")), &v).ok().unwrap();
+        for _ in 0..100 {
+            p.step(rec(json_delta(0, &"x".repeat(100))), &v).ok().unwrap();
+            assert!(p.retained() <= 256 + 100, "retained {}", p.retained());
+        }
+        p.step(rec(json_delta(0, "\"}")), &v).ok().unwrap();
+        let Step::Frame { completed, .. } = p.step(rec(stop(0)), &v).ok().unwrap() else { panic!() };
+        assert!(completed.is_empty(), "an overflowed observed call is not decided");
+        assert_eq!(p.retained(), 0);
+    }
+
+    #[test]
+    fn a_short_observed_block_is_still_decided() {
+        let mut p = AnthropicStream::with_cap(256);
+        let mut v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        v.insert(HoldKey::Block(0), Verdict::PassThrough);
+        p.step(rec(json_delta(0, "{}")), &v).ok().unwrap();
+        let Step::Frame { completed, .. } = p.step(rec(stop(0)), &v).ok().unwrap() else { panic!() };
+        assert_eq!(completed[0].1[0].arguments, "{}");
+    }
+
+    #[test]
+    fn an_other_block_with_a_lossy_number_is_a_deviation() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(json!({"type":"content_block_start","index":0,"content_block":{"type":"computer_v9","name":"click"}})), &v)
+            .ok()
+            .unwrap();
+        let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"coords_delta","x":123456789012345678901234567890}}"#;
+        p.step(
+            Record {
+                event: Some("content_block_delta".into()),
+                data: delta.as_bytes().to_vec(),
+            },
+            &v,
+        )
+        .ok()
+        .unwrap();
+        assert!(matches!(p.step(rec(stop(0)), &v), Err(StepError::Deviation("lossy_number"))));
+        let mut q = AnthropicStream::default();
+        let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"computer_v9","name":"click","n":[1e300]}}"#;
+        q.step(
+            Record {
+                event: Some("content_block_start".into()),
+                data: start.as_bytes().to_vec(),
+            },
+            &v,
+        )
+        .ok()
+        .unwrap();
+        assert!(matches!(q.step(rec(stop(0)), &v), Err(StepError::Deviation("lossy_number"))));
     }
 
     #[test]

@@ -186,6 +186,23 @@ impl<'de> Visitor<'de> for StrictVisitor {
     }
 }
 
+/// serde_json has no arbitrary_precision: an integer beyond u64/i64 becomes an f64 and is rounded,
+/// so a decider reading the parsed value would see a different number than a client that keeps the
+/// exact integer (I1). Bodies check the whole value; streams check the raw entries of kind Other.
+///
+/// `Malformed("lossy_number")` for a number outside u64/i64 that is an integral f64 with magnitude of 2^53 or more.
+pub(crate) fn check_numbers(v: &Value) -> Result<(), Malformed> {
+    match v {
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if !n.is_u64() && !n.is_i64() && f.fract() == 0.0 && f.abs() >= 9_007_199_254_740_992.0 => Err(Malformed("lossy_number")),
+            _ => Ok(()),
+        },
+        Value::Array(a) => a.iter().try_for_each(check_numbers),
+        Value::Object(o) => o.values().try_for_each(check_numbers),
+        _ => Ok(()),
+    }
+}
+
 /// A JSON integer literal in `0..=max` (spec § 4.2). serde_json reads `0.0` and `1e0` as floats,
 /// so `is_u64` already excludes them.
 pub(crate) fn index_of(v: Option<&Value>, max: u64) -> Result<u32, Malformed> {

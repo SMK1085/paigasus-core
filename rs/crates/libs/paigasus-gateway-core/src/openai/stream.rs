@@ -12,7 +12,7 @@ use crate::openai::classify::{self, Chunk};
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
 use crate::report::notice_line;
 use crate::sse::{self, Record};
-use crate::types::{HoldKey, ToolCall};
+use crate::types::HoldKey;
 
 /// The upstream fields a notice chunk copies, in upstream order. `object` is not copied: a notice
 /// chunk always says `chat.completion.chunk`, or openai-python would skip it.
@@ -25,14 +25,32 @@ struct ChoiceState {
     finished: bool,
     has_text: bool,
     notice_done: bool,
-    /// The calls handed to the decider, in hold order.
-    calls: Vec<ToolCall>,
+    /// The (position, name) of the calls handed to the decider, in hold order. Never their
+    /// arguments: a finished choice keeps none.
+    calls: Vec<(u32, String)>,
 }
 
-#[derive(Default)]
 pub(crate) struct OpenAiStream {
     choices: BTreeMap<u32, ChoiceState>,
     meta: Map<String, Value>,
+    /// The most an observed choice may retain (D13, § 5.3).
+    cap: usize,
+}
+
+impl Default for OpenAiStream {
+    fn default() -> Self {
+        Self::with_cap(crate::limits::Limits::defaults().max_held_bytes)
+    }
+}
+
+impl OpenAiStream {
+    pub(crate) fn with_cap(cap: usize) -> Self {
+        OpenAiStream {
+            choices: BTreeMap::new(),
+            meta: Map::new(),
+            cap,
+        }
+    }
 }
 
 /// The scalar (string or number) `META_KEYS` fields of a record. A non-scalar value is skipped.
@@ -64,11 +82,7 @@ fn notice_chunk(meta: &Map<String, Value>, choice: u32, text: &str) -> Bytes {
 impl ChoiceState {
     /// The (position, name) of every call the hold knows.
     fn known(&self) -> Vec<(u32, String)> {
-        if self.calls.is_empty() {
-            self.asm.names()
-        } else {
-            self.calls.iter().map(|c| (c.position, c.name.clone())).collect()
-        }
+        if self.calls.is_empty() { self.asm.names() } else { self.calls.clone() }
     }
 
     fn notice_text(&self, verdict: &Verdict) -> String {
@@ -165,9 +179,7 @@ impl Protocol for OpenAiStream {
             if !cv.fragments.is_empty() || cv.legacy.is_some() {
                 match (verdicts.get(&key), after) {
                     (None, Some(after)) => st.asm.commit(&cv.fragments, cv.legacy.as_ref(), after),
-                    (Some(Verdict::PassThrough), _) => {
-                        let _ = st.asm.apply(&cv.fragments, cv.legacy.as_ref());
-                    }
+                    (Some(Verdict::PassThrough), _) => st.asm.observe(&cv.fragments, cv.legacy.as_ref(), self.cap),
                     _ => {}
                 }
                 if !st.hold_open {
@@ -183,11 +195,12 @@ impl Protocol for OpenAiStream {
                     let finished = match verdicts.get(&key) {
                         // Phase 1 ran the same check on the same state, so this cannot fail.
                         None => Some(st.asm.finish(cv.index)?),
-                        Some(Verdict::PassThrough) => st.asm.finish(cv.index).ok(),
+                        Some(Verdict::PassThrough) if !st.asm.overflowed() => st.asm.finish(cv.index).ok(),
                         Some(_) => None,
                     };
+                    st.asm.drop_buffers();
                     if let Some(calls) = finished {
-                        st.calls = calls.clone();
+                        st.calls = calls.iter().map(|c| (c.position, c.name.clone())).collect();
                         completed.push((key, calls));
                     }
                 }
@@ -269,6 +282,11 @@ impl Protocol for OpenAiStream {
 
     fn unframed(&self, rec: Record) -> Bytes {
         sse::frame(None, &rec.data)
+    }
+
+    #[cfg(test)]
+    fn retained(&self) -> usize {
+        self.choices.values().map(|s| s.asm.retained()).sum()
     }
 }
 
@@ -524,6 +542,100 @@ mod tests {
             panic!()
         };
         assert!(frame.touches.is_empty());
+    }
+
+    fn args_frag(a: &str) -> String {
+        chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":a}}]}}]))
+    }
+    fn finish_rec() -> String {
+        chunk(json!([{"index":0,"delta":{},"finish_reason":"tool_calls"}]))
+    }
+
+    #[test]
+    fn a_finished_choice_keeps_no_argument_buffers() {
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        let big = format!("{{\"a\":\"{}\"}}", "x".repeat(1000));
+        p.step(
+            rec(&chunk(
+                json!([{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"rm","arguments":big}}]}}]),
+            )),
+            &v,
+        )
+        .ok()
+        .unwrap();
+        assert!(p.retained() >= 1000);
+        let Step::Frame { completed, .. } = p.step(rec(&finish_rec()), &v).ok().unwrap() else { panic!() };
+        assert_eq!(completed[0].1[0].arguments, big);
+        assert_eq!(p.retained(), 0, "a finished choice keeps no arguments");
+
+        let mut q = OpenAiStream::default();
+        q.step(
+            rec(&chunk(
+                json!([{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"shell","shell":{"cmd":"y".repeat(1000)}}]}}]),
+            )),
+            &v,
+        )
+        .ok()
+        .unwrap();
+        assert!(q.retained() >= 1000);
+        q.step(rec(&finish_rec()), &v).ok().unwrap();
+        assert_eq!(q.retained(), 0, "a finished Other call keeps no raws");
+    }
+
+    #[test]
+    fn an_observed_choice_stops_retaining_past_the_cap_and_is_not_decided() {
+        let mut p = OpenAiStream::with_cap(256);
+        let mut v = Verdicts::new();
+        p.step(
+            rec(&chunk(
+                json!([{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"rm","arguments":"{\"a\":\""}}]}}]),
+            )),
+            &v,
+        )
+        .ok()
+        .unwrap();
+        v.insert(HoldKey::Choice(0), Verdict::PassThrough);
+        for _ in 0..100 {
+            p.step(rec(&args_frag(&"x".repeat(100))), &v).ok().unwrap();
+            assert!(p.retained() <= 256 + 200, "retained {}", p.retained());
+        }
+        p.step(rec(&args_frag("\"}")), &v).ok().unwrap();
+        let Step::Frame { completed, .. } = p.step(rec(&finish_rec()), &v).ok().unwrap() else { panic!() };
+        assert!(completed.is_empty(), "an overflowed observed call is not decided");
+        assert_eq!(p.retained(), 0);
+    }
+
+    #[test]
+    fn a_short_observed_choice_is_still_decided() {
+        let mut p = OpenAiStream::with_cap(256);
+        let mut v = Verdicts::new();
+        p.step(
+            rec(&chunk(
+                json!([{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"rm","arguments":"{"}}]}}]),
+            )),
+            &v,
+        )
+        .ok()
+        .unwrap();
+        v.insert(HoldKey::Choice(0), Verdict::PassThrough);
+        p.step(rec(&args_frag("}")), &v).ok().unwrap();
+        let Step::Frame { completed, .. } = p.step(rec(&finish_rec()), &v).ok().unwrap() else { panic!() };
+        assert_eq!(completed[0].1[0].arguments, "{}");
+    }
+
+    #[test]
+    fn an_other_call_with_a_lossy_number_is_a_deviation() {
+        let v = Verdicts::new();
+        let huge = r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","type":"shell","shell":{"n":123456789012345678901234567890}}]}}]}"#;
+        let mut p = OpenAiStream::default();
+        p.step(rec(huge), &v).ok().unwrap();
+        assert!(matches!(p.step(rec(&finish_rec()), &v), Err(StepError::Deviation("lossy_number"))));
+        let same_record =
+            r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","type":"shell","shell":{"n":[1e300]}}]},"finish_reason":"tool_calls"}]}"#;
+        assert!(matches!(OpenAiStream::default().step(rec(same_record), &v), Err(StepError::Deviation("lossy_number"))));
+        let ok = r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","type":"shell","shell":{"n":12345678901234567891,"f":1.5}}]},"finish_reason":"tool_calls"}]}"#;
+        assert!(OpenAiStream::default().step(rec(ok), &v).is_ok());
     }
 
     #[test]

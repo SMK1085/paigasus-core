@@ -118,9 +118,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
             Some("assistant") => {
                 for c in arr(m, "tool_calls")? {
                     let c = obj(c)?;
-                    let func = opt_obj(c.get("function"), "function")?;
-                    let name = func.map(|x| req_str(x, "name")).transpose()?.unwrap_or_default();
-                    let arguments = func.map(|x| opt_str(x.get("arguments"), "arguments")).transpose()?.flatten().unwrap_or_default();
+                    let (name, arguments) = prior_body(c)?;
                     f.prior_calls.push(PriorCall {
                         id: opt_str(c.get("id"), "id")?,
                         name,
@@ -147,6 +145,19 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
         }
     }
     Ok(f)
+}
+
+/// The (name, arguments) of a prior OpenAI tool call: a `function` body's name and arguments, or a
+/// `custom` body's name and input. An entry with neither body, both, or a body that disagrees with
+/// its `type` is malformed: an empty name would read as a call to no tool at all.
+fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
+    let ty = opt_str(c.get("type"), "type")?;
+    let (body, input) = match (opt_obj(c.get("function"), "function")?, opt_obj(c.get("custom"), "custom")?, ty.as_deref()) {
+        (Some(x), None, None | Some("function")) => (x, "arguments"),
+        (None, Some(x), None | Some("custom")) => (x, "input"),
+        _ => return Err(Malformed("tool_call")),
+    };
+    Ok((req_str(body, "name")?, opt_str(body.get(input), input)?.unwrap_or_default()))
 }
 
 fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
@@ -259,6 +270,34 @@ mod tests {
             br#"{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{"__proto__":1}}]}]}"#,
         ] {
             assert!(matches!(parse_request(Format::AnthropicMessages, bad), ToolTurn::Unavailable(_)), "{}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    #[test]
+    fn a_prior_custom_call_keeps_its_name_and_input() {
+        let f = facts(
+            Format::OpenAiChat,
+            json!({"messages":[{"role":"assistant","tool_calls":[
+                {"id":"c1","type":"custom","custom":{"name":"sql","input":"SELECT 1"}},
+                {"id":"c2","type":"function","function":{"name":"read","arguments":"{}"}}]}]}),
+        );
+        assert_eq!(
+            f.prior_calls.iter().map(|c| (c.id.as_deref(), c.name.as_str(), c.arguments.as_str())).collect::<Vec<_>>(),
+            [(Some("c1"), "sql", "SELECT 1"), (Some("c2"), "read", "{}")]
+        );
+    }
+
+    #[test]
+    fn a_prior_call_without_a_valid_body_is_unavailable() {
+        for bad in [
+            &br#"{"messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"function"}]}]}"#[..],
+            br#"{"messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"shell","shell":{"cmd":"ls"}}]}]}"#,
+            br#"{"messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"custom","custom":{"input":"x"}}]}]}"#,
+            br#"{"messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"custom","custom":{"name":"sql","input":1}}]}]}"#,
+            br#"{"messages":[{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"a"},"custom":{"name":"b"}}]}]}"#,
+            br#"{"messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"custom","function":{"name":"a","arguments":"{}"}}]}]}"#,
+        ] {
+            assert_eq!(parse_request(Format::OpenAiChat, bad), ToolTurn::Unavailable("malformed"), "{}", String::from_utf8_lossy(bad));
         }
     }
 

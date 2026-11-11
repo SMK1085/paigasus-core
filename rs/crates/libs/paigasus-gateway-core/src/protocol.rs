@@ -110,4 +110,18 @@ pub(crate) trait Protocol: Send {
     fn known_calls(&self, hold: HoldKey) -> Vec<(u32, String)>;
     /// Pass-through framing, with no classification (P-4).
     fn unframed(&self, rec: Record) -> Bytes;
+    /// The argument and raw-entry bytes the protocol still holds, measured exactly. Tests only.
+    #[cfg(test)]
+    fn retained(&self) -> usize;
+}
+
+/// The serialized size of one raw entry, as the decider would see it.
+pub(crate) fn raw_len(raw: &Value) -> usize {
+    serde_json::to_vec(raw).expect("a Value always serializes").len()
+}
+
+/// The serialized size of retained raw entries.
+#[cfg(test)]
+pub(crate) fn raws_len(raws: &[Value]) -> usize {
+    raws.iter().map(raw_len).sum()
 }

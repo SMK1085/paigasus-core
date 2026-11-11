@@ -20,9 +20,9 @@
 
 use serde_json::Value;
 
-use crate::json::parse_value_strict;
+use crate::json::{check_numbers, parse_value_strict};
 use crate::openai::classify::{Fragment, NameArgs};
-use crate::protocol::Deviation;
+use crate::protocol::{Deviation, raw_len};
 use crate::types::{ToolCall, ToolCallKind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -158,6 +158,16 @@ pub(crate) struct ChoiceAssembly {
     calls: Vec<CallBuild>,
     legacy: Option<CallBuild>,
     check: Check,
+    /// The bytes held in arguments and raw entries.
+    retained: usize,
+    /// An observed choice outgrew the cap: it keeps nothing and is never decided (§ 5.3, D13).
+    overflowed: bool,
+}
+
+/// Kind Other carries its raw entries. serde_json rounds an integer beyond u64/i64, so the decider
+/// would read a different number than a client that keeps the exact one (I1, as for bodies).
+fn check_raws<'a>(raws: impl IntoIterator<Item = &'a Value>) -> Result<(), Deviation> {
+    raws.into_iter().try_for_each(check_numbers).map_err(|_| Deviation("lossy_number"))
 }
 
 /// Tool data is allowed only in choice 0, and only at array position 0 of its chunk (spec § 4.3).
@@ -219,6 +229,7 @@ impl ChoiceAssembly {
             }
             if let Some(a) = &l.args {
                 b.args.push_str(a);
+                self.retained += a.len();
             }
         }
         for f in frags {
@@ -239,11 +250,45 @@ impl ChoiceAssembly {
                 }
                 if let Some(a) = &na.args {
                     b.args.push_str(a);
+                    self.retained += a.len();
                 }
             }
-            b.raws.push(f.raw.clone());
+            // Only kind Other reads its raw entries, and only a call with no body is Other. A call
+            // whose body arrived drops them, so its arguments are not held twice.
+            if after.calls.get(pos).is_some_and(|s| s.shape.is_none()) {
+                self.retained += raw_len(&f.raw);
+                b.raws.push(f.raw.clone());
+            } else if !b.raws.is_empty() {
+                self.retained -= std::mem::take(&mut b.raws).iter().map(raw_len).sum::<usize>();
+            }
         }
         self.check = after;
+    }
+
+    /// Observe mode (§ 5.3): apply what fits, and stop retaining once the choice holds more than
+    /// `cap` bytes. The choice is then never decided, as a pass-through call is not.
+    pub(crate) fn observe(&mut self, frags: &[Fragment], legacy: Option<&NameArgs>, cap: usize) {
+        if self.overflowed {
+            return;
+        }
+        let _ = self.apply(frags, legacy);
+        if self.retained > cap {
+            self.overflowed = true;
+            self.drop_buffers();
+        }
+    }
+
+    pub(crate) fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    /// Drop every argument and raw buffer, keeping the names. Used once the choice finished.
+    pub(crate) fn drop_buffers(&mut self) {
+        for b in self.calls.iter_mut().chain(&mut self.legacy) {
+            b.args = String::new();
+            b.raws = Vec::new();
+        }
+        self.retained = 0;
     }
 
     /// Check, then commit. On a deviation nothing is changed.
@@ -268,34 +313,41 @@ impl ChoiceAssembly {
             return complete_arguments(ToolCallKind::LegacyFunctionCall, args).map(drop);
         }
         for (i, kind) in kinds.into_iter().enumerate() {
-            let mut more = frags
-                .iter()
-                .filter(|f| f.index as usize == i)
-                .filter_map(|f| f.function.as_ref().or(f.custom.as_ref()).and_then(|na| na.args.as_deref()));
+            let mine = frags.iter().filter(|f| f.index as usize == i);
+            if kind == ToolCallKind::Other {
+                check_raws(self.calls.get(i).into_iter().flat_map(|b| &b.raws).chain(mine.map(|f| &f.raw)))?;
+                continue;
+            }
+            let mut more = mine.filter_map(|f| f.function.as_ref().or(f.custom.as_ref()).and_then(|na| na.args.as_deref()));
             complete_arguments(kind, pending(self.calls.get(i), &mut more))?;
         }
         Ok(())
     }
 
-    pub(crate) fn finish(&self, choice: u32) -> Result<Vec<ToolCall>, Deviation> {
+    /// The completed calls. Moves the buffers out, so a finished choice keeps no arguments.
+    pub(crate) fn finish(&mut self, choice: u32) -> Result<Vec<ToolCall>, Deviation> {
         let kinds = self.check.finish()?;
-        if let Some(b) = &self.legacy {
+        self.retained = 0;
+        if let Some(b) = &mut self.legacy {
             return Ok(vec![ToolCall {
                 choice,
                 position: 0,
                 id: None,
                 name: b.name.clone().unwrap_or_default(),
                 kind: ToolCallKind::LegacyFunctionCall,
-                arguments: complete_arguments(ToolCallKind::LegacyFunctionCall, b.args.clone())?,
+                arguments: complete_arguments(ToolCallKind::LegacyFunctionCall, std::mem::take(&mut b.args))?,
             }]);
         }
         let mut out = Vec::with_capacity(self.calls.len());
-        for ((i, b), kind) in self.calls.iter().enumerate().zip(kinds) {
+        for ((i, b), kind) in self.calls.iter_mut().enumerate().zip(kinds) {
             let (name, arguments) = if kind == ToolCallKind::Other {
                 let name = b.name.clone().or_else(|| b.ty.clone()).unwrap_or_else(|| "unknown".to_owned());
-                (name, serde_json::to_string(&b.raws).expect("a Value array always serializes"))
+                let raws = std::mem::take(&mut b.raws);
+                check_raws(&raws)?;
+                (name, serde_json::to_string(&raws).expect("a Value array always serializes"))
             } else {
-                (b.name.clone().unwrap_or_default(), complete_arguments(kind, b.args.clone())?)
+                b.raws = Vec::new();
+                (b.name.clone().unwrap_or_default(), complete_arguments(kind, std::mem::take(&mut b.args))?)
             };
             let position = u32::try_from(i).expect("at most 128 calls per choice");
             out.push(ToolCall {
@@ -308,6 +360,12 @@ impl ChoiceAssembly {
             });
         }
         Ok(out)
+    }
+
+    /// The argument and raw-entry bytes held, measured exactly. Tests only.
+    #[cfg(test)]
+    pub(crate) fn retained(&self) -> usize {
+        self.calls.iter().chain(&self.legacy).map(|b| b.args.len() + crate::protocol::raws_len(&b.raws)).sum()
     }
 
     pub(crate) fn names(&self) -> Vec<(u32, String)> {
