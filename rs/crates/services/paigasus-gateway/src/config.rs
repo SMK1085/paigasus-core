@@ -262,6 +262,9 @@ impl Default for ToolInterceptionConfig {
     }
 }
 
+/// The upper bound of every `tool_interception.*_secs` value: one day.
+const MAX_TOOL_INTERCEPTION_SECS: u64 = 86_400;
+
 impl ToolInterceptionConfig {
     /// Every rule of spec 5.2. Each message names the key. Checked even when off, so turning it
     /// on later never meets a config that was always invalid.
@@ -275,6 +278,16 @@ impl ToolInterceptionConfig {
         ] {
             if v == 0 {
                 return Err(format!("{key} must be at least 1"));
+            }
+        }
+        // `Instant + Duration` panics on overflow, and the interceptor adds each of these to a clock reading.
+        for (key, v) in [
+            ("tool_interception.max_hold_secs", self.max_hold_secs),
+            ("tool_interception.decide_timeout_secs", self.decide_timeout_secs),
+            ("tool_interception.keepalive_secs", self.keepalive_secs),
+        ] {
+            if v > MAX_TOOL_INTERCEPTION_SECS {
+                return Err(format!("{key} must be at most {MAX_TOOL_INTERCEPTION_SECS} (one day); got {v}"));
             }
         }
         if self.max_record_bytes > self.max_held_bytes {
@@ -1042,6 +1055,7 @@ mod tests {
             assert!(cfg.tool_interception.enabled);
             assert_eq!(cfg.tool_interception.on_failure, OnFailureConfig::Allow);
             assert_eq!(cfg.tool_interception.limits().max_hold, std::time::Duration::from_secs(120));
+            assert_eq!(cfg.tool_interception.limits().on_failure, paigasus_gateway_core::OnFailure::Allow);
             assert_eq!(cfg.tool_interception.keepalive_secs, 15);
             Ok(())
         });
@@ -1060,6 +1074,10 @@ mod tests {
     #[test]
     fn tool_interception_validation_names_each_key() {
         for (body, key) in [
+            ("max_hold_secs = 86401", "tool_interception.max_hold_secs"),
+            ("decide_timeout_secs = 86401", "tool_interception.decide_timeout_secs"),
+            ("max_hold_secs = 86400\nkeepalive_secs = 86401", "tool_interception.keepalive_secs"),
+            ("keepalive_secs = 18446744073709551615", "tool_interception.keepalive_secs"),
             ("max_record_bytes = 0", "tool_interception.max_record_bytes"),
             ("max_held_bytes = 0", "tool_interception.max_held_bytes"),
             ("max_hold_secs = 0", "tool_interception.max_hold_secs"),
@@ -1073,6 +1091,9 @@ mod tests {
                 let cfg = GatewayConfig::figment().extract::<GatewayConfig>()?;
                 let err = cfg.validate().expect_err(body);
                 assert!(err.contains(key), "{body}: {err}");
+                if body.contains("max_held_bytes = 5") {
+                    assert!(err.contains("must not exceed"), "{body}: {err}");
+                }
                 Ok(())
             });
         }
