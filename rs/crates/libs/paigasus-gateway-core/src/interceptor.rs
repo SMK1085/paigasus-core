@@ -219,6 +219,12 @@ impl Interceptor {
     // ---- input ---------------------------------------------------------------------------------
 
     fn item(&mut self, item: SseItem, now: Instant) {
+        // D4: after the end marker every record is dropped, an oversized one included. It must not
+        // become a stream failure that rules on a hold still waiting for the decider.
+        if self.after_end {
+            self.count(Metric::RecordDropped("after_done"));
+            return;
+        }
         let rec = match item {
             SseItem::Oversized => {
                 self.count(Metric::RecordDropped("oversized"));
@@ -227,10 +233,6 @@ impl Interceptor {
             }
             SseItem::Record(r) => r,
         };
-        if self.after_end {
-            self.count(Metric::RecordDropped("after_done"));
-            return;
-        }
         if self.mode == Mode::PassThrough {
             let b = self.proto.unframed(rec);
             self.emit(b, now);
@@ -744,6 +746,26 @@ mod tests {
         assert!(!r.out.contains("CANARY") && !r.out.contains("LATE"));
         assert!(r.out.ends_with("data: [DONE]\n\n"), "{}", r.out);
         assert!(r.counts.contains(&Metric::RecordDropped("after_done")));
+    }
+
+    #[test]
+    fn an_oversized_record_after_done_is_dropped_as_after_done() {
+        // D4: everything after the end marker is dropped and counted, oversized or not. It must
+        // not become a stream failure that rules on a hold the decider still owns.
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
+        let mut acts = i.push(call(0, 0, "rm", "X1").as_bytes(), t0);
+        acts.extend(i.push(finish(0).as_bytes(), t0));
+        acts.extend(i.push(b"data: [DONE]\n\n", t0));
+        acts.extend(i.push(args(0, 0, &"x".repeat(5000)).as_bytes(), t0));
+        assert!(i.is_deciding(HoldKey::Choice(0)), "the hold is still the decider's");
+        assert!(acts.contains(&Action::Count(Metric::RecordDropped("after_done"))), "{acts:?}");
+        assert!(!acts.contains(&Action::Count(Metric::RecordDropped("oversized"))), "{acts:?}");
+        assert!(!acts.contains(&Action::Count(Metric::OnFailure("malformed"))), "{acts:?}");
+        let out = emitted(&acts) + &emitted(&i.decided(HoldKey::Choice(0), Ok(vec![Decision::Block { code: BlockCode::Policy }]), t0));
+        assert!(!out.contains("(malformed)") && !out.contains("pass-through"), "{out}");
+        assert!(out.contains("(policy)") && !out.contains("X1"), "{out}");
+        assert!(out.ends_with("data: [DONE]\n\n"), "{out}");
     }
 
     #[test]
