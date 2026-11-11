@@ -3192,6 +3192,7 @@ dependencies = [
  "futures",
  "metrics",
  "metrics-util",
+ "paigasus-gateway-core",
  "paigasus-kernel",
  "paigasus-logging",
  "paigasus-observability",
