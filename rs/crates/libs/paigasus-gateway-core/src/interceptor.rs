@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn pass_through_keeps_the_queued_frames_before_later_records() {
-        // D8: the queued frames are released at the switch, before any later record of the same
+        // § 5.3: the queued frames are released at the switch, before any later record of the same
         // push goes out unclassified.
         let chunks = [
             tool_start(0, "read"),
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn an_idle_stream_never_wakes_in_the_past() {
-        // D7: with nothing held, no keep-alive is sent, so the wake must move forward from `now`.
+        // With nothing held, no keep-alive is sent, so the wake must move forward from `now`.
         let t0 = Instant::now();
         let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
         let now = t0 + Duration::from_secs(10);
@@ -1001,7 +1001,7 @@ mod tests {
         assert!(i.is_finished());
     }
 
-    /// F3: a record that deviates after it would open a hold (its first fragment, or a later
+    /// A record that deviates after it would open a hold (its first fragment, or a later
     /// choice of the same record) must leave no hold behind that the interceptor never registered.
     /// Such a hold would wait for a verdict for ever, and the stream would only keep alive.
     #[test]
@@ -1027,7 +1027,7 @@ mod tests {
         }
     }
 
-    /// F3 for Anthropic: a stop rejected as `incomplete_arguments` leaves the block open, so the
+    /// The same for Anthropic: a stop rejected as `incomplete_arguments` leaves the block open, so the
     /// blocked block still gets its notice and its stop frame.
     #[test]
     fn a_rejected_stop_still_closes_the_blocked_block() {

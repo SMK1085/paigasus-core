@@ -61,11 +61,11 @@ pub(crate) enum BodyOutcome {
 /// Parse, decide and rewrite one complete 2xx body. The usage read happened on the ORIGINAL body
 /// before this runs (D24), so nothing here changes the charge.
 pub(crate) async fn intercept_body(ti: &ToolInterception, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, body: &[u8]) -> BodyOutcome {
-    // D15: the body cap is `max_held_bytes` (spec § 5.2).
+    // The body cap is `max_held_bytes` (spec § 5.2).
     let calls = match parse_body(Format::OpenAiChat, body, ti.limits.max_held_bytes) {
         Ok(c) => c,
         Err(_) => {
-            record(Metric::OnFailure(BlockCode::Malformed.as_kebab()));
+            record(Metric::OnFailure("malformed"));
             return match ti.limits.on_failure {
                 OnFailure::Block => BodyOutcome::Refuse,
                 OnFailure::Allow => BodyOutcome::Forward { rewritten: None, report: None },
@@ -132,12 +132,12 @@ impl Relay {
             match a {
                 Action::Emit(b) => self.out.push_back(b),
                 Action::Decide { hold, calls } => self.decide_queue.push_back((hold, calls)),
-                // D7: the core never returns a wake in the past, so this cannot spin.
+                // The core never returns a wake in the past, so this cannot spin.
                 Action::Wake(at) => self.sleep.as_mut().reset(tokio::time::Instant::from_std(at)),
                 Action::Count(m) => record(m),
             }
         }
-        // D22: a hold that is no longer deciding (a timeout ruled on it) needs no answer. Drop
+        // A hold that is no longer deciding (a timeout ruled on it) needs no answer. Drop
         // its future so the next hold is not stuck behind it.
         if let Some((hold, _)) = &self.pending
             && !self.icpt.is_deciding(*hold)
@@ -178,7 +178,7 @@ impl Relay {
         }
     }
 
-    /// D23: the interceptor ended the client stream (an upstream error record mid-hold) while the
+    /// The interceptor ended the client stream (an upstream error record mid-hold) while the
     /// upstream is still open. Today's relay would read the upstream to its end, so with a guard
     /// the rest is read for billing only (the usage record usually follows), and the charge stays
     /// what it is with interception off (D24). Without a guard there is nothing to bill, and the
@@ -216,8 +216,8 @@ pub(crate) fn intercepted_stream(
 
 /// [`intercepted_stream`] for any wire format. Only OpenAI chat is wired in SMA-749 (D26); the
 /// unit tests drive an Anthropic stream through it, because only that format has more than one
-/// hold per stream (an OpenAI stream carries tool calls in choice 0 only), and P-5 and D22 are
-/// about the second hold.
+/// hold per stream (an OpenAI stream carries tool calls in choice 0 only), and P-5 and the
+/// dropped stale decision are about the second hold.
 fn relay(
     format: Format,
     inner: OpenAiByteStream,
@@ -299,7 +299,7 @@ mod tests {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
-        record(Metric::RecordDropped(BlockCode::Malformed.as_kebab()));
+        record(Metric::RecordDropped("malformed"));
         record(Metric::Decision { decision: "block", basis: "decider" });
         record(Metric::OnFailure("hold_limit"));
         record(Metric::HoldSeconds(0.25));
@@ -323,7 +323,7 @@ mod tests {
                 (names::GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL.to_owned(), labels(&[("code", "hold_limit")]), DebugValue::Counter(1)),
                 (
                     names::GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL.to_owned(),
-                    labels(&[("reason", BlockCode::Malformed.as_kebab())]),
+                    labels(&[("reason", "malformed")]),
                     DebugValue::Counter(1)
                 ),
             ]
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(decider.max_in_flight.load(Ordering::SeqCst), 1);
     }
 
-    /// D22: when a timeout rules on the hold being decided, its future is dropped and the next
+    /// When a timeout rules on the hold being decided, its future is dropped and the next
     /// hold is decided. The second hold completes 600 ms after the first, so its own deadline
     /// (1.6 s) lies 600 ms after the first one's (1 s): kept, the stale future would hold it until
     /// that deadline and it would be blocked too. Wide margins, for a loaded CI runner.

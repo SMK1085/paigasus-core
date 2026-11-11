@@ -22,6 +22,6 @@ pub use decider::{AllowAll, DecideFuture, DecisionContext, ToolCallDecider};
 pub use interceptor::{Action, DeciderError, Interceptor, Metric};
 pub use json::Malformed;
 pub use limits::{Limits, OnFailure};
-pub use report::{ReportDecision, ReportEntry, header_value, name_sha256_8, notice_line, sanitize_name};
+pub use report::{ReportDecision, ReportEntry, notice_line};
 pub use turn::{PriorCall, ToolDefinition, ToolResultRef, ToolTurn, TurnFacts, parse_request};
 pub use types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall, ToolCallKind};

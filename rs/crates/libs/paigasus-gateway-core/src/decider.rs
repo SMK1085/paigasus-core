@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(ready(fut), Ok(vec![Decision::Allow, Decision::Allow]));
     }
 
-    // Compile-time proof that the trait is object safe (D21).
+    // Compile-time proof that the trait is object safe (the gateway holds it as `Arc<dyn …>`).
     const _: fn(&dyn ToolCallDecider) = |_| {};
 
     #[test]

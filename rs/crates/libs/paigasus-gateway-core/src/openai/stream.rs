@@ -14,7 +14,9 @@ use crate::report::notice_line;
 use crate::sse::{self, Record};
 use crate::types::{HoldKey, ToolCall};
 
-const META_KEYS: [&str; 5] = ["id", "object", "created", "model", "system_fingerprint"];
+/// The upstream fields a notice chunk copies, in upstream order. `object` is not copied: a notice
+/// chunk always says `chat.completion.chunk`, or openai-python would skip it.
+const META_KEYS: [&str; 4] = ["id", "created", "model", "system_fingerprint"];
 
 #[derive(Default)]
 struct ChoiceState {
@@ -33,11 +35,12 @@ pub(crate) struct OpenAiStream {
     meta: Map<String, Value>,
 }
 
+/// The scalar (string or number) `META_KEYS` fields of a record. A non-scalar value is skipped.
 fn meta_of(v: &Value) -> Map<String, Value> {
     let mut m = Map::new();
     if let Value::Object(top) = v {
         for k in META_KEYS {
-            if let Some(x) = top.get(k) {
+            if let Some(x @ (Value::String(_) | Value::Number(_))) = top.get(k) {
                 m.insert(k.to_owned(), x.clone());
             }
         }
@@ -46,7 +49,14 @@ fn meta_of(v: &Value) -> Map<String, Value> {
 }
 
 fn notice_chunk(meta: &Map<String, Value>, choice: u32, text: &str) -> Bytes {
-    let mut m = meta.clone();
+    let mut m = Map::new();
+    for (k, v) in meta {
+        m.insert(k.clone(), v.clone());
+        if k == "id" {
+            m.insert("object".to_owned(), classify::CHUNK_OBJECT.into());
+        }
+    }
+    m.entry("object").or_insert_with(|| classify::CHUNK_OBJECT.into());
     m.insert("choices".to_owned(), json!([{"index": choice, "delta": {"content": text}, "finish_reason": null}]));
     sse::frame(None, &serde_json::to_vec(&Value::Object(m)).expect("a Value always serializes"))
 }
@@ -103,12 +113,9 @@ impl Protocol for OpenAiStream {
             }
             Chunk::Choices(c) => c,
         };
-        for (k, v) in meta_of(&value) {
-            self.meta.insert(k, v);
-        }
         // Phase 1 checks the whole record and changes nothing. A deviation in any choice drops the
         // record, so no choice may have been changed by then: a hold marked open that the
-        // interceptor never registered would wait for a verdict for ever (F3).
+        // interceptor never registered would wait for a verdict for ever.
         let empty = ChoiceAssembly::default();
         let mut planned: Vec<Option<Check>> = Vec::with_capacity(choices.len());
         let mut new_choices = 0;
@@ -144,7 +151,10 @@ impl Protocol for OpenAiStream {
             }
             planned.push(after);
         }
-        // Phase 2 applies the checked record.
+        // Phase 2 applies the checked record. Only an accepted record updates the notice meta.
+        for (k, v) in meta_of(&value) {
+            self.meta.insert(k, v);
+        }
         let (mut touches, mut opened, mut completed) = (Vec::new(), Vec::new(), Vec::new());
         for (cv, after) in choices.into_iter().zip(planned) {
             let key = HoldKey::Choice(cv.index);
@@ -436,6 +446,29 @@ mod tests {
         assert!(p.closing(&verdicts).is_empty(), "the notice is owed once");
     }
 
+    /// The closing notice takes its metadata only from accepted records, and only scalars: a
+    /// dropped deviating record or a non-scalar field cannot reach the client through it.
+    #[test]
+    fn the_closing_notice_meta_comes_only_from_accepted_scalars() {
+        let first = chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c0","type":"function","function":{"name":"rm","arguments":"{}"}}]}}]));
+        let mut deviating: Value = serde_json::from_str(&chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"again"}}]}}]))).unwrap();
+        deviating["id"] = "chatcmpl-EVIL".into();
+        let mut odd: Value = serde_json::from_str(&chunk(json!([{"index":0,"delta":{"content":"x"}}]))).unwrap();
+        odd["model"] = json!({"leak":"SECRET"});
+        odd.as_object_mut().unwrap().remove("id"); // so only the dropped record could change the id
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        p.step(rec(&first), &v).ok().unwrap();
+        assert!(p.step(rec(&deviating.to_string()), &v).is_err(), "repeated_name");
+        p.step(rec(&odd.to_string()), &v).ok().unwrap();
+        let mut verdicts = Verdicts::new();
+        verdicts.insert(HoldKey::Choice(0), Verdict::BlockAll(BlockCode::Truncated));
+        let closing = String::from_utf8(p.closing(&verdicts).concat()).unwrap();
+        assert!(closing.contains("\"id\":\"chatcmpl-1\""), "{closing}");
+        assert!(!closing.contains("EVIL") && !closing.contains("SECRET"), "{closing}");
+        assert!(closing.contains("\"object\":\"chat.completion.chunk\""), "{closing}");
+    }
+
     #[test]
     fn a_fragment_after_finish_reason_is_a_deviation() {
         let mut p = OpenAiStream::default();
@@ -505,7 +538,7 @@ mod tests {
         assert!(matches!(r, Err(StepError::Deviation("multi_choice_tool_calls"))));
     }
 
-    /// F2: LangChain reads `choices[0]` only, so tool data for choice 0 behind another choice's
+    /// LangChain reads `choices[0]` only (spec § 11, `choice_position`), so tool data for choice 0 behind another choice's
     /// entry would reach the decider but not that client.
     #[test]
     fn tool_data_behind_another_choice_entry_is_a_deviation() {

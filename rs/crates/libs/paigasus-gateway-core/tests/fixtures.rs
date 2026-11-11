@@ -36,7 +36,7 @@ fn s(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-/// D13: the CRLF fixture keeps its CR bytes through git.
+/// The CRLF fixture keeps its CR bytes through git (`.gitattributes`).
 #[test]
 fn the_crlf_fixture_has_crlf_line_endings() {
     let bytes = std::fs::read(dir("openai/conforming/crlf_endings.sse")).unwrap();

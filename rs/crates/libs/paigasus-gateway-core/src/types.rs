@@ -41,6 +41,9 @@ impl ToolCallKind {
 /// LegacyFunctionCall); `custom.input` (Custom); the concatenated `partial_json` of an Anthropic
 /// stream, or the compact JSON of a non-stream `input` (AnthropicToolUse); and the raw JSON of the
 /// whole entry, as a JSON array of its fragments (Other).
+///
+/// `Debug` prints `arguments`, which are model output and may carry secrets. Never log a
+/// `ToolCall` with `{:?}`; log its sanitized name only (spec § 4.5).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {

@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn a_unicode_escaped_key_is_read_as_the_key_it_spells() {
-        // There is no substring prefilter (spec D4): the escaped spelling IS the classifier key.
+        // There is no substring prefilter: the escaped spelling IS the classifier key.
         let v = parse_strict(br#"{"tool\u005fcalls":[1]}"#).unwrap();
         assert_eq!(v, json!({"tool_calls":[1]}));
     }

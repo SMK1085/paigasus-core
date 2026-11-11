@@ -53,7 +53,7 @@ fn ti_with(limits: Limits, decider: Arc<dyn ToolCallDecider>) -> Option<Arc<Tool
     Some(Arc::new(ToolInterception { limits, decider }))
 }
 
-/// A choice-0 tool-call delta. Every chunk carries `"object":"chat.completion.chunk"` (Task 11 F1).
+/// A choice-0 tool-call delta. Every chunk carries `"object":"chat.completion.chunk"` (the `object` rule, spec § 11).
 fn tool_chunk(index: u32, id: Option<&str>, name: Option<&str>, args: &str) -> String {
     let mut e = serde_json::json!({"index": index, "function": {"arguments": args}});
     if let Some(id) = id {
@@ -179,7 +179,7 @@ async fn a_blocked_stream_charges_like_the_upstream() {
     assert_eq!(on, off);
 }
 
-/// D23/D24: the interceptor ends the client stream at an error record mid-hold, but the usage
+/// D24: the interceptor ends the client stream at an error record mid-hold, but the usage
 /// record the upstream sends after it is still read, so the charge equals today's relay's.
 #[tokio::test]
 async fn an_error_record_mid_hold_still_charges_the_upstream_usage() {
@@ -212,7 +212,7 @@ async fn an_error_record_mid_hold_still_charges_the_upstream_usage() {
 }
 
 /// D14/D18 over HTTP: a decider that never answers is timed out, the call is blocked with
-/// `decider-error`, and the stream still ends. (Two holds, P-5 and D22, need a format with more
+/// `decider-error`, and the stream still ends. (Two holds, P-5 and the dropped stale decision, need a format with more
 /// than one hold per stream; the relay's unit tests cover them with Anthropic blocks.)
 #[tokio::test]
 async fn a_hanging_decider_is_timed_out_and_the_call_blocked() {

@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! What the two wire protocols share (spec § 4, D12). Task 6 adds the `Protocol` trait.
-
-/// A violation of the canonical assembly form (spec § 4.3). Always a stream-level `on_failure`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Deviation(pub &'static str);
+//! What the two wire protocols share (spec § 4, D12): the `Protocol` trait, verdicts and frames.
 
 use std::collections::BTreeMap;
 
@@ -14,6 +10,10 @@ use crate::json::Malformed;
 use crate::report::ReportEntry;
 use crate::sse::Record;
 use crate::types::{BlockCode, Decision, HoldKey, ToolCall};
+
+/// A violation of the canonical assembly form (spec § 4.3). Always a stream-level `on_failure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Deviation(pub &'static str);
 
 /// What a hold's calls are allowed to do once released.
 #[derive(Debug, Clone, PartialEq, Eq)]

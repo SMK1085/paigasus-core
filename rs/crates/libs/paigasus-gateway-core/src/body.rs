@@ -376,7 +376,7 @@ mod tests {
         }
     }
 
-    /// F1: a body that carries tool calls must say it is a completion. A text-only body is not
+    /// The `object` rule (spec § 11): a body that carries tool calls must say it is a completion. A text-only body is not
     /// checked, whatever its `finish_reason`.
     #[test]
     fn a_body_with_calls_or_a_finish_needs_the_completion_object() {

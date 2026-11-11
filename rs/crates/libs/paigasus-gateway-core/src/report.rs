@@ -18,7 +18,7 @@ const TRUNCATED: &str = r#"{"truncated":true}"#;
 
 /// The first 128 bytes of `name`, every byte outside `[A-Za-z0-9_.:-]` replaced by `_`.
 #[must_use]
-pub fn sanitize_name(name: &str) -> String {
+pub(crate) fn sanitize_name(name: &str) -> String {
     name.bytes()
         .take(MAX_NAME_BYTES)
         .map(|b| if b.is_ascii_alphanumeric() || b"_.:-".contains(&b) { b as char } else { '_' })
@@ -27,7 +27,7 @@ pub fn sanitize_name(name: &str) -> String {
 
 /// The first 4 bytes of SHA-256 over the raw name, as 8 lower-case hex digits.
 #[must_use]
-pub fn name_sha256_8(name: &str) -> String {
+pub(crate) fn name_sha256_8(name: &str) -> String {
     Sha256::digest(name.as_bytes())[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -41,7 +41,7 @@ pub fn notice_line(name: &str, code: BlockCode) -> String {
 pub enum ReportDecision {
     Allow,
     Block,
-    /// A provider-executed tool (D3, § 4.2): reported, never decided (P-6).
+    /// A provider-executed tool (§ 4.2): reported, never decided (P-6).
     Unenforceable,
 }
 
@@ -86,7 +86,7 @@ impl ReportEntry {
 
 /// The `paigasus-tool-decisions` header value (D22).
 #[must_use]
-pub fn header_value(entries: &[ReportEntry]) -> String {
+pub(crate) fn header_value(entries: &[ReportEntry]) -> String {
     let mut out = String::from("[");
     for (i, e) in entries.iter().enumerate() {
         let json = e.to_json();

@@ -41,7 +41,7 @@ enum TyClass {
 
 /// What the canonical checks read of one call. It is small, so a whole record can be checked
 /// against a copy before anything is changed: a deviation must never leave half-applied state, for
-/// example a hold marked open that the interceptor never registered (F3).
+/// example a hold marked open that the interceptor never registered.
 #[derive(Clone, Copy, Default)]
 struct Shadow {
     id: bool,
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn check_finish_agrees_with_finish() {
-        // Phase 1 of the stream step must reject exactly what finish rejects (F3).
+        // Phase 1 of the stream step must reject exactly what finish rejects.
         for (first, last) in [(r#"{\"p\":"#, "1}"), (r#"{\"p\":"#, "1"), ("", ""), ("{}", "{}")] {
             let mut a = ChoiceAssembly::default();
             feed(&mut a, &tc(&format!(r#"{{"index":0,"id":"c","type":"function","function":{{"name":"x","arguments":"{first}"}}}}"#))).unwrap();

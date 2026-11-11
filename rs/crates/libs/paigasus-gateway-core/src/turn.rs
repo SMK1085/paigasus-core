@@ -24,6 +24,7 @@ pub struct TurnFacts {
     pub tool_results: Vec<ToolResultRef>,
 }
 
+/// A tool the caller declared. `Debug` prints `schema`; never log a definition with `{:?}`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolDefinition {
@@ -32,6 +33,8 @@ pub struct ToolDefinition {
     pub schema: Option<Value>,
 }
 
+/// A call the caller made on an earlier turn. `Debug` prints `arguments`, which may carry
+/// secrets; never log a prior call with `{:?}`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriorCall {

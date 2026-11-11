@@ -44,7 +44,8 @@ pub(crate) struct NameArgs {
     pub args: Option<String>,
 }
 
-/// The `object` a chunk (or body) needs once it carries tool data or a `finish_reason` (F1).
+/// The `object` a chunk needs once it carries tool data or a `finish_reason`, and a body once it
+/// carries tool calls (spec § 11): openai-python skips a chunk with any other `object`.
 pub(crate) const CHUNK_OBJECT: &str = "chat.completion.chunk";
 pub(crate) const BODY_OBJECT: &str = "chat.completion";
 

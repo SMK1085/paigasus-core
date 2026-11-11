@@ -1154,8 +1154,8 @@ const NOT_RUN_BY_CLIENT: [&str; 5] = ["text", "thinking", "redacted_thinking", "
 /// deltas and stops look up `content[event.index]` by Python list indexing. An `input_json_delta`
 /// for a `tool_use` or `server_tool_use` block is appended to a buffer keyed by `event.index` and
 /// partial-parsed into `input`. A `message_delta` writes `snapshot.usage.output_tokens`, so a
-/// `message_start` without a `usage` object makes it raise (checked against 2.3.0, SMA-749
-/// Task 18). Nothing stops at `message_stop`.
+/// `message_start` without a `usage` object makes it raise (checked against 2.3.0 by the
+/// SMA-749 SDK conformance tests). Nothing stops at `message_stop`.
 /// SOURCE: anthropic-python 2.3.0, src/anthropic/lib/streaming/_messages.py
 /// accumulate_event; src/anthropic/_streaming.py Stream.__stream__.
 pub fn run_anthropic_python(bytes: &[u8]) -> Run {
