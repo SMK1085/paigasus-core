@@ -297,6 +297,8 @@ tasks:
       - 'proxy.ts'
       - 'tests/**/*'
       - 'vitest.config.ts'
+      # SMA-749: tests/unit/chat-stream-golden.test.ts reads the gateway-core goldens.
+      - '/rs/crates/libs/paigasus-gateway-core/tests/golden/**/*'
       # tests/unit/hydration.test.ts imports this config and asserts HYDRATION_TIMEOUT_MS against
       # its `timeout` and `expect.timeout` (SMA-639). This task carries `merge: replace`, so no
       # inherited input reaches a root-level config file: without this entry, lowering `timeout:`
