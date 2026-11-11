@@ -266,3 +266,101 @@ async fn client_abort_cancels_upstream_with_interception_on() {
     assert!(propagated.is_ok(), "cancel-on-drop must survive interception");
     server.abort();
 }
+
+fn body_with_calls() -> String {
+    serde_json::json!({"id":"chatcmpl-1","object":"chat.completion","created":1790942400,"model":"gpt-4o-mini",
+        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[
+            {"id":"c0","type":"function","function":{"name":"read_file","arguments":"{}"}},
+            {"id":"c1","type":"function","function":{"name":"blocked_rm","arguments":"{\"p\":\"CANARY\"}"}}]},"finish_reason":"tool_calls"}],
+        "usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":13}})
+    .to_string()
+}
+
+#[tokio::test]
+async fn a_non_stream_allow_all_body_is_forwarded_unchanged_with_a_header() {
+    let body = body_with_calls();
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, body.clone()).await;
+    let app = app_with_interception(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, None, ti(Arc::new(AllowAll)));
+    let sent = send(&app, NON_STREAM_BODY).await;
+    assert_eq!(sent.text(), body);
+    let h: Vec<serde_json::Value> = serde_json::from_str(sent.header("paigasus-tool-decisions")).expect("an ASCII JSON header");
+    assert_eq!(h.len(), 2);
+}
+
+#[tokio::test]
+async fn a_non_stream_blocked_call_is_rewritten() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, body_with_calls()).await;
+    let app = app_with_interception(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, None, ti(Arc::new(BlockNamed)));
+    let sent = send(&app, NON_STREAM_BODY).await;
+    assert_eq!(sent.status, StatusCode::OK);
+    assert!(!sent.text().contains("CANARY"));
+    let v = sent.json();
+    assert_eq!(v["choices"][0]["message"]["tool_calls"].as_array().unwrap().len(), 1);
+    assert!(v["choices"][0]["message"]["content"].as_str().unwrap().contains("(policy)"));
+}
+
+#[tokio::test]
+async fn a_non_stream_body_without_calls_gets_no_header() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, USAGE_BODY).await;
+    let app = app_with_interception(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, None, ti(Arc::new(AllowAll)));
+    let sent = send(&app, NON_STREAM_BODY).await;
+    assert_eq!(sent.text(), USAGE_BODY);
+    assert!(sent.headers.get("paigasus-tool-decisions").is_none());
+}
+
+#[tokio::test]
+async fn a_malformed_non_stream_body_is_a_502_with_block_and_forwarded_with_allow() {
+    let bad = r#"{"choices":[{"index":0,"message":{"tool_calls":[]}}],"a":1,"a":2}"#;
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, bad).await;
+    let block = app_with_interception(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, None, ti(Arc::new(AllowAll)));
+    let sent = send(&block, NON_STREAM_BODY).await;
+    assert_eq!(sent.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(sent.json()["error"]["code"], "tool-interception-malformed-response");
+    let observe = ti_with(
+        Limits {
+            on_failure: paigasus_gateway_core::OnFailure::Allow,
+            ..Limits::defaults()
+        },
+        Arc::new(AllowAll),
+    );
+    let allow = app_with_interception(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, None, observe);
+    let sent = send(&allow, NON_STREAM_BODY).await;
+    assert_eq!(sent.status, StatusCode::OK);
+    assert_eq!(sent.text(), bad);
+}
+
+#[tokio::test]
+async fn a_non_2xx_answer_is_forwarded_as_today() {
+    let err = r#"{"error":{"message":"bad","type":"invalid_request_error","param":null,"code":null}}"#;
+    let mock = MockOpenAi::spawn_json(StatusCode::BAD_REQUEST, err).await;
+    let app = app_with_interception(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, None, ti(Arc::new(BlockNamed)));
+    let sent = send(&app, NON_STREAM_BODY).await;
+    assert_eq!((sent.status, sent.text().as_str()), (StatusCode::BAD_REQUEST, err));
+}
+
+/// D24 (Review focus 5): differential against interception off. The charge is the upstream's
+/// reported usage, whether or not the body is rewritten, and a refused (502) body keeps it too.
+#[tokio::test]
+async fn a_blocked_body_charges_like_the_upstream() {
+    let bad = r#"{"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":13},"a":1,"a":2}"#;
+    for (body, decider) in [
+        (body_with_calls(), Arc::new(BlockNamed) as Arc<dyn ToolCallDecider>),
+        (bad.to_owned(), Arc::new(AllowAll) as Arc<dyn ToolCallDecider>),
+    ] {
+        let mock = MockOpenAi::spawn_json(StatusCode::OK, body).await;
+        let mut charges = Vec::new();
+        for ti in [None, ti(decider.clone())] {
+            let store = RecordingStore::new();
+            let app = app_with_interception(
+                ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN),
+                &mock.base_url,
+                Some(limits(rules(None, None, Some(1_000_000)), store.clone())),
+                ti,
+            );
+            let _ = send(&app, NON_STREAM_BODY).await;
+            charges.push(store.charges());
+        }
+        assert_eq!(charges[0], vec![13]);
+        assert_eq!(charges[1], charges[0]);
+    }
+}

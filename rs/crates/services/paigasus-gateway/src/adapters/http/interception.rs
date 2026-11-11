@@ -24,7 +24,9 @@ use std::time::Instant;
 use axum::body::Bytes;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
-use paigasus_gateway_core::{Action, DecideFuture, DeciderError, Decision, DecisionContext, Format, HoldKey, Interceptor, Limits, Metric, ToolCall, ToolCallDecider, ToolTurn};
+use paigasus_gateway_core::{
+    Action, Basis, BlockCode, DecideFuture, DeciderError, Decision, DecisionContext, Format, HoldKey, Interceptor, Limits, Metric, OnFailure, ToolCall, ToolCallDecider, ToolTurn, parse_body,
+};
 use paigasus_observability::names;
 
 use crate::adapters::http::chat::{feed_scan, finish_scan};
@@ -46,6 +48,61 @@ pub(crate) fn record(m: Metric) {
         Metric::OnFailure(code) => counter!(names::GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL, "code" => code).increment(1),
         Metric::HoldSeconds(s) => histogram!(names::GATEWAY_TOOL_INTERCEPTION_HOLD_SECONDS).record(s),
     }
+}
+
+/// What the non-stream path does with a body (spec § 5.2).
+pub(crate) enum BodyOutcome {
+    Forward {
+        body: Bytes,
+        report: Option<String>,
+    },
+    /// D16 block on a body that cannot be checked: the 502 `tool-interception-malformed-response`.
+    Refuse,
+}
+
+/// Parse, decide and rewrite one complete 2xx body. The usage read happened on the ORIGINAL body
+/// before this runs (D24), so nothing here changes the charge.
+pub(crate) async fn intercept_body(ti: &ToolInterception, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, body: Bytes) -> BodyOutcome {
+    // D15: the body cap is `max_held_bytes` (spec § 5.2).
+    let calls = match parse_body(Format::OpenAiChat, &body, ti.limits.max_held_bytes) {
+        Ok(c) => c,
+        Err(_) => {
+            record(Metric::OnFailure(BlockCode::Malformed.as_kebab()));
+            return match ti.limits.on_failure {
+                OnFailure::Block => BodyOutcome::Refuse,
+                OnFailure::Allow => BodyOutcome::Forward { body, report: None },
+            };
+        }
+    };
+    if calls.calls.is_empty() && calls.unenforceable.is_empty() {
+        return BodyOutcome::Forward { body, report: None };
+    }
+    let n = calls.calls.len();
+    let (decisions, basis) = if n == 0 {
+        (Vec::new(), Basis::Decider)
+    } else {
+        let fut = ti.decider.decide(ctx, turn, calls.calls.clone());
+        match tokio::time::timeout(ti.limits.decide_timeout, fut).await {
+            Ok(Ok(d)) if d.len() == n => (d, Basis::Decider),
+            _ => {
+                record(Metric::OnFailure("decider_error"));
+                match ti.limits.on_failure {
+                    OnFailure::Block => (vec![Decision::Block { code: BlockCode::DeciderError }; n], Basis::OnFailure),
+                    OnFailure::Allow => (vec![Decision::Allow; n], Basis::OnFailure),
+                }
+            }
+        }
+    };
+    for d in &decisions {
+        let decision = if d.is_allow() { "allow" } else { "block" };
+        record(Metric::Decision { decision, basis: basis.as_str() });
+    }
+    let report = calls.report(&decisions, basis);
+    let body = match calls.apply(&decisions) {
+        None => body,
+        Some(rewritten) => Bytes::from(rewritten),
+    };
+    BodyOutcome::Forward { body, report: Some(report) }
 }
 
 /// The unfold state. It owns the upstream, the charge guard and the pending decision, so a

@@ -164,9 +164,29 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
                     guard.mark_no_charge();
                 }
             }
-            // Forward the upstream status + body VERBATIM, including a non-2xx OpenAI error envelope.
-            let resp = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
-            (resp, status)
+            // SMA-749 § 5.2: the guard read the ORIGINAL body above (D24); interception runs after.
+            let outcome = match &interception {
+                Some((ti, ctx, turn)) if status.is_success() => super::interception::intercept_body(ti, Arc::clone(ctx), Arc::clone(turn), body).await,
+                _ => super::interception::BodyOutcome::Forward { body, report: None },
+            };
+            match outcome {
+                super::interception::BodyOutcome::Refuse => {
+                    let resp = GatewayError::ToolInterceptionMalformedResponse.into_response();
+                    let status = resp.status();
+                    (resp, status)
+                }
+                super::interception::BodyOutcome::Forward { body, report } => {
+                    // Forward the upstream status + body VERBATIM (or rewritten by a block),
+                    // including a non-2xx OpenAI error envelope.
+                    let mut resp = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
+                    if let Some(r) = report
+                        && let Ok(v) = axum::http::HeaderValue::from_str(&r)
+                    {
+                        resp.headers_mut().insert("paigasus-tool-decisions", v);
+                    }
+                    (resp, status)
+                }
+            }
         }
         Ok(ChatResponse::Stream { status, stream }) => {
             // NOTE: for `stream:true` this records TTFB (time-to-first-byte / response head), NOT
