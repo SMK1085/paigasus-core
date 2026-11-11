@@ -50,7 +50,14 @@ pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
     }
     let choices = match top.get("choices") {
         None => Vec::new(),
-        Some(Value::Array(a)) => a.iter().map(choice).collect::<Result<_, _>>()?,
+        Some(Value::Array(a)) => {
+            let v: Vec<ChoiceView> = a.iter().map(choice).collect::<Result<_, _>>()?;
+            // LangChain takes choices[0] of every chunk, so a repeated index could be merged by it.
+            if v.iter().enumerate().any(|(i, x)| v[..i].iter().any(|y| y.index == x.index)) {
+                return Err(Malformed("duplicate_choice_index"));
+            }
+            v
+        }
         Some(_) => return Err(Malformed("choices")),
     };
     Ok(Chunk::Choices(choices))
@@ -198,5 +205,11 @@ mod tests {
         ] {
             assert!(c(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_repeated_choice_index_in_one_chunk_is_malformed() {
+        assert!(c(r#"{"choices":[{"index":0,"delta":{}},{"index":0,"delta":{}}]}"#).is_err());
+        assert_eq!(choices(r#"{"choices":[{"index":0,"delta":{}},{"index":1,"delta":{"content":"t"}}]}"#).len(), 2);
     }
 }

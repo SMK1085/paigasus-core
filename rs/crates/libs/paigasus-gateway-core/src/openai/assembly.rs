@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Canonical tool-call assembly for one OpenAI choice (spec § 4.3, D9).
 //!
+//! Only choice 0 may carry tool calls, because LangChain reads `choices[0]` of every chunk and
+//! ignores `choice.index`. A `type` that does not match the body's shape is a deviation, because
+//! clients ignore `type` and run the body. Kind Other is only for a call with no body at all.
+//!
 //! The client SDKs disagree on everything outside this form. openai-python concatenates every
 //! string except `index` and `type`, so a second `name` fragment turns `safe_` into `safe_rm`.
 //! openai-node replaces the name, and LangChain merges by index value. Inside the canonical form
@@ -41,6 +45,16 @@ fn set_once(slot: &mut Option<String>, v: &Option<String>, why: &'static str) ->
             return Err(Deviation(why));
         }
         *slot = Some(v.clone());
+    }
+    Ok(())
+}
+
+/// Tool calls are allowed only in choice 0 (spec § 4.3). LangChain reads `choices[0]` of every
+/// chunk and ignores `choice.index`, so a call split across choices 0 and 1 would be merged by it
+/// but assembled separately here. Text in other choices stays allowed.
+pub(crate) fn check_tool_choice(choice: u32, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<(), Deviation> {
+    if choice != 0 && (!frags.is_empty() || legacy.is_some()) {
+        return Err(Deviation("multi_choice_tool_calls"));
     }
     Ok(())
 }
@@ -105,12 +119,14 @@ impl ChoiceAssembly {
         }
         let mut out = Vec::with_capacity(self.calls.len());
         for (i, b) in self.calls.iter().enumerate() {
-            let kind = match (b.ty.as_deref(), b.shape) {
-                (Some("function") | None, Some(Shape::Function)) => ToolCallKind::Function,
-                (Some("custom") | None, Some(Shape::Custom)) => ToolCallKind::Custom,
-                (Some("function"), Some(Shape::Custom)) | (Some("custom"), Some(Shape::Function)) => return Err(Deviation("type_shape_mismatch")),
-                (Some("function" | "custom"), None) => return Err(Deviation("missing_body")),
-                _ => ToolCallKind::Other,
+            // Clients ignore `type` and run the body, so any type other than the one the body's
+            // shape expects is a deviation, never kind Other (spec I1).
+            let kind = match (b.shape, b.ty.as_deref()) {
+                (Some(Shape::Function), Some("function") | None) => ToolCallKind::Function,
+                (Some(Shape::Custom), Some("custom") | None) => ToolCallKind::Custom,
+                (Some(_), Some(_)) => return Err(Deviation("type_shape_mismatch")),
+                (None, Some("function" | "custom")) => return Err(Deviation("missing_body")),
+                (None, _) => ToolCallKind::Other,
             };
             let (name, arguments) = if kind == ToolCallKind::Other {
                 let name = b.name.clone().or_else(|| b.ty.clone()).unwrap_or_else(|| "unknown".to_owned());
@@ -263,5 +279,30 @@ mod tests {
         assert_eq!(a.names(), vec![(0, "unknown".to_owned())]);
         feed(&mut a, &tc(r#"{"index":0,"function":{"name":"rm"}}"#)).unwrap();
         assert_eq!(a.names(), vec![(0, "rm".to_owned())]);
+    }
+
+    #[test]
+    fn an_unexpected_type_with_a_body_is_a_deviation() {
+        let cases = [
+            r#"{"index":0,"id":"c","type":"shell","function":{"name":"x","arguments":"{}"}}"#,
+            r#"{"index":0,"id":"c","type":"Function","function":{"name":"x","arguments":"{}"}}"#,
+            r#"{"index":0,"id":"c","type":"shell","custom":{"name":"x","input":"y"}}"#,
+        ];
+        for s in cases {
+            let mut a = ChoiceAssembly::default();
+            feed(&mut a, &tc(s)).unwrap();
+            assert_eq!(a.finish(0).unwrap_err().0, "type_shape_mismatch", "{s}");
+        }
+    }
+
+    #[test]
+    fn tool_fragments_outside_choice_zero_are_a_deviation() {
+        let (f, l) = frags(&tc(r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#));
+        assert_eq!(check_tool_choice(1, &f, l.as_ref()).unwrap_err().0, "multi_choice_tool_calls");
+        assert!(check_tool_choice(0, &f, l.as_ref()).is_ok());
+        let (f, l) = frags(r#"{"choices":[{"index":0,"delta":{"function_call":{"name":"f"}}}]}"#);
+        assert_eq!(check_tool_choice(2, &f, l.as_ref()).unwrap_err().0, "multi_choice_tool_calls");
+        let (f, l) = frags(r#"{"choices":[{"index":0,"delta":{"content":"hi"}}]}"#);
+        assert!(check_tool_choice(1, &f, l.as_ref()).is_ok());
     }
 }
