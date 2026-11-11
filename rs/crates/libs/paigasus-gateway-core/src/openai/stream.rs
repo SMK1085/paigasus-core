@@ -7,7 +7,7 @@ use bytes::Bytes;
 use serde_json::{Map, Value, json};
 
 use crate::json::parse_strict;
-use crate::openai::assembly::{self, ChoiceAssembly};
+use crate::openai::assembly::{self, Check, ChoiceAssembly};
 use crate::openai::classify::{self, Chunk};
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
 use crate::report::notice_line;
@@ -106,42 +106,72 @@ impl Protocol for OpenAiStream {
         for (k, v) in meta_of(&value) {
             self.meta.insert(k, v);
         }
-        let (mut touches, mut opened, mut completed) = (Vec::new(), Vec::new(), Vec::new());
-        for cv in choices {
+        // Phase 1 checks the whole record and changes nothing. A deviation in any choice drops the
+        // record, so no choice may have been changed by then: a hold marked open that the
+        // interceptor never registered would wait for a verdict for ever (F3).
+        let empty = ChoiceAssembly::default();
+        let mut planned: Vec<Option<Check>> = Vec::with_capacity(choices.len());
+        let mut new_choices = 0;
+        for (position, cv) in choices.iter().enumerate() {
             let key = HoldKey::Choice(cv.index);
-            if !self.choices.contains_key(&cv.index) && cv.index as usize != self.choices.len() {
-                return Err(StepError::Deviation("choice_order"));
+            let st = self.choices.get(&cv.index);
+            if st.is_none() {
+                if cv.index as usize != self.choices.len() + new_choices {
+                    return Err(StepError::Deviation("choice_order"));
+                }
+                new_choices += 1;
             }
+            let (finished, hold_open, asm) = st.map_or((false, false, &empty), |s| (s.finished, s.hold_open, &s.asm));
+            let tools = !cv.fragments.is_empty() || cv.legacy.is_some();
+            let undecided = !verdicts.contains_key(&key);
+            let mut after = None;
+            if tools {
+                assembly::check_tool_choice(cv.index, position, &cv.fragments, cv.legacy.as_ref())?;
+                if finished {
+                    return Err(StepError::Deviation("late_fragment"));
+                }
+                if undecided {
+                    after = Some(asm.check(&cv.fragments, cv.legacy.as_ref())?);
+                }
+            }
+            if cv.finish_reason.is_some() {
+                if finished {
+                    return Err(StepError::Deviation("second_finish"));
+                }
+                if (hold_open || tools) && undecided {
+                    after.as_ref().unwrap_or(asm.state()).finish()?;
+                }
+            }
+            planned.push(after);
+        }
+        // Phase 2 applies the checked record.
+        let (mut touches, mut opened, mut completed) = (Vec::new(), Vec::new(), Vec::new());
+        for (cv, after) in choices.into_iter().zip(planned) {
+            let key = HoldKey::Choice(cv.index);
             let st = self.choices.entry(cv.index).or_default();
             if cv.has_text {
                 st.has_text = true;
             }
             if !cv.fragments.is_empty() || cv.legacy.is_some() {
-                assembly::check_tool_choice(cv.index, &cv.fragments, cv.legacy.as_ref())?;
-                if st.finished {
-                    return Err(StepError::Deviation("late_fragment"));
+                match (verdicts.get(&key), after) {
+                    (None, Some(after)) => st.asm.commit(&cv.fragments, cv.legacy.as_ref(), after),
+                    (Some(Verdict::PassThrough), _) => {
+                        let _ = st.asm.apply(&cv.fragments, cv.legacy.as_ref());
+                    }
+                    _ => {}
                 }
                 if !st.hold_open {
                     st.hold_open = true;
                     opened.push(key);
                 }
                 touches.push(key);
-                match verdicts.get(&key) {
-                    None => st.asm.apply(&cv.fragments, cv.legacy.as_ref())?,
-                    Some(Verdict::PassThrough) => {
-                        let _ = st.asm.apply(&cv.fragments, cv.legacy.as_ref());
-                    }
-                    Some(_) => {}
-                }
             }
             if cv.finish_reason.is_some() {
-                if st.finished {
-                    return Err(StepError::Deviation("second_finish"));
-                }
                 st.finished = true;
                 if st.hold_open {
                     touches.push(key);
                     let finished = match verdicts.get(&key) {
+                        // Phase 1 ran the same check on the same state, so this cannot fail.
                         None => Some(st.asm.finish(cv.index)?),
                         Some(Verdict::PassThrough) => st.asm.finish(cv.index).ok(),
                         Some(_) => None,
@@ -473,5 +503,29 @@ mod tests {
             &v,
         );
         assert!(matches!(r, Err(StepError::Deviation("multi_choice_tool_calls"))));
+    }
+
+    /// F2: LangChain reads `choices[0]` only, so tool data for choice 0 behind another choice's
+    /// entry would reach the decider but not that client.
+    #[test]
+    fn tool_data_behind_another_choice_entry_is_a_deviation() {
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        p.step(
+            rec(&chunk(
+                json!([{"index":0,"delta":{"role":"assistant","content":""}},{"index":1,"delta":{"role":"assistant","content":""}}]),
+            )),
+            &v,
+        )
+        .ok()
+        .unwrap();
+        let frag = json!({"tool_calls":[{"index":0,"id":"c","type":"function","function":{"name":"rm","arguments":"{}"}}]});
+        let behind = chunk(json!([{"index":1,"delta":{"content":"x"}},{"index":0,"delta":frag}]));
+        assert!(matches!(p.step(rec(&behind), &v), Err(StepError::Deviation("choice_position"))));
+        // Nothing of the rejected record stuck: the same fragment at position 0 still opens the hold.
+        match p.step(rec(&chunk(json!([{"index":0,"delta":frag},{"index":1,"delta":{"content":"x"}}]))), &v).ok().unwrap() {
+            Step::Frame { opened, .. } => assert_eq!(opened, vec![HoldKey::Choice(0)]),
+            _ => panic!("a frame"),
+        }
     }
 }

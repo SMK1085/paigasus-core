@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn an_unknown_type_without_a_body_is_other() {
-        let v = json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"x","type":"mystery","payload":1}]},"finish_reason":"tool_calls"}]});
+        let v = json!({"object":"chat.completion","choices":[{"index":0,"message":{"tool_calls":[{"id":"x","type":"mystery","payload":1}]},"finish_reason":"tool_calls"}]});
         let b = parse_body(Format::OpenAiChat, v.to_string().as_bytes(), MAX).unwrap();
         assert_eq!((b.calls[0].kind, b.calls[0].name.as_str()), (ToolCallKind::Other, "mystery"));
         assert!(b.calls[0].arguments.contains("\"payload\":1"));
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn a_blocked_call_in_a_later_choice_position_leaves_other_choices_alone() {
-        let v = json!({"choices":[
+        let v = json!({"object":"chat.completion","choices":[
             {"index":0,"message":{"content":"a","tool_calls":[{"id":"c","type":"function","function":{"name":"rm","arguments":"{}"}}]},"finish_reason":"tool_calls"},
             {"index":1,"message":{"content":"b"},"finish_reason":"stop","logprobs":null}]});
         let b = parse_body(Format::OpenAiChat, v.to_string().as_bytes(), MAX).unwrap();
@@ -374,5 +374,19 @@ mod tests {
             assert!(text.contains("\"read\" was blocked (decider-error)") && text.contains("\"rm\" was blocked (decider-error)"), "{text}");
             assert!(v["choices"][0]["message"].get("tool_calls").is_none());
         }
+    }
+
+    /// F1: openai-python reads a body as a completion only when `object` says so.
+    #[test]
+    fn a_body_with_calls_or_a_finish_needs_the_completion_object() {
+        let mut v: Value = serde_json::from_slice(&two_calls()).unwrap();
+        v.as_object_mut().unwrap().remove("object");
+        assert_eq!(err_of(Format::OpenAiChat, &v), Some("object"));
+        v["object"] = "chat.completion.chunk".into();
+        assert_eq!(err_of(Format::OpenAiChat, &v), Some("object"));
+        let text = json!({"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]});
+        assert_eq!(err_of(Format::OpenAiChat, &text), Some("object"));
+        let bare = json!({"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]});
+        assert_eq!(err_of(Format::OpenAiChat, &bare), None);
     }
 }

@@ -5,12 +5,15 @@
 //! goes through the same assembly (`check_tool_choice`, `ChoiceAssembly`), so the decider sees
 //! the calls a client sees and the canonical rules cannot drift between the stream and the body.
 //! A `Deviation` there is `Malformed` here: a body has no earlier frame to release.
+//!
+//! A body with tool calls or a `finish_reason` must say `"object":"chat.completion"`, by the rule
+//! the stream applies to chunks (`classify::check_object`).
 
 use serde_json::{Map, Value, json};
 
-use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of, opt_obj};
+use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of, opt_obj, opt_str};
 use crate::openai::assembly::{ChoiceAssembly, check_tool_choice};
-use crate::openai::classify::{Fragment, NameArgs, fragment_at, name_args};
+use crate::openai::classify::{BODY_OBJECT, Fragment, NameArgs, check_object, fragment_at, name_args};
 use crate::report::notice_line;
 use crate::types::{BlockCode, ToolCall};
 
@@ -44,7 +47,8 @@ pub(crate) fn calls(v: &Value) -> Result<Vec<ToolCall>, Malformed> {
     let Some(Value::Array(choices)) = top.get("choices") else { return Err(Malformed("choices")) };
     let mut out = Vec::new();
     let mut seen: Vec<u32> = Vec::new();
-    for ch in choices {
+    let mut carries = false;
+    for (position, ch) in choices.iter().enumerate() {
         let Value::Object(c) = ch else { return Err(Malformed("choice")) };
         if c.contains_key("delta") {
             return Err(Malformed("delta_in_body"));
@@ -62,15 +66,18 @@ pub(crate) fn calls(v: &Value) -> Result<Vec<ToolCall>, Malformed> {
         seen.push(index);
         let Some(Value::Object(m)) = c.get("message") else { return Err(Malformed("message")) };
         let (frags, legacy) = message_parts(m)?;
+        carries |= opt_str(c.get("finish_reason"), "finish_reason")?.is_some();
         if frags.is_empty() && legacy.is_none() {
             continue;
         }
+        carries = true;
         let dev = |d: crate::protocol::Deviation| Malformed(d.0);
-        check_tool_choice(index, &frags, legacy.as_ref()).map_err(dev)?;
+        check_tool_choice(index, position, &frags, legacy.as_ref()).map_err(dev)?;
         let mut asm = ChoiceAssembly::default();
         asm.apply(&frags, legacy.as_ref()).map_err(dev)?;
         out.extend(asm.finish(index).map_err(dev)?);
     }
+    check_object(top, BODY_OBJECT, carries)?;
     Ok(out)
 }
 

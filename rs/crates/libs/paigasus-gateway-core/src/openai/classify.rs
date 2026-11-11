@@ -5,6 +5,12 @@
 //! `tool_calls` or a `function_call` object makes it tool-bearing. Anything else is malformed.
 //! "Has a `tool_calls` key" would be wrong both ways: it misses `tool_calls` as an object, and it
 //! holds every text delta of an upstream that sends `"tool_calls": []`.
+//!
+//! A chunk that carries tool data or a `finish_reason` must say `"object":"chat.completion.chunk"`
+//! (a body: `"chat.completion"`). openai-python's `ChatCompletionStream` skips every chunk whose
+//! `object` differs (it filters Azure's async content-filter chunks), so a fragment in such a chunk
+//! would reach the decider but not that client. Text-only chunks are not checked: skipping them
+//! changes no tool call.
 
 use serde_json::{Map, Value};
 
@@ -38,6 +44,19 @@ pub(crate) struct NameArgs {
     pub args: Option<String>,
 }
 
+/// The `object` a chunk (or body) needs once it carries tool data or a `finish_reason` (F1).
+pub(crate) const CHUNK_OBJECT: &str = "chat.completion.chunk";
+pub(crate) const BODY_OBJECT: &str = "chat.completion";
+
+/// openai-python skips a chunk whose `object` is not `expected`. When `carries` (tool data or a
+/// `finish_reason`), such a chunk is malformed; otherwise it is not checked.
+pub(crate) fn check_object(top: &Map<String, Value>, expected: &str, carries: bool) -> Result<(), Malformed> {
+    if carries && top.get("object").and_then(Value::as_str) != Some(expected) {
+        return Err(Malformed("object"));
+    }
+    Ok(())
+}
+
 pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
     let Value::Object(top) = v else { return Err(Malformed("not_object")) };
     if top.contains_key("error") {
@@ -59,6 +78,8 @@ pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
         }
         Some(_) => return Err(Malformed("choices")),
     };
+    let carries = choices.iter().any(|c| !c.fragments.is_empty() || c.legacy.is_some() || c.finish_reason.is_some());
+    check_object(top, CHUNK_OBJECT, carries)?;
     Ok(Chunk::Choices(choices))
 }
 
@@ -137,7 +158,15 @@ mod tests {
     use super::*;
     use crate::json::parse_strict;
 
+    /// Classify `s`, adding `"object":"chat.completion.chunk"` when it is an object without one.
     fn c(s: &str) -> Result<Chunk, Malformed> {
+        let mut v = parse_strict(s.as_bytes()).unwrap();
+        if let Value::Object(m) = &mut v {
+            m.entry("object").or_insert_with(|| CHUNK_OBJECT.into());
+        }
+        chunk(&v)
+    }
+    fn raw(s: &str) -> Result<Chunk, Malformed> {
         chunk(&parse_strict(s.as_bytes()).unwrap())
     }
     fn choices(s: &str) -> Vec<ChoiceView> {
@@ -217,5 +246,28 @@ mod tests {
     fn a_repeated_choice_index_in_one_chunk_is_malformed() {
         assert!(c(r#"{"choices":[{"index":0,"delta":{}},{"index":0,"delta":{}}]}"#).is_err());
         assert_eq!(choices(r#"{"choices":[{"index":0,"delta":{}},{"index":1,"delta":{"content":"t"}}]}"#).len(), 2);
+    }
+
+    #[test]
+    fn tool_data_or_a_finish_needs_the_chunk_object() {
+        let frag = r#""delta":{"tool_calls":[{"index":0,"id":"c","type":"function","function":{"name":"x","arguments":""}}]}"#;
+        for bad in [
+            format!(r#"{{"choices":[{{"index":0,{frag}}}]}}"#),
+            format!(r#"{{"object":"","choices":[{{"index":0,{frag}}}]}}"#),
+            format!(r#"{{"object":"chat.completion","choices":[{{"index":0,{frag}}}]}}"#),
+            r#"{"choices":[{"index":0,"delta":{"function_call":{"name":"f"}}}]}"#.to_owned(),
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#.to_owned(),
+        ] {
+            assert_eq!(raw(&bad).err(), Some(Malformed("object")), "{bad}");
+        }
+        assert!(raw(&format!(r#"{{"object":"chat.completion.chunk","choices":[{{"index":0,{frag}}}]}}"#)).is_ok());
+        // Text-only and empty chunks are not checked: skipping them changes no tool call.
+        for ok in [
+            r#"{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}"#,
+            r#"{"choices":[],"usage":{"total_tokens":1}}"#,
+            r#"{"object":"","choices":[]}"#,
+        ] {
+            assert!(raw(ok).is_ok(), "{ok}");
+        }
     }
 }

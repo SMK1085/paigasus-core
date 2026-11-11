@@ -579,18 +579,18 @@ mod tests {
         format!("data: {v}\n\n")
     }
     fn text(c: u32, s: &str) -> String {
-        data(json!({"id":"x","choices":[{"index":c,"delta":{"content":s},"finish_reason":null}]}))
+        data(json!({"id":"x","object":"chat.completion.chunk","choices":[{"index":c,"delta":{"content":s},"finish_reason":null}]}))
     }
     fn call(c: u32, i: u32, name: &str, args: &str) -> String {
         data(
-            json!({"id":"x","choices":[{"index":c,"delta":{"tool_calls":[{"index":i,"id":format!("call_{c}_{i}"),"type":"function","function":{"name":name,"arguments":args}}]},"finish_reason":null}]}),
+            json!({"id":"x","object":"chat.completion.chunk","choices":[{"index":c,"delta":{"tool_calls":[{"index":i,"id":format!("call_{c}_{i}"),"type":"function","function":{"name":name,"arguments":args}}]},"finish_reason":null}]}),
         )
     }
     fn args(c: u32, i: u32, a: &str) -> String {
-        data(json!({"id":"x","choices":[{"index":c,"delta":{"tool_calls":[{"index":i,"function":{"arguments":a}}]},"finish_reason":null}]}))
+        data(json!({"id":"x","object":"chat.completion.chunk","choices":[{"index":c,"delta":{"tool_calls":[{"index":i,"function":{"arguments":a}}]},"finish_reason":null}]}))
     }
     fn finish(c: u32) -> String {
-        data(json!({"id":"x","choices":[{"index":c,"delta":{},"finish_reason":"tool_calls"}]}))
+        data(json!({"id":"x","object":"chat.completion.chunk","choices":[{"index":c,"delta":{},"finish_reason":"tool_calls"}]}))
     }
     fn ev(v: Value) -> String {
         format!("event: {}\ndata: {v}\n\n", v["type"].as_str().unwrap())
@@ -999,5 +999,42 @@ mod tests {
         assert!(!r.out.contains("CANARY"));
         assert!(r.out.contains("[paigasus]"));
         assert!(i.is_finished());
+    }
+
+    /// F3: a record that deviates after it would open a hold (its first fragment, or a later
+    /// choice of the same record) must leave no hold behind that the interceptor never registered.
+    /// Such a hold would wait for a verdict for ever, and the stream would only keep alive.
+    #[test]
+    fn a_deviation_while_opening_a_hold_still_ends_the_stream() {
+        let o = |v: Value| data(json!({"id":"x","object":"chat.completion.chunk","choices":v}));
+        let gap = o(json!([{"index":0,"delta":{"tool_calls":[{"index":9,"id":"c","type":"function","function":{"name":"blocked_x","arguments":"{}"}}]}}]));
+        let later_choice = o(json!([
+            {"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","type":"function","function":{"name":"read","arguments":"{}"}}]}},
+            {"index":1,"delta":{"tool_calls":[{"index":0,"id":"d","type":"function","function":{"name":"rm","arguments":"{}"}}]}}
+        ]));
+        let stop = o(json!([{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]));
+        for first in [gap, later_choice] {
+            for on_failure in [OnFailure::Block, OnFailure::Allow] {
+                let chunks = [first.clone(), stop.clone(), "data: [DONE]\n\n".to_owned()];
+                let l = Limits { on_failure, ..limits() };
+                let (r, mut i) = run_format(Format::OpenAiChat, l, &chunks, &allow);
+                let later = Instant::now() + Duration::from_secs(400);
+                let tail = emitted(&i.tick(later));
+                assert!(i.is_finished(), "{on_failure:?}: the stream never ended:\n{}{tail}", r.out);
+                assert!(r.out.contains("\"hi\"") && r.out.ends_with("data: [DONE]\n\n"), "{on_failure:?}:\n{}", r.out);
+                assert!(!r.out.contains("blocked_x\",\"arguments") && !r.out.contains("\"rm\""), "{on_failure:?}:\n{}", r.out);
+            }
+        }
+    }
+
+    /// F3 for Anthropic: a stop rejected as `incomplete_arguments` leaves the block open, so the
+    /// blocked block still gets its notice and its stop frame.
+    #[test]
+    fn a_rejected_stop_still_closes_the_blocked_block() {
+        let chunks = [tool_start(0, "rm"), json_delta(0, "{\"a\":"), block_stop(0), ev(json!({"type":"message_stop"}))];
+        let (r, i) = run_format(Format::AnthropicMessages, limits(), &chunks, &allow);
+        assert!(i.is_finished(), "{}", r.out);
+        assert!(r.out.contains("(malformed)") && r.out.contains("{\"type\":\"content_block_stop\",\"index\":0}"), "{}", r.out);
+        assert!(r.out.find("content_block_stop") < r.out.find("message_stop"), "{}", r.out);
     }
 }

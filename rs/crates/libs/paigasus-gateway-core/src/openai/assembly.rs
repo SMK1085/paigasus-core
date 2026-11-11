@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Canonical tool-call assembly for one OpenAI choice (spec § 4.3, D9).
 //!
-//! Only choice 0 may carry tool calls, because LangChain reads `choices[0]` of every chunk and
-//! ignores `choice.index`. A `type` that does not match the body's shape is a deviation, because
+//! Only choice 0 may carry tool calls, and only at array position 0 of its chunk, because LangChain
+//! reads `choices[0]` of every chunk and ignores `choice.index`. A `type` that does not match the body's shape is a deviation, because
 //! clients ignore `type` and run the body. Kind Other is only for a call with no body at all.
 //!
 //! The client SDKs disagree on everything outside this form. openai-python concatenates every
 //! string except `index` and `type`, so a second `name` fragment turns `safe_` into `safe_rm`.
 //! openai-node replaces the name, and LangChain merges by index value. Inside the canonical form
 //! they all agree, so the decider sees exactly what every client will run.
+//!
+//! Every check runs on a small copy of the state ([`Check`]) before anything is changed, so a
+//! deviation leaves the assembly exactly as it was.
 
 use serde_json::Value;
 
@@ -22,65 +25,71 @@ enum Shape {
     Custom,
 }
 
-#[derive(Default)]
-struct CallBuild {
-    id: Option<String>,
-    ty: Option<String>,
+/// The class of a `type` value: all that the canonical checks read of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TyClass {
+    Function,
+    Custom,
+    Other,
+}
+
+/// What the canonical checks read of one call. It is small, so a whole record can be checked
+/// against a copy before anything is changed: a deviation must never leave half-applied state, for
+/// example a hold marked open that the interceptor never registered (F3).
+#[derive(Clone, Copy, Default)]
+struct Shadow {
+    id: bool,
+    ty: Option<TyClass>,
     shape: Option<Shape>,
-    name: Option<String>,
-    args: String,
-    raws: Vec<Value>,
+    name: bool,
 }
 
-#[derive(Default)]
-pub(crate) struct ChoiceAssembly {
-    calls: Vec<CallBuild>,
-    legacy: Option<CallBuild>,
+/// The canonical-form state of one choice (spec § 4.3), without the strings.
+#[derive(Clone, Default)]
+pub(crate) struct Check {
+    calls: Vec<Shadow>,
+    /// `Some(has_name)` once a legacy `function_call` fragment arrived.
+    legacy: Option<bool>,
 }
 
-fn set_once(slot: &mut Option<String>, v: &Option<String>, why: &'static str) -> Result<(), Deviation> {
-    if let Some(v) = v {
-        if slot.is_some() {
+fn once(slot: &mut bool, present: bool, why: &'static str) -> Result<(), Deviation> {
+    if present {
+        if *slot {
             return Err(Deviation(why));
         }
-        *slot = Some(v.clone());
+        *slot = true;
     }
     Ok(())
 }
 
-/// Tool calls are allowed only in choice 0 (spec § 4.3). LangChain reads `choices[0]` of every
-/// chunk and ignores `choice.index`, so a call split across choices 0 and 1 would be merged by it
-/// but assembled separately here. Text in other choices stays allowed.
-pub(crate) fn check_tool_choice(choice: u32, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<(), Deviation> {
-    if choice != 0 && (!frags.is_empty() || legacy.is_some()) {
-        return Err(Deviation("multi_choice_tool_calls"));
-    }
-    Ok(())
-}
-
-impl ChoiceAssembly {
-    pub(crate) fn apply(&mut self, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<(), Deviation> {
+impl Check {
+    fn apply(&mut self, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<(), Deviation> {
         let mixes = (legacy.is_some() && (!frags.is_empty() || !self.calls.is_empty())) || (!frags.is_empty() && self.legacy.is_some());
         if mixes {
             return Err(Deviation("legacy_and_tool_calls"));
         }
         if let Some(l) = legacy {
-            let b = self.legacy.get_or_insert_with(CallBuild::default);
-            set_once(&mut b.name, &l.name, "repeated_name")?;
-            if let Some(a) = &l.args {
-                b.args.push_str(a);
-            }
+            once(self.legacy.get_or_insert(false), l.name.is_some(), "repeated_name")?;
         }
         for f in frags {
             let pos = f.index as usize;
             if pos == self.calls.len() {
-                self.calls.push(CallBuild::default());
+                self.calls.push(Shadow::default());
             } else if pos > self.calls.len() {
                 return Err(Deviation("index_gap"));
             }
             let b = &mut self.calls[pos];
-            set_once(&mut b.id, &f.id, "repeated_id")?;
-            set_once(&mut b.ty, &f.ty, "repeated_type")?;
+            once(&mut b.id, f.id.is_some(), "repeated_id")?;
+            if let Some(t) = &f.ty {
+                if b.ty.is_some() {
+                    return Err(Deviation("repeated_type"));
+                }
+                b.ty = Some(match t.as_str() {
+                    "function" => TyClass::Function,
+                    "custom" => TyClass::Custom,
+                    _ => TyClass::Other,
+                });
+            }
             let (shape, na) = match (&f.function, &f.custom) {
                 (Some(na), None) => (Some(Shape::Function), Some(na)),
                 (None, Some(na)) => (Some(Shape::Custom), Some(na)),
@@ -94,44 +103,150 @@ impl ChoiceAssembly {
                 }
             }
             if let Some(na) = na {
-                set_once(&mut b.name, &na.name, "repeated_name")?;
+                once(&mut b.name, na.name.is_some(), "repeated_name")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The kind of every call once the choice finishes, or the deviation that finishing is.
+    pub(crate) fn finish(&self) -> Result<Vec<ToolCallKind>, Deviation> {
+        if let Some(has_name) = self.legacy {
+            if !has_name {
+                return Err(Deviation("missing_name"));
+            }
+            return Ok(vec![ToolCallKind::LegacyFunctionCall]);
+        }
+        self.calls
+            .iter()
+            .map(|b| {
+                // Clients ignore `type` and run the body, so any type other than the one the
+                // body's shape expects is a deviation, never kind Other (spec I1).
+                let kind = match (b.shape, b.ty) {
+                    (Some(Shape::Function), Some(TyClass::Function) | None) => ToolCallKind::Function,
+                    (Some(Shape::Custom), Some(TyClass::Custom) | None) => ToolCallKind::Custom,
+                    (Some(_), Some(_)) => return Err(Deviation("type_shape_mismatch")),
+                    (None, Some(TyClass::Function | TyClass::Custom)) => return Err(Deviation("missing_body")),
+                    (None, _) => ToolCallKind::Other,
+                };
+                if kind != ToolCallKind::Other && !b.name {
+                    return Err(Deviation("missing_name"));
+                }
+                Ok(kind)
+            })
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct CallBuild {
+    id: Option<String>,
+    ty: Option<String>,
+    name: Option<String>,
+    args: String,
+    raws: Vec<Value>,
+}
+
+#[derive(Default)]
+pub(crate) struct ChoiceAssembly {
+    calls: Vec<CallBuild>,
+    legacy: Option<CallBuild>,
+    check: Check,
+}
+
+/// Tool data is allowed only in choice 0, and only at array position 0 of its chunk (spec § 4.3).
+/// LangChain reads `choices[0]` of every chunk and ignores `choice.index`. So a call split across
+/// choices 0 and 1 would be merged by it but assembled separately here (`multi_choice_tool_calls`),
+/// and a choice-0 fragment behind another choice's entry would never reach it
+/// (`choice_position`). Text in other choices and positions stays allowed.
+pub(crate) fn check_tool_choice(choice: u32, position: usize, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<(), Deviation> {
+    if frags.is_empty() && legacy.is_none() {
+        return Ok(());
+    }
+    if choice != 0 {
+        return Err(Deviation("multi_choice_tool_calls"));
+    }
+    if position != 0 {
+        return Err(Deviation("choice_position"));
+    }
+    Ok(())
+}
+
+impl ChoiceAssembly {
+    /// The canonical-form state after these fragments, or the deviation they are. Changes nothing.
+    pub(crate) fn check(&self, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<Check, Deviation> {
+        let mut c = self.check.clone();
+        c.apply(frags, legacy)?;
+        Ok(c)
+    }
+
+    /// The current canonical-form state.
+    pub(crate) fn state(&self) -> &Check {
+        &self.check
+    }
+
+    /// Apply fragments that [`ChoiceAssembly::check`] accepted, with `after` its result. Cannot fail.
+    pub(crate) fn commit(&mut self, frags: &[Fragment], legacy: Option<&NameArgs>, after: Check) {
+        if let Some(l) = legacy {
+            let b = self.legacy.get_or_insert_with(CallBuild::default);
+            if let Some(n) = &l.name {
+                b.name = Some(n.clone());
+            }
+            if let Some(a) = &l.args {
+                b.args.push_str(a);
+            }
+        }
+        for f in frags {
+            let pos = f.index as usize;
+            while self.calls.len() <= pos {
+                self.calls.push(CallBuild::default());
+            }
+            let b = &mut self.calls[pos];
+            if let Some(id) = &f.id {
+                b.id = Some(id.clone());
+            }
+            if let Some(t) = &f.ty {
+                b.ty = Some(t.clone());
+            }
+            if let Some(na) = f.function.as_ref().or(f.custom.as_ref()) {
+                if let Some(n) = &na.name {
+                    b.name = Some(n.clone());
+                }
                 if let Some(a) = &na.args {
                     b.args.push_str(a);
                 }
             }
             b.raws.push(f.raw.clone());
         }
+        self.check = after;
+    }
+
+    /// Check, then commit. On a deviation nothing is changed.
+    pub(crate) fn apply(&mut self, frags: &[Fragment], legacy: Option<&NameArgs>) -> Result<(), Deviation> {
+        let after = self.check(frags, legacy)?;
+        self.commit(frags, legacy, after);
         Ok(())
     }
 
     pub(crate) fn finish(&self, choice: u32) -> Result<Vec<ToolCall>, Deviation> {
+        let kinds = self.check.finish()?;
         if let Some(b) = &self.legacy {
-            let name = b.name.clone().ok_or(Deviation("missing_name"))?;
             return Ok(vec![ToolCall {
                 choice,
                 position: 0,
                 id: None,
-                name,
+                name: b.name.clone().unwrap_or_default(),
                 kind: ToolCallKind::LegacyFunctionCall,
                 arguments: b.args.clone(),
             }]);
         }
         let mut out = Vec::with_capacity(self.calls.len());
-        for (i, b) in self.calls.iter().enumerate() {
-            // Clients ignore `type` and run the body, so any type other than the one the body's
-            // shape expects is a deviation, never kind Other (spec I1).
-            let kind = match (b.shape, b.ty.as_deref()) {
-                (Some(Shape::Function), Some("function") | None) => ToolCallKind::Function,
-                (Some(Shape::Custom), Some("custom") | None) => ToolCallKind::Custom,
-                (Some(_), Some(_)) => return Err(Deviation("type_shape_mismatch")),
-                (None, Some("function" | "custom")) => return Err(Deviation("missing_body")),
-                (None, _) => ToolCallKind::Other,
-            };
+        for ((i, b), kind) in self.calls.iter().enumerate().zip(kinds) {
             let (name, arguments) = if kind == ToolCallKind::Other {
                 let name = b.name.clone().or_else(|| b.ty.clone()).unwrap_or_else(|| "unknown".to_owned());
                 (name, serde_json::to_string(&b.raws).expect("a Value array always serializes"))
             } else {
-                (b.name.clone().ok_or(Deviation("missing_name"))?, b.args.clone())
+                (b.name.clone().unwrap_or_default(), b.args.clone())
             };
             let position = u32::try_from(i).expect("at most 128 calls per choice");
             out.push(ToolCall {
@@ -164,7 +279,9 @@ mod tests {
 
     /// The fragments and legacy part of choice 0 of one chunk.
     fn frags(s: &str) -> (Vec<Fragment>, Option<NameArgs>) {
-        let Chunk::Choices(mut v) = chunk(&parse_strict(s.as_bytes()).unwrap()).unwrap() else { panic!() };
+        let mut v = parse_strict(s.as_bytes()).unwrap();
+        v["object"] = crate::openai::classify::CHUNK_OBJECT.into();
+        let Chunk::Choices(mut v) = chunk(&v).unwrap() else { panic!() };
         let c = v.remove(0);
         (c.fragments, c.legacy)
     }
@@ -297,11 +414,22 @@ mod tests {
     #[test]
     fn tool_fragments_outside_choice_zero_are_a_deviation() {
         let (f, l) = frags(&tc(r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#));
-        assert_eq!(check_tool_choice(1, &f, l.as_ref()).unwrap_err().0, "multi_choice_tool_calls");
-        assert!(check_tool_choice(0, &f, l.as_ref()).is_ok());
+        assert_eq!(check_tool_choice(1, 0, &f, l.as_ref()).unwrap_err().0, "multi_choice_tool_calls");
+        assert!(check_tool_choice(0, 0, &f, l.as_ref()).is_ok());
         let (f, l) = frags(r#"{"choices":[{"index":0,"delta":{"function_call":{"name":"f"}}}]}"#);
-        assert_eq!(check_tool_choice(2, &f, l.as_ref()).unwrap_err().0, "multi_choice_tool_calls");
+        assert_eq!(check_tool_choice(2, 0, &f, l.as_ref()).unwrap_err().0, "multi_choice_tool_calls");
         let (f, l) = frags(r#"{"choices":[{"index":0,"delta":{"content":"hi"}}]}"#);
-        assert!(check_tool_choice(1, &f, l.as_ref()).is_ok());
+        assert!(check_tool_choice(1, 1, &f, l.as_ref()).is_ok());
+    }
+
+    #[test]
+    fn tool_fragments_behind_another_choice_entry_are_a_deviation() {
+        // LangChain reads choices[0] only, so choice 0 at array position 1 never reaches it.
+        let (f, l) = frags(&tc(r#"{"index":0,"function":{"arguments":"x"}}"#));
+        assert_eq!(check_tool_choice(0, 1, &f, l.as_ref()).unwrap_err().0, "choice_position");
+        let (f, l) = frags(r#"{"choices":[{"index":0,"delta":{"function_call":{"arguments":"x"}}}]}"#);
+        assert_eq!(check_tool_choice(0, 2, &f, l.as_ref()).unwrap_err().0, "choice_position");
+        // Both rules compose: a later choice at a later position is still a multi-choice call.
+        assert_eq!(check_tool_choice(1, 1, &f, l.as_ref()).unwrap_err().0, "multi_choice_tool_calls");
     }
 }

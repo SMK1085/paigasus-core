@@ -264,17 +264,19 @@ impl Protocol for AnthropicStream {
                 let i = block_index(&value)?;
                 let decided = matches!(verdicts.get(&key(i)), Some(v) if *v != Verdict::PassThrough);
                 let b = self.open_block(i)?;
+                // Check before changing the block: a rejected stop leaves it open, so `closing`
+                // still owes its notice and stop frame.
+                let completes = b.is_hold() && !decided;
+                if completes && b.kind == Kind::ToolUse && !b.args.is_empty() && parse_strict(b.args.as_bytes()).is_err() {
+                    return Err(Deviation("incomplete_arguments").into());
+                }
                 b.open = false;
                 let (mut touches, mut completed) = (Vec::new(), Vec::new());
                 if b.is_hold() {
                     touches.push(key(i));
-                    if !decided {
-                        if b.kind == Kind::ToolUse {
-                            if b.args.is_empty() {
-                                b.args = "{}".to_owned();
-                            } else if parse_strict(b.args.as_bytes()).is_err() {
-                                return Err(Deviation("incomplete_arguments").into());
-                            }
+                    if completes {
+                        if b.kind == Kind::ToolUse && b.args.is_empty() {
+                            b.args = "{}".to_owned();
                         }
                         completed.push((key(i), vec![Self::call_of(b, i)]));
                     }
