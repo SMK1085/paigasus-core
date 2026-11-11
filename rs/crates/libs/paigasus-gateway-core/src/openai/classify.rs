@@ -5,7 +5,6 @@
 //! `tool_calls` or a `function_call` object makes it tool-bearing. Anything else is malformed.
 //! "Has a `tool_calls` key" would be wrong both ways: it misses `tool_calls` as an object, and it
 //! holds every text delta of an upstream that sends `"tool_calls": []`.
-#![allow(dead_code)] // Removed in Task 8, when the interceptor uses every item.
 
 use serde_json::{Map, Value};
 

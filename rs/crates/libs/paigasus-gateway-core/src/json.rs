@@ -6,7 +6,6 @@
 //! `encoding/json` merges struct-typed duplicates, and Go and Newtonsoft match field names
 //! case-insensitively. JavaScript gives `__proto__` meaning. Rejecting all of these costs nothing
 //! on a conforming upstream.
-#![allow(dead_code)] // Removed in Task 8, when the interceptor uses every item.
 
 use std::collections::HashSet;
 use std::fmt;

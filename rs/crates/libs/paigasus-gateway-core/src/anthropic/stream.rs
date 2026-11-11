@@ -13,7 +13,6 @@
 //! A `tool_use` block's arguments are what clients see at its stop: an empty buffer is `{}`, and a
 //! buffer that is not one complete JSON value is a `Deviation`, because anthropic-python
 //! partial-parses it and the client would see different arguments than the decider.
-#![allow(dead_code)] // Removed in Task 8, when the interceptor uses every item.
 
 use bytes::Bytes;
 use serde_json::{Value, json};
@@ -133,7 +132,7 @@ impl Protocol for AnthropicStream {
         let ev: &'static str = EVENTS.iter().copied().find(|e| *e == ty).ok_or(Malformed("unknown_event"))?;
         // The splitter yields an empty `event:` value as `Some("")`; that is an absent name, not a mismatch.
         if rec.event.as_deref().filter(|e| !e.is_empty()).is_some_and(|e| e != ev) {
-            return Err(StepError::Malformed("event_mismatch"));
+            return Err(StepError::Malformed);
         }
         match ev {
             "ping" => Ok(plain(ev, rec, value, Vec::new())),
@@ -256,7 +255,7 @@ impl Protocol for AnthropicStream {
                         touches.push(key(i));
                     }
                     (Kind::Text, "text_delta" | "citations_delta") | (Kind::Thinking, "thinking_delta" | "signature_delta") | (Kind::Server, "input_json_delta") => {}
-                    _ => return Err(StepError::Malformed("delta_type")),
+                    _ => return Err(StepError::Malformed),
                 }
                 Ok(plain(ev, rec, value, touches))
             }
@@ -617,7 +616,7 @@ mod tests {
             Ok(Step::Frame { completed, .. }) => Ok(completed[0].1[0].arguments.clone()),
             Ok(_) => panic!("not a frame"),
             Err(StepError::Deviation(d)) => Err(d),
-            Err(StepError::Malformed(m)) => Err(m),
+            Err(StepError::Malformed) => Err("malformed"),
         }
     }
 

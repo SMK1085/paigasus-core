@@ -10,8 +10,6 @@
 //! Unlike `UsageScanner`, nothing is ever skipped silently. A record over the cap becomes
 //! [`SseItem::Oversized`], which the interceptor treats as a stream-level failure (D8).
 
-#![allow(dead_code)] // Removed in Task 8
-
 use bytes::Bytes;
 
 /// One dispatched SSE record.

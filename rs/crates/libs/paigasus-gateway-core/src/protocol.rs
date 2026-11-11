@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 //! What the two wire protocols share (spec § 4, D12). Task 6 adds the `Protocol` trait.
-#![allow(dead_code)] // Removed in Task 8, when the interceptor uses every item.
 
 /// A violation of the canonical assembly form (spec § 4.3). Always a stream-level `on_failure`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,13 +79,13 @@ pub(crate) enum Step {
 }
 
 pub(crate) enum StepError {
-    Malformed(&'static str),
+    Malformed,
     Deviation(&'static str),
 }
 
 impl From<Malformed> for StepError {
-    fn from(m: Malformed) -> Self {
-        StepError::Malformed(m.0)
+    fn from(_: Malformed) -> Self {
+        StepError::Malformed
     }
 }
 

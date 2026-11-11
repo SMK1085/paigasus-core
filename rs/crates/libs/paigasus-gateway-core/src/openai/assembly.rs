@@ -9,7 +9,6 @@
 //! string except `index` and `type`, so a second `name` fragment turns `safe_` into `safe_rm`.
 //! openai-node replaces the name, and LangChain merges by index value. Inside the canonical form
 //! they all agree, so the decider sees exactly what every client will run.
-#![allow(dead_code)] // Removed in Task 8, when the interceptor uses every item.
 
 use serde_json::Value;
 

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The OpenAI Chat Completions streaming protocol (spec § 4.2–§ 4.4, D10, D12, D20).
-#![allow(dead_code)] // Removed in Task 8, when the interceptor uses every item.
 
 use std::collections::BTreeMap;
 

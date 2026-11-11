@@ -6,8 +6,6 @@
 //! and the sanitized name), never from argument or detector content: the model reads the notice
 //! on its next turn, so echoing content would reflect attacker text into the prompt (D21).
 
-#![allow(dead_code)] // Removed in Task 8
-
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
