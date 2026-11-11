@@ -119,6 +119,12 @@ pub enum GatewayError {
     /// `type: "insufficient_quota"`, `x-should-retry: false`. Not retryable: a retry in seconds
     /// cannot succeed, and each retry costs 2-3 IAM RPCs before the refusal.
     BudgetExhausted { resets_at_unix: i64, period: BudgetPeriod },
+
+    // ---- tool interception (SMA-749) ---------------------------------------------------------
+    /// Interception is on with `on_failure = "block"`, and a 2xx non-stream answer could not be
+    /// classified, so its tool calls could not be checked → 502. Retry unknown: another answer
+    /// from the same upstream may or may not be well-formed.
+    ToolInterceptionMalformedResponse,
 }
 
 /// Map a limit refusal (SMA-677 § 4.5). `Unscoped` is the D2 fail-closed case: a scope with no
@@ -248,6 +254,13 @@ impl GatewayError {
                 None,
                 "The organization token budget for this period is used up.",
             ),
+            GatewayError::ToolInterceptionMalformedResponse => (
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                Some("tool-interception-malformed-response"),
+                None,
+                "The upstream model provider returned a response the gateway could not check.",
+            ),
         }
     }
 
@@ -275,7 +288,7 @@ impl GatewayError {
     pub fn retryable(self) -> Retryable {
         match self {
             Self::IamUnavailable | Self::UpstreamUnavailable | Self::UpstreamTimeout | Self::RateLimited { .. } => Retryable::Yes,
-            Self::Internal | Self::MissingScope => Retryable::Unknown,
+            Self::Internal | Self::MissingScope | Self::ToolInterceptionMalformedResponse => Retryable::Unknown,
             Self::MissingBearer
             | Self::InvalidCredential
             | Self::InvalidDpopProof
@@ -575,7 +588,7 @@ mod tests {
         for err in GatewayError::iter() {
             let want = match err {
                 GatewayError::IamUnavailable | GatewayError::UpstreamUnavailable | GatewayError::UpstreamTimeout | GatewayError::RateLimited { .. } => Retryable::Yes,
-                GatewayError::Internal | GatewayError::MissingScope => Retryable::Unknown,
+                GatewayError::Internal | GatewayError::MissingScope | GatewayError::ToolInterceptionMalformedResponse => Retryable::Unknown,
                 GatewayError::BudgetExhausted { .. } => Retryable::No,
                 _ => Retryable::No,
             };

@@ -33,7 +33,7 @@ describe('fromWireReason', () => {
 
   it('rejects malformed input rather than folding it', () => {
     // Parity with the Rust from_wire_reason_rejects_malformed_input test
-    // (rs/crates/libs/paigasus-proto/src/error.rs:287-302). The list is
+    // (rs/crates/libs/paigasus-proto/src/error.rs:289-304). The list is
     // identical, deliberately: a laxer TypeScript parser would accept codes the
     // service can never emit, and would weaken the consumed-side table test in
     // SMA-625.
@@ -55,9 +55,9 @@ describe('the reason codec round-trips the whole registry', () => {
     const values = ErrorReasonSchema.values.filter((v) => v.name !== 'ERROR_REASON_UNSPECIFIED');
 
     // Cardinality guard. The Rust mirror asserts 69 at
-    // rs/crates/libs/paigasus-proto/src/error.rs:242; the two must agree,
+    // rs/crates/libs/paigasus-proto/src/error.rs:247; the two must agree,
     // because both derive from the same proto.
-    expect(values).toHaveLength(69);
+    expect(values).toHaveLength(70);
 
     for (const value of values) {
       const reason = value.number;
