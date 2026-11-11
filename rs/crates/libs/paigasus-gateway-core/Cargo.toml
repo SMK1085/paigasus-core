@@ -10,6 +10,9 @@ publish = false
 [dependencies]
 # `Bytes` is the body currency at the gateway boundary (`axum::body::Bytes` is this type).
 bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

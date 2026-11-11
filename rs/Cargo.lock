@@ -3223,6 +3223,9 @@ name = "paigasus-gateway-core"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
