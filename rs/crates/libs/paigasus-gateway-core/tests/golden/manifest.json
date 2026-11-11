@@ -5,7 +5,13 @@
     "allowed": [],
     "notices": [
       "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
-    ]
+    ],
+    "notice_choices": [
+      0
+    ],
+    "finish_reasons": {
+      "0": "stop"
+    }
   },
   {
     "file": "openai/parallel_mixed.sse",
@@ -13,12 +19,19 @@
     "allowed": [
       {
         "name": "read_file",
-        "arguments": "{\"p\":1}"
+        "arguments": "{\"p\":1}",
+        "choice": 0
       }
     ],
     "notices": [
       "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
-    ]
+    ],
+    "notice_choices": [
+      0
+    ],
+    "finish_reasons": {
+      "0": "tool_calls"
+    }
   },
   {
     "file": "openai/n2_choices.sse",
@@ -26,12 +39,20 @@
     "allowed": [
       {
         "name": "read_file",
-        "arguments": "{}"
+        "arguments": "{}",
+        "choice": 0
       }
     ],
     "notices": [
       "[paigasus] tool call \"blocked_exfil\" was blocked (policy)."
-    ]
+    ],
+    "notice_choices": [
+      0
+    ],
+    "finish_reasons": {
+      "0": "tool_calls",
+      "1": "stop"
+    }
   },
   {
     "file": "openai/text_after_calls.sse",
@@ -39,7 +60,13 @@
     "allowed": [],
     "notices": [
       "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
-    ]
+    ],
+    "notice_choices": [
+      0
+    ],
+    "finish_reasons": {
+      "0": "stop"
+    }
   },
   {
     "file": "anthropic/tool_use_blocked.sse",
@@ -47,7 +74,13 @@
     "allowed": [],
     "notices": [
       "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
-    ]
+    ],
+    "notice_choices": [
+      0
+    ],
+    "finish_reasons": {
+      "0": "end_turn"
+    }
   },
   {
     "file": "anthropic/two_tools_mixed.sse",
@@ -55,11 +88,18 @@
     "allowed": [
       {
         "name": "read_file",
-        "arguments": "{\"p\":1}"
+        "arguments": "{\"p\":1}",
+        "choice": 0
       }
     ],
     "notices": [
       "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
-    ]
+    ],
+    "notice_choices": [
+      0
+    ],
+    "finish_reasons": {
+      "0": "tool_use"
+    }
   }
 ]
