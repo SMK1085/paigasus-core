@@ -1077,7 +1077,7 @@ mod tests {
             ("max_hold_secs = 86401", "tool_interception.max_hold_secs"),
             ("decide_timeout_secs = 86401", "tool_interception.decide_timeout_secs"),
             ("max_hold_secs = 86400\nkeepalive_secs = 86401", "tool_interception.keepalive_secs"),
-            ("keepalive_secs = 18446744073709551615", "tool_interception.keepalive_secs"),
+            ("keepalive_secs = 9223372036854775807", "tool_interception.keepalive_secs"),
             ("max_record_bytes = 0", "tool_interception.max_record_bytes"),
             ("max_held_bytes = 0", "tool_interception.max_held_bytes"),
             ("max_hold_secs = 0", "tool_interception.max_hold_secs"),
