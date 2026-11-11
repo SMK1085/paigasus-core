@@ -8,6 +8,12 @@
 //!
 //! Like the plain relay, this runs with `current_ids() == None` (SMA-504 § 4.3): the request id
 //! reaches the decider through `DecisionContext`, captured in the handler.
+//!
+//! The decider future and the timer are driven only while the client polls the body, so a client
+//! that stalls long enough can see a hold end as `decider-error` (or `on_failure` in observe mode).
+//!
+//! On a client disconnect mid-hold, billing follows what the relay had read from the upstream so
+//! far, read-ahead included, exactly as in the plain relay (SMA-730 D3).
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -358,6 +364,33 @@ mod tests {
         }
     }
 
+    /// SMA-730 R1 with interception on: a transport error after an unterminated usage record runs
+    /// `finish_scan` before `abort()`, so the reported total is charged, and the core's terminal
+    /// frame is the only one.
+    #[tokio::test]
+    async fn a_transport_error_after_an_unterminated_usage_record_charges_the_reported_tokens() {
+        use crate::adapters::http::chat::tests::{UNTERMINATED_USAGE, admit, make_reqwest_error, sent_guard};
+        use crate::test_support::ScriptedStore;
+        const UPSTREAM_ERROR: &[u8] = b"\n\ndata: {\"error\":{\"code\":\"upstream-error\"}}\n\n";
+        let store = ScriptedStore::new(admit);
+        let upstream = futures::stream::iter(vec![Ok(Bytes::from_static(UNTERMINATED_USAGE))])
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .boxed();
+        let ti = Arc::new(ToolInterception {
+            limits: Limits::defaults(),
+            decider: Arc::new(paigasus_gateway_core::AllowAll),
+        });
+        let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
+        let turn = Arc::new(ToolTurn::Unavailable("unit test"));
+        let out: Vec<Bytes> = intercepted_stream(upstream, Some(sent_guard(&store)), ti, ctx, turn, Bytes::from_static(UPSTREAM_ERROR))
+            .map(|r| r.expect("infallible"))
+            .collect()
+            .await;
+        let text = String::from_utf8(out.concat()).expect("utf-8");
+        assert_eq!(text.matches("\"code\":\"upstream-error\"").count(), 1, "{text}");
+        assert_eq!(store.charges(), vec![7]);
+    }
+
     /// P-5: two holds, decided one after the other, never both at once.
     #[tokio::test]
     async fn the_decider_runs_one_hold_at_a_time() {
@@ -369,18 +402,18 @@ mod tests {
     }
 
     /// D22: when a timeout rules on the hold being decided, its future is dropped and the next
-    /// hold is decided. The second hold completes 150 ms after the first, so its own deadline
-    /// (350 ms) lies 150 ms after the first one's (200 ms): kept, the stale future would hold it
-    /// until that deadline and it would be blocked too.
+    /// hold is decided. The second hold completes 600 ms after the first, so its own deadline
+    /// (1.6 s) lies 600 ms after the first one's (1 s): kept, the stale future would hold it until
+    /// that deadline and it would be blocked too. Wide margins, for a loaded CI runner.
     #[tokio::test]
     async fn a_timed_out_decision_does_not_block_the_next_hold() {
         let limits = Limits {
-            decide_timeout: Duration::from_millis(200),
+            decide_timeout: Duration::from_secs(1),
             ..Limits::defaults()
         };
         let text = tokio::time::timeout(
             Duration::from_secs(5),
-            run(Arc::new(HangNamed), limits, two_tool_blocks("hang_x", "read_file", Duration::from_millis(150))),
+            run(Arc::new(HangNamed), limits, two_tool_blocks("hang_x", "read_file", Duration::from_millis(600))),
         )
         .await
         .expect("the stream ends");

@@ -366,7 +366,7 @@ fn terminal_sse_error_stream(inner: OpenAiByteStream, guard: Option<ChargeGuard>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Section 4.6: the relay never changes a forwarded byte, with or without a scanner (A5).
@@ -438,12 +438,12 @@ mod tests {
     use crate::test_support::{FixedClock, ORG_A, ScriptedStore, at};
     use std::sync::Arc;
 
-    fn admit() -> Result<LimitDecision, LimitStoreError> {
+    pub(crate) fn admit() -> Result<LimitDecision, LimitStoreError> {
         Ok(LimitDecision::Admit(None))
     }
 
     /// A sent guard with a ticket and a request estimate of 1, charging into `store`.
-    fn sent_guard(store: &Arc<ScriptedStore>) -> ChargeGuard {
+    pub(crate) fn sent_guard(store: &Arc<ScriptedStore>) -> ChargeGuard {
         let now = at("2026-10-02T12:00:00Z");
         let limits = Arc::new(Limits::new(LimitRules::default(), store.clone(), Arc::new(FixedClock(now))));
         let ticket = LimitTicket {
@@ -456,7 +456,7 @@ mod tests {
         guard
     }
 
-    const UNTERMINATED_USAGE: &[u8] = b"data: {\"choices\":[],\"usage\":{\"total_tokens\":7}}";
+    pub(crate) const UNTERMINATED_USAGE: &[u8] = b"data: {\"choices\":[],\"usage\":{\"total_tokens\":7}}";
 
     /// SMA-730 R1 (spec D2): an upstream error after a usage record with no blank line charges
     /// the reported total. The terminal frame closes that record for the client too.
@@ -494,7 +494,7 @@ mod tests {
 
     /// Produce a real `reqwest::Error` (there is no public constructor) by forcing a connection
     /// failure against an unroutable address.
-    async fn make_reqwest_error() -> reqwest::Error {
+    pub(crate) async fn make_reqwest_error() -> reqwest::Error {
         reqwest::Client::new()
             .get("http://127.0.0.1:1")
             .timeout(std::time::Duration::from_millis(50))

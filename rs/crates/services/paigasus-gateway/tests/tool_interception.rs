@@ -127,7 +127,7 @@ async fn a_blocked_call_never_reaches_the_client() {
     assert!(!text.contains("CANARY"), "{text}");
     assert!(payloads(&sent.body).iter().all(|p| !p.contains("\"name\":\"blocked_rm\"")), "{text}");
     assert!(text.contains(r#"[paigasus] tool call \"blocked_rm\" was blocked (policy)."#), "{text}");
-    assert!(text.contains("\"read_file\""));
+    assert!(payloads(&sent.body).iter().any(|p| p.contains("\"name\":\"read_file\"")), "{text}");
     assert!(text.ends_with("data: [DONE]\n\n"));
 }
 
@@ -145,20 +145,38 @@ async fn an_upstream_error_mid_hold_ends_with_the_terminal_frame() {
     assert!(text.contains("\"code\":\"upstream-error\""), "{text}");
 }
 
-/// D24 (Review focus 5): the charge follows the upstream's usage record, block or no block.
+/// The charges for one upstream sent through the router with interception off, then on.
+async fn charges_off_and_on(records: Vec<String>, decider: Arc<dyn ToolCallDecider>) -> (Vec<u64>, Vec<u64>) {
+    let mock = MockOpenAi::spawn_raw_sse(records).await;
+    let mut out = Vec::new();
+    for ti in [None, ti(decider)] {
+        let store = RecordingStore::new();
+        let app = app_with_interception(
+            ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN),
+            &mock.base_url,
+            Some(limits(rules(None, None, Some(1_000_000)), store.clone())),
+            ti,
+        );
+        let sent = send(&app, STREAM_BODY).await;
+        assert_eq!(sent.status, StatusCode::OK);
+        out.push(store.charges());
+    }
+    (out.remove(0), out.remove(0))
+}
+
+/// D24 (Review focus 5): a block does not change the charge. Differential against interception
+/// off, once with the upstream's usage record (charged as reported) and once without (charged
+/// from the completion records the scanner counted, which a rewrite would change if the scanner
+/// read the rewritten bytes instead of the upstream's).
 #[tokio::test]
 async fn a_blocked_stream_charges_like_the_upstream() {
-    let mock = MockOpenAi::spawn_raw_sse(upstream()).await;
-    let store = RecordingStore::new();
-    let app = app_with_interception(
-        ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN),
-        &mock.base_url,
-        Some(limits(rules(None, None, Some(1_000_000)), store.clone())),
-        ti(Arc::new(BlockNamed)),
-    );
-    let sent = send(&app, STREAM_BODY).await;
-    assert_eq!(sent.status, StatusCode::OK);
-    assert_eq!(store.charges(), vec![11]);
+    let (off, on) = charges_off_and_on(upstream(), Arc::new(BlockNamed)).await;
+    assert_eq!(off, vec![11]);
+    assert_eq!(on, off);
+    let no_usage: Vec<String> = upstream().into_iter().filter(|r| !r.contains("\"usage\":{")).collect();
+    let (off, on) = charges_off_and_on(no_usage, Arc::new(BlockNamed)).await;
+    assert_eq!(off.len(), 1, "{off:?}");
+    assert_eq!(on, off);
 }
 
 /// D23/D24: the interceptor ends the client stream at an error record mid-hold, but the usage
