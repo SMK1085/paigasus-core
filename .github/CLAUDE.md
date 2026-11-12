@@ -185,7 +185,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   manifests, and the version literals of the napi glue `index.js` (SMA-684). The script checks
   all twenty sites, because a `version_group` fault could stop applying silently. Today that risk
   is real only for `paigasus-proto-derive`. Two sites drift silently without this check.
-  `py/uv.lock` drifts because no Moon task checks or relocks it. Since SMA-765 the kernel task runs `uv run --isolated`, which does not write the lock. The 27
+  `py/uv.lock` can drift because no gate checks it. A plain `uv run` in another task can relock it.
+  Since SMA-765 the kernel task runs `uv run --isolated`. Measured: from a stale state, `uv sync`
+  rewrote the lock and `uv run --isolated` did not. The 27
   `bindingPackageVersion` guards in the committed napi glue (26 native, 1 WASI) drift because the
   codegen-drift gate covers only the three `**/generated` proto dirs. Since SMA-667,
   `paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`) also fails on stale guards.
