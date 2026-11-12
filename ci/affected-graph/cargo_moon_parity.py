@@ -3253,8 +3253,8 @@ UV_RUN_VALUED = UV_GLOBAL_VALUED | frozenset((
     "--prerelease", "--fork-strategy", "--exclude-newer", "--exclude-newer-package",
     "--no-sources-package", "--reinstall-package", "--link-mode", "--config-settings-package",
     "--no-build-isolation-package", "--no-build-package", "--no-binary-package",
-    "--refresh-package", "--bump", "--output-format", "--no-binary", "--no-build", "--config-setting",
-    "-C", "--no-install-package", "--no-install-project",
+    "--refresh-package", "--bump", "--output-format", "--config-setting", "-C",
+    "--upgrade-package", "-P",
 ))
 # `uv version` flags that stop it from locking and syncing the environment.
 UV_VERSION_SAFE_FLAGS = ("--no-sync", "--frozen", "--dry-run")
@@ -3328,7 +3328,14 @@ def _uv_invocations(text):
     found = []
     for base, seg in _uv_segments(text):
         for m in UV_TOKEN_RE.finditer(seg):
-            toks = [t.strip("\"'`()") for t in seg[m.end():].split()]
+            raw = seg[m.end():].split()
+            # A comment is an UNQUOTED word that starts with `#`. Judged on the raw word, before
+            # quotes are trimmed, so `'#settings.env'` stays a value and hides no flag.
+            for ci, word in enumerate(raw):
+                if word.startswith("#"):
+                    raw = raw[:ci]
+                    break
+            toks = [t.strip("\"'`()") for t in raw]
             toks = [t for t in toks if t]
             k = 0
             while k < len(toks) and toks[k] not in UV_SUBCOMMANDS:
@@ -3340,14 +3347,6 @@ def _uv_invocations(text):
                 sub, rest = rest[0], rest[1:]
             found.append((base + m.start(), verb, sub, rest))
     return found
-
-
-def _uv_uncommented(flags):
-    """`flags` up to the first `#` token: a comment executes nothing."""
-    for i, f in enumerate(flags):
-        if f.startswith("#"):
-            return flags[:i]
-    return flags
 
 
 def _uv_option_region(flags):
@@ -3385,7 +3384,6 @@ def _uv_hits(text):
     """`(line, description)` for each mutating uv use in `text`. Empty means clean."""
     hits = []
     for off, verb, sub, flags in _uv_invocations(text):
-        flags = _uv_uncommented(flags)
         names = {f.split("=", 1)[0] for f in flags}
         region = {f.split("=", 1)[0] for f in _uv_option_region(flags)}
         desc = None
@@ -3421,7 +3419,7 @@ def uv_mutations(text):
 def _floor_isolated(blob):
     """True when `blob` has ONE uv invocation with `run`, `--isolated` and the bindings reinstall."""
     for _, verb, _, flags in _uv_invocations(blob or ""):
-        flags = _uv_option_region(_uv_uncommented(flags))
+        flags = _uv_option_region(flags)
         if verb != "run" or "--isolated" not in flags:
             continue
         for i, f in enumerate(flags):
@@ -3430,6 +3428,23 @@ def _floor_isolated(blob):
             if f == "--reinstall-package=paigasus-py-bindings":
                 return True
     return False
+
+
+def _uv_script_closure(path, root):
+    """`path` and every script it reaches through `source` / `.`, RESOLVED, cycle-guarded.
+
+    `script_source_refs` raises MoonOutputError on a sourced path that resolves to no file, so a
+    rename cannot shrink the scan in silence.
+    """
+    queue, seen, out = [Path(path).resolve()], set(), []
+    while queue:
+        key = queue.pop(0)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+        queue.extend(x.resolve() for x in script_source_refs(key, root))
+    return out
 
 
 def check_uv_env_isolation(projects, root, allow=None, floor=None):
@@ -3478,7 +3493,7 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                         f"{proj['source_dir']} - A14 would silently scan less. If the script "
                         f"moved, update the task."
                     )
-                paths.append(path.resolve())
+                paths.extend(_uv_script_closure(path, root_resolved))
             for path in dict.fromkeys(paths):
                 rel_path = str(path.relative_to(root_resolved))
                 text = path.read_text()
@@ -6773,6 +6788,10 @@ def self_test():
         ("isolated with a valued option", "uv run --isolated --with x --reinstall-package p pytest", False),
         ("isolated, reinstall-package", "uv run --isolated --reinstall-package p pytest tests", False),
         ("a comment is not executed", "uv run pytest # --reinstall", False),
+        ("--no-install-project is boolean", "uv run --no-install-project --reinstall-package p --isolated pytest", False),
+        ("--no-build is boolean", "uv run --no-build --reinstall-package p --isolated pytest", False),
+        ("a single-quoted # is a value", "uv run --env-file '#settings.env' --reinstall pytest", True),
+        ("a double-quoted # is a value", 'uv run --env-file "#settings.env" --reinstall pytest', True),
         ("run --refresh-package", "uv run --refresh-package p pytest", True),
         ("UV_PROJECT_ENVIRONMENT assignment", "UV_PROJECT_ENVIRONMENT=.venv uv run pytest", True),
         ("export VIRTUAL_ENV", "export VIRTUAL_ENV=x", True),
@@ -6863,6 +6882,18 @@ def self_test():
         a14_rows = a14_run(a14_proj(a14_good + " && bash ../scripts/run_tests.sh", source_dir="py/sub"))
         if not any("py/scripts/run_tests.sh" in r for r in a14_rows):
             failures.append(f"A14 did not red a `uv pip install` in `bash ../scripts/...`: {a14_rows}")
+        # A project script follows `source` like a ci/ script does (SMA-765 round 2).
+        (a14_root / "py" / "scripts" / "mutate.sh").write_text("#!/bin/bash\nuv sync\n")
+        (a14_root / "py" / "scripts" / "wrap.sh").write_text("#!/bin/bash\nsource ./mutate.sh\n")
+        (a14_root / "py" / "scripts" / "bad.sh").write_text("#!/bin/bash\nsource ./gone.sh\n")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash scripts/wrap.sh"))
+        if not any("py/scripts/mutate.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not red a `uv sync` in a script sourced by a project script: {a14_rows}")
+        try:
+            a14_run(a14_proj(a14_good + " && bash scripts/bad.sh"))
+            failures.append("A14 did not raise on an unresolvable path sourced by a project script")
+        except MoonOutputError:
+            pass
         # A `../` ref that resolves to no file must raise, not be skipped.
         try:
             a14_run(a14_proj(a14_good + " && bash ../scripts/missing.sh", source_dir="py/sub"))
