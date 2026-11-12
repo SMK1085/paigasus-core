@@ -375,17 +375,18 @@ It also runs several checks that the per-case project sets structurally **cannot
   and so is a task `env:` that sets either variable. uv global options (`-q`, `--project X`) and any whitespace or `\` continuation between
   `uv` and the verb are handled. An invocation ends at `&&`, `||`, `;`, `|` or a newline.
   Scan scope, per task: the resolved command blob, the `ci/**/*.sh` scripts it runs with their
-  `source` closure (`task_script_closure`), and the project-relative `scripts/*.sh` files it names
+  `source` closure (`_uv_script_closure`, A14's own matcher), and the project-relative `scripts/*.sh` files it names
   (`PROJECT_SCRIPT_REF_RE`, resolved under the project's `source_dir`), each with its own `source`
-  closure. That closure also follows a `source` or `.` word after `;`, `&&`, `||`, `|`, `(`, `then`,
-  `do` or `else` (`UV_SOURCE_STMT_RE`). A8 and A10 keep their line-start matcher. A `./` or `../`
+  closure. That closure also follows a `source` or `.` word after `;`, `&&`, `||`, `|`, `(`, `{`, `!`,
+  `then`, `do` or `else` (`UV_SOURCE_STMT_RE`). A8 and A10 keep their line-start matcher. A `./` or `../`
   prefix is resolved. A `#` comment starts only at the start of an unquoted, unescaped word. An
   unmatched quote gives no `--isolated` credit. A reference that names no readable file, or leaves the repository, is an
   infrastructure error. Strings are NOT stripped (fail-closed, like A8), so a line that only prints
   `uv sync` is a row. Such a line is waived in `ALLOW_UV_ENV_SCRIPT`, keyed by (script, exact
   stripped line) with a reason. An empty reason, or an entry that matches no scanned line, is a row.
   Floor: `REQUIRED_UV_ISOLATED_TASKS` (`paigasus-kernel-py:test`) must exist and run `uv run
-  --isolated` with `--reinstall-package paigasus-py-bindings`, or A14 gives a `FLOOR:` row.
+  --isolated` with `--reinstall-package paigasus-py-bindings`, and that SAME invocation must run
+  `pytest` (or `python -m pytest`), or A14 gives a `FLOOR:` row.
   Real-tree negative control: `main()` removes `--isolated` from the floor task in a deep copy of
   the real graph. It exits 2 unless A14 gives a row that names the floor task and is not a `FLOOR:`
   row. `run.sh --negative-control` runs only the synthetic

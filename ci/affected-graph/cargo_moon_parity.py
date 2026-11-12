@@ -3418,10 +3418,11 @@ def _uv_invocations(text):
     return found
 
 
-def _uv_option_region(flags):
-    """The uv option region of `uv run`: tokens before the executed command.
+def _uv_run_split(flags):
+    """`(option region, executed command)` of `uv run`.
 
-    It ends at the first token that is neither an option nor the value of a known valued option.
+    The region ends at the first token that is neither an option nor the value of a known valued
+    option. The rest is the command `uv run` executes.
     """
     region, i = [], 0
     while i < len(flags) and flags[i].startswith("-"):
@@ -3430,7 +3431,12 @@ def _uv_option_region(flags):
             region.append(flags[i + 1])
             i += 1
         i += 1
-    return region
+    return region, flags[i:]
+
+
+def _uv_option_region(flags):
+    """The uv option region of `uv run`: tokens before the executed command."""
+    return _uv_run_split(flags)[0]
 
 
 def _uv_version_changes(flags):
@@ -3486,10 +3492,16 @@ def uv_mutations(text):
 
 
 def _floor_isolated(blob):
-    """True when `blob` has ONE uv invocation with `run`, `--isolated` and the bindings reinstall."""
+    """True when ONE uv invocation has `run`, `--isolated`, the bindings reinstall and runs pytest.
+
+    The invocation that is isolated must be the one that runs the tests: a second, ordinary
+    `uv run pytest` would run them in the shared environment.
+    """
     for _, verb, _, flags in _uv_invocations(blob or ""):
-        flags = _uv_option_region(flags)
+        flags, command = _uv_run_split(flags)
         if verb != "run" or "--isolated" not in flags:
+            continue
+        if command[:1] != ["pytest"] and command[:3] not in (["python", "-m", "pytest"], ["python3", "-m", "pytest"]):
             continue
         for i, f in enumerate(flags):
             if f == "--reinstall-package" and flags[i + 1:i + 2] == ["paigasus-py-bindings"]:
@@ -3502,8 +3514,9 @@ def _floor_isolated(blob):
 # A14 follows a `source` / `.` word after `;`, `&`, `|`, `(`, `then`, `do` or `else` too. A8 and A10
 # keep SOURCE_STMT_RE (line start only): their measured edge counts depend on it (SMA-605).
 UV_SOURCE_STMT_RE = re.compile(
-    r"""(?m)(?:^|[;&|(]|\b(?:then|do|else)\b)\s*(?:source|\.)\s+["']?([^"'\s;&|)]+)["']?"""
+    r"""(?m)(?:^|[;&|({!]|\b(?:then|do|else)\b)\s*(?:source|\.)\s+(?!as\s)["']?([^"'\s;&|)]+)["']?"""
 )
+# `(?!as\s)` skips the jq idiom `else . as $rows` (ci/moon-diagnosis/run.sh:278), which is not a source.
 
 
 def _uv_script_closure(path, root):
@@ -3555,7 +3568,11 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                     rows.append(f"{target}: the task `env` sets {env_name}")
             for desc in uv_mutations(blob):
                 rows.append(f"{target}: its command {desc}")
-            paths = list(task_script_closure(projects, root, target))
+            # A14's own closure (UV_SOURCE_STMT_RE), not `task_script_closure`: that one follows a
+            # `source` at line start only, and A8 and A10 depend on it as it is.
+            paths = []
+            for ref in task_script_refs(projects, root, target):
+                paths.extend(_uv_script_closure(ref, root_resolved))
             for rel in sorted(set(PROJECT_SCRIPT_REF_RE.findall(blob))):
                 path = (root_resolved / proj["source_dir"] / rel).resolve()
                 if root_resolved not in path.parents:
@@ -6989,6 +7006,24 @@ def self_test():
             failures.append("A14 did not raise on an unresolvable mid-line sourced path")
         except MoonOutputError:
             pass
+        (a14_root / "py" / "scripts" / "brace.sh").write_text("#!/bin/bash\n{ source ./mutate.sh; }\n")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash scripts/brace.sh"))
+        if not any("py/scripts/mutate.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not follow `{{ source x; }}`: {a14_rows}")
+        (a14_root / "ci" / "x" / "mutate.sh").write_text("#!/bin/bash\nuv sync\n")
+        (a14_root / "ci" / "x" / "semi.sh").write_text("#!/bin/bash\ntrue; source ./mutate.sh\n")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/semi.sh"))
+        if not any("ci/x/mutate.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not follow a mid-line source in a ci/ script: {a14_rows}")
+        for a14_split in (
+            "uv run --isolated --reinstall-package paigasus-py-bindings true && uv run pytest tests",
+            "uv run --isolated --reinstall-package paigasus-py-bindings true",
+        ):
+            if not any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_split))):
+                failures.append(f"A14 gave no FLOOR row for an isolated run that does not run pytest: {a14_split!r}")
+        a14_rows = a14_run(a14_proj("uv run --isolated --reinstall-package paigasus-py-bindings python -m pytest tests"))
+        if any(r.startswith("FLOOR:") for r in a14_rows):
+            failures.append(f"A14 gave a FLOOR row for `python -m pytest`: {a14_rows}")
         # A `../` ref that resolves to no file must raise, not be skipped.
         try:
             a14_run(a14_proj(a14_good + " && bash ../scripts/missing.sh", source_dir="py/sub"))
