@@ -64,7 +64,7 @@ markers = [
 # uv.lock pins the exact resolved versions; these specifiers cap the upgrade window.
 [dependency-groups]
 dev = [
-    "anyio[trio]>=4.15.1,<5",
+    "anyio[trio]>=4.16.0,<5",
     "basedpyright>=1.40.2,<2",
     "betterproto2-compiler>=0.10,<0.11",
     "pytest>=9.2.0,<10",
@@ -72,7 +72,7 @@ dev = [
     # [tool.uv] constraint-dependencies note at the top of this file.
     "python-semantic-release>=10.7.0,<11",
     "pyyaml==6.0.3",
-    "ruff>=0.17.3,<0.18",
+    "ruff>=0.17.4,<0.18",
     # SMA-539 — shellcheck for actionlint's `run:` blocks. Sourced from PyPI, not a proto plugin,
     # because shellcheck's own release ships 13 archives and NO checksums asset (re-measured
     # 2026-09-02), which SMA-525 D2 refused. shellcheck-py is checksummed on both supported
