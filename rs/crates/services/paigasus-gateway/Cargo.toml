@@ -78,6 +78,9 @@ paigasus-service-info = { workspace = true }
 # `domain::resolve_org` (SMA-635) parses and builds org PRNs with the kernel `Prn` API. NOT
 # paigasus-iam-core: that crate pulls cedar-policy and more into the gateway.
 paigasus-kernel = { workspace = true }
+# SMA-749: the sans-IO tool-call interception core. `{ workspace = true }`, so `moon.yml`
+# hand-declares the `dependsOn` edge (ci/CLAUDE.md).
+paigasus-gateway-core = { workspace = true }
 # `domain::resolve_org` reads the `paigasus-org` header as a UUID (SMA-635). Moved from
 # [dev-dependencies]; the correlation test in `adapters::iam::client` still uses it.
 uuid = { workspace = true }

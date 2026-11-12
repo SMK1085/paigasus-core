@@ -172,6 +172,20 @@ describe("arm 3 — the gateway's OpenAI envelope", () => {
     expect(result.retryable).toBe(false);
   });
 
+  // SMA-749. The gateway refused an upstream answer it could not check for tool calls.
+  it('maps tool-interception-malformed-response to degraded, retry unknown', () => {
+    const result = mapError({
+      kind: 'http',
+      status: 502,
+      headers: new Headers(),
+      body: { error: { message: 'The upstream model provider returned a response the gateway could not check.', type: 'api_error', param: null, code: 'tool-interception-malformed-response' } },
+    });
+    expect(result.reason).toBe(ErrorReason.TOOL_INTERCEPTION_MALFORMED_RESPONSE);
+    expect(result.presentation).toBe('degraded');
+    // No `paigasus-retryable` header: whether a retry helps is unknown.
+    expect(result.retryable).toBeNull();
+  });
+
   // SMA-677. The gateway's own rate refusal keeps the transport table's `rate-limited`.
   it('maps rate-limited to rate-limited, retryable', () => {
     const result = mapError({

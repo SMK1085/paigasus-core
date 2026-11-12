@@ -1,0 +1,12 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-gateway-core-rs'
+layer: 'library'
+language: 'rust'
+
+# SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
+# `@group(upstreams)` in .moon/tasks/rust.yml. Empty because this crate has no in-tree
+# dependencies (SMA-749 D1: sans-IO, no kernel change). Asserted to strict equality by
+# repo:affected-smoke's A6.
+fileGroups:
+  upstreams: []

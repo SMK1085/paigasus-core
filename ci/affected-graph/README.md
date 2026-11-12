@@ -28,6 +28,10 @@ runs is the `*_ci` task cases' job.
   (SMA-524). One-directional w.r.t. `paigasus-proto`.
 - **redis lib edit** → `paigasus-redis-rs` + `paigasus-iam-rs` + `paigasus-gateway-rs` +
   `gateway-console-ts` (SMA-726, SMA-677).
+- **gateway-core lib edit** → `paigasus-gateway-core-rs` + `paigasus-gateway-rs` + `gateway-console-ts`
+  (SMA-749). Its task-level twin, `gateway-core->consumer-tasks`, asserts the seven tasks that edit
+  selects under the `moon ci` traversal: the lib's and the gateway's build, test and lint, and
+  `gateway-console-ts:test-e2e`.
 - **test-docker lib edit** → `paigasus-test-docker-rs` + `paigasus-iam-rs` + `paigasus-gateway-rs`
   + `gateway-console-ts` (SMA-726, SMA-677).
 - **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-node-bindings-rs`

@@ -1,0 +1,876 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The Anthropic Messages streaming protocol (spec § 4.2–§ 4.4, D11).
+//!
+//! The SDK selects records by the `event:` name and decodes them by `data.type`. The gateway
+//! dispatches on `data.type`, rejects a disagreeing `event:`, and always writes the event line
+//! itself, so every client reads the record the gateway classified.
+//!
+//! Blocks must not interleave: a `content_block_start` while an earlier block is still open is a
+//! `Deviation`. langchain-anthropic routes an `input_json_delta` to the most recent start, not to
+//! `event.index`, so an interleaved stream would split a call's arguments differently for the
+//! decider and for that client. Real Anthropic never interleaves.
+//!
+//! A `tool_use` block's arguments are what clients see at its stop: an empty buffer is `{}`, and a
+//! buffer that is not one complete JSON value is a `Deviation`, because anthropic-python
+//! partial-parses it and the client would see different arguments than the decider.
+
+use bytes::Bytes;
+use serde_json::{Value, json};
+
+use crate::json::{MAX_ANTHROPIC_INDEX, Malformed, check_numbers, index_of, opt_str, parse_strict, parse_value_strict};
+use crate::protocol::{Deviation, Frame, MAX_IDENTIFIER_BYTES, Protocol, Step, StepError, Verdict, Verdicts, raw_len};
+use crate::report::{ReportDecision, ReportEntry, notice_line};
+use crate::sse::{self, Record};
+use crate::types::{HoldKey, ToolCall, ToolCallKind};
+
+const EVENTS: [&str; 8] = [
+    "message_start",
+    "message_delta",
+    "message_stop",
+    "ping",
+    "error",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Text,
+    Thinking,
+    Server,
+    ToolUse,
+    Other,
+}
+
+struct BlockState {
+    kind: Kind,
+    open: bool,
+    id: Option<String>,
+    name: String,
+    args: String,
+    raws: Vec<Value>,
+    /// The bytes added to `args` and `raws` so far.
+    retained: usize,
+    /// An observed block outgrew the cap: it keeps nothing and is never decided (§ 5.3, D13).
+    overflowed: bool,
+    notice_done: bool,
+}
+
+/// A tool-call id or name over `MAX_IDENTIFIER_BYTES` is a deviation.
+fn long_check(id: Option<&str>, name: &str) -> Result<(), Deviation> {
+    if id.is_some_and(|s| s.len() > MAX_IDENTIFIER_BYTES) || name.len() > MAX_IDENTIFIER_BYTES {
+        return Err(Deviation("long_identifier"));
+    }
+    Ok(())
+}
+
+impl BlockState {
+    fn is_hold(&self) -> bool {
+        matches!(self.kind, Kind::ToolUse | Kind::Other)
+    }
+
+    /// Count `n` retained bytes. An observed block past `cap` drops its buffers for good: nothing
+    /// enforces it any more, and keeping the arguments would grow memory with the call.
+    fn retain(&mut self, n: usize, observed: bool, cap: usize) {
+        self.retained += n;
+        if observed && self.retained > cap {
+            self.overflowed = true;
+            self.drop_buffers();
+        }
+    }
+
+    fn drop_buffers(&mut self) {
+        self.args = String::new();
+        self.raws = Vec::new();
+    }
+}
+
+pub(crate) struct AnthropicStream {
+    blocks: Vec<BlockState>,
+    /// The most an observed block may retain (D13, § 5.3).
+    cap: usize,
+}
+
+impl Default for AnthropicStream {
+    fn default() -> Self {
+        Self::with_cap(crate::limits::Limits::defaults().max_held_bytes)
+    }
+}
+
+fn key(i: u32) -> HoldKey {
+    HoldKey::Block(i)
+}
+
+fn block_index(v: &Value) -> Result<u32, Malformed> {
+    index_of(v.get("index"), MAX_ANTHROPIC_INDEX)
+}
+
+fn plain(ev: &'static str, rec: Record, value: Value, touches: Vec<HoldKey>) -> Step {
+    Step::Frame {
+        frame: Frame {
+            event: Some(ev),
+            payload: rec.data,
+            value: Some(value),
+            touches,
+        },
+        opened: Vec::new(),
+        completed: Vec::new(),
+        reports: Vec::new(),
+    }
+}
+
+fn text_delta(i: u32, text: &str) -> Bytes {
+    let v = json!({"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": text}});
+    sse::frame(Some("content_block_delta"), v.to_string().as_bytes())
+}
+
+fn stop_frame(i: u32) -> Bytes {
+    sse::frame(Some("content_block_stop"), json!({"type": "content_block_stop", "index": i}).to_string().as_bytes())
+}
+
+impl AnthropicStream {
+    pub(crate) fn with_cap(cap: usize) -> Self {
+        AnthropicStream { blocks: Vec::new(), cap }
+    }
+
+    fn holds(&self) -> Vec<HoldKey> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.is_hold())
+            .map(|(i, _)| key(u32::try_from(i).expect("index is bounded")))
+            .collect()
+    }
+
+    fn open_block(&mut self, i: u32) -> Result<&mut BlockState, StepError> {
+        self.blocks.get_mut(i as usize).filter(|b| b.open).ok_or(StepError::Deviation("unknown_block"))
+    }
+
+    /// The completed call. Moves the buffers out: a completed block keeps no arguments.
+    fn call_of(b: &mut BlockState, i: u32) -> ToolCall {
+        let (kind, arguments) = match b.kind {
+            Kind::ToolUse => (ToolCallKind::AnthropicToolUse, std::mem::take(&mut b.args)),
+            _ => (ToolCallKind::Other, serde_json::to_string(&std::mem::take(&mut b.raws)).expect("a Value array always serializes")),
+        };
+        ToolCall {
+            choice: 0,
+            position: i,
+            id: b.id.take(),
+            name: b.name.clone(),
+            kind,
+            arguments,
+        }
+    }
+}
+
+impl Protocol for AnthropicStream {
+    fn step(&mut self, rec: Record, verdicts: &Verdicts) -> Result<Step, StepError> {
+        let value = parse_strict(&rec.data)?;
+        let ty = value.get("type").and_then(Value::as_str).ok_or(Malformed("type"))?;
+        let ev: &'static str = EVENTS.iter().copied().find(|e| *e == ty).ok_or(Malformed("unknown_event"))?;
+        // The splitter yields an empty `event:` value as `Some("")`; that is an absent name, not a mismatch.
+        if rec.event.as_deref().filter(|e| !e.is_empty()).is_some_and(|e| e != ev) {
+            return Err(StepError::Malformed);
+        }
+        match ev {
+            "ping" => Ok(plain(ev, rec, value, Vec::new())),
+            "error" => Ok(Step::UpstreamError(Frame {
+                event: Some(ev),
+                payload: rec.data,
+                value: Some(value),
+                touches: Vec::new(),
+            })),
+            "message_stop" => Ok(Step::End(Frame {
+                event: Some(ev),
+                payload: rec.data,
+                value: Some(value),
+                touches: Vec::new(),
+            })),
+            "message_start" => {
+                match value.pointer("/message/content") {
+                    None => {}
+                    Some(Value::Array(a)) if a.is_empty() => {}
+                    Some(_) => return Err(Deviation("prefilled_content").into()),
+                }
+                Ok(plain(ev, rec, value, Vec::new()))
+            }
+            "message_delta" => {
+                let touches = self.holds();
+                Ok(plain(ev, rec, value, touches))
+            }
+            "content_block_start" => {
+                let i = block_index(&value)?;
+                if i as usize != self.blocks.len() {
+                    return Err(Deviation("block_index").into());
+                }
+                if self.blocks.iter().any(|b| b.open) {
+                    return Err(Deviation("block_interleave").into());
+                }
+                let cb = value.get("content_block").and_then(Value::as_object).ok_or(Malformed("content_block"))?;
+                let bty = cb.get("type").and_then(Value::as_str).ok_or(Malformed("block_type"))?;
+                let kind = match bty {
+                    "text" => Kind::Text,
+                    "thinking" | "redacted_thinking" => Kind::Thinking,
+                    "server_tool_use" | "mcp_tool_use" => Kind::Server,
+                    t if t.ends_with("_tool_result") => Kind::Server,
+                    "tool_use" => Kind::ToolUse,
+                    _ => Kind::Other,
+                };
+                let mut b = BlockState {
+                    kind,
+                    open: true,
+                    id: None,
+                    name: String::new(),
+                    args: String::new(),
+                    raws: Vec::new(),
+                    retained: 0,
+                    overflowed: false,
+                    notice_done: false,
+                };
+                let (mut touches, mut opened, mut reports) = (Vec::new(), Vec::new(), Vec::new());
+                match kind {
+                    Kind::ToolUse => {
+                        match cb.get("input") {
+                            Some(Value::Object(m)) if m.is_empty() => {}
+                            _ => return Err(Deviation("prefilled_input").into()),
+                        }
+                        b.id = opt_str(cb.get("id"), "id")?;
+                        b.name = cb.get("name").and_then(Value::as_str).ok_or(Malformed("name"))?.to_owned();
+                        long_check(b.id.as_deref(), &b.name)?;
+                    }
+                    Kind::Other => {
+                        b.id = opt_str(cb.get("id"), "id")?;
+                        b.name = cb.get("name").and_then(Value::as_str).unwrap_or(bty).to_owned();
+                        long_check(b.id.as_deref(), &b.name)?;
+                        let raw = Value::Object(cb.clone());
+                        b.retained = raw_len(&raw);
+                        b.raws.push(raw);
+                    }
+                    Kind::Server => {
+                        let name = cb.get("name").and_then(Value::as_str).unwrap_or(bty).to_owned();
+                        long_check(opt_str(cb.get("id"), "id")?.as_deref(), &name)?;
+                        reports.push(ReportEntry {
+                            choice: 0,
+                            position: i,
+                            name,
+                            decision: ReportDecision::Unenforceable,
+                            basis: None,
+                            code: None,
+                        });
+                    }
+                    Kind::Text | Kind::Thinking => {}
+                }
+                if b.is_hold() {
+                    touches.push(key(i));
+                    opened.push(key(i));
+                }
+                self.blocks.push(b);
+                Ok(Step::Frame {
+                    frame: Frame {
+                        event: Some(ev),
+                        payload: rec.data,
+                        value: Some(value),
+                        touches,
+                    },
+                    opened,
+                    completed: Vec::new(),
+                    reports,
+                })
+            }
+            "content_block_delta" => {
+                let i = block_index(&value)?;
+                let d = value.get("delta").and_then(Value::as_object).ok_or(Malformed("delta"))?.clone();
+                let dty = d.get("type").and_then(Value::as_str).ok_or(Malformed("delta_type"))?.to_owned();
+                let decided = matches!(verdicts.get(&key(i)), Some(v) if *v != Verdict::PassThrough);
+                let observed = verdicts.get(&key(i)) == Some(&Verdict::PassThrough);
+                let cap = self.cap;
+                let b = self.open_block(i)?;
+                let mut touches = Vec::new();
+                match (b.kind, dty.as_str()) {
+                    (Kind::ToolUse, "input_json_delta") => {
+                        let pj = d.get("partial_json").and_then(Value::as_str).ok_or(StepError::Deviation("partial_json"))?;
+                        if !decided && !b.overflowed {
+                            b.args.push_str(pj);
+                            b.retain(pj.len(), observed, cap);
+                        }
+                        touches.push(key(i));
+                    }
+                    (Kind::ToolUse, _) => return Err(StepError::Deviation("tool_delta_type")),
+                    (Kind::Other, _) => {
+                        if !decided && !b.overflowed {
+                            let raw = Value::Object(d);
+                            let n = raw_len(&raw);
+                            b.raws.push(raw);
+                            b.retain(n, observed, cap);
+                        }
+                        touches.push(key(i));
+                    }
+                    (Kind::Text, "text_delta" | "citations_delta") | (Kind::Thinking, "thinking_delta" | "signature_delta") | (Kind::Server, "input_json_delta") => {}
+                    _ => return Err(StepError::Malformed),
+                }
+                Ok(plain(ev, rec, value, touches))
+            }
+            // "content_block_stop"
+            _ => {
+                let i = block_index(&value)?;
+                let decided = matches!(verdicts.get(&key(i)), Some(v) if *v != Verdict::PassThrough);
+                let b = self.open_block(i)?;
+                // Check before changing the block: a rejected stop leaves it open, so `closing`
+                // still owes its notice and stop frame.
+                let completes = b.is_hold() && !decided && !b.overflowed;
+                if completes && b.kind == Kind::ToolUse && !b.args.is_empty() && parse_value_strict(b.args.as_bytes()).is_err() {
+                    return Err(Deviation("incomplete_arguments").into());
+                }
+                // The decider would read a rounded number where a client keeps the exact one (I1).
+                if completes && b.kind == Kind::Other && b.raws.iter().any(|r| check_numbers(r).is_err()) {
+                    return Err(Deviation("lossy_number").into());
+                }
+                b.open = false;
+                let (mut touches, mut completed) = (Vec::new(), Vec::new());
+                if b.is_hold() {
+                    touches.push(key(i));
+                    if completes {
+                        if b.kind == Kind::ToolUse && b.args.is_empty() {
+                            b.args = "{}".to_owned();
+                        }
+                        completed.push((key(i), vec![Self::call_of(b, i)]));
+                    }
+                }
+                b.drop_buffers();
+                Ok(Step::Frame {
+                    frame: Frame {
+                        event: Some(ev),
+                        payload: rec.data,
+                        value: Some(value),
+                        touches,
+                    },
+                    opened: Vec::new(),
+                    completed,
+                    reports: Vec::new(),
+                })
+            }
+        }
+    }
+
+    fn incomplete(&self) -> Vec<HoldKey> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.is_hold() && b.open)
+            .map(|(i, _)| key(u32::try_from(i).expect("index is bounded")))
+            .collect()
+    }
+
+    fn release(&mut self, frame: Frame, verdicts: &Verdicts) -> Vec<Bytes> {
+        let ev = frame.event.unwrap_or("ping");
+        let original = || sse::frame(Some(ev), &frame.payload);
+        let Some(value) = frame.value.as_ref() else { return vec![original()] };
+        let code_of = |i: u32| verdicts.get(&key(i)).and_then(|v| v.block_code(0));
+        match ev {
+            "content_block_start" | "content_block_delta" | "content_block_stop" => {
+                let Ok(i) = block_index(value) else { return vec![original()] };
+                let Some(code) = code_of(i) else { return vec![original()] };
+                match ev {
+                    "content_block_start" => vec![sse::frame(
+                        Some(ev),
+                        json!({"type": ev, "index": i, "content_block": {"type": "text", "text": ""}}).to_string().as_bytes(),
+                    )],
+                    "content_block_delta" => Vec::new(),
+                    _ => {
+                        let Some(b) = self.blocks.get_mut(i as usize) else { return vec![original()] };
+                        b.notice_done = true;
+                        vec![text_delta(i, &notice_line(&b.name, code)), stop_frame(i)]
+                    }
+                }
+            }
+            "message_delta" => {
+                let any_blocked = self.holds().iter().any(|k| verdicts.get(k).is_some_and(Verdict::blocks_any));
+                let any_allowed = self.holds().iter().any(|k| verdicts.get(k).is_none_or(|v| !v.blocks_any()));
+                if any_blocked && !any_allowed && value.pointer("/delta/stop_reason").and_then(Value::as_str) == Some("tool_use") {
+                    let mut v = value.clone();
+                    v["delta"]["stop_reason"] = "end_turn".into();
+                    return vec![sse::frame(Some(ev), v.to_string().as_bytes())];
+                }
+                vec![original()]
+            }
+            "message_stop" => {
+                let mut out = self.closing(verdicts);
+                out.push(original());
+                out
+            }
+            _ => vec![original()],
+        }
+    }
+
+    fn closing(&mut self, verdicts: &Verdicts) -> Vec<Bytes> {
+        let mut out = Vec::new();
+        for (i, b) in self.blocks.iter_mut().enumerate() {
+            let i = u32::try_from(i).expect("index is bounded");
+            let code = verdicts.get(&key(i)).and_then(|v| v.block_code(0));
+            if let Some(code) = code
+                && b.is_hold()
+                && b.open
+                && !b.notice_done
+            {
+                b.notice_done = true;
+                out.push(text_delta(i, &notice_line(&b.name, code)));
+                out.push(stop_frame(i));
+            }
+        }
+        out
+    }
+
+    fn known_calls(&self, hold: HoldKey) -> Vec<(u32, String)> {
+        match hold {
+            HoldKey::Block(i) => self.blocks.get(i as usize).map(|b| vec![(i, b.name.clone())]).unwrap_or_default(),
+            HoldKey::Choice(_) => Vec::new(),
+        }
+    }
+
+    fn unframed(&self, rec: Record) -> Bytes {
+        sse::frame(rec.event.as_deref(), &rec.data)
+    }
+
+    #[cfg(test)]
+    fn retained(&self) -> usize {
+        self.blocks.iter().map(|b| b.args.len() + crate::protocol::raws_len(&b.raws)).sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{Protocol, Step, Verdict, Verdicts};
+    use crate::report::ReportDecision;
+    use crate::sse::Record;
+    use crate::types::{BlockCode, Decision, HoldKey, ToolCallKind};
+    use serde_json::{Value, json};
+
+    fn rec(v: Value) -> Record {
+        let ty = v["type"].as_str().unwrap().to_owned();
+        Record {
+            event: Some(ty),
+            data: v.to_string().into_bytes(),
+        }
+    }
+
+    fn tool_stream() -> Vec<Value> {
+        vec![
+            json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude","stop_reason":null}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me look."}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"rm","input":{}}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"SECRET\"}"}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}),
+            json!({"type":"message_stop"}),
+        ]
+    }
+
+    fn run(events: Vec<Value>, verdict: Verdict) -> (String, Vec<crate::types::ToolCall>, Vec<ReportEntry>) {
+        let mut p = AnthropicStream::default();
+        let mut verdicts = Verdicts::new();
+        let (mut frames, mut calls, mut reps) = (Vec::new(), Vec::new(), Vec::new());
+        for e in events {
+            match p.step(rec(e), &verdicts).ok().expect("canonical event") {
+                Step::Frame { frame, completed, reports, .. } => {
+                    for (k, c) in completed {
+                        verdicts.insert(k, verdict.clone());
+                        calls.extend(c);
+                    }
+                    reps.extend(reports);
+                    frames.push(frame);
+                }
+                Step::End(f) | Step::UpstreamError(f) => frames.push(f),
+            }
+        }
+        let mut out = Vec::new();
+        for f in frames {
+            out.extend(p.release(f, &verdicts).concat());
+        }
+        (String::from_utf8(out).unwrap(), calls, reps)
+    }
+
+    #[test]
+    fn an_allowed_tool_use_is_reemitted_with_event_lines() {
+        let events = tool_stream();
+        let (out, calls, _) = run(events.clone(), Verdict::AllowAll);
+        let want: String = events.iter().map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e)).collect();
+        assert_eq!(out, want);
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].kind, calls[0].position, calls[0].name.as_str()), (ToolCallKind::AnthropicToolUse, 1, "rm"));
+        assert_eq!(calls[0].arguments, "{\"path\":\"SECRET\"}");
+        assert_eq!(calls[0].id.as_deref(), Some("toolu_1"));
+    }
+
+    #[test]
+    fn a_blocked_tool_use_becomes_a_text_block_at_the_same_index() {
+        let (out, _, _) = run(tool_stream(), Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
+        assert!(!out.contains("SECRET"), "{out}");
+        assert!(!out.contains("\"type\":\"tool_use\""), "{out}");
+        assert!(out.contains(r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#), "{out}");
+        assert!(out.contains(r#"[paigasus] tool call \"rm\" was blocked (policy)."#));
+        assert!(out.contains("\"stop_reason\":\"end_turn\""));
+        // The notice delta comes before the block's stop.
+        let notice = out.find("[paigasus]").unwrap();
+        let stop1 = out.find(r#"{"type":"content_block_stop","index":1}"#).unwrap();
+        assert!(notice < stop1);
+        for frame in out.split("\n\n").filter(|f| !f.is_empty()) {
+            let mut lines = frame.lines();
+            let ev = lines.next().unwrap().strip_prefix("event: ").expect("every frame has an event line");
+            let data: Value = serde_json::from_str(lines.next().unwrap().strip_prefix("data: ").unwrap()).unwrap();
+            assert_eq!(data["type"], ev);
+        }
+    }
+
+    #[test]
+    fn server_tools_pass_and_are_reported_unenforceable() {
+        let events = vec![
+            json!({"type":"message_start","message":{"content":[]}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s1","name":"web_search","input":{}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"s1","content":[]}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_stop"}),
+        ];
+        let (out, calls, reps) = run(events, Verdict::BlockAll(BlockCode::Policy));
+        assert!(calls.is_empty());
+        assert_eq!(reps.len(), 2);
+        assert!(reps.iter().all(|r| r.decision == ReportDecision::Unenforceable));
+        assert!(out.contains("web_search"));
+    }
+
+    #[test]
+    fn an_unknown_block_type_is_held_as_other() {
+        let events = vec![
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"computer_use_v9","id":"x","name":"click"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"coords_delta","x":1}}),
+            json!({"type":"content_block_stop","index":0}),
+        ];
+        let (_, calls, _) = run(events, Verdict::AllowAll);
+        assert_eq!((calls[0].kind, calls[0].name.as_str()), (ToolCallKind::Other, "click"));
+        let raw: Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(raw[1]["x"], 1);
+    }
+
+    #[test]
+    fn every_non_canonical_event_is_rejected() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        let bad = |p: &mut AnthropicStream, r: Record| p.step(r, &v).is_err();
+        assert!(
+            bad(
+                &mut p,
+                Record {
+                    event: Some("ping".into()),
+                    data: br#"{"type":"message_stop"}"#.to_vec()
+                }
+            ),
+            "event mismatch"
+        );
+        assert!(bad(&mut AnthropicStream::default(), rec(json!({"type":"new_event"}))), "unknown type");
+        assert!(
+            bad(&mut AnthropicStream::default(), rec(json!({"type":"message_start","message":{"content":[{"type":"tool_use"}]}}))),
+            "prefilled content"
+        );
+        assert!(
+            bad(
+                &mut AnthropicStream::default(),
+                rec(json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}))
+            ),
+            "index gap"
+        );
+        assert!(
+            bad(
+                &mut AnthropicStream::default(),
+                rec(json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"rm","input":{"p":"/"}}}))
+            ),
+            "prefilled input"
+        );
+        assert!(
+            bad(
+                &mut AnthropicStream::default(),
+                rec(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}))
+            ),
+            "delta for an unknown block"
+        );
+        let mut q = AnthropicStream::default();
+        q.step(
+            rec(json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"rm","input":{}}})),
+            &v,
+        )
+        .ok()
+        .unwrap();
+        assert!(
+            bad(&mut q, rec(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}))),
+            "a text delta on a tool block"
+        );
+    }
+
+    #[test]
+    fn a_block_without_a_stop_is_incomplete_and_closing_finishes_it() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        let Step::Frame { opened, .. } = p
+            .step(
+                rec(json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"rm","input":{}}})),
+                &v,
+            )
+            .ok()
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(opened, vec![HoldKey::Block(0)]);
+        assert_eq!(p.incomplete(), vec![HoldKey::Block(0)]);
+        let mut verdicts = Verdicts::new();
+        verdicts.insert(HoldKey::Block(0), Verdict::BlockAll(BlockCode::Truncated));
+        let closing = String::from_utf8(p.closing(&verdicts).concat()).unwrap();
+        assert!(closing.contains("(truncated)") && closing.contains("content_block_stop"), "{closing}");
+    }
+
+    #[test]
+    fn an_empty_event_name_is_treated_as_absent_and_never_re_emitted() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        let r = Record {
+            event: Some(String::new()),
+            data: br#"{"type":"ping"}"#.to_vec(),
+        };
+        let Step::Frame { frame, .. } = p.step(r, &v).ok().expect("an empty event name is absent") else {
+            panic!()
+        };
+        let out = String::from_utf8(p.release(frame, &v).concat()).unwrap();
+        assert_eq!(out, "event: ping\ndata: {\"type\":\"ping\"}\n\n");
+    }
+
+    fn tool_start(i: u32, id: &str, name: &str) -> Value {
+        json!({"type":"content_block_start","index":i,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}})
+    }
+    fn json_delta(i: u32, pj: &str) -> Value {
+        json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":pj}})
+    }
+    fn stop(i: u32) -> Value {
+        json!({"type":"content_block_stop","index":i})
+    }
+
+    #[test]
+    fn a_start_while_another_block_is_open_is_an_interleave() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        match p.step(rec(tool_start(1, "t1", "ls")), &v) {
+            Err(StepError::Deviation(d)) => assert_eq!(d, "block_interleave"),
+            _ => panic!("expected block_interleave"),
+        }
+    }
+
+    fn stop_arguments(deltas: &[&str]) -> Result<String, &'static str> {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        for d in deltas {
+            p.step(rec(json_delta(0, d)), &v).ok().unwrap();
+        }
+        match p.step(rec(stop(0)), &v) {
+            Ok(Step::Frame { completed, .. }) => Ok(completed[0].1[0].arguments.clone()),
+            Ok(_) => panic!("not a frame"),
+            Err(StepError::Deviation(d)) => Err(d),
+            Err(StepError::Malformed) => Err("malformed"),
+        }
+    }
+
+    #[test]
+    fn tool_use_arguments_follow_what_clients_see() {
+        assert_eq!(stop_arguments(&[]).unwrap(), "{}");
+        assert_eq!(stop_arguments(&["{\"cmd\":\"ls\",\"dry_run\":tru"]), Err("incomplete_arguments"));
+        assert_eq!(stop_arguments(&["{\"cmd\":", "\"ls\"}"]).unwrap(), "{\"cmd\":\"ls\"}");
+    }
+
+    #[test]
+    fn tool_use_argument_keys_are_application_data() {
+        let ok = r#"{"Name":"Alice","Id":1,"constructor":{"Type":"pdf"}}"#;
+        assert_eq!(stop_arguments(&[ok]).as_deref(), Ok(ok));
+        assert_eq!(stop_arguments(&[r#"{"a":1,"a":2}"#]), Err("incomplete_arguments"));
+        assert_eq!(stop_arguments(&[r#"{"__proto__":{}}"#]), Err("incomplete_arguments"));
+    }
+
+    #[test]
+    fn a_blocked_stop_is_the_synthesized_frame_without_upstream_extras() {
+        let mut stop_with_extra = stop(1);
+        stop_with_extra["evil"] = json!("x");
+        let mut events = tool_stream();
+        events[7] = stop_with_extra;
+        let (out, _, _) = run(events, Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
+        assert!(out.contains("data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"), "{out}");
+        assert!(!out.contains("evil"), "{out}");
+    }
+
+    fn start_result(id: &str, name: &str) -> Result<(), &'static str> {
+        let mut p = AnthropicStream::default();
+        match p.step(rec(tool_start(0, id, name)), &Verdicts::new()) {
+            Ok(_) => Ok(()),
+            Err(StepError::Deviation(d)) => Err(d),
+            Err(StepError::Malformed) => Err("malformed"),
+        }
+    }
+
+    #[test]
+    fn identifiers_over_1024_bytes_are_a_deviation() {
+        let (ok, long) = ("a".repeat(1024), "a".repeat(1025));
+        assert_eq!(start_result(&ok, &ok), Ok(()));
+        assert_eq!(start_result(&long, "rm"), Err("long_identifier"));
+        assert_eq!(start_result("t", &long), Err("long_identifier"));
+        let mut p = AnthropicStream::default();
+        let other = json!({"type":"content_block_start","index":0,"content_block":{"type":"computer_v9","id":long,"name":"click"}});
+        assert!(matches!(p.step(rec(other), &Verdicts::new()), Err(StepError::Deviation("long_identifier"))));
+        let mut p = AnthropicStream::default();
+        let server = json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s","name":long,"input":{}}});
+        assert!(matches!(p.step(rec(server), &Verdicts::new()), Err(StepError::Deviation("long_identifier"))));
+    }
+
+    #[test]
+    fn a_completed_block_gives_up_its_id() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        p.step(rec(stop(0)), &v).ok().unwrap();
+        assert!(p.blocks[0].id.is_none());
+        assert_eq!(p.blocks[0].name, "rm");
+    }
+
+    #[test]
+    fn a_blocked_block_does_not_leak_its_id() {
+        let (out, _, _) = run(tool_stream(), Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
+        assert!(!out.contains("toolu_1"), "{out}");
+    }
+
+    #[test]
+    fn stop_reason_stays_tool_use_while_one_block_is_allowed() {
+        let events = vec![
+            tool_start(0, "t0", "ls"),
+            json_delta(0, "{}"),
+            stop(0),
+            tool_start(1, "t1", "rm"),
+            json_delta(1, "{}"),
+            stop(1),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":1}}),
+            json!({"type":"message_stop"}),
+        ];
+        let mut p = AnthropicStream::default();
+        let mut verdicts = Verdicts::new();
+        let mut frames = Vec::new();
+        for e in events {
+            match step_of(&mut p, e, &verdicts) {
+                Step::Frame { frame, completed, .. } => {
+                    for (k, _) in completed {
+                        verdicts.insert(k, if k == HoldKey::Block(1) { Verdict::BlockAll(BlockCode::Policy) } else { Verdict::AllowAll });
+                    }
+                    frames.push(frame);
+                }
+                Step::End(f) | Step::UpstreamError(f) => frames.push(f),
+            }
+        }
+        let out: String = frames.into_iter().flat_map(|f| p.release(f, &verdicts)).map(|b| String::from_utf8(b.to_vec()).unwrap()).collect();
+        assert!(out.contains("\"stop_reason\":\"tool_use\""), "{out}");
+    }
+
+    fn step_of(p: &mut AnthropicStream, e: Value, v: &Verdicts) -> Step {
+        p.step(rec(e), v).ok().expect("canonical event")
+    }
+
+    #[test]
+    fn a_completed_block_keeps_no_argument_buffers() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        let big = format!("{{\"a\":\"{}\"}}", "x".repeat(1000));
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        p.step(rec(json_delta(0, &big)), &v).ok().unwrap();
+        assert!(p.retained() >= 1000);
+        let Step::Frame { completed, .. } = p.step(rec(stop(0)), &v).ok().unwrap() else { panic!() };
+        assert_eq!(completed[0].1[0].arguments, big);
+        assert_eq!(p.retained(), 0, "a completed tool_use block keeps no arguments");
+        p.step(rec(json!({"type":"content_block_start","index":1,"content_block":{"type":"computer_v9","name":"click"}})), &v)
+            .ok()
+            .unwrap();
+        p.step(rec(json!({"type":"content_block_delta","index":1,"delta":{"type":"coords_delta","pad":"y".repeat(1000)}})), &v)
+            .ok()
+            .unwrap();
+        assert!(p.retained() >= 1000);
+        p.step(rec(stop(1)), &v).ok().unwrap();
+        assert_eq!(p.retained(), 0, "a completed Other block keeps no raws");
+    }
+
+    #[test]
+    fn an_observed_block_stops_retaining_past_the_cap_and_is_not_decided() {
+        let mut p = AnthropicStream::with_cap(256);
+        let mut v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        v.insert(HoldKey::Block(0), Verdict::PassThrough);
+        p.step(rec(json_delta(0, "{\"a\":\"")), &v).ok().unwrap();
+        for _ in 0..100 {
+            p.step(rec(json_delta(0, &"x".repeat(100))), &v).ok().unwrap();
+            assert!(p.retained() <= 256 + 100, "retained {}", p.retained());
+        }
+        p.step(rec(json_delta(0, "\"}")), &v).ok().unwrap();
+        let Step::Frame { completed, .. } = p.step(rec(stop(0)), &v).ok().unwrap() else { panic!() };
+        assert!(completed.is_empty(), "an overflowed observed call is not decided");
+        assert_eq!(p.retained(), 0);
+    }
+
+    #[test]
+    fn a_short_observed_block_is_still_decided() {
+        let mut p = AnthropicStream::with_cap(256);
+        let mut v = Verdicts::new();
+        p.step(rec(tool_start(0, "t0", "rm")), &v).ok().unwrap();
+        v.insert(HoldKey::Block(0), Verdict::PassThrough);
+        p.step(rec(json_delta(0, "{}")), &v).ok().unwrap();
+        let Step::Frame { completed, .. } = p.step(rec(stop(0)), &v).ok().unwrap() else { panic!() };
+        assert_eq!(completed[0].1[0].arguments, "{}");
+    }
+
+    #[test]
+    fn an_other_block_with_a_lossy_number_is_a_deviation() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(json!({"type":"content_block_start","index":0,"content_block":{"type":"computer_v9","name":"click"}})), &v)
+            .ok()
+            .unwrap();
+        let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"coords_delta","x":123456789012345678901234567890}}"#;
+        p.step(
+            Record {
+                event: Some("content_block_delta".into()),
+                data: delta.as_bytes().to_vec(),
+            },
+            &v,
+        )
+        .ok()
+        .unwrap();
+        assert!(matches!(p.step(rec(stop(0)), &v), Err(StepError::Deviation("lossy_number"))));
+        let mut q = AnthropicStream::default();
+        let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"computer_v9","name":"click","n":[1e300]}}"#;
+        q.step(
+            Record {
+                event: Some("content_block_start".into()),
+                data: start.as_bytes().to_vec(),
+            },
+            &v,
+        )
+        .ok()
+        .unwrap();
+        assert!(matches!(q.step(rec(stop(0)), &v), Err(StepError::Deviation("lossy_number"))));
+    }
+
+    #[test]
+    fn a_delta_after_the_stop_is_rejected() {
+        let mut p = AnthropicStream::default();
+        let v = Verdicts::new();
+        p.step(rec(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})), &v).ok().unwrap();
+        p.step(rec(stop(0)), &v).ok().unwrap();
+        assert!(p.step(rec(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}})), &v).is_err());
+    }
+}
