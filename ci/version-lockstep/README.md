@@ -22,12 +22,13 @@ not (SMA-685). So five classes of site are owned by nobody:
   1 WASI) each carry the version twice: `bindingPackageVersion !== '<v>'` and
   `expected <v> but got`
 
-Since SMA-765, `py/packages/paigasus-kernel/moon.yml` runs `uv run --isolated`. Measured: from a
-stale state, `uv sync` rewrote `py/uv.lock` and `uv run --isolated` did not. `ci.yml`'s
+Since SMA-765, `py/packages/paigasus-kernel/moon.yml` runs `uv run --isolated`. Measured: after
+a version bump in a member pyproject.toml, `uv sync` rewrote `py/uv.lock` and
+`uv run --isolated` did not. `ci.yml`'s
 codegen-drift gate covers only the three `**/generated` proto dirs. `--check` reads only the
 member version strings in `py/uv.lock`. It does not check the rest of the lock. The napi glue
-does not drift since SMA-667: `paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`) fails when the committed
-`index.js`, version guards included, is not the generator's output.
+does not drift since SMA-667: `paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`)
+fails when the committed `index.js`, version guards included, is not the generator's output.
 
 ## Why `--check` verifies sites release-plz owns
 
