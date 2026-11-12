@@ -3385,8 +3385,28 @@ def _uv_tokens(text):
         return _uv_words(text[:pos])
 
 
-def _uv_invocations(text):
+def _uv_quoted_at(seg, pos):
+    """True when `seg[pos]` sits inside an open quote of the segment (same rules as the segmenter)."""
+    quote, i = None, 0
+    while i < pos:
+        ch = seg[i]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        i += 1
+    return quote is not None
+
+
+def _uv_invocations(text, skip_quoted=False):
     """Every `uv` use in `text` as `(offset, verb, sub, flags)`.
+
+    With `skip_quoted`, a `uv` that starts inside an open quote is left out: the floor must credit
+    an EXECUTED `uv run`, not one inside an `echo '...'`. Mutation detection keeps every match.
 
     `verb` is the first token after the uv global options, `sub` the token after `pip`, and
     `flags` every later token of the same invocation (quotes trimmed). Judged per invocation, so
@@ -3395,6 +3415,8 @@ def _uv_invocations(text):
     found = []
     for base, seg in _uv_segments(text):
         for m in UV_TOKEN_RE.finditer(seg):
+            if skip_quoted and _uv_quoted_at(seg, m.start()):
+                continue
             try:
                 toks = [t.strip("`()") for t in _uv_tokens(seg[m.end():])]
             except ValueError:
@@ -3497,7 +3519,7 @@ def _floor_isolated(blob):
     The invocation that is isolated must be the one that runs the tests: a second, ordinary
     `uv run pytest` would run them in the shared environment.
     """
-    for _, verb, _, flags in _uv_invocations(blob or ""):
+    for _, verb, _, flags in _uv_invocations(blob or "", skip_quoted=True):
         flags, command = _uv_run_split(flags)
         if verb != "run" or "--isolated" not in flags:
             continue
@@ -3514,9 +3536,9 @@ def _floor_isolated(blob):
 # A14 follows a `source` / `.` word after `;`, `&`, `|`, `(`, `then`, `do` or `else` too. A8 and A10
 # keep SOURCE_STMT_RE (line start only): their measured edge counts depend on it (SMA-605).
 UV_SOURCE_STMT_RE = re.compile(
-    r"""(?m)(?:^|[;&|({!]|\b(?:then|do|else)\b)\s*(?:source|\.)\s+(?!as\s)["']?([^"'\s;&|)]+)["']?"""
+    r"""(?m)(?:^|[;&|({!]|\b(?:then|do|else)\b)\s*(?:source|\.)\s+(?!as\s+\$[A-Za-z_])["']?([^"'\s;&|)]+)["']?"""
 )
-# `(?!as\s)` skips the jq idiom `else . as $rows` (ci/moon-diagnosis/run.sh:278), which is not a source.
+# `(?!as\s+\$[A-Za-z_])` skips the jq idiom `else . as $rows` (ci/moon-diagnosis/run.sh:278), which is not a source.
 
 
 def _uv_script_closure(path, root):
@@ -7024,6 +7046,23 @@ def self_test():
         a14_rows = a14_run(a14_proj("uv run --isolated --reinstall-package paigasus-py-bindings python -m pytest tests"))
         if any(r.startswith("FLOOR:") for r in a14_rows):
             failures.append(f"A14 gave a FLOOR row for `python -m pytest`: {a14_rows}")
+        (a14_root / "py" / "scripts" / "asrc.sh").write_text("#!/bin/bash\nsource as arg\n")
+        (a14_root / "py" / "scripts" / "as").write_text("#!/bin/bash\nuv sync\n")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash scripts/asrc.sh"))
+        if not any("py/scripts/as:" in r for r in a14_rows):
+            failures.append(f"A14 did not follow `source as arg`: {a14_rows}")
+        (a14_root / "py" / "scripts" / "as").unlink()
+        try:
+            a14_run(a14_proj(a14_good + " && bash scripts/asrc.sh"))
+            failures.append("A14 did not raise on `source as` with no such file")
+        except MoonOutputError:
+            pass
+        (a14_root / "py" / "scripts" / "jq.sh").write_text("#!/bin/bash\njq 'else . as $rows | $rows'\n")
+        if a14_run(a14_proj(a14_good + " && bash scripts/jq.sh")):
+            failures.append("A14 followed the jq binding `. as $rows` as a source")
+        a14_quoted = "echo 'uv run --isolated --reinstall-package paigasus-py-bindings pytest tests'\nuv run pytest tests"
+        if not any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_quoted))):
+            failures.append("A14 credited the floor to a `uv run` inside quotes")
         # A `../` ref that resolves to no file must raise, not be skipped.
         try:
             a14_run(a14_proj(a14_good + " && bash ../scripts/missing.sh", source_dir="py/sub"))
