@@ -1215,7 +1215,7 @@ def _executable_text(path):
     return "\n".join(out)
 
 
-def script_source_refs(path, root):
+def script_source_refs(path, root, stmt_re=None):
     """The scripts `path` EXECUTES through a `source` / `.` statement.
 
     A variable assigned EXACTLY ONCE resolves to its value; one assigned more than once - or
@@ -1250,7 +1250,7 @@ def script_source_refs(path, root):
     ordered = sorted(env.items(), key=lambda kv: (-len(kv[0]), kv[0]))
     root_resolved = Path(root).resolve()
     out = []
-    for raw in SOURCE_STMT_RE.findall(text):
+    for raw in (stmt_re or SOURCE_STMT_RE).findall(text):
         target = raw
         for name, value in ordered:
             target = target.replace("${" + name + "}", value).replace("$" + name, value)
@@ -3318,6 +3318,73 @@ def _uv_segments(text):
     return out
 
 
+def _uv_words(text):
+    """Split `text` into shell words; a `#` at the start of an unquoted word ends the list.
+
+    POSIX-like: a backslash escapes the next character, single quotes are literal, double quotes
+    escape only `"`, backslash, `$` and a backtick. `shlex` is NOT used: it treats a `#` inside a
+    word (`a#b`) as a comment, and drops text after an escaped space. Raises ValueError on an
+    unbalanced quote, with the
+    position of the quote that never closed.
+    """
+    words, buf, started, quote, qpos, i, n = [], [], False, None, 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                buf.append(ch)
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "\\" and i + 1 < n and text[i + 1] in '"\\$`':
+                buf.append(text[i + 1])
+                i += 1
+            else:
+                buf.append(ch)
+        elif ch.isspace():
+            if started:
+                words.append("".join(buf))
+                buf, started = [], False
+        elif ch == "#" and not started:
+            break
+        else:
+            started = True
+            if ch in "'\"":
+                quote, qpos = ch, i
+            elif ch == "\\" and i + 1 < n:
+                buf.append(text[i + 1])
+                i += 1
+            else:
+                buf.append(ch)
+        i += 1
+    if quote:
+        raise ValueError(qpos)
+    if started:
+        words.append("".join(buf))
+    return words
+
+
+def _uv_tokens(text):
+    """`_uv_words`, but an unmatched quote that ENDS a word closes an enclosing string.
+
+    A `uv` inside `echo "... 'uv run x' ..."` has the closing quote in its tail. That tail is cut
+    at the quote. An unmatched quote that opens a word (or sits mid-word) still raises ValueError
+    (fail-closed): `uv run --env-file "a --isolated pytest` hides what follows the quote.
+    """
+    try:
+        return _uv_words(text)
+    except ValueError as err:
+        pos = err.args[0]
+        closes = pos > 0 and not text[pos - 1].isspace() and (
+            pos + 1 == len(text) or text[pos + 1].isspace() or text[pos + 1] in ",.:;)"
+        )
+        if not closes:
+            raise
+        return _uv_words(text[:pos])
+
+
 def _uv_invocations(text):
     """Every `uv` use in `text` as `(offset, verb, sub, flags)`.
 
@@ -3328,14 +3395,16 @@ def _uv_invocations(text):
     found = []
     for base, seg in _uv_segments(text):
         for m in UV_TOKEN_RE.finditer(seg):
-            raw = seg[m.end():].split()
-            # A comment is an UNQUOTED word that starts with `#`. Judged on the raw word, before
-            # quotes are trimmed, so `'#settings.env'` stays a value and hides no flag.
-            for ci, word in enumerate(raw):
-                if word.startswith("#"):
-                    raw = raw[:ci]
-                    break
-            toks = [t.strip("\"'`()") for t in raw]
+            try:
+                toks = [t.strip("`()") for t in _uv_tokens(seg[m.end():])]
+            except ValueError:
+                # Fail closed, but not red on every apostrophe: 41 prose lines in ci/ (an `echo`
+                # or a comment that names `uv`) leave an unmatched quote in the tail. Split on
+                # whitespace instead, and give NO credit for `--isolated`: the words after the
+                # quote are unknown, so a mutating flag anywhere still reds, and a run that
+                # needs `--isolated` for its reinstall flag reds too.
+                toks = [t.strip("\"'`()") for t in seg[m.end():].split()]
+                toks = [t for t in toks if t and t != "--isolated"]
             toks = [t for t in toks if t]
             k = 0
             while k < len(toks) and toks[k] not in UV_SUBCOMMANDS:
@@ -3430,6 +3499,13 @@ def _floor_isolated(blob):
     return False
 
 
+# A14 follows a `source` / `.` word after `;`, `&`, `|`, `(`, `then`, `do` or `else` too. A8 and A10
+# keep SOURCE_STMT_RE (line start only): their measured edge counts depend on it (SMA-605).
+UV_SOURCE_STMT_RE = re.compile(
+    r"""(?m)(?:^|[;&|(]|\b(?:then|do|else)\b)\s*(?:source|\.)\s+["']?([^"'\s;&|)]+)["']?"""
+)
+
+
 def _uv_script_closure(path, root):
     """`path` and every script it reaches through `source` / `.`, RESOLVED, cycle-guarded.
 
@@ -3443,7 +3519,7 @@ def _uv_script_closure(path, root):
             continue
         seen.add(key)
         out.append(key)
-        queue.extend(x.resolve() for x in script_source_refs(key, root))
+        queue.extend(x.resolve() for x in script_source_refs(key, root, UV_SOURCE_STMT_RE))
     return out
 
 
@@ -6790,6 +6866,12 @@ def self_test():
         ("a comment is not executed", "uv run pytest # --reinstall", False),
         ("--no-install-project is boolean", "uv run --no-install-project --reinstall-package p --isolated pytest", False),
         ("--no-build is boolean", "uv run --no-build --reinstall-package p --isolated pytest", False),
+        ("an escaped space keeps # in the word", "uv run --env-file a\\ #settings.env --reinstall pytest", True),
+        ("a quoted space keeps # in the word", 'uv run --env-file "a #settings.env" --reinstall pytest', True),
+        ("an unbalanced quote fails closed", 'uv run --env-file "a --reinstall pytest', True),
+        ("an unbalanced quote gives no --isolated credit", 'uv run --isolated --reinstall-package p "pytest', True),
+        ("a prose apostrophe stays green", "echo uv run's own status", False),
+        ("# inside a word is not a comment", "uv run --env-file a#b --reinstall pytest", True),
         ("a single-quoted # is a value", "uv run --env-file '#settings.env' --reinstall pytest", True),
         ("a double-quoted # is a value", 'uv run --env-file "#settings.env" --reinstall pytest', True),
         ("run --refresh-package", "uv run --refresh-package p pytest", True),
@@ -6892,6 +6974,19 @@ def self_test():
         try:
             a14_run(a14_proj(a14_good + " && bash scripts/bad.sh"))
             failures.append("A14 did not raise on an unresolvable path sourced by a project script")
+        except MoonOutputError:
+            pass
+        (a14_root / "py" / "scripts" / "semi.sh").write_text("#!/bin/bash\ntrue; source ./mutate.sh\n")
+        (a14_root / "py" / "scripts" / "and.sh").write_text("#!/bin/bash\nx && . ./mutate.sh\n")
+        (a14_root / "py" / "scripts" / "then.sh").write_text("#!/bin/bash\nif x; then source ./mutate.sh; fi\n")
+        (a14_root / "py" / "scripts" / "badsemi.sh").write_text("#!/bin/bash\ntrue; source ./gone.sh\n")
+        for a14_s in ("semi", "and", "then"):
+            a14_rows = a14_run(a14_proj(a14_good + f" && bash scripts/{a14_s}.sh"))
+            if not any("py/scripts/mutate.sh" in r for r in a14_rows):
+                failures.append(f"A14 did not follow a mid-line source in {a14_s}.sh: {a14_rows}")
+        try:
+            a14_run(a14_proj(a14_good + " && bash scripts/badsemi.sh"))
+            failures.append("A14 did not raise on an unresolvable mid-line sourced path")
         except MoonOutputError:
             pass
         # A `../` ref that resolves to no file must raise, not be skipped.

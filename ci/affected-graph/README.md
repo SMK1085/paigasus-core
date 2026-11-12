@@ -377,7 +377,10 @@ It also runs several checks that the per-case project sets structurally **cannot
   Scan scope, per task: the resolved command blob, the `ci/**/*.sh` scripts it runs with their
   `source` closure (`task_script_closure`), and the project-relative `scripts/*.sh` files it names
   (`PROJECT_SCRIPT_REF_RE`, resolved under the project's `source_dir`), each with its own `source`
-  closure. A `./` or `../` prefix is resolved. A `#` comment starts only at an unquoted word. A reference that names no readable file, or leaves the repository, is an
+  closure. That closure also follows a `source` or `.` word after `;`, `&&`, `||`, `|`, `(`, `then`,
+  `do` or `else` (`UV_SOURCE_STMT_RE`). A8 and A10 keep their line-start matcher. A `./` or `../`
+  prefix is resolved. A `#` comment starts only at the start of an unquoted, unescaped word. An
+  unmatched quote gives no `--isolated` credit. A reference that names no readable file, or leaves the repository, is an
   infrastructure error. Strings are NOT stripped (fail-closed, like A8), so a line that only prints
   `uv sync` is a row. Such a line is waived in `ALLOW_UV_ENV_SCRIPT`, keyed by (script, exact
   stripped line) with a reason. An empty reason, or an entry that matches no scanned line, is a row.
