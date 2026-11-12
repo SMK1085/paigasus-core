@@ -14,6 +14,7 @@ pub(crate) mod bytes;
 pub mod chat;
 pub mod dto;
 pub mod error;
+pub mod interception;
 pub mod service_info;
 pub mod usage;
 
@@ -60,6 +61,9 @@ pub struct AppState {
     pub limits: Option<Arc<Limits>>,
     /// SMA-700: `GatewayConfig::dpop.enabled`. The auth middlewares read it through `AuthState`.
     pub dpop_enabled: bool,
+    /// SMA-749: tool-call interception, or `None` when `[tool_interception] enabled = false`.
+    /// `None` keeps the relay exactly as it was (D27).
+    pub tool_interception: Option<Arc<interception::ToolInterception>>,
 }
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
@@ -261,6 +265,7 @@ mod tests {
             capabilities: crate::service_info::Capabilities { chat_stream: true },
             limits: None,
             dpop_enabled: false,
+            tool_interception: None,
         }
     }
 

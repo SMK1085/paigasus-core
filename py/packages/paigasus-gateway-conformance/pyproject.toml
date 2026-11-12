@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+[project]
+name = "paigasus-gateway-conformance"
+version = "0.0.0"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "Checks the gateway's rewritten tool-call streams against the real OpenAI and Anthropic SDKs (SMA-749)."
+classifiers = ["Private :: Do Not Upload"]
+requires-python = ">=3.12"
+# Exact pins: the conformance claim is about these versions (spec § 8.2). Bump deliberately, and
+# re-read the stream helpers against tests/support/oracle.rs in paigasus-gateway-core.
+dependencies = ["openai==3.40.0", "anthropic==2.3.0", "httpx2"]
+
+[tool.uv]
+package = false

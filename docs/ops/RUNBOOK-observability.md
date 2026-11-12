@@ -143,6 +143,10 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `gateway_limit_charges_dropped_total` | counter | `reason` | Charges that were not sent. `reason` ∈ `no_runtime` (a guard dropped outside the async runtime) / `shutdown` (still running after the 5 s shutdown drain) / `period_expired` (more than one day after its budget period ended). |
 | `gateway_redis_breaker_state` | gauge | `role` | The limits Redis circuit breaker (`role="limits"`): 0 closed, 1 half-open, 2 open. Only with `backend = "redis"`. Per replica: aggregate `max by (job, role)`, never `sum`. |
 | `gateway_redis_breaker_transitions_total` | counter | `role`, `to` | One per transition of that breaker; `to` ∈ `closed` / `half_open` / `open`. Catches a flapping breaker that the gauge misses between scrapes. |
+| `gateway_tool_interception_records_dropped_total` | counter | `reason` | Upstream SSE records the tool-call interceptor did not forward; `reason` ∈ `malformed` / `oversized` / `after_done` / `late_fragment`. A conforming upstream keeps this at 0. |
+| `gateway_tool_interception_decisions_total` | counter | `decision`, `basis` | One per decided tool call; `decision` ∈ `allow` / `block`, `basis` ∈ `decider` / `on_failure`. |
+| `gateway_tool_interception_on_failure_total` | counter | `code` | Failures that took the `on_failure` path; `code` ∈ `hold_limit` / `truncated` / `decider_error` / `malformed`. |
+| `gateway_tool_interception_hold_seconds` | histogram | — | Seconds from a hold's first tool-call frame to its completion. |
 
 **The `chat completion metered` log line** (`info` when tokens > 0, `debug` otherwise) is the
 per-org spend record: fields `org`, `tokens`, `source`, `outcome` (`charged` / `store_unavailable`
