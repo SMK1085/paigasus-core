@@ -10,7 +10,7 @@ classifiers = ["Private :: Do Not Upload"]
 requires-python = ">=3.12"
 # Exact pins: the conformance claim is about these versions (spec § 8.2). Bump deliberately, and
 # re-read the stream helpers against tests/support/oracle.rs in paigasus-gateway-core.
-dependencies = ["openai==3.40.0", "anthropic==2.3.0", "httpx2"]
+dependencies = ["openai==3.48.0", "anthropic==2.3.0", "httpx2"]
 
 [tool.uv]
 package = false
