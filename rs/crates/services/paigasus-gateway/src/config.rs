@@ -46,6 +46,9 @@ pub struct GatewayConfig {
     /// deploy the gateway, so the operator sets `GATEWAY_DPOP__ENABLED`. Turn DPoP on in IAM first.
     #[serde(default)]
     pub dpop: GatewayDpopConfig,
+    /// SMA-749: tool-call interception on `POST /v1/chat/completions`. Off by default (D26).
+    #[serde(default)]
+    pub tool_interception: ToolInterceptionConfig,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -210,6 +213,112 @@ pub enum LimitsBackend {
 #[serde(default, deny_unknown_fields)]
 pub struct GatewayDpopConfig {
     pub enabled: bool,
+}
+
+/// `[tool_interception]` (SMA-749 D26). Off by default: with `enabled = false` the chat relay is
+/// exactly the relay without interception (D27). A misspelt key fails extraction, so a typo can
+/// never leave a security control silently off.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolInterceptionConfig {
+    pub enabled: bool,
+    /// D8: one SSE record larger than this is a failure, never skipped.
+    pub max_record_bytes: usize,
+    /// D13: the queued bytes of one stream, across every hold. Also the cap on one non-stream
+    /// body (spec 5.2).
+    pub max_held_bytes: usize,
+    /// D14: from a hold's first frame to its completion. The default equals the stream idle
+    /// timeout: a file-writing call with 40 KB of arguments takes about 200 s.
+    pub max_hold_secs: u64,
+    /// D14: how long the decider may take for one hold.
+    pub decide_timeout_secs: u64,
+    /// D15: the keep-alive comment interval while a call is held.
+    pub keepalive_secs: u64,
+    /// D16: `block` (default) or `allow` (observe mode).
+    pub on_failure: OnFailureConfig,
+}
+
+/// D16.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnFailureConfig {
+    #[default]
+    Block,
+    Allow,
+}
+
+impl Default for ToolInterceptionConfig {
+    fn default() -> Self {
+        let l = paigasus_gateway_core::Limits::defaults();
+        ToolInterceptionConfig {
+            enabled: false,
+            max_record_bytes: l.max_record_bytes,
+            max_held_bytes: l.max_held_bytes,
+            max_hold_secs: l.max_hold.as_secs(),
+            decide_timeout_secs: l.decide_timeout.as_secs(),
+            keepalive_secs: l.keepalive.as_secs(),
+            on_failure: OnFailureConfig::Block,
+        }
+    }
+}
+
+/// The upper bound of every `tool_interception.*_secs` value: one day.
+const MAX_TOOL_INTERCEPTION_SECS: u64 = 86_400;
+
+impl ToolInterceptionConfig {
+    /// Every rule of spec 5.2. Each message names the key. Checked even when off, so turning it
+    /// on later never meets a config that was always invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        for (key, v) in [
+            ("tool_interception.max_record_bytes", self.max_record_bytes as u64),
+            ("tool_interception.max_held_bytes", self.max_held_bytes as u64),
+            ("tool_interception.max_hold_secs", self.max_hold_secs),
+            ("tool_interception.decide_timeout_secs", self.decide_timeout_secs),
+            ("tool_interception.keepalive_secs", self.keepalive_secs),
+        ] {
+            if v == 0 {
+                return Err(format!("{key} must be at least 1"));
+            }
+        }
+        // `Instant + Duration` panics on overflow, and the interceptor adds each of these to a clock reading.
+        for (key, v) in [
+            ("tool_interception.max_hold_secs", self.max_hold_secs),
+            ("tool_interception.decide_timeout_secs", self.decide_timeout_secs),
+            ("tool_interception.keepalive_secs", self.keepalive_secs),
+        ] {
+            if v > MAX_TOOL_INTERCEPTION_SECS {
+                return Err(format!("{key} must be at most {MAX_TOOL_INTERCEPTION_SECS} (one day); got {v}"));
+            }
+        }
+        if self.max_record_bytes > self.max_held_bytes {
+            return Err(format!(
+                "tool_interception.max_record_bytes ({}) must not exceed tool_interception.max_held_bytes ({})",
+                self.max_record_bytes, self.max_held_bytes
+            ));
+        }
+        if self.keepalive_secs >= self.max_hold_secs {
+            return Err(format!(
+                "tool_interception.keepalive_secs ({}) must be less than tool_interception.max_hold_secs ({})",
+                self.keepalive_secs, self.max_hold_secs
+            ));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn limits(&self) -> paigasus_gateway_core::Limits {
+        paigasus_gateway_core::Limits {
+            max_record_bytes: self.max_record_bytes,
+            max_held_bytes: self.max_held_bytes,
+            max_hold: std::time::Duration::from_secs(self.max_hold_secs),
+            decide_timeout: std::time::Duration::from_secs(self.decide_timeout_secs),
+            keepalive: std::time::Duration::from_secs(self.keepalive_secs),
+            on_failure: match self.on_failure {
+                OnFailureConfig::Block => paigasus_gateway_core::OnFailure::Block,
+                OnFailureConfig::Allow => paigasus_gateway_core::OnFailure::Allow,
+            },
+        }
+    }
 }
 
 /// D11/D23: `0` refuses every request (never what an operator means), and a value above the cap
@@ -448,6 +557,7 @@ impl GatewayConfig {
         if let Some(limits) = &self.limits {
             limits.validate()?;
         }
+        self.tool_interception.validate()?;
         Ok(())
     }
 }
@@ -912,6 +1022,81 @@ mod tests {
             assert_eq!(limits.budget_period, BudgetPeriod::Daily);
             Ok(())
         });
+    }
+
+    fn ti_toml(body: &str) -> String {
+        format!("{}\n[tool_interception]\n{body}\n", valid_toml())
+    }
+
+    #[test]
+    fn tool_interception_is_off_by_default_with_the_spec_limits() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            let cfg = GatewayConfig::figment().extract::<GatewayConfig>()?;
+            let ti = &cfg.tool_interception;
+            assert!(!ti.enabled);
+            assert_eq!(
+                (ti.max_record_bytes, ti.max_held_bytes, ti.max_hold_secs, ti.decide_timeout_secs, ti.keepalive_secs),
+                (1_048_576, 4_194_304, 300, 5, 10)
+            );
+            assert_eq!(ti.on_failure, OnFailureConfig::Block);
+            assert_eq!(ti.limits(), paigasus_gateway_core::Limits::defaults());
+            cfg.validate().map_err(figment::Error::from)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tool_interception_reads_the_table_and_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &ti_toml("enabled = true\non_failure = \"allow\"\nmax_hold_secs = 120"))?;
+            jail.set_env("GATEWAY_TOOL_INTERCEPTION__KEEPALIVE_SECS", "15");
+            let cfg = GatewayConfig::figment().extract::<GatewayConfig>()?;
+            assert!(cfg.tool_interception.enabled);
+            assert_eq!(cfg.tool_interception.on_failure, OnFailureConfig::Allow);
+            assert_eq!(cfg.tool_interception.limits().max_hold, std::time::Duration::from_secs(120));
+            assert_eq!(cfg.tool_interception.limits().on_failure, paigasus_gateway_core::OnFailure::Allow);
+            assert_eq!(cfg.tool_interception.keepalive_secs, 15);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_misspelt_tool_interception_key_fails_extraction() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &ti_toml("enabeld = true"))?;
+            let err = GatewayConfig::figment().extract::<GatewayConfig>().expect_err("a typo must not leave interception silently off");
+            assert!(err.to_string().contains("unknown field"), "{err}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tool_interception_validation_names_each_key() {
+        for (body, key) in [
+            ("max_hold_secs = 86401", "tool_interception.max_hold_secs"),
+            ("decide_timeout_secs = 86401", "tool_interception.decide_timeout_secs"),
+            ("max_hold_secs = 86400\nkeepalive_secs = 86401", "tool_interception.keepalive_secs"),
+            ("keepalive_secs = 9223372036854775807", "tool_interception.keepalive_secs"),
+            ("max_record_bytes = 0", "tool_interception.max_record_bytes"),
+            ("max_held_bytes = 0", "tool_interception.max_held_bytes"),
+            ("max_hold_secs = 0", "tool_interception.max_hold_secs"),
+            ("decide_timeout_secs = 0", "tool_interception.decide_timeout_secs"),
+            ("keepalive_secs = 0", "tool_interception.keepalive_secs"),
+            ("max_record_bytes = 10\nmax_held_bytes = 5", "tool_interception.max_record_bytes"),
+            ("keepalive_secs = 300", "tool_interception.keepalive_secs"),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.create_file("gateway.toml", &ti_toml(body))?;
+                let cfg = GatewayConfig::figment().extract::<GatewayConfig>()?;
+                let err = cfg.validate().expect_err(body);
+                assert!(err.contains(key), "{body}: {err}");
+                if body.contains("max_held_bytes = 5") {
+                    assert!(err.contains("must not exceed"), "{body}: {err}");
+                }
+                Ok(())
+            });
+        }
     }
 
     #[test]

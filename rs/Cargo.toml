@@ -21,6 +21,7 @@ members = [
   "crates/bindings/paigasus-node-bindings",
   "crates/bindings/paigasus-py-bindings",
   "crates/bindings/paigasus-wasm",
+  "crates/libs/paigasus-gateway-core",
   "crates/libs/paigasus-iam-core",
   "crates/libs/paigasus-kernel",
   "crates/libs/paigasus-kernel-parity",
@@ -191,6 +192,9 @@ paigasus-observability = { path = "crates/libs/paigasus-observability", version 
 # Callers name the breaker's metrics. `version` is required: `rs/deny.toml` sets
 # `wildcards = "deny"`.
 paigasus-redis = { path = "crates/libs/paigasus-redis", version = "0.0.0" }
+# In-tree path dep: the gateway's sans-IO tool-call interception core (SMA-749). `version` is
+# required: `rs/deny.toml` sets `wildcards = "deny"`.
+paigasus-gateway-core = { path = "crates/libs/paigasus-gateway-core", version = "0.0.0" }
 # paigasus-service-info — the shared `ServiceInfo` builder + HTTP DTO (SMA-505). Owns the wire
 # invariants both services must not re-derive: the UNSPECIFIED sentinel is never advertised,
 # ordering is deterministic, and `capabilities` is always emitted (as `[]` when empty) so a
