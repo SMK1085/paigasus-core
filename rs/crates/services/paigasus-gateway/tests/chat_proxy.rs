@@ -168,6 +168,7 @@ fn app_for_with_streaming(fake: FakeIam, base_url: String, max_request_bytes: us
         capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: stream_enabled },
         limits: None,
         dpop_enabled: false,
+        tool_interception: None,
     };
     router(state)
 }
@@ -677,6 +678,7 @@ async fn one_dpop_request_end_to_end() {
         capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: true },
         limits: None,
         dpop_enabled: true,
+        tool_interception: None,
     });
     let req = Request::builder()
         .method("POST")

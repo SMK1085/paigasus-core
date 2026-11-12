@@ -566,6 +566,15 @@ class ErrorReason(betterproto2.Enum):
     until the period resets; the answer carries x-should-retry: false (SMA-677).
     """
 
+    TOOL_INTERCEPTION_MALFORMED_RESPONSE = 313
+    """
+    "tool-interception-malformed-response" — tool-call interception is on and the
+    upstream answered a non-stream request with a 2xx body the gateway could not
+    classify (not strict JSON, or not the provider's shape), so it could not check
+    the tool calls in it (502, OpenAI type "api_error"). Sent only with
+    [tool_interception] on_failure = "block" (SMA-749).
+    """
+
     INTERNAL = 900
     """
     ---- Shared (900-999) ----------------------------------------------------
@@ -714,6 +723,7 @@ class ErrorReason(betterproto2.Enum):
             310: "ERROR_REASON_ORG_REQUIRED",
             311: "ERROR_REASON_RATE_LIMITED",
             312: "ERROR_REASON_BUDGET_EXHAUSTED",
+            313: "ERROR_REASON_TOOL_INTERCEPTION_MALFORMED_RESPONSE",
             900: "ERROR_REASON_INTERNAL",
             901: "ERROR_REASON_INVALID_REQUEST_BODY",
             902: "ERROR_REASON_REQUEST_TOO_LARGE",
@@ -789,6 +799,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_ORG_REQUIRED": 310,
             "ERROR_REASON_RATE_LIMITED": 311,
             "ERROR_REASON_BUDGET_EXHAUSTED": 312,
+            "ERROR_REASON_TOOL_INTERCEPTION_MALFORMED_RESPONSE": 313,
             "ERROR_REASON_INTERNAL": 900,
             "ERROR_REASON_INVALID_REQUEST_BODY": 901,
             "ERROR_REASON_REQUEST_TOO_LARGE": 902,

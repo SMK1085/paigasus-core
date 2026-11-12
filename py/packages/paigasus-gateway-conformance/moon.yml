@@ -1,0 +1,23 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-gateway-conformance-py'
+layer: 'library'
+language: 'python'
+
+# Test-only (tool.uv.package = false): there is no wheel, so the inherited `uv build` has nothing
+# to build. Drop the inherited task rather than give the package a build backend (SMA-749).
+workspace:
+  inheritedTasks:
+    exclude: ['build']
+
+tasks:
+  # SMA-749. Scoped like paigasus-kernel-py:test, so a golden-file change selects this task: the
+  # goldens live under rs/, outside this project, and Moon confers affectedness only through a
+  # task's own inputs.
+  test:
+    command: 'uv run pytest tests'
+    inputs:
+      - 'tests/**/*'
+      - 'pyproject.toml'
+      - '/py/uv.lock'
+      - '/rs/crates/libs/paigasus-gateway-core/tests/golden/**/*'

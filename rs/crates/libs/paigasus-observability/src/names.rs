@@ -30,6 +30,18 @@ pub const GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL: &str = "gateway_limit_charges_dro
 pub const GATEWAY_REDIS_BREAKER_STATE: &str = "gateway_redis_breaker_state";
 /// One increment per breaker transition; `role` = `limits`, `to` = `closed` | `half_open` | `open`.
 pub const GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL: &str = "gateway_redis_breaker_transitions_total";
+// Gateway tool-call interception (SMA-749). No label carries a tool name, an argument, a principal
+// or an org id.
+/// Upstream SSE records the interceptor did not forward; `reason` = `malformed` | `oversized` |
+/// `after_done` | `late_fragment`. A conforming upstream keeps this at 0.
+pub const GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL: &str = "gateway_tool_interception_records_dropped_total";
+/// One per decided tool call; `decision` = `allow` | `block`, `basis` = `decider` | `on_failure`.
+pub const GATEWAY_TOOL_INTERCEPTION_DECISIONS_TOTAL: &str = "gateway_tool_interception_decisions_total";
+/// Failures that took the `on_failure` path; `code` = `hold_limit` | `truncated` |
+/// `decider_error` | `malformed`.
+pub const GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL: &str = "gateway_tool_interception_on_failure_total";
+/// Seconds from a hold's first tool-call frame to its completion.
+pub const GATEWAY_TOOL_INTERCEPTION_HOLD_SECONDS: &str = "gateway_tool_interception_hold_seconds";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -276,6 +288,10 @@ pub const ALL: &[&str] = &[
     GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL,
     GATEWAY_REDIS_BREAKER_STATE,
     GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL,
+    GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL,
+    GATEWAY_TOOL_INTERCEPTION_DECISIONS_TOTAL,
+    GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL,
+    GATEWAY_TOOL_INTERCEPTION_HOLD_SECONDS,
     IAM_HTTP_REQUESTS_TOTAL,
     IAM_HTTP_REQUEST_DURATION_SECONDS,
     IAM_HTTP_INFLIGHT_REQUESTS,
@@ -333,6 +349,18 @@ mod tests {
             GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL,
             GATEWAY_REDIS_BREAKER_STATE,
             GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_gateway_tool_interception_families_are_registered() {
+        for name in [
+            GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL,
+            GATEWAY_TOOL_INTERCEPTION_DECISIONS_TOTAL,
+            GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL,
+            GATEWAY_TOOL_INTERCEPTION_HOLD_SECONDS,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

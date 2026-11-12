@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-fx","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","system_fingerprint":"fp_fx","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_0_0","type":"function","function":{"name":"blocked_rm","arguments":"CANARY-err"}}]},"finish_reason":null}]}
+
+data: {"error":{"message":"boom","type":"server_error"}}
+
