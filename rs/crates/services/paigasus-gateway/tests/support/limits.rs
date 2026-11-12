@@ -18,6 +18,7 @@ use tonic::Status;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::{CallerCredential, DpopContext, Iam, IamError};
 use paigasus_gateway::adapters::limits::MemoryLimitStore;
@@ -205,6 +206,15 @@ pub fn app(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>) -> Ro
 }
 
 pub fn app_with(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, first_byte: Duration, chat_stream: bool) -> Router {
+    build(iam, base_url, limits, first_byte, chat_stream, None)
+}
+
+/// SMA-749: the router with tool-call interception set.
+pub fn app_with_interception(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, ti: Option<Arc<ToolInterception>>) -> Router {
+    build(iam, base_url, limits, Duration::from_secs(30), true, ti)
+}
+
+fn build(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, first_byte: Duration, chat_stream: bool, tool_interception: Option<Arc<ToolInterception>>) -> Router {
     router(AppState {
         iam,
         openai: Arc::new(openai(base_url, first_byte)),
@@ -212,6 +222,7 @@ pub fn app_with(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, 
         capabilities: Capabilities { chat_stream },
         limits,
         dpop_enabled: false,
+        tool_interception,
     })
 }
 

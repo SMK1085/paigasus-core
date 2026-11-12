@@ -1,0 +1,6 @@
+event: message_start
+data: {"type":"message_start","message":{"content":[{"type":"tool_use","id":"t","name":"blocked_hidden","input":{"v":"CANARY-pm"}}]}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

@@ -29,6 +29,7 @@
 //! upstream request (G8 proves this abort).
 
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Extension;
@@ -67,7 +68,7 @@ use crate::domain::{CallerContext, Credential};
 /// record; without the blank line the frame would join that partial record and no SSE parser
 /// could read it. After a clean record boundary the extra blank line is an empty record, which
 /// dispatches nothing, so a client that reads a clean boundary sees no change.
-const TERMINAL_SSE_ERROR: &str = "\n\ndata: {\"error\":{\"message\":\"upstream stream error\",\"type\":\"api_error\",\"param\":null,\"code\":\"upstream-error\"}}\n\n";
+pub(crate) const TERMINAL_SSE_ERROR: &str = "\n\ndata: {\"error\":{\"message\":\"upstream stream error\",\"type\":\"api_error\",\"param\":null,\"code\":\"upstream-error\"}}\n\n";
 
 /// Proxy a chat-completion request to the OpenAI upstream.
 ///
@@ -133,6 +134,16 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
         guard.mark_sent();
     }
 
+    // SMA-749: capture what the decider needs while the request ids still exist (SMA-504 § 4.3:
+    // inside the stream they are `None`). Parsed from the same raw bytes that go upstream.
+    // `None` when interception is off: nothing is parsed or constructed (D27).
+    let interception = state.tool_interception.clone().map(|ti| {
+        let turn = Arc::new(paigasus_gateway_core::parse_request(paigasus_gateway_core::Format::OpenAiChat, &body));
+        let request_id = paigasus_observability::current_ids().map(|ids| ids.request_id.to_string());
+        let ctx = Arc::new(paigasus_gateway_core::DecisionContext::new(caller.principal_prn.clone(), caller.scope_prn.clone(), request_id));
+        (ti, ctx, turn)
+    });
+
     let started = Instant::now();
     // EGRESS HYGIENE: only the raw body bytes cross the boundary — never the caller's headers.
     let result = state.openai.chat_completion(body, stream).await;
@@ -153,9 +164,30 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
                     guard.mark_no_charge();
                 }
             }
-            // Forward the upstream status + body VERBATIM, including a non-2xx OpenAI error envelope.
-            let resp = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
-            (resp, status)
+            // SMA-749 § 5.2: the guard read the ORIGINAL body above (D24); interception runs after.
+            let outcome = match &interception {
+                Some((ti, ctx, turn)) if status.is_success() => super::interception::intercept_body(ti, Arc::clone(ctx), Arc::clone(turn), &body).await,
+                _ => super::interception::BodyOutcome::Forward { rewritten: None, report: None },
+            };
+            match outcome {
+                super::interception::BodyOutcome::Refuse => {
+                    let resp = GatewayError::ToolInterceptionMalformedResponse.into_response();
+                    let status = resp.status();
+                    (resp, status)
+                }
+                super::interception::BodyOutcome::Forward { rewritten, report } => {
+                    let body = rewritten.unwrap_or(body);
+                    // Forward the upstream status + body VERBATIM (or rewritten by a block),
+                    // including a non-2xx OpenAI error envelope.
+                    let mut resp = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
+                    if let Some(r) = report
+                        && let Ok(v) = axum::http::HeaderValue::from_str(&r)
+                    {
+                        resp.headers_mut().insert("paigasus-tool-decisions", v);
+                    }
+                    (resp, status)
+                }
+            }
         }
         Ok(ChatResponse::Stream { status, stream }) => {
             // NOTE: for `stream:true` this records TTFB (time-to-first-byte / response head), NOT
@@ -173,12 +205,12 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
                 // runs — hyper polls the `Body::from_stream` future (and therefore
                 // `terminal_sse_error_stream` below) AFTERWARDS, outside the scope. Anything
                 // added inside the stream adapter — a log line, a metric — will see no ids.
-                (
-                    status,
-                    [(header::CONTENT_TYPE, "text/event-stream")],
-                    Body::from_stream(terminal_sse_error_stream(stream, guard.take())),
-                )
-                    .into_response()
+                let body = match interception {
+                    // SMA-749: the interceptor owns the terminal frame from here on (D17).
+                    Some((ti, ctx, turn)) => Body::from_stream(super::interception::intercepted_stream(stream, guard.take(), ti, ctx, turn, TERMINAL_SSE_ERROR.as_bytes())),
+                    None => Body::from_stream(terminal_sse_error_stream(stream, guard.take())),
+                };
+                (status, [(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
             } else {
                 // Non-2xx `stream:true` request: OpenAI answers with a JSON error body (NOT SSE), so
                 // forward it as an error passthrough — no SSE terminal-error wrapping applies.
@@ -270,9 +302,19 @@ struct Relay {
     guard: Option<ChargeGuard>,
 }
 
+/// One upstream chunk, read for billing before anything else sees it (SMA-677, SMA-749 D24).
+/// Without a guard (no `[limits]`) nothing is parsed at all. Shared with the intercepting relay.
+pub(crate) fn feed_scan(scan: &mut UsageScanner, guard: &mut Option<ChargeGuard>, chunk: &[u8]) {
+    if let Some(guard) = guard.as_mut() {
+        scan.feed(chunk);
+        guard.set_stream_progress(scan.completion_records(), scan.reported_total());
+    }
+}
+
 /// SMA-730: the upstream ended or failed. A last record with no blank line after it still
-/// counts. Without a guard the scanner reads nothing, as in the chunk arm.
-fn finish_scan(scan: &mut UsageScanner, guard: &mut Option<ChargeGuard>) {
+/// counts. Without a guard the scanner reads nothing, as in the chunk arm. Shared with the
+/// intercepting relay (SMA-749 D24).
+pub(crate) fn finish_scan(scan: &mut UsageScanner, guard: &mut Option<ChargeGuard>) {
     if let Some(guard) = guard.as_mut() {
         scan.finish();
         guard.set_stream_progress(scan.completion_records(), scan.reported_total());
@@ -303,10 +345,7 @@ fn terminal_sse_error_stream(inner: OpenAiByteStream, guard: Option<ChargeGuard>
                 // Forward each chunk exactly as it arrived (unbuffered). The scanner reads a copy,
                 // and only when a guard exists (no `[limits]`: no parsing at all).
                 Some(Ok(chunk)) => {
-                    if let Some(guard) = guard.as_mut() {
-                        scan.feed(&chunk);
-                        guard.set_stream_progress(scan.completion_records(), scan.reported_total());
-                    }
+                    feed_scan(&mut scan, &mut guard, &chunk);
                     Some((
                         Ok(chunk),
                         Relay {
@@ -341,7 +380,7 @@ fn terminal_sse_error_stream(inner: OpenAiByteStream, guard: Option<ChargeGuard>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Section 4.6: the relay never changes a forwarded byte, with or without a scanner (A5).
@@ -413,12 +452,12 @@ mod tests {
     use crate::test_support::{FixedClock, ORG_A, ScriptedStore, at};
     use std::sync::Arc;
 
-    fn admit() -> Result<LimitDecision, LimitStoreError> {
+    pub(crate) fn admit() -> Result<LimitDecision, LimitStoreError> {
         Ok(LimitDecision::Admit(None))
     }
 
     /// A sent guard with a ticket and a request estimate of 1, charging into `store`.
-    fn sent_guard(store: &Arc<ScriptedStore>) -> ChargeGuard {
+    pub(crate) fn sent_guard(store: &Arc<ScriptedStore>) -> ChargeGuard {
         let now = at("2026-10-02T12:00:00Z");
         let limits = Arc::new(Limits::new(LimitRules::default(), store.clone(), Arc::new(FixedClock(now))));
         let ticket = LimitTicket {
@@ -431,7 +470,7 @@ mod tests {
         guard
     }
 
-    const UNTERMINATED_USAGE: &[u8] = b"data: {\"choices\":[],\"usage\":{\"total_tokens\":7}}";
+    pub(crate) const UNTERMINATED_USAGE: &[u8] = b"data: {\"choices\":[],\"usage\":{\"total_tokens\":7}}";
 
     /// SMA-730 R1 (spec D2): an upstream error after a usage record with no blank line charges
     /// the reported total. The terminal frame closes that record for the client too.
@@ -469,7 +508,7 @@ mod tests {
 
     /// Produce a real `reqwest::Error` (there is no public constructor) by forcing a connection
     /// failure against an unroutable address.
-    async fn make_reqwest_error() -> reqwest::Error {
+    pub(crate) async fn make_reqwest_error() -> reqwest::Error {
         reqwest::Client::new()
             .get("http://127.0.0.1:1")
             .timeout(std::time::Duration::from_millis(50))

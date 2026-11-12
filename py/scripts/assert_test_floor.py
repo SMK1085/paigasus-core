@@ -29,7 +29,7 @@ from pathlib import Path
 # Packages that MUST contribute at least one collected test. Compared by STRICT EQUALITY against
 # the set actually collected, which makes one comparison bidirectional: a lost tests/ directory
 # drops a package out and reds, and a package that gains tests without being added here also reds.
-EXPECTED_TEST_PACKAGES = frozenset({"paigasus-kernel", "paigasus-proto"})
+EXPECTED_TEST_PACKAGES = frozenset({"paigasus-gateway-conformance", "paigasus-kernel", "paigasus-proto"})
 
 # Packages with no tests, each with a reason. Blank reasons are rejected.
 #

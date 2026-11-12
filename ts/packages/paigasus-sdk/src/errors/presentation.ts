@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 70 keys rather than 69.
+// demanding an entry for it would make the table 71 keys rather than 70.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -87,6 +87,9 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   // presentation, whose copy says to ask an administrator instead of to try again.
   [ErrorReason.RATE_LIMITED]: 'from-transport',
   [ErrorReason.BUDGET_EXHAUSTED]: 'quota-exhausted',
+  // SMA-749. The gateway could not check a non-stream answer for tool calls, so it refused to
+  // forward it. A 502 like an upstream failure: the transport table's `degraded` copy fits.
+  [ErrorReason.TOOL_INTERCEPTION_MALFORMED_RESPONSE]: 'from-transport',
   [ErrorReason.INTERNAL]: 'from-transport',
   [ErrorReason.INVALID_REQUEST_BODY]: 'from-transport',
   [ErrorReason.REQUEST_TOO_LARGE]: 'from-transport',

@@ -1,0 +1,27 @@
+[package]
+name = "paigasus-gateway-core"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# `Bytes` is the body currency at the gateway boundary (`axum::body::Bytes` is this type).
+bytes = { workspace = true }
+serde = { workspace = true }
+# Rewritten frames keep the upstream key order, deterministic across builds.
+serde_json = { workspace = true, features = ["preserve_order"] }
+# `name_sha256_8` in decision reports (spec § 4.6). The same major as paigasus-iam-core's line,
+# already in rs/Cargo.lock.
+sha2 = "0.11"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The differential oracle's hostile-stream generators (spec § 8.1). `bytes` and `serde_json` are
+# already normal dependencies, which integration tests can use.
+proptest = { workspace = true }
+
+[lints]
+workspace = true

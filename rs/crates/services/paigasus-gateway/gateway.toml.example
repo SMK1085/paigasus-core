@@ -133,3 +133,23 @@
 # Charging: a stream is charged its reported usage only when the client sends
 # stream_options: {"include_usage": true} (the console playground does). Otherwise the gateway
 # charges an estimate: about one token per streamed record plus the prompt text / 4.
+
+# --- Tool-call interception (SMA-749): hold, check and rewrite model tool calls ---
+#
+# Off by default. With enabled = true the gateway parses every response of
+# POST /v1/chat/completions, holds each tool call until its arguments are complete (text keeps
+# streaming), asks the decider, and replaces a blocked call with an assistant notice. This build's
+# decider allows every call. Each decision is reported as an SSE comment ": paigasus-decision {...}"
+# or, for a non-stream answer, in the paigasus-tool-decisions header. A misspelt key fails the boot.
+#
+# [tool_interception]
+# enabled             = false      # env GATEWAY_TOOL_INTERCEPTION__ENABLED
+# max_record_bytes    = 1048576    # one SSE record; larger is a failure
+# max_held_bytes      = 4194304    # all held bytes of one stream; also the cap on one non-stream body
+# max_hold_secs       = 300        # from a tool call's first fragment to its completion
+# decide_timeout_secs = 5
+# keepalive_secs      = 10         # ": keep-alive" comment while a call is held; < max_hold_secs
+# on_failure          = "block"    # "block" (default) | "allow" (observe: forward and report)
+#   # A failure is: a record or body that is not strict JSON or not the provider's shape, a
+#   # limit above, a decider error, or a stream that ends inside a tool call. With "block", a
+#   # non-stream answer that cannot be checked is a 502 "tool-interception-malformed-response".

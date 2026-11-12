@@ -3192,6 +3192,7 @@ dependencies = [
  "futures",
  "metrics",
  "metrics-util",
+ "paigasus-gateway-core",
  "paigasus-kernel",
  "paigasus-logging",
  "paigasus-observability",
@@ -3216,6 +3217,18 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "paigasus-gateway-core"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
 ]
 
 [[package]]
