@@ -12,6 +12,7 @@ dependsOn:
   # `Prn` API), so this hand-written edge is REQUIRED (ci/CLAUDE.md: Moon does not resolve
   # `workspace = true`). It also feeds `fileGroups.upstreams` below.
   - 'paigasus-kernel-rs'
+  - 'paigasus-gateway-core-rs'
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-service-info-rs'
@@ -23,6 +24,8 @@ dependsOn:
 # strict equality by repo:affected-smoke's A6.
 fileGroups:
   upstreams:
+    - '/rs/crates/libs/paigasus-gateway-core/src/**/*'
+    - '/rs/crates/libs/paigasus-gateway-core/Cargo.toml'
     - '/rs/crates/libs/paigasus-kernel/src/**/*'
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
     - '/rs/crates/libs/paigasus-logging/src/**/*'

@@ -112,6 +112,7 @@ mod tests {
                 stream_enabled,
                 limits: None,
                 dpop: crate::config::GatewayDpopConfig::default(),
+                tool_interception: crate::config::ToolInterceptionConfig::default(),
             }
         }
 
