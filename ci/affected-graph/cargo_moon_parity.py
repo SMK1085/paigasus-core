@@ -3221,7 +3221,14 @@ def check_ts_vitest_inputs(projects, root, tracked, floor=REQUIRED_VITEST_TASKS,
 # that share py/.venv race: an exact `uv sync` in one removes the packages another one imports.
 #
 # uv global options that take a value. The verb is the first token after them.
-UV_VALUE_OPTIONS = ("--project", "--directory", "--cache-dir", "--config-file", "--color")
+# Fail-closed (SMA-765): the verb is the first token that IS a uv subcommand. Any option, and
+# any value of an option that this list does not know (`--python 3.12`), is skipped, so no option
+# can hide a verb.
+UV_SUBCOMMANDS = frozenset((
+    "run", "init", "add", "remove", "version", "sync", "lock", "export", "tree", "format",
+    "tool", "python", "pip", "venv", "build", "publish", "cache", "self", "help", "auth",
+    "generate-shell-completion",
+))
 # `uv run` flags that rewrite the environment unless `--isolated` gives the run its own.
 UV_RUN_MUTATING_FLAGS = ("--exact", "--reinstall", "--reinstall-package", "--refresh-package")
 UV_MUTATING_VERBS = ("sync", "venv", "add", "remove")
@@ -3297,8 +3304,8 @@ def _uv_invocations(text):
             toks = [t.strip("\"'`()") for t in seg[m.end():].split()]
             toks = [t for t in toks if t]
             k = 0
-            while k < len(toks) and toks[k].startswith("-"):
-                k += 2 if toks[k] in UV_VALUE_OPTIONS else 1
+            while k < len(toks) and toks[k] not in UV_SUBCOMMANDS:
+                k += 1
             verb = toks[k] if k < len(toks) else ""
             rest = toks[k + 1:]
             sub = ""
@@ -6657,6 +6664,9 @@ def self_test():
         ("a tab", "uv\tsync", True),
         ("a global flag", "uv -q sync", True),
         ("a valued global option", "uv --project py sync", True),
+        ("an unlisted valued option", "uv --allow-insecure-host h sync", True),
+        ("--python-preference", "uv --python-preference only-managed sync", True),
+        ("--python", "uv --python 3.12 sync", True),
         ("a line continuation", "uv \\\n  sync", True),
         ("sync --inexact", "uv sync --inexact", True),
         ("pip sync", "uv pip sync r.txt", True),
