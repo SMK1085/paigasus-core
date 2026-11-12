@@ -140,7 +140,7 @@ FMT_TASK_INPUTS = (
 # `maturin` is FORWARD-LOOKING and matches no RESOLVED moon task invocation today: the string
 # shows up elsewhere in the tree (pyproject.toml, moon.yml comments, the python template), but
 # paigasus-kernel-py:test's actual resolved script is
-# `uv sync --reinstall-package paigasus-py-bindings`. It is kept so a future direct maturin
+# `... && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests`. It is kept so a future direct maturin
 # invocation is covered on day one. Do not mistake it for measured coverage.
 FFI_MARKERS = ("napi build", "wasm-pack", "maturin", "--reinstall-package")
 
@@ -156,6 +156,13 @@ REQUIRED_FFI_TASKS = (
     "paigasus-kernel-ts:build",
     "paigasus-kernel-ts:test",
 )
+
+# SMA-765 (A14) - the floor for the uv-isolation check. A14 scans EVERY task, so its derived set
+# cannot shrink to empty. What can vanish silently is the kernel task's own isolation: the
+# `--isolated` flag or the `--reinstall-package paigasus-py-bindings` that keeps the binding
+# fresh. Each task named here must exist and must run `uv run --isolated` with
+# `--reinstall-package paigasus-py-bindings`, or A14 reds with a `FLOOR:` row.
+REQUIRED_UV_ISOLATED_TASKS = ("paigasus-kernel-py:test",)
 
 # SMA-601 — the cargo subcommands that RESOLVE the dependency graph, and therefore rewrite an
 # inconsistent Cargo.lock in place unless --locked is passed. `fmt` and `machete` are absent
@@ -454,7 +461,7 @@ ALLOW_UNLOCKED_CARGO = {
         "reads the declaration."
     ),
     "paigasus-kernel-py:test": (
-        "reaches cargo through `uv sync --reinstall-package`, which drives maturin, which drives "
+        "reaches cargo through `uv run --reinstall-package`, which drives maturin, which drives "
         "cargo — no flag path through either (SMA-601)"
     ),
 }
@@ -521,6 +528,42 @@ ALLOW_UNLOCKED_CARGO_SCRIPT = {
         "itself does not report, because --no-deps never resolves (MEASURED, §2.1)."
     ),
 }
+
+# SMA-765 (A14) - waivers for uv text inside a script that a task runs. Keyed by
+# (repo-relative script path, EXACT stripped line text), not by line number, like
+# ALLOW_UNLOCKED_CARGO_SCRIPT. The value is the non-empty reason. A14 does not strip strings, so a
+# line that only PRINTS a remedy such as `uv sync` counts as a hit until it is listed here.
+# An entry that matches no line of a scanned script is itself a row, so the list cannot rot.
+ALLOW_UV_ENV_SCRIPT = {
+    ("ci/ruff/run.sh",
+     "|| die_infra \"could not resolve ruff via 'uv run --locked --project py' "
+     "\u2014 run 'uv sync --project py'\""): (
+        "PROSE, not an invocation: the diagnostic that tells the reader how to repair a missing "
+        "ruff. The script executes no `uv sync`."
+    ),
+    ("ci/actionlint/run.sh",
+     "|| infra \"could not resolve shellcheck via 'uv run --locked --project py' "
+     "\u2014 run 'uv sync --project py'\""): (
+        "PROSE, not an invocation: the diagnostic that tells the reader how to repair a missing "
+        "shellcheck. The script executes no `uv sync`."
+    ),
+    ("ci/release-parity/ecosystems/python-semantic-release.sh", "# `uv sync` CI step)."): (
+        "COMMENT, not an invocation: it explains that no separate `uv sync` CI step exists. "
+        "The script executes no `uv sync`."
+    ),
+    (
+        "ci/release-parity/ecosystems/python-semantic-release.sh",
+        "\"Run 'uv sync' in py/, and check py/uv.lock still carries python-semantic-release.\" \\",
+    ): (
+        "PROSE, not an invocation: an argument of `_psr_fatal` that prints a remedy in an error "
+        "message. The script executes no `uv sync`."
+    ),
+}
+
+# A `scripts/*.sh` reference inside a project, resolved against the project's `source_dir`
+# (`py:test` runs `bash scripts/run_tests.sh`). SCRIPT_REF_RE covers only the `ci/` form.
+PROJECT_SCRIPT_REF_RE = re.compile(r"(?:^|[\s;&|(])(?:bash\s+|sh\s+)?(scripts/[\w./-]+\.sh)\b")
+
 
 # The floor, for the reason REQUIRED_FFI_TASKS carries: a derived set that shrinks to EMPTY
 # asserts nothing while still printing PASS. Every task named here MUST be in the derived set.
@@ -3174,6 +3217,212 @@ def check_ts_vitest_inputs(projects, root, tracked, floor=REQUIRED_VITEST_TASKS,
     return list(dict.fromkeys(floor_rows + walk_rows + task_rows))
 
 
+# SMA-765 (A14) - a Moon task must never change a uv project environment IN PLACE. Two tasks
+# that share py/.venv race: an exact `uv sync` in one removes the packages another one imports.
+#
+# uv global options that take a value. The verb is the first token after them.
+UV_VALUE_OPTIONS = ("--project", "--directory", "--cache-dir", "--config-file", "--color")
+# `uv run` flags that rewrite the environment unless `--isolated` gives the run its own.
+UV_RUN_MUTATING_FLAGS = ("--exact", "--reinstall", "--reinstall-package", "--refresh-package")
+UV_MUTATING_VERBS = ("sync", "venv", "add", "remove")
+UV_PIP_MUTATING = ("sync", "install", "uninstall")
+UV_TOKEN_RE = re.compile(r"(?<![\w.-])uv(?![\w.-])")
+UV_ENV_NAMES = r"(?:UV_PROJECT_ENVIRONMENT|VIRTUAL_ENV)"
+UV_ENV_RES = (
+    (re.compile(rf"(?<![\w]){UV_ENV_NAMES}\+?=(?!=)"), "assigns {name}"),
+    (re.compile(rf"\b(?:export|unset|readonly|declare)\s+(?:-\w+\s+)*{UV_ENV_NAMES}\b"),
+     "exports or unsets {name}"),
+    (re.compile(rf"(?<![\w-])-u\s+{UV_ENV_NAMES}\b"), "unsets {name} through `env -u`"),
+    (re.compile(r"(?<![\w-])--active(?![\w-])"), "passes `--active`"),
+)
+
+
+def _uv_segments(text):
+    """Yield `(offset, segment)` for each shell-ish command in `text`.
+
+    A `\\` + newline is a continuation: the pair becomes two spaces, so offsets stay valid and the
+    invocation continues. `&&`, `||`, `;`, `|` and a newline end a segment, unless inside a
+    quote. A newline ALWAYS ends a segment and resets the quote state, so an apostrophe in a
+    comment cannot merge later lines into one invocation (fail-closed). This is a quote-aware
+    split, not a shell parser.
+    """
+    out, buf, start, quote, i, n = [], [], 0, None, 0, len(text)
+
+    def flush():
+        out.append((start, "".join(buf)))
+        buf.clear()
+
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            if text[i + 1] == "\n" and quote != "'":
+                buf.append("  ")
+            else:
+                buf.append(text[i:i + 2])
+            i += 2
+            continue
+        if ch == "\n":
+            flush()
+            quote, i, start = None, i + 1, i + 1
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif text.startswith(("&&", "||"), i):
+            flush()
+            i, start = i + 2, i + 2
+            continue
+        elif ch in ";|":
+            flush()
+            i, start = i + 1, i + 1
+            continue
+        buf.append(ch)
+        i += 1
+    flush()
+    return out
+
+
+def _uv_invocations(text):
+    """Every `uv` use in `text` as `(offset, verb, sub, flags)`.
+
+    `verb` is the first token after the uv global options, `sub` the token after `pip`, and
+    `flags` every later token of the same invocation (quotes trimmed). Judged per invocation, so
+    an `--isolated` in a DIFFERENT invocation never covers this one.
+    """
+    found = []
+    for base, seg in _uv_segments(text):
+        for m in UV_TOKEN_RE.finditer(seg):
+            toks = [t.strip("\"'`()") for t in seg[m.end():].split()]
+            toks = [t for t in toks if t]
+            k = 0
+            while k < len(toks) and toks[k].startswith("-"):
+                k += 2 if toks[k] in UV_VALUE_OPTIONS else 1
+            verb = toks[k] if k < len(toks) else ""
+            rest = toks[k + 1:]
+            sub = ""
+            if verb == "pip" and rest:
+                sub, rest = rest[0], rest[1:]
+            found.append((base + m.start(), verb, sub, rest))
+    return found
+
+
+def _uv_hits(text):
+    """`(line, description)` for each mutating uv use in `text`. Empty means clean."""
+    hits = []
+    for off, verb, sub, flags in _uv_invocations(text):
+        names = {f.split("=", 1)[0] for f in flags}
+        desc = None
+        if verb in UV_MUTATING_VERBS:
+            desc = f"`uv {verb}` writes the project environment in place"
+        elif verb == "pip" and sub in UV_PIP_MUTATING:
+            desc = f"`uv pip {sub}` writes the project environment in place"
+        elif verb == "run" and "--isolated" not in names:
+            bad = [f for f in UV_RUN_MUTATING_FLAGS if f in names]
+            if bad:
+                desc = f"`uv run {bad[0]}` rewrites the project environment without `--isolated`"
+        if desc:
+            hits.append((text.count("\n", 0, off) + 1, desc))
+    for rx, what in UV_ENV_RES:
+        for m in rx.finditer(text):
+            name = re.search(UV_ENV_NAMES, m.group(0))
+            hits.append((text.count("\n", 0, m.start()) + 1,
+                         what.format(name=name.group(0) if name else "")))
+    return sorted(hits)
+
+
+def uv_mutations(text):
+    """One description per mutating uv use in `text`; an empty list means clean (SMA-765, A14).
+
+    Strings are NOT stripped (fail-closed, like A8): `echo "run uv sync"` is a hit, and a script
+    line that only prints a remedy is waived in ALLOW_UV_ENV_SCRIPT instead.
+    """
+    return [desc for _, desc in _uv_hits(text)]
+
+
+def _floor_isolated(blob):
+    """True when `blob` has ONE uv invocation with `run`, `--isolated` and the bindings reinstall."""
+    for _, verb, _, flags in _uv_invocations(blob or ""):
+        if verb != "run" or "--isolated" not in flags:
+            continue
+        for i, f in enumerate(flags):
+            if f == "--reinstall-package" and flags[i + 1:i + 2] == ["paigasus-py-bindings"]:
+                return True
+            if f == "--reinstall-package=paigasus-py-bindings":
+                return True
+    return False
+
+
+def check_uv_env_isolation(projects, root, allow=None, floor=None):
+    """Return the A14 violation list: tasks that can change a uv environment in place (SMA-765).
+
+    Scanned per task: its resolved blob, the `ci/**/*.sh` scripts it runs (with their `source`
+    closure), and the project-relative `scripts/*.sh` files it names. Absent data is a violation:
+    an unreadable script raises MoonOutputError, a missing floor task is a `FLOOR:` row. A task
+    `env:` that sets UV_PROJECT_ENVIRONMENT or VIRTUAL_ENV is a row, since `--isolated` leaves no
+    legitimate use for either. An allowlist entry with an empty reason, or one that matches no
+    scanned line, is a row, so the list cannot rot. Direction of failure: a row means a task can
+    race another task on the shared environment.
+    """
+    allow = ALLOW_UV_ENV_SCRIPT if allow is None else allow
+    floor = REQUIRED_UV_ISOLATED_TASKS if floor is None else floor
+    root_resolved = Path(root).resolve()
+    rows, matched = [], set()
+
+    for key, reason in sorted(allow.items()):
+        if not str(reason).strip():
+            rows.append(f"A14 allowlist entry {key[0]}: {key[1]!r} has an empty reason")
+
+    for pid in sorted(projects):
+        proj = projects[pid]
+        for name in sorted(proj.get("invocations") or {}):
+            target = f"{pid}:{name}"
+            blob = proj["invocations"][name]
+            if not blob:
+                continue
+            for env_name in sorted(dict((proj.get("task_env") or {}).get(name) or {})):
+                if env_name in ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV"):
+                    rows.append(f"{target}: the task `env` sets {env_name}")
+            for desc in uv_mutations(blob):
+                rows.append(f"{target}: its command {desc}")
+            paths = list(task_script_closure(projects, root, target))
+            for rel in sorted(set(PROJECT_SCRIPT_REF_RE.findall(blob))):
+                path = root_resolved / proj["source_dir"] / rel
+                if not path.is_file():
+                    raise MoonOutputError(
+                        f"{target} runs {rel}, which does not resolve to a readable file under "
+                        f"{proj['source_dir']} - A14 would silently scan less. If the script "
+                        f"moved, update the task."
+                    )
+                paths.append(path.resolve())
+            for path in dict.fromkeys(paths):
+                rel_path = str(path.relative_to(root_resolved))
+                text = path.read_text()
+                lines = text.split("\n")
+                for lineno, desc in _uv_hits(text):
+                    line = lines[lineno - 1].strip()
+                    if (rel_path, line) in allow:
+                        matched.add((rel_path, line))
+                        continue
+                    rows.append(f"{target}: {rel_path}:{lineno} {desc}")
+
+    for target in floor:
+        pid, _, name = target.partition(":")
+        blob = ((projects.get(pid) or {}).get("invocations") or {}).get(name)
+        if not blob:
+            rows.append(f"FLOOR: {target} is missing or has no command, so A14 asserts nothing for it")
+        elif not _floor_isolated(blob):
+            rows.append(
+                f"FLOOR: {target} does not run `uv run --isolated` with "
+                f"`--reinstall-package paigasus-py-bindings`"
+            )
+
+    for key in sorted(set(allow) - matched):
+        rows.append(f"A14 allowlist entry {key[0]}: {key[1]!r} matches no line of a scanned script (stale)")
+    return list(dict.fromkeys(rows))
+
+
 def moon_projects():
     """Moon's own resolved graph. Never parse moon.yml — Moon already resolved it.
 
@@ -3191,7 +3440,10 @@ def moon_projects():
         task_inputs = {}
         task_input_globs = {}
         invocations = {}
+        task_env = {}
         for name, task in (p.get("tasks") or {}).items():
+            # SMA-765 (A14): a missing `env` means "no env", not "unknown".
+            task_env[name] = dict(task.get("env") or {})
             tasks[name] = [
                 d if isinstance(d, str) else d.get("target")
                 for d in (task.get("deps") or [])
@@ -3225,6 +3477,7 @@ def moon_projects():
             "task_inputs": task_inputs,
             "task_input_globs": task_input_globs,
             "invocations": invocations,
+            "task_env": task_env,
             "language": p.get("language"),
         }
     return projects
@@ -4427,7 +4680,9 @@ def self_test():
             "deps": {},
             "tasks": {"test": []},
             "task_inputs": {"test": list(FFI_TASK_INPUTS)},
-            "invocations": {"test": "uv sync --reinstall-package paigasus-py-bindings"},
+            "invocations": {
+                "test": "touch a b && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
+            },
         },
         "unrelated-ts": {
             "source_dir": "ts/packages/unrelated",
@@ -6394,12 +6649,110 @@ def self_test():
                 f"the A13 parser reads {cfg} as aliases {aliases}, tsconfig_off {off}, rows {rows}; the "
                 f"corpus pin says aliases {list(want_aliases)}, tsconfig_off {want_off}, no rows"
             )
+    # A14 (SMA-765) - the uv parser, called directly. Spacing varies on purpose (tab, two spaces, a
+    # `\` continuation, global options), so the rows do not inherit the implementer's assumption.
+    for a14_label, a14_text, a14_want_red in (
+        ("uv sync", "uv sync", True),
+        ("two spaces", "uv  sync", True),
+        ("a tab", "uv\tsync", True),
+        ("a global flag", "uv -q sync", True),
+        ("a valued global option", "uv --project py sync", True),
+        ("a line continuation", "uv \\\n  sync", True),
+        ("sync --inexact", "uv sync --inexact", True),
+        ("pip sync", "uv pip sync r.txt", True),
+        ("pip install", "uv pip install x", True),
+        ("pip uninstall", "uv pip uninstall x", True),
+        ("venv", "uv venv", True),
+        ("add", "uv add x", True),
+        ("remove", "uv remove x", True),
+        ("run --reinstall-package", "uv run --reinstall-package p pytest", True),
+        ("run --reinstall", "uv run --reinstall pytest", True),
+        ("run --exact", "uv run --exact pytest", True),
+        ("run --refresh-package", "uv run --refresh-package p pytest", True),
+        ("UV_PROJECT_ENVIRONMENT assignment", "UV_PROJECT_ENVIRONMENT=.venv uv run pytest", True),
+        ("export VIRTUAL_ENV", "export VIRTUAL_ENV=x", True),
+        ("unset UV_PROJECT_ENVIRONMENT", "unset UV_PROJECT_ENVIRONMENT", True),
+        ("--active", "uv run --active x", True),
+        ("a string is not stripped", 'echo "run uv sync"', True),
+        ("--isolated in a different invocation",
+         "uv run --isolated true && uv run --reinstall-package p pytest", True),
+        ("the target form", "uv run --isolated --reinstall-package paigasus-py-bindings pytest tests", False),
+        ("plain run", "uv run pytest", False),
+        ("run --locked", "uv run --locked --project py ruff", False),
+        ("run --frozen", "uv run --frozen x", False),
+        ("a prefix and the target form",
+         "touch a b && uv run --isolated --reinstall-package p pytest tests", False),
+        ("uv.lock is not uv", "cat py/uv.lock", False),
+    ):
+        if bool(uv_mutations(a14_text)) != a14_want_red:
+            failures.append(f"A14 parser, {a14_label}: {a14_text!r} should be {'red' if a14_want_red else 'green'}")
+
+    # A14 - the check. Small project dicts in the shape of the A5 fixture.
+    def a14_proj(blob, env=None, source_dir="py"):
+        return {"p": {"source_dir": source_dir, "deps": {}, "tasks": {"test": []},
+                      "task_inputs": {"test": []}, "invocations": {"test": blob},
+                      "task_env": {"test": env or {}}}}
+
+    a14_floor = ("p:test",)
+    a14_good = "uv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
+    with tempfile.TemporaryDirectory() as a14_tmp:
+        a14_root = Path(a14_tmp)
+        (a14_root / "ci" / "x").mkdir(parents=True)
+        (a14_root / "py" / "scripts").mkdir(parents=True)
+        (a14_root / "ci" / "x" / "run.sh").write_text("#!/bin/bash\nuv sync\n")
+        (a14_root / "ci" / "x" / "msg.sh").write_text("#!/bin/bash\necho 'run uv sync'\n")
+        (a14_root / "py" / "scripts" / "run_tests.sh").write_text("#!/bin/bash\nuv pip install x\n")
+
+        def a14_run(projects, **kw):
+            kw.setdefault("allow", {})
+            kw.setdefault("floor", a14_floor)
+            return check_uv_env_isolation(projects, a14_root, **kw)
+
+        if a14_run(a14_proj(a14_good)):
+            failures.append(f"A14 reported rows on the clean floor task: {a14_run(a14_proj(a14_good))}")
+        if not any(r.startswith("FLOOR:") and "p:test" in r for r in a14_run({}, floor=a14_floor)):
+            failures.append("A14 did not report a FLOOR row for a missing floor task")
+        a14_rows = a14_run(a14_proj("uv run --reinstall-package paigasus-py-bindings pytest tests"))
+        if not any("p:test" in r and not r.startswith("FLOOR:") for r in a14_rows):
+            failures.append(f"A14 did not red a floor task without --isolated: {a14_rows}")
+        if not any(r.startswith("FLOOR:") for r in a14_rows):
+            failures.append(f"A14 gave no FLOOR row for a floor task without --isolated: {a14_rows}")
+        a14_rows = a14_run(a14_proj("uv run --isolated pytest tests"))
+        if not any(r.startswith("FLOOR:") for r in a14_rows):
+            failures.append(f"A14 gave no FLOOR row without --reinstall-package paigasus-py-bindings: {a14_rows}")
+        for a14_var in ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV"):
+            if not a14_run(a14_proj(a14_good, env={a14_var: ".venv-x"})):
+                failures.append(f"A14 did not red a task env that sets {a14_var}")
+        if a14_run(a14_proj(a14_good, env={"OTHER": "1"})):
+            failures.append("A14 reddened an unrelated task env key")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/run.sh"))
+        if not any("ci/x/run.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not red a `uv sync` in a followed ci script: {a14_rows}")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash scripts/run_tests.sh"))
+        if not any("py/scripts/run_tests.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not red a `uv pip install` in a project scripts/*.sh: {a14_rows}")
+        a14_msg = ("ci/x/msg.sh", "echo 'run uv sync'")
+        a14_msg_proj = a14_proj(a14_good + " && bash ci/x/msg.sh")
+        if not a14_run(a14_msg_proj):
+            failures.append("A14 did not red a message line that is not allowlisted")
+        if a14_run(a14_msg_proj, allow={a14_msg: "prints a remedy only"}):
+            failures.append(f"A14 reddened an allowlisted message line: {a14_run(a14_msg_proj, allow={a14_msg: 'r'})}")
+        if not a14_run(a14_msg_proj, allow={a14_msg: "  "}):
+            failures.append("A14 accepted an allowlist entry with an empty reason")
+        a14_stale = {("ci/x/msg.sh", "echo 'gone'"): "stale on purpose"}
+        if not any("stale" in r for r in a14_run(a14_proj(a14_good), allow=a14_stale)):
+            failures.append("A14 did not red a stale allowlist entry")
+        try:
+            a14_run(a14_proj(a14_good + " && bash scripts/missing.sh"))
+            failures.append("A14 did not raise on an unreadable project script")
+        except MoonOutputError:
+            pass
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all thirteen assertions fire on synthetic violations")
+    print("  OK   [parity] all fourteen assertions fire on synthetic violations")
     return 0
 
 
@@ -6416,7 +6769,7 @@ def self_test():
 # rather than a bare count.
 #
 # Adding a check means adding its key here AND its tuple there, in the same order.
-EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12a", "a12b", "a13")
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12a", "a12b", "a13", "a14")
 
 
 def collect_findings(projects, crates, root, tracked):
@@ -6594,6 +6947,16 @@ def collect_findings(projects, crates, root, tracked):
              "    row needs `deps: ['contracts:generate']` on that task. For a \"matches no input of\n"
              "    repo:affected-smoke\" row, add a glob that matches the config to the inputs of\n"
              "    `repo:affected-smoke` in the root moon.yml. See ci/affected-graph/README.md (A13)."),
+        ("a14", check_uv_env_isolation(projects, root),
+             "A task can change a uv environment IN PLACE that another task reads, so two parallel\n"
+             "    tasks race on py/.venv and one loses packages it imports (SMA-765).\n"
+             "    Fix: run `uv run --isolated` (with `--reinstall-package paigasus-py-bindings` for the\n"
+             "    kernel task). Never run `uv sync`, `uv pip`, `uv venv`, `uv add` or `uv remove` in a\n"
+             "    Moon task, and never set UV_PROJECT_ENVIRONMENT or VIRTUAL_ENV. A script line that only\n"
+             "    prints a remedy needs an ALLOW_UV_ENV_SCRIPT entry with a reason.\n"
+             "    A `FLOOR:` row means the check itself cannot be trusted - the floor task is missing or\n"
+             "    lost `--isolated` or the bindings reinstall; fix that first. See\n"
+             "    ci/affected-graph/README.md (A14)."),
     ]
 
     return findings
@@ -6612,6 +6975,28 @@ def main():
         print(f"FATAL [parity] could not build the graphs: {exc}", file=sys.stderr)
         return 2
 
+    # SMA-765: A14's real-tree negative control. Remove `--isolated` from the kernel task in a deep
+    # copy of the real graph. A14 must go red, or the check cannot see the defect it exists for.
+    # `run.sh --negative-control` runs only the synthetic self-test, so this is an explicit step.
+    try:
+        mutated = json.loads(json.dumps(projects))
+        for a14_target in REQUIRED_UV_ISOLATED_TASKS:
+            a14_pid, _, a14_name = a14_target.partition(":")
+            a14_inv = (mutated.get(a14_pid) or {}).get("invocations") or {}
+            if a14_inv.get(a14_name):
+                a14_inv[a14_name] = a14_inv[a14_name].replace("--isolated", "")
+        a14_control = check_uv_env_isolation(mutated, root)
+    except INFRA_ERRORS as exc:
+        print(f"FATAL [parity] A14 negative control could not run: {exc}", file=sys.stderr)
+        return 2
+    if not a14_control:
+        print(
+            "FATAL [parity] A14 negative control: A14 stayed green after `--isolated` was removed "
+            "from the kernel task, so A14 cannot see the defect it exists for",
+            file=sys.stderr,
+        )
+        return 2
+
     if not any(rows for _, rows, _ in findings):
         print(
             f"PASS  {'cargo-moon-parity':<18} -> "
@@ -6624,7 +7009,8 @@ def main():
             f"workspace members entry is a literal path, and every ts tsc task keys on its "
             f"package.json closure and runs the installed-typings preflight first when that "
             f"closure holds a binding, and every ts vitest task keys on its configs, its package.json "
-            f"closure, its tsconfig chain and its alias targets"
+            f"closure, its tsconfig chain and its alias targets, and no task changes a uv "
+            f"environment in place"
         )
         return 0
 

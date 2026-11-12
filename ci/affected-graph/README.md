@@ -362,6 +362,27 @@ It also runs several checks that the per-case project sets structurally **cannot
   A13 reads `-c=<f>` like `-c <f>`. A `-r`, `-r=<dir>`, `--root=<dir>`, `pnpm -C <dir>` or
   `pnpm --dir <dir>` before the vitest call is a row. An alias value that is an absolute path is a
   row, and so is a computed `['alias']` key.
+- **A14** (`check_uv_env_isolation` in `cargo_moon_parity.py`, SMA-765, findings key `a14`) reds when
+  a Moon task can change a uv project environment in place. The `paigasus-kernel-py:test` task ran
+  an exact `uv sync` in the shared `py/.venv` and removed packages that parallel tasks needed.
+  The rule: a `uv sync`, `uv pip sync|install|uninstall`, `uv venv`, `uv add` or `uv remove`, and a
+  `uv run` with `--exact`, `--reinstall`, `--reinstall-package` or `--refresh-package` and no
+  `--isolated` in the SAME invocation, are rows. So is any assignment, `export` or `unset` of
+  `UV_PROJECT_ENVIRONMENT` or `VIRTUAL_ENV`, any `--active`, and a task `env:` that sets either
+  variable. uv global options (`-q`, `--project X`) and any whitespace or `\` continuation between
+  `uv` and the verb are handled. An invocation ends at `&&`, `||`, `;`, `|` or a newline.
+  Scan scope, per task: the resolved command blob, the `ci/**/*.sh` scripts it runs with their
+  `source` closure (`task_script_closure`), and the project-relative `scripts/*.sh` files it names
+  (`PROJECT_SCRIPT_REF_RE`, resolved under the project's `source_dir`; an unreadable one is an
+  infrastructure error). Strings are NOT stripped (fail-closed, like A8), so a line that only prints
+  `uv sync` is a row. Such a line is waived in `ALLOW_UV_ENV_SCRIPT`, keyed by (script, exact
+  stripped line) with a reason. An empty reason, or an entry that matches no scanned line, is a row.
+  Floor: `REQUIRED_UV_ISOLATED_TASKS` (`paigasus-kernel-py:test`) must exist and run `uv run
+  --isolated` with `--reinstall-package paigasus-py-bindings`, or A14 gives a `FLOOR:` row.
+  Real-tree negative control: `main()` removes `--isolated` from the floor task in a deep copy of
+  the real graph and exits 2 if A14 stays green. `run.sh --negative-control` runs only the synthetic
+  self-test, so this is a separate step. Named limit: A14 does not see Moon toolchain actions such
+  as `InstallDependencies(unstable_python, py)`.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`

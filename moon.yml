@@ -224,6 +224,8 @@ tasks:
       - 'ts/packages/*/tsconfig*.json'
       - 'ts/apps/*/tsconfig*.json'
       - 'ts/tsconfig.base.json'
+      # SMA-765 — A14 READS py/scripts/run_tests.sh (a project-relative `scripts/*.sh` that py:test runs).
+      - '/py/scripts/**/*'
       # SMA-542 — this task now pins the call sites of repo:actionlint's self-tests and mutation
       # battery (ACTIONLINT_SH_CALL_SITES), so a change under ci/actionlint/ MUST re-key it.
       # Without this the pin is real but unreachable: the PR that deletes those lines does not
