@@ -367,7 +367,10 @@ It also runs several checks that the per-case project sets structurally **cannot
   an exact `uv sync` in the shared `py/.venv` and removed packages that parallel tasks needed.
   Each of these is a row: `uv sync`, `uv pip sync|install|uninstall`, `uv venv`, `uv add` and
   `uv remove`. A `uv run` with `--exact`, `--reinstall`, `--reinstall-package` or
-  `--refresh-package` is a row when the SAME invocation has no `--isolated`. Any assignment,
+  `--refresh-package` is a row when the SAME invocation has no `--isolated`. `--force-reinstall` counts as
+  `--reinstall`. A `uv version` that sets a version (`--bump` or a value) is a row, unless it has
+  `--no-sync`, `--frozen` or `--dry-run`. For `uv run`, `--isolated` counts only in the option region,
+  before the executed command and before any `#` comment. Any assignment,
   `export` or `unset` of `UV_PROJECT_ENVIRONMENT` or `VIRTUAL_ENV` is a row. So is any `--active`,
   and so is a task `env:` that sets either variable. uv global options (`-q`, `--project X`) and any whitespace or `\` continuation between
   `uv` and the verb are handled. An invocation ends at `&&`, `||`, `;`, `|` or a newline.

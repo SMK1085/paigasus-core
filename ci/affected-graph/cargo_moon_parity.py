@@ -3234,7 +3234,30 @@ UV_SUBCOMMANDS = frozenset((
     "generate-shell-completion",
 ))
 # `uv run` flags that rewrite the environment unless `--isolated` gives the run its own.
-UV_RUN_MUTATING_FLAGS = ("--exact", "--reinstall", "--reinstall-package", "--refresh-package")
+UV_RUN_MUTATING_FLAGS = (
+    "--exact", "--reinstall", "--force-reinstall", "--reinstall-package", "--refresh-package",
+)
+# uv global options that take a value (`uv --help`, uv 0.11.16, plus the python and index ones).
+# The value is skipped before the verb is chosen, so `uv --project run sync` finds `sync`. An
+# option NOT listed here keeps the fail-closed rule: the verb is the first known subcommand.
+UV_GLOBAL_VALUED = frozenset((
+    "--project", "--directory", "--cache-dir", "--config-file", "--color", "--python", "-p",
+    "--python-preference", "--allow-insecure-host", "--index-url", "-i", "--default-index",
+    "--index",
+))
+# Options of `uv run` that take a value (`uv run --help`, uv 0.11.16), and those of `uv version`.
+UV_RUN_VALUED = UV_GLOBAL_VALUED | frozenset((
+    "--extra", "--no-extra", "--group", "--no-group", "--only-group", "--env-file", "--with", "-w",
+    "--with-editable", "--with-requirements", "--package", "--python-platform", "--extra-index-url",
+    "--find-links", "-f", "--index-strategy", "--keyring-provider", "--upgrade-group", "--resolution",
+    "--prerelease", "--fork-strategy", "--exclude-newer", "--exclude-newer-package",
+    "--no-sources-package", "--reinstall-package", "--link-mode", "--config-settings-package",
+    "--no-build-isolation-package", "--no-build-package", "--no-binary-package",
+    "--refresh-package", "--bump", "--output-format", "--no-binary", "--no-build", "--config-setting",
+    "-C", "--no-install-package", "--no-install-project",
+))
+# `uv version` flags that stop it from locking and syncing the environment.
+UV_VERSION_SAFE_FLAGS = ("--no-sync", "--frozen", "--dry-run")
 UV_MUTATING_VERBS = ("sync", "venv", "add", "remove")
 UV_PIP_MUTATING = ("sync", "install", "uninstall")
 UV_TOKEN_RE = re.compile(r"(?<![\w.-])uv(?![\w.-])")
@@ -3309,7 +3332,7 @@ def _uv_invocations(text):
             toks = [t for t in toks if t]
             k = 0
             while k < len(toks) and toks[k] not in UV_SUBCOMMANDS:
-                k += 1
+                k += 2 if toks[k] in UV_GLOBAL_VALUED else 1
             verb = toks[k] if k < len(toks) else ""
             rest = toks[k + 1:]
             sub = ""
@@ -3319,17 +3342,60 @@ def _uv_invocations(text):
     return found
 
 
+def _uv_uncommented(flags):
+    """`flags` up to the first `#` token: a comment executes nothing."""
+    for i, f in enumerate(flags):
+        if f.startswith("#"):
+            return flags[:i]
+    return flags
+
+
+def _uv_option_region(flags):
+    """The uv option region of `uv run`: tokens before the executed command.
+
+    It ends at the first token that is neither an option nor the value of a known valued option.
+    """
+    region, i = [], 0
+    while i < len(flags) and flags[i].startswith("-"):
+        region.append(flags[i])
+        if flags[i] in UV_RUN_VALUED and i + 1 < len(flags):
+            region.append(flags[i + 1])
+            i += 1
+        i += 1
+    return region
+
+
+def _uv_version_changes(flags):
+    """True when `uv version` sets a version (`--bump` or a positional value) and may sync."""
+    names = {f.split("=", 1)[0] for f in flags}
+    if names & set(UV_VERSION_SAFE_FLAGS):
+        return False
+    if "--bump" in names:
+        return True
+    i = 0
+    while i < len(flags):
+        if flags[i].startswith("-"):
+            i += 2 if flags[i] in UV_RUN_VALUED else 1
+        else:
+            return True
+    return False
+
+
 def _uv_hits(text):
     """`(line, description)` for each mutating uv use in `text`. Empty means clean."""
     hits = []
     for off, verb, sub, flags in _uv_invocations(text):
+        flags = _uv_uncommented(flags)
         names = {f.split("=", 1)[0] for f in flags}
+        region = {f.split("=", 1)[0] for f in _uv_option_region(flags)}
         desc = None
-        if verb in UV_MUTATING_VERBS:
+        if verb == "version" and _uv_version_changes(flags):
+            desc = "`uv version` changing the version locks and syncs the project environment"
+        elif verb in UV_MUTATING_VERBS:
             desc = f"`uv {verb}` writes the project environment in place"
         elif verb == "pip" and sub in UV_PIP_MUTATING:
             desc = f"`uv pip {sub}` writes the project environment in place"
-        elif verb == "run" and "--isolated" not in names:
+        elif verb == "run" and "--isolated" not in region:
             bad = [f for f in UV_RUN_MUTATING_FLAGS if f in names]
             if bad:
                 desc = f"`uv run {bad[0]}` rewrites the project environment without `--isolated`"
@@ -3355,6 +3421,7 @@ def uv_mutations(text):
 def _floor_isolated(blob):
     """True when `blob` has ONE uv invocation with `run`, `--isolated` and the bindings reinstall."""
     for _, verb, _, flags in _uv_invocations(blob or ""):
+        flags = _uv_option_region(_uv_uncommented(flags))
         if verb != "run" or "--isolated" not in flags:
             continue
         for i, f in enumerate(flags):
@@ -6687,6 +6754,25 @@ def self_test():
         ("run --reinstall-package", "uv run --reinstall-package p pytest", True),
         ("run --reinstall", "uv run --reinstall pytest", True),
         ("run --exact", "uv run --exact pytest", True),
+        ("run --force-reinstall", "uv run --force-reinstall pytest tests", True),
+        ("isolated run --force-reinstall", "uv run --isolated --force-reinstall pytest", False),
+        ("version --bump", "uv version --bump patch", True),
+        ("version positional", "uv version 1.2.3", True),
+        ("bare version", "uv version", False),
+        ("version --short", "uv version --short", False),
+        ("version --output-format", "uv version --output-format json", False),
+        ("version --bump --no-sync", "uv version --bump patch --no-sync", False),
+        ("version --bump --dry-run", "uv version --bump patch --dry-run", False),
+        ("version --bump --frozen", "uv version --bump patch --frozen", False),
+        ("--project value is a verb name", "uv --project run sync", True),
+        ("--directory value is a verb name", "uv --directory add sync", True),
+        ("--directory value hides run", "uv --directory sync run pytest", False),
+        ("--isolated is the executed command's", "uv run --reinstall-package p echo --isolated", True),
+        ("--isolated in a comment", "uv run --reinstall-package p pytest # --isolated", True),
+        ("mutating flag after a valued option", "uv run --with x --reinstall pytest", True),
+        ("isolated with a valued option", "uv run --isolated --with x --reinstall-package p pytest", False),
+        ("isolated, reinstall-package", "uv run --isolated --reinstall-package p pytest tests", False),
+        ("a comment is not executed", "uv run pytest # --reinstall", False),
         ("run --refresh-package", "uv run --refresh-package p pytest", True),
         ("UV_PROJECT_ENVIRONMENT assignment", "UV_PROJECT_ENVIRONMENT=.venv uv run pytest", True),
         ("export VIRTUAL_ENV", "export VIRTUAL_ENV=x", True),
@@ -6736,6 +6822,9 @@ def self_test():
             failures.append(f"A14 did not red a floor task without --isolated: {a14_rows}")
         if not any(r.startswith("FLOOR:") for r in a14_rows):
             failures.append(f"A14 gave no FLOOR row for a floor task without --isolated: {a14_rows}")
+        a14_rows = a14_run(a14_proj("uv run --reinstall-package paigasus-py-bindings pytest --isolated"))
+        if not any(r.startswith("FLOOR:") for r in a14_rows):
+            failures.append(f"A14 gave no FLOOR row when --isolated is outside the option region: {a14_rows}")
         a14_rows = a14_run(a14_proj("uv run --isolated pytest tests"))
         if not any(r.startswith("FLOOR:") for r in a14_rows):
             failures.append(f"A14 gave no FLOOR row without --reinstall-package paigasus-py-bindings: {a14_rows}")

@@ -138,6 +138,8 @@ git commit -m "test(ci): add affected-smoke A14 for in-place uv environment writ
 In a scratch copy of the workspace state (a temp `git worktree` or a copy of `py/`, never the branch's `py/uv.lock`), make `py/uv.lock` stale by bumping `version` in `py/packages/paigasus-kernel/pyproject.toml`, then in `py/packages/paigasus-kernel` run (a) `uv sync --reinstall-package paigasus-py-bindings` and (b) `uv run --isolated --reinstall-package paigasus-py-bindings python -c 0`, each from the same stale state. Record whether each one rewrote `uv.lock`.
 Expected: both rewrite it. If (b) does NOT, stop and report to the coordinator with the measurement; do not change the task.
 
+Measured on 2026-11-12: (a) rewrote the lock, (b) did not. The coordinator ruled to proceed and corrected the docs that described the old relock; see the PR body.
+
 - [ ] **Step 2: Record the red-first baseline (spec §7)**
 
 ```bash
