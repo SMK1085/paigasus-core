@@ -22,9 +22,11 @@ not (SMA-685). So five classes of site are owned by nobody:
   1 WASI) each carry the version twice: `bindingPackageVersion !== '<v>'` and
   `expected <v> but got`
 
-`py/packages/paigasus-kernel/moon.yml` runs bare `uv sync` (not `--locked`), and
-`ci.yml`'s codegen-drift gate covers only the three `**/generated` proto dirs — so the
-`uv.lock` class still drifts **silently** today. The napi glue does not since SMA-667:
+Since SMA-765, `py/packages/paigasus-kernel/moon.yml` runs `uv run --isolated`. That command
+does not write `py/uv.lock`. Measured: from a stale state, `uv sync` rewrote the lock and
+`uv run --isolated` did not. `ci.yml`'s codegen-drift gate covers only the three `**/generated`
+proto dirs. So the `uv.lock` class can still drift silently: no Moon task relocks it, and the
+release flow relocks it explicitly. The napi glue does not drift since SMA-667:
 `paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`) fails when the committed
 `index.js`, version guards included, is not the generator's output.
 
