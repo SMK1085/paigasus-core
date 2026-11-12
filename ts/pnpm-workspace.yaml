@@ -119,6 +119,10 @@ overrides:
   # parity gate on EVERY dependabot PR. Fixed upstream in 7.1.1. Scoped to @commitlint/parse
   # so semantic-release keeps its own parser major. Drop once @commitlint/parse floors it.
   '@commitlint/parse>conventional-commits-parser': '>=7.1.1'
+  # jsdom 31 calls Tokenizer.flushCharacters, which parse5 8.1.0 added. parse5-parser-stream
+  # 8.1.0 otherwise resolves parse5 8.0.1, so two parse5 copies mix and every jsdom worker
+  # crashes with `flushCharacters is not a function`. Scoped to parse5-parser-stream.
+  'parse5-parser-stream>parse5': '>=8.1.0 <9'
 
 # Catalog — single bump-point for shared dep versions across the workspace.
 # Per-package package.json references these as "<dep>": "catalog:".
