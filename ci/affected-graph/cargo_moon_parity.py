@@ -562,7 +562,12 @@ ALLOW_UV_ENV_SCRIPT = {
 
 # A `scripts/*.sh` reference inside a project, resolved against the project's `source_dir`
 # (`py:test` runs `bash scripts/run_tests.sh`). SCRIPT_REF_RE covers only the `ci/` form.
-PROJECT_SCRIPT_REF_RE = re.compile(r"(?:^|[\s;&|(])(?:bash\s+|sh\s+)?(scripts/[\w./-]+\.sh)\b")
+# A leading `./` or `../` is part of the reference. The path is resolved with those segments, so
+# `../scripts/x.sh` is read relative to the project dir. A ref that does not resolve to a file
+# raises MoonOutputError (fail-closed), and so does a ref that leaves the repository root.
+PROJECT_SCRIPT_REF_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:bash\s+|sh\s+)?((?:\.{1,2}/)*scripts/[\w./-]+\.sh)\b"
+)
 
 
 # The floor, for the reason REQUIRED_FFI_TASKS carries: a derived set that shrinks to EMPTY
@@ -3220,7 +3225,6 @@ def check_ts_vitest_inputs(projects, root, tracked, floor=REQUIRED_VITEST_TASKS,
 # SMA-765 (A14) - a Moon task must never change a uv project environment IN PLACE. Two tasks
 # that share py/.venv race: an exact `uv sync` in one removes the packages another one imports.
 #
-# uv global options that take a value. The verb is the first token after them.
 # Fail-closed (SMA-765): the verb is the first token that IS a uv subcommand. Any option, and
 # any value of an option that this list does not know (`--python 3.12`), is skipped, so no option
 # can hide a verb.
@@ -3395,7 +3399,12 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                 rows.append(f"{target}: its command {desc}")
             paths = list(task_script_closure(projects, root, target))
             for rel in sorted(set(PROJECT_SCRIPT_REF_RE.findall(blob))):
-                path = root_resolved / proj["source_dir"] / rel
+                path = (root_resolved / proj["source_dir"] / rel).resolve()
+                if root_resolved not in path.parents:
+                    raise MoonOutputError(
+                        f"{target} runs {rel}, which resolves outside the repository - A14 "
+                        f"would silently scan less. If the script moved, update the task."
+                    )
                 if not path.is_file():
                     raise MoonOutputError(
                         f"{target} runs {rel}, which does not resolve to a readable file under "
@@ -6757,6 +6766,20 @@ def self_test():
             failures.append("A14 did not raise on an unreadable project script")
         except MoonOutputError:
             pass
+        # A leading `./` must not hide the script (fail-open before SMA-765's final review).
+        a14_rows = a14_run(a14_proj(a14_good + " && bash ./scripts/run_tests.sh"))
+        if not any("py/scripts/run_tests.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not red a `uv pip install` in `bash ./scripts/...`: {a14_rows}")
+        # `../scripts/x.sh` resolves against the project dir: from `py/sub` it is `py/scripts/x.sh`.
+        a14_rows = a14_run(a14_proj(a14_good + " && bash ../scripts/run_tests.sh", source_dir="py/sub"))
+        if not any("py/scripts/run_tests.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not red a `uv pip install` in `bash ../scripts/...`: {a14_rows}")
+        # A `../` ref that resolves to no file must raise, not be skipped.
+        try:
+            a14_run(a14_proj(a14_good + " && bash ../scripts/missing.sh", source_dir="py/sub"))
+            failures.append("A14 did not raise on an unresolvable `../scripts/` reference")
+        except MoonOutputError:
+            pass
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
@@ -6986,7 +7009,9 @@ def main():
         return 2
 
     # SMA-765: A14's real-tree negative control. Remove `--isolated` from the kernel task in a deep
-    # copy of the real graph. A14 must go red, or the check cannot see the defect it exists for.
+    # copy of the real graph. A14 must report a row that names the kernel task and is not a
+    # `FLOOR:` row, or the check cannot see the defect it exists for. The FLOOR row alone would
+    # pass even if the per-task scan were dead.
     # `run.sh --negative-control` runs only the synthetic self-test, so this is an explicit step.
     try:
         mutated = json.loads(json.dumps(projects))
@@ -6999,7 +7024,9 @@ def main():
     except INFRA_ERRORS as exc:
         print(f"FATAL [parity] A14 negative control could not run: {exc}", file=sys.stderr)
         return 2
-    if not a14_control:
+    if not any(
+        r.startswith("paigasus-kernel-py:test") and not r.startswith("FLOOR:") for r in a14_control
+    ):
         print(
             "FATAL [parity] A14 negative control: A14 stayed green after `--isolated` was removed "
             "from the kernel task, so A14 cannot see the defect it exists for",
