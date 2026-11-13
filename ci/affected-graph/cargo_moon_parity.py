@@ -1175,6 +1175,16 @@ REQUIRED_SOURCED_SCRIPTS = {
 }
 
 
+def _read_utf8(path):
+    """`path`'s text, read as UTF-8. A script that is not UTF-8 is an infrastructure error."""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise MoonOutputError(
+            f"{path}: not valid UTF-8 ({exc.reason} at byte {exc.start}) - the scan cannot read it"
+        ) from exc
+
+
 def _executable_text(path):
     """`path`'s text with heredoc BODIES and comment tails removed.
 
@@ -1195,7 +1205,7 @@ def _executable_text(path):
     otherwise the rest of the file is skipped in silence.
     """
     out, delim, held = [], None, None
-    for raw in Path(path).read_text().splitlines():
+    for raw in _read_utf8(path).splitlines():
         if delim is not None:
             if raw.strip() == delim:
                 delim = None
@@ -3611,7 +3621,7 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                 paths.extend(_uv_script_closure(path, root_resolved))
             for path in dict.fromkeys(paths):
                 rel_path = str(path.relative_to(root_resolved))
-                text = path.read_text()
+                text = _read_utf8(path)
                 lines = text.split("\n")
                 for lineno, desc in _uv_hits(text):
                     line = lines[lineno - 1].strip()
@@ -6953,6 +6963,14 @@ def self_test():
             kw.setdefault("floor", a14_floor)
             return check_uv_env_isolation(projects, a14_root, **kw)
 
+        (a14_root / "py" / "scripts" / "latin.sh").write_bytes(bytes([0x75, 0x76, 0x20, 0xff, 0x0a]))
+        try:
+            a14_run(a14_proj(a14_good + " && bash scripts/latin.sh"))
+            a14_latin = None
+        except MoonOutputError as a14_exc:
+            a14_latin = str(a14_exc)
+        if a14_latin is None or "latin.sh" not in a14_latin or "not valid UTF-8" not in a14_latin:
+            failures.append("A14 did not raise MoonOutputError on a script that is not UTF-8")
         if a14_run(a14_proj(a14_good)):
             failures.append(f"A14 reported rows on the clean floor task: {a14_run(a14_proj(a14_good))}")
         if not any(r.startswith("FLOOR:") and "p:test" in r for r in a14_run({}, floor=a14_floor)):
