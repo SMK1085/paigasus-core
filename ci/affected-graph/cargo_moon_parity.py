@@ -3549,9 +3549,11 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
 
     Scanned per task: its resolved blob, the `ci/**/*.sh` scripts it runs (with their `source`
     closure), and the project-relative `scripts/*.sh` files it names. Absent data is a violation:
-    an unreadable script raises MoonOutputError, a missing floor task is a `FLOOR:` row. A task
-    `env:` that sets UV_PROJECT_ENVIRONMENT or VIRTUAL_ENV is a row, since `--isolated` leaves no
-    legitimate use for either. An allowlist entry with an empty reason, or one that matches no
+    an unreadable script raises MoonOutputError, a missing floor task is a `FLOOR:` row. Script
+    lines pass an allow-list of approved `uv` forms (`uv_form_hits`); any other `uv` line is a row.
+    Rule 7: a task `env:` key that is VIRTUAL_ENV or starts with `UV_` is a row. Rule 8: a task
+    that runs `ci/version-lockstep/run.sh` with `--write` in one command is a row, because that
+    runs `uv lock`. An allowlist entry with an empty reason, or one that matches no
     scanned line, is a row, so the list cannot rot. Direction of failure: a row means a task can
     race another task on the shared environment.
     """
@@ -3572,8 +3574,16 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
             if not blob:
                 continue
             for env_name in sorted(dict((proj.get("task_env") or {}).get(name) or {})):
-                if env_name in ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV"):
+                if env_name == "VIRTUAL_ENV" or env_name.startswith("UV_"):
                     rows.append(f"{target}: the task `env` sets {env_name}")
+            # Rule 8: `version-lockstep --write` runs `uv lock`; the EXECUTED waiver assumes no task does.
+            for seg in re.split(r"&&|\|\||;|\|", blob):
+                m = re.search(r"ci/version-lockstep/run\.sh(?=\s|$|['\"])(.*)", seg)
+                if m and re.search(r"(?<![\w-])--write(?![\w-])", m.group(1)):
+                    rows.append(
+                        f"{target}: runs ci/version-lockstep/run.sh with --write, which runs `uv lock` "
+                        f"(the EXECUTED waiver in ALLOW_UV_ENV_SCRIPT assumes no Moon task does)"
+                    )
             for desc in uv_mutations(blob):
                 rows.append(f"{target}: its command {desc}")
             # A14's own closure (UV_SOURCE_STMT_RE), not `task_script_closure`: that one follows a
@@ -7016,6 +7026,18 @@ def self_test():
                 failures.append(f"A14 did not red a task env that sets {a14_var}")
         if a14_run(a14_proj(a14_good, env={"OTHER": "1"})):
             failures.append("A14 reddened an unrelated task env key")
+        a14_rows = a14_run(a14_proj(a14_good, env={"UV_PYTHON": "3.13"}))
+        if not any("p:test" in r and "UV_PYTHON" in r for r in a14_rows):
+            failures.append(f"A14 did not red a task env that sets UV_PYTHON: {a14_rows}")
+        (a14_root / "ci" / "version-lockstep").mkdir()
+        (a14_root / "ci" / "version-lockstep" / "run.sh").write_text("#!/bin/bash\ntrue\n")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash ci/version-lockstep/run.sh --write"))
+        if not any("--write" in r for r in a14_rows):
+            failures.append(f"A14 did not red a version-lockstep task with --write: {a14_rows}")
+        for a14_ok in (" && bash ci/version-lockstep/run.sh --self-test",
+                       " && bash ci/version-lockstep/run.sh && echo --write"):
+            if any("--write" in r for r in a14_run(a14_proj(a14_good + a14_ok))):
+                failures.append(f"A14 reddened a version-lockstep task without --write: {a14_ok!r}")
         a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/run.sh"))
         if not any("ci/x/run.sh" in r for r in a14_rows):
             failures.append(f"A14 did not red a `uv sync` in a followed ci script: {a14_rows}")
