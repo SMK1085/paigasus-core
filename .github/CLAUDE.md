@@ -242,6 +242,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   (OS, arch) covers CPython 3.12+, so the matrix never multiplies by Python version. maturin also
   relocates `pyproject.toml` to the sdist **root**, not the crate dir, so the sdist content
   assertions match on basename.
+  The darwin steps of `wheels.yml` and `prebuild.yml` also assert `stroff mod 8 = 0` for the
+  `LC_SYMTAB` string pool, because dyld on macOS 27 rejects a mis-aligned binary (SMA-767; see
+  `rs/CLAUDE.md`).
 - All four **Linux** wheel legs cross-compile with `--zig` — not only the musl ones, unlike
   `prebuild.yml`. `ubuntu-latest` ships glibc 2.39, so a *native* build tags `manylinux_2_39`,
   which almost nothing can install. The floor comes from **`--zig` together with
