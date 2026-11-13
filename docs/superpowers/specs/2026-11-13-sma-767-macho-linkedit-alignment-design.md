@@ -238,6 +238,39 @@ The `.github/workflows/*` edits select `repo:actionlint` and the other workflow 
 8. The full gate graph from the root `CLAUDE.md` before the push. Read the gate notes on bash
    versions for this Mac.
 
+### 6.1 Steps 6 and 7, done after the merge (follow-up sweep, 2026-11-13)
+
+The PR did not record steps 6 and 7. The follow-up sweep measured them on the merged `main` runs.
+"Before" is `main` at `15bc114a` (wheels run 43304821010, prebuild run 43304821032). "After" is
+`main` at `3220c9ca` (wheels run 43516091389, prebuild run 43516091280). The artefacts were
+downloaded and inspected with `stat`, `shasum`, `cmp`, `otool` and `nm` only. Nothing was executed.
+
+| Binary | Before (bytes) | After (bytes) | Note |
+|---|---|---|---|
+| py `.so`, macosx arm64 | 508128 | 547584 | +39456; stroff 402708 to 435672 |
+| py `.so`, macosx x86_64 | 502820 | 539480 | +36660; stroff 402300 to 432560 |
+| py `.so`, 2 manylinux + 2 musllinux | unchanged | unchanged | byte-identical (sha256) |
+| py `.pyd`, win amd64 | 222720 | 222720 | same size, 28 bytes differ |
+| napi `.node`, darwin arm64 | 585584 | 626592 | +41008; stroff 470120 to 503048 |
+| napi `.node`, darwin x64 | 572824 | 610848 | +38024; stroff 461704 to 491800 |
+| napi `.node`, 2 linux gnu + 2 linux musl | unchanged | unchanged | byte-identical (sha256) |
+| napi `.node`, win32 x64 | 386560 | 386560 | same size, 28 bytes differ |
+
+The Windows difference is not from this change: the Windows build reads no apple-darwin key. Its
+cause (probably a PE time stamp or a debug-directory ID) was not examined. All four darwin
+binaries carry `sdk 26.5`, and the "after" stroff values are all `mod 8 = 0`. The "before" x86_64
+py `.so` was also mis-aligned (402300 mod 8 = 4); §2.4 inspected only the PyPI copy.
+
+Step 7, the N_OSO paths (`nm -ap | grep OSO`, hashes shown as `<hash>`). Every entry is a `std`
+rlib of the runner's toolchain. No path under the checkout and no personal data:
+
+- py arm64 (4): `/Users/runner/.rustup/toolchains/1.95.0-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib/`
+  `lib{std,panic_unwind,alloc,core}-<hash>.rlib(...)`.
+- py x86_64 (5): the same toolchain, `.../rustlib/x86_64-apple-darwin/lib/lib{std,panic_unwind,memchr,alloc,core}-<hash>.rlib(...)`.
+- napi arm64 (5): `lib{std,panic_unwind,hashbrown,alloc,core}`; napi x64 (6): `lib{std,panic_unwind,memchr,hashbrown,alloc,core}`.
+
+The "before" binaries had 0 N_OSO entries. R3 holds as written.
+
 ## 7. Decisions by Sven (GATE 1, 2026-11-13)
 
 Sven approved the spec at GATE 1 and decided the four provisional calls:
@@ -256,6 +289,10 @@ Sven approved the spec at GATE 1 and decided the four provisional calls:
   `rust-objcopy`. rustc `dlopen`s the proc macros. Today all of them are aligned (2 proc-macro
   dylibs, 8 build scripts, measured). The CI darwin legs use `--target` and SDK 26.5, so they are
   not at risk today. Local builds without `--target` are covered by D1.
+  Follow-up sweep: closed for the CI darwin legs. `wheels.yml` and `prebuild.yml` set
+  `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` in a darwin-only step. The `rs/Cargo.toml`
+  profile form was measured and rejected (+385 MB in a Linux release target dir); see
+  `rs/CLAUDE.md`. A local macOS release build with `--target` is still stripped.
 - **R2.** The guard runs in `wheels.yml` and `prebuild.yml`. A PR that edits only
   `rs/.cargo/config.toml` runs both before the merge. A PR that edits only binding source does
   not, but `release.yml` calls both workflows, and `approve-release` needs them. So every publish
