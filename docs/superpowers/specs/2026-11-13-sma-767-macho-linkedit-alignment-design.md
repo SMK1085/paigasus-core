@@ -1,6 +1,6 @@
 # SMA-767: a stripped macOS binding that dyld rejects (mis-aligned LINKEDIT string pool)
 
-Status: revised after the spec challenge, for GATE 1. Linear: SMA-767.
+Status: approved by Sven at GATE 1 (2026-11-13). Linear: SMA-767.
 Branch: `feature/sma-767-maturin-linkedit-dlopen`.
 
 ## 1. Problem
@@ -135,12 +135,12 @@ Inspected with `otool` only. The downloads were not executed.
 
 - **D2. The sdist gap.** maturin does not ship `rs/.cargo/config.toml` in the sdist (SMA-578).
   So a user who builds the sdist on a host with SDK 27 gets a binary that does not load.
-  Provisional — needs Sven (P1). The plan first measures one option: ship a `.cargo/config.toml`
+  Decided by Sven (P1). The plan first measures one option: ship a `.cargo/config.toml`
   at the sdist root with `[tool.maturin] include` (`format = "sdist"`), then build from the
   extracted sdist and import. If that works, adopt it and add the D3 guard to the macOS leg of
-  `sdist-verify`. If it does not work, accept the gap and record it in `py/README.md` and in the
-  `rs/.cargo/config.toml` comment. The anti-goal "a fix that the sdist does not carry" is
-  therefore conditional on P1.
+  `sdist-verify`. If it does not work, accept the gap as a residual, and document the sdist
+  workaround (`CARGO_TARGET_<TRIPLE>_RUSTFLAGS="-C strip=none"` or `CARGO_PROFILE_RELEASE_STRIP=none`
+  for the build) in `py/README.md` and in the `rs/.cargo/config.toml` comment.
 
 - **D3. CI guard.** Add an assertion to the darwin steps that exist today:
   - `wheels.yml`, step "Assert Mach-O arch and minimum macOS (darwin only)": each `*.abi3.so`.
@@ -153,7 +153,7 @@ Inspected with `otool` only. The downloads were not executed.
   names SMA-767. The guard is needed because the runner's binaries carry `sdk 26.5`, so dyld on
   the runner does not check, and the import step cannot catch a regression.
 
-  P3 (provisional — needs Sven): check `stroff` only. If more fields are checked later, use a
+  P3 (decided by Sven): check `stroff` mod 8 only, with a proof that it bites (D4). If more fields are checked later, use a
   per-field rule (`stroff` and `symoff` mod 8, `LC_CODE_SIGNATURE` `dataoff` mod 16), never one
   rule for every `*off` field.
 
@@ -183,7 +183,7 @@ Inspected with `otool` only. The downloads were not executed.
   `stroff > indirectsymoff + 4 × nindirectsyms`. The D3 guard alone cannot prove it, because an
   even count passes by chance.
 
-- **D7. No version bump and no re-release.** Provisional — needs Sven (P4). The published 0.2.0
+- **D7. No version bump and no re-release.** Decided by Sven (P4). R6 records the inference. The published 0.2.0
   wheels load on macOS 27 today (inferred, §2.4). The next normal release ships aligned wheels.
   The commit type is `fix(rs)`. `rs/.cargo/config.toml` is outside every crate directory, so
   release-plz probably sees no package change (inferred; the plan must confirm it).
@@ -230,14 +230,17 @@ The `.github/workflows/*` edits select `repo:actionlint` and the other workflow 
 8. The full gate graph from the root `CLAUDE.md` before the push. Read the gate notes on bash
    versions for this Mac.
 
-## 7. Provisional calls — need Sven
+## 7. Decisions by Sven (GATE 1, 2026-11-13)
 
-- **P1.** The sdist gap: try to ship `.cargo/config.toml` in the sdist; if that fails, accept and
-  document the gap.
-- **P2.** The fix is a macOS-only rustflag in `rs/.cargo/config.toml`, not a profile override, to
-  keep Linux artefacts at their current size. It covers the napi binding too.
-- **P3.** The CI guard checks `stroff` only.
-- **P4.** No out-of-band re-release of 0.2.0.
+Sven approved the spec at GATE 1 and decided the four provisional calls:
+
+- **P1.** Measure `[tool.maturin] include` for `.cargo/config.toml` in the sdist, and test a build
+  from that sdist. If it works, ship it and add the sdist guard. If it does not work, record the
+  gap as an accepted residual, with the sdist workaround in the docs.
+- **P2.** The fix is the macOS-only rustflag `-C strip=none` in the apple-darwin `rustflags` of
+  `rs/.cargo/config.toml`.
+- **P3.** The CI guard checks only `stroff` alignment (mod 8), with a proof that it bites.
+- **P4.** No extra release for 0.2.0. The inference about 0.2.0 is a residual (R6).
 
 ## 8. Risks and residuals
 
@@ -254,6 +257,8 @@ The `.github/workflows/*` edits select `repo:actionlint` and the other workflow 
   `/Users/runner/...`). No personal data ships from CI. The build is less reproducible.
 - **R4.** A user who installs the sdist on a host with SDK 27 (for example PyPy) gets a broken
   binary, unless P1 closes the gap.
+- **R6.** The published 0.2.0 macOS wheels are mis-aligned. That they load on macOS 27 is an
+  inference from the `sdk 26.5` stamp test (§2.4); nobody loaded them. No extra release (P4).
 - **R5.** The shared `py/.venv` of every Mac checkout keeps the broken binding until the README
   command runs (D5).
 
