@@ -3409,7 +3409,7 @@ def _uv_bash_scan(text):
     quotes, so a `\\` that ends a comment line does NOT join the next line.
     """
     eff, live = [], []
-    quote, comment, i, n = None, False, 0, len(text)
+    quote, comment, i, n, escaped_end = None, False, 0, len(text), -1
     while i < n:
         ch = text[i]
         if comment:
@@ -3423,14 +3423,23 @@ def _uv_bash_scan(text):
             if text[i + 1:i + 2] == "\n":
                 i += 2
                 continue
+            nxt = text[i + 1:i + 2]
+            if quote == '"' and nxt not in ('"', "\\", "$", "`"):
+                # Inside double quotes `\` escapes only `"`, `\`, `$`, a backtick and newline.
+                eff.append(ch)
+                live.append(False)
+                i += 1
+                continue
             eff.append(ch)
             live.append(quote is None)
-            if i + 1 < n:
-                eff.append(text[i + 1])
+            if nxt:
+                eff.append(nxt)
                 live.append(quote is None)
+                # An escaped character is a word character, so a `#` after it is mid-word.
+                escaped_end = len(eff)
             i += 2
             continue
-        if quote is None and ch == "#" and (not eff or eff[-1] in " \t\n"):
+        if quote is None and ch == "#" and len(eff) != escaped_end and (not eff or eff[-1] in " \t\n"):
             comment = True
             i += 1
             continue
@@ -7257,6 +7266,16 @@ def self_test():
         a14_cmt2 = "echo ok # \\\nuv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
         if any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_cmt2))):
             failures.append("A14 gave no floor credit to a real command on the line after a comment that ends in a backslash")
+        a14_iso = "uv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
+        a14_esc = "echo a\\ # '\n" + a14_iso + "\n'\nuv run pytest tests"
+        if not any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_esc))):
+            failures.append("A14 treated a `#` after an escaped space as a comment and credited a quoted `uv run`")
+        a14_escq = "echo a\\'b\n" + a14_iso
+        if any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_escq))):
+            failures.append("A14 let an escaped quote open a quote and gave no floor credit to the next line")
+        a14_dq = "echo \"a\\\"\" # '\n" + a14_iso
+        if any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_dq))):
+            failures.append("A14 let a `'` in a comment after a closed double quote open a quote")
         # A `../` ref that resolves to no file must raise, not be skipped.
         try:
             a14_run(a14_proj(a14_good + " && bash ../scripts/missing.sh", source_dir="py/sub"))
