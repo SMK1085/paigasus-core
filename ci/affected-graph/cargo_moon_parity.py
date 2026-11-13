@@ -529,10 +529,12 @@ ALLOW_UNLOCKED_CARGO_SCRIPT = {
     ),
 }
 
-# SMA-765 (A14) - waivers for uv text inside a script that a task runs. Keyed by
-# (repo-relative script path, EXACT stripped line text), not by line number, like
-# ALLOW_UNLOCKED_CARGO_SCRIPT. The value is the non-empty reason. A14 does not strip strings, so a
-# line that only PRINTS a remedy such as `uv sync` counts as a hit until it is listed here.
+# SMA-765, SMA-768 (A14) - waivers for a red uv line inside a script that a task runs. Keyed by
+# (repo-relative script path, EXACT stripped PHYSICAL line text), not by line number, like
+# ALLOW_UNLOCKED_CARGO_SCRIPT. The value is the non-empty reason. It starts with its class: PROSE (a
+# message), DATA (a pattern or Python data) or EXECUTED (a real call). A14 does not strip strings,
+# so a line that only NAMES `uv` is red until it is listed here. Exactly one entry is EXECUTED:
+# the `uv lock` line in ci/version-lockstep/run.sh. Add no second EXECUTED entry without a review.
 # An entry that matches no line of a scanned script is itself a row, so the list cannot rot.
 ALLOW_UV_ENV_SCRIPT = {
     ("ci/ruff/run.sh",
@@ -547,16 +549,132 @@ ALLOW_UV_ENV_SCRIPT = {
         "PROSE, not an invocation: the diagnostic that tells the reader how to repair a missing "
         "shellcheck. The script executes no `uv sync`."
     ),
-    ("ci/release-parity/ecosystems/python-semantic-release.sh", "# `uv sync` CI step)."): (
-        "COMMENT, not an invocation: it explains that no separate `uv sync` CI step exists. "
-        "The script executes no `uv sync`."
-    ),
     (
         "ci/release-parity/ecosystems/python-semantic-release.sh",
         "\"Run 'uv sync' in py/, and check py/uv.lock still carries python-semantic-release.\" \\",
     ): (
         "PROSE, not an invocation: an argument of `_psr_fatal` that prints a remedy in an error "
         "message. The script executes no `uv sync`."
+    ),
+    ('ci/actionlint/run.sh',
+     'echo "                 shells out to \'uv run --locked --project py\', so it needs uv on PATH and" >&2'): (
+        'PROSE, not an invocation: a usage message that names the `uv run` call the script '
+        'makes elsewhere. The script executes no `uv` here.'
+    ),
+    ('ci/actionlint/run.sh',
+     'echo "                 shells out to \'uv run --project ci/release-plan\', which needs uv on" >&2'): (
+        'PROSE, not an invocation: a usage message that names the `uv run` call the script '
+        'makes elsewhere. The script executes no `uv` here.'
+    ),
+    ('ci/actionlint/run.sh',
+     '[ "$pc_rc" -eq 0 ] || infra "the pipe-capacity probe failed (rc $pc_rc) via \'uv run --locked --project py\'. No check ran."'): (
+        'PROSE, not an invocation: the `infra` message when the pipe-capacity probe fails. '
+        'The script executes no `uv` here.'
+    ),
+    ('ci/actionlint/run.sh',
+     "rc 0 having asserted nothing — MEASURED at rc 127. A missing 'uv' produces 127 from the"): (
+        'PROSE, not an invocation: a line inside a multi-line comment text that names a '
+        'missing `uv`. The script executes no `uv` here.'
+    ),
+    ('ci/actionlint/run.sh',
+     'infra "check 11: ci/release-plan/run.sh --assert aborted (exit 2) — uv or the interpreter'): (
+        'PROSE, not an invocation: an `infra` message that says `uv` or the interpreter '
+        'failed. The script executes no `uv` here.'
+    ),
+    ('ci/helm-render/run.sh',
+     'command -v uv >/dev/null 2>&1 || die_infra "uv is not on PATH; run \'proto install\', or add ~/.proto/shims to PATH"'): (
+        'PROSE, not an invocation: the `die_infra` message after the `command -v uv` probe. '
+        'The probe is an approved form. The script executes no `uv` here.'
+    ),
+    ('ci/helm-render/run.sh',
+     '|| die_infra "uv could not provide the locked PyYAML environment for $HERE"'): (
+        'PROSE, not an invocation: a `die_infra` message that says `uv` could not provide the '
+        'environment. The script executes no `uv` here.'
+    ),
+    ('ci/osv/run.sh',
+     'echo "  npm transitive, or \'uv lock --upgrade-package <name>\' for pip). Waive ONLY with a" >&2'): (
+        'PROSE, not an invocation: a usage hint that tells the reader how to relock. The '
+        'script executes no `uv lock`. The script executes no `uv` here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     'lpos="$(grep -Fn \'( cd "$REPO_ROOT/py" && uv lock\' < <(printf \'%s\\n\' "$wbody"))" || lpos=""'): (
+        'DATA, not an invocation: a `grep -F` pattern in a self-test that looks for the `uv '
+        'lock` text in the `run_write` body. It is data, not a call.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     '|| { fail "self-test: run_write must run uv_static_metadata_check before uv lock"; return 1; }'): (
+        'PROSE, not an invocation: a `fail` message of a self-test. The script executes no '
+        '`uv` here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     '|| { fail "self-test: run_write no longer maps the uv metadata check\'s rc 1 to exit 1"; return 1; }'): (
+        'PROSE, not an invocation: a `fail` message of a self-test. The script executes no '
+        '`uv` here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     "0) printf 'uv workspace: every local package declares static metadata\\n' ;;"): (
+        'PROSE, not an invocation: a `printf` status message. The script executes no `uv` '
+        'here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     '|| { rm -rf "$dest"; die_infra "cannot list the uv workspace pyproject files to stage"; }'): (
+        'PROSE, not an invocation: a `die_infra` message. The script executes no `uv` here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     'uvws = ws.get("tool", {}).get("uv", {}).get("workspace")'): (
+        'DATA, not an invocation: Python data in a heredoc: `ws.get("tool", {}).get("uv", '
+        '{})` reads the `[tool.uv]` table. It is data, not a call.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     'print(f"INFRA: the uv workspace member glob {pat!r} matches no directory", file=sys.stderr)'): (
+        'PROSE, not an invocation: a Python `INFRA:` message in a heredoc. The script '
+        'executes no `uv` here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     'violations.append(f"{rel(p)}: no [project] table, so uv would run the build backend to read its metadata")'): (
+        'PROSE, not an invocation: a Python violation message in a heredoc. The script '
+        'executes no `uv` here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     'violations.append(f"{rel(p)}: [project].dynamic lists \'{field}\', so uv lock would run the build backend")'): (
+        'PROSE, not an invocation: a Python violation message in a heredoc. The script '
+        'executes no `uv` here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     'sources = doc.get("tool", {}).get("uv", {}).get("sources", {})'): (
+        'DATA, not an invocation: Python data in a heredoc: `doc.get("tool", {}).get("uv", '
+        '{})` reads the `[tool.uv]` table. It is data, not a call.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     'violations.append(f"{rel(p)}: [tool.uv.sources] {name} path {entry[\'path\']!r} is not a directory, so uv would build it")'): (
+        'PROSE, not an invocation: a Python violation message in a heredoc. The script '
+        'executes no `uv` here.'
+    ),
+    ('ci/wasm-lockstep/run.sh',
+     'command -v uv >/dev/null 2>&1 || die_infra "uv is not on PATH; run \'proto install\', or add ~/.proto/shims to PATH"'): (
+        'PROSE, not an invocation: the `die_infra` message after the `command -v uv` probe. '
+        'The probe is an approved form. The script executes no `uv` here.'
+    ),
+    ('ci/wasm-lockstep/run.sh',
+     '|| die_infra "uv could not provide the locked PyYAML environment for $HERE"'): (
+        'PROSE, not an invocation: a `die_infra` message that says `uv` could not provide the '
+        'environment. The script executes no `uv` here.'
+    ),
+    ('ci/workflow-credentials/run.sh',
+     '|| die_infra "uv is not on PATH — run \'proto install\', or add ~/.proto/shims to PATH"'): (
+        'PROSE, not an invocation: a `die_infra` message that says `uv` is not on PATH. The '
+        'script executes no `uv` here.'
+    ),
+    ('ci/workflow-credentials/run.sh',
+     '*) die_infra "checker exited $rc — uv or the interpreter failed, not an assertion" ;;'): (
+        'PROSE, not an invocation: a `die_infra` message that says `uv` or the interpreter '
+        'failed. The script executes no `uv` here.'
+    ),
+    ('ci/version-lockstep/run.sh',
+     '( cd "$REPO_ROOT/py" && uv lock >/dev/null ) || die_infra "uv lock failed (site 17)"'): (
+        'EXECUTED: this `uv lock` writes py/uv.lock. The line is in `run_write`, and no Moon '
+        'task passes `--write` to the script, so no Moon task runs it. The A14 `--write` '
+        'guard keeps this true.'
     ),
 }
 
@@ -3232,167 +3350,53 @@ def check_ts_vitest_inputs(projects, root, tracked, floor=REQUIRED_VITEST_TASKS,
     return list(dict.fromkeys(floor_rows + walk_rows + task_rows))
 
 
-# SMA-765 (A14) - a Moon task must never change a uv project environment IN PLACE. Two tasks
-# that share py/.venv race: an exact `uv sync` in one removes the packages another one imports.
+# SMA-765, SMA-768 (A14) - a Moon task must never change a uv project environment IN PLACE. Two
+# tasks that share py/.venv race: an exact `uv sync` in one removes the packages another one imports.
 #
-# Fail-closed (SMA-765): the verb is the first token that IS a uv subcommand. Any option, and
-# any value of an option that this list does not know (`--python 3.12`), is skipped, so no option
-# can hide a verb.
-UV_SUBCOMMANDS = frozenset((
-    "run", "init", "add", "remove", "version", "sync", "lock", "export", "tree", "format",
-    "tool", "python", "pip", "venv", "build", "publish", "cache", "self", "help", "auth",
-    "generate-shell-completion",
-))
-# `uv run` flags that rewrite the environment unless `--isolated` gives the run its own.
-UV_RUN_MUTATING_FLAGS = (
-    "--exact", "--reinstall", "--force-reinstall", "--reinstall-package", "--refresh-package",
-)
-# uv global options that take a value (`uv --help`, uv 0.11.16, plus the python and index ones).
-# The value is skipped before the verb is chosen, so `uv --project run sync` finds `sync`. An
-# option NOT listed here keeps the fail-closed rule: the verb is the first known subcommand.
-UV_GLOBAL_VALUED = frozenset((
-    "--project", "--directory", "--cache-dir", "--config-file", "--color", "--python", "-p",
-    "--python-preference", "--allow-insecure-host", "--index-url", "-i", "--default-index",
-    "--index",
-))
-# Options of `uv run` that take a value (`uv run --help`, uv 0.11.16), and those of `uv version`.
-UV_RUN_VALUED = UV_GLOBAL_VALUED | frozenset((
-    "--extra", "--no-extra", "--group", "--no-group", "--only-group", "--env-file", "--with", "-w",
-    "--with-editable", "--with-requirements", "--package", "--python-platform", "--extra-index-url",
-    "--find-links", "-f", "--index-strategy", "--keyring-provider", "--upgrade-group", "--resolution",
-    "--prerelease", "--fork-strategy", "--exclude-newer", "--exclude-newer-package",
-    "--no-sources-package", "--reinstall-package", "--link-mode", "--config-settings-package",
-    "--no-build-isolation-package", "--no-build-package", "--no-binary-package",
-    "--refresh-package", "--bump", "--output-format", "--config-setting", "-C",
-    "--upgrade-package", "-P",
-))
-# `uv version` flags that stop it from locking and syncing the environment.
-UV_VERSION_SAFE_FLAGS = ("--no-sync", "--frozen", "--dry-run")
-UV_MUTATING_VERBS = ("sync", "venv", "add", "remove")
-UV_PIP_MUTATING = ("sync", "install", "uninstall")
+# An allow-list, not a denylist (SMA-768): every `uv` token in a scanned file must be one of the
+# approved forms below, or the line is a row. A new form is one edit to these constants plus a
+# self-test row. The rule is in the spec docs/superpowers/specs/2026-11-13-sma-768-a14-uv-gate-design.md.
 UV_TOKEN_RE = re.compile(r"(?<![\w.-])uv(?![\w.-])")
-UV_ENV_NAMES = r"(?:UV_PROJECT_ENVIRONMENT|VIRTUAL_ENV)"
-UV_ENV_RES = (
-    (re.compile(rf"(?<![\w]){UV_ENV_NAMES}\+?=(?!=)"), "assigns {name}"),
-    (re.compile(rf"\b(?:export|unset|readonly|declare)\s+(?:-\w+\s+)*{UV_ENV_NAMES}\b"),
-     "exports or unsets {name}"),
-    (re.compile(rf"(?<![\w-])-u\s+{UV_ENV_NAMES}\b"), "unsets {name} through `env -u`"),
-    (re.compile(r"(?<![\w-])--active(?![\w-])"), "passes `--active`"),
-)
+UV_APPROVED_FLAGS = frozenset(("--locked", "--frozen", "--isolated"))
+# An approved option with a value. The value is the next word, compared as exact text.
+UV_APPROVED_VALUES = {
+    "--project": ("py", "ci/release-plan", '"$HERE"'),
+    "--python": ("'>=3.12'",),
+}
+UV_BINDINGS_REINSTALL = ("--reinstall-package", "paigasus-py-bindings")
+UV_COMMAND_WORD_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+/-]*")
+UV_REDIRECT_WORDS = (">/dev/null", "2>/dev/null", "2>&1")
+# Rule 6: a name that selects or changes the uv environment. Any mention is a row.
+UV_ENV_NAME_RE = re.compile(r"(?<![\w])(?:UV_[A-Z0-9_]+|VIRTUAL_ENV)(?![\w])|(?<![\w-])--active(?![\w-])")
+# One invocation ends at the first of these. The cut is not quote-aware, on purpose (R6).
+UV_CUT_RE = re.compile(r"&&|\|\||[;|)`]")
+UV_PROBE_RE = re.compile(r"(?<![\w.-])command\s+-v\s+$")
 
 
-def _uv_segments(text):
-    """Yield `(offset, segment)` for each shell-ish command in `text`.
+def _uv_logical_lines(text):
+    """Yield `(logical, starts)` for each non-comment logical line of `text`.
 
-    A `\\` + newline is a continuation: the pair becomes two spaces, so offsets stay valid and the
-    invocation continues. `&&`, `||`, `;`, `|` and a newline end a segment, unless inside a
-    quote. A newline ALWAYS ends a segment and resets the quote state, so an apostrophe in a
-    comment cannot merge later lines into one invocation (fail-closed). This is a quote-aware
-    split, not a shell parser.
+    A physical line whose first non-blank character is `#` is a comment: it is skipped and never
+    joins the next line. A non-comment line that ends in a backslash joins the next physical line.
+    `starts` lists `(offset in logical, physical line number)` for each joined line.
     """
-    out, buf, start, quote, i, n = [], [], 0, None, 0, len(text)
-
-    def flush():
-        out.append((start, "".join(buf)))
-        buf.clear()
-
+    lines = text.split("\n")
+    i, n = 0, len(lines)
     while i < n:
-        ch = text[i]
-        if ch == "\\" and i + 1 < n:
-            if text[i + 1] == "\n" and quote != "'":
-                buf.append("  ")
-            else:
-                buf.append(text[i:i + 2])
-            i += 2
+        if lines[i].lstrip().startswith("#"):
+            i += 1
             continue
-        if ch == "\n":
-            flush()
-            quote, i, start = None, i + 1, i + 1
-            continue
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "'\"":
-            quote = ch
-        elif text.startswith(("&&", "||"), i):
-            flush()
-            i, start = i + 2, i + 2
-            continue
-        elif ch in ";|":
-            flush()
-            i, start = i + 1, i + 1
-            continue
-        buf.append(ch)
-        i += 1
-    flush()
-    return out
-
-
-def _uv_words(text):
-    """Split `text` into shell words; a `#` at the start of an unquoted word ends the list.
-
-    POSIX-like: a backslash escapes the next character, single quotes are literal, double quotes
-    escape only `"`, backslash, `$` and a backtick. `shlex` is NOT used: it treats a `#` inside a
-    word (`a#b`) as a comment, and drops text after an escaped space. Raises ValueError on an
-    unbalanced quote, with the
-    position of the quote that never closed.
-    """
-    words, buf, started, quote, qpos, i, n = [], [], False, None, 0, 0, len(text)
-    while i < n:
-        ch = text[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            else:
-                buf.append(ch)
-        elif quote == '"':
-            if ch == '"':
-                quote = None
-            elif ch == "\\" and i + 1 < n and text[i + 1] in '"\\$`':
-                buf.append(text[i + 1])
-                i += 1
-            else:
-                buf.append(ch)
-        elif ch.isspace():
-            if started:
-                words.append("".join(buf))
-                buf, started = [], False
-        elif ch == "#" and not started:
-            break
-        else:
-            started = True
-            if ch in "'\"":
-                quote, qpos = ch, i
-            elif ch == "\\" and i + 1 < n:
-                buf.append(text[i + 1])
-                i += 1
-            else:
-                buf.append(ch)
-        i += 1
-    if quote:
-        raise ValueError(qpos)
-    if started:
-        words.append("".join(buf))
-    return words
-
-
-def _uv_tokens(text):
-    """`_uv_words`, but an unmatched quote that ENDS a word closes an enclosing string.
-
-    A `uv` inside `echo "... 'uv run x' ..."` has the closing quote in its tail. That tail is cut
-    at the quote. An unmatched quote that opens a word (or sits mid-word) still raises ValueError
-    (fail-closed): `uv run --env-file "a --isolated pytest` hides what follows the quote.
-    """
-    try:
-        return _uv_words(text)
-    except ValueError as err:
-        pos = err.args[0]
-        closes = pos > 0 and not text[pos - 1].isspace() and (
-            pos + 1 == len(text) or text[pos + 1].isspace() or text[pos + 1] in ",.:;)"
-        )
-        if not closes:
-            raise
-        return _uv_words(text[:pos])
+        parts, starts, pos = [], [], 0
+        while i < n:
+            cont = lines[i].endswith("\\")
+            body = lines[i][:-1] if cont else lines[i]
+            starts.append((pos, i + 1))
+            parts.append(body)
+            pos += len(body) + 1
+            i += 1
+            if not cont:
+                break
+        yield " ".join(parts), starts
 
 
 def _uv_quoted_at(seg, pos):
@@ -3412,133 +3416,104 @@ def _uv_quoted_at(seg, pos):
     return quote is not None
 
 
-def _uv_invocations(text, skip_quoted=False):
-    """Every `uv` use in `text` as `(offset, verb, sub, flags)`.
-
-    With `skip_quoted`, a `uv` that starts inside an open quote is left out: the floor must credit
-    an EXECUTED `uv run`, not one inside an `echo '...'`. Mutation detection keeps every match.
-
-    `verb` is the first token after the uv global options, `sub` the token after `pip`, and
-    `flags` every later token of the same invocation (quotes trimmed). Judged per invocation, so
-    an `--isolated` in a DIFFERENT invocation never covers this one.
-    """
-    found = []
-    for base, seg in _uv_segments(text):
-        for m in UV_TOKEN_RE.finditer(seg):
-            if skip_quoted and _uv_quoted_at(seg, m.start()):
-                continue
-            try:
-                toks = [t.strip("`()") for t in _uv_tokens(seg[m.end():])]
-            except ValueError:
-                # Fail closed, but not red on every apostrophe: 41 prose lines in ci/ (an `echo`
-                # or a comment that names `uv`) leave an unmatched quote in the tail. Split on
-                # whitespace instead, and give NO credit for `--isolated`: the words after the
-                # quote are unknown, so a mutating flag anywhere still reds, and a run that
-                # needs `--isolated` for its reinstall flag reds too.
-                toks = [t.strip("\"'`()") for t in seg[m.end():].split()]
-                toks = [t for t in toks if t and t != "--isolated"]
-            toks = [t for t in toks if t]
-            k = 0
-            while k < len(toks) and toks[k] not in UV_SUBCOMMANDS:
-                k += 2 if toks[k] in UV_GLOBAL_VALUED else 1
-            verb = toks[k] if k < len(toks) else ""
-            rest = toks[k + 1:]
-            sub = ""
-            if verb == "pip" and rest:
-                sub, rest = rest[0], rest[1:]
-            found.append((base + m.start(), verb, sub, rest))
-    return found
+def _uv_words_after(logical, match):
+    """The whitespace-split words of the invocation that starts after the `uv` at `match`."""
+    tail = logical[match.end():]
+    cut = UV_CUT_RE.search(tail)
+    return (tail[:cut.start()] if cut else tail).split()
 
 
-def _uv_run_split(flags):
-    """`(option region, executed command)` of `uv run`.
-
-    The region ends at the first token that is neither an option nor the value of a known valued
-    option. The rest is the command `uv run` executes.
-    """
-    region, i = [], 0
-    while i < len(flags) and flags[i].startswith("-"):
-        region.append(flags[i])
-        if flags[i] in UV_RUN_VALUED and i + 1 < len(flags):
-            region.append(flags[i + 1])
+def _uv_run_form(words):
+    """Parse `words` that start with `run`. Return `(options, command words, reason or None)`."""
+    opts, i = [], 1
+    while i < len(words) and words[i].startswith("-"):
+        word = words[i]
+        if word in UV_APPROVED_FLAGS:
+            opts.append(word)
             i += 1
-        i += 1
-    return region, flags[i:]
-
-
-def _uv_option_region(flags):
-    """The uv option region of `uv run`: tokens before the executed command."""
-    return _uv_run_split(flags)[0]
-
-
-def _uv_version_changes(flags):
-    """True when `uv version` sets a version (`--bump` or a positional value) and may sync."""
-    names = {f.split("=", 1)[0] for f in flags}
-    if names & set(UV_VERSION_SAFE_FLAGS):
-        return False
-    if "--bump" in names:
-        return True
-    i = 0
-    while i < len(flags):
-        if flags[i].startswith("-"):
-            i += 2 if flags[i] in UV_RUN_VALUED else 1
+        elif word in UV_APPROVED_VALUES:
+            if words[i + 1:i + 2] and words[i + 1] in UV_APPROVED_VALUES[word]:
+                opts.append(word)
+                i += 2
+            else:
+                return opts, [], f"{word} needs one of {', '.join(UV_APPROVED_VALUES[word])}"
+        elif word == UV_BINDINGS_REINSTALL[0] and words[i + 1:i + 2] == [UV_BINDINGS_REINSTALL[1]]:
+            opts.append(word)
+            i += 2
         else:
-            return True
-    return False
+            return opts, [], f"the option {word} is not approved"
+    if UV_BINDINGS_REINSTALL[0] in opts and "--isolated" not in opts:
+        return opts, [], f"{UV_BINDINGS_REINSTALL[0]} needs --isolated"
+    command = words[i:]
+    if not command:
+        return opts, [], "there is no command word after the options"
+    if not UV_COMMAND_WORD_RE.fullmatch(command[0]):
+        return opts, command, f"the command word {command[0]!r} is not a bare literal"
+    return opts, command, None
 
 
-def _uv_hits(text):
-    """`(line, description)` for each mutating uv use in `text`. Empty means clean."""
+def _uv_reason(logical, match):
+    """None when the `uv` at `match` is an approved form, else the reason it is not."""
+    words = _uv_words_after(logical, match)
+    if UV_PROBE_RE.search(logical[:match.start()]):
+        if all(w in UV_REDIRECT_WORDS for w in words):
+            return None
+        return "`command -v uv` takes only a redirection after it"
+    if words == ["build"]:
+        return None
+    if words[:1] == ["run"]:
+        return _uv_run_form(words)[2]
+    if words[:1] == ["build"]:
+        return "`uv build` takes no other word"
+    return f"the verb {words[0]!r} is not approved" if words else "there is no verb"
+
+
+def uv_form_hits(text):
+    """Sorted `(physical line, reason)` for each `uv` token or environment name that is red.
+
+    Strings are NOT stripped (fail-closed): `echo "run uv sync"` is a hit, and a script line that
+    only prints a remedy is waived in ALLOW_UV_ENV_SCRIPT instead.
+    """
     hits = []
-    for off, verb, sub, flags in _uv_invocations(text):
-        names = {f.split("=", 1)[0] for f in flags}
-        region = {f.split("=", 1)[0] for f in _uv_option_region(flags)}
-        desc = None
-        if verb == "version" and _uv_version_changes(flags):
-            desc = "`uv version` changing the version locks and syncs the project environment"
-        elif verb in UV_MUTATING_VERBS:
-            desc = f"`uv {verb}` writes the project environment in place"
-        elif verb == "pip" and sub in UV_PIP_MUTATING:
-            desc = f"`uv pip {sub}` writes the project environment in place"
-        elif verb == "run" and "--isolated" not in region:
-            bad = [f for f in UV_RUN_MUTATING_FLAGS if f in names]
-            if bad:
-                desc = f"`uv run {bad[0]}` rewrites the project environment without `--isolated`"
-        if desc:
-            hits.append((text.count("\n", 0, off) + 1, desc))
-    for rx, what in UV_ENV_RES:
-        for m in rx.finditer(text):
-            name = re.search(UV_ENV_NAMES, m.group(0))
-            hits.append((text.count("\n", 0, m.start()) + 1,
-                         what.format(name=name.group(0) if name else "")))
+    for logical, starts in _uv_logical_lines(text):
+        def line_of(idx):
+            return [ln for off, ln in starts if off <= idx][-1]
+
+        for m in UV_TOKEN_RE.finditer(logical):
+            why = _uv_reason(logical, m)
+            if why:
+                hits.append((line_of(m.start()), f"uses `uv` in a form that is not approved: {why}"))
+        for m in UV_ENV_NAME_RE.finditer(logical):
+            hits.append((line_of(m.start()), f"names {m.group(0)}, which can change the uv environment"))
     return sorted(hits)
 
 
 def uv_mutations(text):
-    """One description per mutating uv use in `text`; an empty list means clean (SMA-765, A14).
-
-    Strings are NOT stripped (fail-closed, like A8): `echo "run uv sync"` is a hit, and a script
-    line that only prints a remedy is waived in ALLOW_UV_ENV_SCRIPT instead.
-    """
-    return [desc for _, desc in _uv_hits(text)]
+    """One reason per red `uv` token or environment name in `text`; an empty list means clean."""
+    return [reason for _, reason in uv_form_hits(text)]
 
 
 def _floor_isolated(blob):
     """True when ONE uv invocation has `run`, `--isolated`, the bindings reinstall and runs pytest.
 
     The invocation that is isolated must be the one that runs the tests: a second, ordinary
-    `uv run pytest` would run them in the shared environment.
+    `uv run pytest` would run them in the shared environment. The `uv` must start a logical line or
+    follow `&&` or `;`, outside a quote. A wrong answer of the quote tracker removes credit only.
     """
-    for _, verb, _, flags in _uv_invocations(blob or "", skip_quoted=True):
-        flags, command = _uv_run_split(flags)
-        if verb != "run" or "--isolated" not in flags:
-            continue
-        if command[:1] != ["pytest"] and command[:3] not in (["python", "-m", "pytest"], ["python3", "-m", "pytest"]):
-            continue
-        for i, f in enumerate(flags):
-            if f == "--reinstall-package" and flags[i + 1:i + 2] == ["paigasus-py-bindings"]:
-                return True
-            if f == "--reinstall-package=paigasus-py-bindings":
+    for logical, _ in _uv_logical_lines(blob or ""):
+        for m in UV_TOKEN_RE.finditer(logical):
+            before = logical[:m.start()].rstrip()
+            if before and not before.endswith(("&&", ";")):
+                continue
+            if _uv_quoted_at(logical, m.start()):
+                continue
+            words = _uv_words_after(logical, m)
+            if words[:1] != ["run"]:
+                continue
+            opts, command, why = _uv_run_form(words)
+            if why or "--isolated" not in opts or UV_BINDINGS_REINSTALL[0] not in opts:
+                continue
+            if command[:1] == ["pytest"] or command[:3] in (["python", "-m", "pytest"], ["python3", "-m", "pytest"]):
                 return True
     return False
 
@@ -3623,7 +3598,7 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                 rel_path = str(path.relative_to(root_resolved))
                 text = _read_utf8(path)
                 lines = text.split("\n")
-                for lineno, desc in _uv_hits(text):
+                for lineno, desc in uv_form_hits(text):
                     line = lines[lineno - 1].strip()
                     if (rel_path, line) in allow:
                         matched.add((rel_path, line))
@@ -6895,31 +6870,31 @@ def self_test():
         ("run --reinstall", "uv run --reinstall pytest", True),
         ("run --exact", "uv run --exact pytest", True),
         ("run --force-reinstall", "uv run --force-reinstall pytest tests", True),
-        ("isolated run --force-reinstall", "uv run --isolated --force-reinstall pytest", False),
+        ("not an approved form: isolated run --force-reinstall", "uv run --isolated --force-reinstall pytest", True),
         ("version --bump", "uv version --bump patch", True),
         ("version positional", "uv version 1.2.3", True),
-        ("bare version", "uv version", False),
-        ("version --short", "uv version --short", False),
-        ("version --output-format", "uv version --output-format json", False),
-        ("version --bump --no-sync", "uv version --bump patch --no-sync", False),
-        ("version --bump --dry-run", "uv version --bump patch --dry-run", False),
-        ("version --bump --frozen", "uv version --bump patch --frozen", False),
+        ("not an approved form: bare version", "uv version", True),
+        ("not an approved form: version --short", "uv version --short", True),
+        ("not an approved form: version --output-format", "uv version --output-format json", True),
+        ("not an approved form: version --bump --no-sync", "uv version --bump patch --no-sync", True),
+        ("not an approved form: version --bump --dry-run", "uv version --bump patch --dry-run", True),
+        ("not an approved form: version --bump --frozen", "uv version --bump patch --frozen", True),
         ("--project value is a verb name", "uv --project run sync", True),
         ("--directory value is a verb name", "uv --directory add sync", True),
-        ("--directory value hides run", "uv --directory sync run pytest", False),
+        ("not an approved form: --directory value hides run", "uv --directory sync run pytest", True),
         ("--isolated is the executed command's", "uv run --reinstall-package p echo --isolated", True),
         ("--isolated in a comment", "uv run --reinstall-package p pytest # --isolated", True),
         ("mutating flag after a valued option", "uv run --with x --reinstall pytest", True),
-        ("isolated with a valued option", "uv run --isolated --with x --reinstall-package p pytest", False),
-        ("isolated, reinstall-package", "uv run --isolated --reinstall-package p pytest tests", False),
+        ("not an approved form: isolated with a valued option", "uv run --isolated --with x --reinstall-package p pytest", True),
+        ("not an approved form: isolated, reinstall-package with another package", "uv run --isolated --reinstall-package p pytest tests", True),
         ("a comment is not executed", "uv run pytest # --reinstall", False),
-        ("--no-install-project is boolean", "uv run --no-install-project --reinstall-package p --isolated pytest", False),
-        ("--no-build is boolean", "uv run --no-build --reinstall-package p --isolated pytest", False),
+        ("not an approved form: --no-install-project", "uv run --no-install-project --reinstall-package p --isolated pytest", True),
+        ("not an approved form: --no-build", "uv run --no-build --reinstall-package p --isolated pytest", True),
         ("an escaped space keeps # in the word", "uv run --env-file a\\ #settings.env --reinstall pytest", True),
         ("a quoted space keeps # in the word", 'uv run --env-file "a #settings.env" --reinstall pytest', True),
         ("an unbalanced quote fails closed", 'uv run --env-file "a --reinstall pytest', True),
         ("an unbalanced quote gives no --isolated credit", 'uv run --isolated --reinstall-package p "pytest', True),
-        ("a prose apostrophe stays green", "echo uv run's own status", False),
+        ("not an approved form: a prose apostrophe", "echo uv run's own status", True),
         ("# inside a word is not a comment", "uv run --env-file a#b --reinstall pytest", True),
         ("a single-quoted # is a value", "uv run --env-file '#settings.env' --reinstall pytest", True),
         ("a double-quoted # is a value", 'uv run --env-file "#settings.env" --reinstall pytest', True),
@@ -6935,9 +6910,55 @@ def self_test():
         ("plain run", "uv run pytest", False),
         ("run --locked", "uv run --locked --project py ruff", False),
         ("run --frozen", "uv run --frozen x", False),
-        ("a prefix and the target form",
-         "touch a b && uv run --isolated --reinstall-package p pytest tests", False),
+        ("not an approved form: a prefix and another package",
+         "touch a b && uv run --isolated --reinstall-package p pytest tests", True),
         ("uv.lock is not uv", "cat py/uv.lock", False),
+        ("an unknown verb", "uv frobnicate --sync", True),
+        ("a := default of VIRTUAL_ENV", "echo ${VIRTUAL_ENV:=x}", True),
+        ("a := default of UV_PROJECT_ENVIRONMENT", ': "${UV_PROJECT_ENVIRONMENT:=.venv-x}"', True),
+        ("an assignment with no command", "UV_PROJECT_ENVIRONMENT=.venv-x", True),
+        ("an assignment, then uv run", "VIRTUAL_ENV=/x\nuv run pytest", True),
+        ("uv lock", "uv lock", True),
+        ("run --upgrade", "uv run --upgrade pytest", True),
+        ("tool install", "uv tool install ruff", True),
+        ("uv in a variable", 'UVB=uv; "$UVB" sync', True),
+        ("a comment line does not join the next line", "# uv run --isolated \\\nuv sync", True),
+        ("a later # is not a comment", "x # uv sync", True),
+        ("a quoted command word", 'uv run --locked "--reinstall" pytest', True),
+        ("a redirect as command word", "uv run --locked >/dev/null --reinstall pytest", True),
+        ("a stderr redirect as command word", "uv run --locked 2>/dev/null --upgrade pytest", True),
+        ("a $ command word", "uv run --locked $F pytest", True),
+        ("--python 3.13", "uv run --python 3.13 pytest", True),
+        ("--project with an option as value", "uv run --project --reinstall pytest", True),
+        ("--project with a quoted pair", 'uv run --project "a b" --reinstall pytest', True),
+        ("--project with a substitution", "uv run --project $(x) --reinstall pytest", True),
+        ("--project=py", "uv run --project=py pytest", True),
+        ("run with no command", "uv run --locked", True),
+        ("build with a flag", "uv build --wheel", True),
+        ("a second uv in bash -c", 'bash -c "uv run --locked pytest; uv sync"', True),
+        ("reinstall without --isolated", "uv run --reinstall-package paigasus-py-bindings pytest", True),
+        ("command uv without -v", "command uv sync", True),
+        ("X=--active", "X=--active", True),
+        ("UV_PYTHON assignment", "UV_PYTHON=3.13 uv run pytest", True),
+        ("python heredoc data", "python3 - <<'EOF'\nimport subprocess\nsubprocess.run([\"uv\", \"sync\"])\nEOF", True),
+        ("a CR at line end", "uv sync\r", True),
+        ("echo uv", "echo uv", True),
+        ("uv build", "uv build", False),
+        ("uv build and a tail", "uv build && echo ok", False),
+        ("run, project py", "uv run --locked --project py python3 -c x", False),
+        ("run, project ci/release-plan", "uv run --locked --project ci/release-plan --python '>=3.12' python3 x", False),
+        ("run, project HERE", "uv run --project \"$HERE\" --python '>=3.12' python3 x", False),
+        ("run --frozen python", "uv run --frozen python -c x", False),
+        ("command -v uv", "command -v uv >/dev/null 2>&1", False),
+        ("command -v uv and a tail", "command -v uv >/dev/null 2>&1 || exit 2", False),
+        ("the floor form after a prefix",
+         "touch a b && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests", False),
+        ("reinstall before --isolated",
+         "uv run --reinstall-package paigasus-py-bindings --isolated pytest tests", False),
+        ("a continuation", "uv run \\\n  --locked pytest", False),
+        ("a comment line", "# uv sync", False),
+        ("uv in a command substitution",
+         "PY=\"$(uv run --locked --project \"$HERE\" python3 -c 'import sys; print(sys.executable)')\"", False),
     ):
         if bool(uv_mutations(a14_text)) != a14_want_red:
             failures.append(f"A14 parser, {a14_label}: {a14_text!r} should be {'red' if a14_want_red else 'green'}")
@@ -7005,6 +7026,13 @@ def self_test():
             failures.append(f"A14 reddened an allowlisted message line: {a14_run(a14_msg_proj, allow={a14_msg: 'r'})}")
         if not a14_run(a14_msg_proj, allow={a14_msg: "  "}):
             failures.append("A14 accepted an allowlist entry with an empty reason")
+        (a14_root / "ci" / "x" / "cont.sh").write_text("echo \"run 'uv sync' now\" \\\n  >&2\n")
+        a14_cont = ("ci/x/cont.sh", "echo \"run 'uv sync' now\" \\")
+        a14_cont_proj = a14_proj(a14_good + " && bash ci/x/cont.sh")
+        if a14_run(a14_cont_proj, allow={a14_cont: "PROSE: test"}):
+            failures.append(f"A14 did not match a waiver for a line that ends in a backslash: {a14_run(a14_cont_proj, allow={a14_cont: 'PROSE: test'})}")
+        if not any("ci/x/cont.sh:1" in r for r in a14_run(a14_cont_proj)):
+            failures.append(f"A14 row does not name the physical line of a continued match: {a14_run(a14_cont_proj)}")
         a14_stale = {("ci/x/msg.sh", "echo 'gone'"): "stale on purpose"}
         if not any("stale" in r for r in a14_run(a14_proj(a14_good), allow=a14_stale)):
             failures.append("A14 did not red a stale allowlist entry")
@@ -7081,6 +7109,9 @@ def self_test():
         a14_quoted = "echo 'uv run --isolated --reinstall-package paigasus-py-bindings pytest tests'\nuv run pytest tests"
         if not any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_quoted))):
             failures.append("A14 credited the floor to a `uv run` inside quotes")
+        a14_quoted2 = "echo 'x && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests'\nuv run pytest tests"
+        if not any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_quoted2))):
+            failures.append("A14 credited the floor to a `uv run` after `&&` inside quotes")
         # A `../` ref that resolves to no file must raise, not be skipped.
         try:
             a14_run(a14_proj(a14_good + " && bash ../scripts/missing.sh", source_dir="py/sub"))
