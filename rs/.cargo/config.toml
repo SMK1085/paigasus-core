@@ -22,7 +22,13 @@
 # Remove the flag only when this holds on an odd-count dylib built with the default strip:
 # `stroff > indirectsymoff + 4 * nindirectsyms` (spec decision D6).
 # The crate-local copy in `rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml`
-# must stay in step with this file.
+# must stay in step with this file. A build with cwd in that crate reads both files, and cargo
+# joins the two lists, so rustc gets `-C strip=none` twice. That is harmless: measured, the dylib
+# has the same stroff (435672) and size from the crate directory and from `rs/`. Do not remove
+# either copy: `rs/` builds (napi, cargo) need this one, and the sdist needs the crate-local one.
+# This flag reaches host units (proc macros, build scripts) only without `--target`. The CI
+# darwin legs pass `--target`, so wheels.yml and prebuild.yml also set
+# CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none on darwin (SMA-767 R1, see rs/CLAUDE.md).
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup", "-C", "strip=none"]
 

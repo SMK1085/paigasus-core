@@ -154,6 +154,15 @@ jobs:
       - name: Install JS workspace deps
         run: pnpm --dir ts install --frozen-lockfile
 
+      # SMA-767 R1. With --target, the apple-darwin rustflag `-C strip=none` reaches only the
+      # target units. The host proc macros and build scripts keep the release default strip,
+      # which rustc does with `rust-objcopy`. This variable stops that strip for host units
+      # only, on darwin only. The comment in wheels.yml and rs/CLAUDE.md give the measurement.
+      - name: Keep host build units unstripped (darwin only)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo 'CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none' >> "$GITHUB_ENV"
+
       - name: Build the addon
         working-directory: ts/packages/paigasus-kernel
         run: pnpm exec napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '-x' || '' }} --cwd ../../../rs/crates/bindings/paigasus-node-bindings
