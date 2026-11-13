@@ -371,7 +371,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   project-relative `scripts/*.sh` files it names (`PROJECT_SCRIPT_REF_RE`, resolved under the
   `source_dir` of the project). Each script brings its `source` closure (`_uv_script_closure`,
   `UV_SOURCE_STMT_RE`). That closure follows a `source` or `.` word at the start of a line.
-  It also follows the word after any of these: `;`, `&&`, `||`, `|`, `(`, `{`, `!`, `then`, `do` and `else`.
+  It also follows the word after any of these: `;`, `&&`, `&`, `||`, `|`, `(`, `{`, `!`, `then`, `do` and `else`.
   A8 and A10 keep their line-start matcher. A `./` or `../` prefix is resolved.
   A reference to a file that does not exist, or that leaves the repository, is an infrastructure error.
   The rules, in order:
@@ -420,8 +420,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   `run.sh --negative-control` runs only the synthetic self-test, so this is a separate step.
   The six SMA-768 gaps:
   - Gap 1, the denylist let an unknown uv form pass: closed by the allow-list.
-  - Gap 2, a name that selects the environment, such as `UV_PYTHON`: closed by rules 6 and 7.
-  - Gap 3, a `command -v uv` probe: closed as invalid. The old parser already reddened the probe forms. The self-test row stays.
+  - Gap 2, the `:=` default assignment, such as `${VIRTUAL_ENV:=x}`: closed by rule 6.
+  - Gap 3, an assignment with no command, such as `UV_PROJECT_ENVIRONMENT=.venv-x`: closed as invalid.
+    The old parser already reddened it. A self-test row stays.
   - Gap 4, a script that is not UTF-8: closed by G4.
   - Gap 5, an edit to a scanned script that does not schedule `repo:affected-smoke`: closed by G5.
   - Gap 6, a `source` word inside a quoted argument: not closed. See R1.
@@ -433,6 +434,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   - R2. A `uv` reached through a computed word is not seen. Examples: `UVB=$(command -v uv); "$UVB" sync`
     (rule 5 approves the probe), `${x}v sync`, `eval`, `"$(command -v uv)" sync` and its backtick form.
     Quote-removal spellings are not seen either: `u\v sync`, `u''v sync` and `"u"v sync`.
+    `UV_TOKEN_RE` does not match `uv.exe`. This matters only on Windows, and no scanned task runs there.
   - R3. A command that `uv run` executes is not checked. Examples: `uv run pip install`, `uv run python -m pip install`.
   - R4. A direct write such as `py/.venv/bin/pip install` is not seen.
   - R5. Moon toolchain actions, such as `InstallDependencies(unstable_python, py)`, are not seen. The inexact
@@ -447,7 +449,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   - R9. A waiver matches its line text anywhere in the same script. A copy of the `EXECUTED` `uv lock`
     line elsewhere in `ci/version-lockstep/run.sh` passes, and rule 8 does not catch it.
   - R10. Rule 8 sees only the literal path `ci/version-lockstep/run.sh` in the task text. It misses
-    `cd ci/version-lockstep && ./run.sh --write`, a path built from a variable, and a quoted separator before `--write`.
+    `cd ci/version-lockstep && ./run.sh --write`, a path built from a variable, a quoted separator before `--write`, and `--write` from a variable (`W=--write; ... run.sh $W`), from `"$@"`,
+    or from passthrough arguments (`moon run repo:version-lockstep -- --write`).
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`

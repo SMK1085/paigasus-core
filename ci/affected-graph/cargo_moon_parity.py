@@ -3384,7 +3384,7 @@ def _uv_logical_lines(text):
     lines = text.split("\n")
     i, n = 0, len(lines)
     while i < n:
-        if lines[i].lstrip().startswith("#"):
+        if lines[i].lstrip(" \t").startswith("#"):
             i += 1
             continue
         parts, starts, pos = [], [], 0
@@ -6996,6 +6996,10 @@ def self_test():
          "uv run --reinstall-package paigasus-py-bindings --isolated pytest tests", False),
         ("a continuation", "uv run \\\n  --locked pytest", False),
         ("a comment line", "# uv sync", False),
+        ("a CR before # is not a comment", "\r# x; uv sync", True),
+        ("a form feed before # is not a comment", "\x0c# x; uv sync", True),
+        ("a NBSP before # is not a comment", "\xa0# x; uv sync", True),
+        ("a tab before # is a comment", "\t# uv sync", False),
         ("uv in a command substitution",
          "PY=\"$(uv run --locked --project \"$HERE\" python3 -c 'import sys; print(sys.executable)')\"", False),
     ):
@@ -7068,11 +7072,11 @@ def self_test():
         (a14_root / "ci" / "version-lockstep").mkdir()
         (a14_root / "ci" / "version-lockstep" / "run.sh").write_text("#!/bin/bash\ntrue\n")
         a14_rows = a14_run(a14_proj(a14_good + " && bash ci/version-lockstep/run.sh --write"))
-        if not any("--write" in r for r in a14_rows):
+        if not any("runs ci/version-lockstep/run.sh with --write" in r for r in a14_rows):
             failures.append(f"A14 did not red a version-lockstep task with --write: {a14_rows}")
         for a14_ok in (" && bash ci/version-lockstep/run.sh --self-test",
                        " && bash ci/version-lockstep/run.sh && echo --write"):
-            if any("--write" in r for r in a14_run(a14_proj(a14_good + a14_ok))):
+            if any("runs ci/version-lockstep/run.sh with --write" in r for r in a14_run(a14_proj(a14_good + a14_ok))):
                 failures.append(f"A14 reddened a version-lockstep task without --write: {a14_ok!r}")
         a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/run.sh"))
         if not any("ci/x/run.sh" in r for r in a14_rows):
@@ -7116,8 +7120,15 @@ def self_test():
         for a14_w in (" && bash ci/version-lockstep/run.sh \\\n  --write",
                       " && bash ci/version-lockstep/run.sh --write=x",
                       " && bash ci/version-lockstep/run.sh --check --write"):
-            if not any("--write" in r for r in a14_run(a14_proj(a14_good + a14_w))):
+            if not any("runs ci/version-lockstep/run.sh with --write" in r
+                       for r in a14_run(a14_proj(a14_good + a14_w))):
                 failures.append(f"A14 did not red a version-lockstep --write form: {a14_w!r}")
+        # The live waiver table: every reason opens with a class word, and exactly one entry is EXECUTED.
+        # (The live reasons read "PROSE, not an invocation ...", so the class word ends at a word boundary.)
+        if not all(re.match(r"(?:PROSE|DATA|EXECUTED)\b", a14_r) for a14_r in ALLOW_UV_ENV_SCRIPT.values()):
+            failures.append("ALLOW_UV_ENV_SCRIPT has a reason that does not start with PROSE, DATA or EXECUTED")
+        if sum(a14_r.startswith("EXECUTED") for a14_r in ALLOW_UV_ENV_SCRIPT.values()) != 1:
+            failures.append("ALLOW_UV_ENV_SCRIPT must have exactly one EXECUTED entry")
         a14_stale = {("ci/x/msg.sh", "echo 'gone'"): "stale on purpose"}
         if not any("stale" in r for r in a14_run(a14_proj(a14_good), allow=a14_stale)):
             failures.append("A14 did not red a stale allowlist entry")
