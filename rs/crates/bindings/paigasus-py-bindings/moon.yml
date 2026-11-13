@@ -26,8 +26,21 @@ fileGroups:
     - '/rs/crates/libs/paigasus-kernel/src/**/*'
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
 
+# SMA-767: the crate-local `.cargo/config.toml` holds the macOS `-C strip=none` flag for the sdist.
+# Cargo reads it when it runs from this crate directory, so it can change the build output.
+# Each task below adds it to the inputs that the task inherits from `.moon/tasks/rust.yml`.
 tasks:
   build:
     deps: ['^:build']
+    inputs:
+      - '.cargo/config.toml'
+  build-release:
+    inputs:
+      - '.cargo/config.toml'
   test:
     deps: ['^:build']
+    inputs:
+      - '.cargo/config.toml'
+  lint:
+    inputs:
+      - '.cargo/config.toml'

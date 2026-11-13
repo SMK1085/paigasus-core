@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# SMA-767: this file exists so that `maturin sdist` ships the strip flag.
+# maturin cannot include a path that has `..`, so it cannot include `rs/.cargo/config.toml`.
+# A path inside the crate directory lands at the sdist root, which mirrors `rs/`.
+# A build from the sdist then reads this file in the same way as `rs/.cargo/config.toml`.
+# Keep this file in step with the strip flag in `rs/.cargo/config.toml`.
+# The comment in that file explains why the flag is needed.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "strip=none"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "strip=none"]

@@ -47,6 +47,7 @@ on:
       - 'rs/.cargo/config.toml'
       - 'rs/crates/bindings/paigasus-py-bindings/pyproject.toml'
       - 'rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml'
       - 'py/packages/paigasus-kernel/pyproject.toml'
 
   # POST-merge verification of Rust changes — where the broad coverage lives.
@@ -536,11 +537,16 @@ jobs:
           # is not allowlist evidence; what it does assert is that the BINDINGS' own README
           # shipped rather than only the vendored kernel's, which the basename form could not
           # tell apart.
+          #
+          # `.cargo/config.toml` (SMA-767) holds the macOS `-C strip=none` flag. The `[tool.maturin]
+          # include` puts it at the archive root. Without it, a macOS build from the sdist strips
+          # the binary and dyld on macOS 27 can reject the result.
           for required in \
             crates/bindings/paigasus-py-bindings/README.md \
             crates/bindings/paigasus-py-bindings/LICENSE \
             pyproject.toml \
-            Cargo.lock; do
+            Cargo.lock \
+            .cargo/config.toml; do
             grep -q "/$required$" < <(printf '%s\n' "$listing") \
               || { echo "::error::sdist is missing $required"; exit 1; }
           done

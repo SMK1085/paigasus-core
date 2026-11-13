@@ -45,3 +45,7 @@ build-backend = "maturin"
 # The sdist is therefore a supported install path, verified per-platform in
 # .github/workflows/wheels.yml.
 module-name = "paigasus_py_bindings"
+# SMA-767: ship the macOS strip flag in the sdist.
+# The crate-local `.cargo/config.toml` lands at the sdist root, which mirrors `rs/`.
+# A path with `..` (for example `rs/.cargo/config.toml`) is not allowed in an archive.
+include = [{ path = ".cargo/config.toml", format = "sdist" }]
