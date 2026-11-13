@@ -3677,6 +3677,7 @@ def _uv_script_closure(path, root):
 
 LOCKSTEP_SCRIPT = "ci/version-lockstep/run.sh"
 LOCKSTEP_WRITE_RE = re.compile(r"(?<![\w-])--write(?![\w-])")
+LOCKSTEP_ASSIGN_RE = re.compile(r"""\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=["']?([^"'\s;&|()]+)""")
 
 
 def _split_commands(text):
@@ -3747,11 +3748,15 @@ def runs_lockstep_write(blob):
     script path that only a real shell can compute. See R10 in ci/affected-graph/README.md.
     """
     text = blob.replace("\\\n", "")
+    segments = _split_commands(text)
     values = {}
-    for name, value in VAR_ASSIGN_RE.findall(text):
-        values.setdefault(name, set()).add(value)
+    # Per command, so a value stops at a separator (`D=x; …` assigns `x`, not `x;`).
+    for seg in segments:
+        m = LOCKSTEP_ASSIGN_RE.match(seg)
+        if m:
+            values.setdefault(m.group(1), set()).add(m.group(2))
     cwds = {""}
-    for seg in _split_commands(text):
+    for seg in segments:
         words = [w.lstrip("(").rstrip(")").strip("'\"") for w in seg.split()]
         words = [w for w in words if w not in ("", "{", "}", "!")]
         if len(words) > 1 and words[0] == words[1]:
@@ -7371,6 +7376,8 @@ def self_test():
             ("cd ci/version-lockstep && (cd ../actionlint && true) && ./run.sh --write", True),
             ("D=ci/version-lockstep\nbash \"$D/run.sh\" --write\nD=ci/actionlint", True),
             ("cd cd ci/version-lockstep && ./run.sh --write", True),
+            ('D=ci/version-lockstep; bash "$D/run.sh" --write', True),
+            ('export D=ci/version-lockstep && bash "$D/run.sh" --write', True),
             ("pushd pushd ci/version-lockstep && ./run.sh --write", True),
             ("bash ci/version-lockstep/run.sh 'a' && echo --write", False),
         ):
