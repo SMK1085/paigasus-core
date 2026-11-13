@@ -378,6 +378,36 @@ REQUIRED_CARGO_CONFIG_TASKS = (
     "repo:publish-metadata",
 )
 
+# SMA-767 follow-up — the crate-local `.cargo/config.toml` files. cargo reads every
+# `.cargo/config.toml` from its cwd up to the file system root, so a cargo run with cwd in a crate
+# directory reads the crate-local file AND `rs/.cargo/config.toml`. uv and maturin build
+# `paigasus-py-bindings` with cwd in its crate directory, which is why that crate ships the
+# macOS `-C strip=none` flag in its own file (the sdist cannot carry `rs/.cargo/config.toml`).
+# A10 demands each such file from every compiling task with cwd at or under its directory; A5
+# demands it from every FFI task whose invocation names the crate. The floor: each path here
+# must be demanded by A10 AND by A5 at least once, or the derivation has degraded.
+REQUIRED_CRATE_CARGO_CONFIGS = ("rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml",)
+
+
+def crate_local_cargo_configs(root):
+    """{crate directory name: workspace-relative path} of every `rs/crates/*/*/.cargo/config.toml`."""
+    out = {}
+    for path in sorted((Path(root) / "rs" / "crates").glob("*/*/.cargo/config.toml")):
+        out[path.parent.parent.name] = str(path.relative_to(root))
+    return out
+
+
+def _cargo_configs_below_rs(root, source_dir):
+    """The `.cargo/config.toml` paths that cargo reads between `source_dir` and `rs/`, `rs/` excluded."""
+    out, d = [], Path(source_dir)
+    while str(d).startswith("rs/"):
+        rel = d / ".cargo" / "config.toml"
+        if (Path(root) / rel).is_file():
+            out.append(str(rel))
+        d = d.parent
+    return out
+
+
 # SMA-599 — the shell-script cargo-line classifier shared by A8's script arm and A10.
 #
 # THE CONSERVATIVE RULE. Report every cargo invocation that does not carry `--locked` in its
@@ -1206,7 +1236,7 @@ def script_cargo_lines(path):
     no quote state to get wrong, so such a file classifies as ordinary code.
     """
     rows, delim, held, pending = [], None, None, []
-    for lineno, raw in enumerate(Path(path).read_text().splitlines(), 1):
+    for lineno, raw in enumerate(_read_utf8(path).splitlines(), 1):
         if delim is not None:
             if raw.strip() == delim:
                 delim = None
@@ -1294,7 +1324,14 @@ REQUIRED_SOURCED_SCRIPTS = {
 
 
 def _read_utf8(path):
-    """`path`'s text, read as UTF-8. A script that is not UTF-8 is an infrastructure error."""
+    """`path`'s text, read as UTF-8. A file that is not UTF-8 raises MoonOutputError that names it.
+
+    Every file read in this module goes through this helper (SMA-768 follow-up). A bare
+    `read_text()` raised a raw `UnicodeDecodeError`: rc 1 and a traceback with no file name.
+    MoonOutputError is in INFRA_ERRORS, so main() exits 2. A13's readers catch it and give a row
+    that names the file, which is A13's contract for an unreadable file. The self-test pins that
+    this is the only `read_text` call in the module.
+    """
     try:
         return Path(path).read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
@@ -1755,7 +1792,7 @@ def _var_sensitive(text):
     )
 
 
-def check_cargo_config_inputs(projects, root, allow=None, floor=None):
+def check_cargo_config_inputs(projects, root, allow=None, floor=None, local_floor=None):
     """A10: every task whose cargo can READ rs/.cargo/config.toml must key on it.
 
     Scope is the conjunction of two independent tests, and both matter:
@@ -1774,9 +1811,13 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
     "in scope", never a false "out of scope"), so the failure direction is a row a human must
     dismiss by hand, not a silently missed one (SMA-599 review).
     """
+    # `local_floor` defaults to the live floor only on the live call (no `floor` given), so the
+    # synthetic fixtures, which pass their own `floor`, do not need a crate-local file.
+    if local_floor is None:
+        local_floor = REQUIRED_CRATE_CARGO_CONFIGS if floor is None else ()
     allow = ALLOW_MISSING_CARGO_CONFIG if allow is None else allow
     floor = REQUIRED_CARGO_CONFIG_TASKS if floor is None else floor
-    rows, in_scope = [], set()
+    rows, in_scope, demanded = [], set(), set()
     for target, kind in sorted(derive_cargo_tasks(projects, root).items()):
         pid, _, name = target.partition(":")
         blob = projects[pid]["invocations"][name]
@@ -1790,7 +1831,7 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
         # script, so this costs nothing for a task that really is blob-only: MEASURED on the
         # real corpus, in_scope stays 58 and no row appears.
         for path in task_script_closure(projects, root, target):
-            text += "\n" + Path(path).read_text()
+            text += "\n" + _read_utf8(path)
         # A wrapper reaches cargo without a literal verb, so the verb test cannot see it. The
         # three FFI tasks compile and link cdylibs and wasm32 by construction.
         # Arm 2 makes a task sensitive UNCONDITIONALLY: `CARGO=<path> <tool>` reaches cargo
@@ -1826,6 +1867,15 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
                 f"{target} runs a compiling cargo command with cwd inside rs/ but does not "
                 f"key on {CARGO_CONFIG_INPUT} — a rustflags edit replays its cached result"
             )
+        # SMA-767 follow-up: a crate-local `.cargo/config.toml` at or above the task's cwd.
+        for local in _cargo_configs_below_rs(root, projects[pid]["source_dir"]):
+            demanded.add(local)
+            if local not in set(files) | set(globs):
+                rows.append(
+                    f"{target} runs a compiling cargo command in {projects[pid]['source_dir']} but "
+                    f"does not key on {local}, which cargo reads from that cwd — a rustflags edit "
+                    f"replays its cached result"
+                )
     for target in sorted(set(floor) - in_scope):
         rows.append(
             f"FLOOR: A10 examines {len(in_scope)} task(s) and {target} is not among them — "
@@ -1840,6 +1890,11 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
         rows.append(
             f"ALLOW_MISSING_CARGO_CONFIG names {target}, which A10 does not examine — the "
             f"waiver is stale; delete it"
+        )
+    for local in sorted(set(local_floor) - demanded):
+        rows.append(
+            f"FLOOR: A10 demands {local} from no task — the file moved, or the crate-local "
+            f"derivation has degraded (see REQUIRED_CRATE_CARGO_CONFIGS)"
         )
     return rows
 
@@ -1859,7 +1914,7 @@ def check_dockerfile_locked(root):
         )
     rows = []
     seen = 0
-    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+    for lineno, line in enumerate(_read_utf8(path).splitlines(), 1):
         stripped = line.split("#", 1)[0]
         if _dockerfile_env_redirects_cargo(stripped):
             rows.append(
@@ -1943,7 +1998,7 @@ def read_workspace_members(root, assertion):
             f"workspace root legitimately moved, update read_workspace_members rather than "
             f"deleting the check"
         )
-    members = (tomllib.loads(path.read_text()).get("workspace") or {}).get("members")
+    members = (tomllib.loads(_read_utf8(path)).get("workspace") or {}).get("members")
     if not members:
         raise MoonOutputError(
             f"{path} declares no `[workspace] members` — {assertion} cannot examine a member "
@@ -2025,7 +2080,7 @@ def check_member_literals(root):
     ]
 
 
-def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS):
+def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS, root=None, local_floor=None):
     """Return the A5 violation list: FFI-compiling tasks that do not key on the workspace files.
 
     Two halves, and both are load-bearing:
@@ -2038,9 +2093,17 @@ def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASK
 
     The derivation itself lives in `derive_ffi_tasks`, shared with A7.
 
+    With `root` (the live call), a derived task whose invocation names a crate that has a
+    crate-local `.cargo/config.toml` must declare that file too (SMA-767 follow-up), and each
+    `local_floor` path (default REQUIRED_CRATE_CARGO_CONFIGS) must be demanded at least once.
+
     Raises MoonOutputError if a task exposes none of a command, a script, or any args.
     """
     matched, a5 = derive_ffi_tasks(projects), []
+    configs = crate_local_cargo_configs(root) if root is not None else {}
+    if local_floor is None:
+        local_floor = REQUIRED_CRATE_CARGO_CONFIGS if root is not None else ()
+    demanded = set()
     for target in sorted(matched):
         pid, _, name = target.partition(":")
         resolved = (projects[pid].get("task_inputs") or {}).get(name)
@@ -2051,8 +2114,19 @@ def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASK
             )
             continue
         missing = [f for f in required if f not in resolved]
+        blob = (projects[pid].get("invocations") or {}).get(name) or ""
+        for crate, local in sorted(configs.items()):
+            if re.search(rf"(?<![\w-]){re.escape(crate)}(?![\w-])", blob):
+                demanded.add(local)
+                if local not in resolved:
+                    missing.append(local)
         if missing:
             a5.append(f"{target} inputs omit {', '.join(missing)}")
+    for local in sorted(set(local_floor) - demanded):
+        a5.append(
+            f"FLOOR: A5 demands {local} from no FFI task — the file moved, or no derived task "
+            f"names its crate any more (see REQUIRED_CRATE_CARGO_CONFIGS)"
+        )
     for target in sorted(set(floor) - matched):
         a5.append(
             f"{target} is not matched by any FFI marker — the derived set no longer covers it, "
@@ -2372,11 +2446,11 @@ def _read_package_json(root, rel_dir, rows):
     """
     rel = f"{rel_dir}/package.json"
     try:
-        data = json.loads((root / rel).read_text())
+        data = json.loads(_read_utf8(root / rel))
     except FileNotFoundError:
         rows.append(f"{rel} is missing")
         return None
-    except OSError as exc:
+    except (OSError, MoonOutputError) as exc:
         rows.append(f"{rel} cannot be read ({exc})")
         return None
     except ValueError as exc:
@@ -3144,8 +3218,8 @@ def _tsconfig_chain(root, pkg_dir, rows):
     while rel not in chain:
         chain.append(rel)
         try:
-            text = (root / rel).read_text()
-        except OSError as exc:
+            text = _read_utf8(root / rel)
+        except (OSError, MoonOutputError) as exc:
             rows.append(f"{rel} cannot be read ({exc})")
             break
         scanned = _scan_js(text, rel, rows)
@@ -3215,6 +3289,28 @@ def _builds_scratch_alias(target, blob, dest, ffi):
     return False
 
 
+def smoke_unreached(projects, paths):
+    """The `paths` that no input of repo:affected-smoke matches, sorted. None if it reports no `inputGlobs`.
+
+    One match for A13 and for A14's G5 (SMA-768 follow-up), so the two cannot drift. A path is
+    reached when it is in the task's `inputFiles`, or when a positive input glob matches it. A
+    negated glob (`!x`) removes a path from the inputs, even when a positive glob matches it.
+    """
+    smoke = projects.get(AFFECTED_SMOKE_PROJECT) or {}
+    smoke_globs = (smoke.get("task_input_globs") or {}).get(AFFECTED_SMOKE_TASK)
+    if smoke_globs is None:
+        return None
+    smoke_files = (smoke.get("task_inputs") or {}).get(AFFECTED_SMOKE_TASK) or []
+    patterns = [_moon_glob_re(g) for g in smoke_globs if not g.startswith("!")]
+    excluded = [_moon_glob_re(g[1:]) for g in smoke_globs if g.startswith("!")]
+    out = []
+    for path in sorted(paths):
+        reached = path in smoke_files or any(p.fullmatch(path) for p in patterns)
+        if not reached or any(p.fullmatch(path) for p in excluded):
+            out.append(path)
+    return out
+
+
 def _moon_glob_re(glob):
     """A regex for one moon input glob: `**/` and `**` cross `/`, `*` and `?` do not, `{a,b}` is a choice."""
     out, i = [], 0
@@ -3272,8 +3368,8 @@ def check_ts_vitest_inputs(projects, root, tracked, floor=REQUIRED_VITEST_TASKS,
         facts = []
         for cfg in vitest_invocation_configs(target, blob, root, own, task_rows):
             try:
-                text = (root / cfg).read_text()
-            except OSError as exc:
+                text = _read_utf8(root / cfg)
+            except (OSError, MoonOutputError) as exc:
                 walk_rows.append(f"{cfg} cannot be read ({exc})")
                 continue
             aliases, tsconfig_off = vitest_config_facts(text, cfg, walk_rows)
@@ -3316,25 +3412,18 @@ def check_ts_vitest_inputs(projects, root, tracked, floor=REQUIRED_VITEST_TASKS,
                 f"tree, so it must run after the generator for a deterministic cache key"
             )
     if configs_read:
-        smoke = projects.get(AFFECTED_SMOKE_PROJECT) or {}
-        smoke_globs = (smoke.get("task_input_globs") or {}).get(AFFECTED_SMOKE_TASK)
-        smoke_files = (smoke.get("task_inputs") or {}).get(AFFECTED_SMOKE_TASK) or []
-        if smoke_globs is None:
+        unreached = smoke_unreached(projects, configs_read)
+        if unreached is None:
             task_rows.append(
                 f"{AFFECTED_SMOKE_PROJECT}:{AFFECTED_SMOKE_TASK} reported no `inputGlobs`, so A13 cannot check "
                 f"that an edit to a vitest config schedules it"
             )
         else:
-            patterns = [_moon_glob_re(g) for g in smoke_globs if not g.startswith("!")]
-            # A negated glob removes a file from the inputs, even when a positive glob matches it.
-            excluded = [_moon_glob_re(g[1:]) for g in smoke_globs if g.startswith("!")]
-            for cfg in sorted(configs_read):
-                reached = cfg in smoke_files or any(p.fullmatch(cfg) for p in patterns)
-                if not reached or any(p.fullmatch(cfg) for p in excluded):
-                    task_rows.append(
-                        f"{cfg} matches no input of {AFFECTED_SMOKE_PROJECT}:{AFFECTED_SMOKE_TASK}, so an edit to it "
-                        f"alone does not schedule the gate that reads it"
-                    )
+            for cfg in unreached:
+                task_rows.append(
+                    f"{cfg} matches no input of {AFFECTED_SMOKE_PROJECT}:{AFFECTED_SMOKE_TASK}, so an edit to it "
+                    f"alone does not schedule the gate that reads it"
+                )
     for target in sorted(set(floor or ()) - tasks):
         floor_rows.append(
             f"FLOOR: {target} is not matched by the vitest token, so A13 asserts nothing about it "
@@ -3586,6 +3675,112 @@ def _uv_script_closure(path, root):
     return out
 
 
+LOCKSTEP_SCRIPT = "ci/version-lockstep/run.sh"
+LOCKSTEP_WRITE_RE = re.compile(r"(?<![\w-])--write(?![\w-])")
+LOCKSTEP_ASSIGN_RE = re.compile(r"""\s*(?:export\s+)*([A-Za-z_][A-Za-z0-9_]*)=["']?([^"'\s;&|()]+)""")
+
+
+def _split_commands(text):
+    """`text` cut at `&&`, `||`, `;`, `|` and a newline that are outside single and double quotes.
+
+    Not a shell parser (SMA-768 R10 follow-up): it knows quotes and a backslash inside double
+    quotes, and nothing else. Remove each backslash-newline continuation before the call.
+    """
+    out, cur, quote, i = [], [], None, 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < len(text):
+                cur.append(text[i:i + 2])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            cur.append(c)
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+        elif text.startswith(("&&", "||"), i):
+            out.append("".join(cur))
+            cur = []
+            i += 2
+            continue
+        elif c in ";|\n":
+            out.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    out.append("".join(cur))
+    return out
+
+
+def _expand_words(word, values):
+    """Every spelling of `word` after `$NAME` / `${NAME}` is replaced by each value assigned to NAME."""
+    out = {word}
+    for name in sorted(values, key=lambda n: (-len(n), n)):
+        nxt = set()
+        for cand in out:
+            if f"${name}" in cand or f"${{{name}}}" in cand:
+                for value in values[name]:
+                    nxt.add(cand.replace(f"${{{name}}}", value).replace(f"${name}", value))
+            else:
+                nxt.add(cand)
+        out = nxt
+    return out
+
+
+def runs_lockstep_write(blob):
+    """True when `blob` can run `ci/version-lockstep/run.sh` with `--write` (A14 rule 8).
+
+    Closed forms (SMA-768 R10 follow-up): the literal path anywhere in a command, a path relative
+    to a `cd` or `pushd` in an earlier command (`cd ci/version-lockstep && ./run.sh --write`), a
+    path through a `NAME=value` assignment in the blob (`$D/run.sh`), and a quoted separator
+    before `--write`. The check over-approximates on purpose, so it can add a row but never hide
+    one. It keeps EVERY directory that an earlier `cd` or `pushd` can reach, from the repository
+    root on, and never drops one (a `( … )` group, `popd`, or a `cd "$ROOT"` adds nothing and
+    removes nothing). It expands a `$NAME` with EVERY value that the blob assigns to NAME, in any
+    order. A repeated first word (`cd cd x`, the shape of moon's joined `command` + `script`) is
+    read once.
+    Not closed: `--write` from a variable, from `"$@"` or from moon passthrough arguments, and a
+    script path that only a real shell can compute. See R10 in ci/affected-graph/README.md.
+    """
+    text = blob.replace("\\\n", "")
+    segments = _split_commands(text)
+    values = {}
+    # Per command, so a value stops at a separator (`D=x; …` assigns `x`, not `x;`).
+    for seg in segments:
+        m = LOCKSTEP_ASSIGN_RE.match(seg)
+        if m:
+            values.setdefault(m.group(1), set()).add(m.group(2))
+    cwds = {""}
+    for seg in segments:
+        words = [w.lstrip("(").rstrip(")").strip("'\"") for w in seg.split()]
+        words = [w for w in words if w not in ("", "{", "}", "!")]
+        if len(words) > 1 and words[0] == words[1]:
+            words = words[1:]
+        if not words:
+            continue
+        if words[0] in ("cd", "pushd", "popd"):
+            arg = words[1] if len(words) > 1 and words[0] != "popd" else ""
+            for cand in _expand_words(arg, values):
+                if cand and not cand.startswith(("$", "/", "~", "-")):
+                    cwds |= {os.path.normpath(os.path.join(c, cand)) for c in cwds}
+            continue
+        for idx, word in enumerate(words):
+            hit = False
+            for cand in _expand_words(word, values):
+                if LOCKSTEP_SCRIPT in cand:
+                    hit = True
+                elif cand.endswith("run.sh") and not cand.startswith(("$", "/", "~")):
+                    hit = hit or any(os.path.normpath(os.path.join(c, cand)) == LOCKSTEP_SCRIPT for c in cwds)
+            if hit and any(LOCKSTEP_WRITE_RE.search(w) for w in words[idx + 1:]):
+                return True
+    return False
+
+
 def check_uv_env_isolation(projects, root, allow=None, floor=None):
     """Return the A14 violation list: tasks that can change a uv environment in place (SMA-765).
 
@@ -3594,8 +3789,8 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
     an unreadable script raises MoonOutputError, a missing floor task is a `FLOOR:` row. Script
     lines pass an allow-list of approved `uv` forms (`uv_form_hits`); any other `uv` line is a row.
     Rule 7: a task `env:` key that is VIRTUAL_ENV or starts with `UV_` is a row. Rule 8: a task
-    that runs `ci/version-lockstep/run.sh` with `--write` in one command is a row, because that
-    runs `uv lock`. An allowlist entry with an empty reason, or one that matches no
+    that can run `ci/version-lockstep/run.sh` with `--write` (`runs_lockstep_write`) is a row,
+    because that runs `uv lock`. An allowlist entry with an empty reason, or one that matches no
     scanned line, is a row, so the list cannot rot. Direction of failure: a row means a task can
     race another task on the shared environment.
     """
@@ -3621,13 +3816,11 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                 if env_name == "VIRTUAL_ENV" or env_name.startswith("UV_"):
                     rows.append(f"{target}: the task `env` sets {env_name}")
             # Rule 8: `version-lockstep --write` runs `uv lock`; the EXECUTED waiver assumes no task does.
-            for seg in re.split(r"&&|\|\||;|\|", blob.replace("\\\n", "")):
-                m = re.search(r"ci/version-lockstep/run\.sh(?=\s|$|['\"])(.*)", seg)
-                if m and re.search(r"(?<![\w-])--write(?![\w-])", m.group(1)):
-                    rows.append(
-                        f"{target}: runs ci/version-lockstep/run.sh with --write, which runs `uv lock` "
-                        f"(the EXECUTED waiver in ALLOW_UV_ENV_SCRIPT assumes no Moon task does)"
-                    )
+            if runs_lockstep_write(blob):
+                rows.append(
+                    f"{target}: runs ci/version-lockstep/run.sh with --write, which runs `uv lock` "
+                    f"(the EXECUTED waiver in ALLOW_UV_ENV_SCRIPT assumes no Moon task does)"
+                )
             for desc in uv_mutations(blob):
                 rows.append(f"{target}: its command {desc}")
             # A14's own closure (UV_SOURCE_STMT_RE), not `task_script_closure`: that one follows a
@@ -3661,26 +3854,20 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                         continue
                     rows.append(f"{target}: {rel_path}:{lineno} {desc}")
 
-    # G5: an edit to a file A14 reads must schedule repo:affected-smoke (same match as A13).
+    # G5: an edit to a file A14 reads must schedule repo:affected-smoke (`smoke_unreached`, shared with A13).
     if scanned:
-        smoke = projects.get(AFFECTED_SMOKE_PROJECT) or {}
-        smoke_globs = (smoke.get("task_input_globs") or {}).get(AFFECTED_SMOKE_TASK)
-        smoke_files = (smoke.get("task_inputs") or {}).get(AFFECTED_SMOKE_TASK) or []
-        if smoke_globs is None:
+        unreached = smoke_unreached(projects, reads)
+        if unreached is None:
             rows.append(
                 f"{AFFECTED_SMOKE_PROJECT}:{AFFECTED_SMOKE_TASK} reported no `inputGlobs`, so A14 cannot check "
                 f"that an edit to a script it reads schedules it"
             )
         else:
-            patterns = [_moon_glob_re(g) for g in smoke_globs if not g.startswith("!")]
-            excluded = [_moon_glob_re(g[1:]) for g in smoke_globs if g.startswith("!")]
-            for rel_path in sorted(reads):
-                reached = rel_path in smoke_files or any(p.fullmatch(rel_path) for p in patterns)
-                if not reached or any(p.fullmatch(rel_path) for p in excluded):
-                    rows.append(
-                        f"{rel_path} is read by A14 but matches no input of {AFFECTED_SMOKE_PROJECT}:"
-                        f"{AFFECTED_SMOKE_TASK}, so an edit to it alone does not schedule the gate that reads it"
-                    )
+            for rel_path in unreached:
+                rows.append(
+                    f"{rel_path} is read by A14 but matches no input of {AFFECTED_SMOKE_PROJECT}:"
+                    f"{AFFECTED_SMOKE_TASK}, so an edit to it alone does not schedule the gate that reads it"
+                )
 
     for target in floor:
         pid, _, name = target.partition(":")
@@ -3767,7 +3954,7 @@ def cargo_crates(root):
     """
     manifests = {}
     for path in sorted((root / "rs" / "crates").rglob("Cargo.toml")):
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(_read_utf8(path))
         package = data.get("package")
         if not package or "name" not in package:
             continue
@@ -6918,7 +7105,7 @@ def self_test():
         if not path.is_file():
             failures.append(f"the A13 corpus pin lists {cfg}, but it is not a file in the tree, so the parser cannot read it")
             continue
-        aliases, off = vitest_config_facts(path.read_text(), cfg, rows)
+        aliases, off = vitest_config_facts(_read_utf8(path), cfg, rows)
         if rows or tuple(aliases) != want_aliases or off is not want_off:
             failures.append(
                 f"the A13 parser reads {cfg} as aliases {aliases}, tsconfig_off {off}, rows {rows}; the "
@@ -7169,6 +7356,37 @@ def self_test():
         if not any("runs ci/version-lockstep/run.sh with --write" in r
                    for r in a14_run(a14_proj(a14_good + " && bash ci/version-lockstep/run.sh --wr\\\nite"))):
             failures.append("A14 did not red a version-lockstep --write that a continuation splits")
+        # R10 follow-up: the cheap indirect forms red; a different script or no --write stays green.
+        for a14_w, a14_want in (
+            ("cd ci/version-lockstep && ./run.sh --write", True),
+            ("cd ci/version-lockstep && bash run.sh --write", True),
+            ("(cd ci/version-lockstep; ./run.sh --write)", True),
+            ("{ cd ci/version-lockstep; ./run.sh --write; }", True),
+            ("cd ci && bash version-lockstep/run.sh --write", True),
+            ("pushd ci/version-lockstep && ./run.sh --write", True),
+            ("cd ci/version-lockstep\n./run.sh --write", True),
+            ("bash ci/version-lockstep/run.sh 'a;b' --write", True),
+            ('bash ci/version-lockstep/run.sh "a && b" --write', True),
+            ("D=ci/version-lockstep\nbash $D/run.sh --write", True),
+            ('D=ci/version-lockstep\nbash "${D}/run.sh" --write', True),
+            ('bash "$ROOT"/ci/version-lockstep/run.sh --write', True),
+            ("cd ci/x && ./run.sh --write", False),
+            ("cd ci/version-lockstep && ./run.sh --self-test", False),
+            ('cd ci/version-lockstep && cd "$ROOT" && ./run.sh --write', True),
+            ("cd ci/version-lockstep && (cd ../actionlint && true) && ./run.sh --write", True),
+            ("D=ci/version-lockstep\nbash \"$D/run.sh\" --write\nD=ci/actionlint", True),
+            ("cd cd ci/version-lockstep && ./run.sh --write", True),
+            ('D=ci/version-lockstep; bash "$D/run.sh" --write', True),
+            ('export D=ci/version-lockstep && bash "$D/run.sh" --write', True),
+            ('export export D=ci/version-lockstep && bash "$D/run.sh" --write', True),
+            ("pushd pushd ci/version-lockstep && ./run.sh --write", True),
+            ("bash ci/version-lockstep/run.sh 'a' && echo --write", False),
+        ):
+            if runs_lockstep_write(a14_w) is not a14_want:
+                failures.append(f"A14 rule 8 reads {a14_w!r} as {'green' if a14_want else 'red'}")
+        if not any("runs ci/version-lockstep/run.sh with --write" in r
+                   for r in a14_run(a14_proj(a14_good + " && cd ci/version-lockstep && ./run.sh --write"))):
+            failures.append("A14 did not red `cd ci/version-lockstep && ./run.sh --write` through the check")
         # The floor gives no credit to an isolated run that sits in a multi-line quote or after a `#` word.
         a14_iso = "uv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
         for a14_blob in (f"echo '\n{a14_iso}\n'\nuv run pytest tests",
@@ -7282,6 +7500,100 @@ def self_test():
             failures.append("A14 did not raise on an unresolvable `../scripts/` reference")
         except MoonOutputError:
             pass
+
+    # SMA-768 follow-up: every file read goes through `_read_utf8`. A file that is not UTF-8 is
+    # MoonOutputError (rc 2) that names the file, never a raw UnicodeDecodeError (rc 1). A13 keeps
+    # its own contract: an unreadable file is a row that names it.
+    rd_bad = bytes([0x23, 0x20, 0xFF, 0x0A])
+
+    def rd_infra(label, name, fn):
+        try:
+            fn()
+        except MoonOutputError as exc:
+            if "not valid UTF-8" not in str(exc) or name not in str(exc):
+                failures.append(f"UTF-8 read, {label}: the error does not name {name}: {exc}")
+            return
+        except Exception as exc:
+            failures.append(f"UTF-8 read, {label}: raised {type(exc).__name__}, not MoonOutputError: {exc}")
+            return
+        failures.append(f"UTF-8 read, {label}: a file that is not UTF-8 raised nothing")
+
+    with tempfile.TemporaryDirectory() as rd_tmp:
+        rd_root = Path(rd_tmp)
+        (rd_root / "a8.sh").write_bytes(rd_bad)
+        rd_infra("A8 script_cargo_lines", "a8.sh", lambda: script_cargo_lines(rd_root / "a8.sh"))
+        (rd_root / "rs" / "crates" / "libs" / "x").mkdir(parents=True)
+        (rd_root / "rs" / "Dockerfile").write_bytes(rd_bad)
+        rd_infra("A8 check_dockerfile_locked", "Dockerfile", lambda: check_dockerfile_locked(rd_root))
+        (rd_root / "rs" / "Cargo.toml").write_bytes(rd_bad)
+        rd_infra("read_workspace_members", "Cargo.toml", lambda: read_workspace_members(rd_root, "A9"))
+        (rd_root / "rs" / "crates" / "libs" / "x" / "Cargo.toml").write_bytes(rd_bad)
+        rd_infra("cargo_crates", "Cargo.toml", lambda: cargo_crates(rd_root))
+        (rd_root / "ci" / "y").mkdir(parents=True)
+        (rd_root / "ci" / "y" / "run.sh").write_bytes(b"cd rs\n\xff\n")
+        rd_a10 = {"repo": {"source_dir": ".", "deps": {}, "tasks": {},
+                           "task_inputs": {"g": []}, "task_input_globs": {"g": []},
+                           "invocations": {"g": "bash ci/y/run.sh"}}}
+        rd_infra("A10 followed script", "run.sh",
+                 lambda: check_cargo_config_inputs(rd_a10, rd_root, allow={}, floor=()))
+        (rd_root / "pkg").mkdir()
+        (rd_root / "pkg" / "package.json").write_bytes(rd_bad)
+        (rd_root / "pkg" / "tsconfig.json").write_bytes(rd_bad)
+        for rd_label, rd_fn in (("A13 package.json", _read_package_json), ("A13 tsconfig chain", _tsconfig_chain)):
+            rd_rows = []
+            try:
+                rd_fn(rd_root, "pkg", rd_rows)
+            except Exception as exc:
+                failures.append(f"UTF-8 read, {rd_label}: raised {type(exc).__name__} in place of a row: {exc}")
+                continue
+            if not any("pkg/" in r and "not valid UTF-8" in r for r in rd_rows):
+                failures.append(f"UTF-8 read, {rd_label}: no row names the file that is not UTF-8: {rd_rows}")
+    # The pin: `_read_utf8` holds the only `read_text` call, and nothing opens a file another way.
+    rd_src = _read_utf8(__file__)
+    if rd_src.count("." + "read_text(") != 1 or re.search(r"\bopen\(|\.read_bytes\(|tomllib\.load\(", rd_src):
+        failures.append("a file read in cargo_moon_parity.py does not go through _read_utf8")
+
+    # SMA-768 follow-up: A13 and A14 G5 share `smoke_unreached`.
+    su_proj = {AFFECTED_SMOKE_PROJECT: {"task_inputs": {AFFECTED_SMOKE_TASK: ["x/lit.sh"]},
+                                        "task_input_globs": {AFFECTED_SMOKE_TASK: ["ci/**/*", "!ci/no.sh"]}}}
+    su_got = smoke_unreached(su_proj, {"ci/a.sh", "ci/no.sh", "x/lit.sh", "y/b.sh"})
+    if su_got != ["ci/no.sh", "y/b.sh"]:
+        failures.append(f"smoke_unreached returned {su_got}, not ['ci/no.sh', 'y/b.sh']")
+    if smoke_unreached({}, {"ci/a.sh"}) is not None:
+        failures.append("smoke_unreached did not return None when repo:affected-smoke reports no inputGlobs")
+
+    # SMA-767 follow-up: a crate-local `.cargo/config.toml` is demanded by A10 and by A5.
+    with tempfile.TemporaryDirectory() as cl_tmp:
+        cl_root = Path(cl_tmp)
+        cl_rel = "rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml"
+        (cl_root / cl_rel).parent.mkdir(parents=True)
+        (cl_root / cl_rel).write_text("[target.x86_64-apple-darwin]\n")
+        cl_crate = {"pb-rs": {"source_dir": "rs/crates/bindings/paigasus-py-bindings", "deps": {}, "tasks": {},
+                              "task_inputs": {"build": [CARGO_CONFIG_INPUT, cl_rel]},
+                              "task_input_globs": {"build": []},
+                              "invocations": {"build": "cargo build --locked"}}}
+        if check_cargo_config_inputs(cl_crate, cl_root, allow={}, floor=(), local_floor=(cl_rel,)):
+            failures.append("A10 reported rows on a crate task that keys on its crate-local cargo config")
+        cl_broken = json.loads(json.dumps(cl_crate))
+        cl_broken["pb-rs"]["task_inputs"]["build"] = [CARGO_CONFIG_INPUT]
+        if not any("pb-rs:build" in r and cl_rel in r
+                   for r in check_cargo_config_inputs(cl_broken, cl_root, allow={}, floor=())):
+            failures.append("A10 did not red a crate task that omits its crate-local cargo config")
+        cl_other = json.loads(json.dumps(cl_crate))
+        cl_other["pb-rs"]["source_dir"] = "rs/crates/libs/other"
+        if not any(r.startswith("FLOOR:") and cl_rel in r
+                   for r in check_cargo_config_inputs(cl_other, cl_root, allow={}, floor=(), local_floor=(cl_rel,))):
+            failures.append("A10 gave no FLOOR row when no task demands the crate-local cargo config")
+        cl_ffi = json.loads(json.dumps(ffi_ok))
+        if not any("paigasus-kernel-py:test" in r and cl_rel in r for r in check_ffi_inputs(cl_ffi, root=cl_root)):
+            failures.append("A5 did not red the py FFI task that omits the crate-local cargo config")
+        cl_ffi["paigasus-kernel-py"]["task_inputs"]["test"].append(cl_rel)
+        if check_ffi_inputs(cl_ffi, root=cl_root):
+            failures.append(f"A5 reported rows on a py FFI task that keys on the crate-local cargo config: "
+                            f"{check_ffi_inputs(cl_ffi, root=cl_root)}")
+        cl_ffi["paigasus-kernel-py"]["invocations"]["test"] = "uv run --isolated --reinstall-package other pytest"
+        if not any(r.startswith("FLOOR:") and cl_rel in r for r in check_ffi_inputs(cl_ffi, root=cl_root)):
+            failures.append("A5 gave no FLOOR row when no FFI task names the crate with a crate-local cargo config")
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
@@ -7322,7 +7634,7 @@ def collect_findings(projects, crates, root, tracked):
     with `task_inputs.tracked_files`; the self-test passes a fixed set.
     """
     a1, a2, a3 = check(projects, crates)
-    a5 = check_ffi_inputs(projects)
+    a5 = check_ffi_inputs(projects, root=root)
     a8 = (
         check_cargo_locked(projects, root)
         + check_dockerfile_locked(root)
@@ -7376,7 +7688,8 @@ def collect_findings(projects, crates, root, tracked):
              "    replays a CACHED artifact built from a different resolution — and clippy cannot\n"
              "    cover it, because it never links a cdylib and never targets wasm32 (SMA-546).\n"
              f"    Fix: add {want_ffi_inputs}\n"
-             "    to that task's `inputs`. A `not matched by any FFI marker` row\n"
+             "    to that task's `inputs`, and the crate-local `.cargo/config.toml` of each binding\n"
+             "    crate that the task names (SMA-767 follow-up). A `not matched by any FFI marker` row\n"
              "    means the opposite — the task stopped looking like a Rust build to A5; either\n"
              "    restore the invocation or update FFI_MARKERS."),
         ("a6", check_upstream_inputs(projects),
@@ -7434,7 +7747,9 @@ def collect_findings(projects, crates, root, tracked):
              "    (SMA-594, SMA-599).\n"
              "    Fix: for a crate task the input is declared once for ALL crates in\n"
              "    .moon/tasks/rust.yml — restore it there, not per-crate. For a repo:* gate it\n"
-             "    is declared in that task's own `inputs` in moon.yml.\n"
+             "    is declared in that task's own `inputs` in moon.yml. A crate-local\n"
+             "    `.cargo/config.toml` row: add `.cargo/config.toml` to the `inputs` of that\n"
+             "    task in the crate's own moon.yml (SMA-767 follow-up).\n"
              "    `cargo fmt`, `cargo tree`, `cargo metadata`, `cargo deny` and `cargo machete`\n"
              "    are out of scope BY VERB (they never compile or link) — see\n"
              "    CONFIG_SENSITIVE_VERBS. A `FLOOR:` row means the check itself cannot be\n"

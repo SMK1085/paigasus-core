@@ -12,6 +12,20 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   binary linked with SDK 27. The error is "mis-aligned LINKEDIT". Do not add maturin `--strip` or
   `strip = true`. Do not add napi `--strip`. Each one runs `rust-objcopy` again. The crate-local
   `rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml` must agree with the shared file.
+  `repo:affected-smoke` A5 and A10 red when a task that reads the crate-local file does not key on it.
+  A build with cwd in that crate gets `-C strip=none` twice. Measured: same stroff and size. Keep both.
+- **SMA-767 R1, host units: the CI darwin legs set `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none`.**
+  With `--target`, a target rustflag does not reach the host proc macros and build scripts. They
+  keep the release strip with `rust-objcopy`, and rustc loads a proc macro with dlopen. Measured
+  on macOS 27.2 (`--release --target aarch64-apple-darwin`, both bindings): 29 of 40 host units got
+  `-C strip=debuginfo`; with the variable, 0 did. Today all 4 proc-macro dylibs and 11 build
+  scripts are aligned. Cost on macOS: +1.1 MB in `target/release`. The variable is set in a
+  darwin-only step of `wheels.yml` and `prebuild.yml`, NOT as `[profile.release.build-override]`
+  in `rs/Cargo.toml`. Measured in `rust:1.95.0-bookworm` (`cargo build --release --workspace`):
+  the profile grew the Linux target dir by 385 MB (1.45 GB to 1.84 GB, proc-macro `.so` files
+  159 MB to 351 MB), with the same build time (85 s, 86 s). It also changed the bytes of every
+  shipped Linux binary (py `.so` 582016 to 582008 bytes), because the proc-macro hashes change.
+  A local `--target` release build on macOS still strips host units. Set the variable for it.
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - Tests that assert on a log line use `paigasus_logging::test_support` (`capture_logs` at TRACE,
   `capture_logs_at(level)`). Turn on its `test-support` feature from `[dev-dependencies]` only,

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # SMA-767: this file exists so that `maturin sdist` ships the strip flag.
-# maturin cannot include a path that has `..`, so it cannot include `rs/.cargo/config.toml`.
+# A `[tool.maturin] include` path is relative to this crate directory. maturin rejects a path
+# with a `..` component ("paths in archives must not have `..`"), so the sdist cannot carry
+# `rs/.cargo/config.toml`.
 # A path inside the crate directory lands at the sdist root, which mirrors `rs/`.
 # A build from the sdist then reads this file in the same way as `rs/.cargo/config.toml`.
 # Keep this file in step with the strip flag in `rs/.cargo/config.toml`.

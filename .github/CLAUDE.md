@@ -245,7 +245,12 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   assertions match on basename.
   The darwin steps of `wheels.yml` and `prebuild.yml` also assert `stroff mod 8 = 0` for the
   `LC_SYMTAB` string pool, because dyld on macOS 27 rejects a mis-aligned binary linked with SDK 27 (SMA-767; see
-  `rs/CLAUDE.md`).
+  `rs/CLAUDE.md`). A darwin-only step in each workflow sets `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none`, so
+  the host proc macros and build scripts of a `--target` build are not stripped either (SMA-767 R1).
+  Measured on the merged `main` runs (wheels 43516091389, prebuild 43516091280) against the runs before
+  (43304821010, 43304821032): every Linux binary is byte-identical, and the Windows binaries have the same
+  size with 28 different bytes. The darwin binaries grew by 36 KB to 41 KB. Each unstripped darwin binary
+  holds 4 to 6 N_OSO paths, all of them `std` rlibs under `/Users/runner/.rustup/toolchains/` (spec §6).
 - All four **Linux** wheel legs cross-compile with `--zig` — not only the musl ones, unlike
   `prebuild.yml`. `ubuntu-latest` ships glibc 2.39, so a *native* build tags `manylinux_2_39`,
   which almost nothing can install. The floor comes from **`--zig` together with

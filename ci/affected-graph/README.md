@@ -107,6 +107,12 @@ It also runs several checks that the per-case project sets structurally **cannot
   covers a future fourth binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
   vacuous PASS if a task ever stops matching the markers. A task with none of a `command`, a
   `script`, or any `args` aborts as infra (rc 2), never as a silent skip.
+  Since the SMA-767 follow-up, A5 also demands each crate-local `rs/crates/*/*/.cargo/config.toml`
+  from a derived task whose invocation names that crate. Today this is
+  `rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml` for `paigasus-kernel-py:test`
+  (`--reinstall-package paigasus-py-bindings`). uv and maturin build the binding with cwd in the
+  crate directory, so cargo reads that file. The floor `REQUIRED_CRATE_CARGO_CONFIGS` makes A5
+  red when no derived task demands the file.
 - **A6** (in `cargo_moon_parity.py`, SMA-528) asserts every crate's `build`/`test`/`lint` keys on its
   TRANSITIVE `dependsOn` closure's sources — `fileGroups.upstreams`, strict equality against moon's
   own Rust-restricted closure (`rust_closure()`, which excludes non-Rust build-scope parents like
@@ -290,6 +296,13 @@ It also runs several checks that the per-case project sets structurally **cannot
   from A8 — reusing A8's would pull `"$CARGO_BIN" tree` into A10's scope with nothing to red it
   — and the `CARGO=` prefix, which makes a task sensitive UNCONDITIONALLY, since A10 cannot read
   the subcommand the redirected tool will run.
+  Since the SMA-767 follow-up, A10 also demands each `.cargo/config.toml` between the task's
+  project directory and `rs/` (`rs/` excluded) from an in-scope task. cargo reads every
+  `.cargo/config.toml` from its cwd upward, and Moon runs a crate task in the crate directory. Today
+  this is the crate-local file of `paigasus-py-bindings`, for its `build`, `build-release`, `test`
+  and `lint`. The same floor `REQUIRED_CRATE_CARGO_CONFIGS` makes A10 red when no task demands the
+  file. Not seen: a task that `cd`s into a crate directory from outside `rs/crates/` (the cwd rule
+  then sees only `rs/`).
 - **A12** (`check_ts_tsc_inputs` and `check_ts_tsc_preflight` in `cargo_moon_parity.py`, SMA-536,
   findings keys `a12a` and `a12b`) covers every task of a `language: typescript` project whose
   resolved invocation runs `tsc` (`TSC_TOKEN_RE`). It reads each task's `package.json` closure
@@ -396,9 +409,15 @@ It also runs several checks that the per-case project sets structurally **cannot
   6. Any non-comment mention of `UV_*`, `VIRTUAL_ENV` or `--active` is a row. This covers an assignment,
      a default, an `export`, an `unset` and a plain mention.
   7. A task `env:` key that is `VIRTUAL_ENV` or starts with `UV_` is a row.
-  8. A task that runs `ci/version-lockstep/run.sh` with `--write` in one command is a row.
+  8. A task that can run `ci/version-lockstep/run.sh` with `--write` is a row (`runs_lockstep_write`).
      That script runs `uv lock` in `run_write`. The `EXECUTED` waiver below is true only while
-     no Moon task passes `--write`.
+     no Moon task passes `--write`. The check cuts the task text into commands at `&&`, `||`, `;`,
+     `|` and a new line that are outside quotes. It keeps every directory that an earlier `cd` or
+     `pushd` to a plain relative path can reach, and never drops one. It expands `$NAME` with every
+     value that the task text assigns to NAME. A repeated first word (`cd cd x`) is read once. So
+     the check can add a row, but it cannot hide one. So `cd ci/version-lockstep && ./run.sh --write`,
+     `$D/run.sh --write` and `run.sh 'a;b' --write` are rows. A `--write` in a later command, such as
+     `run.sh && echo --write`, is not a row.
   Waivers: `ALLOW_UV_ENV_SCRIPT` has 27 entries. They are keyed by the script path and the exact stripped
   physical line, and each has a reason that starts with its class. There are 23 `PROSE` entries (a message),
   3 `DATA` entries (a pattern or Python data) and 1 `EXECUTED` entry (the `uv lock` call). Do not add a second
@@ -409,10 +428,14 @@ It also runs several checks that the per-case project sets structurally **cannot
   paigasus-py-bindings`, and its command must be `pytest`, `python -m pytest` or `python3 -m pytest`.
   If not, A14 gives a `FLOOR:` row. Fix a `FLOOR:` row first, because the check cannot be trusted until then.
   Two more checks do not depend on the allow-list. G4: a scanned script that is not valid UTF-8 raises
-  `MoonOutputError`, and the gate exits 2 with the file name. The shared `source` walk (`_executable_text`) and the A14 read both raise this error.
-  The A8 cargo-line read (`script_cargo_lines`) does not. It can still raise a raw `UnicodeDecodeError`.
-  This is a known limit outside SMA-768. A8 and A10 follow the same files as before.
-  G5: each file that A14 reads must match an input of `repo:affected-smoke`, with the same match as A13.
+  `MoonOutputError`, and the gate exits 2 with the file name. Since the SMA-765/767/768 follow-up,
+  every file read in `cargo_moon_parity.py` goes through `_read_utf8`, A8's `script_cargo_lines`,
+  A10's script read, the Dockerfile, `rs/Cargo.toml` and every crate manifest included. A13 keeps
+  its own contract: an unreadable `package.json`, `tsconfig.json` or vitest config is a row that
+  names the file. The self-test has one row per read path, and it pins that `_read_utf8` holds the
+  only `read_text` call in the file. A8 and A10 follow the same files as before.
+  G5: each file that A14 reads must match an input of `repo:affected-smoke`. A13 and G5 use one
+  helper for this match, `smoke_unreached`.
   A missing task, or a task with no `inputGlobs`, is a row. To fix a G5 row, add a glob to the `inputs`
   of `repo:affected-smoke` in `moon.yml`, and to `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`.
   Real-tree negative control: `main()` removes `--isolated` from the floor task in a deep copy of the real graph.
@@ -448,9 +471,14 @@ It also runs several checks that the per-case project sets structurally **cannot
     `ci/actionlint/run.sh` runs `bash ci/release-plan/run.sh`.
   - R9. A waiver matches its line text anywhere in the same script. A copy of the `EXECUTED` `uv lock`
     line elsewhere in `ci/version-lockstep/run.sh` passes, and rule 8 does not catch it.
-  - R10. Rule 8 sees only the literal path `ci/version-lockstep/run.sh` in the task text. It misses
-    `cd ci/version-lockstep && ./run.sh --write`, a path built from a variable, a quoted separator before `--write`, and `--write` from a variable (`W=--write; ... run.sh $W`), from `"$@"`,
-    or from passthrough arguments (`moon run repo:version-lockstep -- --write`).
+  - R10. Partly closed by the follow-up sweep: a `cd`/`pushd` before a relative `run.sh`, a path
+    through a `NAME=value` assignment in the task text, and a quoted separator before `--write` are
+    now rows. Still not seen: `--write` from a variable (`W=--write; ... run.sh $W`), from `"$@"`,
+    or from passthrough arguments (`moon run repo:version-lockstep -- --write`); a path that only a
+    shell can compute (`$(dirname …)`, `eval`); and a script that runs `version-lockstep --write`
+    from a scanned `ci/**/*.sh` file. Each one needs real shell evaluation. The check never drops a
+    reachable directory (a `( … )` group, `popd`, `cd "$ROOT"`) and uses every assigned value of a
+    variable, so a false row is possible and a missed row is not.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`

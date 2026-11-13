@@ -196,6 +196,17 @@ jobs:
         shell: bash
         run: echo 'RUSTFLAGS=-C target-feature=-crt-static' >> "$GITHUB_ENV"
 
+      # SMA-767 R1. With --target, the apple-darwin rustflag `-C strip=none` reaches only the
+      # target units. The host proc macros and build scripts keep the release default strip,
+      # which rustc does with `rust-objcopy`. rustc loads a proc macro with dlopen, so a
+      # mis-aligned one breaks the build on a macOS 27 host with SDK 27. This variable stops
+      # that strip for host units only. It is set on darwin only: as a `rs/Cargo.toml` profile
+      # it grew a Linux release target dir by 385 MB (measured, see rs/CLAUDE.md).
+      - name: Keep host build units unstripped (darwin only)
+        if: ${{ contains(matrix.target, 'apple-darwin') }}
+        shell: bash
+        run: echo 'CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none' >> "$GITHUB_ENV"
+
       # --compatibility is passed EXPLICITLY so maturin's built-in auditwheel errors on a
       # mismatch rather than silently emitting a `linux_*` tag that PyPI rejects.
       - name: Build the wheel
