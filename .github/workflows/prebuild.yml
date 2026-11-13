@@ -199,6 +199,17 @@ jobs:
           x64min="$(otool -l paigasus-node-bindings.darwin-x64.node | awk '/LC_VERSION_MIN_MACOSX/&&!d{getline; getline; v=$2; d=1} END{print v}')"
           [ "$x64min" = "10.12" ] || { echo "::error::darwin-x64 minimum macOS moved from 10.12 to [$x64min] — set MACOSX_DEPLOYMENT_TARGET"; exit 1; }
           echo "darwin-x64 minimum macOS: [$x64min] (unchanged from the Intel-runner build)"
+          # SMA-767: dyld on macOS 27 rejects a binary linked with SDK 27 when the string pool
+          # of LC_SYMTAB is not 8-byte aligned. Assert `stroff mod 8 = 0` for both files.
+          # The awk reads the whole pipe, so otool never gets SIGPIPE (see ci/CLAUDE.md).
+          for f in paigasus-node-bindings.darwin-arm64.node paigasus-node-bindings.darwin-x64.node; do
+            # sma767-guard:begin
+            stroff="$(otool -l "$f" | awk '/^ *stroff /&&!d{v=$2; d=1} END{print v}')"
+            case "$stroff" in ''|*[!0-9]*) echo "::error::no numeric LC_SYMTAB stroff in $f [$stroff] (SMA-767)"; exit 1;; esac
+            [ $((stroff % 8)) -eq 0 ] || { echo "::error::$f string pool at stroff $stroff is not 8-byte aligned; dyld on macOS 27 rejects it when linked with SDK 27 (SMA-767)"; exit 1; }
+            echo "$f stroff $stroff: 8-byte aligned"
+            # sma767-guard:end
+          done
 
       - name: Upload prebuild artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2

@@ -38,6 +38,8 @@ refresh the binding when no Moon run is active, run this from the repository roo
 The `touch` forces a rebuild from the current Rust source. Without it, a checkout or rebase can
 leave a source file older than the cached build, and the reinstall then gets a stale binding
 (the same reason as the `touch` in the kernel test task).
+After you pull the SMA-767 change, run this command once. `py/.venv` keeps the old binding, and macOS 27 cannot
+load it. See the SMA-767 entry in `rs/CLAUDE.md`.
 
 Notes:
 
