@@ -117,7 +117,7 @@
 
 - [ ] **Step 1: Rewrite the README A14 entry** for spec §4.2, §4.3 and §4.4. Name the six SMA-768 gaps by number with their result: 1 closed (allow-list), 2 closed (rule 6), 3 closed as invalid (already red; row kept), 4 closed (G4), 5 closed (G5), 6 residual R1. List residuals R1-R8. Write in ASD-STE100 style: short sentences, active voice.
 - [ ] **Step 2: Rewrite the `a14` `Fix:` text** as spec §6 says. Name `moon.yml` and `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh` for a G5 row.
-- [ ] **Step 3: Run** `--self-test` → rc 0, and `grep -c ciReport.json ci/affected-graph/README.md` gives the same count as before the edit (actionlint check 12).
+- [ ] **Step 3: Run** `--self-test` → rc 0, and the README names the moon CI report file no more often than before the edit (actionlint check 12 reds a file that names it without a marker).
 - [ ] **Step 4: Commit.** `docs(ci): describe the A14 allow-list and its residuals (SMA-768)`.
 
 ### Task 6: Mutation battery and the full proof
