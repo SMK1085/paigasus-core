@@ -2114,7 +2114,7 @@ affected_graph_wiring_verdict() {
 # MEASURED to match dot-prefixed paths, so a .github/-only PR does schedule it — and that
 # premise is itself now pinned, from ci_targets.py's SELF_TASK_EXPECTED_GLOBS["actionlint"].
 #
-# CONTAINMENT, not equality: the list is thirty-four entries and legitimately grows every time a
+# CONTAINMENT, not equality: the list is thirty-five entries and legitimately grows every time a
 # gate keys on a new directory, so an exact match would red on every honest addition. The set
 # below is the WHOLE current list rather than a judged subset — a floor, not a judgement call.
 # The first design draft picked seven by a stated principle and an adversarial review showed the
@@ -2148,6 +2148,8 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ts/packages/*/tsconfig*.json'
   'ts/apps/*/tsconfig*.json'
   'ts/tsconfig.base.json'
+  # SMA-765 - floors the input that makes A14 reachable: A14 reads py/scripts/*.sh.
+  'py/scripts/**/*'
   'ci/actionlint/**/*'
   'ci/release-parity/**/*'
   'ci/workflow-credentials/**/*'

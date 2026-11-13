@@ -32,8 +32,16 @@ tasks:
   # per-triple subdir), so we avoid it. Only `test` carries the touch — the `build` task above
   # neither materializes nor asserts the wheel, so it cannot serve a stale artifact (intentional
   # asymmetry with the ts side, whose `build` produces the .node).
+  #
+  # `--isolated` (SMA-765): the task builds its own temporary environment. The old exact `uv sync`
+  # wrote the shared py/.venv and removed 18 packages (grpclib, anthropic, ...) while `py:test`
+  # collected in parallel (CI run 43295812102). `--reinstall-package` stays: it still forces the
+  # maturin rebuild inside that environment (spike S4). Measured: after a version bump in a member
+  # pyproject.toml, `uv run --isolated` did not write py/uv.lock.
+  # Residual (R-stale): no Moon task refreshes the binding in py/.venv, so `py:test` and
+  # `py:typecheck` can see a stale binding. The remedy is in py/README.md ("After a Rust change").
   test:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-py-bindings/src/lib.rs && uv sync --reinstall-package paigasus-py-bindings && uv run pytest tests'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-py-bindings/src/lib.rs && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests'
     deps: ['^:build']
     inputs:
       - 'tests/**/*'

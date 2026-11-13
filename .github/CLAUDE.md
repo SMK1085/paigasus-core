@@ -184,10 +184,14 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - `--write` owns ten sites: five kernel non-Cargo sites, one proto pyproject site, three binding
   manifests, and the version literals of the napi glue `index.js` (SMA-684). The script checks
   all twenty sites, because a `version_group` fault could stop applying silently. Today that risk
-  is real only for `paigasus-proto-derive`. Two sites drift silently without this check.
-  `py/uv.lock` drifts because its `moon.yml` runs bare `uv sync`, not `--locked`. The 27
-  `bindingPackageVersion` guards in the committed napi glue (26 native, 1 WASI) drift because the
-  codegen-drift gate covers only the three `**/generated` proto dirs. Since SMA-667,
+  is real only for `paigasus-proto-derive`. Two sites drift silently without this check:
+  `py/uv.lock` and the napi glue guards that the next paragraph describes.
+  `repo:version-lockstep` checks only the member version strings in `py/uv.lock`. It does not
+  check the rest of the lock. Since SMA-765 the kernel test runs `uv run --isolated`. Measured:
+  after a version bump in a member pyproject.toml, `uv sync` rewrote `py/uv.lock`, and
+  `uv run --isolated` did not.
+  The 27 `bindingPackageVersion` guards in the committed napi glue (26 native, 1 WASI) drift
+  because the codegen-drift gate covers only the three `**/generated` proto dirs. Since SMA-667,
   `paigasus-kernel-ts:test` (`tests/committed-napi-glue.test.ts`) also fails on stale guards.
 - `--write` writes the napi guards with a text writer, not with `napi build` (SMA-684). The
   release-PR job compiles nothing, because every step of that job can read the App private key.

@@ -29,6 +29,16 @@ The quality gates live on the `py` Moon project and run once over the whole work
 | Type check | `moon run py:typecheck` |
 | Test | `moon run py:test` |
 
+## After a Rust change
+
+`py:test` and `py:typecheck` use the binding that is installed in `py/.venv`. No Moon task
+rebuilds that binding after a Rust source change (SMA-765). The kernel test builds its own isolated environment instead. To
+refresh the binding when no Moon run is active, run this from the repository root:
+`touch rs/crates/libs/paigasus-kernel/src/lib.rs rs/crates/bindings/paigasus-py-bindings/src/lib.rs && (cd py && uv sync --all-packages --reinstall-package paigasus-py-bindings)`.
+The `touch` forces a rebuild from the current Rust source. Without it, a checkout or rebase can
+leave a source file older than the cached build, and the reinstall then gets a stale binding
+(the same reason as the `touch` in the kernel test task).
+
 Notes:
 
 - The workspace lock resolves all packages' dependencies together. For a faster CI / iteration
