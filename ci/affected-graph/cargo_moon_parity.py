@@ -3716,43 +3716,61 @@ def _split_commands(text):
     return out
 
 
+def _expand_words(word, values):
+    """Every spelling of `word` after `$NAME` / `${NAME}` is replaced by each value assigned to NAME."""
+    out = {word}
+    for name in sorted(values, key=lambda n: (-len(n), n)):
+        nxt = set()
+        for cand in out:
+            if f"${name}" in cand or f"${{{name}}}" in cand:
+                for value in values[name]:
+                    nxt.add(cand.replace(f"${{{name}}}", value).replace(f"${name}", value))
+            else:
+                nxt.add(cand)
+        out = nxt
+    return out
+
+
 def runs_lockstep_write(blob):
     """True when `blob` can run `ci/version-lockstep/run.sh` with `--write` (A14 rule 8).
 
     Closed forms (SMA-768 R10 follow-up): the literal path anywhere in a command, a path relative
     to a `cd` or `pushd` in an earlier command (`cd ci/version-lockstep && ./run.sh --write`), a
     path through a `NAME=value` assignment in the blob (`$D/run.sh`), and a quoted separator
-    before `--write`. The cwd starts at the repository root. A `cd` to a word that is not a plain
-    relative path (`"$ROOT"`, `-`, `~`) or a `popd` resets it to the root. A `cd` inside `( … )`
-    stays in effect after the `)`: this can only add a row, never hide one.
+    before `--write`. The check over-approximates on purpose, so it can add a row but never hide
+    one. It keeps EVERY directory that an earlier `cd` or `pushd` can reach, from the repository
+    root on, and never drops one (a `( … )` group, `popd`, or a `cd "$ROOT"` adds nothing and
+    removes nothing). It expands a `$NAME` with EVERY value that the blob assigns to NAME, in any
+    order. A repeated first word (`cd cd x`, the shape of moon's joined `command` + `script`) is
+    read once.
     Not closed: `--write` from a variable, from `"$@"` or from moon passthrough arguments, and a
     script path that only a real shell can compute. See R10 in ci/affected-graph/README.md.
     """
     text = blob.replace("\\\n", "")
-    env = dict(VAR_ASSIGN_RE.findall(text))
-    ordered = sorted(env.items(), key=lambda kv: (-len(kv[0]), kv[0]))
-    cwd = ""
+    values = {}
+    for name, value in VAR_ASSIGN_RE.findall(text):
+        values.setdefault(name, set()).add(value)
+    cwds = {""}
     for seg in _split_commands(text):
         words = [w.lstrip("(").rstrip(")").strip("'\"") for w in seg.split()]
         words = [w for w in words if w not in ("", "{", "}", "!")]
+        if len(words) > 1 and words[0] == words[1]:
+            words = words[1:]
         if not words:
             continue
         if words[0] in ("cd", "pushd", "popd"):
             arg = words[1] if len(words) > 1 and words[0] != "popd" else ""
-            for name, value in ordered:
-                arg = arg.replace(f"${{{name}}}", value).replace(f"${name}", value)
-            plain = arg and not arg.startswith(("$", "/", "~", "-"))
-            cwd = os.path.normpath(os.path.join(cwd, arg)) if plain else ""
+            for cand in _expand_words(arg, values):
+                if cand and not cand.startswith(("$", "/", "~", "-")):
+                    cwds |= {os.path.normpath(os.path.join(c, cand)) for c in cwds}
             continue
         for idx, word in enumerate(words):
-            for name, value in ordered:
-                word = word.replace(f"${{{name}}}", value).replace(f"${name}", value)
-            if LOCKSTEP_SCRIPT in word:
-                hit = True
-            elif word.endswith("run.sh") and not word.startswith(("$", "/", "~")):
-                hit = os.path.normpath(os.path.join(cwd, word)) == LOCKSTEP_SCRIPT
-            else:
-                hit = False
+            hit = False
+            for cand in _expand_words(word, values):
+                if LOCKSTEP_SCRIPT in cand:
+                    hit = True
+                elif cand.endswith("run.sh") and not cand.startswith(("$", "/", "~")):
+                    hit = hit or any(os.path.normpath(os.path.join(c, cand)) == LOCKSTEP_SCRIPT for c in cwds)
             if hit and any(LOCKSTEP_WRITE_RE.search(w) for w in words[idx + 1:]):
                 return True
     return False
@@ -7349,7 +7367,11 @@ def self_test():
             ('bash "$ROOT"/ci/version-lockstep/run.sh --write', True),
             ("cd ci/x && ./run.sh --write", False),
             ("cd ci/version-lockstep && ./run.sh --self-test", False),
-            ('cd ci/version-lockstep && cd "$ROOT" && ./run.sh --write', False),
+            ('cd ci/version-lockstep && cd "$ROOT" && ./run.sh --write', True),
+            ("cd ci/version-lockstep && (cd ../actionlint && true) && ./run.sh --write", True),
+            ("D=ci/version-lockstep\nbash \"$D/run.sh\" --write\nD=ci/actionlint", True),
+            ("cd cd ci/version-lockstep && ./run.sh --write", True),
+            ("pushd pushd ci/version-lockstep && ./run.sh --write", True),
             ("bash ci/version-lockstep/run.sh 'a' && echo --write", False),
         ):
             if runs_lockstep_write(a14_w) is not a14_want:

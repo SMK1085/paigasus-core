@@ -412,8 +412,10 @@ It also runs several checks that the per-case project sets structurally **cannot
   8. A task that can run `ci/version-lockstep/run.sh` with `--write` is a row (`runs_lockstep_write`).
      That script runs `uv lock` in `run_write`. The `EXECUTED` waiver below is true only while
      no Moon task passes `--write`. The check cuts the task text into commands at `&&`, `||`, `;`,
-     `|` and a new line that are outside quotes. It follows a `cd` or `pushd` to a plain relative
-     path, and a `NAME=value` assignment in the task text. So `cd ci/version-lockstep && ./run.sh --write`,
+     `|` and a new line that are outside quotes. It keeps every directory that an earlier `cd` or
+     `pushd` to a plain relative path can reach, and never drops one. It expands `$NAME` with every
+     value that the task text assigns to NAME. A repeated first word (`cd cd x`) is read once. So
+     the check can add a row, but it cannot hide one. So `cd ci/version-lockstep && ./run.sh --write`,
      `$D/run.sh --write` and `run.sh 'a;b' --write` are rows. A `--write` in a later command, such as
      `run.sh && echo --write`, is not a row.
   Waivers: `ALLOW_UV_ENV_SCRIPT` has 27 entries. They are keyed by the script path and the exact stripped
@@ -474,8 +476,9 @@ It also runs several checks that the per-case project sets structurally **cannot
     now rows. Still not seen: `--write` from a variable (`W=--write; ... run.sh $W`), from `"$@"`,
     or from passthrough arguments (`moon run repo:version-lockstep -- --write`); a path that only a
     shell can compute (`$(dirname …)`, `eval`); and a script that runs `version-lockstep --write`
-    from a scanned `ci/**/*.sh` file. Each one needs real shell evaluation. A `cd` inside `( … )`
-    stays in effect after the `)`, which can only add a row.
+    from a scanned `ci/**/*.sh` file. Each one needs real shell evaluation. The check never drops a
+    reachable directory (a `( … )` group, `popd`, `cd "$ROOT"`) and uses every assigned value of a
+    variable, so a false row is possible and a missed row is not.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
