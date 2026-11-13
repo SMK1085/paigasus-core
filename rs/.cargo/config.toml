@@ -10,12 +10,14 @@
 # inside `rs/` (as CONTRIBUTING/CLAUDE.md document, and as `moon` always does). A workspace
 # build launched from the repo ROOT won't pick up these flags and fails to link the cdylib
 # on macOS with undefined `_Py*` symbols.
+#
 # SMA-767: the strip rustflag on macOS.
 # rustc 1.95 strips release Mach-O output with `rust-objcopy`.
 # `rust-objcopy` does not pad after the indirect symbol table.
 # With an odd count of indirect symbols, the string pool is only 4-byte aligned.
 # dyld on macOS 27 rejects that alignment for a binary linked with SDK 27.
 # The error is "mis-aligned LINKEDIT". The flag stops the strip step.
+# Measured: stroff 402708 (mod 8 = 4) with the strip; 435672 (mod 8 = 0) with `strip=none`.
 # The flag is scoped to apple-darwin. On Linux, `strip = "none"` makes the .so 7.7 times larger.
 # Remove the flag only when this holds on an odd-count dylib built with the default strip:
 # `stroff > indirectsymoff + 4 * nindirectsyms` (spec decision D6).

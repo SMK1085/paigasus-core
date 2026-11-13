@@ -233,7 +233,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   premise (measured on ONE host / maturin 1.9.6 / one target, natively — which is why the sdist
   is verified on three platforms rather than trusted); (2) maturin builds the sdist from `cargo
   package --list`, so the crate's **Cargo** `include` allowlist is what keeps `moon.yml` out —
-  `[tool.maturin] include` is not needed, and Checks 1c/1d/2b/2c never reach this crate because it
+  `[tool.maturin] include` is not needed for the Cargo allowlist (this is about the link flags
+  only: since SMA-767 the sdist ships a strip-flag config through `[tool.maturin] include`), and Checks 1c/1d/2b/2c never reach this crate because it
   is `publish = false`, so the only assertion holding that allowlist honest lives in `wheels.yml`;
   (3) the sdist ships the **workspace** `Cargo.toml` verbatim, `[workspace.lints.rust] warnings =
   "deny"` included, and a consumer builds as the ROOT package where `--cap-lints allow` does NOT
@@ -243,7 +244,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   relocates `pyproject.toml` to the sdist **root**, not the crate dir, so the sdist content
   assertions match on basename.
   The darwin steps of `wheels.yml` and `prebuild.yml` also assert `stroff mod 8 = 0` for the
-  `LC_SYMTAB` string pool, because dyld on macOS 27 rejects a mis-aligned binary (SMA-767; see
+  `LC_SYMTAB` string pool, because dyld on macOS 27 rejects a mis-aligned binary linked with SDK 27 (SMA-767; see
   `rs/CLAUDE.md`).
 - All four **Linux** wheel legs cross-compile with `--zig` — not only the musl ones, unlike
   `prebuild.yml`. `ubuntu-latest` ships glibc 2.39, so a *native* build tags `manylinux_2_39`,

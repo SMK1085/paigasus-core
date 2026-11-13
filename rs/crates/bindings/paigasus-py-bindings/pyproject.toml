@@ -44,6 +44,8 @@ build-backend = "maturin"
 # symbols, which is exactly what rs/.cargo/config.toml exists for ("WITHOUT maturin").
 # The sdist is therefore a supported install path, verified per-platform in
 # .github/workflows/wheels.yml.
+# This statement is about the link flags only. Since SMA-767 the sdist ships a strip-flag
+# config through `[tool.maturin] include` (see below).
 module-name = "paigasus_py_bindings"
 # SMA-767: ship the macOS strip flag in the sdist.
 # The crate-local `.cargo/config.toml` lands at the sdist root, which mirrors `rs/`.

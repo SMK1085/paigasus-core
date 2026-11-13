@@ -550,16 +550,19 @@ jobs:
           #
           # `.cargo/config.toml` (SMA-767) holds the macOS `-C strip=none` flag. The `[tool.maturin]
           # include` puts it at the archive root. Without it, a macOS build from the sdist strips
-          # the binary and dyld on macOS 27 can reject the result.
+          # the binary and dyld on macOS 27 can reject the result. The entry is anchored to the
+          # archive root (the first path component is `paigasus_py_bindings-<version>/`). A copy
+          # at the crate path does not count, because cargo does not find it from the root.
           for required in \
             crates/bindings/paigasus-py-bindings/README.md \
             crates/bindings/paigasus-py-bindings/LICENSE \
             pyproject.toml \
-            Cargo.lock \
-            .cargo/config.toml; do
+            Cargo.lock; do
             grep -q "/$required$" < <(printf '%s\n' "$listing") \
               || { echo "::error::sdist is missing $required"; exit 1; }
           done
+          grep -q '^[^/]*/\.cargo/config\.toml$' < <(printf '%s\n' "$listing") \
+            || { echo "::error::sdist is missing .cargo/config.toml at the archive root"; exit 1; }
 
       - name: Upload sdist
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -658,7 +661,7 @@ jobs:
 
       # SMA-767: a source build must also give a string pool that is 8-byte aligned. The sdist
       # ships `.cargo/config.toml` with the macOS strip flag, and this step proves that the
-      # flag reaches the linker. The venv path is the same as in the step above.
+      # flag reaches rustc. The venv path is the same as in the step above.
       - name: Assert 8-byte string pool alignment of the source build (darwin only)
         if: runner.os == 'macOS'
         shell: bash
