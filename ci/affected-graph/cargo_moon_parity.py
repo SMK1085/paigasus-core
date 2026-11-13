@@ -3677,7 +3677,7 @@ def _uv_script_closure(path, root):
 
 LOCKSTEP_SCRIPT = "ci/version-lockstep/run.sh"
 LOCKSTEP_WRITE_RE = re.compile(r"(?<![\w-])--write(?![\w-])")
-LOCKSTEP_ASSIGN_RE = re.compile(r"""\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=["']?([^"'\s;&|()]+)""")
+LOCKSTEP_ASSIGN_RE = re.compile(r"""\s*(?:export\s+)*([A-Za-z_][A-Za-z0-9_]*)=["']?([^"'\s;&|()]+)""")
 
 
 def _split_commands(text):
@@ -7378,6 +7378,7 @@ def self_test():
             ("cd cd ci/version-lockstep && ./run.sh --write", True),
             ('D=ci/version-lockstep; bash "$D/run.sh" --write', True),
             ('export D=ci/version-lockstep && bash "$D/run.sh" --write', True),
+            ('export export D=ci/version-lockstep && bash "$D/run.sh" --write', True),
             ("pushd pushd ci/version-lockstep && ./run.sh --write", True),
             ("bash ci/version-lockstep/run.sh 'a' && echo --write", False),
         ):
