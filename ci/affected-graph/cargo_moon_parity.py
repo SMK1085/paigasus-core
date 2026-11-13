@@ -7401,11 +7401,16 @@ def collect_findings(projects, crates, root, tracked):
              "    `repo:affected-smoke` in the root moon.yml. See ci/affected-graph/README.md (A13)."),
         ("a14", check_uv_env_isolation(projects, root),
              "A task can change a uv environment IN PLACE that another task reads, so two parallel\n"
-             "    tasks race on py/.venv and one loses packages it imports (SMA-765).\n"
-             "    Fix: run `uv run --isolated` (with `--reinstall-package paigasus-py-bindings` for the\n"
-             "    kernel task). Never run `uv sync`, `uv pip`, `uv venv`, `uv add` or `uv remove` in a\n"
-             "    Moon task, and never set UV_PROJECT_ENVIRONMENT or VIRTUAL_ENV. A script line that only\n"
-             "    prints a remedy needs an ALLOW_UV_ENV_SCRIPT entry with a reason.\n"
+             "    tasks race on py/.venv and one loses packages it imports (SMA-765, SMA-768).\n"
+             "    Fix: use an approved uv form, or add the form to the allow-list constants in\n"
+             "    cargo_moon_parity.py with a self-test row. Use `uv run --isolated` (with\n"
+             "    `--reinstall-package paigasus-py-bindings` for the kernel task). Do not run `uv sync`,\n"
+             "    `uv pip`, `uv venv`, `uv add` or `uv remove` in a Moon task. Do not name UV_*,\n"
+             "    VIRTUAL_ENV or --active. A script line that only prints `uv` needs an\n"
+             "    ALLOW_UV_ENV_SCRIPT entry with a reason that starts with PROSE, DATA or EXECUTED.\n"
+             "    For a \"matches no input of repo:affected-smoke\" row, add a glob for the file to the\n"
+             "    inputs of `repo:affected-smoke` in moon.yml and to T_AFFECTED_SMOKE_REQUIRED_INPUTS\n"
+             "    in ci/actionlint/run.sh.\n"
              "    A `FLOOR:` row means the check itself cannot be trusted - the floor task is missing or\n"
              "    lost `--isolated` or the bindings reinstall; fix that first. See\n"
              "    ci/affected-graph/README.md (A14)."),

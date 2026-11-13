@@ -362,38 +362,89 @@ It also runs several checks that the per-case project sets structurally **cannot
   A13 reads `-c=<f>` like `-c <f>`. A `-r`, `-r=<dir>`, `--root=<dir>`, `pnpm -C <dir>` or
   `pnpm --dir <dir>` before the vitest call is a row. An alias value that is an absolute path is a
   row, and so is a computed `['alias']` key.
-- **A14** (`check_uv_env_isolation` in `cargo_moon_parity.py`, SMA-765, findings key `a14`) reds when
-  a Moon task can change a uv project environment in place. The `paigasus-kernel-py:test` task ran
-  an exact `uv sync` in the shared `py/.venv` and removed packages that parallel tasks needed.
-  Each of these is a row: `uv sync`, `uv pip sync|install|uninstall`, `uv venv`, `uv add` and
-  `uv remove`. A `uv run` with `--exact`, `--reinstall`, `--reinstall-package` or
-  `--refresh-package` is a row when the SAME invocation has no `--isolated`. `--force-reinstall` counts as
-  `--reinstall`. A `uv version` that sets a version (`--bump` or a value) is a row, unless it has
-  `--no-sync`, `--frozen` or `--dry-run`. For `uv run`, `--isolated` counts only in the option region,
-  before the executed command and before any `#` comment. Any assignment,
-  `export` or `unset` of `UV_PROJECT_ENVIRONMENT` or `VIRTUAL_ENV` is a row. So is any `--active`,
-  and so is a task `env:` that sets either variable. uv global options (`-q`, `--project X`) and any whitespace or `\` continuation between
-  `uv` and the verb are handled. An invocation ends at `&&`, `||`, `;`, `|` or a newline.
-  Scan scope, per task: the resolved command blob, the `ci/**/*.sh` scripts it runs with their
-  `source` closure (`_uv_script_closure`, A14's own matcher), and the project-relative `scripts/*.sh` files it names
-  (`PROJECT_SCRIPT_REF_RE`, resolved under the project's `source_dir`), each with its own `source`
-  closure. That closure also follows a `source` or `.` word after `;`, `&&`, `||`, `|`, `(`, `{`, `!`,
-  `then`, `do` or `else` (`UV_SOURCE_STMT_RE`). A8 and A10 keep their line-start matcher. A `./` or `../`
-  prefix is resolved. A `#` comment starts only at the start of an unquoted, unescaped word. An
-  unmatched quote gives no `--isolated` credit. A reference that names no readable file, or leaves the repository, is an
-  infrastructure error. Strings are NOT stripped (fail-closed, like A8), so a line that only prints
-  `uv sync` is a row. Such a line is waived in `ALLOW_UV_ENV_SCRIPT`, keyed by (script, exact
-  stripped line) with a reason. An empty reason, or an entry that matches no scanned line, is a row.
-  Floor: `REQUIRED_UV_ISOLATED_TASKS` (`paigasus-kernel-py:test`) must exist and run `uv run
-  --isolated` with `--reinstall-package paigasus-py-bindings`, and that SAME invocation must run
-  `pytest` (or `python -m pytest`), or A14 gives a `FLOOR:` row.
-  Real-tree negative control: `main()` removes `--isolated` from the floor task in a deep copy of
-  the real graph. It exits 2 unless A14 gives a row that names the floor task and is not a `FLOOR:`
-  row. `run.sh --negative-control` runs only the synthetic
-  self-test, so this is a separate step. Named limits: A14 does not see Moon toolchain actions such
-  as `InstallDependencies(unstable_python, py)`. A14 does not list `uv run --upgrade` or
-  `--upgrade-package`. These flags can change installed versions in place, which is the inexact
-  relock class (spec R-relock).
+- **A14** (`check_uv_env_isolation` in `cargo_moon_parity.py`, SMA-765 and SMA-768, findings key `a14`)
+  reds when a Moon task can change a uv project environment in place. The `paigasus-kernel-py:test`
+  task once ran an exact `uv sync` in the shared `py/.venv`. That removed packages that parallel
+  tasks needed. SMA-768 replaced the old list of bad uv commands with an allow-list of approved forms.
+  A new uv form now needs one reviewed edit to the constants and one self-test row.
+  Scan scope, per task: the resolved command text, the `ci/**/*.sh` scripts it runs, and the
+  project-relative `scripts/*.sh` files it names (`PROJECT_SCRIPT_REF_RE`, resolved under the
+  `source_dir` of the project). Each script brings its `source` closure (`_uv_script_closure`,
+  `UV_SOURCE_STMT_RE`). That closure follows a `source` or `.` word after `;`, `&&`, `||`, `|`, `(`,
+  `{`, `!`, `then`, `do` or `else`. A8 and A10 keep their line-start matcher. A `./` or `../` prefix is resolved.
+  A reference to a file that does not exist, or that leaves the repository, is an infrastructure error.
+  The rules, in order:
+  1. A physical line whose first non-blank character is `#` is a comment. A comment line never joins
+     the next line, also when it ends in `\`. A `#` later in a line is not a comment, so `x # uv sync` is a row.
+  2. A non-comment line that ends in `\` joins the next physical line with no separator. A row names
+     the physical line of the match.
+  3. Every `uv` token (`UV_TOKEN_RE`) in a non-comment line must be an approved form. This includes a token
+     inside a quoted string and inside Python data, so `bash -c "uv sync"` and
+     `subprocess.run(["uv", "sync"])` are rows.
+  4. One invocation is the text after the token, up to the first `&&`, `||`, `;`, `|`, `)` or backtick.
+     The cut is not quote-aware. The code splits the invocation on white space.
+  5. The approved forms. Nothing else is approved.
+     - `uv build` with no further word.
+     - `uv run`, then approved options, then a command word. The flags are `--locked`, `--frozen` and
+       `--isolated`. `--project` accepts only `py`, `ci/release-plan` or `"$HERE"`. `--python` accepts
+       only `'>=3.12'`. The value is the next word, compared as exact text. The `--opt=value` form is not approved.
+       `--reinstall-package paigasus-py-bindings` is approved only with `--isolated` in the same option region.
+       The command word is the first word that does not start with `-`. It must match
+       `[A-Za-z0-9_][A-Za-z0-9_.+/-]*`. A `uv run` with no command word is a row. A2 does not check the words after the command word.
+     - `command -v uv`, with only `>/dev/null`, `2>/dev/null` or `2>&1` after it. `command uv sync` is a row.
+  6. Any non-comment mention of `UV_*`, `VIRTUAL_ENV` or `--active` is a row. This covers an assignment,
+     a default, an `export`, an `unset` and a plain mention.
+  7. A task `env:` key that is `VIRTUAL_ENV` or starts with `UV_` is a row.
+  8. A task that runs `ci/version-lockstep/run.sh` with `--write` in one command is a row.
+     That script runs `uv lock` in `run_write`. The `EXECUTED` waiver below is true only while
+     no Moon task passes `--write`.
+  Waivers: `ALLOW_UV_ENV_SCRIPT` has 27 entries. They are keyed by the script path and the exact stripped
+  physical line, and each has a reason that starts with its class. There are 23 `PROSE` entries (a message),
+  3 `DATA` entries (a pattern or Python data) and 1 `EXECUTED` entry (the `uv lock` call). Do not add a second
+  `EXECUTED` entry without a review. Each new message line that names `uv` needs a new waiver. An empty reason is a row.
+  An entry that matches no scanned line is a row. A line in the task text cannot be waived.
+  Floor: `REQUIRED_UV_ISOLATED_TASKS` (`paigasus-kernel-py:test`) must exist. One invocation must start a
+  logical line or follow `&&` or `;`, outside a quote. It must have `--isolated` and `--reinstall-package
+  paigasus-py-bindings`, and its command must be `pytest`, `python -m pytest` or `python3 -m pytest`.
+  If not, A14 gives a `FLOOR:` row. Fix a `FLOOR:` row first, because the check cannot be trusted until then.
+  Two more checks do not depend on the allow-list. G4: a scanned script that is not valid UTF-8 raises
+  `MoonOutputError`, and the gate exits 2 with the file name. A8 and A10 get the same error class, and they follow the same files as before.
+  G5: each file that A14 reads must match an input of `repo:affected-smoke`, with the same match as A13.
+  A missing task, or a task with no `inputGlobs`, is a row. To fix a G5 row, add a glob to the `inputs`
+  of `repo:affected-smoke` in `moon.yml`, and to `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`.
+  Real-tree negative control: `main()` removes `--isolated` from the floor task in a deep copy of the real graph.
+  It exits 2 unless A14 gives a row that names the floor task and is not a `FLOOR:` row.
+  `run.sh --negative-control` runs only the synthetic self-test, so this is a separate step.
+  The six SMA-768 gaps:
+  - Gap 1, the denylist let an unknown uv form pass: closed by the allow-list.
+  - Gap 2, a name that selects the environment, such as `UV_PYTHON`: closed by rules 6 and 7.
+  - Gap 3, a `command -v uv` probe: closed as invalid. The old parser already reddened the probe forms. The self-test row stays.
+  - Gap 4, a script that is not UTF-8: closed by G4.
+  - Gap 5, an edit to a scanned script that does not schedule `repo:affected-smoke`: closed by G5.
+  - Gap 6, a `source` word inside a quoted argument: not closed. See R1.
+  Accepted residuals:
+  - R1. A `source` word inside a quoted argument is followed. This fails closed: at worst a false red
+    or an infrastructure error. A `#` line inside a multi-line quoted string is skipped as a comment, but bash
+    can run the text after the closing quote. Example: `bash -c '` then a new line `#'; uv sync`.
+    A correct fix needs a full shell parser.
+  - R2. A `uv` reached through a computed word is not seen. Examples: `UVB=$(command -v uv); "$UVB" sync`
+    (rule 5 approves the probe), `${x}v sync`, `eval`, `"$(command -v uv)" sync` and its backtick form.
+    Quote-removal spellings are not seen either: `u\v sync`, `u''v sync` and `"u"v sync`.
+  - R3. A command that `uv run` executes is not checked. Examples: `uv run pip install`, `uv run python -m pip install`.
+  - R4. A direct write such as `py/.venv/bin/pip install` is not seen.
+  - R5. Moon toolchain actions, such as `InstallDependencies(unstable_python, py)`, are not seen. The inexact
+    relock of a plain `uv run` (the `--upgrade` class, SMA-765 R-relock) is not listed.
+  - R6. The cut in rule 4 is not quote-aware. A separator inside a quoted value ends the invocation early.
+    Each option value is compared as exact text, so a cut value is a row.
+  - R7. uv configuration is not scanned. The keys `reinstall`, `reinstall-package`, `upgrade`,
+    `upgrade-package` and `cache-keys` in `[tool.uv]` or in a `uv.toml` can make an approved plain `uv run` change
+    `py/.venv` in place. Rules 6 and 7 close only the environment-variable half of this class.
+  - R8. A script that a scanned script runs, but does not source, is not scanned. Example:
+    `ci/actionlint/run.sh` runs `bash ci/release-plan/run.sh`.
+  - R9. A waiver matches its line text anywhere in the same script. A copy of the `EXECUTED` `uv lock`
+    line elsewhere in `ci/version-lockstep/run.sh` passes, and rule 8 does not catch it.
+  - R10. Rule 8 sees only the literal path `ci/version-lockstep/run.sh` in the task text. It misses
+    `cd ci/version-lockstep && ./run.sh --write`, a path built from a variable, and a quoted separator before `--write`.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
