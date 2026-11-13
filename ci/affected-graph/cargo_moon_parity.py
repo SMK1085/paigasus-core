@@ -3477,7 +3477,7 @@ def uv_form_hits(text):
     """
     hits = []
     for logical, starts in _uv_logical_lines(text):
-        def line_of(idx):
+        def line_of(idx, starts=starts):
             return [ln for off, ln in starts if off <= idx][-1]
 
         for m in UV_TOKEN_RE.finditer(logical):
@@ -6976,6 +6976,7 @@ def self_test():
         ("a second uv in bash -c", 'bash -c "uv run --locked pytest; uv sync"', True),
         ("reinstall without --isolated", "uv run --reinstall-package paigasus-py-bindings pytest", True),
         ("command uv without -v", "command uv sync", True),
+        ("command uv as a redirect word", "command uv >/dev/null", True),
         ("X=--active", "X=--active", True),
         ("UV_PYTHON assignment", "UV_PYTHON=3.13 uv run pytest", True),
         ("python heredoc data", "python3 - <<'EOF'\nimport subprocess\nsubprocess.run([\"uv\", \"sync\"])\nEOF", True),
@@ -7053,6 +7054,9 @@ def self_test():
         a14_rows = a14_run(a14_proj("uv run --isolated pytest tests"))
         if not any(r.startswith("FLOOR:") for r in a14_rows):
             failures.append(f"A14 gave no FLOOR row without --reinstall-package paigasus-py-bindings: {a14_rows}")
+        a14_rows = a14_run(a14_proj("uv run --reinstall-package paigasus-py-bindings --isolated pytest tests"))
+        if any(r.startswith("FLOOR:") for r in a14_rows):
+            failures.append(f"A14 gave a FLOOR row when --isolated follows --reinstall-package: {a14_rows}")
         for a14_var in ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV"):
             if not a14_run(a14_proj(a14_good, env={a14_var: ".venv-x"})):
                 failures.append(f"A14 did not red a task env that sets {a14_var}")
@@ -7098,11 +7102,11 @@ def self_test():
         if not any("other/scripts/x.sh" in r and "matches no input" in r for r in a14_g5):
             failures.append(f"A14 did not red a read script that no affected-smoke input matches: {a14_g5}")
         a14_g5 = a14_run(a14_proj("bash scripts/x.sh", source_dir="other", name="q",
-                                  smoke_globs=a14_smoke_globs + ["other/**/*", "!other/scripts/x.sh"]), floor=())
+                                  smoke_globs=[*a14_smoke_globs, "other/**/*", "!other/scripts/x.sh"]), floor=())
         if not any("other/scripts/x.sh" in r and "matches no input" in r for r in a14_g5):
             failures.append(f"A14 did not red a read script that a negated smoke glob removes: {a14_g5}")
         a14_g5 = a14_run(a14_proj("bash scripts/x.sh", source_dir="other", name="q",
-                                  smoke_globs=a14_smoke_globs + ["other/**/*"]), floor=())
+                                  smoke_globs=[*a14_smoke_globs, "other/**/*"]), floor=())
         if a14_g5:
             failures.append(f"A14 reddened a read script that an affected-smoke glob matches: {a14_g5}")
         a14_g5 = a14_run(a14_proj("bash scripts/x.sh", source_dir="other", name="q", smoke_globs=None), floor=())
