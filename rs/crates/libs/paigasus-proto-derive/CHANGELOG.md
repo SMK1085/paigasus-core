@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-derive-v0.6.0...paigasus-proto-derive-v0.7.0) - 2026-11-13
+
+### Added
+
+- *(rs)* intercept tool calls in gateway chat completions (SMA-749) ([#453](https://github.com/SMK1085/paigasus-core/pull/453))
+
 ## [0.6.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-derive-v0.5.0...paigasus-proto-derive-v0.6.0) - 2026-10-12
 
 ### Added
