@@ -370,8 +370,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   Scan scope, per task: the resolved command text, the `ci/**/*.sh` scripts it runs, and the
   project-relative `scripts/*.sh` files it names (`PROJECT_SCRIPT_REF_RE`, resolved under the
   `source_dir` of the project). Each script brings its `source` closure (`_uv_script_closure`,
-  `UV_SOURCE_STMT_RE`). That closure follows a `source` or `.` word after `;`, `&&`, `||`, `|`, `(`,
-  `{`, `!`, `then`, `do` or `else`. A8 and A10 keep their line-start matcher. A `./` or `../` prefix is resolved.
+  `UV_SOURCE_STMT_RE`). That closure follows a `source` or `.` word at the start of a line.
+  It also follows the word after any of these: `;`, `&&`, `||`, `|`, `(`, `{`, `!`, `then`, `do` and `else`.
+  A8 and A10 keep their line-start matcher. A `./` or `../` prefix is resolved.
   A reference to a file that does not exist, or that leaves the repository, is an infrastructure error.
   The rules, in order:
   1. A physical line whose first non-blank character is `#` is a comment. A comment line never joins
@@ -390,7 +391,7 @@ It also runs several checks that the per-case project sets structurally **cannot
        only `'>=3.12'`. The value is the next word, compared as exact text. The `--opt=value` form is not approved.
        `--reinstall-package paigasus-py-bindings` is approved only with `--isolated` in the same option region.
        The command word is the first word that does not start with `-`. It must match
-       `[A-Za-z0-9_][A-Za-z0-9_.+/-]*`. A `uv run` with no command word is a row. A2 does not check the words after the command word.
+       `[A-Za-z0-9_][A-Za-z0-9_.+/-]*`. A `uv run` with no command word is a row. A14 does not check the words after the command word.
      - `command -v uv`, with only `>/dev/null`, `2>/dev/null` or `2>&1` after it. `command uv sync` is a row.
   6. Any non-comment mention of `UV_*`, `VIRTUAL_ENV` or `--active` is a row. This covers an assignment,
      a default, an `export`, an `unset` and a plain mention.
@@ -403,12 +404,14 @@ It also runs several checks that the per-case project sets structurally **cannot
   3 `DATA` entries (a pattern or Python data) and 1 `EXECUTED` entry (the `uv lock` call). Do not add a second
   `EXECUTED` entry without a review. Each new message line that names `uv` needs a new waiver. An empty reason is a row.
   An entry that matches no scanned line is a row. A line in the task text cannot be waived.
-  Floor: `REQUIRED_UV_ISOLATED_TASKS` (`paigasus-kernel-py:test`) must exist. One invocation must start a
-  logical line or follow `&&` or `;`, outside a quote. It must have `--isolated` and `--reinstall-package
+  Floor: `REQUIRED_UV_ISOLATED_TASKS` (`paigasus-kernel-py:test`) must exist.
+  One invocation must start a logical line or follow `&&` or `;`, outside a quote. It must have `--isolated` and `--reinstall-package
   paigasus-py-bindings`, and its command must be `pytest`, `python -m pytest` or `python3 -m pytest`.
   If not, A14 gives a `FLOOR:` row. Fix a `FLOOR:` row first, because the check cannot be trusted until then.
   Two more checks do not depend on the allow-list. G4: a scanned script that is not valid UTF-8 raises
-  `MoonOutputError`, and the gate exits 2 with the file name. A8 and A10 get the same error class, and they follow the same files as before.
+  `MoonOutputError`, and the gate exits 2 with the file name. The shared `source` walk (`_executable_text`) and the A14 read both raise this error.
+  The A8 cargo-line read (`script_cargo_lines`) does not. It can still raise a raw `UnicodeDecodeError`.
+  This is a known limit outside SMA-768. A8 and A10 follow the same files as before.
   G5: each file that A14 reads must match an input of `repo:affected-smoke`, with the same match as A13.
   A missing task, or a task with no `inputGlobs`, is a row. To fix a G5 row, add a glob to the `inputs`
   of `repo:affected-smoke` in `moon.yml`, and to `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`.
@@ -423,8 +426,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   - Gap 5, an edit to a scanned script that does not schedule `repo:affected-smoke`: closed by G5.
   - Gap 6, a `source` word inside a quoted argument: not closed. See R1.
   Accepted residuals:
-  - R1. A `source` word inside a quoted argument is followed. This fails closed: at worst a false red
-    or an infrastructure error. A `#` line inside a multi-line quoted string is skipped as a comment, but bash
+  - R1. A `source` word inside a quoted argument is followed. The gate then gives a false red
+    or an infrastructure error. It never misses a violation. A `#` line inside a multi-line quoted string is skipped as a comment, but bash
     can run the text after the closing quote. Example: `bash -c '` then a new line `#'; uv sync`.
     A correct fix needs a full shell parser.
   - R2. A `uv` reached through a computed word is not seen. Examples: `UVB=$(command -v uv); "$UVB" sync`
