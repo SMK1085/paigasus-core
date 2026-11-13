@@ -142,6 +142,14 @@ Inspected with `otool` only. The downloads were not executed.
   workaround (`CARGO_TARGET_<TRIPLE>_RUSTFLAGS="-C strip=none"` or `CARGO_PROFILE_RELEASE_STRIP=none`
   for the build) in `py/README.md` and in the `rs/.cargo/config.toml` comment.
 
+  MEASURED after GATE 1: `include = [{ path = "../../../.cargo/config.toml", … }]` fails
+  ("paths in archives must not have `..`"). An include path is relative to the crate directory
+  and lands at the same path under the sdist root. So a crate-local
+  `rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml` that holds only the strip flag lands
+  at the sdist root. A wheel built from that extracted sdist (outside the repo, Rust 1.95.0) has
+  `stroff 435672` and loads, with 0 build warnings. Decision: ship it (P1). Cost: a second config
+  file, which cargo merges with `rs/.cargo/config.toml` when the cwd is the crate directory.
+
 - **D3. CI guard.** Add an assertion to the darwin steps that exist today:
   - `wheels.yml`, step "Assert Mach-O arch and minimum macOS (darwin only)": each `*.abi3.so`.
   - `prebuild.yml`, step "Verify Mach-O architecture (darwin only)": both `.node` files.
