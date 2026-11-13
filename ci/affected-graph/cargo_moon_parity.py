@@ -3561,6 +3561,7 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
     floor = REQUIRED_UV_ISOLATED_TASKS if floor is None else floor
     root_resolved = Path(root).resolve()
     rows, matched = [], set()
+    reads, scanned = set(), False
 
     for key, reason in sorted(allow.items()):
         if not str(reason).strip():
@@ -3573,11 +3574,12 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
             blob = proj["invocations"][name]
             if not blob:
                 continue
+            scanned = True
             for env_name in sorted(dict((proj.get("task_env") or {}).get(name) or {})):
                 if env_name == "VIRTUAL_ENV" or env_name.startswith("UV_"):
                     rows.append(f"{target}: the task `env` sets {env_name}")
             # Rule 8: `version-lockstep --write` runs `uv lock`; the EXECUTED waiver assumes no task does.
-            for seg in re.split(r"&&|\|\||;|\|", blob):
+            for seg in re.split(r"&&|\|\||;|\|", blob.replace("\\\n", " ")):
                 m = re.search(r"ci/version-lockstep/run\.sh(?=\s|$|['\"])(.*)", seg)
                 if m and re.search(r"(?<![\w-])--write(?![\w-])", m.group(1)):
                     rows.append(
@@ -3607,6 +3609,7 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                 paths.extend(_uv_script_closure(path, root_resolved))
             for path in dict.fromkeys(paths):
                 rel_path = str(path.relative_to(root_resolved))
+                reads.add(rel_path)
                 text = _read_utf8(path)
                 lines = text.split("\n")
                 for lineno, desc in uv_form_hits(text):
@@ -3615,6 +3618,27 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                         matched.add((rel_path, line))
                         continue
                     rows.append(f"{target}: {rel_path}:{lineno} {desc}")
+
+    # G5: an edit to a file A14 reads must schedule repo:affected-smoke (same match as A13).
+    if scanned:
+        smoke = projects.get(AFFECTED_SMOKE_PROJECT) or {}
+        smoke_globs = (smoke.get("task_input_globs") or {}).get(AFFECTED_SMOKE_TASK)
+        smoke_files = (smoke.get("task_inputs") or {}).get(AFFECTED_SMOKE_TASK) or []
+        if smoke_globs is None:
+            rows.append(
+                f"{AFFECTED_SMOKE_PROJECT}:{AFFECTED_SMOKE_TASK} reported no `inputGlobs`, so A14 cannot check "
+                f"that an edit to a script it reads schedules it"
+            )
+        else:
+            patterns = [_moon_glob_re(g) for g in smoke_globs if not g.startswith("!")]
+            excluded = [_moon_glob_re(g[1:]) for g in smoke_globs if g.startswith("!")]
+            for rel_path in sorted(reads):
+                reached = rel_path in smoke_files or any(p.fullmatch(rel_path) for p in patterns)
+                if not reached or any(p.fullmatch(rel_path) for p in excluded):
+                    rows.append(
+                        f"{rel_path} is read by A14 but matches no input of {AFFECTED_SMOKE_PROJECT}:"
+                        f"{AFFECTED_SMOKE_TASK}, so an edit to it alone does not schedule the gate that reads it"
+                    )
 
     for target in floor:
         pid, _, name = target.partition(":")
@@ -6978,10 +7002,18 @@ def self_test():
             failures.append(f"A14 parser, {a14_label}: {a14_text!r} should be {'red' if a14_want_red else 'green'}")
 
     # A14 - the check. Small project dicts in the shape of the A5 fixture.
-    def a14_proj(blob, env=None, source_dir="py"):
-        return {"p": {"source_dir": source_dir, "deps": {}, "tasks": {"test": []},
-                      "task_inputs": {"test": []}, "invocations": {"test": blob},
-                      "task_env": {"test": env or {}}}}
+    a14_smoke_globs = ["ci/**/*", "py/scripts/**/*"]
+
+    def a14_proj(blob, env=None, source_dir="py", smoke_globs=a14_smoke_globs, name="p"):
+        projects = {name: {"source_dir": source_dir, "deps": {}, "tasks": {"test": []},
+                           "task_inputs": {"test": []}, "invocations": {"test": blob},
+                           "task_env": {"test": env or {}}}}
+        if smoke_globs is not None:
+            projects[AFFECTED_SMOKE_PROJECT] = {
+                "source_dir": ".", "deps": {}, "tasks": {AFFECTED_SMOKE_TASK: []},
+                "task_inputs": {AFFECTED_SMOKE_TASK: []},
+                "task_input_globs": {AFFECTED_SMOKE_TASK: smoke_globs}}
+        return projects
 
     a14_floor = ("p:test",)
     a14_good = "uv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
@@ -7059,6 +7091,29 @@ def self_test():
             failures.append(f"A14 did not match a waiver for a line that ends in a backslash: {a14_run(a14_cont_proj, allow={a14_cont: 'PROSE: test'})}")
         if not any("ci/x/cont.sh:1" in r for r in a14_run(a14_cont_proj)):
             failures.append(f"A14 row does not name the physical line of a continued match: {a14_run(a14_cont_proj)}")
+        # G5: every file A14 reads must match an input of repo:affected-smoke (SMA-768).
+        (a14_root / "other" / "scripts").mkdir(parents=True)
+        (a14_root / "other" / "scripts" / "x.sh").write_text("#!/bin/bash\ntrue\n")
+        a14_g5 = a14_run(a14_proj("bash scripts/x.sh", source_dir="other", name="q"), floor=())
+        if not any("other/scripts/x.sh" in r and "matches no input" in r for r in a14_g5):
+            failures.append(f"A14 did not red a read script that no affected-smoke input matches: {a14_g5}")
+        a14_g5 = a14_run(a14_proj("bash scripts/x.sh", source_dir="other", name="q",
+                                  smoke_globs=a14_smoke_globs + ["other/**/*", "!other/scripts/x.sh"]), floor=())
+        if not any("other/scripts/x.sh" in r and "matches no input" in r for r in a14_g5):
+            failures.append(f"A14 did not red a read script that a negated smoke glob removes: {a14_g5}")
+        a14_g5 = a14_run(a14_proj("bash scripts/x.sh", source_dir="other", name="q",
+                                  smoke_globs=a14_smoke_globs + ["other/**/*"]), floor=())
+        if a14_g5:
+            failures.append(f"A14 reddened a read script that an affected-smoke glob matches: {a14_g5}")
+        a14_g5 = a14_run(a14_proj("bash scripts/x.sh", source_dir="other", name="q", smoke_globs=None), floor=())
+        if not any("inputGlobs" in r for r in a14_g5):
+            failures.append(f"A14 gave no row when repo:affected-smoke reports no inputGlobs: {a14_g5}")
+        # Rule 8: a `\`+newline continuation, `--write=x` and `--check --write` all red.
+        for a14_w in (" && bash ci/version-lockstep/run.sh \\\n  --write",
+                      " && bash ci/version-lockstep/run.sh --write=x",
+                      " && bash ci/version-lockstep/run.sh --check --write"):
+            if not any("--write" in r for r in a14_run(a14_proj(a14_good + a14_w))):
+                failures.append(f"A14 did not red a version-lockstep --write form: {a14_w!r}")
         a14_stale = {("ci/x/msg.sh", "echo 'gone'"): "stale on purpose"}
         if not any("stale" in r for r in a14_run(a14_proj(a14_good), allow=a14_stale)):
             failures.append("A14 did not red a stale allowlist entry")
