@@ -3401,10 +3401,17 @@ def _uv_logical_lines(text):
 
 
 def _uv_quoted_at(seg, pos):
-    """True when `seg[pos]` sits inside an open quote. A small quote tracker that only the floor uses."""
-    quote, i = None, 0
+    """True when `seg[pos]` sits inside an open quote or in a comment tail. Only the floor uses it.
+
+    A comment tail starts at an unquoted `#` that starts a word and ends at the next newline.
+    """
+    quote, comment, i = None, False, 0
     while i < pos:
         ch = seg[i]
+        if comment:
+            comment = ch != "\n"
+            i += 1
+            continue
         if ch == "\\" and quote != "'":
             i += 2
             continue
@@ -3413,8 +3420,10 @@ def _uv_quoted_at(seg, pos):
                 quote = None
         elif ch in "'\"":
             quote = ch
+        elif ch == "#" and (i == 0 or seg[i - 1] in " \t\n"):
+            comment = True
         i += 1
-    return quote is not None
+    return quote is not None or comment
 
 
 def _uv_words_after(logical, match):
@@ -3501,12 +3510,14 @@ def _floor_isolated(blob):
     `uv run pytest` would run them in the shared environment. The `uv` must start a logical line or
     follow `&&` or `;`, outside a quote. A wrong answer of the quote tracker removes credit only.
     """
+    seen = ""  # the earlier logical lines, so an open quote carries across them
     for logical, _ in _uv_logical_lines(blob or ""):
+        prefix, seen = seen, seen + logical + "\n"
         for m in UV_TOKEN_RE.finditer(logical):
             before = logical[:m.start()].rstrip()
             if before and not before.endswith(("&&", ";")):
                 continue
-            if _uv_quoted_at(logical, m.start()):
+            if _uv_quoted_at(prefix + logical, len(prefix) + m.start()):
                 continue
             words = _uv_words_after(logical, m)
             if words[:1] != ["run"]:
@@ -3579,7 +3590,7 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None):
                 if env_name == "VIRTUAL_ENV" or env_name.startswith("UV_"):
                     rows.append(f"{target}: the task `env` sets {env_name}")
             # Rule 8: `version-lockstep --write` runs `uv lock`; the EXECUTED waiver assumes no task does.
-            for seg in re.split(r"&&|\|\||;|\|", blob.replace("\\\n", " ")):
+            for seg in re.split(r"&&|\|\||;|\|", blob.replace("\\\n", "")):
                 m = re.search(r"ci/version-lockstep/run\.sh(?=\s|$|['\"])(.*)", seg)
                 if m and re.search(r"(?<![\w-])--write(?![\w-])", m.group(1)):
                     rows.append(
@@ -7123,6 +7134,16 @@ def self_test():
             if not any("runs ci/version-lockstep/run.sh with --write" in r
                        for r in a14_run(a14_proj(a14_good + a14_w))):
                 failures.append(f"A14 did not red a version-lockstep --write form: {a14_w!r}")
+        # A split flag: bash removes `\`+newline with no space, so `--wr\`+newline+`ite` is `--write`.
+        if not any("runs ci/version-lockstep/run.sh with --write" in r
+                   for r in a14_run(a14_proj(a14_good + " && bash ci/version-lockstep/run.sh --wr\\\nite"))):
+            failures.append("A14 did not red a version-lockstep --write that a continuation splits")
+        # The floor gives no credit to an isolated run that sits in a multi-line quote or after a `#` word.
+        a14_iso = "uv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
+        for a14_blob in (f"echo '\n{a14_iso}\n'\nuv run pytest tests",
+                         f"echo ok # ; {a14_iso}\nuv run pytest tests"):
+            if not any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_blob))):
+                failures.append(f"A14 gave floor credit to a quoted or commented isolated run: {a14_blob!r}")
         # The live waiver table: every reason opens with a class word, and exactly one entry is EXECUTED.
         # (The live reasons read "PROSE, not an invocation ...", so the class word ends at a word boundary.)
         if not all(re.match(r"(?:PROSE|DATA|EXECUTED)\b", a14_r) for a14_r in ALLOW_UV_ENV_SCRIPT.values()):
