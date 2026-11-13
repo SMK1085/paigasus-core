@@ -6,6 +6,12 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 
 ## Cargo, the lockfile and nextest
 
+- **Do not remove the macOS `-C strip=none` from `rs/.cargo/config.toml` until spec D6 holds
+  (SMA-767).** rustc 1.95 strips a release Mach-O with `rust-objcopy`, and that leaves the string
+  pool only 4-byte aligned when the indirect symbol count is odd. dyld on macOS 27 then rejects a
+  binary linked with SDK 27. The error is "mis-aligned LINKEDIT". Do not add maturin `--strip` or
+  `strip = true`. Do not add napi `--strip`. Each one runs `rust-objcopy` again. The crate-local
+  `rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml` must agree with the shared file.
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - Tests that assert on a log line use `paigasus_logging::test_support` (`capture_logs` at TRACE,
   `capture_logs_at(level)`). Turn on its `test-support` feature from `[dev-dependencies]` only,

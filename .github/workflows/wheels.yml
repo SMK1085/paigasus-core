@@ -47,6 +47,7 @@ on:
       - 'rs/.cargo/config.toml'
       - 'rs/crates/bindings/paigasus-py-bindings/pyproject.toml'
       - 'rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml'
       - 'py/packages/paigasus-kernel/pyproject.toml'
 
   # POST-merge verification of Rust changes — where the broad coverage lives.
@@ -297,6 +298,16 @@ jobs:
             unzip -q "$whl" -d "$work"
             so="$(find "$work" -name '*.abi3.so' -print -quit)"
             [ -n "$so" ] || { echo "::error::$whl contains no *.abi3.so"; unzip -l "$whl"; exit 1; }
+            # SMA-767: dyld on macOS 27 rejects a binary linked with SDK 27 when the string pool
+            # of LC_SYMTAB is not 8-byte aligned. Assert `stroff mod 8 = 0` for every wheel.
+            # The awk reads the whole pipe, so otool never gets SIGPIPE (see ci/CLAUDE.md).
+            f="$so"
+            # sma767-guard:begin
+            stroff="$(otool -l "$f" | awk '/^ *stroff /&&!d{v=$2; d=1} END{print v}')"
+            case "$stroff" in ''|*[!0-9]*) echo "::error::no numeric LC_SYMTAB stroff in $f [$stroff] (SMA-767)"; exit 1;; esac
+            [ $((stroff % 8)) -eq 0 ] || { echo "::error::$f string pool at stroff $stroff is not 8-byte aligned; dyld on macOS 27 rejects it when linked with SDK 27 (SMA-767)"; exit 1; }
+            echo "$f stroff $stroff: 8-byte aligned"
+            # sma767-guard:end
             archs="$(lipo -archs "$so")"
             echo "$whl archs: [$archs]"
             case "$whl" in
@@ -536,6 +547,12 @@ jobs:
           # is not allowlist evidence; what it does assert is that the BINDINGS' own README
           # shipped rather than only the vendored kernel's, which the basename form could not
           # tell apart.
+          #
+          # `.cargo/config.toml` (SMA-767) holds the macOS `-C strip=none` flag. The `[tool.maturin]
+          # include` puts it at the archive root. Without it, a macOS build from the sdist strips
+          # the binary and dyld on macOS 27 can reject the result. The entry is anchored to the
+          # archive root (the first path component is `paigasus_py_bindings-<version>/`). A copy
+          # at the crate path does not count, because cargo does not find it from the root.
           for required in \
             crates/bindings/paigasus-py-bindings/README.md \
             crates/bindings/paigasus-py-bindings/LICENSE \
@@ -544,6 +561,8 @@ jobs:
             grep -q "/$required$" < <(printf '%s\n' "$listing") \
               || { echo "::error::sdist is missing $required"; exit 1; }
           done
+          grep -q '^[^/]*/\.cargo/config\.toml$' < <(printf '%s\n' "$listing") \
+            || { echo "::error::sdist is missing .cargo/config.toml at the archive root"; exit 1; }
 
       - name: Upload sdist
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -639,6 +658,29 @@ jobs:
           assert k.prn_canonicalize(p) == p, k.prn_canonicalize(p)
           print("sdist source build + FFI call OK")
           PY
+
+      # SMA-767: a source build must also give a string pool that is 8-byte aligned. The sdist
+      # ships `.cargo/config.toml` with the macOS strip flag, and this step proves that the
+      # flag reaches rustc. The venv path is the same as in the step above.
+      - name: Assert 8-byte string pool alignment of the source build (darwin only)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          vpy="venv/bin/python"
+          pkgdir="$("$vpy" -c 'import paigasus_py_bindings, os; print(os.path.dirname(paigasus_py_bindings.__file__))')"
+          found=0
+          for f in "$pkgdir"/*.abi3.so; do
+            [ -e "$f" ] || continue
+            found=1
+            # sma767-guard:begin
+            stroff="$(otool -l "$f" | awk '/^ *stroff /&&!d{v=$2; d=1} END{print v}')"
+            case "$stroff" in ''|*[!0-9]*) echo "::error::no numeric LC_SYMTAB stroff in $f [$stroff] (SMA-767)"; exit 1;; esac
+            [ $((stroff % 8)) -eq 0 ] || { echo "::error::$f string pool at stroff $stroff is not 8-byte aligned; dyld on macOS 27 rejects it when linked with SDK 27 (SMA-767)"; exit 1; }
+            echo "$f stroff $stroff: 8-byte aligned"
+            # sma767-guard:end
+          done
+          [ "$found" -eq 1 ] || { echo "::error::no *.abi3.so in $pkgdir (SMA-767)"; ls -la "$pkgdir"; exit 1; }
 
   face:
     name: build paigasus-kernel (pure python)

@@ -62,6 +62,9 @@ tasks:
       # (Cargo.toml) change re-keys the guard even without a Rust src diff (cache-input completeness).
       - '/rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
       - '/rs/crates/bindings/paigasus-py-bindings/pyproject.toml'
+      # SMA-767: the crate-local cargo config. It holds the macOS `-C strip=none` flag.
+      # maturin runs cargo from this crate directory, so the file can change the linked binary.
+      - '/rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml'
       # The hand-written PyO3 stub (SMA-594'). It is the interface contract this test exercises,
       # and basedpyright reads it INSTEAD of the Rust — but it sits at the crate ROOT, so the
       # `src/**/*` glob above does not match it. Before this line, editing the stub selected only
