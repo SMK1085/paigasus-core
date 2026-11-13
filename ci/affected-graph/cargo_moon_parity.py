@@ -3400,30 +3400,50 @@ def _uv_logical_lines(text):
         yield "".join(parts), starts
 
 
-def _uv_quoted_at(seg, pos):
-    """True when `seg[pos]` sits inside an open quote or in a comment tail. Only the floor uses it.
+def _uv_bash_scan(text):
+    """Scan `text` once as bash does. Return `(eff, live)`. Only the floor uses it.
 
-    A comment tail starts at an unquoted `#` that starts a word and ends at the next newline.
+    `eff` is the text with every comment and every removed `\\`+newline taken out. `live[i]` is True
+    when `eff[i]` is outside any quote. A comment starts at an unquoted `#` that starts a word and
+    ends at the next physical newline. `\\`+newline is removed outside a comment and outside single
+    quotes, so a `\\` that ends a comment line does NOT join the next line.
     """
-    quote, comment, i = None, False, 0
-    while i < pos:
-        ch = seg[i]
+    eff, live = [], []
+    quote, comment, i, n = None, False, 0, len(text)
+    while i < n:
+        ch = text[i]
         if comment:
-            comment = ch != "\n"
+            if ch == "\n":
+                comment = False
+                eff.append(ch)
+                live.append(True)
             i += 1
             continue
         if ch == "\\" and quote != "'":
+            if text[i + 1:i + 2] == "\n":
+                i += 2
+                continue
+            eff.append(ch)
+            live.append(quote is None)
+            if i + 1 < n:
+                eff.append(text[i + 1])
+                live.append(quote is None)
             i += 2
             continue
+        if quote is None and ch == "#" and (not eff or eff[-1] in " \t\n"):
+            comment = True
+            i += 1
+            continue
+        was_open = quote is not None
         if quote:
             if ch == quote:
                 quote = None
         elif ch in "'\"":
             quote = ch
-        elif ch == "#" and (i == 0 or seg[i - 1] in " \t\n"):
-            comment = True
+        eff.append(ch)
+        live.append(not was_open and quote is None)
         i += 1
-    return quote is not None or comment
+    return "".join(eff), live
 
 
 def _uv_words_after(logical, match):
@@ -3507,19 +3527,20 @@ def _floor_isolated(blob):
     """True when ONE uv invocation has `run`, `--isolated`, the bindings reinstall and runs pytest.
 
     The invocation that is isolated must be the one that runs the tests: a second, ordinary
-    `uv run pytest` would run them in the shared environment. The `uv` must start a logical line or
-    follow `&&` or `;`, outside a quote. A wrong answer of the quote tracker removes credit only.
+    `uv run pytest` would run them in the shared environment. The `uv` must start a line or follow
+    `&&` or `;`, outside a quote and a comment. `_uv_bash_scan` reads the raw blob once, as bash
+    does. A wrong answer of the scan removes credit only.
     """
-    seen = ""  # the earlier logical lines, so an open quote carries across them
-    for logical, _ in _uv_logical_lines(blob or ""):
-        prefix, seen = seen, seen + logical + "\n"
-        for m in UV_TOKEN_RE.finditer(logical):
-            before = logical[:m.start()].rstrip()
+    eff, live = _uv_bash_scan(blob or "")
+    base = 0
+    for line in eff.split("\n"):
+        for m in UV_TOKEN_RE.finditer(line):
+            before = line[:m.start()].rstrip()
             if before and not before.endswith(("&&", ";")):
                 continue
-            if _uv_quoted_at(prefix + logical, len(prefix) + m.start()):
+            if not live[base + m.start()]:
                 continue
-            words = _uv_words_after(logical, m)
+            words = _uv_words_after(line, m)
             if words[:1] != ["run"]:
                 continue
             opts, command, why = _uv_run_form(words)
@@ -3527,6 +3548,7 @@ def _floor_isolated(blob):
                 continue
             if command[:1] == ["pytest"] or command[:3] in (["python", "-m", "pytest"], ["python3", "-m", "pytest"]):
                 return True
+        base += len(line) + 1
     return False
 
 
@@ -7229,6 +7251,12 @@ def self_test():
         a14_quoted2 = "echo 'x && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests'\nuv run pytest tests"
         if not any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_quoted2))):
             failures.append("A14 credited the floor to a `uv run` after `&&` inside quotes")
+        a14_cmt = "echo ok # \\\necho '\nuv run --isolated --reinstall-package paigasus-py-bindings pytest tests\n'\nuv run pytest tests"
+        if not any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_cmt))):
+            failures.append("A14 credited the floor to a `uv run` inside a quote that follows a comment ending in a backslash")
+        a14_cmt2 = "echo ok # \\\nuv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
+        if any(r.startswith("FLOOR:") for r in a14_run(a14_proj(a14_cmt2))):
+            failures.append("A14 gave no floor credit to a real command on the line after a comment that ends in a backslash")
         # A `../` ref that resolves to no file must raise, not be skipped.
         try:
             a14_run(a14_proj(a14_good + " && bash ../scripts/missing.sh", source_dir="py/sub"))
