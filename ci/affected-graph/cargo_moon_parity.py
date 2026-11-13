@@ -3377,7 +3377,8 @@ def _uv_logical_lines(text):
     """Yield `(logical, starts)` for each non-comment logical line of `text`.
 
     A physical line whose first non-blank character is `#` is a comment: it is skipped and never
-    joins the next line. A non-comment line that ends in a backslash joins the next physical line.
+    joins the next line. A non-comment line that ends in a backslash joins the next physical line with no
+    separator, as bash does, so a continuation can split a word.
     `starts` lists `(offset in logical, physical line number)` for each joined line.
     """
     lines = text.split("\n")
@@ -3392,15 +3393,15 @@ def _uv_logical_lines(text):
             body = lines[i][:-1] if cont else lines[i]
             starts.append((pos, i + 1))
             parts.append(body)
-            pos += len(body) + 1
+            pos += len(body)
             i += 1
             if not cont:
                 break
-        yield " ".join(parts), starts
+        yield "".join(parts), starts
 
 
 def _uv_quoted_at(seg, pos):
-    """True when `seg[pos]` sits inside an open quote of the segment (same rules as the segmenter)."""
+    """True when `seg[pos]` sits inside an open quote. A small quote tracker that only the floor uses."""
     quote, i = None, 0
     while i < pos:
         ch = seg[i]
@@ -6913,6 +6914,9 @@ def self_test():
         ("not an approved form: a prefix and another package",
          "touch a b && uv run --isolated --reinstall-package p pytest tests", True),
         ("uv.lock is not uv", "cat py/uv.lock", False),
+        ("a continuation splits uv", "u\\\nv sync", True),
+        ("a continuation splits VIRTUAL_ENV", "VIRTUAL\\\n_ENV=x", True),
+        ("a continuation splits --active", "--act\\\nive", True),
         ("an unknown verb", "uv frobnicate --sync", True),
         ("a := default of VIRTUAL_ENV", "echo ${VIRTUAL_ENV:=x}", True),
         ("a := default of UV_PROJECT_ENVIRONMENT", ': "${UV_PROJECT_ENVIRONMENT:=.venv-x}"', True),
