@@ -3996,13 +3996,37 @@ def uv_config_rows(rel_path, text):
     return rows
 
 
+def _yaml_code(line):
+    """`line` without its YAML comment. A comment starts at a `#` that begins the line or follows
+    white space, OUTSIDE a quote: a `#` inside `' … '` or `" … "` is part of the value. In a
+    double-quoted value `\\` escapes the next character. A single-quoted `''` closes and opens
+    the quote again, which gives the same state, so it needs no own branch.
+    """
+    quote, i = None, 0
+    while i < len(line):
+        c = line[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif quote == '"':
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+        i += 1
+    return line
+
+
 def moon_toolchain_rows(rel_path, text):
     """A14 rows for an argument that Moon appends to its own `uv sync` or `uv venv` (R5, R-toolchain)."""
     rows = []
     for lineno, line in enumerate(text.split("\n"), 1):
-        # A YAML comment starts at a `#` that begins the line or follows white space. A `#` inside
-        # a quoted value can hide a key from this cut, but no key text ever needs a `#`.
-        code = re.split(r"(?:^|(?<=[ \t]))#", line, maxsplit=1)[0]
+        code = _yaml_code(line)
         rows.extend(
             f"{rel_path}:{lineno} sets {m.group(1)}, which Moon appends to the `uv sync` of "
             f"InstallDependencies; A14 approves no argument there (SMA-765 R-toolchain)"
@@ -7803,6 +7827,10 @@ def self_test():
             ("unstable_uv: {version: '0.11.16', syncArgs: ['--reinstall']}\n", True),
             ("unstable_uv:\n  \"syncArgs\": ['--reinstall']\n", True),
             ("unstable_uv:\n  version: '0.11.16' # syncArgs: x\n", False),
+            ("{$schema: ' # local', unstable_uv: {syncArgs: ['--reinstall']}}\n", True),
+            ('{$schema: " # local", unstable_uv: {syncArgs: [x]}}\n', True),
+            ("{a: 'it''s # x', unstable_uv: {syncArgs: [x]}}\n", True),
+            ('{a: "x\\" # y", unstable_uv: {syncArgs: [x]}}\n', True),
         ):
             if bool(moon_toolchain_rows(".moon/toolchains.yml", a14_tc)) is not a14_want:
                 failures.append(f"A14 toolchain rule reads {a14_tc!r} as {'green' if a14_want else 'red'}")

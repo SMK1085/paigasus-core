@@ -447,7 +447,7 @@ It also runs several checks that the per-case project sets structurally **cannot
      level or in `[pip]` of every tracked `uv.toml` (`uv_config_rows`). A file that is not valid TOML is an
      infrastructure error. `FLOOR:` row: `py/pyproject.toml` must be in the list. A user-level uv.toml outside
      the repository cannot be read and is not covered.
-  10. R5 and SMA-765 R-toolchain (follow-up sweep 2): a `syncArgs`, `venvArgs` or `installArgs` key (also quoted, or in a flow mapping) outside a comment in
+  10. R5 and SMA-765 R-toolchain (follow-up sweep 2): a `syncArgs`, `venvArgs` or `installArgs` key (also quoted, or in a flow mapping) outside a comment (a `#` inside a quoted value is not one) in
       `.moon/toolchains.yml` is a row (`moon_toolchain_rows`). Moon's own InstallDependencies action runs
       `uv sync --no-managed-python --no-python-downloads --no-progress` in `py/` (measured on moon 2.5.3),
       and an added argument would apply on every run. A missing file is a `FLOOR:` row.

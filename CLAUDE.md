@@ -315,8 +315,10 @@ a gate. Do not copy it here.
   healthy pipe, per the correction above. A local full-graph `moon ci` run must pick one bash for the
   whole invocation, then re-run the gates that need the other bash directly
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
-  them. `repo:nats-permissions` has no `ci/` script: re-run its bash half as
-  `/opt/homebrew/bin/bash ops/nats/check-subjects.sh`. Its nextest half does not depend on the bash.
+  them. `repo:nats-permissions` has no `ci/` script, and under 3.2 its `set -e` stops the task
+  before its nextest half. Re-run both halves: `/opt/homebrew/bin/bash ops/nats/check-subjects.sh`,
+  then the task's own `( cd rs && cargo nextest run --locked --no-tests=pass -p paigasus-iam --test
+  nats_permissions --test docker_preflight --profile iam-nats )` (it needs Docker).
   `repo:actionlint` yields a local verdict only when its pipe preflight passes. CI runs a single Linux bash and
   never sees this split.
 - **A new pipe on the development Mac can hold only 512 bytes, and two local hangs come from
