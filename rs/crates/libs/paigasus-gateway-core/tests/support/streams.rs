@@ -55,8 +55,9 @@ pub enum Quirk {
     /// a call instead (spec § 5.2, the opening record counts).
     NoDelta,
     /// A fragment with `"type":null` and a function body for call 0: a present `type` key counts
-    /// as the type fragment, so it is a repeated type or a type/shape mismatch. The body keeps the
-    /// entry a named call; a bare `{"index":0,"type":null}` is covered by the unit tests and fixture.
+    /// as the type fragment, so it is a repeated type or a type/shape mismatch. When choice 0 has
+    /// no call, a bare `{"index":0,"type":null}` goes after its first record instead: a conforming
+    /// bodyless call that the core and the oracle both name `unknown`.
     NullType,
     /// A top-level `chunk` key with an empty `choices` (spec § 2.2 H1): LangChain reads
     /// `chunk.choices` then, so the hidden call sits inside `chunk`.
@@ -385,6 +386,10 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
                     let rec = if *q == Quirk::NoChoicesKey { r#"{"object":"chat.completion.chunk","id":"q"}"#.to_owned() } else { chunk(json!([{"index":0}])).to_string() };
                     lines.insert(at, format!("data: {rec}\n\n"));
                 }
+            }
+            Quirk::NullType if s.choices[0].calls.is_empty() && has(s, Quirk::ReverseChoices).is_none() => {
+                let at = 1.min(lines.len());
+                lines.insert(at, format!("data: {}\n\n", chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"type":null}]}}]))));
             }
             Quirk::NullType => insert(&mut lines, chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"type":null,"function":{"name":"blocked_hidden","arguments":"CANARY-nt"}}]}}])).to_string()),
             Quirk::ChunkKey => insert(&mut lines, json!({"object":"chat.completion.chunk","id":"q","choices":[],"chunk":{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ck","type":"function","function":{"name":"blocked_chunk","arguments":"CANARY-chunk"}}]}}]}}).to_string()),

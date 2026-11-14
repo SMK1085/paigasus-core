@@ -219,8 +219,9 @@ LangChain skips such a record, so the decider and LangChain would see different 
   way. This spec does not change that behaviour.
 - Each deviation is reported as `RecordDropped("malformed")` and `OnFailure("malformed")`, as the
   existing deviations are. An operator cannot tell the new deviations apart. This is unchanged.
-- The rules and their reasons go into the module doc of `src/openai/assembly.rs` (§ 5.1 to § 5.3)
-  and of `src/openai/classify.rs` (§ 5.4, § 5.5). The SMA-749 spec is not edited; this spec
+- The rules and their reasons go into the module docs: `src/openai/assembly.rs` for § 5.1 and
+  § 5.3, `src/openai/stream.rs` for § 5.2 and § 5.7, and `src/openai/classify.rs` for § 5.4,
+  § 5.5 and § 5.8. The SMA-749 spec is not edited; this spec
   supersedes its § 4.3 list for these shapes.
 
 ### 5.7 `array_outside_tool_calls` (P-e)

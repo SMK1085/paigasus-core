@@ -18,6 +18,12 @@
 //! A fragment that adds nothing is a deviation too, on purpose: the rule does not read content.
 //! Calls that start in or after the bodyless record are conforming.
 //!
+//! A present `type` key counts as the type fragment, `null` included (spec § 5.3, P-c): a second
+//! one is `repeated_type`, and a first `"type": null` with a body is `type_shape_mismatch` at
+//! completion. openai-python replaces `type` on every fragment, so a later `"type": null` turns a
+//! function call's type into `None`, and its `new_tool.type == "function"` assert then raises with
+//! a strict prefix of the arguments. A non-stream body keeps reading `null` as absent (D4).
+//!
 //! Every check runs on a small copy of the state ([`Check`]) before anything is changed, so a
 //! deviation leaves the assembly exactly as it was.
 //!

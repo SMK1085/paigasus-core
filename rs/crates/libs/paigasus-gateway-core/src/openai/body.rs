@@ -33,10 +33,12 @@ fn message_parts(m: &Map<String, Value>) -> Result<(Vec<Fragment>, Option<NameAr
     if entries.len() > MAX_CALLS {
         return Err(Malformed("too_many_calls"));
     }
+    // D4: the stream's § 5.3 rule (a present `type` key, `null` included, is the type fragment)
+    // does not apply to a body, which has one entry per call. A `null` type is read as absent.
     let frags = entries
         .iter()
         .enumerate()
-        .map(|(i, e)| fragment_at(e, u32::try_from(i).expect("bounded by MAX_CALLS")))
+        .map(|(i, e)| fragment_at(e, u32::try_from(i).expect("bounded by MAX_CALLS")).map(|f| Fragment { ty_key: f.ty.is_some(), ..f }))
         .collect::<Result<Vec<_>, _>>()?;
     let legacy = legacy_call(m.get("function_call"))?;
     Ok((frags, legacy))
@@ -137,6 +139,16 @@ mod tests {
         let body = |ty: String| json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"tool_calls": [{"id": "c", "type": ty}]}}]});
         assert!(calls(&body("a".repeat(1024))).is_ok());
         assert!(matches!(calls(&body("a".repeat(1025))), Err(Malformed("long_identifier"))));
+    }
+
+    /// D4: a body is unchanged by the stream's § 5.3 rule. A `"type": null` with a function body
+    /// is a function call, as at 2d58afd6.
+    #[test]
+    fn a_null_type_in_a_body_is_read_as_absent() {
+        let tool_calls = json!([{"id": "c0", "type": null, "function": {"name": "read", "arguments": "{}"}}]);
+        let body = json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"tool_calls": tool_calls}}]});
+        let got = calls(&body).unwrap();
+        assert_eq!((got.len(), got[0].kind, got[0].name.as_str()), (1, crate::types::ToolCallKind::Function, "read"));
     }
 
     #[test]

@@ -481,7 +481,8 @@ fn message_calls(choice: u32, m: &Map<String, Value>) -> Vec<ModelCall> {
             } else if let Some(Value::Object(c)) = e.get("custom") {
                 ("custom", str_or_empty(c.get("name")), str_or_empty(c.get("input")))
             } else {
-                ("other", str_or_empty(e.get("type")), Value::Object(e.clone()).to_string())
+                // The core names a bodyless call by its `type`, or `unknown` when it has none.
+                ("other", e.get("type").and_then(Value::as_str).unwrap_or("unknown").to_owned(), Value::Object(e.clone()).to_string())
             };
             out.push(ModelCall {
                 choice,

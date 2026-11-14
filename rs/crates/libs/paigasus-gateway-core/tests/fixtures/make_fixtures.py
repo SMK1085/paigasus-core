@@ -68,6 +68,8 @@ OPENAI = {
     "custom_tool_blocked": [ch([{"index": 0, "delta": {"role": "assistant", "content": None, "tool_calls": [{"index": 0, "id": "call_c", "type": "custom", "custom": {"name": "blocked_sql", "input": "DROP CANARY-7"}}]}, "finish_reason": None}]), fin(0)],
     "usage_chunk": one_blocked("CANARY-8") + [{"id": "chatcmpl-fx", "object": "chat.completion.chunk", "choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}],
     "event_line": one_blocked("CANARY-9"),
+    # A bodyless call with `"type": null` and no id: kind Other, named `unknown` (spec § 5.3).
+    "bodyless_type_null": [text(0, "", role=True), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "type": None}]}, "finish_reason": None}]), fin(0)],
 }
 
 OPENAI_MALFORMED = {
