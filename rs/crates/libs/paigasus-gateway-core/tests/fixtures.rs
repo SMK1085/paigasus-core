@@ -6,8 +6,9 @@ mod support;
 use std::path::{Path, PathBuf};
 
 use paigasus_gateway_core::{Format, Metric, OnFailure};
+use support::driver::cut;
 use support::driver::{DECIDERS, allow_all, block_named, drive, limits};
-use support::oracle::{check_i1, payloads};
+use support::oracle::{as_model_call, check_i1, payloads, runners};
 
 const SETS: [(Format, &str); 4] = [
     (Format::OpenAiChat, "openai/conforming"),
@@ -209,6 +210,55 @@ fn malformed_shapes_follow_section_6() {
             }
             for bad in r.allow_lacks {
                 assert!(!a.contains(bad), "{rel}/{name} (allow) holds {bad:?}:\n{a}");
+            }
+        }
+    }
+}
+
+/// The split points to test for `bytes`. Every point costs three client runs (two processes
+/// each), and a full sweep of the 12 recordings took over 100 s in a debug build. So a file up to
+/// 4 KiB gets every point. A larger file gets a stride of 7 plus every record boundary (each
+/// `\n\n` offset, and the offsets on both sides of it), where a split is most likely to matter.
+fn split_points(bytes: &[u8]) -> Vec<usize> {
+    if bytes.len() <= 4096 {
+        return (0..=bytes.len()).collect();
+    }
+    let mut v: Vec<usize> = (0..=bytes.len()).step_by(7).collect();
+    for (i, w) in bytes.windows(2).enumerate() {
+        if w == b"\n\n" {
+            v.extend([i, i + 1, i + 2]);
+        }
+    }
+    v.push(bytes.len());
+    v.sort_unstable();
+    v.dedup();
+    v.retain(|&i| i <= bytes.len());
+    v
+}
+
+/// Real OpenAI recordings (2026-11-14) pass the interceptor unchanged: no record is dropped, no
+/// `on_failure` path runs, and every client derives the decided calls from the output.
+#[test]
+fn recorded_streams_pass_unchanged() {
+    for (name, bytes) in files("openai/recorded") {
+        for i in split_points(&bytes) {
+            let o = drive(Format::OpenAiChat, limits(OnFailure::Block), &cut(&bytes, &[i]), &allow_all);
+            let ctx = format!("recorded/{name} split at {i}");
+            assert!(o.finished, "{ctx} never ended");
+            assert!(!o.metrics.iter().any(|m| matches!(m, Metric::RecordDropped(_) | Metric::OnFailure(_))), "{ctx}: {:?}", o.metrics);
+            check_i1(Format::OpenAiChat, &bytes, &o.out, &o.decided, o.core_failed()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+            let want: Vec<(&str, String)> = o.decided.iter().map(|(c, _)| as_model_call(c)).map(|m| (m.kind, m.name)).collect();
+            assert!(!want.is_empty(), "{ctx}: no tool call was decided");
+            for (model, run) in runners(Format::OpenAiChat) {
+                let r = run(&o.out);
+                if let Some(e) = &r.error {
+                    // A client that raises on the recorded bytes themselves is a client limit, not
+                    // an interceptor defect: LangChain raises on any `custom` call (oracle.rs).
+                    assert!(run(&bytes).error.is_some(), "{ctx}: {model} raised on the output only: {e}");
+                    continue;
+                }
+                let got: Vec<(&str, String)> = r.calls.iter().map(|m| (m.kind, m.name.clone())).collect();
+                assert_eq!(got, want, "{ctx}: {model}");
             }
         }
     }
