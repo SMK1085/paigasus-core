@@ -88,6 +88,17 @@ WRAPPER_CASES: tuple[WrapperCase, ...] = (
     WrapperCase("wheel-smoke extra argument", "sub", ("wheel-smoke", "<ROOT>/v", "x.whl", "y"), {}, 0, 2, None, None, None),
     WrapperCase("sdist-install", "sub", ("sdist-install", "<ROOT>/v", "p.tar.gz"), {}, 0, 0, "v/bin/pip", "sub", ("install", "p.tar.gz")),
     WrapperCase("sdist-install extra argument", "sub", ("sdist-install", "<ROOT>/v", "p.tar.gz", "y"), {}, 0, 2, None, None, None),
+    WrapperCase("sdist-install windows", "sub", ("sdist-install", "<ROOT>/w", "p.tar.gz"), {}, 0, 0, "w/Scripts/pip.exe", "sub", ("install", "p.tar.gz")),
+    WrapperCase("wheel-smoke dash wheel", "sub", ("wheel-smoke", "<ROOT>/v", "-x"), {}, 0, 2, None, None, None),
+    WrapperCase("sdist-install dash sdist", "sub", ("sdist-install", "<ROOT>/v", "-x"), {}, 0, 2, None, None, None),
+    WrapperCase("run-frozen unknown target", "py", ("run-frozen", "ci/helm-render", "x"), {}, 0, 2, None, None, None),
+    WrapperCase("install-ziglang missing python", "sub", ("install-ziglang", "<ROOT>/nov/python"), {}, 0, 127, None, None, None),
+    WrapperCase("install-ziglang extra argument", "sub", ("install-ziglang", "<FAKE>/python", "y"), {}, 0, 2, None, None, None),
+    WrapperCase("install-ziglang dash python", "sub", ("install-ziglang", "-x"), {}, 0, 2, None, None, None),
+    WrapperCase("install-ziglang-system missing python", "sub", ("install-ziglang-system", "<ROOT>/nov/python3"), {}, 0, 127, None, None, None),
+    WrapperCase("install-ziglang-system extra argument", "sub", ("install-ziglang-system", "<FAKE>/python3", "y"), {}, 0, 2, None, None, None),
+    WrapperCase("install-ziglang-system dash python", "sub", ("install-ziglang-system", "-x"), {}, 0, 2, None, None, None),
+    WrapperCase("build empty outdir", "sub", ("build", "paigasus-proto", ""), {}, 0, 2, None, None, None),
     WrapperCase("argv transport", "py", ("run", "py", "p", "", "a b", "--locked"), {}, 0, 0, "uv", "py", ("run", "--locked", "--", "p", "", "a b", "--locked")),
     WrapperCase("unknown operation", "sub", ("sync",), {}, 0, 2, None, None, None),
     WrapperCase("no operation", "sub", (), {}, 0, 2, None, None, None),
@@ -134,7 +145,7 @@ def _build_fixture(root: Path, repo: Path) -> None:
         (root / d).mkdir(parents=True, exist_ok=True)
     for tool in ("uv", "pip", "python", "python3", "proto"):
         _write_fake(root / "fake" / "bin" / tool)
-    for venv_tool in ("v/bin/python", "v/bin/pip", "w/Scripts/python.exe"):
+    for venv_tool in ("v/bin/python", "v/bin/pip", "w/Scripts/python.exe", "w/Scripts/pip.exe"):
         _write_fake(root / venv_tool)
     (root / "empty" / "bin").mkdir(parents=True)
 

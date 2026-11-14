@@ -48,6 +48,7 @@ Any other value exits 2.
 - R-lock: `lock` exits 2 when `MOON_PROJECT_ID` is set, also when it is empty.
 - R-build: `build` never passes `--no-build-isolation`.
 - R-script: `script` refuses a file that starts with `-`.
+- `install-ziglang` and `install-ziglang-system` refuse a python that starts with `-`.
 - Style: each uv, pip or proto command is one literal line in one `case` branch. No flag is held
   in a variable or an array. The wrapper does not unset `UV_*` variables.
 - Bash: the wrapper runs under bash 3.2, bash 5, and Git bash on Windows. Do not use `mapfile`,

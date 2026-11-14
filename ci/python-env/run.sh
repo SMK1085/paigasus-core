@@ -131,12 +131,18 @@ case "$op" in
   install-ziglang)
     [ "$#" -eq 1 ] || die "install-ziglang needs one python"
     python=$1
+    case "$python" in
+      -*) die "install-ziglang: the python must not start with '-'" ;;
+    esac
     need_tool "$python"
     "$python" -m pip install ziglang
     ;;
   install-ziglang-system)
     [ "$#" -eq 1 ] || die "install-ziglang-system needs one python"
     python=$1
+    case "$python" in
+      -*) die "install-ziglang-system: the python must not start with '-'" ;;
+    esac
     need_tool "$python"
     "$python" -m pip install --break-system-packages ziglang
     ;;
