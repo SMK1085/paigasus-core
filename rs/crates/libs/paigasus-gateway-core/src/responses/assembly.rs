@@ -34,6 +34,20 @@ use crate::types::{ToolCall, ToolCallKind};
 /// The fields that R9 compares in `added`, `done` and the terminal `output`.
 const IDENTITY: [&str; 5] = ["type", "id", "call_id", "namespace", "name"];
 
+/// The client-run item types whose openai-python 3.48.0 model has a `status` field
+/// (`openai/types/responses/`). For these an absent `status` at `done` is a truncation (R15,
+/// ruling T4b). `custom_tool_call`, `mcp_approval_request`, `custom_tool_call_output`,
+/// `mcp_approval_response` and any type the SDK does not know have no such field.
+const STATUS_TYPES: [&str; 7] = [
+    "function_call",
+    "computer_call",
+    "local_shell_call",
+    "shell_call",
+    "apply_patch_call",
+    "tool_search_call",
+    "function_call_output",
+];
+
 /// The prefix of the gateway's own rewrite ids (§ 6.5). No upstream item id may start with it.
 const RESERVED_ID_PREFIX: &str = "msg_paigasus_";
 
@@ -122,7 +136,7 @@ fn name_of(item: &Map<String, Value>, kind: ToolCallKind) -> Result<(Option<Stri
     }
     Ok(match kind {
         ToolCallKind::Function => (opt_str(item.get("namespace"), "namespace")?, text_of(item, "name")?),
-        ToolCallKind::Custom => (None, text_of(item, "name")?),
+        ToolCallKind::Custom => (opt_str(item.get("namespace"), "namespace")?, text_of(item, "name")?),
         ToolCallKind::McpApprovalRequest => (opt_str(item.get("server_label"), "server_label")?, text_of(item, "name")?),
         ToolCallKind::Other => (None, text_of(item, "type")?),
         _ => return Err(Malformed("kind")),
@@ -132,6 +146,8 @@ fn name_of(item: &Map<String, Value>, kind: ToolCallKind) -> Result<(Option<Stri
 /// The call of one client-run Responses item, by the § 5 table. Shared by the stream (the `done`
 /// item) and the body path (an `output[]` item).
 ///
+/// `namespace` is the `namespace` of a function or custom call (when present) and the
+/// `server_label` of an `mcp_approval_request` (§ 5, ruling T4a).
 /// `id` is the `call_id`, or the item `id` for `mcp_approval_request`. A server `tool_search_call`
 /// may have no `call_id`. Kind `Other` takes the `call_id` when the item has one, else the item
 /// `id` (§ 5 gives no row for it). `arguments` is `arguments` for a function (`""` becomes `"{}"`),
@@ -511,6 +527,9 @@ impl Assembly {
         if !self.started && ty != "response.created" {
             return Err(Deviation("first_not_created"));
         }
+        if self.started && ty == "response.created" {
+            return Err(Deviation("repeated_created"));
+        }
         self.sequence(ev)?;
         match scope {
             Scope::Lifecycle => {
@@ -744,7 +763,7 @@ impl Assembly {
     /// R9, R11–R15 and the subset rule at `response.output_item.done`.
     fn done(&mut self, ev: &Map<String, Value>) -> Result<Effect, Deviation> {
         let value = ev.get("item");
-        let (item, _, _) = item_shape(value)?;
+        let (item, item_type, _) = item_shape(value)?;
         let index = self.locate(ev)?;
         if identity(item) != self.items[index as usize].identity {
             return Err(Deviation("item_identity_changed"));
@@ -755,10 +774,10 @@ impl Assembly {
             client = true;
             let added_value = open.added.as_ref().expect("a client-run item keeps its added item");
             let added = added_value.as_object().expect("item_shape checked the added item");
-            // R15: a `done` that has a `status` other than `"completed"` is a truncation. An item
-            // type with no `status` field (`mcp_approval_request`) is complete at its `done`.
+            // R15: a `done` whose `status` is not `"completed"` is a truncation. An absent `status`
+            // is one too, except for an item type whose model has no `status` field (T4b).
             let completed = match item.get("status") {
-                None => true,
+                None => !STATUS_TYPES.contains(&item_type),
                 Some(Value::String(s)) => s == "completed",
                 Some(_) => false,
             };
@@ -1052,6 +1071,27 @@ mod tests {
     }
 
     #[test]
+    fn a_namespaced_custom_call_keeps_its_namespace() {
+        // Ruling T4a: a custom call's `namespace` is part of its identity, as a function's is.
+        let item = |ns: &str, input: &str, status: &str| json!({"id": "ctc_1", "type": "custom_tool_call", "status": status, "call_id": "call_c", "namespace": ns, "input": input, "name": "run"});
+        let build = |done_ns: &str| {
+            let done = item(done_ns, "ls", "completed");
+            let evs = vec![
+                added(0, item("tools", "", "in_progress")),
+                scoped("response.custom_tool_call_input.delta", 0, "ctc_1", json!({"delta": "ls"})),
+                item_done(0, done.clone()),
+            ];
+            stream(vec![(evs, done)])
+        };
+        let mut a = passes(build("tools"));
+        assert_eq!(a.known(), [(0, "tools.run".to_owned())]);
+        let calls = a.hold_calls();
+        assert_eq!(calls, [call(0, "call_c", Some("tools"), "run", ToolCallKind::Custom, "ls")]);
+        assert_eq!(calls[0].display_name(), "tools.run");
+        assert_eq!(deviation(build("other")), "item_identity_changed");
+    }
+
+    #[test]
     fn a_namespaced_function_keeps_its_namespace() {
         let mut item = function_item(0, "fc_1", "call_1", "read", &["{}"]);
         for e in item.0.iter_mut().filter(|e| e.get("item").is_some()) {
@@ -1232,6 +1272,11 @@ mod tests {
     fn r1_first_record_and_response_id() {
         assert_eq!(deviation(vec![in_progress(), created()]), "first_not_created");
         assert_eq!(deviation(vec![json!({"type": "response.output_text.delta"})]), "first_not_created");
+        // Ruling T4c: a `response.created` after the first record, with the same id.
+        let mut evs = stream(vec![message_item(0, "msg_1", "x")]);
+        evs.insert(4, created());
+        assert_eq!(deviation(evs), "repeated_created");
+        assert_eq!(deviation(vec![created(), created()]), "repeated_created");
         let mut evs = stream(vec![]);
         evs[1]["response"]["id"] = json!("resp_2");
         assert_eq!(deviation(evs), "response_id_changed");
@@ -1534,6 +1579,38 @@ mod tests {
         let a = passes(vec![created(), msg[0].clone(), completed(vec![msg[0]["item"].clone()])]);
         assert!(!a.truncated());
         assert!(!passes(stream(vec![function_item(0, "fc_1", "call_1", "f", &["{}"])])).truncated());
+    }
+
+    #[test]
+    fn an_absent_done_status_is_a_truncation_where_the_model_has_one() {
+        // Ruling T4b: `function_call` and `computer_call` have a `status` field in the SDK model.
+        let without_status = |mut item: Item| {
+            item.1.as_object_mut().unwrap().remove("status");
+            let last = item.0.len() - 1;
+            item.0[last]["item"].as_object_mut().unwrap().remove("status");
+            stream(vec![item])
+        };
+        assert!(passes(without_status(function_item(0, "fc_1", "call_1", "f", &["{}"]))).truncated());
+        let computer = plain_item(
+            0,
+            json!({"id": "cu_1", "type": "computer_call", "status": "in_progress", "call_id": "call_cu"}),
+            json!({"id": "cu_1", "type": "computer_call", "status": "completed", "actions": [], "call_id": "call_cu"}),
+        );
+        assert!(passes(without_status(computer)).truncated());
+        // `custom_tool_call` and `mcp_approval_request` have none: an absent status is complete.
+        let custom = plain_item(
+            0,
+            json!({"id": "ctc_1", "type": "custom_tool_call", "call_id": "call_c", "input": "", "name": "run"}),
+            json!({"id": "ctc_1", "type": "custom_tool_call", "call_id": "call_c", "input": "", "name": "run"}),
+        );
+        assert!(!passes(stream(vec![custom])).truncated());
+        let mcp = json!({"id": "mcpr_1", "type": "mcp_approval_request", "server_label": "git", "name": "push", "arguments": "{}"});
+        assert!(!passes(stream(vec![plain_item(0, mcp.clone(), mcp)])).truncated());
+        // A `null` status is never complete.
+        let mut evs = stream(vec![function_item(0, "fc_1", "call_1", "f", &["{}"])]);
+        evs[5]["item"]["status"] = json!(null);
+        evs[6]["response"]["output"][0]["status"] = json!(null);
+        assert!(passes(evs).truncated());
     }
 
     #[test]

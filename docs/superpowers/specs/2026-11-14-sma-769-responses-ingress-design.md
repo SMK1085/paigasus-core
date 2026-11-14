@@ -272,7 +272,7 @@ All stay `#[non_exhaustive]`. For a Responses call:
 | `choice` | `0` |
 | `position` | the item's `output_index` |
 | `id` | `call_id` (function, custom, computer, local shell, shell, apply patch, tool search); the item `id` for `mcp_approval_request` |
-| `namespace` | `namespace` (function, when present); `server_label` (`mcp_approval_request`); `None` otherwise |
+| `namespace` | `namespace` (function and custom, when present); `server_label` (`mcp_approval_request`); `None` otherwise |
 | `name` | `name` (function, custom, `mcp_approval_request`); a fixed label for the others: `computer`, `local_shell`, `shell`, `apply_patch`, `tool_search` |
 | `arguments` | `arguments` (function; `""` becomes `"{}"`, as chat, 749 § 11); `input` (custom); for every other kind, including `Other`: the `done` item as compact JSON, with `status` removed |
 
@@ -349,6 +349,7 @@ type is malformed. openai-node 7.57.0 does not know the two diff types and raise
 Stream order:
 
 - R1. The first record is `response.created`. Every lifecycle event has the same `response.id`.
+  A `response.created` after the first record is a deviation (`repeated_created`).
 - R2. `response.created`, `response.queued` and `response.in_progress` carry `response.output: []`.
 - R3. Exactly one terminal event (`response.completed`, `response.incomplete` or
   `response.failed`). It carries `response.output` as an array, never absent or `null` (R-d).
