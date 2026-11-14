@@ -571,8 +571,9 @@ from every surface its SDK exposes:
   an excused raise.
 - **openai-node 7.57.0.** `core/streaming.ts`, `lib/responses/ResponseStream.ts` and
   `internal/responses/response-accumulator.ts`. Calls: the final snapshot (partial at a clean
-  EOF), plus every emitted `output_item.done` item. At a raise, `finalResponse()` rejects, so only
-  the emitted `done` items count.
+  EOF), plus every emitted `output_item.done` item, plus the `response.output` of every emitted
+  terminal event, counted at the emit point (ruling T7e). At a raise, `finalResponse()` rejects,
+  so only the emitted `done` items and terminal events count.
 - **LangChain (langchain-openai 1.8.0, langchain-core 1.8.0)** on the raw stream.
   `_convert_responses_chunk_to_generation_chunk`, `merge_lists`, `merge_dicts`, and
   `init_tool_calls` with `parse_partial_json`. Calls: `tool_calls` of the summed chunk, plus the

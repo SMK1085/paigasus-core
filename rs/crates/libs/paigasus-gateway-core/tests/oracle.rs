@@ -538,6 +538,22 @@ fn a_changed_position_id_or_namespace_fails() {
     }
 }
 
+/// Ruling T7e: openai-node emits a terminal event with its `response.output`, and an app can act
+/// on it before a later raise. A call that only that output shows is a call.
+#[test]
+fn node_counts_the_output_of_an_emitted_terminal_event() {
+    let mut evs = conforming(vec![function_item(0, "fc_1", "call_1", "read_file", None, &["{}"])]);
+    let last = evs.len() - 1;
+    let extra = json!({"type": "function_call", "id": "fc_2", "status": "completed", "call_id": "call_2", "name": "write_file", "arguments": "{}"});
+    evs[last]["response"]["output"].as_array_mut().unwrap().push(extra);
+    // An unknown type after the terminal event: openai-node raises there.
+    let bytes = render_with(&evs, evs.len(), "data: {\"type\":\"response.unknown_kind\"}\n\n");
+    let r = run_node(&bytes);
+    assert!(r.error.is_some(), "openai-node raises after the terminal event");
+    let ids: Vec<Option<String>> = r.calls.iter().map(|c| c.id.clone()).collect();
+    assert!(ids.contains(&s("call_2")), "{:?}", r.calls);
+}
+
 fn split_call_stream(args: &str, k: usize) -> (Vec<u8>, Vec<(ToolCall, Decision)>) {
     let item = function_item(0, "fc_1", "call_1", "read_file", None, &[&args[..k], &args[k..]]);
     let decided = decided_of(std::slice::from_ref(&item.done));

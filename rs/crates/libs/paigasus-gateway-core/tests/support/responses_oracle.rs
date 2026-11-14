@@ -987,7 +987,10 @@ impl NodeStream {
         Ok(true)
     }
 
-    fn lifecycle(&mut self, ty: &str, ev: &Map<String, Value>) -> Result<(), String> {
+    /// A lifecycle event. `#addEvent` emits it with the prepared response (its `output` filled
+    /// when absent), so the `output` of an emitted terminal event is a call surface, counted at
+    /// the emit point (ruling T7e).
+    fn lifecycle(&mut self, ty: &str, ev: &Map<String, Value>, emitted: &mut Vec<ModelCall>) -> Result<(), String> {
         let Some(r) = ev.get("response") else {
             return Err("OpenAIError: Lifecycle events require their own response field.".into());
         };
@@ -1034,13 +1037,17 @@ impl NodeStream {
         let new = node_clone_validated(&r)?;
         if ty == "response.completed" {
             self.dirty = false;
-            self.snap = Some(new);
-            return Ok(());
+        } else {
+            self.rebuild(&new, ty)?;
         }
-        self.rebuild(&new, ty)?;
         self.snap = Some(new);
         if INTERIM.contains(&ty) {
             self.reorder();
+        }
+        if TERMINAL.contains(&ty)
+            && let Some(Value::Array(output)) = r.get("output")
+        {
+            output_calls(output, false, emitted);
         }
         Ok(())
     }
@@ -1238,7 +1245,7 @@ fn node_steps(bytes: &[u8], st: &mut NodeStream, emitted: &mut Vec<ModelCall>) -
             continue;
         }
         if LIFECYCLE.contains(&ty) {
-            st.lifecycle(ty, ev)?;
+            st.lifecycle(ty, ev, emitted)?;
         } else {
             st.output_event(ty, ev, emitted)?;
         }
@@ -1256,9 +1263,11 @@ fn node_steps(bytes: &[u8], st: &mut NodeStream, emitted: &mut Vec<ModelCall>) -
 /// `shell_call_command.done` and `output_item.done` replace the value or the whole item; a
 /// lifecycle event replaces the whole snapshot.
 ///
-/// Calls: every emitted `output_item.done` item, and the final snapshot (`finalResponse()`;
+/// Calls: every emitted `output_item.done` item, the `response.output` of every emitted terminal
+/// event (`response.completed`, `.failed`, `.incomplete`, with the output that `#prepareEvent`
+/// fills), counted at the emit point (ruling T7e), and the final snapshot (`finalResponse()`;
 /// partial at a clean EOF without a terminal event). At a raise `finalResponse()` rejects, so
-/// only the emitted `done` items count.
+/// only the emitted events count.
 /// SOURCE: openai-node 7.57.0, `src/core/streaming.ts` `Stream.fromSSEResponse` and `SSEDecoder`;
 /// `src/lib/responses/ResponseStream.ts` `#addEvent`, `#prepareEvent`, `#prepareOutputEvent`,
 /// `#recordOutput`, `#updateInterimResponse`, `#assertComplete`, `#endRequest`, `outputIdentity`;
