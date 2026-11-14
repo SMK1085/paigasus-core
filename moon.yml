@@ -319,6 +319,11 @@ tasks:
       # an edit to any file must schedule this task. G5 proves each read file matches an input.
       # The narrow globs above are KEPT: check 8e in ci/actionlint/run.sh floors them.
       - '**/*'
+      # Moon does not ignore `.next` output. The ban reads tracked files only, so a build must not
+      # re-key this task. These are the same three negations as repo:next-public-free.
+      - '!ts/apps/*/.next/**'
+      - '!ts/apps/*/tests/fixtures/*/.next/**'
+      - '!ts/packages/*/tests/e2e/fixture/.next/**'
 
   parity-corpus-drift:
     description: 'Regenerate the parity corpus from the kernel; assert it matches the committed vectors (SMA-433).'

@@ -538,15 +538,21 @@ def _build_fixture(root: Path, repo: Path) -> None:
         _write_fake(root / "fake" / "bin" / tool)
     for venv_tool in ("v/bin/python", "v/bin/pip", "w/Scripts/python.exe", "w/Scripts/pip.exe"):
         _write_fake(root / venv_tool)
-    (root / "empty" / "bin").mkdir(parents=True)
+    empty = root / "empty" / "bin"
+    empty.mkdir(parents=True)
+    # The tool-absent PATH holds only the utilities the wrapper runs, so a system uv or proto cannot leak in.
+    for util in ("dirname", "mkdir"):
+        found = shutil.which(util)
+        if found is not None:
+            (empty / util).symlink_to(found)
 
 
 def _read_log(path: Path) -> list[str]:
     return path.read_bytes().decode("utf-8").split("\0")[:-1]
 
 
-def _run(bash: str, root: Path, cwd: Path, args: tuple[str, ...], env: dict[str, str], path_dir: str, log: Path, fake_rc: int) -> subprocess.CompletedProcess[str]:
-    run_env = {"PATH": f"{path_dir}:/usr/bin:/bin", "LOG": str(log), "FIXROOT": str(root), "FAKE_RC": str(fake_rc)}
+def _run(bash: str, root: Path, cwd: Path, args: tuple[str, ...], env: dict[str, str], path_dir: str, log: Path, fake_rc: int, isolated: bool = False) -> subprocess.CompletedProcess[str]:
+    run_env = {"PATH": path_dir if isolated else f"{path_dir}:/usr/bin:/bin", "LOG": str(log), "FIXROOT": str(root), "FAKE_RC": str(fake_rc)}
     run_env.update(env)
     return subprocess.run([bash, str(root / WRAPPER_PATH), *args], cwd=cwd, env=run_env, capture_output=True, text=True, check=False)
 
@@ -609,7 +615,7 @@ def wrapper_behaviour_failures(root: Path) -> list[str]:
             log = fresh_log()
             args = tuple(_subst(a, fix, fake) for a in raw_args)
             path_dir = str(fake) if with_fake else str(fix / "empty" / "bin")
-            proc = _run(bash, fix, fix / "py", args, {}, path_dir, log, 0)
+            proc = _run(bash, fix, fix / "py", args, {}, path_dir, log, 0, isolated=not with_fake)
             tag = f"python-env wrapper, {name}"
             if proc.returncode != want_rc:
                 failures.append(f"{tag}: exit {proc.returncode}, want {want_rc}")
