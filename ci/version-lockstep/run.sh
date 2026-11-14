@@ -611,7 +611,7 @@ PY
   { [ -n "$gpos" ] && [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$gpos" ] && [ "$gpos" -lt "$spos" ]; } \
     || { fail "self-test: run_write must refuse a dirty tree in CI after the snapshot and before stamp_sites"; return 1; }
   # SMA-684 §5.2: run_write runs the static package-manager metadata check, and BEFORE the `lock` operation. A check after
-  # The `lock` operation is too late: the lock would already have run the build backend.
+  # the `lock` operation is too late: the lock would already have run the build backend.
   local cpos lpos
   # `|| cpos=""`: under errexit, a grep that finds nothing would stop the script with no message.
   cpos="$(grep -Fn 'uv_static_metadata_check || uvrc=$?' < <(printf '%s\n' "$wbody"))" || cpos=""

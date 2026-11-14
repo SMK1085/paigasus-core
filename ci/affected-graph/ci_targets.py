@@ -245,7 +245,7 @@ REQUIRED_REPO_TASKS = (
 # repo:version-lockstep's entry is the file-level twin of its SELF_SCHEDULED_GATES pin below: that
 # one proves the gate still RUNS both halves, this one proves it is still SCHEDULED by every file
 # that carries a version. Drop `py/uv.lock` here and the gate stops re-keying on the one file a
-# a `ci/python-env/run.sh lock` rewrite touches — it would still report PASS, from cache, over a tree it never read.
+# `ci/python-env/run.sh lock` rewrite touches — it would still report PASS, from cache, over a tree it never read.
 SELF_TASK_EXPECTED_GLOBS = {
     "input-liveness": ("**/*",),
     "version-lockstep": (
