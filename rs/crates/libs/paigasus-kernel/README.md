@@ -8,4 +8,13 @@ No I/O, no FFI, no adapters. The Python, Node and browser bindings live in
 [`rs/crates/bindings/`](https://github.com/SMK1085/paigasus-core/tree/main/rs/crates/bindings)
 and call into this crate rather than reimplementing it (ADR-0005).
 
+## macOS wheels of version 0.2.0
+
+The `paigasus-py-bindings` 0.2.0 macOS wheels (arm64 and x86_64) have a Mach-O string table
+with `stroff mod 8 = 4`. They load on macOS 27 only because the build used SDK 26.5.
+On macOS 27.2, dyld rejects the same layout in a binary that SDK 27.2 linked
+("mis-aligned LINKEDIT"). The npm darwin 0.2.0 packages are not affected (`stroff mod 8 = 0`).
+
+The fix (SMA-767) is in the repository. Releases after 0.2.0 are built with it.
+
 Licensed under the Apache License, Version 2.0.
