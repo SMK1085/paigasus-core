@@ -85,6 +85,15 @@ OPENAI_MALFORMED = {
         call(0, 0, "", 'cdefgh","k":"CANARY-bodyless"}', first=False),
         fin(0),
     ],
+    # The rewrite removes the blocked call 0, so record 3 is the first bodyless record in the
+    # output, and LangChain would hold only a prefix of call 1 (spec § 5.1).
+    "fragment_after_blocked_bodyless_entry": [
+        ch([{"index": 0, "delta": {"role": "assistant", "content": None, "tool_calls": [{"index": 0, "id": "call_0_0", "type": "custom", "custom": {"name": "blocked_early", "input": "CANARY-early"}}]}, "finish_reason": None}]),
+        call(0, 1, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "delta": {"tool_calls": [{"index": 2, "id": "call_0_2", "type": "custom", "custom": {"name": "note", "input": "x"}}]}, "finish_reason": None}]),
+        call(0, 1, "", 'cdefgh","k":"CANARY-later"}', first=False),
+        fin(0),
+    ],
     "chunk_without_choices": [
         call(0, 0, "read_file", '{"v":"ab'),
         '{"id":"chatcmpl-fx","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","note":"CANARY-nochoices"}',

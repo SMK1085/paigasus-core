@@ -133,10 +133,13 @@ def capture(key: str, model: str, runs: int, out: pathlib.Path, only: list[str],
                 with urllib.request.urlopen(request(key, "POST", "/chat/completions", body), timeout=300) as r:
                     raw = r.read()
                 (out / f"{stem}.sse").write_bytes(raw)
+                # One current result per stem: drop a stale error from an earlier run.
+                (out / f"{stem}.error.json").unlink(missing_ok=True)
                 print(f"{stem}.sse {len(raw)} bytes")
             except urllib.error.HTTPError as e:
                 err = {"status": e.code, "body": e.read().decode("utf-8", "replace")}
                 (out / f"{stem}.error.json").write_text(json.dumps(err, indent=2) + "\n")
+                (out / f"{stem}.sse").unlink(missing_ok=True)
                 print(f"{stem}: HTTP {e.code}")
 
 

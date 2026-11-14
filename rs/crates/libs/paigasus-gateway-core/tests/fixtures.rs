@@ -62,7 +62,8 @@ fn allow_all_is_payload_identical_for_every_conforming_fixture() {
 /// (except where observe mode passes the stream through by design).
 #[test]
 fn blocked_canaries_never_appear() {
-    let observe_may_leak = ["index_reuse"];
+    // A stream-level failure under `allow` passes the held records through, the blocked ones too.
+    let observe_may_leak = ["index_reuse", "fragment_after_blocked_bodyless_entry"];
     for (format, rel) in SETS {
         for (name, bytes) in files(rel) {
             let blocked = drive(format, limits(OnFailure::Block), &[&bytes], &block_named);
@@ -161,6 +162,7 @@ fn malformed_shapes_follow_section_6() {
         row("float_index", &["\"ok\""], &[], &["\"ok\""], &[], false),
         row("repeated_name", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("fragment_after_bodyless_entry", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("fragment_after_blocked_bodyless_entry", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("chunk_without_choices", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("choice_without_delta", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("choice_without_delta_in_opening_record", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),

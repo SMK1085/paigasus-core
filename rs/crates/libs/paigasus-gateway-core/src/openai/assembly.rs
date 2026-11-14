@@ -15,8 +15,12 @@
 //! that whole record. After such a record, a fragment of a call that existed before it would make
 //! LangChain's snapshot of that call a strict prefix of the other clients' (spec § 2.1 M3). So that
 //! fragment is a deviation (`fragment_after_bodyless_entry`), also in the bodyless record itself.
+//! The rewrite removes a blocked call, so a later bodyless record can be the first one in the
+//! output. So every bodyless record renews the boundary, not only the first one. A bodyless
+//! fragment that continues a custom or Other call does not renew it and does not deviate: that
+//! call's first record was bodyless already.
 //! A fragment that adds nothing is a deviation too, on purpose: the rule does not read content.
-//! Calls that start in or after the bodyless record are conforming.
+//! Calls that start in or after the latest bodyless record are conforming.
 //!
 //! A present `type` key counts as the type fragment, `null` included (spec § 5.3, P-c): a second
 //! one is `repeated_type`, and a first `"type": null` with a body is `type_shape_mismatch` at
@@ -70,7 +74,8 @@ pub(crate) struct Check {
     calls: Vec<Shadow>,
     /// `Some(has_name)` once a legacy `function_call` fragment arrived.
     legacy: Option<bool>,
-    /// The number of calls that existed before the first record with a bodyless entry was applied.
+    /// The number of calls that existed before the latest record with a new bodyless entry was
+    /// applied. Each such record renews it, so it only grows.
     bodyless_at: Option<usize>,
 }
 
@@ -103,15 +108,19 @@ impl Check {
             once(self.legacy.get_or_insert(false), l.name.is_some(), "repeated_name")?;
         }
         let before = self.calls.len();
-        if let Some(n) = self.bodyless_at {
-            if frags.iter().any(|f| (f.index as usize) < n) {
-                return Err(Deviation("fragment_after_bodyless_entry"));
-            }
-        } else if frags.iter().any(|f| f.function.is_none()) {
-            if frags.iter().any(|f| (f.index as usize) < before) {
-                return Err(Deviation("fragment_after_bodyless_entry"));
-            }
+        // A bodyless fragment of an existing call with no function body continues a call whose
+        // first record was bodyless already. That record stays in the output before this one
+        // when the call is allowed, and the rewrite removes both when it is blocked.
+        let continues = |f: &Fragment| f.function.is_none() && self.calls.get(f.index as usize).is_some_and(|b| b.shape != Some(Shape::Function));
+        // The rewrite can remove an earlier blocked bodyless call, so every bodyless record can be
+        // the first one that LangChain reads: each one renews the boundary (it only grows).
+        if frags.iter().any(|f| f.function.is_none() && !continues(f)) {
             self.bodyless_at = Some(before);
+        }
+        if let Some(n) = self.bodyless_at
+            && frags.iter().any(|f| (f.index as usize) < n && !continues(f))
+        {
+            return Err(Deviation("fragment_after_bodyless_entry"));
         }
         for f in frags {
             let pos = f.index as usize;
@@ -450,6 +459,33 @@ mod tests {
         feed(&mut a, &tc(F0A)).unwrap();
         feed(&mut a, &tc(CUSTOM1)).unwrap();
         assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    /// The rewrite removes a blocked call, so a later bodyless record can be the first one that
+    /// LangChain reads. Call 0 is blocked: LangChain then raises at record 3 with a prefix of call 1.
+    #[test]
+    fn a_fragment_after_a_later_bodyless_record_deviates() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c0","type":"custom","custom":{"name":"blocked_early","input":"x"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"v\":\"ab"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":2,"id":"c2","type":"custom","custom":{"name":"note","input":"x"}}"#)).unwrap();
+        assert_eq!(
+            feed(&mut a, &tc(r#"{"index":1,"function":{"arguments":"cdefgh\"}"}}"#)),
+            Err(Deviation("fragment_after_bodyless_entry"))
+        );
+    }
+
+    /// A bodyless fragment that continues a custom call only repeats a call whose first record was
+    /// bodyless already, so it neither renews the boundary nor deviates.
+    #[test]
+    fn interleaved_custom_continuations_are_conforming() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c0","type":"custom","custom":{"name":"note","input":"x"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","type":"custom","custom":{"name":"sql","input":"SELECT"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":0,"custom":{"input":"y"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"custom":{"input":" 1"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":2,"id":"c2","type":"function","function":{"name":"read","arguments":"{"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":2,"function":{"arguments":"}"}}"#)).unwrap();
     }
 
     #[test]

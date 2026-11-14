@@ -1119,12 +1119,45 @@ impl Partial<'_> {
                     Ok(v) if !v.is_object() && !v.is_array() && !v.is_string() => Ok(Some(v)),
                     _ if self.eof() && [&b"true"[..], b"false", b"null"].iter().any(|l| l.starts_with(tok)) => Ok(None),
                     // An unfinished number at the end of the input (`10.`, `1e`, `-`) is dropped with its key.
-                    _ if self.eof() && !tok.is_empty() && tok.iter().all(|c| b"-+.0123456789eE".contains(c)) => Ok(None),
+                    _ if self.eof() && number_prefix(tok) => Ok(None),
                     _ => Err(format!("ValueError: invalid token {:?}", String::from_utf8_lossy(tok))),
                 }
             }
         }
     }
+}
+
+/// Whether `tok` is a non-empty prefix of a JSON number
+/// (`-? (0 | [1-9][0-9]*) (\.[0-9]+)? ([eE][+-]?[0-9]+)?`). jiter 0.19.0 raises on any other token:
+/// `01`, `1e--`, `+1` and `--` raise, `-`, `1e`, `1e-` and `10.` are dropped (measured 2026-11-14).
+fn number_prefix(tok: &[u8]) -> bool {
+    #[derive(Clone, Copy)]
+    enum S {
+        Start,
+        Minus,
+        Zero,
+        Int,
+        Dot,
+        Frac,
+        E,
+        ESign,
+        Exp,
+    }
+    let mut s = S::Start;
+    for &c in tok {
+        s = match (s, c) {
+            (S::Start, b'-') => S::Minus,
+            (S::Start | S::Minus, b'0') => S::Zero,
+            (S::Start | S::Minus, b'1'..=b'9') | (S::Int, b'0'..=b'9') => S::Int,
+            (S::Zero | S::Int, b'.') => S::Dot,
+            (S::Dot | S::Frac, b'0'..=b'9') => S::Frac,
+            (S::Zero | S::Int | S::Frac, b'e' | b'E') => S::E,
+            (S::E, b'+' | b'-') => S::ESign,
+            (S::E | S::ESign | S::Exp, b'0'..=b'9') => S::Exp,
+            _ => return false,
+        };
+    }
+    !tok.is_empty()
 }
 
 pub fn partial_json(buf: &str) -> Result<Value, String> {
