@@ -3307,7 +3307,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-kernel"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "proptest",
  "thiserror",
