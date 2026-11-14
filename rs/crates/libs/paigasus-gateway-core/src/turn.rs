@@ -17,11 +17,25 @@ pub enum ToolTurn {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TurnFacts {
     pub definitions: Vec<ToolDefinition>,
     pub prior_calls: Vec<PriorCall>,
     pub tool_results: Vec<ToolResultRef>,
+    /// `false` when the request does not list every tool the model may call (spec § 7.2).
+    /// The chat and Anthropic formats always list them, so they set `true`.
+    pub definitions_complete: bool,
+}
+
+impl Default for TurnFacts {
+    fn default() -> Self {
+        Self {
+            definitions: Vec::new(),
+            prior_calls: Vec::new(),
+            tool_results: Vec::new(),
+            definitions_complete: true,
+        }
+    }
 }
 
 /// A tool the caller declared. `Debug` prints `schema`; never log a definition with `{:?}`.
@@ -29,6 +43,8 @@ pub struct TurnFacts {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolDefinition {
     pub name: String,
+    /// The tool namespace of a Responses API definition. `None` for every other format.
+    pub namespace: Option<String>,
     pub kind: ToolCallKind,
     pub schema: Option<Value>,
 }
@@ -89,6 +105,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                 let func = opt_obj(t.get("function"), "function")?.ok_or(Malformed("function"))?;
                 f.definitions.push(ToolDefinition {
                     name: req_str(func, "name")?,
+                    namespace: None,
                     kind: ToolCallKind::Function,
                     schema: func.get("parameters").cloned(),
                 });
@@ -97,6 +114,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                 let c = opt_obj(t.get("custom"), "custom")?.ok_or(Malformed("custom"))?;
                 f.definitions.push(ToolDefinition {
                     name: req_str(c, "name")?,
+                    namespace: None,
                     kind: ToolCallKind::Custom,
                     schema: None,
                 });
@@ -108,6 +126,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
         let d = obj(d)?;
         f.definitions.push(ToolDefinition {
             name: req_str(d, "name")?,
+            namespace: None,
             kind: ToolCallKind::LegacyFunctionCall,
             schema: d.get("parameters").cloned(),
         });
@@ -168,6 +187,7 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
         match opt_str(t.get("type"), "type")?.as_deref() {
             None | Some("custom") => f.definitions.push(ToolDefinition {
                 name: req_str(t, "name")?,
+                namespace: None,
                 kind: ToolCallKind::AnthropicToolUse,
                 schema: t.get("input_schema").cloned(),
             }),
@@ -205,6 +225,23 @@ mod tests {
         match parse_request(format, v.to_string().as_bytes()) {
             ToolTurn::Parsed(f) => f,
             ToolTurn::Unavailable(r) => panic!("unavailable: {r}"),
+        }
+    }
+
+    #[test]
+    fn chat_and_anthropic_definitions_are_complete() {
+        let oa = facts(
+            Format::OpenAiChat,
+            json!({"model":"m","tools":[{"type":"function","function":{"name":"read"}}],"messages":[{"role":"user","content":"hi"}]}),
+        );
+        let an = facts(
+            Format::AnthropicMessages,
+            json!({"model":"m","tools":[{"name":"read","input_schema":{}}],"messages":[{"role":"user","content":"hi"}]}),
+        );
+        for f in [oa, an] {
+            assert!(f.definitions_complete);
+            assert!(!f.definitions.is_empty());
+            assert!(f.definitions.iter().all(|d| d.namespace.is_none()));
         }
     }
 

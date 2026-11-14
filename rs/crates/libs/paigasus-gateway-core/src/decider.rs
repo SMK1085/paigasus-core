@@ -63,6 +63,7 @@ mod tests {
             position: 0,
             id: None,
             name: "x".into(),
+            namespace: None,
             kind: ToolCallKind::Function,
             arguments: String::new(),
         }

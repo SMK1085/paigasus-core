@@ -310,7 +310,7 @@ impl Protocol for OpenAiStream {
     fn known_calls(&self, hold: HoldKey) -> Vec<(u32, String)> {
         match hold {
             HoldKey::Choice(c) => self.choices.get(&c).map(ChoiceState::known).unwrap_or_default(),
-            HoldKey::Block(_) => Vec::new(),
+            HoldKey::Block(_) | HoldKey::Response => Vec::new(),
         }
     }
 

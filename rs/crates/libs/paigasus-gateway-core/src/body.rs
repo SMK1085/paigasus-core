@@ -8,7 +8,7 @@
 use serde_json::Value;
 
 use crate::json::{Malformed, check_numbers, parse_strict};
-use crate::report::{ReportDecision, ReportEntry, header_value};
+use crate::report::{ReportDecision, ReportEntry, header_value, report_entry};
 use crate::types::{Basis, BlockCode, Decision, Format, ToolCall};
 use crate::{anthropic, openai};
 
@@ -78,14 +78,7 @@ impl BodyCalls {
             .map(|(i, c)| {
                 let code = self.code(decisions, i);
                 let decision = if code.is_some() { ReportDecision::Block } else { ReportDecision::Allow };
-                ReportEntry {
-                    choice: c.choice,
-                    position: c.position,
-                    name: c.name.clone(),
-                    decision,
-                    basis: Some(basis),
-                    code,
-                }
+                report_entry(c, decision, basis, code)
             })
             .collect();
         entries.extend(self.unenforceable.iter().cloned());

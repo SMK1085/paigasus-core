@@ -15,7 +15,7 @@ use crate::anthropic::stream::AnthropicStream;
 use crate::limits::{Limits, OnFailure};
 use crate::openai::stream::OpenAiStream;
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
-use crate::report::{ReportDecision, ReportEntry, report_comment};
+use crate::report::{ReportDecision, ReportEntry, report_comment, report_entry};
 use crate::sse::{self, SseItem, SseSplitter};
 use crate::types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall};
 
@@ -87,7 +87,7 @@ pub struct Interceptor {
 fn choice_of(k: HoldKey) -> u32 {
     match k {
         HoldKey::Choice(c) => c,
-        HoldKey::Block(_) => 0,
+        HoldKey::Block(_) | HoldKey::Response => 0,
     }
 }
 
@@ -369,14 +369,7 @@ impl Interceptor {
                 decision: label,
                 basis: basis.as_str(),
             });
-            let entry = ReportEntry {
-                choice: c.choice,
-                position: c.position,
-                name: c.name.clone(),
-                decision,
-                basis: Some(basis),
-                code,
-            };
+            let entry = report_entry(c, decision, basis, code);
             self.emit(report_comment(&entry), now);
         }
         if !observe {
@@ -567,6 +560,23 @@ mod tests {
     use crate::types::{BlockCode, Decision};
     use serde_json::{Value, json};
     use std::time::Duration;
+
+    #[test]
+    fn a_namespaced_call_reports_the_qualified_name() {
+        use crate::types::ToolCallKind;
+        let c = ToolCall {
+            choice: 0,
+            position: 0,
+            id: None,
+            name: "f".to_owned(),
+            namespace: Some("ns".to_owned()),
+            kind: ToolCallKind::Function,
+            arguments: String::new(),
+        };
+        let entry = report_entry(&c, ReportDecision::Block, Basis::Decider, Some(BlockCode::Policy));
+        let comment = String::from_utf8(report_comment(&entry).to_vec()).unwrap();
+        assert!(comment.contains(r#""name":"ns.f""#), "{comment}");
+    }
 
     const TERMINAL: &[u8] = b"\n\ndata: {\"error\":\"terminal\"}\n\n";
 

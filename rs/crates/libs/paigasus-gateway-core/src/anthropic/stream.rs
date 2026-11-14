@@ -158,6 +158,7 @@ impl AnthropicStream {
             position: i,
             id: b.id.take(),
             name: b.name.clone(),
+            namespace: None,
             kind,
             arguments,
         }
@@ -424,7 +425,7 @@ impl Protocol for AnthropicStream {
     fn known_calls(&self, hold: HoldKey) -> Vec<(u32, String)> {
         match hold {
             HoldKey::Block(i) => self.blocks.get(i as usize).map(|b| vec![(i, b.name.clone())]).unwrap_or_default(),
-            HoldKey::Choice(_) => Vec::new(),
+            HoldKey::Choice(_) | HoldKey::Response => Vec::new(),
         }
     }
 

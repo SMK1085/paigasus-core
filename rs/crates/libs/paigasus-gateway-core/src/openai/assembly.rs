@@ -383,6 +383,7 @@ impl ChoiceAssembly {
                 position: 0,
                 id: None,
                 name: b.name.clone().unwrap_or_default(),
+                namespace: None,
                 kind: ToolCallKind::LegacyFunctionCall,
                 arguments: complete_arguments(ToolCallKind::LegacyFunctionCall, std::mem::take(&mut b.args))?,
             }]);
@@ -404,6 +405,7 @@ impl ChoiceAssembly {
                 position,
                 id: b.id.clone(),
                 name,
+                namespace: None,
                 kind,
                 arguments,
             });

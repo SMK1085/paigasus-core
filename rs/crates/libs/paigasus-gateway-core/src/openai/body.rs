@@ -90,7 +90,7 @@ pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<BlockCo
         if mine.iter().all(|(_, k)| k.is_none()) {
             continue;
         }
-        let notice: String = mine.iter().filter_map(|(c, k)| k.map(|k| notice_line(&c.name, k))).collect::<Vec<_>>().join("\n");
+        let notice: String = mine.iter().filter_map(|(c, k)| k.map(|k| notice_line(&c.display_name(), k))).collect::<Vec<_>>().join("\n");
         let remaining = mine.iter().filter(|(_, k)| k.is_none()).count();
         let blocked: Vec<u32> = mine.iter().filter(|(_, k)| k.is_some()).map(|(c, _)| c.position).collect();
         if let Value::Object(o) = ch {
