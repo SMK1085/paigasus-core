@@ -28,10 +28,10 @@ _psr_fatal() { # line...
 }
 
 # PSR is a Python package in py/'s package-manager dev-deps. The fixture lives in /tmp, outside
-# the repo, where a plain run cannot resolve the project — so resolve the absolute
+# the repo, where a plain `run py` cannot resolve the project — so resolve the absolute
 # semantic-release binary once, from py/ (mirrors release-plz.sh's RELEASE_PLZ_BIN).
-# The frozen run also creates the py environment directory from uv.lock (there is no separate
-# sync step in CI).
+# The `run-frozen py` call also creates the py project environment from uv.lock (there is no separate
+# environment sync step in CI).
 #
 # The `|| true` is KEPT so a failure lands as an empty value on the assertion below
 # rather than killing the script under `set -e` with no explanation.

@@ -15,7 +15,7 @@
 # worst one seen: 2 before 1 before 0.
 #
 # Read-only: everything this gate writes lands under one mktemp -d directory, removed on EXIT,
-# except the ci/helm-render environment directory, which the package manager creates and .gitignore ignores. It never writes into
+# except its own project environment directory, which the package manager creates and .gitignore ignores. It never writes into
 # charts/ and never calls render.sh --update. See README.md.
 #
 # Runs under /bin/bash 3.2.57 and bash 5: no mapfile, no declare -A, no here-string, no pipe into
@@ -26,7 +26,7 @@ set -euo pipefail
 # proto or shim call. Exported once here, so every later capture inherits it (SMA-609).
 export PROTO_REPORTER=text
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 HERE="$REPO_ROOT/ci/helm-render"
 CHART="$REPO_ROOT/charts/paigasus"
 FIXTURES="$HERE/fixtures"
@@ -85,7 +85,7 @@ resolve_helm() {
   HELM_BIN="$bin"
 }
 
-# The venv interpreter, resolved ONCE. --locked stops the package manager from rewriting uv.lock. After this no package manager
+# The venv interpreter, resolved ONCE. --locked stops the wrapper's `run ci/helm-render` from rewriting uv.lock. After this no package manager
 # runs, and never from inside a fixture directory (ci/ruff/README.md, the PR 206 lesson).
 resolve_python() {
   local py

@@ -42,7 +42,7 @@ class AssertionFailureError(Exception):
 
 
 # The expression grammar of ci/workflow-credentials/workflow_credentials.py, copied (the two gates
-# have separate package-manager projects on purpose). See that file for the measured reasons of each part.
+# have separate Python projects on purpose). See that file for the measured reasons of each part.
 EXPR_SPAN = re.compile(r"\$\{\{((?:'[^']*'|\"[^\"]*\"|(?!\}\}).)*+)\}\}", re.S)
 STRING_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
 SECRETS_CTX = re.compile(r"(?<![\w.-])secrets(?![\w-])", re.IGNORECASE)

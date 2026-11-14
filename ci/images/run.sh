@@ -33,12 +33,12 @@ REGISTRY="${PAIGASUS_IMAGE_REGISTRY:-ghcr.io/smk1085}"
 REVISION="$(git -C "$ROOT" rev-parse HEAD)"
 
 # proto prints an NDJSON preamble on STDOUT inside an agent session, and that poisons every
-# `$(...)` capture of a shimmed tool such as the package manager (CLAUDE.md, SMA-609). Exported once here so every
+# `$(...)` capture of a shimmed tool such as the Python package manager (CLAUDE.md, SMA-609). Exported once here so every
 # capture below inherits it.
 export PROTO_REPORTER=text
 
 # The release decisions live in release_decision.py so a self-test can prove them (SMA-658).
-# Standard library only: no project, no lock, any Python >= 3.12 that the package manager can find.
+# Standard library only: no project, no lock, any Python >= 3.12 that the wrapper's `script` operation can find.
 decide() {
   bash "$ROOT/ci/python-env/run.sh" script "$HERE/release_decision.py" "$@"
 }

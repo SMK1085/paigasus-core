@@ -12,7 +12,7 @@
 # Exit codes: 0 pass | 1 the repo is wrong | 2 infrastructure failed.
 #
 # The checker exits 3, not 1, for an assertion failure. The package manager exits 1 on its own failures —
-# MEASURED on a failed resolution both online and with offline mode — so without a distinct
+# MEASURED on a failed resolution both online and in offline mode — so without a distinct
 # code a PyPI outage would report "a workflow declares a credential". This wrapper owns the
 # translation and nothing else may.
 set -euo pipefail
@@ -22,7 +22,7 @@ HERE="$REPO_ROOT/ci/workflow-credentials"
 
 die_infra() { printf 'workflow-credentials: %s\n' "$*" >&2; exit 2; }
 
-# Preflight. The package manager absent yields 127 from the shell, which is neither 0/1/2 nor actionable.
+# Preflight. An absent package manager yields 127 from the shell, which is neither 0/1/2 nor actionable.
 bash "$REPO_ROOT/ci/python-env/run.sh" probe \
   || die_infra "the package manager is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
 
@@ -40,7 +40,7 @@ run_checker() {
 }
 
 # The wiring rows — only what needs the real tree. The rule table lives in the checker's
-# --self-test, in-process, because ~31 rows through the package manager would be ~31 subprocesses.
+# --self-test, in-process, because ~31 rows through `run ci/workflow-credentials` would be ~31 subprocesses.
 #
 # These seven discrete lines are pinned by ci_targets.py. Pinning the moon.yml INVOCATION
 # alone is not enough: the repo measured two bypasses of exactly that shape on

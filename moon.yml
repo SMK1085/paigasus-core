@@ -109,6 +109,7 @@ tasks:
     toolchain: 'system'
     inputs:
       - 'ci/release-parity/**/*'
+      - 'ci/python-env/run.sh'
       - 'py/packages/paigasus-ml/pyproject.toml'
       - 'py/packages/paigasus-workflows/pyproject.toml'
       - 'py/uv.lock'
@@ -929,6 +930,7 @@ tasks:
       # never run on it. Matches zero tracked files today — see ALLOW_DEAD_INPUT.
       - '.github/workflows/.*.y*ml'
       - 'ci/workflow-credentials/**/*'
+      - 'ci/python-env/run.sh'
       # The gate shells out to the package manager, whose version is pinned here — without this input a
       # bump would not invalidate a cached PASS, exactly as the release-parity tasks list it.
       - '.prototools'
@@ -1012,6 +1014,7 @@ tasks:
       # exclude skips them — so a stray venv under ci/ cannot false-trigger or slow this gate.
       - 'ci/**/*.py'
       - 'ci/ruff/**/*'
+      - 'ci/python-env/run.sh'
       - 'py/pyproject.toml'
       - 'py/uv.lock'
 
@@ -1100,6 +1103,7 @@ tasks:
       - '.proto/plugins/helm.toml'
       - 'charts/**/*'
       - 'ci/helm-render/**/*'
+      - 'ci/python-env/run.sh'
       # SMA-688: row 8a reads the chain registry and each chain's version file. Without these
       # five, a version bump that forgets the chart tag serves a cached PASS.
       - 'ci/images/chains.toml'
@@ -1161,6 +1165,7 @@ tasks:
     toolchain: 'system'
     inputs:
       - 'ci/wasm-lockstep/**/*'
+      - 'ci/python-env/run.sh'
       - '.github/workflows/wasm-lockstep.yml'
       - 'rs/Cargo.lock'
       - '.prototools'

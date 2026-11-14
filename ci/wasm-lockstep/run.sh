@@ -27,7 +27,7 @@ set -euo pipefail
 # proto or shim call. Exported once here, so every later capture inherits it (SMA-609).
 export PROTO_REPORTER=text
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 HERE="$REPO_ROOT/ci/wasm-lockstep"
 WORKFLOW="$REPO_ROOT/.github/workflows/wasm-lockstep.yml"
 
@@ -45,7 +45,7 @@ done
 TMP="$(mktemp -d)" || die_infra "mktemp -d failed"
 trap 'rm -rf "$TMP"' EXIT
 
-# The venv interpreter, resolved ONCE, at the top level. --locked stops the package manager from rewriting
+# The venv interpreter, resolved ONCE, at the top level. --locked stops the wrapper's `run ci/wasm-lockstep` from rewriting
 # uv.lock. lockstep_check.py needs only the stdlib, but runs through the same >=3.12 interpreter,
 # because the host python3 of the development Mac can be older than tomllib (3.11).
 bash "$REPO_ROOT/ci/python-env/run.sh" probe || die_infra "the package manager is not on PATH; run 'proto install', or add ~/.proto/shims to PATH"

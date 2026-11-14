@@ -18,7 +18,7 @@ set -euo pipefail
 
 # proto prints an NDJSON preamble on STDOUT when it detects an agent environment (AI_AGENT /
 # CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), which poisons every `$(...)` capture in this file.
-# MEASURED on the package-manager SHIM: default reporter yields `{"type":"message",...}` on stdout, and
+# MEASURED on the proto SHIM of the package manager: default reporter yields `{"type":"message",...}` on stdout, and
 # PROTO_REPORTER=text yields none. CLAUDE.md's NDJSON entry had carved shims out as "not proven
 # generally"; a captured shim call leaking the preamble is the counterexample that closes it.
 # Exported once here rather than prefixed per call site, so a future capture inherits it (SMA-609).
@@ -29,7 +29,7 @@ HERE="$REPO_ROOT/ci/release-plan"
 
 die_infra() { printf 'release-plan: %s\n' "$*" >&2; exit 2; }
 
-# The package-manager preflight. It is a FUNCTION called from the mode dispatch at the bottom of this file,
+# The `probe` preflight of the package manager. It is a FUNCTION called from the mode dispatch at the bottom of this file,
 # NOT a top-level statement, and that placement is load-bearing (SMA-603 fix wave, C1).
 #
 # It used to run above the dispatch, so it applied to `--github-output` too. The package manager is a
@@ -42,12 +42,12 @@ require_uv() {
     || die_infra "the package manager is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
 }
 
-# `--locked` on all six package-manager calls below (SMA-603 fix round 2,
+# `--locked` on all six `run ci/release-plan` calls below (SMA-603 fix round 2,
 # ruled in; widened to six as rows 3/4/7/8 of the negative control gained their own direct
 # calls): mirrors ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the
 # rationale applies MORE strongly here — these six calls run across EVERY invocation of the four
 # CI modes (--self-test, --negative-control, --assert, --github-output), where
-# ci/actionlint/run.sh's own package-manager call is only the --fixture-count bypass path. It is inert today
+# ci/actionlint/run.sh's own `run ci/release-plan` call is only the --fixture-count bypass path. It is inert today
 # because this project is zero-dependency (see pyproject.toml's own comment) and becomes live the
 # moment it gains one — without it, any of these six calls could silently re-lock py/uv.lock's
 # sibling here as a side effect of deciding whether to release. Verified against the current
@@ -362,7 +362,7 @@ negative_control() {
   }
 
   # Row 6 — THE C1 REGRESSION ROW, widened by SMA-688. `--github-output` must still exit 0 and
-  # write the fail-safe outputs when the package manager cannot be found at all. The package-manager preflight lived above
+  # write the fail-safe outputs when the package manager cannot be found at all. The `probe` preflight lived above
   # the mode dispatch until the SMA-603 fix wave, so the runtime arm exited 2 and wrote NOTHING on
   # a runner with no proto toolchain — the `plan` job then failed, and because every consumer
   # carries a status-function-free `if:` (implicit success()), the whole publish path skipped.

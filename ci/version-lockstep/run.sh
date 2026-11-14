@@ -277,7 +277,7 @@ lock_reader_self_test() {
   got="$(REPO_ROOT="$tmp" read_version cargo-lock rs/Cargo.lock proto)"
   [ -z "$got" ] || { fail "self-test: a non-uniform cargo-lock must read '', got '$got'"; rm -rf "$tmp"; return 1; }
 
-  # The uv-lock arm reads its OWN namespace: proto's package manager membership is one name.
+  # The uv-lock arm reads its OWN namespace: proto's membership of the package manager is one name.
   printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n' >"$tmp/py/uv.lock"
   got="$(REPO_ROOT="$tmp" read_version uv-lock py/uv.lock proto)"
   [ "$got" = "0.1.0" ] || { fail "self-test: proto uv-lock should read 0.1.0, got '$got'"; rm -rf "$tmp"; return 1; }
@@ -610,17 +610,17 @@ PY
   gpos="${gpos%%:*}"
   { [ -n "$gpos" ] && [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$gpos" ] && [ "$gpos" -lt "$spos" ]; } \
     || { fail "self-test: run_write must refuse a dirty tree in CI after the snapshot and before stamp_sites"; return 1; }
-  # SMA-684 §5.2: run_write runs the static package-manager metadata check, and BEFORE the package manager lock. A check after
-  # The package manager lock is too late: the package manager lock would already have run the build backend.
+  # SMA-684 §5.2: run_write runs the static package-manager metadata check, and BEFORE the `lock` operation. A check after
+  # The `lock` operation is too late: the lock would already have run the build backend.
   local cpos lpos
   # `|| cpos=""`: under errexit, a grep that finds nothing would stop the script with no message.
   cpos="$(grep -Fn 'uv_static_metadata_check || uvrc=$?' < <(printf '%s\n' "$wbody"))" || cpos=""
   lpos="$(grep -Fn 'bash "$REPO_ROOT/ci/python-env/run.sh" lock' < <(printf '%s\n' "$wbody"))" || lpos=""
   cpos="${cpos%%:*}"; lpos="${lpos%%:*}"
   { [ -n "$cpos" ] && [ -n "$lpos" ] && [ "$cpos" -lt "$lpos" ]; } \
-    || { fail "self-test: run_write must run uv_static_metadata_check before the lock step"; return 1; }
+    || { fail "self-test: run_write must run uv_static_metadata_check before the lock operation"; return 1; }
   grep -Eq '^    1\) exit 1 ;;$' < <(printf '%s\n' "$wbody") \
-    || { fail "self-test: run_write no longer maps the package-manager metadata check's rc 1 to exit 1"; return 1; }
+    || { fail "self-test: run_write no longer maps the rc 1 of the package-manager metadata check to exit 1"; return 1; }
 
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
@@ -925,7 +925,7 @@ run_check() {
   # Non-vacuity: the loop must have covered every declared site.
   [ "$checked" -eq "${#SITES[@]}" ] \
     || die_infra "checked $checked sites but ${#SITES[@]} are declared"
-  # SMA-684 §5.2: the package manager lock in --write must never need a build backend. Explicit status routing,
+  # SMA-684 §5.2: the `lock` operation in --write must never need a build backend. Explicit status routing,
   # not errexit, for the same reason as read_version above.
   local uvrc=0
   uv_static_metadata_check || uvrc=$?
@@ -1209,9 +1209,9 @@ else:
 PY
 }
 
-# SMA-684 §5.2: the package manager runs no build backend only while the package manager can read every local package's
+# SMA-684 §5.2: the `lock` operation runs no build backend only while the package manager can read every local package's
 # metadata without a build (spec F7). A `dynamic` version, dependencies or optional-dependencies
-# field makes the lock step run the build backend, and for paigasus-py-bindings that backend is
+# field makes the `lock` operation run the build backend, and for paigasus-py-bindings that backend is
 # maturin, which compiles Rust in the release-PR job. The pyproject reader above covers only the
 # three SITES pyproject files; this check reads every package-manager workspace member (members glob of
 # py/pyproject.toml, minus `exclude`) and every [tool.uv.sources] path source, transitively. A
@@ -1274,7 +1274,7 @@ while queue:
         dynamic = proj.get("dynamic", [])
         for field in ("version", "dependencies", "optional-dependencies"):
             if field in dynamic:
-                violations.append(f"{rel(p)}: [project].dynamic lists '{field}', so the lock step would run the build backend")
+                violations.append(f"{rel(p)}: [project].dynamic lists '{field}', so the `lock` operation would run the build backend")
     sources = doc.get("tool", {}).get("uv", {}).get("sources", {})
     for name, src in sources.items():
         for entry in src if isinstance(src, list) else [src]:
@@ -1620,10 +1620,10 @@ run_write() {
   ( cd "$REPO_ROOT/rs" && cargo update -w --offline >/dev/null 2>&1 ) \
     || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
     || die_infra "cargo update -w failed (site 16)"
-  # SMA-684 §5.2: the package manager lock runs no build backend only while every local package declares static
+  # SMA-684 §5.2: the `lock` operation runs no build backend only while every local package declares static
   # metadata. run_check asserts that too, but a path source outside py/packages/* is not an input
   # of repo:version-lockstep, so a later PR could add `dynamic` there unseen. Check it here again,
-  # right before the package manager lock, with the same status routing as run_check. Print nothing on success: the
+  # right before the `lock` operation, with the same status routing as run_check. Print nothing on success: the
   # stamp step's output stays the same.
   uvrc=0
   uv_static_metadata_check || uvrc=$?
@@ -1632,7 +1632,7 @@ run_write() {
     1) exit 1 ;;
     *) exit 2 ;;
   esac
-  bash "$REPO_ROOT/ci/python-env/run.sh" lock >/dev/null || die_infra "the lock step failed (site 17)"
+  bash "$REPO_ROOT/ci/python-env/run.sh" lock >/dev/null || die_infra "the lock operation failed (site 17)"
 
   violations="$(write_set_violations "$before")" || die_infra "cannot list the changed paths after --write"
   [ -z "$violations" ] \

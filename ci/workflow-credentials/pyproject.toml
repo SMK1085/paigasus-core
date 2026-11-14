@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # A DEDICATED one-dependency project, deliberately not the py/ workspace. py/ is a
 # [tool.uv.workspace] root whose member paigasus-kernel depends on paigasus-py-bindings by
-# path, and that crate builds with maturin — so the package manager compiles a PyO3 cdylib.
+# path, and that crate builds with maturin — so a run with `--project py` compiles a PyO3 cdylib.
 # This gate's inputs are .github/workflows/*.y*ml, so that cost would land on every
 # workflow-edit PR, which is exactly what moving the check out of repo:publish-metadata
 # avoided. Measured here: 0.073s warm, 0.959s cold. (SMA-593 spec §3 Decision A.)

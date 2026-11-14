@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # A DEDICATED one-dependency project, the same layout as ci/workflow-credentials/ (SMA-593). py/
-# is a package-manager workspace whose members build a PyO3 cdylib, so the package manager would put a
+# is a package-manager workspace whose members build a PyO3 cdylib, so a run with `--project py` would put a
 # maturin build on every chart-edit PR. run.sh resolves this project's interpreter ONCE, with
 # --locked, and runs everything else through it (spec § 4).
 [project]

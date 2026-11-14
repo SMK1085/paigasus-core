@@ -245,7 +245,7 @@ REQUIRED_REPO_TASKS = (
 # repo:version-lockstep's entry is the file-level twin of its SELF_SCHEDULED_GATES pin below: that
 # one proves the gate still RUNS both halves, this one proves it is still SCHEDULED by every file
 # that carries a version. Drop `py/uv.lock` here and the gate stops re-keying on the one file a
-# The package manager rewrite touches — it would still report PASS, from cache, over a tree it never read.
+# a `ci/python-env/run.sh lock` rewrite touches — it would still report PASS, from cache, over a tree it never read.
 SELF_TASK_EXPECTED_GLOBS = {
     "input-liveness": ("**/*",),
     "version-lockstep": (
@@ -346,6 +346,7 @@ SELF_TASK_EXPECTED_GLOBS = {
         # (measured on 2.5.3). The gate shells out to the package manager, pinned in .prototools, so without
         # this input a package-manager bump could not invalidate a cached PASS.
         ".prototools",
+        "ci/python-env/run.sh",
     ),
     # SMA-600. Five globs then one literal, in check_gate_inputs' comparison order (globs sorted,
     # then files sorted) — NOT the authored order in moon.yml. The first two are deliberately
@@ -371,6 +372,7 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ci/ruff/**/*",
         ".moon/tasks/python.yml",
         ".prototools",
+        "ci/python-env/run.sh",
         "py/pyproject.toml",
         "py/uv.lock",
     ),
@@ -414,6 +416,7 @@ SELF_TASK_EXPECTED_GLOBS = {
         ".proto/plugins/helm.toml",
         ".prototools",
         "ci/images/chains.toml",
+        "ci/python-env/run.sh",
         "contracts/proto/paigasus/common/v1/service_info.proto",
         "rs/crates/services/paigasus-gateway/Cargo.toml",
         "rs/crates/services/paigasus-iam/Cargo.toml",
@@ -453,6 +456,7 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ci/wasm-lockstep/**/*",
         ".github/workflows/wasm-lockstep.yml",
         ".prototools",
+        "ci/python-env/run.sh",
         "rs/Cargo.lock",
     ),
 }
@@ -661,7 +665,7 @@ SELF_SCHEDULED_GATES = {
     # three-line gates: a `--self-test` invocation as well as a `--negative-control`, because the
     # rule table lives in the checker (in-process) while the wiring rows live in run.sh, and
     # neither half proves the other can report red. All three modes go through run.sh rather than
-    # calling the checker directly, so each gets the package-manager preflight — `python3
+    # calling the checker directly, so each gets the `probe` preflight — `python3
     # workflow_credentials.py` would fail on `import yaml` — and the wrapper's 3 -> 1 exit-code
     # translation. Whole-line matched like every other entry, and here that is load-bearing in the
     # usual direction: `bash ci/workflow-credentials/run.sh` is a strict PREFIX of BOTH flagged
@@ -1363,8 +1367,8 @@ RELEASE_PLAN_SH_CALL_SITES = (
 #
 # PR 206 fix. negative_control() no longer re-enters a COPY of this script inside its fixture —
 # that re-entry called resolve_ruff() a second time from a foreign root reached through an
-# absolute `py` symlink, and the package manager there mutated the ONE SHARED
-# the py environment directory every other py Moon task depends on, invisible until a concurrent `moon ci` raced
+# absolute `py` symlink, and `run py` there mutated the ONE SHARED
+# project environment of py that every other py Moon task depends on, invisible until a concurrent `moon ci` raced
 # it (measured in CI: `contracts:generate`, `py:typecheck`, `py:test`,
 # `paigasus-kernel-py:test` and `repo:release-parity-py` all failed). ruff is now resolved
 # EXACTLY ONCE, in the real repo, before the fixture is built; the fixture carries no `py`, `rs`
@@ -4439,7 +4443,7 @@ def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, 
          "    corpus-derivation line, the real (run_check) ruff invocation, the negative\n"
          "    control's own direct ruff invocation against its fixture (run with CWD=$tmp so\n"
          "    ruff's file arguments resolve — PR 206 dropped the prior re-entry of a script\n"
-         "    copy inside the fixture, which is what corrupted the shared py environment directory under a\n"
+         "    copy inside the fixture, which is what corrupted the shared project environment of py under a\n"
          "    concurrent moon ci; skipping the cd instead reports a false rc-1 from a\n"
          "    file-not-found error rather than a real lint verdict), the assertion guard, or\n"
          "    the report line. Losing the flag parse or dispatch arm means the control never\n"

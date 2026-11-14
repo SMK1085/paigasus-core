@@ -50,10 +50,10 @@ LOCKFILES=(
   'ts/pnpm-lock.yaml'
   'py/uv.lock'
   'ci/workflow-credentials/uv.lock'
-  # SMA-513 PR 2b — repo:helm-render resolves pyyaml through its own package-manager project, so its lockfile
+  # SMA-513 PR 2b — repo:helm-render resolves pyyaml through its own Python project, so its lockfile
   # is a fourth pip-ecosystem manifest. moon.yml's repo:osv inputs carry the same path.
   'ci/helm-render/uv.lock'
-  # SMA-693 — repo:wasm-lockstep resolves pyyaml through its own package-manager project, so its lockfile is a
+  # SMA-693 — repo:wasm-lockstep resolves pyyaml through its own Python project, so its lockfile is a
   # fifth pip-ecosystem manifest. moon.yml's repo:osv inputs carry the same path.
   'ci/wasm-lockstep/uv.lock'
 )
@@ -160,7 +160,7 @@ for result in data.get('results', []):
 PY
   echo "" >&2
   echo "  Fix by raising the resolved version (a pnpm-workspace.yaml override for a pinned" >&2
-  echo "  npm transitive, or a lock upgrade of the package, for a Python package). Waive ONLY with a" >&2
+  echo "  npm transitive, or a lock upgrade of the one package, for a Python package). Waive ONLY with a" >&2
   echo "  justified [[IgnoredVulns]] entry in osv-scanner.toml." >&2
 fi
 

@@ -24,7 +24,7 @@ set -uo pipefail
 
 # proto prints an NDJSON preamble on STDOUT when it detects an agent environment (AI_AGENT /
 # CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), which poisons every `$(...)` capture in this file.
-# MEASURED on the package-manager SHIM: default reporter yields `{"type":"message",...}` on stdout, and
+# MEASURED on the proto SHIM of the Python package manager: default reporter yields `{"type":"message",...}` on stdout, and
 # PROTO_REPORTER=text yields none. CLAUDE.md's NDJSON entry had carved shims out as "not proven
 # generally"; a captured shim call leaking the preamble is the counterexample that closes it.
 # Exported once here rather than prefixed per call site, so a future capture inherits it (SMA-609).
@@ -85,7 +85,7 @@ usage() {
 # `-shellcheck=` here is a PLACEHOLDER, deliberately left empty: SMA-539 resolves the real
 # `-shellcheck=$SHELLCHECK_BIN` value later, after the --self-test early exit, beside the
 # `command -v actionlint` guard (see the SMA-539 comment there) — never here, since a
-# hash-pinned package-manager resolution at file-load time would run once per --self-test mutant too.
+# hash-pinned `run py` resolution at file-load time would run once per --self-test mutant too.
 #
 # `-pyflakes=` stays DISABLED DELIBERATELY (spec D2/L4): actionlint shells out to pyflakes when
 # it finds it on PATH, which would make this gate's strictness a property of the host, and
@@ -4617,10 +4617,10 @@ kill_predicate_self_test() {
 # 98, so 78 of the 98 rows — the whole V10 credential control among them — could be deleted with
 # the gate still green. FIXTURES is the ONLY pin on that control. Re-baseline the floor whenever
 # rows are added: set it just under the current `--fixture-count`, never far below it.
-# `--locked` (Minor 5, fix round 3): a bare package-manager run RE-LOCKS py/uv.lock as a side
+# `--locked` (Minor 5, fix round 3): a bare, unlocked run of the py project RE-LOCKS py/uv.lock as a side
 # effect of running the gate. CLAUDE.md already records py/uv.lock as one of the two sites that
 # drift SILENTLY, and a lint gate that rewrites a lockfile it is not asserting is exactly that
-# drift. `--locked` makes the package manager fail instead of writing. That failure is nonzero but not 2, which is
+# drift. `--locked` makes the wrapper's `run py` fail instead of writing. That failure is nonzero but not 2, which is
 # precisely the class check 10's `elif` arm now routes — before it, a stale lock would have made
 # this gate pass having asserted nothing.
 release_guard_py() {
@@ -5304,7 +5304,7 @@ print(n)'
 
 # SMA-612 — full-gate preflight. It runs BEFORE run_self_tests, because under bash 5.x the
 # self-tests themselves deadlock on a small pipe. It is not run in --self-test mode: check 9
-# starts one --self-test subprocess per table, and a package-manager run in each is the cost the SHELLCHECK_BIN
+# starts one --self-test subprocess per table, and a `run py` call in each is the cost the SHELLCHECK_BIN
 # comment below already refuses. Every failure is infra (rc 2): no check ran, so rc 1 would be a
 # false "a workflow is wrong" and rc 0 a false pass. `ok)` is the only arm that continues.
 pipe_capacity_preflight() {
@@ -5956,7 +5956,7 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # PLACEMENT IS LOAD-BEARING. This sits AFTER the `--self-test` early exit that follows
 # run_self_tests, beside the actionlint guard, for the same reason that guard does: --self-test
 # must stay runnable on a machine with neither binary installed. It also keeps check 9's mutant
-# fan-out — one --self-test subprocess per self-test — from paying 16 package-manager invocations
+# fan-out — one --self-test subprocess per self-test — from paying 16 `run py` invocations
 # against one py/.venv.
 #
 # FAIL CLOSED. There is deliberately NO fallback to `-shellcheck=`: a silent downgrade to
@@ -5965,23 +5965,23 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # resolution rather than discovering it 80 lines later.
 #
 # PROVENANCE, NOT JUST PRESENCE. `shutil.which` is PATH-based, so "FAIL CLOSED" above was
-# incomplete: if the `py` package-manager project does not itself contain shellcheck (a `[dependency-groups]`
-# rename, a `[tool.uv] default-groups` change, or a package-manager switch at invocation time — real,
-# documented package-manager knobs, none of which trips the package manager's own exit status), the package manager still exits 0
+# incomplete: if the `py` project does not itself contain shellcheck (a `[dependency-groups]`
+# rename, a `[tool.uv] default-groups` change, or the no-dev environment switch at invocation time — real,
+# documented package-manager knobs, none of which trips the exit status of `run py`), `run py` still exits 0
 # and `which` silently returns whatever `shellcheck` is first on the OUTER host PATH — `[ -x ]`
 # passes on that impostor, reproducing the exact "strictness is a property of the host" failure
 # this whole block exists to refuse, now green. MEASURED: with shellcheck removed from
-# the py environment directory/bin and a host impostor earlier on PATH, the bare `shutil.which` resolver printed the
-# impostor's path at exit 0. `sys.prefix` under the package manager IS the py environment directory (measured),
+# the bin directory of the py project environment and a host impostor earlier on PATH, the bare `shutil.which` resolver printed the
+# impostor's path at exit 0. `sys.prefix` under `run py` IS the py project environment (measured),
 # so requiring the resolved path to live under it is a same-process check no outer-PATH
 # manipulation can spoof — a host binary now routes to `infra` (rc 2) instead of a silent pass.
 # Containment is COMPONENT-WISE (`is_relative_to` on resolved paths), not a string prefix.
 # `p.startswith(sys.prefix)` accepts a SIBLING directory — `py/.venv-host/bin/shellcheck` starts with
-# the py environment directory and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
+# the py project environment and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
 # sides also means a symlinked venv compares by its real location rather than by spelling.
 # PROTO_REPORTER=text AND `tail -n1`, deliberately both. proto prints an NDJSON preamble on
 # STDOUT when it detects an agent environment (AI_AGENT / CLAUDECODE / CLAUDE_CODE_ENTRYPOINT),
-# and MEASURED on merged main: the proto-managed package-manager SHIM leaked that preamble into this very
+# and MEASURED on merged main: the proto-managed SHIM of the package manager leaked that preamble into this very
 # capture, so the variable held a JSON blob and the gate died with "not executable: {...}".
 # CLAUDE.md's NDJSON entry had carved shims out as "not proven generally" — this is the
 # counterexample that closes the carve-out (SMA-609). The env var suppresses it at source; the
@@ -5989,7 +5989,7 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # weakens the `[ -x ]` below: a preamble-only capture still fails it and still aborts.
 SHELLCHECK_BIN="$( (cd py && bash ../ci/python-env/run.sh run py python3 -c \
   'import pathlib, shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)') | tail -n1)" \
-  || infra "could not resolve shellcheck via 'ci/python-env/run.sh run py' — run 'proto install', then 'moon setup'"
+  || infra "could not resolve shellcheck via 'ci/python-env/run.sh run py' — run 'proto install'; if py/uv.lock is stale, run 'bash ci/python-env/run.sh lock'"
 [ -x "$SHELLCHECK_BIN" ] || infra "resolved shellcheck is not executable: $SHELLCHECK_BIN"
 ARGS+=("-shellcheck=$SHELLCHECK_BIN")
 
@@ -6270,12 +6270,12 @@ done
 # the status, THEN read.
 #
 # ROUTE EVERY STATUS, NOT JUST 2 (fix round 3, Critical 1). This block first shipped routing only
-# rc 2, and the earlier version of this very comment claimed a "missing package manager" was among the cases it
-# covered. It was not, and the wording is now corrected: a missing package manager makes the WRAPPER exit 127,
+# rc 2, and the earlier version of this very comment claimed a "missing tool" was among the cases it
+# covered. It was not, and the wording is now corrected: a missing package manager makes the wrapper exit 127,
 # which is not the guard's own 2 and was therefore unrouted. MEASURED on this branch: with the
 # production call replaced by `( exit 127 )`, the full gate exited 0 — $RG_OUT empty, the read loop
 # below saw nothing, FAILED stayed 0. The `elif` arm closes that for 127 and for every other
-# unexpected status (a 137 kill, a package-manager resolution failure). The rc-1-with-empty-output arm
+# unexpected status (a 137 kill, a `run py` resolution failure). The rc-1-with-empty-output arm
 # below closes the remaining shape: rc 1 means "violations found", so producing none contradicts
 # the guard's contract and must not read as a clean run.
 #

@@ -186,7 +186,7 @@ STATUS_FUNCS = ("always", "cancelled", "success", "failure")
 # A naive substring test here would red the real repository on the very PR that added V7. The
 # `(?![-\w])` boundary is what keeps `release-pr` distinct from `release`.
 #
-# Fix round 3, Important 3: `maturin publish`, `maturin upload`, the package manager and `yarn publish`
+# Fix round 3, Important 3: `maturin publish`, `maturin upload`, `twine upload` and `yarn publish`
 # were missing, and this repo's own Python publishing IS maturin — `wheels.yml` carries both
 # `pull_request` and `push` triggers, and `maturin publish` is a one-word edit from the
 # `maturin build` already in it. Spec §8.3 leaves detection as the sole rule for called workflows,
@@ -1621,7 +1621,7 @@ class StepAllowlist:
 # V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
 # the runner receives every secret a job references when the job starts, so code in ANY step of
 # the job can read it, not only a step with a token in its env:. So no step of such a job may
-# compile, or run a build script, a proc macro, or an npm or Python package lifecycle or install script
+# compile, or run a build script, a proc macro, or an npm or Python installer lifecycle or install script
 # (spec A1). This is an ALLOWLIST (spec D4): a new tool reds until someone adds it here, with a
 # reason, after the job's trust in it is reviewed. The spec's §4.1 lists the tools it trusts.
 UNGATED_JOB_ACTIONS = frozenset({
