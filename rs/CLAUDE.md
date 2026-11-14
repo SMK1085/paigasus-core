@@ -25,7 +25,14 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   the profile grew the Linux target dir by 385 MB (1.45 GB to 1.84 GB, proc-macro `.so` files
   159 MB to 351 MB), with the same build time (85 s, 86 s). It also changed the bytes of every
   shipped Linux binary (py `.so` 582016 to 582008 bytes), because the proc-macro hashes change.
-  A local `--target` release build on macOS still strips host units. Set the variable for it.
+  The local half (follow-up sweep 2): the two Moon tasks that run a `--target` release build on a
+  developer host are `paigasus-kernel-ts:test` and `:generate-wasm` (`wasm-pack build --release`,
+  target wasm32). Both export the variable when `uname -s` is `Darwin`, so Linux runs do not change.
+  Measured on macOS 27.2: 16 of 16 host rustc calls had `-C strip=debuginfo` without it, 0 with it.
+  All 9 host binaries had `stroff mod 8 = 0` in both builds, so this closes a latent risk only.
+  The darwin wasm binary changes (74514 to 74519 bytes) and the four glue files do not.
+  Stable cargo has no host-conditional profile. A `cargo`, `napi` or `maturin` command that you
+  type with `--release --target <apple-darwin triple>` still strips host units. Set the variable for it.
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - Tests that assert on a log line use `paigasus_logging::test_support` (`capture_logs` at TRACE,
   `capture_logs_at(level)`). Turn on its `test-support` feature from `[dev-dependencies]` only,
