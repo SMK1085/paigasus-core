@@ -65,11 +65,14 @@ python3 -I ci/affected-graph/python_env_ban.py
 PYTHON_ENV_TEST_BASH=/opt/homebrew/bin/bash python3 -I ci/affected-graph/python_env_ban.py
 ```
 
+`ci/python-env/real-tool-check.sh` runs the cheap operations against the real tool: `probe`,
+`cache-dir`, `run py`, `script` and `build`. A step in `repo:affected-smoke` runs it on every PR.
+
 ## How to add an operation
 
 1. Add one `case` branch to `run.sh`. Write the command as one literal line.
 2. Add the operation to the table above.
 3. Add rows to `WRAPPER_CASES` in `ci/affected-graph/python_env_ban.py`: one success row and one
    usage-error row at least.
-4. Update the sha256 of `run.sh` that the gate pins, when the gate exists.
+4. Update `WRAPPER_SHA256` in `ci/affected-graph/python_env_ban.py`. The G-wrapper row of the gate prints the new hash.
 5. Run both commands in the Tests section.

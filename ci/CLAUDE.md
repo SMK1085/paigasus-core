@@ -194,8 +194,8 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   and — once `SELF_SCHEDULED_GATES` holds a key — `SELF_TASK_EXPECTED_GLOBS` are self-enforcing.
   A brand-new gate with no registry entries at all still passes.**
   `repo:ruff-ci` (SMA-539) lints `ci/**/*.py` against `py/pyproject.toml`'s rule set — a new `ci/`
-  Python file must pass it. It routes through the wrapper's `run py` operation (`uv run --locked`) rather than a
-  dedicated uv project: `repo:actionlint`'s `inputs: ['**/*']` strictly supersets `repo:ruff-ci`'s,
+  Python file must pass it. It routes through the wrapper's `run py` operation (`uv run --locked`). It has no
+  dedicated uv project. `repo:actionlint`'s `inputs: ['**/*']` strictly supersets `repo:ruff-ci`'s,
   so the `py` environment is materialised once per CI run regardless of which task reaches it
   first — one lockfile therefore means one ruff version, shared with `py:lint`, with no second
   lockfile to drift out of step. `ruff format` is deliberately NOT gated over `ci/`: MEASURED,
@@ -288,7 +288,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   (`<<:`) — a workflow using one keeps the literal, unmerged key rather than erroring (SMA-579).
 - `repo:actionlint` now runs shellcheck over every workflow `run:` block, sourced from
   `shellcheck-py` pinned in `py/uv.lock` (bounded specifier `>=0.11.0.1,<0.12`), resolved via
-  `ci/python-env/run.sh run py` (`uv run --locked`) and asserted with `[ -x ]`. It FAILS CLOSED at rc 2 — there is
+  `ci/python-env/run.sh run py` (`uv run --locked`) and asserted with `[ -x ]`. It FAILS CLOSED at rc 2. There is
   deliberately no fallback to whatever `shellcheck` a host happens to have, the silent-downgrade
   failure SMA-525 refused. shellcheck's own GitHub release ships 13 platform archives and no
   checksums asset (re-measured 2026-09-02), which is why it is not a proto plugin; three of

@@ -100,7 +100,7 @@ SMOKE_PROJECT = "repo"
 SMOKE_TASK = "affected-smoke"
 
 # (path, exact stripped line) -> the reason the text cannot change (spec 5.4). The count must stay
-# lower than 35. Tasks 4 to 6 add the entries.
+# lower than 35. Each entry has a reason.
 PINNED_LINES: dict[tuple[str, str], str] = {
     (".gitignore", ".venv/"): "ignore pattern: the name of the project environment directory that git must ignore",
     (".moon/toolchains.yml", "packageManager: 'uv'"): "Moon toolchain schema value: the schema accepts only the tool name here",

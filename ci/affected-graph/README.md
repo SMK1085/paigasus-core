@@ -380,7 +380,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   Only `ci/python-env/run.sh` may run it (see `ci/python-env/README.md`). The gate does not parse
   shell text. It reads every tracked file line by line and looks for a token.
   - History: SMA-768 had a shell parser here (`check_uv_env_isolation`) and a waiver table
-    (`ALLOW_UV_ENV_SCRIPT`). SMA-770 deleted both. The parser left residuals R1, R2 and R10 that
+    (`ALLOW_UV_ENV_SCRIPT`). SMA-770 deleted both. The parser left open gaps R1, R2 and R10 that
     no further patch could close. It also gave a false red on `cd` and `source` lines.
   - Scope: every file that git tracks, except the exclusions. The gate reads each file as UTF-8.
   - Exclusions (`EXCLUSIONS`, in this order): `markdown` (`*.md`), `docs` (`docs/`), `uv.lock`,
@@ -392,7 +392,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   - Boundary: a token matches only when no word character, `.` or `-` is on either side. `.venv`
     needs only a non-word, non-`-` character on its left, so `py/.venv` matches and `a.venv` does not.
   - Known non-matches (`NON_MATCHES`): `uv.lock`, `uv.toml`, `uv-cache`, `pip.exe`, `pipefail`,
-    `pipeline`, `uvicorn` and `the uv.`. The last one is a false green that the spec accepts: the
+    `pipeline`, `uvicorn` and `the uv.`. The gate does not see the last one, and the spec accepts that: the
     word `uv` at the end of a sentence is not a token. A prose line with that shape is not seen.
   - Rules:
     - G-ban: a token on a scanned line is a row, unless the line is in `PINNED_LINES`.
@@ -415,8 +415,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   - `PINNED_LINES` maps (path, exact stripped line) to a reason. It has 15 entries. The count must
     stay lower than 35. Each reason must not be empty. A pin counts only on a line that has a token,
     so an entry that matches no line is a stale row. An entry that matches two lines is an
-    ambiguous row. A pin is a last resort: first route the command through the wrapper, or give the
-    text new words.
+    ambiguous row. Use a pin only when no other change works. First route the command through the
+    wrapper, or reword the text.
   - Self-test classes (`self_test_failures`): one red row for each token and one green row for each
     known non-match; one fixture for each exclusion; the `binary_paths` check against the real
     `.gitattributes`, with a path list longer than 512 bytes; CRLF, a missing final newline and a
@@ -430,7 +430,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   - Real tool: `ci/python-env/real-tool-check.sh` runs the cheap wrapper operations against the real
     tool. A step in `repo:affected-smoke` runs it on every PR.
   - Real-tree negative control: `main()` removes the wrapper call text from the floor task in a deep copy
-    of the real graph. It exits 2 unless A14 gives a row that names the floor task and is not a `FLOOR:` row.
+    of the real graph. The gate then must give a row that names the floor task and is not a `FLOOR:` row.
+    If not, `main()` exits 2.
     `run.sh --negative-control` runs only the synthetic self-test, so this is a separate step.
   - To add a Python package manager operation: add a wrapper operation, then update
     `WRAPPER_SHA256` and `WRAPPER_CASES` in `python_env_ban.py`.
