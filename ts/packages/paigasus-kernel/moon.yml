@@ -168,8 +168,17 @@ tasks:
   # `-- --locked` reaches the `cargo build` wasm-pack forwards to, but wasm-pack makes its own
   # unlocked cargo call BEFORE that build and repairs an inconsistent lock there first — so this
   # task cannot guarantee a locked resolution (measured, SMA-601).
+  #
+  # SMA-767 R1, local half. `wasm-pack build --release` is a `--target wasm32-unknown-unknown` build,
+  # so the apple-darwin `-C strip=none` in rs/.cargo/config.toml does not reach the host proc macros
+  # and build scripts. On a darwin host they keep the release strip, which rustc 1.95 does with
+  # rust-objcopy, and rustc dlopens a proc macro. The `if` exports
+  # CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none on a darwin host only, so a Linux run is
+  # unchanged. Measured on macOS 27.2: 16 of 16 host rustc calls carried `-C strip=debuginfo`
+  # without it, 0 with it. The wasm binary bytes change on darwin and the four glue files do not;
+  # every check in tests/committed-wasm.test.ts is host-independent (SMA-634 spec F12).
   test:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts --no-dts-cache && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-test-out --out-name paigasus_wasm -- --locked ) && pnpm exec vitest run'
+    script: 'if [ "$(uname -s)" = Darwin ]; then export CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none; fi && touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings --js index.fresh.js --dts index.fresh.d.ts --no-dts-cache && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-test-out --out-name paigasus_wasm -- --locked ) && pnpm exec vitest run'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -284,6 +293,8 @@ tasks:
     script: |
       set -euo pipefail
       export PROTO_REPORTER=text
+      # SMA-767 R1, local half: see the comment above the `test` task. Darwin hosts only.
+      if [ "$(uname -s)" = Darwin ]; then export CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none; fi
       node scripts/generate-wasm.mjs --pre
       remap="$(node scripts/generate-wasm.mjs --remap)"
       case "$remap" in '['*--remap-path-prefix=*']') ;; *) echo "generate-wasm: --remap produced \"$remap\", not a rustflags array. Refusing to build a binary that would hold absolute host paths." >&2; exit 2 ;; esac
