@@ -768,7 +768,8 @@ mod tests {
                         Action::Emit(b) => out.push_str(std::str::from_utf8(&b).unwrap()),
                         Action::Decide { hold, calls } => {
                             decides += 1;
-                            assert!(calls.iter().all(|c| c.kind != crate::types::ToolCallKind::Other), "{name}");
+                            use crate::types::ToolCallKind as K;
+                            assert!(calls.iter().all(|c| matches!(c.kind, K::Function | K::Custom | K::Computer | K::Shell | K::ApplyPatch)), "{name}");
                             pending.extend(i.decided(hold, Ok(vec![Decision::Allow; calls.len()]), t0));
                         }
                         Action::Count(m) => assert!(!matches!(m, Metric::RecordDropped(_)), "{name}: {m:?}"),

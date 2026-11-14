@@ -386,29 +386,31 @@ fn responses_every_fixture_holds_i1_for_every_client() {
     }
 }
 
-/// § 8.3: every single split point gives the same output as one push, for fixtures up to 6 KiB.
-/// One thread per fixture, because a Responses fixture is a few KiB and has thousands of split points.
+/// § 8.3: every split point gives the same output as one push, for every Responses fixture. A
+/// fixture over 6 KiB (the limit paths: `hold_limit`, `oversized_*`) gets the points of
+/// [`split_points`]. One thread per fixture.
 #[test]
 fn responses_every_split_point_gives_the_same_output() {
-    let mut covered = 0;
+    let mut total = 0;
+    let mut covered = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
         for rel in RESPONSES_SETS {
             for (name, bytes) in files(rel) {
-                if bytes.len() > 6144 {
-                    continue;
-                }
-                covered += 1;
+                total += 1;
+                let covered = &covered;
                 scope.spawn(move || {
                     let whole = drive(Format::OpenAiResponses, limits(OnFailure::Block), &[&bytes], &block_named).out;
-                    for i in 0..=bytes.len() {
+                    let points = if bytes.len() > 6144 { split_points(&bytes) } else { (0..=bytes.len()).collect() };
+                    for i in points {
                         let split = drive(Format::OpenAiResponses, limits(OnFailure::Block), &[&bytes[..i], &bytes[i..]], &block_named).out;
                         assert!(split == whole, "{rel}/{name} split at {i}");
                     }
+                    covered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 });
             }
         }
     });
-    assert!(covered >= 60, "only {covered} fixtures were split");
+    assert_eq!(*covered.get_mut(), total, "every fixture is split-tested");
 }
 
 /// AC 5 for Responses: each malformed shape follows § 6 under both `on_failure` values.
