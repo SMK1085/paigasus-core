@@ -10,6 +10,20 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-14-sma-757-oracle-argument-prefix-design.md`
 
+## As built (differences from the tasks below)
+
+The tasks below stay as the record of the original plan. The code and the spec hold the final rules.
+
+- Fixture canaries are in the deviating record or in the allowed call's late fragment, not in a separate later `blocked_*` call. Observe mode forwards later records, so a separate canary leaks under `allow` (Tasks 3-6; spec § 7.3).
+- `fragment_after_bodyless_entry`: the boundary is renewed at every bodyless record, because the rewrite can remove an earlier blocked bodyless call (spec § 5.1). A bodyless continuation fragment of an existing custom or Other call does not renew it.
+- `chunk_without_choices`, `choice_without_delta` and `array_outside_tool_calls` apply in an open call of choice 0 and in the record that opens one, through one shared predicate (`in_call`, spec § 5.2, § 5.7). The finish entry of choice 0 may omit `delta`. The spec § 5.2 text does not state this exemption. The module doc of `src/openai/stream.rs` does.
+- `"delta": null` stays `Malformed("delta")` (spec § 5.2).
+- New rules from the final review: `array_outside_tool_calls` at any depth (spec § 5.7) and `Malformed("function_call_key")` on stream and body (spec § 5.8). Each has a generator quirk, a fixture and a row.
+- A body reads `"type": null` as absent (spec D4: bodies have no fragments, so § 5.3 does not apply to them).
+- The oracle names a bodyless kind-Other call `unknown`, as the core does (spec § 7.3, fixture `bodyless_type_null`).
+- The recorded test runs every split point under allow-all and one push under each decider (spec § 7.3).
+- The full `moon ci` graph ran after the final-review fix wave (Task 8 Step 5).
+
 ## Global Constraints
 
 - Every new source file opens with `// SPDX-License-Identifier: Apache-2.0` (`#` for Python).

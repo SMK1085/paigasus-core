@@ -108,6 +108,10 @@ fn partial_json_drops_an_unfinished_number() {
     assert_eq!(partial_json(r#"{"a":"x","n":10."#).unwrap(), json!({"a":"x"}));
     assert_eq!(partial_json(r#"{"n":10"#).unwrap(), json!({"n":10}));
     assert!(partial_json(r#"{"n":1x}"#).is_err()); // invalid, not at the end of input
+    // A non-string token at a key position raises, even in partial mode (jiter 0.19.0).
+    assert!(partial_json("{-").is_err());
+    assert!(partial_json(r#"{"a":1,1e"#).is_err());
+    assert_eq!(partial_json(r#"{"a":1,"b":1e"#).unwrap(), json!({"a":1}));
 }
 
 /// Only a proper prefix of a valid JSON number is dropped at the end of the input. jiter 0.19.0

@@ -1041,6 +1041,10 @@ impl Partial<'_> {
                         self.i += 1;
                         return Ok(Some(Value::Object(m)));
                     }
+                    // jiter 0.19.0 rejects a non-string key, even in partial mode.
+                    if self.b[self.i] != b'"' {
+                        return Err("ValueError: key must be a string".into());
+                    }
                     let Some(Value::String(k)) = self.value()? else { return Ok(Some(Value::Object(m))) };
                     self.ws();
                     if self.eof() {
