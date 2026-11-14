@@ -2189,6 +2189,9 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ci/wasm-lockstep/**/*'
   'CLAUDE.md'
   '.prototools'
+  # SMA-770 — floors the input that makes the python-env token ban (A14) reachable: it reads every
+  # tracked file outside its exclusions, so an edit to any file must schedule repo:affected-smoke.
+  '**/*'
 )
 
 # SMA-601 — check 8f. The lockfile-integrity step is a plain ci.yml step, not a Moon task, so

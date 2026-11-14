@@ -313,6 +313,10 @@ tasks:
       # only true if a version bump re-runs it. Every other repo gate that shells out to a
       # proto-pinned binary lists this (repo:osv, repo:promtool, the three release-parity*).
       - '.prototools'
+      # SMA-770 — the python-env token ban (A14) READS every tracked file outside its exclusions, so
+      # an edit to any file must schedule this task. G5 proves each read file matches an input.
+      # The narrow globs above are KEPT: check 8e in ci/actionlint/run.sh floors them.
+      - '**/*'
 
   parity-corpus-drift:
     description: 'Regenerate the parity corpus from the kernel; assert it matches the committed vectors (SMA-433).'

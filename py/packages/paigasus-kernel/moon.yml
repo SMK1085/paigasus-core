@@ -8,8 +8,8 @@ language: 'python'
 # build ordering (paigasus-py-bindings-rs:build runs first) and affected-graph propagation
 # under `moon ci --include-relations` — the task-level `^:build` is what carries the cascade;
 # a project dependsOn alone does not (SMA-389 D3). It does NOT provision the Rust toolchain
-# for this project (verified: these tasks resolve to python/uv toolchains only); cargo must be
-# on PATH (CI proto shims / dev shell) when `uv sync --reinstall-package` triggers maturin (S6).
+# for this project (verified: these tasks resolve to the Python toolchains only); cargo must be
+# on PATH (CI proto shims / dev shell) when the bindings reinstall triggers maturin (S6).
 dependsOn:
   - 'paigasus-py-bindings-rs'
 
@@ -17,9 +17,10 @@ tasks:
   build:
     deps: ['^:build']
   # Dedicated runtime FFI smoke test. It lives here (not only in the whole-tree py:test) so the
-  # kernel→bindings→py cascade actually re-runs it on a Rust edit (review F4). uv serves a CACHED
-  # maturin wheel and ignores Rust source changes (spike S4), so we MUST force a rebuild with
-  # --reinstall-package before pytest — otherwise this would assert against a stale wheel.
+  # kernel→bindings→py cascade actually re-runs it on a Rust edit (review F4). The Python package
+  # manager serves a CACHED maturin wheel and ignores Rust source changes (spike S4), so we MUST
+  # force a rebuild with --reinstall-package before pytest — otherwise this would assert against a
+  # stale wheel. The `kernel-test` operation of ci/python-env/run.sh runs that command (SMA-770).
   #
   # `touch` the kernel + binding sources first: maturin's underlying cargo is mtime-incremental, so
   # after a git op that leaves a Rust source OLDER than an existing rs/target/ artifact (warm cache +
@@ -33,21 +34,23 @@ tasks:
   # neither materializes nor asserts the wheel, so it cannot serve a stale artifact (intentional
   # asymmetry with the ts side, whose `build` produces the .node).
   #
-  # `--isolated` (SMA-765): the task builds its own temporary environment. The old exact `uv sync`
-  # wrote the shared py/.venv and removed 18 packages (grpclib, anthropic, ...) while `py:test`
-  # collected in parallel (CI run 43295812102). `--reinstall-package` stays: it still forces the
-  # maturin rebuild inside that environment (spike S4). Measured: after a version bump in a member
-  # pyproject.toml, `uv run --isolated` did not write py/uv.lock.
-  # Residual (R-stale): no Moon task refreshes the binding in py/.venv, so `py:test` and
-  # `py:typecheck` can see a stale binding. The remedy is in py/README.md ("After a Rust change").
+  # The task builds its own temporary environment (SMA-765). The old exact environment sync
+  # wrote the shared project environment and removed 18 packages (grpclib, anthropic, ...) while
+  # `py:test` collected in parallel (CI run 43295812102). `--reinstall-package` stays: it still
+  # forces the maturin rebuild inside that environment (spike S4). Measured: after a version bump
+  # in a member pyproject.toml, the isolated run did not write the py/ lockfile.
+  # Residual (R-stale): no Moon task refreshes the binding in the shared project environment, so
+  # `py:test` and `py:typecheck` can see a stale binding. The remedy is in py/README.md ("After a Rust change").
   test:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-py-bindings/src/lib.rs && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-py-bindings/src/lib.rs && bash ../../../ci/python-env/run.sh kernel-test'
     deps: ['^:build']
     inputs:
       - 'tests/**/*'
       - 'src/**/*'
       - 'pyproject.toml'
       - '/py/uv.lock'
+      # SMA-770: the script runs the command through this wrapper, so a wrapper edit re-keys the task.
+      - '/ci/python-env/run.sh'
       # Both Rust sources: maturin recompiles the binding AND the kernel it calls, so a kernel-source
       # edit must bust this task's Moon cache too (review F4) — Moon hashes only listed inputs, and an
       # upstream `^:build` recompile alone does not re-key this task.
@@ -79,7 +82,7 @@ tasks:
       # Workspace-level Rust files (SMA-546) — see ts/packages/paigasus-kernel/moon.yml's `build`
       # for the full rationale. `--reinstall-package` forces maturin to relink the cdylib, so this
       # task's result depends on the resolution these files pin. `/.prototools` on THIS path pins
-      # `uv` (which drives maturin) rather than wasm-pack — nothing on the py path invokes wasm-pack.
+      # the Python package manager (which drives maturin) rather than wasm-pack — nothing on the py path invokes wasm-pack.
       #   /rs/.cargo/config.toml  read by maturin's cargo (cwd is inside rs/). maturin injects these
       #                           link args ITSELF (SMA-578, measured), so the wheel does not NEED
       #                           them — but the file still influences any darwin build from rs/,

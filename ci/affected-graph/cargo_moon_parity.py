@@ -53,8 +53,11 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-# SMA-736: A13 reads git's tracked set through repo:input-liveness's own helper. Python puts this
-# script's directory (ci/affected-graph/) first on sys.path, so the sibling module imports directly.
+# SMA-770: the a14 key (the python-env token ban) lives in its own module. Python puts this
+# script's directory (ci/affected-graph/) first on sys.path, so the sibling modules import directly.
+import python_env_ban
+
+# SMA-736: A13 reads git's tracked set through repo:input-liveness's own helper.
 import task_inputs
 
 
@@ -82,6 +85,8 @@ INFRA_ERRORS = (
     MoonOutputError,
     # SMA-736: task_inputs.tracked_files raises task_inputs' own MoonOutputError class.
     task_inputs.MoonOutputError,
+    # SMA-770: the python-env ban raises its own class for a missing tracked file or bad TOML.
+    python_env_ban.MoonOutputError,
 )
 
 # (consumer, upstream) -> why this hand-declared Moon edge has no Cargo backing.
@@ -140,9 +145,12 @@ FMT_TASK_INPUTS = (
 # `maturin` is FORWARD-LOOKING and matches no RESOLVED moon task invocation today: the string
 # shows up elsewhere in the tree (pyproject.toml, moon.yml comments, the python template), but
 # paigasus-kernel-py:test's actual resolved script is
-# `... && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests`. It is kept so a future direct maturin
+# `... && bash ../../../ci/python-env/run.sh kernel-test`. It is kept so a future direct maturin
 # invocation is covered on day one. Do not mistake it for measured coverage.
-FFI_MARKERS = ("napi build", "wasm-pack", "maturin", "--reinstall-package")
+# `ci/python-env/run.sh kernel-test` (SMA-770) is the wrapper operation that runs the bindings
+# reinstall, which drives maturin. It is the marker that matches paigasus-kernel-py:test today.
+# `--reinstall-package` stays for a direct call outside the wrapper.
+FFI_MARKERS = ("napi build", "wasm-pack", "maturin", "--reinstall-package", "ci/python-env/run.sh kernel-test")
 
 # The floor. A5's derived set is its strength (a fourth FFI task is covered the day it is added —
 # SMA-524's "a MISSING case is how the bug survived" lesson) and also its weakness: a derived set
@@ -163,6 +171,12 @@ REQUIRED_FFI_TASKS = (
 # fresh. Each task named here must exist and must run `uv run --isolated` with
 # `--reinstall-package paigasus-py-bindings`, or A14 reds with a `FLOOR:` row.
 REQUIRED_UV_ISOLATED_TASKS = ("paigasus-kernel-py:test",)
+
+# SMA-770: check functions that stay in this file but that the real run no longer calls. The
+# call-site guard in self_test() skips them, and asserts that the real run does not call them.
+# check_uv_env_isolation is the SMA-765 parser; python_env_ban.check_python_env replaced it under
+# the a14 key. Task 7 of the SMA-770 plan deletes the function and this entry.
+RETIRED_CHECKS = ("check_uv_env_isolation",)
 
 # SMA-601 — the cargo subcommands that RESOLVE the dependency graph, and therefore rewrite an
 # inconsistent Cargo.lock in place unless --locked is passed. `fmt` and `machete` are absent
@@ -4475,8 +4489,19 @@ def self_test():
     real_run_src = inspect.getsource(main) + inspect.getsource(collect_findings)
     unreferenced = sorted(
         name for name in globals()
-        if name.startswith("check_") and f"{name}(" not in real_run_src
+        if name.startswith("check_") and f"{name}(" not in real_run_src and name not in RETIRED_CHECKS
     )
+    # A retired check must really be retired: the real run must not call it.
+    for name in RETIRED_CHECKS:
+        if f"{name}(" in real_run_src:
+            failures.append(f"{name} is in RETIRED_CHECKS, but the real run still calls it")
+    # SMA-770 (ruling F2): the a14 key must run the python-env ban, and its raise class must abort as rc 2.
+    if "python_env_ban.check_python_env(" not in inspect.getsource(collect_findings):
+        failures.append("collect_findings does not call python_env_ban.check_python_env, so the a14 key asserts nothing")
+    if python_env_ban.MoonOutputError not in INFRA_ERRORS:
+        failures.append("python_env_ban.MoonOutputError is not in INFRA_ERRORS, so a missing tracked file is rc 1, not rc 2")
+    if (python_env_ban.SMOKE_PROJECT, python_env_ban.SMOKE_TASK) != (AFFECTED_SMOKE_PROJECT, AFFECTED_SMOKE_TASK):
+        failures.append("python_env_ban names another repo:affected-smoke task than cargo_moon_parity.py")
     if unreferenced:
         failures.append(
             f"the real run never calls {', '.join(unreferenced)} — a check that is defined but "
@@ -5489,7 +5514,7 @@ def self_test():
             "tasks": {"test": []},
             "task_inputs": {"test": list(FFI_TASK_INPUTS)},
             "invocations": {
-                "test": "touch a b && uv run --isolated --reinstall-package paigasus-py-bindings pytest tests"
+                "test": "touch ../../../rs/crates/bindings/paigasus-py-bindings/src/lib.rs && bash ../../../ci/python-env/run.sh kernel-test"
             },
         },
         "unrelated-ts": {
@@ -8121,9 +8146,12 @@ def self_test():
         if check_ffi_inputs(cl_ffi, root=cl_root):
             failures.append(f"A5 reported rows on a py FFI task that keys on the crate-local cargo config: "
                             f"{check_ffi_inputs(cl_ffi, root=cl_root)}")
-        cl_ffi["paigasus-kernel-py"]["invocations"]["test"] = "uv run --isolated --reinstall-package other pytest"
+        cl_ffi["paigasus-kernel-py"]["invocations"]["test"] = "bash ../../../ci/python-env/run.sh kernel-test"
         if not any(r.startswith("FLOOR:") and cl_rel in r for r in check_ffi_inputs(cl_ffi, root=cl_root)):
             failures.append("A5 gave no FLOOR row when no FFI task names the crate with a crate-local cargo config")
+
+    # SMA-770: the a14 key runs the python-env token ban. Its rows live in its own module.
+    failures.extend(python_env_ban.self_test_failures(_read_utf8, smoke_unreached))
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
     if failures:
@@ -8327,25 +8355,23 @@ def collect_findings(projects, crates, root, tracked):
              "    row needs `deps: ['contracts:generate']` on that task. For a \"matches no input of\n"
              "    repo:affected-smoke\" row, add a glob that matches the config to the inputs of\n"
              "    `repo:affected-smoke` in the root moon.yml. See ci/affected-graph/README.md (A13)."),
-        ("a14", check_uv_env_isolation(
-            projects, root,
-            uv_configs=uv_configs_of(tracked) if tracked else None,
-            moon_toolchains=MOON_TOOLCHAINS if tracked else None,
+        # SMA-770: the python-env token ban. The SMA-765 parser below (check_uv_env_isolation) is
+        # no longer called; Task 7 of the SMA-770 plan deletes it.
+        ("a14", python_env_ban.check_python_env(
+            projects, root, tracked, read_utf8=_read_utf8, smoke_unreached=smoke_unreached,
         ),
-             "A task can change a uv environment IN PLACE that another task reads, so two parallel\n"
-             "    tasks race on py/.venv and one loses packages it imports (SMA-765, SMA-768).\n"
-             "    Fix: use an approved uv form, or add the form to the allow-list constants in\n"
-             "    cargo_moon_parity.py with a self-test row. Use `uv run --isolated` (with\n"
-             "    `--reinstall-package paigasus-py-bindings` for the kernel task). Do not run `uv sync`,\n"
-             "    `uv pip`, `uv venv`, `uv add` or `uv remove` in a Moon task. Do not name UV_*,\n"
-             "    VIRTUAL_ENV or --active. A script line that only prints `uv` needs an\n"
-             "    ALLOW_UV_ENV_SCRIPT entry with a reason that starts with PROSE, DATA or EXECUTED.\n"
-             "    For a \"matches no input of repo:affected-smoke\" row, add a glob for the file to the\n"
-             "    inputs of `repo:affected-smoke` in moon.yml and to T_AFFECTED_SMOKE_REQUIRED_INPUTS\n"
-             "    in ci/actionlint/run.sh.\n"
-             "    A `FLOOR:` row means the check itself cannot be trusted - the floor task is missing or\n"
-             "    lost `--isolated` or the bindings reinstall; fix that first. See\n"
-             "    ci/affected-graph/README.md (A14)."),
+             "A tracked file names the Python package manager, its installer or its environment\n"
+             "    outside ci/python-env/run.sh, so a command can change a shared project environment\n"
+             "    that another task reads (SMA-765, SMA-768, SMA-770).\n"
+             "    Fix: route an executed command through an operation of ci/python-env/run.sh. Give a\n"
+             "    comment, a message or a fixture new words. A literal that cannot change goes in\n"
+             "    PINNED_LINES in ci/affected-graph/python_env_ban.py, with a reason. Never split a\n"
+             "    token to pass the ban. A wrapper hash row: review the wrapper change, then set\n"
+             "    WRAPPER_SHA256. For a \"matches no input of repo:affected-smoke\" row, add a glob for the\n"
+             "    file to the inputs of `repo:affected-smoke` in moon.yml and to\n"
+             "    T_AFFECTED_SMOKE_REQUIRED_INPUTS in ci/actionlint/run.sh.\n"
+             "    A `FLOOR:` row means the check itself cannot be trusted - the floor task, the wrapper,\n"
+             "    the Moon toolchain file or py/pyproject.toml is missing; fix that first."),
     ]
 
     return findings
@@ -8364,28 +8390,25 @@ def main():
         print(f"FATAL [parity] could not build the graphs: {exc}", file=sys.stderr)
         return 2
 
-    # SMA-765: A14's real-tree negative control. Remove `--isolated` from the kernel task in a deep
-    # copy of the real graph. A14 must report a row that names the kernel task and is not a
-    # `FLOOR:` row, or the check cannot see the defect it exists for. The FLOOR row alone would
-    # pass even if the per-task scan were dead.
+    # SMA-770: the real-tree negative control of the A14 floor (G-floor). Remove the wrapper call
+    # text from the kernel task in a deep copy of the real graph. The floor must then report a row
+    # that names the kernel task, or the floor cannot see the defect it exists for.
     # `run.sh --negative-control` runs only the synthetic self-test, so this is an explicit step.
     try:
         mutated = json.loads(json.dumps(projects))
-        for a14_target in REQUIRED_UV_ISOLATED_TASKS:
-            a14_pid, _, a14_name = a14_target.partition(":")
-            a14_inv = (mutated.get(a14_pid) or {}).get("invocations") or {}
-            if a14_inv.get(a14_name):
-                a14_inv[a14_name] = a14_inv[a14_name].replace("--isolated", "")
-        a14_control = check_uv_env_isolation(mutated, root)
+        a14_pid, _, a14_name = python_env_ban.FLOOR_TASK.partition(":")
+        a14_inv = (mutated.get(a14_pid) or {}).get("invocations") or {}
+        if a14_inv.get(a14_name):
+            a14_inv[a14_name] = a14_inv[a14_name].replace(python_env_ban.FLOOR_TEXT, "")
+        a14_control = python_env_ban.floor_rows(mutated)
     except INFRA_ERRORS as exc:
         print(f"FATAL [parity] A14 negative control could not run: {exc}", file=sys.stderr)
         return 2
-    if not any(
-        r.startswith("paigasus-kernel-py:test") and not r.startswith("FLOOR:") for r in a14_control
-    ):
+    if not any(python_env_ban.FLOOR_TASK in r for r in a14_control):
         print(
-            "FATAL [parity] A14 negative control: A14 stayed green after `--isolated` was removed "
-            "from the kernel task, so A14 cannot see the defect it exists for",
+            f"FATAL [parity] A14 negative control: the floor stayed green after "
+            f"`{python_env_ban.FLOOR_TEXT}` was removed from {python_env_ban.FLOOR_TASK}, so it "
+            f"cannot see the defect it exists for",
             file=sys.stderr,
         )
         return 2
@@ -8402,8 +8425,8 @@ def main():
             f"workspace members entry is a literal path, and every ts tsc task keys on its "
             f"package.json closure and runs the installed-typings preflight first when that "
             f"closure holds a binding, and every ts vitest task keys on its configs, its package.json "
-            f"closure, its tsconfig chain and its alias targets, and no task changes a uv "
-            f"environment in place"
+            f"closure, its tsconfig chain and its alias targets, and only ci/python-env/run.sh "
+            f"names the Python package manager"
         )
         return 0
 
