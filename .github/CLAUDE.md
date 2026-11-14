@@ -249,7 +249,13 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   the host proc macros and build scripts of a `--target` build are not stripped either (SMA-767 R1).
   Measured on the merged `main` runs (wheels 43516091389, prebuild 43516091280) against the runs before
   (43304821010, 43304821032): every Linux binary is byte-identical, and the Windows binaries have the same
-  size with 28 different bytes. The darwin binaries grew by 36 KB to 41 KB. Each unstripped darwin binary
+  size with 28 different bytes. The 28 bytes are link metadata, not code (follow-up sweep 2): the COFF
+  `TimeDateStamp`, the same stamp in the CodeView, VC_FEATURE and POGO debug entries, and the 16-byte RSDS
+  PDB GUID. No byte of `.text`, `.data`, `.pdata` or `.reloc` differs, and the PDB path and Age do not change.
+  MSVC `link.exe` runs without `/Brepro` (the debug directory has no REPRO entry), so both values change
+  on every link. Two builds of the same Rust source (3220c9ca, b670daea) differ in the same fields (24 bytes;
+  the count depends on how many timestamp bytes are equal by chance). So a Windows diff of 24 to 28 bytes
+  in these fields is normal. A diff in a section is a real change. The darwin binaries grew by 36 KB to 41 KB. Each unstripped darwin binary
   holds 4 to 6 N_OSO paths, all of them `std` rlibs under `/Users/runner/.rustup/toolchains/` (spec §6).
 - All four **Linux** wheel legs cross-compile with `--zig` — not only the musl ones, unlike
   `prebuild.yml`. `ubuntu-latest` ships glibc 2.39, so a *native* build tags `manylinux_2_39`,
