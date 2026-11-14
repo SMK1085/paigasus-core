@@ -48,6 +48,30 @@ pub enum Quirk {
     /// Every call's arguments gain PascalCase, `constructor` and `prototype` keys. They are
     /// application data, so the stream is conforming (I-1).
     CapitalisedArgKeys,
+    /// A chunk without a `choices` key (`chunk_without_choices` inside an open call).
+    NoChoicesKey,
+    /// A chunk whose choice 0 entry has no `delta` (`choice_without_delta` inside an open call).
+    /// At an odd position, a delta-less `{"index":1}` is added behind the first record that opens
+    /// a call instead (spec § 5.2, the opening record counts).
+    NoDelta,
+    /// A fragment with `"type":null` and a function body for call 0: a present `type` key counts
+    /// as the type fragment, so it is a repeated type or a type/shape mismatch. When choice 0 has
+    /// no call, a bare `{"index":0,"type":null}` goes after its first record instead: a conforming
+    /// bodyless call that the core and the oracle both name `unknown`.
+    NullType,
+    /// A top-level `chunk` key with an empty `choices` (spec § 2.2 H1): LangChain reads
+    /// `chunk.choices` then, so the hidden call sits inside `chunk`.
+    ChunkKey,
+    /// A fragment in a record with top-level `"type":"content.delta"` (spec § 2.2 H2): LangChain
+    /// skips that record.
+    ContentDeltaType,
+    /// Two records with an array outside `tool_calls`, an indexed list and then a scalar list:
+    /// openai-python's `accumulate_delta` raises at the second (spec § 5.7). The array sits under
+    /// an unknown delta key, a tool-call entry key or a `function` key, chosen by the position.
+    ArrayOutsideToolCalls,
+    /// Two legacy `function_call` fragments with an extra key whose JSON type changes (`"x":"s"`,
+    /// then `"x":1`): LangChain raises at the second (spec § 5.8).
+    FunctionCallKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +162,13 @@ fn quirk_strategy() -> impl Strategy<Value = Quirk> {
         Just(Quirk::TruncatedArgs),
         Just(Quirk::ConcatenatedObjects),
         Just(Quirk::CapitalisedArgKeys),
+        Just(Quirk::NoChoicesKey),
+        Just(Quirk::NoDelta),
+        Just(Quirk::NullType),
+        Just(Quirk::ChunkKey),
+        Just(Quirk::ContentDeltaType),
+        Just(Quirk::ArrayOutsideToolCalls),
+        Just(Quirk::FunctionCallKey),
     ]
 }
 
@@ -259,6 +290,15 @@ fn is_tool_bearing(rec: &Value) -> bool {
         .is_some_and(|cs| cs.iter().any(|c| c.pointer("/delta/tool_calls").is_some() || c.pointer("/delta/function_call").is_some()))
 }
 
+/// Whether `line` is a generated record whose only entry carries tool data for choice 0.
+fn opens_call(line: &str) -> bool {
+    let Some(Ok(v)) = line.strip_prefix("data: ").map(|d| serde_json::from_str::<Value>(d.trim_end())) else {
+        return false;
+    };
+    let Some([c]) = v.get("choices").and_then(Value::as_array).map(Vec::as_slice) else { return false };
+    c.get("index").and_then(Value::as_u64) == Some(0) && is_tool_bearing(&v)
+}
+
 pub fn render_openai(s: &Scenario) -> Vec<u8> {
     let interleave = has(s, Quirk::Interleave).is_some();
     let bad_args = s.quirks.iter().copied().find(|(q, _)| matches!(q, Quirk::TruncatedArgs | Quirk::ConcatenatedObjects));
@@ -331,6 +371,48 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
                     chunk(json!([{"index":0,"delta":{"tool_calls":[hidden_entry(json!(0))]}}]))
                 ),
             ),
+            Quirk::NoDelta if at % 2 == 1 && lines.iter().any(|l| opens_call(l)) => {
+                // R-B (spec § 5.2): a delta-less entry at position 1 of the record that opens a call.
+                let i = lines.iter().position(|l| opens_call(l)).expect("checked");
+                let mut v: Value = serde_json::from_str(lines[i].trim_start_matches("data: ").trim_end()).expect("a generated record");
+                v["choices"].as_array_mut().expect("checked").push(json!({"index":1}));
+                lines[i] = format!("data: {v}\n\n");
+            }
+            Quirk::NoChoicesKey | Quirk::NoDelta => {
+                // SMA-749 D2 strips the BOM, so a client that ignores the BOM-prefixed first line
+                // would read it after the strip (known limitation, spec § 9). Keep it off line 0.
+                let at = if pos == 0 && has(s, Quirk::Bom).is_some() { 1 } else { pos };
+                if at <= lines.len() {
+                    let rec = if *q == Quirk::NoChoicesKey { r#"{"object":"chat.completion.chunk","id":"q"}"#.to_owned() } else { chunk(json!([{"index":0}])).to_string() };
+                    lines.insert(at, format!("data: {rec}\n\n"));
+                }
+            }
+            Quirk::NullType if s.choices[0].calls.is_empty() && has(s, Quirk::ReverseChoices).is_none() => {
+                let at = 1.min(lines.len());
+                lines.insert(at, format!("data: {}\n\n", chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"type":null}]}}]))));
+            }
+            Quirk::NullType => insert(&mut lines, chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"type":null,"function":{"name":"blocked_hidden","arguments":"CANARY-nt"}}]}}])).to_string()),
+            Quirk::ChunkKey => insert(&mut lines, json!({"object":"chat.completion.chunk","id":"q","choices":[],"chunk":{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ck","type":"function","function":{"name":"blocked_chunk","arguments":"CANARY-chunk"}}]}}]}}).to_string()),
+            Quirk::ContentDeltaType => insert(&mut lines, {
+                let mut r = chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"zz"}}]}}]));
+                r["type"] = json!("content.delta");
+                r.to_string()
+            }),
+            Quirk::ArrayOutsideToolCalls => {
+                let delta = |list: Value| match at % 3 {
+                    0 => json!({"foo":list}),
+                    1 => json!({"tool_calls":[{"index":0,"function":{"arguments":""},"x":list}]}),
+                    _ => json!({"tool_calls":[{"index":0,"function":{"arguments":"","x":list}}]}),
+                };
+                let two = [json!([{"index":0}]), json!([1])].map(|l| format!("data: {}\n\n", chunk(json!([{"index":0,"delta":delta(l)}]))));
+                // As for NoChoicesKey: keep the raising records off the BOM-prefixed line 0 (spec § 9).
+                let at = if pos == 0 && has(s, Quirk::Bom).is_some() { 1.min(lines.len()) } else { pos };
+                lines.splice(at..at, two);
+            }
+            Quirk::FunctionCallKey => {
+                let two = [json!("s"), json!(1)].map(|x| format!("data: {}\n\n", chunk(json!([{"index":0,"delta":{"function_call":{"arguments":"","x":x}}}]))));
+                lines.splice(pos..pos, two);
+            }
             Quirk::UnknownFields => lines.insert(pos, "id: 7\nretry: 10\nfoo: bar\n".to_owned()),
             Quirk::Comments => lines.insert(pos, ": hello\n: data: {\"x\":\"CANARY-comment\"}\n".to_owned()),
             Quirk::EventLine => lines.insert(pos, "event: message\n".to_owned()),
@@ -393,13 +475,13 @@ pub fn anthropic_scenario() -> impl Strategy<Value = AnthropicScenario> {
         (prop::bool::ANY, 0usize..2, "[a-z]{0,10}", 1usize..4).prop_map(|(b, n, s, pieces)| if b {
             Block::Tool {
                 name: BLOCKED[n],
-                args: format!("{{\"v\":\"CANARY-{s}\"}}"),
+                args: format!("{{\"v\":\"CANARY-{s}\",\"n\":10.5}}"),
                 pieces,
             }
         } else {
             Block::Tool {
                 name: ALLOWED[n],
-                args: format!("{{\"v\":\"{s}\"}}"),
+                args: format!("{{\"v\":\"{s}\",\"n\":10.5}}"),
                 pieces,
             }
         }),

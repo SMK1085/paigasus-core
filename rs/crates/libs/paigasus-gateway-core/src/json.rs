@@ -27,6 +27,7 @@ pub(crate) const MAX_ANTHROPIC_INDEX: u64 = 4095;
 const CLASSIFIER_KEYS: &[&str] = &[
     "arguments",
     "choices",
+    "chunk",
     "content",
     "content_block",
     "custom",

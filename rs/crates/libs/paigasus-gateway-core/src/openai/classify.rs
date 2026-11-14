@@ -11,13 +11,25 @@
 //! `object` differs (it filters Azure's async content-filter chunks), so a fragment in such a chunk
 //! would reach the decider but not that client. Text-only chunks are not checked: skipping them
 //! changes no tool call.
+//!
+//! Two more keys make LangChain read a chunk differently (spec § 2.2 H1, H2). A top-level `chunk`
+//! key is malformed: LangChain reads `chunk.choices` when `choices` is empty
+//! (`_convert_chunk_to_generation_chunk`). A top-level `"type":"content.delta"` on a chunk that
+//! carries tool data or a `finish_reason` is malformed: LangChain skips that record.
+//!
+//! A legacy `function_call` with a key other than `name` and `arguments` is malformed
+//! (`function_call_key`, spec § 5.8), in a stream and in a body ([`legacy_call`]).
 
 use serde_json::{Map, Value};
 
 use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of, opt_obj, opt_str};
 
 pub(crate) enum Chunk {
-    Choices(Vec<ChoiceView>),
+    /// `keyed` is whether the chunk has a `choices` key at all (`"choices":[]` is keyed).
+    Choices {
+        choices: Vec<ChoiceView>,
+        keyed: bool,
+    },
     UpstreamError,
 }
 
@@ -27,12 +39,18 @@ pub(crate) struct ChoiceView {
     pub legacy: Option<NameArgs>,
     pub finish_reason: Option<String>,
     pub has_text: bool,
+    /// Whether the entry has a `delta` key.
+    pub has_delta: bool,
+    /// Whether the delta holds an array outside the `tool_calls` array itself (spec § 5.7).
+    pub stray_array: bool,
 }
 
 pub(crate) struct Fragment {
     pub index: u32,
     pub id: Option<String>,
     pub ty: Option<String>,
+    /// Whether the entry has a `type` key. `null` counts: a client reads the key, not its value.
+    pub ty_key: bool,
     pub function: Option<NameArgs>,
     pub custom: Option<NameArgs>,
     /// The whole entry, for kind Other (§ 4.1).
@@ -67,6 +85,11 @@ pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
             Ok(Chunk::UpstreamError)
         };
     }
+    // H1 (spec § 2.2): LangChain reads `chunk.choices` when `choices` is empty.
+    if top.contains_key("chunk") {
+        return Err(Malformed("chunk_key"));
+    }
+    let keyed = top.contains_key("choices");
     let choices = match top.get("choices") {
         None => Vec::new(),
         Some(Value::Array(a)) => {
@@ -80,8 +103,12 @@ pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
         Some(_) => return Err(Malformed("choices")),
     };
     let carries = choices.iter().any(|c| !c.fragments.is_empty() || c.legacy.is_some() || c.finish_reason.is_some());
+    // H2 (spec § 2.2): LangChain skips a record whose top-level `type` is `content.delta`.
+    if carries && top.get("type").and_then(Value::as_str) == Some("content.delta") {
+        return Err(Malformed("content_delta_type"));
+    }
     check_object(top, CHUNK_OBJECT, carries)?;
-    Ok(Chunk::Choices(choices))
+    Ok(Chunk::Choices { choices, keyed })
 }
 
 fn choice(v: &Value) -> Result<ChoiceView, Malformed> {
@@ -91,9 +118,12 @@ fn choice(v: &Value) -> Result<ChoiceView, Malformed> {
     }
     let index = index_of(c.get("index"), MAX_OPENAI_INDEX)?;
     let finish_reason = opt_str(c.get("finish_reason"), "finish_reason")?;
-    let (fragments, legacy, has_text) = match c.get("delta") {
-        None => (Vec::new(), None, false),
-        Some(Value::Object(d)) => delta(d)?,
+    let (fragments, legacy, has_text, stray_array) = match c.get("delta") {
+        None => (Vec::new(), None, false, false),
+        Some(Value::Object(d)) => {
+            let (f, l, t) = delta(d)?;
+            (f, l, t, has_stray_array(d))
+        }
         Some(_) => return Err(Malformed("delta")),
     };
     Ok(ChoiceView {
@@ -102,6 +132,28 @@ fn choice(v: &Value) -> Result<ChoiceView, Malformed> {
         legacy,
         finish_reason,
         has_text,
+        has_delta: c.contains_key("delta"),
+        stray_array,
+    })
+}
+
+/// Whether `v` is an array or holds one at any depth.
+fn holds_array(v: &Value) -> bool {
+    match v {
+        Value::Array(_) => true,
+        Value::Object(o) => o.values().any(holds_array),
+        _ => false,
+    }
+}
+
+/// An array in a delta outside the `tool_calls` array: under any other delta key, or under any key
+/// of a tool-call entry (its `function` and `custom` objects included). openai-python's
+/// `accumulate_delta` raises when a later list does not merge into an earlier one (spec § 5.7).
+fn has_stray_array(d: &Map<String, Value>) -> bool {
+    d.iter().any(|(k, v)| match (k.as_str(), v) {
+        ("tool_calls", Value::Array(entries)) => entries.iter().any(|e| matches!(e, Value::Object(o) if o.values().any(holds_array))),
+        ("tool_calls", _) => false,
+        _ => holds_array(v),
     })
 }
 
@@ -111,7 +163,7 @@ fn delta(d: &Map<String, Value>) -> Result<(Vec<Fragment>, Option<NameArgs>, boo
         Some(Value::Array(a)) => a.iter().map(fragment).collect::<Result<_, _>>()?,
         Some(_) => return Err(Malformed("tool_calls")),
     };
-    let legacy = opt_obj(d.get("function_call"), "function_call")?.map(|f| name_args(f, "arguments")).transpose()?;
+    let legacy = legacy_call(d.get("function_call"))?;
     let has_text = match d.get("content") {
         None | Some(Value::Null) => false,
         Some(Value::String(s)) => !s.is_empty(),
@@ -141,10 +193,23 @@ pub(crate) fn fragment_at(v: &Value, index: u32) -> Result<Fragment, Malformed> 
         index,
         id,
         ty,
+        ty_key: e.contains_key("type"),
         function,
         custom,
         raw: v.clone(),
     })
+}
+
+/// A legacy `function_call`, in a stream delta or a body message. A key other than `name` and
+/// `arguments` is malformed (spec § 5.8): LangChain merges it into `additional_kwargs` and raises
+/// when a later fragment changes its JSON type, so it keeps a strict prefix of the call. Real
+/// OpenAI sends no other key.
+pub(crate) fn legacy_call(v: Option<&Value>) -> Result<Option<NameArgs>, Malformed> {
+    let Some(f) = opt_obj(v, "function_call")? else { return Ok(None) };
+    if f.keys().any(|k| k != "name" && k != "arguments") {
+        return Err(Malformed("function_call_key"));
+    }
+    name_args(f, "arguments").map(Some)
 }
 
 pub(crate) fn name_args(f: &Map<String, Value>, args_key: &'static str) -> Result<NameArgs, Malformed> {
@@ -172,9 +237,63 @@ mod tests {
     }
     fn choices(s: &str) -> Vec<ChoiceView> {
         match c(s).unwrap() {
-            Chunk::Choices(v) => v,
+            Chunk::Choices { choices, .. } => choices,
             Chunk::UpstreamError => panic!("not an error"),
         }
+    }
+
+    #[test]
+    fn a_top_level_chunk_key_is_malformed() {
+        for s in [
+            r#"{"choices":[],"chunk":{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"x"}}]}}]}}"#,
+            r#"{"choices":[],"chunk":{}}"#,
+        ] {
+            assert!(matches!(raw(s), Err(Malformed("chunk_key"))), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_case_folded_chunk_key_is_rejected() {
+        // `parse_with` reports every strict-parse failure as `json`, as the `json.rs` tests assume.
+        assert!(parse_strict(br#"{"choices":[],"Chunk":{}}"#).is_err());
+        assert!(parse_strict(br#"{"choices":[],"CHUNK":{}}"#).is_err());
+        assert!(parse_strict(br#"{"choices":[],"chunk":{}}"#).is_ok());
+    }
+
+    #[test]
+    fn content_delta_type_with_tool_data_is_malformed() {
+        for d in [
+            r#"{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"zz"}}]}}"#,
+            r#"{"index":0,"delta":{},"finish_reason":"tool_calls"}"#,
+        ] {
+            let s = format!(r#"{{"type":"content.delta","choices":[{d}]}}"#);
+            assert!(matches!(c(&s), Err(Malformed("content_delta_type"))), "{s}");
+        }
+    }
+
+    /// Spec § 5.8 (probe G2): LangChain merges an extra legacy key and raises when it changes type.
+    #[test]
+    fn an_extra_key_in_a_legacy_function_call_is_malformed() {
+        for fc in [r#"{"name":"f","arguments":"{","x":"s"}"#, r#"{"arguments":"cd","x":1}"#, r#"{"x":null}"#, r#"{"name":"f","id":"c"}"#] {
+            let s = format!(r#"{{"choices":[{{"index":0,"delta":{{"function_call":{fc}}}}}]}}"#);
+            assert_eq!(c(&s).err(), Some(Malformed("function_call_key")), "{s}");
+        }
+        for fc in [r#"{"name":"f","arguments":"{"}"#, r#"{"arguments":"}"}"#, r#"{}"#] {
+            let s = format!(r#"{{"choices":[{{"index":0,"delta":{{"function_call":{fc}}}}}]}}"#);
+            assert!(c(&s).is_ok(), "{s}");
+        }
+    }
+
+    /// `content.delta` with a legacy `function_call` carries tool data too.
+    #[test]
+    fn content_delta_type_with_a_legacy_call_is_malformed() {
+        let s = r#"{"type":"content.delta","choices":[{"index":0,"delta":{"function_call":{"name":"f","arguments":"{}"}}}]}"#;
+        assert_eq!(c(s).err(), Some(Malformed("content_delta_type")));
+    }
+
+    #[test]
+    fn content_delta_type_with_text_only_is_not_checked() {
+        assert!(c(r#"{"type":"content.delta","choices":[{"index":0,"delta":{"content":"hi"}}]}"#).is_ok());
     }
 
     #[test]

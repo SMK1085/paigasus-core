@@ -68,6 +68,8 @@ OPENAI = {
     "custom_tool_blocked": [ch([{"index": 0, "delta": {"role": "assistant", "content": None, "tool_calls": [{"index": 0, "id": "call_c", "type": "custom", "custom": {"name": "blocked_sql", "input": "DROP CANARY-7"}}]}, "finish_reason": None}]), fin(0)],
     "usage_chunk": one_blocked("CANARY-8") + [{"id": "chatcmpl-fx", "object": "chat.completion.chunk", "choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}],
     "event_line": one_blocked("CANARY-9"),
+    # A bodyless call with `"type": null` and no id: kind Other, named `unknown` (spec § 5.3).
+    "bodyless_type_null": [text(0, "", role=True), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "type": None}]}, "finish_reason": None}]), fin(0)],
 }
 
 OPENAI_MALFORMED = {
@@ -77,6 +79,72 @@ OPENAI_MALFORMED = {
     "proto_key": ['{"choices":[{"index":0,"delta":{"__proto__":{"tool_calls":[' + dump(HIDDEN) + "]}}}]}", text(0, "ok", role=True), fin(0, "stop")],
     "float_index": [ch([{"index": 0, "delta": {"tool_calls": [{**HIDDEN, "index": 0.0}]}}]), text(0, "ok", role=True), fin(0, "stop")],
     "repeated_name": [call(0, 0, "read_file", "{}"), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"name": "blocked_x", "arguments": "CANARY-rn"}}]}}]), fin(0)],
+    "fragment_after_bodyless_entry": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "call_0_1", "type": "custom", "custom": {"name": "note", "input": "x"}}]}, "finish_reason": None}]),
+        call(0, 0, "", 'cdefgh","k":"CANARY-bodyless"}', first=False),
+        fin(0),
+    ],
+    # The rewrite removes the blocked call 0, so record 3 is the first bodyless record in the
+    # output, and LangChain would hold only a prefix of call 1 (spec § 5.1).
+    "fragment_after_blocked_bodyless_entry": [
+        ch([{"index": 0, "delta": {"role": "assistant", "content": None, "tool_calls": [{"index": 0, "id": "call_0_0", "type": "custom", "custom": {"name": "blocked_early", "input": "CANARY-early"}}]}, "finish_reason": None}]),
+        call(0, 1, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "delta": {"tool_calls": [{"index": 2, "id": "call_0_2", "type": "custom", "custom": {"name": "note", "input": "x"}}]}, "finish_reason": None}]),
+        call(0, 1, "", 'cdefgh","k":"CANARY-later"}', first=False),
+        fin(0),
+    ],
+    "chunk_without_choices": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        '{"id":"chatcmpl-fx","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","note":"CANARY-nochoices"}',
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "choice_without_delta": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "finish_reason": None, "note": "CANARY-nodelta"}]),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "choice_without_delta_in_opening_record": [
+        text(0, "", role=True),
+        ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_0_0", "type": "function", "function": {"name": "read_file", "arguments": '{"v":"ab'}}]}, "finish_reason": None}, {"index": 1, "note": "CANARY-opening"}]),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+        ch([{"index": 1, "delta": {"role": "assistant", "content": "x"}, "finish_reason": "stop"}]),
+    ],
+    "type_null": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "type": None, "function": {"arguments": "CANARY-typenull"}}]}, "finish_reason": None}]),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "chunk_key": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([], chunk={"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_ck", "type": "function", "function": {"name": "blocked_chunk", "arguments": "{\"v\":\"CANARY-chunk\"}"}}]}}]}),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "content_delta_type": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        {**ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-cdt"}}]}, "finish_reason": None}]), "type": "content.delta"},
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "array_outside_tool_calls": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "delta": {"foo": [{"index": 0, "note": "CANARY-array"}]}, "finish_reason": None}]),
+        ch([{"index": 0, "delta": {"foo": [1]}, "finish_reason": None}]),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "function_call_key": [
+        ch([{"index": 0, "delta": {"role": "assistant", "content": None, "function_call": {"name": "read_file", "arguments": '{"v":"ab'}}, "finish_reason": None}]),
+        ch([{"index": 0, "delta": {"function_call": {"arguments": "cd", "x": "CANARY-fckey"}}, "finish_reason": None}]),
+        ch([{"index": 0, "delta": {"function_call": {"arguments": "ef", "x": 1}}, "finish_reason": None}]),
+        ch([{"index": 0, "delta": {"function_call": {"arguments": 'gh"}'}}, "finish_reason": None}]),
+        fin(0, "function_call"),
+    ],
     "oversized": [call(0, 0, "read_file", "{"), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-big" + "x" * 5000}}]}}]), fin(0)],
 }
 
