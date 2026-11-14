@@ -51,9 +51,10 @@ every OpenAI model. In each case `core_failed` was `false` and the upstream byte
 | P-e | two records: an unknown delta key with an indexed list, then a scalar list (`{"foo":[{"index":0}]}`, then `{"foo":[1]}`). The same under a tool-call entry key (`"x":[…]`) or a `function` key. | openai-python (raw `{"v":"ab`) |
 | P-e′ | as P-e, but the indexed list is in a text record before the call, and the scalar list is in the record that opens the call | openai-python (raw `{"v":"ab`) |
 | P-f | an earlier text record, then one record with the fragment that opens the call at position 0 and a choice entry `{"index":1}` with no `delta` at position 1 | openai-python (raw `{"v":"ab`) |
-| P-d | a legacy `function_call` whose extra key changes JSON type | none: LangChain raises, but it merges `arguments` before the extra key, so it holds the full call |
+| P-d | a legacy `function_call` whose extra key changes JSON type | LangChain raises. It merges `arguments` before the extra key, so it holds the full call **only when the type change is in the last fragment**. When the change is in a middle fragment and more arguments follow, LangChain holds a strict prefix (raw `{"v":"abcd`, final review probe G2). |
 
-P-e, P-e′ and P-f were measured by the final branch review (2026-11-14, at 29784b6a), after the
+P-d was first recorded with the type change in the last fragment only, so its first result
+("none") was wrong for the general case. P-e, P-e′ and P-f were measured by the final branch review (2026-11-14, at 29784b6a), after the
 rules of § 5.1 to § 5.5 were in place. openai-python raises in `accumulate_delta` (P-e) or at
 `choice.delta` (P-f) and keeps what it merged before the raise. P-f was missed at first because
 the "open call" state was read before the record that opens the call (§ 5.2).
@@ -118,7 +119,7 @@ script.
 | D1 | Scope: the oracle **and** the interceptor (Sven, 2026-11-14). An oracle-only change cannot pass honestly (§ 2). |
 | D2 | Oracle rule: **reject every strict partial.** At an excused raise, a call in the client's snapshot must match an allowed call exactly (the non-partial rules, including `""` against `{}`). A re-decide of the prefix was the first draft. It was dropped: it proves I1 only for the test deciders, and the gateway never asks the production decider about a prefix. This rule is decider-free, and it is what I1 says. Changed after the review. Confirmed by Sven at Gate 1 (2026-11-14). |
 | D3 | Interceptor rule: each record shape in § 5 becomes a canonical-form deviation (a stream-level `on_failure`, as every § 4.3 deviation of SMA-749 is), or a malformed record. The rules name shapes, not one SDK. |
-| D4 | Anthropic: no interceptor change (§ 2.3). The anthropic-python model's partial parser is fixed to match jiter (§ 6.3). Bodies: no change (a body has no fragments). |
+| D4 | Anthropic: no interceptor change (§ 2.3). The anthropic-python model's partial parser is fixed to match jiter (§ 6.3). Bodies: no change (a body has no fragments), with one exception: § 5.8 applies to a body `function_call` too, because the stream and the body share one parser for it and real OpenAI sends no such key in either. |
 | D5 | The generators render every shape of § 2.2, so P1 covers each one with random cuts and deciders (§ 7.1). |
 | D6 | H1 and H2 are fixed in this change, not in a later sweep. Confirmed by Sven at Gate 1 (2026-11-14). |
 | D7 | Real OpenAI streams are recorded and kept as fixtures (§ 2.4), at Sven's request. Every recording must pass with no deviation (§ 7.3). |
@@ -243,6 +244,21 @@ below those keys. The rule applies to the choice entries in every position of th
   The recorded delta keys are `content`, `function_call`, `refusal`, `role` and `tool_calls`.
 - Outside a call the shape stays conforming: a raise there cuts no call.
 
+### 5.8 `function_call_key` (P-d)
+
+A legacy `function_call` object with a key other than `name` and `arguments` is
+`Malformed("function_call_key")`. This applies in every stream record and in a non-stream body:
+`classify::legacy_call` reads the object for both.
+
+- LangChain merges the extra key into `additional_kwargs["function_call"]`. When a later fragment
+  gives it another JSON type, `merge_dicts` raises `TypeError`. Its snapshot then holds the
+  arguments merged so far, which is a strict prefix when more arguments follow.
+- The rule is malformed, not a deviation, and it does not depend on an open call: no real OpenAI
+  stream or body sends another key (§ 2.4: the recorded `function_call` keys are `name` and
+  `arguments`). A body with such a key is `Malformed`, which changes the body path (D4).
+- In a stream, the record is dropped. Inside an open hold this is a stream-level failure, as for
+  every malformed record (SMA-749 § 6).
+
 ## 6. Model changes in the oracle
 
 ### 6.1 None for the raise paths
@@ -269,8 +285,8 @@ measured. A unit test pins the three measured inputs: `{"n":10.` gives `{}`, `{"
 `tests/support/streams.rs` gets one OpenAI `Quirk` for each shape of § 2.2 and § 5: a bodyless
 entry interleaved inside an open call (it exists), a chunk without `choices`, a choice entry
 without `delta`, a `"type": null` fragment, a top-level `chunk` key with a tool call, a
-`content.delta` record with a fragment, and two records with an array outside `tool_calls`
-(§ 5.7). The quirk for a choice entry without `delta` also adds `{"index":1}` behind the
+`content.delta` record with a fragment, two records with an array outside `tool_calls`
+(§ 5.7), and two legacy fragments with an extra key that changes type (§ 5.8). The quirk for a choice entry without `delta` also adds `{"index":1}` behind the
 record that opens a call (P-f). Each quirk must be able to land between two fragments of
 an allowed call. The generators must also emit an Anthropic input with a decimal number, split
 inside the number.
@@ -300,7 +316,7 @@ One fixture per new rule under `tests/fixtures/openai/malformed/`, generated by
 `tests/fixtures/make_fixtures.py`, each with a row in `malformed_shapes_follow_section_6`:
 `fragment_after_bodyless_entry`, `chunk_without_choices`, `choice_without_delta`, `type_null`,
 `chunk_key`, `content_delta_type`, `array_outside_tool_calls` (§ 5.7) and
-`choice_without_delta_in_opening_record` (§ 5.2, P-f).
+`choice_without_delta_in_opening_record` (§ 5.2, P-f) and `function_call_key` (§ 5.8).
 
 Each fixture has an **allowed** function call (for example `read_file` with `{"v":"abcdefgh"}`)
 whose fragments are split around the rule's record, plus a separate `blocked_*` call with a canary.
@@ -347,7 +363,8 @@ None are needed for the proof: D2 is decider-free. The existing three deciders s
   availability only: no tool call is affected (a hidden first record with a call makes the client
   run fewer calls). It is SMA-749 behaviour, and this change does not fix it. The generator keeps
   such records off the first line when it emits a BOM.
-- No change to the Anthropic assembly, to bodies, or to the decider port (`ToolCallDecider`).
+- No change to the Anthropic assembly, to bodies (except § 5.8), or to the decider port
+  (`ToolCallDecider`).
 - The OpenAI Responses API (`/v1/responses`) is SMA-769, which starts after this change. It needs
   its own ingress, format and oracle models. It takes the D2 rule and the recording method of this
   spec from the start (§ 2.4).

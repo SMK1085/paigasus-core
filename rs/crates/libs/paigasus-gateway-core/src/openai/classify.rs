@@ -16,6 +16,9 @@
 //! key is malformed: LangChain reads `chunk.choices` when `choices` is empty
 //! (`_convert_chunk_to_generation_chunk`). A top-level `"type":"content.delta"` on a chunk that
 //! carries tool data or a `finish_reason` is malformed: LangChain skips that record.
+//!
+//! A legacy `function_call` with a key other than `name` and `arguments` is malformed
+//! (`function_call_key`, spec § 5.8), in a stream and in a body ([`legacy_call`]).
 
 use serde_json::{Map, Value};
 
@@ -160,7 +163,7 @@ fn delta(d: &Map<String, Value>) -> Result<(Vec<Fragment>, Option<NameArgs>, boo
         Some(Value::Array(a)) => a.iter().map(fragment).collect::<Result<_, _>>()?,
         Some(_) => return Err(Malformed("tool_calls")),
     };
-    let legacy = opt_obj(d.get("function_call"), "function_call")?.map(|f| name_args(f, "arguments")).transpose()?;
+    let legacy = legacy_call(d.get("function_call"))?;
     let has_text = match d.get("content") {
         None | Some(Value::Null) => false,
         Some(Value::String(s)) => !s.is_empty(),
@@ -195,6 +198,18 @@ pub(crate) fn fragment_at(v: &Value, index: u32) -> Result<Fragment, Malformed> 
         custom,
         raw: v.clone(),
     })
+}
+
+/// A legacy `function_call`, in a stream delta or a body message. A key other than `name` and
+/// `arguments` is malformed (spec § 5.8): LangChain merges it into `additional_kwargs` and raises
+/// when a later fragment changes its JSON type, so it keeps a strict prefix of the call. Real
+/// OpenAI sends no other key.
+pub(crate) fn legacy_call(v: Option<&Value>) -> Result<Option<NameArgs>, Malformed> {
+    let Some(f) = opt_obj(v, "function_call")? else { return Ok(None) };
+    if f.keys().any(|k| k != "name" && k != "arguments") {
+        return Err(Malformed("function_call_key"));
+    }
+    name_args(f, "arguments").map(Some)
 }
 
 pub(crate) fn name_args(f: &Map<String, Value>, args_key: &'static str) -> Result<NameArgs, Malformed> {
@@ -254,6 +269,26 @@ mod tests {
             let s = format!(r#"{{"type":"content.delta","choices":[{d}]}}"#);
             assert!(matches!(c(&s), Err(Malformed("content_delta_type"))), "{s}");
         }
+    }
+
+    /// Spec § 5.8 (probe G2): LangChain merges an extra legacy key and raises when it changes type.
+    #[test]
+    fn an_extra_key_in_a_legacy_function_call_is_malformed() {
+        for fc in [r#"{"name":"f","arguments":"{","x":"s"}"#, r#"{"arguments":"cd","x":1}"#, r#"{"x":null}"#, r#"{"name":"f","id":"c"}"#] {
+            let s = format!(r#"{{"choices":[{{"index":0,"delta":{{"function_call":{fc}}}}}]}}"#);
+            assert_eq!(c(&s).err(), Some(Malformed("function_call_key")), "{s}");
+        }
+        for fc in [r#"{"name":"f","arguments":"{"}"#, r#"{"arguments":"}"}"#, r#"{}"#] {
+            let s = format!(r#"{{"choices":[{{"index":0,"delta":{{"function_call":{fc}}}}}]}}"#);
+            assert!(c(&s).is_ok(), "{s}");
+        }
+    }
+
+    /// `content.delta` with a legacy `function_call` carries tool data too.
+    #[test]
+    fn content_delta_type_with_a_legacy_call_is_malformed() {
+        let s = r#"{"type":"content.delta","choices":[{"index":0,"delta":{"function_call":{"name":"f","arguments":"{}"}}}]}"#;
+        assert_eq!(c(s).err(), Some(Malformed("content_delta_type")));
     }
 
     #[test]

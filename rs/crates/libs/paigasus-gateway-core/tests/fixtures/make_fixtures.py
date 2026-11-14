@@ -127,6 +127,13 @@ OPENAI_MALFORMED = {
         call(0, 0, "", 'cdefgh"}', first=False),
         fin(0),
     ],
+    "function_call_key": [
+        ch([{"index": 0, "delta": {"role": "assistant", "content": None, "function_call": {"name": "read_file", "arguments": '{"v":"ab'}}, "finish_reason": None}]),
+        ch([{"index": 0, "delta": {"function_call": {"arguments": "cd", "x": "CANARY-fckey"}}, "finish_reason": None}]),
+        ch([{"index": 0, "delta": {"function_call": {"arguments": "ef", "x": 1}}, "finish_reason": None}]),
+        ch([{"index": 0, "delta": {"function_call": {"arguments": 'gh"}'}}, "finish_reason": None}]),
+        fin(0, "function_call"),
+    ],
     "oversized": [call(0, 0, "read_file", "{"), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-big" + "x" * 5000}}]}}]), fin(0)],
 }
 

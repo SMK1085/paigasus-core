@@ -11,9 +11,9 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of, opt_obj};
+use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of};
 use crate::openai::assembly::{ChoiceAssembly, check_tool_choice};
-use crate::openai::classify::{BODY_OBJECT, Fragment, NameArgs, check_object, fragment_at, name_args};
+use crate::openai::classify::{BODY_OBJECT, Fragment, NameArgs, check_object, fragment_at, legacy_call};
 use crate::report::notice_line;
 use crate::types::{BlockCode, ToolCall};
 
@@ -38,7 +38,7 @@ fn message_parts(m: &Map<String, Value>) -> Result<(Vec<Fragment>, Option<NameAr
         .enumerate()
         .map(|(i, e)| fragment_at(e, u32::try_from(i).expect("bounded by MAX_CALLS")))
         .collect::<Result<Vec<_>, _>>()?;
-    let legacy = opt_obj(m.get("function_call"), "function_call")?.map(|f| name_args(f, "arguments")).transpose()?;
+    let legacy = legacy_call(m.get("function_call"))?;
     Ok((frags, legacy))
 }
 
@@ -137,6 +137,13 @@ mod tests {
         let body = |ty: String| json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"tool_calls": [{"id": "c", "type": ty}]}}]});
         assert!(calls(&body("a".repeat(1024))).is_ok());
         assert!(matches!(calls(&body("a".repeat(1025))), Err(Malformed("long_identifier"))));
+    }
+
+    #[test]
+    fn an_extra_key_in_a_legacy_body_function_call_is_malformed() {
+        let body = |fc: serde_json::Value| json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"function_call": fc}}]});
+        assert!(matches!(calls(&body(json!({"name": "f", "arguments": "{}", "x": 1}))), Err(Malformed("function_call_key"))));
+        assert_eq!(calls(&body(json!({"name": "f", "arguments": "{}"}))).unwrap().len(), 1);
     }
 
     #[test]

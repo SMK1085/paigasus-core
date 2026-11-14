@@ -169,6 +169,7 @@ fn malformed_shapes_follow_section_6() {
         row("chunk_key", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("content_delta_type", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("array_outside_tool_calls", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("function_call_key", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("oversized", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("after_done", &["data: [DONE]"], &[], &["data: [DONE]"], &[], false),
         row("error_mid_hold", &["\"terminal\""], &[], &["\"terminal\""], &[], false),

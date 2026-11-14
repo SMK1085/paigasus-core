@@ -68,6 +68,9 @@ pub enum Quirk {
     /// openai-python's `accumulate_delta` raises at the second (spec § 5.7). The array sits under
     /// an unknown delta key, a tool-call entry key or a `function` key, chosen by the position.
     ArrayOutsideToolCalls,
+    /// Two legacy `function_call` fragments with an extra key whose JSON type changes (`"x":"s"`,
+    /// then `"x":1`): LangChain raises at the second (spec § 5.8).
+    FunctionCallKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +167,7 @@ fn quirk_strategy() -> impl Strategy<Value = Quirk> {
         Just(Quirk::ChunkKey),
         Just(Quirk::ContentDeltaType),
         Just(Quirk::ArrayOutsideToolCalls),
+        Just(Quirk::FunctionCallKey),
     ]
 }
 
@@ -399,6 +403,10 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
                 // As for NoChoicesKey: keep the raising records off the BOM-prefixed line 0 (spec § 9).
                 let at = if pos == 0 && has(s, Quirk::Bom).is_some() { 1.min(lines.len()) } else { pos };
                 lines.splice(at..at, two);
+            }
+            Quirk::FunctionCallKey => {
+                let two = [json!("s"), json!(1)].map(|x| format!("data: {}\n\n", chunk(json!([{"index":0,"delta":{"function_call":{"arguments":"","x":x}}}]))));
+                lines.splice(pos..pos, two);
             }
             Quirk::UnknownFields => lines.insert(pos, "id: 7\nretry: 10\nfoo: bar\n".to_owned()),
             Quirk::Comments => lines.insert(pos, ": hello\n: data: {\"x\":\"CANARY-comment\"}\n".to_owned()),
