@@ -1,0 +1,162 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_0510996a19c4e76b006af881f17f5887d2ae564127fc396469","object":"response","created_at":1794671089,"status":"in_progress","access_programs":null,"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":48,"max_tool_calls":null,"model":"gpt-4.1-2025-04-14","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"in_memory","reasoning":{"context":null,"effort":null,"summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"function","name":"write_file"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Write a file to the workspace.","name":"write_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false},"strict":true}],"top_logprobs":0,"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_0510996a19c4e76b006af881f17f5887d2ae564127fc396469","object":"response","created_at":1794671089,"status":"in_progress","access_programs":null,"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":48,"max_tool_calls":null,"model":"gpt-4.1-2025-04-14","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"in_memory","reasoning":{"context":null,"effort":null,"summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"function","name":"write_file"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Write a file to the workspace.","name":"write_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false},"strict":true}],"top_logprobs":0,"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","type":"function_call","status":"in_progress","arguments":"","call_id":"call_M7vjg3NkZrtXMPFwWIqwbQ17","name":"write_file"},"output_index":0,"sequence_number":2}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"{\"","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"l3BSOku30AyBFl","output_index":0,"sequence_number":3}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"path","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"IX7HGlaiTCuH","output_index":0,"sequence_number":4}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\":","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"gwLSImEwTosbiP","output_index":0,"sequence_number":5}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\"/","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"7w2DBHbVnCTWu9","output_index":0,"sequence_number":6}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"workspace","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"c9FrRxl","output_index":0,"sequence_number":7}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"/","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"aAS09YDDgti3ghU","output_index":0,"sequence_number":8}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"po","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"0tyiolhscpw3HJ","output_index":0,"sequence_number":9}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"em","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"vDphPAwvus5NRc","output_index":0,"sequence_number":10}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":".txt","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"lGycfac1xzaF","output_index":0,"sequence_number":11}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\",\"","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"5kOOObkrDb6Kk","output_index":0,"sequence_number":12}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"content","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"MnMkljnLz","output_index":0,"sequence_number":13}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\":\"","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"KukErPK9XonjV","output_index":0,"sequence_number":14}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"The","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"HPOVYODgE0DIq","output_index":0,"sequence_number":15}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" Sea","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"6E30CIi8dHKO","output_index":0,"sequence_number":16}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"'s","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"rmoWDWMBzH3is3","output_index":0,"sequence_number":17}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" Em","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"kYk5RY3vZhpDW","output_index":0,"sequence_number":18}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"brace","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"WNIf3ideTFa","output_index":0,"sequence_number":19}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\\n","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"G6Lt3LBSFokUb2","output_index":0,"sequence_number":20}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\\n","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"YTY6fXVoMAw735","output_index":0,"sequence_number":21}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"Upon","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"CdZRSL6rW7Dn","output_index":0,"sequence_number":22}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" the","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"OUcXwnTjuOQC","output_index":0,"sequence_number":23}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" shore","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"Kppsk2iz0Z","output_index":0,"sequence_number":24}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" where","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"ogwi1UQoV9","output_index":0,"sequence_number":25}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" dreams","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"DsTX450d1","output_index":0,"sequence_number":26}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" meet","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"SjIt5SugZah","output_index":0,"sequence_number":27}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" foam","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"RScVztWlI8k","output_index":0,"sequence_number":28}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":",\\","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"RDeBli4zeM0Crv","output_index":0,"sequence_number":29}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"n","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"ePgXC5E8ZcEanOX","output_index":0,"sequence_number":30}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"The","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"lifu2j8b7cLt5","output_index":0,"sequence_number":31}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" sea","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"QlYy3gav97ER","output_index":0,"sequence_number":32}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" whispers","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"6pLz0Cm","output_index":0,"sequence_number":33}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" secrets","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"mdwtVnRB","output_index":0,"sequence_number":34}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":",","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"FScVRctmrKrBtnr","output_index":0,"sequence_number":35}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" calling","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"k1APwOAx","output_index":0,"sequence_number":36}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" me","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"y6FbqxENViLut","output_index":0,"sequence_number":37}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" home","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"0ghWsHRvz06","output_index":0,"sequence_number":38}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":".\\","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"w5btElTbyoaf9J","output_index":0,"sequence_number":39}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"n","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"6b10eLq4sHdV7hw","output_index":0,"sequence_number":40}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"It","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"avKaIMMK8EKAUy","output_index":0,"sequence_number":41}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" stretches","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"coWbhj","output_index":0,"sequence_number":42}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" far","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"eZDWzkEA2NWX","output_index":0,"sequence_number":43}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" beneath","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"af3CtvcV","output_index":0,"sequence_number":44}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" the","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"bDoijaL5vILp","output_index":0,"sequence_number":45}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" sky","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"iQx1XcT9hfO5","output_index":0,"sequence_number":46}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":",\\","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"cYVXV3TCWTCDlt","output_index":0,"sequence_number":47}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"n","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"ogwF9fwWOl2cyph","output_index":0,"sequence_number":48}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"A","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"aWZotafU19QXRie","output_index":0,"sequence_number":49}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" sh","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","obfuscation":"jUBGkkiUkPVA2","output_index":0,"sequence_number":50}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","arguments":"{\"path\":\"/workspace/poem.txt\",\"content\":\"The Sea's Embrace\\n\\nUpon the shore where dreams meet foam,\\nThe sea whispers secrets, calling me home.\\nIt stretches far beneath the sky,\\nA sh","item_id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","output_index":0,"sequence_number":51}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","type":"function_call","status":"incomplete","arguments":"{\"path\":\"/workspace/poem.txt\",\"content\":\"The Sea's Embrace\\n\\nUpon the shore where dreams meet foam,\\nThe sea whispers secrets, calling me home.\\nIt stretches far beneath the sky,\\nA sh","call_id":"call_M7vjg3NkZrtXMPFwWIqwbQ17","name":"write_file"},"output_index":0,"sequence_number":52}
+
+event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"resp_0510996a19c4e76b006af881f17f5887d2ae564127fc396469","object":"response","created_at":1794671089,"status":"incomplete","access_programs":null,"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":{"reason":"max_output_tokens"},"input_transformations":[],"instructions":null,"max_output_tokens":48,"max_tool_calls":null,"model":"gpt-4.1-2025-04-14","moderation":null,"output":[{"id":"fc_0510996a19c4e76b006af881f1dfd887d28a0f0df403ae6c9c","type":"function_call","status":"incomplete","arguments":"{\"path\":\"/workspace/poem.txt\",\"content\":\"The Sea's Embrace\\n\\nUpon the shore where dreams meet foam,\\nThe sea whispers secrets, calling me home.\\nIt stretches far beneath the sky,\\nA sh","call_id":"call_M7vjg3NkZrtXMPFwWIqwbQ17","name":"write_file"}],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"in_memory","reasoning":{"context":null,"effort":null,"summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"function","name":"write_file"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Write a file to the workspace.","name":"write_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false},"strict":true}],"top_logprobs":0,"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":75,"input_tokens_details":{"cache_write_tokens":0,"cache_write_tokens_details":{"ttl_12h_tokens":0,"ttl_30m_tokens":0},"cached_tokens":0},"output_tokens":48,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":123},"user":null,"metadata":{}},"sequence_number":53}
+
