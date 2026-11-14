@@ -205,7 +205,16 @@ def binary_paths(root: Path, paths: list[str]) -> frozenset[str]:
         raise MoonOutputError(
             f"`git check-attr binary` failed with rc {proc.returncode}: {proc.stderr.decode('utf-8', 'replace').strip()}"
         )
-    parts = proc.stdout.decode("utf-8").split("\0")
+    return _parse_check_attr(proc.stdout)
+
+
+def _parse_check_attr(stdout: bytes) -> frozenset[str]:
+    """The paths whose `binary` value is `set` in the `git check-attr -z` output `stdout`."""
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MoonOutputError(f"`git check-attr -z binary` printed output that is not UTF-8: {exc}") from exc
+    parts = text.split("\0")
     if len(parts) % 3 != 1 or parts[-1]:
         raise MoonOutputError("`git check-attr -z binary` printed output that is not NUL-separated triples")
     return frozenset(path for path, _attr, value in zip(parts[0:-1:3], parts[1:-1:3], parts[2:-1:3], strict=True) if value == "set")
@@ -245,11 +254,12 @@ def ban_rows(
         text = read_text(full)
         for lineno, raw in enumerate(text.split("\n"), 1):
             names = token_hits(raw)
+            if not names:
+                continue
             stripped = raw.rstrip("\r").strip()
+            # A pin counts only on a line with a token, so a pinned line that lost its token is stale.
             if path in pinned_paths and (path, stripped) in pin_hits:
                 pin_hits[(path, stripped)].append(lineno)
-                continue
-            if not names:
                 continue
             hit_files.add(path)
             if path in migration:
@@ -758,6 +768,9 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
         rows, _ = run(["ci/x/run.sh"], pinned={("ci/x/run.sh", "uv lock"): "fixture"})
         if not any("stale" in r and "uv lock" in r for r in rows):
             failures.append(f"python-env ban: a pinned line that matches no line gave no stale row: {rows}")
+        rows, _ = run(["ci/clean.sh"], pinned={("ci/clean.sh", "echo ok"): "fixture"})
+        if not any("stale" in r and "echo ok" in r for r in rows):
+            failures.append(f"python-env ban: a pinned line with no token gave no stale row: {rows}")
         rows, _ = run(["ci/two.sh"], pinned={("ci/two.sh", "uv sync"): "fixture"})
         if not any("ambiguous" in r for r in rows):
             failures.append(f"python-env ban: a pinned line that matches two lines gave no ambiguous row: {rows}")
@@ -784,6 +797,12 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
     got = binary_paths(repo, [wasm, WRAPPER_PATH, "ci/a b.sh"])
     if got != frozenset({wasm}):
         failures.append(f"python-env ban: binary_paths returned {sorted(got)}, want [{wasm!r}]")
+    try:
+        _parse_check_attr(b"x\0binary\0\xff\0")
+        failures.append("python-env ban: check-attr output that is not UTF-8 did not raise")
+    except Exception as exc:  # the wrong class is a row, not a crash
+        if not isinstance(exc, MoonOutputError):
+            failures.append(f"python-env ban: check-attr output that is not UTF-8 raised {type(exc).__name__}, want MoonOutputError")
     if binary_paths(repo, []) != frozenset():
         failures.append("python-env ban: binary_paths of no path is not empty")
     # A list far over 512 bytes, as on the real tree (the SMA-612 small-pipe hang).

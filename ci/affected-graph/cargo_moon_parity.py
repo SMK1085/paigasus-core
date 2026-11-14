@@ -41,6 +41,7 @@
 # and it asks git which files it tracks.
 #
 # usage: cargo_moon_parity.py [--self-test]
+import ast
 import collections
 import fnmatch
 import inspect
@@ -4495,6 +4496,19 @@ def self_test():
     for name in RETIRED_CHECKS:
         if f"{name}(" in real_run_src:
             failures.append(f"{name} is in RETIRED_CHECKS, but the real run still calls it")
+        # A stale entry: Task 7 deletes the function, and then this entry must go too.
+        if not callable(globals().get(name)):
+            failures.append(f"{name} is in RETIRED_CHECKS, but the module defines no such function (stale entry)")
+    # The a14 call must use the live tables: no `pinned=`, `migration=` or `binary=` keyword.
+    pe_calls = [
+        node for node in ast.walk(ast.parse(inspect.getsource(collect_findings)))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "check_python_env"
+    ]
+    if len(pe_calls) != 1 or {kw.arg for kw in pe_calls[0].keywords} != {"read_utf8", "smoke_unreached"}:
+        failures.append(
+            "collect_findings must call python_env_ban.check_python_env once, with only the read_utf8 and "
+            "smoke_unreached keywords, so the live PINNED_LINES and MIGRATION_FILES apply"
+        )
     # SMA-770 (ruling F2): the a14 key must run the python-env ban, and its raise class must abort as rc 2.
     if "python_env_ban.check_python_env(" not in inspect.getsource(collect_findings):
         failures.append("collect_findings does not call python_env_ban.check_python_env, so the a14 key asserts nothing")
