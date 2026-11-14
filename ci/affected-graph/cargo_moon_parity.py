@@ -3502,8 +3502,6 @@ UV_PROBE_CAPTURE_RE = re.compile(r"(?:\$\(|`)\s*command\s+-v\s+$")
 UV_RUN_LOCK_FLAGS = ("--locked", "--frozen", "--isolated")
 # R3 (follow-up sweep 2): a command word that `uv run` runs and that installs into the environment.
 UV_RUN_INSTALLERS = frozenset(("pip", "pip3", "uv", "ensurepip", "virtualenv"))
-UV_RUN_PY_MODULES = frozenset(("pip", "ensurepip", "venv", "virtualenv", "uv"))
-UV_PYTHON_WORD_RE = re.compile(r"python[0-9.]*")
 # R2 (follow-up sweep 2): spellings that a shell turns into `uv` but the token regex cannot see.
 # `eval` runs text that A14 cannot read. `${x}v`, `$(…)v` and `u$x` join `uv` from an expansion.
 UV_EVAL_RE = re.compile(r"(?<![\w.-])eval(?![\w.-])")
@@ -3512,7 +3510,7 @@ UV_QUOTE_CHARS_RE = re.compile(r"[\\'\"]")
 # R4 (follow-up sweep 2): a write to an environment that does not go through `uv`.
 UV_DIRECT_WRITE_RE = re.compile(
     r"(?<![\w.-])pip3?\s+(?:install|uninstall|sync)(?![\w-])"
-    r"|(?<![\w-])-m\s*(?:pip|ensurepip)(?![\w-])"
+    r"|(?<![\w-])-m\s*(?:pip|ensurepip|venv|virtualenv)(?![\w-])"
     r"|\.venv[\w./-]*/bin/(?:pip3?|uv|python[0-9.]*\s+-m\s*(?:pip|ensurepip))(?![\w-])"
     r"|(?<![\w.-])(?:rm|mv|cp|ln|rsync)(?![\w.-])[^;&|\n]*\.venv(?![\w-])"
 )
@@ -3556,13 +3554,15 @@ def _uv_quote_after(line, quote):
     the line is a comment. Returns None when no context is open.
     """
     stack = list(quote or ())
-    i, n = 0, len(line)
+    i, n, word_start = 0, len(line), True
     while i < n:
         c, top = line[i], (stack[-1] if stack else None)
+        at_word_start, word_start = word_start, c in " \t"
         if top == "'":
             if c == "'":
                 stack.pop()
         elif c == "\\":
+            # An escaped character is a word character, so a `#` after `\ ` is mid-word.
             i += 2
             continue
         elif top == '"':
@@ -3580,7 +3580,7 @@ def _uv_quote_after(line, quote):
             continue
         elif c == ")" and top == "$(":
             stack.pop()
-        elif c == "#" and (i == 0 or line[i - 1] in " \t"):
+        elif c == "#" and at_word_start:
             break
         i += 1
     return tuple(stack) or None
@@ -3682,11 +3682,9 @@ def _uv_run_form(words):
     word = command[0].rsplit("/", 1)[-1]
     if word in UV_RUN_INSTALLERS:
         return opts, command, f"`uv run` runs the installer {command[0]!r} in the environment (R3)"
-    if UV_PYTHON_WORD_RE.fullmatch(word):
-        rest = command[1:3]
-        module = rest[1] if rest[:1] == ["-m"] and len(rest) > 1 else (rest[0][2:] if rest[:1] and rest[0].startswith("-m") else "")
-        if module in UV_RUN_PY_MODULES:
-            return opts, command, f"`uv run` runs `{command[0]} -m {module}`, which installs into the environment (R3)"
+    # `uv run python -m pip|ensurepip|venv|virtualenv` (with any interpreter options before `-m`)
+    # is a row through UV_DIRECT_WRITE_RE, which searches the whole line, and `-m uv` through the
+    # `uv` token rule. A second check here could not fail a test.
     return opts, command, None
 
 
@@ -7495,6 +7493,9 @@ def self_test():
         ("R3 uv run python3 -mpip", "uv run --locked python3 -mpip install x", True),
         ("R3 uv run python -m venv", "uv run --frozen python3.12 -m venv x", True),
         ("R3 uv run python -m pytest", "uv run --locked python -m pytest", False),
+        ("R3 an interpreter option before -m", "uv run --locked python -I -m ensurepip", True),
+        ("R3 two interpreter options before -mpip", "uv run --locked python3 -I -B -mpip list", True),
+        ("R4 -m venv", "python3 -I -m venv --clear py/.venv-x", True),
         # R2: `eval`, a captured probe, and spellings that a shell turns into `uv`.
         ("R2 eval", 'eval "$CMD"', True),
         ("R2 evaluate is a word", "evaluate x", False),
@@ -7523,6 +7524,7 @@ def self_test():
         ("R4 pip in a word", "shellcheck-pip install", False),
         # R1: a `#` line is a comment only when no quote is open from an earlier line.
         ("R1 a # line inside an open quote", "bash -c '\n#'; uv sync", True),
+        ("R1 an escaped space keeps # mid-word", "echo a\\ # '\n#'; uv sync", True),
         ("R1 a # line inside open double quotes", 'bash -c "\n#"; uv sync', True),
         ("R1 a # line after a closed quote", "echo 'x'\n# uv sync", False),
         ("R1 quotes inside $( ) in double quotes", "X=\"$(grep 'a=\"$(b)\"' f)\"\n# uv sync", False),

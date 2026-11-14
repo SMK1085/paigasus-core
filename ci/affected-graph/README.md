@@ -396,7 +396,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   It also scans every tracked `pyproject.toml` and `uv.toml`, and `.moon/toolchains.yml` (R7, rule 9).
   The rules, in order:
   1. A physical line whose first non-blank character is `#` is a comment, but only when no quote is
-     open from an earlier line (R1, `_uv_quote_after`). The quote state knows `'`, `"` and `$(`, and a
+     open from an earlier line (R1, `_uv_quote_after`). An escaped space does not start a word, so the `#` in
+     `a\ #` is mid-word. The quote state knows `'`, `"` and `$(`, and a
      `$(` inside `"…"` starts a new quote context, as in bash. A comment line never joins
      the next line, also when it ends in `\`. A `#` later in a line is not a comment, so `x # uv sync` is a row.
   2. A non-comment line that ends in `\` joins the next physical line with no separator. A row names
@@ -415,7 +416,8 @@ It also runs several checks that the per-case project sets structurally **cannot
        The command word is the first word that does not start with `-`. It must match
        `[A-Za-z0-9_][A-Za-z0-9_.+/-]*`. A `uv run` with no command word is a row. A14 does not check the words after the command word,
        with one exception (R3): a command word `pip`, `pip3`, `uv`, `ensurepip` or `virtualenv` (also as the last part
-       of a path), or `python… -m pip|ensurepip|venv|virtualenv|uv`, is a row.
+       of a path) is a row. `python … -m pip|ensurepip|venv|virtualenv` is a row through rule 12, also with
+       interpreter options before `-m`, and `-m uv` through the `uv` token rule.
        Since follow-up sweep 2 (SMA-765 R-relock), every `uv run` needs `--locked`, `--frozen` or `--isolated`.
        A plain `uv run` can relock the project, and then change the environment to the new lock while another task reads it.
      - `command -v uv`, with only `>/dev/null`, `2>/dev/null` or `2>&1` after it. `command uv sync` is a row.
@@ -450,7 +452,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   11. R2 (follow-up sweep 2): `eval` as a word is a row. `${x}v`, `$(…)v`, a backtick before `v`, and `u` before
       `$`, `${`, `$(` or a backtick are rows. A line whose text has more `uv` tokens after the removal of `\`, `'`
       and `"` is a row (`u\v`, `u''v`, `"u"v`).
-  12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync`, `-m pip`, `-m ensurepip`,
+  12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync`, `-m pip`, `-m ensurepip`, `-m venv`, `-m virtualenv`,
       `.venv/…/bin/pip`, `.venv/…/bin/uv`, `.venv/…/bin/python -m pip` and a `rm`, `mv`, `cp`, `ln` or `rsync`
       of a `.venv` path are rows (`UV_DIRECT_WRITE_RE`).
   Waivers: `ALLOW_UV_ENV_SCRIPT` has 35 entries. They are keyed by the script path and the exact stripped
