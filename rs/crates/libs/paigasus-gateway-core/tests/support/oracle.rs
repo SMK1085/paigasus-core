@@ -20,18 +20,32 @@ use std::collections::BTreeMap;
 use paigasus_gateway_core::{Decision, Format, ToolCall, ToolCallKind};
 use serde_json::{Map, Value, json};
 
+use super::responses_oracle::{self, RESPONSES_RUNNERS};
+
 /// One tool call a client would run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCall {
     /// The choice the client attributes the call to. Always 0 for Anthropic and LangChain.
     pub choice: u32,
-    /// `function`, `custom`, `legacy`, `tool_use`, or `other`.
+    /// `function`, `custom`, `legacy`, `tool_use`, or `other`. A Responses call has its own kind
+    /// per item type ([`responses_kind_of`]).
     pub kind: &'static str,
     pub name: String,
     /// The raw argument string, or, when `parsed`, the compact JSON of the value the client parsed
-    /// from it (anthropic-python's `input`, LangChain's `args`).
+    /// from it (anthropic-python's `input`, LangChain's `args`). For a Responses item kind, the
+    /// compact JSON of the item without `status`.
     pub arguments: String,
+    /// For a Responses item kind, `parsed` means that the SDK dropped the `null` fields
+    /// (LangChain's `model_dump(exclude_none=True)`), and the decided item is compared after the
+    /// same step.
     pub parsed: bool,
+    /// The Responses `output_index` the client sees, or `None` where the SDK does not expose it
+    /// (LangChain). `None` in the chat and Anthropic models.
+    pub position: Option<u32>,
+    /// The Responses call id (spec § 5). `None` in the chat and Anthropic models.
+    pub id: Option<String>,
+    /// The Responses namespace (spec § 5). `None` in the chat and Anthropic models.
+    pub namespace: Option<String>,
 }
 
 /// What one client derives from a byte stream.
@@ -77,11 +91,14 @@ pub const MODELS: &[(&str, Model)] = &[
 const OPENAI_RUNNERS: &[(&str, Runner)] = &[("openai-python", run_openai_python), ("openai-node", run_openai_node), ("langchain", run_langchain)];
 const ANTHROPIC_RUNNERS: &[(&str, Runner)] = &[("anthropic-python", run_anthropic_python)];
 
-/// The models of the clients that read `format`.
+/// The models of the clients that read `format`. A format without models panics, so that a
+/// missing table cannot pass with zero calls (SMA-769 § 10.1).
 pub fn runners(format: Format) -> &'static [(&'static str, Runner)] {
     match format {
         Format::AnthropicMessages => ANTHROPIC_RUNNERS,
-        _ => OPENAI_RUNNERS,
+        Format::OpenAiChat => OPENAI_RUNNERS,
+        Format::OpenAiResponses => RESPONSES_RUNNERS,
+        f => panic!("no oracle runners for {f:?}"),
     }
 }
 
@@ -96,6 +113,22 @@ pub fn kind_of(k: ToolCallKind) -> &'static str {
     }
 }
 
+/// The model kind of a decided Responses call. Each client-run kind has its own model kind
+/// (ruling F9); `item` is kind `Other`, any item type that § 6.2 does not name.
+pub fn responses_kind_of(k: ToolCallKind) -> &'static str {
+    match k {
+        ToolCallKind::Function => "function",
+        ToolCallKind::Custom => "custom",
+        ToolCallKind::Computer => "computer",
+        ToolCallKind::LocalShell => "local_shell",
+        ToolCallKind::Shell => "shell",
+        ToolCallKind::ApplyPatch => "apply_patch",
+        ToolCallKind::ToolSearch => "tool_search",
+        ToolCallKind::McpApprovalRequest => "mcp_approval_request",
+        _ => "item",
+    }
+}
+
 /// A decided call in the models' terms. A `tool_use` call's arguments are compared as parsed JSON,
 /// because anthropic-python hands the client the parsed `input`, not the string.
 pub fn as_model_call(c: &ToolCall) -> ModelCall {
@@ -105,6 +138,9 @@ pub fn as_model_call(c: &ToolCall) -> ModelCall {
         name: c.name.clone(),
         arguments: c.arguments.clone(),
         parsed: false,
+        position: None,
+        id: None,
+        namespace: None,
     }
 }
 
@@ -143,8 +179,14 @@ fn arguments_match(mc: &ModelCall, decided: &ModelCall) -> bool {
 /// the client may have acted on calls before it raised, so every call in its snapshot must match
 /// a decided, allowed call exactly. A strict prefix of an allowed call is never accepted: the
 /// gateway never asked the decider about it, and an argument-reading policy (SMA-752) may deny it.
+///
+/// In the Responses format, a call also matches by `position`, `id` and `namespace`, and the
+/// arguments of an item kind match as the JSON of the item without `status`
+/// ([`responses_oracle::matches`]).
 pub fn check_i1(format: Format, input: &[u8], out: &[u8], decided: &[(ToolCall, Decision)], core_failed: bool) -> Result<(), String> {
-    let allowed: Vec<ModelCall> = decided.iter().filter(|(_, d)| d.is_allow()).map(|(c, _)| as_model_call(c)).collect();
+    let responses = format == Format::OpenAiResponses;
+    let model_call = if responses { responses_oracle::as_model_call } else { as_model_call };
+    let allowed: Vec<ModelCall> = decided.iter().filter(|(_, d)| d.is_allow()).map(|(c, _)| model_call(c)).collect();
     let show = || String::from_utf8_lossy(out).into_owned();
     for (model, run) in runners(format) {
         let r = run(out);
@@ -155,7 +197,13 @@ pub fn check_i1(format: Format, input: &[u8], out: &[u8], decided: &[(ToolCall, 
         }
         let mut left = allowed.clone();
         for mc in r.calls {
-            let hit = left.iter().position(|a| a.choice == mc.choice && a.kind == mc.kind && a.name == mc.name && arguments_match(&mc, a));
+            let hit = left.iter().position(|a| {
+                if responses {
+                    responses_oracle::matches(&mc, a)
+                } else {
+                    a.choice == mc.choice && a.kind == mc.kind && a.name == mc.name && arguments_match(&mc, a)
+                }
+            });
             match hit {
                 Some(i) => {
                     left.remove(i);
@@ -336,7 +384,7 @@ pub fn payloads(bytes: &[u8]) -> Vec<Vec<u8>> {
 
 // ---- Python and JavaScript value semantics -----------------------------------------------------
 
-fn py_truthy(v: Option<&Value>) -> bool {
+pub(super) fn py_truthy(v: Option<&Value>) -> bool {
     match v {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
@@ -347,7 +395,7 @@ fn py_truthy(v: Option<&Value>) -> bool {
     }
 }
 
-fn js_truthy(v: Option<&Value>) -> bool {
+pub(super) fn js_truthy(v: Option<&Value>) -> bool {
     match v {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
@@ -358,7 +406,7 @@ fn js_truthy(v: Option<&Value>) -> bool {
 }
 
 /// A Python `int` (a `bool` is one), or `None` for anything else.
-fn py_int(v: &Value) -> Option<i64> {
+pub(super) fn py_int(v: &Value) -> Option<i64> {
     match v {
         Value::Bool(b) => Some(i64::from(*b)),
         Value::Number(n) => n.as_i64().or_else(|| n.as_u64().map(|_| i64::MAX)),
@@ -367,7 +415,7 @@ fn py_int(v: &Value) -> Option<i64> {
 }
 
 /// `list[idx]` with Python's negative indexing; `None` is an `IndexError`.
-fn py_get(len: usize, idx: i64) -> Option<usize> {
+pub(super) fn py_get(len: usize, idx: i64) -> Option<usize> {
     let len = i64::try_from(len).expect("small");
     let pos = if idx < 0 { idx + len } else { idx };
     (0..len).contains(&pos).then(|| usize::try_from(pos).expect("in range"))
@@ -492,6 +540,9 @@ fn message_calls(choice: u32, m: &Map<String, Value>) -> Vec<ModelCall> {
                 name,
                 arguments,
                 parsed: false,
+                position: None,
+                id: None,
+                namespace: None,
             });
         }
     }
@@ -502,6 +553,9 @@ fn message_calls(choice: u32, m: &Map<String, Value>) -> Vec<ModelCall> {
             name: str_or_empty(fc.get("name")),
             arguments: str_or_empty(fc.get("arguments")),
             parsed: false,
+            position: None,
+            id: None,
+            namespace: None,
         });
     }
     out
@@ -749,6 +803,9 @@ pub fn run_openai_node(bytes: &[u8]) -> Run {
                     name: js_string(name),
                     arguments: arguments.clone(),
                     parsed: false,
+                    position: None,
+                    id: None,
+                    namespace: None,
                 }),
                 None if error.is_none() => error = Some(format!("OpenAIError: missing tool_calls[].{kind}.name")),
                 None => {}
@@ -764,6 +821,9 @@ pub fn run_openai_node(bytes: &[u8]) -> Run {
                 name: fc.get("name").map(js_string).unwrap_or_default(),
                 arguments: fc.get("arguments").filter(|a| !a.is_null()).map(js_string).unwrap_or_default(),
                 parsed: false,
+                position: None,
+                id: None,
+                namespace: None,
             });
         }
     }
@@ -932,6 +992,9 @@ pub fn run_langchain(bytes: &[u8]) -> Run {
                 name: str_or_empty(e.get("name")),
                 arguments: args.to_string(),
                 parsed: true,
+                position: None,
+                id: None,
+                namespace: None,
             })
         })
         .collect();
@@ -942,6 +1005,9 @@ pub fn run_langchain(bytes: &[u8]) -> Run {
             name: str_or_empty(fc.get("name")),
             arguments: str_or_empty(fc.get("arguments")),
             parsed: false,
+            position: None,
+            id: None,
+            namespace: None,
         });
     }
     Run { calls, error }
@@ -1274,6 +1340,9 @@ pub fn run_anthropic_python(bytes: &[u8]) -> Run {
                 name: b.get("name").and_then(Value::as_str).unwrap_or(t).to_owned(),
                 arguments,
                 parsed: kind == "tool_use",
+                position: None,
+                id: None,
+                namespace: None,
             })
         })
         .collect();
