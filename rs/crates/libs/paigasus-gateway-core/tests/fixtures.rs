@@ -252,9 +252,10 @@ fn recorded_streams_pass_unchanged() {
             for (model, run) in runners(Format::OpenAiChat) {
                 let r = run(&o.out);
                 if let Some(e) = &r.error {
-                    // A client that raises on the recorded bytes themselves is a client limit, not
-                    // an interceptor defect: LangChain raises on any `custom` call (oracle.rs).
-                    assert!(run(&bytes).error.is_some(), "{ctx}: {model} raised on the output only: {e}");
+                    // Only LangChain on a recording with a `custom` call may raise: its model
+                    // raises on any custom entry (oracle.rs), also on the recorded bytes.
+                    let excused = *model == "langchain" && want.iter().any(|(k, _)| *k == "custom") && run(&bytes).error.is_some();
+                    assert!(excused, "{ctx}: {model} raised: {e}");
                     continue;
                 }
                 let got: Vec<(&str, String)> = r.calls.iter().map(|m| (m.kind, m.name.clone())).collect();
