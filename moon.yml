@@ -24,7 +24,7 @@ tasks:
       - 'rs/deny.toml'
 
   osv:
-    description: 'osv-scanner advisory gate over the npm + pip lockfiles — the ts/py counterpart to :deny (SMA-518).'
+    description: 'osv-scanner advisory gate over the npm + Python lockfiles — the ts/py counterpart to :deny (SMA-518).'
     # rs/ is deliberately excluded: :deny already gates it AND enforces license + yanked-crate
     # policy that OSV does not, so folding Rust in here would lose coverage, not add it.
     #
@@ -43,14 +43,14 @@ tasks:
       - 'osv-scanner.toml'
       - 'ts/pnpm-lock.yaml'
       - 'py/uv.lock'
-      # SMA-593 — repo:workflow-credentials resolves pyyaml through its own uv project, so
+      # SMA-593 — repo:workflow-credentials resolves pyyaml through its own Python project, so
       # its lockfile is a third pip-ecosystem manifest. It is in ci/osv/run.sh's LOCKFILES
       # array too; this entry is what re-keys the gate when that lockfile changes.
       - 'ci/workflow-credentials/uv.lock'
-      # SMA-513 PR 2b — the same for repo:helm-render's own uv project; it is in
+      # SMA-513 PR 2b — the same for repo:helm-render's own Python project; it is in
       # ci/osv/run.sh's LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
       - 'ci/helm-render/uv.lock'
-      # SMA-693 — the same for repo:wasm-lockstep's own uv project; it is in ci/osv/run.sh's
+      # SMA-693 — the same for repo:wasm-lockstep's own Python project; it is in ci/osv/run.sh's
       # LOCKFILES array too. This entry re-keys the gate when that lockfile moves.
       - 'ci/wasm-lockstep/uv.lock'
       - '.prototools'
@@ -263,7 +263,7 @@ tasks:
       # SMA-603 — this task now pins eleven load-bearing lines inside ci/release-plan/run.sh
       # (RELEASE_PLAN_SH_CALL_SITES), so a change under ci/release-plan/ MUST re-key it. Without
       # this the pin is real but unreachable: the PR that deletes the fail-safe write, or puts
-      # the `uv` preflight back on the --github-output arm, does not schedule this task. Same
+      # the package-manager preflight back on the --github-output arm, does not schedule this task. Same
       # reasoning as the ci/release-parity/**/* entry above.
       - 'ci/release-plan/**/*'
       # SMA-539 — this task now pins load-bearing lines inside ci/ruff/run.sh, so a change under
@@ -698,7 +698,7 @@ tasks:
       # under py/packages/ touches no listed input, so Moon never selects this task
       # and the new package's metadata is never checked at all. A glob selects the
       # task for a package that does not exist yet; a literal list cannot. ONE
-      # level, never `**/`: a recursive glob would sweep in py/pyproject.toml (a uv
+      # level, never `**/`: a recursive glob would sweep in py/pyproject.toml (a package-manager
       # virtual root with no [project] table) and node-gyp's copy under
       # ts/node_modules in a provisioned tree — `py/packages/*/` matches neither.
       # README/LICENSE are globbed because Check P2 asserts they EXIST, so deleting
@@ -725,8 +725,8 @@ tasks:
       bash ci/version-lockstep/run.sh --negative-control
       bash ci/version-lockstep/run.sh
     toolchain: 'system'
-    # Every file that CARRIES a version in either family, plus the script itself, plus the uv
-    # workspace pyproject files that --check's static uv metadata assertion reads (SMA-684): the
+    # Every file that CARRIES a version in either family, plus the script itself, plus the package-manager
+    # workspace pyproject files that --check's static package-manager metadata assertion reads (SMA-684): the
     # workspace root as a literal path, and every member as a glob, because that check discovers
     # members at runtime from the members glob. Narrower than
     # publish-metadata's `rs/crates/**/*` because the site list here is STATIC (declared in run.sh's
@@ -929,7 +929,7 @@ tasks:
       # never run on it. Matches zero tracked files today — see ALLOW_DEAD_INPUT.
       - '.github/workflows/.*.y*ml'
       - 'ci/workflow-credentials/**/*'
-      # The gate shells out to `uv`, whose version is pinned here — without this input a uv
+      # The gate shells out to the package manager, whose version is pinned here — without this input a
       # bump would not invalidate a cached PASS, exactly as the release-parity tasks list it.
       - '.prototools'
 
@@ -942,7 +942,7 @@ tasks:
     # compares the two.
     #
     # WHY NOT py:typecheck INPUTS (SMA-535's filed fix) — basedpyright reads the stub and never
-    # the Rust, so no input list changes what it reads; and `uv run basedpyright` is measured
+    # the Rust, so no input list changes what it reads; and a wrapper-run basedpyright is measured
     # in-repo to serve a CACHED wheel, so even the stub it reads is the installed copy.
     #
     # ARM 2 is py/packages/paigasus-kernel/tests/test_stub_surface.py, which asks the COMPILED
@@ -979,12 +979,12 @@ tasks:
 
   ruff-ci:
     description: 'Lint ci/**/*.py against py/pyproject.toml''s Ruff rule set (SMA-539).'
-    # WHY THIS EXISTS — .moon/tasks/python.yml runs `uv run ruff check .` scoped to the py
+    # WHY THIS EXISTS — .moon/tasks/python.yml runs the wrapper-run ruff check scoped to the py
     # project, and ci/**/*.py is outside it. Nothing else lints it. ci_targets.py merged through
     # a full review carrying three RUF005 violations (SMA-541), found only because a CodeRabbit
     # learning mentioned the convention in passing.
     #
-    # WHY --project py AND NOT A DEDICATED uv PROJECT — the ci/workflow-credentials precedent
+    # WHY --project py AND NOT A DEDICATED PYTHON PROJECT — the ci/workflow-credentials precedent
     # avoids `--project py` because it compiles a PyO3 cdylib. That premise does not hold here:
     # repo:actionlint's `inputs: ['**/*']` strictly supersets this task's, so this gate can never
     # be a cache miss while repo:actionlint is a hit, and the py environment is materialised once
@@ -1007,7 +1007,7 @@ tasks:
       # gate: AC B5 is one rule set AND one tool version, and that file is where they diverge.
       - '.moon/tasks/python.yml'
       - '.prototools'
-      # This formally reaches under **/.venv/**, which .moon/workspace.yml:41-43 asks tasks not
+      # This formally reaches under the project environment trees, which .moon/workspace.yml:41-43 asks tasks not
       # to declare. Benign — the hasher's ignorePatterns filters those trees and ruff's default
       # exclude skips them — so a stray venv under ci/ cannot false-trigger or slow this gate.
       - 'ci/**/*.py'
@@ -1147,7 +1147,7 @@ tasks:
     # invariant before the next scheduled run does (ci/wasm-lockstep/README.md).
     #
     # INPUTS. The workflow is what pin_check.py reads. rs/Cargo.lock is what the real run reads
-    # through `git show HEAD:` (spec F15: never the working tree). .prototools pins the `uv` the
+    # through `git show HEAD:` (spec F15: never the working tree). .prototools pins the package manager the
     # gate shells out to. SELF_TASK_EXPECTED_GLOBS pins these four.
     #
     # `--self-test` and `--negative-control` run FIRST and in the SAME block. `set -euo pipefail`

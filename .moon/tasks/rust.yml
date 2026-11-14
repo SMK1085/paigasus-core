@@ -111,7 +111,7 @@ tasks:
     # `paigasus-kernel-ts:{build,test}` and `paigasus-kernel-py:test` instead, since those are
     # the tasks that actually link and compile them. Those three tasks carry FIVE such inputs,
     # not four: the four listed above plus `/.prototools`, which pins wasm-pack on the ts path
-    # and uv (hence maturin) on the py path.
+    # and the Python package manager (hence maturin) on the py path.
     # See `ci/affected-graph/README.md`'s A5 bullet for the guard that keeps it that way.
     inputs:
       - '@group(sources)'

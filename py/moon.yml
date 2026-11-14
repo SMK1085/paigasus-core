@@ -18,4 +18,4 @@ fileGroups:
 # .moon/tasks/python-project.yml, so it never attaches to this configuration root. This replaces
 # the SMA-399 `workspace.inheritedTasks.exclude: ['build']`, now redundant under layer routing
 # (SMA-401) — py/pyproject.toml is a virtual workspace root with no [project] table, so a root
-# `uv build` would emit a junk UNKNOWN wheel; routing simply never gives it the task.
+# a package build would emit a junk UNKNOWN wheel; routing simply never gives it the task.

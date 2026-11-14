@@ -41,7 +41,7 @@ tasks:
     # other two generators do not, and without them this task's cache key is a lie:
     #   /.prototools   pins buf ITSELF (1.70.0). buf's own version changes its output.
     #   /py/uv.lock    pins protoc-gen-python_betterproto2 — the `local:` plugin in buf.gen.yaml
-    #                  is run through `uv run --project ../py`, so the py workspace lock is what
+    #                  is run through the python-env wrapper (`protoc-plugin`), so the py workspace lock is what
     #                  selects the compiler version.
     # This matters because ci.yml:309-322's codegen-drift gate DELEGATES its freshness to this
     # task: it runs `moon run contracts:generate` and diffs. On a cache hit buf never runs, and

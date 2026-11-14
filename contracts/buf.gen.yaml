@@ -42,10 +42,10 @@ plugins:
       - no_include
       - compile_well_known_types
 
-  # ─── Python: betterproto2 via LOCAL plugin (ADR-0004). Run through `uv run`
+  # ─── Python: betterproto2 via LOCAL plugin (ADR-0004). Run through the python-env wrapper
   #     so it resolves in the py workspace venv (which also provides the `ruff`
   #     the compiler shells out to). betterproto2-compiler is a py dev dep. ────
-  - local: ['uv', 'run', '--project', '../py', 'protoc-gen-python_betterproto2']
+  - local: ['bash', '../ci/python-env/run.sh', 'protoc-plugin']
     out: ../py/packages/paigasus-proto/src/paigasus_proto/generated
     opt:
       - client_generation=async

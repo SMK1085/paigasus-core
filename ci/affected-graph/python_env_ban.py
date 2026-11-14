@@ -101,7 +101,20 @@ SMOKE_TASK = "affected-smoke"
 
 # (path, exact stripped line) -> the reason the text cannot change (spec 5.4). The count must stay
 # lower than 35. Tasks 4 to 6 add the entries.
-PINNED_LINES: dict[tuple[str, str], str] = {}
+PINNED_LINES: dict[tuple[str, str], str] = {
+    (".gitignore", ".venv/"): "ignore pattern: the name of the project environment directory that git must ignore",
+    (".moon/toolchains.yml", "packageManager: 'uv'"): "Moon toolchain schema value: the schema accepts only the tool name here",
+    (".moon/workspace.yml", "- '**/.venv/**'"): "Moon hasher ignore glob: it names the project environment directory",
+    (".prototools", 'uv = "0.11.16"'): "proto tool version pin: proto reads the tool name as the key",
+    (
+        "py/pyproject.toml",
+        'exclude = ["**/__pycache__", "**/node_modules", "**/.venv", "**/dist", "**/build", "**/generated/**"]',
+    ): "tool exclude glob: it names the project environment directory",
+    (
+        "py/scripts/assert_typecheck_coverage.py",
+        'EXCLUDE_PARTS = frozenset({"generated", "__pycache__", "node_modules", ".venv", "dist", "build"})',
+    ): "path parts to skip: one part is the name of the project environment directory",
+}
 
 # TEMPORARY (SMA-770 Tasks 3 to 7). The files that still hold hits that a later task migrates
 # (plan Appendix A.6). A hit in a listed file is not a row; a listed file with no hit is a row, so
@@ -114,14 +127,6 @@ MIGRATION_FILES: frozenset[str] = frozenset((
     ".github/workflows/release.yml",
     ".github/workflows/security-scan.yml",
     ".github/workflows/wheels.yml",
-    ".gitignore",
-    ".moon/tasks/python-project.yml",
-    ".moon/tasks/python.yml",
-    ".moon/tasks/rust.yml",
-    ".moon/templates/python/moon.yml",
-    ".moon/toolchains.yml",
-    ".moon/workspace.yml",
-    ".prototools",
     "ci/actionlint/release_guard.py",
     "ci/actionlint/run.sh",
     "ci/affected-graph/cargo_moon_parity.py",
@@ -149,22 +154,6 @@ MIGRATION_FILES: frozenset[str] = frozenset((
     "ci/workflow-credentials/pyproject.toml",
     "ci/workflow-credentials/run.sh",
     "ci/workflow-credentials/workflow_credentials.py",
-    "contracts/buf.gen.yaml",
-    "contracts/moon.yml",
-    "moon.yml",
-    "osv-scanner.toml",
-    "py/moon.yml",
-    "py/packages/paigasus-gateway-conformance/moon.yml",
-    "py/packages/paigasus-kernel/pyproject.toml",
-    "py/packages/paigasus-kernel/tests/test_stub_surface.py",
-    "py/pyproject.toml",
-    "py/scripts/assert_test_floor.py",
-    "py/scripts/assert_typecheck_coverage.py",
-    "py/scripts/run_tests.sh",
-    "rs/crates/bindings/paigasus-py-bindings/Cargo.toml",
-    "rs/crates/bindings/paigasus-py-bindings/src/lib.rs",
-    "rs/crates/libs/paigasus-gateway-core/tests/fixtures/make_fixtures.py",
-    "ts/packages/paigasus-kernel/moon.yml",
 ))
 
 _BAN_FIX = "route the command through ci/python-env/run.sh, give the text new words, or pin the line in PINNED_LINES"
