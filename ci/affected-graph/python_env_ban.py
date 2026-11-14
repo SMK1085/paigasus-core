@@ -152,13 +152,6 @@ PINNED_LINES: dict[tuple[str, str], str] = {
     ): "pyproject table key: the code reads the tool table whose key is the tool name",
 }
 
-# TEMPORARY (SMA-770 Tasks 3 to 7). The files that still hold hits that a later task migrates
-# (plan Appendix A.6). A hit in a listed file is not a row; a listed file with no hit is a row, so
-# the list shrinks as the migration moves. Tasks 4 to 6 empty it, and Task 7 deletes it.
-MIGRATION_FILES: frozenset[str] = frozenset((
-    "ci/affected-graph/cargo_moon_parity.py",
-))
-
 _BAN_FIX = "route the command through ci/python-env/run.sh, give the text new words, or pin the line in PINNED_LINES"
 
 
@@ -219,7 +212,6 @@ def ban_rows(
     read_text: Callable[[Path], str],
     binary: frozenset[str],
     pinned: dict[tuple[str, str], str] = PINNED_LINES,
-    migration: frozenset[str] = MIGRATION_FILES,
 ) -> tuple[list[str], set[str]]:
     """G-ban rows for the `tracked` paths, and the set of paths that were read.
 
@@ -232,7 +224,6 @@ def ban_rows(
     reads: set[str] = set()
     pin_hits: dict[tuple[str, str], list[int]] = {key: [] for key in pinned}
     pinned_paths = {path for path, _ in pinned}
-    hit_files: set[str] = set()
     for key, reason in sorted(pinned.items()):
         if not str(reason).strip():
             rows.append(f"PINNED_LINES entry {key[0]}: {key[1]!r} has an empty reason")
@@ -253,9 +244,6 @@ def ban_rows(
             if path in pinned_paths and (path, stripped) in pin_hits:
                 pin_hits[(path, stripped)].append(lineno)
                 continue
-            hit_files.add(path)
-            if path in migration:
-                continue
             rows.append(f"{path}:{lineno}: {', '.join(names)} in `{stripped}` - {_BAN_FIX}")
     for key, linenos in sorted(pin_hits.items()):
         if not linenos:
@@ -265,8 +253,6 @@ def ban_rows(
                 f"PINNED_LINES entry {key[0]}: {key[1]!r} matches {len(linenos)} lines "
                 f"({', '.join(map(str, linenos))}), so it is ambiguous; give one copy new words"
             )
-    for path in sorted(migration - hit_files):
-        rows.append(f"MIGRATION_FILES: {path} holds no hit any more (stale migration entry); remove it")
     return rows, reads
 
 
@@ -386,14 +372,13 @@ def check_python_env(
     smoke_unreached: Callable[..., list[str] | None],
     binary: frozenset[str] | None = None,
     pinned: dict[tuple[str, str], str] = PINNED_LINES,
-    migration: frozenset[str] = MIGRATION_FILES,
 ) -> list[str]:
     """All rows of the `a14` key. `binary` None asks git; the self-test passes a fixed set."""
     root = Path(root)
     tracked = sorted(tracked)
     if binary is None:
         binary = binary_paths(root, tracked)
-    rows, reads = ban_rows(root, tracked, read_text=read_utf8, binary=binary, pinned=pinned, migration=migration)
+    rows, reads = ban_rows(root, tracked, read_text=read_utf8, binary=binary, pinned=pinned)
     rows.extend(wrapper_rows(root))
     rows.extend(floor_rows(projects))
     if not (root / MOON_TOOLCHAINS).is_file():
@@ -704,8 +689,8 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
         _put(root, "ci/sp2.sh", "uv  sync\n")
         _put(root, "ci/clean.sh", "echo ok\n")
 
-        def run(tracked, binary=frozenset(), pinned=None, migration=frozenset()):
-            return ban_rows(root, tracked, read_text=read_utf8, binary=binary, pinned={} if pinned is None else pinned, migration=migration)
+        def run(tracked, binary=frozenset(), pinned=None):
+            return ban_rows(root, tracked, read_text=read_utf8, binary=binary, pinned={} if pinned is None else pinned)
 
         rows, reads = run(["ci/x/run.sh"])
         if len(rows) != 1 or "ci/x/run.sh:2" not in rows[0]:
@@ -772,16 +757,6 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
         rows, _ = run(["ci/sp2.sh"], pinned={("ci/sp2.sh", "uv sync"): "fixture"})
         if not any("ci/sp2.sh:1" in r for r in rows):
             failures.append(f"python-env ban: `uv  sync` matched the pin `uv sync`: {rows}")
-        # MIGRATION_FILES: a listed file is not red; a listed file with no hit, or not tracked, is stale.
-        rows, _ = run(["ci/x/run.sh"], migration=frozenset({"ci/x/run.sh"}))
-        if rows:
-            failures.append(f"python-env ban: a MIGRATION_FILES path was red: {rows}")
-        rows, _ = run(["ci/clean.sh"], migration=frozenset({"ci/clean.sh"}))
-        if not any("stale migration entry" in r and "ci/clean.sh" in r for r in rows):
-            failures.append(f"python-env ban: a MIGRATION_FILES path with no hit gave no stale row: {rows}")
-        rows, _ = run([], migration=frozenset({"ci/x/run.sh"}))
-        if not any("stale migration entry" in r for r in rows):
-            failures.append(f"python-env ban: an untracked MIGRATION_FILES path gave no stale row: {rows}")
 
     # binary_paths reads the real .gitattributes of this repository.
     repo = _repo_root()
@@ -878,7 +853,7 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
 
         def full(projects=projects, tracked=clean):
             return check_python_env(projects, root, tracked, read_utf8=read_utf8, smoke_unreached=smoke_unreached,
-                                    binary=frozenset(), pinned={}, migration=frozenset())
+                                    binary=frozenset(), pinned={})
 
         if full():
             failures.append(f"python-env ban, integration: the clean fixture tree gave {full()}")
