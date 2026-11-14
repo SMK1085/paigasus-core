@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
 import re
 import shutil
@@ -512,6 +513,7 @@ name="$(printf '%s' "$key" | tr '/' '_')"
   printf '%s\\0' "$here"
   for a in "$@"; do printf '%s\\0' "$a"; done
 } >"$LOG/$name"
+printf '%s' "${PROTO_REPORTER-unset}" >"$LOG.env.$name"
 exit "${FAKE_RC:-0}"
 """
 
@@ -596,6 +598,12 @@ def wrapper_behaviour_failures(root: Path) -> list[str]:
             want_argv = [_subst(a, fix, fake) for a in (case.want_argv or ())]
             if record[1:] != want_argv:
                 failures.append(f"{tag}: argv {record[1:]!r}, want {want_argv!r}")
+            # A tool that proto shims (uv, proto) must see PROTO_REPORTER=text: the wrapper exports it
+            # once at the top, and a captured shim call would otherwise leak NDJSON (SMA-609).
+            if case.want_tool in ("uv", "proto"):
+                reporter = Path(f"{log}.env.{want_name}").read_text(encoding="utf-8")
+                if reporter != "text":
+                    failures.append(f"{tag}: the {case.want_tool} tool saw PROTO_REPORTER={reporter!r}, want 'text'")
 
         for name, raw_args, want_rc, with_fake in _ABSENT_CASES:
             log = fresh_log()
@@ -882,6 +890,11 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
         _put(root, WRAPPER_PATH, "changed\n")
         if not any(WRAPPER_PATH in r and "sha256" in r for r in full()):
             failures.append("python-env ban, integration: check_python_env did not run the wrapper hash rule")
+
+    # Ruling C10: the `binary is None` branch of check_python_env must ask git. The integration rows
+    # above always pass `binary=`, so they cannot see a deleted call; this reads the source line.
+    if "binary = binary_paths(root, tracked)" not in [ln.strip() for ln in inspect.getsource(check_python_env).splitlines()]:
+        failures.append("python-env ban, integration: check_python_env does not call binary_paths when `binary` is None")
 
     failures.extend(wrapper_behaviour_failures(repo))
     return failures

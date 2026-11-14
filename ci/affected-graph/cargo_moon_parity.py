@@ -3556,6 +3556,10 @@ def self_test():
     pe_hook = "failures.extend(python_env_ban.self_test_failures(_read_utf8, smoke_unreached))"
     if pe_hook not in [line.strip() for line in inspect.getsource(self_test).splitlines()]:
         failures.append("self_test does not run python_env_ban.self_test_failures, so the ban's rows never run")
+    # Ruling C9: the 50 wrapper cases run only if self_test_failures extends its result with them.
+    wb_hook = "failures.extend(wrapper_behaviour_failures(repo))"
+    if wb_hook not in [line.strip() for line in inspect.getsource(python_env_ban.self_test_failures).splitlines()]:
+        failures.append("python_env_ban.self_test_failures does not run wrapper_behaviour_failures, so the wrapper cases never run")
     if python_env_ban.MoonOutputError not in INFRA_ERRORS:
         failures.append("python_env_ban.MoonOutputError is not in INFRA_ERRORS, so a missing tracked file is rc 1, not rc 2")
     if (python_env_ban.SMOKE_PROJECT, python_env_ban.SMOKE_TASK) != (AFFECTED_SMOKE_PROJECT, AFFECTED_SMOKE_TASK):
