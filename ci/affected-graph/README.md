@@ -389,7 +389,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   A reference to a file that does not exist, or that leaves the repository, is an infrastructure error.
   Since follow-up sweep 2 (R8), A14 also scans a script that a scanned script RUNS, and any other
   `*.sh` word in the task text (`UV_RUN_REF_RE`). A leading `$VAR/` part is dropped, and the rest is
-  resolved against the repo root and against the directory of the script (or the project). A word
+  resolved against the repo root, the directory of the script, and the project directory of the task
+  (a child script inherits the task's cwd). A word
   that names no file is skipped. The match is wide on purpose: a path in a message is followed too,
   which can add rows but cannot hide one. So `ci/release-plan/run.sh` (run by `ci/actionlint/run.sh`)
   and `ops/nats/check-subjects.sh` (run by `repo:nats-permissions`) are now scanned.
@@ -397,7 +398,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   The rules, in order:
   1. A physical line whose first non-blank character is `#` is a comment, but only when no quote is
      open from an earlier line (R1, `_uv_quote_after`). An escaped space does not start a word, so the `#` in
-     `a\ #` is mid-word. The quote state knows `'`, `"` and `$(`, and a
+     `a\ #` is mid-word. The state is read over the joined logical line, so a `\` continuation does not
+     start a word either. The quote state knows `'`, `"` and `$(`, and a
      `$(` inside `"…"` starts a new quote context, as in bash. A comment line never joins
      the next line, also when it ends in `\`. A `#` later in a line is not a comment, so `x # uv sync` is a row.
   2. A non-comment line that ends in `\` joins the next physical line with no separator. A row names
@@ -452,7 +454,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   11. R2 (follow-up sweep 2): `eval` as a word is a row. `${x}v`, `$(…)v`, a backtick before `v`, and `u` before
       `$`, `${`, `$(` or a backtick are rows. A line whose text has more `uv` tokens after the removal of `\`, `'`
       and `"` is a row (`u\v`, `u''v`, `"u"v`).
-  12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync`, `-m pip`, `-m ensurepip`, `-m venv`, `-m virtualenv`,
+  12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync` (also with pip options before the subcommand), `-m pip`, `-m ensurepip`, `-m venv`, `-m virtualenv`,
       `.venv/…/bin/pip`, `.venv/…/bin/uv`, `.venv/…/bin/python -m pip` and a `rm`, `mv`, `cp`, `ln` or `rsync`
       of a `.venv` path are rows (`UV_DIRECT_WRITE_RE`).
   Waivers: `ALLOW_UV_ENV_SCRIPT` has 35 entries. They are keyed by the script path and the exact stripped

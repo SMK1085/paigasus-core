@@ -3509,7 +3509,7 @@ UV_SPLICE_RE = re.compile(r"[})`]v(?![\w.-])|(?<![\w.$-])u(?=\$[{(A-Za-z_]|`)")
 UV_QUOTE_CHARS_RE = re.compile(r"[\\'\"]")
 # R4 (follow-up sweep 2): a write to an environment that does not go through `uv`.
 UV_DIRECT_WRITE_RE = re.compile(
-    r"(?<![\w.-])pip3?\s+(?:install|uninstall|sync)(?![\w-])"
+    r"(?<![\w.-])pip3?(?![\w.-])[^;&|\n]*?(?<![\w.-])(?:install|uninstall|sync)(?![\w-])"
     r"|(?<![\w-])-m\s*(?:pip|ensurepip|venv|virtualenv)(?![\w-])"
     r"|\.venv[\w./-]*/bin/(?:pip3?|uv|python[0-9.]*\s+-m\s*(?:pip|ensurepip))(?![\w-])"
     r"|(?<![\w.-])(?:rm|mv|cp|ln|rsync)(?![\w.-])[^;&|\n]*\.venv(?![\w-])"
@@ -3539,10 +3539,11 @@ def _uv_logical_lines(text):
             starts.append((pos, i + 1))
             parts.append(body)
             pos += len(body)
-            quote = _uv_quote_after(body, quote)
             i += 1
             if not cont:
                 break
+        # Over the JOINED line, so a word that a continuation splits stays one word (`a\`+newline+`#`).
+        quote = _uv_quote_after("".join(parts), quote)
         yield "".join(parts), starts
 
 
@@ -3784,23 +3785,27 @@ UV_SOURCE_STMT_RE = re.compile(
 UV_RUN_REF_RE = re.compile(r"(?:\$\{?[A-Za-z_]\w*\}?/)*((?:[\w.-]+/)*[\w.-]+\.sh)(?![\w.-])")
 
 
-def _uv_run_refs(path, root):
-    """The existing repo files that a `*.sh` word in `path` can name: against the repo root and
-    against the script's own directory, after the leading `$VAR/` parts are dropped. A word that
-    resolves to no file is skipped: bash cannot run a missing file either.
+def _uv_run_refs(path, root, bases=()):
+    """The existing repo files that a `*.sh` word in `path` can name: against the repo root, the
+    script's own directory and each of `bases` (the working directory that the task gives the
+    script), after the leading `$VAR/` parts are dropped. A word that resolves to no file is
+    skipped: bash cannot run a missing file either.
     """
     root_resolved = Path(root).resolve()
     out = []
     for rel in sorted(set(UV_RUN_REF_RE.findall(_executable_text(path)))):
-        for base in (root_resolved, Path(path).resolve().parent):
+        for base in (root_resolved, Path(path).resolve().parent, *bases):
             cand = (base / rel).resolve()
             if cand.is_file() and root_resolved in cand.parents:
                 out.append(cand)
     return out
 
 
-def _uv_script_closure(path, root):
+def _uv_script_closure(path, root, bases=()):
     """`path` and every script it reaches through `source` / `.` or runs (R8), RESOLVED, cycle-guarded.
+
+    `bases` are the working directories that the task gives its scripts (its project directory).
+    A child inherits the cwd, so `bash scripts/x.sh` inside a script also resolves against them.
 
     `script_source_refs` raises MoonOutputError on a sourced path that resolves to no file, so a
     rename cannot shrink the scan in silence. A run reference that resolves to no file is skipped
@@ -3814,7 +3819,7 @@ def _uv_script_closure(path, root):
         seen.add(key)
         out.append(key)
         queue.extend(x.resolve() for x in script_source_refs(key, root, UV_SOURCE_STMT_RE))
-        queue.extend(_uv_run_refs(key, root))
+        queue.extend(_uv_run_refs(key, root, bases))
     return out
 
 
@@ -4041,8 +4046,11 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None, uv_configs=No
             # A14's own closure (UV_SOURCE_STMT_RE), not `task_script_closure`: that one follows a
             # `source` at line start only, and A8 and A10 depend on it as it is.
             paths = []
+            # A script inherits the task's cwd (the project directory), so a child script that it runs
+            # by a relative path also resolves there (R8).
+            task_bases = ((root_resolved / proj["source_dir"]).resolve(),)
             for ref in task_script_refs(projects, root, target):
-                paths.extend(_uv_script_closure(ref, root_resolved))
+                paths.extend(_uv_script_closure(ref, root_resolved, task_bases))
             for rel in sorted(set(PROJECT_SCRIPT_REF_RE.findall(blob))):
                 path = (root_resolved / proj["source_dir"] / rel).resolve()
                 if root_resolved not in path.parents:
@@ -4056,14 +4064,14 @@ def check_uv_env_isolation(projects, root, allow=None, floor=None, uv_configs=No
                         f"{proj['source_dir']} - A14 would silently scan less. If the script "
                         f"moved, update the task."
                     )
-                paths.extend(_uv_script_closure(path, root_resolved))
+                paths.extend(_uv_script_closure(path, root_resolved, task_bases))
             # R8 (follow-up sweep 2): any other `*.sh` word in the task text that names a repo file,
             # against the repo root and the project directory (`bash ops/nats/check-subjects.sh`).
             for rel in sorted(set(UV_RUN_REF_RE.findall(blob))):
                 for base in (root_resolved, root_resolved / proj["source_dir"]):
                     cand = (base / rel).resolve()
                     if cand.is_file() and root_resolved in cand.parents:
-                        paths.extend(_uv_script_closure(cand, root_resolved))
+                        paths.extend(_uv_script_closure(cand, root_resolved, task_bases))
             for path in dict.fromkeys(paths):
                 rel_path = str(path.relative_to(root_resolved))
                 reads.add(rel_path)
@@ -7525,6 +7533,10 @@ def self_test():
         # R1: a `#` line is a comment only when no quote is open from an earlier line.
         ("R1 a # line inside an open quote", "bash -c '\n#'; uv sync", True),
         ("R1 an escaped space keeps # mid-word", "echo a\\ # '\n#'; uv sync", True),
+        ("R1 a continuation keeps # mid-word", "echo a\\\n# '\n#'; uv sync", True),
+        ("R4 a pip option before install", "pip -q install x", True),
+        ("R4 a valued pip option before install", "pip3 --index-url https://x install y", True),
+        ("R4 pip list", "pip list", False),
         ("R1 a # line inside open double quotes", 'bash -c "\n#"; uv sync', True),
         ("R1 a # line after a closed quote", "echo 'x'\n# uv sync", False),
         ("R1 quotes inside $( ) in double quotes", "X=\"$(grep 'a=\"$(b)\"' f)\"\n# uv sync", False),
@@ -7719,6 +7731,12 @@ def self_test():
         a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/here.sh"))
         if not any("ci/x/mut8.sh" in r for r in a14_rows):
             failures.append(f"A14 did not scan a script that a scanned script runs by its own directory (R8): {a14_rows}")
+        # R8: a child script inherits the task's cwd, so `bash scripts/m.sh` resolves in the project.
+        (a14_root / "py" / "scripts" / "child8.sh").write_text("#!/bin/bash\nuv sync\n")
+        (a14_root / "py" / "scripts" / "parent8.sh").write_text("#!/bin/bash\nbash scripts/child8.sh\n")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash scripts/parent8.sh"))
+        if not any("py/scripts/child8.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not resolve a child script against the task's cwd (R8): {a14_rows}")
         (a14_root / "ops").mkdir()
         (a14_root / "ops" / "y.sh").write_text("#!/bin/bash\nuv sync\n")
         a14_rows = a14_run(a14_proj(a14_good + " && bash ops/y.sh", smoke_globs=[*a14_smoke_globs, "ops/**/*"]))
