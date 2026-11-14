@@ -10,6 +10,24 @@
 //! openai-node replaces the name, and LangChain merges by index value. Inside the canonical form
 //! they all agree, so the decider sees exactly what every client will run.
 //!
+//! A tool-call entry with no `function` body (a custom call, or an entry with only an `index`) is
+//! bodyless. LangChain raises at the first record that holds one (`rtc["function"].get`) and drops
+//! that whole record. After such a record, a fragment of a call that existed before it would make
+//! LangChain's snapshot of that call a strict prefix of the other clients' (spec § 2.1 M3). So that
+//! fragment is a deviation (`fragment_after_bodyless_entry`), also in the bodyless record itself.
+//! The rewrite removes a blocked call, so a later bodyless record can be the first one in the
+//! output. So every bodyless record renews the boundary, not only the first one. A bodyless
+//! fragment that continues a custom or Other call does not renew it and does not deviate: that
+//! call's first record was bodyless already.
+//! A fragment that adds nothing is a deviation too, on purpose: the rule does not read content.
+//! Calls that start in or after the latest bodyless record are conforming.
+//!
+//! A present `type` key counts as the type fragment, `null` included (spec § 5.3, P-c): a second
+//! one is `repeated_type`, and a first `"type": null` with a body is `type_shape_mismatch` at
+//! completion. openai-python replaces `type` on every fragment, so a later `"type": null` turns a
+//! function call's type into `None`, and its `new_tool.type == "function"` assert then raises with
+//! a strict prefix of the arguments. A non-stream body keeps reading `null` as absent (D4).
+//!
 //! Every check runs on a small copy of the state ([`Check`]) before anything is changed, so a
 //! deviation leaves the assembly exactly as it was.
 //!
@@ -56,6 +74,9 @@ pub(crate) struct Check {
     calls: Vec<Shadow>,
     /// `Some(has_name)` once a legacy `function_call` fragment arrived.
     legacy: Option<bool>,
+    /// The number of calls that existed before the latest record with a new bodyless entry was
+    /// applied. Each such record renews it, so it only grows.
+    bodyless_at: Option<usize>,
 }
 
 fn once(slot: &mut bool, present: bool, why: &'static str) -> Result<(), Deviation> {
@@ -86,6 +107,21 @@ impl Check {
             long_check(None, l.name.as_deref())?;
             once(self.legacy.get_or_insert(false), l.name.is_some(), "repeated_name")?;
         }
+        let before = self.calls.len();
+        // A bodyless fragment of an existing call with no function body continues a call whose
+        // first record was bodyless already. That record stays in the output before this one
+        // when the call is allowed, and the rewrite removes both when it is blocked.
+        let continues = |f: &Fragment| f.function.is_none() && self.calls.get(f.index as usize).is_some_and(|b| b.shape != Some(Shape::Function));
+        // The rewrite can remove an earlier blocked bodyless call, so every bodyless record can be
+        // the first one that LangChain reads: each one renews the boundary (it only grows).
+        if frags.iter().any(|f| f.function.is_none() && !continues(f)) {
+            self.bodyless_at = Some(before);
+        }
+        if let Some(n) = self.bodyless_at
+            && frags.iter().any(|f| (f.index as usize) < n && !continues(f))
+        {
+            return Err(Deviation("fragment_after_bodyless_entry"));
+        }
         for f in frags {
             let pos = f.index as usize;
             if pos == self.calls.len() {
@@ -96,15 +132,16 @@ impl Check {
             let b = &mut self.calls[pos];
             long_check(f.id.as_deref(), f.function.as_ref().or(f.custom.as_ref()).and_then(|na| na.name.as_deref()))?;
             once(&mut b.id, f.id.is_some(), "repeated_id")?;
-            if let Some(t) = &f.ty {
+            if f.ty_key {
                 // The type names a bodyless Other call, so it is bounded like an id or a name.
-                long_check(Some(t), None)?;
+                long_check(f.ty.as_deref(), None)?;
                 if b.ty.is_some() {
                     return Err(Deviation("repeated_type"));
                 }
-                b.ty = Some(match t.as_str() {
-                    "function" => TyClass::Function,
-                    "custom" => TyClass::Custom,
+                // A `null` type is a present key that names no known type, so it is Other.
+                b.ty = Some(match f.ty.as_deref() {
+                    Some("function") => TyClass::Function,
+                    Some("custom") => TyClass::Custom,
                     _ => TyClass::Other,
                 });
             }
@@ -400,7 +437,7 @@ mod tests {
     fn frags(s: &str) -> (Vec<Fragment>, Option<NameArgs>) {
         let mut v = parse_strict(s.as_bytes()).unwrap();
         v["object"] = crate::openai::classify::CHUNK_OBJECT.into();
-        let Chunk::Choices(mut v) = chunk(&v).unwrap() else { panic!() };
+        let Chunk::Choices { choices: mut v, .. } = chunk(&v).unwrap() else { panic!() };
         let c = v.remove(0);
         (c.fragments, c.legacy)
     }
@@ -410,6 +447,129 @@ mod tests {
     fn feed(a: &mut ChoiceAssembly, s: &str) -> Result<(), Deviation> {
         let (f, l) = frags(s);
         a.apply(&f, l.as_ref())
+    }
+
+    const F0A: &str = r#"{"index":0,"id":"c0","type":"function","function":{"name":"read","arguments":"{\"v\":\"ab"}}"#;
+    const F0B: &str = r#"{"index":0,"function":{"arguments":"cdefgh\"}"}}"#;
+    const CUSTOM1: &str = r#"{"index":1,"id":"c1","type":"custom","custom":{"name":"note","input":"x"}}"#;
+
+    #[test]
+    fn a_fragment_of_an_earlier_call_after_a_custom_entry_deviates() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        feed(&mut a, &tc(CUSTOM1)).unwrap();
+        assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    /// The rewrite removes a blocked call, so a later bodyless record can be the first one that
+    /// LangChain reads. Call 0 is blocked: LangChain then raises at record 3 with a prefix of call 1.
+    #[test]
+    fn a_fragment_after_a_later_bodyless_record_deviates() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c0","type":"custom","custom":{"name":"blocked_early","input":"x"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"v\":\"ab"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":2,"id":"c2","type":"custom","custom":{"name":"note","input":"x"}}"#)).unwrap();
+        assert_eq!(
+            feed(&mut a, &tc(r#"{"index":1,"function":{"arguments":"cdefgh\"}"}}"#)),
+            Err(Deviation("fragment_after_bodyless_entry"))
+        );
+    }
+
+    /// A bodyless fragment that continues a custom call only repeats a call whose first record was
+    /// bodyless already, so it neither renews the boundary nor deviates.
+    #[test]
+    fn interleaved_custom_continuations_are_conforming() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c0","type":"custom","custom":{"name":"note","input":"x"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","type":"custom","custom":{"name":"sql","input":"SELECT"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":0,"custom":{"input":"y"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"custom":{"input":" 1"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":2,"id":"c2","type":"function","function":{"name":"read","arguments":"{"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":2,"function":{"arguments":"}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn a_later_null_type_is_a_repeated_type() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        // The null-type fragment carries a body, so the bodyless rule does not fire first.
+        let r = feed(&mut a, &tc(r#"{"index":0,"type":null,"function":{"arguments":""}}"#));
+        assert_eq!(r, Err(Deviation("repeated_type")));
+        // Without a body it is a bodyless entry for an earlier call: a deviation either way.
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        assert_eq!(feed(&mut a, &tc(r#"{"index":0,"type":null}"#)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    #[test]
+    fn a_first_null_type_with_a_function_body_mismatches() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c0","type":null,"function":{"name":"read","arguments":"{}"}}"#)).unwrap();
+        assert_eq!(a.state().finish(), Err(Deviation("type_shape_mismatch")));
+    }
+
+    #[test]
+    fn a_null_type_with_no_body_stays_kind_other() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"x","type":null}"#)).unwrap();
+        assert_eq!(a.state().finish(), Ok(vec![ToolCallKind::Other]));
+    }
+
+    #[test]
+    fn an_earlier_call_in_the_bodyless_record_deviates() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        assert_eq!(feed(&mut a, &tc(&format!("{F0B},{CUSTOM1}"))), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    #[test]
+    fn a_bodyless_entry_with_only_an_index_counts() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1}"#)).unwrap();
+        assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    /// Spec § 5.1 names `"function": null` as bodyless: `null` reads as an absent body.
+    #[test]
+    fn a_null_function_is_a_bodyless_entry() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","function":null}"#)).unwrap();
+        assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    #[test]
+    fn custom_first_then_function_is_conforming() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c0","type":"custom","custom":{"name":"note","input":"x"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","type":"function","function":{"name":"read","arguments":"{"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"function":{"arguments":"\"v\":1"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"function":{"arguments":"}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn a_function_call_that_starts_in_the_bodyless_record_is_conforming() {
+        let mut a = ChoiceAssembly::default();
+        let start1 = r#"{"index":1,"id":"c1","type":"function","function":{"name":"read","arguments":"{"}}"#;
+        let custom0 = r#"{"index":0,"id":"c0","type":"custom","custom":{"name":"note","input":"x"}}"#;
+        feed(&mut a, &tc(&format!("{custom0},{start1}"))).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"function":{"arguments":"}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn contiguous_function_then_custom_is_conforming() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        feed(&mut a, &tc(F0B)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","type":"custom","custom":{"name":"note","input":"x"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"custom":{"input":"y"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn the_bodyless_rule_is_a_no_op_for_a_body() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(&format!("{F0A},{CUSTOM1}"))).unwrap();
     }
 
     #[test]
@@ -474,13 +634,22 @@ mod tests {
                 &[r#"{"index":0,"id":"c","type":"function","function":{"name":"safe_"}}"#, r#"{"index":0,"function":{"name":"rm"}}"#],
                 "repeated_name",
             ),
-            (&[r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#, r#"{"index":0,"id":"d"}"#], "repeated_id"),
             (
-                &[r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#, r#"{"index":0,"type":"function"}"#],
+                &[
+                    r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#,
+                    r#"{"index":0,"id":"d","function":{"arguments":""}}"#,
+                ],
+                "repeated_id",
+            ),
+            (
+                &[
+                    r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#,
+                    r#"{"index":0,"type":"function","function":{"arguments":""}}"#,
+                ],
                 "repeated_type",
             ),
             (
-                &[r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#, r#"{"index":0,"custom":{"input":"y"}}"#],
+                &[r#"{"index":0,"id":"c","type":"custom","custom":{"name":"x"}}"#, r#"{"index":0,"function":{"arguments":"y"}}"#],
                 "shape_changed",
             ),
         ];
