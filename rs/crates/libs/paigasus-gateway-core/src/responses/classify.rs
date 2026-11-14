@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg_attr(not(test), allow(dead_code))]
 //! Responses record classification (spec § 6.1–§ 6.3).
 //!
 //! Sources of the two closed lists:

@@ -396,7 +396,7 @@ mod tests {
                     }
                     frames.push(frame);
                 }
-                Step::End(f) | Step::UpstreamError(f) => frames.push(f),
+                Step::End(f) | Step::UpstreamError(f) | Step::Terminal { frame: f, .. } => frames.push(f),
             }
         }
         let mut out = Vec::new();

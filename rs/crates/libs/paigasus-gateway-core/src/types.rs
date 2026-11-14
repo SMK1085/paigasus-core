@@ -170,6 +170,8 @@ pub enum HoldKey {
 pub enum Format {
     OpenAiChat,
     AnthropicMessages,
+    /// The OpenAI Responses API (`/v1/responses`, SMA-769).
+    OpenAiResponses,
 }
 
 #[cfg(test)]

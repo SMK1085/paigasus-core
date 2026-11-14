@@ -1,26 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Non-stream bodies (spec § 4.2, § 4.4, § 5.2). The same strict parse and the same canonical
-//! rules as the streams, applied to `choices[].message` (OpenAI) or `content[]` (Anthropic).
+//! rules as the streams, applied to `choices[].message` (OpenAI), `content[]` (Anthropic) or
+//! `output[]` (Responses, SMA-769 § 6.5).
 //!
 //! A body that the streams would call a deviation is `Malformed` here: there is no earlier
 //! frame to release, so the caller applies `on_failure` to the whole body.
 
 use serde_json::Value;
 
-use crate::json::{Malformed, check_numbers, parse_strict};
+use crate::json::{Malformed, ResponsesDoc, check_numbers, check_numbers_responses, parse_strict, parse_strict_responses};
 use crate::report::{ReportDecision, ReportEntry, header_value, report_entry};
 use crate::types::{Basis, BlockCode, Decision, Format, ToolCall};
-use crate::{anthropic, openai};
+use crate::{anthropic, openai, responses};
 
 /// The tool calls of one complete body, and the means to rewrite it.
 pub struct BodyCalls {
     format: Format,
     value: Value,
+    /// The block code the body itself forces on each call (`Truncated` for a Responses item that
+    /// is not `"completed"`, ruling F7). It wins over every decision. Empty for chat and Anthropic.
+    forced: Vec<Option<BlockCode>>,
     pub calls: Vec<ToolCall>,
     pub unenforceable: Vec<ReportEntry>,
 }
 
-/// Parse a complete `chat.completion` or Messages body (strictly) and extract its tool calls.
+/// Parse a complete `chat.completion`, Messages or Responses body (strictly) and extract its tool
+/// calls.
 ///
 /// # Errors
 /// `Malformed` when the body is over `max_bytes`, is not strict JSON, or is not in canonical form.
@@ -28,22 +33,50 @@ pub fn parse_body(format: Format, body: &[u8], max_bytes: usize) -> Result<BodyC
     if body.len() > max_bytes {
         return Err(Malformed("too_large"));
     }
-    let value = parse_strict(body)?;
-    // serde_json has no arbitrary_precision: an integer beyond u64/i64 becomes an f64 and is
-    // rounded, so the decider would see a different number than a client that keeps the exact int
-    // (I1). Rejecting every such number up front also makes the single re-serialization in
-    // `apply` exact for every number that remains, so the rewritten body cannot alter a value.
-    check_numbers(&value)?;
+    let value = match format {
+        // Spec § 7.1: the Responses key list and data subtrees. The numbers of the data subtrees
+        // are the application's; `assembly::tool_call` checks those of each client-run item.
+        Format::OpenAiResponses => {
+            let value = parse_strict_responses(body, ResponsesDoc::Body)?;
+            check_numbers_responses(&value, ResponsesDoc::Body)?;
+            value
+        }
+        Format::OpenAiChat | Format::AnthropicMessages => {
+            let value = parse_strict(body)?;
+            // serde_json has no arbitrary_precision: an integer beyond u64/i64 becomes an f64 and
+            // is rounded, so the decider would see a different number than a client that keeps
+            // the exact int (I1). Rejecting every such number up front also makes the single
+            // re-serialization in `apply` exact for every number that remains, so the rewritten
+            // body cannot alter a value.
+            check_numbers(&value)?;
+            value
+        }
+    };
     let (calls, unenforceable) = match format {
         Format::OpenAiChat => (openai::body::calls(&value)?, Vec::new()),
         Format::AnthropicMessages => anthropic::body::calls(&value)?,
+        Format::OpenAiResponses => responses::body::calls(&value)?,
     };
-    Ok(BodyCalls { format, value, calls, unenforceable })
+    let forced = match format {
+        Format::OpenAiResponses => responses::body::forced(&value, &calls),
+        Format::OpenAiChat | Format::AnthropicMessages => Vec::new(),
+    };
+    Ok(BodyCalls {
+        format,
+        value,
+        forced,
+        calls,
+        unenforceable,
+    })
 }
 
 impl BodyCalls {
-    /// The block code of call `i`. A decision vector of the wrong length blocks every call (D18).
+    /// The block code of call `i`. A forced code wins (ruling F7). A decision vector of the wrong
+    /// length blocks every call (D18).
     fn code(&self, decisions: &[Decision], i: usize) -> Option<BlockCode> {
+        if let Some(code) = self.forced.get(i).copied().flatten() {
+            return Some(code);
+        }
         if decisions.len() != self.calls.len() {
             return Some(BlockCode::DeciderError);
         }
@@ -64,6 +97,7 @@ impl BodyCalls {
         match self.format {
             Format::OpenAiChat => openai::body::rewrite(&mut value, &self.calls, &codes),
             Format::AnthropicMessages => anthropic::body::rewrite(&mut value, &self.calls, &codes),
+            Format::OpenAiResponses => responses::body::rewrite(&mut value, &self.calls, &codes),
         }
         Some(serde_json::to_vec(&value).expect("a Value always serializes"))
     }
@@ -422,5 +456,51 @@ mod tests {
         assert_eq!(err_of(Format::OpenAiChat, &v), Some("incomplete_arguments"));
         let b = parse_body(Format::OpenAiChat, &call(""), MAX).unwrap();
         assert_eq!(b.calls[0].arguments, "{}");
+    }
+
+    fn responses_body(output: Value) -> Vec<u8> {
+        json!({"id":"resp_1","object":"response","status":"completed","output":output,"usage":{"total_tokens":3}})
+            .to_string()
+            .into_bytes()
+    }
+
+    #[test]
+    fn a_responses_body_parses_and_rewrites_through_parse_body() {
+        let body = responses_body(json!([
+            {"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Sure.","annotations":[]}]},
+            {"type":"function_call","id":"fc_1","call_id":"c1","name":"rm","namespace":"fs","arguments":"{\"p\":\"SECRET\"}","status":"completed"},
+            {"type":"web_search_call","id":"ws_1","status":"completed"}
+        ]));
+        let b = parse_body(Format::OpenAiResponses, &body, MAX).unwrap();
+        assert_eq!(b.calls.iter().map(|c| (c.position, c.display_name())).collect::<Vec<_>>(), [(1, "fs.rm".to_owned())]);
+        assert_eq!(b.unenforceable.len(), 1);
+        assert!(b.report(&[block()], Basis::Decider).contains(r#""name":"fs.rm""#));
+        assert!(parse_body(Format::OpenAiResponses, &body, MAX).unwrap().apply(&[Decision::Allow]).is_none(), "allow keeps the bytes");
+        let out = b.apply(&[block()]).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert!(!String::from_utf8(out).unwrap().contains("SECRET"));
+        assert_eq!(v["output"][1]["id"], "msg_paigasus_1");
+        assert_eq!(v["output"][1]["content"][0]["text"], "[paigasus] tool call \"fs.rm\" was blocked (policy).");
+        assert_eq!(v["output"][0]["id"], "msg_1");
+        assert_eq!(v["output"][2]["type"], "web_search_call");
+        // Ruling F7: a call that is not completed is blocked `Truncated` over an allow, in the
+        // rewrite and in the report.
+        let cut = responses_body(json!([{"type":"function_call","id":"fc_1","call_id":"c1","name":"rm","arguments":"{\"p\":\"SEC","status":"incomplete"}]));
+        let b = parse_body(Format::OpenAiResponses, &cut, MAX).unwrap();
+        let report = b.report(&[Decision::Allow], Basis::Decider);
+        assert!(report.contains(r#""decision":"block""#) && report.contains(r#""code":"truncated""#), "{report}");
+        let v: Value = serde_json::from_slice(&b.apply(&[Decision::Allow]).unwrap()).unwrap();
+        assert_eq!(v["output"][0]["content"][0]["text"], "[paigasus] tool call \"rm\" was blocked (truncated).");
+        // The Responses profile, not the chat one: a `choices` body is malformed here.
+        assert!(parse_body(Format::OpenAiResponses, &two_calls(), MAX).is_err());
+    }
+
+    /// Spec § 7.1: application keys and numbers in a data subtree pass on the body.
+    #[test]
+    fn structured_output_keys_pass_on_the_body() {
+        let body = br#"{"id":"resp_1","object":"response","status":"completed","metadata":{"Id":"x"},"text":{"format":{"type":"json_schema","name":"s","schema":{"type":"object","properties":{"Name":{"type":"string"},"ID":{"type":"integer","maximum":1e300},"Type":{"type":"string"},"constructor":{"type":"string"}}}}},"output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{}","annotations":[]}]}]}"#;
+        let b = parse_body(Format::OpenAiResponses, body, MAX).unwrap_or_else(|e| panic!("{e}"));
+        assert!(b.calls.is_empty());
+        assert!(b.apply(&[]).is_none());
     }
 }

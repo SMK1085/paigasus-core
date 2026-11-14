@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg_attr(not(test), allow(dead_code))]
 //! Responses item assembly under the canonical rules (spec § 5, § 6.2, § 6.4, § 15).
 //!
 //! The decided value of a client-run item is always its `output_item.done` item (§ 5). The rules
@@ -845,6 +844,20 @@ impl Assembly {
         self.overflowed
     }
 
+    /// The terminal event arrived (R3). Every later record but `[DONE]` is dropped and counted.
+    pub(crate) fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// The end-of-stream rule of the response hold, read at the terminal event, at `[DONE]` and at
+    /// EOF: the hold opened and cannot be decided as complete. It is cut when no terminal event
+    /// arrived (R3; also R15 when a client-run item has no `done`), when the stream is truncated
+    /// (R15), or when the calls outgrew the cap (749 D13, ruling T4d). A cut hold is never decided
+    /// on [`Assembly::hold_calls`]: the interceptor applies `on_failure` to it.
+    pub(crate) fn hold_cut(&self) -> bool {
+        self.hold_open && (!self.ended || self.truncated() || self.overflowed())
+    }
+
     /// The completed calls, in `output_index` order. Moves them out. Empty after an overflow.
     pub(crate) fn hold_calls(&mut self) -> Vec<ToolCall> {
         let calls = std::mem::take(&mut self.calls);
@@ -862,7 +875,9 @@ impl Assembly {
         self.names.clone()
     }
 
-    /// R7: the stream's events carry `sequence_number`.
+    /// R7: the stream's events carry `sequence_number`. Tests only: the rewrite copies the key
+    /// from the frame it replaces, so it needs no flag.
+    #[cfg(test)]
     pub(crate) fn sequence_numbers(&self) -> bool {
         self.numbered == Some(true)
     }
@@ -1595,6 +1610,36 @@ mod tests {
         let a = passes(vec![created(), msg[0].clone(), completed(vec![msg[0]["item"].clone()])]);
         assert!(!a.truncated());
         assert!(!passes(stream(vec![function_item(0, "fc_1", "call_1", "f", &["{}"])])).truncated());
+    }
+
+    /// The end-of-stream rule (R3, R15, T4d): a hold is cut unless a terminal event completes it.
+    #[test]
+    fn the_hold_is_cut_unless_a_terminal_event_completes_it() {
+        let call = || function_item(0, "fc_1", "call_1", "f", &["{}"]);
+        let whole = passes(stream(vec![call()]));
+        assert!(whole.ended() && !whole.hold_cut(), "a terminal event with every call done completes the hold");
+        let text = passes(stream(vec![message_item(0, "msg_1", "x")]));
+        assert!(text.ended() && !text.hold_cut(), "no hold, nothing to cut");
+        // R3: every item done, but no terminal event.
+        let mut evs = stream(vec![call()]);
+        evs.pop();
+        let a = passes(evs);
+        assert!(!a.ended() && a.hold_cut());
+        // R15: the stream stops inside a client-run item.
+        let (item, _) = call();
+        let a = passes(vec![created(), item[0].clone(), item[1].clone()]);
+        assert!(!a.ended() && a.hold_cut());
+        // R15 at the terminal event: a `done` that is not completed.
+        let (mut evs, mut done) = call();
+        done["status"] = json!("incomplete");
+        let last = evs.len() - 1;
+        evs[last]["item"] = done.clone();
+        let a = passes(stream(vec![(evs, done)]));
+        assert!(a.ended() && a.hold_cut());
+        // T4d: calls over the cap are never decided.
+        let mut a = Assembly::with_cap(1);
+        run_with(&mut a, &numbered(stream(vec![call()]))).unwrap();
+        assert!(a.ended() && a.overflowed() && a.hold_cut());
     }
 
     #[test]

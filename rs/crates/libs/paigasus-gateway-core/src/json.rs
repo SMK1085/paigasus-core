@@ -104,7 +104,6 @@ pub(crate) fn parse_value_strict(bytes: &[u8]) -> Result<Value, Malformed> {
 
 /// Parse a Responses request, event or body strictly (spec § 7.1). The Responses key list and the
 /// per-document data subtrees apply; the chat and Anthropic rules are not used.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_strict_responses(bytes: &[u8], doc: ResponsesDoc) -> Result<Value, Malformed> {
     parse_with(bytes, Mode::ResponsesTop(doc))
 }
@@ -129,7 +128,6 @@ enum Mode {
 
 /// Which Responses document is parsed. It decides where the data subtrees are (spec § 7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum ResponsesDoc {
     /// A request body: `tools`, `text`, `metadata`, `instructions`, `prompt`, `reasoning` and
     /// `input` at the top level are data.
@@ -279,7 +277,6 @@ pub(crate) fn check_numbers(v: &Value) -> Result<(), Malformed> {
 /// `check_numbers` for a Responses document: the envelope only. The data subtrees (spec § 7.1) are
 /// the application's, so a schema `maximum: 1e300` passes. The caller runs `check_numbers` on each
 /// client-run item.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn check_numbers_responses(v: &Value, doc: ResponsesDoc) -> Result<(), Malformed> {
     fn envelope(o: &Map<String, Value>, with_input: bool, response_key: bool) -> Result<(), Malformed> {
         for (k, v) in o {

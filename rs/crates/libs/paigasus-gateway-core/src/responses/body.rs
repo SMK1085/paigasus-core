@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg_attr(not(test), allow(dead_code))]
 //! Non-stream Responses bodies (spec § 6.5 non-stream, § 15).
 //!
 //! The body is parsed with `parse_strict_responses(.., Body)` and checked with

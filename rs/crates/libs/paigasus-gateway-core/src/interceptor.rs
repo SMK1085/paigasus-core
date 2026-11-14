@@ -16,6 +16,7 @@ use crate::limits::{Limits, OnFailure};
 use crate::openai::stream::OpenAiStream;
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
 use crate::report::{ReportDecision, ReportEntry, report_comment, report_entry};
+use crate::responses::stream::ResponsesStream;
 use crate::sse::{self, SseItem, SseSplitter};
 use crate::types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall};
 
@@ -77,6 +78,8 @@ pub struct Interceptor {
     verdicts: Verdicts,
     holds: BTreeMap<HoldKey, Track>,
     mode: Mode,
+    /// A Responses terminal event arrived (SMA-769 R3): only `[DONE]` may follow.
+    after_terminal: bool,
     after_end: bool,
     input_done: bool,
     ended: bool,
@@ -97,6 +100,7 @@ impl Interceptor {
         let proto: Box<dyn Protocol> = match format {
             Format::OpenAiChat => Box::new(OpenAiStream::with_cap(limits.max_held_bytes)),
             Format::AnthropicMessages => Box::new(AnthropicStream::with_cap(limits.max_held_bytes)),
+            Format::OpenAiResponses => Box::new(ResponsesStream::with_cap(limits.max_held_bytes)),
         };
         Interceptor {
             proto,
@@ -108,6 +112,7 @@ impl Interceptor {
             verdicts: Verdicts::new(),
             holds: BTreeMap::new(),
             mode: Mode::Normal,
+            after_terminal: false,
             after_end: false,
             input_done: false,
             ended: false,
@@ -157,6 +162,7 @@ impl Interceptor {
         self.queued = 0;
         self.ended = true;
         let mut out = std::mem::take(&mut self.out);
+        out.extend(self.proto.closing_on_abort(&self.verdicts).into_iter().map(Action::Emit));
         out.push(Action::Emit(self.terminal.clone()));
         out
     }
@@ -231,6 +237,12 @@ impl Interceptor {
             return;
         }
         let rec = match item {
+            // R3: after the terminal event every record but `[DONE]` is dropped, so an oversized
+            // one must not become a failure that rules on the hold the decider owns either.
+            SseItem::Oversized if self.after_terminal => {
+                self.count(Metric::RecordDropped("after_done"));
+                return;
+            }
             SseItem::Oversized => {
                 self.count(Metric::RecordDropped("oversized"));
                 self.stream_failure(now);
@@ -254,6 +266,7 @@ impl Interceptor {
                 self.count(Metric::RecordDropped(if why == "late_fragment" { "late_fragment" } else { "malformed" }));
                 self.stream_failure(now);
             }
+            Err(StepError::AfterEnd) => self.count(Metric::RecordDropped("after_done")),
             Ok(Step::UpstreamError(frame)) => {
                 if !self.queue.is_empty() || self.any_open() {
                     let acts = self.abort();
@@ -261,6 +274,14 @@ impl Interceptor {
                 } else {
                     self.enqueue(frame, now);
                 }
+            }
+            Ok(Step::Terminal { frame, completed }) => {
+                self.after_terminal = true;
+                for (k, calls) in completed {
+                    self.complete(k, calls, now);
+                }
+                self.truncate_open();
+                self.enqueue(frame, now);
             }
             Ok(Step::End(frame)) => {
                 self.after_end = true;
@@ -1053,6 +1074,65 @@ mod tests {
         assert!(r.out.find("content_block_stop") < r.out.find("message_stop"), "{}", r.out);
     }
 
+    /// One Responses `function_call` item: `added`, one delta, the `.done` event and the item `done`.
+    fn responses_call(i: u32, name: &str, args: &str) -> Vec<Value> {
+        let id = format!("fc_{i}");
+        let item = |a: &str, status: &str| json!({"id":id,"type":"function_call","status":status,"arguments":a,"call_id":format!("call_{i}"),"name":name});
+        vec![
+            json!({"type":"response.output_item.added","output_index":i,"item":item("","in_progress")}),
+            json!({"type":"response.function_call_arguments.delta","output_index":i,"item_id":id,"delta":args}),
+            json!({"type":"response.function_call_arguments.done","output_index":i,"item_id":id,"arguments":args}),
+            json!({"type":"response.output_item.done","output_index":i,"item":item(args,"completed")}),
+        ]
+    }
+
+    #[test]
+    fn a_responses_stream_runs_end_to_end() {
+        let life = |t: &str, output: Value| json!({"type":t,"response":{"id":"resp_1","status":"in_progress","output":output}});
+        let mut evs = vec![life("response.created", json!([])), life("response.in_progress", json!([]))];
+        let (read, rm) = (responses_call(0, "read", "{}"), responses_call(1, "rm_all", "{\"p\":\"CANARY\"}"));
+        let output = json!([read[3]["item"], rm[3]["item"]]);
+        evs.extend(read);
+        evs.extend(rm);
+        evs.push(life("response.completed", output));
+        let chunks: Vec<String> = evs.into_iter().map(ev).collect();
+        let (r, i) = run_format(Format::OpenAiResponses, limits(), &chunks, &block_named("rm"));
+        assert!(i.is_finished());
+        assert_eq!(r.decides.len(), 1, "one hold per response");
+        let (hold, calls) = &r.decides[0];
+        assert_eq!(*hold, HoldKey::Response);
+        assert_eq!(
+            calls.iter().map(|c| (c.position, c.name.as_str(), c.arguments.as_str())).collect::<Vec<_>>(),
+            [(0, "read", "{}"), (1, "rm_all", "{\"p\":\"CANARY\"}")]
+        );
+        assert!(!r.out.contains("CANARY"), "{}", r.out);
+        assert!(
+            r.out.contains(r#""status":"completed","arguments":"{}","call_id":"call_0","name":"read""#),
+            "the allowed call is kept: {}",
+            r.out
+        );
+        assert!(r.out.contains(r#"[paigasus] tool call \"rm_all\" was blocked (policy)."#), "{}", r.out);
+        assert!(r.out.contains("\"id\":\"msg_paigasus_1\""), "{}", r.out);
+        assert!(r.out.contains(r#""position":1,"name":"rm_all","name_sha256_8""#), "{}", r.out);
+    }
+
+    /// The default `closing_on_abort` keeps the chat bytes of D17: only the terminal frame, even
+    /// with a blocked choice whose notice is still owed, and with a truncated one.
+    #[test]
+    fn the_chat_abort_bytes_do_not_change() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
+        i.push(call(0, 0, "read", "\"X1\"").as_bytes(), t0);
+        let acts = i.push(b"data: {\"a\":1,\"a\":2}\n\n", t0);
+        assert!(acts.contains(&Action::Count(Metric::OnFailure("malformed"))), "the choice is blocked: {acts:?}");
+        assert_eq!(i.abort(), vec![Action::Emit(Bytes::from_static(TERMINAL))]);
+        let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
+        i.push(call(0, 0, "read", "\"X1\"").as_bytes(), t0);
+        let acts = i.push(b"data: [DONE]\n\n", t0);
+        assert!(acts.contains(&Action::Count(Metric::OnFailure("truncated"))), "{acts:?}");
+        assert_eq!(i.abort(), vec![Action::Emit(Bytes::from_static(TERMINAL))]);
+    }
+
     /// § 5.3 and D13: an observed hold still assembles for the report, but never past the cap. A
     /// call that outgrows it is not decided, and its frames still flow.
     #[test]
@@ -1076,6 +1156,7 @@ mod tests {
                     vec![json_delta(0, "\"}"), block_stop(0)],
                     ev(json!({"type":"message_stop"})),
                 ),
+                Format::OpenAiResponses => unreachable!("the loop runs chat and Anthropic only"),
             };
             let t0 = Instant::now();
             let mut i = Interceptor::new(format, l, Bytes::from_static(TERMINAL), t0);

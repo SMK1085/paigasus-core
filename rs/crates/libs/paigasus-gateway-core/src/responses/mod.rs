@@ -5,3 +5,4 @@ pub(crate) mod assembly;
 pub(crate) mod body;
 pub(crate) mod classify;
 pub(crate) mod rewrite;
+pub(crate) mod stream;

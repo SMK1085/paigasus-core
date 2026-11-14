@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg_attr(not(test), allow(dead_code))]
 //! The rewrite of a blocked Responses item (spec § 6.5): one completed `message` item that holds
 //! the notice, and the four events that a stream carries for it. Key order is the order of § 6.5.
 

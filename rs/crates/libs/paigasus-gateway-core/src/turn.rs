@@ -4,7 +4,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::json::{Malformed, opt_obj, opt_str, parse_strict};
+use crate::json::{Malformed, ResponsesDoc, opt_obj, opt_str, parse_strict, parse_strict_responses};
 use crate::responses::assembly::tool_call;
 use crate::responses::classify::{ItemClass, item_class};
 use crate::types::{Format, ToolCallKind};
@@ -71,10 +71,11 @@ pub struct ToolResultRef {
 
 #[must_use]
 pub fn parse_request(format: Format, body: &[u8]) -> ToolTurn {
-    let parsed = parse_strict(body).and_then(|v| match format {
-        Format::OpenAiChat => openai(&v),
-        Format::AnthropicMessages => anthropic(&v),
-    });
+    let parsed = match format {
+        Format::OpenAiResponses => parse_strict_responses(body, ResponsesDoc::Request).and_then(|v| responses(&v)),
+        Format::OpenAiChat => parse_strict(body).and_then(|v| openai(&v)),
+        Format::AnthropicMessages => parse_strict(body).and_then(|v| anthropic(&v)),
+    };
     match parsed {
         Ok(f) => ToolTurn::Parsed(f),
         Err(_) => ToolTurn::Unavailable("malformed"),
@@ -181,7 +182,7 @@ fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
     Ok((req_str(body, "name")?, opt_str(body.get(input), input)?.unwrap_or_default()))
 }
 
-/// The request side of a Responses turn (spec § 7.2). Task 6 calls this from `parse_request`.
+/// The request side of a Responses turn (spec § 7.2), read by `parse_request`.
 ///
 /// `tools[]` gives the definitions: a `function` or `custom` tool by name, the tools of a
 /// `namespace` tool with that namespace, and any other tool by its `type` (kind `Other`). A
@@ -190,7 +191,6 @@ fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
 /// prior calls (read as a response reads them, `assembly::tool_call`), and each output item is a
 /// tool result. An `mcp_approval_response` refers to its request by `approval_request_id`, and the
 /// id of an `mcp_approval_request` call is its item `id`. A string `input` has no items.
-#[cfg_attr(not(test), allow(dead_code))]
 fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
     let mut f = TurnFacts::default();
@@ -520,6 +520,26 @@ mod tests {
             json!({"input":[{"type":"function_call","name":"f"}]}),
         ] {
             assert!(responses(&v).is_err(), "{v}");
+        }
+    }
+
+    #[test]
+    fn parse_request_reads_a_responses_request() {
+        let body = json!({"model":"m","stream":true,
+            "tools":[{"type":"function","name":"read","parameters":{"type":"object","properties":{"Id":{"type":"integer","maximum":1e300},"constructor":{}}}}],
+            "metadata":{"Id":"x"},
+            "input":[{"type":"function_call","id":"fc_1","call_id":"c1","name":"read","arguments":"{}","status":"completed"},
+                     {"type":"function_call_output","call_id":"c1","output":"SECRET"}]});
+        let f = facts(Format::OpenAiResponses, body);
+        assert_eq!(f.definitions.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["read"]);
+        assert_eq!(f.prior_calls.iter().map(|c| c.id.as_deref()).collect::<Vec<_>>(), [Some("c1")]);
+        assert_eq!(f.tool_results.len(), 1);
+        for bad in [&b"{"[..], br#"{"a":1,"a":2}"#, br#"{"input":[{"type":"item_reference","id":"x"}]}"#, br#"{"Type":"x","type":"y"}"#] {
+            assert!(
+                matches!(parse_request(Format::OpenAiResponses, bad), ToolTurn::Unavailable("malformed")),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
         }
     }
 }
