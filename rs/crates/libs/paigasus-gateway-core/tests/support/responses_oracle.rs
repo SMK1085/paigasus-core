@@ -237,8 +237,8 @@ pub fn as_model_call(c: &ToolCall) -> ModelCall {
 }
 
 /// Whether a model call matches a decided call (spec § 10.1, ruling F9): the same choice, kind,
-/// name and call id; the same `output_index` where the SDK shows one; the same namespace, except
-/// for a LangChain tool call, which carries none; and the same arguments. A function's raw `""`
+/// name and call id; the same `output_index` where the SDK shows one; the same namespace; and the
+/// same arguments. A function's raw `""`
 /// matches the decided `{}` (749 § 11). A LangChain tool call (`parsed`) holds the parsed
 /// arguments, and a custom call's `{"__arg1": input}`. An item kind matches as the JSON of the
 /// item without `status`, after the SDK's `null` drop when `parsed`. The match is exact: a prefix
@@ -250,8 +250,7 @@ pub fn matches(mc: &ModelCall, d: &ModelCall) -> bool {
     if mc.position.is_some() && mc.position != d.position {
         return false;
     }
-    let lc_tool_call = mc.parsed && matches!(mc.kind, "function" | "custom");
-    if !lc_tool_call && mc.namespace != d.namespace {
+    if mc.namespace != d.namespace {
         return false;
     }
     let parse = |s: &str| serde_json::from_str::<Value>(s).ok();
@@ -1588,6 +1587,24 @@ impl Lc {
         Ok(())
     }
 
+    /// The namespace that the application reads for the tool call at content index `index`: the
+    /// `namespace` of the `function_call` (or `custom_tool_call`) content block at that index
+    /// (`base.py:5578-5588` for a function, the item dump at `base.py:5620-5622` for a custom
+    /// call). The tool call chunk itself has no namespace (`base.py:5569-5577`, `5623-5631`). A non-string
+    /// namespace is its JSON text, so it never equals a decided one.
+    fn namespace_at(&self, index: Option<&Value>) -> Option<String> {
+        let block = self
+            .content
+            .iter()
+            .flatten()
+            .find(|b| matches!(b.get("type").and_then(Value::as_str), Some("function_call" | "custom_tool_call")) && b.get("index").is_some() && py_eq(b.get("index"), index))?;
+        match block.get("namespace") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(ns)) => Some(ns.clone()),
+            Some(v) => Some(v.to_string()),
+        }
+    }
+
     /// `init_tool_calls` of the summed chunk, plus the content blocks that are calls.
     fn calls(&self) -> Vec<ModelCall> {
         let mut out = Vec::new();
@@ -1610,6 +1627,7 @@ impl Lc {
                 Some(Value::String(s)) => Some(s.clone()),
                 Some(v) => Some(v.to_string()),
             };
+            let namespace = self.namespace_at(c.get("index"));
             out.push(ModelCall {
                 choice: 0,
                 kind,
@@ -1618,7 +1636,7 @@ impl Lc {
                 parsed: true,
                 position: None,
                 id,
-                namespace: None,
+                namespace,
             });
         }
         for b in self.content.iter().flatten() {
@@ -1667,7 +1685,10 @@ fn langchain_steps(bytes: &[u8], lc: &mut Lc) -> Result<(), String> {
 /// Calls: `tool_calls` of the summed chunk (`init_tool_calls` with `parse_partial_json`; an
 /// `invalid_tool_calls` entry is not a call), plus the content blocks of `computer_call`,
 /// `apply_patch_call`, `mcp_approval_request` and `tool_search_call`. `local_shell_call` and
-/// `shell_call` are dropped. A tool call carries no namespace and no output index. Not
+/// `shell_call` are dropped. A tool call carries no output index. Its namespace is not on the tool
+/// call chunk (`base.py:5569-5577`) but on the content block at the same content index, which the
+/// application reads: `function_call_content["namespace"]` (`base.py:5587-5588`), or the custom
+/// item's dump. The model takes it from there ([`Lc::namespace_at`]). Not
 /// modelled: the `non_standard` branch of `merge_lists` (no OpenAI block has that type) and the
 /// raises inside `_construct_lc_result_from_responses_api` at the terminal event (a missing raise
 /// only makes the model stricter).

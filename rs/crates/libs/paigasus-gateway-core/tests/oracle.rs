@@ -343,9 +343,10 @@ fn each_model_reads_a_conforming_stream() {
         ("custom", "sql".into(), Some(1), s("call_2"), None),
         ("apply_patch", "apply_patch".into(), Some(2), s("call_3"), None),
     ];
-    // LangChain's tool calls carry no output index and no namespace; the patch is a content block.
+    // LangChain's tool calls carry no output index; the namespace is on the call's content
+    // block; the patch is a content block.
     let langchain: Vec<View> = vec![
-        ("function", "read_file".into(), None, s("call_1"), None),
+        ("function", "read_file".into(), None, s("call_1"), s("fs")),
         ("custom", "sql".into(), None, s("call_2"), None),
         ("apply_patch", "apply_patch".into(), None, s("call_3"), None),
     ];
@@ -479,6 +480,26 @@ fn a_changed_patch_fails_p1() {
 }
 
 type Change = (&'static str, fn(&mut Value));
+
+/// LangChain reads a function call's namespace from the `added` item, into the `function_call`
+/// content block at the call's content index (langchain-openai 1.8.0 `base.py:5587-5588`). A
+/// namespace that changes at `added` only reaches LangChain alone, and must fail P1.
+#[test]
+fn langchain_reads_the_namespace_from_the_content_block() {
+    let item = function_item(0, "fc_1", "call_1", "read_file", Some("fs"), &["{}"]);
+    let input = render_responses(&conforming(vec![item]));
+    let o = drive(Format::OpenAiResponses, limits(OnFailure::Block), &[&input], &allow_all);
+    let lc = run_langchain(&o.out);
+    assert_eq!(lc.calls.iter().map(|c| c.namespace.clone()).collect::<Vec<_>>(), [s("fs")]);
+    let mutated = mutate(&o.out, |v| {
+        if v["type"] == "response.output_item.added" {
+            v["item"]["namespace"] = json!("other");
+        }
+    });
+    assert_eq!(run_langchain(&mutated).calls[0].namespace, s("other"));
+    let e = check_i1(Format::OpenAiResponses, &input, &mutated, &o.decided, false).expect_err("LangChain runs another namespace");
+    assert!(e.starts_with("langchain-responses runs an undecided or blocked call"), "{e}");
+}
 
 #[test]
 fn a_changed_position_id_or_namespace_fails() {
