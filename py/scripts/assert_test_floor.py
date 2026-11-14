@@ -11,12 +11,12 @@ disk, so a deleted directory drops them together and it stays green.
 This guard reads `pytest --collect-only -q` from stdin and fails unless EXACTLY the pinned set
 of packages contributed collected tests. Intended use (pipe), with py/ as the cwd:
 
-    uv run pytest --collect-only -q | uv run python scripts/assert_test_floor.py
+    bash ../ci/python-env/run.sh run py pytest --collect-only -q | bash ../ci/python-env/run.sh run py python scripts/assert_test_floor.py
 
 The pure functions are exercised by a built-in fixture suite, which is also the only way to
 reach exit codes 3 and 4 -- they read git, not stdin:
 
-    uv run python scripts/assert_test_floor.py --self-test
+    bash ../ci/python-env/run.sh run py python scripts/assert_test_floor.py --self-test
 """
 
 from __future__ import annotations
@@ -283,7 +283,7 @@ def main(argv: list[str]) -> int:
     if sys.stdin.isatty():
         print(
             "py:test floor: stdin is a terminal. This guard reads `pytest --collect-only -q` from "
-            "a pipe; run it as `uv run pytest --collect-only -q | uv run python "
+            "a pipe; run it as `bash ../ci/python-env/run.sh run py pytest --collect-only -q | bash ../ci/python-env/run.sh run py python "
             "scripts/assert_test_floor.py`, or use --self-test (SMA-610).",
             file=sys.stderr,
         )

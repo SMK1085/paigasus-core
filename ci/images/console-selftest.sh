@@ -1454,6 +1454,9 @@ awk 'index($0, "      - name: Console release sequence") == 1 { on = 1; next }
      on && /^      [-#]/ { exit }' "$W1_WF" > "$T/rs-body.sh" || infra "awk could not read images.yml"
 [ -s "$T/rs-body.sh" ] || infra "no run: body for 'Console release sequence' in images.yml"
 mkdir -p "$T/rs-work/ci/images" "$T/rs-bin"
+# SMA-770: the body calls release_decision.py through the real wrapper, which then finds the stub
+# tool below on PATH. So the work tree holds a copy of ci/python-env, not a stub of it.
+cp -R "$REPO/ci/python-env" "$T/rs-work/ci/python-env" || infra "could not copy ci/python-env into the RS work tree"
 # shellcheck disable=SC2016 # the stub lines are written literally
 printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$RS_LOG"' \
   'if [ "${1:-}" = "$RS_FAIL_CMD" ] && [ "${2:-}" = "$RS_FAIL_KEY" ]; then exit 1; fi' 'exit 0' \

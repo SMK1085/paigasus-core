@@ -661,7 +661,7 @@ def _malformed_config_asserts_three() -> str | None:
     MEASURED before the SMA-603 fix wave: `workspace = 3` raised a bare `TypeError` out of
     `assert_default_tag_format`, `_assert_repo`'s `except InconclusiveError` did not catch it, the
     interpreter exited 1 with a traceback, and `run.sh`'s `run_checker` mapped that 1 onto
-    `die_infra` (2). Check 11 then reported "uv or the interpreter failed" for what is plainly a
+    `die_infra` (2). Check 11 then reported "the package manager or the interpreter failed" for what is plainly a
     broken repository file, and README.md's "never 1" claim was false.
 
     SMA-608 types the `workspace = 3` shape itself: `config_sections` now raises
@@ -1288,8 +1288,8 @@ _REGISTRY_SHAPE_CASES: tuple[tuple[str, str, str], ...] = (
      '[chain.iam]\nkind = "cargo"\nchangelog = "c"\nghcr = "g"\nhub = "h"\n',
      "has no string version_file"),
     ("an unknown kind",
-     '[chain.iam]\nkind = "pip"\nversion_file = "v"\nchangelog = "c"\nghcr = "g"\nhub = "h"\n',
-     "kind 'pip' is not one of"),
+     '[chain.iam]\nkind = "gem"\nversion_file = "v"\nchangelog = "c"\nghcr = "g"\nhub = "h"\n',
+     "kind 'gem' is not one of"),
     ("a key outside [a-z][a-z0-9-]*",
      '[chain.Iam_X]\nkind = "cargo"\nversion_file = "v"\nchangelog = "c"\nghcr = "g"\nhub = "h"\n',
      "is not [a-z][a-z0-9-]*"),
@@ -1767,7 +1767,7 @@ def self_test() -> int:
     # EVERY call is wrapped. A helper that raises anything other than a returned error string
     # would otherwise escape main() and exit the interpreter at 1 — which README.md's "0, 2 or 3,
     # never 1" contract forbids, and which run_checker would then map onto die_infra (2),
-    # reporting "uv or the interpreter failed" for a broken repository file. MEASURED (SMA-608
+    # reporting "the package manager or the interpreter failed" for a broken repository file. MEASURED (SMA-608
     # Task 3, M3 re-run): with config_sections's element-not-a-table check neutered, its own
     # `entry.get("name")` raises AttributeError on a non-dict entry — this wrapper is what turns
     # that into a reported FAIL instead of an interpreter exit at 1. Not every neutered check

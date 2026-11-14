@@ -33,6 +33,29 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   The darwin wasm binary changes (74514 to 74519 bytes) and the four glue files do not.
   Stable cargo has no host-conditional profile. A `cargo`, `napi` or `maturin` command that you
   type with `--release --target <apple-darwin triple>` still strips host units. Set the variable for it.
+- **SMA-770 Part 3: no repository setting stops the darwin host strip, so the env rule stays.**
+  Measured on macOS 27.2 (`cargo build --release -v --locked --workspace --target aarch64-apple-darwin`,
+  fresh `CARGO_TARGET_DIR`, the variable unset). A host unit is a rustc call with no `--target`.
+  Linux: Docker `rust:1.95.0-bookworm`, the same build without `--target`. The A/A control gave
+  six identical shipped binaries (sha256).
+  The count of 182 host units is larger than the R1 figures above. Those count only the two bindings
+  (29 of 40) or only the two Moon tasks (16 of 16). This count covers the whole `--workspace` build.
+
+  | Candidate | darwin host units with `-C strip=debuginfo` | Linux bytes identical | Linux dir growth | Verdict |
+  |---|---|---|---|---|
+  | base | 182 of 182 | yes (A/A) | 0 (1425, 1427 MB) | - |
+  | C1 `[profile.release.build-override] debug = "line-tables-only"` in `rs/Cargo.toml` | 0 of 182 | no (6 of 6 changed) | +541 MB | fail |
+  | C3 `[env] CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP` in `rs/.cargo/config.toml` | 182 of 182 | yes | +3 MB | fail |
+
+  C1 works on darwin, but it fails the pass rule of the SMA-770 spec section 7. That rule needs
+  byte-identical shipped Linux binaries (after a passing A/A control) and less than 50 MB of growth.
+  C1 changed 6 of 6 shipped binaries and added 541 MB. It also changed target units: 308 of 358 kept
+  `-C strip=debuginfo`, against 358 of 358 in the base. C2 (the same key in
+  `.cargo/config.toml`) is not measured, because C1 failed. C3 has no effect: `[env]` sets the
+  environment of processes that cargo starts, not cargo's own config. C4 (a target `rustflags`)
+  does not reach host units (SMA-767). C5 (`[build] rustc-wrapper`) is rejected: it has no
+  per-target form, it breaks the Windows legs, `RUSTC_WRAPPER` overrides it, and it runs on every compile.
+  Keep the `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP` rule in `wheels.yml`, `prebuild.yml` and `moon.yml`.
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - Tests that assert on a log line use `paigasus_logging::test_support` (`capture_logs` at TRACE,
   `capture_logs_at(level)`). Turn on its `test-support` feature from `[dev-dependencies]` only,

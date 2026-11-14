@@ -1,4 +1,4 @@
-# osv-scanner waivers for the npm + pip lockfiles (SMA-518).
+# osv-scanner waivers for the npm + Python lockfiles (SMA-518).
 #
 # This is the JS/Python counterpart to the `[advisories] ignore` list in rs/deny.toml, and
 # it is held to the same standard: an entry must explain why the vulnerable code path is
@@ -7,7 +7,7 @@
 # waiver is worse than the alert backlog it replaces, because it is invisible.
 #
 # Prefer fixing over waiving. For a pinned npm transitive, add a range-scoped selector to
-# the `overrides:` block in ts/pnpm-workspace.yaml; for pip, `uv lock --upgrade-package`.
+# the `overrides:` block in ts/pnpm-workspace.yaml; for Python, the package manager lock upgrade of one package.
 #
 # Format (osv-scanner 2.x):
 #

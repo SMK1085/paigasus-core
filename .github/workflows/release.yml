@@ -108,8 +108,8 @@ permissions:
 # release commit on main already carries the bumped versions, so the artifacts can be built first.
 #
 # COROLLARY, equally load-bearing: NO JOB DOWNSTREAM OF `release` MAY BUILD ANYTHING. A wasm-pack
-# or uv build after the crates.io upload reintroduces exactly the half-published state this order
-# exists to prevent.
+# or Python package build after the crates.io upload reintroduces exactly the half-published state
+# this order exists to prevent.
 #
 # ONE EXCEPTION, stated precisely (fix round 3, Important 5; the earlier wording claimed both
 # publish jobs "only download, assert and upload", and that was false of one of them):
@@ -314,7 +314,7 @@ jobs:
         if: steps.preflight.outputs.configured == 'true'
         run: proto install release-plz
 
-      - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
+      - name: Install Moon-managed toolchains (node, pnpm, rust, python and the Python package manager)
         if: steps.preflight.outputs.configured == 'true'
         run: moon setup
 
@@ -358,8 +358,9 @@ jobs:
       # push straight to it).
       #
       # This step compiles nothing (SMA-684). `--write` edits text with python3 and runs
-      # `cargo update -w` and `uv lock`; neither runs a build script or a build backend (spec F6,
-      # F7, and repo:version-lockstep's --check asserts the static uv metadata that F7 needs).
+      # `cargo update -w` and `ci/python-env/run.sh lock`; neither runs a build script or a build
+      # backend (spec F6, F7, and repo:version-lockstep's --check asserts the static metadata of
+      # the Python package manager that F7 needs).
       # The isolation level is the JOB, not the step: every step of this job can read the App
       # private key from the runner, so no step may compile or run an install script.
       # ci/actionlint/release_guard.py V18 holds this job to an allowlist of actions, command
@@ -457,8 +458,8 @@ jobs:
           persist-credentials: false
 
       # LOAD-BEARING, and the reason is measured (SMA-603 C1). `ci/release-plan/run.sh` runs the
-      # checker through `uv`, which is a proto-managed shim and is NOT on `ubuntu-latest`. Without
-      # these two steps the Decide step died, the `plan` job failed, and because every consumer
+      # checker through the Python package manager, which is a proto-managed shim and is NOT on
+      # `ubuntu-latest`. Without these two steps the Decide step died, the `plan` job failed, and because every consumer
       # carries a status-function-free `if:` — GitHub applies an implicit `success()` — `wheels`,
       # `prebuild` and `proto-dist` SKIPPED, and `approve-release`, `release`, `publish-pypi` and
       # `publish-npm` skipped down the `needs:` chain. The whole publish path was dropped on every
@@ -466,8 +467,8 @@ jobs:
       # `publish-npm` died on `pnpm: command not found`, and the conclusion there was "the actual
       # fault was a missing toolchain".
       #
-      # `run.sh` now ALSO fails safe when `uv` is absent (it writes nothing_to_release=false and
-      # exits 0). Both halves are needed: without the toolchain the job would build every time and
+      # `run.sh` now ALSO fails safe when the Python package manager is absent (it writes
+      # nothing_to_release=false and exits 0). Both halves are needed: without the toolchain the job would build every time and
       # the feature would never fire; without the fail-safe a future toolchain regression would
       # drop the release path again. SMA-688: `run.sh --github-output` exits 0 on every OTHER
       # path too, but exits 2 when ci/images/chains.toml names no key, and the plan job then fails.
@@ -480,9 +481,10 @@ jobs:
           cache: false
 
       # NARROW install, like the release-pr job's `proto install release-plz`: this job needs
-      # none of actionlint/buf/deny/machete/nextest/promtool/wasm-pack, only `uv`.
-      - name: Install pinned uv
-        run: proto install uv
+      # none of actionlint/buf/deny/machete/nextest/promtool/wasm-pack, only the Python package
+      # manager.
+      - name: Install the Python package manager
+        run: bash ci/python-env/run.sh install
 
       # ONE PHYSICAL LINE, AND ONE COMMAND. release_guard.py's command_segments is per physical
       # line, so a backslash continuation would be judged without its flags; V9e additionally
@@ -539,9 +541,9 @@ jobs:
       - name: Install Moon-managed toolchains
         run: moon setup
 
+      # From the repository root: the wrapper changes to py/ itself and keeps dist/ at the root.
       - name: Build the distribution
-        working-directory: py
-        run: uv build --package paigasus-proto --out-dir ../dist
+        run: bash ci/python-env/run.sh build paigasus-proto dist
 
       - name: Upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -864,8 +866,9 @@ jobs:
       # Binds the proto distribution to the release, same reason as the wheel/sdist assertion
       # above: `PROTO_VERSION` was computed but never exported, so this upload shipped whatever
       # proto-dist happened to build — a re-run against a moved main could publish it at a
-      # version that does not match the release. Filenames match `uv build --package
-      # paigasus-proto`'s output (a pure-Python uv_build wheel, tag py3-none-any).
+      # version that does not match the release. Filenames match the output of
+      # `ci/python-env/run.sh build paigasus-proto dist` (a pure-Python uv_build wheel, tag
+      # py3-none-any).
       - name: Assert the proto distribution matches the released version
         if: steps.relinfo.outputs.proto_release == 'true'
         env:
@@ -922,10 +925,10 @@ jobs:
       # run 33264074393, after crates.io and PyPI had already published.
       #
       # Every other job in this repository that runs pnpm already does this: both `prebuild.yml`
-      # jobs. (`proto-dist` above also runs `moon setup`, but it runs uv, not pnpm. `release-pr`
-      # above runs no pnpm since SMA-684.) `publish-npm` was the only one missing
+      # jobs. (`proto-dist` above also runs `moon setup`, but it runs the Python package manager,
+      # not pnpm. `release-pr` above runs no pnpm since SMA-684.) `publish-npm` was the only one missing
       # it, and it is the one job that had never executed before the flag was flipped.
-      - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
+      - name: Install Moon-managed toolchains (node, pnpm, rust, python and the Python package manager)
         run: moon setup
 
       # REQUIRED (SMA-602 final review, Critical 1), and its absence would repeat the SMA-580
@@ -1281,11 +1284,11 @@ jobs:
         with:
           cache: false
 
-      - name: Install crane, syft and uv
+      - name: Install crane, syft and the Python package manager
         run: |
           proto install crane
           proto install syft
-          proto install uv
+          bash ci/python-env/run.sh install
 
       - name: Build the image as an OCI archive
         run: ci/images/run.sh build-oci "${SERVICE}" out
@@ -1296,7 +1299,7 @@ jobs:
           set -euo pipefail
           archive="out/paigasus-${SERVICE}-${ARCH}.oci.tar"
           ci/images/run.sh load-oci "$archive" "paigasus-${SERVICE}:dev"
-          digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
+          digests="$(bash ci/python-env/run.sh script ci/images/release_decision.py oci-digests "$archive")"
           manifest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
           # I2 (SMA-658 fix round 1): write the digest into the uploaded artifact, BEFORE
           # upload, so the publish job can compare it against a digest it computes itself from
@@ -1324,7 +1327,7 @@ jobs:
         run: |
           set -euo pipefail
           sbom="out/sbom-paigasus-${SERVICE}-${ARCH}.spdx.json"
-          summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "$sbom")"
+          summary="$(bash ci/python-env/run.sh script ci/images/release_decision.py sbom-summary "$sbom")"
           echo "M8 image=paigasus-${SERVICE} arch=${ARCH} ${summary}"
           # One floor for each image kind, read from ci/images/chains.toml. A cargo image needs
           # Rust crates (cargo auditable), libc6, and exactly one Debian entry for each package of
@@ -1332,7 +1335,7 @@ jobs:
           # wrote at the repo root in this job). A console image needs npm packages, libc6 and
           # next, and reads no list. Every kind takes --arch. A failed floor exits 3 and names
           # what is missing. A missing list for a cargo image exits 2.
-          uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "${SERVICE}" --arch "${ARCH}" "$sbom"
+          bash ci/python-env/run.sh script ci/images/release_decision.py sbom-floor --service "${SERVICE}" --arch "${ARCH}" "$sbom"
 
       - name: Upload the archive and its SBOM
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -1402,11 +1405,11 @@ jobs:
         with:
           cache: false
 
-      - name: Install crane, cosign and uv
+      - name: Install crane, cosign and the Python package manager
         run: |
           proto install crane
           proto install cosign
-          proto install uv
+          bash ci/python-env/run.sh install
 
       # SMA-688 D11: two downloads, each by its EXACT artifact name. `pattern: image-iam-*` also
       # matched `image-iam-console-*`, because `iam` is a string prefix of `iam-console`.
@@ -1459,7 +1462,7 @@ jobs:
           }
           for arch in amd64 arm64; do
             archive="in/paigasus-${SERVICE}-${arch}.oci.tar"
-            digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
+            digests="$(bash ci/python-env/run.sh script ci/images/release_decision.py oci-digests "$archive")"
             manifest_digest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
             # I2 (SMA-658 fix round 1): the build job wrote this file from the archive it just
             # built, before upload. This file and the archive travel in the SAME artifact
@@ -1487,7 +1490,7 @@ jobs:
           # mismatched arm64 archive could still publish. Both archives are now checked in the
           # same loop, and each error names its own arch.
           for arch in amd64 arm64; do
-            labels="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py labels "in/paigasus-${SERVICE}-${arch}.oci.tar")"
+            labels="$(bash ci/python-env/run.sh script ci/images/release_decision.py labels "in/paigasus-${SERVICE}-${arch}.oci.tar")"
             label="$(printf '%s\n' "$labels" | sed -n 's/^version=//p')"
             # minor 7 (SMA-658 fix round 1): this is what catches Task 4's empty-version
             # fail-safe -- if `plan` ever emits skip_<svc>=false with an empty version, $VERSION
@@ -1566,15 +1569,14 @@ jobs:
           # (Task 8's own fix). Spec section 7.1 still holds -- the registry commands stay
           # literal in this step; this only removes the duplication inside it.
           revision_of() {
-            crane config "$1" | uv run --no-project --python '>=3.12' python3 -c \
-              'import json,sys; c=json.load(sys.stdin); print(c["config"]["Labels"]["org.opencontainers.image.revision"])'
+            crane config "$1" | bash ci/python-env/run.sh script ci/images/release_decision.py revision
           }
           # D10: the FIRST digest published under :<version> is final. A later run adopts it and
           # discards its own build, so a rebuild -- which never reproduces a digest, because the
           # chisel cut resolves the live archive -- can never replace a published image.
           # C5 (SMA-658): --new-digest feeds only the push-new branch below, so it must be a real
           # digest, not a placeholder -- pass the amd64 archive's own manifest digest.
-          decision="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py adopt \
+          decision="$(bash ci/python-env/run.sh script ci/images/release_decision.py adopt \
             --new-digest "$DIGEST_AMD64" \
             --ghcr "$GHCR_EXISTING" --dockerhub "$HUB_EXISTING" --git-tag "$GIT_TAG_STATE")"
           action="$(printf '%s\n' "$decision" | sed -n 's/^action=//p')"
@@ -1722,7 +1724,7 @@ jobs:
           fi
           cosign sign --yes "${HUB_IMAGE}@${index}"
           git tag -l > /tmp/tags.txt
-          floating="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py floating \
+          floating="$(bash ci/python-env/run.sh script ci/images/release_decision.py floating \
             --service "$SERVICE" --version "$VERSION" --tags-file /tmp/tags.txt)"
           move="$(printf '%s\n' "$floating" | sed -n 's/^move=//p')"
           minor="$(printf '%s\n' "$floating" | sed -n 's/^minor_tag=//p')"

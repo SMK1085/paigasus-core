@@ -8,7 +8,7 @@ is the other half: it asks the imported module what it really exports. Neither a
 other, because `__text_signature__` carries parameter names but no TYPES (design doc §4.4, §6).
 
 This lives in paigasus-kernel-py:test because that task already forces a wheel rebuild
-(`uv sync --reinstall-package`) and already keys on the stub, both Rust sources and every
+(the reinstall of one package) and already keys on the stub, both Rust sources and every
 manifest — so the check costs no new build and no registry wiring.
 """
 

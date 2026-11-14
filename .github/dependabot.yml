@@ -91,7 +91,7 @@ updates:
         update-types:
           - "version-update:semver-major"
 
-  # ---- Python: uv workspace at py/ ----
+  # ---- Python: workspace at py/ ----
   - package-ecosystem: uv
     directory: /py
     schedule:
@@ -109,8 +109,8 @@ updates:
           - minor
           - patch
 
-  # ---- Python: standalone uv project for repo:workflow-credentials (SMA-593) ----
-  # A SECOND uv entry, not a widening of the one above: dependabot resolves each `directory`
+  # ---- Python: standalone project for repo:workflow-credentials (SMA-593) ----
+  # A SECOND Python entry, not a widening of the one above: dependabot resolves each `directory`
   # independently, and this gate's project is outside the py/ workspace on purpose (it is CI
   # tooling, not a shipped package). Without this entry its pinned pyyaml is in a lockfile that
   # nothing watches, which the spec's "the pin is in a lockfile, where Dependabot sees it"
@@ -132,8 +132,8 @@ updates:
           - minor
           - patch
 
-  # ---- Python: standalone uv project for repo:helm-render (SMA-513 PR 2b) ----
-  # A THIRD uv entry, for the same reason as the /ci/workflow-credentials entry above: this
+  # ---- Python: standalone project for repo:helm-render (SMA-513 PR 2b) ----
+  # A THIRD Python entry, for the same reason as the /ci/workflow-credentials entry above: this
   # gate's project sits outside the py/ workspace on purpose, so without this entry its pinned
   # pyyaml is in a lockfile that nothing watches. Settings mirror that block exactly.
   - package-ecosystem: uv
@@ -153,8 +153,8 @@ updates:
           - minor
           - patch
 
-  # ---- Python: standalone uv project for repo:wasm-lockstep (SMA-693) ----
-  # A FOURTH uv entry, for the same reason as the /ci/workflow-credentials entry above: this
+  # ---- Python: standalone project for repo:wasm-lockstep (SMA-693) ----
+  # A FOURTH Python entry, for the same reason as the /ci/workflow-credentials entry above: this
   # gate's project sits outside the py/ workspace on purpose, so without this entry its pinned
   # pyyaml is in a lockfile that nothing watches. Settings mirror that block exactly.
   - package-ecosystem: uv

@@ -57,6 +57,8 @@ on:
       - 'rs/crates/bindings/paigasus-wasm/.prototools'
       - 'ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs'
       - 'ts/packages/paigasus-kernel/tests/wasm-probe.mjs'
+      # SMA-770: the wrapper that the zig install of the musl legs goes through.
+      - 'ci/python-env/**'
 
 # Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
 # GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
@@ -141,14 +143,14 @@ jobs:
         run: rustup target add ${{ matrix.target }} ${{ matrix.extra_target }}
 
       # musl targets cross-compile with cargo-zigbuild (zig supplies the musl libc) on a glibc host,
-      # instead of a job-level Alpine container (decision #6 revised — SMA-428 CI). ziglang via pip is
-      # the zig that cargo-zigbuild discovers (`python3 -m ziglang`); cargo-zigbuild provides the
+      # instead of a job-level Alpine container (decision #6 revised — SMA-428 CI). ziglang from
+      # PyPI is the zig that cargo-zigbuild discovers (`python3 -m ziglang`); cargo-zigbuild provides the
       # `cargo zigbuild` subcommand that napi's `-x` flag invokes. Built with the pinned toolchain.
       - name: Set up zig + cargo-zigbuild (musl cross-compile)
         if: ${{ matrix.zig }}
         working-directory: rs
         run: |
-          pip3 install --break-system-packages ziglang
+          bash ../ci/python-env/run.sh install-ziglang-system python3
           cargo install --locked cargo-zigbuild
 
       - name: Install JS workspace deps

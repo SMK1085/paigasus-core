@@ -11,7 +11,7 @@
 #
 # Exit codes: 0 pass | 1 an assertion failed | 2 infrastructure error. Both checkers exit 3 for an
 # assertion (and lockstep_check.py 4 for "no change"). This wrapper maps 3 to 1 and every other
-# non-zero code to 2, because `uv` and a Python traceback both exit 1 (ci/CLAUDE.md). Do not
+# non-zero code to 2, because the package manager and a Python traceback both exit 1 (ci/CLAUDE.md). Do not
 # "normalize" a checker to 1.
 #
 # The lock comes from `git show HEAD:rs/Cargo.lock`, never from the working tree: an unlocked
@@ -27,7 +27,7 @@ set -euo pipefail
 # proto or shim call. Exported once here, so every later capture inherits it (SMA-609).
 export PROTO_REPORTER=text
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 HERE="$REPO_ROOT/ci/wasm-lockstep"
 WORKFLOW="$REPO_ROOT/.github/workflows/wasm-lockstep.yml"
 
@@ -45,12 +45,12 @@ done
 TMP="$(mktemp -d)" || die_infra "mktemp -d failed"
 trap 'rm -rf "$TMP"' EXIT
 
-# The venv interpreter, resolved ONCE, at the top level. --locked stops uv from rewriting
+# The venv interpreter, resolved ONCE, at the top level. --locked stops the wrapper's `run ci/wasm-lockstep` from rewriting
 # uv.lock. lockstep_check.py needs only the stdlib, but runs through the same >=3.12 interpreter,
 # because the host python3 of the development Mac can be older than tomllib (3.11).
-command -v uv >/dev/null 2>&1 || die_infra "uv is not on PATH; run 'proto install', or add ~/.proto/shims to PATH"
-PY="$(uv run --locked --project "$HERE" --python '>=3.12' python3 -c 'import sys, tomllib, yaml; print(sys.executable)')" \
-  || die_infra "uv could not provide the locked PyYAML environment for $HERE"
+bash "$REPO_ROOT/ci/python-env/run.sh" probe || die_infra "the package manager is not on PATH; run 'proto install', or add ~/.proto/shims to PATH"
+PY="$(bash "$REPO_ROOT/ci/python-env/run.sh" run ci/wasm-lockstep python3 -c 'import sys, tomllib, yaml; print(sys.executable)')" \
+  || die_infra "the package manager could not provide the locked PyYAML environment for $HERE"
 case "$PY" in
   "$HERE/.venv/"*) ;;
   *) die_infra "the interpreter is not under $HERE/.venv. Got: ${PY:-<empty>}" ;;

@@ -23,11 +23,11 @@ fileGroups:
 
 tasks:
   lint:
-    command: 'uv run --locked ruff check .'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
+    command: 'bash $workspaceRoot/ci/python-env/run.sh run py ruff check .'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**', '/ci/python-env/run.sh']
   fmt:
-    command: 'uv run --locked ruff format --check .'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
+    command: 'bash $workspaceRoot/ci/python-env/run.sh run py ruff format --check .'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**', '/ci/python-env/run.sh']
   typecheck:
     # `script` (not `command`) because we chain two steps. First run: basedpyright's native
     # output, which fails on real type errors. Second run: --outputjson piped to the coverage
@@ -49,9 +49,9 @@ tasks:
     # py:test it needs no passthrough.
     script: |
       set -euo pipefail
-      uv run --locked basedpyright
-      uv run --locked basedpyright --outputjson | uv run --locked python scripts/assert_typecheck_coverage.py
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
+      bash $workspaceRoot/ci/python-env/run.sh run py basedpyright
+      bash $workspaceRoot/ci/python-env/run.sh run py basedpyright --outputjson | bash $workspaceRoot/ci/python-env/run.sh run py python scripts/assert_typecheck_coverage.py
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**', '/ci/python-env/run.sh']
   test:
     # `command` (not `script`) deliberately: Moon forwards `moon run py:test -- -k foo` to a
     # command, and SILENTLY DROPS it for a script -- measured, `-k parity` gave 124 passed /
@@ -68,6 +68,7 @@ tasks:
       # The guard and the wrapper. Without this, editing either would not re-run the task and a
       # broken guard would serve a cached pass.
       - 'scripts/**'
+      - '/ci/python-env/run.sh'
       # assert_test_floor.py's registry assertion reads these, so a PR adding a scaffold package
       # that has only a pyproject.toml must select this task -- otherwise the assertion never runs
       # on the PR that breaks it, and reds an unrelated PR later. repo:affected-smoke lists this

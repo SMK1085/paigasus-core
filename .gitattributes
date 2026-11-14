@@ -32,3 +32,7 @@ rs/crates/bindings/paigasus-node-bindings/index.d.ts text eol=lf linguist-genera
 # silently disappear, so neither directory gets any end-of-line conversion.
 rs/crates/libs/paigasus-gateway-core/tests/fixtures/**/*.sse -text
 rs/crates/libs/paigasus-gateway-core/tests/golden/** -text
+#
+# SMA-770. ci/python-env/run.sh runs under Git bash on the Windows wheel legs. A CRLF checkout of
+# any shell script breaks bash, so every .sh file keeps LF.
+*.sh text eol=lf

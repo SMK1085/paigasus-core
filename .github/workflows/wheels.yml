@@ -49,6 +49,9 @@ on:
       - 'rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
       - 'rs/crates/bindings/paigasus-py-bindings/.cargo/config.toml'
       - 'py/packages/paigasus-kernel/pyproject.toml'
+      # SMA-770: the wrapper that the zig install, the wheel smoke, the sdist install and the
+      # face build go through.
+      - 'ci/python-env/**'
 
   # POST-merge verification of Rust changes — where the broad coverage lives.
   push:
@@ -185,7 +188,8 @@ jobs:
       # `cargo install cargo-zigbuild` is needed here).
       - name: Set up zig (Linux cross-compile)
         if: ${{ matrix.zig }}
-        run: python -m pip install ziglang
+        shell: bash
+        run: bash ci/python-env/run.sh install-ziglang python
 
       # Set ONLY on the musl legs, and via $GITHUB_ENV rather than a step-level
       # `env: RUSTFLAGS: ${{ … || '' }}`. A set-but-EMPTY RUSTFLAGS still outranks
@@ -434,7 +438,7 @@ jobs:
             ls -R "$venv"
             exit 1
           fi
-          "$vpy" -m pip install --no-index --disable-pip-version-check "$WHEEL"
+          bash ci/python-env/run.sh wheel-smoke "$venv" "$WHEEL"
           # Exercises real kernel logic, not just the loader: the PRN below is vector 0 of
           # rs/crates/libs/paigasus-kernel-parity/vectors/prn_canonical.json, whose `canonical`
           # equals its `input`.
@@ -601,6 +605,16 @@ jobs:
           # rustc they have. This leg proves the advertised MSRV is real.
           - { runner: ubuntu-latest, msrv: true }
     steps:
+      # SMA-770: only ci/python-env/, for the sdist install below. No rust-toolchain.toml and
+      # no other repository file reaches this job; the comment above the MSRV step says why
+      # that matters. It runs BEFORE the download: actions/checkout cleans the workspace.
+      - name: Checkout the Python environment wrapper only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: ci/python-env
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Download the sdist
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
@@ -620,16 +634,17 @@ jobs:
         with:
           python-version: '3.12'
 
-      # No `actions/checkout` in this job on purpose: the sdist ships no rust-toolchain.toml
-      # (MEASURED: its Cargo `include` allowlist doesn't list it). The real insulation isn't
-      # the missing checkout, though — `pip install <local-sdist>` uses pip's build isolation,
+      # The checkout of this job holds only `ci/python-env/` (SMA-770), so no rust-toolchain.toml
+      # exists in the workspace. The sdist ships none either (MEASURED: its Cargo `include`
+      # allowlist doesn't list it). The real insulation isn't the narrow checkout, though: an
+      # install of a local sdist uses the build isolation of the Python package installer,
       # which unpacks the sdist and runs the build entirely under the OS temp root (MEASURED
       # locally: `/private/var/.../T/pip-req-build-*`), a directory tree that is not an
       # ancestor or descendant of $GITHUB_WORKSPACE. So rustup's upward directory walk from
-      # that build dir would never reach a checked-out rust-toolchain.toml even if this job
-      # did add a checkout step — `rustup default` below stays authoritative either way. The
-      # checkout is omitted because this job simply doesn't need repo source, not as a load-
-      # bearing MSRV precaution.
+      # that build dir would never reach a rust-toolchain.toml in the workspace even if one
+      # were checked out — `rustup default` below stays authoritative either way. The
+      # checkout is narrow because this job needs only the wrapper, not as a load-bearing MSRV
+      # precaution.
       - name: Use rustc at the declared MSRV
         if: ${{ matrix.msrv }}
         run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
@@ -644,10 +659,8 @@ jobs:
           # one outcome this step must never produce (Task 4's precedent for this exact trap).
           if [ -f venv/bin/python ]; then
             vpy="venv/bin/python"
-            vpip="venv/bin/pip"
           elif [ -f venv/Scripts/python.exe ]; then
             vpy="venv/Scripts/python.exe"
-            vpip="venv/Scripts/pip.exe"
           else
             echo "::error::no interpreter under venv"
             ls -R venv
@@ -655,8 +668,9 @@ jobs:
           fi
           # NOT --no-binary :all: — that forces source builds of BUILD dependencies too,
           # maturin included. Installing a local sdist never consults a wheel for the
-          # package itself, so the plain form already proves the source build.
-          "$vpip" install dist/*.tar.gz
+          # package itself, so the plain form already proves the source build. The wrapper finds
+          # the installer of the venv (bin/ or Scripts/) itself.
+          bash ci/python-env/run.sh sdist-install venv dist/*.tar.gz
           # Exercises real kernel logic, not just the loader: same assertion Task 4 Step 7
           # settled on. The PRN below is vector 0 of
           # rs/crates/libs/paigasus-kernel-parity/vectors/prn_canonical.json, whose
@@ -711,11 +725,12 @@ jobs:
       - name: Install Moon-managed toolchains
         run: moon setup
 
+      # From the repository root: the wrapper changes to py/ itself and keeps dist/ at the root.
       - name: Build the wrapper distribution
-        working-directory: py
-        run: uv build --package paigasus-kernel --out-dir ../dist
+        run: bash ci/python-env/run.sh build paigasus-kernel dist
 
-      # [tool.uv.sources] is DEVELOPMENT-ONLY metadata that uv strips from the built
+      # The `sources` table of the Python package manager is DEVELOPMENT-ONLY metadata that
+      # the build strips from the built
       # wheel, so the published wrapper depends on the `==` pin alone. Assert the pin
       # survived: without it the wrapper would float against any bindings version.
       - name: Assert the exact dependency pin shipped

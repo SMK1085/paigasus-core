@@ -12,7 +12,7 @@ Stdlib only (tomllib, Python 3.11+). The `propose` job runs this file with the r
   lockstep_check.py --self-test
   lockstep_check.py --negative-control --lock <lock>
 
-Exit codes: 0 pass | 3 refusal | 2 infrastructure | 4 no change. Not 1: `uv` and a Python
+Exit codes: 0 pass | 3 refusal | 2 infrastructure | 4 no change. Not 1: the package manager and a Python
 traceback both exit 1, so 1 cannot mean "the lock is wrong". ci/wasm-lockstep/run.sh maps
 3 -> 1 and every other non-zero code -> 2. Do not "normalize" the refusal code to 1.
 

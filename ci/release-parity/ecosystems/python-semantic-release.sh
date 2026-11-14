@@ -27,11 +27,11 @@ _psr_fatal() { # line...
   exit 2
 }
 
-# PSR is a Python package in py/'s uv dev-deps. The fixture lives in /tmp, outside
-# the repo, where `uv run` can't resolve the project — so resolve the absolute
+# PSR is a Python package in py/'s package-manager dev-deps. The fixture lives in /tmp, outside
+# the repo, where a plain `run py` cannot resolve the project — so resolve the absolute
 # semantic-release binary once, from py/ (mirrors release-plz.sh's RELEASE_PLZ_BIN).
-# `uv run --frozen` also bootstraps py/.venv from uv.lock (there is no separate
-# `uv sync` CI step).
+# The `run-frozen py` call also creates the py project environment from uv.lock (there is no separate
+# environment sync step in CI).
 #
 # The `|| true` is KEPT so a failure lands as an empty value on the assertion below
 # rather than killing the script under `set -e` with no explanation.
@@ -45,13 +45,13 @@ _psr_fatal() { # line...
 # comparison rather than one side of it.
 _PSR_SELF="${BASH_SOURCE[0]:-$0}"
 _PSR_REPO_ROOT="$(cd "$(dirname "$_PSR_SELF")/../../.." && pwd)"
-PSR_BIN="$( (cd "$_PSR_REPO_ROOT/py" && uv run --frozen python -c 'import shutil,sys; sys.stdout.write(shutil.which("semantic-release") or "")') 2>/dev/null || true )"
+PSR_BIN="$( (cd "$_PSR_REPO_ROOT/py" && bash "$_PSR_REPO_ROOT/ci/python-env/run.sh" run-frozen py python -c 'import shutil,sys; sys.stdout.write(shutil.which("semantic-release") or "")') 2>/dev/null || true )"
 # -f AND -x, for the same reason as release-plz.sh: `-x` alone passes for a
 # searchable directory, which then fails with status 126 at invocation.
 if [ ! -f "$PSR_BIN" ] || [ ! -x "$PSR_BIN" ]; then _psr_fatal \
   "python-semantic-release.sh: semantic-release did not resolve to an executable file." \
   "Got: ${PSR_BIN:-<empty>}" \
-  "Run 'uv sync' in py/, and check py/uv.lock still carries python-semantic-release." \
+  "Set up the py environment (see CONTRIBUTING.md), and check py/uv.lock still carries python-semantic-release." \
   "There is deliberately no PATH fallback (SMA-596 D3.1)."
 fi
 
