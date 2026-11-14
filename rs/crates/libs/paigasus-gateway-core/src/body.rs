@@ -495,6 +495,22 @@ mod tests {
         assert!(parse_body(Format::OpenAiResponses, &two_calls(), MAX).is_err());
     }
 
+    /// Ruling F11, spec § 7.1: the body number check covers the envelope and the client-run items
+    /// only. A provider-run or tool-free item may carry a number that a float cannot hold.
+    #[test]
+    fn lossy_numbers_count_only_in_the_envelope_and_client_run_items() {
+        let body = |item: &str| format!(r#"{{"id":"r","object":"response","status":"completed","output":[{item}]}}"#);
+        let search = r#"{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","n":1e300}}"#;
+        let text = r#"{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"x","annotations":[],"n":1e300}]}"#;
+        for ok in [search, text] {
+            assert!(parse_body(Format::OpenAiResponses, body(ok).as_bytes(), MAX).is_ok(), "{ok}");
+        }
+        let call = r#"{"id":"r","object":"response","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"c1","name":"f","arguments":"{}","status":"completed","n":1e300}]}"#;
+        assert_eq!(parse_body(Format::OpenAiResponses, call.as_bytes(), MAX).err().map(|e| e.0), Some("lossy_number"));
+        let envelope = r#"{"id":"r","object":"response","status":"completed","n":1e300,"output":[]}"#;
+        assert_eq!(parse_body(Format::OpenAiResponses, envelope.as_bytes(), MAX).err().map(|e| e.0), Some("lossy_number"));
+    }
+
     /// Spec § 7.1: application keys and numbers in a data subtree pass on the body.
     #[test]
     fn structured_output_keys_pass_on_the_body() {

@@ -13,6 +13,8 @@ use std::fmt;
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 
+use crate::responses::classify::{ItemClass, item_class};
+
 /// A record the gateway cannot classify with certainty. The label is for tests and logs only;
 /// it never reaches a metric label with a value from the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -274,17 +276,33 @@ pub(crate) fn check_numbers(v: &Value) -> Result<(), Malformed> {
     }
 }
 
-/// `check_numbers` for a Responses document: the envelope only. The data subtrees (spec § 7.1) are
-/// the application's, so a schema `maximum: 1e300` passes. The caller runs `check_numbers` on each
-/// client-run item.
+/// `check_numbers` for a Responses document (spec § 7.1, ruling F11): the envelope and each
+/// client-run item only. The data subtrees are the application's, so a schema `maximum: 1e300`
+/// passes. So do the provider-run and tool-free items of `output` (and of an event's `item`): no
+/// decider reads them. An item with no string `type` is checked (fail closed).
 pub(crate) fn check_numbers_responses(v: &Value, doc: ResponsesDoc) -> Result<(), Malformed> {
+    fn item(v: &Value) -> Result<(), Malformed> {
+        match v.get("type").and_then(Value::as_str).map(item_class) {
+            Some(ItemClass::Content | ItemClass::ProviderRun) => Ok(()),
+            _ => check_numbers(v),
+        }
+    }
+    fn items(v: &Value) -> Result<(), Malformed> {
+        match v {
+            Value::Array(a) => a.iter().try_for_each(item),
+            _ => check_numbers(v),
+        }
+    }
     fn envelope(o: &Map<String, Value>, with_input: bool, response_key: bool) -> Result<(), Malformed> {
         for (k, v) in o {
             if response_key {
                 match v {
                     Value::Object(r) if k == "response" => envelope(r, false, false)?,
+                    _ if k == "item" => item(v)?,
                     _ => check_numbers(v)?,
                 }
+            } else if k == "output" && !with_input {
+                items(v)?;
             } else if !is_responses_data_key(k, with_input) {
                 check_numbers(v)?;
             }
