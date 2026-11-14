@@ -38,6 +38,8 @@ pub(crate) struct ChoiceView {
     pub has_text: bool,
     /// Whether the entry has a `delta` key.
     pub has_delta: bool,
+    /// Whether the delta holds an array outside the `tool_calls` array itself (spec § 5.7).
+    pub stray_array: bool,
 }
 
 pub(crate) struct Fragment {
@@ -113,9 +115,12 @@ fn choice(v: &Value) -> Result<ChoiceView, Malformed> {
     }
     let index = index_of(c.get("index"), MAX_OPENAI_INDEX)?;
     let finish_reason = opt_str(c.get("finish_reason"), "finish_reason")?;
-    let (fragments, legacy, has_text) = match c.get("delta") {
-        None => (Vec::new(), None, false),
-        Some(Value::Object(d)) => delta(d)?,
+    let (fragments, legacy, has_text, stray_array) = match c.get("delta") {
+        None => (Vec::new(), None, false, false),
+        Some(Value::Object(d)) => {
+            let (f, l, t) = delta(d)?;
+            (f, l, t, has_stray_array(d))
+        }
         Some(_) => return Err(Malformed("delta")),
     };
     Ok(ChoiceView {
@@ -125,6 +130,27 @@ fn choice(v: &Value) -> Result<ChoiceView, Malformed> {
         finish_reason,
         has_text,
         has_delta: c.contains_key("delta"),
+        stray_array,
+    })
+}
+
+/// Whether `v` is an array or holds one at any depth.
+fn holds_array(v: &Value) -> bool {
+    match v {
+        Value::Array(_) => true,
+        Value::Object(o) => o.values().any(holds_array),
+        _ => false,
+    }
+}
+
+/// An array in a delta outside the `tool_calls` array: under any other delta key, or under any key
+/// of a tool-call entry (its `function` and `custom` objects included). openai-python's
+/// `accumulate_delta` raises when a later list does not merge into an earlier one (spec § 5.7).
+fn has_stray_array(d: &Map<String, Value>) -> bool {
+    d.iter().any(|(k, v)| match (k.as_str(), v) {
+        ("tool_calls", Value::Array(entries)) => entries.iter().any(|e| matches!(e, Value::Object(o) if o.values().any(holds_array))),
+        ("tool_calls", _) => false,
+        _ => holds_array(v),
     })
 }
 

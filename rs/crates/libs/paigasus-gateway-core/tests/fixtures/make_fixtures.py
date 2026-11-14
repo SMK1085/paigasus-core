@@ -95,6 +95,13 @@ OPENAI_MALFORMED = {
         call(0, 0, "", 'cdefgh"}', first=False),
         fin(0),
     ],
+    "choice_without_delta_in_opening_record": [
+        text(0, "", role=True),
+        ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_0_0", "type": "function", "function": {"name": "read_file", "arguments": '{"v":"ab'}}]}, "finish_reason": None}, {"index": 1, "note": "CANARY-opening"}]),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+        ch([{"index": 1, "delta": {"role": "assistant", "content": "x"}, "finish_reason": "stop"}]),
+    ],
     "type_null": [
         call(0, 0, "read_file", '{"v":"ab'),
         ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "type": None, "function": {"arguments": "CANARY-typenull"}}]}, "finish_reason": None}]),
@@ -110,6 +117,13 @@ OPENAI_MALFORMED = {
     "content_delta_type": [
         call(0, 0, "read_file", '{"v":"ab'),
         {**ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-cdt"}}]}, "finish_reason": None}]), "type": "content.delta"},
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "array_outside_tool_calls": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "delta": {"foo": [{"index": 0, "note": "CANARY-array"}]}, "finish_reason": None}]),
+        ch([{"index": 0, "delta": {"foo": [1]}, "finish_reason": None}]),
         call(0, 0, "", 'cdefgh"}', first=False),
         fin(0),
     ],

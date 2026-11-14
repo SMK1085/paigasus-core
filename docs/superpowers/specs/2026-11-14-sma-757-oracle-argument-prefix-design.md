@@ -48,7 +48,15 @@ every OpenAI model. In each case `core_failed` was `false` and the upstream byte
 | P-a | a chunk with no `choices` key | openai-python, openai-node (raw `{"v":"ab`) |
 | P-b | a choice entry with no `delta` key | openai-python (raw), LangChain (parsed) |
 | P-c | a fragment `{"index":0,"type":null}` of the same call | openai-python (raw), LangChain (parsed) |
+| P-e | two records: an unknown delta key with an indexed list, then a scalar list (`{"foo":[{"index":0}]}`, then `{"foo":[1]}`). The same under a tool-call entry key (`"x":[…]`) or a `function` key. | openai-python (raw `{"v":"ab`) |
+| P-e′ | as P-e, but the indexed list is in a text record before the call, and the scalar list is in the record that opens the call | openai-python (raw `{"v":"ab`) |
+| P-f | an earlier text record, then one record with the fragment that opens the call at position 0 and a choice entry `{"index":1}` with no `delta` at position 1 | openai-python (raw `{"v":"ab`) |
 | P-d | a legacy `function_call` whose extra key changes JSON type | none: LangChain raises, but it merges `arguments` before the extra key, so it holds the full call |
+
+P-e, P-e′ and P-f were measured by the final branch review (2026-11-14, at 29784b6a), after the
+rules of § 5.1 to § 5.5 were in place. openai-python raises in `accumulate_delta` (P-e) or at
+`choice.delta` (P-f) and keeps what it merged before the raise. P-f was missed at first because
+the "open call" state was read before the record that opens the call (§ 5.2).
 
 Two related I1 holes have the same root cause (a record that the interceptor reads differently
 from LangChain). They are not prefixes:
@@ -157,9 +165,10 @@ fragment for a call that existed **before that record was applied**. Such a frag
   (`"arguments":""`, `null`, `"function":{}`) is also a deviation. Exempting it adds a case for no
   practical gain.
 
-### 5.2 `record_without_delta` and `chunk_without_choices` (P-a, P-b)
+### 5.2 `choice_without_delta` and `chunk_without_choices` (P-a, P-b, P-f)
 
-While choice 0 has an open call:
+While choice 0 has an open call, **and in the record that opens a call of choice 0** (the record
+carries tool data for choice 0):
 
 - a chunk with no `choices` key is `Deviation("chunk_without_choices")`;
 - a choice entry with no `delta` key, in any position, is `Deviation("choice_without_delta")`.
@@ -169,6 +178,10 @@ call the queue is non-empty, so it is already a stream-level failure.
 
 Outside an open call these records stay as they are today (classified as tool-free). This limits
 the rule to the place where a raise can cut a call.
+
+The record that opens a call counts (P-f): a raise later in that record cuts the call after its
+first fragment. One predicate in `stream.rs` (`in_call`: an open call, or this record carries tool
+data for choice 0) decides this for § 5.2 and § 5.7, so the two rules cannot drift.
 
 ### 5.3 A present `type` key counts as the type fragment (P-c)
 
@@ -209,6 +222,27 @@ LangChain skips such a record, so the decider and LangChain would see different 
   and of `src/openai/classify.rs` (§ 5.4, § 5.5). The SMA-749 spec is not edited; this spec
   supersedes its § 4.3 list for these shapes.
 
+### 5.7 `array_outside_tool_calls` (P-e)
+
+Inside a call of choice 0 (the `in_call` predicate of § 5.2), a delta that holds an array outside
+the `tool_calls` array itself is `Deviation("array_outside_tool_calls")`. The array can be the
+value of any delta key other than `tool_calls`, or of any key of a tool-call entry, its `function`
+and `custom` objects included, or of any key of a legacy `function_call`. It counts at any depth
+below those keys. The rule applies to the choice entries in every position of the record, as
+§ 5.2 does: a raise in any choice stops openai-python for the whole stream.
+
+- openai-python's `accumulate_delta` merges a list by `index` when the earlier list holds
+  non-scalar entries. A later list whose entry is not a dict raises `TypeError`, so the client
+  keeps a strict prefix of the call. The rule names the shape (an array where no real upstream
+  sends one), not the exact raise condition.
+- The rule also covers an array nested in an object (`{"foo":{"bar":[…]}}`), because
+  `accumulate_delta` merges dicts recursively. The review named only the first level. A kind
+  Other entry with an array in its raw body is a deviation too: that is fail-closed.
+- Choice-level keys (for example `logprobs`) are not merged as a delta. They are not checked.
+- The recorded streams (§ 2.4) and the conforming fixtures hold no array outside `tool_calls`.
+  The recorded delta keys are `content`, `function_call`, `refusal`, `role` and `tool_calls`.
+- Outside a call the shape stays conforming: a raise there cuts no call.
+
 ## 6. Model changes in the oracle
 
 ### 6.1 None for the raise paths
@@ -234,8 +268,10 @@ measured. A unit test pins the three measured inputs: `{"n":10.` gives `{}`, `{"
 
 `tests/support/streams.rs` gets one OpenAI `Quirk` for each shape of § 2.2 and § 5: a bodyless
 entry interleaved inside an open call (it exists), a chunk without `choices`, a choice entry
-without `delta`, a `"type": null` fragment, a top-level `chunk` key with a tool call, and a
-`content.delta` record with a fragment. Each quirk must be able to land between two fragments of
+without `delta`, a `"type": null` fragment, a top-level `chunk` key with a tool call, a
+`content.delta` record with a fragment, and two records with an array outside `tool_calls`
+(§ 5.7). The quirk for a choice entry without `delta` also adds `{"index":1}` behind the
+record that opens a call (P-f). Each quirk must be able to land between two fragments of
 an allowed call. The generators must also emit an Anthropic input with a decimal number, split
 inside the number.
 
@@ -263,7 +299,8 @@ because `support/` is compiled into every test binary.
 One fixture per new rule under `tests/fixtures/openai/malformed/`, generated by
 `tests/fixtures/make_fixtures.py`, each with a row in `malformed_shapes_follow_section_6`:
 `fragment_after_bodyless_entry`, `chunk_without_choices`, `choice_without_delta`, `type_null`,
-`chunk_key`, `content_delta_type`.
+`chunk_key`, `content_delta_type`, `array_outside_tool_calls` (§ 5.7) and
+`choice_without_delta_in_opening_record` (§ 5.2, P-f).
 
 Each fixture has an **allowed** function call (for example `read_file` with `{"v":"abcdefgh"}`)
 whose fragments are split around the rule's record, plus a separate `blocked_*` call with a canary.
