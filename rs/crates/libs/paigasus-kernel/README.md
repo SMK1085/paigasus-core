@@ -11,10 +11,12 @@ and call into this crate rather than reimplementing it (ADR-0005).
 ## macOS wheels of version 0.2.0
 
 The `paigasus-py-bindings` 0.2.0 macOS wheels (arm64 and x86_64) have a Mach-O string table
-with `stroff mod 8 = 4`. They load on macOS 27 only because the build used SDK 26.5.
+with `stroff mod 8 = 4`. The build used SDK 26.5. The arm64 wheel loads on macOS 27.
+Nobody has loaded the x86_64 wheel on macOS 27.
 On macOS 27.2, dyld rejects the same layout in a binary that SDK 27.2 linked
-("mis-aligned LINKEDIT"). The npm darwin 0.2.0 packages are not affected (`stroff mod 8 = 0`).
+("mis-aligned LINKEDIT"). The npm darwin 0.2.0 packages (arm64 and x64) are not affected
+(`stroff mod 8 = 0`).
 
-The fix (SMA-767) is in the repository. Releases after 0.2.0 are built with it.
+The fix (SMA-767) is in the repository. Each release after 0.2.0 includes the fix.
 
 Licensed under the Apache License, Version 2.0.
