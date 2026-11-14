@@ -112,7 +112,9 @@ pub fn as_model_call(c: &ToolCall) -> ModelCall {
 /// function arguments (the core's rule), so a client's raw `""` matches it. A `parsed` model value
 /// is compared with the parsed decided string. The match is exact, also for the snapshot at an
 /// excused raise: a prefix of allowed arguments can be a call that an argument-reading policy
-/// (SMA-752) denies, and the gateway never asks the decider about it.
+/// (SMA-752) denies, and the gateway never asks the decider about it. The exception is kind
+/// `other`: its arguments are not compared, because the decided form is the raw entry (spec § 4,
+/// § 9).
 fn arguments_match(mc: &ModelCall, decided: &ModelCall) -> bool {
     if mc.kind == "other" {
         return true; // the decided form of kind Other is the raw entry
