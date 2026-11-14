@@ -758,4 +758,29 @@ mod tests {
         let usage = json!({"object":"chat.completion.chunk","id":"c","choices":[],"usage":{"total_tokens":1}}).to_string();
         assert!(p.step(rec(&usage), &v).is_ok());
     }
+
+    /// Spec § 5.2: `"delta": null` stays `Malformed("delta")` in every position (SMA-749 classifier).
+    #[test]
+    fn a_null_delta_inside_an_open_call_is_a_stream_failure() {
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        start_call(&mut p, &v);
+        let r = p.step(rec(&chunk(json!([{"index":0,"delta":null}]))), &v);
+        assert!(matches!(r, Err(StepError::Malformed)));
+        // Through the interceptor, the non-empty queue makes it a stream failure under block.
+        let chunks = vec![
+            format!(
+                "data: {}\n\n",
+                chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","type":"function","function":{"name":"read","arguments":"\"X1\""}}]}}]))
+            ),
+            format!("data: {}\n\n", chunk(json!([{"index":0,"delta":null}]))),
+        ];
+        let mut i = crate::interceptor::Interceptor::new(crate::Format::OpenAiChat, crate::Limits::defaults(), Bytes::from_static(b"data: [DONE]\n\n"), std::time::Instant::now());
+        let t0 = std::time::Instant::now();
+        let mut acts = Vec::new();
+        for c in &chunks {
+            acts.extend(i.push(c.as_bytes(), t0));
+        }
+        assert!(acts.contains(&crate::interceptor::Action::Count(crate::interceptor::Metric::OnFailure("malformed"))), "{acts:?}");
+    }
 }

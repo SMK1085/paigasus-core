@@ -162,8 +162,10 @@ fragment for a call that existed **before that record was applied**. Such a frag
 While choice 0 has an open call:
 
 - a chunk with no `choices` key is `Deviation("chunk_without_choices")`;
-- a choice entry with no `delta` key, or with `"delta": null`, in any position, is
-  `Deviation("choice_without_delta")`.
+- a choice entry with no `delta` key, in any position, is `Deviation("choice_without_delta")`.
+
+`"delta": null` stays `Malformed("delta")` in every position (SMA-749 classifier); inside an open
+call the queue is non-empty, so it is already a stream-level failure.
 
 Outside an open call these records stay as they are today (classified as tool-free). This limits
 the rule to the place where a raise can cut a call.
