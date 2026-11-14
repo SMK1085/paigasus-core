@@ -226,13 +226,16 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
     // A string `input` is one user message. Only an array has items.
     let items: &[Value] = match top.get("input") {
         Some(Value::Array(a)) => a,
-        _ => &[],
+        None | Some(Value::Null | Value::String(_)) => &[],
+        Some(_) => return Err(Malformed("input")),
     };
     for (i, item) in items.iter().enumerate() {
         let item = obj(item)?;
         // A message in the short form has no `type`.
         let Some(ty) = opt_str(item.get("type"), "type")? else { continue };
         match ty.as_str() {
+            // The referenced items are not in the request, so the history is unknown (D3, § 7.2).
+            "item_reference" => return Err(Malformed("item_reference")),
             "additional_tools" | "tool_search_output" => f.definitions_complete = false,
             "function_call_output" | "custom_tool_call_output" | "computer_call_output" | "local_shell_call_output" | "shell_call_output" | "apply_patch_call_output" => {
                 f.tool_results.push(ToolResultRef {
@@ -458,8 +461,7 @@ mod tests {
                      {"type":"apply_patch_call_output","call_id":"c6","status":"completed"},
                      {"type":"mcp_approval_request","id":"mcpr_1","name":"rm","server_label":"srv","arguments":"{}"},
                      {"type":"mcp_approval_response","approval_request_id":"mcpr_1","approve":true},
-                     {"type":"reasoning","id":"rs_1","summary":[]},
-                     {"type":"item_reference","id":"x"}]}))
+                     {"type":"reasoning","id":"rs_1","summary":[]}]}))
         .unwrap();
         assert!(f.definitions_complete);
         assert_eq!(
@@ -511,6 +513,10 @@ mod tests {
             json!({"tools":[{"type":"function"}]}),
             json!({"tools":[{"type":"namespace","name":"n","tools":[{"type":"web_search"}]}]}),
             json!({"input":["x"]}),
+            json!({"input":[{"type":"item_reference","id":"x"}]}),
+            json!({"input":1}),
+            json!({"input":{"type":"function_call"}}),
+            json!({"input":true}),
             json!({"input":[{"type":"function_call","name":"f"}]}),
         ] {
             assert!(responses(&v).is_err(), "{v}");
