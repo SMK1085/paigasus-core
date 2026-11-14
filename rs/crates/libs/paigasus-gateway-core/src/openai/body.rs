@@ -138,4 +138,14 @@ mod tests {
         assert!(calls(&body("a".repeat(1024))).is_ok());
         assert!(matches!(calls(&body("a".repeat(1025))), Err(Malformed("long_identifier"))));
     }
+
+    #[test]
+    fn a_function_call_and_a_custom_call_in_one_body_parse_to_two_calls() {
+        let tool_calls = json!([
+            {"id": "c0", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+            {"id": "c1", "type": "custom", "custom": {"name": "note", "input": "x"}}
+        ]);
+        let body = json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"tool_calls": tool_calls}}]});
+        assert_eq!(calls(&body).unwrap().len(), 2);
+    }
 }
