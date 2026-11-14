@@ -315,7 +315,9 @@ a gate. Do not copy it here.
   healthy pipe, per the correction above. A local full-graph `moon ci` run must pick one bash for the
   whole invocation, then re-run the gates that need the other bash directly
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
-  them — `repo:actionlint` yields a local verdict only when its pipe preflight passes. CI runs a single Linux bash and
+  them. `repo:nats-permissions` has no `ci/` script: re-run its bash half as
+  `/opt/homebrew/bin/bash ops/nats/check-subjects.sh`. Its nextest half does not depend on the bash.
+  `repo:actionlint` yields a local verdict only when its pipe preflight passes. CI runs a single Linux bash and
   never sees this split.
 - **A new pipe on the development Mac can hold only 512 bytes, and two local hangs come from
   it** (SMA-612). A new pipe on that host holds 512 bytes (M4), not the nominal 16384 that

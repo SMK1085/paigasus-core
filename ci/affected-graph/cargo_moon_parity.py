@@ -3502,6 +3502,8 @@ UV_PROBE_CAPTURE_RE = re.compile(r"(?:\$\(|`)\s*command\s+-v\s+$")
 UV_RUN_LOCK_FLAGS = ("--locked", "--frozen", "--isolated")
 # R3 (follow-up sweep 2): a command word that `uv run` runs and that installs into the environment.
 UV_RUN_INSTALLERS = frozenset(("pip", "pip3", "uv", "ensurepip", "virtualenv"))
+# `pip3.12` and other version-qualified pip names (CodeRabbit, PR 461).
+UV_PIP_VERSIONED_RE = re.compile(r"pip[0-9]*(?:\.[0-9]+)*")
 # R2 (follow-up sweep 2): spellings that a shell turns into `uv` but the token regex cannot see.
 # `eval` runs text that A14 cannot read. `${x}v`, `$(…)v` and `u$x` join `uv` from an expansion.
 UV_EVAL_RE = re.compile(r"(?<![\w.-])eval(?![\w.-])")
@@ -3509,7 +3511,7 @@ UV_SPLICE_RE = re.compile(r"[})`]v(?![\w.-])|(?<![\w.$-])u(?=\$[{(A-Za-z_]|`)")
 UV_QUOTE_CHARS_RE = re.compile(r"[\\'\"]")
 # R4 (follow-up sweep 2): a write to an environment that does not go through `uv`.
 UV_DIRECT_WRITE_RE = re.compile(
-    r"(?<![\w.-])pip3?(?![\w.-])[^;&|\n]*?(?<![\w.-])(?:install|uninstall|sync)(?![\w-])"
+    r"(?<![\w.-])pip[0-9]*(?:\.[0-9]+)*(?![\w.-])[^;&|\n]*?(?<![\w.-])(?:install|uninstall|sync)(?![\w-])"
     r"|(?<![\w-])-m\s*(?:pip|ensurepip|venv|virtualenv)(?![\w-])"
     r"|\.venv[\w./-]*/bin/(?:pip3?|uv|python[0-9.]*\s+-m\s*(?:pip|ensurepip))(?![\w-])"
     r"|(?<![\w.-])(?:rm|mv|cp|ln|rsync)(?![\w.-])[^;&|\n]*\.venv(?![\w-])"
@@ -3681,7 +3683,7 @@ def _uv_run_form(words):
             f"change the environment while another task reads it (SMA-765 R-relock)"
         )
     word = command[0].rsplit("/", 1)[-1]
-    if word in UV_RUN_INSTALLERS:
+    if word in UV_RUN_INSTALLERS or UV_PIP_VERSIONED_RE.fullmatch(word):
         return opts, command, f"`uv run` runs the installer {command[0]!r} in the environment (R3)"
     # `uv run python -m pip|ensurepip|venv|virtualenv` (with any interpreter options before `-m`)
     # is a row through UV_DIRECT_WRITE_RE, which searches the whole line, and `-m uv` through the
@@ -3957,7 +3959,9 @@ REQUIRED_UV_CONFIG = "py/pyproject.toml"
 # The Moon uv toolchain appends these to its own `uv sync` / `uv venv` (InstallDependencies). Any
 # value is a row: the measured command is `uv sync --no-managed-python --no-python-downloads
 # --no-progress`, and an added argument such as `--reinstall` would change py/.venv on every run.
-MOON_UV_ARGS_RE = re.compile(r"(?m)^[ \t]*(syncArgs|venvArgs|installArgs)[ \t]*:")
+# The key anywhere outside a `#` comment, quoted or not, so a flow mapping
+# (`unstable_uv: {syncArgs: [...]}`) and a quoted key (`"syncArgs": [...]`) are rows too.
+MOON_UV_ARGS_RE = re.compile(r"""(?<![\w-])["']?(syncArgs|venvArgs|installArgs)["']?[ \t]*:""")
 
 
 def uv_configs_of(tracked):
@@ -3994,11 +3998,17 @@ def uv_config_rows(rel_path, text):
 
 def moon_toolchain_rows(rel_path, text):
     """A14 rows for an argument that Moon appends to its own `uv sync` or `uv venv` (R5, R-toolchain)."""
-    return [
-        f"{rel_path}:{text.count(chr(10), 0, m.start()) + 1} sets {m.group(1)}, which Moon appends to the "
-        f"`uv sync` of InstallDependencies; A14 approves no argument there (SMA-765 R-toolchain)"
-        for m in MOON_UV_ARGS_RE.finditer(text)
-    ]
+    rows = []
+    for lineno, line in enumerate(text.split("\n"), 1):
+        # A YAML comment starts at a `#` that begins the line or follows white space. A `#` inside
+        # a quoted value can hide a key from this cut, but no key text ever needs a `#`.
+        code = re.split(r"(?:^|(?<=[ \t]))#", line, maxsplit=1)[0]
+        rows.extend(
+            f"{rel_path}:{lineno} sets {m.group(1)}, which Moon appends to the `uv sync` of "
+            f"InstallDependencies; A14 approves no argument there (SMA-765 R-toolchain)"
+            for m in MOON_UV_ARGS_RE.finditer(code)
+        )
+    return rows
 
 
 def check_uv_env_isolation(projects, root, allow=None, floor=None, uv_configs=None, moon_toolchains=None):
@@ -7537,6 +7547,9 @@ def self_test():
         ("R4 a pip option before install", "pip -q install x", True),
         ("R4 a valued pip option before install", "pip3 --index-url https://x install y", True),
         ("R4 pip list", "pip list", False),
+        ("R3 a version-qualified pip", "uv run --locked pip3.12 list", True),
+        ("R4 a version-qualified pip install", "pip3.12 install x", True),
+        ("R4 pip.conf is not pip", "cat pip.conf install", False),
         ("R1 a # line inside open double quotes", 'bash -c "\n#"; uv sync', True),
         ("R1 a # line after a closed quote", "echo 'x'\n# uv sync", False),
         ("R1 quotes inside $( ) in double quotes", "X=\"$(grep 'a=\"$(b)\"' f)\"\n# uv sync", False),
@@ -7787,6 +7800,9 @@ def self_test():
             ("unstable_uv:\n  version: '0.11.16'\n  syncArgs: ['--reinstall']\n", True),
             ("unstable_python:\n  venvArgs:\n    - '--clear'\n", True),
             ("unstable_uv:\n  # syncArgs: ['--reinstall']\n  version: '0.11.16'\n", False),
+            ("unstable_uv: {version: '0.11.16', syncArgs: ['--reinstall']}\n", True),
+            ("unstable_uv:\n  \"syncArgs\": ['--reinstall']\n", True),
+            ("unstable_uv:\n  version: '0.11.16' # syncArgs: x\n", False),
         ):
             if bool(moon_toolchain_rows(".moon/toolchains.yml", a14_tc)) is not a14_want:
                 failures.append(f"A14 toolchain rule reads {a14_tc!r} as {'green' if a14_want else 'red'}")

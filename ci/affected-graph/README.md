@@ -417,7 +417,7 @@ It also runs several checks that the per-case project sets structurally **cannot
        `--reinstall-package paigasus-py-bindings` is approved only with `--isolated` in the same option region.
        The command word is the first word that does not start with `-`. It must match
        `[A-Za-z0-9_][A-Za-z0-9_.+/-]*`. A `uv run` with no command word is a row. A14 does not check the words after the command word,
-       with one exception (R3): a command word `pip`, `pip3`, `uv`, `ensurepip` or `virtualenv` (also as the last part
+       with one exception (R3): a command word `pip`, `pip3`, a version-qualified pip such as `pip3.12`, `uv`, `ensurepip` or `virtualenv` (also as the last part
        of a path) is a row. `python … -m pip|ensurepip|venv|virtualenv` is a row through rule 12, also with
        interpreter options before `-m`, and `-m uv` through the `uv` token rule.
        Since follow-up sweep 2 (SMA-765 R-relock), every `uv run` needs `--locked`, `--frozen` or `--isolated`.
@@ -447,14 +447,14 @@ It also runs several checks that the per-case project sets structurally **cannot
      level or in `[pip]` of every tracked `uv.toml` (`uv_config_rows`). A file that is not valid TOML is an
      infrastructure error. `FLOOR:` row: `py/pyproject.toml` must be in the list. A user-level uv.toml outside
      the repository cannot be read and is not covered.
-  10. R5 and SMA-765 R-toolchain (follow-up sweep 2): a `syncArgs`, `venvArgs` or `installArgs` key in
+  10. R5 and SMA-765 R-toolchain (follow-up sweep 2): a `syncArgs`, `venvArgs` or `installArgs` key (also quoted, or in a flow mapping) outside a comment in
       `.moon/toolchains.yml` is a row (`moon_toolchain_rows`). Moon's own InstallDependencies action runs
       `uv sync --no-managed-python --no-python-downloads --no-progress` in `py/` (measured on moon 2.5.3),
       and an added argument would apply on every run. A missing file is a `FLOOR:` row.
   11. R2 (follow-up sweep 2): `eval` as a word is a row. `${x}v`, `$(…)v`, a backtick before `v`, and `u` before
       `$`, `${`, `$(` or a backtick are rows. A line whose text has more `uv` tokens after the removal of `\`, `'`
       and `"` is a row (`u\v`, `u''v`, `"u"v`).
-  12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync` (also with pip options before the subcommand), `-m pip`, `-m ensurepip`, `-m venv`, `-m virtualenv`,
+  12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync` (also with pip options before the subcommand, and with `pip3.12` and other version-qualified names), `-m pip`, `-m ensurepip`, `-m venv`, `-m virtualenv`,
       `.venv/…/bin/pip`, `.venv/…/bin/uv`, `.venv/…/bin/python -m pip` and a `rm`, `mv`, `cp`, `ln` or `rsync`
       of a `.venv` path are rows (`UV_DIRECT_WRITE_RE`).
   Waivers: `ALLOW_UV_ENV_SCRIPT` has 35 entries. They are keyed by the script path and the exact stripped
