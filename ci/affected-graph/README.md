@@ -391,7 +391,7 @@ It also runs several checks that the per-case project sets structurally **cannot
     `UV_*`, `VIRTUAL_ENV` and `--active`.
   - Boundary: a token matches only when no word character, `.` or `-` is on either side. `.venv`
     needs only a non-word, non-`-` character on its left, so `py/.venv` matches and `a.venv` does not.
-  - Known non-matches (`NON_MATCHES`): `uv.lock`, `uv.toml`, `uv-cache`, `pip.exe`, `pipefail`,
+  - Known non-matches (`NON_MATCHES`): `uv.lock`, `uv.toml`, `uv-cache`, `pip.exe`, `uv.exe`, `pipefail`,
     `pipeline`, `uvicorn` and `the uv.`. The gate does not see the last one, and the spec accepts that.
     The word `uv` at the end of a sentence is not a token. A prose line with that shape is not seen.
   - Rules:

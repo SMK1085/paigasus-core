@@ -67,7 +67,7 @@ TOKENS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("--active", re.compile(_L + r"--active" + _R)),
 )
 # Known non-matches (spec 5.3). The last one is a false green that the spec accepts: prose.
-NON_MATCHES: tuple[str, ...] = ("uv.lock", "uv.toml", "uv-cache", "pip.exe", "pipefail", "pipeline", "uvicorn", "the uv.")
+NON_MATCHES: tuple[str, ...] = ("uv.lock", "uv.toml", "uv-cache", "pip.exe", "uv.exe", "pipefail", "pipeline", "uvicorn", "the uv.")
 
 EXEMPT_PATHS = ("ci/affected-graph/python_env_ban.py", "ci/python-env/run.sh")
 _LOCKFILES = ("uv.lock", "Cargo.lock", "pnpm-lock.yaml")
@@ -645,7 +645,7 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
         "UV_*": ["UV_CACHE_DIR=x", "env: { UV_PYTHON: 3 }"], "VIRTUAL_ENV": ["VIRTUAL_ENV=x"],
         "--active": ["x --active"],
     }
-    green = [*NON_MATCHES, "-uv", "uv-x", "x.uv", "the uv.", "pip.exe", "uvicorn", "a.venv"]
+    green = [*NON_MATCHES, "-uv", "uv-x", "x.uv", "the uv.", "pip.exe", "uv.exe", "uvicorn", "a.venv"]
     for name, lines in red.items():
         for line in lines:
             if name not in token_hits(line):
@@ -658,8 +658,8 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
         failures.append("python-env ban: a token has no red row, or a red row names no token (or the order differs)")
     if set(NON_MATCHES) - set(green):
         failures.append("python-env ban: a known non-match has no green row")
-    if len(NON_MATCHES) != 8:
-        failures.append(f"python-env ban: NON_MATCHES has {len(NON_MATCHES)} entries, the spec lists 8")
+    if len(NON_MATCHES) != 9:
+        failures.append(f"python-env ban: NON_MATCHES has {len(NON_MATCHES)} entries, the spec lists 8 and the SMA-770 final review added uv.exe")
 
     # The live tables.
     if [n for n, _ in EXCLUSIONS] != ["markdown", "docs", "uv.lock", "Cargo.lock", "pnpm-lock.yaml", "binary", "dependabot", "exempt"]:

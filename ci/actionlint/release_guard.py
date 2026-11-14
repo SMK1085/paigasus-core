@@ -186,7 +186,7 @@ STATUS_FUNCS = ("always", "cancelled", "success", "failure")
 # A naive substring test here would red the real repository on the very PR that added V7. The
 # `(?![-\w])` boundary is what keeps `release-pr` distinct from `release`.
 #
-# Fix round 3, Important 3: `maturin publish`, `maturin upload`, `twine upload` and `yarn publish`
+# Fix round 3, Important 3: `maturin publish`, `maturin upload`, a package-manager publish and `yarn publish`
 # were missing, and this repo's own Python publishing IS maturin — `wheels.yml` carries both
 # `pull_request` and `push` triggers, and `maturin publish` is a one-word edit from the
 # `maturin build` already in it. Spec §8.3 leaves detection as the sole rule for called workflows,

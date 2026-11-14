@@ -34,8 +34,8 @@ tasks:
   # after a git op that leaves a Rust source OLDER than an existing rs/target/ artifact (warm cache +
   # checkout/rebase/stash → mtime inversion), cargo reports "up to date" and napi re-links a STALE
   # .node against the wrong source. Bumping the two (tiny) crates' source mtime forces a
-  # content-correct recompile from current source — the napi analog of the py wheel's
-  # the Python reinstall of one package. `touch` is host-agnostic (CI is Linux, dev is macOS); a per-triple
+  # content-correct recompile from current source — the napi analog of the Python
+  # reinstall of one package. `touch` is host-agnostic (CI is Linux, dev is macOS); a per-triple
   # `cargo clean --target <triple>` would have to know the host triple, so we avoid it.
   #
   # SMA-634: this task no longer runs wasm-pack and no longer writes the crate directory. The five
@@ -162,7 +162,7 @@ tasks:
   # (mtime inversion) makes cargo skip the recompile and napi re-link a STALE .node — the review
   # reproduced sum(2,3)→6 against `a + b` source (silent false red/green, which defeats the guard's
   # whole purpose). Bumping the two crates' source mtime forces a content-correct recompile from
-  # current source before the assertion (napi analog of py's the Python reinstall of one package); it is
+  # current source before the assertion (napi analog of the Python reinstall of one package); it is
   # host-agnostic, unlike a per-triple `cargo clean --target`.
   #
   # `-- --locked` reaches the `cargo build` wasm-pack forwards to, but wasm-pack makes its own

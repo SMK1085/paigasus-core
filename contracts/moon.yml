@@ -57,6 +57,8 @@ tasks:
       - 'buf.lock'
       - '/.prototools'
       - '/py/uv.lock'
+      # SMA-770. buf.gen.yaml runs the Python plugin through this wrapper.
+      - '/ci/python-env/run.sh'
   lint:
     command: 'buf lint'
     toolchain: 'system'
