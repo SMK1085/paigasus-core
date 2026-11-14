@@ -4258,7 +4258,7 @@ def self_test():
                        ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {}},
         "inputFiles": {"contracts/buf.gen.googleapis.yaml": {}, "contracts/buf.gen.yaml": {},
                        "contracts/buf.lock": {}, "contracts/buf.yaml": {}, ".prototools": {},
-                       "py/uv.lock": {}},
+                       "ci/python-env/run.sh": {}, "py/uv.lock": {}},
     }}}
     if check_contracts_generate_inputs(cg_ok):
         failures.append("contracts:generate pin reported drift on the clean fixture")
