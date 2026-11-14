@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Records real OpenAI Chat Completions streams with tool calls (SMA-757 spec § 5.6).
+"""Records real OpenAI Chat Completions streams with tool calls (SMA-757 spec § 2.4, § 7.3).
 
 The key is read from a file and is never printed. Only the standard library is used.
 
     python3 -I capture.py --key-file ~/.config/paigasus/openai.key --list-models
     python3 -I capture.py --key-file ~/.config/paigasus/openai.key --model <id> --runs 5 --out <dir>
+    python3 -I capture.py --key-file ~/.config/paigasus/openai.key --model gpt-6.1-terra \
+        --reasoning-effort none --runs 5 --out <dir>
 
-Each run writes the raw response bytes to `<dir>/<model>__<scenario>__<n>.sse`, unchanged.
+Each run writes the raw response bytes to `<dir>/<model>__<scenario>__<n>.sse`, unchanged. The
+repository keeps 12 of the 60 streams of 2026-11-14: one for each model and scenario.
 A rejected request writes `<model>__<scenario>__<n>.error.json` with the status and the body.
 """
 

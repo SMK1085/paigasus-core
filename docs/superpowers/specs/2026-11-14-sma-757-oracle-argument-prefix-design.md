@@ -211,6 +211,12 @@ LangChain skips such a record, so the decider and LangChain would see different 
   rule fires on that traffic. The recorded fixtures pin this (§ 7.3). A self-hosted or Azure
   upstream that sends one of these shapes gets `on_failure`. The upstream bytes already make at
   least one supported client raise or misread in every case.
+- **`"type": null` on every continuation fragment.** An upstream that sends `"type": null` on
+  each later fragment of a call (for example a server that dumps pydantic models without
+  `exclude_none`) now gets `repeated_type`, so `on_failure` runs on every tool stream from it. The
+  rule is necessary: openai-python replaces `type` on such a fragment and its
+  `new_tool.type == "function"` assert raises (§ 5.3, P-c). How common this upstream shape is was
+  not measured. Real OpenAI does not send it (§ 2.4, R2).
 - **Observe mode trade-off.** Under `on_failure = allow`, the deviating record is not emitted and
   later records are forwarded unclassified (SMA-749 § 5.3). A stream that was enforced before (for
   example an interleaved function and custom call) now reaches openai-python and openai-node in
@@ -385,6 +391,8 @@ None are needed for the proof: D2 is decider-free. The existing three deciders s
 - The OpenAI Responses API (`/v1/responses`) is SMA-769, which starts after this change. It needs
   its own ingress, format and oracle models. It takes the D2 rule and the recording method of this
   spec from the start (§ 2.4).
+- Support for an upstream that sends `"type": null` on every continuation fragment (§ 5.6). It
+  gets `on_failure`; this change does not measure or relax that.
 - The LangChain model is `<not pinned: modelled only>` (`oracle.rs`). This change does not pin it.
   If the real SDK does not raise where the model raises, the § 5 rules still hold: they only reject
   streams.

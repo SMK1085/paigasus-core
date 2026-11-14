@@ -21,6 +21,11 @@ repository. The script reads the key from that file and never prints it.
 
     python3 -I capture.py --key-file ~/.config/paigasus/openai.key --list-models
     python3 -I capture.py --key-file ~/.config/paigasus/openai.key --model <id> --runs 5 --out <dir>
+    python3 -I capture.py --key-file ~/.config/paigasus/openai.key --model gpt-6.1-terra \
+        --reasoning-effort none --runs 5 --out <dir>
+
+Use `--reasoning-effort none` for `gpt-6.1-terra`. The 2026-11-14 run made 60 streams. This
+directory keeps 12 of them: one for each model and scenario.
 
 CI does not run the script. CI only replays the recorded files.
 

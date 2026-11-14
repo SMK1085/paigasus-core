@@ -75,9 +75,10 @@ proptest! {
     #[test]
     fn a_prefix_at_an_excused_raise_is_rejected(s in "[a-z]{4,16}", cut in 0usize..1000, shape in 0usize..4) {
         let args = format!(r#"{{"v":"{s}"}}"#);
-        // P-M3 (shape 0) is read by langchain, which parses partial JSON: a prefix that lacks only
-        // the closing `"}` parses to the full value, so it is not a strict prefix in value. In the
-        // other shapes openai-python holds the raw prefix, so every cut counts.
+        // In P-M3 (shape 0) only LangChain holds a prefix (spec § 2.2), and it parses partial
+        // JSON: a prefix that lacks only the closing `"}` parses to the full value, so it is not a
+        // strict prefix in value. So the cut is narrowed for shape 0 only. In the other shapes
+        // openai-python holds the raw prefix, so every cut counts.
         let span = if shape == 0 { args.len() - 3 } else { args.len() - 1 };
         let k = 1 + cut % span;
         let bytes = stream(shape, &args, k, false);

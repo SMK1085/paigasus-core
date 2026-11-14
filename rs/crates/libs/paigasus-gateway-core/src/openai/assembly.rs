@@ -462,7 +462,7 @@ mod tests {
         // Without a body it is a bodyless entry for an earlier call: a deviation either way.
         let mut a = ChoiceAssembly::default();
         feed(&mut a, &tc(F0A)).unwrap();
-        assert!(feed(&mut a, &tc(r#"{"index":0,"type":null}"#)).is_err());
+        assert_eq!(feed(&mut a, &tc(r#"{"index":0,"type":null}"#)), Err(Deviation("fragment_after_bodyless_entry")));
     }
 
     #[test]
@@ -491,6 +491,15 @@ mod tests {
         let mut a = ChoiceAssembly::default();
         feed(&mut a, &tc(F0A)).unwrap();
         feed(&mut a, &tc(r#"{"index":1}"#)).unwrap();
+        assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    /// Spec § 5.1 names `"function": null` as bodyless: `null` reads as an absent body.
+    #[test]
+    fn a_null_function_is_a_bodyless_entry() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","function":null}"#)).unwrap();
         assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
     }
 
