@@ -392,8 +392,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   - Boundary: a token matches only when no word character, `.` or `-` is on either side. `.venv`
     needs only a non-word, non-`-` character on its left, so `py/.venv` matches and `a.venv` does not.
   - Known non-matches (`NON_MATCHES`): `uv.lock`, `uv.toml`, `uv-cache`, `pip.exe`, `pipefail`,
-    `pipeline`, `uvicorn` and `the uv.`. The gate does not see the last one, and the spec accepts that: the
-    word `uv` at the end of a sentence is not a token. A prose line with that shape is not seen.
+    `pipeline`, `uvicorn` and `the uv.`. The gate does not see the last one, and the spec accepts that.
+    The word `uv` at the end of a sentence is not a token. A prose line with that shape is not seen.
   - Rules:
     - G-ban: a token on a scanned line is a row, unless the line is in `PINNED_LINES`.
     - G-wrapper: the sha256 of `ci/python-env/run.sh` must equal `WRAPPER_SHA256`. The row prints
@@ -430,7 +430,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   - Real tool: `ci/python-env/real-tool-check.sh` runs the cheap wrapper operations against the real
     tool. A step in `repo:affected-smoke` runs it on every PR.
   - Real-tree negative control: `main()` removes the wrapper call text from the floor task in a deep copy
-    of the real graph. The gate then must give a row that names the floor task and is not a `FLOOR:` row.
+    of the real graph. The gate must then give a row that names the floor task and is not a `FLOOR:` row.
     If not, `main()` exits 2.
     `run.sh --negative-control` runs only the synthetic self-test, so this is a separate step.
   - To add a Python package manager operation: add a wrapper operation, then update
