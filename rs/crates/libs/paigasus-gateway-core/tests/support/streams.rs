@@ -48,6 +48,10 @@ pub enum Quirk {
     /// Every call's arguments gain PascalCase, `constructor` and `prototype` keys. They are
     /// application data, so the stream is conforming (I-1).
     CapitalisedArgKeys,
+    /// A chunk without a `choices` key (`chunk_without_choices` inside an open call).
+    NoChoicesKey,
+    /// A chunk whose choice 0 entry has no `delta` (`choice_without_delta` inside an open call).
+    NoDelta,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +142,8 @@ fn quirk_strategy() -> impl Strategy<Value = Quirk> {
         Just(Quirk::TruncatedArgs),
         Just(Quirk::ConcatenatedObjects),
         Just(Quirk::CapitalisedArgKeys),
+        Just(Quirk::NoChoicesKey),
+        Just(Quirk::NoDelta),
     ]
 }
 
@@ -331,6 +337,15 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
                     chunk(json!([{"index":0,"delta":{"tool_calls":[hidden_entry(json!(0))]}}]))
                 ),
             ),
+            Quirk::NoChoicesKey | Quirk::NoDelta => {
+                // SMA-749 D2 strips the BOM, so a client that ignores the BOM-prefixed first line
+                // would read it after the strip (known limitation, spec § 9). Keep it off line 0.
+                let at = if pos == 0 && has(s, Quirk::Bom).is_some() { 1 } else { pos };
+                if at <= lines.len() {
+                    let rec = if *q == Quirk::NoChoicesKey { r#"{"object":"chat.completion.chunk","id":"q"}"#.to_owned() } else { chunk(json!([{"index":0}])).to_string() };
+                    lines.insert(at, format!("data: {rec}\n\n"));
+                }
+            }
             Quirk::UnknownFields => lines.insert(pos, "id: 7\nretry: 10\nfoo: bar\n".to_owned()),
             Quirk::Comments => lines.insert(pos, ": hello\n: data: {\"x\":\"CANARY-comment\"}\n".to_owned()),
             Quirk::EventLine => lines.insert(pos, "event: message\n".to_owned()),

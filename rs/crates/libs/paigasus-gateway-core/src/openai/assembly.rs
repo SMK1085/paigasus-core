@@ -421,7 +421,7 @@ mod tests {
     fn frags(s: &str) -> (Vec<Fragment>, Option<NameArgs>) {
         let mut v = parse_strict(s.as_bytes()).unwrap();
         v["object"] = crate::openai::classify::CHUNK_OBJECT.into();
-        let Chunk::Choices(mut v) = chunk(&v).unwrap() else { panic!() };
+        let Chunk::Choices { choices: mut v, .. } = chunk(&v).unwrap() else { panic!() };
         let c = v.remove(0);
         (c.fragments, c.legacy)
     }

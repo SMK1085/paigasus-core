@@ -83,6 +83,18 @@ OPENAI_MALFORMED = {
         call(0, 0, "", 'cdefgh","k":"CANARY-bodyless"}', first=False),
         fin(0),
     ],
+    "chunk_without_choices": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        '{"id":"chatcmpl-fx","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","note":"CANARY-nochoices"}',
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "choice_without_delta": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "finish_reason": None, "note": "CANARY-nodelta"}]),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
     "oversized": [call(0, 0, "read_file", "{"), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-big" + "x" * 5000}}]}}]), fin(0)],
 }
 

@@ -17,7 +17,11 @@ use serde_json::{Map, Value};
 use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of, opt_obj, opt_str};
 
 pub(crate) enum Chunk {
-    Choices(Vec<ChoiceView>),
+    /// `keyed` is whether the chunk has a `choices` key at all (`"choices":[]` is keyed).
+    Choices {
+        choices: Vec<ChoiceView>,
+        keyed: bool,
+    },
     UpstreamError,
 }
 
@@ -27,6 +31,8 @@ pub(crate) struct ChoiceView {
     pub legacy: Option<NameArgs>,
     pub finish_reason: Option<String>,
     pub has_text: bool,
+    /// Whether the entry has a `delta` key.
+    pub has_delta: bool,
 }
 
 pub(crate) struct Fragment {
@@ -67,6 +73,7 @@ pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
             Ok(Chunk::UpstreamError)
         };
     }
+    let keyed = top.contains_key("choices");
     let choices = match top.get("choices") {
         None => Vec::new(),
         Some(Value::Array(a)) => {
@@ -81,7 +88,7 @@ pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
     };
     let carries = choices.iter().any(|c| !c.fragments.is_empty() || c.legacy.is_some() || c.finish_reason.is_some());
     check_object(top, CHUNK_OBJECT, carries)?;
-    Ok(Chunk::Choices(choices))
+    Ok(Chunk::Choices { choices, keyed })
 }
 
 fn choice(v: &Value) -> Result<ChoiceView, Malformed> {
@@ -102,6 +109,7 @@ fn choice(v: &Value) -> Result<ChoiceView, Malformed> {
         legacy,
         finish_reason,
         has_text,
+        has_delta: c.contains_key("delta"),
     })
 }
 
@@ -172,7 +180,7 @@ mod tests {
     }
     fn choices(s: &str) -> Vec<ChoiceView> {
         match c(s).unwrap() {
-            Chunk::Choices(v) => v,
+            Chunk::Choices { choices, .. } => choices,
             Chunk::UpstreamError => panic!("not an error"),
         }
     }

@@ -303,6 +303,11 @@ None are needed for the proof: D2 is decider-free. The existing three deciders s
   does. This change does not touch it.
 - Kind `other` arguments are not compared (§ 4). An SMA-752 policy that reads them needs its own
   rule.
+- A BOM-prefixed first record that openai-python ignores on the upstream bytes reaches it after the
+  SMA-749 D2 BOM strip. With a chunk that has no `choices`, the client then raises. This is
+  availability only: no tool call is affected (a hidden first record with a call makes the client
+  run fewer calls). It is SMA-749 behaviour, and this change does not fix it. The generator keeps
+  such records off the first line when it emits a BOM.
 - No change to the Anthropic assembly, to bodies, or to the decider port (`ToolCallDecider`).
 - The OpenAI Responses API (`/v1/responses`) is SMA-769, which starts after this change. It needs
   its own ingress, format and oracle models. It takes the D2 rule and the recording method of this

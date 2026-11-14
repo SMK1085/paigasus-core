@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The OpenAI Chat Completions streaming protocol (spec § 4.2–§ 4.4, D10, D12, D20).
+//!
+//! Two shapes are a deviation only inside an open call of choice 0 (spec § 2.2 P-a, P-b): a chunk
+//! without a `choices` key (`chunk_without_choices`), and a choice entry without a `delta` key
+//! (`choice_without_delta`). A raising client drops the stream there: openai-python reads
+//! `chunk.choices` and `choice.delta`, openai-node reads `chunk.choices`, and LangChain raises
+//! `KeyError: 'delta'`. The decider would still hold the call. `"choices":[]` is keyed, so the
+//! final usage chunk is conforming. The entry of choice 0 with a `finish_reason` may omit `delta`.
 
 use std::collections::BTreeMap;
 
@@ -116,7 +123,7 @@ impl Protocol for OpenAiStream {
             }));
         }
         let value = parse_strict(&rec.data)?;
-        let choices = match classify::chunk(&value)? {
+        let (choices, keyed) = match classify::chunk(&value)? {
             Chunk::UpstreamError => {
                 return Ok(Step::UpstreamError(Frame {
                     event: None,
@@ -125,15 +132,26 @@ impl Protocol for OpenAiStream {
                     touches: Vec::new(),
                 }));
             }
-            Chunk::Choices(c) => c,
+            Chunk::Choices { choices, keyed } => (choices, keyed),
         };
         // Phase 1 checks the whole record and changes nothing. A deviation in any choice drops the
         // record, so no choice may have been changed by then: a hold marked open that the
         // interceptor never registered would wait for a verdict for ever.
         let empty = ChoiceAssembly::default();
+        // Inside an open call of choice 0, a chunk without `choices` or a choice without `delta` is
+        // dropped by a raising client: openai-python reads `chunk.choices`/`choice.delta` and raises,
+        // openai-node reads `chunk.choices`, LangChain raises `KeyError: 'delta'`. The decider would
+        // still see the call. The entry of choice 0 that carries `finish_reason` may omit `delta`.
+        let open_call = self.choices.get(&0).is_some_and(|s| s.hold_open && !s.finished);
+        if open_call && !keyed {
+            return Err(StepError::Deviation("chunk_without_choices"));
+        }
         let mut planned: Vec<Option<Check>> = Vec::with_capacity(choices.len());
         let mut new_choices = 0;
         for (position, cv) in choices.iter().enumerate() {
+            if open_call && !cv.has_delta && !(cv.index == 0 && cv.finish_reason.is_some()) {
+                return Err(StepError::Deviation("choice_without_delta"));
+            }
             let key = HoldKey::Choice(cv.index);
             let st = self.choices.get(&cv.index);
             if st.is_none() {
@@ -672,5 +690,72 @@ mod tests {
             Step::Frame { opened, .. } => assert_eq!(opened, vec![HoldKey::Choice(0)]),
             _ => panic!("a frame"),
         }
+    }
+
+    fn start_call(p: &mut OpenAiStream, v: &Verdicts) {
+        let frag = json!({"tool_calls":[{"index":0,"id":"c","type":"function","function":{"name":"read","arguments":"{"}}]});
+        p.step(rec(&chunk(json!([{"index":0,"delta":frag}]))), v).ok().unwrap();
+    }
+
+    #[test]
+    fn a_chunk_without_choices_inside_an_open_call_deviates() {
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        start_call(&mut p, &v);
+        let r = p.step(rec(r#"{"object":"chat.completion.chunk","id":"c"}"#), &v);
+        assert!(matches!(r, Err(StepError::Deviation("chunk_without_choices"))));
+    }
+
+    #[test]
+    fn a_choice_without_delta_inside_an_open_call_deviates() {
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        start_call(&mut p, &v);
+        let r = p.step(rec(&chunk(json!([{"index":0}]))), &v);
+        assert!(matches!(r, Err(StepError::Deviation("choice_without_delta"))));
+    }
+
+    #[test]
+    fn a_choice_without_delta_at_position_1_also_deviates() {
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        start_call(&mut p, &v);
+        let r = p.step(rec(&chunk(json!([{"index":0,"delta":{}},{"index":1}]))), &v);
+        assert!(matches!(r, Err(StepError::Deviation("choice_without_delta"))));
+    }
+
+    /// Review Focus 1: a bare finish record is what a real stream ends with.
+    #[test]
+    fn a_finish_record_without_delta_is_conforming() {
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        start_call(&mut p, &v);
+        p.step(rec(&chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]))), &v)
+            .ok()
+            .unwrap();
+        match p.step(rec(&chunk(json!([{"index":0,"finish_reason":"tool_calls"}]))), &v).ok().unwrap() {
+            Step::Frame { completed, .. } => assert_eq!(completed.len(), 1),
+            _ => panic!("a frame"),
+        }
+    }
+
+    /// Review Focus 3: with no open call the two shapes change no call.
+    #[test]
+    fn no_choices_or_no_delta_with_no_open_call_is_conforming() {
+        let mut p = OpenAiStream::default();
+        let v = Verdicts::new();
+        assert!(p.step(rec(r#"{"object":"chat.completion.chunk","id":"c"}"#), &v).is_ok());
+        assert!(p.step(rec(&chunk(json!([{"index":0}]))), &v).is_ok());
+        start_call(&mut p, &v);
+        p.step(
+            rec(&chunk(
+                json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]},"finish_reason":"tool_calls"}]),
+            )),
+            &v,
+        )
+        .ok()
+        .unwrap();
+        let usage = json!({"object":"chat.completion.chunk","id":"c","choices":[],"usage":{"total_tokens":1}}).to_string();
+        assert!(p.step(rec(&usage), &v).is_ok());
     }
 }
