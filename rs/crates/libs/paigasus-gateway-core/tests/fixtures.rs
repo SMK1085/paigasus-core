@@ -6,8 +6,8 @@ mod support;
 use std::path::{Path, PathBuf};
 
 use paigasus_gateway_core::{Format, Metric, OnFailure};
-use support::driver::{DECIDERS, allow_all, block_named, drive, limits};
-use support::oracle::{check_i1, payloads};
+use support::driver::{DECIDERS, Outcome, allow_all, block_named, drive, limits};
+use support::oracle::{as_model_call, check_i1, payloads, runners};
 
 const SETS: [(Format, &str); 4] = [
     (Format::OpenAiChat, "openai/conforming"),
@@ -62,7 +62,8 @@ fn allow_all_is_payload_identical_for_every_conforming_fixture() {
 /// (except where observe mode passes the stream through by design).
 #[test]
 fn blocked_canaries_never_appear() {
-    let observe_may_leak = ["index_reuse"];
+    // A stream-level failure under `allow` passes the held records through, the blocked ones too.
+    let observe_may_leak = ["index_reuse", "fragment_after_blocked_bodyless_entry"];
     for (format, rel) in SETS {
         for (name, bytes) in files(rel) {
             let blocked = drive(format, limits(OnFailure::Block), &[&bytes], &block_named);
@@ -160,6 +161,16 @@ fn malformed_shapes_follow_section_6() {
         row("proto_key", &["\"ok\""], &[], &["\"ok\""], &[], false),
         row("float_index", &["\"ok\""], &[], &["\"ok\""], &[], false),
         row("repeated_name", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("fragment_after_bodyless_entry", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("fragment_after_blocked_bodyless_entry", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("chunk_without_choices", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("choice_without_delta", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("choice_without_delta_in_opening_record", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("type_null", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("chunk_key", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("content_delta_type", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("array_outside_tool_calls", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("function_call_key", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("oversized", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("after_done", &["data: [DONE]"], &[], &["data: [DONE]"], &[], false),
         row("error_mid_hold", &["\"terminal\""], &[], &["\"terminal\""], &[], false),
@@ -212,4 +223,62 @@ fn malformed_shapes_follow_section_6() {
             }
         }
     }
+}
+
+/// Real OpenAI recordings (2026-11-14) pass the interceptor unchanged (spec § 7.3).
+///
+/// One push per file and decider: the stream ends, no record is dropped, no `on_failure` path
+/// runs, and I1 holds. Under `allow-all` every client also derives the decided calls from the
+/// output, and the output is payload-identical to the input. Then every single split point under
+/// `allow-all`: the output must equal the one-push output, so it is payload-identical to the
+/// input too, and the client runs of the one-push pass hold for it.
+#[test]
+fn recorded_streams_pass_unchanged() {
+    let clean = |o: &Outcome| !o.metrics.iter().any(|m| matches!(m, Metric::RecordDropped(_) | Metric::OnFailure(_)));
+    let mut splits = Vec::new();
+    for (name, bytes) in files("openai/recorded") {
+        for (decider, decide) in DECIDERS {
+            let o = drive(Format::OpenAiChat, limits(OnFailure::Block), &[&bytes], decide);
+            let ctx = format!("recorded/{name} ({decider})");
+            assert!(o.finished, "{ctx} never ended");
+            assert!(clean(&o), "{ctx}: {:?}", o.metrics);
+            check_i1(Format::OpenAiChat, &bytes, &o.out, &o.decided, o.core_failed()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+            if *decider != "allow-all" {
+                continue;
+            }
+            assert_eq!(payloads(&o.out), payloads(&bytes), "{ctx}");
+            let want: Vec<(&str, String)> = o.decided.iter().map(|(c, _)| as_model_call(c)).map(|m| (m.kind, m.name)).collect();
+            assert!(!want.is_empty(), "{ctx}: no tool call was decided");
+            for (model, run) in runners(Format::OpenAiChat) {
+                let r = run(&o.out);
+                if let Some(e) = &r.error {
+                    // Only LangChain on a recording with a `custom` call may raise: its model
+                    // raises on any custom entry (oracle.rs), also on the recorded bytes.
+                    let excused = *model == "langchain" && want.iter().any(|(k, _)| *k == "custom") && run(&bytes).error.is_some();
+                    assert!(excused, "{ctx}: {model} raised: {e}");
+                    continue;
+                }
+                let got: Vec<(&str, String)> = r.calls.iter().map(|m| (m.kind, m.name.clone())).collect();
+                assert_eq!(got, want, "{ctx}: {model}");
+            }
+        }
+        // The one-push output is payload-identical to the input (checked above), so a split whose
+        // output equals it byte for byte is payload-identical too.
+        splits.push((name, bytes));
+    }
+    // About 74 000 drives in a debug build: one thread per file, so the files run in parallel.
+    std::thread::scope(|scope| {
+        for (name, bytes) in &splits {
+            scope.spawn(move || {
+                let whole = drive(Format::OpenAiChat, limits(OnFailure::Block), &[bytes], &allow_all).out;
+                for i in 0..=bytes.len() {
+                    let o = drive(Format::OpenAiChat, limits(OnFailure::Block), &[&bytes[..i], &bytes[i..]], &allow_all);
+                    let ctx = format!("recorded/{name} split at {i}");
+                    assert!(o.finished, "{ctx} never ended");
+                    assert!(clean(&o), "{ctx}: {:?}", o.metrics);
+                    assert!(o.out == whole, "{ctx}: the output differs from the one-push output");
+                }
+            });
+        }
+    });
 }
