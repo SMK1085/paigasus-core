@@ -4498,6 +4498,11 @@ def self_test():
     # SMA-770 (ruling F2): the a14 key must run the python-env ban, and its raise class must abort as rc 2.
     if "python_env_ban.check_python_env(" not in inspect.getsource(collect_findings):
         failures.append("collect_findings does not call python_env_ban.check_python_env, so the a14 key asserts nothing")
+    # The hook that runs the ban's own rows, as a whole stripped line of self_test (this guard's
+    # string literal is a different line, so deleting or commenting out the hook reds here).
+    pe_hook = "failures.extend(python_env_ban.self_test_failures(_read_utf8, smoke_unreached))"
+    if pe_hook not in [line.strip() for line in inspect.getsource(self_test).splitlines()]:
+        failures.append("self_test does not run python_env_ban.self_test_failures, so the ban's rows never run")
     if python_env_ban.MoonOutputError not in INFRA_ERRORS:
         failures.append("python_env_ban.MoonOutputError is not in INFRA_ERRORS, so a missing tracked file is rc 1, not rc 2")
     if (python_env_ban.SMOKE_PROJECT, python_env_ban.SMOKE_TASK) != (AFFECTED_SMOKE_PROJECT, AFFECTED_SMOKE_TASK):

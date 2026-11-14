@@ -715,7 +715,11 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
             failures.append("python-env ban: an exclusion has no fixture, or a fixture names no exclusion")
         for name, paths in excl_fixtures.items():
             for rel in paths:
-                rows, reads = run([rel], binary=fixture_binary)
+                try:
+                    rows, reads = run([rel], binary=fixture_binary)
+                except Exception as exc:  # a read of an excluded file raises on the non-UTF-8 fixture
+                    failures.append(f"python-env ban: the {name} exclusion did not skip {rel}: {type(exc).__name__}: {exc}")
+                    continue
                 if rows or reads:
                     failures.append(f"python-env ban: the {name} exclusion did not skip {rel}: {rows}")
                 by = [n for n, pred in EXCLUSIONS if pred(rel, fixture_binary)]
@@ -734,9 +738,9 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
         try:
             run(["ci/gone.sh"])
             failures.append("python-env ban: a tracked path that is missing on disk did not raise")
-        except MoonOutputError as exc:
-            if "ci/gone.sh" not in str(exc):
-                failures.append(f"python-env ban: the missing-path error does not name the path: {exc}")
+        except Exception as exc:  # the wrong class is a row, not a crash
+            if not isinstance(exc, MoonOutputError) or "ci/gone.sh" not in str(exc):
+                failures.append(f"python-env ban: a missing tracked path raised {type(exc).__name__}, want MoonOutputError: {exc}")
         # Review Focus 2: CRLF, a pinned line in a CRLF file, and a last line with no newline.
         rows, _ = run(["ci/crlf.sh"])
         if len(rows) != 1 or "ci/crlf.sh:1" not in rows[0]:
