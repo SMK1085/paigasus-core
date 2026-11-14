@@ -392,7 +392,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   resolved against the repo root, the directory of the script, and the project directory of the task
   (a child script inherits the task's cwd). A `$NAME/` part is also read with every value that the
   script assigns to NAME (`D=ops; bash "$D/y.sh"`). Each literal `cd` or `pushd` target in the script is
-  one more base for its children (`cd ops; bash y.sh`). A word
+  one more base for its children (`cd ops; bash y.sh`), also under the directories that earlier targets reached
+  (`cd ops; cd nested`). A word
   that names no file is skipped. The match is wide on purpose: a path in a message is followed too,
   which can add rows but cannot hide one. So `ci/release-plan/run.sh` (run by `ci/actionlint/run.sh`)
   and `ops/nats/check-subjects.sh` (run by `repo:nats-permissions`) are now scanned.

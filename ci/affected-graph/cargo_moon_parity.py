@@ -3837,11 +3837,13 @@ def _uv_run_refs(path, root, bases=()):
     # A literal `cd` / `pushd` target in the script is a cwd for the children it runs later. Every
     # one is a candidate against every base, so an extra candidate can add a row, never hide one.
     plain = (root_resolved, Path(path).resolve().parent, *bases)
+    # Each target is resolved against every directory reached so far, in text order, so
+    # `cd ops; cd nested` reaches `ops/nested`. A directory is never dropped (no popd tracking).
     cd_bases = []
     for target in UV_RUN_CD_RE.findall(text):
         for c in _expand_words(target, values):
             if "$" not in c and not c.startswith(("/", "~", "-")):
-                cd_bases.extend(b / c for b in plain)
+                cd_bases.extend([b / c for b in (*plain, *cd_bases)])
     out = []
     for rel in sorted(rels):
         for base in (*plain, *cd_bases):
@@ -7834,6 +7836,13 @@ def self_test():
         a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/cd8.sh", smoke_globs=[*a14_smoke_globs, "cdx/**/*"]))
         if not any("cdx/c8.sh" in r for r in a14_rows):
             failures.append(f"A14 did not follow a child script after a literal cd (R8): {a14_rows}")
+        # R8: two successive literal cds add up (`cd cdy; cd nested; bash n8.sh`).
+        (a14_root / "cdy" / "nested").mkdir(parents=True)
+        (a14_root / "cdy" / "nested" / "n8.sh").write_text("#!/bin/bash\nuv sync\n")
+        (a14_root / "ci" / "x" / "cd2.sh").write_text("#!/bin/bash\ncd cdy\ncd nested\nbash n8.sh\n")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/cd2.sh", smoke_globs=[*a14_smoke_globs, "cdy/**/*"]))
+        if not any("cdy/nested/n8.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not follow a child script after two successive cds (R8): {a14_rows}")
         # R8: a child script inherits the task's cwd, so `bash scripts/m.sh` resolves in the project.
         (a14_root / "py" / "scripts" / "child8.sh").write_text("#!/bin/bash\nuv sync\n")
         (a14_root / "py" / "scripts" / "parent8.sh").write_text("#!/bin/bash\nbash scripts/child8.sh\n")
