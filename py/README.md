@@ -41,6 +41,15 @@ leave a source file older than the cached build, and the reinstall then gets a s
 After you pull the SMA-767 change, run this command once. `py/.venv` keeps the old binding, and macOS 27 cannot
 load it. See the SMA-767 entry in `rs/CLAUDE.md`.
 
+## After a `pyproject.toml` change
+
+Every Moon task runs `uv run --locked` (SMA-765 R-relock). If you change a `pyproject.toml` and do
+not relock, `py:lint`, `py:fmt`, `py:typecheck` and `py:test` stop with a uv error that says the
+lockfile must be updated. Run `(cd py && uv lock)` when no Moon run is active, and commit `py/uv.lock`.
+The tasks do not relock by themselves, because a relock during a run can change `py/.venv` while
+another task reads it. `repo:affected-smoke` (A14) reds a `uv run` with no `--locked`, `--frozen`
+or `--isolated`.
+
 Notes:
 
 - The workspace lock resolves all packages' dependencies together. For a faster CI / iteration

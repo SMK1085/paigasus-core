@@ -115,6 +115,12 @@ ALLOW_DEAD_INPUT = {
         "forward guard: no dot-prefixed workflow exists yet, and the gate must be scheduled "
         "by the PR that first adds one (SMA-593)"
     ),
+    # Follow-up sweep 2. A14 (R7) reads every tracked uv.toml. There is none today, so the glob
+    # matches nothing; it exists so that the PR that ADDS one schedules repo:affected-smoke.
+    ("affected-smoke", "**/uv.toml"): (
+        "forward guard: no uv.toml exists yet, and A14 must run on the PR that first adds one "
+        "(follow-up sweep 2, R7)"
+    ),
 }
 
 

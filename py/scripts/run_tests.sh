@@ -14,7 +14,7 @@
 # still exit non-zero.
 set -euo pipefail
 
-uv run pytest "$@"
+uv run --locked pytest "$@"
 
 # The floor only makes sense over an UNFILTERED collection: `moon run py:test -- -k parity`
 # legitimately collects from one package. This is the design's one deliberate no-op branch, and
@@ -29,5 +29,5 @@ if [ "$#" -eq 0 ]; then
   # Explicitly '' rather than a bare `PYTEST_ADDOPTS=`: shellcheck 0.11.0 (the version this repo
   # pins for repo:actionlint) reports SC1007 on the bare form, since it cannot tell a deliberate
   # empty assignment from a typo'd one. Same semantics, no warning.
-  PYTEST_ADDOPTS='' uv run pytest --collect-only -q | uv run python scripts/assert_test_floor.py
+  PYTEST_ADDOPTS='' uv run --locked pytest --collect-only -q | uv run --locked python scripts/assert_test_floor.py
 fi

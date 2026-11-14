@@ -256,7 +256,8 @@ a gate. Do not copy it here.
 ### This development Mac only
 
 - **Standing rule: No single local bash runs every gate. `repo:affected-smoke` needs system bash
-  3.2. `repo:ruff-ci`, `repo:next-public-free` and `repo:publish-metadata` need bash 4+.
+  3.2. `repo:ruff-ci`, `repo:next-public-free`, `repo:publish-metadata` and `repo:nats-permissions`
+  need bash 4+.
   `repo:actionlint`'s full gate needs bash 5 AND a healthy pipe: it completes under Homebrew
   bash 5.3.15 when the host pipe holds 65536 bytes, and has no working local bash when the pipe
   holds 512.**
@@ -302,14 +303,23 @@ a gate. Do not copy it here.
   `declare`/`mapfile` stderr as a bash-version artifact, never as a finding: the same commit passed
   `/opt/homebrew/bin/bash ci/publish-metadata/run.sh` ("all checks passed"). Expect more gates in
   this class — grep a failing gate for `declare -A` and `mapfile` before diagnosing anything else.
+  MEASURED (follow-up sweep 2): `repo:nats-permissions` is a FOURTH bash-4+ gate. Its
+  `ops/nats/check-subjects.sh` uses `local -n` (bash 4.3+) and checks `BASH_VERSINFO` first. Under
+  `/bin/bash` 3.2 it exits 1 with `this script needs bash >= 4.3` on stderr. Under Homebrew bash
+  5.3.20 it passes. So also grep for `local -n` and `BASH_VERSINFO`.
   So on this class of machine, no single local bash satisfies every
   gate: `repo:affected-smoke` needs 3.2 (no `mapfile`, and no here-string deadlock);
-  `repo:ruff-ci`, `repo:next-public-free` and `repo:publish-metadata` need 4+; and
+  `repo:ruff-ci`, `repo:next-public-free`, `repo:publish-metadata` and `repo:nats-permissions`
+  need 4+; and
   `repo:actionlint` needs bash 5 and a
   healthy pipe, per the correction above. A local full-graph `moon ci` run must pick one bash for the
   whole invocation, then re-run the gates that need the other bash directly
   (`<bash-binary> ci/<gate>/run.sh`) and read those results instead of the `moon ci` verdict for
-  them — `repo:actionlint` yields a local verdict only when its pipe preflight passes. CI runs a single Linux bash and
+  them. `repo:nats-permissions` has no `ci/` script, and under 3.2 its `set -e` stops the task
+  before its nextest half. Re-run both halves: `/opt/homebrew/bin/bash ops/nats/check-subjects.sh`,
+  then the task's own `( cd rs && cargo nextest run --locked --no-tests=pass -p paigasus-iam --test
+  nats_permissions --test docker_preflight --profile iam-nats )` (it needs Docker).
+  `repo:actionlint` yields a local verdict only when its pipe preflight passes. CI runs a single Linux bash and
   never sees this split.
 - **A new pipe on the development Mac can hold only 512 bytes, and two local hangs come from
   it** (SMA-612). A new pipe on that host holds 512 bytes (M4), not the nominal 16384 that

@@ -5,7 +5,7 @@ language: 'python'
 {%- if archetype == "service" %}
 tasks:
   start:
-    command: 'uv run python -m {{ name | replace(from="-", to="_") }}'
+    command: 'uv run --locked python -m {{ name | replace(from="-", to="_") }}'
     options:
       cache: false
       persistent: true

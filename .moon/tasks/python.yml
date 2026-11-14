@@ -23,10 +23,10 @@ fileGroups:
 
 tasks:
   lint:
-    command: 'uv run ruff check .'
+    command: 'uv run --locked ruff check .'
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
   fmt:
-    command: 'uv run ruff format --check .'
+    command: 'uv run --locked ruff format --check .'
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
   typecheck:
     # `script` (not `command`) because we chain two steps. First run: basedpyright's native
@@ -49,8 +49,8 @@ tasks:
     # py:test it needs no passthrough.
     script: |
       set -euo pipefail
-      uv run basedpyright
-      uv run basedpyright --outputjson | uv run python scripts/assert_typecheck_coverage.py
+      uv run --locked basedpyright
+      uv run --locked basedpyright --outputjson | uv run --locked python scripts/assert_typecheck_coverage.py
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
   test:
     # `command` (not `script`) deliberately: Moon forwards `moon run py:test -- -k foo` to a
