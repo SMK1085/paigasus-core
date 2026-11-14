@@ -10,6 +10,14 @@
 //! openai-node replaces the name, and LangChain merges by index value. Inside the canonical form
 //! they all agree, so the decider sees exactly what every client will run.
 //!
+//! A tool-call entry with no `function` body (a custom call, or an entry with only an `index`) is
+//! bodyless. LangChain raises at the first record that holds one (`rtc["function"].get`) and drops
+//! that whole record. After such a record, a fragment of a call that existed before it would make
+//! LangChain's snapshot of that call a strict prefix of the other clients' (spec § 2.1 M3). So that
+//! fragment is a deviation (`fragment_after_bodyless_entry`), also in the bodyless record itself.
+//! A fragment that adds nothing is a deviation too, on purpose: the rule does not read content.
+//! Calls that start in or after the bodyless record are conforming.
+//!
 //! Every check runs on a small copy of the state ([`Check`]) before anything is changed, so a
 //! deviation leaves the assembly exactly as it was.
 //!
@@ -56,6 +64,8 @@ pub(crate) struct Check {
     calls: Vec<Shadow>,
     /// `Some(has_name)` once a legacy `function_call` fragment arrived.
     legacy: Option<bool>,
+    /// The number of calls that existed before the first record with a bodyless entry was applied.
+    bodyless_at: Option<usize>,
 }
 
 fn once(slot: &mut bool, present: bool, why: &'static str) -> Result<(), Deviation> {
@@ -85,6 +95,17 @@ impl Check {
         if let Some(l) = legacy {
             long_check(None, l.name.as_deref())?;
             once(self.legacy.get_or_insert(false), l.name.is_some(), "repeated_name")?;
+        }
+        let before = self.calls.len();
+        if let Some(n) = self.bodyless_at {
+            if frags.iter().any(|f| (f.index as usize) < n) {
+                return Err(Deviation("fragment_after_bodyless_entry"));
+            }
+        } else if frags.iter().any(|f| f.function.is_none()) {
+            if frags.iter().any(|f| (f.index as usize) < before) {
+                return Err(Deviation("fragment_after_bodyless_entry"));
+            }
+            self.bodyless_at = Some(before);
         }
         for f in frags {
             let pos = f.index as usize;
@@ -412,6 +433,66 @@ mod tests {
         a.apply(&f, l.as_ref())
     }
 
+    const F0A: &str = r#"{"index":0,"id":"c0","type":"function","function":{"name":"read","arguments":"{\"v\":\"ab"}}"#;
+    const F0B: &str = r#"{"index":0,"function":{"arguments":"cdefgh\"}"}}"#;
+    const CUSTOM1: &str = r#"{"index":1,"id":"c1","type":"custom","custom":{"name":"note","input":"x"}}"#;
+
+    #[test]
+    fn a_fragment_of_an_earlier_call_after_a_custom_entry_deviates() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        feed(&mut a, &tc(CUSTOM1)).unwrap();
+        assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    #[test]
+    fn an_earlier_call_in_the_bodyless_record_deviates() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        assert_eq!(feed(&mut a, &tc(&format!("{F0B},{CUSTOM1}"))), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    #[test]
+    fn a_bodyless_entry_with_only_an_index_counts() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1}"#)).unwrap();
+        assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    #[test]
+    fn custom_first_then_function_is_conforming() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c0","type":"custom","custom":{"name":"note","input":"x"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","type":"function","function":{"name":"read","arguments":"{"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"function":{"arguments":"\"v\":1"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"function":{"arguments":"}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn a_function_call_that_starts_in_the_bodyless_record_is_conforming() {
+        let mut a = ChoiceAssembly::default();
+        let start1 = r#"{"index":1,"id":"c1","type":"function","function":{"name":"read","arguments":"{"}}"#;
+        let custom0 = r#"{"index":0,"id":"c0","type":"custom","custom":{"name":"note","input":"x"}}"#;
+        feed(&mut a, &tc(&format!("{custom0},{start1}"))).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"function":{"arguments":"}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn contiguous_function_then_custom_is_conforming() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        feed(&mut a, &tc(F0B)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"id":"c1","type":"custom","custom":{"name":"note","input":"x"}}"#)).unwrap();
+        feed(&mut a, &tc(r#"{"index":1,"custom":{"input":"y"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn the_bodyless_rule_is_a_no_op_for_a_body() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(&format!("{F0A},{CUSTOM1}"))).unwrap();
+    }
+
     #[test]
     fn two_interleaved_calls_assemble() {
         let mut a = ChoiceAssembly::default();
@@ -474,13 +555,22 @@ mod tests {
                 &[r#"{"index":0,"id":"c","type":"function","function":{"name":"safe_"}}"#, r#"{"index":0,"function":{"name":"rm"}}"#],
                 "repeated_name",
             ),
-            (&[r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#, r#"{"index":0,"id":"d"}"#], "repeated_id"),
             (
-                &[r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#, r#"{"index":0,"type":"function"}"#],
+                &[
+                    r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#,
+                    r#"{"index":0,"id":"d","function":{"arguments":""}}"#,
+                ],
+                "repeated_id",
+            ),
+            (
+                &[
+                    r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#,
+                    r#"{"index":0,"type":"function","function":{"arguments":""}}"#,
+                ],
                 "repeated_type",
             ),
             (
-                &[r#"{"index":0,"id":"c","type":"function","function":{"name":"x"}}"#, r#"{"index":0,"custom":{"input":"y"}}"#],
+                &[r#"{"index":0,"id":"c","type":"custom","custom":{"name":"x"}}"#, r#"{"index":0,"function":{"arguments":"y"}}"#],
                 "shape_changed",
             ),
         ];

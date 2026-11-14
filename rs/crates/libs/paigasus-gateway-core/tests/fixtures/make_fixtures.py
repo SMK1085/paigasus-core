@@ -77,6 +77,12 @@ OPENAI_MALFORMED = {
     "proto_key": ['{"choices":[{"index":0,"delta":{"__proto__":{"tool_calls":[' + dump(HIDDEN) + "]}}}]}", text(0, "ok", role=True), fin(0, "stop")],
     "float_index": [ch([{"index": 0, "delta": {"tool_calls": [{**HIDDEN, "index": 0.0}]}}]), text(0, "ok", role=True), fin(0, "stop")],
     "repeated_name": [call(0, 0, "read_file", "{}"), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"name": "blocked_x", "arguments": "CANARY-rn"}}]}}]), fin(0)],
+    "fragment_after_bodyless_entry": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "call_0_1", "type": "custom", "custom": {"name": "note", "input": "x"}}]}, "finish_reason": None}]),
+        call(0, 0, "", 'cdefgh","k":"CANARY-bodyless"}', first=False),
+        fin(0),
+    ],
     "oversized": [call(0, 0, "read_file", "{"), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-big" + "x" * 5000}}]}}]), fin(0)],
 }
 

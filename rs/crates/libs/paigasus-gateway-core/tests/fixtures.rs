@@ -161,6 +161,7 @@ fn malformed_shapes_follow_section_6() {
         row("proto_key", &["\"ok\""], &[], &["\"ok\""], &[], false),
         row("float_index", &["\"ok\""], &[], &["\"ok\""], &[], false),
         row("repeated_name", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("fragment_after_bodyless_entry", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("oversized", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("after_done", &["data: [DONE]"], &[], &["data: [DONE]"], &[], false),
         row("error_mid_hold", &["\"terminal\""], &[], &["\"terminal\""], &[], false),
