@@ -156,15 +156,7 @@ PINNED_LINES: dict[tuple[str, str], str] = {
 # (plan Appendix A.6). A hit in a listed file is not a row; a listed file with no hit is a row, so
 # the list shrinks as the migration moves. Tasks 4 to 6 empty it, and Task 7 deletes it.
 MIGRATION_FILES: frozenset[str] = frozenset((
-    ".github/workflows/ci.yml",
-    ".github/workflows/images-rehearsal.yml",
-    ".github/workflows/images.yml",
-    ".github/workflows/prebuild.yml",
-    ".github/workflows/release.yml",
-    ".github/workflows/security-scan.yml",
-    ".github/workflows/wheels.yml",
     "ci/affected-graph/cargo_moon_parity.py",
-    "ci/images/release_decision.py",
 ))
 
 _BAN_FIX = "route the command through ci/python-env/run.sh, give the text new words, or pin the line in PINNED_LINES"

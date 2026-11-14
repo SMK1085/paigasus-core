@@ -1,6 +1,6 @@
 name: security-scan
 
-# Scheduled advisory scan of the npm + pip lockfiles (SMA-518).
+# Scheduled advisory scan of the npm and Python package lockfiles (SMA-518).
 #
 # WHY A SCHEDULE AND NOT JUST THE PR GATE — `repo:osv` runs inside `moon ci`, but Moon keys it
 # on the lockfiles, so it only fires when dependencies actually MOVE. Advisories are published
@@ -60,15 +60,15 @@ jobs:
           cache: false
 
       # Install the proto-pinned osv-scanner directly rather than via `moon setup`: this job
-      # needs no language toolchains (no node/uv/rust), only the scanner and python3 (present
-      # on the runner) for run.sh's report rendering.
+      # needs no language toolchains (no node, Python package manager or rust), only the scanner
+      # and python3 (present on the runner) for run.sh's report rendering.
       - name: Install pinned osv-scanner
         run: proto install osv-scanner
 
       # Invoked directly, NOT through `moon run repo:osv`: Moon would report the task as cached
       # whenever the lockfiles are unchanged, which is the normal case here and exactly the
       # state this job exists to re-check against a freshly published advisory.
-      - name: OSV advisory gate (npm + pip lockfiles)
+      - name: OSV advisory gate (npm and Python package lockfiles)
         run: ci/osv/run.sh
 
   category-slugs:

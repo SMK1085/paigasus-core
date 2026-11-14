@@ -50,6 +50,9 @@ on:
       # SMA-634: the kernel's `file:` dependency list. ts/Dockerfile's COPY list is hand-maintained
       # against it, and only the Docker path reads it.
       - 'ts/packages/paigasus-kernel/package.json'
+      # SMA-770: the wrapper that every release_decision.py call goes through. Its gate pins the
+      # sha256 of run.sh, but no other pull request check runs these calls with the real tool.
+      - 'ci/python-env/**'
       # SMA-675: the console smoke's kernel route row depends on these four files at RUNTIME,
       # not at build time. It seeds a literal SessionRecord, which isSessionRecord in session.ts
       # must accept. It expects the seeded session's nonce from the (console) layout on each
@@ -94,8 +97,8 @@ jobs:
         arch: ${{ fromJSON(github.event_name == 'pull_request' && '["amd64"]' || '["amd64", "arm64"]') }}
     env:
       ARCH: ${{ matrix.arch }}
-      # SMA-609: every captured shim output must set this, so `$(uv run …)` never captures proto's
-      # NDJSON preamble.
+      # SMA-609: every captured shim output must set this, so a captured wrapper call
+      # (`$(bash ci/python-env/run.sh …)`) never captures proto's NDJSON preamble.
       PROTO_REPORTER: text
     steps:
       # Same reclaim as ci.yml: this builds the cedar-policy tree in --release on a ~14 GB disk.
@@ -122,17 +125,17 @@ jobs:
 
       # Narrow installs, not a bare `proto install`: this job needs only these six. SMA-671: moon,
       # node and pnpm are for the host build of both consoles (the staged-tree parity reference).
-      - name: Install crane, syft, uv, moon, node and pnpm
+      - name: Install crane, syft, the Python package manager, moon, node and pnpm
         run: |
           proto install crane
           proto install syft
-          proto install uv
+          bash ci/python-env/run.sh install
           proto install moon
           proto install node
           proto install pnpm
 
       - name: Decision script self-test
-        run: uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py --self-test
+        run: bash ci/python-env/run.sh script ci/images/release_decision.py --self-test
 
       # SMA-665 T2 (spec D10): the self-test of rs/docker/chisel-dpkg-status.sh. The target is the
       # chisel-dpkg-status-test stage of rs/Dockerfile, so BuildKit builds the rootfs stage and the
@@ -174,9 +177,9 @@ jobs:
           for key in iam gateway; do
             crate="paigasus-${key}"
             syft "oci-archive:out/${crate}-${ARCH}.oci.tar" -o "spdx-json=sbom-${crate}-${ARCH}.spdx.json"
-            summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-${crate}-${ARCH}.spdx.json")"
+            summary="$(bash ci/python-env/run.sh script ci/images/release_decision.py sbom-summary "sbom-${crate}-${ARCH}.spdx.json")"
             echo "M8 image=${crate} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
-            uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" --arch "${ARCH}" "sbom-${crate}-${ARCH}.spdx.json"
+            bash ci/python-env/run.sh script ci/images/release_decision.py sbom-floor --service "$key" --arch "${ARCH}" "sbom-${crate}-${ARCH}.spdx.json"
           done
 
       # SMA-670: the self-test of the console image checks in ci/images/run.sh. Each static check
@@ -259,9 +262,9 @@ jobs:
               ci/images/run.sh load-oci "$archive" "paigasus-${key}:dev"
               ci/images/run.sh smoke "$key"
               syft "oci-archive:${archive}" -o "spdx-json=sbom-paigasus-${key}-${ARCH}.spdx.json"
-              summary="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-summary "sbom-paigasus-${key}-${ARCH}.spdx.json")"
+              summary="$(bash ci/python-env/run.sh script ci/images/release_decision.py sbom-summary "sbom-paigasus-${key}-${ARCH}.spdx.json")"
               echo "M8 image=paigasus-${key} arch=${ARCH} $(printf '%s' "$summary" | tr '\n' ' ')"
-              uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py sbom-floor --service "$key" --arch "${ARCH}" "sbom-paigasus-${key}-${ARCH}.spdx.json"
+              bash ci/python-env/run.sh script ci/images/release_decision.py sbom-floor --service "$key" --arch "${ARCH}" "sbom-paigasus-${key}-${ARCH}.spdx.json"
             )
             key_rc=$?
             set -e
