@@ -101,6 +101,18 @@ OPENAI_MALFORMED = {
         call(0, 0, "", 'cdefgh"}', first=False),
         fin(0),
     ],
+    "chunk_key": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([], chunk={"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_ck", "type": "function", "function": {"name": "blocked_chunk", "arguments": "{\"v\":\"CANARY-chunk\"}"}}]}}]}),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
+    "content_delta_type": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        {**ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-cdt"}}]}, "finish_reason": None}]), "type": "content.delta"},
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
     "oversized": [call(0, 0, "read_file", "{"), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-big" + "x" * 5000}}]}}]), fin(0)],
 }
 

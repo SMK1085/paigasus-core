@@ -56,6 +56,12 @@ pub enum Quirk {
     /// as the type fragment, so it is a repeated type or a type/shape mismatch. The body keeps the
     /// entry a named call; a bare `{"index":0,"type":null}` is covered by the unit tests and fixture.
     NullType,
+    /// A top-level `chunk` key with an empty `choices` (spec § 2.2 H1): LangChain reads
+    /// `chunk.choices` then, so the hidden call sits inside `chunk`.
+    ChunkKey,
+    /// A fragment in a record with top-level `"type":"content.delta"` (spec § 2.2 H2): LangChain
+    /// skips that record.
+    ContentDeltaType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +155,8 @@ fn quirk_strategy() -> impl Strategy<Value = Quirk> {
         Just(Quirk::NoChoicesKey),
         Just(Quirk::NoDelta),
         Just(Quirk::NullType),
+        Just(Quirk::ChunkKey),
+        Just(Quirk::ContentDeltaType),
     ]
 }
 
@@ -352,6 +360,12 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
                 }
             }
             Quirk::NullType => insert(&mut lines, chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"type":null,"function":{"name":"blocked_hidden","arguments":"CANARY-nt"}}]}}])).to_string()),
+            Quirk::ChunkKey => insert(&mut lines, json!({"object":"chat.completion.chunk","id":"q","choices":[],"chunk":{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ck","type":"function","function":{"name":"blocked_chunk","arguments":"CANARY-chunk"}}]}}]}}).to_string()),
+            Quirk::ContentDeltaType => insert(&mut lines, {
+                let mut r = chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"zz"}}]}}]));
+                r["type"] = json!("content.delta");
+                r.to_string()
+            }),
             Quirk::UnknownFields => lines.insert(pos, "id: 7\nretry: 10\nfoo: bar\n".to_owned()),
             Quirk::Comments => lines.insert(pos, ": hello\n: data: {\"x\":\"CANARY-comment\"}\n".to_owned()),
             Quirk::EventLine => lines.insert(pos, "event: message\n".to_owned()),

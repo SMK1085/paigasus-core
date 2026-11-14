@@ -11,6 +11,11 @@
 //! `object` differs (it filters Azure's async content-filter chunks), so a fragment in such a chunk
 //! would reach the decider but not that client. Text-only chunks are not checked: skipping them
 //! changes no tool call.
+//!
+//! Two more keys make LangChain read a chunk differently (spec § 2.2 H1, H2). A top-level `chunk`
+//! key is malformed: LangChain reads `chunk.choices` when `choices` is empty
+//! (`_convert_chunk_to_generation_chunk`). A top-level `"type":"content.delta"` on a chunk that
+//! carries tool data or a `finish_reason` is malformed: LangChain skips that record.
 
 use serde_json::{Map, Value};
 
@@ -75,6 +80,10 @@ pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
             Ok(Chunk::UpstreamError)
         };
     }
+    // H1 (spec § 2.2): LangChain reads `chunk.choices` when `choices` is empty.
+    if top.contains_key("chunk") {
+        return Err(Malformed("chunk_key"));
+    }
     let keyed = top.contains_key("choices");
     let choices = match top.get("choices") {
         None => Vec::new(),
@@ -89,6 +98,10 @@ pub(crate) fn chunk(v: &Value) -> Result<Chunk, Malformed> {
         Some(_) => return Err(Malformed("choices")),
     };
     let carries = choices.iter().any(|c| !c.fragments.is_empty() || c.legacy.is_some() || c.finish_reason.is_some());
+    // H2 (spec § 2.2): LangChain skips a record whose top-level `type` is `content.delta`.
+    if carries && top.get("type").and_then(Value::as_str) == Some("content.delta") {
+        return Err(Malformed("content_delta_type"));
+    }
     check_object(top, CHUNK_OBJECT, carries)?;
     Ok(Chunk::Choices { choices, keyed })
 }
@@ -186,6 +199,40 @@ mod tests {
             Chunk::Choices { choices, .. } => choices,
             Chunk::UpstreamError => panic!("not an error"),
         }
+    }
+
+    #[test]
+    fn a_top_level_chunk_key_is_malformed() {
+        for s in [
+            r#"{"choices":[],"chunk":{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"x"}}]}}]}}"#,
+            r#"{"choices":[],"chunk":{}}"#,
+        ] {
+            assert!(matches!(raw(s), Err(Malformed("chunk_key"))), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_case_folded_chunk_key_is_rejected() {
+        // `parse_with` reports every strict-parse failure as `json`, as the `json.rs` tests assume.
+        assert!(parse_strict(br#"{"choices":[],"Chunk":{}}"#).is_err());
+        assert!(parse_strict(br#"{"choices":[],"CHUNK":{}}"#).is_err());
+        assert!(parse_strict(br#"{"choices":[],"chunk":{}}"#).is_ok());
+    }
+
+    #[test]
+    fn content_delta_type_with_tool_data_is_malformed() {
+        for d in [
+            r#"{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"zz"}}]}}"#,
+            r#"{"index":0,"delta":{},"finish_reason":"tool_calls"}"#,
+        ] {
+            let s = format!(r#"{{"type":"content.delta","choices":[{d}]}}"#);
+            assert!(matches!(c(&s), Err(Malformed("content_delta_type"))), "{s}");
+        }
+    }
+
+    #[test]
+    fn content_delta_type_with_text_only_is_not_checked() {
+        assert!(c(r#"{"type":"content.delta","choices":[{"index":0,"delta":{"content":"hi"}}]}"#).is_ok());
     }
 
     #[test]

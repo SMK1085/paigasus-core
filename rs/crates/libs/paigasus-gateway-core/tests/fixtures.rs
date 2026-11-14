@@ -165,6 +165,8 @@ fn malformed_shapes_follow_section_6() {
         row("chunk_without_choices", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("choice_without_delta", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("type_null", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("chunk_key", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
+        row("content_delta_type", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("oversized", &["(malformed)"], &[], &[PASS_THROUGH], &[], true),
         row("after_done", &["data: [DONE]"], &[], &["data: [DONE]"], &[], false),
         row("error_mid_hold", &["\"terminal\""], &[], &["\"terminal\""], &[], false),
