@@ -2,4 +2,6 @@
 //! OpenAI Responses API (`/v1/responses`) tool-call interception (SMA-769).
 
 pub(crate) mod assembly;
+pub(crate) mod body;
 pub(crate) mod classify;
+pub(crate) mod rewrite;

@@ -53,7 +53,7 @@ const STATUS_TYPES: [&str; 8] = [
 ];
 
 /// The prefix of the gateway's own rewrite ids (§ 6.5). No upstream item id may start with it.
-const RESERVED_ID_PREFIX: &str = "msg_paigasus_";
+pub(crate) const RESERVED_ID_PREFIX: &str = "msg_paigasus_";
 
 type Hash = [u8; 32];
 
@@ -300,7 +300,7 @@ fn identity(item: &Map<String, Value>) -> [Option<Value>; 5] {
 /// R8: an object with a string `type` and a non-empty string `id`. The identity fields and
 /// `server_label` are strings or `null` where present, and none is longer than
 /// `MAX_IDENTIFIER_BYTES`.
-fn item_shape(v: Option<&Value>) -> Result<(&Map<String, Value>, &str, &str), Deviation> {
+pub(crate) fn item_shape(v: Option<&Value>) -> Result<(&Map<String, Value>, &str, &str), Deviation> {
     let bad = Deviation("item_shape");
     let Some(Value::Object(m)) = v else { return Err(bad) };
     let Some(Value::String(ty)) = m.get("type") else { return Err(bad) };
@@ -393,6 +393,22 @@ fn shell_event(commands: &mut Vec<Command>, ty: &str, ev: &Map<String, Value>) -
     Ok(())
 }
 
+/// R15: whether a client-run item has finished. A `status` other than `"completed"` is a
+/// truncation. So is an absent `status`, except for an item type whose model has no `status`
+/// field (T4b). Shared by the stream (`done`) and the body path (an `output[]` item).
+pub(crate) fn is_completed(item: &Map<String, Value>, item_type: &str) -> bool {
+    match item.get("status") {
+        None => !STATUS_TYPES.contains(&item_type),
+        Some(Value::String(s)) => s == "completed",
+        Some(_) => false,
+    }
+}
+
+/// R11: the arguments of a completed function call are `""` or one complete JSON value.
+pub(crate) fn arguments_complete(text: &str) -> bool {
+    text.is_empty() || parse_value_strict(text.as_bytes()).is_ok()
+}
+
 /// The per-kind rules of a client-run `done` item (R11–R14).
 fn check_client(kind: ToolCallKind, open: &Open, added: &Map<String, Value>, done: &Map<String, Value>, completed: bool) -> Result<(), Deviation> {
     match kind {
@@ -414,7 +430,7 @@ fn check_client(kind: ToolCallKind, open: &Open, added: &Map<String, Value>, don
             if !open.text.agrees(text) {
                 return Err(Deviation(mismatch));
             }
-            if function && !text.is_empty() && parse_value_strict(text.as_bytes()).is_err() {
+            if function && !arguments_complete(text) {
                 return Err(Deviation("incomplete_arguments"));
             }
         }
@@ -780,11 +796,7 @@ impl Assembly {
             let added = added_value.as_object().expect("item_shape checked the added item");
             // R15: a `done` whose `status` is not `"completed"` is a truncation. An absent `status`
             // is one too, except for an item type whose model has no `status` field (T4b).
-            let completed = match item.get("status") {
-                None => !STATUS_TYPES.contains(&item_type),
-                Some(Value::String(s)) => s == "completed",
-                Some(_) => false,
-            };
+            let completed = is_completed(item, item_type);
             check_client(kind, &open, added, item, completed)?;
             if !subset(added, item, true) {
                 return Err(Deviation("added_done_differ"));
