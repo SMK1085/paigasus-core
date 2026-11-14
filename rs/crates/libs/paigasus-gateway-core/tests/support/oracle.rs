@@ -108,23 +108,12 @@ pub fn as_model_call(c: &ToolCall) -> ModelCall {
     }
 }
 
-/// Whether `p`, a value parsed from a prefix of some JSON text, can be a prefix of `f`, the value
-/// of the whole text: strings and numbers may be cut short, objects and arrays may lack members.
-pub fn json_prefix(p: &Value, f: &Value) -> bool {
-    match (p, f) {
-        (Value::Object(a), Value::Object(b)) => a.iter().all(|(k, v)| b.get(k).is_some_and(|w| json_prefix(v, w))),
-        (Value::Array(a), Value::Array(b)) => a.len() <= b.len() && a.iter().zip(b).all(|(x, y)| json_prefix(x, y)),
-        (Value::String(a), Value::String(b)) => b.starts_with(a.as_str()),
-        (Value::Number(a), Value::Number(b)) => b.to_string().starts_with(&a.to_string()),
-        _ => p == f,
-    }
-}
-
 /// Whether a model call's arguments match a decided call's. The decider sees `{}` for empty
 /// function arguments (the core's rule), so a client's raw `""` matches it. A `parsed` model value
-/// is compared with the parsed decided string. With `partial` (the snapshot at a raise) the model
-/// may hold a prefix of the decided arguments: the client stopped reading inside the call.
-fn arguments_match(mc: &ModelCall, decided: &ModelCall, partial: bool) -> bool {
+/// is compared with the parsed decided string. The match is exact, also for the snapshot at an
+/// excused raise: a prefix of allowed arguments can be a call that an argument-reading policy
+/// (SMA-752) denies, and the gateway never asks the decider about it.
+fn arguments_match(mc: &ModelCall, decided: &ModelCall) -> bool {
     if mc.kind == "other" {
         return true; // the decided form of kind Other is the raw entry
     }
@@ -137,10 +126,7 @@ fn arguments_match(mc: &ModelCall, decided: &ModelCall, partial: bool) -> bool {
         let (Ok(full), Ok(got)) = (full, serde_json::from_str::<Value>(&mc.arguments)) else {
             return false;
         };
-        return if partial { json_prefix(&got, &full) } else { got == full };
-    }
-    if partial {
-        return decided.arguments.starts_with(&mc.arguments);
+        return got == full;
     }
     mc.arguments == decided.arguments || (mc.arguments.is_empty() && decided.arguments == "{}")
 }
@@ -152,23 +138,22 @@ fn arguments_match(mc: &ModelCall, decided: &ModelCall, partial: bool) -> bool {
 /// A model that raises on `out` is an error unless the interceptor dropped a record or took an
 /// `on_failure` path (`core_failed`), or the client already raises on the upstream bytes `input`:
 /// a correct interceptor must not make a working client fail. An excused raise is still checked:
-/// the client may have acted on calls before it raised, so every call in its snapshot must be a
-/// decided, allowed call, of which it may hold only a prefix if it raised inside the call.
+/// the client may have acted on calls before it raised, so every call in its snapshot must match
+/// a decided, allowed call exactly. A strict prefix of an allowed call is never accepted: the
+/// gateway never asked the decider about it, and an argument-reading policy (SMA-752) may deny it.
 pub fn check_i1(format: Format, input: &[u8], out: &[u8], decided: &[(ToolCall, Decision)], core_failed: bool) -> Result<(), String> {
     let allowed: Vec<ModelCall> = decided.iter().filter(|(_, d)| d.is_allow()).map(|(c, _)| as_model_call(c)).collect();
     let show = || String::from_utf8_lossy(out).into_owned();
     for (model, run) in runners(format) {
         let r = run(out);
-        let partial = match &r.error {
-            None => false,
-            Some(_) if core_failed || run(input).error.is_some() => true,
+        match &r.error {
+            Some(_) if core_failed || run(input).error.is_some() => {} // excused; the snapshot is still checked
             Some(e) => return Err(format!("{model} raised on the output: {e}\n{}", show())),
-        };
+            None => {}
+        }
         let mut left = allowed.clone();
         for mc in r.calls {
-            let hit = left
-                .iter()
-                .position(|a| a.choice == mc.choice && a.kind == mc.kind && a.name == mc.name && arguments_match(&mc, a, partial));
+            let hit = left.iter().position(|a| a.choice == mc.choice && a.kind == mc.kind && a.name == mc.name && arguments_match(&mc, a));
             match hit {
                 Some(i) => {
                     left.remove(i);
