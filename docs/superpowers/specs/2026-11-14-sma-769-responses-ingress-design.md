@@ -288,6 +288,7 @@ Every item-scoped event type belongs to exactly one item type. The map is closed
 | `response.image_generation_call.*` | `image_generation_call` |
 | `response.audio.*`, `response.audio.transcript.*` | no item (response-level) |
 | `response.compaction.compacting` | `compaction` |
+| `response.apply_patch_call_operation_diff.delta`, `.done` (not in the 3.48.0 union; measured, A4) | `apply_patch_call` |
 
 The builder takes the exact type list from openai-python 3.48.0 and checks it against Node's
 `expectedOutputItemTypes` (`response-accumulator.mjs:111-153`). An item-scoped event whose item
@@ -324,7 +325,10 @@ Dispatch on `data.type`. A present `event:` name that differs from `data.type` i
 record with a top-level `error` key whose value is truthy, and a `type: "error"` record, are
 upstream error records (749 D17 when a hold is open; forwarded otherwise). `[DONE]` ends the
 stream. The known types are the 59 members of openai-python 3.48.0's `ResponseStreamEvent` union
-plus `keepalive`. Any other type is malformed.
+plus `keepalive`, plus the two `response.apply_patch_call_operation_diff.*` types (A4). Any other
+type is malformed. openai-node 7.57.0 does not know the two diff types and raises at the first one
+(`Unhandled response stream event`), on upstream bytes too. So a Node client cannot stream an
+`apply_patch_call` with or without the gateway.
 
 ### 6.4 Canonical rules (any deviation: stream-level `on_failure`, code `Malformed`)
 
@@ -355,24 +359,33 @@ Every item, of every class (R-b):
 - R9. `type`, `id`, `call_id`, `namespace` and `name` (each where the type has it) are equal in
   `added`, `done` and the item at the same index in the terminal `output`.
 - R10. The terminal `output` has exactly one item per streamed `output_index`, in order, and no
-  other item. An item with a `done` frame equals its `done` item as a JSON value in the terminal
-  `output`.
+  other item. A **client-run** item with a `done` frame equals its `done` item as a JSON value in
+  the terminal `output`. A tool-free or provider-run item needs only R9 there: the measured
+  `reasoning` items have a different `encrypted_content` in the terminal `output` (§ 3.3,
+  amendment A1).
 
-Per client-run item (R-a, R-e):
+Per client-run item (R-a, R-e). The decided value is always the `done` item (§ 5). The **subset
+rule**: every field of the `added` item, at any depth, except `status`, is absent, `null`, `""`,
+`[]`, or equal to the same field of the `done` item; and the `added` item has no field that the
+`done` item does not have (amendment A2, measured § 3.3):
 
 - R11. `function_call`: `added.item.arguments` is `""`. The concatenated
   `function_call_arguments.delta` values equal `function_call_arguments.done.arguments`, which
-  equals `done.item.arguments`. At `done`, the arguments are `""` or one complete JSON value
-  (749 § 11 `incomplete_arguments`).
+  equals `done.item.arguments`. When the `done` status is `"completed"`, the arguments are `""`
+  or one complete JSON value (749 § 11 `incomplete_arguments`). Any other `done` status is R15,
+  and R15 takes precedence (amendment A3).
 - R12. `custom_tool_call`: the same rule with `input` and `custom_tool_call_input.*`. `input` is
   free text.
 - R13. `shell_call`: per command index i, the `shell_call_command.added` command plus its deltas
   equal its `shell_call_command.done` command, which equals `done.item.action.commands[i]`.
-  Indexes appear in order. `added` and `done` are equal as JSON values except for `status` and
-  `action.commands`. `added.item.action.commands` is `[]` or equals the `done` commands
-  (preflight ruling F2).
-- R14. The other client-run kinds: `added` and `done` are equal as JSON values, except for
-  `status` (M4).
+  Indexes appear in order. The subset rule applies to every other field (for example
+  `action.max_output_length`: `null` at `added`, `20000` at `done`). `added.item.action.commands`
+  is `[]` or equals the `done` commands (preflight ruling F2).
+- R14. `apply_patch_call`: the concatenated `response.apply_patch_call_operation_diff.delta` values
+  equal `response.apply_patch_call_operation_diff.done.diff`, which equals
+  `done.item.operation.diff`. The subset rule applies to every other field. The other client-run
+  kinds (`computer_call`, `local_shell_call`, `tool_search_call`, `mcp_approval_request`): the
+  subset rule (for example `computer_call` `actions`: absent at `added`, present at `done`).
 - R15. A client-run item whose `done` has a `status` other than `"completed"` is a truncation (M5).
   So are a terminal event, `[DONE]` or EOF while a client-run item has no `done`.
 - R16. No event for an item arrives after its `done`.
@@ -535,16 +548,18 @@ Four models, each with its cited version and source paths in a doc comment. Each
 from every surface its SDK exposes:
 
 - **openai-python 3.48.0 `ResponseStream`.** `_streaming.py`, `lib/streaming/responses/_responses.py`
-  and `lib/_parsing/_responses.py`. Calls: the items of every yielded `output_item.added` (for
-  client-run kinds other than function and custom) and `output_item.done` event, the `output` of a
-  yielded `response.incomplete` or `response.failed`, and the `get_final_response()` output.
+  and `lib/_parsing/_responses.py`. Calls: the items of every yielded `output_item.done` event, the
+  `output` of a yielded `response.incomplete` or `response.failed`, and the `get_final_response()`
+  output. An `output_item.added` item is not a call: it has `status: "in_progress"`, and the
+  measured `added` items of built-in kinds are incomplete by design (A2, A5).
 - **openai-python 3.48.0 raw stream** (`client.responses.create(stream=True)`). The same SSE
   decoder, no accumulation. Calls: the items of every yielded `output_item.done` and the terminal
   `output`. It raises only at the SSE layer, so it is stronger than the `ResponseStream` model at
   an excused raise.
 - **openai-node 7.57.0.** `core/streaming.ts`, `lib/responses/ResponseStream.ts` and
   `internal/responses/response-accumulator.ts`. Calls: the final snapshot (partial at a clean
-  EOF), plus every emitted `output_item.done` item.
+  EOF), plus every emitted `output_item.done` item. At a raise, `finalResponse()` rejects, so only
+  the emitted `done` items count.
 - **LangChain (langchain-openai 1.8.0, langchain-core 1.8.0)** on the raw stream.
   `_convert_responses_chunk_to_generation_chunk`, `merge_lists`, `merge_dicts`, and
   `init_tool_calls` with `parse_partial_json`. Calls: `tool_calls` of the summed chunk, plus the
@@ -696,3 +711,22 @@ Verdict: NEEDS REWORK (3 BLOCKER, 9 MAJOR, 11 MINOR, 3 QUESTION). Folded in:
   function call: M5 and R15.
 
 Rejected: none.
+
+## 15. Amendments after the measurements (2026-11-14, Task 1)
+
+Task 1 measured real traffic (§ 3.3). Four rules did not match it. Each amendment keeps the
+decided value as the `done` item and keeps every call surface equal to it.
+
+- A1. R10 full equality applies to client-run items only. `reasoning` `encrypted_content`
+  differs between `done` and the terminal `output` in 26 of 26 items. Tool-free and provider-run
+  items keep R9.
+- A2. The subset rule replaces "`added` equals `done`" for the built-in client-run kinds (R13,
+  R14). Measured: `computer_call` `actions` absent at `added`; `apply_patch_call`
+  `operation.diff` `""` at `added`; `shell_call` `action.max_output_length` `null` at `added`.
+- A3. R15 takes precedence over R11: a `done` with `status: "incomplete"` has partial JSON
+  arguments in 9 of 9 cut calls. It is a truncation (block, `Truncated`), not `Malformed`.
+- A4. Two event types that the openai-python 3.48.0 union does not have:
+  `response.apply_patch_call_operation_diff.delta` and `.done`. They are known types now, mapped
+  to `apply_patch_call`, with the diff rule in R14.
+- A5. The openai-python `ResponseStream` model no longer counts `output_item.added` items as
+  calls (§ 10.1). Under A2, an `added` item is a partial view by design.
