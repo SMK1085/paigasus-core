@@ -390,14 +390,17 @@ It also runs several checks that the per-case project sets structurally **cannot
   Since follow-up sweep 2 (R8), A14 also scans a script that a scanned script RUNS, and any other
   `*.sh` word in the task text (`UV_RUN_REF_RE`). A leading `$VAR/` part is dropped, and the rest is
   resolved against the repo root, the directory of the script, and the project directory of the task
-  (a child script inherits the task's cwd). A word
+  (a child script inherits the task's cwd). A `$NAME/` part is also read with every value that the
+  script assigns to NAME (`D=ops; bash "$D/y.sh"`). A word
   that names no file is skipped. The match is wide on purpose: a path in a message is followed too,
   which can add rows but cannot hide one. So `ci/release-plan/run.sh` (run by `ci/actionlint/run.sh`)
   and `ops/nats/check-subjects.sh` (run by `repo:nats-permissions`) are now scanned.
   It also scans every tracked `pyproject.toml` and `uv.toml`, and `.moon/toolchains.yml` (R7, rule 9).
+  `repo:affected-smoke` lists `**/pyproject.toml` and `**/uv.toml` as inputs, so a PR that adds one
+  schedules A14. No `uv.toml` exists yet, so that glob has an `ALLOW_DEAD_INPUT` entry.
   The rules, in order:
   1. A physical line whose first non-blank character is `#` is a comment, but only when no quote is
-     open from an earlier line (R1, `_uv_quote_after`). An escaped space does not start a word, so the `#` in
+     open from an earlier line (R1, `_uv_quote_after`). A word starts after white space or a shell operator (`;`, `&`, `|`, `(`, `)`, `<`, `>`). An escaped space does not start a word, so the `#` in
      `a\ #` is mid-word. The state is read over the joined logical line, so a `\` continuation does not
      start a word either. The quote state knows `'`, `"` and `$(`, and a
      `$(` inside `"…"` starts a new quote context, as in bash. A comment line never joins
@@ -452,8 +455,9 @@ It also runs several checks that the per-case project sets structurally **cannot
       `uv sync --no-managed-python --no-python-downloads --no-progress` in `py/` (measured on moon 2.5.3),
       and an added argument would apply on every run. A missing file is a `FLOOR:` row.
   11. R2 (follow-up sweep 2): `eval` as a word is a row. `${x}v`, `$(…)v`, a backtick before `v`, and `u` before
-      `$`, `${`, `$(` or a backtick are rows. A line whose text has more `uv` tokens after the removal of `\`, `'`
-      and `"` is a row (`u\v`, `u''v`, `"u"v`).
+      `$`, `${`, `$(` or a backtick are rows. A `uv` token that exists only after the removal of `\`, `'`
+      and `"` is a row (`u\v`, `u''v`, `"u"v`). The check is per token, so a literal `uv` that the removal joins into a
+      longer word does not cancel a spelled one elsewhere on the line.
   12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync` (also with pip options before the subcommand, and with `pip3.12` and other version-qualified names), `-m pip`, `-m ensurepip`, `-m venv`, `-m virtualenv`,
       `.venv/…/bin/pip`, `.venv/…/bin/uv`, `.venv/…/bin/python -m pip` and a `rm`, `mv`, `cp`, `ln` or `rsync`
       of a `.venv` path are rows (`UV_DIRECT_WRITE_RE`).

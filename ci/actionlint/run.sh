@@ -2153,6 +2153,8 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   # Follow-up sweep 2 - A14 also reads py/pyproject.toml (R7) and ops/nats/*.sh (R8).
   'py/pyproject.toml'
   'ops/nats/**/*'
+  '**/pyproject.toml'
+  '**/uv.toml'
   'ci/actionlint/**/*'
   'ci/release-parity/**/*'
   'ci/workflow-credentials/**/*'

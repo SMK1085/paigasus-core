@@ -255,7 +255,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   MSVC `link.exe` runs without `/Brepro` (the debug directory has no REPRO entry), so both values change
   on every link. Two builds of the same Rust source (3220c9ca, b670daea) differ in the same fields (24 bytes;
   the count depends on how many timestamp bytes are equal by chance). So a Windows diff of 24 to 28 bytes
-  in these fields is normal. A diff in a section is a real change. The darwin binaries grew by 36 KB to 41 KB. Each unstripped darwin binary
+  in these fields is normal. The debug directory and its RSDS record sit inside `.rdata`, so a
+  `.rdata` diff that stays in those debug fields is metadata too. A diff anywhere else, in `.rdata`
+  or in another section, is a real change. The darwin binaries grew by 36 KB to 41 KB. Each unstripped darwin binary
   holds 4 to 6 N_OSO paths, all of them `std` rlibs under `/Users/runner/.rustup/toolchains/` (spec §6).
 - All four **Linux** wheel legs cross-compile with `--zig` — not only the musl ones, unlike
   `prebuild.yml`. `ubuntu-latest` ships glibc 2.39, so a *native* build tags `manylinux_2_39`,

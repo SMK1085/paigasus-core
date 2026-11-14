@@ -3560,7 +3560,8 @@ def _uv_quote_after(line, quote):
     i, n, word_start = 0, len(line), True
     while i < n:
         c, top = line[i], (stack[-1] if stack else None)
-        at_word_start, word_start = word_start, c in " \t"
+        # A shell operator also ends a word, so `true;# '` starts a comment at the `#`.
+        at_word_start, word_start = word_start, c in " \t;&|()<>"
         if top == "'":
             if c == "'":
                 stack.pop()
@@ -3709,6 +3710,24 @@ def _uv_reason(logical, match):
     return f"the verb {words[0]!r} is not approved" if words else "there is no verb"
 
 
+def _uv_spelled_tokens(logical):
+    """Offsets in `logical` of each `uv` token that exists only after `\\`, `'` and `"` are removed (R2).
+
+    Per token, not per count: a literal `uv` that the removal joins into a longer word must not
+    cancel a `u''v` elsewhere on the line. A token of the stripped text is plain only when the raw
+    text holds a `uv` token at the same place with no removed character inside it.
+    """
+    kept = [i for i, c in enumerate(logical) if not UV_QUOTE_CHARS_RE.match(c)]
+    stripped = "".join(logical[i] for i in kept)
+    raw_tokens = {m.start() for m in UV_TOKEN_RE.finditer(logical)}
+    out = []
+    for m in UV_TOKEN_RE.finditer(stripped):
+        start, end = kept[m.start()], kept[m.end() - 1] + 1
+        if not (end - start == 2 and start in raw_tokens):
+            out.append(start)
+    return out
+
+
 def uv_form_hits(text):
     """Sorted `(physical line, reason)` for each `uv` token or environment name that is red.
 
@@ -3731,8 +3750,8 @@ def uv_form_hits(text):
             hits.append((line_of(m.start()), "runs `eval`, so A14 cannot read the command it runs (R2)"))
         for m in UV_SPLICE_RE.finditer(logical):
             hits.append((line_of(m.start()), "joins `u` or `v` to an expansion, which can spell `uv` (R2)"))
-        if len(UV_TOKEN_RE.findall(UV_QUOTE_CHARS_RE.sub("", logical))) > len(UV_TOKEN_RE.findall(logical)):
-            hits.append((starts[0][1], "spells `uv` through quote or backslash removal (R2)"))
+        for idx in _uv_spelled_tokens(logical):
+            hits.append((line_of(idx), "spells `uv` through quote or backslash removal (R2)"))
         # R4: a write to an environment that does not go through `uv`.
         for m in UV_DIRECT_WRITE_RE.finditer(logical):
             hits.append((line_of(m.start()), f"writes an environment directly ({m.group(0).strip()!r}) (R4)"))
@@ -3785,6 +3804,10 @@ UV_SOURCE_STMT_RE = re.compile(
 # it (`bash ci/release-plan/run.sh`, `"$HERE/x.sh"`), so A14 scans it too. The match is wide on
 # purpose: a path in a message is followed as well, which can only add rows.
 UV_RUN_REF_RE = re.compile(r"(?:\$\{?[A-Za-z_]\w*\}?/)*((?:[\w.-]+/)*[\w.-]+\.sh)(?![\w.-])")
+# The same word WITH its `$NAME/` parts, and a `NAME=value` assignment, so that a directory
+# variable that the script assigns is expanded too (CodeRabbit, PR 461).
+UV_RUN_REF_FULL_RE = re.compile(r"((?:\$\{?[A-Za-z_]\w*\}?/)+(?:[\w.-]+/)*[\w.-]+\.sh)(?![\w.-])")
+UV_RUN_ASSIGN_RE = re.compile(r"""(?m)(?:^|[;&|]\s*)\s*(?:export\s+)?([A-Za-z_]\w*)=["']?([\w./-]+)["']?(?=\s|;|$)""")
 
 
 def _uv_run_refs(path, root, bases=()):
@@ -3794,8 +3817,17 @@ def _uv_run_refs(path, root, bases=()):
     skipped: bash cannot run a missing file either.
     """
     root_resolved = Path(root).resolve()
+    text = _executable_text(path)
+    rels = set(UV_RUN_REF_RE.findall(text))
+    # A `$NAME/` part with a value that the script assigns (`D=ops; bash "$D/y.sh"`) is also
+    # read with EVERY assigned value, so the dropped form above is not the only candidate.
+    values = {}
+    for name, value in UV_RUN_ASSIGN_RE.findall(text):
+        values.setdefault(name, set()).add(value)
+    for full in UV_RUN_REF_FULL_RE.findall(text):
+        rels.update(c for c in _expand_words(full, values) if "$" not in c)
     out = []
-    for rel in sorted(set(UV_RUN_REF_RE.findall(_executable_text(path)))):
+    for rel in sorted(rels):
         for base in (root_resolved, Path(path).resolve().parent, *bases):
             cand = (base / rel).resolve()
             if cand.is_file() and root_resolved in cand.parents:
@@ -7568,6 +7600,9 @@ def self_test():
         ("R1 a # line inside an open quote", "bash -c '\n#'; uv sync", True),
         ("R1 an escaped space keeps # mid-word", "echo a\\ # '\n#'; uv sync", True),
         ("R1 a continuation keeps # mid-word", "echo a\\\n# '\n#'; uv sync", True),
+        ("R1 ; ends a word before #", "true;# '\necho '\n#'; uv sync", True),
+        ("R2 a joined literal uv does not cancel u''v", "echo prefix\"uv build &&\"; u''v sync", True),
+        ("R2 quotes elsewhere do not make a plain uv a spelling", 'X="a" uv build', False),
         ("R4 a pip option before install", "pip -q install x", True),
         ("R4 a valued pip option before install", "pip3 --index-url https://x install y", True),
         ("R4 pip list", "pip list", False),
@@ -7768,6 +7803,13 @@ def self_test():
         a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/here.sh"))
         if not any("ci/x/mut8.sh" in r for r in a14_rows):
             failures.append(f"A14 did not scan a script that a scanned script runs by its own directory (R8): {a14_rows}")
+        # R8: a directory variable that the script assigns is expanded (`D=varx; bash "$D/y.sh"`).
+        (a14_root / "varx").mkdir()
+        (a14_root / "varx" / "v8.sh").write_text("#!/bin/bash\nuv sync\n")
+        (a14_root / "ci" / "x" / "var8.sh").write_text('#!/bin/bash\nD=varx\nbash "$D/v8.sh"\n')
+        a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/var8.sh", smoke_globs=[*a14_smoke_globs, "varx/**/*"]))
+        if not any("varx/v8.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not expand an assigned directory variable in a run reference (R8): {a14_rows}")
         # R8: a child script inherits the task's cwd, so `bash scripts/m.sh` resolves in the project.
         (a14_root / "py" / "scripts" / "child8.sh").write_text("#!/bin/bash\nuv sync\n")
         (a14_root / "py" / "scripts" / "parent8.sh").write_text("#!/bin/bash\nbash scripts/child8.sh\n")
