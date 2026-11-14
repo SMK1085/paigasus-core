@@ -736,7 +736,7 @@ mod tests {
     }
 
     /// D23 on real traffic: every recorded stream passes through the interceptor under allow-all
-    /// with each record byte-identical. The two `max_output_tokens_in_call` streams end with a cut
+    /// with each record byte-identical. The three `max_output_tokens_in_call` streams end with a cut
     /// call, which is blocked `Truncated` and rewritten (spec § 15 A3, ruling F6).
     #[test]
     fn recorded_streams_pass_through_the_interceptor() {
@@ -747,7 +747,7 @@ mod tests {
             .filter(|p| p.extension().is_some_and(|x| x == "sse"))
             .collect();
         names.sort();
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 28);
         let limits = Limits {
             max_record_bytes: 16_777_216,
             max_held_bytes: 33_554_432,
@@ -768,10 +768,7 @@ mod tests {
                         Action::Emit(b) => out.push_str(std::str::from_utf8(&b).unwrap()),
                         Action::Decide { hold, calls } => {
                             decides += 1;
-                            assert!(
-                                calls.iter().all(|c| c.kind == crate::types::ToolCallKind::Function || c.kind == crate::types::ToolCallKind::Custom),
-                                "{name}"
-                            );
+                            assert!(calls.iter().all(|c| c.kind != crate::types::ToolCallKind::Other), "{name}");
                             pending.extend(i.decided(hold, Ok(vec![Decision::Allow; calls.len()]), t0));
                         }
                         Action::Count(m) => assert!(!matches!(m, Metric::RecordDropped(_)), "{name}: {m:?}"),
@@ -787,7 +784,10 @@ mod tests {
                 assert!(out.contains(r#"tool call \"write_file\" was blocked (truncated)."#), "{name}: {out}");
                 let got = payloads(&records);
                 let want = payloads(&input);
-                let at = want.iter().position(|v| v["type"] == "response.output_item.added").unwrap();
+                // The cut call is the last item; a `reasoning` item can come before it.
+                let cut = want.iter().rposition(|v| v["type"] == "response.output_item.added").unwrap();
+                let at = cut;
+                let index = want[cut]["output_index"].as_u64().unwrap() as usize;
                 assert_eq!(got[..at], want[..at], "{name}: the frames before the call are unchanged");
                 assert_eq!(
                     types(&records)[at..],
@@ -801,13 +801,17 @@ mod tests {
                     "{name}"
                 );
                 let term = got.last().unwrap();
-                assert_eq!(term["response"]["output"][0]["id"], "msg_paigasus_0", "{name}");
+                assert_eq!(term["response"]["output"][index]["id"], format!("msg_paigasus_{index}"), "{name}");
                 assert_eq!(term["response"]["usage"], want.last().unwrap()["response"]["usage"], "{name}");
             } else {
                 assert_eq!(records, input, "{name}: allow-all changes no record");
                 assert_eq!(
                     decides,
-                    usize::from(input.contains("\"type\":\"function_call\"") || input.contains("\"type\":\"custom_tool_call\"")),
+                    usize::from(
+                        ["function_call", "custom_tool_call", "computer_call", "apply_patch_call", "shell_call"]
+                            .iter()
+                            .any(|t| input.contains(&format!("\"type\":\"{t}\"")))
+                    ),
                     "{name}"
                 );
             }

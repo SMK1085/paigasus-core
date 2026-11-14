@@ -1827,6 +1827,6 @@ mod tests {
             assert_eq!(calls.is_empty(), name.contains("text_only") || name.contains("structured_output"), "{name}");
             seen += 1;
         }
-        assert_eq!(seen, 17);
+        assert_eq!(seen, 28);
     }
 }

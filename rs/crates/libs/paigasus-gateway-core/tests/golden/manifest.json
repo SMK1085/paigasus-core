@@ -101,5 +101,82 @@
     "finish_reasons": {
       "0": "tool_use"
     }
+  },
+  {
+    "file": "responses/function_blocked_deltas.sse",
+    "format": "responses",
+    "allowed": [
+      {
+        "name": "read_file",
+        "arguments": "{\"p\":\"a.txt\"}",
+        "choice": 0,
+        "position": 0,
+        "id": "call_0",
+        "namespace": null
+      }
+    ],
+    "notices": [
+      "[paigasus] tool call \"blocked_rm\" was blocked (policy)."
+    ],
+    "notice_choices": [
+      0
+    ],
+    "notice_positions": [
+      1
+    ],
+    "finish_reasons": {
+      "0": "completed"
+    }
+  },
+  {
+    "file": "responses/builtin_blocked_added_done.sse",
+    "format": "responses",
+    "allowed": [],
+    "notices": [
+      "[paigasus] tool call \"srv.blocked_deploy\" was blocked (policy)."
+    ],
+    "notice_choices": [
+      0
+    ],
+    "notice_positions": [
+      0
+    ],
+    "finish_reasons": {
+      "0": "completed"
+    }
+  },
+  {
+    "file": "responses/truncated_item.sse",
+    "format": "responses",
+    "allowed": [],
+    "notices": [
+      "[paigasus] tool call \"read_file\" was blocked (truncated)."
+    ],
+    "notice_choices": [
+      0
+    ],
+    "notice_positions": [
+      0
+    ],
+    "finish_reasons": {
+      "0": "incomplete"
+    }
+  },
+  {
+    "file": "responses/blocked_after_reasoning.sse",
+    "format": "responses",
+    "allowed": [],
+    "notices": [
+      "[paigasus] tool call \"blocked_exfil\" was blocked (policy)."
+    ],
+    "notice_choices": [
+      0
+    ],
+    "notice_positions": [
+      1
+    ],
+    "finish_reasons": {
+      "0": "completed"
+    }
   }
 ]

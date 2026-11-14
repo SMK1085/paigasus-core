@@ -1,0 +1,23 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress","output":[]},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_1","object":"response","status":"in_progress","output":[]},"sequence_number":1}
+
+: paigasus-decision {"v":1,"choice":0,"position":0,"name":"read_file","name_sha256_8":"c9f8123b","decision":"block","basis":"on_failure","code":"truncated"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"sequence_number":2,"item":{"type":"message","id":"msg_paigasus_0","role":"assistant","status":"in_progress","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_paigasus_0","output_index":0,"content_index":0,"sequence_number":2,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_paigasus_0","output_index":0,"content_index":0,"sequence_number":2,"delta":"[paigasus] tool call \"read_file\" was blocked (truncated).","logprobs":[]}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"sequence_number":7,"item":{"type":"message","id":"msg_paigasus_0","role":"assistant","status":"completed","content":[{"type":"output_text","text":"[paigasus] tool call \"read_file\" was blocked (truncated).","annotations":[],"logprobs":[]}]}}
+
+event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"resp_1","object":"response","status":"incomplete","output":[{"type":"message","id":"msg_paigasus_0","role":"assistant","status":"completed","content":[{"type":"output_text","text":"[paigasus] tool call \"read_file\" was blocked (truncated).","annotations":[],"logprobs":[]}]}],"incomplete_details":{"reason":"max_output_tokens"}},"sequence_number":8}
+

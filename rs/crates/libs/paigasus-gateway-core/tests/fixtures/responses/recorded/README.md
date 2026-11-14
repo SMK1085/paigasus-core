@@ -13,15 +13,24 @@ the raw response bytes, unchanged.
 - Continuations, 1 run per model: `m1_unanswered_continuation` and `m6_rewrite_replay`. They
   write `.measure.json` files, not streams, so this directory keeps none of them.
 
-The run made 78 streams. This directory keeps 17 of them: the first run of each model and
-scenario that obeyed every rule of spec § 6.4 as it was before the § 15 amendments. The check
-used `../../openai/recorded/measure.py`. A file is named `<model>__<scenario>.sse`.
+The run made 78 streams. This directory keeps 28 of them: the first run of each model and
+scenario that the model accepts (see "What was rejected"). A file is named `<model>__<scenario>.sse`.
+Each file passes the canonical rules of spec § 6.4 as § 15 amended them (A1, A2, A4), with no
+deviation. Task 1 first kept only 17 files, because the rules of the day (R10, R13, R14) rejected
+the 11 others. Task 9 checked the 11 again against the amended rules, with no new API call, and
+they all pass. Their raw `.sse` bytes are unchanged. The `.error.json` and `.measure.json` files
+of the run are not kept.
 
-No test replays this directory yet. Task 9 adds the replay. The `recorded_streams_pass_unchanged`
-test in `tests/fixtures.rs` reads only `openai/recorded/`, as Chat Completions streams. The three
-`max_output_tokens_in_call` files end with a `function_call` that has `status: "incomplete"`.
-The replay must expect a `Truncated` block for that call (spec § 15, A3), not a pass with no
-change.
+Two tests in `tests/fixtures.rs` replay this directory.
+
+- `recorded_responses_streams_pass_unchanged` replays every file except the cut streams. Under
+  every decider: the stream ends, no record is dropped, no `on_failure` path runs, and I1 holds for
+  every client model. Under allow-all: the output is payload-identical to the input, and every
+  split point gives the one-push output. A file over 12 KiB gets the split points near each record
+  boundary and every 499th point, because the cost of all points grows with the square of the size.
+- `recorded_responses_cut_streams_are_rewritten` replays the three `max_output_tokens_in_call`
+  files. Each one ends with a `function_call` that has `status: "incomplete"`. The expected outcome
+  is a `Truncated` block with the exact § 6.5 rewrite (spec § 15, A3), not a pass with no change.
 
 ## What was rejected
 
@@ -30,30 +39,27 @@ change.
 - `gpt-6.1-sol` refuses the `local_shell` tool: HTTP 400, `The local_shell tool is no longer
   supported.`. So no file has a `local_shell_call`.
 
-## What was recorded but not kept
+## What the amendments changed for these files
 
-These streams broke a rule of spec § 6.4 as it was on the day of the run. They are not in this
-directory. The spec § 15 amendments A1, A2 and A4 changed those rules after the run. This
-directory does not add the streams again.
+Four rules of spec § 6.4 did not match these streams on the day of the run. Spec § 15 amended
+them, and the files above follow the amended rules.
 
-- Every stream with a `reasoning` item (26 streams of `gpt-6.1-sol` and `gpt-6.1-terra`) breaks
-  R10. The `encrypted_content` of the `reasoning` item in the terminal `output` is different from
-  the one in `response.output_item.done`. So `gpt-6.1-sol` has no `reasoning_then_call`,
-  `text_only`, `structured_output` and `max_output_tokens_in_call` file, and `gpt-6.1-terra` has
-  no `custom_and_function`, `reasoning_then_call`, `structured_output` and
-  `web_search_then_function` file.
-- `gpt-6.1-sol__computer_forced`: `added` has no `actions`, and `done` has them. This breaks R14.
+- A `reasoning` item has a different `encrypted_content` in the terminal `output` than in
+  `response.output_item.done` (26 streams of `gpt-6.1-sol` and `gpt-6.1-terra`). A1: R10 full
+  equality applies to client-run items only.
+- `gpt-6.1-sol__computer_forced`: `added` has no `actions`, and `done` has them. A2: the subset
+  rule.
 - `gpt-6.1-sol__apply_patch_forced`: `added` has `operation.diff: ""`, and the diff streams in
-  `response.apply_patch_call_operation_diff.delta` and `.done` events. This breaks R14, and these
-  event types are not in the § 6.1 map.
+  `response.apply_patch_call_operation_diff.delta` and `.done` events. A2 and A4: the subset rule,
+  and the two event types are known now.
 - `gpt-6.1-sol__shell_forced`: `action.max_output_length` is `null` at `added` and `20000` at
-  `done`. This breaks R13.
+  `done`. A2: the subset rule.
 
 ## Client-run kinds with no recording here
 
-Task 9 builds these from the openai-python 3.48.0 types: `computer_call`, `apply_patch_call`,
-`shell_call`, `local_shell_call`, `tool_search_call` and `mcp_approval_request`. No model made a
-`custom_tool_call` and a `function_call` in one response.
+`make_fixtures.py` builds these from the openai-python 3.48.0 types: `local_shell_call`,
+`tool_search_call` and `mcp_approval_request`. No model made a `custom_tool_call` and a
+`function_call` in one response.
 
 ## The M1 to M7 results
 

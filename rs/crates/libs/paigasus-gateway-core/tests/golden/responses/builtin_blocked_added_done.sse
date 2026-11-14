@@ -1,0 +1,23 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress","output":[]},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_1","object":"response","status":"in_progress","output":[]},"sequence_number":1}
+
+: paigasus-decision {"v":1,"choice":0,"position":0,"name":"srv.blocked_deploy","name_sha256_8":"e25bdac0","decision":"block","basis":"decider","code":"policy"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"sequence_number":2,"item":{"type":"message","id":"msg_paigasus_0","role":"assistant","status":"in_progress","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_paigasus_0","output_index":0,"content_index":0,"sequence_number":2,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_paigasus_0","output_index":0,"content_index":0,"sequence_number":2,"delta":"[paigasus] tool call \"srv.blocked_deploy\" was blocked (policy).","logprobs":[]}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"sequence_number":3,"item":{"type":"message","id":"msg_paigasus_0","role":"assistant","status":"completed","content":[{"type":"output_text","text":"[paigasus] tool call \"srv.blocked_deploy\" was blocked (policy).","annotations":[],"logprobs":[]}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"message","id":"msg_paigasus_0","role":"assistant","status":"completed","content":[{"type":"output_text","text":"[paigasus] tool call \"srv.blocked_deploy\" was blocked (policy).","annotations":[],"logprobs":[]}]}],"usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}},"sequence_number":4}
+

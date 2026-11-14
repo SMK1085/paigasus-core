@@ -1,0 +1,60 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress","output":[]},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_1","object":"response","status":"in_progress","output":[]},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"shell_call","id":"sh_0","status":"in_progress","action":{"commands":[],"max_output_length":null,"timeout_ms":null},"call_id":"call_0","environment":null},"output_index":0,"sequence_number":2}
+
+event: response.shell_call_command.added
+data: {"type":"response.shell_call_command.added","command":"","command_index":0,"output_index":0,"sequence_number":3}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","delta":"ls","command_index":0,"output_index":0,"obfuscation":"ob","sequence_number":4}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","delta":" -","command_index":0,"output_index":0,"obfuscation":"ob","sequence_number":5}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","delta":"la","command_index":0,"output_index":0,"obfuscation":"ob","sequence_number":6}
+
+event: response.shell_call_command.done
+data: {"type":"response.shell_call_command.done","command":"ls -la","command_index":0,"output_index":0,"sequence_number":7}
+
+event: response.shell_call_command.added
+data: {"type":"response.shell_call_command.added","command":"","command_index":1,"output_index":0,"sequence_number":8}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","delta":"da","command_index":1,"output_index":0,"obfuscation":"ob","sequence_number":9}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","delta":"te","command_index":1,"output_index":0,"obfuscation":"ob","sequence_number":10}
+
+event: response.shell_call_command.done
+data: {"type":"response.shell_call_command.done","command":"date","command_index":1,"output_index":0,"sequence_number":11}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"shell_call","id":"sh_0","status":"completed","action":{"commands":["ls -la","date"],"max_output_length":20000,"timeout_ms":null},"call_id":"call_0","environment":null},"output_index":0,"sequence_number":12}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","status":"in_progress","call_id":"call_1","name":"blocked_rm","arguments":""},"output_index":1,"sequence_number":13}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"{\"path\"","item_id":"fc_1","output_index":1,"obfuscation":"ob","sequence_number":14}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":":\"CANAR","item_id":"fc_1","output_index":1,"obfuscation":"ob","sequence_number":15}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"Y-7\"}","item_id":"fc_1","output_index":1,"obfuscation":"ob","sequence_number":16}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","arguments":"{\"path\":\"CANARY-7\"}","item_id":"fc_1","output_index":1,"sequence_number":17}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","status":"completed","call_id":"call_1","name":"blocked_rm","arguments":"{\"path\":\"CANARY-7\"}"},"output_index":1,"sequence_number":18}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"shell_call","id":"sh_0","status":"completed","action":{"commands":["ls -la","date"],"max_output_length":20000,"timeout_ms":null},"call_id":"call_0","environment":null},{"type":"function_call","id":"fc_1","status":"completed","call_id":"call_1","name":"blocked_rm","arguments":"{\"path\":\"CANARY-7\"}"}],"usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}},"sequence_number":19}
+
