@@ -3,19 +3,24 @@
 
 mod support;
 
-use paigasus_gateway_core::{Format, OnFailure};
+use paigasus_gateway_core::{Format, Metric, OnFailure, ToolCall, ToolCallKind};
 use proptest::prelude::*;
 use support::driver::{DECIDERS, Outcome, allow_all, block_named, cut, drive, limits};
-use support::oracle::{check_i1, runners};
-use support::streams::{AQuirk, Quirk, anthropic_scenario, openai_scenario, render_anthropic, render_openai};
+use support::oracle::{Run, check_i1, runners};
+use support::responses_oracle::{run_node, run_python_stream};
+use support::streams::{AQuirk, Quirk, RKind, RQUIRKS, RQuirk, anthropic_scenario, every_kind_scenario, openai_scenario, render_anthropic, render_openai, render_responses, responses_scenario};
 
 fn show(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-/// P1 (invariant I1), through every client model; see `oracle::check_i1`.
+/// P1 (invariant I1), through every client model; see `oracle::check_i1`. A Responses abort on an
+/// upstream error record inside the hold (749 D17, SMA-769 § 6.3) is a failure path too: it ends
+/// the stream with the D13 frame, so openai-python, which passes an `error` event through, raises
+/// at EOF. The chat and Anthropic checks are unchanged.
 fn check_p1(format: Format, input: &[u8], o: &Outcome) -> Result<(), TestCaseError> {
-    check_i1(format, input, &o.out, &o.decided, o.core_failed()).map_err(TestCaseError::fail)
+    let failed = o.core_failed() || (format == Format::OpenAiResponses && o.aborted);
+    check_i1(format, input, &o.out, &o.decided, failed).map_err(TestCaseError::fail)
 }
 
 fn check_canary(out: &[u8]) -> Result<(), TestCaseError> {
@@ -50,6 +55,18 @@ proptest! {
     fn anthropic_p1_and_p2_hold(s in anthropic_scenario()) {
         check_all_deciders(Format::AnthropicMessages, &render_anthropic(&s), &s.cuts)?;
     }
+
+    /// SMA-769 AC 4 and AC 5: P1 and P2 over generated Responses streams (spec § 10.3).
+    #[test]
+    fn responses_p1_and_p2_hold(s in responses_scenario()) {
+        check_all_deciders(Format::OpenAiResponses, &render_responses(&s), &s.cuts)?;
+    }
+}
+
+/// Whether a Responses model shows a call of this kind at all. LangChain drops `shell_call` and
+/// `local_shell_call`, and it has no surface for an item of kind `Other` (spec § 10.1).
+fn shown_by(model: &str, c: &ToolCall) -> bool {
+    model != "langchain-responses" || !matches!(c.kind, ToolCallKind::Shell | ToolCallKind::LocalShell | ToolCallKind::Other)
 }
 
 proptest! {
@@ -74,6 +91,45 @@ proptest! {
                     let r = run(&o.out);
                     prop_assert!(r.error.is_none() || o.core_failed() || run(&bytes).error.is_some(), "{model} failed in observe mode: {:?}\n{}", r.error, show(&o.out));
                 }
+            }
+        }
+    }
+
+    /// The Responses variant of `observe_mode_is_bounded_and_parseable` (spec § 10.3).
+    #[test]
+    fn responses_observe_mode_is_bounded_and_parseable(s in responses_scenario()) {
+        let bytes = render_responses(&s);
+        let l = limits(OnFailure::Allow);
+        let o = drive(Format::OpenAiResponses, l, &cut(&bytes, &s.cuts), &block_named);
+        prop_assert!(o.finished, "observe mode never ended:\n{}", show(&o.out));
+        prop_assert!(o.max_queued <= l.max_held_bytes + l.max_record_bytes);
+        if s.quirks.len() <= 1 {
+            for (model, run) in runners(Format::OpenAiResponses) {
+                let r = run(&o.out);
+                prop_assert!(r.error.is_none() || o.core_failed() || o.aborted || run(&bytes).error.is_some(), "{model} failed in observe mode: {:?}\n{}", r.error, show(&o.out));
+            }
+        }
+    }
+
+    /// The Responses variant of `allow_all_models_agree_with_the_decider`: with only framing
+    /// quirks, every model shows exactly the decided calls of the kinds it has a surface for.
+    #[test]
+    fn responses_allow_all_models_agree_with_the_decider(mut s in responses_scenario()) {
+        s.quirks.retain(|(q, _)| matches!(q, RQuirk::KeepaliveWithoutSequence | RQuirk::Bom));
+        let bytes = render_responses(&s);
+        let o = drive(Format::OpenAiResponses, limits(OnFailure::Block), &cut(&bytes, &s.cuts), &allow_all);
+        prop_assert!(o.finished);
+        check_p1(Format::OpenAiResponses, &bytes, &o)?;
+        if !o.core_failed() && !o.aborted {
+            for (model, run) in runners(Format::OpenAiResponses) {
+                let derived = run(&o.out);
+                if derived.error.is_some() {
+                    // openai-node raises on the apply_patch diff events, upstream bytes included.
+                    prop_assert!(run(&bytes).error.is_some(), "{} raised: {:?}", model, derived.error);
+                    continue;
+                }
+                let shown = o.decided.iter().filter(|(c, _)| shown_by(model, c)).count();
+                prop_assert_eq!(derived.calls.len(), shown, "{}: every decided call reaches the client", model);
             }
         }
     }
@@ -125,6 +181,112 @@ proptest! {
                     continue;
                 }
                 prop_assert_eq!(derived.calls.len(), o.decided.len(), "{}: every decided call reaches the client", model);
+            }
+        }
+    }
+}
+
+/// What the core does with a stream that has one quirk (allow-all, `on_failure = block`).
+#[derive(Debug, PartialEq, Eq)]
+enum Reach {
+    /// A malformed record or a § 6.4 deviation: the record is dropped as `malformed`.
+    Malformed,
+    /// R15: `on_failure` with code `truncated`, and no malformed record.
+    Truncated,
+    /// An upstream error record: no failure metric; the core aborts with D13 inside the hold.
+    Upstream,
+    /// R3: the record after the terminal event is dropped and counted, nothing else.
+    AfterEnd,
+    /// No failure at all.
+    Clean,
+}
+
+fn reach(q: RQuirk, at: usize) -> Reach {
+    use RQuirk::*;
+    match q {
+        TopLevelError | ErrorEventMidItem => Reach::Upstream,
+        RecordAfterTerminal => Reach::AfterEnd,
+        Bom | NoFinalBlankLine | KeepaliveWithoutSequence => Reach::Clean,
+        AbsentStatus if at % 2 == 1 => Reach::Clean,
+        FailedWithOpenItem if at.is_multiple_of(2) => Reach::Truncated,
+        DoneIncomplete | NoTerminal | AbsentStatus | EofInItem => Reach::Truncated,
+        _ => Reach::Malformed,
+    }
+}
+
+fn reached(o: &Outcome) -> Reach {
+    let has = |m: Metric| o.metrics.contains(&m);
+    if has(Metric::RecordDropped("malformed")) {
+        Reach::Malformed
+    } else if has(Metric::OnFailure("truncated")) {
+        Reach::Truncated
+    } else if has(Metric::RecordDropped("after_done")) && !o.metrics.iter().any(|m| matches!(m, Metric::OnFailure(_))) {
+        Reach::AfterEnd
+    } else if !o.core_failed() && (o.aborted || show(&o.out).contains("\"boom\"")) {
+        Reach::Upstream
+    } else if !o.core_failed() && !o.aborted {
+        Reach::Clean
+    } else {
+        panic!("an unexpected outcome: {:?}", o.metrics)
+    }
+}
+
+/// Ruling F3 and F12: every quirk, alone on a stream with every item kind, reaches the outcome of
+/// its rule, and P1 holds. (The deviation label is crate-private. The label each quirk reaches
+/// first was measured once with a print in `Assembly::accept`; see the SMA-769 Task 8 report.)
+/// The client surfaces of the R-d fill and of ruling T7e see the hidden call on the upstream
+/// bytes, so the generated cases exercise them.
+#[test]
+fn each_responses_quirk_reaches_its_rule() {
+    for q in RQUIRKS {
+        for at in 0..4usize {
+            for second in [false, true] {
+                let mut s = every_kind_scenario(second);
+                s.quirks = vec![(q, at)];
+                s.ensure_targets();
+                let bytes = render_responses(&s);
+                let o = drive(Format::OpenAiResponses, limits(OnFailure::Block), &[&bytes], &allow_all);
+                assert!(o.finished, "{q:?} {at}");
+                assert_eq!(reached(&o), reach(q, at), "{q:?} at {at}: {:?}\n{}", o.metrics, show(&bytes));
+                check_p1(Format::OpenAiResponses, &bytes, &o).unwrap_or_else(|e| panic!("{q:?} at {at}: {e}"));
+                let ids = |r: Run| r.calls.into_iter().filter_map(|c| c.id).collect::<Vec<_>>();
+                match q {
+                    // R-d: openai-python fills the absent `response.failed` output from its items.
+                    RQuirk::FailedWithOpenItem if at % 2 == 1 => {
+                        let last = s.items.iter().rposition(|i| i.kind.client_run()).expect("ensured");
+                        let open = s.items[last].kind;
+                        if open != RKind::McpApproval {
+                            assert!(ids(run_python_stream(&bytes)).contains(&format!("call_{last}")), "{q:?} {at}");
+                        }
+                    }
+                    // T7e: openai-node counts the output of the terminal event it emitted, then raises.
+                    // (It raises earlier at an apply_patch diff event, § 6.3.)
+                    RQuirk::TerminalItemNeverStreamed if at % 2 == 1 && !s.items.iter().any(|i| i.kind == RKind::ApplyPatch) => {
+                        let r = run_node(&bytes);
+                        assert!(r.error.is_some() && ids(r).contains(&"call_hidden".to_owned()), "{q:?} {at}");
+                    }
+                    RQuirk::TerminalItemNeverStreamed => assert!(ids(run_python_stream(&bytes)).contains(&"call_hidden".to_owned()), "{q:?} {at}"),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Two quirks in one stream never break the generator, and P1 holds (two `FirstNotCreated`
+/// quirks once emptied the lifecycle records before a swap).
+#[test]
+fn every_pair_of_responses_quirks_renders_and_holds_p1() {
+    for (k, a) in RQUIRKS.iter().enumerate() {
+        for b in &RQUIRKS[k..] {
+            for at in 0..2usize {
+                let mut s = every_kind_scenario(at == 1);
+                s.quirks = vec![(*a, at), (*b, at + 1)];
+                s.ensure_targets();
+                let bytes = render_responses(&s);
+                let o = drive(Format::OpenAiResponses, limits(OnFailure::Block), &[&bytes], &allow_all);
+                assert!(o.finished, "{a:?} {b:?} {at}");
+                check_p1(Format::OpenAiResponses, &bytes, &o).unwrap_or_else(|e| panic!("{a:?} {b:?} {at}: {e}"));
             }
         }
     }

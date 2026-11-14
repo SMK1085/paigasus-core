@@ -585,4 +585,19 @@ proptest! {
         prop_assert!(node.error.is_some());
         prop_assert!(node.calls.is_empty(), "{:?}", node.calls);
     }
+
+    /// The control of 757 § 7.2 on the Responses form: the same raise after the last argument
+    /// delta is `Ok`, so the oracle does not reject every excused raise. LangChain then holds the
+    /// whole allowed call.
+    #[test]
+    fn a_raise_after_the_last_argument_delta_is_ok(s in "[a-z]{4,16}", cut in 0usize..1000) {
+        let args = format!(r#"{{"v":"{s}"}}"#);
+        let k = 1 + cut % (args.len() - 3);
+        let item = function_item(0, "fc_1", "call_1", "read_file", None, &[&args[..k], &args[k..]]);
+        let decided = decided_of(std::slice::from_ref(&item.done));
+        // created, in_progress, added, delta 1, delta 2, | D13 |, arguments.done, ...
+        let bytes = render_with(&conforming(vec![item]), 5, D13);
+        prop_assert_eq!(check_i1(Format::OpenAiResponses, &bytes, &bytes, &decided, true), Ok(()));
+        prop_assert!(run_langchain(&bytes).error.is_some());
+    }
 }
