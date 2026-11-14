@@ -194,6 +194,7 @@ tasks:
       set -euo pipefail
       ci/affected-graph/run.sh --negative-control
       ci/affected-graph/run.sh
+      bash ci/python-env/real-tool-check.sh
     toolchain: 'system'
     inputs:
       - 'ci/affected-graph/**/*'
