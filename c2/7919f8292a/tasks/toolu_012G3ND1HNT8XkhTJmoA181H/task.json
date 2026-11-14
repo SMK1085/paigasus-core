@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_012G3ND1HNT8XkhTJmoA181H",
+  "agent_id": "a50ac09881fd5c924",
+  "subagent_type": "general-purpose",
+  "task_description": "Find windows-sys downgrade cause",
+  "token_usage": {
+    "input_tokens": 60,
+    "cache_creation_tokens": 125145,
+    "cache_read_tokens": 2653842,
+    "output_tokens": 24864,
+    "api_call_count": 29
+  },
+  "started_at": "2026-11-07T22:09:34.631923+01:00",
+  "completed_at": "2026-11-12T20:38:01.167465+01:00"
+}

@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01W9iwnv9e9Y7QoLGMVrtNJp",
+  "agent_id": "a5328e9ce4b86224e",
+  "subagent_type": "general-purpose",
+  "task_description": "Review PR 440 lock diff",
+  "token_usage": {
+    "input_tokens": 18,
+    "cache_creation_tokens": 92240,
+    "cache_read_tokens": 651455,
+    "output_tokens": 5265,
+    "api_call_count": 9
+  },
+  "started_at": "2026-11-07T19:36:38.106846+01:00",
+  "completed_at": "2026-11-07T19:37:46.321133+01:00"
+}

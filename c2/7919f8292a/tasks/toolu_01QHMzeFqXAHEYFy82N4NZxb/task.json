@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01QHMzeFqXAHEYFy82N4NZxb",
+  "agent_id": "a6209f51a23c5b9e2",
+  "subagent_type": "general-purpose",
+  "task_description": "Check PR 384 status",
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 69866,
+    "cache_read_tokens": 265138,
+    "output_tokens": 3164,
+    "api_call_count": 5
+  },
+  "started_at": "2026-11-07T19:36:38.136903+01:00",
+  "completed_at": "2026-11-07T19:37:03.861264+01:00"
+}
