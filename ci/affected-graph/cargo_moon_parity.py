@@ -3542,7 +3542,9 @@ def _uv_logical_lines(text):
             parts.append(body)
             pos += len(body)
             i += 1
-            if not cont:
+            # bash ends a comment at its physical newline, so a `\` at the end of a comment does
+            # not join the next line (`true # \` + newline + `echo '`).
+            if not cont or _uv_scan("".join(parts), quote)[1]:
                 break
         # Over the JOINED line, so a word that a continuation splits stays one word (`a\`+newline+`#`).
         quote = _uv_quote_after("".join(parts), quote)
@@ -3556,6 +3558,11 @@ def _uv_quote_after(line, quote):
     nest again, as in bash. A `#` that starts a word outside a quote ends the scan: the rest of
     the line is a comment. Returns None when no context is open.
     """
+    return _uv_scan(line, quote)[0]
+
+
+def _uv_scan(line, quote):
+    """`(_uv_quote_after state, True when the scan stopped at a comment)` for `line`."""
     stack = list(quote or ())
     i, n, word_start = 0, len(line), True
     while i < n:
@@ -3585,9 +3592,9 @@ def _uv_quote_after(line, quote):
         elif c == ")" and top == "$(":
             stack.pop()
         elif c == "#" and at_word_start:
-            break
+            return (tuple(stack) or None), True
         i += 1
-    return tuple(stack) or None
+    return (tuple(stack) or None), False
 
 
 def _uv_bash_scan(text):
@@ -3807,6 +3814,7 @@ UV_RUN_REF_RE = re.compile(r"(?:\$\{?[A-Za-z_]\w*\}?/)*((?:[\w.-]+/)*[\w.-]+\.sh
 # The same word WITH its `$NAME/` parts, and a `NAME=value` assignment, so that a directory
 # variable that the script assigns is expanded too (CodeRabbit, PR 461).
 UV_RUN_REF_FULL_RE = re.compile(r"((?:\$\{?[A-Za-z_]\w*\}?/)+(?:[\w.-]+/)*[\w.-]+\.sh)(?![\w.-])")
+UV_RUN_CD_RE = re.compile(r"""(?:^|[;&|({]|\bthen\b|\bdo\b)\s*(?:cd|pushd)\s+["']?([\w./${}-]+)["']?""", re.M)
 UV_RUN_ASSIGN_RE = re.compile(r"""(?m)(?:^|[;&|]\s*)\s*(?:export\s+)?([A-Za-z_]\w*)=["']?([\w./-]+)["']?(?=\s|;|$)""")
 
 
@@ -3826,9 +3834,17 @@ def _uv_run_refs(path, root, bases=()):
         values.setdefault(name, set()).add(value)
     for full in UV_RUN_REF_FULL_RE.findall(text):
         rels.update(c for c in _expand_words(full, values) if "$" not in c)
+    # A literal `cd` / `pushd` target in the script is a cwd for the children it runs later. Every
+    # one is a candidate against every base, so an extra candidate can add a row, never hide one.
+    plain = (root_resolved, Path(path).resolve().parent, *bases)
+    cd_bases = []
+    for target in UV_RUN_CD_RE.findall(text):
+        for c in _expand_words(target, values):
+            if "$" not in c and not c.startswith(("/", "~", "-")):
+                cd_bases.extend(b / c for b in plain)
     out = []
     for rel in sorted(rels):
-        for base in (root_resolved, Path(path).resolve().parent, *bases):
+        for base in (*plain, *cd_bases):
             cand = (base / rel).resolve()
             if cand.is_file() and root_resolved in cand.parents:
                 out.append(cand)
@@ -7601,6 +7617,7 @@ def self_test():
         ("R1 an escaped space keeps # mid-word", "echo a\\ # '\n#'; uv sync", True),
         ("R1 a continuation keeps # mid-word", "echo a\\\n# '\n#'; uv sync", True),
         ("R1 ; ends a word before #", "true;# '\necho '\n#'; uv sync", True),
+        ("R1 a \\ that ends a comment does not join", "true # \\\necho '\n#'; uv sync", True),
         ("R2 a joined literal uv does not cancel u''v", "echo prefix\"uv build &&\"; u''v sync", True),
         ("R2 quotes elsewhere do not make a plain uv a spelling", 'X="a" uv build', False),
         ("R4 a pip option before install", "pip -q install x", True),
@@ -7810,6 +7827,13 @@ def self_test():
         a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/var8.sh", smoke_globs=[*a14_smoke_globs, "varx/**/*"]))
         if not any("varx/v8.sh" in r for r in a14_rows):
             failures.append(f"A14 did not expand an assigned directory variable in a run reference (R8): {a14_rows}")
+        # R8: a literal `cd` before a relative child reference moves its cwd (`cd cdx; bash c8.sh`).
+        (a14_root / "cdx").mkdir()
+        (a14_root / "cdx" / "c8.sh").write_text("#!/bin/bash\nuv sync\n")
+        (a14_root / "ci" / "x" / "cd8.sh").write_text("#!/bin/bash\ncd cdx\nbash c8.sh\n")
+        a14_rows = a14_run(a14_proj(a14_good + " && bash ci/x/cd8.sh", smoke_globs=[*a14_smoke_globs, "cdx/**/*"]))
+        if not any("cdx/c8.sh" in r for r in a14_rows):
+            failures.append(f"A14 did not follow a child script after a literal cd (R8): {a14_rows}")
         # R8: a child script inherits the task's cwd, so `bash scripts/m.sh` resolves in the project.
         (a14_root / "py" / "scripts" / "child8.sh").write_text("#!/bin/bash\nuv sync\n")
         (a14_root / "py" / "scripts" / "parent8.sh").write_text("#!/bin/bash\nbash scripts/child8.sh\n")

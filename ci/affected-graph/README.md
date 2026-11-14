@@ -391,7 +391,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   `*.sh` word in the task text (`UV_RUN_REF_RE`). A leading `$VAR/` part is dropped, and the rest is
   resolved against the repo root, the directory of the script, and the project directory of the task
   (a child script inherits the task's cwd). A `$NAME/` part is also read with every value that the
-  script assigns to NAME (`D=ops; bash "$D/y.sh"`). A word
+  script assigns to NAME (`D=ops; bash "$D/y.sh"`). Each literal `cd` or `pushd` target in the script is
+  one more base for its children (`cd ops; bash y.sh`). A word
   that names no file is skipped. The match is wide on purpose: a path in a message is followed too,
   which can add rows but cannot hide one. So `ci/release-plan/run.sh` (run by `ci/actionlint/run.sh`)
   and `ops/nats/check-subjects.sh` (run by `repo:nats-permissions`) are now scanned.
@@ -405,7 +406,8 @@ It also runs several checks that the per-case project sets structurally **cannot
      start a word either. The quote state knows `'`, `"` and `$(`, and a
      `$(` inside `"…"` starts a new quote context, as in bash. A comment line never joins
      the next line, also when it ends in `\`. A `#` later in a line is not a comment, so `x # uv sync` is a row.
-  2. A non-comment line that ends in `\` joins the next physical line with no separator. A row names
+  2. A non-comment line that ends in `\` joins the next physical line with no separator. A `\` at the end of a
+     comment does not join (bash ends a comment at its newline), so `true # \` does not swallow the next line. A row names
      the physical line of the match.
   3. Every `uv` token (`UV_TOKEN_RE`) in a non-comment line must be an approved form. This includes a token
      inside a quoted string and inside Python data, so `bash -c "uv sync"` and
