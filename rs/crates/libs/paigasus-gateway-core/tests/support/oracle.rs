@@ -1017,7 +1017,11 @@ pub fn lc_parse_partial_json(s: &str) -> Option<Value> {
 // ---- anthropic-python --------------------------------------------------------------------------
 
 /// jiter `from_json(buf, partial_mode=True)`: a truncated value is closed at the end of the input,
-/// an unfinished string or literal is dropped (with its key), anything invalid raises.
+/// an unfinished string, literal or number is dropped (with its key), anything invalid raises.
+///
+/// SOURCE: jiter 0.19.0 in partial mode, measured on 2026-11-14 (anthropic 2.3.0 requires
+/// `jiter<1,>=0.4.0`): `{"n":10.` -> `{}`, `{"n":1e` -> `{}`, `{"n":-` -> `{}`,
+/// `{"a":"x","n":10.` -> `{"a":"x"}`, `{"n":10` -> `{"n":10}`.
 struct Partial<'a> {
     b: &'a [u8],
     i: usize,
@@ -1128,6 +1132,8 @@ impl Partial<'_> {
                 match serde_json::from_slice::<Value>(tok) {
                     Ok(v) if !v.is_object() && !v.is_array() && !v.is_string() => Ok(Some(v)),
                     _ if self.eof() && [&b"true"[..], b"false", b"null"].iter().any(|l| l.starts_with(tok)) => Ok(None),
+                    // An unfinished number at the end of the input (`10.`, `1e`, `-`) is dropped with its key.
+                    _ if self.eof() && !tok.is_empty() && tok.iter().all(|c| b"-+.0123456789eE".contains(c)) => Ok(None),
                     _ => Err(format!("ValueError: invalid token {:?}", String::from_utf8_lossy(tok))),
                 }
             }

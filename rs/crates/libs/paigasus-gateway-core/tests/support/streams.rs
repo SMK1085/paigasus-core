@@ -393,13 +393,13 @@ pub fn anthropic_scenario() -> impl Strategy<Value = AnthropicScenario> {
         (prop::bool::ANY, 0usize..2, "[a-z]{0,10}", 1usize..4).prop_map(|(b, n, s, pieces)| if b {
             Block::Tool {
                 name: BLOCKED[n],
-                args: format!("{{\"v\":\"CANARY-{s}\"}}"),
+                args: format!("{{\"v\":\"CANARY-{s}\",\"n\":10.5}}"),
                 pieces,
             }
         } else {
             Block::Tool {
                 name: ALLOWED[n],
-                args: format!("{{\"v\":\"{s}\"}}"),
+                args: format!("{{\"v\":\"{s}\",\"n\":10.5}}"),
                 pieces,
             }
         }),
