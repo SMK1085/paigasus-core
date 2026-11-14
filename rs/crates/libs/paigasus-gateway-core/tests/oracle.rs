@@ -75,13 +75,16 @@ proptest! {
     #[test]
     fn a_prefix_at_an_excused_raise_is_rejected(s in "[a-z]{4,16}", cut in 0usize..1000, shape in 0usize..4) {
         let args = format!(r#"{{"v":"{s}"}}"#);
-        // The cut keeps part of the string value. A prefix that lacks only the closing `"}` parses
-        // (langchain's partial JSON) to the full value, so it is not a strict prefix in value.
-        let k = 1 + cut % (args.len() - 3);
+        // P-M3 (shape 0) is read by langchain, which parses partial JSON: a prefix that lacks only
+        // the closing `"}` parses to the full value, so it is not a strict prefix in value. In the
+        // other shapes openai-python holds the raw prefix, so every cut counts.
+        let span = if shape == 0 { args.len() - 3 } else { args.len() - 1 };
+        let k = 1 + cut % span;
         let bytes = stream(shape, &args, k, false);
         let d = decided(shape, &args);
         let e = check_i1(Format::OpenAiChat, &bytes, &bytes, &d, false).expect_err("a prefix must be rejected");
         prop_assert!(e.contains("undecided or blocked call"), "{e}");
+        prop_assert!(e.contains("read_file"), "{e}");
         let model = if shape == 0 { "langchain" } else { "openai-python" };
         prop_assert!(e.starts_with(model), "{e}");
     }
