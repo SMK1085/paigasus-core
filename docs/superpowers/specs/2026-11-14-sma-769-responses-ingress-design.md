@@ -119,66 +119,76 @@ Consequences:
 - M1. A continuation with `previous_response_id` after a function call that the client did not
   answer. Expected: a 400 error. This is a reason for D3. D3 stays whatever the result, because
   the gateway still cannot see the earlier turns.
-  Measured 2026-11-14: 3 of 3 models (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-4.1`) refused the
+  Measured 2026-11-14 (the `.measure.json` files of `capture.py`): 3 of 3 models
+  (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-4.1`) refused the
   continuation with HTTP 400, type `invalid_request_error`, `param` `"input"`, `code` `null` and
   the message `No tool output found for function call <call_id>.`. The first call was a non-stream
   call with `store: true` and a forced function call.
 - M2. Whether OpenAI sends `event:` lines, `[DONE]`, `sequence_number`, `obfuscation`, a wire
   `output_text`, and `keepalive` events on Responses streams, and the position of each.
-  Measured 2026-11-14 on 78 streams of the 3 models (§ 10.5). Every record has an `event:` line,
-  and it is equal to `data.type` (78 of 78). No stream has `[DONE]` (0 of 78): the stream ends
-  after the terminal event. Every event has `sequence_number`. It starts at 0 and increases by 1,
-  with no gap (78 of 78). `obfuscation` is on every `*.delta` event and on no other event type
-  (77 of 78 streams; the one `computer_call` stream has no delta event). No terminal `response`
-  has a wire `output_text` key (0 of 78). So the § 6.5 sentence about a wire `output_text` does
-  not apply. No stream has a `keepalive` event (0 of 78).
+  Measured 2026-11-14 on 78 streams of the 3 models (§ 10.5), with the committed `measure.py`.
+  The fields named here are its output fields. `event_lines`: every record has an `event:` line,
+  equal to `data.type` (78 of 78). `done_marker`: no stream has `[DONE]` (0 of 78), so the stream
+  ends after the terminal event. `sequence_number`: on every event, `starts_at_zero` and `no_gap`
+  (78 of 78). `obfuscation.types` holds only `*.delta` types (6 types in all streams), and
+  `on_every_delta` is true in 78 of 78. `obfuscation.present` is true in 77 of 78: the one
+  `computer_call` stream has no delta event. `wire_output_text`: no terminal `response` has an
+  `output_text` key (0 of 78). So the § 6.5 sentence about a wire `output_text` does not apply.
+  `keepalive`: 0 events in 78 of 78.
 - M3. Whether the events of one output item are contiguous, and whether `output_index` stays the
   same from `added` to `done` (R-f). Include a stream with several provider-run tool calls.
-  Measured 2026-11-14: R5 holds in 78 of 78 streams, and `output_index` is the same at `added`
-  and `done` for every item (78 of 78). 6 streams have two provider-run `web_search_call` items
-  and then a `function_call` (`gpt-6.1-sol` and `gpt-6.1-terra`, `web_search_then_function`).
-  `gpt-4.1` did not search in 3 of 3 runs. An extra check of R1 to R4, R6, R8, R9 and R16 found
-  no deviation in 78 of 78. **R10 does not hold for `reasoning` items:** in 26 of 26 `reasoning`
-  items (one in each of 26 streams of `gpt-6.1-sol` and `gpt-6.1-terra`), the
-  `encrypted_content` in the terminal `output` is different from the one in
-  `response.output_item.done`. All other fields are equal. The streams did not ask for
-  `include: ["reasoning.encrypted_content"]`.
+  Measured 2026-11-14 with `measure.py`: `contiguous` (R5) holds in 78 of 78 streams, and
+  `index_stable` holds in 78 of 78. `item_types`: 6 streams have two provider-run
+  `web_search_call` items and then a `function_call` (`gpt-6.1-sol` and `gpt-6.1-terra`,
+  `web_search_then_function`). `gpt-4.1` did not search in 3 of 3 runs. `rules`: R1 to R4, R6,
+  R8, R9 and R16 have no break in 78 of 78. `done_vs_terminal` (R10, per item type): every
+  `function_call` (78), `custom_tool_call` (6), `computer_call`, `apply_patch_call`, `shell_call`
+  (1 each), `message` (21) and `web_search_call` (12) `done` item equals its terminal `output`
+  item. **R10 does not hold for `reasoning` items:** 26 of 26 differ (one in each of 26 streams of
+  `gpt-6.1-sol` and `gpt-6.1-terra`), and the only key that differs is `encrypted_content`. The
+  requests did not ask for `include: ["reasoning.encrypted_content"]` (see `capture.py --dry-run`).
 - M4. The `added`, delta and `done` shapes of each client-run kind that can be recorded: whether
   `function_call` `added` carries `arguments: ""`, and whether `computer_call`,
   `apply_patch_call`, `shell_call` and `local_shell_call` are complete at `added`.
-  Measured 2026-11-14. `function_call`: `added.item.arguments` is `""`, and the deltas equal
-  `function_call_arguments.done` and `done.item.arguments` (78 items in 51 streams).
-  `custom_tool_call`: the same with `input` (6 items in 6 `custom_forced` streams of
-  `gpt-6.1-sol` and `gpt-6.1-terra`). No model made a custom call and a function call in one
-  response (`custom_and_function`: 6 of 6 runs made only function calls). `gpt-4.1` refuses
-  `custom` tools: HTTP 400, `Invalid value: 'custom'`, code `unknown_parameter` (6 of 6). The
-  built-in kinds were recorded once each on `gpt-6.1-sol`:
-  `computer_call` is **not** complete at `added`. `added` has no `actions`, and `done` has
-  `actions: [{"type":"screenshot"}]`. No event comes between them. This breaks R14.
-  `apply_patch_call` is **not** complete at `added`. `added` has `operation.diff: ""`, the diff
-  streams in `response.apply_patch_call_operation_diff.delta` events and one `.done` event (each
-  with `item_id`), and `done` has the full diff. This breaks R14. These two event types are not in
-  the openai-python 3.48.0 `ResponseStreamEvent` union and not in the § 6.1 map, so § 6.3 makes
-  them malformed.
-  `shell_call`: `added.item.action.commands` is `[]`. The `shell_call_command.added` command
-  (`""`) plus its deltas equals the `.done` command and `done.item.action.commands[0]`. The
-  `shell_call_command.*` events have no `item_id`. `added` and `done` also differ in
-  `action.max_output_length` (`null` at `added`, `20000` at `done`). This breaks R13.
+  Measured 2026-11-14 with `measure.py` (`added_shapes`). `function_call`: `arguments_at_added`
+  is `""` and `deltas_equal_done` is true for 78 items in 51 streams. `custom_tool_call`:
+  `input_at_added` is `""` and `deltas_equal_done` is true for 6 items in the 6 `custom_forced`
+  streams of `gpt-6.1-sol` and `gpt-6.1-terra`. No model made a custom call and a function call in
+  one response (`custom_and_function`: 6 of 6 runs made only function calls). `gpt-4.1` refuses
+  `custom` tools: HTTP 400, `Invalid value: 'custom'`, code `unknown_parameter` (6 of 6
+  `.error.json` files of `capture.py`). The built-in kinds were recorded once each on
+  `gpt-6.1-sol`:
+  `computer_call` is **not** complete at `added`: `differs_from_done` is
+  `["actions (only at done)"]`. The stream has no event type other than the lifecycle events and
+  `output_item.added`/`.done` (`max_record_bytes` keys). This breaks R14.
+  `apply_patch_call` is **not** complete at `added`: `differs_from_done` is `["operation.diff"]`.
+  The diff streams in `response.apply_patch_call_operation_diff.delta` events and a `.done`
+  event, and `diff_deltas_equal_done` is true. These events carry `item_id`
+  (`events_without_item_id` does not list them). This breaks R14. A grep of the openai-python
+  3.48.0 sources finds neither event type, so they are not in its `ResponseStreamEvent` union and
+  not in the § 6.1 map. Then § 6.3 makes them malformed.
+  `shell_call`: `commands_at_added` is `[]`, and `commands_from_events_equal_done` is true (the
+  `shell_call_command.added` command plus its deltas equals the `.done` command and
+  `done.item.action.commands`). `events_without_item_id` lists the three
+  `response.shell_call_command.*` types. `differs_from_done` is
+  `["action.commands", "action.max_output_length"]`: `max_output_length` is `null` at `added` and
+  `20000` at `done`. This breaks R13.
   `local_shell_call` could not be recorded: HTTP 400, `The local_shell tool is no longer
   supported.` (`param` `"tools"`). `tool_search_call` and `mcp_approval_request` were not tried.
 - M5. What OpenAI emits when `max_output_tokens` cuts a function call: an `output_item.done` with
   `status: "incomplete"`, or no `done`.
-  Measured 2026-11-14 in 9 of 9 cut streams (3 per model, `max_output_tokens: 48`): OpenAI sends
-  one `function_call_arguments.done` and one `response.output_item.done` with
-  `status: "incomplete"`, then `response.incomplete` with
-  `incomplete_details.reason: "max_output_tokens"`. The arguments at `done` are not complete JSON
-  (9 of 9), and they equal the deltas. So R15 sees a truncation. R11 also applies to the same
-  item ("`""` or one complete JSON value"), and this spec does not say which rule wins.
+  Measured 2026-11-14 with `measure.py` in 9 of 9 cut streams (3 per model,
+  `max_output_tokens: 48`): `terminal` is `response.incomplete`, and `done_status` of the
+  `function_call` is `"incomplete"`, so OpenAI sends the `done`. `deltas_equal_done` is true, so a
+  `function_call_arguments.done` event has the same arguments as the deltas and the `done` item.
+  `arguments_complete_json` is false (9 of 9). So R15 sees a truncation. R11 also applies to the
+  same item ("`""` or one complete JSON value"), and this spec does not say which rule wins.
 - M6. A next turn after a rewrite: replay a rewritten output (a `reasoning` item followed by the
   `msg_paigasus_…` message) as `input`, with and without `store`, with
   `include: ["reasoning.encrypted_content"]`. Expected unknown. If OpenAI rejects it, the rewrite
   (§ 6.5) changes before implementation.
-  Measured 2026-11-14: OpenAI accepted the rewritten output in 9 of 9 requests (3 models,
+  Measured 2026-11-14 (the `.measure.json` files of `capture.py`): OpenAI accepted the rewritten
+  output in 9 of 9 requests (3 models,
   3 variants each, HTTP 200, `status: "completed"`). Only `gpt-6.1-sol` put a `reasoning` item
   before the call. Its replay was `reasoning`, then `msg_paigasus_1`, then a user message, in all
   3 variants. `gpt-6.1-terra` and `gpt-4.1` made only a `function_call`, so their replay had
@@ -188,11 +198,13 @@ Consequences:
   `encrypted_content` with `store: false` was not measured.
 - M7. The byte size of `response.created` and `response.completed` with a long `instructions`
   (about 50 KB) and 30 tool schemas.
-  Measured 2026-11-14 (9 streams, `long_instructions_30_tools`, 50,000 bytes of `instructions`,
-  30 function tools): `response.created` is 60,472 to 60,507 bytes, `response.in_progress` is
-  60,480 to 60,515 bytes, and `response.completed` is 60,933 to 60,976 bytes (the whole record,
-  with the `event:` line). The largest other record in the 78 streams is 4,885 bytes
-  (`response.incomplete`). All are below 64 KiB and far below the D15 limits.
+  Measured 2026-11-14 with `measure.py` (`max_record_bytes`, the whole record with the `event:`
+  line) in 9 streams of `long_instructions_30_tools` (50,000 bytes of `instructions`, 30 function
+  tools): `response.created` is 60,472 to 60,507 bytes, `response.in_progress` is 60,480 to
+  60,515 bytes, and `response.completed` is 60,933 to 60,976 bytes. In the 78 streams, the largest
+  record of any other type is 4,885 bytes (`response.incomplete`). Outside the 9 long streams,
+  the largest record is 6,175 bytes (`response.completed`). All are below 64 KiB and far below the
+  D15 limits.
 
 ## 4. Decisions
 

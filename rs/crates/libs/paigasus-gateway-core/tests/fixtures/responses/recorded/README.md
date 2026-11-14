@@ -14,11 +14,14 @@ the raw response bytes, unchanged.
   write `.measure.json` files, not streams, so this directory keeps none of them.
 
 The run made 78 streams. This directory keeps 17 of them: the first run of each model and
-scenario that obeys every rule of spec § 6.4. A file is named `<model>__<scenario>.sse`.
+scenario that obeyed every rule of spec § 6.4 as it was before the § 15 amendments. The check
+used `../../openai/recorded/measure.py`. A file is named `<model>__<scenario>.sse`.
 
-The test `recorded_streams_pass_unchanged` in `tests/fixtures.rs` replays every file. Note that
-the `max_output_tokens_in_call` files end with a `function_call` that has
-`status: "incomplete"`. R15 makes that item a truncation.
+No test replays this directory yet. Task 9 adds the replay. The `recorded_streams_pass_unchanged`
+test in `tests/fixtures.rs` reads only `openai/recorded/`, as Chat Completions streams. The three
+`max_output_tokens_in_call` files end with a `function_call` that has `status: "incomplete"`.
+The replay must expect a `Truncated` block for that call (spec § 15, A3), not a pass with no
+change.
 
 ## What was rejected
 
@@ -29,8 +32,9 @@ the `max_output_tokens_in_call` files end with a `function_call` that has
 
 ## What was recorded but not kept
 
-These streams break a rule of spec § 6.4. They are not in this directory. The coordinator must
-decide on a spec change first (spec § 6.4, last paragraph).
+These streams broke a rule of spec § 6.4 as it was on the day of the run. They are not in this
+directory. The spec § 15 amendments A1, A2 and A4 changed those rules after the run. This
+directory does not add the streams again.
 
 - Every stream with a `reasoning` item (26 streams of `gpt-6.1-sol` and `gpt-6.1-terra`) breaks
   R10. The `encrypted_content` of the `reasoning` item in the terminal `output` is different from
@@ -58,7 +62,7 @@ The full results with the counts are in spec § 3.3.
 - M1. A `previous_response_id` continuation with no `function_call_output` gets HTTP 400,
   `No tool output found for function call <call_id>.` (3 of 3 models).
 - M2. Every record has an `event:` line equal to `data.type`. No stream has `[DONE]`. Every
-  event has `sequence_number`, from 0 and with no gap. Every `*.delta` event has `obfuscation`.
+  event has `sequence_number`, from 0 and with no gap. Every `*.delta` event has `obfuscation`, and no other event type has it.
   No terminal `response` has `output_text`. No stream has a `keepalive` event.
 - M3. The events of each item are contiguous, and `output_index` does not change from `added` to
   `done` (78 of 78). R10 does not hold for `reasoning` items (see above).
