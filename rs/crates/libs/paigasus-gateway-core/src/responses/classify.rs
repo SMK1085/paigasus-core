@@ -10,8 +10,8 @@
 //!   `expectedOutputItemTypes` (`internal/responses/response-accumulator.mjs:111-153`). Node maps
 //!   `response.shell_call_output_content.*` to `shell_call_output`, which spec § 6.1 omits. This
 //!   file follows Node, so the item stays provider-run. Node maps `response.content_part.*` by
-//!   the part type (`reasoning_text` to `reasoning`); here that event is `Item("message")` and the
-//!   assembly step must apply the part rule.
+//!   the part type; [`content_part_item`] does that and [`classify`] rejects an unknown part. The
+//!   scope of the event stays `Item("message")` in [`scope_of`]: use [`content_part_item`] for it.
 
 use serde_json::Value;
 
@@ -182,6 +182,20 @@ pub(crate) fn scope_of(ty: &'static str) -> Scope {
     FAMILIES.iter().find(|(p, _)| ty.starts_with(p)).map_or(Scope::Item(""), |(_, item)| Scope::Item(item))
 }
 
+/// The item type of a `response.content_part.added` or `.done` event, by `part.type` (ruling T3a;
+/// Node's `getExpectedOutputItemType`). `output_text` and `refusal` belong to `message`,
+/// `reasoning_text` to `reasoning`. Any other, missing or non-string part type is malformed.
+pub(crate) fn content_part_item(event: &Value) -> Result<&'static str, Malformed> {
+    match event.get("part").and_then(|p| p.get("type")) {
+        Some(Value::String(t)) => match t.as_str() {
+            "output_text" | "refusal" => Ok("message"),
+            "reasoning_text" => Ok("reasoning"),
+            _ => Err(Malformed("part_type")),
+        },
+        _ => Err(Malformed("part_type")),
+    }
+}
+
 /// One classified record.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Event {
@@ -221,7 +235,12 @@ pub(crate) fn classify(rec: &Record) -> Result<Event, Malformed> {
         return Ok(Event::UpstreamError(value));
     }
     match STREAM_EVENT_TYPES.iter().find(|t| **t == ty) {
-        Some(known) => Ok(Event::Known { ty: known, value }),
+        Some(known) => {
+            if matches!(*known, "response.content_part.added" | "response.content_part.done") {
+                content_part_item(&value)?;
+            }
+            Ok(Event::Known { ty: known, value })
+        }
         None => Err(Malformed("unknown_type")),
     }
 }
@@ -352,6 +371,26 @@ mod tests {
         assert_eq!(classify(&rec(None, r#"{"type":3}"#)), Err(Malformed("type")));
         assert_eq!(classify(&rec(None, "[1]")), Err(Malformed("not_object")));
         assert_eq!(classify(&rec(None, r#"{"type":"response.created","Item_Id":"x"}"#)), Err(Malformed("json")));
+    }
+
+    #[test]
+    fn a_content_part_maps_by_its_part_type() {
+        for (part, item) in [("output_text", "message"), ("refusal", "message"), ("reasoning_text", "reasoning")] {
+            for ty in ["response.content_part.added", "response.content_part.done"] {
+                let data = format!(r#"{{"type":"{ty}","part":{{"type":"{part}"}}}}"#);
+                let Ok(Event::Known { value, .. }) = classify(&rec(None, &data)) else { panic!("{data}") };
+                assert_eq!(content_part_item(&value), Ok(item), "{data}");
+            }
+        }
+        for data in [
+            r#"{"type":"response.content_part.added","part":{"type":"audio"}}"#,
+            r#"{"type":"response.content_part.done","part":{"type":3}}"#,
+            r#"{"type":"response.content_part.done","part":{}}"#,
+            r#"{"type":"response.content_part.added"}"#,
+            r#"{"type":"response.content_part.added","part":null}"#,
+        ] {
+            assert_eq!(classify(&rec(None, data)), Err(Malformed("part_type")), "{data}");
+        }
     }
 
     #[test]
