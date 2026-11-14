@@ -119,7 +119,7 @@ script.
 | D1 | Scope: the oracle **and** the interceptor (Sven, 2026-11-14). An oracle-only change cannot pass honestly (§ 2). |
 | D2 | Oracle rule: **reject every strict partial.** At an excused raise, a call in the client's snapshot must match an allowed call exactly (the non-partial rules, including `""` against `{}`). A re-decide of the prefix was the first draft. It was dropped: it proves I1 only for the test deciders, and the gateway never asks the production decider about a prefix. This rule is decider-free, and it is what I1 says. Changed after the review. Confirmed by Sven at Gate 1 (2026-11-14). |
 | D3 | Interceptor rule: each record shape in § 5 becomes a canonical-form deviation (a stream-level `on_failure`, as every § 4.3 deviation of SMA-749 is), or a malformed record. The rules name shapes, not one SDK. |
-| D4 | Anthropic: no interceptor change (§ 2.3). The anthropic-python model's partial parser is fixed to match jiter (§ 6.3). Bodies: no change (a body has no fragments), with one exception: § 5.8 applies to a body `function_call` too, because the stream and the body share one parser for it and real OpenAI sends no such key in either. |
+| D4 | Anthropic: no interceptor change (§ 2.3). The anthropic-python model's partial parser is fixed to match jiter (§ 6.3). Bodies: no change (a body has no fragments). So a body tool call reads `"type": null` as absent, as before; § 5.3 applies to streams only. One exception: § 5.8 applies to a body `function_call` too, because the stream and the body share one parser for it and real OpenAI sends no such key in either. |
 | D5 | The generators render every shape of § 2.2, so P1 covers each one with random cuts and deciders (§ 7.1). |
 | D6 | H1 and H2 are fixed in this change, not in a later sweep. Confirmed by Sven at Gate 1 (2026-11-14). |
 | D7 | Real OpenAI streams are recorded and kept as fixtures (§ 2.4), at Sven's request. Every recording must pass with no deviation (§ 7.3). |
@@ -182,6 +182,8 @@ carries tool data for choice 0):
 
 - a chunk with no `choices` key is `Deviation("chunk_without_choices")`;
 - a choice entry with no `delta` key, in any position, is `Deviation("choice_without_delta")`.
+  One exception: the entry of choice 0 that carries its `finish_reason` may omit `delta`. No
+  fragment can follow it (`late_fragment`), so every call is complete when a client raises there.
 
 `"delta": null` stays `Malformed("delta")` in every position (SMA-749 classifier); inside an open
 call the queue is non-empty, so it is already a stream-level failure.
@@ -342,7 +344,8 @@ legacy call for § 5.8) whose fragments are split around the rule's record. The 
 the deviating record itself** (for example a `"note":"CANARY-…"` key), not in a separate
 `blocked_*` call: a separate later call is forwarded in observe mode after the deviation, so its
 canary would leak there. Then `every_fixture_holds_i1_for_every_client` reds for that fixture
-under every decider when its rule is removed (§ 7.4). The H1 fixture puts a `blocked_*` call
+under `allow-all` and `block-by-name` when its rule is removed (§ 7.4). Under `block-all` the
+allowed call is blocked and rewritten out, so no partial call reaches a client and I1 cannot red. The H1 fixture puts a `blocked_*` call
 inside `chunk`.
 
 The recorded streams of § 2.4 are kept in `openai/recorded`. They are **not** in the fixture sets
