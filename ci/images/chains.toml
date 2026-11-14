@@ -11,7 +11,7 @@
 #   ci/helm-render/helm_render.py     the keys (row 8c), kind, version_file, ghcr (row 8a)
 #   ci/actionlint/release_guard.py    the keys, ghcr, hub (V16)
 # The fifth reader is a sed fallback in ci/release-plan/run.sh. It reads the keys when
-# `uv` is not on PATH. It needs each header as a bare `[chain.<key>]` line, nothing else
+# The package manager is not on PATH. It needs each header as a bare `[chain.<key>]` line, nothing else
 # on that line. `release_plan.py --assert` checks that the sed read and the tomllib read
 # agree.
 #

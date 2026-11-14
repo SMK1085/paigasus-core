@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# OSV advisory gate for the npm and pip lockfiles (SMA-518).
+# OSV advisory gate for the npm and Python package lockfiles (SMA-518).
 #
 # `rs/` is deliberately NOT scanned here: repo:deny (cargo-deny) already gates it and also
 # enforces license + yanked-crate policy that OSV does not, so folding Rust in would lose
@@ -50,10 +50,10 @@ LOCKFILES=(
   'ts/pnpm-lock.yaml'
   'py/uv.lock'
   'ci/workflow-credentials/uv.lock'
-  # SMA-513 PR 2b — repo:helm-render resolves pyyaml through its own uv project, so its lockfile
+  # SMA-513 PR 2b — repo:helm-render resolves pyyaml through its own package-manager project, so its lockfile
   # is a fourth pip-ecosystem manifest. moon.yml's repo:osv inputs carry the same path.
   'ci/helm-render/uv.lock'
-  # SMA-693 — repo:wasm-lockstep resolves pyyaml through its own uv project, so its lockfile is a
+  # SMA-693 — repo:wasm-lockstep resolves pyyaml through its own package-manager project, so its lockfile is a
   # fifth pip-ecosystem manifest. moon.yml's repo:osv inputs carry the same path.
   'ci/wasm-lockstep/uv.lock'
 )
@@ -160,7 +160,7 @@ for result in data.get('results', []):
 PY
   echo "" >&2
   echo "  Fix by raising the resolved version (a pnpm-workspace.yaml override for a pinned" >&2
-  echo "  npm transitive, or 'uv lock --upgrade-package <name>' for pip). Waive ONLY with a" >&2
+  echo "  npm transitive, or a lock upgrade of the package, for a Python package). Waive ONLY with a" >&2
   echo "  justified [[IgnoredVulns]] entry in osv-scanner.toml." >&2
 fi
 
@@ -174,4 +174,4 @@ fi
 if [ "$osv_found" -eq 1 ] || [ "$guard" -eq 1 ]; then
   exit 1
 fi
-echo "osv gate: no known vulnerabilities in the npm or pip lockfiles."
+echo "osv gate: no known vulnerabilities in the npm or Python lockfiles."

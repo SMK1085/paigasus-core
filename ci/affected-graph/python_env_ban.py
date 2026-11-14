@@ -114,6 +114,42 @@ PINNED_LINES: dict[tuple[str, str], str] = {
         "py/scripts/assert_typecheck_coverage.py",
         'EXCLUDE_PARTS = frozenset({"generated", "__pycache__", "node_modules", ".venv", "dist", "build"})',
     ): "path parts to skip: one part is the name of the project environment directory",
+    (
+        "ci/actionlint/release_guard.py",
+        'r"uv\\s+publish",',
+    ): "detection data: the regex that finds a package-manager publish in a workflow cannot name the tool in other words",
+    (
+        "ci/actionlint/release_guard.py",
+        '"jobs:\\n  build:\\n    steps: [{run: uv publish --trusted-publishing always}]\\n"),',
+    ): "fixture data: a workflow with a package-manager publish step, which the release guard must refuse",
+    (
+        "ci/actionlint/release_guard.py",
+        '("uvx", {"run": "uvx foo"}, True),',
+    ): "fixture data: the command name is the input of the row that tests the allow list of run commands",
+    (
+        "ci/images/console-selftest.sh",
+        """printf '%s\\n' '#!/usr/bin/env bash' 'echo "packages=1"' 'exit 0' > "$T/rs-bin/uv\"""",
+    ): "fake tool: the stub must have the real tool name so that the body under test finds it on PATH",
+    (
+        "ci/images/console-selftest.sh",
+        'chmod +x "$T/rs-work/ci/images/run.sh" "$T/rs-bin/syft" "$T/rs-bin/uv"',
+    ): "fake tool: makes the stub of the real tool name executable",
+    (
+        "ci/helm-render/run.sh",
+        '"$HERE/.venv/"*) ;;',
+    ): "case guard: the interpreter must lie under the environment directory that the project creates, which has this name",
+    (
+        "ci/wasm-lockstep/run.sh",
+        '"$HERE/.venv/"*) ;;',
+    ): "case guard: the interpreter must lie under the environment directory that the project creates, which has this name",
+    (
+        "ci/version-lockstep/run.sh",
+        'uvws = ws.get("tool", {}).get("uv", {}).get("workspace")',
+    ): "pyproject table key: the code reads the tool table whose key is the tool name",
+    (
+        "ci/version-lockstep/run.sh",
+        'sources = doc.get("tool", {}).get("uv", {}).get("sources", {})',
+    ): "pyproject table key: the code reads the tool table whose key is the tool name",
 }
 
 # TEMPORARY (SMA-770 Tasks 3 to 7). The files that still hold hits that a later task migrates
@@ -127,33 +163,8 @@ MIGRATION_FILES: frozenset[str] = frozenset((
     ".github/workflows/release.yml",
     ".github/workflows/security-scan.yml",
     ".github/workflows/wheels.yml",
-    "ci/actionlint/release_guard.py",
-    "ci/actionlint/run.sh",
     "ci/affected-graph/cargo_moon_parity.py",
-    "ci/affected-graph/ci_targets.py",
-    "ci/affected-graph/run.sh",
-    "ci/helm-render/pyproject.toml",
-    "ci/helm-render/run.sh",
-    "ci/images/chains.toml",
-    "ci/images/console-selftest.sh",
     "ci/images/release_decision.py",
-    "ci/images/run.sh",
-    "ci/osv/run.sh",
-    "ci/osv/shipped_reachability.py",
-    "ci/publish-metadata/run.sh",
-    "ci/release-parity/ecosystems/python-semantic-release.sh",
-    "ci/release-parity/run.sh",
-    "ci/release-plan/pyproject.toml",
-    "ci/release-plan/release_plan.py",
-    "ci/release-plan/run.sh",
-    "ci/ruff/run.sh",
-    "ci/version-lockstep/run.sh",
-    "ci/wasm-lockstep/lockstep_check.py",
-    "ci/wasm-lockstep/pin_check.py",
-    "ci/wasm-lockstep/run.sh",
-    "ci/workflow-credentials/pyproject.toml",
-    "ci/workflow-credentials/run.sh",
-    "ci/workflow-credentials/workflow_credentials.py",
 ))
 
 _BAN_FIX = "route the command through ci/python-env/run.sh, give the text new words, or pin the line in PINNED_LINES"

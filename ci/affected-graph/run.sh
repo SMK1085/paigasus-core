@@ -400,9 +400,9 @@ run_suite() {
   # `unexpected` row rather than passing silently. Add it if intended; do not widen the filter.
   #
   # The py CONFIGURATION ROOT's tasks (py:test/lint/fmt/typecheck) are deliberately absent. They do
-  # not key on these files: `uv run` alone serves a CACHED wheel and cannot observe a Rust change
+  # not key on these files: the package manager alone serves a CACHED wheel and cannot observe a Rust change
   # (measured for SMA-546 — a kernel edit that made `--reinstall-package` fail 67 tests left plain
-  # `uv run pytest` reporting 124 passed), so giving them these inputs would buy cost with no
+  # the package manager reporting 124 passed), so giving them these inputs would buy cost with no
   # coverage.
   # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case "lockfile->all-lint" "rs/Cargo.lock" \

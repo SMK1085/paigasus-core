@@ -6,7 +6,7 @@ set -euo pipefail
 
 # proto prints an NDJSON preamble on STDOUT when it detects an agent environment (AI_AGENT /
 # CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), which poisons every `$(...)` capture in this file.
-# MEASURED on the uv SHIM: default reporter yields `{"type":"message",...}` on stdout, and
+# MEASURED on the package-manager SHIM: default reporter yields `{"type":"message",...}` on stdout, and
 # PROTO_REPORTER=text yields none. CLAUDE.md's NDJSON entry had carved shims out as "not proven
 # generally"; a captured shim call leaking the preamble is the counterexample that closes it.
 # Exported once here rather than prefixed per call site, so a future capture inherits it (SMA-609).

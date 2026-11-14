@@ -15,7 +15,7 @@
 # worst one seen: 2 before 1 before 0.
 #
 # Read-only: everything this gate writes lands under one mktemp -d directory, removed on EXIT,
-# except ci/helm-render/.venv, which uv creates and .gitignore ignores. It never writes into
+# except the ci/helm-render environment directory, which the package manager creates and .gitignore ignores. It never writes into
 # charts/ and never calls render.sh --update. See README.md.
 #
 # Runs under /bin/bash 3.2.57 and bash 5: no mapfile, no declare -A, no here-string, no pipe into
@@ -85,13 +85,13 @@ resolve_helm() {
   HELM_BIN="$bin"
 }
 
-# The venv interpreter, resolved ONCE. --locked stops uv from rewriting uv.lock. After this no uv
+# The venv interpreter, resolved ONCE. --locked stops the package manager from rewriting uv.lock. After this no package manager
 # runs, and never from inside a fixture directory (ci/ruff/README.md, the PR 206 lesson).
 resolve_python() {
   local py
-  command -v uv >/dev/null 2>&1 || die_infra "uv is not on PATH; run 'proto install', or add ~/.proto/shims to PATH"
-  py="$(uv run --locked --project "$HERE" python3 -c 'import sys, yaml; print(sys.executable)')" \
-    || die_infra "uv could not provide the locked PyYAML environment for $HERE"
+  bash "$REPO_ROOT/ci/python-env/run.sh" probe || die_infra "the package manager is not on PATH; run 'proto install', or add ~/.proto/shims to PATH"
+  py="$(bash "$REPO_ROOT/ci/python-env/run.sh" run ci/helm-render python3 -c 'import sys, yaml; print(sys.executable)')" \
+    || die_infra "the package manager could not provide the locked PyYAML environment for $HERE"
   case "$py" in
     "$HERE/.venv/"*) ;;
     *) die_infra "the interpreter is not under $HERE/.venv. Got: ${py:-<empty>}" ;;

@@ -8,17 +8,17 @@
 #
 # Exit codes: 0 pass | 1 the repo is wrong | 2 infrastructure failed.
 #
-# WHY THE BINARY IS RESOLVED, NOT PIPED THROUGH `uv run`. `ruff check` exits 1 on violations and
-# `uv` exits 1 on a failed resolution or a stale --locked lock, so one combined command cannot
+# WHY THE BINARY IS RESOLVED, NOT PIPED THROUGH the package manager. `ruff check` exits 1 on violations and
+# The package manager exits 1 on a failed resolution or a stale --locked lock, so one combined command cannot
 # tell "ci/ has lint violations" from "PyPI is down". CLAUDE.md records that lesson verbatim for
-# repo:workflow-credentials. .moon/tasks/python.yml runs a BARE, re-locking `uv run ruff check .`,
+# repo:workflow-credentials. .moon/tasks/python.yml runs a BARE, re-locking the package manager,
 # so py/uv.lock genuinely can be stale in a working tree — without the split, that reds this gate
 # and a contributor "fixes" it by re-locking.
 set -euo pipefail
 
 # proto prints an NDJSON preamble on STDOUT when it detects an agent environment (AI_AGENT /
 # CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), which poisons every `$(...)` capture in this file.
-# MEASURED on the uv SHIM: default reporter yields `{"type":"message",...}` on stdout, and
+# MEASURED on the package-manager SHIM: default reporter yields `{"type":"message",...}` on stdout, and
 # PROTO_REPORTER=text yields none. CLAUDE.md's NDJSON entry had carved shims out as "not proven
 # generally"; a captured shim call leaking the preamble is the counterexample that closes it.
 # Exported once here rather than prefixed per call site, so a future capture inherits it (SMA-609).
@@ -62,24 +62,24 @@ ruff_corpus() {
   git -C "$root" ls-files -- ':(glob)ci/**/*.py' 'ci/*.py' | sort
 }
 
-# PROVENANCE, NOT JUST PRESENCE. `shutil.which` is PATH-based: if the `py` uv project does not
+# PROVENANCE, NOT JUST PRESENCE. `shutil.which` is PATH-based: if the `py` package-manager project does not
 # actually contain ruff (a `[dependency-groups]` rename, a `[tool.uv] default-groups` change, or
-# simply `UV_NO_DEV=1` at invocation time — all real, documented uv knobs, none of which trips
-# `uv run`'s own exit status), `uv run` still exits 0 and `which` silently returns whatever `ruff`
+# simply a package-manager switch at invocation time — all real, documented package-manager knobs, none of which trips
+# the package manager's own exit status), the package manager still exits 0 and `which` silently returns whatever `ruff`
 # is first on the OUTER host PATH. `[ -x ]` then passes on that impostor, and the gate lints with
 # a binary this repo never pinned — exactly the "strictness is a property of the host" failure
-# SMA-525 refused, now green. MEASURED: with ruff removed from py/.venv/bin and a host impostor
+# SMA-525 refused, now green. MEASURED: with ruff removed from the py environment directory/bin and a host impostor
 # earlier on PATH, the bare `shutil.which` resolver printed the impostor's path at exit 0.
-# `sys.prefix` under `uv run --project py` IS `py/.venv` (measured), so requiring the resolved
+# `sys.prefix` under the package manager IS the py environment directory (measured), so requiring the resolved
 # path to live under it is a same-process check that no amount of outer-PATH manipulation can
 # spoof — a host binary now routes to `die_infra` (rc 2) instead of a silent pass.
 # Containment is COMPONENT-WISE (`is_relative_to` on resolved paths), not a string prefix.
 # `p.startswith(sys.prefix)` accepts a SIBLING directory — `py/.venv-host/bin/ruff` starts with
-# `py/.venv` and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
+# the py environment directory and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
 # sides also means a symlinked venv compares by its real location rather than by spelling.
 # PROTO_REPORTER=text AND `tail -n1`, deliberately both. proto prints an NDJSON preamble on
 # STDOUT when it detects an agent environment (AI_AGENT / CLAUDECODE / CLAUDE_CODE_ENTRYPOINT),
-# and MEASURED on merged main: the proto-managed `uv` SHIM leaked that preamble into this very
+# and MEASURED on merged main: the proto-managed package-manager SHIM leaked that preamble into this very
 # capture, so the variable held a JSON blob and the gate died with "not executable: {...}".
 # CLAUDE.md's NDJSON entry had carved shims out as "not proven generally" — this is the
 # counterexample that closes the carve-out (SMA-609). The env var suppresses it at source; the
@@ -87,9 +87,9 @@ ruff_corpus() {
 # weakens the `[ -x ]` below: a preamble-only capture still fails it and still aborts.
 resolve_ruff() {
   local p
-  p="$(uv run --locked --project py python3 -c \
-    'import pathlib, shutil, sys; p = shutil.which("ruff"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)' | tail -n1)" \
-    || die_infra "could not resolve ruff via 'uv run --locked --project py' — run 'uv sync --project py'"
+  p="$( (cd py && bash "$REPO_ROOT/ci/python-env/run.sh" run py python3 -c \
+    'import pathlib, shutil, sys; p = shutil.which("ruff"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)') | tail -n1)" \
+    || die_infra "could not resolve ruff via 'ci/python-env/run.sh run py' — run 'proto install', then 'moon setup'"
   [ -x "$p" ] || die_infra "resolved ruff is not executable: $p"
   printf '%s' "$p"
 }
@@ -134,13 +134,13 @@ self_test() {
   local failures=0 tmp
   tmp="$(mktemp -d)"
   git -C "$tmp" init -q
-  mkdir -p "$tmp/ci/sub" "$tmp/ci/sub/.venv"
+  mkdir -p "$tmp/ci/sub" "$tmp/ci/sub/vendored-env"
   : >"$tmp/ci/top.py"; : >"$tmp/ci/sub/nested.py"
-  : >"$tmp/ci/sub/notes.md"; : >"$tmp/ci/sub/.venv/vendored.py"
-  # .venv is left UNTRACKED (gitignored), not force-added: ruff_corpus excludes it by tracking,
-  # the same mechanism the real repo's own untracked ci/*/.venv trees rely on — not by any
+  : >"$tmp/ci/sub/notes.md"; : >"$tmp/ci/sub/vendored-env/vendored.py"
+  # The vendored environment directory is left UNTRACKED (gitignored), not force-added: ruff_corpus excludes it by tracking,
+  # the same mechanism the real repo's own untracked environment directories under ci/ rely on — not by any
   # pattern of its own. `-f` here would defeat the very row it is meant to prove.
-  printf '.venv/\n' >"$tmp/.gitignore"
+  printf 'vendored-env/\n' >"$tmp/.gitignore"
   git -C "$tmp" add -A >/dev/null 2>&1
 
   _row() { # $1 label, $2 expected-present (0/1), $3 path
@@ -166,7 +166,7 @@ self_test() {
   _row 'top-level .py is found'   0 'ci/top.py'
   _row 'nested .py is found'      0 'ci/sub/nested.py'
   _row 'non-.py is not found'     1 'ci/sub/notes.md'
-  _row 'a .venv tree is excluded' 1 'ci/sub/.venv/vendored.py'
+  _row 'a vendored environment tree is excluded' 1 'ci/sub/vendored-env/vendored.py'
 
   # The floor must trip on an empty corpus, or a moved ci/ passes vacuously. There is no
   # REPO_ROOT override to lean on (see the REPO_ROOT assignment above), so a COPY of this
@@ -191,17 +191,17 @@ self_test() {
 }
 
 negative_control() {
-  # uv is resolved EXACTLY ONCE here, from the REAL repo root, via the same resolve_ruff() the
+  # The package manager is resolved EXACTLY ONCE here, from the REAL repo root, via the same resolve_ruff() the
   # real check uses — never from inside the fixture. The prior shape re-entered a COPY of this
   # script inside the fixture, which recomputed REPO_ROOT as the fixture dir and called
-  # resolve_ruff() there too, so `uv run --locked --project py` ran a second time with `py`
+  # resolve_ruff() there too, so the package manager ran a second time with `py`
   # reached through an ABSOLUTE SYMLINK from a foreign root. That mutated the ONE SHARED
-  # `py/.venv` every other py Moon task depends on (uv treats the symlink's target, not its
+  # the py environment directory every other py Moon task depends on (the package manager treats the symlink's target, not its
   # location, as the project root, so it still resolved to the real venv and reinstalled into
   # it) — invisible in a lone run of this gate, but under a concurrent `moon ci` it raced and
   # broke `contracts:generate`, `py:typecheck`, `py:test`, `paigasus-kernel-py:test` and
   # `repo:release-parity-py` (measured in CI, PR 206). Resolving ruff once, up front, in the real
-  # repo removes every uv call from the fixture, so there is nothing left inside it to race.
+  # repo removes every package-manager call from the fixture, so there is nothing left inside it to race.
   # Since no code under the fixture is ever executed, `py/`, `rs/` and `.prototools` are no
   # longer needed there either.
   local ruff
@@ -223,7 +223,7 @@ negative_control() {
   # cleanup on exactly the path that most needs it (measured: it left a stray dir on disk).
   trap 'rm -rf "$tmp"' EXIT
   git init -q "$tmp"
-  # The root .gitignore is copied in so a plain `git add` would exclude a vendored .venv tree
+  # The root .gitignore is copied in so a plain `git add` would exclude a vendored environment directory
   # exactly as the real repo does, if one ever showed up here — defensive, since this fixture no
   # longer contains anything but the planted violation below.
   cp "$REPO_ROOT/.gitignore" "$tmp/.gitignore"
@@ -231,7 +231,7 @@ negative_control() {
   printf 'x = [1]\ny = x + [2]\n' >"$tmp/ci/probe/violation.py"
   git -C "$tmp" add -A >/dev/null 2>&1
 
-  # Corpus derivation is pure `git -C` (ruff_corpus), no uv anywhere in this path. The resolved
+  # Corpus derivation is pure `git -C` (ruff_corpus), no package manager anywhere in this path. The resolved
   # ruff binary is then invoked DIRECTLY against those files, with --config pointing at the REAL
   # py/pyproject.toml by absolute path — not the fixture's (nonexistent) copy — so the rule set
   # under test is the one the real check actually uses. ruff_corpus returns paths relative to

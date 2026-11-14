@@ -5,7 +5,7 @@ osv-scanner applies an [[IgnoredVulns]] entry to an advisory ID for EVERY path i
 file. Some waivers in osv-scanner.toml are justified only because no shipped package reaches
 the vulnerable package. This guard walks ts/pnpm-lock.yaml and fails when a shipped importer
 reaches a package that SHIPPED_FREE_WAIVERS names. It uses only the Python standard library,
-because the `osv advisory scan` job has no uv, node or pnpm (spec F10).
+because the `osv advisory scan` job has no Python package manager, node or pnpm (spec F10).
 
 A shipped importer is an importer whose key starts with `apps/`, plus every importer that such
 an importer reaches through a `link:` entry. Its roots are its dependencies,

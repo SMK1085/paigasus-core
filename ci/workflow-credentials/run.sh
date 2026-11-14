@@ -11,8 +11,8 @@
 #
 # Exit codes: 0 pass | 1 the repo is wrong | 2 infrastructure failed.
 #
-# The checker exits 3, not 1, for an assertion failure. `uv` exits 1 on its own failures —
-# MEASURED on a failed resolution both online and with UV_OFFLINE=1 — so without a distinct
+# The checker exits 3, not 1, for an assertion failure. The package manager exits 1 on its own failures —
+# MEASURED on a failed resolution both online and with offline mode — so without a distinct
 # code a PyPI outage would report "a workflow declares a credential". This wrapper owns the
 # translation and nothing else may.
 set -euo pipefail
@@ -22,25 +22,25 @@ HERE="$REPO_ROOT/ci/workflow-credentials"
 
 die_infra() { printf 'workflow-credentials: %s\n' "$*" >&2; exit 2; }
 
-# Preflight. `uv` absent yields 127 from the shell, which is neither 0/1/2 nor actionable.
-command -v uv >/dev/null 2>&1 \
-  || die_infra "uv is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
+# Preflight. The package manager absent yields 127 from the shell, which is neither 0/1/2 nor actionable.
+bash "$REPO_ROOT/ci/python-env/run.sh" probe \
+  || die_infra "the package manager is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
 
 # $@ is forwarded to the checker. Returns 0, returns 1 for a real assertion failure, and
 # EXITS 2 for anything else.
 run_checker() {
   local rc=0
-  uv run --locked --project "$HERE" --python '>=3.12' python3 \
+  bash "$REPO_ROOT/ci/python-env/run.sh" run ci/workflow-credentials python3 \
     "$HERE/workflow_credentials.py" "$@" || rc=$?
   case "$rc" in
     0) return 0 ;;
     3) return 1 ;;
-    *) die_infra "checker exited $rc — uv or the interpreter failed, not an assertion" ;;
+    *) die_infra "checker exited $rc — the package manager or the interpreter failed, not an assertion" ;;
   esac
 }
 
 # The wiring rows — only what needs the real tree. The rule table lives in the checker's
-# --self-test, in-process, because ~31 rows through `uv run` would be ~31 subprocesses.
+# --self-test, in-process, because ~31 rows through the package manager would be ~31 subprocesses.
 #
 # These seven discrete lines are pinned by ci_targets.py. Pinning the moon.yml INVOCATION
 # alone is not enough: the repo measured two bypasses of exactly that shape on
@@ -67,7 +67,7 @@ negative_control() {
   # AssertionFailureError (rc 3), not the InfraError (rc 2) this row's label and _expect require.
   mkdir -p "$tmp/empty"
   _expect 2 "a tree with no .github/ is INFRA, not a vacuous pass" \
-    uv run --locked --project "$HERE" --python '>=3.12' python3 \
+    bash "$REPO_ROOT/ci/python-env/run.sh" run ci/workflow-credentials python3 \
       "$HERE/workflow_credentials.py" "$tmp/empty"
 
   # A tree whose workflows exist but disagree with EXPECTED_PR_SUBJECTS is the repo's fault.
@@ -75,7 +75,7 @@ negative_control() {
   printf 'on:\n  pull_request:\njobs:\n  a:\n    runs-on: x\n' \
     >"$tmp/one/.github/workflows/ci.yml"
   _expect 3 "a shrunken subject set reds against the strict pin" \
-    uv run --locked --project "$HERE" --python '>=3.12' python3 \
+    bash "$REPO_ROOT/ci/python-env/run.sh" run ci/workflow-credentials python3 \
       "$HERE/workflow_credentials.py" "$tmp/one"
 
   # THE key row. release.yml fails the credential rules and passes the gate ONLY because

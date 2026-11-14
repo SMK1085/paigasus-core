@@ -11,14 +11,14 @@
 # `release_plan.py --keys` nor a bash read of ci/images/chains.toml names one. See the comment on
 # that arm.
 #
-# The checker exits 3, not 1, for an assertion failure. `uv` exits 1 on its own failures, so
+# The checker exits 3, not 1, for an assertion failure. The package manager exits 1 on its own failures, so
 # without a distinct code a PyPI outage would read as "the repo is wrong". This wrapper owns
 # the 3 -> 1 translation and nothing else may.
 set -euo pipefail
 
 # proto prints an NDJSON preamble on STDOUT when it detects an agent environment (AI_AGENT /
 # CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), which poisons every `$(...)` capture in this file.
-# MEASURED on the uv SHIM: default reporter yields `{"type":"message",...}` on stdout, and
+# MEASURED on the package-manager SHIM: default reporter yields `{"type":"message",...}` on stdout, and
 # PROTO_REPORTER=text yields none. CLAUDE.md's NDJSON entry had carved shims out as "not proven
 # generally"; a captured shim call leaking the preamble is the counterexample that closes it.
 # Exported once here rather than prefixed per call site, so a future capture inherits it (SMA-609).
@@ -29,25 +29,25 @@ HERE="$REPO_ROOT/ci/release-plan"
 
 die_infra() { printf 'release-plan: %s\n' "$*" >&2; exit 2; }
 
-# The `uv` preflight. It is a FUNCTION called from the mode dispatch at the bottom of this file,
+# The package-manager preflight. It is a FUNCTION called from the mode dispatch at the bottom of this file,
 # NOT a top-level statement, and that placement is load-bearing (SMA-603 fix wave, C1).
 #
-# It used to run above the dispatch, so it applied to `--github-output` too. `uv` is a
+# It used to run above the dispatch, so it applied to `--github-output` too. The package manager is a
 # proto-managed shim and is absent from a bare `ubuntu-latest` runner, so the RUNTIME arm exited
 # 2 and wrote nothing at all. A failed `plan` job SKIPS its dependents — see the comment on
 # `github_output` below — so a missing toolchain dropped the entire publish path silently. The
 # three CI modes keep the loud exit-2 contract: they are assertions and must fail visibly.
 require_uv() {
-  command -v uv >/dev/null 2>&1 \
-    || die_infra "uv is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
+  bash "$REPO_ROOT/ci/python-env/run.sh" probe \
+    || die_infra "the package manager is not on PATH — run 'proto install', or add ~/.proto/shims to PATH"
 }
 
-# `--locked` on all six `uv run` calls below (SMA-603 fix round 2,
+# `--locked` on all six package-manager calls below (SMA-603 fix round 2,
 # ruled in; widened to six as rows 3/4/7/8 of the negative control gained their own direct
 # calls): mirrors ci/actionlint/run.sh's release_guard_py() wrapper for check 10, and the
 # rationale applies MORE strongly here — these six calls run across EVERY invocation of the four
 # CI modes (--self-test, --negative-control, --assert, --github-output), where
-# ci/actionlint/run.sh's own uv call is only the --fixture-count bypass path. It is inert today
+# ci/actionlint/run.sh's own package-manager call is only the --fixture-count bypass path. It is inert today
 # because this project is zero-dependency (see pyproject.toml's own comment) and becomes live the
 # moment it gains one — without it, any of these six calls could silently re-lock py/uv.lock's
 # sibling here as a side effect of deciding whether to release. Verified against the current
@@ -57,11 +57,11 @@ require_uv() {
 # EXITS 2 for anything else.
 run_checker() {
   local rc=0
-  uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" "$@" || rc=$?
+  bash "$REPO_ROOT/ci/python-env/run.sh" run ci/release-plan python3 "$HERE/release_plan.py" "$@" || rc=$?
   case "$rc" in
     0) return 0 ;;
     3) return 1 ;;
-    *) die_infra "checker exited $rc — uv or the interpreter failed, not an assertion" ;;
+    *) die_infra "checker exited $rc — the package manager or the interpreter failed, not an assertion" ;;
   esac
 }
 
@@ -102,7 +102,7 @@ write_failsafe() {
 #
 # SMA-688, the chain keys (spec § 4.3). The keys come from `release_plan.py --keys`, which reads
 # ci/images/chains.toml with tomllib. When that call fails, prints no key, or prints a line
-# outside [a-z][a-z0-9-]* (for example, `uv` is missing on the runner), the arm reads the keys
+# outside [a-z][a-z0-9-]* (for example, the package manager is missing on the runner), the arm reads the keys
 # from the same file with sed, which needs no toolchain. It then takes the fail-safe branch for
 # every key, and does NOT run the decision: a toolchain that cannot name the keys cannot be
 # trusted to decide. That keeps the SMA-603 C1 contract. Negative-control rows 6, 10 and 11
@@ -113,12 +113,12 @@ write_failsafe() {
 # that chain with an empty version. So it writes nothing_to_release=false and EXITS 2: the plan
 # job fails, and every chain and the kernel release skip until a fix. Rows 12 and 13 assert it.
 #
-# THIS ARM CALLS NO PREFLIGHT, deliberately. An ABSENT `uv` makes the command substitutions
+# THIS ARM CALLS NO PREFLIGHT, deliberately. An ABSENT package manager makes the command substitutions
 # below exit 127, which `|| keys_rc=$?` and `|| rc=$?` catch like any other failure. `set -e`
 # does not fire on them: each assignment is the left operand of an `||` list.
 github_output() {
   local rc=0 out keys keys_rc=0 key failsafe=0
-  keys="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" --keys "$REPO_ROOT")" || keys_rc=$?
+  keys="$(bash "$REPO_ROOT/ci/python-env/run.sh" run ci/release-plan python3 "$HERE/release_plan.py" --keys "$REPO_ROOT")" || keys_rc=$?
   if [ "$keys_rc" -ne 0 ] || ! keys_are_valid "$keys"; then
     # The sed pattern admits only a bare `[chain.<key>]` header line, with the key in the same
     # shape that keys_are_valid tests. The test below still runs, so both sources pass one rule.
@@ -137,7 +137,7 @@ github_output() {
     printf '::warning::release-plan --keys gave no usable key list (rc=%s). The keys come from a sed read of ci/images/chains.toml.\n' "$keys_rc"
     write_failsafe "$keys_rc" "$keys"
   fi
-  out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
+  out="$(bash "$REPO_ROOT/ci/python-env/run.sh" run ci/release-plan python3 \
     "$HERE/release_plan.py" --event-name "${GITHUB_EVENT_NAME:-}" "$REPO_ROOT" 2>&1)" || rc=$?
   printf '%s\n' "$out"
   # SMA-658 fix round 2, widened by SMA-688 to every key. Under `set -euo pipefail`, each
@@ -268,7 +268,7 @@ negative_control() {
   # target this tree at all).
   _build_synthetic_tree "$tmp/synthetic-true"
   git -C "$tmp/synthetic-true" tag "a-v1.0.0"
-  out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
+  out="$(bash "$REPO_ROOT/ci/python-env/run.sh" run ci/release-plan python3 "$HERE/release_plan.py" \
     --event-name push "$tmp/synthetic-true" 2>&1)" || true
   if ! grep -q '^nothing_to_release=true$' < <(printf '%s\n' "$out"); then
     printf '  FAIL a synthetic tree with every tag already cut did not print nothing_to_release=true\n' >&2
@@ -283,7 +283,7 @@ negative_control() {
   # either direction.
   _build_synthetic_tree "$tmp/synthetic-false"
   git -C "$tmp/synthetic-false" tag "a-v0.9.0"
-  out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
+  out="$(bash "$REPO_ROOT/ci/python-env/run.sh" run ci/release-plan python3 "$HERE/release_plan.py" \
     --event-name push "$tmp/synthetic-false" 2>&1)" || true
   if ! grep -q '^nothing_to_release=false$' < <(printf '%s\n' "$out"); then
     printf '  FAIL a synthetic tree with a missing tag did not print nothing_to_release=false\n' >&2
@@ -362,18 +362,18 @@ negative_control() {
   }
 
   # Row 6 — THE C1 REGRESSION ROW, widened by SMA-688. `--github-output` must still exit 0 and
-  # write the fail-safe outputs when `uv` cannot be found at all. The `uv` preflight lived above
+  # write the fail-safe outputs when the package manager cannot be found at all. The package-manager preflight lived above
   # the mode dispatch until the SMA-603 fix wave, so the runtime arm exited 2 and wrote NOTHING on
   # a runner with no proto toolchain — the `plan` job then failed, and because every consumer
   # carries a status-function-free `if:` (implicit success()), the whole publish path skipped.
   # Reordering this file re-arms that trap in one edit, which is why the row exists.
   #
-  # SMA-688: without `uv` the wrapper cannot run `release_plan.py --keys`. It reads the keys from
+  # SMA-688: without the package manager the wrapper cannot run `release_plan.py --keys`. It reads the keys from
   # ci/images/chains.toml with sed, and writes all nine outputs fail-safe (spec § 4.3). So the
   # restricted PATH now also holds `sed`, and the row asserts all nine outputs, not the verdict only.
   #
   # A hermetic PATH, not a guessed one. `PATH=/usr/bin:/bin` would be a silent no-op on any host
-  # that installs uv system-wide; a directory holding symlinks to exactly the externals this arm
+  # that installs the package manager system-wide; a directory holding symlinks to exactly the externals this arm
   # needs cannot. The precondition is asserted rather than assumed.
   local nouv_dir nouv_out rc6=0 t tpath
   nouv_dir="$tmp/nouv-path"
@@ -387,25 +387,25 @@ negative_control() {
       ln -s "$tpath" "$nouv_dir/$t"
     fi
   done
-  if ( PATH="$nouv_dir"; export PATH; command -v uv >/dev/null 2>&1 ); then
-    printf '  FAIL row 6 proves nothing: uv is still reachable under the restricted PATH\n' >&2
+  if ( PATH="$nouv_dir"; export PATH; bash "$REPO_ROOT/ci/python-env/run.sh" probe ); then
+    printf '  FAIL row 6 proves nothing: the package manager is still reachable under the restricted PATH\n' >&2
     failures=$((failures + 1))
   fi
   nouv_out="$(mktemp)"
   PATH="$nouv_dir" GITHUB_EVENT_NAME=push GITHUB_OUTPUT="$nouv_out" \
     "$nouv_dir/bash" "$0" --github-output >/dev/null 2>&1 || rc6=$?
   if [ "$rc6" -ne 0 ]; then
-    printf '  FAIL --github-output exited %s with uv unreachable, expected 0 (the fail-safe arm)\n' \
+    printf '  FAIL --github-output exited %s with the package manager unreachable, expected 0 (the fail-safe arm)\n' \
       "$rc6" >&2
     failures=$((failures + 1))
   fi
   if ! grep -qx 'nothing_to_release=false' "$nouv_out"; then
-    printf '  FAIL --github-output with uv unreachable did not write nothing_to_release=false\n' >&2
+    printf '  FAIL --github-output with the package manager unreachable did not write nothing_to_release=false\n' >&2
     printf '  --- %s contents ---\n' "$nouv_out" >&2
     cat "$nouv_out" >&2
     failures=$((failures + 1))
   fi
-  _expect_failsafe_outputs "row 6 (uv unreachable)" "$nouv_out"
+  _expect_failsafe_outputs "row 6 (package manager unreachable)" "$nouv_out"
   rm -f "$nouv_out"
 
   # Row 7 — the FIXTURES verdict loop in release_plan.py:self_test(). The loop is deletable in
@@ -427,7 +427,7 @@ negative_control() {
     printf '  FAIL row 7 is vacuous: the fixture mutation matched nothing in release_plan.py\n' >&2
     failures=$((failures + 1))
   fi
-  uv run --locked --project "$HERE" --python '>=3.12' python3 "$mut_dir/release_plan.py" \
+  bash "$REPO_ROOT/ci/python-env/run.sh" run ci/release-plan python3 "$mut_dir/release_plan.py" \
     --self-test >/dev/null 2>&1 || mut_rc=$?
   if [ "$mut_rc" != "3" ]; then
     printf '  FAIL a fixture with an INVERTED expected verdict exited %s, expected 3 — the\n' \
@@ -459,7 +459,7 @@ negative_control() {
     printf '  FAIL row 8 is vacuous: the shape mutation matched nothing in release_plan.py\n' >&2
     failures=$((failures + 1))
   fi
-  mut8_out="$(uv run --locked --project "$HERE" --python '>=3.12' python3 \
+  mut8_out="$(bash "$REPO_ROOT/ci/python-env/run.sh" run ci/release-plan python3 \
     "$mut8_dir/release_plan.py" --self-test 2>&1)" || mut8_rc=$?
   if [ "$mut8_rc" != "3" ]; then
     printf '  FAIL a neutered [workspace] shape check exited %s, expected 3 — the collection\n' \
@@ -494,6 +494,9 @@ negative_control() {
   stub_root="$tmp/github-output-stub/ci/release-plan"
   mkdir -p "$stub_root"
   cp -R "$HERE/." "$stub_root/"
+  # The copy of run.sh calls the wrapper at its own REPO_ROOT, so the stub root carries the wrapper too.
+  mkdir -p "$stub_root/../python-env"
+  cp -R "$REPO_ROOT/ci/python-env/." "$stub_root/../python-env/"
   cat > "$stub_root/release_plan.py" <<'PYEOF'
 import sys
 if "--keys" in sys.argv:
@@ -545,6 +548,8 @@ PYEOF
     stub="$tmp/keys-stub-${label}"
     mkdir -p "$stub/ci/release-plan" "$stub/ci/images"
     cp -R "$HERE/." "$stub/ci/release-plan/"
+    mkdir -p "$stub/ci/python-env"
+    cp -R "$REPO_ROOT/ci/python-env/." "$stub/ci/python-env/"
     case "$registry" in
       copy)    cp "$REPO_ROOT/ci/images/chains.toml" "$stub/ci/images/chains.toml"; want=0 ;;
       empty)   : > "$stub/ci/images/chains.toml" ;;

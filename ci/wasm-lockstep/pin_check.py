@@ -9,7 +9,7 @@ ci/wasm-lockstep/README.md lists each rule and what it does not prove.
   pin_check.py --self-test                          the in-process fixture table (T3)
   pin_check.py --negative-control <workflow.yml>    mutations of the real workflow must red
 
-Exit codes: 0 pass | 3 a rule failed | 2 infrastructure. Not 1: `uv` exits 1 on a failed
+Exit codes: 0 pass | 3 a rule failed | 2 infrastructure. Not 1: the package manager exits 1 on a failed
 resolution. ci/wasm-lockstep/run.sh maps 3 -> 1 and every other non-zero code -> 2.
 
 The five PyYAML coercions of ci/CLAUDE.md are handled: a bare `on:` key is the boolean True;
@@ -42,7 +42,7 @@ class AssertionFailureError(Exception):
 
 
 # The expression grammar of ci/workflow-credentials/workflow_credentials.py, copied (the two gates
-# have separate uv projects on purpose). See that file for the measured reasons of each part.
+# have separate package-manager projects on purpose). See that file for the measured reasons of each part.
 EXPR_SPAN = re.compile(r"\$\{\{((?:'[^']*'|\"[^\"]*\"|(?!\}\}).)*+)\}\}", re.S)
 STRING_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
 SECRETS_CTX = re.compile(r"(?<![\w.-])secrets(?![\w-])", re.IGNORECASE)

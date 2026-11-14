@@ -129,7 +129,7 @@ EXPECTED_PYPI_PUBLISHABLE=("paigasus-kernel" "paigasus-proto" "paigasus-py-bindi
 # completeness assertion: a new marked package reds the gate until someone adds it to
 # EXPECTED_PYPI_PUBLISHABLE, exactly as a new publishable crate does on the Cargo side.
 #
-# ONE LEVEL, never `**/`: a recursive glob sweeps in py/pyproject.toml (a uv virtual root
+# ONE LEVEL, never `**/`: a recursive glob sweeps in py/pyproject.toml (a package-manager virtual root
 # with NO [project] table, which this arm classifies as rc 2 infrastructure) and, in a
 # provisioned tree, ts/node_modules/.pnpm/…/node-gyp/gyp/pyproject.toml. `py/packages/*/`
 # matches neither. The bindings manifest is named literally because it lives OUTSIDE py/.
@@ -1717,7 +1717,7 @@ STUB
   : >"$scanroot/py/packages/alpha/pyproject.toml"
   : >"$scanroot/py/packages/beta/pyproject.toml"
   : >"$scanroot/rs/crates/bindings/paigasus-py-bindings/pyproject.toml"
-  # The two shapes a recursive glob would wrongly sweep in — a uv virtual root one level
+  # The two shapes a recursive glob would wrongly sweep in — a package-manager virtual root one level
   # UP, and a vendored manifest three levels DOWN. Neither may appear in the output.
   : >"$scanroot/py/pyproject.toml"
   mkdir -p "$scanroot/ts/node_modules/.pnpm/node-gyp/gyp"

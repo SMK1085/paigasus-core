@@ -126,7 +126,7 @@ PY
       ;;
     pyproject-dep)
       # The pin on paigasus-py-bindings. An UNPINNED dep prints "" and so reads as MISMATCH —
-      # which is the point: uv strips [tool.uv.sources] from the built wheel, so an unpinned
+      # which is the point: the package manager strips [tool.uv.sources] from the built wheel, so an unpinned
       # wrapper would float against any bindings version once published (spec §4). A malformed
       # or unparsable pyproject.toml is a DIFFERENT failure mode — infrastructure, not drift —
       # and exits 2 instead.
@@ -277,7 +277,7 @@ lock_reader_self_test() {
   got="$(REPO_ROOT="$tmp" read_version cargo-lock rs/Cargo.lock proto)"
   [ -z "$got" ] || { fail "self-test: a non-uniform cargo-lock must read '', got '$got'"; rm -rf "$tmp"; return 1; }
 
-  # The uv-lock arm reads its OWN namespace: proto's uv membership is one name.
+  # The uv-lock arm reads its OWN namespace: proto's package manager membership is one name.
   printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n' >"$tmp/py/uv.lock"
   got="$(REPO_ROOT="$tmp" read_version uv-lock py/uv.lock proto)"
   [ "$got" = "0.1.0" ] || { fail "self-test: proto uv-lock should read 0.1.0, got '$got'"; rm -rf "$tmp"; return 1; }
@@ -610,17 +610,17 @@ PY
   gpos="${gpos%%:*}"
   { [ -n "$gpos" ] && [ -n "$bpos" ] && [ -n "$spos" ] && [ "$bpos" -lt "$gpos" ] && [ "$gpos" -lt "$spos" ]; } \
     || { fail "self-test: run_write must refuse a dirty tree in CI after the snapshot and before stamp_sites"; return 1; }
-  # SMA-684 §5.2: run_write runs the static uv metadata check, and BEFORE uv lock. A check after
-  # uv lock is too late: uv lock would already have run the build backend.
+  # SMA-684 §5.2: run_write runs the static package-manager metadata check, and BEFORE the package manager lock. A check after
+  # The package manager lock is too late: the package manager lock would already have run the build backend.
   local cpos lpos
   # `|| cpos=""`: under errexit, a grep that finds nothing would stop the script with no message.
   cpos="$(grep -Fn 'uv_static_metadata_check || uvrc=$?' < <(printf '%s\n' "$wbody"))" || cpos=""
-  lpos="$(grep -Fn '( cd "$REPO_ROOT/py" && uv lock' < <(printf '%s\n' "$wbody"))" || lpos=""
+  lpos="$(grep -Fn 'bash "$REPO_ROOT/ci/python-env/run.sh" lock' < <(printf '%s\n' "$wbody"))" || lpos=""
   cpos="${cpos%%:*}"; lpos="${lpos%%:*}"
   { [ -n "$cpos" ] && [ -n "$lpos" ] && [ "$cpos" -lt "$lpos" ]; } \
-    || { fail "self-test: run_write must run uv_static_metadata_check before uv lock"; return 1; }
+    || { fail "self-test: run_write must run uv_static_metadata_check before the lock step"; return 1; }
   grep -Eq '^    1\) exit 1 ;;$' < <(printf '%s\n' "$wbody") \
-    || { fail "self-test: run_write no longer maps the uv metadata check's rc 1 to exit 1"; return 1; }
+    || { fail "self-test: run_write no longer maps the package-manager metadata check's rc 1 to exit 1"; return 1; }
 
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
@@ -805,7 +805,7 @@ PY
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
-# SMA-684 §5.2: fixture table for the static uv metadata check. Each case is a small uv workspace
+# SMA-684 §5.2: fixture table for the static package-manager metadata check. Each case is a small package-manager workspace
 # under its own scratch REPO_ROOT: one member with a path source (the maturin crate's shape), and
 # one member that SITES does not name (the dormant shape of paigasus-ml and paigasus-workflows).
 uv_static_metadata_self_test() {
@@ -848,7 +848,7 @@ uv_static_metadata_self_test() {
   _usm_tree u3
   printf '[project]\nname = "b"\nversion = "0.1.0"\ndynamic = ["optional-dependencies"]\n\n[build-system]\nrequires = ["maturin>=1.9.6,<2"]\nbuild-backend = "maturin"\n' >"$tmp/u3/rs/b/pyproject.toml"
   _usm u3; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U3 (dynamic optional-dependencies) rc=$rc, expected 1"; return 1; }
-  # U4: a member with no [project] table: uv would run its build backend to read its metadata.
+  # U4: a member with no [project] table: the package manager would run its build backend to read its metadata.
   _usm_tree u4
   printf '[build-system]\nrequires = ["setuptools"]\n' >"$tmp/u4/py/packages/dormant/pyproject.toml"
   _usm u4; [ "$rc" -eq 1 ] || { fail "self-test: uv-static U4 (no [project]) rc=$rc, expected 1"; return 1; }
@@ -865,8 +865,8 @@ uv_static_metadata_self_test() {
   printf '[project\n' >"$tmp/u7/py/packages/dormant/pyproject.toml"
   _usm u7; [ "$rc" -eq 2 ] || { fail "self-test: uv-static U7 (malformed) rc=$rc, expected 2"; return 1; }
   # U8: the production path. The real run_check, on a staged copy of the real tree, with a dynamic
-  # version in the staged paigasus-ml (a uv member that SITES does not name). rc 2 here means the
-  # staging lacks a uv file; rc 0 means run_check no longer calls the check.
+  # version in the staged paigasus-ml (a package-manager member that SITES does not name). rc 2 here means the
+  # staging lacks a package-manager file; rc 0 means run_check no longer calls the check.
   mkdir "$tmp/st"
   stage_pristine_tree "$tmp/st"
   mkdir -p "$tmp/st/py/packages/paigasus-ml"
@@ -925,12 +925,12 @@ run_check() {
   # Non-vacuity: the loop must have covered every declared site.
   [ "$checked" -eq "${#SITES[@]}" ] \
     || die_infra "checked $checked sites but ${#SITES[@]} are declared"
-  # SMA-684 §5.2: uv lock in --write must never need a build backend. Explicit status routing,
+  # SMA-684 §5.2: the package manager lock in --write must never need a build backend. Explicit status routing,
   # not errexit, for the same reason as read_version above.
   local uvrc=0
   uv_static_metadata_check || uvrc=$?
   case "$uvrc" in
-    0) printf 'uv workspace: every local package declares static metadata\n' ;;
+    0) printf 'Python workspace: every local package declares static metadata\n' ;;
     1) rc=1 ;;
     *) return 2 ;;
   esac
@@ -958,10 +958,10 @@ run_check() {
 # caller-owned cleanup would not fire. This function owns $dest, so it cleans $dest itself.
 stage_pristine_tree() { # $1 destination dir
   local dest="$1" entry kind target uvfiles
-  # SMA-684: run_check also reads the uv workspace pyproject files (uv_static_metadata_check), so
+  # SMA-684: run_check also reads the package-manager workspace pyproject files (uv_static_metadata_check), so
   # the staged tree carries the same list that check reads, derived from the check itself.
   uvfiles="$(uv_static_metadata_check --list)" \
-    || { rm -rf "$dest"; die_infra "cannot list the uv workspace pyproject files to stage"; }
+    || { rm -rf "$dest"; die_infra "cannot list the Python workspace pyproject files to stage"; }
   {
     printf 'rs/Cargo.toml\n'
     printf '%s\n' "$uvfiles"
@@ -1209,14 +1209,14 @@ else:
 PY
 }
 
-# SMA-684 §5.2: `uv lock` runs no build backend only while uv can read every local package's
+# SMA-684 §5.2: the package manager runs no build backend only while the package manager can read every local package's
 # metadata without a build (spec F7). A `dynamic` version, dependencies or optional-dependencies
-# field makes `uv lock` run the build backend, and for paigasus-py-bindings that backend is
+# field makes the lock step run the build backend, and for paigasus-py-bindings that backend is
 # maturin, which compiles Rust in the release-PR job. The pyproject reader above covers only the
-# three SITES pyproject files; this check reads every uv workspace member (members glob of
+# three SITES pyproject files; this check reads every package-manager workspace member (members glob of
 # py/pyproject.toml, minus `exclude`) and every [tool.uv.sources] path source, transitively. A
 # member with no [project] table and a path source that is not a directory are violations too:
-# uv would build either to read its metadata. With --list it prints the files it reads instead,
+# The package manager would build either to read its metadata. With --list it prints the files it reads instead,
 # so stage_pristine_tree can stage them.
 uv_static_metadata_check() { # [--list] -> rc 0 clean | 1 a violation | 2 cannot read
   python3 - "$REPO_ROOT" "$@" <<'PY'
@@ -1254,7 +1254,7 @@ queue = [ws_file]
 for pat in uvws["members"]:
     dirs = [d for d in sorted(glob.glob(os.path.join(py, pat))) if os.path.isdir(d)]
     if not dirs:
-        print(f"INFRA: the uv workspace member glob {pat!r} matches no directory", file=sys.stderr)
+        print(f"INFRA: the Python workspace member glob {pat!r} matches no directory", file=sys.stderr)
         raise SystemExit(2)
     for d in dirs:
         if not any(fnmatch(os.path.relpath(d, py), e) for e in uvws.get("exclude", [])):
@@ -1269,12 +1269,12 @@ while queue:
     doc = load(p)
     proj = doc.get("project")
     if p != ws_file and not isinstance(proj, dict):
-        violations.append(f"{rel(p)}: no [project] table, so uv would run the build backend to read its metadata")
+        violations.append(f"{rel(p)}: no [project] table, so the package manager would run the build backend to read its metadata")
     if isinstance(proj, dict):
         dynamic = proj.get("dynamic", [])
         for field in ("version", "dependencies", "optional-dependencies"):
             if field in dynamic:
-                violations.append(f"{rel(p)}: [project].dynamic lists '{field}', so uv lock would run the build backend")
+                violations.append(f"{rel(p)}: [project].dynamic lists '{field}', so the lock step would run the build backend")
     sources = doc.get("tool", {}).get("uv", {}).get("sources", {})
     for name, src in sources.items():
         for entry in src if isinstance(src, list) else [src]:
@@ -1283,7 +1283,7 @@ while queue:
                 if os.path.isdir(target):
                     queue.append(os.path.join(target, "pyproject.toml"))
                 else:
-                    violations.append(f"{rel(p)}: [tool.uv.sources] {name} path {entry['path']!r} is not a directory, so uv would build it")
+                    violations.append(f"{rel(p)}: [tool.uv.sources] {name} path {entry['path']!r} is not a directory, so the package manager would build it")
 
 if listing:
     for p in sorted(seen):
@@ -1613,17 +1613,17 @@ run_write() {
   # Regenerate the two derived lock files (SITES rows 16, 17, 19 and 20: kernel's and proto's
   # cargo-lock and uv-lock rows each point at the same file, so four rows resolve to two files).
   # Each lock file is owned by its tool. Neither command runs a build script or a build backend
-  # (spec F6, F7; --check asserts the static uv metadata that F7 needs). Row 18, the napi glue,
+  # (spec F6, F7; --check asserts the static package-manager metadata that F7 needs). Row 18, the napi glue,
   # is written by stamp_sites above through write_site's napi-glue arm (SMA-684). This function
   # compiles nothing: the release-PR job runs it, and every step of that job can read the App
   # private key. napi_glue_writer_self_test pins that no build command comes back here.
   ( cd "$REPO_ROOT/rs" && cargo update -w --offline >/dev/null 2>&1 ) \
     || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
     || die_infra "cargo update -w failed (site 16)"
-  # SMA-684 §5.2: uv lock runs no build backend only while every local package declares static
+  # SMA-684 §5.2: the package manager lock runs no build backend only while every local package declares static
   # metadata. run_check asserts that too, but a path source outside py/packages/* is not an input
   # of repo:version-lockstep, so a later PR could add `dynamic` there unseen. Check it here again,
-  # right before uv lock, with the same status routing as run_check. Print nothing on success: the
+  # right before the package manager lock, with the same status routing as run_check. Print nothing on success: the
   # stamp step's output stays the same.
   uvrc=0
   uv_static_metadata_check || uvrc=$?
@@ -1632,7 +1632,7 @@ run_write() {
     1) exit 1 ;;
     *) exit 2 ;;
   esac
-  ( cd "$REPO_ROOT/py" && uv lock >/dev/null ) || die_infra "uv lock failed (site 17)"
+  bash "$REPO_ROOT/ci/python-env/run.sh" lock >/dev/null || die_infra "the lock step failed (site 17)"
 
   violations="$(write_set_violations "$before")" || die_infra "cannot list the changed paths after --write"
   [ -z "$violations" ] \
