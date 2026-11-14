@@ -34,18 +34,22 @@ use crate::types::{ToolCall, ToolCallKind};
 /// The fields that R9 compares in `added`, `done` and the terminal `output`.
 const IDENTITY: [&str; 5] = ["type", "id", "call_id", "namespace", "name"];
 
-/// The client-run item types whose openai-python 3.48.0 model has a `status` field
-/// (`openai/types/responses/`). For these an absent `status` at `done` is a truncation (R15,
-/// ruling T4b). `custom_tool_call`, `mcp_approval_request`, `custom_tool_call_output`,
-/// `mcp_approval_response` and any type the SDK does not know have no such field.
-const STATUS_TYPES: [&str; 7] = [
+/// The client-run item types whose model in the openai-python 3.48.0 output union
+/// (`ResponseOutputItem`, `openai/types/responses/response_output_item.py`) has a `status` field.
+/// For these an absent `status` at `done` is a truncation (R15, ruling T4b). The models of
+/// `custom_tool_call`, `mcp_approval_request` and `mcp_approval_response` have no `status` field,
+/// and a type that the union does not have has no model. `custom_tool_call_output` is
+/// `ResponseCustomToolCallOutputItem` in the union, which declares `status`; the input model
+/// `ResponseCustomToolCallOutput` does not.
+const STATUS_TYPES: [&str; 8] = [
     "function_call",
+    "function_call_output",
     "computer_call",
+    "tool_search_call",
     "local_shell_call",
     "shell_call",
     "apply_patch_call",
-    "tool_search_call",
-    "function_call_output",
+    "custom_tool_call_output",
 ];
 
 /// The prefix of the gateway's own rewrite ids (§ 6.5). No upstream item id may start with it.
@@ -1597,7 +1601,17 @@ mod tests {
             json!({"id": "cu_1", "type": "computer_call", "status": "completed", "actions": [], "call_id": "call_cu"}),
         );
         assert!(passes(without_status(computer)).truncated());
-        // `custom_tool_call` and `mcp_approval_request` have none: an absent status is complete.
+        // `custom_tool_call_output` declares `status` in the output union (fix round 1).
+        let output = |ty: &str| {
+            let item = json!({"id": "out_1", "type": ty, "call_id": "call_o", "output": "42"});
+            stream(vec![plain_item(0, item.clone(), item)])
+        };
+        assert!(passes(output("custom_tool_call_output")).truncated());
+        assert!(passes(output("function_call_output")).truncated());
+        // `custom_tool_call`, `mcp_approval_request` and `mcp_approval_response` have none: an
+        // absent status is complete.
+        let response = json!({"id": "mcpa_1", "type": "mcp_approval_response", "approval_request_id": "mcpr_0", "approve": true});
+        assert!(!passes(stream(vec![plain_item(0, response.clone(), response)])).truncated());
         let custom = plain_item(
             0,
             json!({"id": "ctc_1", "type": "custom_tool_call", "call_id": "call_c", "input": "", "name": "run"}),
