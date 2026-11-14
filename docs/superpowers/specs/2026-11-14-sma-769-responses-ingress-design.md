@@ -310,7 +310,8 @@ Per client-run item (R-a, R-e):
 - R13. `shell_call`: per command index i, the `shell_call_command.added` command plus its deltas
   equal its `shell_call_command.done` command, which equals `done.item.action.commands[i]`.
   Indexes appear in order. `added` and `done` are equal as JSON values except for `status` and
-  `action.commands`.
+  `action.commands`. `added.item.action.commands` is `[]` or equals the `done` commands
+  (preflight ruling F2).
 - R14. The other client-run kinds: `added` and `done` are equal as JSON values, except for
   `status` (M4).
 - R15. A client-run item whose `done` has a `status` other than `"completed"` is a truncation (M5).
@@ -361,7 +362,9 @@ notice to it and records this here. The Responses API has no `finish_reason`, so
 rewritten.
 
 **Non-stream.** The same replacement in the body's `output[]` (the completed message). 749 § 4.4
-applies otherwise: one re-serialization, and the original bytes when nothing is blocked.
+applies otherwise: one re-serialization, and the original bytes when nothing is blocked. A
+client-run item with a `status` other than `"completed"` is blocked with code `Truncated` and
+replaced, as in the stream (R15; preflight ruling F7).
 
 ### 6.6 Notice, names and report
 
