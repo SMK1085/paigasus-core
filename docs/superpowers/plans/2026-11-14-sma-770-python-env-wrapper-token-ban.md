@@ -718,3 +718,213 @@ running, stop and ask the coordinator.
 - [ ] **Step 5:** Re-run the Task 11 Step 4 commit-body check. Record for the PR: the pinned-line
   count and reasons, the toolchain diffs (empty, or the added `toolchains:` entries), the mutation
   battery table, and the Part 3 table.
+
+## Appendix A: Inventory
+
+Measured on 2026-11-14 by Task 1 on branch `feature/sma-770-close-the-sma-765767768-residuals-for-good`
+(base `de928aa5`). Moon 2.5.3, uv 0.11.16 (proto shim). `$SCRATCH` was
+`/var/folders/dc/3qfs44nn0574bmkgl_rk6_bw0000gn/T/sma-770`. The raw Moon baseline is
+`$SCRATCH/toolchains-before.json` (outside the repository). `moon.yml` was edited for A.2 and
+restored: `git status --short` was empty after Task 1 step A.2.
+
+### A.1 Coupled pins
+
+A coupled pin is a gate that holds the text of a line in another file. When a task moves the pinned
+line, the same commit moves its pin. The grep of the brief found rows 1 to 5. Row 6 and row 7 were
+found by reading `cargo_moon_parity.py` and `ci/actionlint/run.sh`; no `uv` token is in their pin text.
+
+| # | Pinning file:line | Pinned file:line | Pinned text (today) | Moves in |
+|---|---|---|---|---|
+| 1 | `ci/affected-graph/ci_targets.py:896` (`PIPE_CAPACITY_INDENTED_CALL_SITES`, stripped whole line) | `ci/actionlint/run.sh:5310` | `pc_out="$(uv run --locked --project py python3 -c "$PIPE_CAPACITY_PROBE_PY" \| tail -n1)" \|\| pc_rc=$?` | Task 5 |
+| 2 | `ci/affected-graph/ci_targets.py:897` (same tuple) | `ci/actionlint/run.sh:5311` | `[ "$pc_rc" -eq 0 ] \|\| infra "the pipe-capacity probe failed (rc $pc_rc) via 'uv run --locked --project py'. No check ran."` | Task 5 |
+| 3 | `ci/affected-graph/ci_targets.py:1321` (`RELEASE_PLAN_SH_CALL_SITES`, the `keys=` line) | `ci/release-plan/run.sh:121` | `keys="$(uv run --locked --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" --keys "$REPO_ROOT")" \|\| keys_rc=$?` | Task 5 |
+| 4 | `ci/affected-graph/ci_targets.py:1337` (same tuple) | `ci/release-plan/run.sh:408` | `_expect_failsafe_outputs "row 6 (uv unreachable)" "$nouv_out"` | Task 5 |
+| 5 | `ci/version-lockstep/run.sh:618` (self-test `grep -Fn`) | `ci/version-lockstep/run.sh:1635` | `( cd "$REPO_ROOT/py" && uv lock` (order pin: the static metadata check must come first) | Task 5 |
+| 6 | `ci/affected-graph/cargo_moon_parity.py:145` (`FFI_MARKERS` has `"--reinstall-package"`) and `:147-151` (`REQUIRED_FFI_TASKS` floor); fixtures at `:5492` and `:8124` | `py/packages/paigasus-kernel/moon.yml:44` (script ends `uv run --isolated --reinstall-package paigasus-py-bindings pytest tests`) | A5 derives its FFI task set from this marker text in the resolved task command. When Task 4 moves the script to `ci/python-env/run.sh kernel-test`, the marker is gone and the derived set loses `paigasus-kernel-py:test`. `REQUIRED_FFI_TASKS` then reds with a floor row. Task 4 must add the marker `ci/python-env/run.sh kernel-test` to `FFI_MARKERS` in the same commit and update the two fixtures. | Task 4 (and Task 7 when the file is edited) |
+| 7 | `ci/actionlint/run.sh:2127` (`T_AFFECTED_SMOKE_REQUIRED_INPUTS`, 39 entries now; floor `-ge 20` at `:5806`, copied at `ci_targets.py:974` and `:2940`) | `moon.yml` `repo:affected-smoke` `inputs:` | An input list, not a text pin. Task 3 adds the `ci/python-env/**` input (and `**/*` minus the excluded paths if the design needs it) to `repo:affected-smoke`. Both tuples must list the new entry in the same commit. The floor of 20 stays below the count. | Task 3 |
+| 8 | `ci/affected-graph/ci_targets.py:1319` (`"negctl)   require_uv; negative_control ;;"`) and `:1287`, `:3556-3566` (the C1 trap mutation) | `ci/release-plan/run.sh` function `require_uv` (`:32-42`) and its `negctl)` arm | The function NAME `require_uv` contains `uv` but is not a token match (the `_` is a word character). Keep the name, or change the pin and the mutation text together. | Task 5 |
+
+No other file in `ci/` greps for the text of an `uv`, `pip` or `.venv` line. The brief's grep over
+`ci/affected-graph/ci_targets.py`, `ci/actionlint/run.sh`, `ci/version-lockstep/run.sh`,
+`ci/actionlint/release_guard.py` and `ci/images/console-selftest.sh` returned only rows 1 to 5, the
+`release_guard.py` publish detector (a pin, not a coupled pin: see A.6) and the fake binary in
+`console-selftest.sh` (a pin, see A.6).
+
+### A.2 R-lock (Moon sets `MOON_PROJECT_ID` for a `script:` task)
+
+Inserted `echo "SMA770_PROBE MOON_PROJECT_ID=${MOON_PROJECT_ID-unset}"` as the first line of the
+`script:` of `repo:input-liveness`, ran `moon run repo:input-liveness --force`, and read
+`.moon/cache/states/repo/input-liveness/stdout.log`.
+
+Result: first line `SMA770_PROBE MOON_PROJECT_ID=repo`. R-lock holds: `$MOON_PROJECT_ID` is `repo` for a
+root `repo:*` script task. The inserted line was deleted; `git status --short` was empty.
+
+### A.3 R-script (a script run with `--isolated --no-project --python '>=3.12'`)
+
+| Check | Command | Result |
+|---|---|---|
+| Stdlib only | `python3 -I -c '<ast walk over ci/images/release_decision.py>'` | `[]` (no third-party import) |
+| `--isolated` changes nothing | `uv run [--isolated] --no-project --python '>=3.12' python3 ci/images/release_decision.py --self-test`, stdout to two files | both rc 0, 39 bytes each, empty stderr, `cmp` rc 0 (identical) |
+| Exit code passes through | `uv run --isolated --no-project --python '>=3.12' python3 $SCRATCH/rc.py N` | N=2 gives rc 2, N=3 gives rc 3, N=4 gives rc 4 |
+
+### A.4 uv flags and `--` (measured in a `git archive HEAD` copy, ruling F5)
+
+The copy was `git archive HEAD` extracted to `$SCRATCH/arch`, outside the repository. So the tree is
+clean: no `py/.venv`, no generated files that are not tracked, no `target/`.
+
+| Command (in `$SCRATCH/arch/py`) | Result |
+|---|---|
+| `uv run --locked -- python -c pass` | rc 0 (it built the four workspace members and installed 67 packages) |
+| `uv run --locked -- python -c 'import sys; print(sys.argv[1:])' --locked ''` | rc 0, printed `['--locked', '']` (the `--` ends uv options; later flags and the empty argument reach the program unchanged) |
+| `uv build --package paigasus-proto --out-dir "$SCRATCH/dist"` | rc 0; exactly `paigasus_proto-0.7.0.tar.gz` and `paigasus_proto-0.7.0-py3-none-any.whl` (32 files in the wheel) |
+
+Generated sources do NOT need to exist first for `paigasus-proto`: the build worked from the clean
+archive, because the generated protobuf modules are tracked in git (15 tracked files under
+`py/packages/paigasus-proto/src`). (The same copy built
+`paigasus-py-bindings` from `rs/crates/bindings/paigasus-py-bindings` during `uv run --locked`.)
+Note for Task 2: the first `uv run --locked` in a clean tree is slow because it builds the bindings.
+
+### A.5 Toolchain baseline
+
+`moon query tasks > $SCRATCH/toolchains-before.json` gave rc 0. The JSON shape is
+`{"tasks": {"<project>": {"<task>": {..., "toolchains": [...]}}}}`; the brief's reader works
+unchanged (171 task rows in `$SCRATCH/toolchains-before.txt`). Tasks 4 to 6 must leave these rows
+unchanged (or add an explicit `toolchains:` entry). Rows for the tasks that Tasks 4, 5 and 6 change:
+
+| Task row | Toolchains | Changed by |
+|---|---|---|
+| `py:fmt`, `py:lint`, `py:test`, `py:typecheck` | `unstable_python`, `unstable_uv` | Task 4 (`.moon/tasks/python.yml`) |
+| `paigasus-kernel-py:build`, `paigasus-ml-py:build`, `paigasus-proto-py:build`, `paigasus-workflows-py:build` | `unstable_python`, `unstable_uv` | Task 4 (`python-project.yml` `build`) |
+| `paigasus-kernel-py:test` | `unstable_python`, `unstable_uv` | Task 4 (`py/packages/paigasus-kernel/moon.yml:44`) |
+| `paigasus-gateway-conformance-py:test` | `unstable_python`, `unstable_uv` | Task 4 |
+| `contracts:breaking`, `contracts:fmt`, `contracts:generate`, `contracts:lint` | `system` | Task 4 (`buf.gen.yaml`, `contracts/moon.yml`) |
+| all 29 `repo:*` tasks | `system` (each) | Tasks 3 to 5 |
+| `paigasus-kernel-ts:*`, `paigasus-py-bindings-rs:*` | `node`, `pnpm` / `rust` | comments only (Task 4) |
+
+The `repo:*` rows are: actionlint, affected-smoke, deny, error-code-single-site, helm-render,
+http-extractor-envelope, iam-docker-policy-single-site, input-liveness, install-hooks, machete,
+moon-diagnosis-exec, nats-permissions, next-env-drift, next-public-free, observability-drift, osv,
+parity-corpus-drift, promtool, publish-metadata, pyo3-stub-drift, redis-connect-single-site,
+release-parity, release-parity-py, release-parity-ts, ruff-ci, version-lockstep,
+wasm-getrandom-free, wasm-lockstep, workflow-credentials. There is no `repo:release-plan` task; the
+gate `ci/release-plan` runs from `repo:release-parity*` and `ci.yml`. A task that moves from
+`command: 'uv ...'` to `command: 'bash ...'` can lose the inferred `unstable_python` and
+`unstable_uv` toolchains. Task 4 Step 3 detects this with a `diff` against the baseline.
+
+### A.6 Token hits (the Task 3 scan rule, run by hand)
+
+Scan: `git ls-files -z > $SCRATCH/files.z; python3 -I $SCRATCH/scan.py < $SCRATCH/files.z > $SCRATCH/hits.txt`.
+Ruling F10: the scan script is `/var/folders/dc/3qfs44nn0574bmkgl_rk6_bw0000gn/T/sma-770/scan.py`
+(outside the repository). Task 3 compares its count with the gate's.
+
+**Total: 704 hits in 59 files.** The spec's 325 used a smaller token set. Exclusions applied:
+`**/*.md`, `docs/**`, `uv.lock`/`Cargo.lock`/`pnpm-lock.yaml`, `.github/dependabot.yml`,
+`ci/affected-graph/python_env_ban.py` and `ci/python-env/run.sh` (the last two do not exist yet).
+One tracked non-UTF-8 file was skipped: `rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm`.
+`.gitattributes:17` already marks it `binary`, so the gate skips it as the spec allows (G4).
+
+Counts by class: execute 65, reword 227, pin 15, coupled 9, delete 388. A *coupled* hit is a
+line whose text a gate pins (A.1). It changes with its pinned line. `PINNED_LINES` need hold only
+the 15 pins (limit: lower than 35). A hit that is neither in the `execute` list, the `pin` list nor
+the `coupled` list of its row is a `reword` (comment, docstring, message, step name, fixture
+literal). Per-line classification: `$SCRATCH/classified.tsv` (columns: path, line, class, task,
+note, text); the generator is `$SCRATCH/classify.py`.
+
+Task column: 4 = Task 4 (batch 1), 5 = Task 5 (batch 2), 6 = Task 6 (batch 3), 7 = Task 7.
+
+| File | Task | execute | reword | pin | coupled | delete | execute lines | pin lines | coupled lines |
+|---|---|---|---|---|---|---|---|---|---|
+| `.gitignore` | 4 | 0 | 0 | 1 | 0 | 0 |  | 32 |  |
+| `.moon/tasks/python-project.yml` | 4 | 1 | 1 | 0 | 0 | 0 | 26 |  |  |
+| `.moon/tasks/python.yml` | 4 | 4 | 0 | 0 | 0 | 0 | 26,29,52,53 |  |  |
+| `.moon/tasks/rust.yml` | 4 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `.moon/templates/python/moon.yml` | 4 | 1 | 0 | 0 | 0 | 0 | 8 |  |  |
+| `.moon/toolchains.yml` | 4 | 0 | 3 | 1 | 0 | 0 |  | 35 |  |
+| `.moon/workspace.yml` | 4 | 0 | 0 | 1 | 0 | 0 |  | 64 |  |
+| `.prototools` | 4 | 0 | 2 | 1 | 0 | 0 |  | 31 |  |
+| `contracts/buf.gen.yaml` | 4 | 1 | 1 | 0 | 0 | 0 | 48 |  |  |
+| `contracts/moon.yml` | 4 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `moon.yml` | 4 | 0 | 14 | 0 | 0 | 0 |  |  |  |
+| `osv-scanner.toml` | 4 | 0 | 2 | 0 | 0 | 0 |  |  |  |
+| `py/moon.yml` | 4 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `py/packages/paigasus-gateway-conformance/moon.yml` | 4 | 1 | 1 | 0 | 0 | 0 | 18 |  |  |
+| `py/packages/paigasus-kernel/moon.yml` | 4 | 1 | 8 | 0 | 0 | 0 | 44 |  |  |
+| `py/packages/paigasus-kernel/pyproject.toml` | 4 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `py/packages/paigasus-kernel/tests/test_stub_surface.py` | 4 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `py/pyproject.toml` | 4 | 0 | 1 | 1 | 0 | 0 |  | 29 |  |
+| `py/scripts/assert_test_floor.py` | 4 | 0 | 3 | 0 | 0 | 0 |  |  |  |
+| `py/scripts/assert_typecheck_coverage.py` | 4 | 0 | 1 | 1 | 0 | 0 |  | 25 |  |
+| `py/scripts/run_tests.sh` | 4 | 2 | 0 | 0 | 0 | 0 | 17,32 |  |  |
+| `rs/crates/bindings/paigasus-py-bindings/Cargo.toml` | 4 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `rs/crates/bindings/paigasus-py-bindings/src/lib.rs` | 4 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `rs/crates/libs/paigasus-gateway-core/tests/fixtures/make_fixtures.py` | 4 | 0 | 2 | 0 | 0 | 0 |  |  |  |
+| `ts/packages/paigasus-kernel/moon.yml` | 4 | 0 | 3 | 0 | 0 | 0 |  |  |  |
+| `ci/actionlint/release_guard.py` | 5 | 0 | 4 | 5 | 0 | 0 |  | 214,3115,3117,3631,4866 |  |
+| `ci/actionlint/run.sh` | 5 | 5 | 22 | 0 | 1 | 0 | 4624,4660,4674,5310,5987 |  | 5311 |
+| `ci/affected-graph/ci_targets.py` | 5 | 0 | 10 | 0 | 4 | 0 |  |  | 896,897,1321,1337 |
+| `ci/affected-graph/run.sh` | 5 | 0 | 2 | 0 | 0 | 0 |  |  |  |
+| `ci/helm-render/pyproject.toml` | 5 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `ci/helm-render/run.sh` | 5 | 3 | 3 | 0 | 0 | 0 | 92,93,96 |  |  |
+| `ci/images/chains.toml` | 5 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `ci/images/console-selftest.sh` | 5 | 0 | 0 | 2 | 0 | 0 |  | 1462,1463 |  |
+| `ci/images/run.sh` | 5 | 1 | 2 | 0 | 0 | 0 | 43 |  |  |
+| `ci/osv/run.sh` | 5 | 0 | 5 | 0 | 0 | 0 |  |  |  |
+| `ci/osv/shipped_reachability.py` | 5 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `ci/publish-metadata/run.sh` | 5 | 0 | 2 | 0 | 0 | 0 |  |  |  |
+| `ci/release-parity/ecosystems/python-semantic-release.sh` | 5 | 1 | 5 | 0 | 0 | 0 | 48 |  |  |
+| `ci/release-parity/run.sh` | 5 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `ci/release-plan/pyproject.toml` | 5 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `ci/release-plan/release_plan.py` | 5 | 0 | 4 | 0 | 0 | 0 |  |  |  |
+| `ci/release-plan/run.sh` | 5 | 9 | 16 | 0 | 1 | 0 | 41,60,121,140,271,286,390,430,462 |  | 408 |
+| `ci/ruff/run.sh` | 5 | 1 | 24 | 0 | 0 | 0 | 90 |  |  |
+| `ci/version-lockstep/run.sh` | 5 | 1 | 25 | 2 | 1 | 0 | 1635 | 1249,1278 | 618 |
+| `ci/wasm-lockstep/lockstep_check.py` | 5 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `ci/wasm-lockstep/pin_check.py` | 5 | 0 | 2 | 0 | 0 | 0 |  |  |  |
+| `ci/wasm-lockstep/run.sh` | 5 | 3 | 3 | 0 | 0 | 0 | 51,52,55 |  |  |
+| `ci/workflow-credentials/pyproject.toml` | 5 | 0 | 1 | 0 | 0 | 0 |  |  |  |
+| `ci/workflow-credentials/run.sh` | 5 | 4 | 6 | 0 | 0 | 0 | 26,33,70,78 |  |  |
+| `ci/workflow-credentials/workflow_credentials.py` | 5 | 0 | 2 | 0 | 0 | 0 |  |  |  |
+| `.github/workflows/ci.yml` | 6 | 1 | 6 | 0 | 0 | 0 | 154 |  |  |
+| `.github/workflows/images-rehearsal.yml` | 6 | 2 | 1 | 0 | 0 | 0 | 141,167 |  |  |
+| `.github/workflows/images.yml` | 6 | 6 | 2 | 0 | 0 | 0 | 129,135,177,179,262,264 |  |  |
+| `.github/workflows/prebuild.yml` | 6 | 1 | 1 | 0 | 0 | 0 | 151 |  |  |
+| `.github/workflows/release.yml` | 6 | 12 | 13 | 0 | 0 | 0 | 485,544,1288,1299,1327,1335,1409,1462,1490,1569,1577,1725 |  |  |
+| `.github/workflows/security-scan.yml` | 6 | 0 | 3 | 0 | 0 | 0 |  |  |  |
+| `.github/workflows/wheels.yml` | 6 | 4 | 2 | 0 | 0 | 0 | 188,437,647,716 |  |  |
+| `ci/images/release_decision.py` | 6 | 0 | 3 | 0 | 0 | 0 |  |  |  |
+| `ci/affected-graph/cargo_moon_parity.py` | 7 | 0 | 3 | 0 | 2 | 388 |  |  | 5492,8124 |
+
+Totals by task: Task 4 has 11 execute, 49 reword, 6 pin. Task 5 has 28 execute, 144 reword, 9 pin,
+7 coupled. Task 6 has 26 execute, 31 reword. Task 7 has 388 delete, 3 reword and 2 coupled (all in
+`cargo_moon_parity.py`).
+
+**Pins (15).** Task 4: `.prototools:31`, `.moon/toolchains.yml:35` (`packageManager: 'uv'`),
+`.gitignore:32`, `.moon/workspace.yml:64`, `py/pyproject.toml:29`,
+`py/scripts/assert_typecheck_coverage.py:25` (`EXCLUDE_PARTS`). Task 5: `release_guard.py:214`
+(the `uv\s+publish` detector) with its fixtures `:3115`, `:3117`, `:3631`, `:4866`;
+`console-selftest.sh:1462`, `:1463` (a fake binary named like the real tool); and
+`version-lockstep/run.sh:1249`, `:1278` (the `[tool.uv]` TOML table key, read as data). Task 6 has
+no pin. The reasons are the literal each file needs from an external format or tool.
+
+**Decisions left to the migration task (not hidden):**
+- `ci/helm-render/run.sh:96` and `ci/wasm-lockstep/run.sh:55` match `"$HERE/.venv/"*` (a guard that
+  the resolved interpreter lives in the project environment). Task 5 moves the guard into the
+  wrapper `<ci-project>` operation or turns each line into a pin. Count the pin if it stays.
+- `ci/ruff/run.sh:137,139,143,169` use a `.venv` directory as a fixture of the ruff corpus
+  exclusion. Task 5 uses another ignored directory name that tests the same behaviour, or pins it.
+- `ci/release-plan/run.sh:390` runs `command -v uv` under a restricted `PATH` to prove the
+  missing-tool arm (row 6). With the wrapper, the missing tool is the wrapper's exit 127. Task 5
+  reworks the test with the wrapper and keeps the pin of A.1 row 4 in step.
+- `ci/release-plan/release_plan.py:1291-1292` and `ci/images/release_decision.py:732` use the word
+  `pip` as an unknown-kind fixture. Reword to another unknown word; the test meaning is unchanged.
+- `.github/workflows/release.yml:1569` is the R-inline `python3 -c` (Task 6 Step 2).
+- `ci/affected-graph/cargo_moon_parity.py:143, 383, 494` stay in the file (outside A14) and need
+  new words. All other hits in that file are A14 code, comments or fixtures and go in Task 7.
+- Operation mapping (for the wrapper, from the execute lines): `uv run --locked --project py ...` is
+  `run py`; `uv run --locked --project "$HERE" ...` is `run <ci-project>`; `uv run --frozen` in
+  `python-semantic-release.sh:48` is `run-frozen py`; `uv run --no-project --python '>=3.12' python3`
+  on `release_decision.py` is `script`; `uv build` is `build`; `uv lock` is `lock`;
+  `command -v uv` is `probe`; `uv cache dir` is `cache-dir`; `proto install uv` is `install`;
+  the `pip` installs are `install-ziglang`, `install-ziglang-system`, `wheel-smoke`,
+  `sdist-install`; `buf.gen.yaml:48` is `protoc-plugin`; `paigasus-kernel/moon.yml:44` is
+  `kernel-test`.
