@@ -39,6 +39,8 @@ pub(crate) struct Fragment {
     pub index: u32,
     pub id: Option<String>,
     pub ty: Option<String>,
+    /// Whether the entry has a `type` key. `null` counts: a client reads the key, not its value.
+    pub ty_key: bool,
     pub function: Option<NameArgs>,
     pub custom: Option<NameArgs>,
     /// The whole entry, for kind Other (§ 4.1).
@@ -149,6 +151,7 @@ pub(crate) fn fragment_at(v: &Value, index: u32) -> Result<Fragment, Malformed> 
         index,
         id,
         ty,
+        ty_key: e.contains_key("type"),
         function,
         custom,
         raw: v.clone(),

@@ -117,15 +117,16 @@ impl Check {
             let b = &mut self.calls[pos];
             long_check(f.id.as_deref(), f.function.as_ref().or(f.custom.as_ref()).and_then(|na| na.name.as_deref()))?;
             once(&mut b.id, f.id.is_some(), "repeated_id")?;
-            if let Some(t) = &f.ty {
+            if f.ty_key {
                 // The type names a bodyless Other call, so it is bounded like an id or a name.
-                long_check(Some(t), None)?;
+                long_check(f.ty.as_deref(), None)?;
                 if b.ty.is_some() {
                     return Err(Deviation("repeated_type"));
                 }
-                b.ty = Some(match t.as_str() {
-                    "function" => TyClass::Function,
-                    "custom" => TyClass::Custom,
+                // A `null` type is a present key that names no known type, so it is Other.
+                b.ty = Some(match f.ty.as_deref() {
+                    Some("function") => TyClass::Function,
+                    Some("custom") => TyClass::Custom,
                     _ => TyClass::Other,
                 });
             }
@@ -443,6 +444,33 @@ mod tests {
         feed(&mut a, &tc(F0A)).unwrap();
         feed(&mut a, &tc(CUSTOM1)).unwrap();
         assert_eq!(feed(&mut a, &tc(F0B)), Err(Deviation("fragment_after_bodyless_entry")));
+    }
+
+    #[test]
+    fn a_later_null_type_is_a_repeated_type() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        // The null-type fragment carries a body, so the bodyless rule does not fire first.
+        let r = feed(&mut a, &tc(r#"{"index":0,"type":null,"function":{"arguments":""}}"#));
+        assert_eq!(r, Err(Deviation("repeated_type")));
+        // Without a body it is a bodyless entry for an earlier call: a deviation either way.
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(F0A)).unwrap();
+        assert!(feed(&mut a, &tc(r#"{"index":0,"type":null}"#)).is_err());
+    }
+
+    #[test]
+    fn a_first_null_type_with_a_function_body_mismatches() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"c0","type":null,"function":{"name":"read","arguments":"{}"}}"#)).unwrap();
+        assert_eq!(a.state().finish(), Err(Deviation("type_shape_mismatch")));
+    }
+
+    #[test]
+    fn a_null_type_with_no_body_stays_kind_other() {
+        let mut a = ChoiceAssembly::default();
+        feed(&mut a, &tc(r#"{"index":0,"id":"x","type":null}"#)).unwrap();
+        assert_eq!(a.state().finish(), Ok(vec![ToolCallKind::Other]));
     }
 
     #[test]

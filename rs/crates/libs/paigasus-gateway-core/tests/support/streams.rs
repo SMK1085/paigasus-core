@@ -52,6 +52,10 @@ pub enum Quirk {
     NoChoicesKey,
     /// A chunk whose choice 0 entry has no `delta` (`choice_without_delta` inside an open call).
     NoDelta,
+    /// A fragment with `"type":null` and a function body for call 0: a present `type` key counts
+    /// as the type fragment, so it is a repeated type or a type/shape mismatch. The body keeps the
+    /// entry a named call; a bare `{"index":0,"type":null}` is covered by the unit tests and fixture.
+    NullType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +148,7 @@ fn quirk_strategy() -> impl Strategy<Value = Quirk> {
         Just(Quirk::CapitalisedArgKeys),
         Just(Quirk::NoChoicesKey),
         Just(Quirk::NoDelta),
+        Just(Quirk::NullType),
     ]
 }
 
@@ -346,6 +351,7 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
                     lines.insert(at, format!("data: {rec}\n\n"));
                 }
             }
+            Quirk::NullType => insert(&mut lines, chunk(json!([{"index":0,"delta":{"tool_calls":[{"index":0,"type":null,"function":{"name":"blocked_hidden","arguments":"CANARY-nt"}}]}}])).to_string()),
             Quirk::UnknownFields => lines.insert(pos, "id: 7\nretry: 10\nfoo: bar\n".to_owned()),
             Quirk::Comments => lines.insert(pos, ": hello\n: data: {\"x\":\"CANARY-comment\"}\n".to_owned()),
             Quirk::EventLine => lines.insert(pos, "event: message\n".to_owned()),

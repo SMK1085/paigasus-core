@@ -95,6 +95,12 @@ OPENAI_MALFORMED = {
         call(0, 0, "", 'cdefgh"}', first=False),
         fin(0),
     ],
+    "type_null": [
+        call(0, 0, "read_file", '{"v":"ab'),
+        ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "type": None, "function": {"arguments": "CANARY-typenull"}}]}, "finish_reason": None}]),
+        call(0, 0, "", 'cdefgh"}', first=False),
+        fin(0),
+    ],
     "oversized": [call(0, 0, "read_file", "{"), ch([{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "CANARY-big" + "x" * 5000}}]}}]), fin(0)],
 }
 
