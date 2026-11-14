@@ -283,7 +283,7 @@ def floor_rows(projects, task: str = FLOOR_TASK, text: str = FLOOR_TEXT) -> list
 
 # The Moon Python toolchains append these to their own environment sync (InstallDependencies). Any
 # value is a row. The key anywhere outside a `#` comment, quoted or not, so a flow mapping and a
-# quoted key are rows too. (A copy of SMA-765's MOON_UV_ARGS_RE; Task 7 deletes the old one.)
+# quoted key are rows too. (SMA-765 R-toolchain.)
 MOON_ARGS_RE = re.compile(r"""(?<![\w-])["']?(syncArgs|venvArgs|installArgs)["']?[ \t]*:""")
 
 

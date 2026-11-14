@@ -391,3 +391,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   accept only the 404 body (`"status":"404"`) as "absent"; any other failure must stop the job.
   `release.yml`'s "Make the release tag" step is the worked example. A `git ls-remote --exit-code`
   probe, which the publish job uses, does not have this trap.
+- Workflow steps are in the scope of the python-env token ban. A step runs the Python package
+  manager only through `bash ci/python-env/run.sh <operation>`. The `sdist-verify` job has a sparse
+  checkout of `ci/python-env/` only, so it can call the wrapper and nothing else from `ci/`. See
+  `ci/python-env/README.md` and the A14 entry in `ci/affected-graph/README.md` (SMA-770).

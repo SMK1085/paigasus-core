@@ -375,152 +375,65 @@ It also runs several checks that the per-case project sets structurally **cannot
   A13 reads `-c=<f>` like `-c <f>`. A `-r`, `-r=<dir>`, `--root=<dir>`, `pnpm -C <dir>` or
   `pnpm --dir <dir>` before the vitest call is a row. An alias value that is an absolute path is a
   row, and so is a computed `['alias']` key.
-- **A14** (`check_uv_env_isolation` in `cargo_moon_parity.py`, SMA-765 and SMA-768, findings key `a14`)
-  reds when a Moon task can change a uv project environment in place. The `paigasus-kernel-py:test`
-  task once ran an exact `uv sync` in the shared `py/.venv`. That removed packages that parallel
-  tasks needed. SMA-768 replaced the old list of bad uv commands with an allow-list of approved forms.
-  A new uv form now needs one reviewed edit to the constants and one self-test row.
-  Scan scope, per task: the resolved command text, the `ci/**/*.sh` scripts it runs, and the
-  project-relative `scripts/*.sh` files it names (`PROJECT_SCRIPT_REF_RE`, resolved under the
-  `source_dir` of the project). Each script brings its `source` closure (`_uv_script_closure`,
-  `UV_SOURCE_STMT_RE`). That closure follows a `source` or `.` word at the start of a line.
-  It also follows the word after any of these: `;`, `&&`, `&`, `||`, `|`, `(`, `{`, `!`, `then`, `do` and `else`.
-  A8 and A10 keep their line-start matcher. A `./` or `../` prefix is resolved.
-  A reference to a file that does not exist, or that leaves the repository, is an infrastructure error.
-  Since follow-up sweep 2 (R8), A14 also scans a script that a scanned script RUNS, and any other
-  `*.sh` word in the task text (`UV_RUN_REF_RE`). A leading `$VAR/` part is dropped, and the rest is
-  resolved against the repo root, the directory of the script, and the project directory of the task
-  (a child script inherits the task's cwd). A `$NAME/` part is also read with every value that the
-  script assigns to NAME (`D=ops; bash "$D/y.sh"`). Each literal `cd` or `pushd` target in the script is
-  one more base for its children (`cd ops; bash y.sh`), also under the directories that earlier targets reached
-  (`cd ops; cd nested`). A word
-  that names no file is skipped. The match is wide on purpose: a path in a message is followed too,
-  which can add rows but cannot hide one. So `ci/release-plan/run.sh` (run by `ci/actionlint/run.sh`)
-  and `ops/nats/check-subjects.sh` (run by `repo:nats-permissions`) are now scanned.
-  It also scans every tracked `pyproject.toml` and `uv.toml`, and `.moon/toolchains.yml` (R7, rule 9).
-  `repo:affected-smoke` lists `**/pyproject.toml` and `**/uv.toml` as inputs, so a PR that adds one
-  schedules A14. No `uv.toml` exists yet, so that glob has an `ALLOW_DEAD_INPUT` entry.
-  The rules, in order:
-  1. A physical line whose first non-blank character is `#` is a comment, but only when no quote is
-     open from an earlier line (R1, `_uv_quote_after`). A word starts after white space or a shell operator (`;`, `&`, `|`, `(`, `)`, `<`, `>`). An escaped space does not start a word, so the `#` in
-     `a\ #` is mid-word. The state is read over the joined logical line, so a `\` continuation does not
-     start a word either. The quote state knows `'`, `"` and `$(`, and a
-     `$(` inside `"…"` starts a new quote context, as in bash. A comment line never joins
-     the next line, also when it ends in `\`. A `#` later in a line is not a comment, so `x # uv sync` is a row.
-  2. A non-comment line that ends in `\` joins the next physical line with no separator. A `\` at the end of a
-     comment does not join (bash ends a comment at its newline), so `true # \` does not swallow the next line. A row names
-     the physical line of the match.
-  3. Every `uv` token (`UV_TOKEN_RE`) in a non-comment line must be an approved form. This includes a token
-     inside a quoted string and inside Python data, so `bash -c "uv sync"` and
-     `subprocess.run(["uv", "sync"])` are rows.
-  4. One invocation is the text after the token, up to the first `&&`, `||`, `;`, `|`, `)` or backtick.
-     The cut is not quote-aware. The code splits the invocation on white space.
-  5. The approved forms. Nothing else is approved.
-     - `uv build` with no further word.
-     - `uv run`, then approved options, then a command word. The flags are `--locked`, `--frozen` and
-       `--isolated`. `--project` accepts only `py`, `ci/release-plan` or `"$HERE"`. `--python` accepts
-       only `'>=3.12'`. The value is the next word, compared as exact text. The `--opt=value` form is not approved.
-       `--reinstall-package paigasus-py-bindings` is approved only with `--isolated` in the same option region.
-       The command word is the first word that does not start with `-`. It must match
-       `[A-Za-z0-9_][A-Za-z0-9_.+/-]*`. A `uv run` with no command word is a row. A14 does not check the words after the command word,
-       with one exception (R3): a command word `pip`, `pip3`, a version-qualified pip such as `pip3.12`, `uv`, `ensurepip` or `virtualenv` (also as the last part
-       of a path) is a row. `python … -m pip|ensurepip|venv|virtualenv` is a row through rule 12, also with
-       interpreter options before `-m`, and `-m uv` through the `uv` token rule.
-       Since follow-up sweep 2 (SMA-765 R-relock), every `uv run` needs `--locked`, `--frozen` or `--isolated`.
-       A plain `uv run` can relock the project, and then change the environment to the new lock while another task reads it.
-     - `command -v uv`, with only `>/dev/null`, `2>/dev/null` or `2>&1` after it. `command uv sync` is a row.
-       The probe inside `$( … )` or backticks is a row (R2): it captures the uv path, and a call through that variable is not seen.
-  6. Any non-comment mention of `UV_*`, `VIRTUAL_ENV` or `--active` is a row. This covers an assignment,
-     a default, an `export`, an `unset` and a plain mention.
-  7. A task `env:` key that is `VIRTUAL_ENV` or starts with `UV_` is a row.
-  8. A task that can run `ci/version-lockstep/run.sh` with `--write` is a row (`runs_lockstep_write`).
-     That script runs `uv lock` in `run_write`. The `EXECUTED` waiver below is true only while
-     no Moon task passes `--write`. The check cuts the task text into commands at `&&`, `||`, `;`,
-     `|` and a new line that are outside quotes. It keeps every directory that an earlier `cd` or
-     `pushd` to a plain relative path can reach, and never drops one. It expands `$NAME` with every
-     value that the task text assigns to NAME. A repeated first word (`cd cd x`) is read once. So
-     the check can add a row, but it cannot hide one. So `cd ci/version-lockstep && ./run.sh --write`,
-     `$D/run.sh --write` and `run.sh 'a;b' --write` are rows. A `--write` in a later command, such as
-     `run.sh && echo --write`, is not a row.
-     Since follow-up sweep 2 (R10): every later word is read after expansion, so `W=--write; run.sh $W` is a row.
-     A later word that still holds `$` or a backtick after expansion (`"$@"`, `$*`, an unassigned `$W`, `$(…)`)
-     is a row too. A moon target `repo:version-lockstep` or `:version-lockstep` counts as the script, so
-     `moon run repo:version-lockstep -- --write` is a row. A command word that only a shell can compute
-     (`$(…)`, a backtick, `eval`) followed by a literal `--write` is a row. Each scanned script, except
-     `ci/version-lockstep/run.sh` itself, goes through the same check.
-  9. R7 (follow-up sweep 2): the keys `reinstall`, `reinstall-package`, `upgrade`, `upgrade-package` and
-     `cache-keys` are rows in `[tool.uv]` or `[tool.uv.pip]` of every tracked `pyproject.toml`, and at the top
-     level or in `[pip]` of every tracked `uv.toml` (`uv_config_rows`). A file that is not valid TOML is an
-     infrastructure error. `FLOOR:` row: `py/pyproject.toml` must be in the list. A user-level uv.toml outside
-     the repository cannot be read and is not covered.
-  10. R5 and SMA-765 R-toolchain (follow-up sweep 2): a `syncArgs`, `venvArgs` or `installArgs` key (also quoted, or in a flow mapping) outside a comment (a `#` inside a quoted value is not one) in
-      `.moon/toolchains.yml` is a row (`moon_toolchain_rows`). Moon's own InstallDependencies action runs
-      `uv sync --no-managed-python --no-python-downloads --no-progress` in `py/` (measured on moon 2.5.3),
-      and an added argument would apply on every run. A missing file is a `FLOOR:` row.
-  11. R2 (follow-up sweep 2): `eval` as a word is a row. `${x}v`, `$(…)v`, a backtick before `v`, and `u` before
-      `$`, `${`, `$(` or a backtick are rows. A `uv` token that exists only after the removal of `\`, `'`
-      and `"` is a row (`u\v`, `u''v`, `"u"v`). The check is per token, so a literal `uv` that the removal joins into a
-      longer word does not cancel a spelled one elsewhere on the line.
-  12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync` (also with pip options before the subcommand, and with `pip3.12` and other version-qualified names), `-m pip`, `-m ensurepip`, `-m venv`, `-m virtualenv`,
-      `.venv/…/bin/pip`, `.venv/…/bin/uv`, `.venv/…/bin/python -m pip` and a `rm`, `mv`, `cp`, `ln` or `rsync`
-      of a `.venv` path are rows (`UV_DIRECT_WRITE_RE`).
-  Waivers: `ALLOW_UV_ENV_SCRIPT` has 35 entries. They are keyed by the script path and the exact stripped
-  physical line, and each has a reason that starts with its class. There are 30 `PROSE` entries (a message),
-  4 `DATA` entries (a pattern or Python data) and 1 `EXECUTED` entry (the `uv lock` call). Do not add a second
-  `EXECUTED` entry without a review. Each new message line that names `uv` needs a new waiver. An empty reason is a row.
-  An entry that matches no scanned line is a row. An `EXECUTED` entry must match exactly one physical
-  line of its script (R9, follow-up sweep 2), so a copy of the waived call is a row. A line in the task text cannot be waived.
-  Floor: `REQUIRED_UV_ISOLATED_TASKS` (`paigasus-kernel-py:test`) must exist.
-  One invocation must start a logical line or follow `&&` or `;`, outside a quote. It must have `--isolated` and `--reinstall-package
-  paigasus-py-bindings`, and its command must be `pytest`, `python -m pytest` or `python3 -m pytest`.
-  If not, A14 gives a `FLOOR:` row. Fix a `FLOOR:` row first, because the check cannot be trusted until then.
-  Two more checks do not depend on the allow-list. G4: a scanned script that is not valid UTF-8 raises
-  `MoonOutputError`, and the gate exits 2 with the file name. Since the SMA-765/767/768 follow-up,
-  every file read in `cargo_moon_parity.py` goes through `_read_utf8`, A8's `script_cargo_lines`,
-  A10's script read, the Dockerfile, `rs/Cargo.toml` and every crate manifest included. A13 keeps
-  its own contract: an unreadable `package.json`, `tsconfig.json` or vitest config is a row that
-  names the file. The self-test has one row per read path, and it pins that `_read_utf8` holds the
-  only `read_text` call in the file. A8 and A10 follow the same files as before.
-  G5: each file that A14 reads must match an input of `repo:affected-smoke`. A13 and G5 use one
-  helper for this match, `smoke_unreached`.
-  A missing task, or a task with no `inputGlobs`, is a row. To fix a G5 row, add a glob to the `inputs`
-  of `repo:affected-smoke` in `moon.yml`, and to `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`.
-  Real-tree negative control: `main()` removes `--isolated` from the floor task in a deep copy of the real graph.
-  It exits 2 unless A14 gives a row that names the floor task and is not a `FLOOR:` row.
-  `run.sh --negative-control` runs only the synthetic self-test, so this is a separate step.
-  The six SMA-768 gaps:
-  - Gap 1, the denylist let an unknown uv form pass: closed by the allow-list.
-  - Gap 2, the `:=` default assignment, such as `${VIRTUAL_ENV:=x}`: closed by rule 6.
-  - Gap 3, an assignment with no command, such as `UV_PROJECT_ENVIRONMENT=.venv-x`: closed as invalid.
-    The old parser already reddened it. A self-test row stays.
-  - Gap 4, a script that is not UTF-8: closed by G4.
-  - Gap 5, an edit to a scanned script that does not schedule `repo:affected-smoke`: closed by G5.
-  - Gap 6, a `source` word inside a quoted argument: not closed. See R1.
-  Residuals, after follow-up sweep 2. Each closed one has self-test rows and a mutation that kills it.
-  - R1. Closed for the fail-open half: a `#` line inside an open quote is no longer a comment (rule 1).
-    Still open, and fail-closed: a `source` word inside a quoted argument is followed, which can give a
-    false red or an infrastructure error. The quote state is not a shell parser: it does not know a
-    heredoc, `case` patterns inside `$( … )`, or `$'…'`. An error there can add a row or skip a comment
-    line; it can make a `#` line a comment only when the stack shows no open quote.
-  - R2. Closed for the forms in rules 5 and 11. Still open: a command word that is only a variable whose
-    value comes from outside the scanned text (the environment, a file, the output of another program).
-    That needs data-flow evaluation. `UV_TOKEN_RE` does not match `uv.exe`; no scanned task runs on Windows.
-  - R3. Closed for the installer words and modules in rule 5. A Python program that installs by itself
-    (`python -c "import subprocess; …pip…"`) is not seen.
-  - R4. Closed for the forms in rule 12. A write by a program that A14 does not read is not seen.
-  - R5. The toolchain arguments are closed by rule 10. The exact `uv sync` of Moon's InstallDependencies
-    action itself stays: see "Rulings" in the follow-up sweep 2 PR (SMA-765 R-toolchain). The inexact
-    relock of a plain `uv run` (R-relock) is closed by the lock-flag rule in rule 5.
-  - R6. Not changed, because it cannot change a verdict: no approved option value and no approved flag
-    holds a separator, so a cut inside a quoted value leaves a value that is not exact text, which is red.
-    A quote-aware cut was written and removed: no mutation of it could fail a test.
-  - R7. Closed by rule 9.
-  - R8. Closed by the run-reference scan above.
-  - R9. Closed for `EXECUTED` entries (see Waivers). A `PROSE` or `DATA` line can still match several copies;
-    a copy of a message line is still a message.
-  - R10. Closed for the forms in rule 8. Still open: a path that a script computes in a way that the
-    text does not show (for example a value read from a file), and `--write` that a scanned script
-    gets from its own caller through a variable that A14 does not follow across files.
+- **A14** (`check_python_env` in `ci/affected-graph/python_env_ban.py`, SMA-765, SMA-768 and SMA-770,
+  findings key `a14`) reds when a file outside the wrapper can run the Python package manager.
+  Only `ci/python-env/run.sh` may run it (see `ci/python-env/README.md`). The gate does not parse
+  shell text. It reads every tracked file line by line and looks for a token.
+  - History: SMA-768 had a shell parser here (`check_uv_env_isolation`) and a waiver table
+    (`ALLOW_UV_ENV_SCRIPT`). SMA-770 deleted both. The parser left residuals R1, R2 and R10 that
+    no further patch could close. It also gave a false red on `cd` and `source` lines.
+  - Scope: every file that git tracks, except the exclusions. The gate reads each file as UTF-8.
+  - Exclusions (`EXCLUSIONS`, in this order): `markdown` (`*.md`), `docs` (`docs/`), `uv.lock`,
+    `Cargo.lock`, `pnpm-lock.yaml`, `binary` (a path that git marks `binary`), `dependabot`
+    (`.github/dependabot.yml`) and `exempt` (`EXEMPT_PATHS`: `ci/python-env/run.sh` and
+    `ci/affected-graph/python_env_ban.py`). A path in `binary` is skipped before the read.
+  - Tokens (`TOKENS`): `uv`, `uvx`, `pip`, `pip3`, `pip3.<n>`, `ensurepip`, `virtualenv`, `.venv`,
+    `UV_*`, `VIRTUAL_ENV` and `--active`.
+  - Boundary: a token matches only when no word character, `.` or `-` is on either side. `.venv`
+    needs only a non-word, non-`-` character on its left, so `py/.venv` matches and `a.venv` does not.
+  - Known non-matches (`NON_MATCHES`): `uv.lock`, `uv.toml`, `uv-cache`, `pip.exe`, `pipefail`,
+    `pipeline`, `uvicorn` and `the uv.`. The last one is a false green that the spec accepts: the
+    word `uv` at the end of a sentence is not a token. A prose line with that shape is not seen.
+  - Rules:
+    - G-ban: a token on a scanned line is a row, unless the line is in `PINNED_LINES`.
+    - G-wrapper: the sha256 of `ci/python-env/run.sh` must equal `WRAPPER_SHA256`. The row prints
+      the real hash. A change to the wrapper needs a change to the hash in the same diff.
+    - G-floor: the command of `paigasus-kernel-py:test` must contain
+      `ci/python-env/run.sh kernel-test`. A missing task is a `FLOOR:` row.
+    - G-toolchain: `.moon/toolchains.yml` must not set `syncArgs`, `venvArgs` or `installArgs`
+      outside a YAML comment. Moon appends these arguments to its own environment sync. A missing
+      file is a `FLOOR:` row.
+    - TOML keys (R7): `reinstall`, `reinstall-package`, `upgrade`, `upgrade-package` and
+      `cache-keys` are rows in `[tool.uv]` and `[tool.uv.pip]` of every tracked `pyproject.toml`,
+      and at the top level and in `[pip]` of every tracked `uv.toml`. A file that is not valid TOML
+      is an infrastructure error. `py/pyproject.toml` must be in the list (`FLOOR:` row).
+    - G4: a scanned file that is not UTF-8 raises `MoonOutputError`, and the gate exits 2 with the
+      file name. A file that git marks `binary` is the only exception.
+    - G5: each file that the ban reads must match an input of `repo:affected-smoke`. To fix a row,
+      add a glob to the `inputs` of that task in `moon.yml`, and to
+      `T_AFFECTED_SMOKE_REQUIRED_INPUTS` in `ci/actionlint/run.sh`. A task with no `inputGlobs` is a row.
+  - `PINNED_LINES` maps (path, exact stripped line) to a reason. It has 15 entries. The count must
+    stay lower than 35. Each reason must not be empty. A pin counts only on a line that has a token,
+    so an entry that matches no line is a stale row. An entry that matches two lines is an
+    ambiguous row. A pin is a last resort: first route the command through the wrapper, or give the
+    text new words.
+  - Self-test classes (`self_test_failures`): one red row for each token and one green row for each
+    known non-match; one fixture for each exclusion; the `binary_paths` check against the real
+    `.gitattributes`, with a path list longer than 512 bytes; CRLF, a missing final newline and a
+    path with a space; the pin cases (empty reason, stale, ambiguous, exact text); G-wrapper;
+    G-floor; G-toolchain and the TOML keys; an integration pass through `check_python_env` so that a
+    deleted rule call reds; and the wrapper behaviour cases (`wrapper_behaviour_failures`).
+  - Wrapper behaviour: the self-test copies the wrapper into a temporary root, puts fake tools on
+    `PATH`, and compares the working directory and the arguments that the fake tool logged. The
+    `PYTHON_ENV_TEST_BASH` variable selects the bash binary. Run
+    `python3 -I ci/affected-graph/python_env_ban.py` for this part alone.
+  - Real tool: `ci/python-env/real-tool-check.sh` runs the cheap wrapper operations against the real
+    tool. A step in `repo:affected-smoke` runs it on every PR.
+  - Real-tree negative control: `main()` removes the wrapper call text from the floor task in a deep copy
+    of the real graph. It exits 2 unless A14 gives a row that names the floor task and is not a `FLOOR:` row.
+    `run.sh --negative-control` runs only the synthetic self-test, so this is a separate step.
+  - To add a Python package manager operation: add a wrapper operation, then update
+    `WRAPPER_SHA256` and `WRAPPER_CASES` in `python_env_ban.py`.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`

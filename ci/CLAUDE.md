@@ -194,7 +194,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   and — once `SELF_SCHEDULED_GATES` holds a key — `SELF_TASK_EXPECTED_GLOBS` are self-enforcing.
   A brand-new gate with no registry entries at all still passes.**
   `repo:ruff-ci` (SMA-539) lints `ci/**/*.py` against `py/pyproject.toml`'s rule set — a new `ci/`
-  Python file must pass it. It routes through `uv run --locked --project py` rather than a
+  Python file must pass it. It routes through the wrapper's `run py` operation (`uv run --locked`) rather than a
   dedicated uv project: `repo:actionlint`'s `inputs: ['**/*']` strictly supersets `repo:ruff-ci`'s,
   so the `py` environment is materialised once per CI run regardless of which task reaches it
   first — one lockfile therefore means one ruff version, shared with `py:lint`, with no second
@@ -288,7 +288,7 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   (`<<:`) — a workflow using one keeps the literal, unmerged key rather than erroring (SMA-579).
 - `repo:actionlint` now runs shellcheck over every workflow `run:` block, sourced from
   `shellcheck-py` pinned in `py/uv.lock` (bounded specifier `>=0.11.0.1,<0.12`), resolved via
-  `uv run --locked --project py` and asserted with `[ -x ]`. It FAILS CLOSED at rc 2 — there is
+  `ci/python-env/run.sh run py` (`uv run --locked`) and asserted with `[ -x ]`. It FAILS CLOSED at rc 2 — there is
   deliberately no fallback to whatever `shellcheck` a host happens to have, the silent-downgrade
   failure SMA-525 refused. shellcheck's own GitHub release ships 13 platform archives and no
   checksums asset (re-measured 2026-09-02), which is why it is not a proto plugin; three of
@@ -374,3 +374,10 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - A fixture that commits also sets `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` on every
   `git` call and local `commit.gpgsign false` and `tag.gpgsign false`. The development Mac signs
   every commit through 1Password, and a locked vault makes an unguarded fixture commit hang or fail.
+
+## Python package manager: one wrapper (SMA-770)
+
+- **Standing rule: Every uv, pip and `.venv` operation goes through `ci/python-env/run.sh`.** The
+  `a14` gate (`ci/affected-graph/python_env_ban.py`) reds any other token in a tracked file. To
+  add an operation, add a wrapper operation, then update `WRAPPER_SHA256` and `WRAPPER_CASES` in
+  that file. Details: `ci/python-env/README.md` and the A14 entry in `ci/affected-graph/README.md`.

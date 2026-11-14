@@ -61,3 +61,6 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   `ts/packages/paigasus-kernel/scripts/optimize-wasm.mjs`, after wasm-pack in `generate-wasm`
   and in `prebuild.yml` (SMA-435). Its pin is in `rs/crates/bindings/paigasus-wasm/.prototools`.
   A job that optimizes needs no `proto install` step for it: the script installs the pin.
+- `buf.gen.yaml` is in the scope of the python-env token ban. The Python plugin runs as
+  `bash ../ci/python-env/run.sh protoc-plugin`. Do not call the package manager there. See
+  `ci/python-env/README.md` (SMA-770).
