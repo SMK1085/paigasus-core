@@ -2150,6 +2150,9 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ts/tsconfig.base.json'
   # SMA-765 - floors the input that makes A14 reachable: A14 reads py/scripts/*.sh.
   'py/scripts/**/*'
+  # Follow-up sweep 2 - A14 also reads py/pyproject.toml (R7) and ops/nats/*.sh (R8).
+  'py/pyproject.toml'
+  'ops/nats/**/*'
   'ci/actionlint/**/*'
   'ci/release-parity/**/*'
   'ci/workflow-credentials/**/*'
@@ -5487,7 +5490,7 @@ selftest_mutation_battery() {
   set -- $labels
   for pid in $pids; do
     i=$((i + 1))
-    eval "label=\${$i}"
+    label=${!i}
     wait "$pid"
     rc=$?
     if [ "$label" = '__control__' ]; then

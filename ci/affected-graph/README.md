@@ -387,8 +387,17 @@ It also runs several checks that the per-case project sets structurally **cannot
   It also follows the word after any of these: `;`, `&&`, `&`, `||`, `|`, `(`, `{`, `!`, `then`, `do` and `else`.
   A8 and A10 keep their line-start matcher. A `./` or `../` prefix is resolved.
   A reference to a file that does not exist, or that leaves the repository, is an infrastructure error.
+  Since follow-up sweep 2 (R8), A14 also scans a script that a scanned script RUNS, and any other
+  `*.sh` word in the task text (`UV_RUN_REF_RE`). A leading `$VAR/` part is dropped, and the rest is
+  resolved against the repo root and against the directory of the script (or the project). A word
+  that names no file is skipped. The match is wide on purpose: a path in a message is followed too,
+  which can add rows but cannot hide one. So `ci/release-plan/run.sh` (run by `ci/actionlint/run.sh`)
+  and `ops/nats/check-subjects.sh` (run by `repo:nats-permissions`) are now scanned.
+  It also scans every tracked `pyproject.toml` and `uv.toml`, and `.moon/toolchains.yml` (R7, rule 9).
   The rules, in order:
-  1. A physical line whose first non-blank character is `#` is a comment. A comment line never joins
+  1. A physical line whose first non-blank character is `#` is a comment, but only when no quote is
+     open from an earlier line (R1, `_uv_quote_after`). The quote state knows `'`, `"` and `$(`, and a
+     `$(` inside `"…"` starts a new quote context, as in bash. A comment line never joins
      the next line, also when it ends in `\`. A `#` later in a line is not a comment, so `x # uv sync` is a row.
   2. A non-comment line that ends in `\` joins the next physical line with no separator. A row names
      the physical line of the match.
@@ -404,8 +413,13 @@ It also runs several checks that the per-case project sets structurally **cannot
        only `'>=3.12'`. The value is the next word, compared as exact text. The `--opt=value` form is not approved.
        `--reinstall-package paigasus-py-bindings` is approved only with `--isolated` in the same option region.
        The command word is the first word that does not start with `-`. It must match
-       `[A-Za-z0-9_][A-Za-z0-9_.+/-]*`. A `uv run` with no command word is a row. A14 does not check the words after the command word.
+       `[A-Za-z0-9_][A-Za-z0-9_.+/-]*`. A `uv run` with no command word is a row. A14 does not check the words after the command word,
+       with one exception (R3): a command word `pip`, `pip3`, `uv`, `ensurepip` or `virtualenv` (also as the last part
+       of a path), or `python… -m pip|ensurepip|venv|virtualenv|uv`, is a row.
+       Since follow-up sweep 2 (SMA-765 R-relock), every `uv run` needs `--locked`, `--frozen` or `--isolated`.
+       A plain `uv run` can relock the project, and then change the environment to the new lock while another task reads it.
      - `command -v uv`, with only `>/dev/null`, `2>/dev/null` or `2>&1` after it. `command uv sync` is a row.
+       The probe inside `$( … )` or backticks is a row (R2): it captures the uv path, and a call through that variable is not seen.
   6. Any non-comment mention of `UV_*`, `VIRTUAL_ENV` or `--active` is a row. This covers an assignment,
      a default, an `export`, an `unset` and a plain mention.
   7. A task `env:` key that is `VIRTUAL_ENV` or starts with `UV_` is a row.
@@ -418,11 +432,33 @@ It also runs several checks that the per-case project sets structurally **cannot
      the check can add a row, but it cannot hide one. So `cd ci/version-lockstep && ./run.sh --write`,
      `$D/run.sh --write` and `run.sh 'a;b' --write` are rows. A `--write` in a later command, such as
      `run.sh && echo --write`, is not a row.
-  Waivers: `ALLOW_UV_ENV_SCRIPT` has 27 entries. They are keyed by the script path and the exact stripped
-  physical line, and each has a reason that starts with its class. There are 23 `PROSE` entries (a message),
-  3 `DATA` entries (a pattern or Python data) and 1 `EXECUTED` entry (the `uv lock` call). Do not add a second
+     Since follow-up sweep 2 (R10): every later word is read after expansion, so `W=--write; run.sh $W` is a row.
+     A later word that still holds `$` or a backtick after expansion (`"$@"`, `$*`, an unassigned `$W`, `$(…)`)
+     is a row too. A moon target `repo:version-lockstep` or `:version-lockstep` counts as the script, so
+     `moon run repo:version-lockstep -- --write` is a row. A command word that only a shell can compute
+     (`$(…)`, a backtick, `eval`) followed by a literal `--write` is a row. Each scanned script, except
+     `ci/version-lockstep/run.sh` itself, goes through the same check.
+  9. R7 (follow-up sweep 2): the keys `reinstall`, `reinstall-package`, `upgrade`, `upgrade-package` and
+     `cache-keys` are rows in `[tool.uv]` or `[tool.uv.pip]` of every tracked `pyproject.toml`, and at the top
+     level or in `[pip]` of every tracked `uv.toml` (`uv_config_rows`). A file that is not valid TOML is an
+     infrastructure error. `FLOOR:` row: `py/pyproject.toml` must be in the list. A user-level uv.toml outside
+     the repository cannot be read and is not covered.
+  10. R5 and SMA-765 R-toolchain (follow-up sweep 2): a `syncArgs`, `venvArgs` or `installArgs` key in
+      `.moon/toolchains.yml` is a row (`moon_toolchain_rows`). Moon's own InstallDependencies action runs
+      `uv sync --no-managed-python --no-python-downloads --no-progress` in `py/` (measured on moon 2.5.3),
+      and an added argument would apply on every run. A missing file is a `FLOOR:` row.
+  11. R2 (follow-up sweep 2): `eval` as a word is a row. `${x}v`, `$(…)v`, a backtick before `v`, and `u` before
+      `$`, `${`, `$(` or a backtick are rows. A line whose text has more `uv` tokens after the removal of `\`, `'`
+      and `"` is a row (`u\v`, `u''v`, `"u"v`).
+  12. R4 (follow-up sweep 2): `pip install`, `pip uninstall`, `pip sync`, `-m pip`, `-m ensurepip`,
+      `.venv/…/bin/pip`, `.venv/…/bin/uv`, `.venv/…/bin/python -m pip` and a `rm`, `mv`, `cp`, `ln` or `rsync`
+      of a `.venv` path are rows (`UV_DIRECT_WRITE_RE`).
+  Waivers: `ALLOW_UV_ENV_SCRIPT` has 35 entries. They are keyed by the script path and the exact stripped
+  physical line, and each has a reason that starts with its class. There are 30 `PROSE` entries (a message),
+  4 `DATA` entries (a pattern or Python data) and 1 `EXECUTED` entry (the `uv lock` call). Do not add a second
   `EXECUTED` entry without a review. Each new message line that names `uv` needs a new waiver. An empty reason is a row.
-  An entry that matches no scanned line is a row. A line in the task text cannot be waived.
+  An entry that matches no scanned line is a row. An `EXECUTED` entry must match exactly one physical
+  line of its script (R9, follow-up sweep 2), so a copy of the waived call is a row. A line in the task text cannot be waived.
   Floor: `REQUIRED_UV_ISOLATED_TASKS` (`paigasus-kernel-py:test`) must exist.
   One invocation must start a logical line or follow `&&` or `;`, outside a quote. It must have `--isolated` and `--reinstall-package
   paigasus-py-bindings`, and its command must be `pytest`, `python -m pytest` or `python3 -m pytest`.
@@ -449,36 +485,31 @@ It also runs several checks that the per-case project sets structurally **cannot
   - Gap 4, a script that is not UTF-8: closed by G4.
   - Gap 5, an edit to a scanned script that does not schedule `repo:affected-smoke`: closed by G5.
   - Gap 6, a `source` word inside a quoted argument: not closed. See R1.
-  Accepted residuals:
-  - R1. A `source` word inside a quoted argument is followed. The gate then gives a false red
-    or an infrastructure error. It never misses a violation. A `#` line inside a multi-line quoted string is skipped as a comment, but bash
-    can run the text after the closing quote. Example: `bash -c '` then a new line `#'; uv sync`.
-    A correct fix needs a full shell parser.
-  - R2. A `uv` reached through a computed word is not seen. Examples: `UVB=$(command -v uv); "$UVB" sync`
-    (rule 5 approves the probe), `${x}v sync`, `eval`, `"$(command -v uv)" sync` and its backtick form.
-    Quote-removal spellings are not seen either: `u\v sync`, `u''v sync` and `"u"v sync`.
-    `UV_TOKEN_RE` does not match `uv.exe`. This matters only on Windows, and no scanned task runs there.
-  - R3. A command that `uv run` executes is not checked. Examples: `uv run pip install`, `uv run python -m pip install`.
-  - R4. A direct write such as `py/.venv/bin/pip install` is not seen.
-  - R5. Moon toolchain actions, such as `InstallDependencies(unstable_python, py)`, are not seen. The inexact
-    relock of a plain `uv run` (the `--upgrade` class, SMA-765 R-relock) is not listed.
-  - R6. The cut in rule 4 is not quote-aware. A separator inside a quoted value ends the invocation early.
-    Each option value is compared as exact text, so a cut value is a row.
-  - R7. uv configuration is not scanned. The keys `reinstall`, `reinstall-package`, `upgrade`,
-    `upgrade-package` and `cache-keys` in `[tool.uv]` or in a `uv.toml` can make an approved plain `uv run` change
-    `py/.venv` in place. Rules 6 and 7 close only the environment-variable half of this class.
-  - R8. A script that a scanned script runs, but does not source, is not scanned. Example:
-    `ci/actionlint/run.sh` runs `bash ci/release-plan/run.sh`.
-  - R9. A waiver matches its line text anywhere in the same script. A copy of the `EXECUTED` `uv lock`
-    line elsewhere in `ci/version-lockstep/run.sh` passes, and rule 8 does not catch it.
-  - R10. Partly closed by the follow-up sweep: a `cd`/`pushd` before a relative `run.sh`, a path
-    through a `NAME=value` assignment in the task text, and a quoted separator before `--write` are
-    now rows. Still not seen: `--write` from a variable (`W=--write; ... run.sh $W`), from `"$@"`,
-    or from passthrough arguments (`moon run repo:version-lockstep -- --write`); a path that only a
-    shell can compute (`$(dirname …)`, `eval`); and a script that runs `version-lockstep --write`
-    from a scanned `ci/**/*.sh` file. Each one needs real shell evaluation. The check never drops a
-    reachable directory (a `( … )` group, `popd`, `cd "$ROOT"`) and uses every assigned value of a
-    variable, so a false row is possible and a missed row is not.
+  Residuals, after follow-up sweep 2. Each closed one has self-test rows and a mutation that kills it.
+  - R1. Closed for the fail-open half: a `#` line inside an open quote is no longer a comment (rule 1).
+    Still open, and fail-closed: a `source` word inside a quoted argument is followed, which can give a
+    false red or an infrastructure error. The quote state is not a shell parser: it does not know a
+    heredoc, `case` patterns inside `$( … )`, or `$'…'`. An error there can add a row or skip a comment
+    line; it can make a `#` line a comment only when the stack shows no open quote.
+  - R2. Closed for the forms in rules 5 and 11. Still open: a command word that is only a variable whose
+    value comes from outside the scanned text (the environment, a file, the output of another program).
+    That needs data-flow evaluation. `UV_TOKEN_RE` does not match `uv.exe`; no scanned task runs on Windows.
+  - R3. Closed for the installer words and modules in rule 5. A Python program that installs by itself
+    (`python -c "import subprocess; …pip…"`) is not seen.
+  - R4. Closed for the forms in rule 12. A write by a program that A14 does not read is not seen.
+  - R5. The toolchain arguments are closed by rule 10. The exact `uv sync` of Moon's InstallDependencies
+    action itself stays: see "Rulings" in the follow-up sweep 2 PR (SMA-765 R-toolchain). The inexact
+    relock of a plain `uv run` (R-relock) is closed by the lock-flag rule in rule 5.
+  - R6. Not changed, because it cannot change a verdict: no approved option value and no approved flag
+    holds a separator, so a cut inside a quoted value leaves a value that is not exact text, which is red.
+    A quote-aware cut was written and removed: no mutation of it could fail a test.
+  - R7. Closed by rule 9.
+  - R8. Closed by the run-reference scan above.
+  - R9. Closed for `EXECUTED` entries (see Waivers). A `PROSE` or `DATA` line can still match several copies;
+    a copy of a message line is still a message.
+  - R10. Closed for the forms in rule 8. Still open: a path that a script computes in a way that the
+    text does not show (for example a value read from a file), and `--write` that a scanned script
+    gets from its own caller through a variable that A14 does not follow across files.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`

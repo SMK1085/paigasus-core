@@ -15,7 +15,7 @@ tasks:
   # goldens live under rs/, outside this project, and Moon confers affectedness only through a
   # task's own inputs.
   test:
-    command: 'uv run pytest tests'
+    command: 'uv run --locked pytest tests'
     inputs:
       - 'tests/**/*'
       - 'pyproject.toml'
