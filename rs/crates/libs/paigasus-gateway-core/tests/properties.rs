@@ -197,6 +197,10 @@ enum Reach {
     Upstream,
     /// R3: the record after the terminal event is dropped and counted, nothing else.
     AfterEnd,
+    /// D16: a record over `max_record_bytes` is dropped as `oversized`.
+    Oversized,
+    /// D13: the held bytes outgrew `max_held_bytes`: `on_failure` with code `hold_limit`.
+    HoldLimit,
     /// No failure at all.
     Clean,
 }
@@ -206,6 +210,8 @@ fn reach(q: RQuirk, at: usize) -> Reach {
     match q {
         TopLevelError | ErrorEventMidItem => Reach::Upstream,
         RecordAfterTerminal => Reach::AfterEnd,
+        Oversized => Reach::Oversized,
+        HoldLimit => Reach::HoldLimit,
         Bom | NoFinalBlankLine | KeepaliveWithoutSequence => Reach::Clean,
         AbsentStatus if at % 2 == 1 => Reach::Clean,
         FailedWithOpenItem if at.is_multiple_of(2) => Reach::Truncated,
@@ -216,7 +222,11 @@ fn reach(q: RQuirk, at: usize) -> Reach {
 
 fn reached(o: &Outcome) -> Reach {
     let has = |m: Metric| o.metrics.contains(&m);
-    if has(Metric::RecordDropped("malformed")) {
+    if has(Metric::OnFailure("hold_limit")) {
+        Reach::HoldLimit
+    } else if has(Metric::RecordDropped("oversized")) {
+        Reach::Oversized
+    } else if has(Metric::RecordDropped("malformed")) {
         Reach::Malformed
     } else if has(Metric::OnFailure("truncated")) {
         Reach::Truncated

@@ -827,10 +827,16 @@ pub enum RQuirk {
     AbsentStatus,
     /// R15: EOF inside a client-run item, with no terminal event.
     EofInItem,
+    /// D16 (`max_record_bytes`): a record over the limit with `CANARY`: a function delta (even) or
+    /// a terminal `output` with a blocked call (odd).
+    Oversized,
+    /// D13 (`max_held_bytes`): one open function call whose deltas, each under the record limit,
+    /// hold more than the hold limit in all.
+    HoldLimit,
 }
 
 /// Every [`RQuirk`], for the strategy and for the per-quirk test.
-pub const RQUIRKS: [RQuirk; 45] = [
+pub const RQUIRKS: [RQuirk; 47] = [
     RQuirk::EventErrorName,
     RQuirk::TopLevelError,
     RQuirk::DoneTrailing,
@@ -876,6 +882,8 @@ pub const RQUIRKS: [RQuirk; 45] = [
     RQuirk::AddedNotSubset,
     RQuirk::AbsentStatus,
     RQuirk::EofInItem,
+    RQuirk::Oversized,
+    RQuirk::HoldLimit,
 ];
 
 /// A generated Responses stream. The real-traffic facts of spec § 3.3 hold unless a quirk breaks
@@ -949,6 +957,8 @@ impl ResponsesScenario {
                 | RQuirk::AddedArgumentsNotEmpty
                 | RQuirk::ArgumentsMismatch
                 | RQuirk::InvalidJsonArguments
+                | RQuirk::Oversized
+                | RQuirk::HoldLimit
                 | RQuirk::EventAfterDone => (!any(self, &|i| i.kind == RKind::Function)).then_some(RKind::Function),
                 RQuirk::AbsentStatus if at.is_multiple_of(2) => (!any(self, &|i| i.kind == RKind::Function)).then_some(RKind::Function),
                 RQuirk::AbsentStatus | RQuirk::InputMismatch => (!any(self, &|i| i.kind == RKind::Custom)).then_some(RKind::Custom),
@@ -1302,6 +1312,13 @@ pub fn render_responses(s: &ResponsesScenario) -> Vec<u8> {
         if let Some(t) = target {
             items[t].text.pop(); // `{"v":"…"` : no complete JSON value (M5)
         }
+        if *q == RQuirk::HoldLimit
+            && let Some(t) = pick(&items, *at, |i| i.kind == RKind::Function)
+        {
+            // 20 deltas of about 1 KiB: each record is under 4 KiB, the hold is over 16 KiB.
+            items[t].text = format!("{{\"v\":\"{}\"}}", "y".repeat(20_000));
+            items[t].pieces = 20;
+        }
     }
     let n = items.len();
     let mut ids: Vec<String> = items.iter().enumerate().map(|(i, it)| format!("{}_{i}", it.kind.id_prefix())).collect();
@@ -1580,6 +1597,20 @@ pub fn render_responses(s: &ResponsesScenario) -> Vec<u8> {
                 }));
             }
             RQuirk::NoTerminal => terminal_present = false,
+            RQuirk::Oversized => {
+                let big = format!("CANARY-big{}", "x".repeat(5000));
+                if at.is_multiple_of(2) {
+                    if let Some(t) = fpick(at) {
+                        let ev = scoped_ev("response.function_call_arguments.delta", t, &ids[t], json!({"delta": big}));
+                        let k = 1.min(segs[t].middle.len());
+                        segs[t].middle.insert(k, Rec::Ev(ev));
+                    }
+                } else {
+                    let mut h = hidden_call("fc_big");
+                    h["arguments"] = json!(format!("{{\"v\":\"{big}\"}}"));
+                    output.push(h);
+                }
+            }
             _ => {}
         }
     }
