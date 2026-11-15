@@ -3224,12 +3224,14 @@ name = "paigasus-gateway-core"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "paigasus-kernel",
  "paigasus-proto",
  "proptest",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

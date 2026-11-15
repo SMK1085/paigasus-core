@@ -343,8 +343,9 @@ run_suite() {
   # runs the real binary), so it is a legitimate PROJECT-level dependent here too. MEASURED with the
   # no-flag `moon query tasks --affected` traversal: a throwaway kernel edit selects exactly one
   # gateway-console-ts task, test-e2e (before SMA-536 added `typecheck` to the name filter).
+  # SMA-752: paigasus-gateway-core depends on the kernel (feature tool-policy), so it is a dependent too.
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs,paigasus-iam-core-rs,paigasus-iam-rs,paigasus-observability-rs,gateway-console-ts"
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-gateway-core-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs,paigasus-iam-core-rs,paigasus-iam-rs,paigasus-observability-rs,gateway-console-ts"
   # py binding edit -> the binding + the py wrapper that depends on it (SMA-419). One-directional
   # w.r.t. the kernel: paigasus-kernel-rs is deliberately ABSENT (a binding edit must not rebuild
   # the kernel), now enforced implicitly by strict equality rather than a forbid-regex.
@@ -421,7 +422,7 @@ run_suite() {
   # hand (SMA-420/546) rather than through @group(upstreams), which is Rust-only.
   # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case_ci "kernel->consumer-tasks" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:build,paigasus-kernel-parity-rs:test,paigasus-kernel-parity-rs:lint,paigasus-node-bindings-rs:build,paigasus-node-bindings-rs:test,paigasus-node-bindings-rs:lint,paigasus-observability-rs:build,paigasus-observability-rs:test,paigasus-observability-rs:lint,paigasus-py-bindings-rs:build,paigasus-py-bindings-rs:test,paigasus-py-bindings-rs:lint,paigasus-wasm-rs:build,paigasus-wasm-rs:test,paigasus-wasm-rs:lint,paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test,gateway-console-ts:test-e2e"
+    "paigasus-gateway-core-rs:build,paigasus-gateway-core-rs:test,paigasus-gateway-core-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:build,paigasus-kernel-parity-rs:test,paigasus-kernel-parity-rs:lint,paigasus-node-bindings-rs:build,paigasus-node-bindings-rs:test,paigasus-node-bindings-rs:lint,paigasus-observability-rs:build,paigasus-observability-rs:test,paigasus-observability-rs:lint,paigasus-py-bindings-rs:build,paigasus-py-bindings-rs:test,paigasus-py-bindings-rs:lint,paigasus-wasm-rs:build,paigasus-wasm-rs:test,paigasus-wasm-rs:lint,paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test,gateway-console-ts:test-e2e"
   # SMA-749 (spec § 7) — a paigasus-gateway-core SOURCE edit must select the lib's own and the
   # gateway's build/test/lint, and gateway-console-ts:test-e2e, whose playground runs the real
   # gateway binary and so mirrors the gateway's upstreams in its inputs (Task 15). Measured with

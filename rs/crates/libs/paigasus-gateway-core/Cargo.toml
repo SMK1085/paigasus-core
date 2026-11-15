@@ -16,6 +16,8 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 # `name_sha256_8` in decision reports (spec § 4.6). The same major as paigasus-iam-core's line,
 # already in rs/Cargo.lock.
 sha2 = "0.11"
+# The kernel's tool-policy types (SMA-752 Task 7).
+paigasus-kernel = { workspace = true, features = ["tool-policy"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -24,6 +26,8 @@ thiserror = { workspace = true }
 proptest = { workspace = true }
 # The decision-report reasons are checked against the canonical error registry (SMA-752 D10).
 paigasus-proto = { workspace = true }
+# The policy mapping tests build a kernel `Facts` with an org id.
+uuid = { workspace = true }
 
 [lints]
 workspace = true

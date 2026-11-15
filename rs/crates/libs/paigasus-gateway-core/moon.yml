@@ -7,6 +7,7 @@ language: 'rust'
 # SMA-752: a `{ workspace = true }` dev-dependency, so this edge is hand-written. The decision
 # report's reasons are checked against paigasus-proto's error registry.
 dependsOn:
+  - 'paigasus-kernel-rs'
   - 'paigasus-proto-rs'
 
 # SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
@@ -14,6 +15,8 @@ dependsOn:
 # repo:affected-smoke's A6.
 fileGroups:
   upstreams:
+    - '/rs/crates/libs/paigasus-kernel/src/**/*'
+    - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
     - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto/src/**/*'
