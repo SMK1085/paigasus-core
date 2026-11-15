@@ -860,7 +860,7 @@ Run under system `/bin/bash` 3.2 for the whole `moon ci` invocation (it is what 
 - bash 5 with a healthy pipe: `ci/actionlint/run.sh` — read the `pipe capacity` preflight line; on a 512-byte pipe, run it in a Linux container (memory `small-pipe-linux-container-workaround`).
 - Also run `bash ci/cargo-lock-integrity/run.sh` (a `ci.yml` step, not a Moon target).
 
-Expected: every target passes. On an unattributed failure, follow the root `CLAUDE.md` diagnosis procedure (copy `.moon/cache/ciReport.json` and the state dir before any re-run).
+Expected: every target passes. On an unattributed failure, follow the root `CLAUDE.md` diagnosis procedure (copy the moon cache report and the task state dir before any re-run).
 
 - [ ] **Step 3: Confirm the commit rules.** `git log origin/main..HEAD --format=%B | grep -c 'SMA-751'` → `0`; every subject ends with `(SMA-774)`; every body ends with the `Co-Authored-By` line.
 
