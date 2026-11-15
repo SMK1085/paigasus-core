@@ -36,6 +36,14 @@ pub struct PolicyRef {
     pub id: String,
 }
 
+impl PolicyRef {
+    /// Make a policy reference.
+    #[must_use]
+    pub fn new(set: PolicyOrigin, id: impl Into<String>) -> Self {
+        Self { set, id: id.into() }
+    }
+}
+
 /// Why a policy set does not compile.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
@@ -234,6 +242,11 @@ impl ToolPolicies {
     #[must_use]
     pub fn floor(&self) -> &Arc<FloorPolicies> {
         &self.floor
+    }
+
+    /// The merged policy set.
+    pub(crate) fn set(&self) -> &PolicySet {
+        &self.set
     }
 
     /// The set and `@id` of a merged policy id (`floor/<id>` or `tenant/<id>`).
