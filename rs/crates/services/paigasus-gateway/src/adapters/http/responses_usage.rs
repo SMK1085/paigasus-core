@@ -611,25 +611,23 @@ pub fn non_stream_usage(body: &[u8]) -> BodyUsage {
 const KNOWN_ITEM_FIELDS: [&str; 5] = ["content", "summary", "arguments", "input", "output"];
 
 /// The request estimate by the chat rule (§ 8.2, SMA-677 D14), which counts the text of every
-/// role: `ceil(text_bytes / 4)` over `instructions`, a string `input`, and per `input` item:
+/// role: `ceil(text_bytes / 4)` over `instructions`, `input`, and per `input` item:
 /// - `content`: a string, or per part its `text` string (of any part type) or its `refusal`
 ///   string; another typed part (an image, a file) counts 85;
-/// - every `summary[].text` string; a `summary` that is not an array counts its JSON length;
-/// - `arguments` and `input` strings;
-/// - `output`: a string by its bytes, any other value by its serialized JSON length;
+/// - every `summary[].text` string;
+/// - `arguments`, `input` and `output`;
 /// - an item with none of these fields: its serialized JSON length.
 ///
-/// A `null` or absent field counts 0. Any other shape (a non-object item, an untyped part, a
-/// non-string `instructions`, `arguments` or `input`) falls back to `ceil(body_len / 4)`, capped
+/// A string counts its bytes. A field that is not a string (and, for `content` and `summary`,
+/// not an array) counts its serialized JSON length, with no cap. A `null` or absent field counts
+/// 0. Only a non-object input item and an untyped part fall back to `ceil(body_len / 4)`, capped
 /// at 32768. Over-estimating is the safe direction: this estimate is the charge when no reported
 /// total arrives.
 pub fn request_tokens_estimate(v: &Value, body_len: usize) -> u64 {
     let fallback = bytes_to_tokens(body_len).min(FALLBACK_REQUEST_CAP);
     let mut text_bytes = 0usize;
     let mut other_parts = 0u64;
-    if !add_text(v.get("instructions"), &mut text_bytes) {
-        return fallback;
-    }
+    add_field(v.get("instructions"), &mut text_bytes);
     match v.get("input") {
         Some(Value::Array(items)) => {
             for item in items {
@@ -638,24 +636,16 @@ pub fn request_tokens_estimate(v: &Value, body_len: usize) -> u64 {
                     text_bytes = text_bytes.saturating_add(serde_json::to_vec(item).map_or(0, |bytes| bytes.len()));
                     continue;
                 }
-                for field in ["arguments", "input"] {
-                    if !add_text(item.get(field), &mut text_bytes) {
-                        return fallback;
-                    }
-                }
-                match item.get("output") {
-                    None | Some(Value::Null) => {}
-                    Some(Value::String(text)) => text_bytes = text_bytes.saturating_add(text.len()),
-                    Some(other) => text_bytes = text_bytes.saturating_add(json_len(other)),
+                for field in ["arguments", "input", "output"] {
+                    add_field(item.get(field), &mut text_bytes);
                 }
                 match item.get("summary") {
-                    None | Some(Value::Null) => {}
                     Some(Value::Array(parts)) => {
                         for text in parts.iter().filter_map(|part| part.get("text").and_then(Value::as_str)) {
                             text_bytes = text_bytes.saturating_add(text.len());
                         }
                     }
-                    Some(other) => text_bytes = text_bytes.saturating_add(json_len(other)),
+                    summary => add_field(summary, &mut text_bytes),
                 }
                 match item.get("content") {
                     Some(Value::Array(parts)) => {
@@ -668,39 +658,24 @@ pub fn request_tokens_estimate(v: &Value, body_len: usize) -> u64 {
                             }
                         }
                     }
-                    content => {
-                        if !add_text(content, &mut text_bytes) {
-                            return fallback;
-                        }
-                    }
+                    content => add_field(content, &mut text_bytes),
                 }
             }
         }
-        input => {
-            if !add_text(input, &mut text_bytes) {
-                return fallback;
-            }
-        }
+        input => add_field(input, &mut text_bytes),
     }
     bytes_to_tokens(text_bytes).saturating_add(other_parts.saturating_mul(NON_TEXT_PART_TOKENS))
 }
 
-/// The serialized JSON length of a value, for the byte rule.
-fn json_len(value: &Value) -> usize {
-    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
-}
-
-/// Adds the bytes of a string field. A `null` or absent field adds 0. Any other shape returns
-/// `false`: the caller uses the fallback.
-fn add_text(field: Option<&Value>, text_bytes: &mut usize) -> bool {
-    match field {
-        None | Some(Value::Null) => true,
-        Some(Value::String(text)) => {
-            *text_bytes = text_bytes.saturating_add(text.len());
-            true
-        }
-        Some(_) => false,
-    }
+/// Adds the bytes of a field: a string by its bytes, any other value by its serialized JSON
+/// length. A `null` or absent field adds 0.
+fn add_field(field: Option<&Value>, text_bytes: &mut usize) {
+    let bytes = match field {
+        None | Some(Value::Null) => 0,
+        Some(Value::String(text)) => text.len(),
+        Some(other) => serde_json::to_vec(other).map_or(0, |bytes| bytes.len()),
+    };
+    *text_bytes = text_bytes.saturating_add(bytes);
 }
 
 #[cfg(test)]
@@ -1039,18 +1014,40 @@ mod tests {
             {"type": "reasoning", "summary": [], "content": null}
         ]});
         assert_eq!(est(body, 999), 89);
-        // Any other shape falls back to ceil(body_len / 4), capped at 32768.
-        for body in [
-            json!({"input": ["not an object"]}),
-            json!({"input": 42}),
-            json!({"instructions": ["x"], "input": "abc"}),
-            json!({"input": [{"role": "user", "content": 42}]}),
-            json!({"input": [{"role": "user", "content": [{"text": "no type"}]}]}),
-            json!({"input": [{"type": "function_call", "arguments": {"a": 1}}]}),
-        ] {
+        // A non-object item and an untyped part fall back to ceil(body_len / 4), capped at 32768.
+        for body in [json!({"input": ["not an object"]}), json!({"input": [{"role": "user", "content": [{"text": "no type"}]}]})] {
             assert_eq!(est(body.clone(), 401), 101, "{body}");
         }
-        assert_eq!(est(json!({"input": 42}), 1_000_000), 32_768);
+        assert_eq!(est(json!({"input": ["not an object"]}), 1_000_000), 32_768);
+    }
+
+    /// Fix I1, round 2 (coordinator ruling): a counted field that is not a string counts its
+    /// serialized JSON length, with no cap.
+    #[test]
+    fn non_string_fields_count_their_json_length() {
+        let est = |v: Value| request_tokens_estimate(&v, 401);
+        // Small shapes, exact: `42` is 2 bytes, `["x"]` 5, `{"a":1}` 7.
+        assert_eq!(est(json!({"input": 42})), 1);
+        assert_eq!(est(json!({"instructions": ["x"], "input": "abc"})), 2);
+        assert_eq!(est(json!({"input": [{"role": "user", "content": 42}]})), 1);
+        assert_eq!(est(json!({"input": [{"type": "function_call", "arguments": {"a": 1}}]})), 2);
+        assert_eq!(est(json!({"input": [{"type": "custom_tool_call", "input": {"a": 1}}]})), 2);
+        // Large shapes scale past the 32768 cap of the fallback.
+        const MIB: usize = 1024 * 1024;
+        let object = |n: usize| json!({"blob": "x".repeat(n)});
+        let len = |n: usize| serde_json::to_vec(&object(n)).unwrap().len();
+        let shapes: [&dyn Fn(usize) -> Value; 5] = [
+            &|n| json!({"input": [{"type": "function_call", "call_id": "c1", "name": "f", "arguments": object(n)}]}),
+            &|n| json!({"input": [{"type": "custom_tool_call", "call_id": "c2", "name": "g", "input": object(n)}]}),
+            &|n| json!({"input": [{"role": "user", "content": object(n)}]}),
+            &|n| json!({"instructions": object(n)}),
+            &|n| json!({"input": object(n)}),
+        ];
+        for shape in shapes {
+            assert_eq!(est(shape(4 * MIB)), len(4 * MIB).div_ceil(4) as u64);
+            assert!(est(shape(4 * MIB)) > 32_768);
+            assert!(est(shape(8 * MIB)) > est(shape(4 * MIB)) + MIB as u64 / 2);
+        }
     }
 
     /// Fix I1 (coordinator ruling): the chat rule counts the text of every role, so a replayed
