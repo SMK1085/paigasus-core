@@ -293,8 +293,11 @@ impl PolicyCache {
         let cache = Arc::clone(self);
         let flag = Arc::clone(&timed_out);
         let handle = tokio::spawn(async move {
-            // The cap keeps a hung source from blocking every later load of this entry.
-            let run = AssertUnwindSafe(tokio::time::timeout(cache.settings.max_stale, cache.load(key, floor, gen_now))).catch_unwind().await;
+            // The cap keeps a hung source from blocking every later load of this entry. It is one
+            // refresh interval, so a hung call delays recovery for no longer than that.
+            let run = AssertUnwindSafe(tokio::time::timeout(cache.settings.refresh.min(cache.settings.max_stale), cache.load(key, floor, gen_now)))
+                .catch_unwind()
+                .await;
             let ok = match run {
                 Ok(Ok(ok)) => ok,
                 Ok(Err(_elapsed)) => {
@@ -363,6 +366,12 @@ impl PolicyCache {
             {
                 good.loaded_at = Instant::now();
                 good.gen_at_load = gen_at_load;
+                // A remembered tenant set that does not compile is still a compile failure, not a good load.
+                if matches!(&good.data, Data::Tenant(t) if t.compiled.is_none()) {
+                    good.stale = true;
+                    counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "compile_error").increment(1);
+                    return false;
+                }
                 good.stale = false;
                 counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "ok").increment(1);
                 return true;
@@ -483,7 +492,14 @@ impl PolicyCache {
             }
             self.start_or_join(&mut inner, key, floor, Instant::now())
         };
-        inflight.done.await
+        // A hung source must not stop the pass: the load goes on in the background and the next pass joins it.
+        match tokio::time::timeout(self.settings.load_timeout, inflight.done.clone()).await {
+            Ok(ok) => ok,
+            Err(_) => {
+                self.count_timeout(&inflight);
+                false
+            }
+        }
     }
 
     fn evict_idle(&self) {
@@ -553,6 +569,7 @@ mod tests {
         tenant_calls: AtomicUsize,
         fail: AtomicBool,
         delay: Mutex<Duration>,
+        floor_delay: Mutex<Duration>,
         floor_text: Mutex<(String, String)>,
         tenant_text: Mutex<(String, String)>,
     }
@@ -564,6 +581,7 @@ mod tests {
                 tenant_calls: AtomicUsize::new(0),
                 fail: AtomicBool::new(false),
                 delay: Mutex::new(Duration::ZERO),
+                floor_delay: Mutex::new(Duration::ZERO),
                 floor_text: Mutex::new((FLOOR.into(), "f1".into())),
                 tenant_text: Mutex::new((TENANT.into(), "t1".into())),
             })
@@ -580,14 +598,17 @@ mod tests {
         fn set_delay(&self, d: Duration) {
             *self.delay.lock().unwrap() = d;
         }
+        fn set_floor_delay(&self, d: Duration) {
+            *self.floor_delay.lock().unwrap() = d;
+        }
         fn set_floor(&self, text: &str, version: &str) {
             *self.floor_text.lock().unwrap() = (text.into(), version.into());
         }
         fn set_tenant(&self, text: &str, version: &str) {
             *self.tenant_text.lock().unwrap() = (text.into(), version.into());
         }
-        async fn pause(&self) -> Result<(), SourceError> {
-            let d = *self.delay.lock().unwrap();
+        async fn pause(&self, extra: Duration) -> Result<(), SourceError> {
+            let d = (*self.delay.lock().unwrap()).max(extra);
             if !d.is_zero() {
                 tokio::time::sleep(d).await;
             }
@@ -599,14 +620,16 @@ mod tests {
     impl PolicySource for FakeSource {
         async fn floor(&self) -> Result<PolicyText, SourceError> {
             self.floor_calls.fetch_add(1, Ordering::SeqCst);
-            self.pause().await?;
+            // The content is read before the wait, like a source that has already read its data.
             let (text, version) = self.floor_text.lock().unwrap().clone();
+            let extra = *self.floor_delay.lock().unwrap();
+            self.pause(extra).await?;
             Ok(PolicyText { text, version })
         }
         async fn tenant(&self, _org: Uuid) -> Result<TenantPolicies, SourceError> {
             self.tenant_calls.fetch_add(1, Ordering::SeqCst);
-            self.pause().await?;
             let (text, version) = self.tenant_text.lock().unwrap().clone();
+            self.pause(Duration::ZERO).await?;
             Ok(TenantPolicies {
                 text,
                 catalog: vec!["read_file".into()],
@@ -911,5 +934,77 @@ mod tests {
         as_trait.invalidate_all();
         ready_floor(&cache, OnUnavailable::Closed).await;
         assert_eq!(src.floor_calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_floor_call_does_not_stop_the_refresh_pass() {
+        let src = FakeSource::new();
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        src.set_floor_delay(secs(3600));
+        tokio::time::advance(secs(30)).await;
+        let started = Instant::now();
+        cache.refresh_once().await;
+        assert_eq!(started.elapsed(), secs(1), "the pass waits load_timeout for the hung floor and goes on");
+        assert_eq!(src.tenant_calls(), 2, "the tenant was refreshed after the floor wait");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_load_starts_after_the_cap_of_a_hung_call() {
+        let src = FakeSource::new();
+        let cache = PolicyCache::new(src.clone(), settings());
+        ready_floor(&cache, OnUnavailable::Closed).await;
+        src.set_floor_delay(secs(3600));
+        cache.invalidate_all();
+        assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Unavailable));
+        tokio::time::advance(secs(10)).await;
+        assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Unavailable), "the hung call is still in flight");
+        assert_eq!(src.floor_calls(), 2, "the lookups joined the one hung call");
+        // The cap is one refresh interval (30 s) from the start of the hung call.
+        tokio::time::advance(secs(25)).await;
+        src.set_floor_delay(Duration::ZERO);
+        // Let the capped task run its timeout branch.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)), "a new load started and the source answered");
+        assert_eq!(src.floor_calls(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_invalidate_during_a_load_is_not_lost() {
+        for ou in [OnUnavailable::Closed, OnUnavailable::Open] {
+            let src = FakeSource::new();
+            let cache = PolicyCache::new(src.clone(), settings());
+            let floor = ready_floor(&cache, ou).await;
+            src.set_delay(Duration::from_millis(300));
+            let change = async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                src.set_tenant(r#"@id("t2") permit(principal, action, resource);"#, "t2");
+                cache.invalidate_all();
+            };
+            let (set, ()) = tokio::join!(cache.tenant(ORG, &floor, ou), change);
+            assert!(matches!(set, Lookup::Ready(_)), "the second load finishes inside load_timeout");
+            assert_eq!(src.tenant_calls(), 2, "the load that began before the invalidate is not served: {ou:?}");
+            assert_eq!(cache.lock().tenants[&ORG].good.as_ref().map(|g| g.version.clone()).as_deref(), Some("t2"));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_remembered_bad_set_is_a_compile_error_on_each_refresh() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let src = FakeSource::new();
+        src.set_tenant("permit((", "bad");
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Unavailable));
+        snap(&snapshotter);
+        tokio::time::advance(secs(30)).await;
+        cache.refresh_once().await;
+        let s = snap(&snapshotter);
+        assert_eq!(s.loads("compile_error"), 1, "the same bad version is a compile error again");
+        assert_eq!(s.loads("ok"), 1, "only the floor reload is ok");
+        assert_eq!(s.gauge(names::GATEWAY_TOOL_POLICY_STALE_ENTRIES), Some(1.0));
     }
 }
