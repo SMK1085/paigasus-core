@@ -3,7 +3,7 @@
 
 use std::str::FromStr;
 
-use cedar_policy::{AuthorizationError, Authorizer, Context, Decision, EntityId, EntityTypeName, EntityUid, PolicyId, Request, RestrictedExpression};
+use cedar_policy::{AuthorizationError, Authorizer, Context, Decision, Entities, EntityId, EntityTypeName, EntityUid, PolicyId, Request, RestrictedExpression};
 
 use super::compile::{PolicyOrigin, PolicyRef, RESOURCE_TYPE, ToolPolicies, action_entity};
 use super::input::map_input;
@@ -104,6 +104,17 @@ fn sorted(mut refs: Vec<PolicyRef>) -> Vec<PolicyRef> {
     refs
 }
 
+/// The Cedar request and the entities for the tool `name`, with the context of `call` (or the
+/// optimistic context for `None`). `None` if Cedar cannot build the request.
+pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Option<(Request, Entities)> {
+    let (action, entities) = action_entity(policies, &normalise(name));
+    let org = facts.org.as_hyphenated().to_string();
+    let principal = uid(&facts.principal.entity_type, &facts.principal.entity_id)?;
+    let resource = uid(RESOURCE_TYPE, &org)?;
+    let request = Request::new(principal, action, resource, context(call, facts, findings), None).ok()?;
+    Some((request, entities))
+}
+
 /// Decide one tool call. Pure: no I/O, no clock, no random numbers, no global state.
 ///
 /// A request that Cedar cannot build (an entity type in the facts that is not a valid name)
@@ -111,13 +122,7 @@ fn sorted(mut refs: Vec<PolicyRef>) -> Vec<PolicyRef> {
 /// `errored_forbid` true.
 #[must_use]
 pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Verdict {
-    let normalised = normalise(&call.name);
-    let (action, entities) = action_entity(policies, &normalised);
-    let org = facts.org.as_hyphenated().to_string();
-    let (Some(principal), Some(resource)) = (uid(&facts.principal.entity_type, &facts.principal.entity_id), uid(RESOURCE_TYPE, &org)) else {
-        return Verdict::unevaluable();
-    };
-    let Ok(request) = Request::new(principal, action, resource, context(Some(call), facts, findings), None) else {
+    let Some((request, entities)) = request(Some(call), &call.name, facts, findings, policies) else {
         return Verdict::unevaluable();
     };
     let response = Authorizer::new().is_authorized(&request, policies.set(), &entities);

@@ -9,9 +9,11 @@ mod compile;
 mod decide;
 pub(crate) mod input;
 mod normalise;
+mod optimistic;
 mod types;
 
 pub use compile::{CompileError, FloorPolicies, PolicyOrigin, PolicyRef, ToolPolicies};
 pub use decide::{Effect, Verdict, decide};
 pub use normalise::normalise;
+pub use optimistic::{ToolVerdict, decide_tool};
 pub use types::{Declared, Facts, Findings, NAME_COLLISION, RequestInfo, SessionInfo, ToolInput, ToolInvocation, UNPARSED_ARGUMENTS};

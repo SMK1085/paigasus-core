@@ -10,6 +10,7 @@ use std::sync::Arc;
 use cedar_policy::{Effect, Entities, Entity, EntityId, EntityTypeName, EntityUid, Policy, PolicyId, PolicySet};
 
 use super::normalise::normalise;
+use super::optimistic::{DROP_READS, optimistic};
 
 pub(crate) const ACTION_TYPE: &str = "Pgs::Gateway::Action";
 pub(crate) const GROUP_INVOKE: &str = "InvokeTool";
@@ -112,6 +113,8 @@ pub struct ToolPolicies {
     origins: HashMap<PolicyId, PolicyRef>,
     catalog: HashSet<String>,
     entities: Entities,
+    /// The optimistic set of § 6.1.6, built from `set`.
+    optimistic: PolicySet,
 }
 
 /// Parse one set. Return each policy with its `@id`, after the checks that both sets share.
@@ -229,9 +232,11 @@ impl ToolPolicies {
         let names: HashSet<String> = by_norm.into_keys().collect();
         ents.extend(names.iter().map(|n| Entity::new_no_attrs(action_uid(n), HashSet::from([invoke.clone()]))));
         let entities = Entities::from_entities(ents, None).map_err(|e| CompileError::Parse(e.to_string()))?;
+        let optimistic = optimistic(&set, DROP_READS, true);
         Ok(ToolPolicies {
             floor,
             set,
+            optimistic,
             origins,
             catalog: names,
             entities,
@@ -247,6 +252,11 @@ impl ToolPolicies {
     /// The merged policy set.
     pub(crate) fn set(&self) -> &PolicySet {
         &self.set
+    }
+
+    /// The optimistic set of § 6.1.6.
+    pub(crate) fn optimistic_set(&self) -> &PolicySet {
+        &self.optimistic
     }
 
     /// The set and `@id` of a merged policy id (`floor/<id>` or `tenant/<id>`).
