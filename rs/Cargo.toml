@@ -227,8 +227,9 @@ sea-orm-migration = { version = "2", default-features = false, features = [
 redis = { version = "1", default-features = false, features = [
   "tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots",
 ] }
-# cedar-policy — embedded Cedar authorization engine (ADR-0013). Pure evaluation; only
-# consumed by paigasus-iam-core + paigasus-iam. NOT in the wasm/binding tree.
+# cedar-policy — embedded Cedar authorization engine (ADR-0013). Pure evaluation; consumed by
+# paigasus-iam-core + paigasus-iam, and by paigasus-kernel under its off-by-default feature
+# `tool-policy` (SMA-752). NEVER in the wasm/binding tree (D21).
 cedar-policy = "4"
 # blake3 — decision-cache key hashing (`paigasus-iam`'s `adapters::authz::decision_cache`,
 # SMA-444 Task 14): a canonical `(principal, action, resource, context)` serialization is
