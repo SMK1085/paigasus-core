@@ -25,6 +25,10 @@ struct Mapped {
 ///
 /// The top level must be an object schema. The top-level record is level 1. Each nested
 /// object or array adds one level. A schema over `max_depth` levels is `TooDeep`.
+///
+/// A top-level object with `additionalProperties` and no `properties` maps to an empty
+/// record with no `dropped_fields` entry, because the top level has no path to report.
+/// A nested one is dropped with a reason.
 pub fn map_input_schema(schema: &Value, max_depth: usize) -> Result<(Value, Vec<DroppedField>), MappingError> {
     let obj = schema.as_object().ok_or(MappingError::NotAnObject)?;
     match obj.get("type") {
@@ -246,6 +250,20 @@ mod tests {
         let (rec, dropped) = map(json!({"type": "object", "properties": {"e": {"type": "object", "properties": {}}}}));
         assert!(dropped.is_empty());
         assert_eq!(attrs(&rec)["e"], json!({"type": "Record", "attributes": {}, "required": false}));
+    }
+
+    #[test]
+    fn a_nested_bare_object_is_an_empty_record_with_no_drop() {
+        let (rec, dropped) = map(json!({"type": "object", "properties": {"o": {"type": "object"}}}));
+        assert!(dropped.is_empty());
+        assert_eq!(attrs(&rec)["o"], json!({"type": "Record", "attributes": {}, "required": false}));
+    }
+
+    #[test]
+    fn a_top_level_additional_properties_only_schema_is_an_empty_record() {
+        let (rec, dropped) = map(json!({"type": "object", "additionalProperties": {"type": "string"}}));
+        assert!(dropped.is_empty());
+        assert!(attrs(&rec).is_empty());
     }
 
     #[test]

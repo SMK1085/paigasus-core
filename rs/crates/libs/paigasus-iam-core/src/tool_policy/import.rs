@@ -40,7 +40,7 @@ pub enum CatalogProblem {
 
 fn invalid(name: Option<&str>, message: impl Into<String>) -> CatalogProblem {
     CatalogProblem::Invalid {
-        name: name.map(str::to_owned),
+        name: name.map(|n| n.chars().take(64).collect()),
         message: message.into(),
     }
 }
@@ -129,7 +129,7 @@ enum Parsed {
 }
 
 fn parse_item(format: ImportFormat, item: &Value, namespace: Option<&str>, limits: &CatalogLimits) -> Result<Parsed, CatalogProblem> {
-    let tool = |name: &str, kind, schema: Option<&Value>, source| build_entry(namespace, name, kind, schema.cloned(), source, limits).map(|e| Parsed::Tool(Box::new(e)));
+    let tool = |name: &str, kind, schema: Option<&Value>, source| build_entry(namespace, name, kind, schema.filter(|v| !v.is_null()).cloned(), source, limits).map(|e| Parsed::Tool(Box::new(e)));
     let name_of = |v: &Value| v.get("name").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| invalid(None, "the tool has no name"));
     match format {
         ImportFormat::McpToolsList => {
@@ -257,6 +257,43 @@ mod tests {
         }
         let err = build_manual("deep", ToolKind::Function, Some(s), &limits()).unwrap_err();
         assert!(matches!(&err[0], CatalogProblem::Invalid { .. }));
+    }
+
+    #[test]
+    fn an_input_schema_of_exactly_64_kib_is_allowed() {
+        let make = |pad: usize| json!({"type": "object", "properties": {"q": {"type": "string", "description": "x".repeat(pad)}}});
+        let base = serde_json::to_vec(&make(0)).unwrap().len();
+        let exact = make(65536 - base);
+        assert_eq!(serde_json::to_vec(&exact).unwrap().len(), 65536);
+        assert!(build_manual("edge", ToolKind::Function, Some(exact), &limits()).is_ok());
+        assert!(build_manual("edge", ToolKind::Function, Some(make(65537 - base)), &limits()).is_err());
+    }
+
+    #[test]
+    fn a_very_long_name_is_capped_in_the_problem() {
+        let long = "x".repeat(10_000);
+        let doc = json!({"tools": [{"name": long}]});
+        let problems = parse_import(ImportFormat::McpToolsList, &doc, None, &limits()).unwrap_err();
+        match &problems[0] {
+            CatalogProblem::Invalid { name, message } => {
+                assert_eq!(name.as_ref().map(String::len), Some(64));
+                assert!(message.len() < 200, "{}", message.len());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let manual = build_manual(&"y".repeat(10_000), ToolKind::Function, None, &limits()).unwrap_err();
+        assert!(matches!(&manual[0], CatalogProblem::Invalid { name: Some(n), .. } if n.len() == 64));
+    }
+
+    #[test]
+    fn a_null_parameters_value_means_no_schema() {
+        let responses = json!([{"type": "function", "name": "a", "parameters": null}]);
+        let chat = json!([{"type": "function", "function": {"name": "a", "parameters": null}}]);
+        for (format, doc) in [(ImportFormat::OpenAiResponses, responses), (ImportFormat::OpenAiChatCompletions, chat)] {
+            let out = parse_import(format, &doc, None, &limits()).unwrap();
+            assert_eq!(out.tools[0].input_schema, None);
+            assert_eq!(out.tools[0].cedar_input_type, json!({"type": "Record", "attributes": {}}));
+        }
     }
 
     #[test]
