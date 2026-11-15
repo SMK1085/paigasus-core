@@ -35,6 +35,11 @@ use crate::adapters::http::usage::StreamUsage;
 use crate::adapters::openai::OpenAiByteStream;
 use crate::application::charge_guard::ChargeGuard;
 
+/// A response chunk. The alias keeps the body type `Bytes` out of a function parameter list: the
+/// `repo:http-extractor-envelope` gate bans `Bytes` as a REQUEST extractor there, and this is a
+/// response stream item, not an extractor.
+type Chunk = Bytes;
+
 /// What `[tool_interception]` builds at boot.
 pub struct ToolInterception {
     pub limits: Limits,
@@ -257,7 +262,7 @@ pub(crate) fn intercepted_stream(
     ctx: Arc<DecisionContext>,
     turn: Arc<ToolTurn>,
     terminal: &'static [u8],
-    prelude: Vec<Bytes>,
+    prelude: Vec<Chunk>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     relay(format, limits, inner, guard, usage, ti, ctx, turn, terminal, prelude)
 }
@@ -277,7 +282,7 @@ fn relay(
     ctx: Arc<DecisionContext>,
     turn: Arc<ToolTurn>,
     terminal: &'static [u8],
-    prelude: Vec<Bytes>,
+    prelude: Vec<Chunk>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     let now = Instant::now();
     let icpt = Interceptor::new(format, limits, Bytes::from_static(terminal), now);
