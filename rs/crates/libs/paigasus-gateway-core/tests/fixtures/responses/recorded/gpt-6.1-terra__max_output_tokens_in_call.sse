@@ -1,0 +1,126 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_0edb6e45cc6432cc006af881b42adc87d28e35ad2e03bd4177","object":"response","created_at":1794671028,"status":"in_progress","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":48,"max_tool_calls":null,"model":"gpt-6.1-terra","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"function","name":"write_file"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Write a file to the workspace.","name":"write_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false},"strict":true}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_0edb6e45cc6432cc006af881b42adc87d28e35ad2e03bd4177","object":"response","created_at":1794671028,"status":"in_progress","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":48,"max_tool_calls":null,"model":"gpt-6.1-terra","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"function","name":"write_file"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Write a file to the workspace.","name":"write_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false},"strict":true}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","type":"function_call","status":"in_progress","arguments":"","call_id":"call_XGXTduUjAliG5P2Uoe9RmHYI","name":"write_file"},"output_index":0,"sequence_number":2}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"{\"","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"UrAi7dodqUEV4y","output_index":0,"sequence_number":3}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"path","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"aunj4JwTcI2N","output_index":0,"sequence_number":4}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\":","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"9eWFbMPvV3V6sk","output_index":0,"sequence_number":5}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\"/","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"cz7dd206zX81z1","output_index":0,"sequence_number":6}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"workspace","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"8MEz3Vo","output_index":0,"sequence_number":7}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"/","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"7gjqJdSVqlc2dTF","output_index":0,"sequence_number":8}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"po","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"GrKscSAhnJnEwj","output_index":0,"sequence_number":9}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"em","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"gTauH9EFLS94vQ","output_index":0,"sequence_number":10}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":".txt","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"Rg9KjyjSKLvR","output_index":0,"sequence_number":11}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\",\"","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"321jROAq1ko3I","output_index":0,"sequence_number":12}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"content","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"nwVFA8liY","output_index":0,"sequence_number":13}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\":\"","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"lQdVwnxGh7JcF","output_index":0,"sequence_number":14}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"The","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"PwoXrGKJvsfMi","output_index":0,"sequence_number":15}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" sea","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"HZrxXbKdehLD","output_index":0,"sequence_number":16}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" unfolds","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"bVDKdNJC","output_index":0,"sequence_number":17}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" its","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"WQX7t18y1rj1","output_index":0,"sequence_number":18}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" silver","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"SYvphxvQT","output_index":0,"sequence_number":19}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" hands","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"fR4niDmdza","output_index":0,"sequence_number":20}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":",\\","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"qfF23RQyrriYLb","output_index":0,"sequence_number":21}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"n","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"wAG5tsSaG5jJ3ls","output_index":0,"sequence_number":22}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"And","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"rSTQwfqXsyUfs","output_index":0,"sequence_number":23}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" brushes","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"BIYY6e9t","output_index":0,"sequence_number":24}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" sleep","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"OWaiQ74IdV","output_index":0,"sequence_number":25}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" from","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"bexQfrLaqWP","output_index":0,"sequence_number":26}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" distant","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"IUdxn50S","output_index":0,"sequence_number":27}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" sands","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"agsAxuD3zr","output_index":0,"sequence_number":28}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":".\\","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"ttoMjQsecXOEuM","output_index":0,"sequence_number":29}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"n","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"q4b6nGlwWN088rP","output_index":0,"sequence_number":30}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"The","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"EQBv3ZoGnBcpl","output_index":0,"sequence_number":31}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" morning","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"3OMxlnzK","output_index":0,"sequence_number":32}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" pours","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"8oubUFAYMi","output_index":0,"sequence_number":33}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" a","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"bCFYsrO8WyFRJE","output_index":0,"sequence_number":34}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" golden","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"LhLPkuprl","output_index":0,"sequence_number":35}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":" thread","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"ZWpTIdkNN","output_index":0,"sequence_number":36}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\\n","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"UJ6inwOwlNoqsV","output_index":0,"sequence_number":37}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"Across","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","obfuscation":"LHkWxUq9PY","output_index":0,"sequence_number":38}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","arguments":"{\"path\":\"/workspace/poem.txt\",\"content\":\"The sea unfolds its silver hands,\\nAnd brushes sleep from distant sands.\\nThe morning pours a golden thread\\nAcross","item_id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","output_index":0,"sequence_number":39}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","type":"function_call","status":"incomplete","arguments":"{\"path\":\"/workspace/poem.txt\",\"content\":\"The sea unfolds its silver hands,\\nAnd brushes sleep from distant sands.\\nThe morning pours a golden thread\\nAcross","call_id":"call_XGXTduUjAliG5P2Uoe9RmHYI","name":"write_file"},"output_index":0,"sequence_number":40}
+
+event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"resp_0edb6e45cc6432cc006af881b42adc87d28e35ad2e03bd4177","object":"response","created_at":1794671028,"status":"incomplete","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":{"reason":"max_output_tokens"},"input_transformations":[],"instructions":null,"max_output_tokens":48,"max_tool_calls":null,"model":"gpt-6.1-terra","moderation":null,"output":[{"id":"fc_0edb6e45cc6432cc006af881b5774487d287d713399092b653","type":"function_call","status":"incomplete","arguments":"{\"path\":\"/workspace/poem.txt\",\"content\":\"The sea unfolds its silver hands,\\nAnd brushes sleep from distant sands.\\nThe morning pours a golden thread\\nAcross","call_id":"call_XGXTduUjAliG5P2Uoe9RmHYI","name":"write_file"}],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"function","name":"write_file"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Write a file to the workspace.","name":"write_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false},"strict":true}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":{"input_tokens":71,"input_tokens_details":{"cache_write_tokens":0,"cache_write_tokens_details":{"ttl_12h_tokens":0,"ttl_30m_tokens":0},"cached_tokens":0},"output_tokens":48,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":119},"user":null,"metadata":{}},"sequence_number":41}
+

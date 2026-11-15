@@ -4,7 +4,9 @@
 
 use serde_json::{Map, Value};
 
-use crate::json::{Malformed, opt_obj, opt_str, parse_strict};
+use crate::json::{Malformed, ResponsesDoc, opt_obj, opt_str, parse_strict, parse_strict_responses};
+use crate::responses::assembly::tool_call;
+use crate::responses::classify::{ItemClass, item_class};
 use crate::types::{Format, ToolCallKind};
 
 #[non_exhaustive]
@@ -17,11 +19,25 @@ pub enum ToolTurn {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TurnFacts {
     pub definitions: Vec<ToolDefinition>,
     pub prior_calls: Vec<PriorCall>,
     pub tool_results: Vec<ToolResultRef>,
+    /// `false` when the request does not list every tool the model may call (spec § 7.2).
+    /// The chat and Anthropic formats always list them, so they set `true`.
+    pub definitions_complete: bool,
+}
+
+impl Default for TurnFacts {
+    fn default() -> Self {
+        Self {
+            definitions: Vec::new(),
+            prior_calls: Vec::new(),
+            tool_results: Vec::new(),
+            definitions_complete: true,
+        }
+    }
 }
 
 /// A tool the caller declared. `Debug` prints `schema`; never log a definition with `{:?}`.
@@ -29,6 +45,8 @@ pub struct TurnFacts {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolDefinition {
     pub name: String,
+    /// The tool namespace of a Responses API definition. `None` for every other format.
+    pub namespace: Option<String>,
     pub kind: ToolCallKind,
     pub schema: Option<Value>,
 }
@@ -53,10 +71,11 @@ pub struct ToolResultRef {
 
 #[must_use]
 pub fn parse_request(format: Format, body: &[u8]) -> ToolTurn {
-    let parsed = parse_strict(body).and_then(|v| match format {
-        Format::OpenAiChat => openai(&v),
-        Format::AnthropicMessages => anthropic(&v),
-    });
+    let parsed = match format {
+        Format::OpenAiResponses => parse_strict_responses(body, ResponsesDoc::Request).and_then(|v| responses(&v)),
+        Format::OpenAiChat => parse_strict(body).and_then(|v| openai(&v)),
+        Format::AnthropicMessages => parse_strict(body).and_then(|v| anthropic(&v)),
+    };
     match parsed {
         Ok(f) => ToolTurn::Parsed(f),
         Err(_) => ToolTurn::Unavailable("malformed"),
@@ -89,6 +108,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                 let func = opt_obj(t.get("function"), "function")?.ok_or(Malformed("function"))?;
                 f.definitions.push(ToolDefinition {
                     name: req_str(func, "name")?,
+                    namespace: None,
                     kind: ToolCallKind::Function,
                     schema: func.get("parameters").cloned(),
                 });
@@ -97,6 +117,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                 let c = opt_obj(t.get("custom"), "custom")?.ok_or(Malformed("custom"))?;
                 f.definitions.push(ToolDefinition {
                     name: req_str(c, "name")?,
+                    namespace: None,
                     kind: ToolCallKind::Custom,
                     schema: None,
                 });
@@ -108,6 +129,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
         let d = obj(d)?;
         f.definitions.push(ToolDefinition {
             name: req_str(d, "name")?,
+            namespace: None,
             kind: ToolCallKind::LegacyFunctionCall,
             schema: d.get("parameters").cloned(),
         });
@@ -160,6 +182,100 @@ fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
     Ok((req_str(body, "name")?, opt_str(body.get(input), input)?.unwrap_or_default()))
 }
 
+/// The request side of a Responses turn (spec § 7.2), read by `parse_request`.
+///
+/// `tools[]` gives the definitions: a `function` or `custom` tool by name, the tools of a
+/// `namespace` tool with that namespace, and any other tool by its `type` (kind `Other`). A
+/// `tool_search` tool makes the set incomplete, as do an `additional_tools` and a
+/// `tool_search_output` input item. The `input` items of the client-run types of § 6.2 are the
+/// prior calls (read as a response reads them, `assembly::tool_call`), and each output item is a
+/// tool result. An `mcp_approval_response` refers to its request by `approval_request_id`, and the
+/// id of an `mcp_approval_request` call is its item `id`. A string `input` has no items.
+fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
+    let top = obj(v)?;
+    let mut f = TurnFacts::default();
+    for t in arr(top, "tools")? {
+        let t = obj(t)?;
+        let ty = req_str(t, "type")?;
+        match ty.as_str() {
+            "function" | "custom" => f.definitions.push(responses_definition(t, &ty, None)?),
+            "namespace" => {
+                let ns = req_str(t, "name")?;
+                for inner in arr(t, "tools")? {
+                    let inner = obj(inner)?;
+                    let ity = req_str(inner, "type")?;
+                    if !matches!(ity.as_str(), "function" | "custom") {
+                        return Err(Malformed("type"));
+                    }
+                    f.definitions.push(responses_definition(inner, &ity, Some(ns.clone()))?);
+                }
+            }
+            other => {
+                if other == "tool_search" {
+                    f.definitions_complete = false;
+                }
+                f.definitions.push(ToolDefinition {
+                    name: ty,
+                    namespace: None,
+                    kind: ToolCallKind::Other,
+                    schema: None,
+                });
+            }
+        }
+    }
+    // A string `input` is one user message. Only an array has items.
+    let items: &[Value] = match top.get("input") {
+        Some(Value::Array(a)) => a,
+        None | Some(Value::Null | Value::String(_)) => &[],
+        Some(_) => return Err(Malformed("input")),
+    };
+    for (i, item) in items.iter().enumerate() {
+        let item = obj(item)?;
+        // A message in the short form has no `type`.
+        let Some(ty) = opt_str(item.get("type"), "type")? else { continue };
+        match ty.as_str() {
+            // The referenced items are not in the request, so the history is unknown (D3, § 7.2).
+            "item_reference" => return Err(Malformed("item_reference")),
+            "additional_tools" | "tool_search_output" => f.definitions_complete = false,
+            "function_call_output" | "custom_tool_call_output" | "computer_call_output" | "local_shell_call_output" | "shell_call_output" | "apply_patch_call_output" => {
+                f.tool_results.push(ToolResultRef {
+                    call_id: opt_str(item.get("call_id"), "call_id")?,
+                    name: None,
+                });
+            }
+            "mcp_approval_response" => f.tool_results.push(ToolResultRef {
+                call_id: opt_str(item.get("approval_request_id"), "approval_request_id")?,
+                name: None,
+            }),
+            _ => {
+                // An unknown type is client-run of kind `Other` for a response (fail closed), but in
+                // a request it is just an item the gateway does not read (`message`, `reasoning`).
+                if let ItemClass::ClientRun(kind) = item_class(&ty)
+                    && kind != ToolCallKind::Other
+                {
+                    let c = tool_call(u32::try_from(i).map_err(|_| Malformed("input"))?, item, kind)?;
+                    f.prior_calls.push(PriorCall {
+                        id: c.id.clone(),
+                        name: c.name,
+                        arguments: c.arguments,
+                    });
+                }
+            }
+        }
+    }
+    Ok(f)
+}
+
+fn responses_definition(t: &Map<String, Value>, ty: &str, namespace: Option<String>) -> Result<ToolDefinition, Malformed> {
+    let function = ty == "function";
+    Ok(ToolDefinition {
+        name: req_str(t, "name")?,
+        namespace,
+        kind: if function { ToolCallKind::Function } else { ToolCallKind::Custom },
+        schema: if function { t.get("parameters").cloned() } else { None },
+    })
+}
+
 fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
     let mut f = TurnFacts::default();
@@ -168,6 +284,7 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
         match opt_str(t.get("type"), "type")?.as_deref() {
             None | Some("custom") => f.definitions.push(ToolDefinition {
                 name: req_str(t, "name")?,
+                namespace: None,
                 kind: ToolCallKind::AnthropicToolUse,
                 schema: t.get("input_schema").cloned(),
             }),
@@ -205,6 +322,23 @@ mod tests {
         match parse_request(format, v.to_string().as_bytes()) {
             ToolTurn::Parsed(f) => f,
             ToolTurn::Unavailable(r) => panic!("unavailable: {r}"),
+        }
+    }
+
+    #[test]
+    fn chat_and_anthropic_definitions_are_complete() {
+        let oa = facts(
+            Format::OpenAiChat,
+            json!({"model":"m","tools":[{"type":"function","function":{"name":"read"}}],"messages":[{"role":"user","content":"hi"}]}),
+        );
+        let an = facts(
+            Format::AnthropicMessages,
+            json!({"model":"m","tools":[{"name":"read","input_schema":{}}],"messages":[{"role":"user","content":"hi"}]}),
+        );
+        for f in [oa, an] {
+            assert!(f.definitions_complete);
+            assert!(!f.definitions.is_empty());
+            assert!(f.definitions.iter().all(|d| d.namespace.is_none()));
         }
     }
 
@@ -305,6 +439,107 @@ mod tests {
     fn a_malformed_request_is_unavailable_never_empty() {
         for bad in [&b"{"[..], br#"{"a":1,"a":2}"#, br#"{"messages":"x"}"#, br#"{"tools":[{"type":"function","function":{"name":1}}]}"#] {
             assert!(matches!(parse_request(Format::OpenAiChat, bad), ToolTurn::Unavailable(_)), "{}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    #[test]
+    fn a_responses_request_yields_definitions_calls_and_results() {
+        let f = responses(&json!({"model":"m",
+            "tools":[{"type":"function","name":"read","parameters":{"type":"object"}},
+                     {"type":"custom","name":"sql"},
+                     {"type":"namespace","name":"db","tools":[{"type":"function","name":"query","parameters":{}},{"type":"custom","name":"raw"}]},
+                     {"type":"web_search"}],
+            "input":[{"role":"user","content":"hi"},
+                     {"type":"function_call","id":"fc_1","call_id":"c1","name":"read","arguments":"{\"p\":1}","status":"completed"},
+                     {"type":"function_call_output","call_id":"c1","output":"SECRET"},
+                     {"type":"custom_tool_call","id":"ctc_1","call_id":"c2","name":"sql","input":"SELECT 1"},
+                     {"type":"custom_tool_call_output","call_id":"c2","output":"SECRET"},
+                     {"type":"shell_call","id":"sh_1","call_id":"c3","status":"completed","action":{"commands":["ls"]}},
+                     {"type":"shell_call_output","call_id":"c3","output":[]},
+                     {"type":"computer_call_output","call_id":"c4","output":{}},
+                     {"type":"local_shell_call_output","call_id":"c5","output":"x"},
+                     {"type":"apply_patch_call_output","call_id":"c6","status":"completed"},
+                     {"type":"mcp_approval_request","id":"mcpr_1","name":"rm","server_label":"srv","arguments":"{}"},
+                     {"type":"mcp_approval_response","approval_request_id":"mcpr_1","approve":true},
+                     {"type":"reasoning","id":"rs_1","summary":[]}]}))
+        .unwrap();
+        assert!(f.definitions_complete);
+        assert_eq!(
+            f.definitions.iter().map(|d| (d.name.as_str(), d.namespace.as_deref(), d.kind)).collect::<Vec<_>>(),
+            [
+                ("read", None, ToolCallKind::Function),
+                ("sql", None, ToolCallKind::Custom),
+                ("query", Some("db"), ToolCallKind::Function),
+                ("raw", Some("db"), ToolCallKind::Custom),
+                ("web_search", None, ToolCallKind::Other),
+            ]
+        );
+        assert!(f.definitions[0].schema.is_some() && f.definitions[1].schema.is_none());
+        assert_eq!(
+            f.prior_calls.iter().map(|c| (c.id.as_deref(), c.name.as_str())).collect::<Vec<_>>(),
+            [(Some("c1"), "read"), (Some("c2"), "sql"), (Some("c3"), "shell"), (Some("mcpr_1"), "rm")]
+        );
+        assert_eq!(f.prior_calls[0].arguments, "{\"p\":1}");
+        assert_eq!(f.prior_calls[1].arguments, "SELECT 1");
+        let ids: Vec<_> = f.tool_results.iter().map(|r| r.call_id.as_deref().unwrap()).collect();
+        assert_eq!(ids, ["c1", "c2", "c3", "c4", "c5", "c6", "mcpr_1"]);
+        assert!(!format!("{f:?}").contains("SECRET"), "tool result content is never kept");
+    }
+
+    #[test]
+    fn a_string_input_has_no_calls() {
+        let f = responses(&json!({"model":"m","input":"hi"})).unwrap();
+        assert_eq!(f, TurnFacts::default());
+        assert!(f.definitions_complete);
+    }
+
+    #[test]
+    fn run_time_tools_make_definitions_incomplete() {
+        for v in [
+            json!({"tools":[{"type":"tool_search"}],"input":"hi"}),
+            json!({"input":[{"type":"additional_tools","id":"at_1","tools":[]}]}),
+            json!({"input":[{"type":"tool_search_output","id":"tso_1","tools":[]}]}),
+        ] {
+            assert!(!responses(&v).unwrap().definitions_complete, "{v}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_responses_request_is_malformed() {
+        for v in [
+            json!([]),
+            json!({"tools":"x"}),
+            json!({"tools":[{"name":"f"}]}),
+            json!({"tools":[{"type":"function"}]}),
+            json!({"tools":[{"type":"namespace","name":"n","tools":[{"type":"web_search"}]}]}),
+            json!({"input":["x"]}),
+            json!({"input":[{"type":"item_reference","id":"x"}]}),
+            json!({"input":1}),
+            json!({"input":{"type":"function_call"}}),
+            json!({"input":true}),
+            json!({"input":[{"type":"function_call","name":"f"}]}),
+        ] {
+            assert!(responses(&v).is_err(), "{v}");
+        }
+    }
+
+    #[test]
+    fn parse_request_reads_a_responses_request() {
+        let body = json!({"model":"m","stream":true,
+            "tools":[{"type":"function","name":"read","parameters":{"type":"object","properties":{"Id":{"type":"integer","maximum":1e300},"constructor":{}}}}],
+            "metadata":{"Id":"x"},
+            "input":[{"type":"function_call","id":"fc_1","call_id":"c1","name":"read","arguments":"{}","status":"completed"},
+                     {"type":"function_call_output","call_id":"c1","output":"SECRET"}]});
+        let f = facts(Format::OpenAiResponses, body);
+        assert_eq!(f.definitions.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["read"]);
+        assert_eq!(f.prior_calls.iter().map(|c| c.id.as_deref()).collect::<Vec<_>>(), [Some("c1")]);
+        assert_eq!(f.tool_results.len(), 1);
+        for bad in [&b"{"[..], br#"{"a":1,"a":2}"#, br#"{"input":[{"type":"item_reference","id":"x"}]}"#, br#"{"Type":"x","type":"y"}"#] {
+            assert!(
+                matches!(parse_request(Format::OpenAiResponses, bad), ToolTurn::Unavailable("malformed")),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
         }
     }
 }

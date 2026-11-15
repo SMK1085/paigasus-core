@@ -56,6 +56,7 @@ pub struct ChargeGuard {
     reported: Option<u64>,
     phase: Phase,
     ids: Option<RequestIds>,
+    endpoint: &'static str,
 }
 
 impl ChargeGuard {
@@ -70,6 +71,7 @@ impl ChargeGuard {
             reported: None,
             phase: Phase::Admitted,
             ids: None,
+            endpoint: "chat_completions",
         }
     }
 
@@ -86,6 +88,11 @@ impl ChargeGuard {
     /// stream runs with `current_ids() == None` (SMA-504 § 4.3 situation 3).
     pub fn set_ids(&mut self, ids: Option<RequestIds>) {
         self.ids = ids;
+    }
+
+    /// The endpoint name for the `chat completion metered` line. The default is `chat_completions`.
+    pub fn set_endpoint(&mut self, endpoint: &'static str) {
+        self.endpoint = endpoint;
     }
 
     /// Just before the egress call.
@@ -162,9 +169,9 @@ impl Drop for ChargeGuard {
         let (request_id, correlation_id) = self.ids.map(|ids| (ids.request_id.to_string(), ids.correlation_id.to_string())).unwrap_or_default();
         // The per-org spend record for both paths, fail-open spend included (§ 4.6).
         if tokens > 0 {
-            tracing::info!(org = %org, tokens, source = source.as_label(), outcome, request_id = %request_id, correlation_id = %correlation_id, "chat completion metered");
+            tracing::info!(org = %org, tokens, source = source.as_label(), outcome, request_id = %request_id, correlation_id = %correlation_id, endpoint = self.endpoint, "chat completion metered");
         } else {
-            tracing::debug!(org = %org, tokens, source = source.as_label(), outcome, request_id = %request_id, correlation_id = %correlation_id, "chat completion metered");
+            tracing::debug!(org = %org, tokens, source = source.as_label(), outcome, request_id = %request_id, correlation_id = %correlation_id, endpoint = self.endpoint, "chat completion metered");
         }
     }
 }
@@ -291,6 +298,26 @@ mod tests {
         );
         assert!(lines[0].contains("0190a100-0000-7000-8000-0000000000a1"), "the org: {}", lines[0]);
         assert!(lines[1].contains("outcome=\"store_unavailable\"") && lines[1].contains("tokens=3"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn the_metered_line_names_the_endpoint() {
+        let (logs, _g) = paigasus_logging::test_support::capture_logs_at(tracing::Level::INFO);
+        let store = ScriptedStore::new(admit);
+        let mut chat = guard_with(store.clone(), Some(ticket()), NoTicket::NoBudget);
+        chat.mark_sent();
+        chat.set_reported(7);
+        drop(chat);
+        let mut responses = guard_with(store, Some(ticket()), NoTicket::NoBudget);
+        responses.set_endpoint("responses");
+        responses.mark_sent();
+        responses.set_reported(8);
+        drop(responses);
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains("chat completion metered")).collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].contains("endpoint=\"chat_completions\""), "the default: {}", lines[0]);
+        assert!(lines[1].contains("endpoint=\"responses\""), "{}", lines[1]);
     }
 
     /// Spec § 5.8, memory: a guard dropped on a plain thread charges at once (no spawn).

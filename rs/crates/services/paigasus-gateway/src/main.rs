@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use paigasus_gateway::adapters::http::interception::ToolInterception;
-use paigasus_gateway::adapters::http::{AppState, router};
+use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::limits::build_limits;
 use paigasus_gateway::adapters::openai::OpenAiClient;
@@ -103,6 +103,14 @@ async fn serve() -> anyhow::Result<()> {
             Arc::new(ToolInterception {
                 limits: config.tool_interception.limits(),
                 decider: Arc::new(paigasus_gateway_core::AllowAll),
+            })
+        }),
+        responses: config.responses.enabled.then(|| {
+            tracing::info!("the responses route is on (SMA-769)");
+            Arc::new(ResponsesSettings {
+                max_request_bytes: config.responses.max_request_bytes,
+                max_record_bytes: config.responses.max_record_bytes,
+                max_held_bytes: config.responses.max_held_bytes,
             })
         }),
     };

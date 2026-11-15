@@ -29,8 +29,8 @@ use paigasus_gateway_core::{
 };
 use paigasus_observability::names;
 
-use crate::adapters::http::chat::{feed_scan, finish_scan};
-use crate::adapters::http::usage::UsageScanner;
+use crate::adapters::http::relay::{feed_scan, finish_scan};
+use crate::adapters::http::usage::StreamUsage;
 use crate::adapters::openai::OpenAiByteStream;
 use crate::application::charge_guard::ChargeGuard;
 
@@ -60,13 +60,13 @@ pub(crate) enum BodyOutcome {
 
 /// Parse, decide and rewrite one complete 2xx body. The usage read happened on the ORIGINAL body
 /// before this runs (D24), so nothing here changes the charge.
-pub(crate) async fn intercept_body(ti: &ToolInterception, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, body: &[u8]) -> BodyOutcome {
+pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format: Format, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, body: &[u8]) -> BodyOutcome {
     // The body cap is `max_held_bytes` (spec § 5.2).
-    let calls = match parse_body(Format::OpenAiChat, body, ti.limits.max_held_bytes) {
+    let calls = match parse_body(format, body, limits.max_held_bytes) {
         Ok(c) => c,
         Err(_) => {
             record(Metric::OnFailure("malformed"));
-            return match ti.limits.on_failure {
+            return match limits.on_failure {
                 OnFailure::Block => BodyOutcome::Refuse,
                 OnFailure::Allow => BodyOutcome::Forward { rewritten: None, report: None },
             };
@@ -75,16 +75,25 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, ctx: Arc<DecisionConte
     if calls.calls.is_empty() && calls.unenforceable.is_empty() {
         return BodyOutcome::Forward { rewritten: None, report: None };
     }
+    // SMA-769 (ruling F7, R15): a Responses item that is not `"completed"` is a truncation. The
+    // stream counts it and, under `on_failure = allow`, passes the hold through unchanged; the
+    // body does the same. Under `block` the forced `Truncated` wins over the decision below.
+    if calls.is_truncated() {
+        record(Metric::OnFailure("truncated"));
+        if limits.on_failure == OnFailure::Allow {
+            return BodyOutcome::Forward { rewritten: None, report: None };
+        }
+    }
     let n = calls.calls.len();
     let (decisions, basis) = if n == 0 {
         (Vec::new(), Basis::Decider)
     } else {
         let fut = ti.decider.decide(ctx, turn, calls.calls.clone());
-        match tokio::time::timeout(ti.limits.decide_timeout, fut).await {
+        match tokio::time::timeout(limits.decide_timeout, fut).await {
             Ok(Ok(d)) if d.len() == n => (d, Basis::Decider),
             _ => {
                 record(Metric::OnFailure("decider_error"));
-                match ti.limits.on_failure {
+                match limits.on_failure {
                     OnFailure::Block => (vec![Decision::Block { code: BlockCode::DeciderError }; n], Basis::OnFailure),
                     OnFailure::Allow => (vec![Decision::Allow; n], Basis::OnFailure),
                 }
@@ -105,7 +114,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, ctx: Arc<DecisionConte
 struct Relay {
     /// `None` once the upstream has ended, failed, or been drained.
     inner: Option<OpenAiByteStream>,
-    scan: UsageScanner,
+    scan: StreamUsage,
     guard: Option<ChargeGuard>,
     icpt: Interceptor,
     ti: Arc<ToolInterception>,
@@ -203,36 +212,43 @@ impl Relay {
 /// 3. On the upstream end: `finish_scan`, then [`Interceptor::finish`].
 /// 4. Decisions run one at a time (P-5).
 /// 5. Nothing is spawned.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn intercepted_stream(
+    format: Format,
+    limits: Limits,
     inner: OpenAiByteStream,
     guard: Option<ChargeGuard>,
+    usage: StreamUsage,
     ti: Arc<ToolInterception>,
     ctx: Arc<DecisionContext>,
     turn: Arc<ToolTurn>,
     terminal: &'static [u8],
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
-    relay(Format::OpenAiChat, inner, guard, ti, ctx, turn, terminal)
+    relay(format, limits, inner, guard, usage, ti, ctx, turn, terminal)
 }
 
-/// [`intercepted_stream`] for any wire format. Only OpenAI chat is wired in SMA-749 (D26); the
-/// unit tests drive an Anthropic stream through it, because only that format has more than one
-/// hold per stream (an OpenAI stream carries tool calls in choice 0 only), and P-5 and the
-/// dropped stale decision are about the second hold.
+/// [`intercepted_stream`] for any wire format. The unit tests drive an Anthropic stream through
+/// it, because only that format has more than one hold per stream (an OpenAI chat stream
+/// carries tool calls in choice 0 only), and P-5 and the dropped stale decision are about the
+/// second hold.
+#[allow(clippy::too_many_arguments)]
 fn relay(
     format: Format,
+    limits: Limits,
     inner: OpenAiByteStream,
     guard: Option<ChargeGuard>,
+    usage: StreamUsage,
     ti: Arc<ToolInterception>,
     ctx: Arc<DecisionContext>,
     turn: Arc<ToolTurn>,
     terminal: &'static [u8],
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     let now = Instant::now();
-    let icpt = Interceptor::new(format, ti.limits, Bytes::from_static(terminal), now);
-    let sleep = Box::pin(tokio::time::sleep(ti.limits.keepalive));
+    let icpt = Interceptor::new(format, limits, Bytes::from_static(terminal), now);
+    let sleep = Box::pin(tokio::time::sleep(limits.keepalive));
     let start = Relay {
         inner: Some(inner),
-        scan: UsageScanner::new(),
+        scan: usage,
         guard,
         icpt,
         ti,
@@ -288,6 +304,7 @@ mod tests {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
     use super::*;
+    use crate::adapters::http::usage::UsageScanner;
 
     /// A metric name, its labels and its value.
     type Sample = (String, Vec<(String, String)>, DebugValue);
@@ -375,7 +392,7 @@ mod tests {
         let ti = Arc::new(ToolInterception { limits, decider });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
-        let out: Vec<Bytes> = relay(Format::AnthropicMessages, upstream, None, ti, ctx, turn, TERMINAL)
+        let out: Vec<Bytes> = relay(Format::AnthropicMessages, ti.limits, upstream, None, StreamUsage::Chat(UsageScanner::new()), ti, ctx, turn, TERMINAL)
             .map(|r| r.expect("infallible"))
             .collect()
             .await;
@@ -434,10 +451,20 @@ mod tests {
         });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
-        let out: Vec<Bytes> = intercepted_stream(upstream, Some(sent_guard(&store)), ti, ctx, turn, TERMINAL_SSE_ERROR.as_bytes())
-            .map(|r| r.expect("infallible"))
-            .collect()
-            .await;
+        let out: Vec<Bytes> = intercepted_stream(
+            Format::OpenAiChat,
+            ti.limits,
+            upstream,
+            Some(sent_guard(&store)),
+            StreamUsage::Chat(UsageScanner::new()),
+            ti,
+            ctx,
+            turn,
+            TERMINAL_SSE_ERROR.as_bytes(),
+        )
+        .map(|r| r.expect("infallible"))
+        .collect()
+        .await;
         let text = String::from_utf8(out.concat()).expect("utf-8");
         assert_eq!(text.matches(TERMINAL_SSE_ERROR.trim()).count(), 1, "{text}");
         assert_eq!(store.charges(), vec![7]);

@@ -1,0 +1,36 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_0b7264903406f7a8006af881385b7487d28ee813adf3f06d29","object":"response","created_at":1794670904,"status":"in_progress","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"shell"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"shell","environment":{"type":"local"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_0b7264903406f7a8006af881385b7487d28ee813adf3f06d29","object":"response","created_at":1794670904,"status":"in_progress","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"shell"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"shell","environment":{"type":"local"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"sh_0b7264903406f7a8006af8813949e487d2a821f75aa5d88572","type":"shell_call","status":"in_progress","action":{"commands":[],"max_output_length":null,"timeout_ms":null},"call_id":"call_ME9Ycs1H6p1jOeVWQlkk5Y1r","environment":null},"output_index":0,"sequence_number":2}
+
+event: response.shell_call_command.added
+data: {"type":"response.shell_call_command.added","command":"","command_index":0,"output_index":0,"sequence_number":3}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","command_index":0,"delta":"ls","obfuscation":"a1DzgOD5hVmFP0","output_index":0,"sequence_number":4}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","command_index":0,"delta":" -","obfuscation":"40YpvNp4ynYbpF","output_index":0,"sequence_number":5}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","command_index":0,"delta":"la","obfuscation":"1hNq0SO0fGlKO4","output_index":0,"sequence_number":6}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","command_index":0,"delta":";","obfuscation":"hbKmKirwUQ6wviJ","output_index":0,"sequence_number":7}
+
+event: response.shell_call_command.delta
+data: {"type":"response.shell_call_command.delta","command_index":0,"delta":" date","obfuscation":"JSDI1RO5Hsu","output_index":0,"sequence_number":8}
+
+event: response.shell_call_command.done
+data: {"type":"response.shell_call_command.done","command":"ls -la; date","command_index":0,"output_index":0,"sequence_number":9}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"sh_0b7264903406f7a8006af8813949e487d2a821f75aa5d88572","type":"shell_call","status":"completed","action":{"commands":["ls -la; date"],"max_output_length":20000,"timeout_ms":null},"call_id":"call_ME9Ycs1H6p1jOeVWQlkk5Y1r","environment":null},"output_index":0,"sequence_number":10}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_0b7264903406f7a8006af881385b7487d28ee813adf3f06d29","object":"response","created_at":1794670904,"status":"completed","access_programs":{"cyber":"standard"},"background":false,"completed_at":1794670905,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[{"id":"sh_0b7264903406f7a8006af8813949e487d2a821f75aa5d88572","type":"shell_call","status":"completed","action":{"commands":["ls -la; date"],"max_output_length":20000,"timeout_ms":null},"call_id":"call_ME9Ycs1H6p1jOeVWQlkk5Y1r","environment":null}],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":{"type":"shell"},"tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"shell","environment":{"type":"local"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":{"input_tokens":256,"input_tokens_details":{"cache_write_tokens":0,"cache_write_tokens_details":{"ttl_12h_tokens":0,"ttl_30m_tokens":0},"cached_tokens":0},"output_tokens":29,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":285},"user":null,"metadata":{}},"sequence_number":11}
+

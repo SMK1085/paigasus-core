@@ -19,6 +19,18 @@ pub enum ToolCallKind {
     AnthropicToolUse,
     /// Any other tool-call shape. Held and decided, never passed unchecked (fail closed).
     Other,
+    /// A Responses API `computer_call` item.
+    Computer,
+    /// A Responses API `local_shell_call` item.
+    LocalShell,
+    /// A Responses API `shell_call` item.
+    Shell,
+    /// A Responses API `apply_patch_call` item.
+    ApplyPatch,
+    /// A Responses API `tool_search_call` item.
+    ToolSearch,
+    /// A Responses API `mcp_approval_request` item.
+    McpApprovalRequest,
 }
 
 impl ToolCallKind {
@@ -31,6 +43,12 @@ impl ToolCallKind {
             ToolCallKind::LegacyFunctionCall => "legacy_function_call",
             ToolCallKind::AnthropicToolUse => "tool_use",
             ToolCallKind::Other => "other",
+            ToolCallKind::Computer => "computer",
+            ToolCallKind::LocalShell => "local_shell",
+            ToolCallKind::Shell => "shell",
+            ToolCallKind::ApplyPatch => "apply_patch",
+            ToolCallKind::ToolSearch => "tool_search",
+            ToolCallKind::McpApprovalRequest => "mcp_approval_request",
         }
     }
 }
@@ -54,8 +72,21 @@ pub struct ToolCall {
     /// The upstream's call id. `None` for a legacy `function_call`.
     pub id: Option<String>,
     pub name: String,
+    /// The tool namespace of a Responses API call. `None` for every other format.
+    pub namespace: Option<String>,
     pub kind: ToolCallKind,
     pub arguments: String,
+}
+
+impl ToolCall {
+    /// `"<namespace>.<name>"`, or `name` when the call has no namespace.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match &self.namespace {
+            Some(ns) => format!("{ns}.{}", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// The decider's answer for one call.
@@ -124,11 +155,13 @@ impl Basis {
     }
 }
 
-/// One hold: an OpenAI choice, or an Anthropic content block (D10, D11).
+/// One hold: an OpenAI choice, an Anthropic content block (D10, D11), or a whole Responses
+/// API response. `Response` is the last variant, so it sorts after every `Block`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HoldKey {
     Choice(u32),
     Block(u32),
+    Response,
 }
 
 /// Which provider wire format a stream or body uses.
@@ -137,6 +170,8 @@ pub enum HoldKey {
 pub enum Format {
     OpenAiChat,
     AnthropicMessages,
+    /// The OpenAI Responses API (`/v1/responses`, SMA-769).
+    OpenAiResponses,
 }
 
 #[cfg(test)]
@@ -175,5 +210,42 @@ mod tests {
         let mut keys = vec![HoldKey::Block(0), HoldKey::Choice(1), HoldKey::Choice(0)];
         keys.sort();
         assert_eq!(keys, [HoldKey::Choice(0), HoldKey::Choice(1), HoldKey::Block(0)]);
+    }
+
+    #[test]
+    fn responses_kinds_have_labels() {
+        let got = [
+            ToolCallKind::Computer,
+            ToolCallKind::LocalShell,
+            ToolCallKind::Shell,
+            ToolCallKind::ApplyPatch,
+            ToolCallKind::ToolSearch,
+            ToolCallKind::McpApprovalRequest,
+        ]
+        .map(ToolCallKind::as_str);
+        assert_eq!(got, ["computer", "local_shell", "shell", "apply_patch", "tool_search", "mcp_approval_request"]);
+    }
+
+    #[test]
+    fn a_namespace_prefixes_the_display_name() {
+        let mut c = ToolCall {
+            choice: 0,
+            position: 0,
+            id: None,
+            name: "f".to_owned(),
+            namespace: Some("ns".to_owned()),
+            kind: ToolCallKind::Function,
+            arguments: String::new(),
+        };
+        assert_eq!(c.display_name(), "ns.f");
+        c.namespace = None;
+        assert_eq!(c.display_name(), "f");
+    }
+
+    #[test]
+    fn the_response_hold_sorts_last() {
+        let mut keys = vec![HoldKey::Response, HoldKey::Block(0), HoldKey::Choice(0)];
+        keys.sort();
+        assert_eq!(keys, [HoldKey::Choice(0), HoldKey::Block(0), HoldKey::Response]);
     }
 }

@@ -632,3 +632,1143 @@ pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
     }
     format!("{prefix}{}{suffix}", frames.concat()).into_bytes()
 }
+
+// ---- Responses (SMA-769 § 10.3) ----------------------------------------------------------------
+
+/// The kinds of output item the Responses generator makes: every class of spec § 6.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RKind {
+    Message,
+    Reasoning,
+    Function,
+    Custom,
+    Computer,
+    LocalShell,
+    Shell,
+    ApplyPatch,
+    ToolSearch,
+    McpApproval,
+    WebSearch,
+    FileSearch,
+    /// A `function_call_output` item in the output: client-run, kind `Other` (fail closed).
+    Other,
+}
+
+impl RKind {
+    /// Client-run: held and decided (§ 6.2).
+    pub fn client_run(self) -> bool {
+        !matches!(self, RKind::Message | RKind::Reasoning | RKind::WebSearch | RKind::FileSearch)
+    }
+
+    fn has_call_id(self) -> bool {
+        self.client_run() && self != RKind::McpApproval
+    }
+
+    fn id_prefix(self) -> &'static str {
+        match self {
+            RKind::Message => "msg",
+            RKind::Reasoning => "rs",
+            RKind::Function => "fc",
+            RKind::Custom => "ctc",
+            RKind::Computer => "cu",
+            RKind::LocalShell => "lsh",
+            RKind::Shell => "sh",
+            RKind::ApplyPatch => "apc",
+            RKind::ToolSearch => "ts",
+            RKind::McpApproval => "mcpr",
+            RKind::WebSearch => "ws",
+            RKind::FileSearch => "fs",
+            RKind::Other => "fco",
+        }
+    }
+}
+
+/// One output item. `name` is `read_file`/`send_mail` or a `blocked_*` name for the kinds that
+/// carry a name (function, custom, MCP approval request); a `blocked_*` item has `CANARY` in its
+/// `text`. `text` is the arguments, the input, the message or summary text, the shell command, the
+/// patch body, or the query.
+#[derive(Debug, Clone)]
+pub struct RItem {
+    pub kind: RKind,
+    pub name: &'static str,
+    pub text: String,
+    pub pieces: usize,
+    pub namespace: Option<&'static str>,
+}
+
+impl RItem {
+    fn new(kind: RKind, blocked: bool, n: usize, s: &str, pieces: usize, namespaced: bool) -> Self {
+        let named = matches!(kind, RKind::Function | RKind::Custom | RKind::McpApproval);
+        let blocked = blocked && named;
+        let name = if !named {
+            ""
+        } else if blocked {
+            BLOCKED[n]
+        } else {
+            ALLOWED[n]
+        };
+        let text = match kind {
+            RKind::Function | RKind::McpApproval if blocked => format!("{{\"v\":\"CANARY-{s}\"}}"),
+            RKind::Function | RKind::McpApproval => format!("{{\"v\":\"{s}\"}}"),
+            RKind::Custom if blocked => format!("CANARY-{s}"),
+            RKind::Message | RKind::Reasoning | RKind::WebSearch | RKind::FileSearch if s.is_empty() => "t".to_owned(),
+            _ => s.to_owned(),
+        };
+        let namespace = (namespaced && matches!(kind, RKind::Function | RKind::Custom)).then_some("fs");
+        RItem { kind, name, text, pieces, namespace }
+    }
+
+    /// An allowed item of `kind`, which a quirk needs.
+    fn plain(kind: RKind) -> Self {
+        RItem::new(kind, false, 0, "a", 2, false)
+    }
+}
+
+/// One quirk per client raise path of spec § 3.2 and per rule of § 6.4 (ruling F3). The doc line
+/// names the rule (or the raise path) that the quirk is placed to reach first, when it is the only
+/// quirk; the variant used depends on the quirk's position value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RQuirk {
+    /// § 3.2 openai-node `event: error` raise; § 6.3: an `event:` name that differs from `data.type`.
+    EventErrorName,
+    /// § 3.2 truthy top-level `error` (every SDK raises); § 6.3: an upstream error record.
+    TopLevelError,
+    /// § 3.2 `[DONE]` prefix match (Python stops) vs exact match (Node raises): `[DONE]x`.
+    DoneTrailing,
+    /// § 3.2 unknown event type (Node raises); § 6.3: any other type is malformed.
+    UnknownType,
+    /// R4: an `output_item.added` that reuses an earlier `output_index`.
+    RepeatedIndex,
+    /// R6: a function delta before its item's `added` (no open item has its index).
+    DeltaBeforeAdded,
+    /// R6: an `item_id` that is not the open item's `id` (openai-node raises).
+    ItemIdMismatch,
+    /// R6 and R-e: a function delta on a custom or a message item.
+    WrongItemTypeEvent,
+    /// R9 and R-b: a message whose `done` item is a function call.
+    TypeChangesAtDone,
+    /// R9 and R-b: a message whose terminal `output` item is a function call.
+    TypeChangesInTerminal,
+    /// R10: a call in the terminal `output` that never streamed; at an odd position a record after
+    /// the terminal makes openai-node raise after it emitted that output (ruling T7e).
+    TerminalItemNeverStreamed,
+    /// R8 and § 3.2 LangChain `AttributeError`: `item: null` on `added`.
+    ItemNull,
+    /// R8: an item `id` that an earlier item has.
+    DuplicateId,
+    /// R8: a `call_id` that an earlier item has.
+    DuplicateCallId,
+    /// R8: an upstream item `id` with the reserved `msg_paigasus_` prefix.
+    ReservedId,
+    /// R2: a hidden call in `response.in_progress.output` (or `response.created.output`).
+    EarlyOutput,
+    /// R9: a terminal function item with a new `name`.
+    TerminalNewName,
+    /// R9: a terminal function item with a new `namespace`.
+    TerminalNewNamespace,
+    /// R11: `added.item.arguments` that is not `""` (LangChain reads it).
+    AddedArgumentsNotEmpty,
+    /// R3 and R-d: a terminal event with no `output` (Python fills it from partial items).
+    TerminalOutputAbsent,
+    /// R3: a terminal event with `output: null`.
+    TerminalOutputNull,
+    /// R15 and § 3.2 `response.failed` raises: the last client-run item has no `done`, and the
+    /// terminal is `response.failed` with its partial item (even) or with no `output` (odd: R3
+    /// first, and the openai-python R-d fill exposes the partial call).
+    FailedWithOpenItem,
+    /// § 3.2 / 749 D17: a `type: "error"` event inside a client-run item.
+    ErrorEventMidItem,
+    /// R15 (M5): a client-run `done` with `status: "incomplete"` (a function's arguments cut).
+    DoneIncomplete,
+    /// R11 (`incomplete_arguments`): completed function arguments that are no complete JSON value.
+    InvalidJsonArguments,
+    /// R1: a lifecycle or terminal `response.id` that differs from the first.
+    ResponseIdChanged,
+    /// § 3.2 leading BOM (openai-node strips it, openai-python does not).
+    Bom,
+    /// § 3.2 a last event with no blank line at EOF (Python drops it, Node flushes it).
+    NoFinalBlankLine,
+    /// R7 exemption: a `keepalive` without `sequence_number` (conforming).
+    KeepaliveWithoutSequence,
+    /// R5: the next item starts before a client-run item's `done`. At an even position the item
+    /// never gets its `done`, while the terminal `output` holds it in full.
+    ItemInterleaved,
+    /// R7: a `sequence_number` that does not increase (on the first event: no integer), or one on
+    /// a single event only when the stream has none.
+    SequenceNotIncreasing,
+    /// R16: an event for an item after its `done`.
+    EventAfterDone,
+    /// R13: a shell command that differs between the command events and the `done` item, or
+    /// non-empty `added` commands that differ (ruling F2).
+    ShellCommandMismatch,
+    /// R1: the first record is not `response.created`.
+    FirstNotCreated,
+    /// R1 (ruling T4c): a second `response.created` (`repeated_created`).
+    RepeatedCreated,
+    /// R3 (ruling F8): a record after the terminal event: dropped and counted.
+    RecordAfterTerminal,
+    /// R15 (ruling T6a): no terminal event at all.
+    NoTerminal,
+    /// R4: an `output_index` that skips one.
+    IndexGap,
+    /// R10: a client-run terminal item that differs from its `done` item.
+    TerminalArgsDiffer,
+    /// R11: function deltas, `arguments.done` and the `done` arguments that disagree.
+    ArgumentsMismatch,
+    /// R12: custom input deltas, `input.done` and the `done` input that disagree.
+    InputMismatch,
+    /// R14 (amendment A4): an `apply_patch_call` diff that differs between the diff events and the
+    /// `done` item.
+    DiffMismatch,
+    /// § 6.4 subset rule (amendment A2): an `added` field that is not a partial view of `done`.
+    AddedNotSubset,
+    /// R15 (ruling T4b): no `done` status. A truncation for a function call (even); conforming for
+    /// a custom call, whose model has no `status` field (odd).
+    AbsentStatus,
+    /// R15: EOF inside a client-run item, with no terminal event.
+    EofInItem,
+    /// D16 (`max_record_bytes`): a record over the limit with `CANARY`: a function delta (even) or
+    /// a terminal `output` with a blocked call (odd).
+    Oversized,
+    /// D13 (`max_held_bytes`): one open function call whose deltas, each under the record limit,
+    /// hold more than the hold limit in all.
+    HoldLimit,
+}
+
+/// Every [`RQuirk`], for the strategy and for the per-quirk test.
+pub const RQUIRKS: [RQuirk; 47] = [
+    RQuirk::EventErrorName,
+    RQuirk::TopLevelError,
+    RQuirk::DoneTrailing,
+    RQuirk::UnknownType,
+    RQuirk::RepeatedIndex,
+    RQuirk::DeltaBeforeAdded,
+    RQuirk::ItemIdMismatch,
+    RQuirk::WrongItemTypeEvent,
+    RQuirk::TypeChangesAtDone,
+    RQuirk::TypeChangesInTerminal,
+    RQuirk::TerminalItemNeverStreamed,
+    RQuirk::ItemNull,
+    RQuirk::DuplicateId,
+    RQuirk::DuplicateCallId,
+    RQuirk::ReservedId,
+    RQuirk::EarlyOutput,
+    RQuirk::TerminalNewName,
+    RQuirk::TerminalNewNamespace,
+    RQuirk::AddedArgumentsNotEmpty,
+    RQuirk::TerminalOutputAbsent,
+    RQuirk::TerminalOutputNull,
+    RQuirk::FailedWithOpenItem,
+    RQuirk::ErrorEventMidItem,
+    RQuirk::DoneIncomplete,
+    RQuirk::InvalidJsonArguments,
+    RQuirk::ResponseIdChanged,
+    RQuirk::Bom,
+    RQuirk::NoFinalBlankLine,
+    RQuirk::KeepaliveWithoutSequence,
+    RQuirk::ItemInterleaved,
+    RQuirk::SequenceNotIncreasing,
+    RQuirk::EventAfterDone,
+    RQuirk::ShellCommandMismatch,
+    RQuirk::FirstNotCreated,
+    RQuirk::RepeatedCreated,
+    RQuirk::RecordAfterTerminal,
+    RQuirk::NoTerminal,
+    RQuirk::IndexGap,
+    RQuirk::TerminalArgsDiffer,
+    RQuirk::ArgumentsMismatch,
+    RQuirk::InputMismatch,
+    RQuirk::DiffMismatch,
+    RQuirk::AddedNotSubset,
+    RQuirk::AbsentStatus,
+    RQuirk::EofInItem,
+    RQuirk::Oversized,
+    RQuirk::HoldLimit,
+];
+
+/// A generated Responses stream. The real-traffic facts of spec § 3.3 hold unless a quirk breaks
+/// one: items are contiguous, `output_index` is stable, a function's `added.arguments` is `""`,
+/// a reasoning item's `encrypted_content` differs between `done` and the terminal `output` (A1),
+/// and built-in `added` items are partial (A2). `sequence`, `event_lines` and `obfuscation` follow
+/// M2 when true; `done_marker` adds the `[DONE]` that OpenAI does not send.
+#[derive(Debug, Clone)]
+pub struct ResponsesScenario {
+    pub items: Vec<RItem>,
+    pub quirks: Vec<(RQuirk, usize)>,
+    pub cuts: Vec<usize>,
+    pub sequence: bool,
+    pub event_lines: bool,
+    pub done_marker: bool,
+    pub obfuscation: bool,
+}
+
+fn ritem_strategy() -> impl Strategy<Value = RItem> {
+    let kind = prop_oneof![
+        4 => Just(RKind::Function),
+        2 => Just(RKind::Custom),
+        2 => Just(RKind::Message),
+        2 => Just(RKind::Reasoning),
+        1 => Just(RKind::Computer),
+        1 => Just(RKind::LocalShell),
+        1 => Just(RKind::Shell),
+        1 => Just(RKind::ApplyPatch),
+        1 => Just(RKind::ToolSearch),
+        1 => Just(RKind::McpApproval),
+        1 => Just(RKind::WebSearch),
+        1 => Just(RKind::FileSearch),
+        1 => Just(RKind::Other),
+    ];
+    (kind, prop::bool::ANY, 0usize..2, "[a-z]{0,10}", 1usize..4, 0u8..4).prop_map(|(kind, blocked, n, s, pieces, ns)| RItem::new(kind, blocked, n, &s, pieces, ns == 0))
+}
+
+pub fn responses_scenario() -> impl Strategy<Value = ResponsesScenario> {
+    (
+        prop::collection::vec(ritem_strategy(), 0..6),
+        prop::collection::vec((prop::sample::select(RQUIRKS.to_vec()), 0usize..64), 0..3),
+        prop::collection::vec(0usize..100_000, 0..6),
+        (prop::bool::weighted(0.8), prop::bool::weighted(0.8), prop::bool::weighted(0.3), prop::bool::ANY),
+    )
+        .prop_map(|(items, quirks, cuts, (sequence, event_lines, done_marker, obfuscation))| {
+            let mut s = ResponsesScenario {
+                items,
+                quirks,
+                cuts,
+                sequence,
+                event_lines,
+                done_marker,
+                obfuscation,
+            };
+            s.ensure_targets();
+            s
+        })
+}
+
+impl ResponsesScenario {
+    /// Add the items a quirk needs, so that every quirk reaches its rule (ruling F3).
+    pub fn ensure_targets(&mut self) {
+        for (q, at) in self.quirks.clone() {
+            let any = |s: &Self, f: &dyn Fn(&RItem) -> bool| s.items.iter().any(f);
+            let need: Option<RKind> = match q {
+                RQuirk::DeltaBeforeAdded
+                | RQuirk::ItemIdMismatch
+                | RQuirk::TerminalNewName
+                | RQuirk::TerminalNewNamespace
+                | RQuirk::TerminalArgsDiffer
+                | RQuirk::AddedArgumentsNotEmpty
+                | RQuirk::ArgumentsMismatch
+                | RQuirk::InvalidJsonArguments
+                | RQuirk::Oversized
+                | RQuirk::HoldLimit
+                | RQuirk::EventAfterDone => (!any(self, &|i| i.kind == RKind::Function)).then_some(RKind::Function),
+                RQuirk::AbsentStatus if at.is_multiple_of(2) => (!any(self, &|i| i.kind == RKind::Function)).then_some(RKind::Function),
+                RQuirk::AbsentStatus | RQuirk::InputMismatch => (!any(self, &|i| i.kind == RKind::Custom)).then_some(RKind::Custom),
+                RQuirk::TypeChangesAtDone | RQuirk::TypeChangesInTerminal => (!any(self, &|i| i.kind == RKind::Message)).then_some(RKind::Message),
+                RQuirk::WrongItemTypeEvent => (!any(self, &|i| matches!(i.kind, RKind::Custom | RKind::Message))).then_some(RKind::Message),
+                RQuirk::ShellCommandMismatch => (!any(self, &|i| i.kind == RKind::Shell)).then_some(RKind::Shell),
+                RQuirk::DiffMismatch => (!any(self, &|i| i.kind == RKind::ApplyPatch && !i.text.is_empty())).then_some(RKind::ApplyPatch),
+                RQuirk::AddedNotSubset => (!any(self, &|i| matches!(i.kind, RKind::Computer | RKind::LocalShell | RKind::ToolSearch | RKind::McpApproval))).then_some(RKind::Computer),
+                RQuirk::DoneIncomplete | RQuirk::ErrorEventMidItem | RQuirk::NoTerminal => (!any(self, &|i| i.kind.client_run())).then_some(RKind::Function),
+                RQuirk::RepeatedIndex | RQuirk::IndexGap | RQuirk::ItemNull | RQuirk::ReservedId => self.items.is_empty().then_some(RKind::Message),
+                RQuirk::FailedWithOpenItem | RQuirk::EofInItem => (!self.items.last().is_some_and(|i| i.kind.client_run())).then_some(RKind::Function),
+                RQuirk::ItemInterleaved => {
+                    let n = self.items.len();
+                    if !self.items.iter().take(n.saturating_sub(1)).any(|i| i.kind.client_run()) {
+                        self.items.push(RItem::plain(RKind::Function));
+                        self.items.push(RItem::plain(RKind::Message));
+                    }
+                    None
+                }
+                RQuirk::DuplicateId => {
+                    while self.items.len() < 2 {
+                        self.items.push(RItem::plain(RKind::Message));
+                    }
+                    None
+                }
+                RQuirk::DuplicateCallId => {
+                    while self.items.iter().filter(|i| i.kind.has_call_id()).count() < 2 {
+                        self.items.push(RItem::plain(RKind::Function));
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(kind) = need {
+                let mut it = RItem::plain(kind);
+                if kind == RKind::ApplyPatch {
+                    it.text = "x".to_owned();
+                }
+                if matches!(q, RQuirk::FailedWithOpenItem | RQuirk::EofInItem) {
+                    self.items.push(it);
+                } else {
+                    let pos = at % (self.items.len() + 1);
+                    self.items.insert(pos, it);
+                }
+            }
+        }
+    }
+}
+
+/// One record of a generated Responses stream.
+#[derive(Debug, Clone)]
+enum Rec {
+    /// An event; it gets a `sequence_number` when the stream has them.
+    Ev(Value),
+    /// An event that never gets a `sequence_number` (a keepalive).
+    Bare(Value),
+    /// An event under another `event:` name.
+    Named(Value, &'static str),
+    /// A `data:` line that is no JSON.
+    Raw(&'static str),
+}
+
+/// The records of one item: `added`, the middle events, the records of an interleaved item
+/// (`inner`), and `done`; `pre` goes before `added` and `post` after `done`.
+#[derive(Debug, Clone, Default)]
+struct Seg {
+    pre: Vec<Rec>,
+    added: Option<Value>,
+    middle: Vec<Rec>,
+    inner: Vec<Rec>,
+    done: Option<Value>,
+    post: Vec<Rec>,
+}
+
+impl Seg {
+    fn flat(self) -> Vec<Rec> {
+        let mut out = self.pre;
+        out.extend(self.added.map(Rec::Ev));
+        out.extend(self.middle);
+        out.extend(self.inner);
+        out.extend(self.done.map(Rec::Ev));
+        out.extend(self.post);
+        out
+    }
+
+    fn added_item(&mut self) -> Option<&mut Value> {
+        self.added.as_mut().map(|a| &mut a["item"])
+    }
+
+    fn done_item(&mut self) -> Option<&mut Value> {
+        self.done.as_mut().map(|d| &mut d["item"])
+    }
+
+    /// The middle events, as JSON, of the type `ty`.
+    fn middles(&mut self, ty: &str) -> Vec<&mut Value> {
+        self.middle
+            .iter_mut()
+            .filter_map(|r| match r {
+                Rec::Ev(v) if v["type"] == ty => Some(v),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    Items,
+    Absent,
+    Null,
+}
+
+const ADDED_T: &str = "response.output_item.added";
+const DONE_T: &str = "response.output_item.done";
+
+fn added_ev(i: usize, item: Value) -> Value {
+    json!({"type": ADDED_T, "item": item, "output_index": i})
+}
+
+fn done_ev(i: usize, item: Value) -> Value {
+    json!({"type": DONE_T, "item": item, "output_index": i})
+}
+
+fn scoped_ev(ty: &str, i: usize, id: &str, extra: Value) -> Value {
+    let mut v = json!({"type": ty});
+    if let (Value::Object(m), Value::Object(e)) = (&mut v, extra) {
+        m.extend(e);
+        m.insert("item_id".into(), json!(id));
+        m.insert("output_index".into(), json!(i));
+    }
+    v
+}
+
+fn with_status(item: &Value, status: &str) -> Value {
+    let mut v = item.clone();
+    v["status"] = json!(status);
+    v
+}
+
+/// The hidden call that quirks inject: its name is blocked and it carries the canary.
+fn hidden_call(id: &str) -> Value {
+    json!({"type": "function_call", "id": id, "status": "completed", "arguments": "{\"v\":\"CANARY-hidden\"}", "call_id": "call_hidden", "name": "blocked_hidden"})
+}
+
+/// The deltas of `text`, as `pieces` events of type `ty` (each with `extra`).
+fn deltas(ty: &str, i: usize, id: &str, text: &str, pieces: usize, obfuscation: bool) -> Vec<Rec> {
+    split(text, pieces)
+        .into_iter()
+        .map(|d| {
+            let mut v = scoped_ev(ty, i, id, json!({"delta": d}));
+            if obfuscation {
+                v["obfuscation"] = json!("ob");
+            }
+            Rec::Ev(v)
+        })
+        .collect()
+}
+
+/// The records of item `i` and its terminal `output` item, as § 3.3 measured them.
+fn build_item(i: usize, it: &RItem, id: &str, call_id: Option<&str>, obf: bool) -> (Seg, Value) {
+    let call_id = call_id.unwrap_or("");
+    let text = it.text.as_str();
+    let mut seg = Seg::default();
+    let (open, done, terminal) = match it.kind {
+        RKind::Function | RKind::Custom => {
+            let (ty, key, family) = if it.kind == RKind::Function {
+                ("function_call", "arguments", "response.function_call_arguments")
+            } else {
+                ("custom_tool_call", "input", "response.custom_tool_call_input")
+            };
+            let mut done = json!({"type": ty, "id": id, "status": "completed", "call_id": call_id, "name": it.name, key: text});
+            if let Some(ns) = it.namespace {
+                done["namespace"] = json!(ns);
+            }
+            let mut open = with_status(&done, "in_progress");
+            open[key] = json!("");
+            seg.middle = deltas(&format!("{family}.delta"), i, id, text, it.pieces, obf);
+            seg.middle.push(Rec::Ev(scoped_ev(&format!("{family}.done"), i, id, json!({key: text}))));
+            (open, done.clone(), done)
+        }
+        RKind::Message => {
+            let part = json!({"type": "output_text", "annotations": [], "logprobs": [], "text": text});
+            let empty = json!({"type": "output_text", "annotations": [], "logprobs": [], "text": ""});
+            let open = json!({"type": "message", "id": id, "status": "in_progress", "content": [], "role": "assistant"});
+            let done = json!({"type": "message", "id": id, "status": "completed", "content": [part.clone()], "role": "assistant"});
+            seg.middle.push(Rec::Ev(scoped_ev("response.content_part.added", i, id, json!({"content_index": 0, "part": empty}))));
+            for d in split(text, it.pieces) {
+                let mut v = scoped_ev("response.output_text.delta", i, id, json!({"content_index": 0, "delta": d, "logprobs": []}));
+                if obf {
+                    v["obfuscation"] = json!("ob");
+                }
+                seg.middle.push(Rec::Ev(v));
+            }
+            seg.middle
+                .push(Rec::Ev(scoped_ev("response.output_text.done", i, id, json!({"content_index": 0, "logprobs": [], "text": text}))));
+            seg.middle.push(Rec::Ev(scoped_ev("response.content_part.done", i, id, json!({"content_index": 0, "part": part}))));
+            (open, done.clone(), done)
+        }
+        RKind::Reasoning => {
+            let summary = json!({"type": "summary_text", "text": text});
+            let open = json!({"type": "reasoning", "id": id, "content": [], "encrypted_content": format!("enc-added-{i}"), "summary": []});
+            let done = json!({"type": "reasoning", "id": id, "content": [], "encrypted_content": format!("enc-done-{i}"), "summary": [summary.clone()]});
+            seg.middle.push(Rec::Ev(scoped_ev(
+                "response.reasoning_summary_part.added",
+                i,
+                id,
+                json!({"part": {"type": "summary_text", "text": ""}, "summary_index": 0}),
+            )));
+            for d in split(text, it.pieces) {
+                let mut v = scoped_ev("response.reasoning_summary_text.delta", i, id, json!({"delta": d, "summary_index": 0}));
+                if obf {
+                    v["obfuscation"] = json!("ob");
+                }
+                seg.middle.push(Rec::Ev(v));
+            }
+            seg.middle
+                .push(Rec::Ev(scoped_ev("response.reasoning_summary_text.done", i, id, json!({"summary_index": 0, "text": text}))));
+            seg.middle
+                .push(Rec::Ev(scoped_ev("response.reasoning_summary_part.done", i, id, json!({"part": summary, "summary_index": 0}))));
+            // Amendment A1: the terminal `encrypted_content` differs from the `done` one.
+            let terminal = {
+                let mut t = done.clone();
+                t["encrypted_content"] = json!(format!("enc-terminal-{i}"));
+                t
+            };
+            (open, done, terminal)
+        }
+        RKind::Computer => {
+            let action = if text.is_empty() { json!({"type": "screenshot"}) } else { json!({"type": "type", "text": text}) };
+            let open = json!({"type": "computer_call", "id": id, "status": "in_progress", "call_id": call_id});
+            // A2 (M4): `actions` only at `done`.
+            let done = json!({"type": "computer_call", "id": id, "status": "completed", "actions": [action], "call_id": call_id});
+            (open, done.clone(), done)
+        }
+        RKind::LocalShell => {
+            let done = json!({"type": "local_shell_call", "id": id, "status": "completed", "call_id": call_id, "action": {"type": "exec", "command": ["ls", text], "env": {}}});
+            (with_status(&done, "in_progress"), done.clone(), done)
+        }
+        RKind::Shell => {
+            let mut commands = vec![format!("ls {text}")];
+            if it.pieces == 3 {
+                commands.push("date".to_owned());
+            }
+            let open =
+                json!({"type": "shell_call", "id": id, "status": "in_progress", "action": {"commands": [], "max_output_length": null, "timeout_ms": null}, "call_id": call_id, "environment": null});
+            let done = json!({"type": "shell_call", "id": id, "status": "completed", "action": {"commands": commands, "max_output_length": 20000, "timeout_ms": null}, "call_id": call_id, "environment": null});
+            for (k, c) in commands.iter().enumerate() {
+                let cmd = |ty: &str, extra: Value| {
+                    let mut v = json!({"type": ty});
+                    if let (Value::Object(m), Value::Object(e)) = (&mut v, extra) {
+                        m.extend(e);
+                        m.insert("command_index".into(), json!(k));
+                        m.insert("output_index".into(), json!(i));
+                    }
+                    v
+                };
+                seg.middle.push(Rec::Ev(cmd("response.shell_call_command.added", json!({"command": ""}))));
+                for d in split(c, it.pieces) {
+                    let mut v = cmd("response.shell_call_command.delta", json!({"delta": d}));
+                    if obf {
+                        v["obfuscation"] = json!("ob");
+                    }
+                    seg.middle.push(Rec::Ev(v));
+                }
+                seg.middle.push(Rec::Ev(cmd("response.shell_call_command.done", json!({"command": c}))));
+            }
+            (open, done.clone(), done)
+        }
+        RKind::ApplyPatch if text.is_empty() => {
+            let done = json!({"type": "apply_patch_call", "id": id, "status": "completed", "call_id": call_id, "operation": {"type": "delete_file", "path": "old.txt"}});
+            (with_status(&done, "in_progress"), done.clone(), done)
+        }
+        RKind::ApplyPatch => {
+            let diff = format!("+{text}\n");
+            let done = json!({"type": "apply_patch_call", "id": id, "status": "completed", "call_id": call_id, "operation": {"type": "create_file", "diff": diff, "path": "a.txt"}});
+            let mut open = with_status(&done, "in_progress");
+            open["operation"]["diff"] = json!("");
+            seg.middle = deltas("response.apply_patch_call_operation_diff.delta", i, id, &diff, it.pieces, obf);
+            seg.middle.push(Rec::Ev(scoped_ev("response.apply_patch_call_operation_diff.done", i, id, json!({"diff": diff}))));
+            (open, done.clone(), done)
+        }
+        RKind::ToolSearch => {
+            let done = json!({"type": "tool_search_call", "id": id, "status": "completed", "arguments": {"query": text}, "call_id": call_id, "execution": "client"});
+            let mut open = with_status(&done, "in_progress");
+            open["arguments"] = json!({});
+            (open, done.clone(), done)
+        }
+        RKind::McpApproval => {
+            let done = json!({"type": "mcp_approval_request", "id": id, "arguments": text, "name": it.name, "server_label": "srv"});
+            let mut open = done.clone();
+            if it.pieces.is_multiple_of(2) {
+                open["arguments"] = json!("");
+            }
+            (open, done.clone(), done)
+        }
+        RKind::WebSearch => {
+            let open = json!({"type": "web_search_call", "id": id, "status": "in_progress"});
+            let done = json!({"type": "web_search_call", "id": id, "status": "completed", "action": {"type": "search", "queries": [text], "query": text}});
+            for t in ["in_progress", "searching", "completed"] {
+                seg.middle.push(Rec::Ev(scoped_ev(&format!("response.web_search_call.{t}"), i, id, json!({}))));
+            }
+            (open, done.clone(), done)
+        }
+        RKind::FileSearch => {
+            let open = json!({"type": "file_search_call", "id": id, "status": "in_progress", "queries": []});
+            let done = json!({"type": "file_search_call", "id": id, "status": "completed", "queries": [text], "results": null});
+            for t in ["in_progress", "searching", "completed"] {
+                seg.middle.push(Rec::Ev(scoped_ev(&format!("response.file_search_call.{t}"), i, id, json!({}))));
+            }
+            (open, done.clone(), done)
+        }
+        RKind::Other => {
+            let done = json!({"type": "function_call_output", "id": id, "status": "completed", "call_id": call_id, "output": text});
+            (with_status(&done, "in_progress"), done.clone(), done)
+        }
+    };
+    seg.added = Some(added_ev(i, open));
+    seg.done = Some(done_ev(i, done));
+    (seg, terminal)
+}
+
+fn rhas(s: &ResponsesScenario, q: RQuirk) -> Option<usize> {
+    s.quirks.iter().find(|(x, _)| *x == q).map(|(_, at)| *at)
+}
+
+/// The index of the `at`-th item (cyclically) that `f` accepts.
+fn pick(items: &[RItem], at: usize, f: impl Fn(&RItem) -> bool) -> Option<usize> {
+    let c: Vec<usize> = (0..items.len()).filter(|i| f(&items[*i])).collect();
+    (!c.is_empty()).then(|| c[at % c.len()])
+}
+
+fn lifecycle_ev(ty: &str) -> Value {
+    json!({"type": ty, "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []}})
+}
+
+/// Append `x` to the `key` string of `v`.
+fn append(v: &mut Value, key: &str, x: &str) {
+    let s = v[key].as_str().unwrap_or("").to_owned();
+    v[key] = json!(format!("{s}{x}"));
+}
+
+pub fn render_responses(s: &ResponsesScenario) -> Vec<u8> {
+    // Quirks that change an item before it is built.
+    let mut items = s.items.clone();
+    for (q, at) in &s.quirks {
+        let target = match q {
+            RQuirk::InvalidJsonArguments => pick(&items, *at, |i| i.kind == RKind::Function),
+            RQuirk::DoneIncomplete => pick(&items, *at, |i| i.kind.client_run()).filter(|t| items[*t].kind == RKind::Function),
+            _ => None,
+        };
+        if let Some(t) = target {
+            items[t].text.pop(); // `{"v":"…"` : no complete JSON value (M5)
+        }
+        if *q == RQuirk::HoldLimit
+            && let Some(t) = pick(&items, *at, |i| i.kind == RKind::Function)
+        {
+            // 20 deltas of about 1 KiB: each record is under 4 KiB, the hold is over 16 KiB.
+            items[t].text = format!("{{\"v\":\"{}\"}}", "y".repeat(20_000));
+            items[t].pieces = 20;
+        }
+    }
+    let n = items.len();
+    let mut ids: Vec<String> = items.iter().enumerate().map(|(i, it)| format!("{}_{i}", it.kind.id_prefix())).collect();
+    let mut call_ids: Vec<Option<String>> = items.iter().enumerate().map(|(i, it)| it.kind.has_call_id().then(|| format!("call_{i}"))).collect();
+    if let Some(at) = rhas(s, RQuirk::DuplicateId)
+        && n >= 2
+    {
+        let t = 1 + at % (n - 1);
+        ids[t] = ids[t - 1].clone();
+    }
+    if let Some(at) = rhas(s, RQuirk::DuplicateCallId) {
+        let c: Vec<usize> = (0..n).filter(|i| call_ids[*i].is_some()).collect();
+        if c.len() >= 2 {
+            let k = c[1 + at % (c.len() - 1)];
+            call_ids[k] = call_ids[c[0]].clone();
+        }
+    }
+    if let Some(at) = rhas(s, RQuirk::ReservedId)
+        && n > 0
+    {
+        let t = at % n;
+        ids[t] = format!("msg_paigasus_{t}");
+    }
+    let mut segs = Vec::new();
+    let mut output = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        let (seg, term) = build_item(i, it, &ids[i], call_ids[i].as_deref(), s.obfuscation);
+        segs.push(seg);
+        output.push(term);
+    }
+    let mut head = vec![Rec::Ev(lifecycle_ev("response.created")), Rec::Ev(lifecycle_ev("response.in_progress"))];
+    let mut terminal_type = "response.completed";
+    let mut output_mode = OutputMode::Items;
+    let mut terminal_id = "resp_1";
+    let mut terminal_present = true;
+    let mut tail: Vec<Rec> = Vec::new();
+    let mut eof = false;
+    let fpick = |at: usize| pick(&items, at, |i| i.kind == RKind::Function);
+    for (q, at) in &s.quirks {
+        let at = *at;
+        match q {
+            RQuirk::RepeatedIndex if n > 0 => {
+                let t = at % n;
+                segs[t].post.push(Rec::Ev(added_ev(t, hidden_call("fc_hidden"))));
+            }
+            RQuirk::IndexGap if n > 0 => {
+                let t = at % n;
+                segs[t].post.push(Rec::Ev(added_ev(t + 2, hidden_call("fc_hidden"))));
+            }
+            RQuirk::ItemNull if n > 0 => {
+                let t = at % n;
+                segs[t].post.push(Rec::Ev(json!({"type": ADDED_T, "item": null, "output_index": t + 1})));
+            }
+            RQuirk::DeltaBeforeAdded => {
+                if let Some(t) = fpick(at)
+                    && let Some(k) = segs[t].middle.iter().position(|r| matches!(r, Rec::Ev(v) if v["type"] == "response.function_call_arguments.delta"))
+                {
+                    let d = segs[t].middle.remove(k);
+                    segs[t].pre.push(d);
+                }
+            }
+            RQuirk::ItemIdMismatch => {
+                if let Some(t) = fpick(at)
+                    && let Some(v) = segs[t].middles("response.function_call_arguments.done").into_iter().next()
+                {
+                    v["item_id"] = json!("fc_other");
+                }
+            }
+            RQuirk::WrongItemTypeEvent => {
+                if let Some(t) = pick(&items, at, |i| matches!(i.kind, RKind::Custom | RKind::Message)) {
+                    let ev = scoped_ev("response.function_call_arguments.delta", t, &ids[t], json!({"delta": "{\"v\":\"CANARY-wt\"}"}));
+                    segs[t].middle.insert(0, Rec::Ev(ev));
+                }
+            }
+            RQuirk::TypeChangesAtDone => {
+                if let Some(t) = pick(&items, at, |i| i.kind == RKind::Message) {
+                    let h = hidden_call(&ids[t]);
+                    if let Some(d) = segs[t].done_item() {
+                        *d = h.clone();
+                    }
+                    output[t] = h;
+                }
+            }
+            RQuirk::TypeChangesInTerminal => {
+                if let Some(t) = pick(&items, at, |i| i.kind == RKind::Message) {
+                    output[t] = hidden_call(&ids[t]);
+                }
+            }
+            RQuirk::TerminalItemNeverStreamed => {
+                output.push(hidden_call("fc_hidden"));
+                if at % 4 >= 2 {
+                    terminal_type = "response.failed";
+                }
+                if at % 2 == 1 {
+                    tail.push(Rec::Ev(json!({"type": "response.unknown_kind"})));
+                }
+            }
+            RQuirk::EarlyOutput => {
+                let k = if at.is_multiple_of(2) { 1 } else { 0 };
+                if let Some(Rec::Ev(v)) = head.get_mut(k) {
+                    v["response"]["output"] = json!([hidden_call("fc_hidden")]);
+                }
+            }
+            RQuirk::TerminalNewName => {
+                if let Some(t) = fpick(at) {
+                    output[t]["name"] = json!("blocked_hidden");
+                }
+            }
+            RQuirk::TerminalNewNamespace => {
+                if let Some(t) = fpick(at) {
+                    output[t]["namespace"] = json!("evil");
+                }
+            }
+            RQuirk::TerminalArgsDiffer => {
+                if let Some(t) = fpick(at) {
+                    output[t]["arguments"] = json!("{\"v\":\"CANARY-td\"}");
+                }
+            }
+            RQuirk::AddedArgumentsNotEmpty => {
+                if let Some(t) = fpick(at) {
+                    let args = items[t].text.clone();
+                    if let Some(a) = segs[t].added_item() {
+                        a["arguments"] = json!(args);
+                    }
+                }
+            }
+            RQuirk::ArgumentsMismatch | RQuirk::InputMismatch => {
+                let (kind, family, key) = if *q == RQuirk::ArgumentsMismatch {
+                    (RKind::Function, "response.function_call_arguments", "arguments")
+                } else {
+                    (RKind::Custom, "response.custom_tool_call_input", "input")
+                };
+                if let Some(t) = pick(&items, at, |i| i.kind == kind) {
+                    match at % 3 {
+                        0 => {
+                            // A delta that the `*.done` event and the `done` item do not have.
+                            let ev = scoped_ev(&format!("{family}.delta"), t, &ids[t], json!({"delta": "x"}));
+                            let k = segs[t].middle.len().saturating_sub(1);
+                            segs[t].middle.insert(k, Rec::Ev(ev));
+                        }
+                        1 => {
+                            if let Some(v) = segs[t].middles(&format!("{family}.done")).into_iter().next() {
+                                append(v, key, "x");
+                            }
+                        }
+                        _ => {
+                            if let Some(d) = segs[t].done_item() {
+                                append(d, key, "x");
+                                output[t] = d.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            RQuirk::DiffMismatch => {
+                if let Some(t) = pick(&items, at, |i| i.kind == RKind::ApplyPatch && !i.text.is_empty()) {
+                    match at % 3 {
+                        0 => {
+                            if let Some(d) = segs[t].done_item() {
+                                d["operation"]["diff"] = json!("+changed\n");
+                                output[t] = d.clone();
+                            }
+                        }
+                        1 => {
+                            if let Some(v) = segs[t].middles("response.apply_patch_call_operation_diff.delta").into_iter().next() {
+                                append(v, "delta", "x");
+                            }
+                        }
+                        _ => {
+                            if let Some(v) = segs[t].middles("response.apply_patch_call_operation_diff.done").into_iter().next() {
+                                append(v, "diff", "x");
+                            }
+                        }
+                    }
+                }
+            }
+            RQuirk::ShellCommandMismatch => {
+                if let Some(t) = pick(&items, at, |i| i.kind == RKind::Shell) {
+                    match at % 4 {
+                        0 => {
+                            if let Some(d) = segs[t].done_item() {
+                                d["action"]["commands"][0] = json!("rm -rf /");
+                                output[t] = d.clone();
+                            }
+                        }
+                        1 => {
+                            if let Some(v) = segs[t].middles("response.shell_call_command.delta").into_iter().next() {
+                                append(v, "delta", "x");
+                            }
+                        }
+                        2 => {
+                            if let Some(v) = segs[t].middles("response.shell_call_command.done").into_iter().next() {
+                                append(v, "command", "x");
+                            }
+                        }
+                        _ => {
+                            if let Some(a) = segs[t].added_item() {
+                                a["action"]["commands"] = json!(["rm -rf /"]);
+                            }
+                        }
+                    }
+                }
+            }
+            RQuirk::AddedNotSubset => {
+                if let Some(t) = pick(&items, at, |i| matches!(i.kind, RKind::Computer | RKind::LocalShell | RKind::ToolSearch | RKind::McpApproval)) {
+                    let kind = items[t].kind;
+                    if let Some(a) = segs[t].added_item() {
+                        if at.is_multiple_of(2) {
+                            a["extra"] = json!("x"); // a field that `done` does not have
+                        } else {
+                            match kind {
+                                RKind::Computer => a["actions"] = json!([{"type": "click", "button": "left"}]),
+                                RKind::LocalShell => a["action"]["command"] = json!(["rm", "-rf"]),
+                                RKind::ToolSearch => a["arguments"] = json!({"query": "other"}),
+                                _ => a["arguments"] = json!("{\"x\":1}"),
+                            }
+                        }
+                    }
+                }
+            }
+            RQuirk::DoneIncomplete => {
+                if let Some(t) = pick(&items, at, |i| i.kind.client_run()) {
+                    if let Some(d) = segs[t].done_item() {
+                        d["status"] = json!("incomplete");
+                        output[t] = d.clone();
+                    }
+                    terminal_type = "response.incomplete";
+                }
+            }
+            RQuirk::AbsentStatus => {
+                let kind = if at.is_multiple_of(2) { RKind::Function } else { RKind::Custom };
+                if let Some(t) = pick(&items, at / 2, |i| i.kind == kind)
+                    && let Some(Value::Object(d)) = segs[t].done_item()
+                {
+                    d.remove("status");
+                    output[t] = Value::Object(d.clone());
+                }
+            }
+            RQuirk::ErrorEventMidItem => {
+                if let Some(t) = pick(&items, at, |i| i.kind.client_run()) {
+                    let k = at % (segs[t].middle.len() + 1);
+                    segs[t].middle.insert(k, Rec::Ev(json!({"type": "error", "code": "server_error", "message": "boom", "param": null})));
+                }
+            }
+            RQuirk::EventAfterDone => {
+                if let Some(t) = fpick(at) {
+                    let ev = scoped_ev("response.function_call_arguments.delta", t, &ids[t], json!({"delta": "CANARY-late"}));
+                    segs[t].post.insert(0, Rec::Ev(ev));
+                }
+            }
+            RQuirk::TerminalOutputAbsent | RQuirk::TerminalOutputNull => {
+                output_mode = if *q == RQuirk::TerminalOutputAbsent { OutputMode::Absent } else { OutputMode::Null };
+                terminal_type = ["response.completed", "response.incomplete", "response.failed"][at % 3];
+            }
+            RQuirk::ResponseIdChanged => {
+                if at.is_multiple_of(2) {
+                    if let Some(Rec::Ev(v)) = head.get_mut(1) {
+                        v["response"]["id"] = json!("resp_other");
+                    }
+                } else {
+                    terminal_id = "resp_other";
+                }
+            }
+            RQuirk::FirstNotCreated => {
+                if at.is_multiple_of(2) && !head.is_empty() {
+                    head.remove(0);
+                } else if head.len() >= 2 {
+                    head.swap(0, 1);
+                }
+            }
+            RQuirk::RecordAfterTerminal => {
+                tail.push(Rec::Ev(if at.is_multiple_of(2) {
+                    added_ev(n, hidden_call("fc_hidden"))
+                } else {
+                    json!({"type": "response.completed", "response": {"id": "resp_1", "object": "response", "status": "completed", "output": [hidden_call("fc_hidden")]}})
+                }));
+            }
+            RQuirk::NoTerminal => terminal_present = false,
+            RQuirk::Oversized => {
+                let big = format!("CANARY-big{}", "x".repeat(5000));
+                if at.is_multiple_of(2) {
+                    if let Some(t) = fpick(at) {
+                        let ev = scoped_ev("response.function_call_arguments.delta", t, &ids[t], json!({"delta": big}));
+                        let k = 1.min(segs[t].middle.len());
+                        segs[t].middle.insert(k, Rec::Ev(ev));
+                    }
+                } else {
+                    let mut h = hidden_call("fc_big");
+                    h["arguments"] = json!(format!("{{\"v\":\"{big}\"}}"));
+                    output.push(h);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Quirks that move or drop whole items, applied last.
+    for (q, at) in &s.quirks {
+        match q {
+            RQuirk::ItemInterleaved => {
+                // Pick only from client-run items that have an item after them.
+                let c: Vec<usize> = (0..segs.len().saturating_sub(1)).filter(|i| items[*i].kind.client_run()).collect();
+                if let Some(t) = (!c.is_empty()).then(|| c[*at % c.len()]) {
+                    let next = std::mem::take(&mut segs[t + 1]).flat();
+                    segs[t].inner = next;
+                    if at.is_multiple_of(2) {
+                        segs[t].done = None;
+                    }
+                }
+            }
+            RQuirk::FailedWithOpenItem | RQuirk::EofInItem => {
+                if let Some(t) = (0..segs.len()).rev().find(|i| items[*i].kind.client_run()) {
+                    segs.truncate(t + 1);
+                    output.truncate(t + 1);
+                    let partial = segs[t].added_item().cloned();
+                    segs[t].done = None;
+                    if *q == RQuirk::EofInItem {
+                        terminal_present = false;
+                        eof = true;
+                    } else {
+                        terminal_type = "response.failed";
+                        if at.is_multiple_of(2) {
+                            output[t] = partial.unwrap_or(Value::Null);
+                        } else {
+                            output_mode = OutputMode::Absent;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut recs = head;
+    for seg in segs {
+        recs.extend(seg.flat());
+    }
+    let term_at = recs.len();
+    if terminal_present {
+        let status = terminal_type.trim_start_matches("response.");
+        let mut resp = json!({"id": terminal_id, "object": "response", "status": status});
+        match output_mode {
+            OutputMode::Items => resp["output"] = Value::Array(output),
+            OutputMode::Null => resp["output"] = Value::Null,
+            OutputMode::Absent => {}
+        }
+        match terminal_type {
+            "response.failed" => resp["error"] = json!({"code": "server_error", "message": "failed"}),
+            "response.incomplete" => resp["incomplete_details"] = json!({"reason": "max_output_tokens"}),
+            _ => {}
+        }
+        recs.push(Rec::Ev(json!({"type": terminal_type, "response": resp})));
+    }
+    recs.extend(tail);
+    // Records inserted between the first two records and the terminal event.
+    let mid = |at: usize| 2.min(term_at) + at % (term_at.saturating_sub(2) + 1);
+    for (q, at) in &s.quirks {
+        let at = *at;
+        match q {
+            RQuirk::EventErrorName => {
+                let k = mid(at).min(recs.len().saturating_sub(1));
+                if let Some(Rec::Ev(v)) = recs.get(k).cloned() {
+                    recs[k] = Rec::Named(v, "error");
+                }
+            }
+            RQuirk::TopLevelError => recs.insert(mid(at), Rec::Ev(json!({"type": "response.error", "error": {"code": "server_error", "message": "boom"}}))),
+            RQuirk::DoneTrailing => recs.insert(mid(at), Rec::Raw("[DONE]x")),
+            RQuirk::UnknownType => recs.insert(mid(at), Rec::Ev(json!({"type": "response.unknown_kind", "item": hidden_call("fc_hidden")}))),
+            RQuirk::KeepaliveWithoutSequence => recs.insert(mid(at), Rec::Bare(json!({"type": "keepalive"}))),
+            RQuirk::RepeatedCreated => recs.insert(mid(at), Rec::Ev(lifecycle_ev("response.created"))),
+            _ => {}
+        }
+    }
+    // R7: `sequence_number` 0, 1, 2, … on every event but a bare keepalive.
+    let mut seq = 0u64;
+    for r in &mut recs {
+        if let Rec::Ev(v) | Rec::Named(v, _) = r
+            && s.sequence
+        {
+            v["sequence_number"] = json!(seq);
+            seq += 1;
+        }
+    }
+    if let Some(at) = rhas(s, RQuirk::SequenceNotIncreasing) {
+        let evs: Vec<usize> = (0..recs.len()).filter(|i| matches!(recs[*i], Rec::Ev(_))).collect();
+        if !evs.is_empty() {
+            let k = evs[at % evs.len()];
+            if let Rec::Ev(v) = &mut recs[k] {
+                if s.sequence {
+                    // The previous number again (or 0): no strict increase.
+                    let prev = v["sequence_number"].as_u64().unwrap_or(0).saturating_sub(1);
+                    v["sequence_number"] = json!(if at.is_multiple_of(2) { prev } else { 0 });
+                    if k == evs[0] {
+                        v["sequence_number"] = json!("0"); // the first event: a number that is no integer
+                    }
+                } else {
+                    v["sequence_number"] = json!(7); // on one event only
+                }
+            }
+        }
+    }
+    let mut body = String::new();
+    if rhas(s, RQuirk::Bom).is_some() {
+        body.push('\u{feff}');
+    }
+    for r in &recs {
+        let (name, data) = match r {
+            Rec::Ev(v) | Rec::Bare(v) => (s.event_lines.then(|| v["type"].as_str().unwrap_or("").to_owned()), v.to_string()),
+            Rec::Named(v, n) => (Some((*n).to_owned()), v.to_string()),
+            Rec::Raw(d) => (None, (*d).to_owned()),
+        };
+        if let Some(n) = name {
+            body += &format!("event: {n}\n");
+        }
+        body += &format!("data: {data}\n\n");
+    }
+    if s.done_marker && !eof {
+        body += "data: [DONE]\n\n";
+    }
+    if rhas(s, RQuirk::NoFinalBlankLine).is_some() {
+        body.truncate(body.trim_end_matches('\n').len());
+    }
+    body.into_bytes()
+}
+
+/// A conforming stream with an item of every kind (two streams together hold all 13), for the
+/// per-quirk test.
+pub fn every_kind_scenario(second: bool) -> ResponsesScenario {
+    let kinds: &[RKind] = if second {
+        &[
+            RKind::McpApproval,
+            RKind::ToolSearch,
+            RKind::LocalShell,
+            RKind::WebSearch,
+            RKind::Function,
+            RKind::FileSearch,
+            RKind::Other,
+        ]
+    } else {
+        &[RKind::Reasoning, RKind::Function, RKind::Message, RKind::Custom, RKind::Shell, RKind::ApplyPatch, RKind::Computer]
+    };
+    let mut items: Vec<RItem> = kinds.iter().map(|k| RItem::plain(*k)).collect();
+    for i in items.iter_mut().filter(|i| i.kind == RKind::ApplyPatch) {
+        i.text = "x".to_owned(); // a patch with a diff
+    }
+    ResponsesScenario {
+        items,
+        quirks: Vec::new(),
+        cuts: Vec::new(),
+        sequence: true,
+        event_lines: true,
+        done_marker: false,
+        obfuscation: true,
+    }
+}

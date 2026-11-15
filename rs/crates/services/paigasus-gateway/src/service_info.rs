@@ -113,6 +113,7 @@ mod tests {
                 limits: None,
                 dpop: crate::config::GatewayDpopConfig::default(),
                 tool_interception: crate::config::ToolInterceptionConfig::default(),
+                responses: crate::config::ResponsesConfig::default(),
             }
         }
 

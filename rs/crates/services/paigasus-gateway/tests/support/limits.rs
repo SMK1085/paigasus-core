@@ -223,6 +223,7 @@ fn build(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, first_b
         limits,
         dpop_enabled: false,
         tool_interception,
+        responses: None,
     })
 }
 

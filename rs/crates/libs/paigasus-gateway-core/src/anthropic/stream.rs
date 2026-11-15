@@ -158,6 +158,7 @@ impl AnthropicStream {
             position: i,
             id: b.id.take(),
             name: b.name.clone(),
+            namespace: None,
             kind,
             arguments,
         }
@@ -424,7 +425,7 @@ impl Protocol for AnthropicStream {
     fn known_calls(&self, hold: HoldKey) -> Vec<(u32, String)> {
         match hold {
             HoldKey::Block(i) => self.blocks.get(i as usize).map(|b| vec![(i, b.name.clone())]).unwrap_or_default(),
-            HoldKey::Choice(_) => Vec::new(),
+            HoldKey::Choice(_) | HoldKey::Response => Vec::new(),
         }
     }
 
@@ -484,7 +485,7 @@ mod tests {
                     reps.extend(reports);
                     frames.push(frame);
                 }
-                Step::End(f) | Step::UpstreamError(f) => frames.push(f),
+                Step::End(f) | Step::UpstreamError(f) | Step::Terminal { frame: f, .. } => frames.push(f),
             }
         }
         let mut out = Vec::new();
@@ -681,6 +682,7 @@ mod tests {
             Ok(_) => panic!("not a frame"),
             Err(StepError::Deviation(d)) => Err(d),
             Err(StepError::Malformed) => Err("malformed"),
+            Err(StepError::AfterEnd) => Err("after_end"),
         }
     }
 
@@ -716,6 +718,7 @@ mod tests {
             Ok(_) => Ok(()),
             Err(StepError::Deviation(d)) => Err(d),
             Err(StepError::Malformed) => Err("malformed"),
+            Err(StepError::AfterEnd) => Err("after_end"),
         }
     }
 
@@ -772,7 +775,7 @@ mod tests {
                     }
                     frames.push(frame);
                 }
-                Step::End(f) | Step::UpstreamError(f) => frames.push(f),
+                Step::End(f) | Step::UpstreamError(f) | Step::Terminal { frame: f, .. } => frames.push(f),
             }
         }
         let out: String = frames.into_iter().flat_map(|f| p.release(f, &verdicts)).map(|b| String::from_utf8(b.to_vec()).unwrap()).collect();

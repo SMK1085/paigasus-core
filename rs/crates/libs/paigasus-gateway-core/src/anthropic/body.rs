@@ -40,6 +40,7 @@ pub(crate) fn calls(v: &Value) -> Result<(Vec<ToolCall>, Vec<ReportEntry>), Malf
                     position,
                     id,
                     name,
+                    namespace: None,
                     kind: ToolCallKind::AnthropicToolUse,
                     arguments: input.to_string(),
                 });
@@ -53,6 +54,7 @@ pub(crate) fn calls(v: &Value) -> Result<(Vec<ToolCall>, Vec<ReportEntry>), Malf
                     position,
                     id,
                     name,
+                    namespace: None,
                     kind: ToolCallKind::Other,
                     arguments: serde_json::to_string(&[b]).expect("a Value array always serializes"),
                 });
@@ -86,7 +88,7 @@ pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<BlockCo
     if let Some(Value::Array(content)) = v.get_mut("content") {
         for (c, code) in calls.iter().zip(codes) {
             if let (Some(code), Some(slot)) = (code, content.get_mut(c.position as usize)) {
-                *slot = json!({"type": "text", "text": notice_line(&c.name, *code)});
+                *slot = json!({"type": "text", "text": notice_line(&c.display_name(), *code)});
             }
         }
     }

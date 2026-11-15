@@ -10,7 +10,7 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
 use crate::sse;
-use crate::types::{Basis, BlockCode};
+use crate::types::{Basis, BlockCode, ToolCall};
 
 const MAX_NAME_BYTES: usize = 128;
 const MAX_HEADER_BYTES: usize = 2048;
@@ -108,6 +108,18 @@ pub(crate) fn header_value(entries: &[ReportEntry]) -> String {
     out.push(']');
     debug_assert!(out.is_ascii());
     out
+}
+
+/// The report entry for one call. The name is the qualified `display_name()`.
+pub(crate) fn report_entry(c: &ToolCall, decision: ReportDecision, basis: Basis, code: Option<BlockCode>) -> ReportEntry {
+    ReportEntry {
+        choice: c.choice,
+        position: c.position,
+        name: c.display_name(),
+        decision,
+        basis: Some(basis),
+        code,
+    }
 }
 
 /// One `: paigasus-decision` SSE comment (D22).

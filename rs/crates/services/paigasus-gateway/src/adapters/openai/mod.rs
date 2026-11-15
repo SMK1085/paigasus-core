@@ -8,4 +8,4 @@
 
 pub mod client;
 
-pub use client::{ChatResponse, OpenAiByteStream, OpenAiClient, OpenAiError};
+pub use client::{ChatResponse, OpenAiByteStream, OpenAiClient, OpenAiError, UpstreamRoute};

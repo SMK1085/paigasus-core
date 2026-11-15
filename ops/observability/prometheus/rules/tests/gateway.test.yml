@@ -38,9 +38,9 @@ tests:
   # GatewayUpstreamErrors: sum(rate(5xx)) / sum(rate(total)) > 0.05, for: 10m.
   - interval: 1m
     input_series:
-      - series: 'gateway_upstream_requests_total{status_class="5xx"}'
+      - series: 'gateway_upstream_requests_total{status_class="5xx",endpoint="chat_completions"}'
         values: '0+1x11'
-      - series: 'gateway_upstream_requests_total{status_class="2xx"}'
+      - series: 'gateway_upstream_requests_total{status_class="2xx",endpoint="chat_completions"}'
         values: '0+1x11'
     alert_rule_test:
       - eval_time: 9m

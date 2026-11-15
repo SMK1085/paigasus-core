@@ -575,6 +575,11 @@ class ErrorReason(betterproto2.Enum):
     [tool_interception] on_failure = "block" (SMA-749).
     """
 
+    RESPONSES_STATEFUL_NOT_SUPPORTED = 314
+    """
+    "responses-stateful-not-supported" — a /v1/responses request asked for server-side state (previous_response_id, conversation, prompt, an item_reference input item) with tool interception on, or asked for background mode (400, OpenAI type "invalid_request_error"). The gateway cannot see a stored turn (SMA-769).
+    """
+
     INTERNAL = 900
     """
     ---- Shared (900-999) ----------------------------------------------------
@@ -724,6 +729,7 @@ class ErrorReason(betterproto2.Enum):
             311: "ERROR_REASON_RATE_LIMITED",
             312: "ERROR_REASON_BUDGET_EXHAUSTED",
             313: "ERROR_REASON_TOOL_INTERCEPTION_MALFORMED_RESPONSE",
+            314: "ERROR_REASON_RESPONSES_STATEFUL_NOT_SUPPORTED",
             900: "ERROR_REASON_INTERNAL",
             901: "ERROR_REASON_INVALID_REQUEST_BODY",
             902: "ERROR_REASON_REQUEST_TOO_LARGE",
@@ -800,6 +806,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_RATE_LIMITED": 311,
             "ERROR_REASON_BUDGET_EXHAUSTED": 312,
             "ERROR_REASON_TOOL_INTERCEPTION_MALFORMED_RESPONSE": 313,
+            "ERROR_REASON_RESPONSES_STATEFUL_NOT_SUPPORTED": 314,
             "ERROR_REASON_INTERNAL": 900,
             "ERROR_REASON_INVALID_REQUEST_BODY": 901,
             "ERROR_REASON_REQUEST_TOO_LARGE": 902,

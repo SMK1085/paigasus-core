@@ -13,6 +13,8 @@ use std::fmt;
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 
+use crate::responses::classify::{ItemClass, item_class};
+
 /// A record the gateway cannot classify with certainty. The label is for tests and logs only;
 /// it never reaches a metric label with a value from the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -71,6 +73,10 @@ fn fold(s: &str) -> String {
 }
 
 fn check_key(k: &str) -> Result<(), &'static str> {
+    check_key_in(k, CLASSIFIER_KEYS)
+}
+
+fn check_key_in(k: &str, classifier_keys: &[&str]) -> Result<(), &'static str> {
     if PROTOTYPE_KEYS.contains(&k) {
         return Err("prototype_key");
     }
@@ -78,7 +84,7 @@ fn check_key(k: &str) -> Result<(), &'static str> {
         return Ok(()); // already folded; equal to a classifier key only if byte-equal
     }
     let folded = fold(k);
-    if CLASSIFIER_KEYS.iter().any(|c| *c != k && folded == *c) {
+    if classifier_keys.iter().any(|c| *c != k && folded == *c) {
         return Err("case_folded_key");
     }
     Ok(())
@@ -98,6 +104,12 @@ pub(crate) fn parse_value_strict(bytes: &[u8]) -> Result<Value, Malformed> {
     parse_with(bytes, Mode::Data)
 }
 
+/// Parse a Responses request, event or body strictly (spec § 7.1). The Responses key list and the
+/// per-document data subtrees apply; the chat and Anthropic rules are not used.
+pub(crate) fn parse_strict_responses(bytes: &[u8], doc: ResponsesDoc) -> Result<Value, Malformed> {
+    parse_with(bytes, Mode::ResponsesTop(doc))
+}
+
 /// Keys whose value is tool argument or schema data, never envelope: an Anthropic `tool_use`
 /// `input`, a request's `tools[].function.parameters` (and legacy `functions[].parameters`), and an
 /// Anthropic `tools[].input_schema`. Below one of these keys, `parse_strict` applies the
@@ -108,6 +120,49 @@ const DATA_KEYS: &[&str] = &["input", "input_schema", "parameters"];
 enum Mode {
     Envelope,
     Data,
+    /// The top-level object of a Responses document (spec § 7.1).
+    ResponsesTop(ResponsesDoc),
+    /// The `response` object of a Responses event.
+    ResponsesResponse,
+    /// Any other object of a Responses document: the Responses key list, no data keys.
+    ResponsesEnvelope,
+}
+
+/// Which Responses document is parsed. It decides where the data subtrees are (spec § 7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponsesDoc {
+    /// A request body: `tools`, `text`, `metadata`, `instructions`, `prompt`, `reasoning` and
+    /// `input` at the top level are data.
+    Request,
+    /// A stream event: the same keys, except `input`, one level below the top-level `response`.
+    Event,
+    /// A non-stream response body: the same keys, except `input`, at the top level.
+    Body,
+}
+
+/// The Responses classifier keys (spec § 7.1). The chat and Anthropic list does not change.
+const RESPONSES_CLASSIFIER_KEYS: &[&str] = &[
+    "type",
+    "output_index",
+    "item_id",
+    "call_id",
+    "item",
+    "output",
+    "arguments",
+    "input",
+    "name",
+    "namespace",
+    "id",
+    "delta",
+    "response",
+    "error",
+];
+
+/// Top-level keys of a Responses request, response or event whose value is data.
+const RESPONSES_DATA_KEYS: &[&str] = &["tools", "text", "metadata", "instructions", "prompt", "reasoning", "input"];
+
+fn is_responses_data_key(k: &str, with_input: bool) -> bool {
+    RESPONSES_DATA_KEYS.contains(&k) && (with_input || k != "input")
 }
 
 fn parse_with(bytes: &[u8], mode: Mode) -> Result<Value, Malformed> {
@@ -176,6 +231,23 @@ impl<'de> Visitor<'de> for StrictVisitor {
                 }
                 Mode::Data if k == "__proto__" => return Err(de::Error::custom("prototype_key")),
                 Mode::Data => Mode::Data,
+                Mode::ResponsesTop(doc) => {
+                    check_key_in(&k, RESPONSES_CLASSIFIER_KEYS).map_err(de::Error::custom)?;
+                    match doc {
+                        ResponsesDoc::Request if is_responses_data_key(&k, true) => Mode::Data,
+                        ResponsesDoc::Body if is_responses_data_key(&k, false) => Mode::Data,
+                        ResponsesDoc::Event if k == "response" => Mode::ResponsesResponse,
+                        _ => Mode::ResponsesEnvelope,
+                    }
+                }
+                Mode::ResponsesResponse => {
+                    check_key_in(&k, RESPONSES_CLASSIFIER_KEYS).map_err(de::Error::custom)?;
+                    if is_responses_data_key(&k, false) { Mode::Data } else { Mode::ResponsesEnvelope }
+                }
+                Mode::ResponsesEnvelope => {
+                    check_key_in(&k, RESPONSES_CLASSIFIER_KEYS).map_err(de::Error::custom)?;
+                    Mode::ResponsesEnvelope
+                }
             };
             if !seen.insert(k.clone()) {
                 return Err(de::Error::custom("duplicate key"));
@@ -201,6 +273,47 @@ pub(crate) fn check_numbers(v: &Value) -> Result<(), Malformed> {
         Value::Array(a) => a.iter().try_for_each(check_numbers),
         Value::Object(o) => o.values().try_for_each(check_numbers),
         _ => Ok(()),
+    }
+}
+
+/// `check_numbers` for a Responses document (spec § 7.1, ruling F11): the envelope and each
+/// client-run item only. The data subtrees are the application's, so a schema `maximum: 1e300`
+/// passes. So do the provider-run and tool-free items of `output` (and of an event's `item`): no
+/// decider reads them. An item with no string `type` is checked (fail closed).
+pub(crate) fn check_numbers_responses(v: &Value, doc: ResponsesDoc) -> Result<(), Malformed> {
+    fn item(v: &Value) -> Result<(), Malformed> {
+        match v.get("type").and_then(Value::as_str).map(item_class) {
+            Some(ItemClass::Content | ItemClass::ProviderRun) => Ok(()),
+            _ => check_numbers(v),
+        }
+    }
+    fn items(v: &Value) -> Result<(), Malformed> {
+        match v {
+            Value::Array(a) => a.iter().try_for_each(item),
+            _ => check_numbers(v),
+        }
+    }
+    fn envelope(o: &Map<String, Value>, with_input: bool, response_key: bool) -> Result<(), Malformed> {
+        for (k, v) in o {
+            if response_key {
+                match v {
+                    Value::Object(r) if k == "response" => envelope(r, false, false)?,
+                    _ if k == "item" => item(v)?,
+                    _ => check_numbers(v)?,
+                }
+            } else if k == "output" && !with_input {
+                items(v)?;
+            } else if !is_responses_data_key(k, with_input) {
+                check_numbers(v)?;
+            }
+        }
+        Ok(())
+    }
+    match (v, doc) {
+        (Value::Object(o), ResponsesDoc::Request) => envelope(o, true, false),
+        (Value::Object(o), ResponsesDoc::Body) => envelope(o, false, false),
+        (Value::Object(o), ResponsesDoc::Event) => envelope(o, false, true),
+        _ => check_numbers(v),
     }
 }
 
@@ -363,5 +476,60 @@ mod tests {
         assert!(opt_str(Some(&json!(1)), "x").is_err());
         assert!(opt_obj(Some(&json!({})), "x").unwrap().is_some());
         assert!(opt_obj(Some(&json!([])), "x").is_err());
+    }
+
+    fn data_subtree() -> &'static str {
+        r#"{"text":{"format":{"schema":{"properties":{"Name":{},"ID":{},"Type":{},"constructor":{}}}}},"metadata":{"Id":"x"}}"#
+    }
+
+    #[test]
+    fn responses_data_subtrees_relax_the_key_rules() {
+        assert!(parse_strict_responses(data_subtree().as_bytes(), ResponsesDoc::Request).is_ok());
+        assert!(parse_strict_responses(data_subtree().as_bytes(), ResponsesDoc::Body).is_ok());
+        let ev = format!(r#"{{"type":"response.created","response":{}}}"#, data_subtree());
+        assert!(parse_strict_responses(ev.as_bytes(), ResponsesDoc::Event).is_ok());
+        // The relaxation is path-bound: the same keys elsewhere are not data.
+        assert!(parse_strict_responses(data_subtree().as_bytes(), ResponsesDoc::Event).is_err());
+        let ev_top = format!(r#"{{"text":{}}}"#, r#"{"constructor":1}"#);
+        assert!(parse_strict_responses(ev_top.as_bytes(), ResponsesDoc::Event).is_err());
+        let nested = format!(r#"{{"x":{}}}"#, data_subtree());
+        assert!(parse_strict_responses(nested.as_bytes(), ResponsesDoc::Body).is_err());
+        // `input` is data in a request only.
+        assert!(parse_strict_responses(br#"{"input":[{"Id":1,"constructor":2}]}"#, ResponsesDoc::Request).is_ok());
+        assert!(parse_strict_responses(br#"{"input":{"constructor":2}}"#, ResponsesDoc::Body).is_err());
+        assert!(parse_strict_responses(br#"{"response":{"input":{"constructor":2}}}"#, ResponsesDoc::Event).is_err());
+    }
+
+    #[test]
+    fn responses_envelope_keys_follow_the_responses_list() {
+        for k in ["Output_Index", "Item_Id", "Call_ıd", "Namespace"] {
+            let r = parse_strict_responses(format!(r#"{{"{k}":"x"}}"#).as_bytes(), ResponsesDoc::Event);
+            assert!(r.is_err(), "{k}");
+        }
+        assert!(parse_strict_responses(br#"{"Choices":[]}"#, ResponsesDoc::Event).is_ok());
+        assert!(parse_strict_responses(br#"{"constructor":{}}"#, ResponsesDoc::Event).is_err());
+        assert!(parse_strict_responses(br#"{"text":{"__proto__":1}}"#, ResponsesDoc::Request).is_err());
+        assert!(parse_strict_responses(br#"{"text":{"a":1,"a":2}}"#, ResponsesDoc::Request).is_err());
+        assert!(parse_strict_responses(br#"{"item":{"Id":"x"}}"#, ResponsesDoc::Event).is_err());
+    }
+
+    #[test]
+    fn the_chat_lists_do_not_change() {
+        assert!(parse_strict(br#"{"Output_Index":0}"#).is_ok());
+        assert!(parse_strict(br#"{"Delta":0}"#).is_err());
+    }
+
+    #[test]
+    fn lossy_numbers_are_checked_outside_data_only() {
+        let body = parse_strict_responses(br#"{"text":{"format":{"schema":{"maximum":1e300}}}}"#, ResponsesDoc::Body).unwrap();
+        assert!(check_numbers_responses(&body, ResponsesDoc::Body).is_ok());
+        let out = parse_strict_responses(br#"{"output":[{"type":"function_call","x":1e300}]}"#, ResponsesDoc::Body).unwrap();
+        assert_eq!(check_numbers_responses(&out, ResponsesDoc::Body), Err(Malformed("lossy_number")));
+        let ev = parse_strict_responses(br#"{"response":{"text":{"m":1e300}},"item":{"x":1e300}}"#, ResponsesDoc::Event).unwrap();
+        assert!(check_numbers_responses(&ev, ResponsesDoc::Event).is_err());
+        let ev_ok = parse_strict_responses(br#"{"response":{"text":{"m":1e300},"output":[]}}"#, ResponsesDoc::Event).unwrap();
+        assert!(check_numbers_responses(&ev_ok, ResponsesDoc::Event).is_ok());
+        let req = parse_strict_responses(br#"{"input":[{"x":1e300}],"max_output_tokens":1e300}"#, ResponsesDoc::Request).unwrap();
+        assert!(check_numbers_responses(&req, ResponsesDoc::Request).is_err());
     }
 }

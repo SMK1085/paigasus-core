@@ -1,0 +1,54 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_0b76495dcdd22b44006af88109251487d2b16d640973583afd","object":"response","created_at":1794670857,"status":"in_progress","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Read a file from the workspace.","name":"read_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false},"strict":true},{"type":"function","description":"Get the weather for a city.","name":"get_weather","output_schema":null,"parameters":{"type":"object","properties":{"city":{"type":"string"},"unit":{"type":"string","enum":["c","f"]}},"required":["city","unit"],"additionalProperties":false},"strict":true},{"type":"web_search","return_token_budget":"default","search_content_types":["text"],"search_context_size":"medium","user_location":{"type":"approximate","city":null,"country":"US","region":null,"timezone":null}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_0b76495dcdd22b44006af88109251487d2b16d640973583afd","object":"response","created_at":1794670857,"status":"in_progress","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Read a file from the workspace.","name":"read_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false},"strict":true},{"type":"function","description":"Get the weather for a city.","name":"get_weather","output_schema":null,"parameters":{"type":"object","properties":{"city":{"type":"string"},"unit":{"type":"string","enum":["c","f"]}},"required":["city","unit"],"additionalProperties":false},"strict":true},{"type":"web_search","return_token_budget":"default","search_content_types":["text"],"search_context_size":"medium","user_location":{"type":"approximate","city":null,"country":"US","region":null,"timezone":null}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"ws_0b76495dcdd22b44006af8810a86b887d28363644d6a17a73f","type":"web_search_call","status":"in_progress"},"output_index":0,"sequence_number":2}
+
+event: response.web_search_call.in_progress
+data: {"type":"response.web_search_call.in_progress","item_id":"ws_0b76495dcdd22b44006af8810a86b887d28363644d6a17a73f","output_index":0,"sequence_number":3}
+
+event: response.web_search_call.searching
+data: {"type":"response.web_search_call.searching","item_id":"ws_0b76495dcdd22b44006af8810a86b887d28363644d6a17a73f","output_index":0,"sequence_number":4}
+
+event: response.web_search_call.completed
+data: {"type":"response.web_search_call.completed","item_id":"ws_0b76495dcdd22b44006af8810a86b887d28363644d6a17a73f","output_index":0,"sequence_number":5}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"ws_0b76495dcdd22b44006af8810a86b887d28363644d6a17a73f","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Paris weather today November 14 2026"],"query":"Paris weather today November 14 2026"}},"output_index":0,"sequence_number":6}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"ws_0b76495dcdd22b44006af8810ce37087d29b85eaee3e2cdb5d","type":"web_search_call","status":"in_progress"},"output_index":1,"sequence_number":7}
+
+event: response.web_search_call.in_progress
+data: {"type":"response.web_search_call.in_progress","item_id":"ws_0b76495dcdd22b44006af8810ce37087d29b85eaee3e2cdb5d","output_index":1,"sequence_number":8}
+
+event: response.web_search_call.searching
+data: {"type":"response.web_search_call.searching","item_id":"ws_0b76495dcdd22b44006af8810ce37087d29b85eaee3e2cdb5d","output_index":1,"sequence_number":9}
+
+event: response.web_search_call.completed
+data: {"type":"response.web_search_call.completed","item_id":"ws_0b76495dcdd22b44006af8810ce37087d29b85eaee3e2cdb5d","output_index":1,"sequence_number":10}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"ws_0b76495dcdd22b44006af8810ce37087d29b85eaee3e2cdb5d","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Tokyo population 2026 Tokyo metropolitan government population"],"query":"Tokyo population 2026 Tokyo metropolitan government population"}},"output_index":1,"sequence_number":11}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"fc_0b76495dcdd22b44006af8810f73f887d2b0692df983e16d07","type":"function_call","status":"in_progress","arguments":"","call_id":"call_xIYyNEWSfymClRsZ693RyWjN","name":"read_file"},"output_index":2,"sequence_number":12}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"{\"path\":\"/workspace","item_id":"fc_0b76495dcdd22b44006af8810f73f887d2b0692df983e16d07","obfuscation":"p0f73roR1VN2n","output_index":2,"sequence_number":13}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"/a.txt\"}","item_id":"fc_0b76495dcdd22b44006af8810f73f887d2b0692df983e16d07","obfuscation":"u3rGU9j3","output_index":2,"sequence_number":14}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","arguments":"{\"path\":\"/workspace/a.txt\"}","item_id":"fc_0b76495dcdd22b44006af8810f73f887d2b0692df983e16d07","output_index":2,"sequence_number":15}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"fc_0b76495dcdd22b44006af8810f73f887d2b0692df983e16d07","type":"function_call","status":"completed","arguments":"{\"path\":\"/workspace/a.txt\"}","call_id":"call_xIYyNEWSfymClRsZ693RyWjN","name":"read_file"},"output_index":2,"sequence_number":16}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_0b76495dcdd22b44006af88109251487d2b16d640973583afd","object":"response","created_at":1794670857,"status":"completed","access_programs":{"cyber":"standard"},"background":false,"completed_at":1794670863,"error":null,"frequency_penalty":0.0,"image":{"context_compression":"disabled"},"incomplete_details":null,"input_transformations":[],"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[{"id":"ws_0b76495dcdd22b44006af8810a86b887d28363644d6a17a73f","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Paris weather today November 14 2026"],"query":"Paris weather today November 14 2026"}},{"id":"ws_0b76495dcdd22b44006af8810ce37087d29b85eaee3e2cdb5d","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Tokyo population 2026 Tokyo metropolitan government population"],"query":"Tokyo population 2026 Tokyo metropolitan government population"}},{"id":"fc_0b76495dcdd22b44006af8810f73f887d2b0692df983e16d07","type":"function_call","status":"completed","arguments":"{\"path\":\"/workspace/a.txt\"}","call_id":"call_xIYyNEWSfymClRsZ693RyWjN","name":"read_file"}],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":2}},"tools":[{"type":"function","description":"Read a file from the workspace.","name":"read_file","output_schema":null,"parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false},"strict":true},{"type":"function","description":"Get the weather for a city.","name":"get_weather","output_schema":null,"parameters":{"type":"object","properties":{"city":{"type":"string"},"unit":{"type":"string","enum":["c","f"]}},"required":["city","unit"],"additionalProperties":false},"strict":true},{"type":"web_search","return_token_budget":"default","search_content_types":["text"],"search_context_size":"medium","user_location":{"type":"approximate","city":null,"country":"US","region":null,"timezone":null}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":{"input_tokens":13158,"input_tokens_details":{"cache_write_tokens":4542,"cache_write_tokens_details":{"ttl_12h_tokens":0,"ttl_30m_tokens":4542},"cached_tokens":0},"output_tokens":85,"output_tokens_details":{"reasoning_tokens":64},"total_tokens":13243},"user":null,"metadata":{}},"sequence_number":17}
+

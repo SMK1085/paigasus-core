@@ -6,15 +6,17 @@
 
 use serde_json::Value;
 
+use super::responses_usage::ResponsesUsageScanner;
+
 /// § 4.6: the bound on one partial SSE record. A larger record is skipped, not buffered, and
 /// still counts as one record. The same bound as the console parser (`chat-stream.ts`).
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// D14: the fallback request estimate is capped.
-const FALLBACK_REQUEST_CAP: u64 = 32_768;
+pub(crate) const FALLBACK_REQUEST_CAP: u64 = 32_768;
 /// D14: an image, audio or other non-text part counts OpenAI's low-detail image cost.
-const NON_TEXT_PART_TOKENS: u64 = 85;
+pub(crate) const NON_TEXT_PART_TOKENS: u64 = 85;
 
-fn bytes_to_tokens(bytes: usize) -> u64 {
+pub(crate) fn bytes_to_tokens(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX).div_ceil(4)
 }
 
@@ -73,6 +75,44 @@ pub fn non_stream_usage(body: &[u8]) -> BodyUsage {
         }
     }
     BodyUsage::Completion(bytes_to_tokens(bytes))
+}
+
+/// The stream reader for one endpoint (SMA-769).
+#[derive(Debug)]
+pub enum StreamUsage {
+    Chat(UsageScanner),
+    /// § 8.2: the Responses reader, with no record size limit.
+    Responses(ResponsesUsageScanner),
+}
+
+impl StreamUsage {
+    pub fn feed(&mut self, chunk: &[u8]) {
+        match self {
+            StreamUsage::Chat(s) => s.feed(chunk),
+            StreamUsage::Responses(s) => s.feed(chunk),
+        }
+    }
+
+    pub fn finish(&mut self) {
+        match self {
+            StreamUsage::Chat(s) => s.finish(),
+            StreamUsage::Responses(s) => s.finish(),
+        }
+    }
+
+    pub fn completion_records(&self) -> u64 {
+        match self {
+            StreamUsage::Chat(s) => s.completion_records(),
+            StreamUsage::Responses(s) => s.completion_records(),
+        }
+    }
+
+    pub fn reported_total(&self) -> Option<u64> {
+        match self {
+            StreamUsage::Chat(s) => s.reported_total(),
+            StreamUsage::Responses(s) => s.reported_total(),
+        }
+    }
 }
 
 /// Reads a copy of a forwarded SSE stream (§ 4.6). Every complete `data:` record that is not

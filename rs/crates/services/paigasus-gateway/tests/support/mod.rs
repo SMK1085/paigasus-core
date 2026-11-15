@@ -21,7 +21,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 
@@ -32,6 +32,8 @@ pub struct RecordedRequest {
     pub headers: HeaderMap,
     /// The raw request body bytes (proves byte-lossless passthrough).
     pub body: Bytes,
+    /// The request path the mock saw (SMA-769: which upstream route the gateway called).
+    pub path: String,
 }
 
 impl RecordedRequest {
@@ -133,7 +135,7 @@ impl MockOpenAi {
             recorded: Mutex::new(None),
             requests: AtomicUsize::new(0),
         });
-        let router = Router::new().route("/v1/chat/completions", post(handle)).with_state(state.clone());
+        let router = Router::new().route("/v1/chat/completions", post(handle)).route("/v1/responses", post(handle)).with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local addr");
@@ -154,11 +156,12 @@ impl MockOpenAi {
 
 /// Records the inbound request, then answers per the configured [`MockResponse`]. `Bytes` is the
 /// body-consuming extractor, so it comes last.
-async fn handle(State(state): State<Arc<MockState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle(State(state): State<Arc<MockState>>, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     state.requests.fetch_add(1, Ordering::SeqCst);
     *state.recorded.lock().expect("recorded lock not poisoned") = Some(RecordedRequest {
         headers: headers.clone(),
         body: body.clone(),
+        path: uri.path().to_owned(),
     });
 
     match &state.response {

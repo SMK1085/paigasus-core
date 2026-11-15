@@ -21,6 +21,10 @@ const SET: &[(&str, &str)] = &[
     ("openai", "text_after_calls"),
     ("anthropic", "tool_use_blocked"),
     ("anthropic", "two_tools_mixed"),
+    ("responses", "function_blocked_deltas"),
+    ("responses", "builtin_blocked_added_done"),
+    ("responses", "truncated_item"),
+    ("responses", "blocked_after_reasoning"),
 ];
 
 fn root() -> PathBuf {
@@ -46,10 +50,88 @@ fn finish_reasons(out: &[u8]) -> Value {
     Value::Object(map.into_iter().map(|(k, v)| (k.to_string(), Value::String(v))).collect())
 }
 
+/// The terminal `response.status` of a Responses golden, as choice 0's finish reason.
+fn responses_finish_reasons(out: &[u8]) -> Value {
+    let status = payloads(out)
+        .iter()
+        .filter_map(|p| serde_json::from_slice::<Value>(p).ok())
+        .filter(|v| matches!(v["type"].as_str(), Some("response.completed" | "response.incomplete" | "response.failed")))
+        .filter_map(|v| v.pointer("/response/status").and_then(Value::as_str).map(str::to_owned))
+        .next_back();
+    json!({"0": status.expect("a terminal response.status in the golden")})
+}
+
+/// The notices of a Responses golden, read from the golden itself: the completed `msg_paigasus_<i>`
+/// message of every rewritten item, in stream order, with its `output_index`. A truncated item is
+/// blocked by `on_failure`, so it never reaches the decider and `decided` does not list it.
+fn responses_notices(out: &[u8]) -> Vec<(u64, String)> {
+    payloads(out)
+        .iter()
+        .filter_map(|p| serde_json::from_slice::<Value>(p).ok())
+        .filter(|v| v["type"] == "response.output_item.done" && v.pointer("/item/id").and_then(Value::as_str).is_some_and(|id| id.starts_with("msg_paigasus_")))
+        .map(|v| {
+            (
+                v["output_index"].as_u64().expect("output_index"),
+                v.pointer("/item/content/0/text").and_then(Value::as_str).expect("notice text").to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// One Responses golden (spec § 10.4): the interceptor's output under `block_named` and
+/// `on_failure = block`, and its manifest entry.
+fn responses_golden(name: &str) -> (PathBuf, Vec<u8>, Value) {
+    let input = std::fs::read(root().join(format!("fixtures/responses/conforming/{name}.sse"))).expect("fixture exists");
+    let o = drive(Format::OpenAiResponses, limits(OnFailure::Block), &[&input], &block_named);
+    let allowed: Vec<Value> = o
+        .decided
+        .iter()
+        .filter(|(_, d)| d.is_allow())
+        .map(|(c, _)| json!({"name": c.name, "arguments": c.arguments, "choice": c.choice, "position": c.position, "id": c.id, "namespace": c.namespace}))
+        .collect();
+    let found = responses_notices(&o.out);
+    assert!(!found.is_empty(), "responses/{name}: a golden must block at least one call");
+    for (c, d) in &o.decided {
+        if let Decision::Block { code } = d {
+            let want = notice_line(&c.display_name(), *code);
+            assert!(
+                found.iter().any(|(i, t)| *t == want && *i == u64::from(c.position)),
+                "responses/{name}: no notice {want:?} at {}",
+                c.position
+            );
+        }
+    }
+    for (model, run) in runners(Format::OpenAiResponses) {
+        let r = run(&o.out);
+        // A client may raise on a stream that does not end in `response.completed` (openai-python
+        // does so for `response.incomplete`). It must then raise on the upstream bytes too.
+        if let Some(e) = &r.error {
+            assert!(run(&input).error.is_some(), "{model} cannot parse golden responses/{name}: {e}");
+        }
+        assert_eq!(r.calls.len(), allowed.len(), "{model} on responses/{name}");
+    }
+    let entry = json!({
+        "file": format!("responses/{name}.sse"),
+        "format": "responses",
+        "allowed": allowed,
+        "notices": found.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+        "notice_choices": found.iter().map(|_| 0).collect::<Vec<u32>>(),
+        "notice_positions": found.iter().map(|(i, _)| *i).collect::<Vec<u64>>(),
+        "finish_reasons": responses_finish_reasons(&o.out),
+    });
+    (root().join(format!("golden/responses/{name}.sse")), o.out, entry)
+}
+
 fn generate() -> (Vec<(PathBuf, Vec<u8>)>, Value) {
     let mut files = Vec::new();
     let mut manifest = Vec::new();
     for (fmt, name) in SET {
+        if *fmt == "responses" {
+            let (path, bytes, entry) = responses_golden(name);
+            files.push((path, bytes));
+            manifest.push(entry);
+            continue;
+        }
         let format = if *fmt == "openai" { Format::OpenAiChat } else { Format::AnthropicMessages };
         let input = std::fs::read(root().join(format!("fixtures/{fmt}/conforming/{name}.sse"))).expect("fixture exists");
         let o = drive(format, limits(OnFailure::Block), &[&input], &block_named);

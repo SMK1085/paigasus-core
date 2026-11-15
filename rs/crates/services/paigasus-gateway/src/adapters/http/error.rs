@@ -125,6 +125,13 @@ pub enum GatewayError {
     /// classified, so its tool calls could not be checked → 502. Retry unknown: another answer
     /// from the same upstream may or may not be well-formed.
     ToolInterceptionMalformedResponse,
+
+    // ---- Responses API ingress (SMA-769) -----------------------------------------------------
+    /// A `/v1/responses` request asked for server-side state (`previous_response_id`,
+    /// `conversation`, `prompt`, an `item_reference` input item) with tool interception on, or
+    /// for background mode → 400. `param` names the refused field. Not retryable: the same
+    /// request is refused again.
+    ResponsesStatefulNotSupported { param: &'static str },
 }
 
 /// Map a limit refusal (SMA-677 § 4.5). `Unscoped` is the D2 fail-closed case: a scope with no
@@ -261,6 +268,13 @@ impl GatewayError {
                 None,
                 "The upstream model provider returned a response the gateway could not check.",
             ),
+            GatewayError::ResponsesStatefulNotSupported { param } => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("responses-stateful-not-supported"),
+                Some(param),
+                "Stateful Responses API requests are not supported by this gateway.",
+            ),
         }
     }
 
@@ -299,6 +313,7 @@ impl GatewayError {
             | Self::StreamingDisabled
             | Self::InvalidOrgHeader
             | Self::OrgRequired
+            | Self::ResponsesStatefulNotSupported { .. }
             | Self::BudgetExhausted { .. } => Retryable::No,
         }
     }
@@ -491,6 +506,10 @@ mod tests {
         assert_eq!(GatewayError::StreamingDisabled.into_response().status(), StatusCode::BAD_REQUEST);
         assert_eq!(GatewayError::InvalidOrgHeader.into_response().status(), StatusCode::BAD_REQUEST);
         assert_eq!(GatewayError::OrgRequired.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            GatewayError::ResponsesStatefulNotSupported { param: "previous_response_id" }.into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
         assert_eq!(GatewayError::RateLimited { retry_after_secs: 1 }.into_response().status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             GatewayError::BudgetExhausted {
@@ -594,6 +613,25 @@ mod tests {
             };
             assert_eq!(err.retryable(), want, "{err:?}");
         }
+    }
+
+    /// SMA-769: the stateful refusal names the refused field in `param`, and the message and
+    /// type are fixed. Not retryable: the same request is refused again.
+    #[tokio::test]
+    async fn the_stateful_refusal_names_its_field() {
+        use paigasus_observability::Retryable;
+
+        let err = GatewayError::ResponsesStatefulNotSupported { param: "previous_response_id" };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.retryable(), Retryable::No);
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "responses-stateful-not-supported");
+        assert_eq!(body["error"]["param"], "previous_response_id");
+        assert_eq!(body["error"]["message"], "Stateful Responses API requests are not supported by this gateway.");
     }
 
     #[tokio::test]

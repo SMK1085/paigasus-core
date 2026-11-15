@@ -60,11 +60,12 @@ pub(crate) type Verdicts = BTreeMap<HoldKey, Verdict>;
 
 /// One classified record, waiting in the queue or about to be released.
 pub(crate) struct Frame {
-    /// The validated Anthropic event name; `None` for OpenAI (P-1).
+    /// The validated event name: the Anthropic event, or the Responses `data.type`. `None` for
+    /// OpenAI chat (P-1).
     pub event: Option<&'static str>,
     /// The original payload bytes, re-framed unchanged when nothing in it is blocked (D23).
     pub payload: Vec<u8>,
-    /// The parsed payload; `None` only for OpenAI's `[DONE]`.
+    /// The parsed payload; `None` only for `[DONE]`.
     pub value: Option<Value>,
     /// The holds this frame carries data of (D12). Sorted and without duplicates.
     pub touches: Vec<HoldKey>,
@@ -77,6 +78,11 @@ pub(crate) enum Step {
         completed: Vec<(HoldKey, Vec<ToolCall>)>,
         reports: Vec<ReportEntry>,
     },
+    /// A Responses terminal event (SMA-769 R3). The interceptor completes each listed hold, then
+    /// truncates every hold still in [`Protocol::incomplete`], then enqueues the frame. Only
+    /// `[DONE]` may follow; the protocol reports every other later record as
+    /// [`StepError::AfterEnd`].
+    Terminal { frame: Frame, completed: Vec<(HoldKey, Vec<ToolCall>)> },
     /// The end marker; every later record is dropped (D4).
     End(Frame),
     /// An upstream error record (D17).
@@ -86,6 +92,8 @@ pub(crate) enum Step {
 pub(crate) enum StepError {
     Malformed,
     Deviation(&'static str),
+    /// A record after the terminal event (SMA-769 R3): dropped and counted, never a failure.
+    AfterEnd,
 }
 
 impl From<Malformed> for StepError {
@@ -111,6 +119,11 @@ pub(crate) trait Protocol: Send {
     fn release(&mut self, frame: Frame, verdicts: &Verdicts) -> Vec<Bytes>;
     /// Notices still owed at the end of a stream that has no end marker.
     fn closing(&mut self, verdicts: &Verdicts) -> Vec<Bytes>;
+    /// Frames still owed when the stream aborts (D17), emitted before the terminal frame. Only
+    /// frames that close what the client already holds; never a queued frame.
+    fn closing_on_abort(&mut self, _verdicts: &Verdicts) -> Vec<Bytes> {
+        Vec::new()
+    }
     /// (position, name) of the calls known so far for a hold, for reports of a `BlockAll` hold.
     fn known_calls(&self, hold: HoldKey) -> Vec<(u32, String)>;
     /// Pass-through framing, with no classification (P-4).

@@ -222,6 +222,8 @@ mod tests {
         "budget-exhausted",
         // Gateway tool interception (SMA-749)
         "tool-interception-malformed-response",
+        // Gateway Responses API ingress (SMA-769)
+        "responses-stateful-not-supported",
         // Shared
         "internal",
         "invalid-request-body",
@@ -244,7 +246,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 70, "the registry should hold 70 reasons");
+        assert_eq!(actual.len(), 71, "the registry should hold 71 reasons");
     }
 
     #[test]

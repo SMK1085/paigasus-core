@@ -15,6 +15,10 @@ pub mod chat;
 pub mod dto;
 pub mod error;
 pub mod interception;
+pub mod pipeline;
+pub(crate) mod relay;
+pub mod responses;
+pub mod responses_usage;
 pub mod service_info;
 pub mod usage;
 
@@ -64,6 +68,20 @@ pub struct AppState {
     /// SMA-749: tool-call interception, or `None` when `[tool_interception] enabled = false`.
     /// `None` keeps the relay exactly as it was (D27).
     pub tool_interception: Option<Arc<interception::ToolInterception>>,
+    /// SMA-769: the `POST /v1/responses` route, or `None` when `[responses] enabled = false`
+    /// (D8). [`router`] mounts the route only when this is `Some`.
+    pub responses: Option<Arc<ResponsesSettings>>,
+}
+
+/// SMA-769 D15: the limits of the Responses route, built from `[responses]` when it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponsesSettings {
+    /// The cap on one request body of the route.
+    pub max_request_bytes: usize,
+    /// One SSE record larger than this is a failure.
+    pub max_record_bytes: usize,
+    /// The queued bytes of one stream; also the cap on one non-stream body.
+    pub max_held_bytes: usize,
 }
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
@@ -106,6 +124,17 @@ pub fn router(state: AppState) -> Router {
 
     let protected = Router::new().route("/v1/chat/completions", post(chat::chat_completions)).route_layer(auth).route_layer(body_limit);
 
+    // SMA-769 D8, D15: `/v1/responses` exists only when `[responses] enabled = true`; otherwise it
+    // is a 404, as an unknown path is. Its own group, because its body limit is
+    // `[responses] max_request_bytes`, not the chat limit. The same auth layer as chat.
+    let responses = match &state.responses {
+        Some(settings) => Router::new()
+            .route("/v1/responses", post(responses::create_response))
+            .route_layer(axum::middleware::from_fn_with_state(auth_state.clone(), require_iam_auth))
+            .route_layer(DefaultBodyLimit::max(settings.max_request_bytes)),
+        None => Router::new(),
+    };
+
     // SMA-505: its own group, because discovery authenticates but does not authorize, and needs
     // no body limit (it is a GET). `route_layer` keeps the middleware off unmatched paths, so a
     // 404 is still a 404 rather than a credential challenge.
@@ -116,6 +145,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .merge(protected)
+        .merge(responses)
         .merge(discovery)
         .layer(paigasus_observability::http_metrics_layer("gateway"))
         // SMA-504 D10: mirrors IAM's placement exactly — outermost, so an auth rejection is
@@ -266,6 +296,7 @@ mod tests {
             limits: None,
             dpop_enabled: false,
             tool_interception: None,
+            responses: None,
         }
     }
 

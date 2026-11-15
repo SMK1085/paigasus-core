@@ -169,6 +169,7 @@ fn app_for_with_streaming(fake: FakeIam, base_url: String, max_request_bytes: us
         limits: None,
         dpop_enabled: false,
         tool_interception: None,
+        responses: None,
     };
     router(state)
 }
@@ -344,6 +345,15 @@ async fn allowed_non_stream_returns_upstream_body_verbatim() {
 
     // The caller's raw body reached the upstream byte-for-byte.
     assert_eq!(mock.recorded().unwrap().body, Bytes::from(NON_STREAM_BODY));
+}
+
+#[tokio::test]
+async fn the_chat_route_forwards_to_the_chat_path() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, r#"{"id":"chatcmpl-xyz"}"#).await;
+    let app = app_for(FakeIam::allowed(), mock.base_url.clone(), ONE_MIB);
+    let resp = app.oneshot(chat_request(NON_STREAM_BODY, Some(CALLER_KEY))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(mock.recorded().unwrap().path, "/v1/chat/completions");
 }
 
 #[tokio::test]
@@ -679,6 +689,7 @@ async fn one_dpop_request_end_to_end() {
         limits: None,
         dpop_enabled: true,
         tool_interception: None,
+        responses: None,
     });
     let req = Request::builder()
         .method("POST")
