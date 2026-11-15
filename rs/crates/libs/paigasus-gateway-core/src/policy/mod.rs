@@ -5,10 +5,12 @@
 
 mod calls;
 mod mapping;
+mod plan;
 mod snapshot;
 
 pub use calls::{CallOutcome, PolicyBasis, decide_calls};
 pub use mapping::{call_findings, ingress, invocation, name_collisions};
+pub use plan::{ChoiceRewrite, PlanItem, RequestPlan, ResultTarget, plan_request};
 pub use snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
 
 /// The floor that ships with the file source (D15). This is the one copy in this crate

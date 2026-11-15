@@ -31,7 +31,7 @@ pub fn name_collisions(defs: &[ToolDefinition]) -> BTreeSet<String> {
 /// The normalised name under which a call of this definition arrives. A built-in definition is
 /// named by its type, but its call has a fixed name: `computer_use_preview` gives `computer` calls.
 /// The other built-ins (`local_shell`, `shell`, `apply_patch`, `tool_search`) use one name for both.
-fn definition_call_name(d: &ToolDefinition) -> String {
+pub(crate) fn definition_call_name(d: &ToolDefinition) -> String {
     let n = normalise(&d.display_name());
     if d.kind == ToolCallKind::Other && n == "computer_use_preview" { "computer".to_owned() } else { n }
 }

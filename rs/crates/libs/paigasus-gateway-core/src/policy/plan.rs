@@ -1,0 +1,573 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The request-side plan of one request (§ 6.5.1 steps 1-4, P-7, P-9, P-15): which definitions to
+//! remove, which tool results to replace, and how `tool_choice` changes. Each item carries its own
+//! `enforced` flag; `rewrite_request` applies only the enforced items. No I/O.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use paigasus_kernel::tool_policy::{Facts, Findings, NAME_COLLISION, ToolPolicies, ToolVerdict, decide_tool, normalise};
+
+use super::mapping::{definition_call_name, name_collisions};
+use super::snapshot::{PolicySet, PolicySnapshot, TenantMode, TenantPart};
+use crate::report::{RequestAction, RequestEntry, RequestReason};
+use crate::turn::{ToolChoice, ToolDefinition, TurnFacts};
+use crate::types::{Format, ToolCallKind};
+
+/// The Responses built-in client-run tools that the plan may remove (P-15). Every other
+/// definition of kind `Other` is a hosted tool that the provider runs, and is never removed.
+const REMOVABLE_BUILT_INS: [&str; 5] = ["local_shell", "shell", "apply_patch", "computer", "computer_use_preview"];
+
+/// The tool result to replace (P-7).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultTarget {
+    /// Every result that refers to this call id.
+    CallId(String),
+    /// A legacy chat `role:"function"` result with this name (it has no call id).
+    Name(String),
+}
+
+/// The `tool_choice` after the enforced removals (§ 6.5.1 step 4).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChoiceRewrite {
+    /// Leave `tool_choice` as it is.
+    Keep,
+    /// Set `tool_choice` to `auto`.
+    Auto,
+    /// Keep only these allowed tools (display names, as the caller spelled them).
+    Allowed(Vec<String>),
+}
+
+/// One planned change. Only an enforced item changes the body (P-9).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanItem<T> {
+    pub target: T,
+    pub enforced: bool,
+}
+
+/// The request-side plan.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestPlan {
+    /// The normalised display names of the definitions to remove. Every definition with that
+    /// name is removed (P-7).
+    pub removed: Vec<PlanItem<String>>,
+    pub replaced: Vec<PlanItem<ResultTarget>>,
+    /// Computed from the enforced removals only.
+    pub choice: ChoiceRewrite,
+    /// The choice is `Unknown` and an enforced removal exists: refuse the request (D17).
+    pub refuse: bool,
+    /// The report entries, in the order: removals, replacements, the `tool_choice` reset.
+    pub entries: Vec<RequestEntry>,
+}
+
+impl RequestPlan {
+    fn empty() -> Self {
+        RequestPlan {
+            removed: Vec::new(),
+            replaced: Vec::new(),
+            choice: ChoiceRewrite::Keep,
+            refuse: false,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Whether the plan changes nothing that is enforced: the body goes out as it came in.
+    #[must_use]
+    pub fn is_noop(&self) -> bool {
+        !self.refuse && self.choice == ChoiceRewrite::Keep && !self.removed.iter().any(|i| i.enforced) && !self.replaced.iter().any(|i| i.enforced)
+    }
+}
+
+/// Whether the plan may remove a definition of this kind and name (P-15).
+fn removable(d: &ToolDefinition) -> bool {
+    d.kind != ToolCallKind::Other || REMOVABLE_BUILT_INS.contains(&d.name.as_str())
+}
+
+/// The kernel answers for one snapshot, one per normalised tool name.
+struct Judge<'a> {
+    policies: &'a ToolPolicies,
+    facts: &'a Facts,
+    collisions: BTreeSet<String>,
+    /// Only a floor deny counts: the tenant mode is `off`, or the set is the floor alone (P-4).
+    floor_only: bool,
+    mode: TenantMode,
+    seen: BTreeMap<String, Option<bool>>,
+}
+
+impl Judge<'_> {
+    /// `Some(enforced)` when the tool is denied for every input and the deny counts, else `None`.
+    fn denied(&mut self, name: &str) -> Option<bool> {
+        let n = normalise(name);
+        if let Some(v) = self.seen.get(&n) {
+            return *v;
+        }
+        let mut findings = Findings::new();
+        if self.collisions.contains(&n) {
+            findings.insert(NAME_COLLISION);
+        }
+        let v = match decide_tool(&n, self.facts, &findings, self.policies) {
+            ToolVerdict::DeniedForAllInputs { by_floor } if by_floor || !self.floor_only => Some(by_floor || self.mode == TenantMode::Enforce),
+            _ => None,
+        };
+        self.seen.insert(n, v);
+        v
+    }
+}
+
+/// The `tool_choice` after removing `removed` (normalised names): the rewrite, whether to refuse,
+/// and the name of the tool that caused a reset.
+fn choice_after(choice: &ToolChoice, removed: &BTreeSet<&str>) -> (ChoiceRewrite, bool, Option<String>) {
+    match choice {
+        ToolChoice::Named(n) if removed.contains(normalise(n).as_str()) => (ChoiceRewrite::Auto, false, Some(n.clone())),
+        ToolChoice::AllowedTools(names) => {
+            let (gone, left): (Vec<&String>, Vec<&String>) = names.iter().partition(|n| removed.contains(normalise(n).as_str()));
+            match (gone.first(), left.is_empty()) {
+                (None, _) => (ChoiceRewrite::Keep, false, None),
+                (Some(g), true) => (ChoiceRewrite::Auto, false, Some((*g).clone())),
+                (Some(g), false) => (ChoiceRewrite::Allowed(left.into_iter().cloned().collect()), false, Some((*g).clone())),
+            }
+        }
+        ToolChoice::Unknown => (ChoiceRewrite::Keep, !removed.is_empty(), None),
+        _ => (ChoiceRewrite::Keep, false, None),
+    }
+}
+
+/// Plan the request-side actions (§ 6.5.1 steps 1-4). With the policies unavailable, or the tenant
+/// part unavailable, the plan is empty (§ 6.4). An item is enforced when a floor policy decided its
+/// deny (D33) or the tenant mode is `enforce`; in log-only mode the plan is only reported (D25).
+///
+/// The plan does not depend on the wire format: the format-specific parts (§ 6.5.1 step 5) belong
+/// to the rewrite.
+#[must_use]
+pub fn plan_request(snapshot: &PolicySnapshot, _format: Format, turn: &TurnFacts) -> RequestPlan {
+    let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
+        return RequestPlan::empty();
+    };
+    // Mode `off` ignores the tenant part (controller ruling, Task 8): only the floor counts.
+    let floor_only = snapshot.mode == TenantMode::Off || *tenant == TenantPart::Off;
+    if *tenant == TenantPart::Unavailable && !floor_only {
+        return RequestPlan::empty();
+    }
+    let mut judge = Judge {
+        policies,
+        facts,
+        // Step 1: the request-level findings.
+        collisions: name_collisions(&turn.definitions),
+        floor_only,
+        mode: snapshot.mode,
+        seen: BTreeMap::new(),
+    };
+    let mut plan = RequestPlan::empty();
+
+    // Step 2: definitions, one item per normalised display name (P-7). A definition is decided by
+    // the name its calls arrive under (`computer_use_preview` gives `computer` calls).
+    let mut done: BTreeSet<String> = BTreeSet::new();
+    for d in turn.definitions.iter().filter(|d| removable(d)) {
+        let target = normalise(&d.display_name());
+        if !done.insert(target.clone()) {
+            continue;
+        }
+        if let Some(enforced) = judge.denied(&definition_call_name(d)) {
+            plan.entries
+                .push(RequestEntry::new(d.display_name(), RequestAction::RemoveDefinition, enforced, RequestReason::ToolCallDenied));
+            plan.removed.push(PlanItem { target, enforced });
+        }
+    }
+
+    // Step 3: results. A result with a call id takes the names of the earlier calls with that id;
+    // it is replaced if any of them is denied. A legacy result carries its own name.
+    let mut targets: BTreeSet<(bool, String)> = BTreeSet::new();
+    for r in &turn.tool_results {
+        let (target, names) = match (&r.call_id, &r.name) {
+            (Some(id), _) => {
+                let names: Vec<&str> = turn.prior_calls.iter().filter(|c| c.id.as_deref() == Some(id.as_str())).map(|c| c.name.as_str()).collect();
+                (ResultTarget::CallId(id.clone()), names)
+            }
+            (None, Some(name)) => (ResultTarget::Name(name.clone()), vec![name.as_str()]),
+            (None, None) => continue,
+        };
+        let key = match &target {
+            ResultTarget::CallId(id) => (true, id.clone()),
+            ResultTarget::Name(n) => (false, n.clone()),
+        };
+        if targets.contains(&key) {
+            continue;
+        }
+        let mut hit: Option<(&str, bool)> = None;
+        for name in names {
+            if let Some(enforced) = judge.denied(name) {
+                hit = Some(match hit {
+                    Some((first, e)) => (first, e || enforced),
+                    None => (name, enforced),
+                });
+            }
+        }
+        if let Some((name, enforced)) = hit {
+            targets.insert(key);
+            plan.entries
+                .push(RequestEntry::new(name.to_owned(), RequestAction::ReplaceResult, enforced, RequestReason::ToolResultBlocked));
+            plan.replaced.push(PlanItem { target, enforced });
+        }
+    }
+
+    // Step 4: `tool_choice`, from the enforced removals. A reset that only all removals together
+    // would make is reported once, not enforced (P-9).
+    let enforced: BTreeSet<&str> = plan.removed.iter().filter(|i| i.enforced).map(|i| i.target.as_str()).collect();
+    let all: BTreeSet<&str> = plan.removed.iter().map(|i| i.target.as_str()).collect();
+    let (choice, refuse, reset) = choice_after(&turn.tool_choice, &enforced);
+    let reset_entry = match reset {
+        Some(tool) => Some((tool, true)),
+        None => choice_after(&turn.tool_choice, &all).2.map(|tool| (tool, false)),
+    };
+    if let Some((tool, enforced)) = reset_entry {
+        plan.entries.push(RequestEntry::new(tool, RequestAction::ResetToolChoice, enforced, RequestReason::ToolCallDenied));
+    }
+    plan.choice = choice;
+    plan.refuse = refuse;
+    plan
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use paigasus_kernel::tool_policy::{RequestInfo, SessionInfo};
+    use paigasus_kernel::{Prn, to_cedar_uid};
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::policy::SHIPPED_FLOOR;
+    use crate::policy::snapshot::OnUnavailable;
+    use crate::turn::{PriorCall, ToolResultRef};
+
+    const NO_FLOOR: &str = "";
+    const RM_FLOOR: &str = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"rm", resource);"#;
+    const PERMIT_ALL: &str = r#"@id("all") permit(principal, action, resource);"#;
+    const PERMIT_OK: &str = r#"@id("ok") permit(principal, action == Pgs::Gateway::Action::"ok", resource);"#;
+
+    fn facts() -> Facts {
+        let prn = Prn::parse("prn:pgs:iam:::user/0190a1e5-0000-7000-8000-000000000004").expect("prn");
+        Facts::new(
+            to_cedar_uid(&prn),
+            Uuid::nil(),
+            RequestInfo::new("prn:pgs:gateway:::scope/x", crate::policy::ingress(Format::OpenAiChat), "m"),
+            SessionInfo::placeholder(),
+        )
+    }
+
+    /// A snapshot whose set is the floor and, when `tenant` is `Evaluated`, the tenant text (P-4).
+    fn snap(floor: &str, tenant_text: &str, tenant: TenantPart, mode: TenantMode) -> PolicySnapshot {
+        let floor = Arc::new(ToolPolicies::compile_floor(floor).expect("floor"));
+        let text = if tenant == TenantPart::Evaluated { tenant_text } else { "" };
+        let set = PolicySet::Available {
+            policies: Arc::new(ToolPolicies::compile(floor, text, &[]).expect("compile")),
+            tenant,
+            facts: facts(),
+        };
+        PolicySnapshot::new(set, mode, OnUnavailable::Closed)
+    }
+
+    fn enforce(tenant_text: &str) -> PolicySnapshot {
+        snap(NO_FLOOR, tenant_text, TenantPart::Evaluated, TenantMode::Enforce)
+    }
+
+    fn def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            namespace: None,
+            kind: ToolCallKind::Function,
+            schema: None,
+        }
+    }
+
+    fn other(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            namespace: None,
+            kind: ToolCallKind::Other,
+            schema: None,
+        }
+    }
+
+    fn prior(id: &str, name: &str) -> PriorCall {
+        PriorCall {
+            id: Some(id.to_owned()),
+            name: name.to_owned(),
+            arguments: "{}".to_owned(),
+        }
+    }
+
+    fn by_id(id: &str) -> ToolResultRef {
+        ToolResultRef {
+            call_id: Some(id.to_owned()),
+            name: None,
+        }
+    }
+
+    fn turn(definitions: Vec<ToolDefinition>) -> TurnFacts {
+        TurnFacts { definitions, ..TurnFacts::default() }
+    }
+
+    fn item<T>(target: T, enforced: bool) -> PlanItem<T> {
+        PlanItem { target, enforced }
+    }
+
+    fn removed(p: &RequestPlan) -> Vec<(&str, bool)> {
+        p.removed.iter().map(|i| (i.target.as_str(), i.enforced)).collect()
+    }
+
+    fn actions(p: &RequestPlan) -> Vec<(RequestAction, bool, RequestReason)> {
+        p.entries.iter().map(|e| (e.action, e.enforced, e.reason)).collect()
+    }
+
+    #[test]
+    fn unavailable_plans_nothing() {
+        let mut t = turn(vec![def("rm"), def("x")]);
+        t.prior_calls = vec![prior("c1", "rm")];
+        t.tool_results = vec![by_id("c1")];
+        t.tool_choice = ToolChoice::Unknown;
+        let unavailable = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Enforce, OnUnavailable::Closed);
+        for s in [
+            unavailable,
+            snap(RM_FLOOR, "", TenantPart::Unavailable, TenantMode::Enforce),
+            snap(RM_FLOOR, "", TenantPart::Unavailable, TenantMode::LogOnly),
+        ] {
+            let p = plan_request(&s, Format::OpenAiChat, &t);
+            assert_eq!(p, RequestPlan::empty());
+            assert!(p.is_noop());
+        }
+    }
+
+    #[test]
+    fn a_tool_denied_for_every_input_is_removed() {
+        let p = plan_request(&enforce(PERMIT_OK), Format::OpenAiChat, &turn(vec![def("X "), def("ok")]));
+        assert_eq!(p.removed, [item("x".to_owned(), true)]);
+        assert_eq!(actions(&p), [(RequestAction::RemoveDefinition, true, RequestReason::ToolCallDenied)]);
+        assert_eq!(p.entries[0].tool, "X ");
+        assert!(!p.is_noop());
+    }
+
+    #[test]
+    fn every_definition_of_a_removed_name_goes_together() {
+        // P-7: one item per normalised display name.
+        let p = plan_request(&enforce(PERMIT_OK), Format::OpenAiChat, &turn(vec![def("x"), def("ok"), def("X")]));
+        assert_eq!(removed(&p), [("x", true)]);
+        assert_eq!(p.entries.len(), 1);
+    }
+
+    #[test]
+    fn an_input_reading_permit_keeps_the_definition() {
+        let permit = r#"@id("p") permit(principal, action == Pgs::Gateway::Action::"read_file", resource) when { context.input.path like "/tmp/*" };"#;
+        let p = plan_request(&enforce(permit), Format::OpenAiChat, &turn(vec![def("read_file")]));
+        assert!(p.removed.is_empty());
+        assert!(p.entries.is_empty());
+        assert!(p.is_noop());
+    }
+
+    #[test]
+    fn log_only_plans_but_does_not_enforce() {
+        let mut t = turn(vec![def("x"), def("ok")]);
+        t.prior_calls = vec![prior("c1", "x")];
+        t.tool_results = vec![by_id("c1")];
+        t.tool_choice = ToolChoice::Named("x".to_owned());
+        let p = plan_request(&snap(NO_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly), Format::OpenAiChat, &t);
+        assert_eq!(removed(&p), [("x", false)]);
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), false)]);
+        assert_eq!(p.choice, ChoiceRewrite::Keep);
+        assert!(!p.refuse);
+        assert_eq!(p.entries.len(), 3);
+        assert!(p.entries.iter().all(|e| !e.enforced));
+        assert!(p.is_noop());
+    }
+
+    #[test]
+    fn a_floor_removal_is_enforced_in_every_mode() {
+        let cases = [
+            snap(RM_FLOOR, "", TenantPart::Off, TenantMode::Off),
+            snap(RM_FLOOR, PERMIT_ALL, TenantPart::Evaluated, TenantMode::Off),
+            snap(RM_FLOOR, PERMIT_ALL, TenantPart::Evaluated, TenantMode::LogOnly),
+            snap(RM_FLOOR, PERMIT_ALL, TenantPart::Evaluated, TenantMode::Enforce),
+            // Mode `off` ignores the tenant part (Task 8 ruling).
+            snap(RM_FLOOR, "", TenantPart::Unavailable, TenantMode::Off),
+        ];
+        for s in cases {
+            let p = plan_request(&s, Format::OpenAiChat, &turn(vec![def("rm"), def("ok")]));
+            // The floor-alone default deny of "ok" does not count (P-4).
+            assert_eq!(removed(&p), [("rm", true)], "{:?}", s.mode);
+            assert!(!p.is_noop());
+        }
+        // Mode `off` with a tenant set: a tenant-only deny is not planned.
+        let p = plan_request(&snap(NO_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::Off), Format::OpenAiChat, &turn(vec![def("x")]));
+        assert!(p.removed.is_empty());
+    }
+
+    #[test]
+    fn an_empty_catalog_in_enforce_removes_every_definition() {
+        let invoke = r#"@id("i") permit(principal, action in Pgs::Gateway::Action::"InvokeTool", resource);"#;
+        let p = plan_request(&enforce(invoke), Format::OpenAiChat, &turn(vec![def("a"), def("b")]));
+        assert_eq!(removed(&p), [("a", true), ("b", true)]);
+        let unregistered = r#"@id("u") permit(principal, action in Pgs::Gateway::Action::"Unregistered", resource);"#;
+        assert!(plan_request(&enforce(unregistered), Format::OpenAiChat, &turn(vec![def("a"), def("b")])).removed.is_empty());
+    }
+
+    #[test]
+    fn colliding_definitions_are_not_removed() {
+        // The collision floor reads `context.findings`, so it cannot deny every input.
+        let s = snap(SHIPPED_FLOOR, PERMIT_ALL, TenantPart::Evaluated, TenantMode::Enforce);
+        let p = plan_request(&s, Format::OpenAiChat, &turn(vec![def("send"), def("Send")]));
+        assert!(p.removed.is_empty());
+        assert!(p.is_noop());
+    }
+
+    #[test]
+    fn hosted_responses_tools_are_never_removed() {
+        let defs = vec![
+            other("web_search"),
+            other("mcp"),
+            other("mcp"),
+            other("tool_search"),
+            other("local_shell"),
+            other("shell"),
+            other("apply_patch"),
+            other("computer"),
+            other("computer_use_preview"),
+        ];
+        let p = plan_request(&enforce(PERMIT_OK), Format::OpenAiResponses, &turn(defs));
+        // `mcp` collides with itself, and is still kept (P-15).
+        assert_eq!(
+            removed(&p),
+            [("local_shell", true), ("shell", true), ("apply_patch", true), ("computer", true), ("computer_use_preview", true)]
+        );
+        // A `computer_use_preview` definition is decided by its call name `computer`.
+        let permit_computer = r#"@id("c") permit(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
+        let p = plan_request(&enforce(permit_computer), Format::OpenAiResponses, &turn(vec![other("computer_use_preview")]));
+        assert!(p.removed.is_empty());
+    }
+
+    #[test]
+    fn result_replacement_by_call_id_and_by_earlier_call() {
+        let s = enforce(PERMIT_OK);
+        let replaced = |prior_calls: Vec<PriorCall>, tool_results: Vec<ToolResultRef>| {
+            let mut t = turn(vec![]);
+            t.prior_calls = prior_calls;
+            t.tool_results = tool_results;
+            plan_request(&s, Format::OpenAiChat, &t)
+        };
+        // A chat `role:"tool"` result named by its earlier call (Anthropic `tool_use_id`, Responses
+        // `call_id` and `approval_request_id` reach the plan in the same shape).
+        let p = replaced(vec![prior("c1", "x")], vec![by_id("c1")]);
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)]);
+        assert_eq!(actions(&p), [(RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked)]);
+        assert_eq!(p.entries[0].tool, "x");
+        // An allowed earlier call: not replaced.
+        assert!(replaced(vec![prior("c1", "ok")], vec![by_id("c1")]).replaced.is_empty());
+        // Two earlier calls with one id: replaced if any is denied.
+        let p = replaced(vec![prior("c1", "ok"), prior("c1", "x")], vec![by_id("c1")]);
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)]);
+        // No earlier call with that id: not replaced.
+        assert!(replaced(vec![prior("c2", "x")], vec![by_id("c1")]).replaced.is_empty());
+        // A legacy `role:"function"` result carries its name.
+        let legacy = ToolResultRef {
+            call_id: None,
+            name: Some("x".to_owned()),
+        };
+        let p = replaced(vec![], vec![legacy]);
+        assert_eq!(p.replaced, [item(ResultTarget::Name("x".to_owned()), true)]);
+        // Two results for one call id: one item.
+        assert_eq!(replaced(vec![prior("c1", "x")], vec![by_id("c1"), by_id("c1")]).replaced.len(), 1);
+        // A result with neither id nor name: not replaced.
+        let none = ToolResultRef { call_id: None, name: None };
+        assert!(replaced(vec![], vec![none]).replaced.is_empty());
+    }
+
+    #[test]
+    fn result_replacement_follows_the_floor_and_the_mode() {
+        let mut t = turn(vec![]);
+        t.prior_calls = vec![prior("c1", "rm"), prior("c2", "x")];
+        t.tool_results = vec![by_id("c1"), by_id("c2")];
+        let p = plan_request(&snap(RM_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly), Format::OpenAiChat, &t);
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true), item(ResultTarget::CallId("c2".to_owned()), false)]);
+        // Mixed floor and tenant denies on one id: enforced.
+        t.prior_calls = vec![prior("c1", "x"), prior("c1", "rm")];
+        t.tool_results = vec![by_id("c1")];
+        let p = plan_request(&snap(RM_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly), Format::OpenAiChat, &t);
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)]);
+    }
+
+    fn with_choice(defs: &[&str], choice: ToolChoice) -> TurnFacts {
+        let mut t = turn(defs.iter().map(|n| def(n)).collect());
+        t.tool_choice = choice;
+        t
+    }
+
+    fn resets(p: &RequestPlan) -> Vec<(String, bool)> {
+        p.entries.iter().filter(|e| e.action == RequestAction::ResetToolChoice).map(|e| (e.tool.clone(), e.enforced)).collect()
+    }
+
+    #[test]
+    fn tool_choice_after_removals() {
+        let s = enforce(PERMIT_OK);
+        let named = |n: &str| ToolChoice::Named(n.to_owned());
+        let allowed = |n: &[&str]| ToolChoice::AllowedTools(n.iter().map(|x| (*x).to_owned()).collect());
+
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "ok"], named("A")));
+        assert_eq!((p.choice.clone(), p.refuse), (ChoiceRewrite::Auto, false));
+        assert_eq!(resets(&p), [("A".to_owned(), true)]);
+
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "ok"], named("ok")));
+        assert_eq!(p.choice, ChoiceRewrite::Keep);
+        assert!(resets(&p).is_empty());
+
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "ok"], allowed(&["a", "ok"])));
+        assert_eq!(p.choice, ChoiceRewrite::Allowed(vec!["ok".to_owned()]));
+        assert_eq!(resets(&p), [("a".to_owned(), true)]);
+
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "b", "ok"], allowed(&["a", "b"])));
+        assert_eq!(p.choice, ChoiceRewrite::Auto);
+        assert_eq!(resets(&p).len(), 1);
+
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["ok"], allowed(&["ok"])));
+        assert_eq!(p.choice, ChoiceRewrite::Keep);
+        assert!(p.is_noop());
+
+        for c in [ToolChoice::Auto, ToolChoice::None, ToolChoice::Required] {
+            let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a"], c));
+            assert_eq!((p.choice.clone(), p.refuse), (ChoiceRewrite::Keep, false));
+            assert!(resets(&p).is_empty());
+        }
+
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a"], ToolChoice::Unknown));
+        assert!(p.refuse);
+        assert!(!p.is_noop());
+        assert!(resets(&p).is_empty());
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["ok"], ToolChoice::Unknown));
+        assert!(!p.refuse);
+
+        let log_only = snap(NO_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly);
+        let p = plan_request(&log_only, Format::OpenAiChat, &with_choice(&["a"], ToolChoice::Unknown));
+        assert!(!p.refuse);
+        assert!(p.is_noop());
+    }
+
+    #[test]
+    fn a_log_only_reset_is_reported_once() {
+        // P-9: the floor removes "a" (enforced); the log-only tenant would remove "b".
+        let s = snap(
+            r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"a", resource);"#,
+            PERMIT_OK,
+            TenantPart::Evaluated,
+            TenantMode::LogOnly,
+        );
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "b", "ok"], ToolChoice::Named("b".to_owned())));
+        assert_eq!(removed(&p), [("a", true), ("b", false)]);
+        assert_eq!(p.choice, ChoiceRewrite::Keep);
+        assert_eq!(resets(&p), [("b".to_owned(), false)]);
+        // An enforced reset is reported once, as enforced.
+        let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "b", "ok"], ToolChoice::AllowedTools(vec!["a".to_owned(), "b".to_owned()])));
+        assert_eq!(p.choice, ChoiceRewrite::Allowed(vec!["b".to_owned()]));
+        assert_eq!(resets(&p), [("a".to_owned(), true)]);
+    }
+}
