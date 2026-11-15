@@ -167,7 +167,10 @@ impl Protocol for ResponsesStream {
             let mut completed = Vec::new();
             if self.asm.hold_open() && !self.asm.hold_cut() {
                 self.completed = true;
-                completed.push((HoldKey::Response, self.asm.hold_calls()));
+                let calls = self.asm.hold_calls();
+                // `hold_cut()` keeps one call per known client-run item on a hold that is not cut.
+                debug_assert_eq!(calls.len(), self.asm.known().len());
+                completed.push((HoldKey::Response, calls));
             }
             return Ok(Step::Terminal { frame, completed });
         }
@@ -200,18 +203,20 @@ impl Protocol for ResponsesStream {
             return out;
         }
         let Some(verdict) = verdict else { return vec![original()] };
+        // I1: under a blocking verdict, a frame that the rewrite cannot place is dropped, never
+        // forwarded. R3 and R6 make both cases below unreachable today.
         if frame.event.map(scope_of) == Some(Scope::Terminal) {
             let mut out = self.owed_done();
-            out.push(match self.rewrite_terminal(&value, verdict) {
-                Some(v) => event_frame(&v),
-                None => original(),
-            });
+            // Without its terminal event, the client raises as on a cut stream.
+            out.extend(self.rewrite_terminal(&value, verdict).map(|v| event_frame(&v)));
             return out;
         }
         let index = value.get("output_index").and_then(Value::as_u64).and_then(|i| u32::try_from(i).ok());
-        let blocked = index.and_then(|i| self.asm.slot_of(i).map(|s| (i, s))).and_then(|(i, s)| verdict.block_code(s).map(|c| (i, s, c)));
-        match blocked {
-            Some((i, slot, code)) => self.rewrite_item(&value, i, slot, code),
+        let Some((i, slot)) = index.and_then(|i| self.asm.slot_of(i).map(|s| (i, s))) else {
+            return self.owed_done();
+        };
+        match verdict.block_code(slot) {
+            Some(code) => self.rewrite_item(&value, i, slot, code),
             None => vec![original()],
         }
     }
@@ -564,6 +569,54 @@ mod tests {
         let (out, _, _) = run(&records(&plain), block_all, BlockCode::Truncated);
         assert!(out.contains("msg_paigasus_1"), "{out}");
         assert!(!out.contains("sequence_number"), "{out}");
+    }
+
+    /// A stream under `BlockAll(policy)` whose call at index 0 has its rewritten `added` out and
+    /// owes its `done`. Returns the stream, the verdicts and the owed `done` frame.
+    fn owing_stream() -> (ResponsesStream, Verdicts, Bytes) {
+        let evs = cut_call();
+        let mut p = ResponsesStream::with_cap(1 << 20);
+        let mut verdicts = Verdicts::new();
+        verdicts.insert(HoldKey::Response, Verdict::BlockAll(BlockCode::Policy));
+        for r in records(&evs[..3]) {
+            let Ok(Step::Frame { frame, .. }) = p.step(r, &verdicts) else { panic!("a canonical frame") };
+            p.release(frame, &verdicts);
+        }
+        let notice = r#"[paigasus] tool call "rm" was blocked (policy)."#;
+        let done = Bytes::from(framed(&done_event(0, notice, Some(&evs[2]["sequence_number"]))));
+        (p, verdicts, done)
+    }
+
+    /// A frame built by hand, because the assembly cannot produce it (R3, R6).
+    fn hand_frame(event: &'static str, value: Value) -> Frame {
+        Frame {
+            event: Some(event),
+            payload: value.to_string().into_bytes(),
+            value: Some(value),
+            touches: vec![HoldKey::Response],
+        }
+    }
+
+    #[test]
+    fn an_unrewritable_terminal_is_dropped_under_a_block() {
+        let (mut p, verdicts, done) = owing_stream();
+        let value = json!({"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": "CANARY"}});
+        let out = p.release(hand_frame("response.completed", value), &verdicts);
+        assert!(!out.concat().windows(6).any(|w| w == b"CANARY"), "{out:?}");
+        assert_eq!(out, vec![done], "only the owed done goes out");
+    }
+
+    #[test]
+    fn a_touching_frame_with_no_slot_is_dropped_under_a_block() {
+        let delta = "response.function_call_arguments.delta";
+        let no_index = json!({"type": delta, "item_id": "fc_1", "delta": "CANARY"});
+        let no_slot = json!({"type": delta, "output_index": 7, "item_id": "fc_9", "delta": "CANARY"});
+        for value in [no_index, no_slot] {
+            let (mut p, verdicts, done) = owing_stream();
+            let out = p.release(hand_frame(delta, value.clone()), &verdicts);
+            assert!(!out.concat().windows(6).any(|w| w == b"CANARY"), "{value}: {out:?}");
+            assert_eq!(out, vec![done], "{value}: only the owed done goes out");
+        }
     }
 
     fn interceptor() -> Interceptor {
