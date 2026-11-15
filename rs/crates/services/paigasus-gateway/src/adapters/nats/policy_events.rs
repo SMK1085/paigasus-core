@@ -11,7 +11,9 @@
 //! - Each message calls [`Invalidate::invalidate_all`] (D16). The payload is not read: an event
 //!   has no tenant scope, so every event clears every tenant.
 //! - Each connect and each reconnect also calls it, because messages may have been missed while
-//!   the client was away. Delivery is at most once; the cache refresh is the backstop.
+//!   the client was away. So do a new subscription after the old one ended and a slow-consumer
+//!   event (the client dropped messages). Delivery is at most once; the cache refresh is the
+//!   backstop.
 //! - A NATS outage never blocks a request: [`connect`] returns at once and the client connects in
 //!   the background (`retry_on_initial_connect`).
 //!
@@ -133,6 +135,13 @@ fn handle_event(event: &async_nats::Event, target: &dyn Invalidate) {
             gauge!(names::GATEWAY_TOOL_POLICY_NATS_CONNECTED).set(0.0);
             tracing::warn!(event = %event, "tool-policy NATS connection event; the cache refresh is the backstop");
         }
+        // The client dropped messages for this subscription. A dropped message can be a policy
+        // event, so the cache is invalidated.
+        async_nats::Event::SlowConsumer(_) => {
+            target.invalidate_all();
+            counter!(names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, "cause" => "slow_consumer").increment(1);
+            tracing::warn!(event = %event, "tool-policy NATS slow consumer; the policy cache is invalidated");
+        }
         // A permission violation names the subject, and nothing else.
         async_nats::Event::ServerError(e) => tracing::error!("tool-policy NATS server error: {e}"),
         async_nats::Event::ClientError(e) => tracing::error!("tool-policy NATS client error: {e}"),
@@ -146,11 +155,31 @@ impl PolicyEvents {
         &self.client
     }
 
+    /// Unsubscribe while the client stays open, for tests: [`Self::run`] then sees the
+    /// subscription end and subscribes again.
+    ///
+    /// # Errors
+    ///
+    /// [`async_nats::UnsubscribeError`] when the client is closed.
+    #[doc(hidden)]
+    pub async fn end_subscription(&mut self) -> Result<(), async_nats::UnsubscribeError> {
+        self.subscriber.unsubscribe().await
+    }
+
     /// Invalidate on each message until `shutdown` changes (or its sender is dropped).
     ///
-    /// If the subscription ends (for example, the server refused it), the loop logs an error and
-    /// subscribes again after [`RESUBSCRIBE_DELAY`]. It never ends the server task for it: a NATS
-    /// problem must not stop the gateway (§ 6.3.5).
+    /// The subscription ends only when the client removes it: an unsubscribe, or a client that
+    /// closed. A permission violation from the server does not end it; it arrives as a
+    /// [`async_nats::Event::ServerError`]. A broker outage does not end it either: the client
+    /// subscribes again on each reconnect.
+    ///
+    /// When the subscription ends, the loop logs an error and subscribes again after
+    /// [`RESUBSCRIBE_DELAY`]. Events may have been missed in the gap, so a new subscription
+    /// invalidates (`cause="resubscribe"`). When the subscribe fails, the client is closed: the
+    /// subject is a valid constant, so no other error kind is possible. A closed client never
+    /// opens again, so the loop logs one error and waits for `shutdown`. The cache refresh is then
+    /// the only backstop. The loop never ends the server task for this: a NATS problem must not
+    /// stop the gateway (§ 6.3.5), and the supervisor stops the gateway when any task ends.
     ///
     /// # Errors
     ///
@@ -173,12 +202,57 @@ impl PolicyEvents {
                             () = tokio::time::sleep(RESUBSCRIBE_DELAY) => {}
                         }
                         match client.subscribe(POLICY_SUBJECT).await {
-                            Ok(s) => subscriber = s,
-                            Err(e) => tracing::error!("tool-policy NATS subscribe failed: {e}"),
+                            Ok(s) => {
+                                subscriber = s;
+                                target.invalidate_all();
+                                counter!(names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, "cause" => "resubscribe").increment(1);
+                                tracing::info!(subject = POLICY_SUBJECT, "tool-policy NATS subscribed again; the policy cache is invalidated");
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    subject = POLICY_SUBJECT,
+                                    "tool-policy NATS subscribe failed ({e}); the client is closed, so only the cache refresh invalidates until shutdown"
+                                );
+                                let _ = shutdown.changed().await;
+                                return Ok(());
+                            }
                         }
                     }
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Counting(AtomicUsize);
+
+    impl Invalidate for Counting {
+        fn invalidate_all(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A slow consumer drops messages, and a dropped message can be a policy event, so the event
+    /// invalidates.
+    #[test]
+    fn a_slow_consumer_invalidates() {
+        let target = Counting::default();
+        handle_event(&async_nats::Event::SlowConsumer(1), &target);
+        assert_eq!(target.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// A disconnect does not invalidate: the connect that follows does.
+    #[test]
+    fn a_disconnect_does_not_invalidate() {
+        let target = Counting::default();
+        handle_event(&async_nats::Event::Disconnected, &target);
+        assert_eq!(target.0.load(Ordering::SeqCst), 0);
     }
 }

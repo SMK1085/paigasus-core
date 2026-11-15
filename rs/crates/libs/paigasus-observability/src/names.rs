@@ -67,7 +67,9 @@ pub const GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL: &str = "gateway_tool_polic
 /// Seconds the tool policy adds to one request: the request side plus the decider (preflight F14).
 pub const GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS: &str = "gateway_tool_policy_overhead_seconds";
 /// Tool-policy cache invalidations from NATS (SMA-752 § 6.3.5). `cause` = `message` (an event on
-/// `iam.policy.>`) | `connect` (a connect or a reconnect, because messages may have been missed).
+/// `iam.policy.>`) | `connect` (a connect or a reconnect, because messages may have been missed) |
+/// `resubscribe` (a new subscription after the old one ended) | `slow_consumer` (the client
+/// dropped messages).
 pub const GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL: &str = "gateway_tool_policy_nats_invalidations_total";
 /// 1 while the tool-policy NATS client is connected, else 0. Set on each connect and disconnect event.
 pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_connected";

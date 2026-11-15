@@ -296,7 +296,7 @@ fn describe_gateway_metrics() {
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
-        "Tool-policy cache invalidations from NATS, labeled by cause (message, connect)."
+        "Tool-policy cache invalidations from NATS, labeled by cause (message, connect, resubscribe, slow_consumer)."
     );
     describe_gauge!(names::GATEWAY_TOOL_POLICY_NATS_CONNECTED, "1 while the tool-policy NATS client is connected, else 0.");
 }

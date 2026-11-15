@@ -148,6 +148,38 @@ async fn a_reconnect_invalidates() {
     assert_eq!(reach(&counter, base + 1, "the reconnect").await, base + 1);
     assert_eq!(metric(names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, &[("cause", "connect")]) - before, 1.0);
     assert_eq!(metric(names::GATEWAY_TOOL_POLICY_NATS_CONNECTED, &[]), 1.0, "the gauge is up after the reconnect");
+
+    // The subscription survives the reconnect: one publish after it is delivered.
+    client.flush().await.expect("flush after the reconnect");
+    js_publish(&url, "iam.policy.put").await;
+    assert_eq!(reach(&counter, base + 2, "a publish after the reconnect").await, base + 2);
+}
+
+/// § 6.3.5: when the subscription ends while the client stays open, `run` subscribes again. Events
+/// may have been missed in the gap, so the new subscription invalidates, with `cause="resubscribe"`.
+/// Then one publish proves that the new subscription delivers.
+#[tokio::test]
+async fn a_resubscribe_invalidates_and_delivers() {
+    metric(names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, &[]);
+    let Some((_node, url)) = start_nats().await else { return };
+    let (_tx, rx) = watch::channel(());
+    let counter = Arc::new(Counting::default());
+    let mut events: PolicyEvents = connect(&cfg(&url), Arc::clone(&counter) as Arc<dyn Invalidate>).await.expect("connect");
+    let client = events.client().clone();
+    reach(&counter, 1, "the first connect invalidates").await;
+    let base = counter.get();
+    let before = metric(names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, &[("cause", "resubscribe")]);
+
+    events.end_subscription().await.expect("the unsubscribe is sent");
+    let _task = tokio::spawn(events.run(rx));
+
+    // The loop waits RESUBSCRIBE_DELAY (5 s) before it subscribes again; BUDGET is 10 s.
+    assert_eq!(reach(&counter, base + 1, "the resubscribe").await, base + 1);
+    assert_eq!(metric(names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, &[("cause", "resubscribe")]) - before, 1.0);
+
+    client.flush().await.expect("flush after the resubscribe");
+    js_publish(&url, "iam.policy.put").await;
+    assert_eq!(reach(&counter, base + 2, "a publish after the resubscribe").await, base + 2);
 }
 
 /// D16 reads only `iam.policy.>`. A role grant is published first and a policy event after it, on
