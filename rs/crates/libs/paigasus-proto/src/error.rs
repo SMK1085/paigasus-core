@@ -205,6 +205,21 @@ mod tests {
         "external-identity-exists",
         // IAM: DPoP (SMA-700)
         "dpop-quota-exceeded",
+        // IAM: tool policies (SMA-774)
+        "tool-policy-invalid",
+        "tool-policy-shape-unsupported",
+        "tool-policy-lowering-failed",
+        "tool-policy-floor-permit",
+        "tool-policy-id-invalid",
+        "tool-policy-window-too-long",
+        "tool-catalog-breaks-policy",
+        "tool-catalog-invalid",
+        "tool-catalog-conflict",
+        "tool-policy-version-conflict",
+        "tool-policy-recompile-pending",
+        "tool-policy-compiler-unavailable",
+        "tool-policy-compiler-busy",
+        "tool-policy-version-not-found",
         // Gateway
         "missing-authorization",
         "invalid-api-key",
@@ -246,7 +261,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 71, "the registry should hold 71 reasons");
+        assert_eq!(actual.len(), 85, "the registry should hold 85 reasons");
     }
 
     #[test]
@@ -419,5 +434,14 @@ mod tests {
         assert_eq!(ErrorReason::DpopQuotaExceeded.as_wire_reason().as_deref(), Some("dpop-quota-exceeded"));
         assert_eq!(ErrorReason::from_wire_reason("dpop-quota-exceeded"), Some(ErrorReason::DpopQuotaExceeded));
         assert_eq!(ErrorReason::DpopQuotaExceeded as i32, 46);
+    }
+
+    /// SMA-774: the tool policy reasons resolve both ways, and the last one pins the number.
+    #[test]
+    fn the_tool_policy_reasons_resolve_both_ways() {
+        assert_eq!(ErrorReason::ToolPolicyInvalid.as_wire_reason().as_deref(), Some("tool-policy-invalid"));
+        assert_eq!(ErrorReason::from_wire_reason("tool-policy-version-not-found"), Some(ErrorReason::ToolPolicyVersionNotFound));
+        assert_eq!(ErrorReason::ToolPolicyInvalid as i32, 47);
+        assert_eq!(ErrorReason::ToolPolicyVersionNotFound as i32, 60);
     }
 }

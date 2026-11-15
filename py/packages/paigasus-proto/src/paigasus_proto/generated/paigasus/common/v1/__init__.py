@@ -95,6 +95,13 @@ class Capability(betterproto2.Enum):
     this key is present (SMA-633 D2) — this key does not promise grants on that path.
     """
 
+    IAM_TOOL_POLICIES = 7
+    """
+    "iam.tool.policies" — the tool catalog and the tool policy sets can be administered
+    (ToolPolicyService). Absent when tool_policies.enabled is false or the compiler binary is
+    missing.
+    """
+
     @classmethod
     def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
         return {
@@ -105,6 +112,7 @@ class Capability(betterproto2.Enum):
             4: "CAPABILITY_GATEWAY_CHAT_STREAM",
             5: "CAPABILITY_IAM_DEADLETTERS",
             6: "CAPABILITY_IAM_AUTHN_GRANTS",
+            7: "CAPABILITY_IAM_TOOL_POLICIES",
         }
 
     @classmethod
@@ -117,6 +125,7 @@ class Capability(betterproto2.Enum):
             "CAPABILITY_GATEWAY_CHAT_STREAM": 4,
             "CAPABILITY_IAM_DEADLETTERS": 5,
             "CAPABILITY_IAM_AUTHN_GRANTS": 6,
+            "CAPABILITY_IAM_TOOL_POLICIES": 7,
         }
 
 
@@ -488,6 +497,79 @@ class ErrorReason(betterproto2.Enum):
     "rate-limited".
     """
 
+    TOOL_POLICY_INVALID = 47
+    """
+    ---- IAM: tool policies (1-299) ------------------------------------------
+    SMA-774. Emitted by the tool catalog and tool policy set RPCs (ToolPolicyService).
+
+    "tool-policy-invalid" — Dogwood validation or Cedar validation failed. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+    """
+
+    TOOL_POLICY_SHAPE_UNSUPPORTED = 48
+    """
+    "tool-policy-shape-unsupported" — a block is not one of the three shapes, has two shapes, or uses a predicate node outside the subset. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+    """
+
+    TOOL_POLICY_LOWERING_FAILED = 49
+    """
+    "tool-policy-lowering-failed" — Dogwood's lower failed. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+    """
+
+    TOOL_POLICY_FLOOR_PERMIT = 50
+    """
+    "tool-policy-floor-permit" — a floor set contains a permit. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+    """
+
+    TOOL_POLICY_ID_INVALID = 51
+    """
+    "tool-policy-id-invalid" — a missing, duplicate or malformed @id, a wrong floor- prefix, or an unknown @scope. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+    """
+
+    TOOL_POLICY_WINDOW_TOO_LONG = 52
+    """
+    "tool-policy-window-too-long" — a window is longer than the limit. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+    """
+
+    TOOL_CATALOG_BREAKS_POLICY = 53
+    """
+    "tool-catalog-breaks-policy" — a catalog write would break the live tenant set. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+    """
+
+    TOOL_CATALOG_INVALID = 54
+    """
+    "tool-catalog-invalid" — a tool name breaks the grammar, or a write breaks a limit. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+    """
+
+    TOOL_CATALOG_CONFLICT = 55
+    """
+    "tool-catalog-conflict" — two tool names have the same match key. gRPC ALREADY_EXISTS, HTTP 409.
+    """
+
+    TOOL_POLICY_VERSION_CONFLICT = 56
+    """
+    "tool-policy-version-conflict" — the expected version or catalog revision is not current. gRPC ABORTED, HTTP 409.
+    """
+
+    TOOL_POLICY_RECOMPILE_PENDING = 57
+    """
+    "tool-policy-recompile-pending" — the live set is from an older compiler or schema. gRPC FAILED_PRECONDITION, HTTP 409.
+    """
+
+    TOOL_POLICY_COMPILER_UNAVAILABLE = 58
+    """
+    "tool-policy-compiler-unavailable" — the compiler crashed, timed out, or broke the protocol. gRPC UNAVAILABLE, HTTP 503.
+    """
+
+    TOOL_POLICY_COMPILER_BUSY = 59
+    """
+    "tool-policy-compiler-busy" — the compiler semaphore is full. Retryable. gRPC RESOURCE_EXHAUSTED, HTTP 429.
+    """
+
+    TOOL_POLICY_VERSION_NOT_FOUND = 60
+    """
+    "tool-policy-version-not-found" — a fetch asked for a version that does not exist, or that is not live or superseded. gRPC NOT_FOUND, HTTP 404.
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -715,6 +797,20 @@ class ErrorReason(betterproto2.Enum):
             44: "ERROR_REASON_CANNOT_UNLINK_OWN_IDENTITY",
             45: "ERROR_REASON_EXTERNAL_IDENTITY_EXISTS",
             46: "ERROR_REASON_DPOP_QUOTA_EXCEEDED",
+            47: "ERROR_REASON_TOOL_POLICY_INVALID",
+            48: "ERROR_REASON_TOOL_POLICY_SHAPE_UNSUPPORTED",
+            49: "ERROR_REASON_TOOL_POLICY_LOWERING_FAILED",
+            50: "ERROR_REASON_TOOL_POLICY_FLOOR_PERMIT",
+            51: "ERROR_REASON_TOOL_POLICY_ID_INVALID",
+            52: "ERROR_REASON_TOOL_POLICY_WINDOW_TOO_LONG",
+            53: "ERROR_REASON_TOOL_CATALOG_BREAKS_POLICY",
+            54: "ERROR_REASON_TOOL_CATALOG_INVALID",
+            55: "ERROR_REASON_TOOL_CATALOG_CONFLICT",
+            56: "ERROR_REASON_TOOL_POLICY_VERSION_CONFLICT",
+            57: "ERROR_REASON_TOOL_POLICY_RECOMPILE_PENDING",
+            58: "ERROR_REASON_TOOL_POLICY_COMPILER_UNAVAILABLE",
+            59: "ERROR_REASON_TOOL_POLICY_COMPILER_BUSY",
+            60: "ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -792,6 +888,20 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_CANNOT_UNLINK_OWN_IDENTITY": 44,
             "ERROR_REASON_EXTERNAL_IDENTITY_EXISTS": 45,
             "ERROR_REASON_DPOP_QUOTA_EXCEEDED": 46,
+            "ERROR_REASON_TOOL_POLICY_INVALID": 47,
+            "ERROR_REASON_TOOL_POLICY_SHAPE_UNSUPPORTED": 48,
+            "ERROR_REASON_TOOL_POLICY_LOWERING_FAILED": 49,
+            "ERROR_REASON_TOOL_POLICY_FLOOR_PERMIT": 50,
+            "ERROR_REASON_TOOL_POLICY_ID_INVALID": 51,
+            "ERROR_REASON_TOOL_POLICY_WINDOW_TOO_LONG": 52,
+            "ERROR_REASON_TOOL_CATALOG_BREAKS_POLICY": 53,
+            "ERROR_REASON_TOOL_CATALOG_INVALID": 54,
+            "ERROR_REASON_TOOL_CATALOG_CONFLICT": 55,
+            "ERROR_REASON_TOOL_POLICY_VERSION_CONFLICT": 56,
+            "ERROR_REASON_TOOL_POLICY_RECOMPILE_PENDING": 57,
+            "ERROR_REASON_TOOL_POLICY_COMPILER_UNAVAILABLE": 58,
+            "ERROR_REASON_TOOL_POLICY_COMPILER_BUSY": 59,
+            "ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND": 60,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,

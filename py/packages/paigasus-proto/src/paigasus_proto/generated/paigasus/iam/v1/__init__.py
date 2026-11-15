@@ -22,8 +22,12 @@ __all__ = (
     "AuthorizationServiceStub",
     "BulkReplayDeadLettersRequest",
     "BulkReplayDeadLettersResponse",
+    "CatalogWriteAccepted",
     "ChangeUserEmailRequest",
     "ChangeUserEmailResponse",
+    "ComparisonOp",
+    "CompiledToolPolicySet",
+    "CountWithinShape",
     "CreateOrganizationRequest",
     "CreateOrganizationResponse",
     "CreateProjectRequest",
@@ -37,14 +41,21 @@ __all__ = (
     "DeadLetterEntry",
     "DeletePolicyRequest",
     "DeletePolicyResponse",
+    "DeleteToolRequest",
+    "DeleteToolResponse",
     "DetachMembershipRequest",
     "DetachMembershipResponse",
     "DiscardDeadLetterRequest",
     "DiscardDeadLetterResponse",
     "DpopContext",
+    "DroppedField",
     "ExternalIdentity",
+    "FieldComparison",
     "FindUserByEmailRequest",
     "FindUserByEmailResponse",
+    "FormerlyShape",
+    "GetFloorPolicySetRequest",
+    "GetFloorPolicySetResponse",
     "GetOrganizationRequest",
     "GetOrganizationResponse",
     "GetProjectRequest",
@@ -53,8 +64,16 @@ __all__ = (
     "GetServiceAccountResponse",
     "GetTeamRequest",
     "GetTeamResponse",
+    "GetToolPolicySetRequest",
+    "GetToolPolicySetResponse",
     "GrantRoleRequest",
     "GrantRoleResponse",
+    "HistoryCondition",
+    "HistoryEventKind",
+    "HistoryPredicate",
+    "HistoryScope",
+    "ImportToolsRequest",
+    "ImportToolsResponse",
     "IntrospectApiKeyRequest",
     "IntrospectApiKeyResponse",
     "IntrospectRequest",
@@ -85,15 +104,25 @@ __all__ = (
     "ListServiceAccountsResponse",
     "ListTeamsRequest",
     "ListTeamsResponse",
+    "ListToolsRequest",
+    "ListToolsResponse",
+    "LiteralValue",
     "Membership",
     "NodeStatus",
     "Organization",
     "OutboxServiceStub",
     "Policy",
+    "PredicatePair",
     "PrincipalKind",
     "Project",
+    "PutFloorPolicySetRequest",
+    "PutFloorPolicySetResponse",
     "PutPolicyRequest",
     "PutPolicyResponse",
+    "PutToolPolicySetRequest",
+    "PutToolPolicySetResponse",
+    "PutToolRequest",
+    "PutToolResponse",
     "RenameOrganizationRequest",
     "RenameOrganizationResponse",
     "RenameProjectRequest",
@@ -122,9 +151,23 @@ __all__ = (
     "ServiceAccount",
     "ServiceAccountServiceStub",
     "ServiceInfo",
+    "SkippedImportEntry",
+    "SumWithinShape",
     "SurvivingGrant",
     "Team",
     "TenancyServiceStub",
+    "Tool",
+    "ToolImportFormat",
+    "ToolKind",
+    "ToolMatch",
+    "ToolPolicyRejection",
+    "ToolPolicyRejections",
+    "ToolPolicyServiceStub",
+    "ToolPolicySetKind",
+    "ToolPolicySetVersion",
+    "ToolPolicyVersionOrigin",
+    "ToolPolicyVersionStatus",
+    "ToolSource",
     "UnlinkExternalIdentityRequest",
     "UnlinkExternalIdentityResponse",
     "User",
@@ -172,6 +215,106 @@ class ApiKeyStatus(betterproto2.Enum):
             "API_KEY_STATUS_UNSPECIFIED": 0,
             "API_KEY_STATUS_ACTIVE": 1,
             "API_KEY_STATUS_REVOKED": 2,
+        }
+
+
+class ComparisonOp(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    LT = 1
+
+    LE = 2
+
+    EQ = 3
+
+    GE = 4
+
+    GT = 5
+
+    NE = 6
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "COMPARISON_OP_UNSPECIFIED",
+            1: "COMPARISON_OP_LT",
+            2: "COMPARISON_OP_LE",
+            3: "COMPARISON_OP_EQ",
+            4: "COMPARISON_OP_GE",
+            5: "COMPARISON_OP_GT",
+            6: "COMPARISON_OP_NE",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "COMPARISON_OP_UNSPECIFIED": 0,
+            "COMPARISON_OP_LT": 1,
+            "COMPARISON_OP_LE": 2,
+            "COMPARISON_OP_EQ": 3,
+            "COMPARISON_OP_GE": 4,
+            "COMPARISON_OP_GT": 5,
+            "COMPARISON_OP_NE": 6,
+        }
+
+
+class HistoryEventKind(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    REQUEST = 1
+
+    RESPONSE = 2
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "HISTORY_EVENT_KIND_UNSPECIFIED",
+            1: "HISTORY_EVENT_KIND_REQUEST",
+            2: "HISTORY_EVENT_KIND_RESPONSE",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "HISTORY_EVENT_KIND_UNSPECIFIED": 0,
+            "HISTORY_EVENT_KIND_REQUEST": 1,
+            "HISTORY_EVENT_KIND_RESPONSE": 2,
+        }
+
+
+class HistoryScope(betterproto2.Enum):
+    """
+    Which events a history condition counts: those of one session, of one principal, or of one
+    API key.
+    """
+
+    UNSPECIFIED = 0
+
+    SESSION = 1
+
+    PRINCIPAL = 2
+
+    KEY = 3
+    """
+    A caller with no API key (an OIDC bearer token) uses its principal as the key.
+    """
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "HISTORY_SCOPE_UNSPECIFIED",
+            1: "HISTORY_SCOPE_SESSION",
+            2: "HISTORY_SCOPE_PRINCIPAL",
+            3: "HISTORY_SCOPE_KEY",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "HISTORY_SCOPE_UNSPECIFIED": 0,
+            "HISTORY_SCOPE_SESSION": 1,
+            "HISTORY_SCOPE_PRINCIPAL": 2,
+            "HISTORY_SCOPE_KEY": 3,
         }
 
 
@@ -226,6 +369,182 @@ class PrincipalKind(betterproto2.Enum):
             "PRINCIPAL_KIND_UNSPECIFIED": 0,
             "PRINCIPAL_KIND_USER": 1,
             "PRINCIPAL_KIND_SERVICE_ACCOUNT": 2,
+        }
+
+
+class ToolImportFormat(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    OPENAI_CHAT_COMPLETIONS = 1
+
+    OPENAI_RESPONSES = 2
+
+    MCP_TOOLS_LIST = 3
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "TOOL_IMPORT_FORMAT_UNSPECIFIED",
+            1: "TOOL_IMPORT_FORMAT_OPENAI_CHAT_COMPLETIONS",
+            2: "TOOL_IMPORT_FORMAT_OPENAI_RESPONSES",
+            3: "TOOL_IMPORT_FORMAT_MCP_TOOLS_LIST",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "TOOL_IMPORT_FORMAT_UNSPECIFIED": 0,
+            "TOOL_IMPORT_FORMAT_OPENAI_CHAT_COMPLETIONS": 1,
+            "TOOL_IMPORT_FORMAT_OPENAI_RESPONSES": 2,
+            "TOOL_IMPORT_FORMAT_MCP_TOOLS_LIST": 3,
+        }
+
+
+class ToolKind(betterproto2.Enum):
+    """
+    ---- Tool catalog and tool policy sets (SMA-774) ----------------------------
+    """
+
+    UNSPECIFIED = 0
+
+    FUNCTION = 1
+
+    CUSTOM = 2
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "TOOL_KIND_UNSPECIFIED",
+            1: "TOOL_KIND_FUNCTION",
+            2: "TOOL_KIND_CUSTOM",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "TOOL_KIND_UNSPECIFIED": 0,
+            "TOOL_KIND_FUNCTION": 1,
+            "TOOL_KIND_CUSTOM": 2,
+        }
+
+
+class ToolPolicySetKind(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    TENANT = 1
+
+    FLOOR = 2
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "TOOL_POLICY_SET_KIND_UNSPECIFIED",
+            1: "TOOL_POLICY_SET_KIND_TENANT",
+            2: "TOOL_POLICY_SET_KIND_FLOOR",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "TOOL_POLICY_SET_KIND_UNSPECIFIED": 0,
+            "TOOL_POLICY_SET_KIND_TENANT": 1,
+            "TOOL_POLICY_SET_KIND_FLOOR": 2,
+        }
+
+
+class ToolPolicyVersionOrigin(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    SAVE = 1
+
+    STARTER = 2
+
+    CATALOG_CHANGE = 3
+
+    RECOMPILE = 4
+
+    ACCEPT = 5
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "TOOL_POLICY_VERSION_ORIGIN_UNSPECIFIED",
+            1: "TOOL_POLICY_VERSION_ORIGIN_SAVE",
+            2: "TOOL_POLICY_VERSION_ORIGIN_STARTER",
+            3: "TOOL_POLICY_VERSION_ORIGIN_CATALOG_CHANGE",
+            4: "TOOL_POLICY_VERSION_ORIGIN_RECOMPILE",
+            5: "TOOL_POLICY_VERSION_ORIGIN_ACCEPT",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "TOOL_POLICY_VERSION_ORIGIN_UNSPECIFIED": 0,
+            "TOOL_POLICY_VERSION_ORIGIN_SAVE": 1,
+            "TOOL_POLICY_VERSION_ORIGIN_STARTER": 2,
+            "TOOL_POLICY_VERSION_ORIGIN_CATALOG_CHANGE": 3,
+            "TOOL_POLICY_VERSION_ORIGIN_RECOMPILE": 4,
+            "TOOL_POLICY_VERSION_ORIGIN_ACCEPT": 5,
+        }
+
+
+class ToolPolicyVersionStatus(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    LIVE = 1
+
+    SUPERSEDED = 2
+
+    HELD = 3
+
+    DISCARDED = 4
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "TOOL_POLICY_VERSION_STATUS_UNSPECIFIED",
+            1: "TOOL_POLICY_VERSION_STATUS_LIVE",
+            2: "TOOL_POLICY_VERSION_STATUS_SUPERSEDED",
+            3: "TOOL_POLICY_VERSION_STATUS_HELD",
+            4: "TOOL_POLICY_VERSION_STATUS_DISCARDED",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "TOOL_POLICY_VERSION_STATUS_UNSPECIFIED": 0,
+            "TOOL_POLICY_VERSION_STATUS_LIVE": 1,
+            "TOOL_POLICY_VERSION_STATUS_SUPERSEDED": 2,
+            "TOOL_POLICY_VERSION_STATUS_HELD": 3,
+            "TOOL_POLICY_VERSION_STATUS_DISCARDED": 4,
+        }
+
+
+class ToolSource(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    MANUAL = 1
+
+    OPENAI = 2
+
+    MCP = 3
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "TOOL_SOURCE_UNSPECIFIED",
+            1: "TOOL_SOURCE_MANUAL",
+            2: "TOOL_SOURCE_OPENAI",
+            3: "TOOL_SOURCE_MCP",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "TOOL_SOURCE_UNSPECIFIED": 0,
+            "TOOL_SOURCE_MANUAL": 1,
+            "TOOL_SOURCE_OPENAI": 2,
+            "TOOL_SOURCE_MCP": 3,
         }
 
 
@@ -497,6 +816,29 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class CatalogWriteAccepted(betterproto2.Message):
+    catalog_revision: "int" = betterproto2.field(1, betterproto2.TYPE_UINT64)
+
+    tool_policy_set_version: "int" = betterproto2.field(2, betterproto2.TYPE_UINT64)
+    """
+    The new live version. 0 when the set did not change.
+    """
+
+    tools: "list[Tool]" = betterproto2.field(
+        3, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    skipped: "list[SkippedImportEntry]" = betterproto2.field(
+        4, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CatalogWriteAccepted", CatalogWriteAccepted
+)
+
+
+@dataclass(eq=False, repr=False)
 class ChangeUserEmailRequest(betterproto2.Message):
     user_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -519,6 +861,96 @@ class ChangeUserEmailResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "ChangeUserEmailResponse", ChangeUserEmailResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class CompiledToolPolicySet(betterproto2.Message):
+    """
+    The compile result of one tool policy set. The gateway evaluates it. The message has no map
+    fields, so its encoding is deterministic.
+
+    Evaluation rules the gateway MUST follow (see HistoryCondition for the per-condition rules):
+     - A missing slot, an unknown shape, or an unknown enum value fails closed.
+     - The gateway must keep history for at least max_window_ms. If its retention is shorter, it
+       fails closed for this set.
+     - Merging with the floor: the gateway builds one merged Cedar policy set from the floor and
+       the tenant set. It prefixes the policy ids with "floor/" and "tenant/" internally. Cedar's
+       rule that a forbid wins over any permit means that a tenant cannot loosen the floor. The
+       floor is compiled and cached apart from the tenant set, so a tenant set that fails to load
+       does not remove the floor. The "floor-" @id prefix keeps the slot names of the two sets
+       apart in the one merged context.
+    """
+
+    kind: "ToolPolicySetKind" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicySetKind(0)
+    )
+
+    org_id: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    The organization UUID as a string. Empty for the floor.
+    """
+
+    version: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+    compiler_generation: "int" = betterproto2.field(4, betterproto2.TYPE_UINT32)
+
+    schema_revision: "int" = betterproto2.field(5, betterproto2.TYPE_UINT32)
+
+    catalog_revision: "int" = betterproto2.field(6, betterproto2.TYPE_UINT64)
+
+    cedar_policies: "str" = betterproto2.field(7, betterproto2.TYPE_STRING)
+    """
+    The lowered Cedar text of the whole set.
+    """
+
+    cedar_schema: "str" = betterproto2.field(8, betterproto2.TYPE_STRING)
+    """
+    The lowered schema in Cedar JSON schema form, as a string. It includes the slot attributes.
+    Every slot attribute has the type Bool.
+    """
+
+    conditions: "list[HistoryCondition]" = betterproto2.field(
+        9, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+    """
+    One condition for each slot, sorted by slot.
+    """
+
+    max_window_ms: "int" = betterproto2.field(10, betterproto2.TYPE_UINT64)
+    """
+    The window limit the set was compiled with.
+    """
+
+    catalog_names: "list[str]" = betterproto2.field(
+        11, betterproto2.TYPE_STRING, repeated=True
+    )
+    """
+    The sorted name_key list of the catalog the set was compiled against. The gateway needs it
+    to give each call the parent InvokeTool or Unregistered. Empty for the floor.
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CompiledToolPolicySet", CompiledToolPolicySet
+)
+
+
+@dataclass(eq=False, repr=False)
+class CountWithinShape(betterproto2.Message):
+    predicate: "HistoryPredicate | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    op: "ComparisonOp" = betterproto2.field(
+        2, betterproto2.TYPE_ENUM, default_factory=lambda: ComparisonOp(0)
+    )
+
+    threshold: "int" = betterproto2.field(3, betterproto2.TYPE_INT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CountWithinShape", CountWithinShape
 )
 
 
@@ -760,6 +1192,43 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class DeleteToolRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    expected_catalog_revision: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DeleteToolRequest", DeleteToolRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class DeleteToolResponse(betterproto2.Message):
+    """
+
+
+    Oneofs:
+        - result:
+    """
+
+    accepted: "CatalogWriteAccepted | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+    rejected: "ToolPolicyRejections | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DeleteToolResponse", DeleteToolResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class DetachMembershipRequest(betterproto2.Message):
     """
     Detaching an org membership cascades: the principal's team/project
@@ -836,6 +1305,16 @@ default_message_pool.register_message("paigasus.iam.v1", "DpopContext", DpopCont
 
 
 @dataclass(eq=False, repr=False)
+class DroppedField(betterproto2.Message):
+    path: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    reason: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message("paigasus.iam.v1", "DroppedField", DroppedField)
+
+
+@dataclass(eq=False, repr=False)
 class ExternalIdentity(betterproto2.Message):
     id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
     """
@@ -860,6 +1339,24 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class FieldComparison(betterproto2.Message):
+    path: "list[str]" = betterproto2.field(1, betterproto2.TYPE_STRING, repeated=True)
+
+    op: "ComparisonOp" = betterproto2.field(
+        2, betterproto2.TYPE_ENUM, default_factory=lambda: ComparisonOp(0)
+    )
+
+    value: "LiteralValue | None" = betterproto2.field(
+        3, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "FieldComparison", FieldComparison
+)
+
+
+@dataclass(eq=False, repr=False)
 class FindUserByEmailRequest(betterproto2.Message):
     email: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -878,6 +1375,40 @@ class FindUserByEmailResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "FindUserByEmailResponse", FindUserByEmailResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class FormerlyShape(betterproto2.Message):
+    predicate: "HistoryPredicate | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "FormerlyShape", FormerlyShape)
+
+
+@dataclass(eq=False, repr=False)
+class GetFloorPolicySetRequest(betterproto2.Message):
+    version: "int | None" = betterproto2.field(
+        1, betterproto2.TYPE_UINT64, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetFloorPolicySetRequest", GetFloorPolicySetRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetFloorPolicySetResponse(betterproto2.Message):
+    set: "ToolPolicySetVersion | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetFloorPolicySetResponse", GetFloorPolicySetResponse
 )
 
 
@@ -970,6 +1501,36 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class GetToolPolicySetRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    version: "int | None" = betterproto2.field(
+        2, betterproto2.TYPE_UINT64, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetToolPolicySetRequest", GetToolPolicySetRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetToolPolicySetResponse(betterproto2.Message):
+    """
+    With no live set and no version requested: version = 0, empty source, no compiled.
+    """
+
+    set: "ToolPolicySetVersion | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetToolPolicySetResponse", GetToolPolicySetResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class GrantRoleRequest(betterproto2.Message):
     principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -992,6 +1553,150 @@ class GrantRoleResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "GrantRoleResponse", GrantRoleResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class HistoryCondition(betterproto2.Message):
+    """
+    One history condition. Its slot is a Bool attribute of the Cedar context. The gateway sets it
+    before it evaluates the Cedar policies.
+
+    Evaluation rules:
+     - The window is closed: [now - window_ms, now]. Only the gateway clock sets event times.
+     - The event being decided is recorded before evaluation. It counts toward count_within and
+       sum_within. A denied call is still recorded, so it counts too.
+     - formerly sees the event being decided: Dogwood's semantics, as the decision corpus
+       (corpus/formerly.json, formerly_sees_the_decided_event = true) settles it. A formerly over
+       the current event is true when that event matches the predicate.
+     - Tool matching uses the name_key of the catalog (the case-folded match key), not the
+       display name.
+     - sum_within: an event with no value at field_path adds 0. A negative value adds 0. This
+       differs from Dogwood, because the arguments come from the model, and a negative amount
+       must not lower a budget. The sum saturates at the 64-bit signed limits.
+     - scope KEY: a caller with no API key uses its principal as the key.
+     - A missing slot, an unknown shape, or an unknown enum value fails closed.
+
+    Oneofs:
+        - shape:
+    """
+
+    slot: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+    """
+    The stable slot name, as it appears in the lowered Cedar context.
+    """
+
+    policy_id: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    The @id of the policy the condition came from.
+    """
+
+    scope: "HistoryScope" = betterproto2.field(
+        3, betterproto2.TYPE_ENUM, default_factory=lambda: HistoryScope(0)
+    )
+
+    window_ms: "int" = betterproto2.field(4, betterproto2.TYPE_UINT64)
+
+    formerly: "FormerlyShape | None" = betterproto2.field(
+        5, betterproto2.TYPE_MESSAGE, optional=True, group="shape"
+    )
+
+    count_within: "CountWithinShape | None" = betterproto2.field(
+        6, betterproto2.TYPE_MESSAGE, optional=True, group="shape"
+    )
+
+    sum_within: "SumWithinShape | None" = betterproto2.field(
+        7, betterproto2.TYPE_MESSAGE, optional=True, group="shape"
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "HistoryCondition", HistoryCondition
+)
+
+
+@dataclass(eq=False, repr=False)
+class HistoryPredicate(betterproto2.Message):
+    """
+    A small expression tree over one event. The member names all_of, any_of and negation avoid
+    the Python keywords and, or and not.
+
+    Oneofs:
+        - node:
+    """
+
+    event_kind: "HistoryEventKind | None" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, optional=True, group="node"
+    )
+
+    tool: "ToolMatch | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True, group="node"
+    )
+
+    field: "FieldComparison | None" = betterproto2.field(
+        3, betterproto2.TYPE_MESSAGE, optional=True, group="node"
+    )
+
+    all_of: "PredicatePair | None" = betterproto2.field(
+        4, betterproto2.TYPE_MESSAGE, optional=True, group="node"
+    )
+
+    any_of: "PredicatePair | None" = betterproto2.field(
+        5, betterproto2.TYPE_MESSAGE, optional=True, group="node"
+    )
+
+    negation: "HistoryPredicate | None" = betterproto2.field(
+        6, betterproto2.TYPE_MESSAGE, optional=True, group="node"
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "HistoryPredicate", HistoryPredicate
+)
+
+
+@dataclass(eq=False, repr=False)
+class ImportToolsRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    format: "ToolImportFormat" = betterproto2.field(
+        2, betterproto2.TYPE_ENUM, default_factory=lambda: ToolImportFormat(0)
+    )
+
+    document_json: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    namespace: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    replace: "bool" = betterproto2.field(5, betterproto2.TYPE_BOOL)
+
+    expected_catalog_revision: "int" = betterproto2.field(6, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ImportToolsRequest", ImportToolsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ImportToolsResponse(betterproto2.Message):
+    """
+
+
+    Oneofs:
+        - result:
+    """
+
+    accepted: "CatalogWriteAccepted | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+    rejected: "ToolPolicyRejections | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ImportToolsResponse", ImportToolsResponse
 )
 
 
@@ -1576,6 +2281,63 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class ListToolsRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListToolsRequest", ListToolsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListToolsResponse(betterproto2.Message):
+    tools: "list[Tool]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    catalog_revision: "int" = betterproto2.field(2, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListToolsResponse", ListToolsResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class LiteralValue(betterproto2.Message):
+    """
+
+
+    Oneofs:
+        - value:
+    """
+
+    long_value: "int | None" = betterproto2.field(
+        1, betterproto2.TYPE_INT64, optional=True, group="value"
+    )
+
+    string_value: "str | None" = betterproto2.field(
+        2, betterproto2.TYPE_STRING, optional=True, group="value"
+    )
+
+    bool_value: "bool | None" = betterproto2.field(
+        3, betterproto2.TYPE_BOOL, optional=True, group="value"
+    )
+
+    decimal_value: "str | None" = betterproto2.field(
+        4, betterproto2.TYPE_STRING, optional=True, group="value"
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "LiteralValue", LiteralValue)
+
+
+@dataclass(eq=False, repr=False)
 class Membership(betterproto2.Message):
     id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -1635,6 +2397,20 @@ default_message_pool.register_message("paigasus.iam.v1", "Policy", Policy)
 
 
 @dataclass(eq=False, repr=False)
+class PredicatePair(betterproto2.Message):
+    left: "HistoryPredicate | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    right: "HistoryPredicate | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "PredicatePair", PredicatePair)
+
+
+@dataclass(eq=False, repr=False)
 class Project(betterproto2.Message):
     prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -1663,6 +2439,41 @@ default_message_pool.register_message("paigasus.iam.v1", "Project", Project)
 
 
 @dataclass(eq=False, repr=False)
+class PutFloorPolicySetRequest(betterproto2.Message):
+    source: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    expected_version: "int" = betterproto2.field(2, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "PutFloorPolicySetRequest", PutFloorPolicySetRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class PutFloorPolicySetResponse(betterproto2.Message):
+    """
+
+
+    Oneofs:
+        - result:
+    """
+
+    accepted: "ToolPolicySetVersion | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+    rejected: "ToolPolicyRejections | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "PutFloorPolicySetResponse", PutFloorPolicySetResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class PutPolicyRequest(betterproto2.Message):
     policy: "Policy | None" = betterproto2.field(
         1, betterproto2.TYPE_MESSAGE, optional=True
@@ -1683,6 +2494,86 @@ class PutPolicyResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "PutPolicyResponse", PutPolicyResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class PutToolPolicySetRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    source: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    expected_version: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "PutToolPolicySetRequest", PutToolPolicySetRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class PutToolPolicySetResponse(betterproto2.Message):
+    """
+
+
+    Oneofs:
+        - result:
+    """
+
+    accepted: "ToolPolicySetVersion | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+    rejected: "ToolPolicyRejections | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "PutToolPolicySetResponse", PutToolPolicySetResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class PutToolRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    kind: "ToolKind" = betterproto2.field(
+        3, betterproto2.TYPE_ENUM, default_factory=lambda: ToolKind(0)
+    )
+
+    input_schema_json: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    expected_catalog_revision: "int" = betterproto2.field(5, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "PutToolRequest", PutToolRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class PutToolResponse(betterproto2.Message):
+    """
+
+
+    Oneofs:
+        - result:
+    """
+
+    accepted: "CatalogWriteAccepted | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+    rejected: "ToolPolicyRejections | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True, group="result"
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "PutToolResponse", PutToolResponse
 )
 
 
@@ -2115,6 +3006,40 @@ default_message_pool.register_message("paigasus.iam.v1", "ServiceInfo", ServiceI
 
 
 @dataclass(eq=False, repr=False)
+class SkippedImportEntry(betterproto2.Message):
+    index: "int" = betterproto2.field(1, betterproto2.TYPE_UINT32)
+
+    type: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "SkippedImportEntry", SkippedImportEntry
+)
+
+
+@dataclass(eq=False, repr=False)
+class SumWithinShape(betterproto2.Message):
+    predicate: "HistoryPredicate | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    field_path: "list[str]" = betterproto2.field(
+        2, betterproto2.TYPE_STRING, repeated=True
+    )
+
+    op: "ComparisonOp" = betterproto2.field(
+        3, betterproto2.TYPE_ENUM, default_factory=lambda: ComparisonOp(0)
+    )
+
+    threshold: "int" = betterproto2.field(4, betterproto2.TYPE_INT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "SumWithinShape", SumWithinShape
+)
+
+
+@dataclass(eq=False, repr=False)
 class SurvivingGrant(betterproto2.Message):
     """
     One grant blocking a role retirement. Deliberately NOT the existing
@@ -2158,6 +3083,134 @@ class Team(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "Team", Team)
+
+
+@dataclass(eq=False, repr=False)
+class Tool(betterproto2.Message):
+    name_key: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    display_name: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    kind: "ToolKind" = betterproto2.field(
+        3, betterproto2.TYPE_ENUM, default_factory=lambda: ToolKind(0)
+    )
+
+    input_schema_json: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    cedar_input_type_json: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+    dropped_fields: "list[DroppedField]" = betterproto2.field(
+        6, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    source: "ToolSource" = betterproto2.field(
+        7, betterproto2.TYPE_ENUM, default_factory=lambda: ToolSource(0)
+    )
+
+    created_at: "datetime.datetime | None" = betterproto2.field(
+        8,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    updated_at: "datetime.datetime | None" = betterproto2.field(
+        9,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "Tool", Tool)
+
+
+@dataclass(eq=False, repr=False)
+class ToolMatch(betterproto2.Message):
+    name_key: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    any_catalog_tool: "bool" = betterproto2.field(2, betterproto2.TYPE_BOOL)
+
+
+default_message_pool.register_message("paigasus.iam.v1", "ToolMatch", ToolMatch)
+
+
+@dataclass(eq=False, repr=False)
+class ToolPolicyRejection(betterproto2.Message):
+    policy_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    line: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+
+    column: "int" = betterproto2.field(3, betterproto2.TYPE_UINT32)
+
+    reason: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+    """
+    A registered reason code, for example "tool-policy-invalid".
+    """
+
+    message: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ToolPolicyRejection", ToolPolicyRejection
+)
+
+
+@dataclass(eq=False, repr=False)
+class ToolPolicyRejections(betterproto2.Message):
+    rejections: "list[ToolPolicyRejection]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ToolPolicyRejections", ToolPolicyRejections
+)
+
+
+@dataclass(eq=False, repr=False)
+class ToolPolicySetVersion(betterproto2.Message):
+    kind: "ToolPolicySetKind" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicySetKind(0)
+    )
+
+    org_id: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    version: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+    source: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    status: "ToolPolicyVersionStatus" = betterproto2.field(
+        5, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicyVersionStatus(0)
+    )
+
+    origin: "ToolPolicyVersionOrigin" = betterproto2.field(
+        6, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicyVersionOrigin(0)
+    )
+
+    compiler_generation: "int" = betterproto2.field(7, betterproto2.TYPE_UINT32)
+
+    schema_revision: "int" = betterproto2.field(8, betterproto2.TYPE_UINT32)
+
+    catalog_revision: "int" = betterproto2.field(9, betterproto2.TYPE_UINT64)
+
+    created_by: "str" = betterproto2.field(10, betterproto2.TYPE_STRING)
+
+    created_at: "datetime.datetime | None" = betterproto2.field(
+        11,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    compiled: "CompiledToolPolicySet | None" = betterproto2.field(
+        12, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ToolPolicySetVersion", ToolPolicySetVersion
+)
 
 
 @dataclass(eq=False, repr=False)
@@ -3116,6 +4169,152 @@ class TenancyServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.TenancyService/ListMemberships",
             message,
             ListMembershipsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+
+class ToolPolicyServiceStub(betterproto2_grpclib.ServiceStub):
+    async def put_tool(
+        self,
+        message: "PutToolRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "PutToolResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/PutTool",
+            message,
+            PutToolResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def delete_tool(
+        self,
+        message: "DeleteToolRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "DeleteToolResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/DeleteTool",
+            message,
+            DeleteToolResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_tools(
+        self,
+        message: "ListToolsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListToolsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/ListTools",
+            message,
+            ListToolsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def import_tools(
+        self,
+        message: "ImportToolsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ImportToolsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/ImportTools",
+            message,
+            ImportToolsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def put_tool_policy_set(
+        self,
+        message: "PutToolPolicySetRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "PutToolPolicySetResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/PutToolPolicySet",
+            message,
+            PutToolPolicySetResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def get_tool_policy_set(
+        self,
+        message: "GetToolPolicySetRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GetToolPolicySetResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/GetToolPolicySet",
+            message,
+            GetToolPolicySetResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def put_floor_policy_set(
+        self,
+        message: "PutFloorPolicySetRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "PutFloorPolicySetResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/PutFloorPolicySet",
+            message,
+            PutFloorPolicySetResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def get_floor_policy_set(
+        self,
+        message: "GetFloorPolicySetRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GetFloorPolicySetResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/GetFloorPolicySet",
+            message,
+            GetFloorPolicySetResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,

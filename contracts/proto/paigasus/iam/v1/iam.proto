@@ -817,3 +817,355 @@ service OutboxService {
   rpc BulkReplayDeadLetters(BulkReplayDeadLettersRequest) returns (BulkReplayDeadLettersResponse);
   rpc DiscardDeadLetter(DiscardDeadLetterRequest) returns (DiscardDeadLetterResponse);
 }
+
+// ---- Tool catalog and tool policy sets (SMA-774) ----------------------------
+
+enum ToolKind {
+  TOOL_KIND_UNSPECIFIED = 0;
+  TOOL_KIND_FUNCTION = 1;
+  TOOL_KIND_CUSTOM = 2;
+}
+
+enum ToolSource {
+  TOOL_SOURCE_UNSPECIFIED = 0;
+  TOOL_SOURCE_MANUAL = 1;
+  TOOL_SOURCE_OPENAI = 2;
+  TOOL_SOURCE_MCP = 3;
+}
+
+enum ToolImportFormat {
+  TOOL_IMPORT_FORMAT_UNSPECIFIED = 0;
+  TOOL_IMPORT_FORMAT_OPENAI_CHAT_COMPLETIONS = 1;
+  TOOL_IMPORT_FORMAT_OPENAI_RESPONSES = 2;
+  TOOL_IMPORT_FORMAT_MCP_TOOLS_LIST = 3;
+}
+
+enum ToolPolicySetKind {
+  TOOL_POLICY_SET_KIND_UNSPECIFIED = 0;
+  TOOL_POLICY_SET_KIND_TENANT = 1;
+  TOOL_POLICY_SET_KIND_FLOOR = 2;
+}
+
+enum ToolPolicyVersionStatus {
+  TOOL_POLICY_VERSION_STATUS_UNSPECIFIED = 0;
+  TOOL_POLICY_VERSION_STATUS_LIVE = 1;
+  TOOL_POLICY_VERSION_STATUS_SUPERSEDED = 2;
+  TOOL_POLICY_VERSION_STATUS_HELD = 3;
+  TOOL_POLICY_VERSION_STATUS_DISCARDED = 4;
+}
+
+enum ToolPolicyVersionOrigin {
+  TOOL_POLICY_VERSION_ORIGIN_UNSPECIFIED = 0;
+  TOOL_POLICY_VERSION_ORIGIN_SAVE = 1;
+  TOOL_POLICY_VERSION_ORIGIN_STARTER = 2;
+  TOOL_POLICY_VERSION_ORIGIN_CATALOG_CHANGE = 3;
+  TOOL_POLICY_VERSION_ORIGIN_RECOMPILE = 4;
+  TOOL_POLICY_VERSION_ORIGIN_ACCEPT = 5;
+}
+
+// Which events a history condition counts: those of one session, of one principal, or of one
+// API key.
+enum HistoryScope {
+  HISTORY_SCOPE_UNSPECIFIED = 0;
+  HISTORY_SCOPE_SESSION = 1;
+  HISTORY_SCOPE_PRINCIPAL = 2;
+  // A caller with no API key (an OIDC bearer token) uses its principal as the key.
+  HISTORY_SCOPE_KEY = 3;
+}
+
+enum HistoryEventKind {
+  HISTORY_EVENT_KIND_UNSPECIFIED = 0;
+  HISTORY_EVENT_KIND_REQUEST = 1;
+  HISTORY_EVENT_KIND_RESPONSE = 2;
+}
+
+enum ComparisonOp {
+  COMPARISON_OP_UNSPECIFIED = 0;
+  COMPARISON_OP_LT = 1;
+  COMPARISON_OP_LE = 2;
+  COMPARISON_OP_EQ = 3;
+  COMPARISON_OP_GE = 4;
+  COMPARISON_OP_GT = 5;
+  COMPARISON_OP_NE = 6;
+}
+
+// The compile result of one tool policy set. The gateway evaluates it. The message has no map
+// fields, so its encoding is deterministic.
+//
+// Evaluation rules the gateway MUST follow (see HistoryCondition for the per-condition rules):
+//  - A missing slot, an unknown shape, or an unknown enum value fails closed.
+//  - The gateway must keep history for at least max_window_ms. If its retention is shorter, it
+//    fails closed for this set.
+//  - Merging with the floor: the gateway builds one merged Cedar policy set from the floor and
+//    the tenant set. It prefixes the policy ids with "floor/" and "tenant/" internally. Cedar's
+//    rule that a forbid wins over any permit means that a tenant cannot loosen the floor. The
+//    floor is compiled and cached apart from the tenant set, so a tenant set that fails to load
+//    does not remove the floor. The "floor-" @id prefix keeps the slot names of the two sets
+//    apart in the one merged context.
+message CompiledToolPolicySet {
+  ToolPolicySetKind kind = 1;
+  // The organization UUID as a string. Empty for the floor.
+  string org_id = 2;
+  uint64 version = 3;
+  uint32 compiler_generation = 4;
+  uint32 schema_revision = 5;
+  uint64 catalog_revision = 6;
+  // The lowered Cedar text of the whole set.
+  string cedar_policies = 7;
+  // The lowered schema in Cedar JSON schema form, as a string. It includes the slot attributes.
+  // Every slot attribute has the type Bool.
+  string cedar_schema = 8;
+  // One condition for each slot, sorted by slot.
+  repeated HistoryCondition conditions = 9;
+  // The window limit the set was compiled with.
+  uint64 max_window_ms = 10;
+  // The sorted name_key list of the catalog the set was compiled against. The gateway needs it
+  // to give each call the parent InvokeTool or Unregistered. Empty for the floor.
+  repeated string catalog_names = 11;
+}
+
+// One history condition. Its slot is a Bool attribute of the Cedar context. The gateway sets it
+// before it evaluates the Cedar policies.
+//
+// Evaluation rules:
+//  - The window is closed: [now - window_ms, now]. Only the gateway clock sets event times.
+//  - The event being decided is recorded before evaluation. It counts toward count_within and
+//    sum_within. A denied call is still recorded, so it counts too.
+//  - formerly sees the event being decided: Dogwood's semantics, as the decision corpus
+//    (corpus/formerly.json, formerly_sees_the_decided_event = true) settles it. A formerly over
+//    the current event is true when that event matches the predicate.
+//  - Tool matching uses the name_key of the catalog (the case-folded match key), not the
+//    display name.
+//  - sum_within: an event with no value at field_path adds 0. A negative value adds 0. This
+//    differs from Dogwood, because the arguments come from the model, and a negative amount
+//    must not lower a budget. The sum saturates at the 64-bit signed limits.
+//  - scope KEY: a caller with no API key uses its principal as the key.
+//  - A missing slot, an unknown shape, or an unknown enum value fails closed.
+message HistoryCondition {
+  // The stable slot name, as it appears in the lowered Cedar context.
+  string slot = 1;
+  // The @id of the policy the condition came from.
+  string policy_id = 2;
+  HistoryScope scope = 3;
+  uint64 window_ms = 4;
+  oneof shape {
+    FormerlyShape formerly = 5;
+    CountWithinShape count_within = 6;
+    SumWithinShape sum_within = 7;
+  }
+}
+
+message FormerlyShape {
+  HistoryPredicate predicate = 1;
+}
+
+message CountWithinShape {
+  HistoryPredicate predicate = 1;
+  ComparisonOp op = 2;
+  int64 threshold = 3;
+}
+
+message SumWithinShape {
+  HistoryPredicate predicate = 1;
+  repeated string field_path = 2;
+  ComparisonOp op = 3;
+  int64 threshold = 4;
+}
+
+// A small expression tree over one event. The member names all_of, any_of and negation avoid
+// the Python keywords and, or and not.
+message HistoryPredicate {
+  oneof node {
+    HistoryEventKind event_kind = 1;
+    ToolMatch tool = 2;
+    FieldComparison field = 3;
+    PredicatePair all_of = 4;
+    PredicatePair any_of = 5;
+    HistoryPredicate negation = 6;
+  }
+}
+
+message ToolMatch {
+  string name_key = 1;
+  bool any_catalog_tool = 2;
+}
+
+message FieldComparison {
+  repeated string path = 1;
+  ComparisonOp op = 2;
+  LiteralValue value = 3;
+}
+
+message LiteralValue {
+  oneof value {
+    int64 long_value = 1;
+    string string_value = 2;
+    bool bool_value = 3;
+    string decimal_value = 4;
+  }
+}
+
+message PredicatePair {
+  HistoryPredicate left = 1;
+  HistoryPredicate right = 2;
+}
+
+message Tool {
+  string name_key = 1;
+  string display_name = 2;
+  ToolKind kind = 3;
+  string input_schema_json = 4;
+  string cedar_input_type_json = 5;
+  repeated DroppedField dropped_fields = 6;
+  ToolSource source = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message DroppedField {
+  string path = 1;
+  string reason = 2;
+}
+
+message SkippedImportEntry {
+  uint32 index = 1;
+  string type = 2;
+}
+
+message ToolPolicyRejection {
+  string policy_id = 1;
+  uint32 line = 2;
+  uint32 column = 3;
+  // A registered reason code, for example "tool-policy-invalid".
+  string reason = 4;
+  string message = 5;
+}
+
+message ToolPolicyRejections {
+  repeated ToolPolicyRejection rejections = 1;
+}
+
+message CatalogWriteAccepted {
+  uint64 catalog_revision = 1;
+  // The new live version. 0 when the set did not change.
+  uint64 tool_policy_set_version = 2;
+  repeated Tool tools = 3;
+  repeated SkippedImportEntry skipped = 4;
+}
+
+message PutToolRequest {
+  string org_prn = 1;
+  string name = 2;
+  ToolKind kind = 3;
+  string input_schema_json = 4;
+  uint64 expected_catalog_revision = 5;
+}
+message PutToolResponse {
+  oneof result {
+    CatalogWriteAccepted accepted = 1;
+    ToolPolicyRejections rejected = 2;
+  }
+}
+
+message DeleteToolRequest {
+  string org_prn = 1;
+  string name = 2;
+  uint64 expected_catalog_revision = 3;
+}
+message DeleteToolResponse {
+  oneof result {
+    CatalogWriteAccepted accepted = 1;
+    ToolPolicyRejections rejected = 2;
+  }
+}
+
+message ListToolsRequest {
+  string org_prn = 1;
+  uint32 limit = 2;
+  uint64 offset = 3;
+}
+message ListToolsResponse {
+  repeated Tool tools = 1;
+  uint64 catalog_revision = 2;
+}
+
+message ImportToolsRequest {
+  string org_prn = 1;
+  ToolImportFormat format = 2;
+  string document_json = 3;
+  string namespace = 4;
+  bool replace = 5;
+  uint64 expected_catalog_revision = 6;
+}
+message ImportToolsResponse {
+  oneof result {
+    CatalogWriteAccepted accepted = 1;
+    ToolPolicyRejections rejected = 2;
+  }
+}
+
+message ToolPolicySetVersion {
+  ToolPolicySetKind kind = 1;
+  string org_id = 2;
+  uint64 version = 3;
+  string source = 4;
+  ToolPolicyVersionStatus status = 5;
+  ToolPolicyVersionOrigin origin = 6;
+  uint32 compiler_generation = 7;
+  uint32 schema_revision = 8;
+  uint64 catalog_revision = 9;
+  string created_by = 10;
+  google.protobuf.Timestamp created_at = 11;
+  CompiledToolPolicySet compiled = 12;
+}
+
+message PutToolPolicySetRequest {
+  string org_prn = 1;
+  string source = 2;
+  uint64 expected_version = 3;
+}
+message PutToolPolicySetResponse {
+  oneof result {
+    ToolPolicySetVersion accepted = 1;
+    ToolPolicyRejections rejected = 2;
+  }
+}
+
+message GetToolPolicySetRequest {
+  string org_prn = 1;
+  optional uint64 version = 2;
+}
+
+// With no live set and no version requested: version = 0, empty source, no compiled.
+message GetToolPolicySetResponse {
+  ToolPolicySetVersion set = 1;
+}
+
+message PutFloorPolicySetRequest {
+  string source = 1;
+  uint64 expected_version = 2;
+}
+message PutFloorPolicySetResponse {
+  oneof result {
+    ToolPolicySetVersion accepted = 1;
+    ToolPolicyRejections rejected = 2;
+  }
+}
+
+message GetFloorPolicySetRequest {
+  optional uint64 version = 1;
+}
+message GetFloorPolicySetResponse {
+  ToolPolicySetVersion set = 1;
+}
+
+service ToolPolicyService {
+  rpc PutTool(PutToolRequest) returns (PutToolResponse);
+  rpc DeleteTool(DeleteToolRequest) returns (DeleteToolResponse);
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+  rpc ImportTools(ImportToolsRequest) returns (ImportToolsResponse);
+  rpc PutToolPolicySet(PutToolPolicySetRequest) returns (PutToolPolicySetResponse);
+  rpc GetToolPolicySet(GetToolPolicySetRequest) returns (GetToolPolicySetResponse);
+  rpc PutFloorPolicySet(PutFloorPolicySetRequest) returns (PutFloorPolicySetResponse);
+  rpc GetFloorPolicySet(GetFloorPolicySetRequest) returns (GetFloorPolicySetResponse);
+}

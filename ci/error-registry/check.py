@@ -98,6 +98,8 @@ MANIFEST = (
      "MIGRATING — the deferred boot router's app-route 503, emitted before any AppState exists"),
     ("rs/crates/services/paigasus-iam/src/adapters/http/system_retirement.rs", "emits",
      "every_system_retirement_code_is_declared_in_the_canonical_registry", "the two 409 refusals"),
+    ("rs/crates/libs/paigasus-iam-core/src/tool_policy/check.rs", "emits",
+     "every_check_reason_is_in_the_canonical_registry", "the Cedar 4.14 check's two rejection reasons (SMA-774)"),
     ("rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs", "emits",
      "the_terminal_sse_frame_carries_a_registered_code", "the terminal SSE error frame"),
     ("rs/crates/services/paigasus-gateway/src/adapters/http/responses.rs", "emits",
