@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// @scope("principal"): the history of the principal, over all its sessions.
+@id("principal-rate")
+@scope("principal")
+permit (principal, action in Pgs::Gateway::Action::"InvokeTool", resource)
+when temporal { count_within(1h, Pgs::Gateway::Action::"InvokeTool"::request{}) < 100 };

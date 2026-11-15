@@ -1,0 +1,35 @@
+{
+  "outcome": "rejected",
+  "protocol_version": 1,
+  "compiler_generation": 1,
+  "rejections": [
+    {
+      "policy_id": null,
+      "line": null,
+      "column": null,
+      "reason": "tool-policy-id-invalid",
+      "message": "policy 0: the @id \"Bad_Id\" does not match ^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    {
+      "policy_id": null,
+      "line": null,
+      "column": null,
+      "reason": "tool-policy-id-invalid",
+      "message": "policy 1 has no @id value"
+    },
+    {
+      "policy_id": "floor-in-tenant",
+      "line": null,
+      "column": null,
+      "reason": "tool-policy-id-invalid",
+      "message": "policy 2: a tenant @id must not start with \"floor-\", but \"floor-in-tenant\" does"
+    },
+    {
+      "policy_id": "upper-tool",
+      "line": null,
+      "column": null,
+      "reason": "tool-policy-invalid",
+      "message": "policy 3: the action \"Search\" is not `InvokeTool`, `Unregistered` or a tool name in normal form"
+    }
+  ]
+}

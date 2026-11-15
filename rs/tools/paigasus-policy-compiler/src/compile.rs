@@ -25,22 +25,25 @@
 
 use std::collections::BTreeSet;
 
-use cedar_policy::{Effect, PolicyId, SchemaFragment, ValidationMode};
+use cedar_policy::{Effect, PolicyId, SchemaFragment, ValidationMode, ValidationWarning};
 use dogwood_language::temporal_ast::{Condition, ConditionKind, Term};
 use dogwood_language::{Error, LoweredPolicySet, ParsedPolicySet, PolicySchema, SourceLoc, Validator};
+use serde::{Deserialize, Serialize};
 
 use crate::lower::{PolicyUnit, lower_units, service_schema, slot_prefix, split_policies};
 use crate::translate::{HistoryCondition, NON_NORMAL_ACTION, Scope, is_normal_action, translate_field};
 
-/// Which set a source is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which set a source is. On the wire: `"tenant"` or `"floor"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SetKind {
     Tenant,
     Floor,
 }
 
-/// The machine-readable reason of a rejection (spec section 7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The machine-readable reason of a rejection (spec section 7). It serializes as `as_wire`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ReasonCode {
     ToolPolicyInvalid,
     ToolPolicyShapeUnsupported,
@@ -64,8 +67,9 @@ impl ReasonCode {
     }
 }
 
-/// One reason why a source does not compile.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One reason why a source does not compile. On the wire every field is present, and an
+/// absent value is `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Rejection {
     /// The `@id` of the policy, when the rejection belongs to one policy that has an id.
     pub policy_id: Option<String>,
@@ -78,7 +82,7 @@ pub struct Rejection {
 }
 
 impl Rejection {
-    fn new(policy_id: Option<&str>, reason: ReasonCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(policy_id: Option<&str>, reason: ReasonCode, message: impl Into<String>) -> Self {
         Rejection {
             policy_id: policy_id.map(str::to_string),
             line: None,
@@ -90,7 +94,7 @@ impl Rejection {
 }
 
 /// A compiled set.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Compiled {
     /// The lowered Cedar text of the whole set.
     pub cedar_policies: String,
@@ -351,7 +355,8 @@ fn translate_all(lowered: &LoweredPolicySet, checked: &[Checked<'_>], rejections
     conditions
 }
 
-/// The strict `cedar-policy` 4.11 validation of the lowered Cedar, and the floor effect rule.
+/// The strict `cedar-policy` 4.11 validation of the lowered Cedar (errors, and the
+/// impossible-policy warning), and the floor effect rule.
 fn cedar_checks(kind: SetKind, lowered: &LoweredPolicySet, checked: &[Checked<'_>], rejections: &mut Vec<Rejection>) {
     let validator = cedar_policy::Validator::new(lowered.cedar_schema().clone());
     let result = validator.validate(lowered.as_cedar(), ValidationMode::Strict);
@@ -361,6 +366,19 @@ fn cedar_checks(kind: SetKind, lowered: &LoweredPolicySet, checked: &[Checked<'_
             ReasonCode::ToolPolicyInvalid,
             format!("Cedar validation: {error}"),
         ));
+    }
+    // A strict validation types a `has` guard on a field that the schema does not declare as
+    // `False`. Then the policy is never satisfied, and cedar gives only an "impossible policy"
+    // warning. Such a policy reads a field that is not in the schema, so it is rejected.
+    for warning in result.validation_warnings() {
+        if let ValidationWarning::ImpossiblePolicy(_) = warning {
+            let owner = owner_by_policy_id(checked, warning.policy_id());
+            rejections.push(Rejection::new(
+                owner,
+                ReasonCode::ToolPolicyInvalid,
+                format!("Cedar validation: {warning}; a guarded field may be missing from the schema"),
+            ));
+        }
     }
     if kind == SetKind::Floor {
         for policy in lowered.as_cedar().policies().filter(|policy| policy.effect() == Effect::Permit) {

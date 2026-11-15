@@ -39,17 +39,21 @@
 
 use dogwood_language::TemporalField;
 use dogwood_language::temporal_ast::{self as ast, AggExprKind, Condition, ConditionKind, NamedArg, Term, Type, WithinSpec};
+use serde::{Serialize, Serializer};
 
-/// How the gateway partitions the history of a condition (`@scope`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the gateway partitions the history of a condition (`@scope`). On the wire:
+/// `"session"`, `"principal"` or `"key"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Scope {
     Session,
     Principal,
     Key,
 }
 
-/// A comparison operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A comparison operator. On the wire: `"lt"`, `"le"`, `"eq"`, `"ge"`, `"gt"` or `"ne"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CmpOp {
     Lt,
     Le,
@@ -72,8 +76,10 @@ impl From<ast::CmpOp> for CmpOp {
     }
 }
 
-/// A constant that an argument field is compared with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A constant that an argument field is compared with. On the wire:
+/// `{"type": "long" | "string" | "bool" | "decimal", "value": ..}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Literal {
     Long(i64),
     String(String),
@@ -82,8 +88,9 @@ pub enum Literal {
     Decimal(String),
 }
 
-/// The kind of a recorded event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The kind of a recorded event. On the wire: `"request"` or `"response"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventKind {
     Request,
     Response,
@@ -110,8 +117,39 @@ pub enum Predicate {
     Negation(Box<Predicate>),
 }
 
-/// The shape of a history condition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The wire form of a `Predicate`: an object with a `"type"` and the named fields of the node.
+/// The tuple variants cannot carry an internal tag, so they get named fields here.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PredicateWire<'a> {
+    EventKind { kind: EventKind },
+    Tool { name_key: &'a str },
+    AnyCatalogTool,
+    Field { path: &'a [String], op: CmpOp, value: &'a Literal },
+    AllOf { left: &'a Predicate, right: &'a Predicate },
+    AnyOf { left: &'a Predicate, right: &'a Predicate },
+    Negation { inner: &'a Predicate },
+}
+
+impl Serialize for Predicate {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let wire = match self {
+            Predicate::EventKind(kind) => PredicateWire::EventKind { kind: *kind },
+            Predicate::Tool { name_key } => PredicateWire::Tool { name_key },
+            Predicate::AnyCatalogTool => PredicateWire::AnyCatalogTool,
+            Predicate::Field { path, op, value } => PredicateWire::Field { path, op: *op, value },
+            Predicate::AllOf(left, right) => PredicateWire::AllOf { left, right },
+            Predicate::AnyOf(left, right) => PredicateWire::AnyOf { left, right },
+            Predicate::Negation(inner) => PredicateWire::Negation { inner },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+/// The shape of a history condition. On the wire it is an object with a `"type"` of
+/// `"formerly"`, `"count_within"` or `"sum_within"`, and the fields of the variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Shape {
     Formerly {
         predicate: Predicate,
@@ -130,7 +168,7 @@ pub enum Shape {
 }
 
 /// One temporal slot of the lowered set, as the gateway evaluates it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HistoryCondition {
     /// The slot attribute in the lowered Cedar context.
     pub slot: String,

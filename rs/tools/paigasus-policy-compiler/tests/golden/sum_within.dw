@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// sum_within: at most 1000 sent in a day.
+@id("send-budget")
+permit (principal, action == Pgs::Gateway::Action::"send", resource)
+when temporal { sum_within(a, 24h, Pgs::Gateway::Action::"send"::request{ input.amount: a }) <= 1000 };

@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// @scope("key"): the history of the API key.
+@id("key-rate")
+@scope("key")
+permit (principal, action == Pgs::Gateway::Action::"search", resource)
+when temporal { bind(c, count_within(10m, Pgs::Gateway::Action::"search"::request{}), c < 20) };

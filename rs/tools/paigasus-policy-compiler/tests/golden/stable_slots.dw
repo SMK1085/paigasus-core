@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Two policies. The slots of the second must not move when the first is deleted.
+@id("slots-first")
+forbid (principal, action == Pgs::Gateway::Action::"send", resource)
+when temporal { formerly within 5m Pgs::Gateway::Action::"send"::response{} };
+
+@id("slots-second")
+permit (principal, action == Pgs::Gateway::Action::"search", resource)
+when temporal { count_within(1h, Pgs::Gateway::Action::"search"::request{}) < 10 };

@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// formerly within: forbid a send within 10 minutes after a search response.
+@id("no-send-after-search")
+forbid (principal, action == Pgs::Gateway::Action::"send", resource)
+when temporal { formerly within 10m Pgs::Gateway::Action::"search"::response{} };
+@id("allow-tools")
+permit (principal, action in Pgs::Gateway::Action::"InvokeTool", resource);
