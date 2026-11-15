@@ -99,7 +99,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             Ok(guard) => Some(guard),
             Err(refusal) => {
                 // The refusal metric is the operator's signal; this line stays at debug.
-                tracing::debug!(principal = %caller.principal_prn, scope = %caller.scope_prn, reason = refusal.label(), "chat completion refused by a limit");
+                tracing::debug!(principal = %caller.principal_prn, scope = %caller.scope_prn, reason = refusal.label(), endpoint = endpoint.name, "chat completion refused by a limit");
                 return GatewayError::from(refusal).into_response();
             }
         },
@@ -108,6 +108,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
         guard.set_request_estimate(request_estimate);
         // The ids exist here; inside the stream `current_ids()` is `None` (SMA-504 § 4.3).
         guard.set_ids(paigasus_observability::current_ids());
+        guard.set_endpoint(endpoint.name);
         guard.mark_sent();
     }
 
@@ -130,7 +131,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
         Ok(ChatResponse::Full { status, body: upstream_body }) => {
             // Non-stream: the upstream head AND body have both landed, so this is a genuine
             // full-request latency, not just TTFB (see the NOTE on the stream arm below).
-            record_upstream_call(status, started);
+            record_upstream_call(status, started, endpoint.name);
             // A4: a 2xx reads a COPY of the body for its usage; a non-2xx charges nothing.
             if let Some(guard) = guard.as_mut() {
                 if status.is_success() {
@@ -173,7 +174,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             // the upstream response head arrives. A mid-stream SSE failure (handled below by the
             // terminal-error adapter, once the 200 head is already committed) is NOT re-counted
             // here — it has no separate HTTP status to attribute.
-            record_upstream_call(status, started);
+            record_upstream_call(status, started, endpoint.name);
             let resp = if status.is_success() {
                 // Success stream: SSE passthrough with the mid-stream terminal-error adapter.
                 //
@@ -224,7 +225,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             }
             let resp = GatewayError::from(err).into_response();
             let status = resp.status();
-            record_upstream_call(status, started);
+            record_upstream_call(status, started, endpoint.name);
             (resp, status)
         }
     };
@@ -244,6 +245,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             scope = %caller.scope_prn,
             auth = "api_key",
             key_id = %key_id,
+            endpoint = endpoint.name,
             "chat completion proxied"
         ),
         Credential::Oidc => tracing::info!(
@@ -254,6 +256,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             principal = %caller.principal_prn,
             scope = %caller.scope_prn,
             auth = "oidc",
+            endpoint = endpoint.name,
             "chat completion proxied"
         ),
     }
@@ -261,13 +264,13 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     response
 }
 
-/// Record `gateway_upstream_requests_total{status_class}` + `gateway_upstream_request_duration_seconds`
+/// Record `gateway_upstream_requests_total{status_class, endpoint}` + `gateway_upstream_request_duration_seconds`
 /// for one upstream call. `status` is either the upstream's OWN status (a completed response,
 /// full or streamed) or, on a transport/connect/timeout failure, the GATEWAY status the error
 /// was mapped to (502/504 — see `GatewayError::from<OpenAiError>`), since no upstream status
 /// exists in that case. See the call sites above for the TTFB-vs-stream-vs-full timing note.
-fn record_upstream_call(status: StatusCode, started: Instant) {
+fn record_upstream_call(status: StatusCode, started: Instant, endpoint: &'static str) {
     let status_class = format!("{}xx", status.as_u16() / 100);
-    counter!(names::GATEWAY_UPSTREAM_REQUESTS_TOTAL, "status_class" => status_class).increment(1);
+    counter!(names::GATEWAY_UPSTREAM_REQUESTS_TOTAL, "status_class" => status_class, "endpoint" => endpoint).increment(1);
     histogram!(names::GATEWAY_UPSTREAM_REQUEST_DURATION_SECONDS).record(started.elapsed().as_secs_f64());
 }

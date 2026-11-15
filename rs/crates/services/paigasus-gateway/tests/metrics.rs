@@ -261,3 +261,56 @@ async fn an_oidc_request_records_a_denied_key_leg_and_an_ok_token_leg() {
     assert!(has("introspect_token", "ok"), "the token leg succeeded:\n{out}");
     assert!(has("authorize", "ok"), "the self-query allowed:\n{out}");
 }
+
+/// The value of the `gateway_upstream_requests_total` sample that carries `endpoint="<name>"`.
+fn upstream_count(out: &str, endpoint: &str) -> f64 {
+    let needle = format!("endpoint=\"{endpoint}\"");
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("gateway_upstream_requests_total{") && l.contains(&needle))
+        .unwrap_or_else(|| panic!("no upstream sample for {endpoint}:\n{out}"));
+    line.rsplit(' ').next().expect("a value").parse().unwrap_or_else(|_| panic!("a number at the end of {line}"))
+}
+
+#[tokio::test]
+async fn the_upstream_counter_carries_the_endpoint() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, "{}").await;
+    let cfg = OpenAiConfig {
+        base_url: mock.base_url.clone(),
+        api_key: SecretString::from("sk-real-openai-key".to_string()),
+        extra_ca_bundle_path: None,
+    };
+    let openai = OpenAiClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300)).expect("client builds");
+    let handle = paigasus_observability::init("test-gateway-endpoint-label");
+    let state = AppState {
+        iam: Arc::new(AllowedIam),
+        openai: Arc::new(openai),
+        max_request_bytes: 1_048_576,
+        capabilities: Capabilities { chat_stream: true },
+        limits: None,
+        dpop_enabled: false,
+        tool_interception: None,
+        responses: Some(Arc::new(paigasus_gateway::adapters::http::ResponsesSettings {
+            max_request_bytes: 1_048_576,
+            max_record_bytes: 1_048_576,
+            max_held_bytes: 2_097_152,
+        })),
+    };
+    let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
+
+    for (uri, body) in [("/v1/chat/completions", NON_STREAM_BODY), ("/v1/responses", r#"{"model":"gpt-6","input":"hi"}"#)] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {CALLER_KEY}"))
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    }
+
+    let out = handle.render();
+    assert_eq!(upstream_count(&out, "chat_completions"), 1.0, "{out}");
+    assert_eq!(upstream_count(&out, "responses"), 1.0, "{out}");
+}
