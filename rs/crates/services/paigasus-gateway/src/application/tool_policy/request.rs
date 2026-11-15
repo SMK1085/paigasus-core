@@ -57,9 +57,21 @@ pub struct RequestToolPolicy {
     settings: ToolPolicySettings,
 }
 
-/// Count a refusal, or a refusal that enforce mode would make (P-10).
-fn count_refusal(mode: TenantMode, refusal: &Refusal) {
+/// Count and log a refusal, or a refusal that enforce mode would make (P-10, D17: log-only is
+/// "forwarded, logged and counted"). `refused` says whether the request is refused (400) or
+/// forwarded. `cause` names the branch (`unreadable_turn`, `unknown_tool_choice`,
+/// `rewrite_failed`). The line holds the request id, the mode and the reason only: no body
+/// content and no tool name (ADR-0027 (i)).
+fn refusal_event(ctx: &DecisionContext, mode: TenantMode, refusal: &Refusal, cause: &'static str, refused: bool) {
     counter!(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, "mode" => mode.as_str(), "reason" => refusal.label()).increment(1);
+    tracing::warn!(
+        request_id = ctx.request_id.as_deref().unwrap_or("-"),
+        mode = mode.as_str(),
+        reason = refusal.label(),
+        cause,
+        refused,
+        "tool-policy request refusal"
+    );
 }
 
 /// One overhead sample per request (preflight F14, spec G8). The gateway holds this for the life of
@@ -141,7 +153,7 @@ impl RequestToolPolicy {
 
         // D17, P-10: an unreadable turn is refused only in enforce mode; log-only counts it.
         if !matches!(turn, ToolTurn::Parsed(_)) && mode != TenantMode::Off {
-            count_refusal(mode, &Refusal::UnreadableTurn);
+            refusal_event(ctx, mode, &Refusal::UnreadableTurn, "unreadable_turn", mode == TenantMode::Enforce);
             if mode == TenantMode::Enforce {
                 return Err(Refusal::UnreadableTurn);
             }
@@ -153,7 +165,7 @@ impl RequestToolPolicy {
         let (body, entries) = if let ToolTurn::Parsed(facts) = turn {
             let plan = plan_request(&snapshot, format, facts);
             if plan.refuse {
-                count_refusal(mode, &Refusal::UnknownToolChoice);
+                refusal_event(ctx, mode, &Refusal::UnknownToolChoice, "unknown_tool_choice", true);
                 return Err(Refusal::UnknownToolChoice);
             }
             let body = if plan.is_noop() {
@@ -162,7 +174,7 @@ impl RequestToolPolicy {
                 rewritten
             } else {
                 // Never send the original bytes for an enforced plan (controller ruling, Task 10).
-                count_refusal(mode, &Refusal::UnreadableTurn);
+                refusal_event(ctx, mode, &Refusal::UnreadableTurn, "rewrite_failed", true);
                 return Err(Refusal::UnreadableTurn);
             };
             (body, plan.entries)
@@ -250,6 +262,39 @@ mod tests {
         // A floor removal is enforced in every mode (D33), so log-only refuses it too.
         let floor_body = chat_request(&["rm", "y"], r#","tool_choice":"weird""#);
         assert_eq!(run(&log_only, floor_body).await.err(), Some(Refusal::UnknownToolChoice));
+    }
+
+    /// The single line of `logs` that holds `needle`.
+    fn one_line(logs: &str, needle: &str) -> String {
+        let lines: Vec<&str> = logs.lines().filter(|l| l.contains(needle)).collect();
+        assert_eq!(lines.len(), 1, "want one line with {needle:?}: {logs}");
+        lines[0].to_owned()
+    }
+
+    /// D17: a refusal, and a log-only refusal that is forwarded, is logged once with the request
+    /// id, the mode and the reason. The line holds no body content and no tool name.
+    #[tokio::test]
+    async fn each_refusal_reason_is_logged_in_enforce_and_log_only() {
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        let unreadable = Bytes::from_static(br#"{"model":"m","model":"SECRET_MODEL","messages":[]}"#);
+        let weird = chat_request(&["rm", "y"], r#","tool_choice":"weird_choice""#);
+        for (mode, want_mode) in [(TenantMode::Enforce, "enforce"), (TenantMode::LogOnly, "log_only")] {
+            let policy = testing::policy(&source, settings(mode));
+            for (body, reason, refused) in [
+                (unreadable.clone(), "unreadable_turn", mode == TenantMode::Enforce),
+                (weird.clone(), "unknown_tool_choice", true),
+            ] {
+                let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::INFO);
+                let _ = run(&policy, body).await;
+                let line = one_line(&logs.text(), "tool-policy request refusal");
+                for want in ["req-1", want_mode, reason, if refused { "refused=true" } else { "refused=false" }] {
+                    assert!(line.contains(want), "{want:?} in {line}");
+                }
+                for secret in ["SECRET_MODEL", "weird_choice", "\"rm\"", "messages"] {
+                    assert!(!line.contains(secret), "{secret:?} must not be logged: {line}");
+                }
+            }
+        }
     }
 
     #[tokio::test]
