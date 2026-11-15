@@ -192,7 +192,14 @@ describe("arm 3 — the gateway's OpenAI envelope", () => {
       kind: 'http',
       status: 400,
       headers: new Headers({ 'paigasus-retryable': 'false' }),
-      body: { error: { message: 'Stateful Responses API requests are not supported by this gateway.', type: 'invalid_request_error', param: 'previous_response_id', code: 'responses-stateful-not-supported' } },
+      body: {
+        error: {
+          message: 'Stateful Responses API requests are not supported by this gateway.',
+          type: 'invalid_request_error',
+          param: 'previous_response_id',
+          code: 'responses-stateful-not-supported',
+        },
+      },
     });
     expect(result.reason).toBe(ErrorReason.RESPONSES_STATEFUL_NOT_SUPPORTED);
     // The transport table presents a 400 as invalid input.

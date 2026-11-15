@@ -8,6 +8,7 @@ nothing here strips them: a decoder that tripped on one would fail these tests.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import NotRequired, TypedDict, cast
 
@@ -15,6 +16,15 @@ import anthropic
 import httpx2
 import openai
 import pytest
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseFailedEvent,
+    ResponseIncompleteEvent,
+    ResponseOutputItem,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 
 GOLDEN = Path(__file__).resolve().parents[4] / "rs" / "crates" / "libs" / "paigasus-gateway-core" / "tests" / "golden"
 
@@ -68,6 +78,7 @@ def test_manifest_lists_ten_goldens() -> None:
         assert (GOLDEN / case["file"]).is_file()
         assert len(case["notices"]) == len(case["notice_choices"])
         if case["format"] == "responses":
+            assert "notice_positions" in case
             assert len(case["notices"]) == len(case["notice_positions"])
 
 
@@ -112,51 +123,58 @@ def _responses_client(body: bytes) -> openai.OpenAI:
     return openai.OpenAI(api_key="x", base_url="http://gateway.test/v1", http_client=httpx2.Client(transport=_transport(body)))
 
 
-def _client_run_calls(items: list[tuple[int, object]]) -> list[tuple[int, str, str, str]]:
+def _client_run_calls(items: list[tuple[int, ResponseOutputItem]]) -> list[tuple[int, str, str, str]]:
     """The (position, call_id, name, arguments) of every item the client would run.
 
     The manifest `allowed[].id` is the `call_id` (`call_0`), not the item id (`fc_0`).
     """
-    calls = []
+    calls: list[tuple[int, str, str, str]] = []
     for position, item in items:
         # Only function calls may reach the client; any other tool-like item type is a leak.
-        assert getattr(item, "type", None) in {"function_call", "message", "reasoning"}, item
-        if getattr(item, "type", None) == "function_call":
-            calls.append((position, item.call_id, item.name, item.arguments))  # type: ignore[attr-defined]
+        assert item.type in {"function_call", "message", "reasoning"}, item
+        if item.type == "function_call":
+            calls.append((position, item.call_id, item.name, item.arguments))
     return sorted(calls)
 
 
+def _expected_call(allowed: Allowed) -> tuple[int, str, str, str]:
+    assert "position" in allowed
+    assert "id" in allowed
+    return (allowed["position"], allowed["id"], allowed["name"], allowed["arguments"])
+
+
 def _expected_calls(case: Case) -> list[tuple[int, str, str, str]]:
-    return sorted((a["position"], a["id"], a["name"], a["arguments"]) for a in case["allowed"])
+    return sorted(_expected_call(a) for a in case["allowed"])
 
 
-def _message_text(item: object) -> str:
-    return "".join(part.text for part in item.content if part.type == "output_text")  # type: ignore[attr-defined]
+def _message_text(item: ResponseOutputMessage) -> str:
+    return "".join(part.text for part in item.content if isinstance(part, ResponseOutputText))
 
 
 @pytest.mark.parametrize("case", _cases("responses"), ids=_case_id)
 def test_responses_stream_helper_sees_only_allowed_calls(case: Case) -> None:
     body = (GOLDEN / case["file"]).read_bytes()
-    terminal = None
+    terminal: Response | None = None
     with _responses_client(body).responses.stream(model="m", input="hi") as stream:
         # Iterate so the helper accumulates every event. In openai-python 3.48.0 the helper keeps a final response
         # only for `response.completed`, so `get_final_response()` raises for an incomplete or failed stream, as it
         # does for real OpenAI traffic. The gateway must behave the same way, so the raise is pinned here.
         for event in stream:
-            if event.type in {"response.completed", "response.incomplete", "response.failed"}:
-                terminal = event.response
+            if isinstance(event, ResponseCompletedEvent | ResponseIncompleteEvent | ResponseFailedEvent):
+                terminal = cast("Response", event.response)
         assert terminal is not None
         if terminal.status == "completed":
             assert stream.get_final_response().status == "completed"
         else:
-            with pytest.raises(RuntimeError, match="response.completed"):
-                stream.get_final_response()
+            with pytest.raises(RuntimeError, match=re.escape("response.completed")):
+                _ = stream.get_final_response()
     final = terminal
     output = list(enumerate(final.output))
     assert _client_run_calls(output) == _expected_calls(case)
+    assert "notice_positions" in case
     for notice, position in zip(case["notices"], case["notice_positions"], strict=True):
         item = final.output[position]
-        assert item.type == "message"
+        assert isinstance(item, ResponseOutputMessage)
         assert item.id == f"msg_paigasus_{position}"
         assert _message_text(item) == notice
     assert final.status == case["finish_reasons"]["0"]
@@ -166,13 +184,13 @@ def test_responses_stream_helper_sees_only_allowed_calls(case: Case) -> None:
 @pytest.mark.parametrize("case", _cases("responses"), ids=_case_id)
 def test_responses_raw_stream_sees_only_allowed_calls(case: Case) -> None:
     body = (GOLDEN / case["file"]).read_bytes()
-    done: list[tuple[int, object]] = []
-    terminal = None
+    done: list[tuple[int, ResponseOutputItem]] = []
+    terminal: Response | None = None
     # The repeated `sequence_number` of spec 6.5 must raise nothing in the SDK decoder.
     for event in _responses_client(body).responses.create(model="m", input="hi", stream=True):
         if event.type == "response.output_item.done":
             done.append((event.output_index, event.item))
-        elif event.type in {"response.completed", "response.incomplete", "response.failed"}:
+        elif isinstance(event, ResponseCompletedEvent | ResponseIncompleteEvent | ResponseFailedEvent):
             terminal = event.response
     assert terminal is not None
     assert _client_run_calls(done) == _expected_calls(case)
