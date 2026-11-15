@@ -275,7 +275,7 @@ mod tests {
     const PERMIT_OK: &str = r#"@id("ok") permit(principal, action == Pgs::Gateway::Action::"ok", resource);"#;
 
     fn facts() -> Facts {
-        let prn = Prn::parse("prn:pgs:iam:::user/0190a1e5-0000-7000-8000-000000000004").expect("prn");
+        let prn = Prn::parse("prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-000000000004").expect("prn");
         Facts::new(
             to_cedar_uid(&prn),
             Uuid::nil(),

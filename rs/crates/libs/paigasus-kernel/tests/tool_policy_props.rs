@@ -45,7 +45,7 @@ fn atom() -> impl Strategy<Value = String> {
         Just("context.session.id == \"\"".to_owned()),
         Just("action in Pgs::Gateway::Action::\"InvokeTool\"".to_owned()),
         Just("action in Pgs::Gateway::Action::\"Unregistered\"".to_owned()),
-        Just("principal == Pgs::Iam::User::\"u1\"".to_owned()),
+        Just("principal == Pgs::Iam::Principal::\"u1\"".to_owned()),
         Just("context == {}".to_owned()),
         Just("true".to_owned()),
         Just("false".to_owned()),
@@ -68,7 +68,7 @@ fn clauses() -> impl Strategy<Value = String> {
 }
 
 fn scope() -> impl Strategy<Value = (String, String)> {
-    let principal = select(vec!["principal", "principal == Pgs::Iam::User::\"u1\"", "principal is Pgs::Iam::User"]);
+    let principal = select(vec!["principal", "principal == Pgs::Iam::Principal::\"u1\"", "principal is Pgs::Iam::Principal"]);
     let action = select(vec![
         "action",
         "action == Pgs::Gateway::Action::\"read_file\"",
@@ -152,7 +152,7 @@ impl fmt::Debug for Case {
 
 fn facts(principal: &str, model: &str, session: SessionInfo) -> Facts {
     let uid = CedarUid {
-        entity_type: "Pgs::Iam::User".into(),
+        entity_type: "Pgs::Iam::Principal".into(),
         entity_id: principal.into(),
     };
     Facts::new(uid, ORG.parse().expect("uuid"), RequestInfo::new("prn:pgs:gateway:::scope/x", "responses", model), session)

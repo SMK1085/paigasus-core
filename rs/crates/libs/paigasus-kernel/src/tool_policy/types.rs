@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn constructors_fill_every_field() {
         let uid = CedarUid {
-            entity_type: "Pgs::Iam::User".into(),
+            entity_type: "Pgs::Iam::Principal".into(),
             entity_id: "x".into(),
         };
         let org = Uuid::nil();

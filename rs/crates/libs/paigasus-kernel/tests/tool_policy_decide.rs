@@ -10,7 +10,7 @@ use paigasus_kernel::{CedarUid, Prn, to_cedar_uid};
 const ORG: &str = "0190a100-0000-7000-8000-0000000000aa";
 
 fn facts() -> Facts {
-    let prn = Prn::parse("prn:pgs:iam:::user/0190a1e5-0000-7000-8000-000000000004").expect("valid PRN");
+    let prn = Prn::parse("prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-000000000004").expect("valid PRN");
     Facts::new(
         to_cedar_uid(&prn),
         ORG.parse().expect("uuid"),
@@ -123,7 +123,7 @@ fn the_floor_alone_has_no_floor_denied_default_deny() {
 #[test]
 fn context_shape() {
     let tenant = format!(
-        r#"@id("c") permit(principal is Pgs::Iam::User, action, resource == Pgs::Iam::Organization::"{ORG}") when {{
+        r#"@id("c") permit(principal is Pgs::Iam::Principal, action, resource == Pgs::Iam::Organization::"{ORG}") when {{
             context.request.ingress == "chat_completions" && context.request.model == "m"
             && context.request.scope == "prn:pgs:gateway:::scope/x"
             && context.call.declared == "yes" && context.session.turn == 0 && context.session.id == ""

@@ -253,7 +253,7 @@ mod tests {
 
     fn facts(turn: i64) -> Facts {
         let uid = CedarUid {
-            entity_type: "Pgs::Iam::User".into(),
+            entity_type: "Pgs::Iam::Principal".into(),
             entity_id: "u".into(),
         };
         Facts::new(uid, Uuid::nil(), RequestInfo::new("prn:pgs:gateway:::scope/x", "responses", "m"), SessionInfo::new("", turn))
@@ -276,7 +276,7 @@ mod tests {
         for cond in [
             r#"context.request.model == "m""#,
             r#"context has request"#,
-            r#"principal is Pgs::Iam::User && action in Pgs::Gateway::Action::"InvokeTool""#,
+            r#"principal is Pgs::Iam::Principal && action in Pgs::Gateway::Action::"InvokeTool""#,
             r#"decimal("1.5").lessThan(decimal("2.0")) && [1, 2].contains(1)"#,
             r#"if context.request.ingress like "resp*" then true else false"#,
         ] {

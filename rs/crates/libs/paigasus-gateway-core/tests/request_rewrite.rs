@@ -29,7 +29,7 @@ fn forbid_text(tools: &[&str]) -> String {
 }
 
 fn facts(format: Format) -> Facts {
-    let prn = Prn::parse("prn:pgs:iam:::user/0190a1e5-0000-7000-8000-000000000004").expect("prn");
+    let prn = Prn::parse("prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-000000000004").expect("prn");
     Facts::new(
         to_cedar_uid(&prn),
         Uuid::nil(),

@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(inv.name, "READ_FILE ");
         let floor = Arc::new(ToolPolicies::compile_floor(r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"read_file", resource);"#).expect("floor"));
         let policies = ToolPolicies::compile(floor, "", &[]).expect("compile");
-        let prn = Prn::parse("prn:pgs:iam:::user/0190a1e5-0000-7000-8000-000000000004").expect("prn");
+        let prn = Prn::parse("prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-000000000004").expect("prn");
         let facts = Facts::new(
             to_cedar_uid(&prn),
             Uuid::nil(),

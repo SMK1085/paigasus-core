@@ -299,7 +299,7 @@ mod tests {
         let m = map_input(&ToolInput::Json(raw.into()));
         let ctx = Context::from_pairs([("input".to_owned(), m.input)]).expect("context");
         let uid = |s: &str| s.parse::<EntityUid>().expect("uid");
-        let req = Request::new(uid("Pgs::Iam::User::\"u\""), uid("Pgs::Gateway::Action::\"x\""), uid("Pgs::Iam::Org::\"o\""), ctx, None).expect("request");
+        let req = Request::new(uid("Pgs::Iam::Principal::\"u\""), uid("Pgs::Gateway::Action::\"x\""), uid("Pgs::Iam::Org::\"o\""), ctx, None).expect("request");
         let ps: PolicySet = format!("permit(principal, action, resource) when {{ {cond} }};").parse().expect("policy");
         Authorizer::new().is_authorized(&req, &ps, &Entities::empty()).decision() == Decision::Allow
     }
@@ -356,11 +356,11 @@ mod tests {
 
     #[test]
     fn entity_and_extension_escapes_stay_records() {
-        let ent = r#"{"v":{"__entity":{"type":"Pgs::Iam::User","id":"x"}}}"#;
+        let ent = r#"{"v":{"__entity":{"type":"Pgs::Iam::Principal","id":"x"}}}"#;
         assert!(allows(r#"context.input.v.__entity.id == "x""#, ent));
-        assert!(allows(r#"context.input.v.__entity["type"] == "Pgs::Iam::User""#, ent));
-        assert!(!allows("context.input.v.__entity is Pgs::Iam::User", ent), "an `is` test on a record never allows");
-        assert!(!allows("context.input.v is Pgs::Iam::User", ent));
+        assert!(allows(r#"context.input.v.__entity["type"] == "Pgs::Iam::Principal""#, ent));
+        assert!(!allows("context.input.v.__entity is Pgs::Iam::Principal", ent), "an `is` test on a record never allows");
+        assert!(!allows("context.input.v is Pgs::Iam::Principal", ent));
         let ext = r#"{"v":{"__extn":{"fn":"decimal","arg":"1.0"}}}"#;
         assert!(allows(r#"context.input.v.__extn.fn == "decimal""#, ext));
         assert!(!allows(r#"context.input.v == decimal("1.0")"#, ext), "not an extension value");
