@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01J94XdMevi3b3PNmNv2AAbD",
+  "agent_id": "ae64e10487972b939",
+  "subagent_type": "general-purpose",
+  "task_description": "Follow-up sweep after SMA-765/767/768",
+  "token_usage": {
+    "input_tokens": 354,
+    "cache_creation_tokens": 982463,
+    "cache_read_tokens": 40476677,
+    "output_tokens": 127028,
+    "api_call_count": 170
+  },
+  "started_at": "2026-11-13T23:16:09.530151+01:00",
+  "completed_at": "2026-11-14T11:14:47.176203+01:00"
+}

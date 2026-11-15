@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01D9PnRXkKTXha2io5xnPSRo",
+  "agent_id": "ad34ba2b1eb3a1e0b",
+  "subagent_type": "general-purpose",
+  "task_description": "Second follow-up sweep PR",
+  "token_usage": {
+    "input_tokens": 528,
+    "cache_creation_tokens": 486180,
+    "cache_read_tokens": 82714564,
+    "output_tokens": 234461,
+    "api_call_count": 257
+  },
+  "started_at": "2026-11-14T08:53:17.589508+01:00",
+  "completed_at": "2026-11-14T11:14:47.267318+01:00"
+}

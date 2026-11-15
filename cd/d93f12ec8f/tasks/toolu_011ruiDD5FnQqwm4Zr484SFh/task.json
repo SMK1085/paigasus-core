@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_011ruiDD5FnQqwm4Zr484SFh",
+  "agent_id": "a3a5d322ce56e71c6",
+  "task_description": "Resolve PR 449 lockfile conflict",
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 74067,
+    "cache_read_tokens": 274045,
+    "output_tokens": 2122,
+    "api_call_count": 5
+  },
+  "started_at": "2026-11-12T21:39:24.834215+01:00",
+  "completed_at": "2026-11-12T21:40:16.664073+01:00"
+}
