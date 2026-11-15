@@ -31,7 +31,7 @@ try:
     import yaml
 except ImportError:  # pragma: no cover - exercised by the missing-interpreter path
     print("release-guard: PyYAML is not importable. This gate needs the pinned pyyaml from "
-          "py/pyproject.toml — invoke via `uv run --project py`.", file=sys.stderr)
+          "py/pyproject.toml — invoke it through ci/python-env/run.sh (run py).", file=sys.stderr)
     raise SystemExit(2) from None
 
 # --- The pinned vocabulary ---------------------------------------------------------------------
@@ -186,7 +186,7 @@ STATUS_FUNCS = ("always", "cancelled", "success", "failure")
 # A naive substring test here would red the real repository on the very PR that added V7. The
 # `(?![-\w])` boundary is what keeps `release-pr` distinct from `release`.
 #
-# Fix round 3, Important 3: `maturin publish`, `maturin upload`, `uv publish` and `yarn publish`
+# Fix round 3, Important 3: `maturin publish`, `maturin upload`, a package-manager publish and `yarn publish`
 # were missing, and this repo's own Python publishing IS maturin — `wheels.yml` carries both
 # `pull_request` and `push` triggers, and `maturin publish` is a one-word edit from the
 # `maturin build` already in it. Spec §8.3 leaves detection as the sole rule for called workflows,
@@ -1391,7 +1391,7 @@ def chain_scope_violations(jobs: dict, name: str) -> list[str]:
             out.append(
                 f"{name}: V8e: job '{jid}' is gated by the chain approval '{approval}', not the "
                 f"kernel gate '{APPROVAL_JOB}'. It contains a step matching a package-registry "
-                f"publish marker (cargo/npm/yarn/pypi/napi/maturin/uv/release-plz). A chain "
+                f"publish marker (cargo, npm, yarn, pypi, napi, maturin, a Python package manager or release-plz). A chain "
                 f"approval authorises only that chain's own container publish; a package publish "
                 f"must sit behind '{APPROVAL_JOB}' instead."
             )
@@ -1621,7 +1621,7 @@ class StepAllowlist:
 # V18 (SMA-684). Every UNGATED_JOBS member (today only release-pr) can read the App private key:
 # the runner receives every secret a job references when the job starts, so code in ANY step of
 # the job can read it, not only a step with a token in its env:. So no step of such a job may
-# compile, or run a build script, a proc macro, or an npm or pip lifecycle or install script
+# compile, or run a build script, a proc macro, or an npm or Python installer lifecycle or install script
 # (spec A1). This is an ALLOWLIST (spec D4): a new tool reds until someone adds it here, with a
 # reason, after the job's trust in it is reviewed. The spec's §4.1 lists the tools it trusts.
 UNGATED_JOB_ACTIONS = frozenset({
@@ -3112,7 +3112,7 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      ("on:\n  workflow_call:\n  push:\n    branches:\n      - main\n"
       "jobs:\n  build:\n    steps: [{run: maturin upload dist/*}]\n"),
      "workflow_call-ONLY"),
-    ("R3 Important 3: uv publish reds the same way", "called",
+    ("R3 Important 3: the Python package manager publish reds the same way", "called",
      ("on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
       "jobs:\n  build:\n    steps: [{run: uv publish --trusted-publishing always}]\n"),
      "workflow_call-ONLY"),
@@ -3628,7 +3628,7 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
          "    steps:\n"
          "      - env:\n"
          "          PYPI_CRED: ${{ secrets['PYPI_NEW'] }}\n"
-         '        run: uv run twine upload -u __token__ -p "$PYPI_CRED" dist/*\n'),
+         '        run: twine upload -u __token__ -p "$PYPI_CRED" dist/*\n'),
      "references the secret PYPI_NEW"),
     # FAIL-CLOSED: a read of the whole context names nothing a strict-equality pin can compare,
     # so it must red rather than read clean.

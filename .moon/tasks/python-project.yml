@@ -3,7 +3,7 @@ $schema: 'https://moonrepo.dev/schemas/tasks.json'
 # Per-distribution tasks for the py workspace. Scoped to library/application layers ONLY:
 # each py/packages/* builds its own wheel via the uv_build backend. NOT routed to the
 # configuration root — py/pyproject.toml is a virtual workspace root with no [project] table,
-# so a root `uv build` emits a junk UNKNOWN wheel (the bug SMA-399 excluded; now simply not
+# so a root package build emits a junk UNKNOWN wheel (the bug SMA-399 excluded; now simply not
 # routed here). (SMA-401)
 #
 # fileGroups are repeated here (not centralized in .moon/tasks.yml) because Moon 2.2.5 does not
@@ -23,5 +23,5 @@ fileGroups:
 
 tasks:
   build:
-    command: 'uv build'
-    inputs: ['@group(sources)', 'pyproject.toml', 'README.md', 'LICENSE']
+    command: 'bash $workspaceRoot/ci/python-env/run.sh build'
+    inputs: ['@group(sources)', 'pyproject.toml', 'README.md', 'LICENSE', '/ci/python-env/run.sh']

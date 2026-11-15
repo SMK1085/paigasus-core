@@ -5,7 +5,7 @@ members = ["packages/*"]
 # blacklisting one release. python-semantic-release 10.6.2 narrowed its own requirement from
 # `click>=8.1.0,<9.0.0` to `click~=8.1.0`, which PEP 440 reads as `>=8.1.0,<8.2.0` — that caps
 # click at 8.1.8, the version carrying PYSEC-2026-2132 / CVE-2026-7246 (severity 7.2, fixed in
-# 8.3.3), so `repo:osv` reds the lock. The constraint below states the invariant directly: uv
+# 8.3.3), so `repo:osv` reds the lock. The constraint below states the invariant directly: the resolver
 # backtracks to a python-semantic-release that permits a fixed click. Remove it only when every
 # resolvable dependent allows click >= 8.3.3 on its own.
 #

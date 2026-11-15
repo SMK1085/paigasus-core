@@ -2,9 +2,9 @@
 """Writes the hand-built SSE fixtures for paigasus-gateway-core (SMA-749 spec § 8.3).
 
 Every fixture here is HAND-BUILT, not a recording. Blocked calls are named blocked_* and carry
-CANARY in their arguments. Run from py/ with the repo's uv:
+CANARY in their arguments. Run from py/ through the python-env wrapper:
 
-    uv run python -I ../rs/crates/libs/paigasus-gateway-core/tests/fixtures/make_fixtures.py \
+    bash ../ci/python-env/run.sh run py python -I ../rs/crates/libs/paigasus-gateway-core/tests/fixtures/make_fixtures.py \
         ../rs/crates/libs/paigasus-gateway-core/tests/fixtures
 """
 

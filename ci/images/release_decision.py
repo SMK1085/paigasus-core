@@ -28,11 +28,15 @@ Subcommands. Each one prints `key=value` lines on stdout, in a fixed order:
       Debian entries must be the same set of (name, version, arch) as that chisel fetch list.
       An npm key reads no list and ignores --arch. A missing, empty or unparsable list is
       exit 2. A failed floor or an unknown key prints floor=fail and exits 3.
+  revision
+      SMA-770: reads one image config (the output of `crane config <ref>`) on stdin and prints
+      its org.opencontainers.image.revision label as a bare value, not as a key=value line. Bad
+      JSON, a wrong shape, or a missing or empty label is exit 2.
 
 Exit codes: 0 decided | 2 usage or unreadable input | 3 a conflict, or a failed self-test row.
-It never exits 1: `uv` exits 1 on its own failures, so 1 would be ambiguous.
+It never exits 1: the Python package manager exits 1 on its own failures, so 1 would be ambiguous.
 
-Standard library only, so it runs with `uv run --no-project --python '>=3.12' python3`.
+Standard library only, so it runs with `bash ci/python-env/run.sh script` (spec R-script).
 """
 
 from __future__ import annotations
@@ -248,6 +252,24 @@ def labels_from(tar: tarfile.TarFile) -> dict[str, str]:
     if not title:
         raise UsageError("the image config carries no org.opencontainers.image.title label")
     return {"version": version, "revision": revision, "title": title}
+
+
+def revision_of_config(text: str) -> str:
+    """SMA-770: the org.opencontainers.image.revision label of one image config, as `crane config
+    <ref>` prints it. A missing or empty label is exit 2, the same rule as labels_from."""
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"the image config on stdin is not JSON: {exc}") from exc
+    config = _require_dict(doc, "the image config")
+    config_obj_value = config.get("config")
+    config_obj = {} if config_obj_value is None else _require_dict(config_obj_value, "the image config's 'config' object")
+    labels_value = config_obj.get("Labels")
+    label_map = {} if labels_value is None else _require_dict(labels_value, "the image config's Labels")
+    revision = label_map.get("org.opencontainers.image.revision")
+    if not isinstance(revision, str) or not revision:
+        raise UsageError("the image config carries no org.opencontainers.image.revision label")
+    return revision
 
 
 def labels(path: Path) -> dict[str, str]:
@@ -547,6 +569,38 @@ def _main_rc(argv: list[str]) -> int:
         return main(argv)
 
 
+def _main_stdin(argv: list[str], stdin_text: str) -> tuple[int, str]:
+    """main()'s exit code and stdout, with `stdin_text` as its stdin and its stderr kept off the
+    self-test's own output."""
+    out = io.StringIO()
+    saved = sys.stdin
+    sys.stdin = io.StringIO(stdin_text)
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = main(argv)
+    finally:
+        sys.stdin = saved
+    return rc, out.getvalue()
+
+
+def _revision_rows() -> list[tuple[str, Callable[[], object], object]]:
+    """SMA-770: `revision` reads one image config (the `crane config` output) on stdin. It
+    replaces the inline `python3 -c` of release.yml's revision_of()."""
+    good = json.dumps({"config": {"Labels": {"org.opencontainers.image.revision": "abc"}}})
+    return [
+        ("revision: the label is printed", lambda: _main_stdin(["revision"], good), (0, "abc\n")),
+        ("revision: no revision label is exit 2", lambda: _main_stdin(["revision"], '{"config":{"Labels":{}}}'), (2, "")),
+        ("revision: an empty revision label is exit 2",
+         lambda: _main_stdin(["revision"], '{"config":{"Labels":{"org.opencontainers.image.revision":""}}}'), (2, "")),
+        ("revision: null Labels is exit 2", lambda: _main_stdin(["revision"], '{"config":{"Labels":null}}'), (2, "")),
+        ("revision: a config that is not an object is exit 2", lambda: _main_stdin(["revision"], '{"config":[]}'), (2, "")),
+        ("revision: not JSON is exit 2", lambda: _main_stdin(["revision"], "not json"), (2, "")),
+        ("revision: a JSON list is exit 2", lambda: _main_stdin(["revision"], "[]"), (2, "")),
+        # Ruling F11: argparse owns this exit code (2 today). Any non-zero code passes the row.
+        ("revision: an extra argument is not exit 0", lambda: _main_stdin(["revision", "extra"], good)[0] != 0, True),
+    ]
+
+
 def _cli_rows(tmp: Path) -> list[tuple[str, Callable[[], object], object]]:
     """SMA-665: the sbom-floor CLI. The cargo key reads its list file; the npm key reads none."""
     cargo_sbom = tmp / "cargo.spdx.json"
@@ -729,7 +783,7 @@ def _self_test(tmp: Path) -> int:
         # A cargo floor must not accept an npm image: crates are the cargo rule, npm is not.
         ("floor: a cargo key with only npm packages", lambda: _cargo_floor(CHISEL, cargo="0", npm="67", next="true"), "FloorError"),
         ("floor: an unknown key", lambda: sbom_floor("billing", FLOOR_KINDS, _summary(cargo="1"), debs=[], chisel=None, arch="amd64"), "FloorError"),
-        ("floor: an unknown kind", lambda: sbom_floor("x", {"x": "pip"}, _summary(cargo="1"), debs=[], chisel=None, arch="amd64"), "FloorError"),
+        ("floor: an unknown kind", lambda: sbom_floor("x", {"x": "gem"}, _summary(cargo="1"), debs=[], chisel=None, arch="amd64"), "FloorError"),
         # SMA-665 D5: the cargo floor's OS rule. Mutation: drop `reasons += _chisel_reasons(…)`,
         # and every FloorError row below reds. Mutation: drop the reverse (count) block in
         # _chisel_reasons, and "an SBOM entry not in the list" reds.
@@ -792,6 +846,7 @@ def _self_test(tmp: Path) -> int:
         ("kinds: an entry with no kind", lambda: chain_kinds("[chain.iam]\nversion_file = 'x'\n"), "UsageError"),
         ("kinds: not TOML", lambda: chain_kinds("[chain.iam\n"), "UsageError"),
         *_cli_rows(tmp),
+        *_revision_rows(),
     ]
     failed = 0
     for label, fn, want in rows:
@@ -855,6 +910,7 @@ def main(argv: list[str]) -> int:
     p_floor.add_argument("--arch", required=True)
     p_floor.add_argument("--chisel-dir", type=Path, default=Path())
     p_floor.add_argument("sbom", type=Path)
+    sub.add_parser("revision")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse exits 2 on a usage error and 0 on --help
@@ -896,6 +952,12 @@ def main(argv: list[str]) -> int:
                 debs = sbom_debs(doc)
             kind = sbom_floor(args.service, kinds, summary, debs=debs, chisel=chisel, arch=args.arch)
             _emit({"kind": kind, "floor": "pass"})
+        elif args.command == "revision":
+            try:
+                text = sys.stdin.read()
+            except (OSError, UnicodeDecodeError) as exc:
+                raise UsageError(f"cannot read stdin: {exc}") from exc
+            print(revision_of_config(text))
         else:
             parser.print_usage(sys.stderr)
             return 2

@@ -2,7 +2,7 @@
 
 //! PyO3 binding shim for `paigasus-kernel` (ADR-0005): exposes the kernel's pure functions
 //! to Python. Compiled as an `abi3` `extension-module` cdylib; packaging into a wheel and
-//! wiring it into the uv workspace are a later issue. The affected-graph cascade
+//! wiring it into the Python workspace are a later issue. The affected-graph cascade
 //! `paigasus-kernel-rs → paigasus-py-bindings-rs` is proven by this crate compiling against a
 //! real `paigasus_kernel::*` call (SMA-409).
 

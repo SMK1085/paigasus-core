@@ -121,7 +121,7 @@ jobs:
           restore-keys: |
             moon-${{ runner.os }}-
 
-      - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
+      - name: Install Moon-managed toolchains (node, pnpm, rust, python and the Python package manager)
         run: moon setup
 
       # rs/rust-toolchain.toml declares `components = ["rustfmt", "clippy"]`, which rustup
@@ -143,15 +143,16 @@ jobs:
           rustup component add rustfmt clippy
           rustup target add wasm32-unknown-unknown
 
-      # pnpm/uv stores live wherever each tool decides; resolve them at runtime (now that
-      # moon setup has installed pnpm + uv) instead of hard-coding Linux defaults that may
-      # not match Moon's managed install. The pnpm-store cache restores before `pnpm install`
-      # and the uv cache before `moon ci` runs the Python tasks.
-      - name: Resolve pnpm/uv cache paths
+      # The pnpm store and the cache of the Python package manager live wherever each tool
+      # decides; resolve them at runtime (now that moon setup has installed both tools) instead
+      # of hard-coding Linux defaults that may not match Moon's managed install. The pnpm-store
+      # cache restores before `pnpm install`, and the Python package cache before `moon ci`
+      # runs the Python tasks.
+      - name: Resolve the pnpm and Python package cache paths
         id: cache-paths
         run: |
           echo "pnpm-store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
-          echo "uv-cache=$(uv cache dir)" >> "$GITHUB_OUTPUT"
+          echo "uv-cache=$(bash ci/python-env/run.sh cache-dir)" >> "$GITHUB_OUTPUT"
 
       - name: Cache pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -161,7 +162,7 @@ jobs:
           restore-keys: |
             pnpm-${{ runner.os }}-
 
-      - name: Cache uv
+      - name: Cache the Python package manager
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ steps.cache-paths.outputs.uv-cache }}

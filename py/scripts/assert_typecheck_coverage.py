@@ -9,7 +9,7 @@ contains -- catching both total and partial darkening of the type gate.
 The expected count mirrors `tool.basedpyright.{include,exclude}` in py/pyproject.toml; the two
 must move together. Intended use (pipe), with py/ as the project root:
 
-    uv run basedpyright --outputjson | uv run python scripts/assert_typecheck_coverage.py
+    bash ../ci/python-env/run.sh run py basedpyright --outputjson | bash ../ci/python-env/run.sh run py python scripts/assert_typecheck_coverage.py
 """
 
 from __future__ import annotations

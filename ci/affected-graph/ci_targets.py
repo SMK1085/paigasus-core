@@ -245,7 +245,7 @@ REQUIRED_REPO_TASKS = (
 # repo:version-lockstep's entry is the file-level twin of its SELF_SCHEDULED_GATES pin below: that
 # one proves the gate still RUNS both halves, this one proves it is still SCHEDULED by every file
 # that carries a version. Drop `py/uv.lock` here and the gate stops re-keying on the one file a
-# `uv lock` rewrite touches — it would still report PASS, from cache, over a tree it never read.
+# `ci/python-env/run.sh lock` rewrite touches — it would still report PASS, from cache, over a tree it never read.
 SELF_TASK_EXPECTED_GLOBS = {
     "input-liveness": ("**/*",),
     "version-lockstep": (
@@ -343,9 +343,10 @@ SELF_TASK_EXPECTED_GLOBS = {
         ".github/workflows/.*.y*ml",
         "ci/workflow-credentials/**/*",
         # A LITERAL path, so moon resolves it into inputFiles and it sorts after both globs
-        # (measured on 2.5.3). The gate shells out to `uv`, pinned in .prototools, so without
-        # this input a uv bump could not invalidate a cached PASS.
+        # (measured on 2.5.3). The gate shells out to the package manager, pinned in .prototools, so without
+        # this input a package-manager bump could not invalidate a cached PASS.
         ".prototools",
+        "ci/python-env/run.sh",
     ),
     # SMA-600. Five globs then one literal, in check_gate_inputs' comparison order (globs sorted,
     # then files sorted) — NOT the authored order in moon.yml. The first two are deliberately
@@ -371,6 +372,7 @@ SELF_TASK_EXPECTED_GLOBS = {
         "ci/ruff/**/*",
         ".moon/tasks/python.yml",
         ".prototools",
+        "ci/python-env/run.sh",
         "py/pyproject.toml",
         "py/uv.lock",
     ),
@@ -414,6 +416,7 @@ SELF_TASK_EXPECTED_GLOBS = {
         ".proto/plugins/helm.toml",
         ".prototools",
         "ci/images/chains.toml",
+        "ci/python-env/run.sh",
         "contracts/proto/paigasus/common/v1/service_info.proto",
         "rs/crates/services/paigasus-gateway/Cargo.toml",
         "rs/crates/services/paigasus-iam/Cargo.toml",
@@ -447,12 +450,13 @@ SELF_TASK_EXPECTED_GLOBS = {
     ),
     # SMA-693. One glob then three literals, in check_gate_inputs' comparison order (globs sorted,
     # then files sorted). The workflow is what pin_check.py reads, rs/Cargo.lock is what the real
-    # run reads through `git show HEAD:`, and .prototools pins the `uv` the gate shells out to.
+    # run reads through `git show HEAD:`, and .prototools pins the package manager the gate shells out to.
     # Drop any one and the gate serves a cached PASS on the exact edit it exists to catch.
     "wasm-lockstep": (
         "ci/wasm-lockstep/**/*",
         ".github/workflows/wasm-lockstep.yml",
         ".prototools",
+        "ci/python-env/run.sh",
         "rs/Cargo.lock",
     ),
 }
@@ -478,6 +482,7 @@ SELF_TASK_EXPECTED_GLOBS = {
 CONTRACTS_GENERATE_INPUTS = (
     "contracts/proto/**/*",
     ".prototools",
+    "ci/python-env/run.sh",
     "contracts/buf.gen.googleapis.yaml",
     "contracts/buf.gen.yaml",
     "contracts/buf.lock",
@@ -661,7 +666,7 @@ SELF_SCHEDULED_GATES = {
     # three-line gates: a `--self-test` invocation as well as a `--negative-control`, because the
     # rule table lives in the checker (in-process) while the wiring rows live in run.sh, and
     # neither half proves the other can report red. All three modes go through run.sh rather than
-    # calling the checker directly, so each gets the uv preflight — `python3
+    # calling the checker directly, so each gets the `probe` preflight — `python3
     # workflow_credentials.py` would fail on `import yaml` — and the wrapper's 3 -> 1 exit-code
     # translation. Whole-line matched like every other entry, and here that is load-bearing in the
     # usual direction: `bash ci/workflow-credentials/run.sh` is a strict PREFIX of BOTH flagged
@@ -893,8 +898,8 @@ PIPE_CAPACITY_CALL_SITES = (
 )
 PIPE_CAPACITY_INDENTED_CALL_SITES = (
     "grep -qxF 'actionlint = \"1.7.12\"' .prototools || infra \".prototools no longer pins actionlint 1.7.12. The pipe-capacity probe (SMA-612) exists only for that version. Re-decide it per docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md D9.\"",
-    'pc_out="$(uv run --locked --project py python3 -c "$PIPE_CAPACITY_PROBE_PY" | tail -n1)" || pc_rc=$?',
-    '[ "$pc_rc" -eq 0 ] || infra "the pipe-capacity probe failed (rc $pc_rc) via \'uv run --locked --project py\'. No check ran."',
+    'pc_out="$( (cd py && bash ../ci/python-env/run.sh run py python3 -c "$PIPE_CAPACITY_PROBE_PY") | tail -n1)" || pc_rc=$?',
+    '[ "$pc_rc" -eq 0 ] || infra "the pipe-capacity probe failed (rc $pc_rc) via \'ci/python-env/run.sh run py\'. No check ran."',
     'case "$(pipe_capacity_verdict "$pc_out")" in',
     'small) infra "a new pipe on this host holds only $pc_out bytes (floor $PIPE_CAPACITY_FLOOR). With pipes this small, the gate cannot finish: bash 5.x here-strings in its own self-tests deadlock above $pc_out bytes, and the pinned actionlint writes each run: script into shellcheck\'s stdin before it starts shellcheck (rhysd/actionlint#650). No check ran. See ci/actionlint/README.md, \\"Small pipes on macOS\\"." ;;',
     '*) infra "the pipe-capacity probe printed \'$pc_out\', not a positive integer. No check ran." ;;',
@@ -1006,7 +1011,7 @@ ACTIONLINT_SH_CALL_SITES = (
     # ...and the CATCH-ALL arm (SMA-579 fix round 3, Critical 1). Routing only rc 2 left the gate
     # failing OPEN on every other non-zero status: run.sh is `set -uo pipefail` with NO -e, so an
     # unrouted status leaves $RG_OUT empty, the read loop finds nothing and FAILED stays 0.
-    # MEASURED: with the production call replaced by `( exit 127 )` — the status a missing `uv`
+    # MEASURED: with the production call replaced by `( exit 127 )` — the status a missing package manager
     # produces from the WRAPPER, which is NOT the guard's own 2 — the full gate exited 0 before
     # this arm existed and exits 2 after it. Deleting this one line restores that fail-open while
     # every other entry here stays green, which is exactly the shape this registry exists to catch.
@@ -1289,7 +1294,7 @@ WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
 #   - SMA-688, the key sources (spec § 4.3): the shape test that both sources pass, the `--keys`
 #     capture, its guard, the sed read of ci/images/chains.toml, the guard on that read, its
 #     exit-2 verdict write, and the call into the fail-safe branch. Delete the sed read and a
-#     runner without `uv` exits 2 again, which is the C1 defect. Delete a guard and an empty key
+#     runner without the package manager exits 2 again, which is the C1 defect. Delete a guard and an empty key
 #     list writes no chain output; every chain then runs with an empty version.
 #   - The fail-safe guard for the verdict, and the per-key presence check (two physical lines).
 #     Delete one and a partial checker output aborts under pipefail or writes nothing.
@@ -1318,7 +1323,7 @@ RELEASE_PLAN_SH_CALL_SITES = (
     "output)   github_output ;;",
     "negctl)   require_uv; negative_control ;;",
     "[ -n \"$1\" ] && ! grep -qvE '^[a-z][a-z0-9-]*$' < <(printf '%s\\n' \"$1\")",
-    "keys=\"$(uv run --locked --project \"$HERE\" --python '>=3.12' python3 \"$HERE/release_plan.py\" --keys \"$REPO_ROOT\")\" || keys_rc=$?",
+    "keys=\"$(bash \"$REPO_ROOT/ci/python-env/run.sh\" run ci/release-plan python3 \"$HERE/release_plan.py\" --keys \"$REPO_ROOT\")\" || keys_rc=$?",
     'if [ "$keys_rc" -ne 0 ] || ! keys_are_valid "$keys"; then',
     "keys=\"$(sed -n 's/^\\[chain\\.\\([a-z][a-z0-9-]*\\)\\]$/\\1/p' \"$REPO_ROOT/ci/images/chains.toml\" 2>/dev/null)\" || keys=",
     'if ! keys_are_valid "$keys"; then',
@@ -1334,7 +1339,7 @@ RELEASE_PLAN_SH_CALL_SITES = (
     'if [ "$n" != "9" ]; then',
     'if [ "$rc6" -ne 0 ]; then',
     "if ! grep -qx 'nothing_to_release=false' \"$nouv_out\"; then",
-    '_expect_failsafe_outputs "row 6 (uv unreachable)" "$nouv_out"',
+    '_expect_failsafe_outputs "row 6 (package manager unreachable)" "$nouv_out"',
     'if [ "$mut_rc" != "3" ]; then',
     "printf 'release-plan negative control: %d row(s) failed\\n' \"$failures\" >&2",
     'if [ "$mut8_rc" != "3" ]; then',
@@ -1363,8 +1368,8 @@ RELEASE_PLAN_SH_CALL_SITES = (
 #
 # PR 206 fix. negative_control() no longer re-enters a COPY of this script inside its fixture —
 # that re-entry called resolve_ruff() a second time from a foreign root reached through an
-# absolute `py` symlink, and `uv run --locked --project py` there mutated the ONE SHARED
-# `py/.venv` every other py Moon task depends on, invisible until a concurrent `moon ci` raced
+# absolute `py` symlink, and `run py` there mutated the ONE SHARED
+# project environment of py that every other py Moon task depends on, invisible until a concurrent `moon ci` raced
 # it (measured in CI: `contracts:generate`, `py:typecheck`, `py:test`,
 # `paigasus-kernel-py:test` and `repo:release-parity-py` all failed). ruff is now resolved
 # EXACTLY ONCE, in the real repo, before the fixture is built; the fixture carries no `py`, `rs`
@@ -4253,7 +4258,7 @@ def self_test():
                        ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {}},
         "inputFiles": {"contracts/buf.gen.googleapis.yaml": {}, "contracts/buf.gen.yaml": {},
                        "contracts/buf.lock": {}, "contracts/buf.yaml": {}, ".prototools": {},
-                       "py/uv.lock": {}},
+                       "ci/python-env/run.sh": {}, "py/uv.lock": {}},
     }}}
     if check_contracts_generate_inputs(cg_ok):
         failures.append("contracts:generate pin reported drift on the clean fixture")
@@ -4439,7 +4444,7 @@ def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, 
          "    corpus-derivation line, the real (run_check) ruff invocation, the negative\n"
          "    control's own direct ruff invocation against its fixture (run with CWD=$tmp so\n"
          "    ruff's file arguments resolve — PR 206 dropped the prior re-entry of a script\n"
-         "    copy inside the fixture, which is what corrupted the shared py/.venv under a\n"
+         "    copy inside the fixture, which is what corrupted the shared project environment of py under a\n"
          "    concurrent moon ci; skipping the cd instead reports a false rc-1 from a\n"
          "    file-not-found error rather than a real lint verdict), the assertion guard, or\n"
          "    the report line. Losing the flag parse or dispatch arm means the control never\n"

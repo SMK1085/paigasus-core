@@ -45,7 +45,7 @@ ignored = ["pyo3"]
 # NOT `workspace = true`. maturin ships the workspace Cargo.toml verbatim in the sdist
 # (measured), including `[workspace.lints.rust] warnings = "deny"`, and an sdist consumer
 # builds this crate as the ROOT package, where `--cap-lints allow` does not apply. An
-# inherited deny would make the first new rustc lint break `pip install` from sdist for
+# inherited deny would make the first new rustc lint break a package install from sdist for
 # every macOS/Windows/musl user, on an already-published version. Same reasoning, and the
 # same fix, as paigasus-kernel's own table (SMA-577 Check 1c). CI strictness is
 # unaffected: the Moon `lint` task passes `-D warnings` explicitly.

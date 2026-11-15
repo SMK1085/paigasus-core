@@ -4,7 +4,7 @@ id: 'paigasus-gateway-conformance-py'
 layer: 'library'
 language: 'python'
 
-# Test-only (tool.uv.package = false): there is no wheel, so the inherited `uv build` has nothing
+# Test-only (the `tool.uv.package = false` setting): there is no wheel, so the inherited package build has nothing
 # to build. Drop the inherited task rather than give the package a build backend (SMA-749).
 workspace:
   inheritedTasks:
@@ -15,9 +15,10 @@ tasks:
   # goldens live under rs/, outside this project, and Moon confers affectedness only through a
   # task's own inputs.
   test:
-    command: 'uv run --locked pytest tests'
+    command: 'bash $workspaceRoot/ci/python-env/run.sh run py pytest tests'
     inputs:
       - 'tests/**/*'
       - 'pyproject.toml'
       - '/py/uv.lock'
+      - '/ci/python-env/run.sh'
       - '/rs/crates/libs/paigasus-gateway-core/tests/golden/**/*'

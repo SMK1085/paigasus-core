@@ -134,11 +134,11 @@ jobs:
         with:
           cache: false
 
-      - name: Install crane, cosign and uv
+      - name: Install crane, cosign and the Python package manager
         run: |
           proto install crane
           proto install cosign
-          proto install uv
+          bash ci/python-env/run.sh install
 
       - name: Download both archives and SBOMs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -164,7 +164,7 @@ jobs:
           refs=()
           for arch in amd64 arm64; do
             archive="in/paigasus-gateway-${arch}.oci.tar"
-            digests="$(uv run --no-project --python '>=3.12' python3 ci/images/release_decision.py oci-digests "$archive")"
+            digests="$(bash ci/python-env/run.sh script ci/images/release_decision.py oci-digests "$archive")"
             manifest="$(printf '%s\n' "$digests" | sed -n 's/^manifest=//p')"
             layout="$(mktemp -d)"
             tar -xf "$archive" -C "$layout"

@@ -2,8 +2,8 @@
 """Assert no credential-bearing-trigger workflow can obtain a repository credential.
 
 Exit codes are DELIBERATELY not the repo's usual 0/1/2. This process exits 3 for an
-assertion failure so that `uv`'s own rc 1 — measured on a failed resolution, online and
-under UV_OFFLINE=1 — cannot be mistaken for "a workflow declares a credential". run.sh
+assertion failure so that the package manager's own rc 1 — measured on a failed resolution, online and
+in offline mode — cannot be mistaken for "a workflow declares a credential". run.sh
 maps 3 -> 1 and everything else -> 2. (SMA-593 spec §6.)
 """
 

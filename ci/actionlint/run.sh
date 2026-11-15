@@ -24,7 +24,7 @@ set -uo pipefail
 
 # proto prints an NDJSON preamble on STDOUT when it detects an agent environment (AI_AGENT /
 # CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), which poisons every `$(...)` capture in this file.
-# MEASURED on the uv SHIM: default reporter yields `{"type":"message",...}` on stdout, and
+# MEASURED on the proto SHIM of the Python package manager: default reporter yields `{"type":"message",...}` on stdout, and
 # PROTO_REPORTER=text yields none. CLAUDE.md's NDJSON entry had carved shims out as "not proven
 # generally"; a captured shim call leaking the preamble is the counterexample that closes it.
 # Exported once here rather than prefixed per call site, so a future capture inherits it (SMA-609).
@@ -71,10 +71,10 @@ usage() {
   echo "                 table reads its fixtures from ci/actionlint/fixtures/early-exit/." >&2
   echo "                 No actionlint binary is required, but the branch-filter table needs a" >&2
   echo "                 git repo carrying refs/remotes/origin/main, and the release-guard table" >&2
-  echo "                 shells out to 'uv run --locked --project py', so it needs uv on PATH and" >&2
-  echo "                 a py workspace whose uv.lock is up to date. The release-plan table" >&2
-  echo "                 shells out to 'uv run --project ci/release-plan', which needs uv on" >&2
-  echo "                 PATH and that project's own uv.lock up to date." >&2
+  echo "                 shells out to 'ci/python-env/run.sh run py', so it needs the package manager" >&2
+  echo "                 on PATH and a py workspace whose uv.lock is up to date. The release-plan" >&2
+  echo "                 table shells out to 'ci/python-env/run.sh run ci/release-plan', which needs" >&2
+  echo "                 the package manager on PATH and that project's own uv.lock up to date." >&2
   echo "                 The check-9 mutation battery is NOT part of this — full gate only." >&2
   exit 2
 }
@@ -85,7 +85,7 @@ usage() {
 # `-shellcheck=` here is a PLACEHOLDER, deliberately left empty: SMA-539 resolves the real
 # `-shellcheck=$SHELLCHECK_BIN` value later, after the --self-test early exit, beside the
 # `command -v actionlint` guard (see the SMA-539 comment there) — never here, since a
-# hash-pinned `uv run` resolution at file-load time would run once per --self-test mutant too.
+# hash-pinned `run py` resolution at file-load time would run once per --self-test mutant too.
 #
 # `-pyflakes=` stays DISABLED DELIBERATELY (spec D2/L4): actionlint shells out to pyflakes when
 # it finds it on PATH, which would make this gate's strictness a property of the host, and
@@ -2189,6 +2189,9 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ci/wasm-lockstep/**/*'
   'CLAUDE.md'
   '.prototools'
+  # SMA-770 — floors the input that makes the python-env token ban (A14) reachable: it reads every
+  # tracked file outside its exclusions, so an edit to any file must schedule repo:affected-smoke.
+  '**/*'
 )
 
 # SMA-601 — check 8f. The lockfile-integrity step is a plain ci.yml step, not a Moon task, so
@@ -4614,14 +4617,14 @@ kill_predicate_self_test() {
 # 98, so 78 of the 98 rows — the whole V10 credential control among them — could be deleted with
 # the gate still green. FIXTURES is the ONLY pin on that control. Re-baseline the floor whenever
 # rows are added: set it just under the current `--fixture-count`, never far below it.
-# `--locked` (Minor 5, fix round 3): a bare `uv run --project py` RE-LOCKS py/uv.lock as a side
+# `--locked` (Minor 5, fix round 3): a bare, unlocked run of the py project RE-LOCKS py/uv.lock as a side
 # effect of running the gate. CLAUDE.md already records py/uv.lock as one of the two sites that
 # drift SILENTLY, and a lint gate that rewrites a lockfile it is not asserting is exactly that
-# drift. `--locked` makes uv fail instead of writing. That failure is nonzero but not 2, which is
+# drift. `--locked` makes the wrapper's `run py` fail instead of writing. That failure is nonzero but not 2, which is
 # precisely the class check 10's `elif` arm now routes — before it, a stale lock would have made
 # this gate pass having asserted nothing.
 release_guard_py() {
-  uv run --locked --project py python3 ci/actionlint/release_guard.py "$@"
+  (cd py && bash ../ci/python-env/run.sh run py bash -c 'cd .. && exec python3 ci/actionlint/release_guard.py "$@"' release_guard "$@")
 }
 
 release_guard_self_test() {
@@ -4657,7 +4660,7 @@ release_plan_self_test() {
   # `die_infra "unknown flag"` on --fixture-count. `--locked` mirrors check 10's release_guard_py
   # wrapper (see the comment above it) — inert today since ci/release-plan is zero-dependency,
   # live the moment that project gains one. Verified against the current lock: exits 0.
-  n="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 \
+  n="$(bash ci/python-env/run.sh run ci/release-plan python3 \
     ci/release-plan/release_plan.py --fixture-count)" \
     || infra "check 11: release_plan.py --fixture-count failed"
   case "$n" in ''|*[!0-9]*) infra "check 11: --fixture-count printed '$n', expected an integer" ;; esac
@@ -4671,7 +4674,7 @@ release_plan_self_test() {
   # The floor tracks the table (SMA-709): one below the current `--collection-count`. When the
   # row count changes, in either direction, re-set this floor and its twin in
   # ci/release-plan/release_plan.py self_test() in the same commit.
-  c="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 \
+  c="$(bash ci/python-env/run.sh run ci/release-plan python3 \
     ci/release-plan/release_plan.py --collection-count)" \
     || infra "check 11: release_plan.py --collection-count failed"
   case "$c" in ''|*[!0-9]*) infra "check 11: --collection-count printed '$c', expected an integer" ;; esac
@@ -5301,14 +5304,14 @@ print(n)'
 
 # SMA-612 — full-gate preflight. It runs BEFORE run_self_tests, because under bash 5.x the
 # self-tests themselves deadlock on a small pipe. It is not run in --self-test mode: check 9
-# starts one --self-test subprocess per table, and a uv run in each is the cost the SHELLCHECK_BIN
+# starts one --self-test subprocess per table, and a `run py` call in each is the cost the SHELLCHECK_BIN
 # comment below already refuses. Every failure is infra (rc 2): no check ran, so rc 1 would be a
 # false "a workflow is wrong" and rc 0 a false pass. `ok)` is the only arm that continues.
 pipe_capacity_preflight() {
   local pc_out pc_rc=0
   grep -qxF 'actionlint = "1.7.12"' .prototools || infra ".prototools no longer pins actionlint 1.7.12. The pipe-capacity probe (SMA-612) exists only for that version. Re-decide it per docs/superpowers/specs/2026-09-19-sma-612-actionlint-pipe-capacity-design.md D9."
-  pc_out="$(uv run --locked --project py python3 -c "$PIPE_CAPACITY_PROBE_PY" | tail -n1)" || pc_rc=$?
-  [ "$pc_rc" -eq 0 ] || infra "the pipe-capacity probe failed (rc $pc_rc) via 'uv run --locked --project py'. No check ran."
+  pc_out="$( (cd py && bash ../ci/python-env/run.sh run py python3 -c "$PIPE_CAPACITY_PROBE_PY") | tail -n1)" || pc_rc=$?
+  [ "$pc_rc" -eq 0 ] || infra "the pipe-capacity probe failed (rc $pc_rc) via 'ci/python-env/run.sh run py'. No check ran."
   case "$(pipe_capacity_verdict "$pc_out")" in
     ok) echo "actionlint gate: pipe capacity $pc_out bytes (floor $PIPE_CAPACITY_FLOOR)" >&2 ;;
     small) infra "a new pipe on this host holds only $pc_out bytes (floor $PIPE_CAPACITY_FLOOR). With pipes this small, the gate cannot finish: bash 5.x here-strings in its own self-tests deadlock above $pc_out bytes, and the pinned actionlint writes each run: script into shellcheck's stdin before it starts shellcheck (rhysd/actionlint#650). No check ran. See ci/actionlint/README.md, \"Small pipes on macOS\"." ;;
@@ -5953,7 +5956,7 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # PLACEMENT IS LOAD-BEARING. This sits AFTER the `--self-test` early exit that follows
 # run_self_tests, beside the actionlint guard, for the same reason that guard does: --self-test
 # must stay runnable on a machine with neither binary installed. It also keeps check 9's mutant
-# fan-out — one --self-test subprocess per self-test — from paying 16 `uv run` invocations
+# fan-out — one --self-test subprocess per self-test — from paying 16 `run py` invocations
 # against one py/.venv.
 #
 # FAIL CLOSED. There is deliberately NO fallback to `-shellcheck=`: a silent downgrade to
@@ -5962,31 +5965,31 @@ done < <(cargo_lock_script_verdict ci/cargo-lock-integrity/run.sh)
 # resolution rather than discovering it 80 lines later.
 #
 # PROVENANCE, NOT JUST PRESENCE. `shutil.which` is PATH-based, so "FAIL CLOSED" above was
-# incomplete: if the `py` uv project does not itself contain shellcheck (a `[dependency-groups]`
-# rename, a `[tool.uv] default-groups` change, or `UV_NO_DEV=1` at invocation time — real,
-# documented uv knobs, none of which trips `uv run`'s own exit status), `uv run` still exits 0
+# incomplete: if the `py` project does not itself contain shellcheck (a `[dependency-groups]`
+# rename, a `[tool.uv] default-groups` change, or the no-dev environment switch at invocation time — real,
+# documented package-manager knobs, none of which trips the exit status of `run py`), `run py` still exits 0
 # and `which` silently returns whatever `shellcheck` is first on the OUTER host PATH — `[ -x ]`
 # passes on that impostor, reproducing the exact "strictness is a property of the host" failure
 # this whole block exists to refuse, now green. MEASURED: with shellcheck removed from
-# py/.venv/bin and a host impostor earlier on PATH, the bare `shutil.which` resolver printed the
-# impostor's path at exit 0. `sys.prefix` under `uv run --project py` IS `py/.venv` (measured),
+# the bin directory of the py project environment and a host impostor earlier on PATH, the bare `shutil.which` resolver printed the
+# impostor's path at exit 0. `sys.prefix` under `run py` IS the py project environment (measured),
 # so requiring the resolved path to live under it is a same-process check no outer-PATH
 # manipulation can spoof — a host binary now routes to `infra` (rc 2) instead of a silent pass.
 # Containment is COMPONENT-WISE (`is_relative_to` on resolved paths), not a string prefix.
 # `p.startswith(sys.prefix)` accepts a SIBLING directory — `py/.venv-host/bin/shellcheck` starts with
-# `py/.venv` and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
+# the py project environment and is outside it (MEASURED: startswith True, is_relative_to False). Resolving both
 # sides also means a symlinked venv compares by its real location rather than by spelling.
 # PROTO_REPORTER=text AND `tail -n1`, deliberately both. proto prints an NDJSON preamble on
 # STDOUT when it detects an agent environment (AI_AGENT / CLAUDECODE / CLAUDE_CODE_ENTRYPOINT),
-# and MEASURED on merged main: the proto-managed `uv` SHIM leaked that preamble into this very
+# and MEASURED on merged main: the proto-managed SHIM of the package manager leaked that preamble into this very
 # capture, so the variable held a JSON blob and the gate died with "not executable: {...}".
 # CLAUDE.md's NDJSON entry had carved shims out as "not proven generally" — this is the
 # counterexample that closes the carve-out (SMA-609). The env var suppresses it at source; the
 # `tail -n1` survives a future reporter change, since the path is always the LAST line. Neither
 # weakens the `[ -x ]` below: a preamble-only capture still fails it and still aborts.
-SHELLCHECK_BIN="$(uv run --locked --project py python3 -c \
-  'import pathlib, shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)' | tail -n1)" \
-  || infra "could not resolve shellcheck via 'uv run --locked --project py' — run 'uv sync --project py'"
+SHELLCHECK_BIN="$( (cd py && bash ../ci/python-env/run.sh run py python3 -c \
+  'import pathlib, shutil, sys; p = shutil.which("shellcheck"); sys.exit(1) if not p or not pathlib.Path(p).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()) else print(p)') | tail -n1)" \
+  || infra "could not resolve shellcheck via 'ci/python-env/run.sh run py' — run 'proto install'; if py/uv.lock is stale, run 'bash ci/python-env/run.sh lock'"
 [ -x "$SHELLCHECK_BIN" ] || infra "resolved shellcheck is not executable: $SHELLCHECK_BIN"
 ARGS+=("-shellcheck=$SHELLCHECK_BIN")
 
@@ -6267,17 +6270,17 @@ done
 # the status, THEN read.
 #
 # ROUTE EVERY STATUS, NOT JUST 2 (fix round 3, Critical 1). This block first shipped routing only
-# rc 2, and the earlier version of this very comment claimed a "missing uv" was among the cases it
-# covered. It was not, and the wording is now corrected: a missing `uv` makes the WRAPPER exit 127,
+# rc 2, and the earlier version of this very comment claimed a "missing tool" was among the cases it
+# covered. It was not, and the wording is now corrected: a missing package manager makes the wrapper exit 127,
 # which is not the guard's own 2 and was therefore unrouted. MEASURED on this branch: with the
 # production call replaced by `( exit 127 )`, the full gate exited 0 — $RG_OUT empty, the read loop
 # below saw nothing, FAILED stayed 0. The `elif` arm closes that for 127 and for every other
-# unexpected status (a 137 kill, a `uv run` resolution failure). The rc-1-with-empty-output arm
+# unexpected status (a 137 kill, a `run py` resolution failure). The rc-1-with-empty-output arm
 # below closes the remaining shape: rc 1 means "violations found", so producing none contradicts
 # the guard's contract and must not read as a clean run.
 #
 # What the full gate ALSO catches, and what it does not: `release_guard_self_test` above runs
-# `release_guard_py --fixture-count` under `|| infra`, so on the full-gate path a missing `uv`
+# `release_guard_py --fixture-count` under `|| infra`, so on the full-gate path a missing package manager
 # already aborts there, before this block is reached. That does not make this routing redundant —
 # it is what covers a status that appears only at the production call (a transient, a kill, an
 # interpreter that resolves for one invocation and not the next), and it is what makes the claim
@@ -6295,7 +6298,7 @@ elif [ "$rg_rc" -ne 0 ] && [ "$rg_rc" -ne 1 ]; then
   infra "check 10: release_guard.py exited $rg_rc, which is none of its three documented statuses
       (0 clean, 1 violations, 2 infra). This file is 'set -uo pipefail' with NO -e, so an
       unrouted status left \$RG_OUT empty, the read loop below saw nothing, and the gate finished
-      rc 0 having asserted nothing — MEASURED at rc 127. A missing 'uv' produces 127 from the
+      rc 0 having asserted nothing — MEASURED at rc 127. A missing package manager produces 127 from the
       WRAPPER, not the guard's own 2, so routing 2 alone was not enough."
 fi
 if [ "$rg_rc" -eq 1 ] && [ ! -s "$RG_OUT" ]; then
@@ -6319,7 +6322,7 @@ rm -f "$RG_OUT"
 rp_rc=0
 release_plan_sh --assert || rp_rc=$?
 if [ "$rp_rc" -eq 2 ]; then
-  infra "check 11: ci/release-plan/run.sh --assert aborted (exit 2) — uv or the interpreter
+  infra "check 11: ci/release-plan/run.sh --assert aborted (exit 2) — the package manager or the interpreter
       failed, not an assertion."
 elif [ "$rp_rc" -eq 1 ]; then
   fail "check 11: ci/release-plan/run.sh --assert reported the repository is wrong — its stderr
