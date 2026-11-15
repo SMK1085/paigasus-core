@@ -333,7 +333,10 @@ fn string_choice(s: &str) -> ToolChoice {
 
 /// The name of a chat `{"type":"function","function":{"name":..}}` or `custom` entry.
 fn chat_entry_name(v: &Value) -> Option<String> {
-    let o = v.as_object()?;
+    chat_entry_name_of(v.as_object()?)
+}
+
+fn chat_entry_name_of(o: &Map<String, Value>) -> Option<String> {
     let ty = o.get("type")?.as_str()?;
     if !matches!(ty, "function" | "custom") {
         return None;
@@ -344,7 +347,7 @@ fn chat_entry_name(v: &Value) -> Option<String> {
 fn chat_object_choice(o: &Map<String, Value>) -> ToolChoice {
     let Some(ty) = o.get("type").and_then(Value::as_str) else { return ToolChoice::Unknown };
     match ty {
-        "function" | "custom" => chat_entry_name(&Value::Object(o.clone())).map_or(ToolChoice::Unknown, ToolChoice::Named),
+        "function" | "custom" => chat_entry_name_of(o).map_or(ToolChoice::Unknown, ToolChoice::Named),
         "allowed_tools" => {
             let tools = o.get("allowed_tools").and_then(Value::as_object).and_then(|a| a.get("tools")).and_then(Value::as_array);
             tools
@@ -387,8 +390,19 @@ fn responses_choice(v: Option<&Value>) -> ToolChoice {
                 }
                 // A remote MCP tool is named by server and tool, not by a display name we can match.
                 "mcp" => ToolChoice::Unknown,
-                // A built-in tool is named by its type (`local_shell`, `apply_patch`, ..).
-                other => ToolChoice::Named(other.to_owned()),
+                // A known built-in or hosted tool is named by its type; any other type is unknown.
+                "local_shell"
+                | "shell"
+                | "apply_patch"
+                | "computer"
+                | "computer_use_preview"
+                | "tool_search"
+                | "web_search"
+                | "web_search_preview"
+                | "file_search"
+                | "code_interpreter"
+                | "image_generation" => ToolChoice::Named(ty.to_owned()),
+                _ => ToolChoice::Unknown,
             }
         }
         Some(_) => ToolChoice::Unknown,
@@ -733,6 +747,8 @@ mod tests {
         );
         assert_eq!(c(json!({"type":"local_shell"})), ToolChoice::Named("local_shell".into()));
         assert_eq!(c(json!({"type":"mcp","server_label":"s"})), ToolChoice::Unknown);
+        assert_eq!(c(json!({"type":"mystery"})), ToolChoice::Unknown);
+        assert_eq!(c(json!({"type":"web_search"})), ToolChoice::Named("web_search".into()));
         assert_eq!(c(json!("weird")), ToolChoice::Unknown);
     }
 

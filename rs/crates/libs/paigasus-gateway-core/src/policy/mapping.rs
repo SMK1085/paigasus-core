@@ -28,6 +28,14 @@ pub fn name_collisions(defs: &[ToolDefinition]) -> BTreeSet<String> {
     count.into_iter().filter(|(_, n)| *n >= 2).map(|(name, _)| name).collect()
 }
 
+/// The normalised name under which a call of this definition arrives. A built-in definition is
+/// named by its type, but its call has a fixed name: `computer_use_preview` gives `computer` calls.
+/// The other built-ins (`local_shell`, `shell`, `apply_patch`, `tool_search`) use one name for both.
+fn definition_call_name(d: &ToolDefinition) -> String {
+    let n = normalise(&d.display_name());
+    if d.kind == ToolCallKind::Other && n == "computer_use_preview" { "computer".to_owned() } else { n }
+}
+
 /// The kernel invocation for a call. The name stays raw: the kernel normalises it.
 #[must_use]
 pub fn invocation(call: &ToolCall, turn: &ToolTurn) -> ToolInvocation {
@@ -46,12 +54,16 @@ pub fn invocation(call: &ToolCall, turn: &ToolTurn) -> ToolInvocation {
     let declared = match turn {
         ToolTurn::Parsed(f) => {
             let n = normalise(&raw);
-            if f.definitions.iter().any(|d| normalise(&d.display_name()) == n) {
-                Declared::Yes
-            } else if f.definitions_complete {
-                Declared::No
-            } else {
+            // Spec 6.1.1: with incomplete definitions the kernel cannot tell. // GUARD-INCOMPLETE
+            if !f.definitions_complete {
                 Declared::Unknown
+            } else if call.kind == ToolCallKind::McpApprovalRequest && f.definitions.iter().any(|d| d.kind == ToolCallKind::Other && d.name == "mcp") {
+                // The call is named `server_label.name`; the definition is the bare `mcp` type.
+                Declared::Unknown
+            } else if f.definitions.iter().any(|d| definition_call_name(d) == n) {
+                Declared::Yes
+            } else {
+                Declared::No
             }
         }
         ToolTurn::Unavailable(_) => Declared::Unknown,
@@ -149,8 +161,45 @@ mod tests {
         let defs = vec![def("read_file", None)];
         assert_eq!(invocation(&c, &turn(defs.clone(), true)).declared, Declared::Yes);
         assert_eq!(invocation(&call("nope", ToolCallKind::Function), &turn(defs.clone(), true)).declared, Declared::No);
-        assert_eq!(invocation(&call("nope", ToolCallKind::Function), &turn(defs, false)).declared, Declared::Unknown);
+        assert_eq!(invocation(&call("nope", ToolCallKind::Function), &turn(defs.clone(), false)).declared, Declared::Unknown);
         assert_eq!(invocation(&c, &ToolTurn::Unavailable("malformed")).declared, Declared::Unknown);
+        // Found, but the definitions are incomplete: Unknown (spec 6.1.1).
+        assert_eq!(invocation(&c, &turn(defs, false)).declared, Declared::Unknown);
+    }
+
+    fn other_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            namespace: None,
+            kind: ToolCallKind::Other,
+            schema: None,
+        }
+    }
+
+    #[test]
+    fn built_in_definitions_match_their_fixed_call_names() {
+        for (def_type, kind, call_name) in [
+            ("computer_use_preview", ToolCallKind::Computer, "computer"),
+            ("computer", ToolCallKind::Computer, "computer"),
+            ("local_shell", ToolCallKind::LocalShell, "local_shell"),
+            ("shell", ToolCallKind::Shell, "shell"),
+            ("apply_patch", ToolCallKind::ApplyPatch, "apply_patch"),
+            ("tool_search", ToolCallKind::ToolSearch, "tool_search"),
+        ] {
+            let c = call(call_name, kind);
+            let complete = invocation(&c, &turn(vec![other_def(def_type)], true)).declared;
+            // `tool_search` makes the real parser set incomplete; here the set is complete.
+            assert_eq!(complete, Declared::Yes, "{def_type}");
+            assert_eq!(invocation(&c, &turn(vec![other_def("web_search")], true)).declared, Declared::No, "{def_type}");
+        }
+    }
+
+    #[test]
+    fn an_mcp_approval_call_is_unknown_when_an_mcp_definition_exists() {
+        let mut c = call("search", ToolCallKind::McpApprovalRequest);
+        c.namespace = Some("srv".to_owned());
+        assert_eq!(invocation(&c, &turn(vec![other_def("mcp")], true)).declared, Declared::Unknown);
+        assert_eq!(invocation(&c, &turn(vec![other_def("web_search")], true)).declared, Declared::No);
     }
 
     #[test]
