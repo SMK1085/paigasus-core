@@ -71,6 +71,18 @@ pub enum Action {
     UnlinkExternalIdentity,
     /// Change a user's email (SMA-712).
     ChangeUserEmail,
+    /// Write the tool catalog (SMA-774).
+    ManageToolCatalog,
+    /// Read the tool catalog (SMA-774).
+    ReadToolCatalog,
+    /// Write tool policy sets (SMA-774).
+    ManageToolPolicies,
+    /// Read tool policy sets (SMA-774).
+    ReadToolPolicies,
+    /// Write the platform tool policy floor (SMA-774). Held by `platform_admin` only.
+    ManageToolPolicyFloor,
+    /// Read the platform tool policy floor (SMA-774). Held by `platform_admin` only.
+    ReadToolPolicyFloor,
 }
 
 impl Action {
@@ -121,6 +133,12 @@ impl Action {
         Action::LinkExternalIdentity,
         Action::UnlinkExternalIdentity,
         Action::ChangeUserEmail,
+        Action::ManageToolCatalog,
+        Action::ReadToolCatalog,
+        Action::ManageToolPolicies,
+        Action::ReadToolPolicies,
+        Action::ManageToolPolicyFloor,
+        Action::ReadToolPolicyFloor,
     ];
 
     /// The exact Cedar action id, verbatim from `SCHEMA_SRC` — this string doubles as
@@ -173,6 +191,12 @@ impl Action {
             Action::LinkExternalIdentity => "LinkExternalIdentity",
             Action::UnlinkExternalIdentity => "UnlinkExternalIdentity",
             Action::ChangeUserEmail => "ChangeUserEmail",
+            Action::ManageToolCatalog => "ManageToolCatalog",
+            Action::ReadToolCatalog => "ReadToolCatalog",
+            Action::ManageToolPolicies => "ManageToolPolicies",
+            Action::ReadToolPolicies => "ReadToolPolicies",
+            Action::ManageToolPolicyFloor => "ManageToolPolicyFloor",
+            Action::ReadToolPolicyFloor => "ReadToolPolicyFloor",
         }
     }
 
@@ -208,7 +232,10 @@ impl Action {
             | Action::ListApiKeys
             | Action::ListAuditLog
             | Action::ListOutboxDeadLetters
-            | Action::GetUser => false,
+            | Action::GetUser
+            | Action::ReadToolCatalog
+            | Action::ReadToolPolicies
+            | Action::ReadToolPolicyFloor => false,
             Action::CreateOrganization
             | Action::RenameOrganization
             | Action::ArchiveOrganization
@@ -238,7 +265,10 @@ impl Action {
             | Action::CreateUser
             | Action::LinkExternalIdentity
             | Action::UnlinkExternalIdentity
-            | Action::ChangeUserEmail => true,
+            | Action::ChangeUserEmail
+            | Action::ManageToolCatalog
+            | Action::ManageToolPolicies
+            | Action::ManageToolPolicyFloor => true,
         }
     }
 
@@ -326,7 +356,13 @@ mod tests {
                 | Action::GetUser
                 | Action::LinkExternalIdentity
                 | Action::UnlinkExternalIdentity
-                | Action::ChangeUserEmail => {}
+                | Action::ChangeUserEmail
+                | Action::ManageToolCatalog
+                | Action::ReadToolCatalog
+                | Action::ManageToolPolicies
+                | Action::ReadToolPolicies
+                | Action::ManageToolPolicyFloor
+                | Action::ReadToolPolicyFloor => {}
             }
         }
         for a in Action::ALL {
@@ -334,8 +370,8 @@ mod tests {
         }
         assert_eq!(
             Action::ALL.len(),
-            45,
-            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity"
+            51,
+            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies"
         );
     }
     #[test]
@@ -388,6 +424,28 @@ mod tests {
             assert!(!a.is_restore(), "{} is not a restore", a.as_wire());
         }
         for a in [Action::GetUser, Action::LinkExternalIdentity, Action::UnlinkExternalIdentity, Action::ChangeUserEmail] {
+            assert_eq!(Action::parse(a.as_wire()), Some(a), "{} must round-trip", a.as_wire());
+            assert!(Action::ALL.contains(&a), "{} must be in ALL", a.as_wire());
+        }
+    }
+    /// SMA-774: `Manage*` are non-restore writes, `Read*` are reads, and all six round-trip.
+    #[test]
+    fn the_tool_policy_actions_are_classified_and_round_trip() {
+        for a in [Action::ManageToolCatalog, Action::ManageToolPolicies, Action::ManageToolPolicyFloor] {
+            assert!(a.is_write(), "{} changes state", a.as_wire());
+            assert!(!a.is_restore(), "{} is not a restore", a.as_wire());
+        }
+        for a in [Action::ReadToolCatalog, Action::ReadToolPolicies, Action::ReadToolPolicyFloor] {
+            assert!(!a.is_write(), "{} is a read", a.as_wire());
+        }
+        for a in [
+            Action::ManageToolCatalog,
+            Action::ReadToolCatalog,
+            Action::ManageToolPolicies,
+            Action::ReadToolPolicies,
+            Action::ManageToolPolicyFloor,
+            Action::ReadToolPolicyFloor,
+        ] {
             assert_eq!(Action::parse(a.as_wire()), Some(a), "{} must round-trip", a.as_wire());
             assert!(Action::ALL.contains(&a), "{} must be in ALL", a.as_wire());
         }

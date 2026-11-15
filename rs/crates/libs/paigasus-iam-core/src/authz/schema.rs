@@ -24,7 +24,9 @@ namespace Pgs::Iam {
          CreateServiceAccount, GetServiceAccount, ListServiceAccounts, ArchiveServiceAccount,
          IssueApiKey, RevokeApiKey, ListApiKeys, ListAuditLog, ListOutboxDeadLetters,
          ReplayOutboxDeadLetter, DiscardOutboxDeadLetter, RetireSystemPolicy, InvokeModel,
-         CreateUser, GetUser, LinkExternalIdentity, UnlinkExternalIdentity, ChangeUserEmail
+         CreateUser, GetUser, LinkExternalIdentity, UnlinkExternalIdentity, ChangeUserEmail,
+         ManageToolCatalog, ReadToolCatalog, ManageToolPolicies, ReadToolPolicies,
+         ManageToolPolicyFloor, ReadToolPolicyFloor
     appliesTo { principal: [Principal], resource: [Root, Organization, Team, Project] };
 }
 "#;
@@ -80,6 +82,21 @@ mod tests {
     #[test]
     fn the_user_identity_actions_validate_against_the_embedded_schema() {
         for name in ["GetUser", "LinkExternalIdentity", "UnlinkExternalIdentity", "ChangeUserEmail"] {
+            let src = format!(r#"permit(principal, action == Pgs::Iam::Action::"{name}", resource);"#);
+            assert!(validate_policy(&src).is_ok(), "{name} must be declared in SCHEMA_SRC");
+        }
+    }
+    /// SMA-774: the six tool catalog and tool policy actions must be declared in `SCHEMA_SRC`.
+    #[test]
+    fn the_tool_policy_actions_validate_against_the_embedded_schema() {
+        for name in [
+            "ManageToolCatalog",
+            "ReadToolCatalog",
+            "ManageToolPolicies",
+            "ReadToolPolicies",
+            "ManageToolPolicyFloor",
+            "ReadToolPolicyFloor",
+        ] {
             let src = format!(r#"permit(principal, action == Pgs::Iam::Action::"{name}", resource);"#);
             assert!(validate_policy(&src).is_ok(), "{name} must be declared in SCHEMA_SRC");
         }

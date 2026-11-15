@@ -63,7 +63,10 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 /// `4`: SMA-712 added `LinkExternalIdentity`, `UnlinkExternalIdentity` and `ChangeUserEmail`.
 /// They are non-restore writes, so they join the generated forbid list. `GetUser` is a read and
 /// does not change the content.
-pub const STARTER_POLICY_REVISION: u32 = 4;
+///
+/// `5`: SMA-774 added ManageToolCatalog, ManageToolPolicies and ManageToolPolicyFloor. They are
+/// non-restore writes, so they join the generated forbid list.
+pub const STARTER_POLICY_REVISION: u32 = 5;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
 /// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
@@ -91,7 +94,7 @@ pub fn is_starter_policy_id(id: &str) -> bool {
 
 /// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
 #[cfg(test)]
-const EXPECTED_STARTER_CONTENT_HASH: &str = "19717fa746b33fe8baceb832b798b11e8d78b415e2878a168bdf4da906f3c2f7";
+const EXPECTED_STARTER_CONTENT_HASH: &str = "1137ee53e6c94330257a0dc6a4533e305fd6b204fbdc67c6b5176575ad2518f3";
 
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
@@ -136,11 +139,22 @@ const ORG_ADMIN_ACTIONS: &[Action] = &[
     Action::IssueApiKey,
     Action::RevokeApiKey,
     Action::ListApiKeys,
+    Action::ManageToolCatalog,
+    Action::ReadToolCatalog,
+    Action::ManageToolPolicies,
+    Action::ReadToolPolicies,
 ];
 
 /// `org_member`: org/team/project reads only (design §3.2) — no membership rosters, no grant
 /// management.
-const ORG_MEMBER_ACTIONS: &[Action] = &[Action::GetOrganization, Action::GetTeam, Action::ListTeams, Action::GetProject, Action::ListProjects];
+const ORG_MEMBER_ACTIONS: &[Action] = &[
+    Action::GetOrganization,
+    Action::GetTeam,
+    Action::ListTeams,
+    Action::GetProject,
+    Action::ListProjects,
+    Action::ReadToolCatalog,
+];
 
 /// `team_admin`: team + project writes/reads, membership, and grant management within the
 /// team subtree (design §3.2). Also carries the seven service-account/API-key management
@@ -713,6 +727,49 @@ mod tests {
                 resource: root_prn(),
                 expect: Effect::Deny,
             },
+            // -- SMA-774: the tool catalog and tool policy actions.
+            Case {
+                name: "org_admin allows ManageToolCatalog on its own org (SMA-774)",
+                grants: vec![grant(120, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageToolCatalog,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "org_member allows ReadToolCatalog on its org (SMA-774)",
+                grants: vec![grant(121, &uni.principal, "org_member", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ReadToolCatalog,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "org_member denies ReadToolPolicies on its org (SMA-774)",
+                grants: vec![grant(122, &uni.principal, "org_member", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ReadToolPolicies,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "org_admin denies ManageToolPolicyFloor at Root (SMA-774)",
+                grants: vec![grant(123, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageToolPolicyFloor,
+                resource: root_prn(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "platform_admin at Root allows ManageToolPolicyFloor at Root (SMA-774)",
+                grants: vec![grant(124, &uni.principal, "platform_admin", GrantScope::Root)],
+                action: Action::ManageToolPolicyFloor,
+                resource: root_prn(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "forbid-archived-writes denies ManageToolPolicies on an archived project even for org_admin (SMA-774)",
+                grants: vec![grant(125, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageToolPolicies,
+                resource: uni.archived_project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
             // -- SMA-635 D4 and D10. The gateway authorizes a user's InvokeModel against the ORG
             // PRN, and org_admin does not carry InvokeModel: a person needs a gateway_user grant,
             // made out of band with GrantRole. Pinned so a change to either role becomes a
@@ -885,5 +942,23 @@ mod tests {
             );
         }
         assert!(!src.contains(r#"Pgs::Iam::Action::"GetUser""#), "GetUser is a read and must not appear in forbid-archived-writes");
+    }
+
+    /// SMA-774: the three `Manage*` writes reach the generated forbid list. The reads do not.
+    #[test]
+    fn the_tool_policy_writes_are_in_the_generated_forbid_source_and_the_reads_are_not() {
+        let src = forbid_archived_writes_source();
+        for name in ["ManageToolCatalog", "ManageToolPolicies", "ManageToolPolicyFloor"] {
+            assert!(
+                src.contains(&format!(r#"Pgs::Iam::Action::"{name}""#)),
+                "{name} is a write, so it must appear in forbid-archived-writes"
+            );
+        }
+        for name in ["ReadToolCatalog", "ReadToolPolicies", "ReadToolPolicyFloor"] {
+            assert!(
+                !src.contains(&format!(r#"Pgs::Iam::Action::"{name}""#)),
+                "{name} is a read and must not appear in forbid-archived-writes"
+            );
+        }
     }
 }
