@@ -21,8 +21,9 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::task::TaskTracker;
 
+use crate::adapters::nats::PolicyEvents;
 use crate::adapters::policy_source::file::FilePolicySource;
-use crate::application::tool_policy::{CacheSettings, CedarDecider, PolicyCache, RequestToolPolicy};
+use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy};
 use crate::config::{GatewayConfig, PolicySourceConfig};
 use crate::domain::limits::ChargeDropReason;
 use crate::domain::tool_policy::PolicySource;
@@ -145,6 +146,24 @@ pub fn build_tool_policy(config: &GatewayConfig) -> anyhow::Result<ToolPolicyRun
     })
 }
 
+/// SMA-752 § 6.3.5: the NATS invalidation subscription for `cache`, only with `[tool_policy]
+/// enabled = true` AND a `[tool_policy.nats]` table. Otherwise `None`: the refresh alone keeps the
+/// cache current. The caller spawns [`PolicyEvents::run`] on the server `JoinSet`.
+///
+/// A broker that is down is not an error: the client connects in the background.
+///
+/// # Errors
+///
+/// [`crate::adapters::nats::NatsError`] (a creds file that cannot be read or parsed, or options
+/// that the client refuses).
+pub async fn build_policy_events(config: &GatewayConfig, cache: &Arc<PolicyCache>) -> anyhow::Result<Option<PolicyEvents>> {
+    let Some(nats) = config.tool_policy.nats.as_ref().filter(|_| config.tool_policy.enabled) else {
+        return Ok(None);
+    };
+    let target: Arc<dyn Invalidate> = Arc::clone(cache) as Arc<dyn Invalidate>;
+    Ok(Some(crate::adapters::nats::connect(nats, target).await?))
+}
+
 #[cfg(test)]
 // `figment::Jail::expect_with` fixes its closure's `Err` type to `figment::Error` (the
 // `config.rs` test module allows the size lint for the same reason).
@@ -219,6 +238,50 @@ mod tool_policy_tests {
         let cfg = config(&format!("{BASE}[tool_policy]\nenabled = true\non_policy_unavailable = \"open\"\n"), false);
         let err = build_tool_policy(&cfg).err().expect("an error");
         assert!(err.to_string().contains("tool_policy.source"), "{err}");
+    }
+
+    /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.
+    fn tp_config(enabled: bool, nats: Option<&str>) -> GatewayConfig {
+        let nats = nats.map(|url| format!("[tool_policy.nats]\nurl = \"{url}\"\n")).unwrap_or_default();
+        config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = {enabled}\non_policy_unavailable = \"closed\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n{nats}"
+            ),
+            true,
+        )
+    }
+
+    /// A port that nothing listens on.
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("addr").port()
+    }
+
+    /// SMA-752 § 6.3.5, Task 18: the subscription exists only with the tool policy on AND a
+    /// `[tool_policy.nats]` table. A broker that is down is not a boot error.
+    #[tokio::test]
+    async fn the_nats_subscription_is_built_only_with_the_policy_on_and_a_nats_table() {
+        let url = format!("nats://127.0.0.1:{}", closed_port());
+        let cache = build_tool_policy(&tp_config(true, None)).expect("builds").policy.expect("on").0;
+
+        assert!(build_policy_events(&tp_config(true, None), &cache).await.expect("no error").is_none(), "no nats table: refresh only");
+        assert!(build_policy_events(&tp_config(false, Some(&url)), &cache).await.expect("no error").is_none(), "the tool policy is off");
+        let events = tokio::time::timeout(Duration::from_secs(5), build_policy_events(&tp_config(true, Some(&url)), &cache))
+            .await
+            .expect("the broker is not waited for")
+            .expect("a down broker is not an error");
+        assert!(events.is_some(), "on with a nats table: the subscription is built");
+    }
+
+    /// A creds file that does not exist is a boot error that names the path, not the URL.
+    #[tokio::test]
+    async fn a_missing_creds_file_is_a_boot_error_without_the_url() {
+        let mut cfg = tp_config(true, Some("nats://user:hunter2@127.0.0.1:1"));
+        cfg.tool_policy.nats.as_mut().expect("nats").creds_file = Some("/nonexistent/gw.creds".to_string());
+        let cache = build_tool_policy(&cfg).expect("builds").policy.expect("on").0;
+        let err = build_policy_events(&cfg, &cache).await.err().expect("an error");
+        let text = format!("{err:#}");
+        assert!(text.contains("/nonexistent/gw.creds"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
     }
 }
 

@@ -3184,6 +3184,7 @@ name = "paigasus-gateway"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-nats",
  "async-trait",
  "axum",
  "bytes",
@@ -3195,6 +3196,7 @@ dependencies = [
  "paigasus-gateway-core",
  "paigasus-kernel",
  "paigasus-logging",
+ "paigasus-nats-creds",
  "paigasus-observability",
  "paigasus-proto",
  "paigasus-redis",

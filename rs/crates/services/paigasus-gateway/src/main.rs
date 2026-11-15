@@ -196,9 +196,13 @@ async fn serve() -> anyhow::Result<()> {
         });
     }
 
-    // SMA-752 § 6.3.3: the tool-policy cache refresh, on the same shutdown watch. NATS
-    // invalidation is a later task (SMA-752 Task 18).
+    // SMA-752 § 6.3.3: the tool-policy cache refresh, on the same shutdown watch. § 6.3.5: with a
+    // `[tool_policy.nats]` table, also the NATS invalidation subscription. A broker that is down
+    // does not stop the boot; the client connects in the background.
     if let Some((cache, _)) = tool_policy {
+        if let Some(events) = runtime::build_policy_events(&config, &cache).await? {
+            servers.spawn(events.run(rx.clone()));
+        }
         let rx = rx.clone();
         servers.spawn(async move {
             cache.run_refresh(rx).await;
@@ -290,6 +294,11 @@ fn describe_gateway_metrics() {
         names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
         "Seconds the tool policy adds to one request: the request side plus the decider."
     );
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
+        "Tool-policy cache invalidations from NATS, labeled by cause (message, connect)."
+    );
+    describe_gauge!(names::GATEWAY_TOOL_POLICY_NATS_CONNECTED, "1 while the tool-policy NATS client is connected, else 0.");
 }
 
 async fn shutdown_signal() {

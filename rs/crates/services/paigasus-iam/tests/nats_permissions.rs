@@ -533,7 +533,8 @@ async fn the_policy_grant_adds_no_jetstream_right() {
         "iam.policy.put",
         "$JS.API.CONSUMER.CREATE.IAM_EVENTS.gateway-cache-invalidator",
         "$JS.API.CONSUMER.UPDATE.IAM_EVENTS.gateway-cache-invalidator",
-        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.gateway-cache-invalidator.iam.policy.>",
+        // The filtered-create form (`CREATE.<stream>.<consumer>.<filter>`), with a policy filter.
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.gateway-cache-invalidator.iam.policy.put",
     ] {
         expect_publish_denied(&client, &mut events, subject).await;
     }

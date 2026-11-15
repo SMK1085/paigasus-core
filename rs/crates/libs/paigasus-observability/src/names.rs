@@ -66,6 +66,11 @@ pub const GATEWAY_TOOL_POLICY_DECISIONS_TOTAL: &str = "gateway_tool_policy_decis
 pub const GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL: &str = "gateway_tool_policy_request_refusals_total";
 /// Seconds the tool policy adds to one request: the request side plus the decider (preflight F14).
 pub const GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS: &str = "gateway_tool_policy_overhead_seconds";
+/// Tool-policy cache invalidations from NATS (SMA-752 § 6.3.5). `cause` = `message` (an event on
+/// `iam.policy.>`) | `connect` (a connect or a reconnect, because messages may have been missed).
+pub const GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL: &str = "gateway_tool_policy_nats_invalidations_total";
+/// 1 while the tool-policy NATS client is connected, else 0. Set on each connect and disconnect event.
+pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_connected";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -325,6 +330,8 @@ pub const ALL: &[&str] = &[
     GATEWAY_TOOL_POLICY_DECISIONS_TOTAL,
     GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
     GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
+    GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
+    GATEWAY_TOOL_POLICY_NATS_CONNECTED,
     IAM_HTTP_REQUESTS_TOTAL,
     IAM_HTTP_REQUEST_DURATION_SECONDS,
     IAM_HTTP_INFLIGHT_REQUESTS,
@@ -416,6 +423,13 @@ mod tests {
     #[test]
     fn the_gateway_tool_policy_decision_families_are_registered() {
         for name in [GATEWAY_TOOL_POLICY_DECISIONS_TOTAL, GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_gateway_tool_policy_nats_families_are_registered() {
+        for name in [GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, GATEWAY_TOOL_POLICY_NATS_CONNECTED] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }
     }
