@@ -3247,6 +3247,7 @@ dependencies = [
  "figment",
  "hmac 0.13.0",
  "jsonwebtoken",
+ "libc",
  "metrics",
  "metrics-util",
  "nkeys",

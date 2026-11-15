@@ -55,6 +55,10 @@ tasks:
     # new flags is correct BECAUSE of that same append behavior.
     args: ['--profile', 'iam']
     deps: ['^:build']
+    # SMA-774 — `tests/tool_policies_compiler_process.rs` reads the protocol fixtures of the
+    # policy compiler, which is outside this project. It is the first IAM reader of them.
+    inputs:
+      - '/rs/tools/paigasus-policy-compiler/protocol/**/*'
     # This task and the two console e2e tasks share one CI runner. This task runs about 520 s of
     # Docker-backed nextest suites, Keycloak e2e included. Overlap starves the browser, so React
     # never hydrates in the console e2e tasks (SMA-718). The mutex stops the three tasks from

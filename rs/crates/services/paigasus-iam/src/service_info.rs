@@ -88,7 +88,7 @@ impl Capabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
+    use crate::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig, ToolPoliciesConfig};
     use paigasus_proto::paigasus::common::v1::Capability;
     use std::collections::HashSet;
 
@@ -190,6 +190,7 @@ mod tests {
             api_keys,
             audit,
             outbox: OutboxConfig::default(),
+            tool_policies: ToolPoliciesConfig::default(),
             metrics: MetricsConfig::default(),
             migration: MigrationConfig::default(),
         }

@@ -9,6 +9,7 @@ use paigasus_iam_core::Issuer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct IamConfig {
@@ -25,6 +26,7 @@ pub struct IamConfig {
     pub api_keys: ApiKeyConfig,
     pub audit: AuditConfig,
     pub outbox: OutboxConfig,
+    pub tool_policies: ToolPoliciesConfig,
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub migration: MigrationConfig,
@@ -330,6 +332,45 @@ pub struct AuthzConfig {
     pub refresh_interval_secs: u64,
     pub cache: AuthzCacheConfig,
     pub bootstrap_admins: Vec<BootstrapAdmin>,
+}
+
+/// The longest `tool_policies.max_window_secs` that `validate` accepts: 24 hours. Dogwood caps
+/// every temporal window at 24 hours itself, so a larger limit could never take effect. The
+/// coordinator ruled this ceiling for SMA-774 (the spec named 7 days).
+pub const MAX_TOOL_POLICY_WINDOW_SECS: u64 = 86_400;
+
+/// Tool catalog and tool policy set config (SMA-774, spec sections 5.2 and 6.2). Like `[authz]`,
+/// every field has a default (see `ToolPoliciesDefaults`), so an absent `[tool_policies]` block
+/// is valid config.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ToolPoliciesConfig {
+    /// Turns the tool policy feature on. `false` (the default) keeps the RPCs off, in the same
+    /// way as `authz.admin_enabled`.
+    pub enabled: bool,
+    /// The `paigasus-policy-compiler` binary. IAM runs `revision` once at boot. If that fails,
+    /// IAM still boots, and the feature reports `capability-disabled`.
+    pub compiler_path: PathBuf,
+    /// The wall-clock limit of one compiler run. The child is killed at this limit.
+    pub compile_timeout_ms: u64,
+    /// The largest Dogwood source that IAM sends to the compiler.
+    pub max_source_bytes: usize,
+    /// The largest compiler stdout that IAM reads. More output makes the run unavailable.
+    pub max_result_bytes: usize,
+    /// `RLIMIT_AS` of the child. Linux only: macOS refuses it, and IAM logs that at boot.
+    pub rlimit_as_bytes: u64,
+    /// `RLIMIT_CPU` of the child.
+    pub rlimit_cpu_secs: u64,
+    /// The number of compiler runs at the same time. A full semaphore answers
+    /// `tool-policy-compiler-busy`.
+    pub compiler_permits: usize,
+    /// The longest window that a temporal block may use. At most 24 hours.
+    pub max_window_secs: u64,
+    /// The largest tool catalog of one organization.
+    pub max_tools: usize,
+    /// The largest `input_schema` of one tool, in bytes.
+    pub max_input_schema_bytes: usize,
+    /// The deepest nesting of one `input_schema`.
+    pub max_schema_depth: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -829,6 +870,7 @@ struct Defaults {
     api_keys: ApiKeyDefaults,
     audit: AuditDefaults,
     outbox: OutboxDefaults,
+    tool_policies: ToolPoliciesDefaults,
     metrics: MetricsConfig,
     migration: MigrationConfig,
 }
@@ -933,6 +975,7 @@ impl Default for Defaults {
             api_keys: ApiKeyDefaults::default(),
             audit: AuditDefaults::default(),
             outbox: OutboxDefaults::default(),
+            tool_policies: ToolPoliciesDefaults::default(),
             metrics: MetricsConfig::default(),
             migration: MigrationConfig::default(),
         }
@@ -1020,6 +1063,64 @@ impl Default for OutboxDefaults {
             listen_database_url: None,
             retention: OutboxRetentionConfig::default(),
             publisher: PublisherConfig::default(),
+        }
+    }
+}
+
+// Mirrors `ToolPoliciesConfig` field-for-field. The values are the spec section 5.2 limits.
+#[derive(Serialize)]
+struct ToolPoliciesDefaults {
+    enabled: bool,
+    compiler_path: PathBuf,
+    compile_timeout_ms: u64,
+    max_source_bytes: usize,
+    max_result_bytes: usize,
+    rlimit_as_bytes: u64,
+    rlimit_cpu_secs: u64,
+    compiler_permits: usize,
+    max_window_secs: u64,
+    max_tools: usize,
+    max_input_schema_bytes: usize,
+    max_schema_depth: usize,
+}
+
+impl Default for ToolPoliciesDefaults {
+    fn default() -> Self {
+        ToolPoliciesDefaults {
+            enabled: false,
+            compiler_path: PathBuf::from("/usr/local/bin/paigasus-policy-compiler"),
+            compile_timeout_ms: 10_000,
+            max_source_bytes: 262_144,
+            max_result_bytes: 3_145_728,
+            rlimit_as_bytes: 1_073_741_824,
+            rlimit_cpu_secs: 15,
+            compiler_permits: 2,
+            max_window_secs: 86_400,
+            max_tools: 500,
+            max_input_schema_bytes: 65_536,
+            max_schema_depth: 8,
+        }
+    }
+}
+
+// `ToolPoliciesConfig` gets a `Default` too, same rationale as `AuthzConfig` below. Delegates to
+// `ToolPoliciesDefaults` so the two never drift apart.
+impl Default for ToolPoliciesConfig {
+    fn default() -> Self {
+        let d = ToolPoliciesDefaults::default();
+        ToolPoliciesConfig {
+            enabled: d.enabled,
+            compiler_path: d.compiler_path,
+            compile_timeout_ms: d.compile_timeout_ms,
+            max_source_bytes: d.max_source_bytes,
+            max_result_bytes: d.max_result_bytes,
+            rlimit_as_bytes: d.rlimit_as_bytes,
+            rlimit_cpu_secs: d.rlimit_cpu_secs,
+            compiler_permits: d.compiler_permits,
+            max_window_secs: d.max_window_secs,
+            max_tools: d.max_tools,
+            max_input_schema_bytes: d.max_input_schema_bytes,
+            max_schema_depth: d.max_schema_depth,
         }
     }
 }
@@ -1578,6 +1679,21 @@ impl IamConfig {
             if value > dpop.replay_capacity {
                 return Err(format!("authn.dpop.{name} ({value}) must not exceed authn.dpop.replay_capacity ({})", dpop.replay_capacity));
             }
+        }
+
+        // --- SMA-774: `[tool_policies]` ------------------------------------------------------
+        let tp = &self.tool_policies;
+        if tp.max_window_secs > MAX_TOOL_POLICY_WINDOW_SECS {
+            return Err(format!(
+                "tool_policies.max_window_secs ({}) must be at most {MAX_TOOL_POLICY_WINDOW_SECS} (24 hours): Dogwood caps every window at 24 hours, so a larger limit never takes effect",
+                tp.max_window_secs
+            ));
+        }
+        if tp.compiler_permits == 0 {
+            return Err("tool_policies.compiler_permits must be at least 1 (0 makes every compile answer tool-policy-compiler-busy)".to_string());
+        }
+        if tp.compile_timeout_ms == 0 {
+            return Err("tool_policies.compile_timeout_ms must be at least 1 (0 makes every compile time out)".to_string());
         }
 
         Ok(())
@@ -4225,5 +4341,71 @@ mod tests {
             assert!(cfg.validate().is_ok(), "metrics.addr on a distinct port from both http_addr and grpc_addr should validate");
             Ok(())
         });
+    }
+
+    // --- SMA-774: `[tool_policies]` -----------------------------------------------------------
+
+    fn tool_policies_config(block: &str) -> Result<IamConfig, figment::Error> {
+        let mut out = None;
+        let block = block.to_owned();
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"\n{block}", minimal_issuer_toml(), valid_pepper_b64()))?;
+            out = Some(IamConfig::figment().extract::<IamConfig>());
+            Ok(())
+        });
+        out.expect("the jail ran")
+    }
+
+    #[test]
+    fn tool_policies_defaults_match_the_spec() {
+        let d = ToolPoliciesConfig::default();
+        assert!(!d.enabled);
+        assert_eq!(d.compiler_path, std::path::PathBuf::from("/usr/local/bin/paigasus-policy-compiler"));
+        assert_eq!(d.compile_timeout_ms, 10_000);
+        assert_eq!(d.max_source_bytes, 262_144);
+        assert_eq!(d.max_result_bytes, 3_145_728);
+        assert_eq!(d.rlimit_as_bytes, 1_073_741_824);
+        assert_eq!(d.rlimit_cpu_secs, 15);
+        assert_eq!(d.compiler_permits, 2);
+        assert_eq!(d.max_window_secs, 86_400);
+        assert_eq!(d.max_tools, 500);
+        assert_eq!(d.max_input_schema_bytes, 65_536);
+        assert_eq!(d.max_schema_depth, 8);
+        // An absent block gives the same values through figment, and they validate.
+        let cfg = tool_policies_config("").expect("the config loads");
+        assert_eq!(cfg.tool_policies, d);
+        cfg.validate().expect("the defaults validate");
+    }
+
+    #[test]
+    fn the_toml_layer_reaches_tool_policies() {
+        let cfg = tool_policies_config("[tool_policies]\nenabled = true\ncompiler_permits = 4\n").expect("the config loads");
+        assert!(cfg.tool_policies.enabled);
+        assert_eq!(cfg.tool_policies.compiler_permits, 4);
+        assert_eq!(cfg.tool_policies.compile_timeout_ms, 10_000, "a key left out keeps its default");
+    }
+
+    /// The coordinator ruled the ceiling at 24 h: Dogwood caps every window at 24 h itself, so a
+    /// larger limit can never take effect (spec section 4.4 named 7 days).
+    #[test]
+    fn a_max_window_over_24_hours_is_refused() {
+        let cfg = tool_policies_config("[tool_policies]\nmax_window_secs = 86401\n").expect("the config loads");
+        let err = cfg.validate().expect_err("86401 must be refused");
+        assert!(err.contains("tool_policies.max_window_secs") && err.contains("86400"), "unexpected error: {err}");
+        let cfg = tool_policies_config("[tool_policies]\nmax_window_secs = 86400\n").expect("the config loads");
+        cfg.validate().expect("the boundary validates");
+    }
+
+    #[test]
+    fn zero_compiler_permits_or_timeout_is_refused() {
+        for (block, key) in [
+            ("[tool_policies]\ncompiler_permits = 0\n", "tool_policies.compiler_permits"),
+            ("[tool_policies]\ncompile_timeout_ms = 0\n", "tool_policies.compile_timeout_ms"),
+        ] {
+            let cfg = tool_policies_config(block).expect("the config loads");
+            let err = cfg.validate().expect_err("0 must be refused");
+            assert!(err.contains(key), "unexpected error for {key}: {err}");
+        }
     }
 }

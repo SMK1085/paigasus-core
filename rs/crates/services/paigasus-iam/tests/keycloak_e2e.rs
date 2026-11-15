@@ -48,7 +48,9 @@ use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::entities::user;
 use paigasus_iam::application::authenticate_token::Provisioning;
 use paigasus_iam::application::dpop::DpopRequest;
-use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, DpopConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
+use paigasus_iam::config::{
+    ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, DpopConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig, ToolPoliciesConfig,
+};
 use paigasus_iam_core::{AuthnError, ProofDefect, TokenDefect};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
@@ -379,6 +381,7 @@ fn keycloak_config(issuer: &str) -> IamConfig {
         api_keys: ApiKeyConfig::with_test_pepper(STANDARD.encode([0x5Au8; 32])),
         audit: AuditConfig::default(),
         outbox: OutboxConfig::default(),
+        tool_policies: ToolPoliciesConfig::default(),
         metrics: MetricsConfig::default(),
         migration: MigrationConfig::default(),
     }

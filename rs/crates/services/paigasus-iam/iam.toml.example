@@ -251,6 +251,30 @@
 #                                # tick open — default shown; must be >= 1. Raise it when draining
 #                                # a large accumulated backlog (at the defaults, 50k rows/hour).
 
+# --- Tool catalog and tool policy sets (SMA-774) ---
+
+# [tool_policies]
+# enabled                = false   # default shown; true serves the tool catalog and tool policy RPCs.
+#                                  # IAM runs `<compiler_path> revision` once at boot. If the binary
+#                                  # is missing or the call fails, IAM still boots and the feature
+#                                  # reports capability-disabled.
+# compiler_path          = "/usr/local/bin/paigasus-policy-compiler"   # default shown
+# compile_timeout_ms     = 10000   # default shown; the child is killed at this limit. Must be >= 1.
+# max_source_bytes       = 262144  # default shown (256 KiB); a larger source is rejected before the
+#                                  # compiler starts
+# max_result_bytes       = 3145728 # default shown (3 MiB); more compiler stdout is
+#                                  # tool-policy-compiler-unavailable
+# rlimit_as_bytes        = 1073741824  # default shown (1 GiB); RLIMIT_AS of the child, Linux only
+#                                  # (macOS refuses it, and IAM logs a warning at boot)
+# rlimit_cpu_secs        = 15      # default shown; RLIMIT_CPU of the child
+# compiler_permits       = 2       # default shown; compiler runs at the same time. A full semaphore
+#                                  # answers tool-policy-compiler-busy (retryable). Must be >= 1.
+# max_window_secs        = 86400   # default shown (24 h); the longest window of a temporal block.
+#                                  # At most 86400: Dogwood caps every window at 24 h.
+# max_tools              = 500     # default shown; tools in the catalog of one organization
+# max_input_schema_bytes = 65536   # default shown; the largest input_schema of one tool
+# max_schema_depth       = 8       # default shown; the deepest nesting of one input_schema
+
 # --- Metrics (SMA-446 Unit 3: Prometheus `GET /metrics`) ---
 
 # [metrics]
