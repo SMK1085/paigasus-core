@@ -4,11 +4,14 @@
 
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::{Figment, error::Error as FigmentError};
+use paigasus_gateway_core::{OnUnavailable, TenantMode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
+use std::time::Duration;
+use uuid::Uuid;
 
 use crate::domain::limits::{BudgetPeriod, LimitRules, MAX_REQUESTS_PER_MINUTE, MAX_TOKENS_PER_PERIOD, OrgOverride};
 use crate::domain::parse_org_uuid;
@@ -52,6 +55,9 @@ pub struct GatewayConfig {
     /// SMA-769: the `POST /v1/responses` route. Off by default (D8).
     #[serde(default)]
     pub responses: ResponsesConfig,
+    /// SMA-752: tool-call decisions from Cedar policies. Off by default (D8).
+    #[serde(default)]
+    pub tool_policy: ToolPolicyConfig,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -610,7 +616,228 @@ impl GatewayConfig {
         }
         self.tool_interception.validate()?;
         self.responses.validate()?;
+        self.tool_policy.validate(&self.tool_interception)?;
         Ok(())
+    }
+}
+
+/// `[tool_policy]` (SMA-752 § 6.4). Off by default: with `enabled = false` the gateway behaves as
+/// before. `GatewayConfig.tool_policy` is not in the `Defaults` layer. A misspelt key fails
+/// extraction, so a typo can never leave a security control silently off.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolPolicyConfig {
+    pub enabled: bool,
+    /// D8: the mode of an org that has no `[[tool_policy.org]]` entry.
+    pub default_mode: TenantModeConfig,
+    /// D9, D34: the global value. Required when `enabled`.
+    pub on_policy_unavailable: Option<OnUnavailableConfig>,
+    pub refresh_secs: u64,
+    pub max_stale_secs: u64,
+    pub idle_evict_secs: u64,
+    /// D31: the time limit of one policy load. It must be shorter than `tool_interception.decide_timeout_secs`.
+    pub load_timeout_ms: u64,
+    pub source: Option<PolicySourceConfig>,
+    pub nats: Option<ToolPolicyNatsConfig>,
+    /// TOML only (figment's environment provider cannot express an array of tables).
+    pub org: Vec<OrgToolPolicyConfig>,
+}
+
+impl Default for ToolPolicyConfig {
+    fn default() -> Self {
+        ToolPolicyConfig {
+            enabled: false,
+            default_mode: TenantModeConfig::Off,
+            on_policy_unavailable: None,
+            refresh_secs: 30,
+            max_stale_secs: 300,
+            idle_evict_secs: 3600,
+            load_timeout_ms: 1000,
+            source: None,
+            nats: None,
+            org: Vec::new(),
+        }
+    }
+}
+
+/// The tenant mode as the config spells it (D8). D33: there is no `floor_mode`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantModeConfig {
+    #[default]
+    Off,
+    LogOnly,
+    Enforce,
+}
+
+/// `on_policy_unavailable` as the config spells it (D9, D34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnUnavailableConfig {
+    Open,
+    Closed,
+}
+
+/// Where the policy text comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum PolicySourceConfig {
+    /// A directory of policy files.
+    File { dir: String },
+}
+
+/// `[tool_policy.nats]`: the invalidation subscription.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolPolicyNatsConfig {
+    /// Never written by `Serialize`: the URL can hold credentials.
+    #[serde(skip_serializing)]
+    pub url: String,
+    pub creds_file: Option<String>,
+    pub ca_file: Option<String>,
+}
+
+/// One `[[tool_policy.org]]` entry (D7, D34).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OrgToolPolicyConfig {
+    /// The org UUID in the 36-character form (the `domain::parse_org_uuid` rule).
+    pub id: String,
+    pub mode: TenantModeConfig,
+    #[serde(default)]
+    pub on_policy_unavailable: Option<OnUnavailableConfig>,
+}
+
+impl From<TenantModeConfig> for TenantMode {
+    fn from(m: TenantModeConfig) -> Self {
+        match m {
+            TenantModeConfig::Off => TenantMode::Off,
+            TenantModeConfig::LogOnly => TenantMode::LogOnly,
+            TenantModeConfig::Enforce => TenantMode::Enforce,
+        }
+    }
+}
+
+impl From<OnUnavailableConfig> for OnUnavailable {
+    fn from(o: OnUnavailableConfig) -> Self {
+        match o {
+            OnUnavailableConfig::Open => OnUnavailable::Open,
+            OnUnavailableConfig::Closed => OnUnavailable::Closed,
+        }
+    }
+}
+
+/// The upper bound of every `tool_policy.*_secs` value: one day.
+const MAX_TOOL_POLICY_SECS: u64 = 86_400;
+
+impl ToolPolicyConfig {
+    /// Every rule of spec § 6.4. Each message names the key. All rules are checked even when
+    /// `enabled = false`, except the three "required when enabled" rules.
+    pub fn validate(&self, ti: &ToolInterceptionConfig) -> Result<(), String> {
+        for (key, v) in [
+            ("tool_policy.refresh_secs", self.refresh_secs),
+            ("tool_policy.max_stale_secs", self.max_stale_secs),
+            ("tool_policy.idle_evict_secs", self.idle_evict_secs),
+        ] {
+            if v == 0 {
+                return Err(format!("{key} must be at least 1"));
+            }
+            if v > MAX_TOOL_POLICY_SECS {
+                return Err(format!("{key} must be at most {MAX_TOOL_POLICY_SECS} (one day); got {v}"));
+            }
+        }
+        if self.load_timeout_ms == 0 {
+            return Err("tool_policy.load_timeout_ms must be at least 1".to_string());
+        }
+        if self.load_timeout_ms > MAX_TOOL_POLICY_SECS * 1000 {
+            return Err(format!(
+                "tool_policy.load_timeout_ms must be at most {} (one day); got {}",
+                MAX_TOOL_POLICY_SECS * 1000,
+                self.load_timeout_ms
+            ));
+        }
+        if self.max_stale_secs < self.refresh_secs {
+            return Err(format!(
+                "tool_policy.max_stale_secs ({}) must not be less than tool_policy.refresh_secs ({})",
+                self.max_stale_secs, self.refresh_secs
+            ));
+        }
+        // D31: a load that can outlast the decider's time limit would turn a slow source into a decider timeout.
+        if self.load_timeout_ms >= ti.decide_timeout_secs.saturating_mul(1000) {
+            return Err(format!(
+                "tool_policy.load_timeout_ms ({}) must be less than tool_interception.decide_timeout_secs ({}) in milliseconds",
+                self.load_timeout_ms, ti.decide_timeout_secs
+            ));
+        }
+        let mut seen = HashSet::new();
+        for (i, entry) in self.org.iter().enumerate() {
+            let Some(id) = parse_org_uuid(&entry.id) else {
+                return Err(format!("tool_policy.org[{i}].id must be one organization UUID in the 36-character form; got {:?}", entry.id));
+            };
+            if !seen.insert(id) {
+                return Err(format!("tool_policy.org[{i}].id {:?} names an org that an earlier [[tool_policy.org]] entry already lists", entry.id));
+            }
+        }
+        if self.enabled {
+            if self.on_policy_unavailable.is_none() {
+                return Err("tool_policy.on_policy_unavailable is required when tool_policy.enabled = true (\"open\" or \"closed\")".to_string());
+            }
+            if !ti.enabled {
+                return Err("tool_policy.enabled = true requires tool_interception.enabled = true".to_string());
+            }
+            match &self.source {
+                None => return Err("tool_policy.enabled = true requires tool_policy.source (for example kind = \"file\")".to_string()),
+                Some(PolicySourceConfig::File { dir }) if dir.trim().is_empty() => return Err("tool_policy.source.dir must not be empty".to_string()),
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The runtime view: durations, the per-org map keyed by the parsed `Uuid`, and the defaults.
+    #[must_use]
+    pub fn settings(&self) -> ToolPolicySettings {
+        ToolPolicySettings {
+            enabled: self.enabled,
+            default_mode: self.default_mode.into(),
+            // When the key is unset, `validate` has already refused `enabled = true`. Closed is the fail-safe value.
+            on_policy_unavailable: self.on_policy_unavailable.map_or(OnUnavailable::Closed, Into::into),
+            refresh: Duration::from_secs(self.refresh_secs),
+            max_stale: Duration::from_secs(self.max_stale_secs),
+            idle_evict: Duration::from_secs(self.idle_evict_secs),
+            load_timeout: Duration::from_millis(self.load_timeout_ms),
+            orgs: self
+                .org
+                .iter()
+                .filter_map(|e| parse_org_uuid(&e.id).map(|id| (id, (e.mode.into(), e.on_policy_unavailable.map(OnUnavailable::from)))))
+                .collect(),
+        }
+    }
+}
+
+/// What the gateway reads at run time from `[tool_policy]` (built once by `ToolPolicyConfig::settings`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPolicySettings {
+    pub enabled: bool,
+    pub default_mode: TenantMode,
+    /// The global `on_policy_unavailable` (D34).
+    pub on_policy_unavailable: OnUnavailable,
+    pub refresh: Duration,
+    pub max_stale: Duration,
+    pub idle_evict: Duration,
+    pub load_timeout: Duration,
+    /// Per org: the mode and the optional `on_policy_unavailable` override.
+    pub orgs: HashMap<Uuid, (TenantMode, Option<OnUnavailable>)>,
+}
+
+impl ToolPolicySettings {
+    /// The tenant mode and the effective `on_policy_unavailable` of an org (D7, D34).
+    #[must_use]
+    pub fn tenant(&self, org: Uuid) -> (TenantMode, OnUnavailable) {
+        match self.orgs.get(&org) {
+            Some((mode, over)) => (*mode, over.unwrap_or(self.on_policy_unavailable)),
+            None => (self.default_mode, self.on_policy_unavailable),
+        }
     }
 }
 
@@ -1253,5 +1480,186 @@ mod tests {
             assert!(!debug.contains("hunter2") && !debug.contains("redis.internal"), "{debug}");
             Ok(())
         });
+    }
+
+    // --- SMA-752 `[tool_policy]` ---------------------------------------------------------------
+
+    fn tp_toml(body: &str) -> String {
+        format!("{}\n[tool_policy]\n{body}\n", valid_toml())
+    }
+
+    /// A valid enabled `[tool_policy]` body plus the `[tool_interception]` it needs.
+    fn tp_enabled_toml(extra: &str) -> String {
+        format!(
+            "{}\n[tool_interception]\nenabled = true\n\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\nsource = {{ kind = \"file\", dir = \"/etc/policies\" }}\n{extra}\n",
+            valid_toml()
+        )
+    }
+
+    fn tp_load(toml: &str) -> Result<GatewayConfig, String> {
+        let mut out = Err("unset".to_string());
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", toml)?;
+            out = GatewayConfig::figment().extract::<GatewayConfig>().map_err(|e| e.to_string());
+            Ok(())
+        });
+        out
+    }
+
+    #[test]
+    fn tool_policy_is_off_by_default() {
+        let cfg = tp_load(valid_toml()).expect("loads");
+        let tp = &cfg.tool_policy;
+        assert!(!tp.enabled);
+        assert_eq!(tp.default_mode, TenantModeConfig::Off);
+        assert_eq!((tp.refresh_secs, tp.max_stale_secs, tp.idle_evict_secs, tp.load_timeout_ms), (30, 300, 3600, 1000));
+        assert!(tp.on_policy_unavailable.is_none() && tp.source.is_none() && tp.nats.is_none() && tp.org.is_empty());
+        assert!(cfg.validate().is_ok());
+        let s = tp.settings();
+        assert_eq!(s.default_mode, TenantMode::Off);
+        assert_eq!(
+            (s.refresh, s.max_stale, s.idle_evict, s.load_timeout),
+            (Duration::from_secs(30), Duration::from_secs(300), Duration::from_secs(3600), Duration::from_millis(1000))
+        );
+    }
+
+    #[test]
+    fn a_full_enabled_table_loads_and_validates() {
+        let cfg = tp_load(&tp_enabled_toml(
+            "default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"nats://x:4222\"\ncreds_file = \"/c\"\nca_file = \"/ca\"",
+        ))
+        .expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        assert_eq!(cfg.tool_policy.settings().default_mode, TenantMode::LogOnly);
+        assert_eq!(cfg.tool_policy.source, Some(PolicySourceConfig::File { dir: "/etc/policies".to_string() }));
+        let json = serde_json::to_string(&cfg.tool_policy).expect("serialises");
+        assert!(!json.contains("nats://x:4222"), "the NATS url must not be serialised");
+    }
+
+    #[test]
+    fn enabled_without_on_policy_unavailable_fails() {
+        let toml = format!(
+            "{}\n[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\nsource = {{ kind = \"file\", dir = \"/p\" }}\n",
+            valid_toml()
+        );
+        let err = tp_load(&toml).expect("loads").validate().expect_err("D9");
+        assert!(err.contains("tool_policy.on_policy_unavailable"), "{err}");
+    }
+
+    #[test]
+    fn enabled_without_tool_interception_fails() {
+        let toml = format!(
+            "{}\n[tool_policy]\nenabled = true\non_policy_unavailable = \"open\"\nsource = {{ kind = \"file\", dir = \"/p\" }}\n",
+            valid_toml()
+        );
+        let err = tp_load(&toml).expect("loads").validate().expect_err("needs interception");
+        assert!(err.contains("tool_interception.enabled"), "{err}");
+    }
+
+    #[test]
+    fn enabled_without_a_source_fails() {
+        let toml = format!(
+            "{}\n[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"open\"\n",
+            valid_toml()
+        );
+        let err = tp_load(&toml).expect("loads").validate().expect_err("needs a source");
+        assert!(err.contains("tool_policy.source"), "{err}");
+    }
+
+    #[test]
+    fn the_required_when_enabled_rules_do_not_apply_when_off() {
+        let cfg = tp_load(&tp_toml("default_mode = \"enforce\"")).expect("loads");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn an_unknown_key_fails_extraction() {
+        for body in [
+            "defualt_mode = \"off\"".to_string(),
+            "[[tool_policy.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nmode = \"off\"\nmdoe = \"off\"".to_string(),
+            "[tool_policy.nats]\nurl = \"nats://x\"\nurl2 = \"y\"".to_string(),
+            "source = { kind = \"file\", dir = \"/p\", extra = 1 }".to_string(),
+        ] {
+            assert!(tp_load(&tp_toml(&body)).is_err(), "must fail: {body}");
+        }
+    }
+
+    #[test]
+    fn a_duplicate_org_fails() {
+        let body = "[[tool_policy.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nmode = \"off\"\n[[tool_policy.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nmode = \"enforce\"";
+        let err = tp_load(&tp_toml(body)).expect("loads").validate().expect_err("duplicate");
+        assert!(err.contains("tool_policy.org[1].id"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_org_id_fails() {
+        for id in ["acme", "0190a1000000700080000000000000a1"] {
+            let body = format!("[[tool_policy.org]]\nid = \"{id}\"\nmode = \"off\"");
+            let err = tp_load(&tp_toml(&body)).expect("loads").validate().expect_err("bad id");
+            assert!(err.contains("tool_policy.org[0].id must be one organization UUID"), "{err}");
+        }
+    }
+
+    /// Review Focus 5: the entry id and the scope PRN may use different letter case.
+    #[test]
+    fn an_upper_case_org_id_applies_to_the_canonical_org() {
+        let body = "[[tool_policy.org]]\nid = \"0190A100-0000-7000-8000-0000000000A1\"\nmode = \"enforce\"";
+        let cfg = tp_load(&tp_toml(body)).expect("loads");
+        assert!(cfg.validate().is_ok());
+        let lower = Uuid::try_parse(ORG_A).expect("a uuid");
+        assert_eq!(cfg.tool_policy.settings().tenant(lower).0, TenantMode::Enforce);
+        // A lower-case second entry for the same org is a duplicate.
+        let dup = format!("{body}\n[[tool_policy.org]]\nid = \"{ORG_A}\"\nmode = \"off\"");
+        let err = tp_load(&tp_toml(&dup)).expect("loads").validate().expect_err("case-only duplicate");
+        assert!(err.contains("tool_policy.org[1].id"), "{err}");
+    }
+
+    #[test]
+    fn a_per_org_override_wins() {
+        let other = "0190a100-0000-7000-8000-0000000000b2";
+        let body = format!(
+            "default_mode = \"log_only\"\non_policy_unavailable = \"closed\"\n[[tool_policy.org]]\nid = \"{ORG_A}\"\nmode = \"enforce\"\non_policy_unavailable = \"open\"\n[[tool_policy.org]]\nid = \"{other}\"\nmode = \"off\""
+        );
+        let cfg = tp_load(&tp_toml(&body)).expect("loads");
+        assert!(cfg.validate().is_ok());
+        let s = cfg.tool_policy.settings();
+        assert_eq!(s.tenant(Uuid::try_parse(ORG_A).expect("uuid")), (TenantMode::Enforce, OnUnavailable::Open));
+        assert_eq!(
+            s.tenant(Uuid::try_parse(other).expect("uuid")),
+            (TenantMode::Off, OnUnavailable::Closed),
+            "no override: the global value"
+        );
+        assert_eq!(
+            s.tenant(Uuid::nil()),
+            (TenantMode::LogOnly, OnUnavailable::Closed),
+            "unlisted org: the default mode and the global value"
+        );
+    }
+
+    #[test]
+    fn load_timeout_must_be_shorter_than_decide_timeout() {
+        let cfg = tp_load(&format!("{}\n[tool_policy]\nload_timeout_ms = 5000\n", valid_toml())).expect("loads");
+        let err = cfg.validate().expect_err("D31");
+        assert!(err.contains("tool_policy.load_timeout_ms"), "{err}");
+        let ok = tp_load(&format!("{}\n[tool_interception]\ndecide_timeout_secs = 6\n[tool_policy]\nload_timeout_ms = 5000\n", valid_toml())).expect("loads");
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn bounds() {
+        for (body, key) in [
+            ("refresh_secs = 0", "tool_policy.refresh_secs must be at least 1"),
+            ("max_stale_secs = 0", "tool_policy.max_stale_secs must be at least 1"),
+            ("idle_evict_secs = 0", "tool_policy.idle_evict_secs must be at least 1"),
+            ("load_timeout_ms = 0", "tool_policy.load_timeout_ms must be at least 1"),
+            ("refresh_secs = 86401", "tool_policy.refresh_secs must be at most 86400"),
+            ("max_stale_secs = 86401", "tool_policy.max_stale_secs must be at most 86400"),
+            ("idle_evict_secs = 86401", "tool_policy.idle_evict_secs must be at most 86400"),
+            ("load_timeout_ms = 86400001", "tool_policy.load_timeout_ms must be at most"),
+            ("refresh_secs = 400", "tool_policy.max_stale_secs (300) must not be less than tool_policy.refresh_secs (400)"),
+        ] {
+            let err = tp_load(&tp_toml(body)).expect("loads").validate().expect_err(body);
+            assert!(err.contains(key), "{body}: {err}");
+        }
     }
 }
