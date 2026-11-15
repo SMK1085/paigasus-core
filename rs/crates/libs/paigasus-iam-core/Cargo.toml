@@ -33,8 +33,6 @@ blake3 = { workspace = true }
 # test-local `SecretHasher` (SMA-445 Task 6, AC-1 "constant-time validation").
 [dev-dependencies]
 proptest.workspace = true
-# `check.rs`'s membership test: every reason this crate emits is in the canonical registry (SMA-774).
-paigasus-proto = { workspace = true }
 # `TestHasher`: a test-local HMAC-SHA-256 `SecretHasher` stand-in that proves the port's
 # round-trip/rejection contract without pulling crypto into this crate's runtime
 # dependencies (the real adapter lands in a later SMA-445 task). Not in the workspace

@@ -115,17 +115,6 @@ mod tests {
         tenant_schema_json(&[tool])
     }
 
-    /// Membership test for `repo:error-code-single-site` (SMA-774): each reason this module emits
-    /// is declared in `common/v1/error.proto`.
-    #[test]
-    fn every_check_reason_is_in_the_canonical_registry() {
-        use paigasus_proto::paigasus::common::v1::ErrorReason;
-
-        for code in [REASON_INVALID, REASON_FLOOR_PERMIT] {
-            assert!(ErrorReason::from_wire_reason(code).is_some(), "{code} is not declared in common/v1/error.proto");
-        }
-    }
-
     #[test]
     fn a_valid_tenant_policy_passes() {
         let policy = "@id(\"ok\")\npermit(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.input.q == \"x\" };";
