@@ -1,0 +1,12 @@
+{
+  "model": "gpt-4.1",
+  "messages": [
+    {"role": "user", "content": "Delete /tmp/report.txt."},
+    {"role": "assistant", "content": null, "function_call": {"name": "delete_file", "arguments": "{\"path\":\"/tmp/report.txt\"}"}},
+    {"role": "function", "name": "delete_file", "content": "[paigasus] tool result for \"delete_file\" was replaced (tool-result-blocked)."}
+  ],
+  "functions": [
+    {"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}
+  ],
+  "function_call": "auto"
+}

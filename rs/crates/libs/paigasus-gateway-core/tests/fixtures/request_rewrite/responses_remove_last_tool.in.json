@@ -1,0 +1,10 @@
+{
+  "model": "gpt-4.1",
+  "input": "Clean up the build directory.",
+  "tools": [
+    {"type": "function", "name": "delete_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+  ],
+  "tool_choice": "required",
+  "parallel_tool_calls": true,
+  "store": false
+}

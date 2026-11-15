@@ -1,0 +1,12 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 1024,
+  "tools": [
+    {"name": "get_weather", "description": "Get the weather for a city.", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}},
+    {"name": "delete_file", "description": "Delete a file.", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+  ],
+  "tool_choice": {"type": "auto"},
+  "messages": [
+    {"role": "user", "content": "What is the weather in Paris?"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "model": "gpt-4.1",
+  "tools": [
+    {"type": "mcp", "server_label": "srv", "server_url": "https://mcp.example.com/sse", "require_approval": "always"}
+  ],
+  "input": [
+    {"type": "mcp_approval_request", "id": "mcpr_1", "server_label": "srv", "name": "search", "arguments": "{}"},
+    {"type": "mcp_approval_response", "approval_request_id": "mcpr_1", "approve": false,"reason":"[paigasus] tool result for \"srv.search\" was replaced (tool-result-blocked)."}
+  ]
+}

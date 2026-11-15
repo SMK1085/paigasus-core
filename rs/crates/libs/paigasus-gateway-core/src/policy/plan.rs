@@ -15,7 +15,7 @@ use crate::types::{Format, ToolCallKind};
 
 /// The Responses built-in client-run tools that the plan may remove (P-15). Every other
 /// definition of kind `Other` is a hosted tool that the provider runs, and is never removed.
-const REMOVABLE_BUILT_INS: [&str; 5] = ["local_shell", "shell", "apply_patch", "computer", "computer_use_preview"];
+pub(crate) const REMOVABLE_BUILT_INS: [&str; 5] = ["local_shell", "shell", "apply_patch", "computer", "computer_use_preview"];
 
 /// The tool result to replace (P-7).
 #[non_exhaustive]
