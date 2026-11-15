@@ -95,7 +95,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     // refused body never uses quota. `None` (no `[limits]` table) skips them entirely (A6).
     let mut guard = match &state.limits {
         None => None,
-        Some(limits) => match limits.admit(&caller).await {
+        Some(limits) => match limits.admit_for(&caller, endpoint.name).await {
             Ok(guard) => Some(guard),
             Err(refusal) => {
                 // The refusal metric is the operator's signal; this line stays at debug.

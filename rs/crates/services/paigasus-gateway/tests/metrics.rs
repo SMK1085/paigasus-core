@@ -262,14 +262,16 @@ async fn an_oidc_request_records_a_denied_key_leg_and_an_ok_token_leg() {
     assert!(has("authorize", "ok"), "the self-query allowed:\n{out}");
 }
 
-/// The value of the `gateway_upstream_requests_total` sample that carries `endpoint="<name>"`.
+/// The sum of every `gateway_upstream_requests_total` sample that carries `endpoint="<name>"`.
 fn upstream_count(out: &str, endpoint: &str) -> f64 {
     let needle = format!("endpoint=\"{endpoint}\"");
-    let line = out
+    let values: Vec<f64> = out
         .lines()
-        .find(|l| l.starts_with("gateway_upstream_requests_total{") && l.contains(&needle))
-        .unwrap_or_else(|| panic!("no upstream sample for {endpoint}:\n{out}"));
-    line.rsplit(' ').next().expect("a value").parse().unwrap_or_else(|_| panic!("a number at the end of {line}"))
+        .filter(|l| l.starts_with("gateway_upstream_requests_total{") && l.contains(&needle))
+        .map(|l| l.rsplit(' ').next().expect("a value").parse().unwrap_or_else(|_| panic!("a number at the end of {l}")))
+        .collect();
+    assert!(!values.is_empty(), "no upstream sample for {endpoint}:\n{out}");
+    values.iter().sum()
 }
 
 #[tokio::test]

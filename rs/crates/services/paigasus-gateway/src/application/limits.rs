@@ -69,12 +69,17 @@ impl Limits {
     /// Admit or refuse one chat request (spec § 4.3a). `Err` is a refusal the handler maps to a
     /// `GatewayError`; `Ok` carries the guard that charges the request when it drops.
     pub async fn admit(self: &Arc<Self>, caller: &CallerContext) -> Result<ChargeGuard, LimitRefusal> {
+        self.admit_for(caller, "chat_completions").await
+    }
+
+    /// `admit` for a named endpoint. The name goes on the unscoped-request warning (SMA-769).
+    pub(crate) async fn admit_for(self: &Arc<Self>, caller: &CallerContext, endpoint: &'static str) -> Result<ChargeGuard, LimitRefusal> {
         let org = org_of(&caller.scope_prn);
         let policy = self.rules.policy_for(org);
         if org.is_none() {
             // D2: a valid request always has an org, so this is a parse mismatch or an IAM defect.
             counter!(names::GATEWAY_LIMIT_UNSCOPED_REQUESTS_TOTAL).increment(1);
-            tracing::warn!(principal = %caller.principal_prn, scope = %caller.scope_prn, "chat request scope names no organization");
+            tracing::warn!(principal = %caller.principal_prn, scope = %caller.scope_prn, endpoint, "chat request scope names no organization");
             if policy.has_org_dimension() {
                 return Err(LimitRefusal::Unscoped);
             }
