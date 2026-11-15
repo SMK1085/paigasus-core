@@ -1,4 +1,4 @@
-: paigasus-decision {"v":1,"choice":0,"position":0,"name":"blocked_rm","name_sha256_8":"e3b2180a","decision":"block","basis":"decider","code":"policy"}
+: paigasus-decision {"v":2,"side":"response","choice":0,"position":0,"name":"blocked_rm","name_sha256_8":"e3b2180a","decision":"block","basis":"decider","code":"policy","enforced":true,"reason":"tool-call-denied"}
 
 data: {"id":"chatcmpl-fx","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","system_fingerprint":"fp_fx","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}
 

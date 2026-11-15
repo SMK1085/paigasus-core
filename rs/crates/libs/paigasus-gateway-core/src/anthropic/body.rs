@@ -80,6 +80,8 @@ fn server(o: &Map<String, Value>, ty: &str, position: u32) -> ReportEntry {
         decision: ReportDecision::Unenforceable,
         basis: None,
         code: None,
+        enforced: None,
+        reason: None,
     }
 }
 

@@ -15,7 +15,7 @@ use crate::anthropic::stream::AnthropicStream;
 use crate::limits::{Limits, OnFailure};
 use crate::openai::stream::OpenAiStream;
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
-use crate::report::{ReportDecision, ReportEntry, report_comment, report_entry};
+use crate::report::{ReportDecision, ReportEntry, reason_label, report_comment, report_entry};
 use crate::responses::stream::ResponsesStream;
 use crate::sse::{self, SseItem, SseSplitter};
 use crate::types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall};
@@ -383,6 +383,7 @@ impl Interceptor {
         for (c, d) in calls.iter().zip(&decisions) {
             let (decision, code) = match d {
                 Decision::Block { code } => (ReportDecision::Block, Some(*code)),
+                Decision::Observe { would } => (ReportDecision::Allow, Some(*would)),
                 _ => (ReportDecision::Allow, None),
             };
             let label = if decision == ReportDecision::Block { "block" } else { "allow" };
@@ -421,6 +422,8 @@ impl Interceptor {
                 decision: ReportDecision::Block,
                 basis: Some(Basis::OnFailure),
                 code: Some(code),
+                enforced: Some(true),
+                reason: reason_label(code),
             };
             self.count(Metric::Decision {
                 decision: "block",
@@ -763,6 +766,19 @@ mod tests {
         assert!(!out.contains("message_delta"), "a frame touching an undecided hold stays queued: {out}");
         let out = emitted(&i.decided(HoldKey::Block(1), Ok(vec![Decision::Block { code: BlockCode::Policy }]), t0));
         assert!(!out.contains("CANARY") && out.contains("[paigasus]") && out.contains("message_delta"), "{out}");
+    }
+
+    #[test]
+    fn observe_releases_the_call_and_reports_not_enforced() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::AnthropicMessages, limits(), Bytes::from_static(TERMINAL), t0);
+        for c in [tool_start(0, "read"), json_delta(0, "\"CANARY\""), block_stop(0)] {
+            i.push(c.as_bytes(), t0);
+        }
+        let out = emitted(&i.decided(HoldKey::Block(0), Ok(vec![Decision::Observe { would: BlockCode::Policy }]), t0));
+        assert!(out.contains("CANARY"), "the call is released unchanged: {out}");
+        assert!(!out.contains("[paigasus]"), "no notice: {out}");
+        assert!(out.contains(r#""enforced":false"#) && out.contains(r#""decision":"allow""#), "{out}");
     }
 
     #[test]

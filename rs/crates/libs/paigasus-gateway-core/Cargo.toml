@@ -22,6 +22,8 @@ thiserror = { workspace = true }
 # The differential oracle's hostile-stream generators (spec § 8.1). `bytes` and `serde_json` are
 # already normal dependencies, which integration tests can use.
 proptest = { workspace = true }
+# The decision-report reasons are checked against the canonical error registry (SMA-752 D10).
+paigasus-proto = { workspace = true }
 
 [lints]
 workspace = true

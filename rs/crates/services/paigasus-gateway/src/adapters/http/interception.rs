@@ -104,7 +104,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
         let decision = if d.is_allow() { "allow" } else { "block" };
         record(Metric::Decision { decision, basis: basis.as_str() });
     }
-    let report = calls.report(&decisions, basis);
+    let report = calls.report(&decisions, basis, &[]);
     let rewritten = calls.apply(&decisions).map(Bytes::from);
     BodyOutcome::Forward { rewritten, report: Some(report) }
 }

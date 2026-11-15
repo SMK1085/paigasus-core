@@ -692,6 +692,8 @@ impl Assembly {
                     decision: ReportDecision::Unenforceable,
                     basis: None,
                     code: None,
+                    enforced: None,
+                    reason: None,
                 });
             }
             ItemClass::Content => {}
@@ -1710,6 +1712,8 @@ mod tests {
                 decision: ReportDecision::Unenforceable,
                 basis: None,
                 code: None,
+                enforced: None,
+                reason: None,
             })
         );
         assert!(effects.iter().all(|e| e.item.is_none() && !e.opened));
