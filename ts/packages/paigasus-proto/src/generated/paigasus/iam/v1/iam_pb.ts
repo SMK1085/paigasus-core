@@ -3672,6 +3672,8 @@ export type CatalogWriteAccepted = Message<"paigasus.iam.v1.CatalogWriteAccepted
   toolPolicySetVersion: bigint;
 
   /**
+   * The tools that this write added or replaced, as stored.
+   *
    * @generated from field: repeated paigasus.iam.v1.Tool tools = 3;
    */
   tools: Tool[];

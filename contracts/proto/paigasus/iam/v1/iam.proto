@@ -1049,6 +1049,7 @@ message CatalogWriteAccepted {
   uint64 catalog_revision = 1;
   // The new live version. 0 when the set did not change.
   uint64 tool_policy_set_version = 2;
+  // The tools that this write added or replaced, as stored.
   repeated Tool tools = 3;
   repeated SkippedImportEntry skipped = 4;
 }

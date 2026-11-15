@@ -827,6 +827,9 @@ class CatalogWriteAccepted(betterproto2.Message):
     tools: "list[Tool]" = betterproto2.field(
         3, betterproto2.TYPE_MESSAGE, repeated=True
     )
+    """
+    The tools that this write added or replaced, as stored.
+    """
 
     skipped: "list[SkippedImportEntry]" = betterproto2.field(
         4, betterproto2.TYPE_MESSAGE, repeated=True
