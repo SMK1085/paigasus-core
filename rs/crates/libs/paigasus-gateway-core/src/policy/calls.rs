@@ -57,14 +57,16 @@ fn basis_of(v: &Verdict) -> PolicyBasis {
 /// The gateway decision for one kernel verdict under the snapshot's tenant part and mode.
 fn outcome(v: Verdict, tenant: TenantPart, mode: TenantMode, on: OnUnavailable) -> CallOutcome {
     // D33: a floor deny is enforced in every tenant mode. The `if` below is the one statement
-    // that the red-first proof deletes (preflight F1). // FLOOR-RULE begin
+    // that the red-first proof deletes (preflight F1).
+    // FLOOR-RULE begin
     if v.floor_denied {
         return CallOutcome {
             decision: Decision::Block { code: BlockCode::Policy },
             basis: basis_of(&v),
             verdict: Some(v),
         };
-    } // FLOOR-RULE end
+    }
+    // FLOOR-RULE end
     let (decision, basis) = match (tenant, mode) {
         // Mode `off`: the floor alone applies, and its default deny does not count (P-4).
         (TenantPart::Off, _) | (_, TenantMode::Off) => (Decision::Allow, basis_of(&v)),
@@ -181,6 +183,7 @@ mod tests {
             let o = one(PolicySet::Unavailable, mode, OnUnavailable::Open, "ok");
             assert_eq!((o.decision, o.basis), (OBSERVE_UNAVAILABLE, PolicyBasis::Unavailable), "{mode:?}");
             assert!(o.decision.is_allow());
+            assert!(o.verdict.is_none(), "{mode:?}");
         }
         // Available, floor_denied, any mode and any tenant part: Block{Policy} (D33).
         for tenant in [TenantPart::Evaluated, TenantPart::Off, TenantPart::Unavailable] {
@@ -198,6 +201,17 @@ mod tests {
             let c = one(available(FLOOR, TenantPart::Off), TenantMode::Off, on, "ok");
             assert_eq!(c.decision, Decision::Allow, "{on:?}");
             assert_eq!(c.verdict.expect("verdict").decision, Effect::Deny);
+        }
+        // Mode Off ignores the tenant part (controller ruling): a deny that is not a floor deny
+        // is an allow, whatever the tenant part.
+        for on in ONS {
+            for tool in ["tdeny", "err"] {
+                let c = one(available(FLOOR, TenantPart::Evaluated), TenantMode::Off, on, tool);
+                assert_eq!(c.decision, Decision::Allow, "Evaluated {tool} {on:?}");
+                assert_eq!(c.verdict.expect("verdict").decision, Effect::Deny, "{tool}");
+            }
+            let c = one(available(FLOOR, TenantPart::Unavailable), TenantMode::Off, on, "ok");
+            assert_eq!(c.decision, Decision::Allow, "Unavailable ok {on:?}");
         }
         // Available + tenant Unavailable, not floor-denied.
         let rows = [
@@ -222,9 +236,25 @@ mod tests {
 
     #[test]
     fn log_only_never_blocks_a_tenant_deny() {
-        for tool in ["tdeny", "err"] {
+        for (tool, basis) in [("tdeny", PolicyBasis::Policy), ("err", PolicyBasis::ErroredForbid)] {
             let c = one(available(FLOOR, TenantPart::Evaluated), TenantMode::LogOnly, OnUnavailable::Closed, tool);
+            assert_eq!((c.decision, c.basis), (OBSERVE_POLICY, basis), "{tool}");
             assert!(c.decision.is_allow(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn a_floor_errored_forbid_blocks_with_its_own_basis() {
+        const ERRORING_FLOOR: &str = r#"@id("fe") forbid(principal, action == Pgs::Gateway::Action::"ferr", resource) when { context.input.missing == 1 };"#;
+        for tenant in [TenantPart::Evaluated, TenantPart::Off, TenantPart::Unavailable] {
+            for mode in MODES {
+                for on in ONS {
+                    let c = one(available(ERRORING_FLOOR, tenant), mode, on, "ferr");
+                    assert_eq!((c.decision, c.basis), (BLOCK_POLICY, PolicyBasis::ErroredForbid), "{tenant:?} {mode:?} {on:?}");
+                    let v = c.verdict.expect("verdict");
+                    assert!(v.floor_denied && v.errored_forbid);
+                }
+            }
         }
     }
 
