@@ -973,6 +973,7 @@ version = "0.0.0"
 dependencies = [
  "cedar-policy",
  "dogwood-language",
+ "serde_json",
 ]
 
 [[package]]
