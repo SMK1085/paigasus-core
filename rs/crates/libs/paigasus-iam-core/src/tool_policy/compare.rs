@@ -15,7 +15,12 @@ pub fn outputs_identical(a: &CompiledOutput, b: &CompiledOutput) -> bool {
     a.cedar_policies == b.cedar_policies && canonical_json(&a.cedar_schema_json) == canonical_json(&b.cedar_schema_json) && a.conditions == b.conditions
 }
 
-/// Compact JSON with the object keys in sorted order at every level. Array order stays.
+/// Compact JSON with the object keys in sorted order at every level.
+///
+/// Array order is kept on purpose. A change of order only in a schema array (`memberOf`,
+/// `principalTypes`, `resourceTypes`) makes the outputs "different". That is the safe direction
+/// for the re-compile job: it stores one more version, and it never keeps an old version that
+/// differs. Do not sort the arrays.
 pub(crate) fn canonical_json(value: &Value) -> String {
     let mut out = String::new();
     write_canonical(value, &mut out);
@@ -100,5 +105,36 @@ mod tests {
     #[test]
     fn a_changed_schema_value_is_not_identical() {
         assert!(!outputs_identical(&output(3, POLICY, json!({"a": [1, 2]})), &output(3, POLICY, json!({"a": [2, 1]}))));
+    }
+
+    #[test]
+    fn an_order_only_change_in_a_schema_array_is_not_identical() {
+        let a = json!({"Pgs::Gateway": {"actions": {"a": {"appliesTo": {"principalTypes": ["P", "Q"], "resourceTypes": ["R"]}}}}});
+        let b = json!({"Pgs::Gateway": {"actions": {"a": {"appliesTo": {"principalTypes": ["Q", "P"], "resourceTypes": ["R"]}}}}});
+        assert!(!outputs_identical(&output(3, POLICY, a), &output(3, POLICY, b)));
+    }
+
+    #[test]
+    fn a_change_in_condition_order_is_not_identical() {
+        let base = output(3, POLICY, json!({}));
+        let mut second = base.conditions[0].clone();
+        second.slot = "p_rate_1__temporal_0".into();
+        let mut a = base.clone();
+        a.conditions.push(second);
+        let mut b = a.clone();
+        b.conditions.reverse();
+        assert!(outputs_identical(&a, &a.clone()), "the control");
+        assert!(!outputs_identical(&a, &b));
+    }
+
+    #[test]
+    fn a_change_in_only_scope_window_or_slot_is_not_identical() {
+        let base = output(3, POLICY, json!({}));
+        let changes: [fn(&mut HistoryCondition); 3] = [|c| c.scope = Scope::Principal, |c| c.window_ms = 60_001, |c| c.slot = "p_rate_9__temporal_0".into()];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut other = base.clone();
+            change(&mut other.conditions[0]);
+            assert!(!outputs_identical(&base, &other), "change {i} counts as identical");
+        }
     }
 }

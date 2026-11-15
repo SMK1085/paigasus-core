@@ -36,6 +36,17 @@ pub fn check_compiled(kind: SetKind, out: &CompiledOutput) -> Result<(), Vec<Rej
         Schema::from_json_value(out.cedar_schema_json.clone()).map_err(|error| vec![rejection(None, REASON_INVALID, format!("the compiled schema does not load under cedar 4.14: {error}"))])?;
 
     let mut rejections = Vec::new();
+    // The compiler writes static policies only (Dogwood refuses a non-static policy). A
+    // template in the text is a defect, and the floor effect rule below reads only
+    // `policies()`, so a `permit` template would pass it. Each template is invalid.
+    for template in policies.templates() {
+        let id = template.annotation("id").map(str::to_owned);
+        let message = format!(
+            "the compiled Cedar holds the template {:?}; only static policies are allowed",
+            id.as_deref().unwrap_or(template.id().as_ref())
+        );
+        rejections.push(rejection(id, REASON_INVALID, message));
+    }
     let result = Validator::new(schema).validate(&policies, ValidationMode::Strict);
     for error in result.validation_errors() {
         rejections.push(rejection(source_id(&policies, error.policy_id()), REASON_INVALID, format!("Cedar 4.14 validation: {error}")));
@@ -145,9 +156,35 @@ mod tests {
     #[test]
     fn text_or_a_schema_that_does_not_parse_is_invalid() {
         let rejections = check_compiled(SetKind::Tenant, &out("permit(", base_schema_json())).expect_err("bad text fails");
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
         assert_eq!(rejections[0].reason, REASON_INVALID);
+        assert_eq!(rejections[0].policy_id, None);
         let rejections = check_compiled(SetKind::Tenant, &out("", json!({"Pgs::Gateway": {"entityTypes": 5}}))).expect_err("a bad schema fails");
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
         assert_eq!(rejections[0].reason, REASON_INVALID);
+        assert_eq!(rejections[0].policy_id, None);
+    }
+
+    #[test]
+    fn a_floor_permit_template_is_invalid() {
+        let policies = "@id(\"floor-deny\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource);\n@id(\"floor-tmpl\")\npermit(principal == ?principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource);";
+        let rejections = check_compiled(SetKind::Floor, &out(policies, base_schema_json())).expect_err("a template fails");
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!(rejections[0].policy_id.as_deref(), Some("floor-tmpl"));
+        assert_eq!(rejections[0].reason, REASON_INVALID);
+    }
+
+    #[test]
+    fn a_tenant_template_is_invalid() {
+        let policies = "@id(\"tmpl\")\nforbid(principal, action == Pgs::Gateway::Action::\"search\", resource == ?resource);";
+        let rejections = check_compiled(SetKind::Tenant, &out(policies, search_schema())).expect_err("a template fails");
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!(rejections[0].policy_id.as_deref(), Some("tmpl"));
+        assert_eq!(rejections[0].reason, REASON_INVALID);
+        // A template with no @id is rejected with no policy id.
+        let anonymous = "forbid(principal == ?principal, action, resource);";
+        let rejections = check_compiled(SetKind::Tenant, &out(anonymous, search_schema())).expect_err("a template fails");
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
         assert_eq!(rejections[0].policy_id, None);
     }
 }
