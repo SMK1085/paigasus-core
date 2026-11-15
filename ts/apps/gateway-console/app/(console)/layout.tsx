@@ -33,7 +33,7 @@ export default async function ConsoleLayout({ children }: { children: ReactNode 
   const nav = buildNavEntries({ iam, gateway, zones });
   return (
     <Providers zone={zone} zones={zones} session={toSessionView(session)}>
-      <OrgSwitcherShell brand={{ label: 'Paigasus AI Gateway', href: `${GATEWAY_BASE_PATH}/overview` }} nav={nav} orgs={switcherOrgs(scopes)}>
+      <OrgSwitcherShell brand={{ label: 'AI Gateway', href: `${GATEWAY_BASE_PATH}/overview` }} nav={nav} orgs={switcherOrgs(scopes)}>
         {children}
       </OrgSwitcherShell>
     </Providers>

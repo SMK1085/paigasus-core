@@ -36,3 +36,13 @@ rs/crates/libs/paigasus-gateway-core/tests/golden/** -text
 # SMA-770. ci/python-env/run.sh runs under Git bash on the Windows wheel legs. A CRLF checkout of
 # any shell script breaks bash, so every .sh file keeps LF.
 *.sh text eol=lf
+#
+# SMA-773. Image files are binary. `repo:affected-smoke`'s A14 scan (ci/affected-graph/
+# python_env_ban.py, guard G4) reads every tracked file as UTF-8 and stops with rc 2 on one that is
+# not, unless git marks it `binary`. The console favicons were the first tracked images.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary

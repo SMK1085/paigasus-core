@@ -3,8 +3,7 @@
 
 import type { ReactElement, ReactNode } from 'react';
 import { useZone } from '../zone/context';
-import { ZoneLink } from '../zone/zone-link';
-import type { Brand } from './app-shell';
+import { BrandLink, type Brand } from './brand-link';
 import { MAIN_ID, SkipLink } from './skip-link';
 
 export type PublicShellProps = {
@@ -27,9 +26,7 @@ export function PublicShell({ brand, children }: PublicShellProps): ReactElement
     <>
       <SkipLink />
       <header className="flex items-center gap-4 border-b border-border bg-background px-4 py-2">
-        <ZoneLink href={brand.href} className="font-semibold">
-          {brand.label}
-        </ZoneLink>
+        <BrandLink brand={brand} />
         <a href={`${basePath}/auth/login`} className="ml-auto text-sm hover:underline">
           Sign in
         </a>
