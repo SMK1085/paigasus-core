@@ -1061,6 +1061,40 @@ mod tests {
         assert_eq!(h.repo.catalog(h.org).await.unwrap().len(), 1);
     }
 
+    /// The catalog side of the race: a save stores a version between the coupling compile and
+    /// the lock. The catalog write must not commit against the old live version.
+    #[tokio::test]
+    async fn a_save_during_a_catalog_write_with_a_live_set_conflicts() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let (writes, audits) = (h.repo.writes(), h.audit.0.lock().unwrap().len());
+        h.repo.change_before_next_lock(ConcurrentChange::LiveVersion);
+        assert_eq!(
+            h.svc.put_tool(&h.actor, h.org, "search", ToolKind::Function, Some(search_schema()), 0).await.unwrap_err(),
+            TenancyError::ToolPolicyVersionConflict
+        );
+        assert_eq!(h.compiler.calls(), 2, "the coupling compile ran before the lock");
+        assert_eq!((h.repo.writes() - writes, h.audit.0.lock().unwrap().len() - audits, h.uow.commits()), (0, 0, 1));
+        assert!(h.repo.catalog(h.org).await.unwrap().is_empty());
+    }
+
+    /// A compiler upgrade between a save and a catalog write: the running generation moves past
+    /// the live version's, so the catalog write is recompile-pending until the set is saved again.
+    #[tokio::test]
+    async fn a_compiler_generation_change_makes_catalog_writes_recompile_pending() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        h.compiler.set_generation(2);
+        assert_eq!(
+            h.svc.put_tool(&h.actor, h.org, "search", ToolKind::Function, None, 0).await.unwrap_err(),
+            TenancyError::ToolPolicyRecompilePending
+        );
+        // A byte-identical save is not a no-op at a new generation: it stores version 2.
+        let v = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 1).await);
+        assert_eq!((v.version, v.compiler_generation), (2, 2));
+        accepted(h.svc.put_tool(&h.actor, h.org, "search", ToolKind::Function, None, 0).await);
+    }
+
     #[tokio::test]
     async fn every_mutation_writes_exactly_one_audit_entry() {
         let doc = json!([{"type": "function", "name": "a"}]);

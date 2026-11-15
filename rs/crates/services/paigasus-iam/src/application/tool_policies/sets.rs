@@ -242,13 +242,28 @@ fn predicate_from_pb(p: Option<pb::HistoryPredicate>) -> Result<Predicate, Tenan
 }
 
 /// Adds the `dropped_fields` reason to a rejection whose message names a dropped path of a
-/// catalog tool (spec section 4.3). The path must appear as a whole word, so `price` does not
-/// match `unit_price`. A tenant reads why the field is not available, not only that it is missing.
+/// catalog tool (spec section 4.3). A tenant reads why the field is not available, not only that
+/// it is missing.
+///
+/// A dropped path is dotted (`a.b`), and a Cedar message often names only the leaf attribute
+/// (`b`). So the full path is matched first, and then the leaf. Each match is on a whole word, so
+/// `price` does not match `unit_price`.
+///
+/// The leaf match runs only when the leaf is unambiguous in that tool: no attribute of the mapped
+/// input type (at any depth) has the same name, and no other dropped path of the tool ends in it.
+/// Otherwise a message about a field that exists, for example a top-level `price` next to a
+/// dropped `order.price`, would get a wrong note. A wrong note misleads the tenant; a missing note
+/// only leaves the plain Cedar message. So an ambiguous leaf adds no note, and only a full-path
+/// match can add one.
 pub(crate) fn add_dropped_field_reasons(rejection: &mut ToolPolicyRejection, catalog: &[ToolEntry]) {
     let mut notes = Vec::new();
     for tool in catalog {
+        let mut mapped = std::collections::BTreeSet::new();
+        attribute_names(&tool.cedar_input_type, &mut mapped);
         for dropped in &tool.dropped_fields {
-            if names_path(&rejection.message, &dropped.path) {
+            let leaf = dropped.path.rsplit('.').next().unwrap_or(&dropped.path);
+            let leaf_is_unique = leaf != dropped.path && !mapped.contains(leaf) && !tool.dropped_fields.iter().any(|other| other.path != dropped.path && other.path.rsplit('.').next() == Some(leaf));
+            if names_path(&rejection.message, &dropped.path) || (leaf_is_unique && names_path(&rejection.message, leaf)) {
                 notes.push(format!("the field `{}` of the tool `{}` is not in the schema: {}", dropped.path, tool.name.display, dropped.reason));
             }
         }
@@ -256,6 +271,19 @@ pub(crate) fn add_dropped_field_reasons(rejection: &mut ToolPolicyRejection, cat
     for note in notes {
         rejection.message.push_str("; ");
         rejection.message.push_str(&note);
+    }
+}
+
+/// Every attribute name of a Cedar JSON type, at any depth (records and set elements).
+fn attribute_names(ty: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+    if let Some(attributes) = ty.get("attributes").and_then(serde_json::Value::as_object) {
+        for (name, inner) in attributes {
+            out.insert(name.clone());
+            attribute_names(inner, out);
+        }
+    }
+    if let Some(element) = ty.get("element") {
+        attribute_names(element, out);
     }
 }
 
@@ -410,5 +438,40 @@ mod tests {
         let mut miss = ToolPolicyRejection::new(RejectionReason::PolicyInvalid, "attribute `unit_price` not found");
         add_dropped_field_reasons(&mut miss, &[tool]);
         assert_eq!(miss.message, "attribute `unit_price` not found");
+    }
+
+    fn order_tool(properties: serde_json::Value) -> ToolEntry {
+        build_manual("orders", ToolKind::Function, Some(json!({"type": "object", "properties": properties})), &CatalogLimits::default()).unwrap()
+    }
+
+    #[test]
+    fn a_nested_drop_is_named_when_the_message_names_only_the_leaf() {
+        let tool = order_tool(json!({"order": {"type": "object", "properties": {"id": {"type": "string"}, "total": {"type": "number"}}}}));
+        assert_eq!(tool.dropped_fields.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(), vec!["order.total"]);
+        let mut leaf_only = ToolPolicyRejection::new(RejectionReason::PolicyInvalid, "attribute `total` on the record is not found");
+        add_dropped_field_reasons(&mut leaf_only, std::slice::from_ref(&tool));
+        assert!(leaf_only.message.contains("the field `order.total` of the tool `orders` is not in the schema"), "{}", leaf_only.message);
+        // The full path also matches, and adds one note, not two.
+        let mut full = ToolPolicyRejection::new(RejectionReason::PolicyInvalid, "context.input.order.total is not found");
+        add_dropped_field_reasons(&mut full, &[tool]);
+        assert_eq!(full.message.matches("is not in the schema").count(), 1, "{}", full.message);
+    }
+
+    #[test]
+    fn a_leaf_that_is_also_a_mapped_field_adds_no_note() {
+        // `total` is a mapped top-level field AND the leaf of the dropped `order.total`. A message
+        // that names `total` may be about the mapped field, so no note is added (see the doc).
+        let tool = order_tool(json!({
+            "total": {"type": "integer"},
+            "order": {"type": "object", "properties": {"total": {"type": "number"}}}
+        }));
+        assert_eq!(tool.dropped_fields.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(), vec!["order.total"]);
+        let mut ambiguous = ToolPolicyRejection::new(RejectionReason::PolicyInvalid, "attribute `total` has the wrong type");
+        add_dropped_field_reasons(&mut ambiguous, std::slice::from_ref(&tool));
+        assert_eq!(ambiguous.message, "attribute `total` has the wrong type");
+        // The full path still names the drop.
+        let mut full = ToolPolicyRejection::new(RejectionReason::PolicyInvalid, "order.total is not found");
+        add_dropped_field_reasons(&mut full, &[tool]);
+        assert!(full.message.contains("the field `order.total`"), "{}", full.message);
     }
 }
