@@ -37,13 +37,15 @@ pub struct Verdict {
 }
 
 impl Verdict {
-    fn deny() -> Self {
+    /// The request cannot be evaluated, so the floor was not evaluated. Treat it as floor-denied,
+    /// so that the floor stays enforced in every tenant mode (D33).
+    fn unevaluable() -> Self {
         Self {
             decision: Effect::Deny,
             determining: Vec::new(),
             errored: Vec::new(),
-            errored_forbid: false,
-            floor_denied: false,
+            errored_forbid: true,
+            floor_denied: true,
         }
     }
 }
@@ -104,22 +106,27 @@ fn sorted(mut refs: Vec<PolicyRef>) -> Vec<PolicyRef> {
 
 /// Decide one tool call. Pure: no I/O, no clock, no random numbers, no global state.
 ///
-/// A request that Cedar cannot build (an entity type in the facts that is not a valid name) is
-/// a plain `Deny` that no floor policy decided.
+/// A request that Cedar cannot build (an entity type in the facts that is not a valid name)
+/// cannot be evaluated, so it is treated as floor-denied: `Deny` with `floor_denied` and
+/// `errored_forbid` true.
 #[must_use]
 pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Verdict {
     let normalised = normalise(&call.name);
     let (action, entities) = action_entity(policies, &normalised);
     let org = facts.org.as_hyphenated().to_string();
     let (Some(principal), Some(resource)) = (uid(&facts.principal.entity_type, &facts.principal.entity_id), uid(RESOURCE_TYPE, &org)) else {
-        return Verdict::deny();
+        return Verdict::unevaluable();
     };
     let Ok(request) = Request::new(principal, action, resource, context(Some(call), facts, findings), None) else {
-        return Verdict::deny();
+        return Verdict::unevaluable();
     };
     let response = Authorizer::new().is_authorized(&request, policies.set(), &entities);
     let diagnostics = response.diagnostics();
-    let lookup = |id: &PolicyId| policies.origin(id).cloned();
+    let lookup = |id: &PolicyId| {
+        let origin = policies.origin(id).cloned();
+        debug_assert!(origin.is_some(), "every merged policy id has an origin");
+        origin
+    };
     let determining = sorted(diagnostics.reason().filter_map(lookup).collect());
     let errored_ids: Vec<&PolicyId> = diagnostics
         .errors()
@@ -130,6 +137,7 @@ pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policie
     let errored_forbid = errored_ids.iter().any(|id| policies.set().policy(id).is_some_and(|p| p.effect() == cedar_policy::Effect::Forbid));
     let errored = sorted(errored_ids.into_iter().filter_map(lookup).collect());
     let decision = if response.decision() == Decision::Allow && !errored_forbid { Effect::Allow } else { Effect::Deny };
+    // Floor policies are forbids only: `compile_floor` rejects a floor permit.
     let floor_denied = decision == Effect::Deny && determining.iter().chain(&errored).any(|r| r.set == PolicyOrigin::Floor);
     Verdict {
         decision,

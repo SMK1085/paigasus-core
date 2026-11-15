@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, PolicyOrigin, PolicyRef, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, UNPARSED_ARGUMENTS, decide};
-use paigasus_kernel::{Prn, to_cedar_uid};
+use paigasus_kernel::{CedarUid, Prn, to_cedar_uid};
 
 const ORG: &str = "0190a100-0000-7000-8000-0000000000aa";
 
@@ -187,4 +187,20 @@ fn the_name_is_normalised_before_the_action_lookup() {
     let tenant = r#"@id("r") permit(principal, action == Pgs::Gateway::Action::"read_file", resource);"#;
     let p = policies("", tenant, &["Read_File"]);
     assert_eq!(decide(&call(" READ_FILE ", "{}"), &facts(), &Findings::new(), &p).decision, Effect::Allow);
+}
+
+#[test]
+fn a_request_that_cannot_be_built_is_floor_denied() {
+    let bad = Facts::new(
+        CedarUid {
+            entity_type: "not a type".into(),
+            entity_id: "x".into(),
+        },
+        ORG.parse().expect("uuid"),
+        RequestInfo::new("s", "responses", "m"),
+        SessionInfo::placeholder(),
+    );
+    let p = policies(BIG, ALL, &["pay"]);
+    let v = decide(&call("pay", "{}"), &bad, &Findings::new(), &p);
+    assert_eq!((v.decision, v.floor_denied, v.errored_forbid), (Effect::Deny, true, true));
 }
