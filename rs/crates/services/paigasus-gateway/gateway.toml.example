@@ -163,8 +163,21 @@
 # max_record_bytes  = 16777216   # env GATEWAY_RESPONSES__MAX_RECORD_BYTES; one SSE record
 # max_held_bytes    = 33554432   # env GATEWAY_RESPONSES__MAX_HELD_BYTES; all held bytes of one stream
 #   # Operator notes (spec 9):
-#   # 1. With store = true, OpenAI keeps the output, including a blocked call, for its
-#   #    retention period. The gateway does not set store = false.
-#   # 2. Tool calls that OpenAI runs itself (hosted execution) cannot be held by the gateway.
-#   # 3. A request that reads or writes stored state is refused with 400
-#   #    "responses-stateful-not-supported".
+#   # 1. The gateway does not rewrite "store". With store = true (the OpenAI default),
+#   #    OpenAI keeps the output, a blocked call included, for its retention period.
+#   # 2. Hosted execution: OpenAI runs a hosted "shell_call" or a server "tool_search_call"
+#   #    itself, even when the report says "block". The gateway cannot hold it, because the
+#   #    item class is fixed before these fields are known. The notice replaces the item for
+#   #    the client only. The decision log must not count such a block as a prevented action.
+#   # 3. With interception on, the route refuses with 400 "responses-stateful-not-supported"
+#   #    a request that asks for state on the server. These are: a non-null
+#   #    "previous_response_id", "conversation" or "prompt", and an "item_reference" input
+#   #    item. An input item with no string "type" and no string "role" counts as an
+#   #    "item_reference". "background": true is refused in both modes.
+#   # 4. With interception on, the route refuses a request body that has a duplicate JSON key
+#   #    at any depth (400, before admission). A duplicate "background" key is refused in
+#   #    both modes.
+#   # 5. Observe mode ("on_failure" = "allow"): when one item is truncated, the response
+#   #    switches to pass-through. A completed call that the policy blocks, in the same
+#   #    response, can then reach the client. A stream and a body behave the same.
+#   # 6. Rollback: set "enabled" = false. The route then answers 404.

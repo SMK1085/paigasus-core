@@ -744,3 +744,28 @@ decided value as the `done` item and keeps every call surface equal to it.
   to `apply_patch_call`, with the diff rule in R14.
 - A5. The openai-python `ResponseStream` model no longer counts `output_item.added` items as
   calls (§ 10.1). Under A2, an `added` item is a partial view by design.
+
+## 16. As built
+
+Where the build differs from this spec or adds to it. Facts come from the build ledger.
+
+- F7. A non-stream client-run item that is not `completed` gets the truncated rewrite under
+  `block` (code `Truncated`). It does not get a 502. A malformed body under `block` is still a 502.
+- Under `on_failure = allow`, a non-stream body with a truncated item goes through unchanged.
+- Observe mode, mixed case: one truncated item switches the response to pass-through. A
+  completed call that the policy blocks in the same response can reach the client. Stream and
+  body behave the same.
+- Stateful refusal (D3): an `item_reference` input item is refused. An input item with no
+  string `type` and no string `role` counts as one. `background: true` is refused in both modes.
+- Duplicate keys: with interception on, a body with a duplicate JSON key at any depth is
+  refused with 400 before admission. A duplicate `background` key is refused in both modes.
+- Request estimate (D14): the estimate counts the text of every replayed role. Non-string
+  fields count by their JSON length. The 32768 fallback applies only to a non-object item or an
+  untyped part.
+- Stream switch: Responses streaming uses the shared stream switch of chat. There is no
+  separate Responses key.
+- Numbers (T6c): a rewritten terminal event or body re-serializes lossy numbers in non-client-run
+  items and data subtrees. So "no other field changes" in § 6.5 is not exact for these numbers.
+- Config: `max_record_bytes` and `max_held_bytes` are keys of `[responses]`.
+- Operator notes are in `gateway.toml.example`, not a README. The gateway service has no README,
+  and the `paigasus-gateway-core` README has no list of formats.
