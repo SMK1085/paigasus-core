@@ -39,8 +39,12 @@ from the same function. An unresolvable member pattern is `InconclusiveError`, w
 literal path, and no entry is at or under an excluded path. Then the exclusion removes no member,
 and the member list is used unchanged. This is the case of the policy compiler workspace
 `tools/paigasus-policy-compiler`, which is excluded and is not a member. Every other `exclude` is
-refused rather than ignored: an exclude that covers a member, and any exclude beside a glob member.
-Reading those as absent would make the skip permanently unreachable in silence.
+refused rather than ignored: an exclude that covers a member, an exclude beside a glob member, and an
+exclude entry with a `..` path component. Cargo's rule, measured on cargo 1.95.0: an explicit member
+is never excluded, and a directory that only a glob member matches is removed. So the first refusal
+is conservative (the member set would be correct, but the two lists contradict each other), and the
+second is a real shrink that this function does not compute. Reading it as absent would make the
+skip permanently unreachable in silence.
 
 ## Fail-safe direction
 
@@ -97,8 +101,8 @@ refuses to guess and builds instead.
 `run.sh` has four modes, and one of them is required:
 
 - `--self-test` — runs `release_plan.py --self-test` in-process: the pure `decide()` fixture
-  table (nine rows) plus forty collection-layer rows (SMA-688 raised this from fifteen;
-  SMA-708 added one; SMA-774 added two, for the two `[workspace] exclude` branches).
+  table (nine rows) plus forty-one collection-layer rows (SMA-688 raised this from fifteen;
+  SMA-708 added one; SMA-774 added three, for the `[workspace] exclude` branches).
   Most collection rows build a throwaway tree under `tempfile.mkdtemp()` to exercise a path the
   pure `decide()` fixture cannot reach. The first fifteen rows are the original set. The original
   six: a missing `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override,

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SMA-774 — cargo-deny policy for the policy compiler workspace (spec 2026-11-15
-# iam-tool-policy-sets, section 5.1). A copy of rs/deny.toml with the additions marked
-# "SMA-774" below. Keep the two files in step: a change to the shared policy goes into both.
+# This file is rs/deny.toml with only the entries that apply to this graph, plus the SMA-774 additions.
+# SMA-774: the policy compiler workspace (spec 2026-11-15 iam-tool-policy-sets, section 5.1).
 [graph]
 all-features = true   # see the full dep surface (service tokio/reqwest features, etc.)
 
@@ -10,30 +9,6 @@ db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "deny"             # reject crates yanked from crates.io
 # vulnerability advisories are deny-by-default in v2 — no separate key needed
 unmaintained = "workspace"  # police crates we pull in, not every deep transitive (noise control)
-ignore = [
-  # RUSTSEC-2023-0071 ("Marvin Attack"): the `rsa` crate's PKCS#1v1.5 implementation leaks
-  # PRIVATE-key timing information over the network during decrypt/sign. Pulled in
-  # transitively via jsonwebtoken's `rust_crypto` CryptoProvider feature (SMA-443 Task 7's
-  # OIDC validator — `aws_lc_rs`, the other provider choice, needs a cmake/C toolchain this
-  # repo's build environments don't carry). `paigasus-iam` only ever uses RSA in
-  # SIGNATURE-VERIFICATION mode: `DecodingKey::from_jwk` builds a key from an IdP's
-  # published JWKS PUBLIC (n, e) components, and the validator never holds or exercises an
-  # RSA private key — the vulnerable decrypt/sign timing path is unreached. No patched
-  # `rsa` release exists upstream ("No safe upgrade is available").
-  "RUSTSEC-2023-0071",
-  # RUSTSEC-2026-0387: timing side channels in `crypto-bigint` operations on SECRET integers,
-  # patched only in >=0.7.6. `crypto-bigint` 0.5.5 comes in through elliptic-curve 0.13 ->
-  # p256/p384 0.13 -> jsonwebtoken 11 with the `rust_crypto` provider (paigasus-iam).
-  # jsonwebtoken 11.1.0 is the newest release, so no lock update can clear it. The `aws_lc_rs`
-  # provider needs a cmake/C toolchain the build environments do not carry (same reason as
-  # RUSTSEC-2023-0071). The production validator and the DPoP check accept RS256 and ES256.
-  # Their EC path only VERIFIES signatures with public JWKS / DPoP key material, so no secret
-  # integer reaches crypto-bigint in the shipped service. Private-key operations
-  # (`EncodingKey`, `p256::SecretKey`) occur only in `#[cfg(test)]` signing fixtures.
-  # Remove this entry only when the locked graph has no affected crypto-bigint version and
-  # `cargo deny check` passes without it. A new jsonwebtoken release alone is not enough.
-  "RUSTSEC-2026-0387",
-]
 
 [licenses]
 allow = [                   # v2: anything NOT listed is denied
@@ -51,15 +26,6 @@ allow = [                   # v2: anything NOT listed is denied
 confidence-threshold = 0.8
 unused-allowed-license = "allow"   # don't warn on allowlist entries no crate matches yet (near-empty lock)
 exceptions = [
-  # sea-orm's runtime-tokio-rustls -> sqlx-core pulls webpki-roots (the embedded Mozilla
-  # root-CA bundle) for TLS cert validation. Its data license is CDLA-Permissive-2.0 —
-  # a permissive (non-copyleft) data license, not code-copyleft — which predates this repo's
-  # allow-list. Covers both the legacy 0.26.x series and the 1.x it now re-exports from.
-  { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
-  # xxhash-rust is BSL-1.0-only (Boost Software License 1.0: permissive, OSI-approved),
-  # pulled in unconditionally by redis (SMA-443 Task 8's RedisJwksCache). Scoped here
-  # rather than globally allowed so a future BSL-1.0 dependency is a conscious decision.
-  { name = "xxhash-rust", allow = ["BSL-1.0"] },
   # SMA-774 (spec D3): tiny-keccak is CC0-1.0 (a public-domain dedication: permissive, no
   # copyleft). It comes in through `rhai`, which is a mandatory dependency of Dogwood. Scoped
   # here rather than globally allowed so a future CC0-1.0 dependency is a conscious decision.

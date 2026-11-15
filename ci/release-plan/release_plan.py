@@ -189,17 +189,23 @@ def workspace_members(rs_root: Path) -> list[str]:
             not all(isinstance(m, str) and m for m in members):
         raise InconclusiveError(f"{rs_root}/Cargo.toml has no usable [workspace] members list "
                            f"(got {members!r})")
-    # `exclude` SHRINKS the member set. This function models exactly ONE case of it (SMA-774):
+    # `exclude` can SHRINK the member set. This function models exactly ONE case of it (SMA-774):
     # every `members` entry is a literal path (SMA-663) and no entry is at or under an excluded
     # path. Then the exclusion removes nothing from the member set, so `members` is returned
     # unchanged. The policy compiler workspace at `tools/paigasus-policy-compiler` is that case:
-    # it is excluded and it is not a member. Every other shape is still refused. A glob member
-    # can match an excluded directory, and a literal member at or under an excluded path is
-    # removed by cargo. Reading either one as "no effect" would over-derive — demanding a tag for
-    # a non-member, which only ever BUILDS, so it is fail-safe at runtime — but it would also make
-    # the skip permanently unreachable, silently. Refusing loudly is the conscious-re-baseline
-    # direction this repo prefers: at runtime it builds, and under --assert it exits 3 and reds
-    # check 11.
+    # it is excluded and it is not a member. Every other shape is still refused.
+    # Cargo's rule, MEASURED on cargo 1.95.0 (SMA-774 review): a package is excluded only when it
+    # is NOT an explicit member. A literal member at or under an excluded path stays a member
+    # (`members = ["crates/a"]` with `exclude = ["crates"]` or `["crates/a"]`: `a` is still in
+    # `workspace_members`). A directory that only a GLOB member matches IS removed
+    # (`members = ["crates/*"]`, `exclude = ["crates/b"]`: only `a` remains). So the refusal of a
+    # covered literal member is conservative: that member set would be correct, but a config that
+    # names one path in both lists is contradictory and is refused for a re-baseline. The glob
+    # case is a real shrink, which this function does not compute. Reading it as "no effect"
+    # would over-derive — demanding a tag for a non-member, which only ever BUILDS, so it is
+    # fail-safe at runtime — but it would also make the skip permanently unreachable, silently.
+    # Refusing loudly is the conscious-re-baseline direction this repo prefers: at runtime it
+    # builds, and under --assert it exits 3 and reds check 11.
     excluded = ws.get("exclude")
     if excluded is not None:
         if not isinstance(excluded, list) or \
@@ -224,6 +230,13 @@ def _refuse_effective_exclusion(rs_root: Path, members: list[str], excluded: lis
     to an excluded path or lies under one. Anything else is the shape workspace_members() does
     not model, and it is refused with the old marker text.
     """
+    # A `..` component can name a directory outside the path prefix that the test below compares,
+    # so the "no member under it" proof does not hold. Fail-safe: refuse it.
+    dotted = [ex for ex in excluded if ".." in ex.split("/")]
+    if dotted:
+        raise InconclusiveError(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r} "
+                           f"with a `..` path component in {dotted!r}; workspace_members() does "
+                           "not model member exclusion")
     globbed = [m for m in members if any(c in m for c in "*?[")]
     if globbed:
         raise InconclusiveError(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r} "
@@ -762,6 +775,30 @@ def _exclude_of_a_member_is_inconclusive() -> str | None:
             return f"an exclude that only shares a string prefix with a member was refused: {exc!r}"
     finally:
         shutil.rmtree(tmp)
+    return None
+
+
+def _exclude_with_dotdot_is_inconclusive() -> str | None:
+    """SMA-774 review: an `exclude` entry with a `..` path component is refused.
+
+    `tools/../crates/libs/a` names the member `crates/libs/a`, but the string-prefix test does not
+    see that. Mutation: remove the `..` check, and this row reds.
+    """
+    for exclude in (["tools/../crates/libs/a"], [".."], ["../rs/crates"]):
+        tmp = tempfile.mkdtemp()
+        try:
+            rs_root = _exclude_tree(tmp, ["crates/libs/a"], exclude)
+            try:
+                releasable_packages(rs_root)
+            except InconclusiveError as exc:
+                if "a `..` path component" in str(exc) and \
+                        "does not model member exclusion" in str(exc):
+                    continue
+                return (f"exclude={exclude!r}: InconclusiveError for the wrong reason: {exc!r} "
+                        f"(expected a message naming 'a `..` path component')")
+            return f"exclude={exclude!r}: releasable_packages did not refuse it"
+        finally:
+            shutil.rmtree(tmp)
     return None
 
 
@@ -1804,6 +1841,8 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
      _exclude_of_a_non_member_is_modelled),
     ("SMA-774 an exclude that covers a member, or beside a glob member, is inconclusive",
      _exclude_of_a_member_is_inconclusive),
+    ("SMA-774 an exclude with a `..` path component is inconclusive",
+     _exclude_with_dotdot_is_inconclusive),
     ("a malformed release-plz.toml makes --assert exit 3, not 1",
      _malformed_config_asserts_three),
     ("a non-table [workspace] is inconclusive", _workspace_not_a_table_is_inconclusive),
@@ -1897,8 +1936,8 @@ def self_test() -> int:
     # The floor tracks the table (SMA-709). When the row count changes, in either direction, set
     # the floor to one below `--collection-count`. Change the twin in ci/actionlint/run.sh
     # check 11 in the same commit.
-    if len(COLLECTION_ROWS) < 39:
-        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 39 — "
+    if len(COLLECTION_ROWS) < 40:
+        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 40 — "
               "something emptied or gutted the collection-layer table; if the removal is "
               "intended, lower both floors in the same commit (SMA-709)", file=sys.stderr)
         rc = 3

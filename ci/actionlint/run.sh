@@ -4678,7 +4678,7 @@ release_plan_self_test() {
     ci/release-plan/release_plan.py --collection-count)" \
     || infra "check 11: release_plan.py --collection-count failed"
   case "$c" in ''|*[!0-9]*) infra "check 11: --collection-count printed '$c', expected an integer" ;; esac
-  [ "$c" -ge 39 ] || infra "check 11: release_plan.py reports $c collection rows, expected at least 39; if the removal is intended, lower both floors in the same commit (SMA-709)"
+  [ "$c" -ge 40 ] || infra "check 11: release_plan.py reports $c collection rows, expected at least 40; if the removal is intended, lower both floors in the same commit (SMA-709)"
 
   release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken
       verdict. The release-plan decision is not deciding what it is documented to decide."; rc=1; }
