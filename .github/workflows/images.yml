@@ -32,6 +32,10 @@ on:
     paths:
       - 'rs/Cargo.lock'
       - 'rs/Cargo.toml'
+      # SMA-774: the policy compiler is a second cargo workspace, and the IAM image builds it.
+      # Only its lock and manifest are listed, for the SMA-520 reason above.
+      - 'rs/tools/paigasus-policy-compiler/Cargo.lock'
+      - 'rs/tools/paigasus-policy-compiler/Cargo.toml'
       - 'rs/rust-toolchain.toml'
       - 'rs/Dockerfile'
       - 'rs/.dockerignore'

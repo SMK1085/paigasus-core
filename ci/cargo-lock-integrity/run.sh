@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # SMA-601 — assert that rs/Cargo.lock satisfies every workspace manifest.
+# SMA-774 — and that rs/tools/paigasus-policy-compiler/Cargo.lock satisfies the manifest of that
+# SECOND cargo workspace. `rs/Cargo.toml` excludes it, so `cargo metadata` from `rs/` never
+# reads its lock (spec 2026-11-15 iam-tool-policy-sets, section 5.1). Dependabot has a cargo
+# entry for it too, so it can ship a truncated lock in the same way.
 #
 # WHY THIS IS A ci.yml STEP AND NOT A repo:* MOON TASK. Dependabot cargo PRs repeatedly ship a
 # truncated lock (PRs 83, 96, 140, 149, 181). `moon ci` was green on all of them because an
@@ -19,6 +23,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RS_DIR="$REPO_ROOT/rs"
+COMPILER_REL="rs/tools/paigasus-policy-compiler"
+COMPILER_DIR="$REPO_ROOT/$COMPILER_REL"
 
 # cargo has no distinct exit code for "the registry is down" vs "your lock is broken", so
 # classify on stderr. Mirrors ci/publish-metadata/run.sh:589-604. Returns 1 for a real
@@ -54,11 +60,11 @@ assert_lock_satisfies_manifests() { # $1 workspace dir
   return "$rc"
 }
 
-report() { # $1 rc
+report() { # $1 rc  $2 workspace dir, repository-relative (rs or the compiler)
   case "$1" in
-    0) echo "cargo-lock-integrity: rs/Cargo.lock satisfies every workspace manifest" ;;
-    1) echo "::error::rs/Cargo.lock does not satisfy every workspace manifest. Two causes give this same result. The common one is a dependency PR that shipped a TRUNCATED lock (see SMA-601): repair it against the merge-base rather than force-pushing, and compare package counts with: grep -c '^\\[\\[package\\]\\]' rs/Cargo.lock. The other is an rs/Cargo.toml edit committed without the regenerated lock: run 'cargo metadata' in rs/ and commit the updated rs/Cargo.lock." >&2 ;;
-    2) echo "::error::cargo-lock-integrity ABORTED: infrastructure error (rc=2). The gate asserted NOTHING — this is not a green result." >&2 ;;
+    0) echo "cargo-lock-integrity: $2/Cargo.lock satisfies every workspace manifest" ;;
+    1) echo "::error::$2/Cargo.lock does not satisfy every workspace manifest. Two causes give this same result. The common one is a dependency PR that shipped a TRUNCATED lock (see SMA-601): repair it against the merge-base rather than force-pushing, and compare package counts with: grep -c '^\\[\\[package\\]\\]' $2/Cargo.lock. The other is a $2/Cargo.toml edit committed without the regenerated lock: run 'cargo metadata' in $2/ and commit the updated $2/Cargo.lock." >&2 ;;
+    2) echo "::error::cargo-lock-integrity ABORTED for $2: infrastructure error (rc=2). The gate asserted NOTHING for that lock — this is not a green result." >&2 ;;
   esac
 }
 
@@ -112,17 +118,12 @@ Caused by: spurious network error (3 tries remaining)'
 
 # --negative-control: prove the gate reports RED, through the SAME function the real run calls.
 # A control that skips that call is the SMA-530 "control that actively lies" shape.
-negative_control() {
-  local tmp rc=0
-  tmp="$(mktemp -d)" || return 2
-  # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" RETURN
-  git -C "$REPO_ROOT" archive HEAD rs | tar -x -C "$tmp" || return 2
-  # Delete the FIRST [[package]] block. Name-free on purpose: a hard-coded crate name rots the
-  # day that dependency is dropped, and any missing package is enough to make the lock
-  # inconsistent with the manifests.
-  python3 - "$tmp/rs/Cargo.lock" <<'PY' || return 2
-import re, sys
+# Delete the FIRST [[package]] block of the lock at $1. Name-free on purpose: a hard-coded crate
+# name rots the day that dependency is dropped, and any missing package is enough to make the
+# lock inconsistent with the manifests.
+truncate_lock() { # $1 Cargo.lock path
+  python3 - "$1" <<'PY'
+import sys
 p = sys.argv[1]
 text = open(p).read()
 blocks = text.split("\n[[package]]\n")
@@ -131,6 +132,16 @@ if len(blocks) < 3:
 del blocks[1]
 open(p, "w").write("\n[[package]]\n".join(blocks))
 PY
+}
+
+negative_control() {
+  local tmp rc=0 rc_compiler=0
+  tmp="$(mktemp -d)" || return 2
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  git -C "$REPO_ROOT" archive HEAD rs | tar -x -C "$tmp" || return 2
+  # The rs/ workspace first. Only its lock is mutated here; the compiler lock is still intact.
+  truncate_lock "$tmp/rs/Cargo.lock" || return 2
   assert_lock_satisfies_manifests "$tmp/rs" || rc=$?
   case "$rc" in
     1) echo "cargo-lock-integrity --negative-control: reported red (rc=1) as expected" ;;
@@ -139,10 +150,21 @@ PY
     *) echo "::error::negative control returned rc=$rc, not the expected 1. The control asserted NOTHING." >&2
        return 2 ;;
   esac
+  # SMA-774 — the compiler workspace, through the SAME function the real run calls for it. It is
+  # its own cargo workspace, so the mutated rs/Cargo.lock above does not reach this result.
+  truncate_lock "$tmp/$COMPILER_REL/Cargo.lock" || return 2
+  assert_lock_satisfies_manifests "$tmp/$COMPILER_REL" || rc_compiler=$?
+  case "$rc_compiler" in
+    1) echo "cargo-lock-integrity --negative-control: $COMPILER_REL reported red (rc=1) as expected" ;;
+    0) echo "::error::negative control PASSED on a mutated $COMPILER_REL lock — the gate cannot report red for it." >&2
+       return 1 ;;
+    *) echo "::error::negative control returned rc=$rc_compiler for $COMPILER_REL, not the expected 1. The control asserted NOTHING." >&2
+       return 2 ;;
+  esac
 }
 
 main() {
-  local rc=0
+  local rc=0 rc_compiler=0
   case "${1:-}" in
     --self-test)        self_test; return $? ;;
     --negative-control) negative_control; return $? ;;
@@ -150,8 +172,18 @@ main() {
     *) echo "usage: run.sh [--self-test|--negative-control]" >&2; return 2 ;;
   esac
   assert_lock_satisfies_manifests "$RS_DIR" || rc=$?
-  report "$rc"
-  return "$rc"
+  report "$rc" rs
+  assert_lock_satisfies_manifests "$COMPILER_DIR" || rc_compiler=$?
+  report "$rc_compiler" "$COMPILER_REL"
+  # A real finding (1) in either lock wins over an infrastructure error (2) in the other, so a
+  # registry outage on one workspace cannot hide a truncated lock in the other.
+  if [ "$rc" -eq 1 ] || [ "$rc_compiler" -eq 1 ]; then
+    return 1
+  fi
+  if [ "$rc" -ne 0 ] || [ "$rc_compiler" -ne 0 ]; then
+    return 2
+  fi
+  return 0
 }
 
 main "$@"

@@ -15,7 +15,9 @@ publish = false
 [dependencies]
 # Dogwood parses the temporal policy language and lowers it to Cedar plus history conditions.
 # Pinned to one commit (version 1.1.1), because the lowering output is part of the IAM contract.
-dogwood-language = { git = "https://github.com/dogwood-policy/dogwood", rev = "ff158506cfd9c7871385ed3a87d7435505fd24b1" }
+# The `version` restates what that commit holds. cargo-deny reads a git dependency with no
+# `version` as a wildcard and `deny.toml` sets `wildcards = "deny"`, so it is required (SMA-774).
+dogwood-language = { git = "https://github.com/dogwood-policy/dogwood", rev = "ff158506cfd9c7871385ed3a87d7435505fd24b1", version = "=1.1.1" }
 # Dogwood's lowered output is a `cedar_policy::PolicySet`. The scope proof reads policy
 # annotations from it. Pinned exactly to the version that the Dogwood commit pins (4.11.0).
 cedar-policy = "=4.11.0"

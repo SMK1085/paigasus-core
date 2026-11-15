@@ -9,6 +9,26 @@ plain `ci.yml` step, not a `repo:*` Moon task — see below for why.
 of three outcomes: the lock is consistent, the lock is not consistent, or the check
 could not be completed at all.
 
+## Two workspaces (SMA-774)
+
+Since SMA-774 the gate checks two cargo workspaces, one after the other:
+
+- `rs/`, with `rs/Cargo.lock`.
+- `rs/tools/paigasus-policy-compiler/`, with its own `Cargo.lock`. This is the policy
+  compiler. `rs/Cargo.toml` lists it under `exclude`, so a `cargo metadata` call from `rs/`
+  does not read its lock. Dependabot has a second `cargo` entry for this directory, so a
+  Dependabot PR can ship a truncated compiler lock in the same way.
+
+The real run reports one line for each lock. Its exit code is `1` when either lock fails
+the assertion. A real finding wins over an infrastructure error in the other workspace, so
+a registry outage on one lock cannot hide a truncated lock in the other. The exit code is
+`2` when neither lock fails and at least one check could not complete.
+
+`--negative-control` truncates each lock in turn, in the same temporary copy, and requires
+`rc=1` for each. The two workspaces are separate, so the truncated `rs/Cargo.lock` does not
+change the compiler result. The step in `ci.yml` and its name do not change. Check 8f pins
+them.
+
 ## The three modes, and why `ci.yml` runs all of them
 
 `run.sh` takes `--self-test`, `--negative-control`, or no argument. The `ci.yml` step
