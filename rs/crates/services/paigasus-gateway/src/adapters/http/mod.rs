@@ -16,6 +16,7 @@ pub mod dto;
 pub mod error;
 pub mod interception;
 pub mod pipeline;
+pub mod responses_usage;
 pub mod service_info;
 pub mod usage;
 
