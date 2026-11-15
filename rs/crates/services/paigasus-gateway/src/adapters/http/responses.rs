@@ -89,6 +89,17 @@ fn parse_responses(body: &[u8], interception: bool) -> Result<RequestFacts, Gate
         serde_json::error::Category::Data => GatewayError::InvalidRequestSchema,
         serde_json::error::Category::Syntax | serde_json::error::Category::Eof | serde_json::error::Category::Io => GatewayError::BadRequestBody,
     })?;
+    // Coordinator ruling (fix round 1): a duplicate key must not decide D3 or D4. A duplicate
+    // top-level `background` is refused in both modes (D4). With interception on, a duplicate key
+    // at any depth is refused, because the turn facts and D3 would read the last value and the
+    // upstream may read the first. With interception off the body passes as before.
+    let dups = duplicates(body).ok_or(GatewayError::BadRequestBody)?;
+    if dups.background {
+        return Err(GatewayError::ResponsesStatefulNotSupported { param: "background" });
+    }
+    if interception && dups.any {
+        return Err(GatewayError::InvalidRequestSchema);
+    }
     let dto = ResponsesRequest::deserialize(&value).map_err(|_| GatewayError::InvalidRequestSchema)?;
     if !matches!(dto.input, None | Some(Value::String(_) | Value::Array(_))) {
         return Err(GatewayError::InvalidRequestSchema);
@@ -129,15 +140,89 @@ fn refuse_stateful(dto: &ResponsesRequest, interception: bool) -> Result<(), Gat
 }
 
 /// An `item_reference` input item. Its `type` is optional in the API (openai-python 3.48.0
-/// `ItemReference`: `id` required, `type` `Optional[Literal["item_reference"]]`), so an item with
-/// no `type` (or a `null` one) and no `role` is a reference too. The only other untyped item, the
-/// easy input message, always has a `role`.
+/// `ItemReference`: `id` required, `type` `Optional[Literal["item_reference"]]`). The only other
+/// untyped item, the easy input message, always has a string `role`. So, failing closed, an item
+/// with no string `type` is a reference unless its `role` is a string.
 fn is_item_reference(item: &Value) -> bool {
     let Some(obj) = item.as_object() else { return false };
     match obj.get("type") {
         Some(Value::String(ty)) => ty == "item_reference",
-        None | Some(Value::Null) => !obj.contains_key("role"),
-        Some(_) => false,
+        _ => !matches!(obj.get("role"), Some(Value::String(_))),
+    }
+}
+
+/// The duplicate keys of one request body.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Duplicates {
+    /// Some object, at any depth, has a key twice.
+    any: bool,
+    /// The top-level object has `background` twice (D4).
+    background: bool,
+}
+
+/// Find the duplicate keys of `body`. serde_json keeps the last of two duplicate keys, and an
+/// upstream may keep the first, so the D3 and D4 checks would read a different value than the
+/// upstream does. Keys compare after JSON unescaping (`"a"` and `"a"` are one key). The walk
+/// holds one key set per open object and no values. `None` when the body is not JSON; the caller
+/// has already parsed it, so that does not occur.
+fn duplicates(body: &[u8]) -> Option<Duplicates> {
+    let mut found = Duplicates::default();
+    let mut de = serde_json::Deserializer::from_slice(body);
+    serde::de::DeserializeSeed::deserialize(Walk { found: &mut found, top: true }, &mut de).ok()?;
+    Some(found)
+}
+
+/// One value of the [`duplicates`] walk. `top` is true for the document's own value only.
+struct Walk<'a> {
+    found: &'a mut Duplicates,
+    top: bool,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for Walk<'_> {
+    type Value = ();
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Walk<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E>(self) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while seq.next_element_seed(Walk { found: &mut *self.found, top: false })?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut seen = std::collections::HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if seen.contains(&key) {
+                self.found.any = true;
+                self.found.background |= self.top && key == "background";
+            }
+            map.next_value_seed(Walk { found: &mut *self.found, top: false })?;
+            seen.insert(key);
+        }
+        Ok(())
     }
 }
 
@@ -273,5 +358,72 @@ mod tests {
         assert_eq!((facts.model.as_str(), facts.stream), ("-", false));
         let facts = parse(&json!({"model":"gpt-6","input":"hi","stream":true}), false).expect("a stream body");
         assert_eq!((facts.model.as_str(), facts.stream), ("gpt-6", true));
+    }
+
+    /// The outcome of a raw body: `Ok`, the stateful `param`, or another error.
+    fn outcome(raw: &str, interception: bool) -> Result<(), Result<&'static str, GatewayError>> {
+        match parse_responses(raw.as_bytes(), interception) {
+            Ok(_) => Ok(()),
+            Err(GatewayError::ResponsesStatefulNotSupported { param }) => Err(Ok(param)),
+            Err(e) => Err(Err(e)),
+        }
+    }
+
+    /// Coordinator ruling (fix round 1): serde keeps the last of two duplicate keys, and the
+    /// upstream may keep the first. With interception on, a duplicate key at any depth is a 400
+    /// `InvalidRequestSchema`. With interception off the body passes, except a duplicate
+    /// `background`, which D4 refuses in both modes. The body without the duplicate passes.
+    #[test]
+    fn duplicate_keys_are_refused() {
+        let schema = Err(Err(GatewayError::InvalidRequestSchema));
+        let on_only = [
+            r#"{"input":"hi","previous_response_id":"resp_1","previous_response_id":null}"#,
+            r#"{"input":"hi","previous_response_id":null,"previous_response_id":"resp_1"}"#,
+            r#"{"input":[{"role":"user","content":"hi","content":"x"}]}"#,
+            r#"{"input":[{"role":"user","content":[{"type":"input_text","text":"a","text":"b"}]}]}"#,
+            r#"{"input":"hi","metadata":{"k":1,"k":2}}"#,
+            r#"{"input":"hi","a":1,"a":2}"#,
+        ];
+        for raw in on_only {
+            assert_eq!(outcome(raw, true), schema, "{raw}");
+            assert_eq!(outcome(raw, false), Ok(()), "{raw}: interception off passes the body");
+        }
+        for raw in [
+            r#"{"input":"hi","background":false,"background":false}"#,
+            r#"{"input":"hi","background":true,"background":false}"#,
+            r#"{"input":"hi","background":false,"background":true}"#,
+        ] {
+            for interception in [true, false] {
+                assert_eq!(outcome(raw, interception), Err(Ok("background")), "{raw}, interception {interception}");
+            }
+        }
+        // A `background` key below the top level is not D4.
+        assert_eq!(outcome(r#"{"input":"hi","metadata":{"background":1,"background":2}}"#, false), Ok(()));
+        for raw in [
+            r#"{"input":"hi","previous_response_id":null}"#,
+            r#"{"input":[{"role":"user","content":"hi"}]}"#,
+            r#"{"input":"hi","metadata":{"k":1,"K":2}}"#,
+            r#"{"input":"hi","background":false}"#,
+        ] {
+            assert_eq!(outcome(raw, true), Ok(()), "{raw}");
+        }
+    }
+
+    /// Fix round 1: an input item with no string `type` is a reference unless `role` is a string.
+    #[test]
+    fn an_untyped_item_without_a_string_role_is_a_reference() {
+        for item in [
+            json!({"id":"msg_1","role":null}),
+            json!({"id":"msg_1","role":5}),
+            json!({"type":5,"id":"msg_1"}),
+            json!({"type":null,"id":"msg_1","role":null}),
+        ] {
+            let body = json!({"input":[item]});
+            assert_eq!(refused(&body, true), Some("input"), "{body}");
+        }
+        for item in [json!({"role":"user","content":"hi"}), json!({"type":null,"role":"user","content":"hi"})] {
+            let body = json!({"input":[item]});
+            assert_eq!(refused(&body, true), None, "{body}");
+        }
     }
 }

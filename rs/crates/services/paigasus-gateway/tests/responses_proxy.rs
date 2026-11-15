@@ -327,6 +327,89 @@ async fn stateful_requests_are_refused_before_admission() {
     assert_eq!(mock.request_count(), 1);
 }
 
+/// Coordinator ruling (fix round 1): a duplicate key must not decide D3 or D4. With interception
+/// on, a duplicate key at any depth is a 400 before admission; with interception off, only a
+/// duplicate `background` is refused (D4). The same body without the duplicate passes.
+#[tokio::test]
+async fn duplicate_keys_are_refused_before_admission() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, OK_BODY).await;
+    let store = RecordingStore::new();
+    let on = app(
+        &mock.base_url,
+        Opts {
+            limits: Some(limits(rules(Some(1), None, None), store.clone())),
+            ti: ti(Arc::new(AllowAll)),
+            ..Opts::default()
+        },
+    );
+    for raw in [
+        r#"{"model":"gpt-6","input":"hi","previous_response_id":"resp_1","previous_response_id":null}"#,
+        r#"{"model":"gpt-6","input":"hi","previous_response_id":null,"previous_response_id":"resp_1"}"#,
+        r#"{"model":"gpt-6","input":[{"role":"user","content":"hi","content":[{"type":"input_text","text":"x"}]}]}"#,
+    ] {
+        let sent = respond(&on, raw).await;
+        assert_eq!(sent.status, StatusCode::BAD_REQUEST, "{raw}");
+        assert_eq!(sent.json()["error"]["code"], "invalid-request-schema", "{raw}");
+    }
+    let sent = respond(&on, r#"{"model":"gpt-6","input":"hi","background":false,"background":false}"#).await;
+    assert_eq!((sent.status, sent.json()["error"]["param"].clone()), (StatusCode::BAD_REQUEST, json!("background")));
+    assert_eq!(store.checks(), 0, "no refusal reached the limits");
+    assert_eq!(mock.request_count(), 0);
+    assert_eq!(
+        respond(&on, r#"{"model":"gpt-6","input":[{"role":"user","content":"hi"}],"previous_response_id":null}"#).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(respond(&on, NON_STREAM).await.status, StatusCode::TOO_MANY_REQUESTS, "the one slot was used by the clean body only");
+
+    let store = RecordingStore::new();
+    let off = app(
+        &mock.base_url,
+        Opts {
+            limits: Some(limits(rules(Some(1), None, None), store.clone())),
+            ..Opts::default()
+        },
+    );
+    for raw in [
+        r#"{"model":"gpt-6","input":"hi","background":false,"background":true}"#,
+        r#"{"model":"gpt-6","input":"hi","background":true,"background":false}"#,
+    ] {
+        let sent = respond(&off, raw).await;
+        assert_eq!(sent.status, StatusCode::BAD_REQUEST, "{raw}");
+        assert_eq!(sent.json()["error"]["code"], "responses-stateful-not-supported", "{raw}");
+        assert_eq!(sent.json()["error"]["param"], "background", "{raw}");
+    }
+    assert_eq!(store.checks(), 0);
+    let dup_d3 = r#"{"model":"gpt-6","input":"hi","previous_response_id":"resp_1","previous_response_id":null,"background":false}"#;
+    assert_eq!(respond(&off, dup_d3).await.status, StatusCode::OK, "interception off passes other duplicates through");
+    assert_eq!(mock.recorded().expect("sent upstream").body.as_ref(), dup_d3.as_bytes());
+    assert_eq!(respond(&off, NON_STREAM).await.status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// D15: a non-stream body over the shared interception hold cap (4 MiB) and under the
+/// `[responses] max_held_bytes` cap (32 MiB) is checked and rewritten, not refused as too large.
+#[tokio::test]
+async fn the_hold_cap_is_the_responses_limit() {
+    let mut v: Value = serde_json::from_str(&body_with_calls("completed")).expect("a fixture body");
+    v["instructions"] = "x".repeat(5 * MIB).into();
+    let body = v.to_string();
+    assert!(body.len() > CoreLimits::defaults().max_held_bytes && body.len() < settings().max_held_bytes);
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, body).await;
+    let sent = respond(
+        &app(
+            &mock.base_url,
+            Opts {
+                ti: ti(Arc::new(BlockNamed)),
+                ..Opts::default()
+            },
+        ),
+        NON_STREAM,
+    )
+    .await;
+    assert_eq!(sent.status, StatusCode::OK, "{}", &sent.text()[..sent.text().len().min(512)]);
+    assert!(!sent.text().contains("CANARY"));
+    assert_eq!(sent.json()["output"][1]["id"], "msg_paigasus_1");
+}
+
 /// D4 holds with interception off; D3 does not apply then (a plain proxy).
 #[tokio::test]
 async fn background_is_refused_with_interception_off() {
