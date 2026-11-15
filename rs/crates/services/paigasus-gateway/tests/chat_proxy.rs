@@ -347,6 +347,15 @@ async fn allowed_non_stream_returns_upstream_body_verbatim() {
 }
 
 #[tokio::test]
+async fn the_chat_route_forwards_to_the_chat_path() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, r#"{"id":"chatcmpl-xyz"}"#).await;
+    let app = app_for(FakeIam::allowed(), mock.base_url.clone(), ONE_MIB);
+    let resp = app.oneshot(chat_request(NON_STREAM_BODY, Some(CALLER_KEY))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(mock.recorded().unwrap().path, "/v1/chat/completions");
+}
+
+#[tokio::test]
 async fn non_2xx_upstream_passes_through_verbatim() {
     // OpenAI's own 429 rate-limit envelope must be forwarded unchanged — same status, same body.
     let envelope = r#"{"error":{"message":"Rate limit reached","type":"rate_limit_error"}}"#;

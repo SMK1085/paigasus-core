@@ -204,6 +204,24 @@ fn base_builder(connect_timeout: Duration, stream_idle_timeout: Duration) -> req
     reqwest::Client::builder().connect_timeout(connect_timeout).read_timeout(stream_idle_timeout)
 }
 
+/// The upstream routes the client can call (SMA-769 D7). A closed set: a caller never passes a
+/// free path string, so no request value can steer the upstream URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamRoute {
+    ChatCompletions,
+    Responses,
+}
+
+impl UpstreamRoute {
+    /// The path appended to the configured base URL.
+    pub fn path(self) -> &'static str {
+        match self {
+            UpstreamRoute::ChatCompletions => "/v1/chat/completions",
+            UpstreamRoute::Responses => "/v1/responses",
+        }
+    }
+}
+
 /// The outbound OpenAI client: a shared `reqwest::Client` (connection-pooled; cheap to clone),
 /// the upstream base URL, the real API key, and the first-byte budget applied per non-stream
 /// request.
@@ -304,7 +322,13 @@ impl OpenAiClient {
     /// headers are never present here to forward. The real key is exposed solely to build the
     /// `Authorization` value.
     pub async fn chat_completion(&self, body: Bytes, stream: bool) -> Result<ChatResponse, OpenAiError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        self.send(UpstreamRoute::ChatCompletions, body, stream).await
+    }
+
+    /// Forward a request to `route` (SMA-769 D7). Same headers, timeouts and cancel-on-drop for
+    /// every route; see [`Self::chat_completion`] for the hygiene rules.
+    pub async fn send(&self, route: UpstreamRoute, body: Bytes, stream: bool) -> Result<ChatResponse, OpenAiError> {
+        let url = format!("{}{}", self.base_url, route.path());
         // `Accept` advertises the path: SSE for stream, JSON otherwise.
         let accept = if stream { "text/event-stream" } else { "application/json" };
 

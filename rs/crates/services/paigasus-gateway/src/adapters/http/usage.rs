@@ -75,6 +75,38 @@ pub fn non_stream_usage(body: &[u8]) -> BodyUsage {
     BodyUsage::Completion(bytes_to_tokens(bytes))
 }
 
+/// The stream reader for one endpoint (SMA-769). Only the chat reader exists in this task.
+#[derive(Debug)]
+pub enum StreamUsage {
+    Chat(UsageScanner),
+}
+
+impl StreamUsage {
+    pub fn feed(&mut self, chunk: &[u8]) {
+        match self {
+            StreamUsage::Chat(s) => s.feed(chunk),
+        }
+    }
+
+    pub fn finish(&mut self) {
+        match self {
+            StreamUsage::Chat(s) => s.finish(),
+        }
+    }
+
+    pub fn completion_records(&self) -> u64 {
+        match self {
+            StreamUsage::Chat(s) => s.completion_records(),
+        }
+    }
+
+    pub fn reported_total(&self) -> Option<u64> {
+        match self {
+            StreamUsage::Chat(s) => s.reported_total(),
+        }
+    }
+}
+
 /// Reads a copy of a forwarded SSE stream (§ 4.6). Every complete `data:` record that is not
 /// `[DONE]` and holds no usage object adds one to the completion estimate (an OpenAI chunk
 /// usually carries one token). A record that holds `"usage":{` is parsed, and the last
