@@ -432,7 +432,7 @@ tasks:
       - 'rs/.cargo/config.toml'
 
   wasm-getrandom-free:
-    description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'
+    description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448) — and that no binding crate pulls `cedar-policy` (SMA-752 D21).'
     # Resolve the FULL dependency tree first (fail LOUD if `cargo tree` itself errors — a broken
     # invocation must not silently read as "getrandom absent"), then grep it for getrandom. We WANT
     # it absent: fail the task only when the (successfully resolved) tree contains it.
@@ -446,6 +446,20 @@ tasks:
         echo "getrandom is in the paigasus-wasm dependency graph — a uuid rng feature leaked" >&2
         exit 1
       fi
+      # SMA-752 D21: no binding crate may pull `cedar-policy` (the kernel `tool-policy` feature).
+      # Measured: `cargo tree -i cedar-policy` exits 101 ("did not match any packages") when the
+      # package is absent, so the `-i` form cannot tell absent from broken. Resolve the full tree
+      # (a failed `cargo tree` exits 2), then grep it, as for getrandom above.
+      for crate in paigasus-wasm paigasus-py-bindings paigasus-node-bindings; do
+        if ! tree="$(cargo tree --locked -p "$crate" -e normal)"; then
+          echo "cargo tree failed for $crate — cannot verify cedar-policy absence" >&2
+          exit 2
+        fi
+        if grep -qw cedar-policy < <(printf '%s\n' "$tree"); then
+          echo "cedar-policy is in the $crate dependency graph — the kernel tool-policy feature leaked into a binding" >&2
+          exit 1
+        fi
+      done
     toolchain: 'system'
     inputs:
       - 'rs/Cargo.toml'
@@ -454,6 +468,10 @@ tasks:
       - 'rs/crates/libs/paigasus-kernel/src/**/*'
       - 'rs/crates/bindings/paigasus-wasm/Cargo.toml'
       - 'rs/crates/bindings/paigasus-wasm/src/**/*'
+      - 'rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-py-bindings/src/**/*'
+      - 'rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-node-bindings/src/**/*'
       # NOT 'rs/.cargo/config.toml' (SMA-594), although this task does run cargo from `rs/`:
       # `cargo tree` resolves the dependency graph and never compiles or links, so the
       # apple-darwin rustflags in that file cannot change what it prints.
