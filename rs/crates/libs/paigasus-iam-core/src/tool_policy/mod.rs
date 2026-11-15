@@ -1,18 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Tool catalog building blocks: tool names, the JSON Schema to Cedar mapping and the
-//! import parsers (SMA-774, spec sections 4.1 to 4.3). Pure code, no I/O.
+//! import parsers (SMA-774, spec sections 4.1 to 4.3). Also the compiler protocol types, the
+//! output comparator, the cedar 4.14 checks and the `PolicyCompiler` port (spec sections 5.2,
+//! 5.3 and 8.1). Pure code, no I/O.
 
+pub mod check;
+pub mod compare;
 pub mod import;
 pub mod json_schema;
 pub mod model;
 pub mod name;
+pub mod ports;
+pub mod protocol;
 pub mod schema;
 pub mod starter;
 
+pub use check::{REASON_FLOOR_PERMIT, REASON_INVALID, check_compiled};
+pub use compare::outputs_identical;
 pub use import::{CatalogProblem, ImportFormat, ImportedTools, build_manual, parse_import};
 pub use json_schema::{MappingError, map_input_schema};
 pub use model::{CatalogLimits, DroppedField, ToolEntry, ToolKind, ToolSource};
 pub use name::{NameError, RESERVED_NAME_KEYS, ToolName, name_key, parse_qualified, parse_tool_name};
+pub use ports::{CompileOutcome, CompilerFailure, PolicyCompiler};
+pub use protocol::{CompileRequest, CompileResult, CompiledOutput, PROTOCOL_VERSION, Rejection, RevisionOutput, SetKind};
 pub use schema::{ACTION_NAMESPACE, TOOL_SCHEMA_REVISION, base_schema_json, catalog_names, tenant_schema_json};
 pub use starter::{STARTER_TOOL_POLICY_ID, STARTER_TOOL_POLICY_SOURCE};
