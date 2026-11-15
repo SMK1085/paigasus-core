@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use paigasus_iam::adapters::policy_compiler::process::{ProcessLimits, run_child};
+use paigasus_iam::adapters::policy_compiler::process::{ProcessLimits, STDERR_KEEP_BYTES, run_child};
 use paigasus_iam::adapters::policy_compiler::{ProcessPolicyCompiler, probe};
 use paigasus_iam::config::ToolPoliciesConfig;
 use paigasus_iam_core::tool_policy::{CompileOutcome, CompileRequest, CompilerFailure, PROTOCOL_VERSION, PolicyCompiler, REASON_FLOOR_PERMIT};
@@ -189,7 +189,44 @@ async fn stderr_is_truncated_to_4_kib() {
     let path = script(&dir, "noisy", "/usr/bin/head -c 100000 /dev/zero | /usr/bin/tr '\\0' e 1>&2\nexit 1");
     let output = run_child(&path, &[], b"", &limits(10_000)).await.expect("the child runs");
     assert!(!output.status.success());
-    assert_eq!(output.stderr_truncated.len(), 4096);
+    assert_eq!(output.stderr_truncated.len(), STDERR_KEEP_BYTES);
+}
+
+/// Spec section 5.2: stderr is captured, truncated and logged, also when the run fails. A child
+/// that writes to stderr and then hangs past the timeout gets its stderr logged, bounded at
+/// `STDERR_KEEP_BYTES`, and the failure message does not hold it.
+#[tokio::test]
+async fn the_stderr_of_a_timed_out_child_is_logged() {
+    let dir = TempDir::new().expect("tempdir");
+    let marker = "stderr-marker-before-the-hang";
+    let path = script(
+        &dir,
+        "noisy-hang",
+        &format!("echo {marker} 1>&2\n/usr/bin/head -c 100000 /dev/zero | /usr/bin/tr '\\0' e 1>&2\nexec /bin/sleep 60"),
+    );
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+    let message = match run_child(&path, &[], b"", &limits(500)).await {
+        Err(CompilerFailure::Unavailable(message)) => message,
+        other => panic!("expected Unavailable, got {:?}", other.map(|o| o.status)),
+    };
+    assert!(message.contains("timeout") && !message.contains(marker), "{message}");
+    let text = logs.text();
+    assert!(text.contains(marker), "the stderr was not logged: {text}");
+    // The kept bytes are the marker line, then `e` up to the bound.
+    let es = STDERR_KEEP_BYTES - (marker.len() + 1);
+    assert!(text.contains(&"e".repeat(es)), "the log holds less stderr than the bound");
+    assert!(!text.contains(&"e".repeat(es + 1)), "the log holds more stderr than the bound");
+}
+
+/// The same for a child that is killed at the stdout limit.
+#[tokio::test]
+async fn the_stderr_of_a_child_over_the_stdout_limit_is_logged() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = script(&dir, "noisy-flood", "echo stderr-marker-before-the-flood 1>&2\nexec /usr/bin/head -c 4000000 /dev/zero");
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+    assert!(matches!(run_child(&path, &[], b"", &limits(10_000)).await, Err(CompilerFailure::Unavailable(_))));
+    let text = logs.text();
+    assert!(text.contains("stderr-marker-before-the-flood"), "the stderr was not logged: {text}");
 }
 
 #[cfg(target_os = "linux")]

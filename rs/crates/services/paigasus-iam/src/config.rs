@@ -1683,6 +1683,14 @@ impl IamConfig {
 
         // --- SMA-774: `[tool_policies]` ------------------------------------------------------
         let tp = &self.tool_policies;
+        // The compiler runs with an empty environment. For a bare name, std then searches a
+        // built-in default path, and a relative path depends on the working directory of IAM.
+        if !tp.compiler_path.is_absolute() {
+            return Err(format!(
+                "tool_policies.compiler_path must be an absolute path (got {:?}): the compiler runs with an empty environment, so a bare name or a relative path does not name one known binary",
+                tp.compiler_path
+            ));
+        }
         if tp.max_window_secs > MAX_TOOL_POLICY_WINDOW_SECS {
             return Err(format!(
                 "tool_policies.max_window_secs ({}) must be at most {MAX_TOOL_POLICY_WINDOW_SECS} (24 hours): Dogwood caps every window at 24 hours, so a larger limit never takes effect",
@@ -4395,6 +4403,20 @@ mod tests {
         assert!(err.contains("tool_policies.max_window_secs") && err.contains("86400"), "unexpected error: {err}");
         let cfg = tool_policies_config("[tool_policies]\nmax_window_secs = 86400\n").expect("the config loads");
         cfg.validate().expect("the boundary validates");
+    }
+
+    #[test]
+    fn a_compiler_path_that_is_not_absolute_is_refused() {
+        for path in ["paigasus-policy-compiler", "bin/paigasus-policy-compiler", "./paigasus-policy-compiler"] {
+            let cfg = tool_policies_config(&format!("[tool_policies]\ncompiler_path = \"{path}\"\n")).expect("the config loads");
+            let err = cfg.validate().expect_err("a path that is not absolute must be refused");
+            assert!(
+                err.contains("tool_policies.compiler_path") && err.contains("absolute") && err.contains(path),
+                "unexpected error for {path}: {err}"
+            );
+        }
+        let cfg = tool_policies_config("[tool_policies]\ncompiler_path = \"/opt/compiler\"\n").expect("the config loads");
+        cfg.validate().expect("an absolute path validates");
     }
 
     #[test]

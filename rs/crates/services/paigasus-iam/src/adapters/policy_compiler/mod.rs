@@ -30,14 +30,8 @@ pub struct ProcessPolicyCompiler {
     max_source_bytes: usize,
     permits: Arc<Semaphore>,
     generation: u32,
+    /// The revision string of the boot probe. Every compile failure log names it.
     revision: String,
-}
-
-impl ProcessPolicyCompiler {
-    /// The revision string that the compiler printed at boot, for logs.
-    pub fn revision(&self) -> &str {
-        &self.revision
-    }
 }
 
 /// Runs `revision` on the configured binary. `None`, with an `error!` log, when the binary is
@@ -109,12 +103,12 @@ impl PolicyCompiler for ProcessPolicyCompiler {
         let stdin = serde_json::to_vec(req).map_err(|error| CompilerFailure::Unavailable(format!("serialize the compile request: {error}")))?;
         let result: CompileResult = run_checked(&self.path, &["compile"], &stdin, &self.limits).await.inspect_err(|failure| {
             if let CompilerFailure::Unavailable(message) = failure {
-                warn!(compiler = %self.path.display(), reason = %message, "the policy compiler is unavailable");
+                warn!(compiler = %self.path.display(), revision = %self.revision, reason = %message, "the policy compiler is unavailable");
             }
         })?;
         if result.compiler_generation() != self.generation {
             let message = format!("the result has compiler generation {}; the boot probe reported {}", result.compiler_generation(), self.generation);
-            warn!(compiler = %self.path.display(), reason = %message, "the policy compiler is unavailable");
+            warn!(compiler = %self.path.display(), revision = %self.revision, reason = %message, "the policy compiler is unavailable");
             return Err(CompilerFailure::Unavailable(message));
         }
         Ok(match result {

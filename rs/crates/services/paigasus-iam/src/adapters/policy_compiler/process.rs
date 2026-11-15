@@ -10,21 +10,27 @@
 //!   `pre_exec`.
 //! - IAM writes stdin and reads stdout and stderr at the same time, so the pipes cannot deadlock.
 //! - A stdout over the limit, or a run over the timeout, kills and reaps the child.
-//! - Stderr is truncated to [`STDERR_KEEP_BYTES`]. The caller logs it. It never reaches an RPC
-//!   caller.
+//! - Stderr is truncated to [`STDERR_KEEP_BYTES`] and logged, also when the run fails. It never
+//!   reaches an RPC caller.
 
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use paigasus_iam_core::tool_policy::CompilerFailure;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tracing::warn;
 
 use crate::config::ToolPoliciesConfig;
 
 /// The number of stderr bytes that a run keeps. The rest is read and dropped.
 pub const STDERR_KEEP_BYTES: usize = 4096;
+
+/// How long IAM waits for the end of stderr after the child exited or was killed. A grandchild
+/// that holds stderr open cannot make a run wait longer than this.
+const STDERR_GRACE: Duration = Duration::from_millis(250);
 
 /// The limits of one child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,11 +60,6 @@ impl ProcessLimits {
     pub const fn rlimit_as_applied() -> bool {
         cfg!(target_os = "linux")
     }
-
-    /// The wall-clock limit of one run.
-    pub fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
 /// What a child that ran to its end gave back.
@@ -73,7 +74,8 @@ pub struct RawOutput {
 /// Runs `path` with `args`, writes `stdin` to it and reads its output under `limits`.
 ///
 /// A spawn failure, an I/O failure, a stdout over the limit and a timeout are all
-/// [`CompilerFailure::Unavailable`]. The exit status is the caller's to judge.
+/// [`CompilerFailure::Unavailable`]. On those paths this function logs the truncated stderr
+/// itself, and the failure message never holds it. The exit status is the caller's to judge.
 pub async fn run_child(path: &Path, args: &[&str], stdin: &[u8], limits: &ProcessLimits) -> Result<RawOutput, CompilerFailure> {
     let workdir = tempfile::tempdir().map_err(|error| CompilerFailure::Unavailable(format!("make the compiler working directory: {error}")))?;
     let mut command = Command::new(path);
@@ -118,6 +120,10 @@ pub async fn run_child(path: &Path, args: &[&str], stdin: &[u8], limits: &Proces
         return Err(CompilerFailure::Unavailable("the child has no pipes".to_string()));
     };
     let max_stdout = limits.max_stdout;
+    // Stderr goes into a bounded buffer that a separate task fills. The buffer outlives the run
+    // future, so stderr is still there to log after a timeout or a kill.
+    let stderr_buffer = Arc::new(Mutex::new(Vec::with_capacity(STDERR_KEEP_BYTES)));
+    let mut stderr_task = tokio::spawn(drain_bounded(child_stderr, Arc::clone(&stderr_buffer)));
 
     let run = async {
         let write = async move {
@@ -145,47 +151,83 @@ pub async fn run_child(path: &Path, args: &[&str], stdin: &[u8], limits: &Proces
             }
             Ok(stdout)
         };
-        let ((), stdout, stderr) = tokio::try_join!(write, read_stdout, read_truncated(child_stderr))?;
+        let ((), stdout) = tokio::try_join!(write, read_stdout)?;
         let status = child.wait().await.map_err(|error| CompilerFailure::Unavailable(format!("wait for the compiler: {error}")))?;
-        Ok(RawOutput {
-            status,
-            stdout,
-            stderr_truncated: stderr,
-        })
+        Ok((status, stdout))
     };
 
     let outcome = tokio::time::timeout(limits.timeout, run).await;
     let result = match outcome {
-        Ok(Ok(output)) => return Ok(output),
+        Ok(Ok(output)) => Ok(output),
         Ok(Err(failure)) => Err(failure),
         Err(_elapsed) => Err(CompilerFailure::Unavailable(format!("timeout after {} ms", limits.timeout.as_millis()))),
     };
-    // Kill and reap the child, so that no process and no zombie stays behind. `kill_on_drop`
-    // is the backstop if this future is dropped first.
-    let _ = child.kill().await;
+    if result.is_err() {
+        // Kill and reap the child, so that no process and no zombie stays behind.
+        // `kill_on_drop` is the backstop if this future is dropped first.
+        let _ = child.kill().await;
+    }
+    // The child is gone, so stderr reaches its end at once, unless a grandchild holds it.
+    let _ = tokio::time::timeout(STDERR_GRACE, &mut stderr_task).await;
+    stderr_task.abort();
+    let stderr = stderr_text(&stderr_buffer);
     drop(workdir);
-    result
+    match result {
+        Ok((status, stdout)) => Ok(RawOutput {
+            status,
+            stdout,
+            stderr_truncated: stderr,
+        }),
+        Err(CompilerFailure::Unavailable(reason)) => {
+            warn!(compiler = %path.display(), reason = %reason, stderr = %stderr, "the policy compiler run failed");
+            Err(CompilerFailure::Unavailable(reason))
+        }
+        Err(failure) => Err(failure),
+    }
 }
 
-/// Reads `reader` to the end and keeps the first [`STDERR_KEEP_BYTES`] bytes.
-async fn read_truncated(mut reader: impl AsyncRead + Unpin) -> Result<String, CompilerFailure> {
-    let mut kept = Vec::with_capacity(STDERR_KEEP_BYTES);
+/// Reads `reader` to the end. `buffer` keeps the first [`STDERR_KEEP_BYTES`] bytes, and the rest
+/// is dropped. A read error ends the drain: stderr is for the log only.
+async fn drain_bounded(mut reader: impl AsyncRead + Unpin, buffer: Arc<Mutex<Vec<u8>>>) {
     let mut chunk = [0u8; 8192];
-    loop {
-        let n = reader
-            .read(&mut chunk)
-            .await
-            .map_err(|error| CompilerFailure::Unavailable(format!("read the compiler stderr: {error}")))?;
+    while let Ok(n) = reader.read(&mut chunk).await {
         if n == 0 {
             break;
         }
-        let room = STDERR_KEEP_BYTES - kept.len();
+        let Ok(mut kept) = buffer.lock() else {
+            break;
+        };
+        let room = STDERR_KEEP_BYTES.saturating_sub(kept.len());
         kept.extend_from_slice(&chunk[..n.min(room)]);
     }
+}
+
+/// The kept stderr as text, at most [`STDERR_KEEP_BYTES`] bytes.
+fn stderr_text(buffer: &Mutex<Vec<u8>>) -> String {
+    let kept = match buffer.lock() {
+        Ok(kept) => kept.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
     let mut text = String::from_utf8_lossy(&kept).into_owned();
     // A replacement character is 3 bytes, so the lossy text can be longer than the bytes kept.
     while text.len() > STDERR_KEEP_BYTES {
         text.pop();
     }
-    Ok(text)
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The drain holds at most `STDERR_KEEP_BYTES` in memory, however much the child writes.
+    /// `stderr_text` cuts the text again, so only this test sees the bound of the buffer itself.
+    #[tokio::test]
+    async fn the_stderr_drain_keeps_at_most_the_bound() {
+        let input = vec![b'e'; 100_000];
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        drain_bounded(input.as_slice(), Arc::clone(&buffer)).await;
+        assert_eq!(buffer.lock().expect("the lock").len(), STDERR_KEEP_BYTES);
+        assert_eq!(stderr_text(&buffer).len(), STDERR_KEEP_BYTES);
+    }
 }
