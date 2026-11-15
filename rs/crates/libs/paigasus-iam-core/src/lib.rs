@@ -14,6 +14,7 @@ pub mod ports;
 pub mod principal;
 pub mod service_account;
 pub mod tenancy;
+pub mod tool_policy;
 pub mod user;
 pub mod value;
 
