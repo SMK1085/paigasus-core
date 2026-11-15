@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use metrics::{counter, histogram};
+use metrics::counter;
 use paigasus_gateway_core::{DecideFuture, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls, sanitize_name};
 use paigasus_kernel::tool_policy::{PolicyOrigin, PolicyRef};
 use paigasus_observability::names;
@@ -74,8 +74,11 @@ fn decide_now(ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec
             "tool-policy decision"
         );
     }
-    // One sample per request: the request side plus this evaluation (preflight F14).
-    histogram!(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).record((snapshot.request_elapsed + started.elapsed()).as_secs_f64());
+    // Preflight F14: the decider records no sample. It adds its time to the request's snapshot,
+    // and the gateway records one sample per request (`OverheadSample`), however many holds.
+    if let Some(s) = ctx.policy.as_deref() {
+        s.add_decide_elapsed(started.elapsed());
+    }
     outcomes.into_iter().map(|o| o.decision).collect()
 }
 
@@ -227,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_decider_counts_each_call_and_records_one_overhead_sample() {
+    async fn the_decider_counts_each_call_and_adds_its_time_to_the_snapshot() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
@@ -239,7 +242,7 @@ mod tests {
         let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
         // A fixed request-side time, so the sample must be at least that.
         let snap = Arc::new(PolicySnapshot::clone(&out.snapshot).with_request_elapsed(Duration::from_secs(5)));
-        let d = decide(ctx.with_policy(snap), turn, &["rm", "ok", "ok"]).await;
+        let d = decide(ctx.with_policy(Arc::clone(&snap)), turn, &["rm", "ok", "ok"]).await;
         assert_eq!(d, [BLOCK_POLICY, Decision::Allow, Decision::Allow]);
         let m = testing::Snap::take(&snapshotter);
         let dec = |effect: &str| {
@@ -249,9 +252,12 @@ mod tests {
             )
         };
         assert_eq!((dec("block"), dec("allow")), (1, 2));
-        let samples = m.histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS);
-        assert_eq!(samples.len(), 1, "one sample per decide");
-        assert!(samples[0] >= 5.0, "the sample holds the request-side time");
+        assert!(
+            m.histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).is_empty(),
+            "the decider records no sample itself (preflight F14)"
+        );
+        assert!(snap.decide_elapsed() > Duration::ZERO, "the decide time is in the snapshot");
+        assert!(snap.overhead() >= Duration::from_secs(5), "the overhead holds the request-side time");
     }
 
     #[test]

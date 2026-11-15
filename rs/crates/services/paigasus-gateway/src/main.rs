@@ -14,9 +14,13 @@ use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::limits::build_limits;
 use paigasus_gateway::adapters::openai::OpenAiClient;
-use paigasus_gateway::config::GatewayConfig;
+use paigasus_gateway::adapters::policy_source::file::FilePolicySource;
+use paigasus_gateway::application::tool_policy::{CacheSettings, CedarDecider, PolicyCache, RequestToolPolicy};
+use paigasus_gateway::config::{GatewayConfig, PolicySourceConfig};
+use paigasus_gateway::domain::tool_policy::PolicySource;
 use paigasus_gateway::runtime;
 use paigasus_gateway::service_info::Capabilities;
+use paigasus_gateway_core::ToolCallDecider;
 use paigasus_observability::names;
 use tokio::task::JoinSet;
 
@@ -91,6 +95,25 @@ async fn serve() -> anyhow::Result<()> {
         Duration::from_secs(config.stream_idle_timeout_secs),
     )?;
 
+    // SMA-752 D19: the tool policy. `settings()` only after `validate` above: it panics on an org
+    // id that `validate` refuses. With `enabled`, `validate` has made sure that tool interception
+    // is on, that `on_policy_unavailable` is set (D9) and that a source is set.
+    let tool_policy = if config.tool_policy.enabled {
+        let settings = config.tool_policy.settings();
+        let source: Arc<dyn PolicySource> = match &config.tool_policy.source {
+            Some(PolicySourceConfig::File { dir }) => Arc::new(FilePolicySource::new(dir)),
+            None => anyhow::bail!("tool_policy.enabled = true requires tool_policy.source"),
+        };
+        let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
+        tracing::info!(
+            mode = settings.default_mode.as_str(),
+            "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies"
+        );
+        Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings))))
+    } else {
+        None
+    };
+
     let state = AppState {
         iam: Arc::new(iam),
         openai: Arc::new(openai),
@@ -100,11 +123,19 @@ async fn serve() -> anyhow::Result<()> {
         dpop_enabled: config.dpop.enabled,
         tool_interception: config.tool_interception.enabled.then(|| {
             tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
+            // SMA-752: the Cedar decider only with the tool policy on. Without the request side
+            // there is no snapshot, and the Cedar decider would block every call (fail closed).
+            let decider: Arc<dyn ToolCallDecider> = if tool_policy.is_some() {
+                Arc::new(CedarDecider)
+            } else {
+                Arc::new(paigasus_gateway_core::AllowAll)
+            };
             Arc::new(ToolInterception {
                 limits: config.tool_interception.limits(),
-                decider: Arc::new(paigasus_gateway_core::AllowAll),
+                decider,
             })
         }),
+        tool_policy: tool_policy.as_ref().map(|(_, tp)| Arc::clone(tp)),
         responses: config.responses.enabled.then(|| {
             tracing::info!("the responses route is on (SMA-769)");
             Arc::new(ResponsesSettings {
@@ -187,6 +218,16 @@ async fn serve() -> anyhow::Result<()> {
                     _ = rx.changed() => break,
                 }
             }
+            Ok(())
+        });
+    }
+
+    // SMA-752 § 6.3.3: the tool-policy cache refresh, on the same shutdown watch. NATS
+    // invalidation is a later task (SMA-752 Task 18).
+    if let Some((cache, _)) = tool_policy {
+        let rx = rx.clone();
+        servers.spawn(async move {
+            cache.run_refresh(rx).await;
             Ok(())
         });
     }

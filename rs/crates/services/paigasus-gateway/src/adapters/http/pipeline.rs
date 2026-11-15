@@ -27,7 +27,7 @@ use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use metrics::{counter, histogram};
-use paigasus_gateway_core::{Format, Limits};
+use paigasus_gateway_core::{DecisionContext, Format, Limits, RequestEntry};
 use paigasus_observability::names;
 
 use super::AppState;
@@ -37,6 +37,7 @@ use super::interception::{self, ToolInterception};
 use super::relay::terminal_sse_error_stream;
 use super::usage::{BodyUsage, StreamUsage};
 use crate::adapters::openai::{ChatResponse, OpenAiError, UpstreamRoute};
+use crate::application::tool_policy::OverheadSample;
 use crate::domain::{CallerContext, Credential};
 
 /// What the pipeline needs from a parsed request.
@@ -91,6 +92,47 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
         return GatewayError::StreamingDisabled.into_response();
     }
 
+    // SMA-749: capture what the decider needs while the request ids still exist (SMA-504 § 4.3:
+    // inside the stream they are `None`). `None` when interception and the tool policy are both
+    // off: nothing is parsed or constructed (D27).
+    //
+    // SMA-752 D17, D19, § 6.5.0: this runs BEFORE the limits, so a refused request never uses
+    // quota. The turn is parsed from exactly the bytes that `apply` plans from and rewrites, and
+    // `body` is then `outcome.body`: nothing after this line changes the tools, the tool choice or
+    // the tool results before the upstream send.
+    let mut body = body;
+    let mut request_entries: Vec<RequestEntry> = Vec::new();
+    // Preflight F14: one overhead sample per request, recorded when this drops.
+    let mut overhead: Option<OverheadSample> = None;
+    let prepared = if state.tool_interception.is_some() || state.tool_policy.is_some() {
+        let turn = paigasus_gateway_core::parse_request(endpoint.format, &body);
+        let request_id = paigasus_observability::current_ids().map(|ids| ids.request_id.to_string());
+        let mut ctx = DecisionContext::new(caller.principal_prn.clone(), caller.scope_prn.clone(), request_id);
+        if let Some(tp) = &state.tool_policy {
+            match tp.apply(&ctx, &model, endpoint.format, &turn, body).await {
+                Ok(outcome) => {
+                    body = outcome.body;
+                    request_entries = outcome.entries;
+                    overhead = Some(OverheadSample::new(Arc::clone(&outcome.snapshot)));
+                    // D30: the decider uses this snapshot; without it, every call fails closed.
+                    ctx = ctx.with_policy(outcome.snapshot);
+                }
+                Err(refusal) => {
+                    // The refusal metric is the operator's signal; this line stays at debug.
+                    tracing::debug!(principal = %caller.principal_prn, scope = %caller.scope_prn, reason = ?refusal, endpoint = endpoint.name, "request refused by the tool policy");
+                    return GatewayError::BadRequestBody.into_response();
+                }
+            }
+        }
+        Some((Arc::new(ctx), Arc::new(turn)))
+    } else {
+        None
+    };
+    let interception = state.tool_interception.clone().zip(prepared).map(|(ti, (ctx, turn))| {
+        let limits = (endpoint.limits)(&ti, &state);
+        (ti, limits, ctx, turn)
+    });
+
     // SMA-677 D9: the limits run after the body and streaming checks and just before egress, so a
     // refused body never uses quota. `None` (no `[limits]` table) skips them entirely (A6).
     let mut guard = match &state.limits {
@@ -111,17 +153,6 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
         guard.set_endpoint(endpoint.name);
         guard.mark_sent();
     }
-
-    // SMA-749: capture what the decider needs while the request ids still exist (SMA-504 § 4.3:
-    // inside the stream they are `None`). Parsed from the same raw bytes that go upstream.
-    // `None` when interception is off: nothing is parsed or constructed (D27).
-    let interception = state.tool_interception.clone().map(|ti| {
-        let limits = (endpoint.limits)(&ti, &state);
-        let turn = Arc::new(paigasus_gateway_core::parse_request(endpoint.format, &body));
-        let request_id = paigasus_observability::current_ids().map(|ids| ids.request_id.to_string());
-        let ctx = Arc::new(paigasus_gateway_core::DecisionContext::new(caller.principal_prn.clone(), caller.scope_prn.clone(), request_id));
-        (ti, limits, ctx, turn)
-    });
 
     let started = Instant::now();
     // EGRESS HYGIENE: only the raw body bytes cross the boundary — never the caller's headers.
@@ -145,12 +176,19 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             }
             // SMA-749 § 5.2: the guard read the ORIGINAL body above (D24); interception runs after.
             let outcome = match &interception {
-                Some((ti, limits, ctx, turn)) if status.is_success() => interception::intercept_body(ti, *limits, endpoint.format, Arc::clone(ctx), Arc::clone(turn), &upstream_body).await,
-                _ => interception::BodyOutcome::Forward { rewritten: None, report: None },
+                Some((ti, limits, ctx, turn)) if status.is_success() => {
+                    interception::intercept_body(ti, *limits, endpoint.format, Arc::clone(ctx), Arc::clone(turn), &upstream_body, &request_entries).await
+                }
+                // § 6.5.3: the request entries also go out on a non-2xx answer.
+                _ => interception::BodyOutcome::Forward {
+                    rewritten: None,
+                    report: interception::request_report(&request_entries),
+                },
             };
             match outcome {
                 interception::BodyOutcome::Refuse => {
-                    let resp = GatewayError::ToolInterceptionMalformedResponse.into_response();
+                    let mut resp = GatewayError::ToolInterceptionMalformedResponse.into_response();
+                    add_request_report(&mut resp, &request_entries);
                     let status = resp.status();
                     (resp, status)
                 }
@@ -187,16 +225,22 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                 let usage = (endpoint.stream_usage)();
                 let out = match interception {
                     // SMA-749: the interceptor owns the terminal frame from here on (D17).
-                    Some((ti, limits, ctx, turn)) => Body::from_stream(interception::intercepted_stream(
-                        endpoint.format,
-                        limits,
-                        upstream,
-                        guard.take(),
-                        usage,
-                        ti,
-                        ctx,
-                        turn,
-                        endpoint.terminal.as_bytes(),
+                    // SMA-752 § 6.5.3: the request entries go out before the first upstream frame,
+                    // and the overhead sample lives as long as the stream (preflight F14).
+                    Some((ti, limits, ctx, turn)) => Body::from_stream(interception::keep_until_end(
+                        interception::intercepted_stream(
+                            endpoint.format,
+                            limits,
+                            upstream,
+                            guard.take(),
+                            usage,
+                            ti,
+                            ctx,
+                            turn,
+                            endpoint.terminal.as_bytes(),
+                            paigasus_gateway_core::request_comments(&request_entries),
+                        ),
+                        overhead.take(),
                     )),
                     None => Body::from_stream(terminal_sse_error_stream(upstream, guard.take(), usage, endpoint.terminal)),
                 };
@@ -207,7 +251,9 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                 if let Some(guard) = guard.as_mut() {
                     guard.mark_no_charge();
                 }
-                (status, [(header::CONTENT_TYPE, "application/json")], Body::from_stream(upstream)).into_response()
+                let mut resp = (status, [(header::CONTENT_TYPE, "application/json")], Body::from_stream(upstream)).into_response();
+                add_request_report(&mut resp, &request_entries);
+                resp
             };
             (resp, status)
         }
@@ -223,7 +269,8 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             {
                 guard.mark_no_charge();
             }
-            let resp = GatewayError::from(err).into_response();
+            let mut resp = GatewayError::from(err).into_response();
+            add_request_report(&mut resp, &request_entries);
             let status = resp.status();
             record_upstream_call(status, started, endpoint.name);
             (resp, status)
@@ -261,7 +308,19 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
         ),
     }
 
+    // Preflight F14: a full answer (or a stream with no interceptor) records its sample here.
+    drop(overhead);
     response
+}
+
+/// SMA-752 § 6.5.3: put the request entries into the `paigasus-tool-decisions` header of an
+/// answer that carries no call entries. No entries, no header (as before).
+fn add_request_report(resp: &mut Response, requests: &[RequestEntry]) {
+    if let Some(r) = interception::request_report(requests)
+        && let Ok(v) = axum::http::HeaderValue::from_str(&r)
+    {
+        resp.headers_mut().insert("paigasus-tool-decisions", v);
+    }
 }
 
 /// Record `gateway_upstream_requests_total{status_class, endpoint}` + `gateway_upstream_request_duration_seconds`

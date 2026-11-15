@@ -75,8 +75,10 @@ bytes = { workspace = true }
 futures = { workspace = true }
 # `service_info` — the shared ServiceInfo builder + HTTP DTO (SMA-505).
 paigasus-service-info = { workspace = true }
-# `domain::resolve_org` (SMA-635) parses and builds org PRNs with the kernel `Prn` API. NOT
-# paigasus-iam-core: that crate pulls cedar-policy and more into the gateway.
+# `domain::resolve_org` (SMA-635) parses and builds org PRNs with the kernel `Prn` API. The
+# `tool-policy` feature (SMA-752) brings Cedar into the gateway ON PURPOSE (ADR-0027 (e)): the tool
+# policy evaluates Cedar here, also through gateway-core. paigasus-iam-core stays out: the gateway
+# needs none of its IAM model.
 paigasus-kernel = { workspace = true, features = ["tool-policy"] }
 # SMA-749: the sans-IO tool-call interception core. `{ workspace = true }`, so `moon.yml`
 # hand-declares the `dependsOn` edge (ci/CLAUDE.md).

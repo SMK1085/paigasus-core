@@ -62,10 +62,24 @@ fn count_refusal(mode: TenantMode, refusal: &Refusal) {
     counter!(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, "mode" => mode.as_str(), "reason" => refusal.label()).increment(1);
 }
 
-/// Record the overhead of a request whose calls the decider never decided (preflight F14). When the
-/// decider runs, it records the sample itself, with the request-side time in it.
-pub fn record_request_overhead(snapshot: &PolicySnapshot) {
-    histogram!(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).record(snapshot.request_elapsed.as_secs_f64());
+/// One overhead sample per request (preflight F14, spec G8). The gateway holds this for the life of
+/// the request: to the end of the handler for a full answer, and inside the response body for a
+/// stream. On drop it records the request-side time plus every decide call of the request, so a
+/// stream with many holds and a request with no call both record exactly one sample.
+#[derive(Debug)]
+pub struct OverheadSample(Arc<PolicySnapshot>);
+
+impl OverheadSample {
+    #[must_use]
+    pub fn new(snapshot: Arc<PolicySnapshot>) -> Self {
+        OverheadSample(snapshot)
+    }
+}
+
+impl Drop for OverheadSample {
+    fn drop(&mut self) {
+        histogram!(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).record(self.0.overhead().as_secs_f64());
+    }
 }
 
 impl RequestToolPolicy {
@@ -109,9 +123,18 @@ impl RequestToolPolicy {
     ///
     /// # Errors
     ///
-    /// A [`Refusal`] when the request must be refused with a 400 (D17, § 6.5.1 step 4).
+    /// A [`Refusal`] when the request must be refused with a 400 (D17, § 6.5.1 step 4). A refused
+    /// request records its overhead sample here: it has no snapshot to hold (preflight F14).
     pub async fn apply(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes) -> Result<RequestOutcome, Refusal> {
         let started = Instant::now();
+        let out = self.apply_inner(ctx, model, format, turn, body, started).await;
+        if out.is_err() {
+            histogram!(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).record(started.elapsed().as_secs_f64());
+        }
+        out
+    }
+
+    async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refusal> {
         let org = org_of(&ctx.scope);
         // D7, D34: the settings of the scope's org; without an org, the global values.
         let (mode, on) = org.map_or((self.settings.default_mode, self.settings.on_policy_unavailable), |o| self.settings.tenant(o));
@@ -307,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_snapshot_holds_the_request_side_time_and_the_helper_records_it() {
+    async fn the_snapshot_holds_the_request_side_time_and_the_sample_records_it_once() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
@@ -319,8 +342,27 @@ mod tests {
             Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).is_empty(),
             "apply records no sample itself"
         );
-        record_request_overhead(&out.snapshot);
+        let sample = OverheadSample::new(Arc::clone(&out.snapshot));
+        out.snapshot.add_decide_elapsed(Duration::from_secs(2));
+        out.snapshot.add_decide_elapsed(Duration::from_secs(3));
+        drop(sample);
         let samples = Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS);
-        assert_eq!(samples, [out.snapshot.request_elapsed.as_secs_f64()]);
+        assert_eq!(
+            samples,
+            [(out.snapshot.request_elapsed + Duration::from_secs(5)).as_secs_f64()],
+            "one sample: the request side plus both decide calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_records_one_sample() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let enforce = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = Bytes::from_static(br#"{"model":"m","model":"n","messages":[]}"#);
+        assert_eq!(run(&enforce, body).await.err(), Some(Refusal::UnreadableTurn));
+        assert_eq!(Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).len(), 1);
     }
 }

@@ -8,8 +8,8 @@ pub mod cache;
 pub mod decider;
 pub mod request;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 pub use cache::{CacheSettings, FloorEntry, Invalidate, Lookup, PolicyCache};
 pub use decider::CedarDecider;
-pub use request::{Refusal, RequestOutcome, RequestToolPolicy, record_request_overhead};
+pub use request::{OverheadSample, Refusal, RequestOutcome, RequestToolPolicy};

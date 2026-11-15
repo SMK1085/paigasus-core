@@ -26,6 +26,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use crate::config::ToolPolicySettings;
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies};
 
 /// How many tenant reloads one refresh pass runs at the same time.
@@ -44,6 +45,19 @@ pub struct CacheSettings {
     pub idle_evict: Duration,
     /// How long one lookup waits for a load.
     pub load_timeout: Duration,
+}
+
+impl CacheSettings {
+    /// The cache timings of a `[tool_policy]` table.
+    #[must_use]
+    pub fn from_settings(s: &ToolPolicySettings) -> Self {
+        CacheSettings {
+            refresh: s.refresh,
+            max_stale: s.max_stale,
+            idle_evict: s.idle_evict,
+            load_timeout: s.load_timeout,
+        }
+    }
 }
 
 /// The result of a lookup. `Unavailable` follows `on_policy_unavailable` in the caller (§ 6.4).
