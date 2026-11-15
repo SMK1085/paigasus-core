@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use paigasus_gateway_core::ToolCall;
 use serde_json::{Map, Value, json};
 
-use super::oracle::{ModelCall, Run, Runner, js_truthy, lc_parse_partial_json, node_events, py_events, py_get, py_int, py_truthy, responses_kind_of};
+use super::oracle::{ModelCall, Run, Runner, js_truthy, lc_parse_partial_json, node_events, py_events_partial, py_get, py_int, py_truthy, responses_kind_of};
 
 /// The models of the Responses clients, in the order [`super::oracle::check_i1`] runs them.
 pub const RESPONSES_RUNNERS: &[(&str, Runner)] = &[
@@ -532,7 +532,8 @@ impl PyStream {
 }
 
 fn python_stream_steps(bytes: &[u8], st: &mut PyStream, calls: &mut Vec<ModelCall>) -> Result<(), String> {
-    for sse in py_events(bytes)? {
+    let (events, decode_error) = py_events_partial(bytes);
+    for sse in events {
         if sse.data.starts_with("[DONE]") {
             break;
         }
@@ -545,11 +546,11 @@ fn python_stream_steps(bytes: &[u8], st: &mut PyStream, calls: &mut Vec<ModelCal
         let Value::Object(ev) = &v else { return Err("AttributeError: event.type".into()) };
         st.step(ev, calls)?;
     }
-    Ok(())
+    decode_error.map_or(Ok(()), Err)
 }
 
 /// openai-python `client.responses.stream()` (`ResponseStream`). The SSE layer is
-/// [`py_events`]: `[DONE]` stops by prefix, and a top-level truthy `error` raises `APIError`;
+/// [`py_events_partial`]: `[DONE]` stops by prefix, and a top-level truthy `error` raises `APIError`;
 /// the `event:` name is not read, so an `error` event passes. `ResponseStreamState` keys every
 /// item by `output_index`, checks the item identities at `done` and at the terminal event, and
 /// asserts the item type on a text delta and on a function-call arguments delta. The first event
@@ -574,7 +575,8 @@ pub fn run_python_stream(bytes: &[u8]) -> Run {
 }
 
 fn python_raw_steps(bytes: &[u8], calls: &mut Vec<ModelCall>) -> Result<(), String> {
-    for sse in py_events(bytes)? {
+    let (events, decode_error) = py_events_partial(bytes);
+    for sse in events {
         if sse.data.starts_with("[DONE]") {
             break;
         }
@@ -596,7 +598,7 @@ fn python_raw_steps(bytes: &[u8], calls: &mut Vec<ModelCall>) -> Result<(), Stri
             output_calls(output, false, calls);
         }
     }
-    Ok(())
+    decode_error.map_or(Ok(()), Err)
 }
 
 /// openai-python `client.responses.create(stream=True)`: the same SSE layer as
@@ -1662,7 +1664,8 @@ impl Lc {
 }
 
 fn langchain_steps(bytes: &[u8], lc: &mut Lc) -> Result<(), String> {
-    for sse in py_events(bytes)? {
+    let (events, decode_error) = py_events_partial(bytes);
+    for sse in events {
         if sse.data.starts_with("[DONE]") {
             break;
         }
@@ -1675,7 +1678,7 @@ fn langchain_steps(bytes: &[u8], lc: &mut Lc) -> Result<(), String> {
         let Value::Object(ev) = &v else { return Err("AttributeError: chunk.type".into()) };
         lc.step(ev)?;
     }
-    Ok(())
+    decode_error.map_or(Ok(()), Err)
 }
 
 /// LangChain `ChatOpenAI` with the Responses API (`_stream_responses`) over the openai-python

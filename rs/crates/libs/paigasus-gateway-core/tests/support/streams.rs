@@ -1618,7 +1618,9 @@ pub fn render_responses(s: &ResponsesScenario) -> Vec<u8> {
     for (q, at) in &s.quirks {
         match q {
             RQuirk::ItemInterleaved => {
-                if let Some(t) = pick(&items, *at, |i| i.kind.client_run()).filter(|t| t + 1 < segs.len()) {
+                // Pick only from client-run items that have an item after them.
+                let c: Vec<usize> = (0..segs.len().saturating_sub(1)).filter(|i| items[*i].kind.client_run()).collect();
+                if let Some(t) = (!c.is_empty()).then(|| c[*at % c.len()]) {
                     let next = std::mem::take(&mut segs[t + 1]).flat();
                     segs[t].inner = next;
                     if at.is_multiple_of(2) {

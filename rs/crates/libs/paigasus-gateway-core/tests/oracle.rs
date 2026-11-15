@@ -421,6 +421,25 @@ fn each_raise_path_raises() {
     }
 }
 
+/// The Python SSE layer decodes lazily: a call completed before a bad UTF-8 byte reaches the
+/// client before the SDK raises, so the Python models keep it.
+#[test]
+fn python_models_keep_the_calls_before_a_utf8_error() {
+    let item = function_item(0, "fc_1", "call_1", "read_file", None, &[r#"{"path":"a"}"#]);
+    let evs = conforming(vec![item]);
+    let mut bytes: Vec<u8> = evs[..evs.len() - 1].iter().map(frame).collect::<String>().into_bytes();
+    bytes.extend_from_slice(b"data: \xff\n\n");
+    for (model, run) in [
+        ("openai-python-responsestream", run_python_stream as fn(&[u8]) -> Run),
+        ("openai-python-raw", run_python_raw),
+        ("langchain-responses", run_langchain),
+    ] {
+        let r = run(&bytes);
+        assert!(r.error.as_deref().is_some_and(|e| e.starts_with("UnicodeDecodeError")), "{model}: {:?}", r.error);
+        assert!(r.calls.iter().any(|c| c.name == "read_file" && c.arguments == r#"{"path":"a"}"#), "{model}: {:?}", r.calls);
+    }
+}
+
 #[test]
 fn models_see_every_surface() {
     // R-a, R-b: the terminal `output` item differs from the `done` item.

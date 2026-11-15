@@ -48,6 +48,8 @@ def records(raw: bytes) -> list[dict]:
                 event = value
             elif field == "data":
                 data.append(value)
+        if not data:
+            continue  # a comment-only block (for example ": ping") is not a record
         out.append({"event": event, "data": "\n".join(data), "bytes": len(block.encode("utf-8"))})
     return out
 
@@ -578,7 +580,17 @@ def self_test() -> int:
             if bool(got["rules"][rule]) != (rule in breaks):
                 failed += 1
                 print(f"FAIL {name}.rules.{rule}: got {json.dumps(got['rules'][rule])}, want {'a break' if rule in breaks else 'no break'}")
-    print(f"self-test: {len(cases)} cases, " + ("ok" if not failed else f"{failed} field(s) wrong"))
+    # A comment-only block (a heartbeat) between two JSON events is not a record.
+    plain = sse(base())
+    first_end = plain.index(b"\n\n") + 2
+    try:
+        with_ping = measure(plain[:first_end] + b": ping\n\n" + plain[first_end:])
+    except ValueError as e:
+        with_ping = f"raised {e!r}"
+    if with_ping != measure(plain):
+        failed += 1
+        print(f"FAIL comment_only_block: got {json.dumps(with_ping)[:200]}, want the measure of the same stream without it")
+    print(f"self-test: {len(cases) + 1} cases, " + ("ok" if not failed else f"{failed} field(s) wrong"))
     return 1 if failed else 0
 
 

@@ -283,6 +283,24 @@ fn each_responses_quirk_reaches_its_rule() {
     }
 }
 
+/// `ItemInterleaved` changes the stream when the last client-run item has no item after it: with
+/// two function items, every position picks the first one, so the quirk reaches R5.
+#[test]
+fn item_interleaved_reaches_r5_when_the_last_item_is_client_run() {
+    for at in 0..4usize {
+        let mut s = every_kind_scenario(false);
+        let function = s.items.iter().find(|i| i.kind == RKind::Function).cloned().expect("a function item");
+        s.items = vec![function.clone(), function];
+        s.quirks = vec![(RQuirk::ItemInterleaved, at)];
+        s.ensure_targets();
+        let bytes = render_responses(&s);
+        let o = drive(Format::OpenAiResponses, limits(OnFailure::Block), &[&bytes], &allow_all);
+        assert!(o.finished, "at {at}");
+        assert_eq!(reached(&o), Reach::Malformed, "at {at}: {:?}\n{}", o.metrics, show(&bytes));
+        check_p1(Format::OpenAiResponses, &bytes, &o).unwrap_or_else(|e| panic!("at {at}: {e}"));
+    }
+}
+
 /// Two quirks in one stream never break the generator, and P1 holds (two `FirstNotCreated`
 /// quirks once emptied the lifecycle records before a swap).
 #[test]

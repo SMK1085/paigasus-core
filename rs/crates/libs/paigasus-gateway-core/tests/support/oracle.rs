@@ -256,11 +256,24 @@ fn lines(bytes: &[u8]) -> (Vec<&[u8]>, &[u8]) {
 /// SOURCE: openai-python 3.40.0, src/openai/_streaming.py SSEDecoder.decode and
 /// _SSELineDecoder; anthropic-python 2.3.0, src/anthropic/_streaming.py SSEDecoder.
 pub fn py_events(bytes: &[u8]) -> Result<Vec<Sse>, String> {
+    match py_events_partial(bytes) {
+        (out, None) => Ok(out),
+        (_, Some(e)) => Err(e),
+    }
+}
+
+/// [`py_events`], but the events dispatched before a decoding error are kept. The SDK decodes
+/// lazily, so it yields those events before it raises; a model that reads them sees the calls
+/// that the client saw before the raise.
+pub fn py_events_partial(bytes: &[u8]) -> (Vec<Sse>, Option<String>) {
     let (ls, rest) = lines(bytes);
     let mut out = Vec::new();
     let (mut event, mut data, mut last_id, mut retry): (Option<String>, Vec<String>, Option<String>, Option<i64>) = (None, Vec::new(), None, None);
     for raw in ls {
-        let line = std::str::from_utf8(raw).map_err(|e| format!("UnicodeDecodeError: {e}"))?;
+        let line = match std::str::from_utf8(raw) {
+            Ok(line) => line,
+            Err(e) => return (out, Some(format!("UnicodeDecodeError: {e}"))),
+        };
         if line.is_empty() {
             if event.as_deref().is_none_or(str::is_empty) && data.is_empty() && last_id.as_deref().is_none_or(str::is_empty) && retry.is_none() {
                 continue;
@@ -288,8 +301,8 @@ pub fn py_events(bytes: &[u8]) -> Result<Vec<Sse>, String> {
             _ => {}
         }
     }
-    std::str::from_utf8(rest).map_err(|e| format!("UnicodeDecodeError: {e}"))?;
-    Ok(out)
+    let error = std::str::from_utf8(rest).err().map(|e| format!("UnicodeDecodeError: {e}"));
+    (out, error)
 }
 
 /// openai-node's `SSEDecoder` behind `LineDecoder` and a `TextDecoder`: lossy UTF-8 with the BOM
