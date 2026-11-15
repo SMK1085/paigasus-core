@@ -21,3 +21,7 @@ tasks:
     deps: ['^:build']
   test:
     deps: ['^:build']
+    # SMA-774 — `tool_policy::schema`'s `the_base_schema_fixture_is_current` reads the base
+    # schema fixture of the policy compiler, which is outside this project.
+    inputs:
+      - '/rs/tools/paigasus-policy-compiler/protocol/fixtures/**/*'
