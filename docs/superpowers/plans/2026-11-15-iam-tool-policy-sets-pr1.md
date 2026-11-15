@@ -22,7 +22,7 @@
 - Every cargo invocation in a Moon task passes `--locked`.
 - A `.proto` edit is followed by `buf format -w` and `moon run contracts:generate --force` in the same task. Commit all generated Rust, Python and TS output with it.
 - Commits: conventional, with a workspace scope (`feat(rs)`, `feat(contracts)`, `feat(ci)`, `test(rs)`), the subject ends with `(SMA-774)`, and the body ends with a blank line and `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- Each "Commit" step: `git add` exactly the files in that task's **Files** block (plus generated output named there), then `git commit -m "<subject shown>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`. If the hook reports `commitlint not found`, provision the worktree (root `CLAUDE.md`), never bypass it.
+- Each "Commit" step: `git add` exactly the files in that task's **Files** block (plus generated output named there, and every lockfile that the task's cargo runs changed), then `git commit -m "<subject shown>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`. If the hook reports `commitlint not found`, provision the worktree (root `CLAUDE.md`), never bypass it.
 - Never write the text `SMA-751` in a commit message, a PR title or a PR body. Refer to the parent as "IAM tool catalog, tool policy sets and policy sync".
 - No `--no-verify`, no `git commit --amend`, no `git reset`, no bare `git stash`. Do not hand-edit `.github/CODEOWNERS`. Do not touch or copy the `ci-targets` or `moon-diagnosis` marker blocks in `CLAUDE.md`.
 - Do not install host software. Use `docker run ubuntu:24.04` for a Linux-only check.
@@ -181,7 +181,7 @@ git commit -m "test(rs): add the policy compiler workspace and the scope-lowerin
 
 **Files:**
 - Create: `rs/tools/paigasus-policy-compiler/src/translate.rs`, `src/compile.rs`, `tests/shapes.rs`
-- Modify: `src/lib.rs` (`pub mod translate; pub mod compile;`)
+- Modify: `src/lib.rs` (`pub mod translate; pub mod compile;`), `Cargo.toml` (`serde_json`), `Cargo.lock`
 
 **Interfaces:**
 - Consumes: Task 1 `split_policies`, `lower_units`, `slot_prefix`, `service_schema`.
@@ -222,7 +222,7 @@ Every other node or term is rejected with `tool-policy-shape-unsupported`, namin
 
 **The `rhai` check (spec §5.3, §11).** Record D3 with the `cargo tree --locked -i rhai` output from Task 1 Step 1 in the module doc of `compile.rs`.
 
-**Compile order (D7):** source over 256 KiB is not checked here (IAM checks size); `split_policies` (parse error → `tool-policy-invalid` with location); for each unit: `@id` present, grammar, unique, floor prefix rule → else `tool-policy-id-invalid`; `@scope` value → else `tool-policy-id-invalid`; `provider_invocations()` not empty → `tool-policy-invalid`; action literals in each lowered Cedar policy scope (`Policy::action_constraint()`) and in each temporal `Predicate.action` must be `InvokeTool`, `Unregistered`, or equal to their own ASCII lowercase and match `^[a-z0-9_-]{1,64}(\.[a-z0-9_-]{1,64})?$` and not be `invoketool`/`unregistered` → else `tool-policy-invalid`; zero units → return the empty `Compiled` (no Dogwood lowering; `cedar_policies` = `""`, `cedar_schema_json` = the input schema converted with cedar 4.11 `SchemaFragment::from_cedarschema_str(..)?.to_json_value()`, `conditions` = `[]`); `lower_units` error → `tool-policy-lowering-failed`; `Validator::new().validate(&lowered)` failures → `tool-policy-invalid`, mapped to the policy whose slot prefix or policy id matches; translate each field → shape errors; `cedar_policy::Validator` (4.11, strict) over `as_cedar()` against `cedar_schema()` → `tool-policy-invalid`; floor: every policy effect is `Forbid` → else `tool-policy-floor-permit`; each `window_ms <= max_window_ms` → else `tool-policy-window-too-long`. Collect every rejection of a unit; continue with the next unit where the step allows it.
+**Compile order (D7):** source over 256 KiB is not checked here (IAM checks size); `split_policies` (parse error → `tool-policy-invalid` with location); for each unit: `@id` present, grammar, unique, floor prefix rule → else `tool-policy-id-invalid`; `@scope` value → else `tool-policy-id-invalid`; `provider_invocations()` not empty → `tool-policy-invalid`; BEFORE any lowering, from the Dogwood parse tree of each unit, the action literals in its Cedar scope and in each temporal `Predicate.action` must be `InvokeTool`, `Unregistered`, or equal to their own ASCII lowercase and match `^[a-z0-9_-]{1,64}(\.[a-z0-9_-]{1,64})?$` and not be `invoketool`/`unregistered` → else `tool-policy-invalid` with the policy id (a non-normal literal is never in a generated schema, so this check must run before Dogwood can fail on it as a lowering or validation error; if the parse tree does not expose these literals, stop and report to the coordinator); zero units → return the empty `Compiled` (no Dogwood lowering; `cedar_policies` = `""`, `cedar_schema_json` = the input schema converted with cedar 4.11 `SchemaFragment::from_cedarschema_str(..)?.to_json_value()`, `conditions` = `[]`); `lower_units` error → `tool-policy-lowering-failed`; `Validator::new().validate(&lowered)` failures → `tool-policy-invalid`, mapped to the policy whose slot prefix or policy id matches; translate each field → shape errors; `cedar_policy::Validator` (4.11, strict) over `as_cedar()` against `cedar_schema()` → `tool-policy-invalid`; floor: every policy effect is `Forbid` → else `tool-policy-floor-permit`; each `window_ms <= max_window_ms` → else `tool-policy-window-too-long`. Collect every rejection of a unit; continue with the next unit where the step allows it.
 
 - [ ] **Step 1: Write the failing tests in `tests/shapes.rs`** (each calls `compile_cedarschema(…, test_schema, 86_400_000)`):
 
@@ -242,7 +242,7 @@ Every other node or term is rejected with `tool-policy-shape-unsupported`, namin
 #[test] fn scope_defaults_to_session() {}
 #[test] fn a_floor_permit_is_rejected_in_every_form() { /* permit(...); permit(...) when {...}; permit with a temporal block → ToolPolicyFloorPermit */ }
 #[test] fn a_window_over_the_limit_is_rejected() { /* max_window_ms = 3_600_000, formerly within 2h → ToolPolicyWindowTooLong */ }
-#[test] fn a_non_normal_action_literal_is_rejected() { /* Action::"Send"; Action::"invoketool"; a non-ASCII literal → ToolPolicyInvalid */ }
+#[test] fn a_non_normal_action_literal_is_rejected() { /* Action::"Send"; Action::"invoketool"; a non-ASCII literal; in a scope and in a temporal predicate → ToolPolicyInvalid with policy_id set, never ToolPolicyLoweringFailed */ }
 #[test] fn a_provider_invocation_is_rejected() { /* Ns::Fn(...) in a when clause → ToolPolicyInvalid (D3) */ }
 #[test] fn a_hyphenated_id_with_a_temporal_block_compiles() { /* @id("rate-limit-search"); slot starts with "p_rate_hlimit_hsearch_0__temporal_" */ }
 #[test] fn slot_names_stay_when_an_earlier_policy_is_deleted() { /* compile [B,A] and [A]; A's conditions identical */ }
@@ -316,7 +316,7 @@ The mapping follows the spec §4.3 table exactly. A property path is dotted (`a.
 
 **Files:**
 - Create: `rs/crates/libs/paigasus-iam-core/src/tool_policy/{schema.rs, starter.rs}`, `rs/tools/paigasus-policy-compiler/protocol/fixtures/base_schema.json`
-- Modify: `tool_policy/mod.rs`
+- Modify: `tool_policy/mod.rs`, `rs/crates/libs/paigasus-iam-core/moon.yml` (`test` inputs add `/rs/tools/paigasus-policy-compiler/protocol/fixtures/**/*`, because this task's test is the first reader)
 
 **Interfaces:**
 - Consumes: Task 3 `ToolEntry`, `ToolKind`.
@@ -357,7 +357,7 @@ The mapping follows the spec §4.3 table exactly. A property path is dotted (`a.
 
 - [ ] **Step 2: Run to verify failure.** `cd rs && cargo nextest run --locked -p paigasus-iam-core tool_policy`. Expected: FAIL to compile.
 - [ ] **Step 3: Implement** `schema.rs` and `starter.rs`. Write the fixture once with `PAIGASUS_WRITE_FIXTURES=1`, then run again without it.
-- [ ] **Step 4: Review the base schema with the SMA-752 author.** Send the coordinator the generated `base_schema.json` and D5 (`Pgs::Iam::Principal`). Record the answer in the module doc of `schema.rs`. If the answer changes a name, change it here, and rerun.
+- [ ] **Step 4: Send the base schema for review.** Send the coordinator the generated `base_schema.json` and D5 (`Pgs::Iam::Principal`) for the SMA-752 author. Do not wait for the answer: continue with Step 5 and the next tasks. If a later answer changes a name, the coordinator orders a fix commit that changes it here and regenerates the fixture and the Task 5 golden files.
 - [ ] **Step 5: Run.** Same command. Expected: PASS.
 - [ ] **Step 6: Commit** `feat(rs): generate the tool policy Cedar schema and add the starter policy (SMA-774)`.
 
@@ -366,8 +366,8 @@ The mapping follows the spec §4.3 table exactly. A property path is dotted (`a.
 ### Task 5: Compiler protocol, binary, golden output and decision corpus
 
 **Files:**
-- Create: `rs/tools/paigasus-policy-compiler/src/{main.rs, protocol.rs}`, `protocol/fixtures/{request_tenant_accepted.json, result_tenant_accepted.json, request_tenant_rejected.json, result_tenant_rejected.json, request_floor_accepted.json, result_floor_accepted.json}`, `tests/{protocol_fixtures.rs, golden.rs, corpus.rs}`, `tests/golden/*.dw` and `*.result.json`, `corpus/*.json`
-- Modify: `src/lib.rs`, `src/compile.rs`, `src/translate.rs` (derive `Serialize`), `Cargo.toml` (`serde = { version = "1", features = ["derive"] }`, `blake3 = "1"` as a dev-dependency for the pin test)
+- Create: `rs/tools/paigasus-policy-compiler/src/{main.rs, protocol.rs}`, `protocol/fixtures/{request_tenant_accepted.json, result_tenant_accepted.json, request_tenant_rejected.json, result_tenant_rejected.json, request_floor_accepted.json, result_floor_accepted.json, request_floor_rejected.json, result_floor_rejected.json}` (and `reason_codes.json` only if no source reaches `tool-policy-lowering-failed`), `tests/{protocol_fixtures.rs, golden.rs, corpus.rs}`, `tests/golden/*.dw` and `*.result.json` (a floor golden is named `floor_*.dw`; every other golden is a tenant set), `corpus/*.json`
+- Modify: `src/lib.rs`, `src/compile.rs`, `src/translate.rs` (derive `Serialize`), `Cargo.toml` (`serde = { version = "1", features = ["derive"] }`, `blake3 = "1"` as a dev-dependency for the pin test), `Cargo.lock`
 
 **Interfaces:**
 - Consumes: Task 2 `compile_cedarschema`, Task 4 fixture `protocol/fixtures/base_schema.json`.
@@ -385,7 +385,7 @@ The mapping follows the spec §4.3 table exactly. A property path is dotted (`a.
 ```rust
 // tests/protocol_fixtures.rs
 #[test] fn every_fixture_request_produces_its_fixture_result() { /* for each request_*.json: compile_request(..) serialised == result_*.json (serde_json::Value equality) */ }
-#[test] fn every_rejection_reason_matches_the_shared_fixture() { /* the six ReasonCode::as_wire values == the "reason" set listed in result_tenant_rejected.json, which holds one rejection per code */ }
+#[test] fn every_rejection_reason_matches_the_shared_fixture() { /* the six ReasonCode::as_wire values == the union of "reason" values over every result_*_rejected.json (tenant and floor; floor-permit comes only from the floor pair); if no source reaches lowering-failed, the union plus reason_codes.json == the six */ }
 #[test] fn an_unknown_protocol_version_is_a_protocol_error() {}
 #[test] fn an_unknown_request_field_is_a_protocol_error() {}
 // tests/golden.rs
@@ -416,7 +416,7 @@ The golden corpus covers: the starter, a generic floor, each accepted shape, `@s
 - [ ] **Step 2: Run to verify failure.** `cargo test --locked`. Expected: FAIL to compile.
 - [ ] **Step 3: Implement** `protocol.rs`, `main.rs`, the serde derives, and write the fixtures, golden files and corpus with `PAIGASUS_WRITE_FIXTURES=1`. Read each written file before you commit it: the starter must give 0 conditions, and the `formerly` current-event answer must be stated in `corpus/formerly.json`.
 - [ ] **Step 4: Run.** `cargo test --locked && cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(rs): add the policy compiler CLI, protocol fixtures, golden output and decision corpus (SMA-774)`.
+- [ ] **Step 5: Commit** `feat(rs): add the policy compiler CLI, protocol fixtures, golden tests and corpus (SMA-774)`.
 
 ---
 
@@ -424,7 +424,7 @@ The golden corpus covers: the starter, a generic floor, each accepted shape, `@s
 
 **Files:**
 - Create: `rs/crates/libs/paigasus-iam-core/src/tool_policy/{protocol.rs, compare.rs, check.rs, ports.rs}`, `rs/crates/libs/paigasus-iam-core/tests/tool_policy_cross_version.rs`
-- Modify: `tool_policy/mod.rs`, `rs/crates/libs/paigasus-iam-core/moon.yml` (`test` inputs add `/rs/tools/paigasus-policy-compiler/protocol/fixtures/**/*` and `/rs/tools/paigasus-policy-compiler/tests/golden/**/*`)
+- Modify: `tool_policy/mod.rs`, `rs/crates/libs/paigasus-iam-core/moon.yml` (`test` inputs add `/rs/tools/paigasus-policy-compiler/tests/golden/**/*`; Task 4 already added `protocol/fixtures/**/*`)
 
 **Interfaces:**
 - Produces (`protocol.rs`): IAM's own serde mirror of Task 5's JSON: `CompileRequest`, `CompileResult`, `CompiledOutput { cedar_policies: String, cedar_schema_json: serde_json::Value, conditions: Vec<HistoryCondition> }`, `HistoryCondition`, `Shape`, `Predicate`, `Literal`, `Scope`, `CmpOp`, `EventKind`, `Rejection { policy_id: Option<String>, line: Option<u32>, column: Option<u32>, reason: String, message: String }`, `RevisionOutput`, `pub const PROTOCOL_VERSION: u32 = 1;`, `pub enum SetKind { Tenant, Floor }`.
@@ -439,6 +439,7 @@ The golden corpus covers: the starter, a generic floor, each accepted shape, `@s
       async fn compile(&self, req: &CompileRequest) -> Result<CompileOutcome, CompilerFailure>;
   }
   ```
+- Recorded exception to the `warnings = "deny"` constraint: no Task 6 test uses `PolicyCompiler`, `CompileOutcome` or `CompilerFailure`; they are `pub` library items (no rustc warning), first used in Task 11.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -453,7 +454,7 @@ The golden corpus covers: the starter, a generic floor, each accepted shape, `@s
 #[test] fn a_floor_with_a_permit_fails_the_second_check() {}
 #[test] fn a_policy_that_fails_4_14_validation_is_rejected() { /* names an attribute absent from the schema */ }
 // tests/tool_policy_cross_version.rs (spec §10 cross-version proof)
-#[test] fn every_golden_result_validates_under_cedar_4_14() { /* for each tests/golden/*.result.json with outcome accepted: check_compiled(kind, &compiled) == Ok(()) */ }
+#[test] fn every_golden_result_validates_under_cedar_4_14() { /* for each tests/golden/*.result.json with outcome accepted: kind = Floor for floor_*, else Tenant; check_compiled(kind, &compiled) == Ok(()) */ }
 ```
 
 - [ ] **Step 2: Run to verify failure.** `cd rs && cargo nextest run --locked -p paigasus-iam-core`. Expected: FAIL to compile.
@@ -474,10 +475,10 @@ The golden corpus covers: the starter, a generic floor, each accepted shape, `@s
 
 Required content:
 - `.moon/workspace.yml`: add the literal entry `'rs/tools/paigasus-policy-compiler'` under `projects.globs`.
-- `moon.yml`: `id: 'paigasus-policy-compiler-rs'`, `layer: 'tool'`, `language: 'rust'`. Each inherited task gets `options: { mergeInputs: 'replace' }` and these inputs: `@group(sources)`, `@group(tests)` (not on `build`), `Cargo.toml`, `Cargo.lock`, `protocol/**/*`, `tests/golden/**/*`, `corpus/**/*`, `/rs/rust-toolchain.toml`, `/rs/.cargo/config.toml` (A10), `/rs/rustfmt.toml` (fmt only), `/rs/.config/nextest.toml` (test only). It must NOT list `/rs/Cargo.lock` or `/rs/Cargo.toml`, so the `lockfile->all-lint` set in `ci/affected-graph/run.sh` does not change. `deny`: `cargo deny --locked check`, inputs `Cargo.toml`, `Cargo.lock`, `deny.toml`. `machete`: `cargo machete .`. Both `toolchain: 'system'`, as the root `moon.yml` tasks are. All cargo commands pass `--locked`.
+- `moon.yml`: `id: 'paigasus-policy-compiler-rs'`, `layer: 'tool'`, `language: 'rust'`. Each inherited task gets `options: { mergeInputs: 'replace' }` and these inputs: `@group(sources)`, `@group(tests)` (not on `build`), `Cargo.toml`, `Cargo.lock`, `protocol/**/*`, `tests/golden/**/*`, `corpus/**/*`, `/rs/rust-toolchain.toml`, `/rs/.cargo/config.toml` (A10), `/rs/rustfmt.toml` (fmt only). Do NOT list `/rs/.config/nextest.toml`: nextest reads `.config/nextest.toml` from the compiler's own workspace root, so that input would be dead. It must NOT list `/rs/Cargo.lock` or `/rs/Cargo.toml`, so the `lockfile->all-lint` set in `ci/affected-graph/run.sh` does not change. `deny`: `cargo deny --locked check`, inputs `Cargo.toml`, `Cargo.lock`, `deny.toml`. `machete`: `cargo machete .`. Both `toolchain: 'system'`, as the root `moon.yml` tasks are. All cargo commands pass `--locked`. Record in a `moon.yml` comment (spec §5.1 asks for a reason for each place): `repo:deny` reads only `rs/Cargo.toml`, so this project's `deny` task covers the compiler lock under `:deny`; `repo:machete` runs `cargo machete rs`, which is recursive and so already scans the compiler, and this project's `machete` task keys the check on the compiler's own inputs.
 - `deny.toml`: a copy of `rs/deny.toml` with `{ name = "tiny-keccak", allow = ["CC0-1.0"] }` (reason: pulled by `rhai`, a mandatory Dogwood dependency, D3) and `[sources] allow-git = ["https://github.com/dogwood-policy/dogwood"]` (reason: spec §3.7). Each further exception that `cargo deny` asks for gets a written reason in the same style.
 - `.github/dependabot.yml`: a second `cargo` entry, `directory: /rs/tools/paigasus-policy-compiler`, same schedule and commit prefix, with `ignore:` for `dogwood-language` and `cedar-policy` (reason comment: spec §3.2, no Dogwood bump before PR 3; cedar must stay 4.11.0).
-- `images.yml`: add `'rs/tools/paigasus-policy-compiler/**'` to the `pull_request.paths` list (the push filter already has `rs/**`).
+- `images.yml`: add only `'rs/tools/paigasus-policy-compiler/Cargo.lock'` and `'rs/tools/paigasus-policy-compiler/Cargo.toml'` to the `pull_request.paths` list. The filter keeps sources out on purpose (SMA-520 comment), and spec §5.1 asks only for the second lockfile. The push filter already has `rs/**`.
 - `ci.yml`: the lock-integrity step stays where it is; `ci/cargo-lock-integrity/run.sh` checks both workspaces (`rs` and `rs/tools/paigasus-policy-compiler`), and its `--negative-control` proves that a truncated compiler lock reds with rc 1. Add `rs/tools/paigasus-policy-compiler/target` to the Rust cache `path:` list and `'rs/tools/paigasus-policy-compiler/Cargo.lock'` to the `hashFiles(...)` of the key (a new hash input changes the key, so the cache saves).
 - `rs/.dockerignore`: `target/` → `**/target/`.
 - `rs/Dockerfile` builder stage: add `--mount=type=cache,id=cargo-git,target=/usr/local/cargo/git` next to the registry mount; after the service build, `if [ "${BIN}" = "paigasus-iam" ]; then cargo auditable build --release --locked --manifest-path tools/paigasus-policy-compiler/Cargo.toml (target cache id=target-policy-compiler) && cp …/release/paigasus-policy-compiler /out/extra/; fi` with `mkdir -p /out/extra` always. Final stage: `COPY --from=builder /out/extra/ /usr/local/bin/`. The gateway image gets an empty copy. Keep the self-test stage above `FROM scratch`.
@@ -507,7 +508,7 @@ Required content:
 
 `iam.proto` (buf lint: every enum value carries its enum prefix; `_UNSPECIFIED = 0`). Oneof members use `all_of`, `any_of`, `negation`, because `and`, `or`, `not` are Python keywords and would break the betterproto output.
 - Enums: `ToolKind`, `ToolSource`, `ToolImportFormat` (`OPENAI_CHAT_COMPLETIONS`, `OPENAI_RESPONSES`, `MCP_TOOLS_LIST`), `ToolPolicySetKind` (`TENANT`, `FLOOR`), `ToolPolicyVersionStatus` (`LIVE`, `SUPERSEDED`, `HELD`, `DISCARDED`), `ToolPolicyVersionOrigin` (`SAVE`, `STARTER`, `CATALOG_CHANGE`, `RECOMPILE`, `ACCEPT`), `HistoryScope` (`SESSION`, `PRINCIPAL`, `KEY`), `HistoryEventKind` (`REQUEST`, `RESPONSE`), `ComparisonOp` (`LT`, `LE`, `EQ`, `GE`, `GT`, `NE`).
-- `CompiledToolPolicySet { kind=1; org_id=2 (uuid string, empty for floor); uint64 version=3; uint32 compiler_generation=4; uint32 schema_revision=5; uint64 catalog_revision=6; string cedar_policies=7; string cedar_schema_json=8; repeated HistoryCondition conditions=9; uint64 max_window_ms=10; repeated string catalog_names=11; }`
+- `CompiledToolPolicySet { kind=1; org_id=2 (uuid string, empty for floor); uint64 version=3; uint32 compiler_generation=4; uint32 schema_revision=5; uint64 catalog_revision=6; string cedar_policies=7; string cedar_schema=8 /* spec §5.4 name; Cedar JSON schema form as a string; the internal serde types keep cedar_schema_json */; repeated HistoryCondition conditions=9; uint64 max_window_ms=10; repeated string catalog_names=11; }`
 - `HistoryCondition { string slot=1; string policy_id=2; HistoryScope scope=3; uint64 window_ms=4; oneof shape { FormerlyShape formerly=5; CountWithinShape count_within=6; SumWithinShape sum_within=7; } }`, `FormerlyShape { HistoryPredicate predicate=1; }`, `CountWithinShape { predicate=1; ComparisonOp op=2; int64 threshold=3; }`, `SumWithinShape { predicate=1; repeated string field_path=2; op=3; threshold=4; }`
 - `HistoryPredicate { oneof node { HistoryEventKind event_kind=1; ToolMatch tool=2; FieldComparison field=3; PredicatePair all_of=4; PredicatePair any_of=5; HistoryPredicate negation=6; } }`, `ToolMatch { string name_key=1; bool any_catalog_tool=2; }`, `FieldComparison { repeated string path=1; ComparisonOp op=2; LiteralValue value=3; }`, `LiteralValue { oneof value { int64 long_value=1; string string_value=2; bool bool_value=3; string decimal_value=4; } }`, `PredicatePair { HistoryPredicate left=1; HistoryPredicate right=2; }`
 - Doc comments on `CompiledToolPolicySet` and `HistoryCondition` state every evaluation rule of spec §5.4 (closed window, event recorded first, `formerly` and the current event per `corpus/formerly.json`, `name_key` matching, `sum_within` adds 0 for missing or negative and saturates, `KEY` scope falls back to the principal, retention ≥ `max_window_ms` or fail closed, missing slot / unknown shape / unknown enum fails closed, the `floor/` and `tenant/` merge rule).
@@ -588,7 +589,7 @@ Rules: add the six to the enum, `Action::ALL` (length 51, message adds `+ 6 SMA-
 - Produces: `pub struct PgToolPolicies` in `pg_tool_policies.rs` with `pub fn new(db: DatabaseConnection) -> Self`.
 
 **m0013 DDL** (one migration, `SET LOCAL lock_timeout = '5s'` as m0008-m0012):
-- `tool_catalog_entry (org_id UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE, name_key TEXT NOT NULL, display_name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('function','custom')), input_schema JSONB NULL, cedar_input_type JSONB NOT NULL, dropped_fields JSONB NOT NULL DEFAULT '[]', source TEXT NOT NULL CHECK (source IN ('manual','openai','mcp')), created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (org_id, name_key), CHECK ((kind = 'custom') = (input_schema IS NULL)))`
+- `tool_catalog_entry (org_id UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE, name_key TEXT NOT NULL, display_name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('function','custom')), input_schema JSONB NULL, cedar_input_type JSONB NOT NULL, dropped_fields JSONB NOT NULL DEFAULT '[]', source TEXT NOT NULL CHECK (source IN ('manual','openai','mcp')), created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (org_id, name_key), CHECK (kind <> 'custom' OR input_schema IS NULL))` (a `custom` tool has no schema; a `function` tool may have none: a built-in tool with an empty record, spec §4.2)
 - `tool_policy_state (set_key TEXT PRIMARY KEY /* 'floor' or 'tenant:<uuid>' */, kind TEXT NOT NULL CHECK (kind IN ('tenant','floor')), org_id UUID NULL REFERENCES organization(id) ON DELETE CASCADE, catalog_revision BIGINT NOT NULL DEFAULT 0, live_version BIGINT NOT NULL DEFAULT 0, CHECK ((kind = 'floor') = (org_id IS NULL)), CHECK (set_key = CASE WHEN kind = 'floor' THEN 'floor' ELSE 'tenant:' || org_id::text END))`, plus `INSERT INTO tool_policy_state (set_key, kind) VALUES ('floor','floor')`
 - `tool_policy_set_version (kind TEXT NOT NULL CHECK (kind IN ('tenant','floor')), org_id UUID NULL REFERENCES organization(id) ON DELETE CASCADE, version BIGINT NOT NULL CHECK (version >= 1), source TEXT NOT NULL, compiled BYTEA NOT NULL, compiler_generation INTEGER NOT NULL, schema_revision INTEGER NOT NULL, catalog_revision BIGINT NULL, status TEXT NOT NULL CHECK (status IN ('live','superseded','held','discarded')), origin TEXT NOT NULL CHECK (origin IN ('save','starter','catalog_change','recompile','accept')), base_version BIGINT NULL, report JSONB NULL, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, CHECK ((kind = 'floor') = (org_id IS NULL)), CHECK ((kind = 'floor') = (catalog_revision IS NULL)))`
 - `CREATE UNIQUE INDEX uq_tool_policy_set_version ON tool_policy_set_version (kind, COALESCE(org_id, '00000000-0000-0000-0000-000000000000'::uuid), version)`
@@ -604,6 +605,7 @@ Rules: add the six to the enum, `Action::ALL` (length 51, message adds `+ 6 SMA-
 #[tokio::test] async fn a_second_live_row_is_refused_by_the_index() { /* raw INSERT of a second 'live' row for one set → unique violation */ }
 #[tokio::test] async fn a_second_held_row_is_refused_by_the_index() { /* raw SQL, two 'held' rows → unique violation */ }
 #[tokio::test] async fn a_floor_row_with_an_org_id_is_refused() {}
+#[tokio::test] async fn a_function_tool_with_no_schema_is_stored_and_a_custom_tool_with_a_schema_is_refused() {}
 #[tokio::test] async fn version_does_not_return_a_held_row() { /* raw SQL inserts a held row v3; version(key, 3) == None */ }
 #[tokio::test] async fn lock_state_blocks_a_second_locker_until_commit() { /* two tasks lock_state_in on one key; the second waits until the first commits (use support::race) */ }
 #[tokio::test] async fn deleting_an_org_cascades() {}
@@ -611,7 +613,7 @@ Rules: add the six to the enum, `Action::ALL` (length 51, message adds `+ 6 SMA-
 ```
 
 - [ ] **Step 2: Run to verify failure.** `cd rs && cargo nextest run --locked -p paigasus-iam --test tool_policies_pg`. Expected: FAIL to compile.
-- [ ] **Step 3: Implement** the migration (register as `m0013_create_tool_policies` in `mod.rs`), the entities and `PgToolPolicies`, following `pg_policies.rs` (`recover_txn`, `map_db_err`). Store `compiled` as the proto bytes the service hands in; this adapter does not decode them.
+- [ ] **Step 3: Implement** the migration (register as `m0013_create_tool_policies` in `mod.rs`), the entities and `PgToolPolicies`, following `pg_policies.rs` for `recover_txn`. Map database errors with `persistence::map_err` (`adapters/persistence/mod.rs`, returns `RepositoryError`), not `pg_policies::map_db_err` (returns `AuthzError`). Store `compiled` as the proto bytes the service hands in; this adapter does not decode them.
 - [ ] **Step 4: Run.** Same command, then `cargo nextest run --locked -p paigasus-iam --lib migration`. Expected: PASS (Docker required; the suite skips without Docker locally, so check that the run did not skip).
 - [ ] **Step 5: Commit** `feat(rs): store the tool catalog and the tool policy set versions (SMA-774)`.
 
@@ -621,13 +623,13 @@ Rules: add the six to the enum, `Action::ALL` (length 51, message adds `+ 6 SMA-
 
 **Files:**
 - Create: `rs/crates/services/paigasus-iam/src/adapters/policy_compiler/{mod.rs, process.rs}`, `tests/tool_policies_compiler_process.rs`
-- Modify: `src/adapters/mod.rs`, `src/config.rs`, `rs/crates/services/paigasus-iam/iam.toml.example`, `rs/crates/services/paigasus-iam/Cargo.toml` (tokio feature `process`; `libc = "0.2"` with a reason comment: `setrlimit` in `pre_exec`)
+- Modify: `src/adapters/mod.rs`, `src/config.rs`, `rs/crates/services/paigasus-iam/iam.toml.example`, `rs/crates/services/paigasus-iam/Cargo.toml` (tokio feature `process`; `libc = "0.2"` with a reason comment: `setrlimit` in `pre_exec`), `rs/Cargo.lock`, `rs/crates/services/paigasus-iam/moon.yml` (`test` inputs add `/rs/tools/paigasus-policy-compiler/protocol/**/*`, because this task's tests are the first IAM readers of the fixtures)
 
 **Interfaces:**
 - Consumes: Task 6 `PolicyCompiler`, `CompileRequest`, `CompileResult`, `RevisionOutput`, `PROTOCOL_VERSION`.
 - Produces (`config.rs`): `pub struct ToolPoliciesConfig { pub enabled: bool /* false */, pub compiler_path: PathBuf /* "/usr/local/bin/paigasus-policy-compiler" */, pub compile_timeout_ms: u64 /* 10_000 */, pub max_source_bytes: usize /* 262_144 */, pub max_result_bytes: usize /* 3_145_728 */, pub rlimit_as_bytes: u64 /* 1_073_741_824 */, pub rlimit_cpu_secs: u64 /* 15 */, pub compiler_permits: usize /* 2 */, pub max_window_secs: u64 /* 86_400 */, pub max_tools: usize /* 500 */, pub max_input_schema_bytes: usize /* 65_536 */, pub max_schema_depth: usize /* 8 */ }` as `IamConfig.tool_policies`, with the same Defaults/shadow pattern as `AuthzConfig`. `validate` rejects `max_window_secs > 604_800`, `compiler_permits == 0` and `compile_timeout_ms == 0`.
 - Produces (`process.rs`):
-  - `pub struct ProcessLimits { timeout: Duration, max_stdout: usize, rlimit_as: u64, rlimit_cpu: u64 }` with `pub fn from_config(cfg: &ToolPoliciesConfig) -> Self`
+  - `pub struct ProcessLimits { timeout: Duration, max_stdout: usize, rlimit_as: u64, rlimit_cpu: u64 }` with `pub fn from_config(cfg: &ToolPoliciesConfig) -> Self`. `rlimit_as` is applied only on Linux, so on macOS the boot log line (below) must read it, or the field is dead code under `warnings = "deny"`; if that is not possible, use `#[cfg_attr(not(target_os = "linux"), allow(dead_code))]` with a reason comment.
   - `pub struct RawOutput { pub status: std::process::ExitStatus, pub stdout: Vec<u8>, pub stderr_truncated: String }`
   - `pub async fn run_child(path: &Path, args: &[&str], stdin: &[u8], limits: &ProcessLimits) -> Result<RawOutput, CompilerFailure>` — `tokio::process::Command` with `env_clear()`, `current_dir(<fresh tempdir>)`, `stdin/stdout/stderr = piped`, `kill_on_drop(true)`, `pre_exec` setting `RLIMIT_CPU` everywhere and `RLIMIT_AS` on Linux only (macOS refuses it; log once at boot); stdin write and stdout/stderr reads run concurrently (`tokio::join!`); stdout over `max_stdout` → `Unavailable`; the whole call under `tokio::time::timeout` → `Unavailable("timeout")`; stderr is truncated to 4 KiB and logged, never returned to a caller.
 - Produces (`mod.rs`):
@@ -648,7 +650,7 @@ The `tempfile` crate is already a dev-dependency only. Make the working director
 #[tokio::test] async fn the_child_gets_an_empty_environment() { /* exec /usr/bin/env; set a canary var in the test process; stdout is empty */ }
 #[tokio::test] async fn the_child_runs_in_an_empty_directory() { /* /bin/ls -A → empty stdout */ }
 #[cfg(target_os = "linux")] #[tokio::test] async fn the_child_inherits_only_the_three_pipes() { /* /bin/ls /proc/self/fd → 0 1 2 and the ls dir fd only */ }
-#[cfg(target_os = "linux")] #[tokio::test] async fn rlimit_as_stops_a_large_allocation() { /* fake that allocates 2 GiB (head -c via a shell var is not enough: use /usr/bin/python3 -c only if present, else skip with a printed reason) → non-zero exit → Unavailable */ }
+#[cfg(target_os = "linux")] #[tokio::test] async fn rlimit_as_stops_a_large_allocation() { /* fake that allocates 2 GiB with /usr/bin/python3 -c (head -c via a shell var is not enough); panic, never skip, if /usr/bin/python3 is absent (CI runners and rust:1.95.0-bookworm have it) → non-zero exit → Unavailable */ }
 #[tokio::test] async fn the_semaphore_answers_busy() { /* permits 1; first call blocks on /bin/sleep 2; second call → Busy at once */ }
 #[tokio::test] async fn a_result_with_a_foreign_generation_is_unavailable() { /* script prints result_tenant_accepted.json with compiler_generation 99 */ }
 #[tokio::test] async fn probe_returns_none_for_a_missing_binary() {}
@@ -669,7 +671,7 @@ The `tempfile` crate is already a dev-dependency only. Make the working director
 
 **Files:**
 - Create: `rs/crates/services/paigasus-iam/src/application/tool_policies/{mod.rs, catalog.rs, sets.rs, rejection.rs}`
-- Modify: `src/application/mod.rs`, `src/application/error.rs`, `src/application/fakes.rs`, `src/adapters/retryable.rs`, `src/adapters/http/error.rs`, `src/adapters/grpc/convert.rs`, `ci/error-registry/check.py`
+- Modify: `src/application/mod.rs`, `src/application/error.rs`, `src/application/fakes.rs`, `src/adapters/retryable.rs`, `src/adapters/http/error.rs`, `src/adapters/grpc/convert.rs`, `ci/error-registry/check.py` (and `ci/error-registry/README.md` if it states the scan root), root `moon.yml` (`error-code-single-site` inputs), `rs/crates/services/paigasus-iam/Cargo.toml` and `rs/Cargo.lock` (only if `prost` is added)
 
 **Interfaces:**
 - Consumes: Tasks 3, 4, 6, 9, 10, 11.
@@ -693,12 +695,13 @@ The `tempfile` crate is already a dev-dependency only. Make the working director
       pub async fn get_floor(&self, actor: &Prn, version: Option<u64>) -> Result<Option<ToolPolicyVersion>, TenancyError>;
   }
   ```
-- `CompiledToolPolicySet` proto bytes are built in `sets.rs` from `CompiledOutput` plus `kind`, `org_id`, `version`, generations, `catalog_revision`, `max_window_ms`, `catalog_names` (`prost::Message::encode_to_vec`; add `prost` with `workspace = true` and a reason comment if it is not already a dependency).
+- `CompiledToolPolicySet` proto bytes are built in `sets.rs` from `CompiledOutput` plus `kind`, `org_id`, `version`, generations, `catalog_revision`, `max_window_ms`, `catalog_names` (`prost::Message::encode_to_vec`; add `prost` with `workspace = true` and a reason comment if it is not already a dependency). `sets.rs` holds both directions: `fn encode_compiled(..) -> Vec<u8>` and `fn decode_compiled(bytes: &[u8]) -> Result<CompiledOutput, TenancyError>`. The coupling decodes the live version's stored bytes and compares with `outputs_identical`; there is no second comparison on bytes (spec §8.1).
+- `sets.rs` also holds one helper that adds the `dropped_fields` reason to a rejection whose message names a dropped path (spec §4.3). `put_set` and the catalog coupling both call it.
 
 **Algorithms the tests pin (spec §4.5, §4.6):**
 - Every method authorizes first: tenant writes `ManageToolCatalog` / `ManageToolPolicies` and reads `ReadToolCatalog` / `ReadToolPolicies` at the org PRN (the org must exist, else `NotFound`); floor writes `ManageToolPolicyFloor`, reads `ReadToolPolicyFloor` at `root_prn()`.
 - Write steps: (1) read `state` and inputs; an expected value that is not current → `ToolPolicyVersionConflict` at once. (2) compile with no transaction open; `CompilerFailure::Busy` → `ToolPolicyCompilerBusy`, `Unavailable` → `ToolPolicyCompilerUnavailable`; an unknown reason string in a rejection → `ToolPolicyCompilerUnavailable`; on accept, `check_compiled` failure → rejection `PolicyInvalid` with the message. (3) `uow.begin()`, `lock_state_in`, recheck `live_version` and `catalog_revision`; a change → drop the tx, `ToolPolicyVersionConflict`. (4) write, `audit.record`, commit. No outbox event (D9).
-- `put_set` / `put_floor`: source over `max_source_bytes` → rejection `PolicyInvalid`; a source byte-identical to the live source → `Accepted(live)` with no write and no audit entry. The tenant compile uses `tenant_schema_json(catalog)`; the floor uses `base_schema_json()` and kind `Floor`.
+- `put_set` / `put_floor`: source over `max_source_bytes` → rejection `PolicyInvalid`; a source byte-identical to the live source, AND the live `compiler_generation` == `compiler.generation()` AND the live `schema_revision` == `TOOL_SCHEMA_REVISION` → `Accepted(live)` with no write and no audit entry. If either value differs, compile and write a new version (`origin = Save`): this save is how an admin clears `tool-policy-recompile-pending` in PR 1 (D10, spec §4.6). The tenant compile uses `tenant_schema_json(catalog)`; the floor uses `base_schema_json()` and kind `Floor`.
 - Catalog writes (`put_tool`, `delete_tool`, `import_tools`): build the entries (Task 3); a problem → `Rejected` with `CatalogInvalid`, or `Err(ToolCatalogConflict)` for a `Conflict`; `put_tool` with the same `name_key` and a different `display_name` → `ToolCatalogConflict`; `import_tools` with `replace = true` deletes every tool not in the batch; the new catalog over `max_tools` → `CatalogInvalid`; `delete_tool` of an absent name → `NotFound`. Coupling: if a live tenant set exists, and its `compiler_generation != compiler.generation()` or `schema_revision != TOOL_SCHEMA_REVISION` → `ToolPolicyRecompilePending`; else compile the live source against the new catalog: rejected → `Rejected`, each rejection re-tagged `CatalogBreaksPolicy` with the policy id, and the message adds the `dropped_fields` reason when the compiler message names a dropped path; accepted and `outputs_identical` with the live output → no new version; else a new live version with `origin = CatalogChange` in the same transaction as the catalog write.
 - Audit (spec §9.6): one `AuditEntry` per committed mutation: `action` = the RPC name (`PutTool`, `DeleteTool`, `ImportTools`, `PutToolPolicySet`, `PutFloorPolicySet`), `resource_prn` = the org PRN or `root_prn()`, `detail` = `{"set": "tenant"|"floor", "version": <n or null>, "origin": "save"|"catalog_change"|null, "catalog_revision": <n or null>}`.
 
@@ -725,22 +728,27 @@ The `tempfile` crate is already a dev-dependency only. Make the working director
 #[tokio::test] async fn a_catalog_change_with_different_output_writes_a_catalog_change_version() {}
 #[tokio::test] async fn a_live_set_from_an_older_generation_blocks_catalog_writes() { /* ToolPolicyRecompilePending */ }
 #[tokio::test] async fn a_live_set_from_an_older_schema_revision_blocks_catalog_writes() {}
-#[tokio::test] async fn a_save_clears_recompile_pending() {}
+#[tokio::test] async fn a_save_clears_recompile_pending() { /* live set from generation 0; save the BYTE-IDENTICAL source → new version, then a catalog write succeeds */ }
+#[tokio::test] async fn a_byte_identical_save_at_the_running_generation_writes_nothing() {}
+#[tokio::test] async fn put_tool_of_a_builtin_with_no_schema_gets_an_empty_record() { /* kind Function, input_schema None → accepted, cedar_input_type is an empty record */ }
+#[tokio::test] async fn a_saved_policy_that_reads_a_dropped_field_names_the_drop_reason() { /* put_set rejection message contains the dropped_fields reason */ }
 #[tokio::test] async fn import_with_replace_removes_missing_tools() {}
 #[tokio::test] async fn every_mutation_writes_exactly_one_audit_entry() { /* table over the five writes */ }
 #[tokio::test] async fn each_rpc_checks_its_action() { /* a Deny for the action → Forbidden, and the compiler was not called */ }
 #[tokio::test] async fn get_set_returns_not_found_for_an_absent_version() { /* ToolPolicyVersionNotFound */ }
 // rejection.rs
 #[test] fn every_rejection_reason_is_declared_in_the_canonical_registry() { /* each code() parses via ErrorReason::from_wire_reason */ }
-#[test] fn every_compiler_reason_in_the_shared_fixture_parses() { /* include_str!("../../../../../../tools/paigasus-policy-compiler/protocol/fixtures/result_tenant_rejected.json") */ }
+#[test] fn every_compiler_reason_in_the_shared_fixture_parses() { /* include_str! of result_tenant_rejected.json and result_floor_rejected.json (and reason_codes.json if Task 5 made it) under "../../../../../../tools/paigasus-policy-compiler/protocol/fixtures/"; every reason parses via RejectionReason::from_wire, and the union is the six compiler codes */ }
+// sets.rs
+#[test] fn decode_compiled_inverts_encode_compiled() { /* every shape, every literal type, window_ms, and the schema JSON string ↔ Value; outputs_identical(decoded, original) */ }
 // error.rs — extend every_tenancy_code_is_declared_in_the_canonical_registry (strum EnumIter covers the new variants)
 ```
 
 - [ ] **Step 2: Run to verify failure.** `cd rs && cargo nextest run --locked -p paigasus-iam --lib tool_policies error`. Expected: FAIL to compile.
 - [ ] **Step 3: Implement** the service, the error variants and the three transport class maps.
-- [ ] **Step 4: Register the emission site.** In `ci/error-registry/check.py`: add the `emits` row `("rs/crates/services/paigasus-iam/src/application/tool_policies/rejection.rs", "emits", "every_rejection_reason_is_declared_in_the_canonical_registry", "RejectionReason::code()")`; widen the scanned tree to also cover `rs/tools/*/src/**/*.rs` and add `("rs/tools/paigasus-policy-compiler/src/compile.rs", "emits", "every_rejection_reason_matches_the_shared_fixture", "ReasonCode::as_wire() — checked against the shared protocol fixture, which IAM checks against the registry")`. If `check.py` requires the guard in the same file, move the Task 5 test into `src/compile.rs`'s `#[cfg(test)]` module. Add the matching input to the root `moon.yml` `error-code-single-site` task. Run `python3 ci/error-registry/check.py --self-test && python3 ci/error-registry/check.py --single-site` (through `bash ci/python-env/run.sh` if the task does so). Expected: pass.
+- [ ] **Step 4: Register the emission site.** In `ci/error-registry/check.py`: add the `emits` row `("rs/crates/services/paigasus-iam/src/application/tool_policies/rejection.rs", "emits", "every_rejection_reason_is_declared_in_the_canonical_registry", "RejectionReason::code()")`; `check.py` uses `SCAN_ROOT = rs/crates` for BOTH the emission scan and `guard_exists`, so widen both to also cover `rs/tools/*` (emission: `src/**/*.rs`; guard lookup: `src/` and `tests/`), and keep the bounded-glob self-test green. Add `("rs/tools/paigasus-policy-compiler/src/compile.rs", "emits", "every_rejection_reason_matches_the_shared_fixture", "ReasonCode::as_wire() — checked against the shared protocol fixture, which IAM checks against the registry")`. In the root `moon.yml` `error-code-single-site` task, add the inputs `rs/tools/**/src/**/*.rs` and `rs/tools/**/tests/**/*.rs`. Run `python3 ci/error-registry/check.py --self-test && python3 ci/error-registry/check.py --single-site` (through `bash ci/python-env/run.sh` if the task does so). Expected: pass.
 - [ ] **Step 5: Run.** `cargo nextest run --locked -p paigasus-iam --lib`. Expected: PASS.
-- [ ] **Step 6: Commit** `feat(rs): add the tool policy application service with compile on save and catalog coupling (SMA-774)`.
+- [ ] **Step 6: Commit** `feat(rs): add the tool policy service with compile on save and catalog coupling (SMA-774)`.
 
 ---
 
@@ -801,13 +809,13 @@ The `tempfile` crate is already a dev-dependency only. Make the working director
 
 **Files:**
 - Create: `rs/crates/services/paigasus-iam/tests/tool_policies_real_compiler.rs`
-- Modify: `rs/crates/services/paigasus-iam/moon.yml`
+- Modify: `rs/crates/services/paigasus-iam/moon.yml`, `ci/affected-graph/run.sh` (only if Step 4 edits it)
 
 **Interfaces:**
 - Consumes: Task 7 build path, Tasks 12-13.
 - Produces: env var `PAIGASUS_POLICY_COMPILER_BIN`, set by the IAM `test` task.
 
-`moon.yml` (`paigasus-iam-rs`): `test.deps` adds `'paigasus-policy-compiler-rs:build'`; `test.env` sets `PAIGASUS_POLICY_COMPILER_BIN: '$workspaceRoot/rs/tools/paigasus-policy-compiler/target/debug/paigasus-policy-compiler'` (check that Moon 2.5.3 expands the token; else use a relative path from the project root); `test.inputs` adds `/rs/tools/paigasus-policy-compiler/src/**/*`, `/rs/tools/paigasus-policy-compiler/Cargo.lock`, `/rs/tools/paigasus-policy-compiler/protocol/**/*`. Skip policy: env unset and `CI` unset → print `skipped: PAIGASUS_POLICY_COMPILER_BIN is not set` and return; env unset and `CI` set → panic. This mirrors `paigasus-test-docker`.
+`moon.yml` (`paigasus-iam-rs`): `test.deps` adds `'paigasus-policy-compiler-rs:build'`; `test.env` sets `PAIGASUS_POLICY_COMPILER_BIN: '$workspaceRoot/rs/tools/paigasus-policy-compiler/target/debug/paigasus-policy-compiler'` (check that Moon 2.5.3 expands the token; else use a relative path from the project root); `test.inputs` adds `/rs/tools/paigasus-policy-compiler/src/**/*` and `/rs/tools/paigasus-policy-compiler/Cargo.lock` (Task 11 already added `protocol/**/*`). Skip policy: the test never reads `CI` (`repo:iam-docker-policy-single-site` reds on `var("CI")` / `var_os("CI")` in an IAM test). The Moon `test` task always sets the variable, and CI runs that task. Env unset → print `skipped: PAIGASUS_POLICY_COMPILER_BIN is not set` and return; env set but the file is absent → panic.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -816,7 +824,7 @@ The `tempfile` crate is already a dev-dependency only. Make the working director
 #[tokio::test] async fn the_real_compiler_compiles_a_generic_floor() {}
 #[tokio::test] async fn a_count_within_policy_round_trips_through_the_real_compiler() { /* catalog tool "search"; conditions[0].count_within.threshold == 2; slot starts with the @id prefix */ }
 #[tokio::test] async fn a_catalog_delete_that_breaks_a_live_policy_is_rejected_by_the_real_compiler() {}
-#[tokio::test] async fn the_boot_probe_reads_generation_1() {}
+#[tokio::test] async fn the_boot_probe_reads_generation_1() { /* also asserts that the path in PAIGASUS_POLICY_COMPILER_BIN exists when the variable is set */ }
 ```
 
 - [ ] **Step 2: Run to verify failure.** `export PATH=…; moon run paigasus-iam-rs:test` (filter is not possible through Moon; read the test names in the output). Expected: FAIL (test file missing → compile error).
