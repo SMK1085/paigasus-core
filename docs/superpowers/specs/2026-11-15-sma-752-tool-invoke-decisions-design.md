@@ -174,10 +174,11 @@ The challenge showed that in revision 1 the floor applies only when the tenant i
 mode, and that a tenant set that fails to compile removes the floor. So the operator cannot
 forbid for every tenant, and § 1 fails. This is the open item **Q2** for Gate 1:
 
-- **Q2-A. A separate `floor_mode` (chosen by Sven at Gate 1).** A global setting `floor_mode` (off, log-only,
-  enforce) applies the floor to every tenant, whatever the tenant's mode. The floor is compiled
-  and cached on its own, so a tenant set that fails does not remove it. In a tenant whose mode is
-  `off`, only the floor is evaluated.
+- **Q2-A. The floor applies to every tenant, whatever the tenant's mode (chosen by Sven at
+  Gate 1).** The floor is compiled and cached on its own, so a tenant set that fails does not
+  remove it. In a tenant whose mode is `off`, only the floor is evaluated. Revision 2 first had a
+  global `floor_mode` knob for this. On 2026-11-15 Sven removed the knob, to agree with SMA-751:
+  **the floor is always enforced** when `[tool_policy] enabled = true` (D33).
 - Q2-B. The floor follows the tenant mode. The spec then says plainly that the floor only
   advises until a tenant is in enforce mode.
 
@@ -192,7 +193,8 @@ Sven can change at Gate 1. "Challenge" marks a call that the adversarial challen
 | D2 | The kernel module `tool_policy` is behind a cargo feature `tool-policy`, off by default. Only the gateway crates enable it. Add `[package.metadata.docs.rs] features = ["tool-policy"]` to the kernel. | Call |
 | D3 | Policy source scope per § 4.2. | Sven |
 | D4 | Every replica gets every policy event (§ 4.3), through a core NATS subscription on `iam.policy.>` (Q1-A). | Sven |
-| D33 | A separate global `floor_mode` applies the floor to every tenant, whatever the tenant's mode (Q2-A, § 4.6). | Sven |
+| D33 | The floor is always enforced for every tenant, whatever the tenant's mode, when `[tool_policy] enabled = true` (Q2-A, § 4.6). There is no `floor_mode` setting. This agrees with SMA-751. | Sven |
+| D34 | `on_policy_unavailable` is global and required (D9). `[[tool_policy.org]]` may override it per org. When SMA-751 lands, the per-tenant `fail_mode` from IAM replaces the config override. When the tenant's policies are unavailable, the IAM value is unavailable too, so the last known per-tenant value applies, and without one the global value applies. | Sven |
 | D5 | Definition removal per § 4.4, with the rule of § 6.1.6. | Sven |
 | D6 | Tool-result replacement per § 4.5. | Sven |
 | D7 | Per-tenant settings come from the gateway config, keyed by **org UUID**, in the `[[tool_policy.org]] id = "<uuid>"` shape of `[[limits.org]]`. The tenant of a request is `domain::org_of(scope_prn)`, so a team or project key uses its org's settings. An unknown or duplicate UUID fails at boot. IAM takes the settings over later. | Challenge |
@@ -341,6 +343,9 @@ pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings,
   comes from the errors. If an errored policy is a `forbid`, the verdict is `Deny` and
   `errored_forbid` is true (D26).
 - No I/O, no clock, no random numbers, no global state.
+- A policy that reads a context attribute the gateway does not fill (for example a SMA-753 history
+  slot in IAM's lowered Cedar) errors. Per D26 a forbid then denies and a permit is skipped, so a
+  missing slot fails closed (ADR-0027 (f)). Test both cases.
 
 #### 6.1.6 Denied for every input
 
@@ -444,7 +449,7 @@ pub trait PolicySource: Send + Sync {
 
 1. Read the snapshot from `DecisionContext` (D30). The snapshot holds the floor, the tenant
    policies (or "unavailable"), the modes and the request facts.
-2. If both the floor mode and the tenant mode are `off`, return `Allow` for every call.
+2. If the tenant mode is `off`, evaluate the floor alone (D33). The floor is never skipped.
 3. For each call: build the `ToolInvocation`, `Facts` and `Findings`, and call `decide`.
 4. Map the verdict per § 6.4.
 
@@ -481,8 +486,7 @@ This section describes Q1-A, which Sven chose.
 [tool_policy]
 enabled = true
 default_mode = "off"              # off | log_only | enforce (tenant mode)
-floor_mode = "enforce"            # off | log_only | enforce (Q2-A)
-on_policy_unavailable = "closed"  # open | closed; required when enabled (D9)
+on_policy_unavailable = "closed"  # open | closed; required when enabled (D9, D34)
 refresh_secs = 30
 max_stale_secs = 300
 idle_evict_secs = 3600
@@ -500,16 +504,19 @@ ca_file = "..."                   # optional
 [[tool_policy.org]]
 id = "0190a100-0000-7000-8000-0000000000aa"
 mode = "enforce"
+on_policy_unavailable = "open"    # optional per-org override (D34)
 ```
 
 `[tool_policy] enabled = true` needs `[tool_interception] enabled = true`. Otherwise the gateway
 does not start.
 
-**Which policies apply (Q2-A).** The floor applies by `floor_mode`, and the tenant set by the
-tenant mode. One evaluation covers both: the effective mode of a deny is the mode of the set
-whose policy decided it. A floor forbid in a tenant whose mode is `off` is evaluated against the
-floor alone. If the tenant set is unavailable, the floor still applies, and the tenant part
-follows `on_policy_unavailable`.
+**Which policies apply (D33).** The floor is always enforced. The tenant set follows the tenant
+mode. One evaluation covers both: a deny that a floor policy decided is always enforced, and a
+deny that only tenant policies decided follows the tenant mode. A tenant whose mode is `off` is
+evaluated against the floor alone. If the tenant set is unavailable, the floor still applies,
+and the tenant part follows the tenant's `on_policy_unavailable` (D34). If the floor itself is
+unavailable, `closed` blocks every call with `PolicyUnavailable` in every tenant mode, and
+`open` allows them and reports `tool-policy-unavailable`.
 
 | Effective mode of a deny | Calls | Request side | Report |
 |---|---|---|---|
@@ -640,8 +647,9 @@ tests.
 - The feature ships with `[tool_policy] enabled = false` (the default). The chart does not
   project `[tool_interception]` or `[tool_policy]` yet. An operator enables both in the gateway
   config.
-- Order: enable with `floor_mode = "log_only"` and `default_mode = "off"`; read the logs; move the
-  floor to `enforce`; then move tenants to `log_only` and then `enforce`, one by one.
+- Order: enable with `default_mode = "off"` and the shipped floor (it enforces at once, D33);
+  then move tenants to `log_only` and then `enforce`, one by one. To test a new floor policy
+  first, put it in one tenant's set in log-only mode, then move it to the floor.
 - Rollback: `[tool_policy] enabled = false`, or the mode of one tenant to `off`.
 
 ## 7. Tests
@@ -684,7 +692,9 @@ stream) and `/v1/responses`:
   log-only mode.
 - An empty catalog in enforce mode removes every definition.
 - A team-scoped and a project-scoped API key use their org's mode.
-- Floor in enforce, tenant `off`: the floor blocks (Q2-A).
+- Tenant `off` and tenant `log_only`: a floor forbid still blocks (D33).
+- A per-org `on_policy_unavailable` override wins over the global value (D34).
+- An unavailable floor under `closed` blocks every call; under `open` it allows and reports.
 - Mode `off` everywhere: the request and response bytes are unchanged.
 - Config: `enabled` without `on_policy_unavailable`, an unknown key, and a duplicate org UUID
   fail at start.
