@@ -35,6 +35,9 @@ members = [
   "crates/services/paigasus-gateway",
   "crates/services/paigasus-iam",
 ]
+# The Dogwood policy compiler is a separate cargo workspace with its own Cargo.lock
+# (spec 2026-11-15 iam-tool-policy-sets, section 5.1). It is not a member of this workspace.
+exclude = ["tools/paigasus-policy-compiler"]
 resolver = "3"
 
 [workspace.package]
