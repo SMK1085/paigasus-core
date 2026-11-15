@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01WXcDXcwL4jhX6JhvnnTx3n",
+  "agent_id": "ae70cb527d8862591",
+  "subagent_type": "general-purpose",
+  "task_description": "Fix local CodeRabbit findings",
+  "token_usage": {
+    "input_tokens": 76,
+    "cache_creation_tokens": 135601,
+    "cache_read_tokens": 4023197,
+    "output_tokens": 28402,
+    "api_call_count": 38
+  },
+  "started_at": "2026-11-14T13:05:10.351735+01:00",
+  "completed_at": "2026-11-14T13:14:19.035932+01:00"
+}

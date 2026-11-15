@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_013dq5XRjL1VnrZcGdQLCM4Z",
+  "agent_id": "a6914639091f3023f",
+  "subagent_type": "general-purpose",
+  "task_description": "Implement Task 1: recorded fixtures",
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 99418,
+    "cache_read_tokens": 1633379,
+    "output_tokens": 11049,
+    "api_call_count": 20
+  },
+  "started_at": "2026-11-14T11:15:26.55979+01:00",
+  "completed_at": "2026-11-14T11:20:10.17475+01:00"
+}

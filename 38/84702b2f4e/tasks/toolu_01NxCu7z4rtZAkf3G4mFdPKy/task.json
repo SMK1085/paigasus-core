@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01NxCu7z4rtZAkf3G4mFdPKy",
+  "agent_id": "a94f916502bd9e0b0",
+  "subagent_type": "general-purpose",
+  "task_description": "Final-review fix wave SMA-757",
+  "token_usage": {
+    "input_tokens": 124,
+    "cache_creation_tokens": 255435,
+    "cache_read_tokens": 12956854,
+    "output_tokens": 81650,
+    "api_call_count": 62
+  },
+  "started_at": "2026-11-14T12:32:25.453782+01:00",
+  "completed_at": "2026-11-14T12:53:44.209614+01:00"
+}
