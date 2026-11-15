@@ -26,14 +26,15 @@ of truth. If the two ever disagree, `subjects.env` is correct and this file is s
 | identity | deployed as | publish (allow) | subscribe (allow) |
 |---|---|---|---|
 | `iam-publisher` | `paigasus-iam`'s outbox relay (`PublisherConfig`, SMA-471) | `iam.>`, `$JS.API.STREAM.INFO.IAM_EVENTS`, `$JS.API.STREAM.CREATE.IAM_EVENTS` | `_INBOX_IAM_PUB.>` |
-| `gateway-consumer` | the AI Gateway's cache-invalidation client (SMA-492) | `$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.gateway-cache-invalidator`, `$JS.API.CONSUMER.INFO.IAM_EVENTS.gateway-cache-invalidator`, `$JS.ACK.IAM_EVENTS.gateway-cache-invalidator.>` | `_INBOX_GW.>` |
+| `gateway-consumer` | the AI Gateway's cache-invalidation client (SMA-492) | `$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.gateway-cache-invalidator`, `$JS.API.CONSUMER.INFO.IAM_EVENTS.gateway-cache-invalidator`, `$JS.ACK.IAM_EVENTS.gateway-cache-invalidator.>` | `_INBOX_GW.>`, `iam.policy.>` |
 | `iam-provisioner` | nobody — operator tooling only, see §9 | `$JS.API.INFO`, `$JS.API.STREAM.>`, `$JS.API.CONSUMER.>` | `_INBOX_PROV.>` |
 
 `iam-publisher` never subscribes to `iam.>` (it must not be able to read the graph it writes) and
 never gets `STREAM.UPDATE`/`DELETE`/`PURGE` (SMA-471 D7 makes stream non-reconciliation
 deliberate — an existing stream is adopted as-is or boot fails, never silently reshaped). The
 durable's subject filter that narrows what `gateway-consumer` actually receives is not a
-permission at all — see §3.
+permission at all — see §3. The one subject-level grant `gateway-consumer` holds is the core
+subscription on `iam.policy.>` (SMA-752) — see §3.1.
 
 ## 2. Why the publisher needs a `subscribe` grant
 
@@ -90,6 +91,29 @@ other stream. If it could create its own consumer, it could create one with no f
 one) and pull the entire stream regardless of what the pre-provisioned durable's filter says. The
 narrowing is enforced by the *absence* of a capability, not the presence of one.
 
+### 3.1 The core subscription on `iam.policy.>` (SMA-752)
+
+The paragraphs above are about the PULL path. Since SMA-752 `gateway-consumer` also holds one
+subject-level grant: `subscribe` on `iam.policy.>`. The gateway uses it to clear its tool-policy
+cache (SMA-752 D4, Q1-A, chosen by Sven). Each gateway replica must get every policy event, and
+a shared durable gives each event to one replica only. A JetStream publish is also an ordinary
+core message on its subject, so each core subscriber of `iam.policy.>` receives it. This was
+measured against the pinned `nats:2.10.14` (SMA-752 D24,
+`the_consumer_core_subscription_receives_a_jetstream_policy_publish`).
+
+The grant is a subscribe right only:
+
+- It is the only subscribe grant outside the inbox. The other IAM subjects stay closed
+  (`iam.api_key.>`, `iam.role.granted`, `iam.>`).
+- It adds no publish right, so the gateway cannot forge a policy event.
+- It adds no JetStream API right. `CONSUMER.CREATE` and `CONSUMER.UPDATE` stay ungranted in every
+  form, and `$JS.>` cannot be subscribed to. So the durable's filter above stays binding.
+
+Delivery is at most once. The gateway clears its cache again on every reconnect, and its
+periodic refresh is the backstop for a lost message. `nats_permissions.rs` holds the negative
+tests (`the_consumer_cannot_subscribe_to_other_iam_subjects`,
+`the_policy_grant_adds_no_jetstream_right`).
+
 ## 4. The four routes to the firehose the allow-list closes
 
 "The firehose" means the entire, undecoded `iam.>` event stream — every authorization change on
@@ -102,6 +126,8 @@ offer to that firehose, not just the obvious one:
    *also* an ordinary NATS publish to the event's subject; any client holding a `subscribe` grant
    on `iam.>` sees every message the instant it is published, filter or no filter. Closed by never
    granting `subscribe` on `iam.*`/`iam.>` to anything but `iam-publisher`'s own narrow inbox.
+   The one exception is `gateway-consumer`'s `iam.policy.>` (§3.1): it opens the policy events
+   only, which the durable's filter already delivers to the same identity.
 2. **A self-created wider consumer** — see §3. Closed by granting no `CONSUMER.CREATE` verb at
    all.
 3. **`STREAM.MSG.GET`** (`$JS.API.STREAM.MSG.GET.<stream>`) — JetStream's direct-by-sequence
@@ -157,7 +183,8 @@ unset keeps the pre-SMA-493 behavior of trusting the system store.
 
 Every user above is granted `subscribe` on exactly one inbox prefix — `_INBOX_IAM_PUB.>` for
 `iam-publisher`, `_INBOX_GW.>` for `gateway-consumer`, `_INBOX_PROV.>` for `iam-provisioner` — and
-nothing else. That prefix is not decorative: it is what stops one client in the account from
+no other inbox (`gateway-consumer`'s only other subscribe grant is the event subject
+`iam.policy.>`, §3.1). That prefix is not decorative: it is what stops one client in the account from
 reading another client's JetStream acks or pull deliveries, both of which land on the requesting
 client's own inbox rather than on any event subject (§2, §3). The account-side grant only helps if
 the client is actually configured to use that exact prefix. `PublisherConfig.inbox_prefix`
