@@ -148,6 +148,25 @@ pub struct ShapeError {
     pub detail: String,
 }
 
+/// The `ShapeError::shape` of an event pattern whose action is not in normal form. The compiler
+/// rejects it with `tool-policy-invalid`, the reason of its own pre-lowering literal check.
+pub const NON_NORMAL_ACTION: &str = "non-normal-action";
+
+/// `InvokeTool`, `Unregistered`, or a tool match key: `^[a-z0-9_-]{1,64}(\.[a-z0-9_-]{1,64})?$`
+/// that is not reserved. The grammar has no upper case, so the key is its own ASCII lowercase.
+pub fn is_normal_action(literal: &str) -> bool {
+    if literal == "InvokeTool" || literal == "Unregistered" {
+        return true;
+    }
+    if literal == "invoketool" || literal == "unregistered" {
+        return false;
+    }
+    let part_ok = |part: &str| (1..=64).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    let mut parts = literal.split('.');
+    let (first, second, rest) = (parts.next(), parts.next(), parts.next());
+    rest.is_none() && first.is_some_and(part_ok) && second.is_none_or(part_ok)
+}
+
 fn unsupported<T>(shape: &'static str, detail: impl Into<String>) -> Result<T, ShapeError> {
     Err(ShapeError { shape, detail: detail.into() })
 }
@@ -293,8 +312,9 @@ struct FieldBinding<'a> {
     used: bool,
 }
 
-/// Translate a predicate position. `capture` is passed only through `And`, so the summed
-/// binder is accepted only where every match of the predicate binds it.
+/// Translate a predicate position. `capture` is passed through `And` and into the body of a
+/// field `exists`, but not into `Or` or `Not`. So the summed binder is accepted only where every
+/// match of the predicate binds it.
 fn predicate(condition: &Condition, capture: &mut Option<SumCapture<'_>>) -> Result<Predicate, ShapeError> {
     match &condition.kind {
         ConditionKind::Predicate(p) => event_predicate(p, capture, &mut None),
@@ -353,7 +373,10 @@ fn event_predicate(p: &ast::Predicate, capture: &mut Option<SumCapture<'_>>, bin
     let tool = match p.action.as_str() {
         "InvokeTool" => Predicate::AnyCatalogTool,
         "Unregistered" => return unsupported("Predicate", "a history condition cannot match `Unregistered` tools"),
-        name => Predicate::Tool { name_key: name.to_string() },
+        name if is_normal_action(name) => Predicate::Tool { name_key: name.to_string() },
+        name => {
+            return unsupported(NON_NORMAL_ACTION, format!("the action {name:?} is not `InvokeTool`, `Unregistered` or a tool name in normal form"));
+        }
     };
     let mut result = Predicate::AllOf(Box::new(Predicate::EventKind(kind)), Box::new(tool));
     for arg in &p.args {
@@ -459,5 +482,44 @@ fn term_name(term: &Term) -> &'static str {
         Term::Arith { .. } => "Term::Arith",
         Term::ParamRef(_) => "Term::ParamRef",
         Term::BinderRef(_) => "Term::BinderRef",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dogwood_language::dummy_span;
+    use dogwood_language::temporal_ast::{Interval, TimeUnit};
+
+    fn formerly_of(action: &str) -> Condition {
+        let predicate = ast::Predicate {
+            span: dummy_span(),
+            namespace: vec!["Pgs".to_string(), "Gateway".to_string(), "Action".to_string()],
+            action: action.to_string(),
+            kind: "request".to_string(),
+            args: Vec::new(),
+        };
+        Condition {
+            span: dummy_span(),
+            kind: ConditionKind::Formerly {
+                within: WithinSpec::Concrete(Interval { amount: 1, unit: TimeUnit::Minutes }),
+                body: Box::new(Condition {
+                    span: dummy_span(),
+                    kind: ConditionKind::Predicate(predicate),
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn a_tool_name_not_in_normal_form_is_rejected_not_lowercased() {
+        for action in ["Send", "invoketool", "s\u{e9}nd", "a.b.c", ""] {
+            let error = translate_root(&formerly_of(action)).expect_err(action);
+            assert_eq!(error.shape, NON_NORMAL_ACTION, "{action}");
+        }
+        let (window_ms, shape) = translate_root(&formerly_of("ns.send")).expect("a normal-form name translates");
+        assert_eq!(window_ms, 60_000);
+        let expected = Predicate::AllOf(Box::new(Predicate::EventKind(EventKind::Request)), Box::new(Predicate::Tool { name_key: "ns.send".to_string() }));
+        assert_eq!(shape, Shape::Formerly { predicate: expected });
     }
 }

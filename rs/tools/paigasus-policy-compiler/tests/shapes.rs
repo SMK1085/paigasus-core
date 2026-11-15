@@ -216,8 +216,9 @@ fn a_missing_or_duplicate_or_malformed_id_is_rejected() {
     let missing = plain("");
     let duplicate = format!("{}{}", plain("@id(\"a\")"), plain("@id(\"a\")"));
     let malformed = plain("@id(\"Bad Id\")");
-    for source in [missing, duplicate, malformed] {
-        only_rejection(tenant(&source), ReasonCode::ToolPolicyIdInvalid);
+    for (source, policy_id) in [(missing, None), (duplicate, Some("a")), (malformed, None)] {
+        let rejection = only_rejection(tenant(&source), ReasonCode::ToolPolicyIdInvalid);
+        assert_eq!(rejection.policy_id.as_deref(), policy_id, "{source}");
     }
 }
 
@@ -242,9 +243,11 @@ fn an_id_outside_the_grammar_never_reaches_lowering() {
 #[test]
 fn the_floor_prefix_rule_holds_in_both_directions() {
     let tenant_source = format!("@id(\"floor-x\")\npermit (principal, action == {GW}::\"search\", resource);\n");
-    only_rejection(tenant(&tenant_source), ReasonCode::ToolPolicyIdInvalid);
+    let rejection = only_rejection(tenant(&tenant_source), ReasonCode::ToolPolicyIdInvalid);
+    assert_eq!(rejection.policy_id.as_deref(), Some("floor-x"));
     let floor_source = format!("@id(\"x\")\nforbid (principal, action == {GW}::\"search\", resource);\n");
-    only_rejection(floor(&floor_source), ReasonCode::ToolPolicyIdInvalid);
+    let rejection = only_rejection(floor(&floor_source), ReasonCode::ToolPolicyIdInvalid);
+    assert_eq!(rejection.policy_id.as_deref(), Some("x"));
     let good_floor = format!("@id(\"floor-x\")\nforbid (principal, action == {GW}::\"search\", resource);\n");
     accepted(floor(&good_floor));
 }
@@ -302,6 +305,17 @@ fn a_non_normal_action_literal_is_rejected() {
             let rejection = only_rejection(tenant(&source), ReasonCode::ToolPolicyInvalid);
             assert_eq!(rejection.policy_id.as_deref(), Some("a"), "{source}");
         }
+    }
+}
+
+#[test]
+fn a_non_normal_action_literal_in_a_when_body_is_rejected() {
+    // The pre-lowering check does not see a `when` body. Dogwood validation rejects the literal,
+    // because a non-normal literal is never an action of a generated schema.
+    for literal in ["Send", "invoketool", "sénd"] {
+        let source = format!("@id(\"a\")\npermit (principal, action, resource)\nwhen {{ action == {GW}::\"{literal}\" }};\n");
+        let rejection = only_rejection(tenant(&source), ReasonCode::ToolPolicyInvalid);
+        assert_eq!(rejection.policy_id.as_deref(), Some("a"), "{source}");
     }
 }
 

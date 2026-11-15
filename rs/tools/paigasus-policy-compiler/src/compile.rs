@@ -30,7 +30,7 @@ use dogwood_language::temporal_ast::{Condition, ConditionKind, Term};
 use dogwood_language::{Error, LoweredPolicySet, ParsedPolicySet, PolicySchema, SourceLoc, Validator};
 
 use crate::lower::{PolicyUnit, lower_units, service_schema, slot_prefix, split_policies};
-use crate::translate::{HistoryCondition, Scope, translate_field};
+use crate::translate::{HistoryCondition, NON_NORMAL_ACTION, Scope, is_normal_action, translate_field};
 
 /// Which set a source is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,23 +173,24 @@ pub fn compile_cedarschema(kind: SetKind, source: &str, cedarschema: &str, max_w
 
 /// The `@id` rules: present, in the grammar, unique, and the `floor-` prefix rule.
 fn check_id<'a>(kind: SetKind, unit: &'a PolicyUnit, seen: &mut BTreeSet<&'a str>, rejections: &mut Vec<Rejection>) -> Option<&'a str> {
-    let reject = |rejections: &mut Vec<Rejection>, message: String| rejections.push(Rejection::new(None, ReasonCode::ToolPolicyIdInvalid, message));
+    // The rejection names the policy only when its id is in the grammar.
+    let reject = |rejections: &mut Vec<Rejection>, id: Option<&str>, message: String| rejections.push(Rejection::new(id, ReasonCode::ToolPolicyIdInvalid, message));
     let Some(id) = unit.id.as_deref() else {
-        reject(rejections, format!("policy {} has no @id value", unit.index));
+        reject(rejections, None, format!("policy {} has no @id value", unit.index));
         return None;
     };
     if !is_valid_id(id) {
-        reject(rejections, format!("policy {}: the @id {id:?} does not match ^[a-z0-9][a-z0-9_-]{{0,63}}$", unit.index));
+        reject(rejections, None, format!("policy {}: the @id {id:?} does not match ^[a-z0-9][a-z0-9_-]{{0,63}}$", unit.index));
         return None;
     }
     if !seen.insert(id) {
-        reject(rejections, format!("policy {}: the @id {id:?} is not unique", unit.index));
+        reject(rejections, Some(id), format!("policy {}: the @id {id:?} is not unique", unit.index));
         return None;
     }
     let has_prefix = id.starts_with("floor-");
     match (kind, has_prefix) {
-        (SetKind::Floor, false) => reject(rejections, format!("policy {}: a floor @id must start with \"floor-\", but {id:?} does not", unit.index)),
-        (SetKind::Tenant, true) => reject(rejections, format!("policy {}: a tenant @id must not start with \"floor-\", but {id:?} does", unit.index)),
+        (SetKind::Floor, false) => reject(rejections, Some(id), format!("policy {}: a floor @id must start with \"floor-\", but {id:?} does not", unit.index)),
+        (SetKind::Tenant, true) => reject(rejections, Some(id), format!("policy {}: a tenant @id must not start with \"floor-\", but {id:?} does", unit.index)),
         _ => return Some(id),
     }
     None
@@ -263,21 +264,6 @@ fn check_parse_tree(unit: &PolicyUnit, id: Option<&str>, svc: &dogwood_language:
     }
 }
 
-/// `InvokeTool`, `Unregistered`, or a tool match key: `^[a-z0-9_-]{1,64}(\.[a-z0-9_-]{1,64})?$`
-/// that is not reserved. The grammar has no upper case, so the key is its own ASCII lowercase.
-fn is_normal_action(literal: &str) -> bool {
-    if literal == "InvokeTool" || literal == "Unregistered" {
-        return true;
-    }
-    if literal == "invoketool" || literal == "unregistered" {
-        return false;
-    }
-    let part_ok = |part: &str| (1..=64).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-    let mut parts = literal.split('.');
-    let (first, second, rest) = (parts.next(), parts.next(), parts.next());
-    rest.is_none() && first.is_some_and(part_ok) && second.is_none_or(part_ok)
-}
-
 /// Every `Predicate.action` in a temporal condition, at any depth.
 fn collect_actions(condition: &Condition, out: &mut Vec<String>) {
     match &condition.kind {
@@ -349,6 +335,11 @@ fn translate_all(lowered: &LoweredPolicySet, checked: &[Checked<'_>], rejections
         };
         match translate_field(field, owner.id, owner.scope) {
             Ok(condition) => conditions.push(condition),
+            Err(error) if error.shape == NON_NORMAL_ACTION => rejections.push(Rejection::new(
+                Some(owner.id),
+                ReasonCode::ToolPolicyInvalid,
+                format!("policy {:?}: the temporal block {}: {}", owner.id, field.id, error.detail),
+            )),
             Err(error) => rejections.push(Rejection::new(
                 Some(owner.id),
                 ReasonCode::ToolPolicyShapeUnsupported,
