@@ -732,7 +732,8 @@ const MAX_TOOL_POLICY_SECS: u64 = 86_400;
 
 impl ToolPolicyConfig {
     /// Every rule of spec § 6.4. Each message names the key. All rules are checked even when
-    /// `enabled = false`, except the three "required when enabled" rules.
+    /// `enabled = false`, except the three "required when enabled" rules and the D31 cross-table
+    /// rule (`load_timeout_ms` against `tool_interception.decide_timeout_secs`).
     pub fn validate(&self, ti: &ToolInterceptionConfig) -> Result<(), String> {
         for (key, v) in [
             ("tool_policy.refresh_secs", self.refresh_secs),
@@ -763,7 +764,8 @@ impl ToolPolicyConfig {
             ));
         }
         // D31: a load that can outlast the decider's time limit would turn a slow source into a decider timeout.
-        if self.load_timeout_ms >= ti.decide_timeout_secs.saturating_mul(1000) {
+        // Checked only when enabled: a disabled table must not refuse a `[tool_interception]` that is valid alone.
+        if self.enabled && self.load_timeout_ms >= ti.decide_timeout_secs.saturating_mul(1000) {
             return Err(format!(
                 "tool_policy.load_timeout_ms ({}) must be less than tool_interception.decide_timeout_secs ({}) in milliseconds",
                 self.load_timeout_ms, ti.decide_timeout_secs
@@ -1686,11 +1688,27 @@ mod tests {
 
     #[test]
     fn load_timeout_must_be_shorter_than_decide_timeout() {
-        let cfg = tp_load(&format!("{}\n[tool_policy]\nload_timeout_ms = 5000\n", valid_toml())).expect("loads");
+        let enabled = |decide: u64| {
+            format!(
+                "{}\n[tool_interception]\nenabled = true\ndecide_timeout_secs = {decide}\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\nsource = {{ kind = \"file\", dir = \"/p\" }}\nload_timeout_ms = 5000\n",
+                valid_toml()
+            )
+        };
+        let cfg = tp_load(&enabled(5)).expect("loads");
         let err = cfg.validate().expect_err("D31");
         assert!(err.contains("tool_policy.load_timeout_ms"), "{err}");
-        let ok = tp_load(&format!("{}\n[tool_interception]\ndecide_timeout_secs = 6\n[tool_policy]\nload_timeout_ms = 5000\n", valid_toml())).expect("loads");
-        assert!(ok.validate().is_ok());
+        let ok = tp_load(&enabled(6)).expect("loads");
+        assert!(ok.validate().is_ok(), "{:?}", ok.validate());
+    }
+
+    #[test]
+    fn a_disabled_table_does_not_constrain_decide_timeout() {
+        // A config that is valid on main: decide_timeout_secs = 1 and no [tool_policy] table. The default
+        // load_timeout_ms (1000) is not less than 1000 ms, but the cross-table rule holds only when enabled.
+        let cfg = tp_load(&format!("{}\n[tool_interception]\ndecide_timeout_secs = 1\n", valid_toml())).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let cfg = tp_load(&format!("{}\n[tool_interception]\nenabled = true\ndecide_timeout_secs = 1\n", valid_toml())).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
     }
 
     #[test]
