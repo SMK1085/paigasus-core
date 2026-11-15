@@ -169,7 +169,7 @@ async fn client_for(fixture: &Fixture, identity: &Identity, inbox_prefix: &str) 
     let path = identity.seed_path.to_string_lossy().to_string();
     let client = async_nats::ConnectOptions::with_auth_callback(move |nonce| {
         let path = path.clone();
-        async move { paigasus_iam::adapters::events::auth_from_credentials(&path, &nonce).await }
+        async move { paigasus_nats_creds::auth_from_credentials(&path, &nonce).await }
     })
     .custom_inbox_prefix(inbox_prefix.to_string())
     .event_callback(move |event| {

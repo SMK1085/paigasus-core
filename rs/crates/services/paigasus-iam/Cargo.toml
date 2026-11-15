@@ -120,7 +120,8 @@ sha2 = "0.11"
 # (SMA-471, ADR-0016): connects to NATS, ensures/verifies the JetStream stream, and publishes
 # each `event_outbox` row as a CloudEvent, waiting for the JetStream ack.
 async-nats = { workspace = true }
-# `adapters::events::creds` signs the server nonce on every connection attempt so a rotated
+paigasus-nats-creds = { workspace = true }
+# `paigasus-nats-creds` signs the server nonce on every connection attempt so a rotated
 # `.creds` is picked up without a restart (SMA-493 D8).
 nkeys = { workspace = true }
 # `service_info` — the shared ServiceInfo builder + HTTP DTO (SMA-505). This crate supplies
@@ -170,7 +171,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # recency/registry/storage, so "debugging" is turned on explicitly here — dev-only, unified
 # into test builds and never the shipped binary.
 metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
-# `adapters::events::creds` tests — `each_call_re_reads_the_file_from_disk` etc. need a real
+# `paigasus-nats-creds` tests — `each_call_re_reads_the_file_from_disk` etc. need a real
 # file on disk to prove the loader re-reads on every call rather than caching (SMA-493 D8).
 tempfile = "3"
 # `adapters::grpc::convert`'s AC2 registry-coverage test enumerates every TenancyError

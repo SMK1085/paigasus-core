@@ -3258,6 +3258,7 @@ dependencies = [
  "paigasus-iam-core",
  "paigasus-kernel",
  "paigasus-logging",
+ "paigasus-nats-creds",
  "paigasus-observability",
  "paigasus-proto",
  "paigasus-redis",
@@ -3337,6 +3338,17 @@ version = "0.0.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "paigasus-nats-creds"
+version = "0.0.0"
+dependencies = [
+ "async-nats",
+ "nkeys",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
