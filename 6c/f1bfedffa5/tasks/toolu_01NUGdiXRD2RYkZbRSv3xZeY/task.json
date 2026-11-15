@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01NUGdiXRD2RYkZbRSv3xZeY",
+  "agent_id": "acc33e5c444054781",
+  "subagent_type": "general-purpose",
+  "task_description": "Run app-shell and console checks",
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 94384,
+    "cache_read_tokens": 817821,
+    "output_tokens": 6080,
+    "api_call_count": 11
+  },
+  "started_at": "2026-11-15T16:19:58.557829+01:00",
+  "completed_at": "2026-11-15T16:21:14.036711+01:00"
+}
