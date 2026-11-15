@@ -49,6 +49,9 @@ pub struct GatewayConfig {
     /// SMA-749: tool-call interception on `POST /v1/chat/completions`. Off by default (D26).
     #[serde(default)]
     pub tool_interception: ToolInterceptionConfig,
+    /// SMA-769: the `POST /v1/responses` route. Off by default (D8).
+    #[serde(default)]
+    pub responses: ResponsesConfig,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -236,6 +239,54 @@ pub struct ToolInterceptionConfig {
     pub keepalive_secs: u64,
     /// D16: `block` (default) or `allow` (observe mode).
     pub on_failure: OnFailureConfig,
+}
+
+/// `[responses]` (SMA-769 D8, D15). Off by default: with `enabled = false`, `/v1/responses`
+/// returns 404, and the key is the rollback with no deploy. A misspelt key fails extraction.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResponsesConfig {
+    pub enabled: bool,
+    /// D15: the cap on one request body of the route.
+    pub max_request_bytes: usize,
+    /// D15: one SSE record larger than this is a failure, never skipped.
+    pub max_record_bytes: usize,
+    /// D15: the queued bytes of one stream. Also the cap on one non-stream body.
+    pub max_held_bytes: usize,
+}
+
+impl Default for ResponsesConfig {
+    fn default() -> Self {
+        ResponsesConfig {
+            enabled: false,
+            max_request_bytes: 16_777_216,
+            max_record_bytes: 16_777_216,
+            max_held_bytes: 33_554_432,
+        }
+    }
+}
+
+impl ResponsesConfig {
+    /// Every value is at least 1, and one record must fit in the held bytes. Each message names
+    /// the key. Checked even when off, so turning the route on later never meets a bad config.
+    pub fn validate(&self) -> Result<(), String> {
+        for (key, v) in [
+            ("responses.max_request_bytes", self.max_request_bytes),
+            ("responses.max_record_bytes", self.max_record_bytes),
+            ("responses.max_held_bytes", self.max_held_bytes),
+        ] {
+            if v == 0 {
+                return Err(format!("{key} must be at least 1"));
+            }
+        }
+        if self.max_record_bytes > self.max_held_bytes {
+            return Err(format!(
+                "responses.max_record_bytes ({}) must not exceed responses.max_held_bytes ({})",
+                self.max_record_bytes, self.max_held_bytes
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// D16.
@@ -558,6 +609,7 @@ impl GatewayConfig {
             limits.validate()?;
         }
         self.tool_interception.validate()?;
+        self.responses.validate()?;
         Ok(())
     }
 }
@@ -1097,6 +1149,71 @@ mod tests {
                 Ok(())
             });
         }
+    }
+
+    fn responses_toml(body: &str) -> String {
+        format!("{}\n[responses]\n{body}\n", valid_toml())
+    }
+
+    #[test]
+    fn responses_defaults_match_the_spec() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            let cfg = GatewayConfig::figment().extract::<GatewayConfig>()?;
+            let r = &cfg.responses;
+            assert!(!r.enabled);
+            assert_eq!((r.max_request_bytes, r.max_record_bytes, r.max_held_bytes), (16_777_216, 16_777_216, 33_554_432));
+            cfg.validate().map_err(figment::Error::from)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn responses_keys_load_from_toml_and_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &responses_toml("enabled = true\nmax_record_bytes = 1024"))?;
+            let cfg = GatewayConfig::figment().extract::<GatewayConfig>()?;
+            assert!(cfg.responses.enabled);
+            assert_eq!(cfg.responses.max_record_bytes, 1024);
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            jail.set_env("GATEWAY_RESPONSES__ENABLED", "true");
+            jail.set_env("GATEWAY_RESPONSES__MAX_REQUEST_BYTES", "2048");
+            let cfg = GatewayConfig::figment().extract::<GatewayConfig>()?;
+            assert!(cfg.responses.enabled);
+            assert_eq!(cfg.responses.max_request_bytes, 2048);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn responses_validation_names_the_key() {
+        for (body, key) in [
+            ("max_request_bytes = 0", "responses.max_request_bytes"),
+            ("max_record_bytes = 0", "responses.max_record_bytes"),
+            ("max_held_bytes = 0", "responses.max_held_bytes"),
+            ("max_record_bytes = 10\nmax_held_bytes = 5", "responses.max_record_bytes"),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.create_file("gateway.toml", &responses_toml(body))?;
+                let cfg = GatewayConfig::figment().extract::<GatewayConfig>()?;
+                let err = cfg.validate().expect_err(body);
+                assert!(err.contains(key), "{body}: {err}");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn an_unknown_responses_key_fails() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &responses_toml("enabeld = true"))?;
+            let err = GatewayConfig::figment().extract::<GatewayConfig>().expect_err("a typo must not leave the route silently off");
+            assert!(err.to_string().contains("unknown field"), "{err}");
+            Ok(())
+        });
     }
 
     #[test]
