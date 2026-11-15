@@ -75,6 +75,15 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
     if calls.calls.is_empty() && calls.unenforceable.is_empty() {
         return BodyOutcome::Forward { rewritten: None, report: None };
     }
+    // SMA-769 (ruling F7, R15): a Responses item that is not `"completed"` is a truncation. The
+    // stream counts it and, under `on_failure = allow`, passes the hold through unchanged; the
+    // body does the same. Under `block` the forced `Truncated` wins over the decision below.
+    if calls.is_truncated() {
+        record(Metric::OnFailure("truncated"));
+        if limits.on_failure == OnFailure::Allow {
+            return BodyOutcome::Forward { rewritten: None, report: None };
+        }
+    }
     let n = calls.calls.len();
     let (decisions, basis) = if n == 0 {
         (Vec::new(), Basis::Decider)

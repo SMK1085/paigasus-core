@@ -33,6 +33,30 @@ pub struct ChatCompletionRequest {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// An OpenAI `POST /v1/responses` request body (SMA-769 § 7.2), modelled only for the fields the
+/// gateway reads: `model` (the log), `stream` (the egress path), `input` (its type), and the
+/// stateful fields that D3 and D4 refuse. Every field is optional: a JSON `null` reads as `None`,
+/// so an explicit `null` is the same as an absent field (Review Focus 2). Like
+/// [`ChatCompletionRequest`], it is never the wire body: the original bytes go upstream.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResponsesRequest {
+    pub model: Option<String>,
+    /// A string or an array of items; another type is a schema error.
+    pub input: Option<serde_json::Value>,
+    pub stream: Option<bool>,
+    /// D4: `true` is refused.
+    pub background: Option<bool>,
+    /// D3: any non-null value is refused when interception is on.
+    pub previous_response_id: Option<serde_json::Value>,
+    /// D3: any non-null value is refused when interception is on.
+    pub conversation: Option<serde_json::Value>,
+    /// D3: any non-null value is refused when interception is on.
+    pub prompt: Option<serde_json::Value>,
+    /// Every other top-level field.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +123,29 @@ mod tests {
         });
         let req: ChatCompletionRequest = serde_json::from_value(raw).expect("valid request parses");
         assert!(!req.stream, "`stream` must default to false when the field is absent");
+    }
+
+    /// SMA-769: an explicit `null` reads as `None`, and the unnamed fields land in `extra`.
+    #[test]
+    fn a_responses_request_reads_null_as_absent() {
+        let raw = json!({
+            "model": "gpt-6",
+            "input": "hi",
+            "stream": true,
+            "background": null,
+            "previous_response_id": null,
+            "conversation": null,
+            "prompt": null,
+            "store": true
+        });
+        let req: ResponsesRequest = serde_json::from_value(raw).expect("a valid request parses");
+        assert_eq!(req.model.as_deref(), Some("gpt-6"));
+        assert_eq!(req.input, Some(json!("hi")));
+        assert_eq!(req.stream, Some(true));
+        assert!(req.background.is_none() && req.previous_response_id.is_none() && req.conversation.is_none() && req.prompt.is_none());
+        assert_eq!(req.extra.get("store"), Some(&json!(true)));
+        assert!(!req.extra.contains_key("prompt"), "named fields must not bleed into `extra`");
+        let empty: ResponsesRequest = serde_json::from_value(json!({})).expect("every field is optional");
+        assert!(empty.model.is_none() && empty.input.is_none() && empty.stream.is_none());
     }
 }

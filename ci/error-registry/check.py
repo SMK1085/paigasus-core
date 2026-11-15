@@ -100,6 +100,8 @@ MANIFEST = (
      "every_system_retirement_code_is_declared_in_the_canonical_registry", "the two 409 refusals"),
     ("rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs", "emits",
      "the_terminal_sse_frame_carries_a_registered_code", "the terminal SSE error frame"),
+    ("rs/crates/services/paigasus-gateway/src/adapters/http/responses.rs", "emits",
+     "the_responses_terminal_frame_carries_a_registered_code", "the D13 terminal SSE error frame of /v1/responses"),
     ("rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs", "asserts", None,
      "NOT test-only — a production conversion path. Safe because every code leaves it through an "
      "ErrorReason LazyLock static, never through a literal, so a code absent from the registry is "

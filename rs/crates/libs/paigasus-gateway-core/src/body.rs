@@ -86,6 +86,14 @@ impl BodyCalls {
         }
     }
 
+    /// Whether the body itself forces `Truncated` on a call (a Responses item that is not
+    /// `"completed"`, ruling F7). The service reads it to apply `on_failure = allow` to such a
+    /// body as the stream does to a truncation: the body goes through unchanged.
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.forced.iter().any(Option::is_some)
+    }
+
     /// The rewritten body, or `None` when nothing is blocked and the original bytes go through.
     #[must_use]
     pub fn apply(self, decisions: &[Decision]) -> Option<Vec<u8>> {
@@ -493,6 +501,16 @@ mod tests {
         assert_eq!(v["output"][0]["content"][0]["text"], "[paigasus] tool call \"rm\" was blocked (truncated).");
         // The Responses profile, not the chat one: a `choices` body is malformed here.
         assert!(parse_body(Format::OpenAiResponses, &two_calls(), MAX).is_err());
+    }
+
+    /// SMA-769 C5: `is_truncated` is true only when the body forces `Truncated` on a call.
+    #[test]
+    fn is_truncated_follows_the_forced_codes() {
+        let done = responses_body(json!([{"type":"function_call","id":"fc_1","call_id":"c1","name":"rm","arguments":"{}","status":"completed"}]));
+        assert!(!parse_body(Format::OpenAiResponses, &done, MAX).unwrap().is_truncated());
+        let cut = responses_body(json!([{"type":"function_call","id":"fc_1","call_id":"c1","name":"rm","arguments":"{\"p\":\"SEC","status":"incomplete"}]));
+        assert!(parse_body(Format::OpenAiResponses, &cut, MAX).unwrap().is_truncated());
+        assert!(!parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap().is_truncated(), "chat forces nothing");
     }
 
     /// Ruling F11, spec § 7.1: the body number check covers the envelope and the client-run items

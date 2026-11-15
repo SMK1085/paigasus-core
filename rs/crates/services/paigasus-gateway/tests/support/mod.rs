@@ -135,7 +135,7 @@ impl MockOpenAi {
             recorded: Mutex::new(None),
             requests: AtomicUsize::new(0),
         });
-        let router = Router::new().route("/v1/chat/completions", post(handle)).with_state(state.clone());
+        let router = Router::new().route("/v1/chat/completions", post(handle)).route("/v1/responses", post(handle)).with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local addr");
