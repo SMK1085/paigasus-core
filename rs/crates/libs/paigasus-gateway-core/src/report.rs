@@ -181,15 +181,15 @@ fn omitted_summary(n: usize) -> String {
 }
 
 /// The `paigasus-tool-decisions` header value (D22). Call entries come first. Request entries
-/// follow and are cut first when the header is full, with one summary entry.
+/// follow and are cut first when the header is full, with one summary entry. When the call
+/// entries alone fill the header, the call cut marker is followed by the summary of every request
+/// entry (§ 6.5.3: "if any request entry is removed, one summary entry gives their count").
 #[must_use]
 pub fn report_header(calls: &[ReportEntry], requests: &[RequestEntry]) -> String {
-    // Room kept at the end for the cut marker and the closing bracket.
-    let reserve = if requests.is_empty() {
-        TRUNCATED.len()
-    } else {
-        TRUNCATED.len().max(omitted_summary(requests.len()).len())
-    };
+    // Room kept at the end of the call entries: the cut marker, and the summary of every request
+    // entry after it. The request loop needs room for its own summary only.
+    let summary = (!requests.is_empty()).then(|| omitted_summary(requests.len()));
+    let reserve = TRUNCATED.len() + summary.as_ref().map_or(0, |s| 1 + s.len());
     let mut out = String::from("[");
     for (i, e) in calls.iter().enumerate() {
         let json = e.to_json();
@@ -199,6 +199,10 @@ pub fn report_header(calls: &[ReportEntry], requests: &[RequestEntry]) -> String
                 out.push(',');
             }
             out.push_str(TRUNCATED);
+            if let Some(s) = &summary {
+                out.push(',');
+                out.push_str(s);
+            }
             out.push(']');
             return out;
         }
@@ -210,6 +214,7 @@ pub fn report_header(calls: &[ReportEntry], requests: &[RequestEntry]) -> String
     for (i, r) in requests.iter().enumerate() {
         let json = r.to_json();
         let sep = usize::from(!out.ends_with('['));
+        let reserve = summary.as_ref().map_or(0, String::len);
         if out.len() + sep + json.len() + 1 + reserve + 1 > MAX_HEADER_BYTES {
             if sep == 1 {
                 out.push(',');
@@ -401,6 +406,24 @@ mod tests {
         let h = report_header(&calls, &many_request_entries(5));
         assert!(h.len() <= 2048);
         serde_json::from_str::<Vec<serde_json::Value>>(&h).unwrap();
+    }
+
+    /// § 6.5.3: when the call entries alone fill the header, every request entry is removed, and
+    /// one summary entry still gives their count.
+    #[test]
+    fn calls_that_fill_the_header_still_leave_the_request_summary() {
+        let calls: Vec<ReportEntry> = (0..200).map(|i| entry(&format!("tool_{i}"))).collect();
+        let h = report_header(&calls, &many_request_entries(5));
+        assert!(h.len() <= 2048, "{}", h.len());
+        let v: Vec<serde_json::Value> = serde_json::from_str(&h).unwrap();
+        let n = v.len();
+        assert_eq!(v[n - 2], serde_json::json!({"truncated": true}), "{h}");
+        assert_eq!(v[n - 1], serde_json::json!({"v": 2, "side": "request", "omitted": 5}), "{h}");
+        assert!(v.iter().all(|e| e.get("action").is_none()), "no request entry fits: {h}");
+        // Without request entries, the cut marker alone ends the header.
+        let h = report_header(&calls, &[]);
+        let v: Vec<serde_json::Value> = serde_json::from_str(&h).unwrap();
+        assert_eq!(v.last(), Some(&serde_json::json!({"truncated": true})));
     }
 
     #[test]
