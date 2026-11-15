@@ -36,8 +36,10 @@ const TYPE_KEY: &[u8] = b"type";
 /// completion estimate. A terminal record that is well-formed JSON with a `u64` at
 /// `/response/usage/total_tokens` gives its total, and the last such total wins.
 ///
-/// Every field is fixed size: the scanner holds no heap buffer, whatever the record size.
-#[derive(Debug, Default)]
+/// Every field is fixed size: the scanner holds no heap buffer, whatever the record size. Two
+/// compile-time checks below keep it so: the type is `Copy` (a `Vec`, `Box` or `String` field
+/// cannot be `Copy`), and its size is under 1024 bytes.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct ResponsesUsageScanner {
     /// The current line has at least one byte.
     line_started: bool,
@@ -55,6 +57,12 @@ pub struct ResponsesUsageScanner {
     records: u64,
     reported: Option<u64>,
 }
+
+/// The scanner has no heap field: only a `Copy` type can satisfy this bound.
+const fn assert_no_heap_fields<T: Copy>() {}
+const _: () = assert_no_heap_fields::<ResponsesUsageScanner>();
+/// The fixed state stays small; `held_bytes()` in the tests checks the same bound.
+const _: () = assert!(std::mem::size_of::<ResponsesUsageScanner>() < 1024);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum LineState {
@@ -272,7 +280,7 @@ enum Capture {
 }
 
 /// The captured `type` bytes (std has no `Default` for `[u8; 64]`).
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct TypeBuf([u8; MAX_TYPE_BYTES]);
 
 impl Default for TypeBuf {
@@ -286,7 +294,7 @@ impl Default for TypeBuf {
 /// `/response/usage/total_tokens`. The last value of a duplicate key wins, as in serde_json. It
 /// does not check UTF-8, and it does not decode escapes: a key or a `type` with an escape matches
 /// nothing, so the estimate applies.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 struct JsonScan {
     error: bool,
     expect: Expect,
@@ -598,11 +606,23 @@ pub fn non_stream_usage(body: &[u8]) -> BodyUsage {
     BodyUsage::Completion(bytes_to_tokens(bytes))
 }
 
-/// The request estimate by the chat rule (§ 8.2, SMA-677 D14): `ceil(text_bytes / 4)` over
-/// `instructions`, a string `input`, and per `input` item its `content` (a string, or the `text`
-/// of `input_text` parts, plus 85 per other typed part), `arguments`, `input` and `output`
-/// strings. A `null` or absent field counts 0. Any other shape falls back to `ceil(body_len / 4)`,
-/// capped at 32768.
+/// The item fields the estimate knows. An item with none of them (all absent or `null`) counts
+/// its serialized JSON length.
+const KNOWN_ITEM_FIELDS: [&str; 5] = ["content", "summary", "arguments", "input", "output"];
+
+/// The request estimate by the chat rule (§ 8.2, SMA-677 D14), which counts the text of every
+/// role: `ceil(text_bytes / 4)` over `instructions`, a string `input`, and per `input` item:
+/// - `content`: a string, or per part its `text` string (of any part type) or its `refusal`
+///   string; another typed part (an image, a file) counts 85;
+/// - every `summary[].text` string; a `summary` that is not an array counts its JSON length;
+/// - `arguments` and `input` strings;
+/// - `output`: a string by its bytes, any other value by its serialized JSON length;
+/// - an item with none of these fields: its serialized JSON length.
+///
+/// A `null` or absent field counts 0. Any other shape (a non-object item, an untyped part, a
+/// non-string `instructions`, `arguments` or `input`) falls back to `ceil(body_len / 4)`, capped
+/// at 32768. Over-estimating is the safe direction: this estimate is the charge when no reported
+/// total arrives.
 pub fn request_tokens_estimate(v: &Value, body_len: usize) -> u64 {
     let fallback = bytes_to_tokens(body_len).min(FALLBACK_REQUEST_CAP);
     let mut text_bytes = 0usize;
@@ -614,17 +634,36 @@ pub fn request_tokens_estimate(v: &Value, body_len: usize) -> u64 {
         Some(Value::Array(items)) => {
             for item in items {
                 let Some(item) = item.as_object() else { return fallback };
-                for field in ["arguments", "input", "output"] {
+                if KNOWN_ITEM_FIELDS.iter().all(|field| item.get(*field).is_none_or(Value::is_null)) {
+                    text_bytes = text_bytes.saturating_add(serde_json::to_vec(item).map_or(0, |bytes| bytes.len()));
+                    continue;
+                }
+                for field in ["arguments", "input"] {
                     if !add_text(item.get(field), &mut text_bytes) {
                         return fallback;
                     }
                 }
+                match item.get("output") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::String(text)) => text_bytes = text_bytes.saturating_add(text.len()),
+                    Some(other) => text_bytes = text_bytes.saturating_add(json_len(other)),
+                }
+                match item.get("summary") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Array(parts)) => {
+                        for text in parts.iter().filter_map(|part| part.get("text").and_then(Value::as_str)) {
+                            text_bytes = text_bytes.saturating_add(text.len());
+                        }
+                    }
+                    Some(other) => text_bytes = text_bytes.saturating_add(json_len(other)),
+                }
                 match item.get("content") {
                     Some(Value::Array(parts)) => {
                         for part in parts {
-                            match (part.get("type").and_then(Value::as_str), part.get("text").and_then(Value::as_str)) {
-                                (Some("input_text"), Some(text)) => text_bytes = text_bytes.saturating_add(text.len()),
-                                (Some(_), _) => other_parts = other_parts.saturating_add(1),
+                            let text = part.get("text").and_then(Value::as_str).or_else(|| part.get("refusal").and_then(Value::as_str));
+                            match (part.get("type").and_then(Value::as_str), text) {
+                                (Some(_), Some(text)) => text_bytes = text_bytes.saturating_add(text.len()),
+                                (Some(_), None) => other_parts = other_parts.saturating_add(1),
                                 (None, _) => return fallback,
                             }
                         }
@@ -644,6 +683,11 @@ pub fn request_tokens_estimate(v: &Value, body_len: usize) -> u64 {
         }
     }
     bytes_to_tokens(text_bytes).saturating_add(other_parts.saturating_mul(NON_TEXT_PART_TOKENS))
+}
+
+/// The serialized JSON length of a value, for the byte rule.
+fn json_len(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
 }
 
 /// Adds the bytes of a string field. A `null` or absent field adds 0. Any other shape returns
@@ -1003,10 +1047,50 @@ mod tests {
             json!({"input": [{"role": "user", "content": 42}]}),
             json!({"input": [{"role": "user", "content": [{"text": "no type"}]}]}),
             json!({"input": [{"type": "function_call", "arguments": {"a": 1}}]}),
-            json!({"input": [{"type": "function_call_output", "output": [{"type": "input_text", "text": "x"}]}]}),
         ] {
             assert_eq!(est(body.clone(), 401), 101, "{body}");
         }
         assert_eq!(est(json!({"input": 42}), 1_000_000), 32_768);
+    }
+
+    /// Fix I1 (coordinator ruling): the chat rule counts the text of every role, so a replayed
+    /// history is charged by its size, also when the client drops the stream.
+    #[test]
+    fn the_request_estimate_counts_every_replayed_text() {
+        let est = |v: Value| request_tokens_estimate(&v, 999);
+        const MIB: usize = 1024 * 1024;
+        let big = |n: usize| "x".repeat(n);
+        // A 4 MiB `output_text` part of an assistant message.
+        let assistant = |n: usize| json!({"input": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": big(n), "annotations": []}]}]});
+        assert_eq!(est(assistant(4 * MIB)), (4 * MIB / 4) as u64);
+        // A reasoning item: every `summary[].text` and every `content[].text`.
+        let reasoning = |n: usize| json!({"input": [{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": big(n)}, {"type": "summary_text", "text": big(n)}], "content": [{"type": "reasoning_text", "text": big(n)}]}]});
+        assert_eq!(est(reasoning(MIB)), (3 * MIB / 4) as u64);
+        // A `summary` that is not an array counts its JSON length.
+        assert_eq!(est(json!({"input": [{"type": "reasoning", "summary": {"text": "abcd"}}]})), 4);
+        // A refusal part counts its `refusal` string.
+        let refusal = |n: usize| json!({"input": [{"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": big(n)}]}]});
+        assert_eq!(est(refusal(MIB)), (MIB / 4) as u64);
+        assert_eq!(est(refusal(9)), 3);
+        // A non-string `output` counts its serialized JSON length.
+        let output = |n: usize| json!({"input": [{"type": "function_call_output", "call_id": "c1", "output": [{"type": "input_text", "text": big(n)}]}]});
+        let small = r#"[{"type":"input_text","text":"x"}]"#;
+        assert_eq!(est(output(1)), small.len().div_ceil(4) as u64);
+        assert_eq!(est(output(MIB)), (small.len() - 1 + MIB).div_ceil(4) as u64);
+        // An item with no known field counts its serialized JSON length.
+        let unknown = |n: usize| json!({"type": "item_reference", "id": big(n)});
+        let unknown_len = |n: usize| serde_json::to_vec(&unknown(n)).unwrap().len();
+        assert_eq!(est(json!({"input": [unknown(MIB)]})), unknown_len(MIB).div_ceil(4) as u64);
+        let null_fields = json!({"type": "x", "content": null, "output": null, "data": big(MIB)});
+        let null_len = serde_json::to_vec(&null_fields).unwrap().len();
+        assert_eq!(est(json!({"input": [null_fields]})), null_len.div_ceil(4) as u64, "null fields are not known fields");
+        // Every one of them scales with its size.
+        let shapes: [&dyn Fn(usize) -> Value; 4] = [&assistant, &reasoning, &refusal, &output];
+        for shape in shapes {
+            assert!(est(shape(2 * MIB)) > est(shape(MIB)) + (MIB / 8) as u64);
+        }
+        // A non-text part keeps the fixed count; text parts of any type add their bytes.
+        let mixed = json!({"input": [{"role": "user", "content": [{"type": "input_file", "file_id": "f"}, {"type": "summary_text", "text": "abcd"}]}]});
+        assert_eq!(est(mixed), 1 + NON_TEXT_PART_TOKENS);
     }
 }
