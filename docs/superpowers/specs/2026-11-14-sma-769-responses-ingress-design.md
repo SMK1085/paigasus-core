@@ -752,6 +752,10 @@ Where the build differs from this spec or adds to it. Facts come from the build 
 - F7. A non-stream client-run item that is not `completed` gets the truncated rewrite under
   `block` (code `Truncated`). It does not get a 502. A malformed body under `block` is still a 502.
 - Under `on_failure = allow`, a non-stream body with a truncated item goes through unchanged.
+- Truncation under `block`, stream and body differ. On a stream, a truncated client-run item
+  blocks the whole hold with `Truncated` (D10), and the decider is not asked. On a body, only the
+  truncated item gets `Truncated`. The decider still decides every other call, so a completed
+  sibling call can be allowed.
 - Observe mode, mixed case: one truncated item switches the response to pass-through. A
   completed call that the policy blocks in the same response can reach the client. Stream and
   body behave the same.

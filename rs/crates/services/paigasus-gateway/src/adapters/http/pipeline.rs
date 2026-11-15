@@ -51,7 +51,7 @@ pub struct RequestFacts {
 
 /// The descriptor of one OpenAI-shaped route.
 pub struct Endpoint {
-    /// The endpoint name. `"chat_completions"` for chat. Task 15 uses it as a log field and a
+    /// The endpoint name. `"chat_completions"` for chat. It is the `endpoint` log field and
     /// metric label.
     pub name: &'static str,
     /// The upstream route this endpoint forwards to.

@@ -2,25 +2,13 @@
 
 //! The `POST /v1/chat/completions` proxy handler — the integration crux of the M0 slice.
 //!
-//! By the time this runs, the G5 [`require_iam_auth`](super::auth::require_iam_auth) middleware has
-//! already authenticated + authorized the caller and attached a [`CallerContext`] to the request
-//! extensions. This handler's job is narrow and security-sensitive:
-//!
-//! 1. Read the full request body as raw [`EnvelopeBytes`] — the body-size limit is enforced by
-//!    the [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit) layer, which `EnvelopeBytes`
-//!    honours and reports as a `413` INSIDE the OpenAI envelope (SMA-588); before that it was
-//!    axum's plain text, outside the error contract.
-//! 2. Parse a COPY of the body into [`ChatCompletionRequest`] ONLY to read `model` (logging) and
-//!    `stream` (which egress path to take). A JSON parse failure → `400`.
-//! 3. **Egress hygiene (load-bearing):** forward ONLY the raw body bytes to the OpenAI client —
-//!    NEVER the caller's inbound headers. The caller's `Authorization: Bearer <paigasus-key>` is
-//!    still on the inbound request; it must never reach OpenAI. The client builds fresh upstream
-//!    headers from its own real key, so simply never handing it caller headers guarantees this.
-//! 4. Forward the upstream response verbatim: a full body (non-stream) or an UNBUFFERED SSE stream.
-//!    A non-2xx upstream (OpenAI's own error envelope) passes through unchanged.
-//!
-//! The flow itself is [`pipeline::proxy`]; the mid-stream terminal frame and the cancel-on-drop
-//! contract are described in [`relay`](super::relay).
+//! This module holds only the parts that are specific to chat: the [`CHAT`] descriptor, the
+//! request parse ([`ChatCompletionRequest`], read from a COPY of the body for `model` and
+//! `stream` only), and the terminal SSE frame `TERMINAL_SSE_ERROR`. The handler gives
+//! [`CHAT`] to [`pipeline::proxy`], which holds the flow and its security rules (egress hygiene
+//! included). The body-size limit and its `413` inside the OpenAI envelope come from
+//! [`EnvelopeBytes`] (SMA-588). The mid-stream terminal frame and the cancel-on-drop contract are
+//! described in [`relay`](super::relay).
 
 use axum::Extension;
 use axum::extract::State;
