@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Cedar schema generation for tool policies (spec section 4.3).
-
 //!
 //! The names come from the SMA-752 spec (D20, D22) with the D5 correction: the principal is
 //! `Pgs::Iam::Principal`, the resource is `Pgs::Iam::Organization`, and every call is an action
@@ -101,12 +100,33 @@ pub fn base_schema_json() -> Value {
 /// The actions are added in `name_key` order. A `Function` tool has its mapped input type and
 /// an optional `input_text`. A `Custom` tool has an empty `input` record and a required
 /// `input_text`.
+///
+/// The function depends on unique `name_key` values: for two entries with the same key, the
+/// later one replaces the earlier one. The catalog layer rejects duplicates (`CatalogProblem::Conflict`).
+///
+/// An entry must never replace a group. An entry whose `name_key` is a key of the base actions
+/// (`InvokeTool`, `Unregistered`) or is not ASCII lowercase is left out, so a policy that names
+/// it fails validation (fail closed). Such an entry cannot come from the catalog layer, so a
+/// debug build also fails a `debug_assert!`.
 pub fn tenant_schema_json(catalog: &[ToolEntry]) -> Value {
+    tenant_schema_with(catalog, true)
+}
+
+fn tenant_schema_with(catalog: &[ToolEntry], assert_valid_keys: bool) -> Value {
     let mut schema = base_schema_json();
     let mut entries: Vec<&ToolEntry> = catalog.iter().collect();
     entries.sort_by(|a, b| a.name.name_key.cmp(&b.name.name_key));
     let actions = schema["Pgs::Gateway"]["actions"].as_object_mut().expect("the base schema has an actions map");
+    let base_keys: Vec<String> = actions.keys().cloned().collect();
     for entry in entries {
+        let key = &entry.name.name_key;
+        if base_keys.contains(key) || *key != key.to_ascii_lowercase() {
+            debug_assert!(
+                !assert_valid_keys,
+                "tool name_key {key:?} is a base action or is not ASCII lowercase; the catalog layer must reject it before schema generation"
+            );
+            continue;
+        }
         let applies = match entry.kind {
             ToolKind::Function => applies_to(entry.cedar_input_type.clone(), false),
             ToolKind::Custom => applies_to(empty_record(), true),
@@ -287,35 +307,128 @@ mod tests {
             }, "required": ["s", "a", "n1", "num"]}),
             json!({"type": "object", "additionalProperties": true}),
             json!({"properties": {"q": {"type": "string"}}}),
+            nested_objects(8),
+            nested_objects(9),
         ]
     }
 
+    /// An object schema with `levels` nested object levels; the top level is level 1.
+    fn nested_objects(levels: usize) -> Value {
+        let mut schema = json!({"type": "object", "properties": {"leaf": {"type": "string"}}});
+        for _ in 1..levels {
+            schema = json!({"type": "object", "properties": {"n": schema}});
+        }
+        schema
+    }
+
+    #[test]
+    fn the_depth_limit_accepts_8_levels_and_rejects_9() {
+        let max = CatalogLimits::default().max_depth;
+        assert_eq!(max, 8);
+        assert!(map_input_schema(&nested_objects(8), max).is_ok());
+        assert_eq!(map_input_schema(&nested_objects(9), max), Err(crate::tool_policy::MappingError::TooDeep));
+    }
+
+    /// The catalog of the pin test: one custom tool and one function tool for each corpus
+    /// schema that maps.
     fn fixed_catalog() -> Vec<ToolEntry> {
         let mut catalog = vec![custom_tool("free_text")];
         for (i, schema) in mapping_corpus().into_iter().enumerate() {
-            catalog.push(function_tool(&format!("pin.tool_{i}"), schema));
+            if let Ok(entry) = build_manual(&format!("pin.tool_{i}"), ToolKind::Function, Some(schema), &CatalogLimits::default()) {
+                catalog.push(entry);
+            }
         }
         catalog
     }
 
+    /// An entry built by hand, with a `name_key` that the catalog layer never makes.
+    fn entry_with_key(key: &str) -> ToolEntry {
+        let mut entry = function_tool("placeholder", json!({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}));
+        entry.name.name_key = key.to_owned();
+        entry
+    }
+
+    fn assert_group_is_kept(key: &str) {
+        let schema = tenant_schema_with(&[entry_with_key(key)], false);
+        let base = base_schema_json();
+        assert_eq!(schema["Pgs::Gateway"]["actions"][key], base["Pgs::Gateway"]["actions"][key], "the group {key} must keep its own entry");
+        assert!(
+            schema["Pgs::Gateway"]["actions"][key].get("memberOf").is_none(),
+            "the group {key} must not become a member of InvokeTool"
+        );
+        assert_eq!(schema["Pgs::Gateway"]["actions"][key]["appliesTo"]["context"]["attributes"]["input"]["attributes"], json!({}));
+        assert_eq!(schema, base, "an entry with the key {key} must be left out");
+        Schema::from_json_value(schema).expect("the schema still parses");
+    }
+
+    #[test]
+    fn an_entry_named_unregistered_does_not_replace_the_group() {
+        assert_group_is_kept("Unregistered");
+    }
+
+    #[test]
+    fn an_entry_named_invoke_tool_does_not_replace_the_group() {
+        assert_group_is_kept("InvokeTool");
+    }
+
+    #[test]
+    fn an_entry_that_is_not_lowercase_is_left_out() {
+        let schema = tenant_schema_with(&[entry_with_key("GitHub.search")], false);
+        assert_eq!(schema, base_schema_json());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is a base action or is not ASCII lowercase")]
+    fn the_public_function_asserts_on_a_group_key_in_debug_builds() {
+        tenant_schema_json(&[entry_with_key("Unregistered")]);
+    }
+
+    #[test]
+    fn a_policy_that_reads_a_dropped_field_fails_validation() {
+        let tool = function_tool("calc", json!({"type": "object", "properties": {"num": {"type": "number"}, "s": {"type": "string"}}}));
+        assert_eq!(tool.dropped_fields.len(), 1);
+        assert_eq!(tool.dropped_fields[0].path, "num");
+        let schema = tenant_schema_json(&[tool]);
+        let (errors, _) = validate(
+            "permit (principal, action == Pgs::Gateway::Action::\"calc\", resource) when { context.input.num == 1 };",
+            schema.clone(),
+        );
+        assert!(!errors.is_empty(), "a read of the dropped field num must not validate");
+        // Measured on cedar-policy 4.14: with a `has` guard, the validator types the guard as
+        // `False`: no error, but an "impossible policy" warning. The caller must treat that
+        // warning as a rejection if a guarded read of a dropped field must not save.
+        let (errors, warnings) = validate(
+            "permit (principal, action == Pgs::Gateway::Action::\"calc\", resource) when { context.input has num && context.input.num == 1 };",
+            schema.clone(),
+        );
+        assert!(errors.is_empty(), "cedar now reports a has-guarded read as an error: {errors:?}");
+        assert!(warnings.iter().any(|w| w.contains("policy is impossible")), "expected an impossible-policy warning: {warnings:?}");
+        assert_valid(
+            "permit (principal, action == Pgs::Gateway::Action::\"calc\", resource) when { context.input has s && context.input.s == \"x\" };",
+            schema,
+        );
+    }
+
     /// The `blake3` hash of the schema output that `TOOL_SCHEMA_REVISION` pins.
-    const EXPECTED_TOOL_SCHEMA_HASH: &str = "0bee5c56f4133590a382a9e6519995048a3b1d4bd9c3104668534d70004043ca";
+    const EXPECTED_TOOL_SCHEMA_HASH: &str = "7e3d7fe6c945b4fc96bb33e3cac2b497e2166e2600f39ab94a147efdc0f8946c";
 
     /// The pin test for `TOOL_SCHEMA_REVISION` (spec section 6.2), in the style of
     /// `starter_policy_content_is_pinned_to_the_declared_revision` in `authz/roles.rs`.
     #[test]
     fn tool_schema_is_pinned_to_the_declared_revision() {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(canonical_json(&base_schema_json()).as_bytes());
-        hasher.update(canonical_json(&tenant_schema_json(&fixed_catalog())).as_bytes());
-        for schema in mapping_corpus() {
-            let (record, dropped) = map_input_schema(&schema, CatalogLimits::default().max_depth).unwrap();
-            hasher.update(canonical_json(&record).as_bytes());
-            for d in dropped {
-                hasher.update(canonical_json(&json!([d.path, d.reason])).as_bytes());
-            }
-        }
-        let actual = hasher.finalize().to_hex().to_string();
+        let mappings: Vec<Value> = mapping_corpus()
+            .iter()
+            .map(|schema| match map_input_schema(schema, CatalogLimits::default().max_depth) {
+                Ok((record, dropped)) => json!({
+                    "ok": record,
+                    "dropped": dropped.into_iter().map(|d| json!([d.path, d.reason])).collect::<Vec<_>>()
+                }),
+                Err(e) => json!({ "err": format!("{e:?}") }),
+            })
+            .collect();
+        let pinned = json!([base_schema_json(), tenant_schema_json(&fixed_catalog()), mappings]);
+        let actual = blake3::hash(canonical_json(&pinned).as_bytes()).to_hex().to_string();
         assert_eq!(
             actual, EXPECTED_TOOL_SCHEMA_HASH,
             "\n\nThe tool policy schema output changed (the base schema, the tenant schema or the JSON Schema mapping).\n\
