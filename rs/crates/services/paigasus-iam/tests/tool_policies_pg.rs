@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use paigasus_iam::adapters::persistence::uow::recover_txn;
 use paigasus_iam::adapters::persistence::{PgToolPolicies, SeaOrmUnitOfWork};
 use paigasus_iam_core::tool_policy::{ToolEntry, ToolKind, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyVersion, ToolSource, VersionOrigin, VersionStatus, parse_tool_name};
-use paigasus_iam_core::{RepositoryError, UnitOfWork};
+use paigasus_iam_core::{ConflictKind, RepositoryError, UnitOfWork};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, SqlErr, Statement};
 use serde_json::json;
 use uuid::Uuid;
@@ -355,4 +355,71 @@ async fn the_floor_state_row_is_seeded() {
         .unwrap()
         .unwrap();
     assert_eq!(row.try_get::<i64>("", "n").unwrap(), 1);
+}
+
+/// Commits version 1 and 2 of a tenant set, so that the live version is 2.
+async fn set_at_version_two(db: &DatabaseConnection) -> (ToolPolicySetKey, PgToolPolicies, SeaOrmUnitOfWork) {
+    let org = seed_org(db).await;
+    let key = ToolPolicySetKey::Tenant(org);
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    for n in [1u64, 2] {
+        let tx = uow.begin().await.unwrap();
+        repo.lock_state_in(&*tx, &key).await.unwrap();
+        repo.insert_live_version_in(&*tx, &version(key, n, VersionStatus::Live, Utc::now())).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    (key, repo, uow)
+}
+
+async fn assert_unchanged_at_two(repo: &PgToolPolicies, key: &ToolPolicySetKey) {
+    assert_eq!(repo.state(key).await.unwrap().live_version, 2);
+    let live = repo.live(key).await.unwrap().unwrap();
+    assert_eq!((live.version, live.status), (2, VersionStatus::Live));
+    assert_eq!(repo.version(key, 1).await.unwrap().unwrap().status, VersionStatus::Superseded);
+    assert!(repo.version(key, 3).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_stale_writer_gets_the_version_conflict_and_changes_nothing() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (key, repo, uow) = set_at_version_two(&db).await;
+    // The stale writer read live_version 1 and wants version 2 again. It does not lock.
+    let tx = uow.begin().await.unwrap();
+    let err = repo.insert_live_version_in(&*tx, &version(key, 2, VersionStatus::Live, Utc::now())).await.unwrap_err();
+    assert!(matches!(err, RepositoryError::Conflict(ConflictKind::ToolPolicyVersion)), "{err:?}");
+    drop(tx);
+    assert_unchanged_at_two(&repo, &key).await;
+}
+
+#[tokio::test]
+async fn a_version_that_is_not_the_next_one_is_refused() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (key, repo, uow) = set_at_version_two(&db).await;
+    for n in [4u64, 1] {
+        let tx = uow.begin().await.unwrap();
+        repo.lock_state_in(&*tx, &key).await.unwrap();
+        let err = repo.insert_live_version_in(&*tx, &version(key, n, VersionStatus::Live, Utc::now())).await.unwrap_err();
+        assert!(matches!(err, RepositoryError::Conflict(ConflictKind::ToolPolicyVersion)), "version {n}: {err:?}");
+        drop(tx);
+    }
+    assert_unchanged_at_two(&repo, &key).await;
+}
+
+#[tokio::test]
+async fn insert_live_version_refuses_a_status_that_is_not_live() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (key, repo, uow) = set_at_version_two(&db).await;
+    let tx = uow.begin().await.unwrap();
+    repo.lock_state_in(&*tx, &key).await.unwrap();
+    let err = repo.insert_live_version_in(&*tx, &version(key, 3, VersionStatus::Superseded, Utc::now())).await.unwrap_err();
+    assert!(matches!(err, RepositoryError::Backend(_)), "{err:?}");
+    drop(tx);
+    assert_unchanged_at_two(&repo, &key).await;
 }

@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::tool_policy::{
     DroppedField, StoredTool, ToolEntry, ToolKind, ToolName, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyState, ToolPolicyVersion, ToolSource, VersionOrigin, VersionStatus,
 };
-use paigasus_iam_core::{RepositoryError, Transaction};
+use paigasus_iam_core::{ConflictKind, RepositoryError, Transaction};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Statement};
 use serde_json::{Value, json};
@@ -315,9 +315,27 @@ impl ToolPolicyRepository for PgToolPolicies {
     }
 
     async fn insert_live_version_in(&self, tx: &dyn Transaction, v: &ToolPolicyVersion) -> Result<(), RepositoryError> {
+        // This method always writes a live row. Any other status is refused, not ignored.
+        if v.status != VersionStatus::Live {
+            return Err(corrupt("insert_live_version_in needs a version with the status Live"));
+        }
         let txn = recover_txn(tx)?;
         let (kind, org) = key_parts(&v.key);
         let version = to_i64(v.version)?;
+        // Compare-and-set on the state row, before any other write. It succeeds only if the
+        // stored live version is exactly one below the new one. It is the backstop: the caller
+        // must still hold the row lock from `lock_state_in`. A stale writer, a skipped version
+        // and a missing state row all change no row and give the version conflict.
+        let swapped = state::Entity::update_many()
+            .col_expr(state::Column::LiveVersion, sea_orm::sea_query::Expr::value(version))
+            .filter(state::Column::SetKey.eq(set_key(&v.key)))
+            .filter(state::Column::LiveVersion.eq(version - 1))
+            .exec(txn)
+            .await
+            .map_err(map_err)?;
+        if swapped.rows_affected == 0 {
+            return Err(RepositoryError::Conflict(ConflictKind::ToolPolicyVersion));
+        }
         // The old live row must go first: the live index allows one live row for each set.
         let supersede = versions::Entity::update_many()
             .col_expr(versions::Column::Status, sea_orm::sea_query::Expr::value("superseded"))
@@ -347,16 +365,6 @@ impl ToolPolicyRepository for PgToolPolicies {
         };
         versions::Entity::insert(row).exec_without_returning(txn).await.map_err(map_err)?;
 
-        let updated = state::Entity::update_many()
-            .col_expr(state::Column::LiveVersion, sea_orm::sea_query::Expr::value(version))
-            .filter(state::Column::SetKey.eq(set_key(&v.key)))
-            .exec(txn)
-            .await
-            .map_err(map_err)?;
-        if updated.rows_affected == 0 {
-            // The caller did not lock the state first. Roll back through the error.
-            return Err(RepositoryError::NotFound);
-        }
         Ok(())
     }
 }

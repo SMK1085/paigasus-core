@@ -355,6 +355,9 @@ impl From<RepositoryError> for TenancyError {
                 // stays `Internal` (Task 16 brief).
                 ConflictKind::ApiKeyHashCollision => Self::Internal,
                 ConflictKind::Other => Self::Internal,
+                // Task 12 maps this to `tool-policy-version-conflict`. No service writes the
+                // version yet, so it stays `Internal` until then.
+                ConflictKind::ToolPolicyVersion => Self::Internal,
             },
             RepositoryError::NotFound => Self::NotFound,
             RepositoryError::PrnMismatch => Self::PrnMismatch,

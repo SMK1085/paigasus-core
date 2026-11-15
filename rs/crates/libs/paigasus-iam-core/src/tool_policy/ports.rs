@@ -56,5 +56,11 @@ pub trait ToolPolicyRepository: Send + Sync {
     /// Upsert and delete catalog entries. Returns the new catalog revision (old + 1).
     async fn apply_catalog_in(&self, tx: &dyn Transaction, org: Uuid, upserts: &[ToolEntry], deletes: &[String], now: DateTime<Utc>) -> Result<u64, RepositoryError>;
     /// Store a new live version. The old live version becomes superseded.
+    ///
+    /// `v.status` must be `Live`. Any other status is an error (`Backend`), because this method
+    /// always writes a live row. `v.version` must be the stored `live_version` plus 1. If it is
+    /// not, the method returns `Conflict(ConflictKind::ToolPolicyVersion)` and changes nothing.
+    /// That check is a compare-and-set on the state row. It is a backstop. The caller must still
+    /// call `lock_state_in` first: the row lock is what makes writers run one after the other.
     async fn insert_live_version_in(&self, tx: &dyn Transaction, v: &ToolPolicyVersion) -> Result<(), RepositoryError>;
 }
