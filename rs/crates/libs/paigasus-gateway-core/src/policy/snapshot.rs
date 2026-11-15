@@ -4,6 +4,7 @@
 //! reads it from `DecisionContext` and never loads policies itself.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use paigasus_kernel::tool_policy::{Facts, ToolPolicies};
 
@@ -74,12 +75,27 @@ pub struct PolicySnapshot {
     pub set: PolicySet,
     pub mode: TenantMode,
     pub on_unavailable: OnUnavailable,
+    /// The time the request side took to build this snapshot and apply the plan. The decider adds
+    /// its own evaluation time and records one overhead sample per request (preflight F14).
+    pub request_elapsed: Duration,
 }
 
 impl PolicySnapshot {
     #[must_use]
     pub fn new(set: PolicySet, mode: TenantMode, on_unavailable: OnUnavailable) -> Self {
-        PolicySnapshot { set, mode, on_unavailable }
+        PolicySnapshot {
+            set,
+            mode,
+            on_unavailable,
+            request_elapsed: Duration::ZERO,
+        }
+    }
+
+    /// Set the request-side elapsed time (preflight F14).
+    #[must_use]
+    pub fn with_request_elapsed(mut self, elapsed: Duration) -> Self {
+        self.request_elapsed = elapsed;
+        self
     }
 }
 
@@ -92,5 +108,13 @@ mod tests {
         assert_eq!(TenantMode::Off.as_str(), "off");
         assert_eq!(TenantMode::LogOnly.as_str(), "log_only");
         assert_eq!(TenantMode::Enforce.as_str(), "enforce");
+    }
+
+    #[test]
+    fn a_new_snapshot_has_no_request_time_and_the_builder_sets_it() {
+        let s = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Off, OnUnavailable::Open);
+        assert_eq!(s.request_elapsed, Duration::ZERO);
+        let s = s.with_request_elapsed(Duration::from_millis(7));
+        assert_eq!(s.request_elapsed, Duration::from_millis(7));
     }
 }

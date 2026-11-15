@@ -18,7 +18,7 @@ const TRUNCATED: &str = r#"{"truncated":true}"#;
 
 /// The first 128 bytes of `name`, every byte outside `[A-Za-z0-9_.:-]` replaced by `_`.
 #[must_use]
-pub(crate) fn sanitize_name(name: &str) -> String {
+pub fn sanitize_name(name: &str) -> String {
     name.bytes()
         .take(MAX_NAME_BYTES)
         .map(|b| if b.is_ascii_alphanumeric() || b"_.:-".contains(&b) { b as char } else { '_' })

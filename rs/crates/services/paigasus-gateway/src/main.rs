@@ -263,6 +263,18 @@ fn describe_gateway_metrics() {
     );
     describe_counter!(names::GATEWAY_TOOL_POLICY_EVICTIONS_TOTAL, "Tool-policy tenant entries evicted for idleness.");
     describe_counter!(names::GATEWAY_TOOL_POLICY_REFRESH_ERRORS_TOTAL, "Tool-policy cache entries whose refresh failed.");
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_DECISIONS_TOTAL,
+        "Tool-policy decisions, labeled by side (request, response), mode, effect (allow, observe, block) and basis (policy, errored_forbid, unavailable)."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
+        "Requests the tool policy refused (mode enforce) or would refuse (mode log_only), labeled by mode and reason (unreadable_turn, unknown_tool_choice)."
+    );
+    describe_histogram!(
+        names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
+        "Seconds the tool policy adds to one request: the request side plus the decider."
+    );
 }
 
 async fn shutdown_signal() {
