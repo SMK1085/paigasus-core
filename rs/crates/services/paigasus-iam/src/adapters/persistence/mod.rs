@@ -25,6 +25,7 @@ pub mod pg_service_accounts;
 pub mod pg_system_roles;
 pub mod pg_system_row_retirer;
 pub mod pg_teams;
+pub mod pg_tool_policies;
 pub mod uow;
 
 pub use migration::Migrator;
@@ -49,6 +50,7 @@ pub use pg_service_accounts::PgServiceAccountRepository;
 pub use pg_system_roles::PgSystemRoleReconciler;
 pub use pg_system_row_retirer::PgSystemRowRetirer;
 pub use pg_teams::PgTeamRepository;
+pub use pg_tool_policies::PgToolPolicies;
 pub use uow::{SeaOrmSavepoint, SeaOrmTransaction, SeaOrmUnitOfWork};
 
 use paigasus_iam_core::{ConflictKind, RepositoryError};
