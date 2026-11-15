@@ -226,3 +226,19 @@ segment loosens every grant beyond what the undomained deployment needs today. W
 actually introduced, rewrite `subjects.env` and `test/accounts.conf.tmpl` together, in the same
 commit that turns the domain on, and let `check-subjects.sh` confirm the two didn't drift apart.
 See `ops/nats/permissions.md` §5 for the exact widened forms.
+
+## 9. The gateway tool-policy cache does not get invalidation events
+
+**Symptom.** A tenant changes a tool policy, but the gateway keeps the old decision until the next
+timed refresh (`tool_policy.refresh_secs`). The log has one line: `tool-policy NATS server error`.
+No metric counts this fault.
+
+**Cause.** The gateway uses a core subscription (not JetStream) on `iam.policy.>` to drop a cached
+policy early (SMA-752). The `gateway-consumer` identity needs a subscribe grant for `iam.policy.>`.
+`ops/nats/subjects.env` now has this grant. A deployment that did not apply it gets a
+`ServerError` (permissions violation) from the server. The gateway still works. It only loses the
+early invalidation.
+
+**Remediation.** Run `ops/nats/provision.sh` again for the deployment, so the new grant reaches the
+account. Then restart the gateway. Check the log for the `ServerError` line. Do not look for a
+metric: none exists.

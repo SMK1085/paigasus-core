@@ -254,7 +254,7 @@ No commit.
 #[test] fn the_floor_alone_has_no_floor_denied_default_deny() { /* compile(floor, "", &[]): Deny, floor_denied false */ }
 #[test] fn context_shape() {
     // tenant permits when context.request.ingress == "chat_completions" && context.call.declared == "yes"
-    // && context.session.turn == 0 && context.findings.contains("name_collision") && principal is Pgs::Iam::User
+    // && context.session.turn == 0 && context.findings.contains("name_collision") && principal is Pgs::Iam::Principal
     // && resource == Pgs::Iam::Organization::"0190a100-0000-7000-8000-0000000000aa"
 }
 #[test] fn an_argument_policy_on_a_path() { /* permit read_file when context.input.path like "/workspace/*": "/workspace/a" Allow, "/etc/passwd" Deny */ }
