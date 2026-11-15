@@ -135,3 +135,21 @@ fn an_unknown_request_field_is_a_protocol_error() {
         assert!(matches!(parse_request(text), Err(ProtocolError::Malformed(_))), "{text:?}");
     }
 }
+
+/// IAM generates `schema_json`, so a schema that does not convert is an IAM defect, not a
+/// tenant error: a protocol error, never a rejection.
+#[test]
+fn a_schema_that_does_not_convert_is_a_protocol_error() {
+    for schema in [serde_json::json!({ "Pgs::Gateway": { "entityTypes": 5 } }), serde_json::json!([]), serde_json::json!("x")] {
+        for source in ["", "@id(\"a\")\npermit (principal, action, resource);\n"] {
+            let mut request = accepted_request();
+            request["schema_json"] = schema.clone();
+            request["source"] = Value::from(source);
+            let request = parse_request(&request.to_string()).expect("the request parses");
+            match compile_request(&request) {
+                Err(ProtocolError::Malformed(detail)) => assert!(detail.contains("schema_json"), "{detail}"),
+                other => panic!("{schema} with {source:?}: {other:?}"),
+            }
+        }
+    }
+}

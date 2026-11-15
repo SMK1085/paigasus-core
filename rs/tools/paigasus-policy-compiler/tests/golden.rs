@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
 use paigasus_policy_compiler::compile::SetKind;
-use paigasus_policy_compiler::protocol::{CompileRequest, compile_request};
+use paigasus_policy_compiler::protocol::{CompileRequest, compile_request, parse_request};
 use paigasus_policy_compiler::{COMPILER_GENERATION, revision_string};
 use serde_json::Value;
 
@@ -135,7 +135,10 @@ fn golden_output_is_pinned_to_the_compiler_generation() {
     assert_eq!(
         (COMPILER_GENERATION, actual_hash.as_str()),
         (1, EXPECTED_GOLDEN_HASH),
-        "the golden compiler output changed. Bump COMPILER_GENERATION and replace EXPECTED_GOLDEN_HASH with {actual_hash}",
+        "the golden compiler output changed. Do these three steps in order: \
+         (1) bump COMPILER_GENERATION in src/lib.rs; \
+         (2) rewrite the result files with PAIGASUS_WRITE_FIXTURES=1 cargo test --locked; \
+         (3) replace EXPECTED_GOLDEN_HASH with {actual_hash} and the expected generation literal in this assert with the new COMPILER_GENERATION",
     );
 }
 
@@ -207,17 +210,22 @@ fn run_binary(args: &[&str], stdin: &[u8]) -> std::process::Output {
     output
 }
 
+/// The binary gives the same result as `compile_request`. It compares with `compile_request`,
+/// not with the `result_*.json` files: `protocol_fixtures.rs` already pins those files, and a
+/// write run there must not race this test binary.
 #[test]
 fn the_binary_round_trips_over_stdin() {
     for name in ["tenant_accepted", "tenant_rejected", "floor_accepted", "floor_rejected"] {
         let request = fs::read(root().join(format!("protocol/fixtures/request_{name}.json"))).expect("the request reads");
+        let parsed = parse_request(std::str::from_utf8(&request).expect("UTF-8 request")).expect("the request parses");
+        let expected = serde_json::to_value(compile_request(&parsed).expect("compiles")).expect("serializes");
         let output = run_binary(&["compile"], &request);
         assert_eq!(output.status.code(), Some(0), "{name}: {}", String::from_utf8_lossy(&output.stderr));
         let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
         assert_eq!(stdout.matches('\n').count(), 1, "{name}: one JSON line");
         assert!(stdout.ends_with('\n'), "{name}");
         let actual: Value = serde_json::from_str(&stdout).expect("stdout is JSON");
-        assert_eq!(actual, read_json(&root().join(format!("protocol/fixtures/result_{name}.json"))), "{name}");
+        assert_eq!(actual, expected, "{name}");
     }
 }
 
@@ -226,7 +234,10 @@ fn the_binary_exits_2_on_a_bad_request() {
     let mut wrong_version = read_json(&root().join("protocol/fixtures/request_tenant_accepted.json"));
     wrong_version["protocol_version"] = Value::from(2);
     let wrong_version = wrong_version.to_string();
-    for input in [&b"not json"[..], b"{}", &[0xff, 0xfe][..], wrong_version.as_bytes()] {
+    let mut bad_schema = read_json(&root().join("protocol/fixtures/request_tenant_accepted.json"));
+    bad_schema["schema_json"] = serde_json::json!({ "Pgs::Gateway": { "entityTypes": 5 } });
+    let bad_schema = bad_schema.to_string();
+    for input in [&b"not json"[..], b"{}", &[0xff, 0xfe][..], wrong_version.as_bytes(), bad_schema.as_bytes()] {
         let output = run_binary(&["compile"], input);
         assert_eq!(output.status.code(), Some(2), "{:?}", String::from_utf8_lossy(input));
         assert!(output.stdout.is_empty(), "{:?}", String::from_utf8_lossy(&output.stdout));

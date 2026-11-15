@@ -5,10 +5,11 @@
 //! and the tests on both sides read it.
 
 use cedar_policy::SchemaFragment;
+use dogwood_language::PolicySchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::compile::{Compiled, ReasonCode, Rejection, SetKind, compile_cedarschema};
+use crate::compile::{Compiled, Rejection, SetKind, compile_cedarschema};
 use crate::{COMPILER_GENERATION, PROTOCOL_VERSION, revision_string};
 
 /// One compile request.
@@ -106,15 +107,26 @@ pub fn cedarschema_from_json(schema_json: &Value) -> Result<String, String> {
     fragment.to_cedarschema().map_err(|error| error.to_string())
 }
 
-/// Compile one request. A schema that does not convert is a `tool-policy-invalid` rejection,
-/// in the same way as a cedarschema that does not parse in `compile_cedarschema`.
+/// The cedarschema text of a request's `schema_json`. IAM generates the schema, so a schema
+/// that does not convert is an IAM defect, not a tenant error: it is `Malformed` (exit 2), never
+/// a rejection. The text is also parsed here in the two ways that `compile_cedarschema` parses
+/// it (the cedar fragment for an empty set, Dogwood's `PolicySchema` for lowering). So the
+/// "the action schema is invalid" rejection of `compile_cedarschema` cannot come from a request.
+fn request_cedarschema(schema_json: &Value) -> Result<String, ProtocolError> {
+    let malformed = |error: String| ProtocolError::Malformed(format!("the schema_json is not a valid Cedar schema: {error}"));
+    let cedarschema = cedarschema_from_json(schema_json).map_err(malformed)?;
+    let (_fragment, _warnings) = SchemaFragment::from_cedarschema_str(&cedarschema).map_err(|error| malformed(error.to_string()))?;
+    PolicySchema::from_cedarschema_str(&cedarschema).map_err(|error| malformed(error.to_string()))?;
+    Ok(cedarschema)
+}
+
+/// Compile one request.
 pub fn compile_request(request: &CompileRequest) -> Result<CompileResult, ProtocolError> {
     if request.protocol_version != PROTOCOL_VERSION {
         return Err(ProtocolError::UnsupportedVersion(request.protocol_version));
     }
-    let outcome = cedarschema_from_json(&request.schema_json)
-        .map_err(|error| vec![Rejection::new(None, ReasonCode::ToolPolicyInvalid, format!("the action schema is invalid: {error}"))])
-        .and_then(|cedarschema| compile_cedarschema(request.kind, &request.source, &cedarschema, request.max_window_ms));
+    let cedarschema = request_cedarschema(&request.schema_json)?;
+    let outcome: Result<Compiled, Vec<Rejection>> = compile_cedarschema(request.kind, &request.source, &cedarschema, request.max_window_ms);
     Ok(match outcome {
         Ok(compiled) => CompileResult::Accepted {
             protocol_version: PROTOCOL_VERSION,
