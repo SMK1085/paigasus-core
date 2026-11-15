@@ -122,8 +122,8 @@ sha2 = "0.11"
 async-nats = { workspace = true }
 paigasus-nats-creds = { workspace = true }
 # `paigasus-nats-creds` signs the server nonce on every connection attempt so a rotated
-# `.creds` is picked up without a restart (SMA-493 D8).
-nkeys = { workspace = true }
+# `.creds` is picked up without a restart (SMA-493 D8). It owns the `nkeys` dependency; this
+# crate uses `nkeys` only in tests (see [dev-dependencies]).
 # `service_info` — the shared ServiceInfo builder + HTTP DTO (SMA-505). This crate supplies
 # only the wire invariants; the config -> capability projection lives in `src/service_info.rs`.
 paigasus-service-info = { workspace = true }
@@ -171,9 +171,13 @@ tokio = { workspace = true, features = ["test-util"] }
 # recency/registry/storage, so "debugging" is turned on explicitly here — dev-only, unified
 # into test builds and never the shipped binary.
 metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
-# `paigasus-nats-creds` tests — `each_call_re_reads_the_file_from_disk` etc. need a real
-# file on disk to prove the loader re-reads on every call rather than caching (SMA-493 D8).
+# Real files on disk: the NATS seed and creds files of `tests/nats_permissions.rs` and the
+# publisher tests in `adapters::events::nats_publisher`, and the JWKS file tests in
+# `adapters::oidc::jwks`. The creds loader tests themselves moved to `paigasus-nats-creds`.
 tempfile = "3"
+# `tests/nats_permissions.rs` makes a fresh user nkey seed for each fixture identity, so no key
+# material is committed. The production auth path is `paigasus-nats-creds` (SMA-752).
+nkeys = { workspace = true }
 # `adapters::grpc::convert`'s AC2 registry-coverage test enumerates every TenancyError
 # variant, which safe Rust cannot do without a derive. Dev-only: the derive is gated behind
 # cfg(test) so strum_macros never enters the shipped binary (SMA-498).

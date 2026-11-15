@@ -161,9 +161,10 @@ fn cfg_for(fixture: &Fixture, identity: &Identity, inbox_prefix: &str) -> Publis
 /// A raw client for `identity`, with its [`async_nats::Event`]s piped into the returned channel so
 /// denials can be asserted on rather than inferred from a timeout.
 ///
-/// Authenticates through the adapter's own `auth_from_credentials` — the same callback body
-/// `NatsEventPublisher::connect` installs — so a fixture client and the production client cannot
-/// diverge in how they present a credential.
+/// Authenticates through `paigasus_nats_creds::auth_from_credentials` — the shared crate whose
+/// callback body `NatsEventPublisher::connect` (and the gateway's tool-policy subscription) also
+/// installs — so a fixture client and the production client cannot diverge in how they present a
+/// credential.
 async fn client_for(fixture: &Fixture, identity: &Identity, inbox_prefix: &str) -> (async_nats::Client, mpsc::UnboundedReceiver<String>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let path = identity.seed_path.to_string_lossy().to_string();
