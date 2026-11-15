@@ -142,7 +142,10 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             Err(refusal) => {
                 // The refusal metric is the operator's signal; this line stays at debug.
                 tracing::debug!(principal = %caller.principal_prn, scope = %caller.scope_prn, reason = refusal.label(), endpoint = endpoint.name, "chat completion refused by a limit");
-                return GatewayError::from(refusal).into_response();
+                // SMA-752 § 6.5.3: the header goes out whenever an entry exists, a limit refusal too.
+                let mut resp = GatewayError::from(refusal).into_response();
+                add_request_report(&mut resp, &request_entries);
+                return resp;
             }
         },
     };
