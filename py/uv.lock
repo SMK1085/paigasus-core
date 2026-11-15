@@ -843,7 +843,7 @@ requires-dist = [
 
 [[package]]
 name = "paigasus-kernel"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "packages/paigasus-kernel" }
 dependencies = [
     { name = "paigasus-py-bindings" },
@@ -870,7 +870,7 @@ requires-dist = [{ name = "betterproto2", extras = ["grpclib"], specifier = ">=0
 
 [[package]]
 name = "paigasus-py-bindings"
-version = "0.2.0"
+version = "0.2.1"
 source = { directory = "../rs/crates/bindings/paigasus-py-bindings" }
 
 [[package]]
