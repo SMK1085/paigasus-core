@@ -22,7 +22,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
@@ -31,6 +31,7 @@ use paigasus_gateway_core::{Format, Limits};
 use paigasus_observability::names;
 
 use super::AppState;
+use super::bytes::EnvelopeBytes;
 use super::error::GatewayError;
 use super::interception::{self, ToolInterception};
 use super::relay::terminal_sse_error_stream;
@@ -70,7 +71,11 @@ pub struct Endpoint {
 }
 
 /// Proxy one request through `endpoint`. See the module docs for the rules that bind it.
-pub async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: CallerContext, body: Bytes) -> Response {
+///
+/// The body arrives as the house [`EnvelopeBytes`] that the handler extracted, and is unwrapped
+/// here. The wrapped bytes are the ORIGINAL request bytes, and they go upstream unchanged (D5).
+pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: CallerContext, body: EnvelopeBytes) -> Response {
+    let EnvelopeBytes(body) = body;
     // Parse a COPY only to read the facts; the ORIGINAL `body` bytes flow upstream verbatim.
     // The parse function splits its failures (SMA-588): a body that PARSED but did not match the
     // type is reported distinctly from one that could not be read at all.

@@ -59,7 +59,7 @@ pub(crate) const TERMINAL_SSE_ERROR: &str = "\n\ndata: {\"error\":{\"message\":\
 ///
 /// Extractor order matters: [`State`] and [`Extension`] are `FromRequestParts` (they read only the
 /// head), while [`EnvelopeBytes`] is `FromRequest` (it consumes the body) and so must come LAST.
-/// [`EnvelopeBytes`] wraps [`Bytes`], so it honours the
+/// [`EnvelopeBytes`] wraps [`Bytes`](axum::body::Bytes), so it honours the
 /// [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit) layer the same way and returns `413`
 /// for an over-limit body before this function body runs — rendered through the OpenAI envelope
 /// rather than as axum's plain text (SMA-588). It is still `FromRequest`, so it must come LAST.
@@ -70,7 +70,7 @@ pub(crate) const TERMINAL_SSE_ERROR: &str = "\n\ndata: {\"error\":{\"message\":\
 /// extension-missing response.
 ///
 /// The flow itself is [`pipeline::proxy`]; this handler only supplies the [`CHAT`] descriptor.
-pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Option<Extension<CallerContext>>, EnvelopeBytes(body): EnvelopeBytes) -> Response {
+pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Option<Extension<CallerContext>>, body: EnvelopeBytes) -> Response {
     let Some(Extension(caller)) = caller else {
         // Unreachable in practice — the auth middleware always attaches a CallerContext.
         return GatewayError::Internal.into_response();

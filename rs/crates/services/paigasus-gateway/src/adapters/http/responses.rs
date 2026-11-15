@@ -46,7 +46,7 @@ pub const RESPONSES_TERMINAL_SSE_ERROR: &str = "\n\nevent: error\ndata: {\"type\
 /// [`chat_completions`](super::chat::chat_completions): [`EnvelopeBytes`] consumes the body, so it
 /// comes last, and it answers an over-limit body (the `[responses] max_request_bytes` layer) with
 /// a `413` inside the OpenAI envelope.
-pub(crate) async fn create_response(State(state): State<AppState>, caller: Option<Extension<CallerContext>>, EnvelopeBytes(body): EnvelopeBytes) -> Response {
+pub(crate) async fn create_response(State(state): State<AppState>, caller: Option<Extension<CallerContext>>, body: EnvelopeBytes) -> Response {
     let Some(Extension(caller)) = caller else {
         // Unreachable in practice — the auth middleware always attaches a CallerContext.
         return GatewayError::Internal.into_response();
