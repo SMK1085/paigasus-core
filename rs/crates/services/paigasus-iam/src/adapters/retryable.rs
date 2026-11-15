@@ -8,13 +8,17 @@ use paigasus_observability::Retryable;
 
 use crate::application::error::ErrorClass;
 
-/// `TenancyError` has no transient variant: everything but `Internal` is a client-actionable
-/// failure, and `Internal` absorbs `RepositoryError::Backend` alongside genuine bugs with the
-/// source erased at conversion — so it is honestly `Unknown`, not a confident `No`.
+/// Most `TenancyError` classes are client-actionable failures, so `No`. `Internal` absorbs
+/// `RepositoryError::Backend` alongside genuine bugs with the source erased at conversion — so it
+/// is honestly `Unknown`, not a confident `No`. SMA-774 adds three classes: `Exhausted` (a full
+/// compiler semaphore) passes on a later try, so `Yes`; `Unavailable` (a compiler crash or
+/// timeout) may or may not, so `Unknown`; `Aborted` (a stale expected value) fails again until
+/// the caller reads the new value, so `No`.
 pub(crate) fn tenancy_retryable(class: ErrorClass) -> Retryable {
     match class {
-        ErrorClass::Internal => Retryable::Unknown,
-        ErrorClass::Validation | ErrorClass::NotFound | ErrorClass::Conflict | ErrorClass::Precondition | ErrorClass::Forbidden => Retryable::No,
+        ErrorClass::Exhausted => Retryable::Yes,
+        ErrorClass::Internal | ErrorClass::Unavailable => Retryable::Unknown,
+        ErrorClass::Validation | ErrorClass::NotFound | ErrorClass::Conflict | ErrorClass::Precondition | ErrorClass::Forbidden | ErrorClass::Aborted => Retryable::No,
     }
 }
 
@@ -80,14 +84,21 @@ mod tests {
     use paigasus_observability::Retryable;
     use strum::IntoEnumIterator;
 
-    /// D4: `TenancyError` has NO transient variant — every one of its 26 codes is a client-actionable
-    /// failure except `Internal`, which erases whether its source was a Postgres blip or a bug.
+    /// D4: every `TenancyError` is a client-actionable failure except `Internal`, which erases
+    /// whether its source was a Postgres blip or a bug. SMA-774: a busy compiler is retryable, and
+    /// an unavailable compiler is `Unknown`, like `Internal`.
     #[test]
-    fn every_tenancy_error_maps_to_no_except_internal() {
+    fn every_tenancy_error_maps_to_no_except_internal_and_the_compiler() {
         for err in TenancyError::iter() {
-            let want = if matches!(err.class(), ErrorClass::Internal) { Retryable::Unknown } else { Retryable::No };
+            let want = match err.class() {
+                ErrorClass::Internal | ErrorClass::Unavailable => Retryable::Unknown,
+                ErrorClass::Exhausted => Retryable::Yes,
+                _ => Retryable::No,
+            };
             assert_eq!(tenancy_retryable(err.class()), want, "{err:?}");
         }
+        assert_eq!(tenancy_retryable(TenancyError::ToolPolicyCompilerBusy.class()), Retryable::Yes);
+        assert_eq!(tenancy_retryable(TenancyError::ToolPolicyVersionConflict.class()), Retryable::No);
     }
 
     /// SMA-700 D10: a quota hit is a rate limit, so it is retryable like `Unavailable`. A bad proof

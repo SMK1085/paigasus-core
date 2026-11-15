@@ -82,6 +82,10 @@ tonic-types = { workspace = true }
 paigasus-proto = { workspace = true }
 # `adapters::grpc::convert::ts` — builds the `AuditMetadata.created_at`/`modified_at` fields.
 prost-types = { workspace = true }
+# `application::tool_policies::sets` — `Message::encode_to_vec` and `decode` of the stored
+# `CompiledToolPolicySet` bytes (SMA-774, spec section 5.4). Already in `rs/Cargo.lock` through
+# `paigasus-proto`.
+prost = { workspace = true }
 # `adapters::persistence::migration` — sea-orm-migration's `SchemaManager`/`MigrationTrait`
 # build the m0001 DDL (production code, not test-only: `PgPrincipalRepository` + the
 # migrator are wired at boot, not just under `#[cfg(test)]`).

@@ -10,6 +10,9 @@
 use crate::application::tenancy_nodes::TenancyNodes;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use paigasus_iam_core::tool_policy::{
+    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyState, ToolPolicyVersion, VersionStatus,
+};
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
     DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, EntityGenBumper, IdGenerator, KeyEntropy, Membership, MembershipAxis, MembershipKindQuery, MembershipRecord, MembershipRepository,
@@ -20,9 +23,9 @@ use paigasus_iam_core::{
 use paigasus_iam_core::{Email, EmailChange, ExternalIdentity, IdentityLinkStore, Issuer, UserWithIdentities};
 use paigasus_kernel::Prn;
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -1925,5 +1928,209 @@ mod role_grant_query_fake_tests {
         let at_root = RoleGrantFilter::new(None, Some(GrantScope::Root), None, None).unwrap();
         let root_ids: Vec<u128> = query.find(&at_root, 200, 0).await.unwrap().iter().map(|g| g.id.as_u128()).collect();
         assert_eq!(root_ids, vec![15]);
+    }
+}
+
+// ---- SMA-774: the tool policy fakes ----------------------------------------------------------
+
+/// A concurrent change that [`InMemoryToolPolicies`] makes inside the next `lock_state_in`, after
+/// the service read the state and compiled, and before the service rechecks it (spec section 4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConcurrentChange {
+    /// Another save stored a version: `live_version` goes up by 1.
+    LiveVersion,
+    /// Another catalog write committed: `catalog_revision` goes up by 1.
+    CatalogRevision,
+}
+
+#[derive(Default)]
+struct ToolPolicyData {
+    states: HashMap<ToolPolicySetKey, ToolPolicyState>,
+    catalogs: HashMap<Uuid, std::collections::BTreeMap<String, StoredTool>>,
+    versions: HashMap<ToolPolicySetKey, Vec<ToolPolicyVersion>>,
+}
+
+/// In-memory `ToolPolicyRepository`, faithful to the port: `insert_live_version_in` is a
+/// compare-and-set on `live_version` and refuses a status other than `Live`; `apply_catalog_in`
+/// bumps the catalog revision. Like the other fakes here it ignores the transaction and writes
+/// at once, so `writes()` counts the calls that changed something.
+#[derive(Clone, Default)]
+pub struct InMemoryToolPolicies {
+    data: Arc<Mutex<ToolPolicyData>>,
+    concurrent: Arc<Mutex<Option<ConcurrentChange>>>,
+    writes: Arc<AtomicUsize>,
+}
+
+const NO_STATE: ToolPolicyState = ToolPolicyState { catalog_revision: 0, live_version: 0 };
+
+impl InMemoryToolPolicies {
+    /// Make `change` inside the next `lock_state_in`.
+    pub fn change_before_next_lock(&self, change: ConcurrentChange) {
+        *self.concurrent.lock().unwrap() = Some(change);
+    }
+
+    /// The calls of `apply_catalog_in` and `insert_live_version_in` that changed the store.
+    pub fn writes(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+
+    /// Every stored version of a set, oldest first.
+    pub fn versions(&self, key: &ToolPolicySetKey) -> Vec<ToolPolicyVersion> {
+        self.data.lock().unwrap().versions.get(key).cloned().unwrap_or_default()
+    }
+
+    /// Store `v` as the live version with no checks, and set `live_version` to its number. For a
+    /// test that needs a live set from another compiler generation or schema revision.
+    pub fn seed_live(&self, v: ToolPolicyVersion) {
+        let mut data = self.data.lock().unwrap();
+        let state = data.states.entry(v.key).or_insert(NO_STATE);
+        state.live_version = v.version;
+        if let Some(rev) = v.catalog_revision {
+            state.catalog_revision = rev;
+        }
+        data.versions.entry(v.key).or_default().push(v);
+    }
+
+    fn state_of(data: &ToolPolicyData, key: &ToolPolicySetKey) -> ToolPolicyState {
+        data.states.get(key).copied().unwrap_or(NO_STATE)
+    }
+}
+
+#[async_trait]
+impl ToolPolicyRepository for InMemoryToolPolicies {
+    async fn state(&self, key: &ToolPolicySetKey) -> Result<ToolPolicyState, RepositoryError> {
+        Ok(Self::state_of(&self.data.lock().unwrap(), key))
+    }
+
+    async fn catalog(&self, org: Uuid) -> Result<Vec<StoredTool>, RepositoryError> {
+        Ok(self.data.lock().unwrap().catalogs.get(&org).map(|c| c.values().cloned().collect()).unwrap_or_default())
+    }
+
+    async fn live(&self, key: &ToolPolicySetKey) -> Result<Option<ToolPolicyVersion>, RepositoryError> {
+        let data = self.data.lock().unwrap();
+        Ok(data.versions.get(key).and_then(|vs| vs.iter().find(|v| v.status == VersionStatus::Live).cloned()))
+    }
+
+    async fn version(&self, key: &ToolPolicySetKey, version: u64) -> Result<Option<ToolPolicyVersion>, RepositoryError> {
+        Ok(self.data.lock().unwrap().versions.get(key).and_then(|vs| vs.iter().find(|v| v.version == version).cloned()))
+    }
+
+    async fn lock_state_in(&self, _tx: &dyn Transaction, key: &ToolPolicySetKey) -> Result<ToolPolicyState, RepositoryError> {
+        let mut data = self.data.lock().unwrap();
+        let mut state = Self::state_of(&data, key);
+        match self.concurrent.lock().unwrap().take() {
+            Some(ConcurrentChange::LiveVersion) => state.live_version += 1,
+            Some(ConcurrentChange::CatalogRevision) => state.catalog_revision += 1,
+            None => {}
+        }
+        data.states.insert(*key, state);
+        Ok(state)
+    }
+
+    async fn apply_catalog_in(&self, _tx: &dyn Transaction, org: Uuid, upserts: &[ToolEntry], deletes: &[String], now: DateTime<Utc>) -> Result<u64, RepositoryError> {
+        let mut data = self.data.lock().unwrap();
+        let key = ToolPolicySetKey::Tenant(org);
+        let mut state = Self::state_of(&data, &key);
+        state.catalog_revision += 1;
+        data.states.insert(key, state);
+        let catalog = data.catalogs.entry(org).or_default();
+        for name_key in deletes {
+            catalog.remove(name_key);
+        }
+        for entry in upserts {
+            let created_at = catalog.get(&entry.name.name_key).map_or(now, |s| s.created_at);
+            catalog.insert(
+                entry.name.name_key.clone(),
+                StoredTool {
+                    entry: entry.clone(),
+                    created_at,
+                    updated_at: now,
+                },
+            );
+        }
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(state.catalog_revision)
+    }
+
+    async fn insert_live_version_in(&self, _tx: &dyn Transaction, v: &ToolPolicyVersion) -> Result<(), RepositoryError> {
+        if v.status != VersionStatus::Live {
+            return Err(RepositoryError::Backend("insert_live_version_in needs a live version".into()));
+        }
+        let mut data = self.data.lock().unwrap();
+        let mut state = Self::state_of(&data, &v.key);
+        if v.version != state.live_version + 1 {
+            return Err(RepositoryError::Conflict(ConflictKind::ToolPolicyVersion));
+        }
+        state.live_version = v.version;
+        data.states.insert(v.key, state);
+        let versions = data.versions.entry(v.key).or_default();
+        for old in versions.iter_mut() {
+            if old.status == VersionStatus::Live {
+                old.status = VersionStatus::Superseded;
+            }
+        }
+        versions.push(v.clone());
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A scripted `PolicyCompiler`. Each `compile` call takes the next scripted answer. With an empty
+/// script it is an identity compiler: it accepts and returns the source as the Cedar text and the
+/// request schema as the schema, with no conditions. A plain Cedar source then reaches the real
+/// cedar 4.14 checks against the real generated schema.
+#[derive(Clone)]
+pub struct FakePolicyCompiler {
+    generation: Arc<AtomicU32>,
+    script: Arc<Mutex<VecDeque<Result<CompileOutcome, CompilerFailure>>>>,
+    requests: Arc<Mutex<Vec<CompileRequest>>>,
+}
+
+impl Default for FakePolicyCompiler {
+    fn default() -> Self {
+        Self {
+            generation: Arc::new(AtomicU32::new(1)),
+            script: Arc::default(),
+            requests: Arc::default(),
+        }
+    }
+}
+
+impl FakePolicyCompiler {
+    /// The answer of the next `compile` call that has no earlier scripted answer.
+    pub fn push(&self, answer: Result<CompileOutcome, CompilerFailure>) {
+        self.script.lock().unwrap().push_back(answer);
+    }
+
+    pub fn set_generation(&self, generation: u32) {
+        self.generation.store(generation, Ordering::SeqCst);
+    }
+
+    /// Every request, in call order.
+    pub fn requests(&self) -> Vec<CompileRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    pub fn calls(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl PolicyCompiler for FakePolicyCompiler {
+    fn generation(&self) -> u32 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    async fn compile(&self, req: &CompileRequest) -> Result<CompileOutcome, CompilerFailure> {
+        self.requests.lock().unwrap().push(req.clone());
+        if let Some(answer) = self.script.lock().unwrap().pop_front() {
+            return answer;
+        }
+        Ok(CompileOutcome::Accepted(CompiledOutput {
+            cedar_policies: req.source.clone(),
+            cedar_schema_json: req.schema_json.clone(),
+            conditions: Vec::new(),
+        }))
     }
 }

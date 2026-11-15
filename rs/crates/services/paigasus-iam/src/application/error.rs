@@ -12,6 +12,13 @@ pub enum ErrorClass {
     Conflict,
     Precondition,
     Forbidden,
+    /// The caller's expected value is not current; it must read again (gRPC `Aborted`, 409).
+    Aborted,
+    /// A dependency of the request is not available (gRPC `Unavailable`, 503).
+    Unavailable,
+    /// A limited resource is in use; the same request can pass later (gRPC
+    /// `ResourceExhausted`, 429).
+    Exhausted,
     Internal,
 }
 
@@ -185,6 +192,24 @@ pub enum TenancyError {
     /// (`ConflictKind::ExternalIdentityExists`, `uq_external_identity_issuer_subject`).
     #[error("this external identity is linked to another user")]
     ExternalIdentityConflict,
+    /// SMA-774. Two tool names have the same match key (spec section 7).
+    #[error("a tool with the same match key already exists")]
+    ToolCatalogConflict,
+    /// SMA-774. The expected version or catalog revision is not current (spec section 4.5).
+    #[error("the tool policy set or the tool catalog changed; read it again")]
+    ToolPolicyVersionConflict,
+    /// SMA-774. The live tool policy set is from an older compiler or schema (spec section 4.6).
+    #[error("the live tool policy set must be saved again before the catalog can change")]
+    ToolPolicyRecompilePending,
+    /// SMA-774. The policy compiler crashed, timed out or broke the protocol.
+    #[error("the policy compiler is unavailable")]
+    ToolPolicyCompilerUnavailable,
+    /// SMA-774. Every compiler slot is in use. Retryable.
+    #[error("the policy compiler is busy")]
+    ToolPolicyCompilerBusy,
+    /// SMA-774. The requested version does not exist, or it is not live or superseded.
+    #[error("the tool policy set version does not exist")]
+    ToolPolicyVersionNotFound,
     #[error("internal server error")]
     Internal,
 }
@@ -232,6 +257,12 @@ impl TenancyError {
             Self::InvalidSubject => "invalid-subject",
             Self::CannotUnlinkOwnIdentity => "cannot-unlink-own-identity",
             Self::ExternalIdentityConflict => "external-identity-exists",
+            Self::ToolCatalogConflict => "tool-catalog-conflict",
+            Self::ToolPolicyVersionConflict => "tool-policy-version-conflict",
+            Self::ToolPolicyRecompilePending => "tool-policy-recompile-pending",
+            Self::ToolPolicyCompilerUnavailable => "tool-policy-compiler-unavailable",
+            Self::ToolPolicyCompilerBusy => "tool-policy-compiler-busy",
+            Self::ToolPolicyVersionNotFound => "tool-policy-version-not-found",
             Self::Internal => "internal",
         }
     }
@@ -263,11 +294,25 @@ impl TenancyError {
             | Self::InvalidReason
             | Self::UnknownIssuer
             | Self::InvalidSubject => ErrorClass::Validation,
-            Self::NotFound => ErrorClass::NotFound,
-            Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict | Self::ServiceAccountNameConflict | Self::PolicyConflict(_) | Self::ExternalIdentityConflict => ErrorClass::Conflict,
-            Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) | Self::NotSystemOwned(_) | Self::FleetNotConverged | Self::CannotUnlinkOwnIdentity => {
-                ErrorClass::Precondition
-            }
+            Self::NotFound | Self::ToolPolicyVersionNotFound => ErrorClass::NotFound,
+            Self::SlugConflict
+            | Self::DuplicateMembership
+            | Self::EmailConflict
+            | Self::ServiceAccountNameConflict
+            | Self::PolicyConflict(_)
+            | Self::ExternalIdentityConflict
+            | Self::ToolCatalogConflict => ErrorClass::Conflict,
+            Self::ParentArchived
+            | Self::NodeArchived
+            | Self::MissingOrgMembership
+            | Self::SystemImmutable(_)
+            | Self::NotSystemOwned(_)
+            | Self::FleetNotConverged
+            | Self::CannotUnlinkOwnIdentity
+            | Self::ToolPolicyRecompilePending => ErrorClass::Precondition,
+            Self::ToolPolicyVersionConflict => ErrorClass::Aborted,
+            Self::ToolPolicyCompilerUnavailable => ErrorClass::Unavailable,
+            Self::ToolPolicyCompilerBusy => ErrorClass::Exhausted,
             Self::Forbidden => ErrorClass::Forbidden,
             Self::Internal => ErrorClass::Internal,
         }
@@ -331,6 +376,12 @@ impl TenancyError {
             | Self::FleetNotConverged
             | Self::CannotUnlinkOwnIdentity
             | Self::ExternalIdentityConflict
+            | Self::ToolCatalogConflict
+            | Self::ToolPolicyVersionConflict
+            | Self::ToolPolicyRecompilePending
+            | Self::ToolPolicyCompilerUnavailable
+            | Self::ToolPolicyCompilerBusy
+            | Self::ToolPolicyVersionNotFound
             | Self::Internal => None,
         }
     }
@@ -355,9 +406,9 @@ impl From<RepositoryError> for TenancyError {
                 // stays `Internal` (Task 16 brief).
                 ConflictKind::ApiKeyHashCollision => Self::Internal,
                 ConflictKind::Other => Self::Internal,
-                // Task 12 maps this to `tool-policy-version-conflict`. No service writes the
-                // version yet, so it stays `Internal` until then.
-                ConflictKind::ToolPolicyVersion => Self::Internal,
+                // SMA-774: the compare-and-set of `insert_live_version_in` found that another
+                // writer stored a version first (spec section 4.5).
+                ConflictKind::ToolPolicyVersion => Self::ToolPolicyVersionConflict,
             },
             RepositoryError::NotFound => Self::NotFound,
             RepositoryError::PrnMismatch => Self::PrnMismatch,
@@ -443,6 +494,30 @@ mod tests {
         assert_eq!(TenancyError::SystemImmutable("x".to_string()).class(), ErrorClass::Precondition);
         assert_eq!(TenancyError::InvalidAction("x".to_string()).class(), ErrorClass::Validation);
         assert_eq!(TenancyError::PolicyConflict("x".to_string()).class(), ErrorClass::Conflict);
+    }
+
+    /// SMA-774: the six tool policy errors, their classes, and no field.
+    #[test]
+    fn the_tool_policy_errors_have_their_codes_and_classes() {
+        for (err, code, class) in [
+            (TenancyError::ToolCatalogConflict, "tool-catalog-conflict", ErrorClass::Conflict),
+            (TenancyError::ToolPolicyVersionConflict, "tool-policy-version-conflict", ErrorClass::Aborted),
+            (TenancyError::ToolPolicyRecompilePending, "tool-policy-recompile-pending", ErrorClass::Precondition),
+            (TenancyError::ToolPolicyCompilerUnavailable, "tool-policy-compiler-unavailable", ErrorClass::Unavailable),
+            (TenancyError::ToolPolicyCompilerBusy, "tool-policy-compiler-busy", ErrorClass::Exhausted),
+            (TenancyError::ToolPolicyVersionNotFound, "tool-policy-version-not-found", ErrorClass::NotFound),
+        ] {
+            assert_eq!(err.code(), code);
+            assert_eq!(err.class(), class, "{code}");
+            assert_eq!(err.field(), None, "{code}");
+        }
+    }
+
+    /// SMA-774: the compare-and-set conflict of the version write is the version conflict, not
+    /// `Internal`.
+    #[test]
+    fn a_tool_policy_version_conflict_from_the_store_is_the_version_conflict() {
+        assert_eq!(TenancyError::from(RepositoryError::Conflict(ConflictKind::ToolPolicyVersion)), TenancyError::ToolPolicyVersionConflict);
     }
 
     #[test]
