@@ -5,9 +5,11 @@
 //! types, the name normal form and the mapping of tool arguments into a Cedar context. The Cedar
 //! types stay inside the crate, so the bindings never get the `cedar-policy` dependency.
 
+mod compile;
 pub(crate) mod input;
 mod normalise;
 mod types;
 
+pub use compile::{CompileError, FloorPolicies, PolicyOrigin, PolicyRef, ToolPolicies};
 pub use normalise::normalise;
 pub use types::{Declared, Facts, Findings, NAME_COLLISION, RequestInfo, SessionInfo, ToolInput, ToolInvocation, UNPARSED_ARGUMENTS};
