@@ -76,7 +76,9 @@ evaluates that format.
   So the translation must run in the same process as Dogwood.
 - One slot is one `Bool` for a whole `temporal { … }` block, with its threshold.
 - Default slot names (`policy_<i>__temporal_<j>`) change when a rule is deleted.
-  `lower_with_distincter`, with a stable id for each policy, keeps them stable.
+  One `lower_with_distincter` call over the whole set does not keep them stable: it numbers
+  rules by position in the call (Dogwood `cedarify/mod.rs:183-197`). One `lower_many` call, with
+  one entry for each policy and a distincter made from its `@id`, keeps them stable (D1).
 - Dogwood's history partitioning (event-schema pins) applies to the whole policy set. IAM must
   implement `@scope` for each policy. Annotations (`@scope`, `@id`) survive lowering verbatim.
 - Dogwood's MCP schema generator breaks on a nested namespace. IAM generates the schema itself.
@@ -254,8 +256,9 @@ The names below come from the approved SMA-752 spec
 (`docs/superpowers/specs/2026-11-15-sma-752-tool-invoke-decisions-design.md`, §6.1.5, D20 and
 D22). They replace the `Paigasus::Tool` namespace in the SMA-751 issue text.
 
-- **Principal:** the entity type of the caller's PRN, for example `Pgs::Iam::User` or
-  `Pgs::Iam::ServiceAccount`. No parents.
+- **Principal:** the entity type of the caller's PRN. Every IAM principal PRN has the resource
+  type `principal`, so the type is `Pgs::Iam::Principal` for users and service accounts (D5).
+  No parents.
 - **Resource:** `Pgs::Iam::Organization::"<org uuid>"`, the organization of the scope. No parents.
 - **Action:** `Pgs::Gateway::Action::"<name_key>"` for every call. The action id does not depend
   on the catalog. A catalog tool has the parent group `Pgs::Gateway::Action::"InvokeTool"`. Any
@@ -478,11 +481,11 @@ The child process runs with these limits. Each one has a test.
 1. Parse the source. Every policy must have a unique `@id`. A missing or duplicate `@id` rejects
    the save. The `@id` grammar is `^[a-z0-9][a-z0-9_-]{0,63}$`. Floor `@id` values must start with
    `floor-`, and tenant `@id` values must not. So the slot names of the two sets cannot collide.
-   The `@id` is the stable id for `lower_with_distincter`.
+   The `@id` gives the distincter of the policy's `lower_many` entry (D1).
 2. Read `@scope` on each policy: `session` (the default), `principal` or `key`. Any other value
    rejects the save.
 3. Validate the set with Dogwood against the schema.
-4. Lower the whole set once with `lower_with_distincter` (§3.8). A failed lowering rejects the
+4. Lower the whole set once: one `lower_many` call, one entry for each policy (§3.8, D1). A failed lowering rejects the
    save.
 5. Translate each temporal block into one history condition. Only these shapes are accepted:
    - `formerly within W` over a predicate on events;
@@ -958,3 +961,14 @@ decision corpus, not by this document.
 **Tenant documentation (PR 2).** A `forbid` on argument values is a deny list, and it is not
 robust, because argument keys keep their case and a model can vary values. The tenant docs
 recommend `permit` allow lists with `has` guards (SMA-752's request).
+
+## Changelog (2026-11-15 plan review)
+
+Sven confirmed these two corrections after the plan review.
+
+- **D1.** Lowering uses one `lower_many` call with one entry for each policy, not one
+  `lower_with_distincter` call. The latter renumbers slots after a delete. PR 1 Task 1 proves both
+  facts against the pinned Dogwood commit.
+- **D5.** The Cedar principal type is `Pgs::Iam::Principal`, because every IAM principal PRN has the
+  resource type `principal`. The earlier examples `Pgs::Iam::User` and `Pgs::Iam::ServiceAccount`
+  were wrong.
