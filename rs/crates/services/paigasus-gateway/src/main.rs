@@ -251,6 +251,18 @@ fn describe_gateway_metrics() {
         names::GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL,
         "Transitions of the limits Redis circuit breaker, labeled by role and to."
     );
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL,
+        "Tool-policy loads, labeled by result (ok, source_error, compile_error, timeout). A timeout counts once per load."
+    );
+    describe_histogram!(names::GATEWAY_TOOL_POLICY_LOAD_SECONDS, "Seconds one tool-policy source call takes.");
+    describe_histogram!(names::GATEWAY_TOOL_POLICY_COMPILE_SECONDS, "Seconds one tool-policy compile takes.");
+    describe_gauge!(
+        names::GATEWAY_TOOL_POLICY_STALE_ENTRIES,
+        "Tool-policy cache entries whose last refresh failed. They are served until max_stale_secs."
+    );
+    describe_counter!(names::GATEWAY_TOOL_POLICY_EVICTIONS_TOTAL, "Tool-policy tenant entries evicted for idleness.");
+    describe_counter!(names::GATEWAY_TOOL_POLICY_REFRESH_ERRORS_TOTAL, "Tool-policy cache entries whose refresh failed.");
 }
 
 async fn shutdown_signal() {

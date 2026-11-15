@@ -103,6 +103,8 @@ sha2 = "0.11"
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a
 # dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
+# SMA-752 Task 13: `#[tokio::test(start_paused = true)]` for the policy-cache refresh, stale and timeout tests.
+tokio = { workspace = true, features = ["test-util"] }
 # SMA-677: the blackhole listener and the lazy / open-breaker handles for the fail-open tests.
 # Test builds only, like paigasus-logging/test-support above.
 paigasus-redis = { workspace = true, features = ["test-support"] }
