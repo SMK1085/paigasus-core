@@ -108,7 +108,7 @@ fn slot_names_survive_deleting_an_earlier_policy() {
     let after = output_of(&lower_source(POLICY_A, &svc), "a-count");
 
     assert!(!before.slot_ids.is_empty(), "policy A has temporal slots");
-    assert_eq!(before.slot_ids, after.slot_ids);
+    assert_eq!(before, after, "policy A output with B before it vs A alone");
     let prefix = slot_prefix("a-count");
     for id in &after.slot_ids {
         assert!(id.starts_with(&prefix), "slot {id} starts with {prefix}");
@@ -144,8 +144,14 @@ fn annotations_read_from_the_rendering_match_the_lowered_cedar() {
     let units = split_policies(&s1, &svc).expect("the source parses");
     let lowered = lower_units(&units, &svc, &policy_schema()).expect("the set lowers");
     assert_eq!(units.len(), 3);
+    let annotation = |key: &str, value: &str| (key.to_string(), Some(value.to_string()));
+    let expected = [
+        vec![annotation("id", "a-count"), annotation("scope", "session")],
+        vec![annotation("id", "b-formerly"), annotation("scope", "principal")],
+        vec![annotation("id", "c-plain")],
+    ];
 
-    for unit in &units {
+    for (unit, expected) in units.iter().zip(expected) {
         let id = unit.id.as_deref().expect("every test policy has an @id");
         let policy_id = cedar_policy::PolicyId::new(slot_prefix(id));
         let policy = lowered.as_cedar().policy(&policy_id).unwrap_or_else(|| panic!("no Cedar policy for {id}"));
@@ -157,7 +163,7 @@ fn annotations_read_from_the_rendering_match_the_lowered_cedar() {
             })
             .collect();
         let mut from_rendering = read_annotations(&unit.source);
-        assert_eq!(from_rendering, unit.annotations, "unit annotations of {id}");
+        assert_eq!(from_rendering, expected, "annotations of the rendering of {id}");
         from_cedar.sort();
         from_rendering.sort();
         assert_eq!(from_rendering, from_cedar, "annotations of {id}");
@@ -166,6 +172,21 @@ fn annotations_read_from_the_rendering_match_the_lowered_cedar() {
     assert_eq!(units[0].scope.as_deref(), Some("session"));
     assert_eq!(units[1].scope.as_deref(), Some("principal"));
     assert_eq!(units[2].scope, None);
+}
+
+#[test]
+fn lowering_the_rendering_gives_the_cedar_of_the_original_text() {
+    let svc = service_schema();
+    let s1 = format!("{POLICY_A}{}{POLICY_C}", policy_b("principal"));
+    let from_units = output_of(&lower_source(&s1, &svc), "a-count");
+
+    let original = ParsedPolicySet::parse(POLICY_A, &svc)
+        .expect("policy A parses")
+        .lower_with_distincter(&policy_schema(), distincter_for("a-count").as_str())
+        .expect("policy A lowers");
+    let from_original = output_of(&original, "a-count");
+
+    assert_eq!(from_units.cedar, from_original.cedar);
 }
 
 #[test]
