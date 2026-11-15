@@ -44,10 +44,19 @@ fileGroups:
     - '/rs/crates/libs/paigasus-test-docker/Cargo.toml'
 
 tasks:
+  # SMA-752 F12: a test reads `tool-policies/floor.cedar` with `include_str!`, so an edit of it must
+  # re-key build, test and lint. Moon merges these inputs with the inherited ones.
   build:
     deps: ['^:build']
+    inputs:
+      - 'tool-policies/**/*'
+  lint:
+    inputs:
+      - 'tool-policies/**/*'
   test:
     deps: ['^:build']
+    inputs:
+      - 'tool-policies/**/*'
     # SMA-677 D22. This task now starts Redis containers. It shares one CI runner with the two
     # console e2e tasks, and SMA-718 showed that such overlap starves the browser, so it takes the
     # same mutex as paigasus-iam-rs:test.
