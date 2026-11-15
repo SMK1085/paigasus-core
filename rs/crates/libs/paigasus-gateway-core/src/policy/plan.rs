@@ -91,7 +91,8 @@ struct Judge<'a> {
     policies: &'a ToolPolicies,
     facts: &'a Facts,
     collisions: BTreeSet<String>,
-    /// Only a floor deny counts: the tenant mode is `off`, or the set is the floor alone (P-4).
+    /// Only a floor deny counts: the tenant mode is `off`, or the set is the floor alone because
+    /// the tenant part is `Off` or `Unavailable` (P-4).
     floor_only: bool,
     mode: TenantMode,
     seen: BTreeMap<String, Option<bool>>,
@@ -138,9 +139,11 @@ fn choice_after(choice: &ToolChoice, removed: &BTreeSet<&str>) -> (ChoiceRewrite
 }
 
 /// Plan the request-side actions (§ 6.5.1 steps 1-4, and the Anthropic part of step 5). With the
-/// policies unavailable, or the tenant part unavailable, the plan is empty (§ 6.4). An item is
-/// enforced when a floor policy decided its deny (D33) or the tenant mode is `enforce`; in log-only
-/// mode the plan is only reported (D25).
+/// policies unavailable, the plan is empty (§ 6.4). With the tenant part unavailable, only floor
+/// denies are planned, in every tenant mode, as in mode `off` (controller ruling I3: D33 says the
+/// floor is always enforced, which outranks the § 6.4 sentence "the request side changes
+/// nothing"). An item is enforced when a floor policy decided its deny (D33) or the tenant mode is
+/// `enforce`; in log-only mode a tenant deny is only reported (D25).
 ///
 /// Anthropic (step 5, controller ruling): when the messages hold `tool_use` or `tool_result`
 /// blocks and the enforced removals would leave `tools[]` empty (server tools count), the last
@@ -152,11 +155,10 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts)
     let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
         return RequestPlan::empty();
     };
-    // Mode `off` ignores the tenant part (controller ruling, Task 8): only the floor counts.
-    let floor_only = snapshot.mode == TenantMode::Off || *tenant == TenantPart::Off;
-    if *tenant == TenantPart::Unavailable && !floor_only {
-        return RequestPlan::empty();
-    }
+    // Only the floor counts when the mode is `off` (controller ruling, Task 8), when the set is the
+    // floor alone, and when the tenant part is unavailable (controller ruling, I3: D33, the floor
+    // is always enforced). In each case `policies` is the floor alone, or the tenant is ignored.
+    let floor_only = snapshot.mode == TenantMode::Off || *tenant != TenantPart::Evaluated;
     let mut judge = Judge {
         policies,
         facts,
@@ -348,21 +350,42 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_plans_nothing() {
+    fn an_unavailable_set_plans_nothing() {
         let mut t = turn(vec![def("rm"), def("x")]);
         t.prior_calls = vec![prior("c1", "rm")];
         t.tool_results = vec![by_id("c1")];
         t.tool_choice = ToolChoice::Unknown;
         let unavailable = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Enforce, OnUnavailable::Closed);
-        for s in [
-            unavailable,
-            snap(RM_FLOOR, "", TenantPart::Unavailable, TenantMode::Enforce),
-            snap(RM_FLOOR, "", TenantPart::Unavailable, TenantMode::LogOnly),
-        ] {
-            let p = plan_request(&s, Format::OpenAiChat, &t);
-            assert_eq!(p, RequestPlan::empty());
-            assert!(p.is_noop());
+        let p = plan_request(&unavailable, Format::OpenAiChat, &t);
+        assert_eq!(p, RequestPlan::empty());
+        assert!(p.is_noop());
+    }
+
+    /// Controller ruling (I3, D33): an unavailable tenant part plans the floor alone in every
+    /// mode. A floor-denied definition is removed and a floor-denied result is replaced, both
+    /// enforced; the floor-alone default deny of "x" does not count (P-4).
+    #[test]
+    fn an_unavailable_tenant_part_plans_the_floor_in_every_mode() {
+        let mut t = turn(vec![def("rm"), def("x")]);
+        t.prior_calls = vec![prior("c1", "rm"), prior("c2", "x")];
+        t.tool_results = vec![by_id("c1"), by_id("c2")];
+        for mode in [TenantMode::Enforce, TenantMode::LogOnly, TenantMode::Off] {
+            let p = plan_request(&snap(RM_FLOOR, "", TenantPart::Unavailable, mode), Format::OpenAiChat, &t);
+            assert_eq!(removed(&p), [("rm", true)], "{mode:?}");
+            assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)], "{mode:?}");
+            assert_eq!(
+                actions(&p),
+                [
+                    (RequestAction::RemoveDefinition, true, RequestReason::ToolCallDenied),
+                    (RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked),
+                ],
+                "{mode:?}"
+            );
+            assert!(!p.is_noop());
         }
+        // With no floor deny, an unavailable tenant part plans nothing.
+        let p = plan_request(&snap(NO_FLOOR, "", TenantPart::Unavailable, TenantMode::Enforce), Format::OpenAiChat, &t);
+        assert!(p.is_noop() && p.entries.is_empty());
     }
 
     #[test]
@@ -414,8 +437,10 @@ mod tests {
             snap(RM_FLOOR, PERMIT_ALL, TenantPart::Evaluated, TenantMode::Off),
             snap(RM_FLOOR, PERMIT_ALL, TenantPart::Evaluated, TenantMode::LogOnly),
             snap(RM_FLOOR, PERMIT_ALL, TenantPart::Evaluated, TenantMode::Enforce),
-            // Mode `off` ignores the tenant part (Task 8 ruling).
+            // An unavailable tenant part plans the floor alone in every mode (I3 ruling).
             snap(RM_FLOOR, "", TenantPart::Unavailable, TenantMode::Off),
+            snap(RM_FLOOR, "", TenantPart::Unavailable, TenantMode::LogOnly),
+            snap(RM_FLOOR, "", TenantPart::Unavailable, TenantMode::Enforce),
         ];
         for s in cases {
             let p = plan_request(&s, Format::OpenAiChat, &turn(vec![def("rm"), def("ok")]));

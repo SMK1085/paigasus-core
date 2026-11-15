@@ -310,7 +310,8 @@ mod tests {
         let waited = started.elapsed();
         assert!(waited <= Duration::from_millis(1100), "waited {waited:?}");
         assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
-        // With the policies unavailable, the request side changes nothing (§ 6.4).
+        // With the tenant part unavailable, only a floor deny changes the request (I3 ruling, D33);
+        // the floor does not deny "x", so the body goes out unchanged.
         assert_eq!(out.body, body);
         assert!(out.entries.is_empty());
     }

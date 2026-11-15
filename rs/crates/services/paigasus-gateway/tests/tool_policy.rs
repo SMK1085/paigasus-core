@@ -818,7 +818,10 @@ fn unavailable_tenant(mode: TenantMode, on: OnUnavailable) -> (Option<&'static s
 }
 
 /// Run the tenant-fault matrix: modes log-only and enforce, `closed` and `open`, every endpoint.
-/// The floor still applies (`floor_rm` is blocked), and the request side changes nothing.
+/// The floor still applies (`floor_rm` is blocked). The request defines no floor-denied tool, so
+/// the request side changes nothing and the original bytes go upstream. A floor-denied definition
+/// is removed during a tenant outage (controller ruling I3); see
+/// `a_tenant_outage_still_removes_a_floor_denied_definition`.
 async fn tenant_fault_matrix(fault: Fault, load_timeout: Duration) {
     let dir = policy_dir(FLOOR, TENANT);
     let calls = &[("read_file", "{}"), ("blocked_rm", "{}"), ("floor_rm", "{}")];
@@ -868,6 +871,30 @@ async fn fail_closed_and_fail_open_with_an_unavailable_source() {
 #[tokio::test]
 async fn fail_closed_and_fail_open_with_a_slow_source() {
     tenant_fault_matrix(Fault::Hang, Duration::from_millis(200)).await;
+}
+
+/// Controller ruling I3 (D33): with the tenant part unavailable, the request side plans the floor
+/// alone in every mode. A floor-denied definition is removed (enforced), and the tenant-only deny
+/// of `blocked_rm` is not planned.
+#[tokio::test]
+async fn a_tenant_outage_still_removes_a_floor_denied_definition() {
+    let dir = policy_dir(FLOOR, TENANT);
+    let calls = &[("read_file", "{}")];
+    for ep in EPS {
+        let body = ep.tools_body(&["read_file", "blocked_rm", "floor_rm"]);
+        for mode in [TenantMode::LogOnly, TenantMode::Enforce] {
+            for on in [OnUnavailable::Closed, OnUnavailable::Open] {
+                let tp = tp_preloaded(FaultySource::arc(&dir, None, Some(Fault::Fail)), tp_settings_on(mode, on)).await;
+                let ex = exchange(ep, ORG_A_PRN, tp, &body, calls).await;
+                let case = format!("{ep:?} {mode:?} {on:?}");
+                assert_eq!(ex.status, StatusCode::OK, "{case}");
+                assert_eq!(request_entries(&ex.entries), [req("floor_rm", "remove-definition", true)], "{case}");
+                let up = String::from_utf8(ex.upstream.clone().expect("upstream")).expect("utf-8");
+                assert!(!up.contains("floor_rm"), "the floor tool is removed ({case}): {up}");
+                assert!(up.contains("blocked_rm") && up.contains("read_file"), "the other tools stay ({case}): {up}");
+            }
+        }
+    }
 }
 
 /// P-6, § 7.2: an unavailable floor under `closed` blocks every call in every tenant mode; under
