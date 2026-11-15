@@ -10,11 +10,14 @@ use serde_json::value::RawValue;
 
 use super::ToolInput;
 
-/// A container nested deeper than this becomes a string of its raw JSON text (§ 6.1.4).
+/// A value nested deeper than this becomes a string of its raw JSON text (§ 6.1.4).
 const MAX_DEPTH: usize = 16;
-/// The largest exponent the number reader tracks. A larger one saturates here, which is already
-/// far outside every range that `Long` and `decimal` can hold.
-const EXPONENT_CAP: i64 = 1_000_000;
+/// Arguments nested deeper than this are unparsed. `RawValue` skips the 128 level limit of
+/// `serde_json`, so the walk below checks the depth itself before it recurses.
+const MAX_NESTING: usize = 128;
+/// The largest exponent the number reader tracks. A larger one saturates here. No text length
+/// reaches this bound, so the length of the fraction never cancels a saturated exponent.
+const EXPONENT_CAP: i64 = i64::MAX / 4;
 
 /// How a JSON number maps into Cedar, by value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +34,9 @@ pub(crate) struct MappedInput {
     pub unparsed: bool,
 }
 
-/// Classify a JSON number by its value, from its text, with no float. A bad grammar gives `Text`.
+/// Classify a JSON number by its value, from its text, with no float. The text comes from a valid
+/// JSON document. A value that `Long` or `decimal` cannot hold exactly, or text that this reader
+/// cannot split into digits and an exponent, gives `Text` with the original text.
 pub(crate) fn classify_number(text: &str) -> NumberClass {
     classify(text).unwrap_or_else(|| NumberClass::Text(text.to_owned()))
 }
@@ -73,7 +78,7 @@ fn classify(text: &str) -> Option<NumberClass> {
             return None;
         }
         for b in digits.bytes() {
-            exp = (exp * 10 + i64::from(b - b'0')).min(EXPONENT_CAP);
+            exp = exp.saturating_mul(10).saturating_add(i64::from(b - b'0')).min(EXPONENT_CAP);
         }
         if exp_negative {
             exp = -exp;
@@ -84,7 +89,7 @@ fn classify(text: &str) -> Option<NumberClass> {
     if digits.is_empty() {
         return Some(NumberClass::Long(0));
     }
-    let mut scale = exp - i64::try_from(frac_part.len()).ok()?;
+    let mut scale = exp.saturating_sub(i64::try_from(frac_part.len()).ok()?);
     while digits.ends_with('0') {
         digits.pop();
         scale += 1;
@@ -176,7 +181,9 @@ fn validate(raw: &RawValue) -> Result<(), Unparsed> {
 fn walk(raw: &RawValue, depth: usize) -> Walk {
     let text = raw.get();
     let first = first_byte(text);
-    if depth > MAX_DEPTH && matches!(first, b'{' | b'[') {
+    // A null member is left out at every depth. Any other value deeper than MAX_DEPTH, a scalar
+    // too, becomes a string of its raw JSON text.
+    if depth > MAX_DEPTH && first != b'n' {
         validate(raw)?;
         return Ok(Some(RestrictedExpression::new_string(text.to_owned())));
     }
@@ -215,9 +222,38 @@ fn empty_record() -> RestrictedExpression {
     RestrictedExpression::new_record(std::iter::empty()).expect("an empty record has no duplicate key")
 }
 
+/// Whether the brackets of one valid JSON text nest at most `MAX_NESTING` levels. Iterative, so a
+/// deep text cannot overflow the stack. A bracket inside a string does not count.
+fn nesting_ok(text: &str) -> bool {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for b in text.bytes() {
+        if in_string {
+            match (escaped, b) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_NESTING {
+                    return false;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    true
+}
+
 fn parse_object(raw: &str) -> Option<RestrictedExpression> {
     let value: &RawValue = serde_json::from_str(raw).ok()?;
-    if first_byte(value.get()) != b'{' {
+    if first_byte(value.get()) != b'{' || !nesting_ok(value.get()) {
         return None;
     }
     walk(value, 1).ok().flatten()
@@ -227,8 +263,9 @@ fn parse_object(raw: &str) -> Option<RestrictedExpression> {
 ///
 /// Anything but one strict JSON object (invalid text, another JSON type, a duplicate key at any
 /// depth, or free text) gives the empty record and `unparsed`. `input_text` is set only for free
-/// text. A null member, or a null array element, is left out. A scalar at any depth maps by its
-/// value; only an object or an array below depth 16 becomes its raw JSON text.
+/// text. A null member, or a null array element, is left out. The top-level object is depth 1;
+/// a value (object, array or scalar) deeper than 16 becomes a string of its raw JSON text.
+/// Arguments that nest deeper than 128 levels are unparsed.
 pub(crate) fn map_input(input: &ToolInput) -> MappedInput {
     match input {
         ToolInput::Text(text) => MappedInput {
@@ -343,7 +380,57 @@ mod tests {
             ok = format!(r#"{{"a":{ok}}}"#);
         }
         let path15: String = std::iter::repeat_n(".a", 15).collect();
-        assert!(allows(&format!("context.input{path15}.x == 1"), &ok), "depth 16 is still a record");
+        assert!(allows(&format!("context.input{path15} has x"), &ok), "depth 16 is still a record");
+        assert!(allows(&format!(r#"context.input{path15}.x == "1""#), &ok), "its member is at depth 17: raw text");
+    }
+
+    #[test]
+    fn a_scalar_at_depth_seventeen_becomes_its_raw_text() {
+        let mut raw = String::from(r#"{"s":"v","n":12345678901234567890,"t":true,"z":null,"a":[1,null,"q"]}"#);
+        for _ in 0..15 {
+            raw = format!(r#"{{"a":{raw}}}"#);
+        }
+        let p: String = std::iter::repeat_n(".a", 15).collect();
+        assert!(allows(&format!(r#"context.input{p}.s == "\"v\"""#), &raw), "string keeps its quotes");
+        assert!(allows(&format!(r#"context.input{p}.n == "12345678901234567890""#), &raw));
+        assert!(allows(&format!(r#"context.input{p}.t == "true""#), &raw));
+        assert!(allows(&format!("!(context.input{p} has z)"), &raw), "a null member is left out at any depth");
+        assert!(allows(&format!(r#"context.input{p}.a == "[1,null,\"q\"]""#), &raw), "an array at depth 17 is raw text");
+    }
+
+    #[test]
+    fn a_null_array_element_is_dropped() {
+        // Cedar compares sets as sets, so equality proves that the set holds exactly these elements.
+        assert!(allows(r#"context.input.a == [1, "x"]"#, r#"{"a":[null,1,null,"x"]}"#));
+        assert!(allows("context.input.a == []", r#"{"a":[null,null]}"#), "only nulls: the empty set");
+    }
+
+    #[test]
+    fn very_deep_arguments_are_unparsed_and_do_not_overflow_the_stack() {
+        for n in [129usize, 20_000, 100_000] {
+            let raw = format!("{{\"a\":{}1{}}}", "[".repeat(n), "]".repeat(n));
+            let m = map_input(&ToolInput::Json(raw));
+            assert!(m.unparsed, "depth {n}");
+            assert_eq!(m.input_text, None);
+        }
+        let raw = format!("{{\"a\":{}1{}}}", "{\"b\":".repeat(100_000), "}".repeat(100_000));
+        assert!(map_input(&ToolInput::Json(raw)).unparsed);
+        let ok = format!("{{\"a\":{}1{}}}", "[".repeat(126), "]".repeat(126));
+        assert!(!map_input(&ToolInput::Json(ok)).unparsed, "127 levels still parse");
+        let in_string = format!("{{\"a\":\"{}\"}}", "[".repeat(1000));
+        assert!(!map_input(&ToolInput::Json(in_string)).unparsed, "brackets in a string do not count");
+    }
+
+    #[test]
+    fn an_inflated_fraction_or_exponent_does_not_change_the_value() {
+        let long_fraction = format!("0.{}1e2000000", "0".repeat(1_000_000));
+        assert_eq!(classify_number(&long_fraction), NumberClass::Text(long_fraction.clone()));
+        let long_integer = format!("1{}e-2000000", "0".repeat(1_000_001));
+        assert_eq!(classify_number(&long_integer), NumberClass::Text(long_integer.clone()));
+        let huge_exponent = "1e999999999999999999999999";
+        assert_eq!(classify_number(huge_exponent), NumberClass::Text(huge_exponent.into()));
+        let tiny_exponent = "1e-999999999999999999999999";
+        assert_eq!(classify_number(tiny_exponent), NumberClass::Text(tiny_exponent.into()));
     }
 
     #[test]

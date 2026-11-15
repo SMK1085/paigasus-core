@@ -26,6 +26,9 @@ mod tests {
         assert_eq!(s, "\u{e5}");
         assert!(unicode_normalization::is_nfc(&normalise("\u{130}X\u{301}")));
         assert!(unicode_normalization::is_nfc(&normalise("\u{1e9e}\u{323}\u{307}")));
+        // No precomposed capital exists, so only the NFC after lowercasing makes the lowercase letter.
+        assert_eq!(normalise("T\u{308}"), "\u{1e97}");
+        assert_eq!(normalise("W\u{30a}"), "\u{1e98}");
     }
 
     #[test]
