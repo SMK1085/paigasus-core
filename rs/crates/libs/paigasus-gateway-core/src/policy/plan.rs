@@ -130,19 +130,25 @@ fn choice_after(choice: &ToolChoice, removed: &BTreeSet<&str>) -> (ChoiceRewrite
                 (Some(g), false) => (ChoiceRewrite::Allowed(left.into_iter().cloned().collect()), false, Some((*g).clone())),
             }
         }
+        // With only log-only removals, `removed` is empty here: no refuse and no entry (§ 6.5.3 has
+        // no refuse action).
         ToolChoice::Unknown => (ChoiceRewrite::Keep, !removed.is_empty(), None),
         _ => (ChoiceRewrite::Keep, false, None),
     }
 }
 
-/// Plan the request-side actions (§ 6.5.1 steps 1-4). With the policies unavailable, or the tenant
-/// part unavailable, the plan is empty (§ 6.4). An item is enforced when a floor policy decided its
-/// deny (D33) or the tenant mode is `enforce`; in log-only mode the plan is only reported (D25).
+/// Plan the request-side actions (§ 6.5.1 steps 1-4, and the Anthropic part of step 5). With the
+/// policies unavailable, or the tenant part unavailable, the plan is empty (§ 6.4). An item is
+/// enforced when a floor policy decided its deny (D33) or the tenant mode is `enforce`; in log-only
+/// mode the plan is only reported (D25).
 ///
-/// The plan does not depend on the wire format: the format-specific parts (§ 6.5.1 step 5) belong
-/// to the rewrite.
+/// Anthropic (step 5, controller ruling): when the messages hold `tool_use` or `tool_result`
+/// blocks and the enforced removals would leave `tools[]` empty (server tools count), the last
+/// definition in array order stays. Its removal is reported with `enforced: false`, and it does not
+/// count in the `tool_choice` rewrite. Its calls are still blocked at call time. The other parts of
+/// step 5 (dropping `tools`, `tool_choice` and their companions) belong to the rewrite.
 #[must_use]
-pub fn plan_request(snapshot: &PolicySnapshot, _format: Format, turn: &TurnFacts) -> RequestPlan {
+pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts) -> RequestPlan {
     let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
         return RequestPlan::empty();
     };
@@ -174,6 +180,23 @@ pub fn plan_request(snapshot: &PolicySnapshot, _format: Format, turn: &TurnFacts
             plan.entries
                 .push(RequestEntry::new(d.display_name(), RequestAction::RemoveDefinition, enforced, RequestReason::ToolCallDenied));
             plan.removed.push(PlanItem { target, enforced });
+        }
+    }
+
+    // Step 5, Anthropic: keep the last definition when blocks refer to tools and nothing else would
+    // stay in `tools[]`. Removal entries come first and in item order, so index `i` matches.
+    let mut kept: Option<String> = None;
+    let blocks = !turn.prior_calls.is_empty() || !turn.tool_results.is_empty();
+    if format == Format::AnthropicMessages && blocks && !turn.server_tools {
+        let gone: BTreeSet<&str> = plan.removed.iter().filter(|i| i.enforced).map(|i| i.target.as_str()).collect();
+        let empties = turn.definitions.iter().all(|d| gone.contains(normalise(&d.display_name()).as_str()));
+        if let Some(last) = turn.definitions.last().filter(|_| empties) {
+            let t = normalise(&last.display_name());
+            if let Some(i) = plan.removed.iter().position(|item| item.target == t) {
+                plan.removed[i].enforced = false; // ANTHROPIC-KEEP-LAST
+                plan.entries[i].enforced = false;
+            }
+            kept = Some(t);
         }
     }
 
@@ -216,7 +239,8 @@ pub fn plan_request(snapshot: &PolicySnapshot, _format: Format, turn: &TurnFacts
     // Step 4: `tool_choice`, from the enforced removals. A reset that only all removals together
     // would make is reported once, not enforced (P-9).
     let enforced: BTreeSet<&str> = plan.removed.iter().filter(|i| i.enforced).map(|i| i.target.as_str()).collect();
-    let all: BTreeSet<&str> = plan.removed.iter().map(|i| i.target.as_str()).collect();
+    // The kept Anthropic definition stays in the request, so it does not count here either.
+    let all: BTreeSet<&str> = plan.removed.iter().map(|i| i.target.as_str()).filter(|t| kept.as_deref() != Some(*t)).collect();
     let (choice, refuse, reset) = choice_after(&turn.tool_choice, &enforced);
     let reset_entry = match reset {
         Some(tool) => Some((tool, true)),
@@ -241,7 +265,7 @@ mod tests {
     use super::*;
     use crate::policy::SHIPPED_FLOOR;
     use crate::policy::snapshot::OnUnavailable;
-    use crate::turn::{PriorCall, ToolResultRef};
+    use crate::turn::{PriorCall, ToolResultRef, ToolTurn, parse_request};
 
     const NO_FLOOR: &str = "";
     const RM_FLOOR: &str = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"rm", resource);"#;
@@ -569,5 +593,104 @@ mod tests {
         let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "b", "ok"], ToolChoice::AllowedTools(vec!["a".to_owned(), "b".to_owned()])));
         assert_eq!(p.choice, ChoiceRewrite::Allowed(vec!["b".to_owned()]));
         assert_eq!(resets(&p), [("a".to_owned(), true)]);
+    }
+
+    fn parsed(format: Format, body: serde_json::Value) -> TurnFacts {
+        match parse_request(format, body.to_string().as_bytes()) {
+            ToolTurn::Parsed(f) => f,
+            ToolTurn::Unavailable(r) => panic!("unavailable: {r}"),
+        }
+    }
+
+    /// A tenant that permits everything and forbids one tool for every input.
+    fn forbid(tool: &str) -> PolicySnapshot {
+        enforce(&format!(r#"{PERMIT_ALL} @id("x") forbid(principal, action == Pgs::Gateway::Action::"{tool}", resource);"#))
+    }
+
+    #[test]
+    fn a_parsed_result_is_decided_by_the_full_call_name() {
+        // A Responses namespace call: the result is decided as `db.query`, not `query`.
+        let responses = serde_json::json!({"model":"m",
+            "tools":[{"type":"namespace","name":"db","tools":[{"type":"function","name":"query","parameters":{}}]}],
+            "input":[{"type":"function_call","call_id":"c1","namespace":"db","name":"query","arguments":"{}"},
+                     {"type":"function_call_output","call_id":"c1","output":"x"}]});
+        let p = plan_request(&forbid("db.query"), Format::OpenAiResponses, &parsed(Format::OpenAiResponses, responses));
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)]);
+        assert!(p.entries.iter().any(|e| (e.action, e.tool.as_str()) == (RequestAction::ReplaceResult, "db.query")));
+
+        // An MCP approval: the response is decided as `server_label.name`.
+        let mcp = serde_json::json!({"model":"m",
+            "input":[{"type":"mcp_approval_request","id":"mcpr_1","server_label":"srv","name":"search","arguments":"{}"},
+                     {"type":"mcp_approval_response","approval_request_id":"mcpr_1","approve":true}]});
+        let p = plan_request(&forbid("srv.search"), Format::OpenAiResponses, &parsed(Format::OpenAiResponses, mcp));
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("mcpr_1".to_owned()), true)]);
+
+        // An Anthropic `tool_result` by `tool_use_id`.
+        let anthropic = serde_json::json!({"model":"c","tools":[{"name":"rm","input_schema":{}}, {"name":"ok","input_schema":{}}],
+            "messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"rm","input":{}}]},
+                        {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}]});
+        let p = plan_request(&forbid("rm"), Format::AnthropicMessages, &parsed(Format::AnthropicMessages, anthropic));
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("t1".to_owned()), true)]);
+    }
+
+    fn anthropic(tools: serde_json::Value, blocks: bool, choice: Option<serde_json::Value>) -> TurnFacts {
+        let messages = if blocks {
+            serde_json::json!([{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"a","input":{}}]},
+                               {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}])
+        } else {
+            serde_json::json!([{"role":"user","content":"hi"}])
+        };
+        let mut body = serde_json::json!({"model":"c","tools":tools,"messages":messages});
+        if let Some(c) = choice {
+            body["tool_choice"] = c;
+        }
+        parsed(Format::AnthropicMessages, body)
+    }
+
+    #[test]
+    fn anthropic_keeps_the_last_definition_when_blocks_refer_to_tools() {
+        let s = enforce(PERMIT_OK);
+        let two = serde_json::json!([{"name":"a","input_schema":{}},{"name":"b","input_schema":{}}]);
+        // Blocks, every definition denied: `b` (the last) stays, reported not enforced.
+        let p = plan_request(&s, Format::AnthropicMessages, &anthropic(two.clone(), true, None));
+        assert_eq!(removed(&p), [("a", true), ("b", false)]);
+        assert_eq!(
+            actions(&p),
+            [
+                (RequestAction::RemoveDefinition, true, RequestReason::ToolCallDenied),
+                (RequestAction::RemoveDefinition, false, RequestReason::ToolCallDenied),
+                (RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked),
+            ]
+        );
+        // A named choice of the kept tool stays named, with no reset entry.
+        let p = plan_request(&s, Format::AnthropicMessages, &anthropic(two.clone(), true, Some(serde_json::json!({"type":"tool","name":"b"}))));
+        assert_eq!(p.choice, ChoiceRewrite::Keep);
+        assert!(resets(&p).is_empty());
+        // A named choice of a removed tool is still reset.
+        let p = plan_request(&s, Format::AnthropicMessages, &anthropic(two.clone(), true, Some(serde_json::json!({"type":"tool","name":"a"}))));
+        assert_eq!((p.choice.clone(), resets(&p)), (ChoiceRewrite::Auto, vec![("a".to_owned(), true)]));
+        // No blocks: every definition goes.
+        let p = plan_request(&s, Format::AnthropicMessages, &anthropic(two.clone(), false, None));
+        assert_eq!(removed(&p), [("a", true), ("b", true)]);
+        // A server tool stays in `tools[]`, so the rule does not apply.
+        let with_server = serde_json::json!([{"name":"a","input_schema":{}},{"name":"b","input_schema":{}},{"type":"web_search_20250305","name":"web_search"}]);
+        let p = plan_request(&s, Format::AnthropicMessages, &anthropic(with_server, true, None));
+        assert_eq!(removed(&p), [("a", true), ("b", true)]);
+        // A definition that stays anyway: the rule does not apply.
+        let with_ok = serde_json::json!([{"name":"a","input_schema":{}},{"name":"ok","input_schema":{}}]);
+        let p = plan_request(&s, Format::AnthropicMessages, &anthropic(with_ok, true, None));
+        assert_eq!(removed(&p), [("a", true)]);
+        // Another format with the same facts: every definition goes.
+        let p = plan_request(&s, Format::OpenAiChat, &anthropic(two, true, None));
+        assert_eq!(removed(&p), [("a", true), ("b", true)]);
+    }
+
+    #[test]
+    fn anthropic_keeps_the_last_definition_only_against_enforced_removals() {
+        // Log-only: nothing is enforced, so nothing needs to be kept; the plan reports both.
+        let s = snap(NO_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly);
+        let two = serde_json::json!([{"name":"a","input_schema":{}},{"name":"b","input_schema":{}}]);
+        let p = plan_request(&s, Format::AnthropicMessages, &anthropic(two, true, None));
+        assert_eq!(removed(&p), [("a", false), ("b", false)]);
     }
 }

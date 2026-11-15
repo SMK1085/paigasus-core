@@ -29,6 +29,9 @@ pub struct TurnFacts {
     pub definitions_complete: bool,
     /// What the caller asked the model to do about tools (spec § 8).
     pub tool_choice: ToolChoice,
+    /// Whether an Anthropic `tools[]` entry is a server tool, which `definitions` does not list. The
+    /// request plan needs it for § 6.5.1 step 5. `false` for the other formats.
+    pub server_tools: bool,
 }
 
 /// The caller's `tool_choice`. Names are display names (`ns.name` for a Responses namespace tool).
@@ -53,6 +56,7 @@ impl Default for TurnFacts {
             tool_results: Vec::new(),
             definitions_complete: true,
             tool_choice: ToolChoice::Auto,
+            server_tools: false,
         }
     }
 }
@@ -85,6 +89,9 @@ impl ToolDefinition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriorCall {
     pub id: Option<String>,
+    /// The display name, as `ToolCall::display_name` gives it: `ns.name` for a Responses
+    /// namespace call, `server_label.name` for an `mcp_approval_request`, else the bare name.
+    /// The request plan decides a result by this name, so it must match the call's name.
     pub name: String,
     pub arguments: String,
 }
@@ -289,8 +296,9 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
                 {
                     let c = tool_call(u32::try_from(i).map_err(|_| Malformed("input"))?, item, kind)?;
                     f.prior_calls.push(PriorCall {
-                        id: c.id.clone(),
-                        name: c.name,
+                        // The display name, so a result is decided as its call is (P-7).
+                        name: c.display_name(), // PRIOR-DISPLAY-NAME
+                        id: c.id,
                         arguments: c.arguments,
                     });
                 }
@@ -448,7 +456,7 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                 kind: ToolCallKind::AnthropicToolUse,
                 schema: t.get("input_schema").cloned(),
             }),
-            Some(_) => {} // a server tool
+            Some(_) => f.server_tools = true, // a server tool
         }
     }
     for m in arr(top, "messages")? {
@@ -544,8 +552,11 @@ mod tests {
                                {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"SECRET"}]}]}),
         );
         assert_eq!(f.definitions.len(), 1);
+        assert!(f.server_tools);
         assert_eq!(f.prior_calls[0].arguments, r#"{"p":"/"}"#);
         assert_eq!(f.tool_results[0].call_id.as_deref(), Some("t1"));
+        let plain = facts(Format::AnthropicMessages, json!({"model":"c","tools":[{"name":"rm","input_schema":{}}],"messages":[]}));
+        assert!(!plain.server_tools);
     }
 
     /// Schemas and prior inputs are application data (I-1): PascalCase and `constructor` keys in
@@ -637,13 +648,19 @@ mod tests {
         assert!(f.definitions[0].schema.is_some() && f.definitions[1].schema.is_none());
         assert_eq!(
             f.prior_calls.iter().map(|c| (c.id.as_deref(), c.name.as_str())).collect::<Vec<_>>(),
-            [(Some("c1"), "read"), (Some("c2"), "sql"), (Some("c3"), "shell"), (Some("mcpr_1"), "rm")]
+            [(Some("c1"), "read"), (Some("c2"), "sql"), (Some("c3"), "shell"), (Some("mcpr_1"), "srv.rm")]
         );
         assert_eq!(f.prior_calls[0].arguments, "{\"p\":1}");
         assert_eq!(f.prior_calls[1].arguments, "SELECT 1");
         let ids: Vec<_> = f.tool_results.iter().map(|r| r.call_id.as_deref().unwrap()).collect();
         assert_eq!(ids, ["c1", "c2", "c3", "c4", "c5", "c6", "mcpr_1"]);
         assert!(!format!("{f:?}").contains("SECRET"), "tool result content is never kept");
+    }
+
+    #[test]
+    fn a_namespaced_prior_call_keeps_its_display_name() {
+        let f = responses(&json!({"input":[{"type":"function_call","call_id":"c1","namespace":"db","name":"query","arguments":"{}"}]})).unwrap();
+        assert_eq!(f.prior_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["db.query"]);
     }
 
     #[test]
