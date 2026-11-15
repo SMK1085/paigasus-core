@@ -17,7 +17,7 @@ import { inShell, inZone } from '../support/providers';
 vi.mock('next/link', () => import('../support/next-link-double'));
 vi.mock('next/navigation', () => import('../support/next-navigation-double'));
 
-const BRAND = { label: 'Paigasus', href: '/iam' };
+const BRAND = { label: 'IAM', href: '/iam' };
 const NAV: readonly NavEntry[] = [
   { zone: 'iam', href: '/iam/users', label: 'Users', state: { state: 'available' } },
   { zone: 'gateway', href: '/gateway/usage', label: 'Gateway', state: { state: 'degraded', service: 'gateway', reason: 'timeout' } },
@@ -54,7 +54,13 @@ describe('AppShell (spec § 8.1)', () => {
     const skip = screen.getByRole('link', { name: 'Skip to content' });
     expect(skip).toHaveAttribute('href', '#main');
     const banner = screen.getByRole('banner');
-    expect(within(banner).getByRole('link', { name: 'Paigasus' })).toBeInTheDocument();
+    const brandLink = within(banner).getByRole('link', { name: 'Paigasus IAM' });
+    // Two decorative logo variants, light then dark; the `dark:` classes pick one per theme.
+    const logos = [...brandLink.querySelectorAll('img')];
+    expect(logos.map((img) => img.getAttribute('alt'))).toEqual(['', '']);
+    expect(logos.map((img) => img.className)).toEqual(['size-8 dark:hidden', 'hidden size-8 dark:block']);
+    for (const img of logos) expect(img.getAttribute('src')).toMatch(/^data:image\/webp;base64,[A-Za-z0-9+/]+=*$/);
+    expect(logos[0]?.getAttribute('src')).not.toBe(logos[1]?.getAttribute('src'));
     expect(within(banner).getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
     expect(within(banner).getByRole('button', { name: 'Organisation: Acme' })).toBeInTheDocument();
     expect(within(banner).getByRole('button', { name: 'Ada Lovelace' })).toBeInTheDocument();
@@ -162,7 +168,7 @@ describe('the keyboard script (AC 5, spec § 10.2)', () => {
     await user.tab();
     expect(screen.getByRole('link', { name: 'Skip to content' })).toHaveFocus();
     await user.tab();
-    expect(screen.getByRole('link', { name: 'Paigasus' })).toHaveFocus();
+    expect(screen.getByRole('link', { name: 'Paigasus IAM' })).toHaveFocus();
     await user.tab();
     expect(screen.getByRole('link', { name: 'Users' })).toHaveFocus();
     await user.tab();

@@ -15,7 +15,7 @@ export default function ShellPage(): ReactElement {
     { zone: 'gateway', href: '/gateway/usage', label: 'Gateway', state: navStateOf(GATEWAY_DOWN) },
   ];
   return (
-    <AppShell brand={{ label: 'Paigasus', href: '/iam' }} nav={nav}>
+    <AppShell brand={{ label: 'IAM', href: '/iam' }} nav={nav}>
       <h1>Shell</h1>
     </AppShell>
   );

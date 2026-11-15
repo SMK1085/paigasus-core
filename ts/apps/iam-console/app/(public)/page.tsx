@@ -17,7 +17,7 @@ export default async function PublicHome(): Promise<ReactElement> {
   await connection();
   if ((await cookies()).has(SESSION_COOKIE)) redirect('/orgs');
   return (
-    <PublicShell brand={{ label: 'Paigasus IAM', href: '/iam' }}>
+    <PublicShell brand={{ label: 'IAM', href: '/iam' }}>
       <section className="p-8" data-testid="public-home">
         <h1 className="mb-2 text-2xl font-semibold">Paigasus IAM</h1>
         <p className="text-muted-foreground text-sm">Sign in to manage your organizations, teams and projects.</p>

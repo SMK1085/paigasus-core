@@ -4,7 +4,7 @@
 import type { ReactElement, ReactNode } from 'react';
 import { cn } from '@paigasus/ui';
 import { PrimaryNav, type NavEntry } from '../nav/primary-nav';
-import { ZoneLink } from '../zone/zone-link';
+import { BrandLink, type Brand } from './brand-link';
 import { MAIN_ID, SkipLink } from './skip-link';
 import { Switcher, type SwitcherProps } from './switcher';
 import { UserMenu } from './user-menu';
@@ -23,11 +23,7 @@ import { UserMenu } from './user-menu';
  */
 const SOURCE_PROBE = '[--paigasus-app-shell-source-probe:1]';
 
-export type Brand = {
-  readonly label: string;
-  /** A full path (spec § 6.2). */
-  readonly href: string;
-};
+export type { Brand };
 
 export type AppShellProps = {
   readonly brand: Brand;
@@ -47,9 +43,7 @@ export function AppShell({ brand, nav, switchers, children }: AppShellProps): Re
     <>
       <SkipLink />
       <header className={cn(SOURCE_PROBE, 'flex flex-wrap items-center gap-4 border-b border-border bg-background px-4 py-2')}>
-        <ZoneLink href={brand.href} className="font-semibold">
-          {brand.label}
-        </ZoneLink>
+        <BrandLink brand={brand} />
         <PrimaryNav entries={nav} />
         <div className="ml-auto flex items-center gap-2">
           {switchers?.map((switcher) => (
