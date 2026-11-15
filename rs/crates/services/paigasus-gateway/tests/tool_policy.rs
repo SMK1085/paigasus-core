@@ -20,7 +20,7 @@ use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::adapters::policy_source::file::FilePolicySource;
 use paigasus_gateway::application::limits::Limits;
-use paigasus_gateway::application::tool_policy::{CacheSettings, CedarDecider, PolicyCache, RequestToolPolicy};
+use paigasus_gateway::application::tool_policy::{CacheSettings, CedarDecider, Lookup, PolicyCache, RequestToolPolicy};
 use paigasus_gateway::config::ToolPolicySettings;
 use paigasus_gateway::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies};
 use paigasus_gateway::service_info::Capabilities;
@@ -79,8 +79,9 @@ fn tp_settings(mode: TenantMode) -> ToolPolicySettings {
         refresh: Duration::from_secs(30),
         max_stale: Duration::from_secs(300),
         idle_evict: Duration::from_secs(3600),
-        // Long: the fault tests use a source that fails at once, and a loaded host must not miss the floor.
-        load_timeout: Duration::from_secs(5),
+        // Far above any real load: the time limit also covers the floor load (D31), and a loaded
+        // host must never miss it. Only the hanging-source test sets a short value.
+        load_timeout: Duration::from_secs(60),
         orgs: HashMap::new(),
     }
 }
@@ -99,6 +100,14 @@ fn tp_with(source: Arc<dyn PolicySource>, settings: ToolPolicySettings) -> Optio
     Some(Arc::new(RequestToolPolicy::new(cache, settings)))
 }
 
+/// `tp_with`, with the floor loaded into the cache before the first request. A request then
+/// spends its `load_timeout` on the tenant load only.
+async fn tp_preloaded(source: Arc<dyn PolicySource>, settings: ToolPolicySettings) -> Option<Arc<RequestToolPolicy>> {
+    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
+    assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)), "the floor loads");
+    Some(Arc::new(RequestToolPolicy::new(cache, settings)))
+}
+
 /// The request side over the file source in `dir`.
 fn tool_policy(dir: &TempDir, mode: TenantMode) -> Option<Arc<RequestToolPolicy>> {
     tp_with(Arc::new(FilePolicySource::new(dir.path())), tp_settings(mode))
@@ -109,8 +118,8 @@ fn tool_policy(dir: &TempDir, mode: TenantMode) -> Option<Arc<RequestToolPolicy>
 enum Fault {
     /// The call fails.
     Fail,
-    /// The call answers after this delay.
-    Slow(Duration),
+    /// The call never answers (a source slower than any `load_timeout_ms`).
+    Hang,
 }
 
 /// The file source with a fault on the floor call, the tenant call, or both.
@@ -134,10 +143,7 @@ async fn fault(f: Option<Fault>) -> Result<(), SourceError> {
     match f {
         None => Ok(()),
         Some(Fault::Fail) => Err(SourceError::Io("test failure".to_owned())),
-        Some(Fault::Slow(d)) => {
-            tokio::time::sleep(d).await;
-            Ok(())
-        }
+        Some(Fault::Hang) => std::future::pending().await,
     }
 }
 
@@ -428,8 +434,11 @@ fn call_of<'a>(entries: &'a [Value], name: &str) -> (Option<&'a str>, Option<&'a
     (e["decision"].as_str(), e["code"].as_str(), e["enforced"].as_bool(), e["reason"].as_str())
 }
 
+/// `(tool, action, enforced)` of one request entry.
+type RequestEntryRow = (String, String, bool);
+
 /// `(tool, action, enforced)` of every request entry.
-fn request_entries(entries: &[Value]) -> Vec<(String, String, bool)> {
+fn request_entries(entries: &[Value]) -> Vec<RequestEntryRow> {
     entries
         .iter()
         .filter(|e| e["side"] == "request")
@@ -474,7 +483,8 @@ fn overhead_samples(snapshotter: &Snapshotter) -> usize {
         })
 }
 
-/// The value of the counter `name` with exactly `labels`, or 0.
+/// The increase of the counter `name` with exactly `labels` since the last snapshot, or 0. A
+/// `DebuggingRecorder` snapshot drains the counters, so each call reads only the new increments.
 fn counter_value(snapshotter: &Snapshotter, name: &str, labels: &[(&str, &str)]) -> u64 {
     snapshotter
         .snapshot()
@@ -533,40 +543,57 @@ async fn a_denied_call_is_blocked_in_enforce() {
 /// turn is unreadable, so no plan exists: the floor tool stays in log-only too (the Task 8 note
 /// for Sven: the floor is checked at call time only).
 #[tokio::test]
-async fn an_unavailable_turn_is_refused_before_the_limits() {
+async fn an_unavailable_turn_is_refused_in_enforce_and_counted_in_log_only() {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let _local = metrics::set_default_local_recorder(&recorder);
     let dir = policy_dir(FLOOR, TENANT);
-    let mock = MockOpenAi::spawn_json(StatusCode::OK, USAGE_BODY).await;
-    let store = RecordingStore::new();
-    let app = full_app(
-        &mock.base_url,
-        Some(limits(rules(Some(100), None, None), store.clone())),
-        cedar(),
-        tool_policy(&dir, TenantMode::Enforce),
-    );
-    // A duplicate key the chat DTO ignores, but the strict request parse refuses (C13).
-    let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"floor_rm","parameters":{}}}],"x":1,"x":2}"#;
-    let sent = send(&app, body).await;
-    assert_eq!(sent.status, StatusCode::BAD_REQUEST, "{}", sent.text());
-    assert_eq!(sent.json()["error"]["code"], "invalid-request-body");
-    assert_eq!(mock.request_count(), 0, "nothing goes upstream");
-    assert_eq!(store.checks(), 0, "the limits never ran");
     let refusals = |mode: &str| counter_value(&snapshotter, names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, &[("mode", mode), ("reason", "unreadable_turn")]);
-    assert_eq!(refusals("enforce"), 1);
-    // The same body in log-only goes through the limits and upstream unchanged (P-10), and is counted.
-    let app = full_app(
-        &mock.base_url,
-        Some(limits(rules(Some(100), None, None), store.clone())),
-        cedar(),
-        tool_policy(&dir, TenantMode::LogOnly),
-    );
-    let sent = send(&app, body).await;
-    assert_eq!(sent.status, StatusCode::OK);
-    assert_eq!(store.checks(), 1);
-    assert_eq!(mock.recorded().expect("recorded").body, body.as_bytes(), "the floor tool stays: no plan for an unreadable turn");
-    assert_eq!(refusals("log_only"), 1, "log-only counts what enforce would refuse");
+    for ep in EPS {
+        let body = if ep.chat() {
+            // A duplicate key the chat DTO ignores, but the strict request parse refuses (C13).
+            let tools = ep.tools_body(&["floor_rm"]);
+            format!("{},\"x\":1,\"x\":2}}", tools.strip_suffix('}').expect("an object"))
+        } else {
+            // The Responses route refuses a duplicate key itself (SMA-769), so this turn is
+            // unreadable another way: a namespace may hold only function and custom tools.
+            let mut tools = responses_tools(&["floor_rm"]);
+            tools.as_array_mut().expect("tools").push(json!({"type":"namespace","name":"ns","tools":[{"type":"web_search"}]}));
+            ep.body(json!({"model":"gpt-6","input":"hi","tools":tools}))
+        };
+        let mock = ep.mock(&[]).await;
+        let store = RecordingStore::new();
+        let app = app_for(
+            ORG_A_PRN,
+            &mock.base_url,
+            Some(limits(rules(Some(100), None, None), store.clone())),
+            cedar(),
+            tool_policy(&dir, TenantMode::Enforce),
+        );
+        let sent = send_to(&app, ep.path(), &body).await;
+        assert_eq!(sent.status, StatusCode::BAD_REQUEST, "{ep:?}: {}", sent.text());
+        assert_eq!(sent.json()["error"]["code"], "invalid-request-body", "{ep:?}");
+        assert_eq!(mock.request_count(), 0, "nothing goes upstream ({ep:?})");
+        assert_eq!(store.checks(), 0, "the limits never ran ({ep:?})");
+        assert_eq!(refusals("enforce"), 1, "{ep:?}");
+        // The same body in log-only goes through the limits and upstream unchanged (P-10), and is counted.
+        let app = app_for(
+            ORG_A_PRN,
+            &mock.base_url,
+            Some(limits(rules(Some(100), None, None), store.clone())),
+            cedar(),
+            tool_policy(&dir, TenantMode::LogOnly),
+        );
+        let sent = send_to(&app, ep.path(), &body).await;
+        assert_eq!(sent.status, StatusCode::OK, "{ep:?}: {}", sent.text());
+        assert_eq!(store.checks(), 1, "{ep:?}");
+        assert_eq!(
+            mock.recorded().expect("recorded").body,
+            body.as_bytes(),
+            "the floor tool stays: no plan for an unreadable turn ({ep:?})"
+        );
+        assert_eq!(refusals("log_only"), 1, "log-only counts what enforce would refuse ({ep:?})");
+    }
 }
 
 /// § 6.5.1, D19: the enforced rewrite is what goes upstream, never the original body.
@@ -803,20 +830,22 @@ async fn tenant_fault_matrix(fault: Fault, load_timeout: Duration) {
             }
         }
     }
-    // The cases run at once: with a slow source each one waits the whole `load_timeout`.
-    let results = futures::future::join_all(cases.iter().map(|&(ep, mode, on)| {
+    // The floor is in the cache before the request, so `load_timeout` covers the tenant load only.
+    // The cases run at once: with a hanging source each one waits the whole `load_timeout`.
+    let mut runs = Vec::new();
+    for &(ep, mode, on) in &cases {
         let settings = ToolPolicySettings {
             load_timeout,
             ..tp_settings_on(mode, on)
         };
-        let tp = tp_with(FaultySource::arc(&dir, None, Some(fault)), settings);
+        let tp = tp_preloaded(FaultySource::arc(&dir, None, Some(fault)), settings).await;
         let body = ep.tools_body(&["read_file", "blocked_rm"]);
-        async move {
+        runs.push(async move {
             let ex = exchange(ep, ORG_A_PRN, tp, &body, calls).await;
             (body, ex)
-        }
-    }))
-    .await;
+        });
+    }
+    let results = futures::future::join_all(runs).await;
     for (&(ep, mode, on), (body, ex)) in cases.iter().zip(&results) {
         let case = format!("{ep:?} {mode:?} {on:?}");
         assert_eq!(ex.status, StatusCode::OK, "{case}");
@@ -831,14 +860,14 @@ async fn tenant_fault_matrix(fault: Fault, load_timeout: Duration) {
 /// § 6.4, § 7.2: a tenant source that fails.
 #[tokio::test]
 async fn fail_closed_and_fail_open_with_an_unavailable_source() {
-    tenant_fault_matrix(Fault::Fail, Duration::from_secs(5)).await;
+    tenant_fault_matrix(Fault::Fail, Duration::from_secs(60)).await;
 }
 
-/// § 6.4, D31, § 7.2: a tenant source that is slower than `load_timeout_ms`. The time limit
-/// covers the floor load too, so it is not so short that a loaded host misses the floor.
+/// § 6.4, D31, § 7.2: a tenant source that is slower than `load_timeout_ms` (it never answers).
+/// The floor is preloaded, so the short time limit only sets how long the test runs.
 #[tokio::test]
 async fn fail_closed_and_fail_open_with_a_slow_source() {
-    tenant_fault_matrix(Fault::Slow(Duration::from_secs(60)), Duration::from_secs(3)).await;
+    tenant_fault_matrix(Fault::Hang, Duration::from_millis(200)).await;
 }
 
 /// P-6, § 7.2: an unavailable floor under `closed` blocks every call in every tenant mode; under
@@ -879,7 +908,7 @@ async fn a_per_org_override_wins_over_the_global_value() {
         ] {
             let mut settings = tp_settings_on(TenantMode::Off, global);
             settings.orgs.insert(org_a(), (TenantMode::Enforce, over));
-            let tp = tp_with(FaultySource::arc(&dir, None, Some(Fault::Fail)), settings);
+            let tp = tp_preloaded(FaultySource::arc(&dir, None, Some(Fault::Fail)), settings).await;
             let ex = exchange(ep, ORG_A_PRN, tp, &body, CALLS).await;
             let case = format!("{ep:?} global {global:?} org {over:?}");
             assert_eq!(call_of(&ex.entries, "read_file"), want, "{case}");
@@ -977,17 +1006,20 @@ async fn each_last_definition_case() {
     let tenant = r#"@id("p") permit(principal is Pgs::Iam::Principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"blocked_rm", resource); @id("ns") forbid(principal, action == Pgs::Gateway::Action::"ns.blocked", resource);"#;
     let dir = policy_dir(FLOOR, tenant);
     for ep in EPS {
-        let cases: Vec<(&str, Value, &[&str])> = if ep.chat() {
+        let removed_and_reset = || vec![req("blocked_rm", "remove-definition", true), req("blocked_rm", "reset-tool-choice", true)];
+        let cases: Vec<(&str, Value, &[&str], Vec<RequestEntryRow>)> = if ep.chat() {
             vec![
                 (
                     "tools",
                     json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"tools":chat_tools(&["blocked_rm"]),"tool_choice":{"type":"function","function":{"name":"blocked_rm"}},"parallel_tool_calls":true}),
                     &["tools", "tool_choice", "parallel_tool_calls"],
+                    removed_and_reset(),
                 ),
                 (
                     "legacy functions",
                     json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"functions":[{"name":"blocked_rm","parameters":{}}],"function_call":{"name":"blocked_rm"}}),
                     &["functions", "function_call"],
+                    removed_and_reset(),
                 ),
             ]
         } else {
@@ -996,15 +1028,17 @@ async fn each_last_definition_case() {
                     "tools",
                     json!({"model":"gpt-6","input":"hi","tools":responses_tools(&["blocked_rm"]),"tool_choice":"required","parallel_tool_calls":false}),
                     &["tools", "tool_choice", "parallel_tool_calls"],
+                    vec![req("blocked_rm", "remove-definition", true)],
                 ),
                 (
                     "namespace",
                     json!({"model":"gpt-6","input":"hi","tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"blocked","parameters":{}}]}],"tool_choice":"auto","parallel_tool_calls":true}),
                     &["tools", "tool_choice", "parallel_tool_calls"],
+                    vec![req("ns.blocked", "remove-definition", true)],
                 ),
             ]
         };
-        for (case, v, gone) in cases {
+        for (case, v, gone, want) in cases {
             let ex = exchange(ep, ORG_A_PRN, tool_policy(&dir, TenantMode::Enforce), &ep.body(v), &[]).await;
             assert_eq!(ex.status, StatusCode::OK, "{ep:?} {case}: {}", ex.text);
             let up = ex.upstream_json();
@@ -1012,7 +1046,7 @@ async fn each_last_definition_case() {
                 assert!(up.get(*key).is_none(), "{ep:?} {case}: {key} stays in {up}");
             }
             assert!(up["model"].as_str().is_some(), "{ep:?} {case}");
-            assert!(!request_entries(&ex.entries).is_empty(), "{ep:?} {case}");
+            assert_eq!(request_entries(&ex.entries), want, "{ep:?} {case}");
         }
         // A namespace that keeps one inner tool stays, with that tool only.
         if !ep.chat() {
@@ -1114,9 +1148,14 @@ async fn tool_result_replacement_for_each_result_type() {
                 assert!(is_notice(&items[i]["output"]), "{ep:?} item {i}: {}", items[i]);
             }
             assert_eq!(items[16]["approve"], false, "{ep:?}: an mcp approval becomes a refusal");
-            let tools: Vec<String> = request_entries(&ex.entries).into_iter().map(|(t, a, e)| format!("{t}:{a}:{e}")).collect();
-            assert_eq!(tools.len(), 7, "{ep:?}: {tools:?}");
-            assert!(tools.iter().all(|t| t.ends_with(":replace-result:true")), "{ep:?}: {tools:?}");
+            let mut have = request_entries(&ex.entries);
+            have.sort();
+            let mut want: Vec<_> = ["blocked_rm", "blocked_sql", "computer", "local_shell", "shell", "apply_patch", "srv.rm"]
+                .iter()
+                .map(|t| req(t, "replace-result", true))
+                .collect();
+            want.sort();
+            assert_eq!(have, want, "{ep:?}");
         }
     }
 }
