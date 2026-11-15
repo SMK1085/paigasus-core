@@ -261,6 +261,8 @@ enum ErrorReason {
   // the tool calls in it (502, OpenAI type "api_error"). Sent only with
   // [tool_interception] on_failure = "block" (SMA-749).
   ERROR_REASON_TOOL_INTERCEPTION_MALFORMED_RESPONSE = 313;
+  // "responses-stateful-not-supported" — a /v1/responses request asked for server-side state (previous_response_id, conversation, prompt, an item_reference input item) with tool interception on, or asked for background mode (400, OpenAI type "invalid_request_error"). The gateway cannot see a stored turn (SMA-769).
+  ERROR_REASON_RESPONSES_STATEFUL_NOT_SUPPORTED = 314;
 
   // ---- Shared (900-999) ----------------------------------------------------
   // Any domain may emit these; `domain` is what distinguishes them.

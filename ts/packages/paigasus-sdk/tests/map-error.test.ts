@@ -186,6 +186,20 @@ describe("arm 3 — the gateway's OpenAI envelope", () => {
     expect(result.retryable).toBeNull();
   });
 
+  // SMA-769. The gateway refused a stateful /v1/responses request: a 400, never retryable.
+  it('maps responses-stateful-not-supported to from-transport, not retryable', () => {
+    const result = mapError({
+      kind: 'http',
+      status: 400,
+      headers: new Headers({ 'paigasus-retryable': 'false' }),
+      body: { error: { message: 'Stateful Responses API requests are not supported by this gateway.', type: 'invalid_request_error', param: 'previous_response_id', code: 'responses-stateful-not-supported' } },
+    });
+    expect(result.reason).toBe(ErrorReason.RESPONSES_STATEFUL_NOT_SUPPORTED);
+    // The transport table presents a 400 as invalid input.
+    expect(result.presentation).toBe('invalid-input');
+    expect(result.retryable).toBe(false);
+  });
+
   // SMA-677. The gateway's own rate refusal keeps the transport table's `rate-limited`.
   it('maps rate-limited to rate-limited, retryable', () => {
     const result = mapError({

@@ -90,6 +90,8 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   // SMA-749. The gateway could not check a non-stream answer for tool calls, so it refused to
   // forward it. A 502 like an upstream failure: the transport table's `degraded` copy fits.
   [ErrorReason.TOOL_INTERCEPTION_MALFORMED_RESPONSE]: 'from-transport',
+  // SMA-769.
+  [ErrorReason.RESPONSES_STATEFUL_NOT_SUPPORTED]: 'from-transport',
   [ErrorReason.INTERNAL]: 'from-transport',
   [ErrorReason.INVALID_REQUEST_BODY]: 'from-transport',
   [ErrorReason.REQUEST_TOO_LARGE]: 'from-transport',
