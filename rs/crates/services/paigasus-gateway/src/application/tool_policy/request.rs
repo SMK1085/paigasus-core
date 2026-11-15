@@ -280,10 +280,7 @@ mod tests {
         let weird = chat_request(&["rm", "y"], r#","tool_choice":"weird_choice""#);
         for (mode, want_mode) in [(TenantMode::Enforce, "enforce"), (TenantMode::LogOnly, "log_only")] {
             let policy = testing::policy(&source, settings(mode));
-            for (body, reason, refused) in [
-                (unreadable.clone(), "unreadable_turn", mode == TenantMode::Enforce),
-                (weird.clone(), "unknown_tool_choice", true),
-            ] {
+            for (body, reason, refused) in [(unreadable.clone(), "unreadable_turn", mode == TenantMode::Enforce), (weird.clone(), "unknown_tool_choice", true)] {
                 let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::INFO);
                 let _ = run(&policy, body).await;
                 let line = one_line(&logs.text(), "tool-policy request refusal");
