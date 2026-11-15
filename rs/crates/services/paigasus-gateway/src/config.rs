@@ -624,7 +624,7 @@ impl GatewayConfig {
 /// `[tool_policy]` (SMA-752 § 6.4). Off by default: with `enabled = false` the gateway behaves as
 /// before. `GatewayConfig.tool_policy` is not in the `Defaults` layer. A misspelt key fails
 /// extraction, so a typo can never leave a security control silently off.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolPolicyConfig {
     pub enabled: bool,
@@ -687,12 +687,12 @@ pub enum PolicySourceConfig {
 }
 
 /// `[tool_policy.nats]`: the invalidation subscription.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicyNatsConfig {
-    /// Never written by `Serialize`: the URL can hold credentials.
+    /// The URL can hold credentials, so it is skipped on `Serialize`, and `SecretString` redacts it on `Debug` (the `limits.redis_url` pattern).
     #[serde(skip_serializing)]
-    pub url: String,
+    pub url: SecretString,
     pub creds_file: Option<String>,
     pub ca_file: Option<String>,
 }
@@ -778,6 +778,16 @@ impl ToolPolicyConfig {
                 return Err(format!("tool_policy.org[{i}].id {:?} names an org that an earlier [[tool_policy.org]] entry already lists", entry.id));
             }
         }
+        if let Some(nats) = &self.nats {
+            if nats.url.expose_secret().trim().is_empty() {
+                return Err("tool_policy.nats.url must not be empty (omit the [tool_policy.nats] table to run without invalidation events)".to_string());
+            }
+            for (key, v) in [("tool_policy.nats.creds_file", &nats.creds_file), ("tool_policy.nats.ca_file", &nats.ca_file)] {
+                if v.as_deref().is_some_and(|p| p.trim().is_empty()) {
+                    return Err(format!("{key} must not be empty (omit the key to use none)"));
+                }
+            }
+        }
         if self.enabled {
             if self.on_policy_unavailable.is_none() {
                 return Err("tool_policy.on_policy_unavailable is required when tool_policy.enabled = true (\"open\" or \"closed\")".to_string());
@@ -795,6 +805,11 @@ impl ToolPolicyConfig {
     }
 
     /// The runtime view: durations, the per-org map keyed by the parsed `Uuid`, and the defaults.
+    /// The values are meaningful only after `validate` returned `Ok`.
+    ///
+    /// # Panics
+    /// Panics on an org id that is not a valid UUID, which `validate` refuses. A silent drop would
+    /// give that org the default mode, so the precondition is enforced loudly instead.
     #[must_use]
     pub fn settings(&self) -> ToolPolicySettings {
         ToolPolicySettings {
@@ -809,7 +824,10 @@ impl ToolPolicyConfig {
             orgs: self
                 .org
                 .iter()
-                .filter_map(|e| parse_org_uuid(&e.id).map(|id| (id, (e.mode.into(), e.on_policy_unavailable.map(OnUnavailable::from)))))
+                .map(|e| {
+                    let id = parse_org_uuid(&e.id).expect("ToolPolicyConfig::settings needs a config that passed validate: tool_policy.org id is not a valid UUID");
+                    (id, (e.mode.into(), e.on_policy_unavailable.map(OnUnavailable::from)))
+                })
                 .collect(),
         }
     }
@@ -1533,7 +1551,7 @@ mod tests {
         assert_eq!(cfg.tool_policy.settings().default_mode, TenantMode::LogOnly);
         assert_eq!(cfg.tool_policy.source, Some(PolicySourceConfig::File { dir: "/etc/policies".to_string() }));
         let json = serde_json::to_string(&cfg.tool_policy).expect("serialises");
-        assert!(!json.contains("nats://x:4222"), "the NATS url must not be serialised");
+        assert!(!json.contains("x:4222"), "the NATS url must not be serialised");
     }
 
     #[test]
@@ -1579,9 +1597,39 @@ mod tests {
             "[[tool_policy.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nmode = \"off\"\nmdoe = \"off\"".to_string(),
             "[tool_policy.nats]\nurl = \"nats://x\"\nurl2 = \"y\"".to_string(),
             "source = { kind = \"file\", dir = \"/p\", extra = 1 }".to_string(),
+            "floor_mode = \"enforce\"".to_string(),
+            "source = { kind = \"s3\", dir = \"/p\" }".to_string(),
         ] {
             assert!(tp_load(&tp_toml(&body)).is_err(), "must fail: {body}");
         }
+    }
+
+    #[test]
+    fn a_blank_source_dir_fails_when_enabled() {
+        let toml = format!(
+            "{}\n[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"open\"\nsource = {{ kind = \"file\", dir = \"  \" }}\n",
+            valid_toml()
+        );
+        let err = tp_load(&toml).expect("loads").validate().expect_err("blank dir");
+        assert!(err.contains("tool_policy.source.dir"), "{err}");
+    }
+
+    #[test]
+    fn a_blank_nats_value_fails() {
+        for (body, key) in [
+            ("[tool_policy.nats]\nurl = \"  \"", "tool_policy.nats.url"),
+            ("[tool_policy.nats]\nurl = \"nats://x\"\ncreds_file = \"\"", "tool_policy.nats.creds_file"),
+            ("[tool_policy.nats]\nurl = \"nats://x\"\nca_file = \" \"", "tool_policy.nats.ca_file"),
+        ] {
+            let err = tp_load(&tp_toml(body)).expect("loads").validate().expect_err(body);
+            assert!(err.contains(key), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_nats_url_never_reaches_debug() {
+        let cfg = tp_load(&tp_toml("[tool_policy.nats]\nurl = \"nats://user:hunter2@n:4222\"")).expect("loads");
+        assert!(!format!("{cfg:?}").contains("hunter2"), "the NATS url must not appear in Debug output");
     }
 
     #[test]
