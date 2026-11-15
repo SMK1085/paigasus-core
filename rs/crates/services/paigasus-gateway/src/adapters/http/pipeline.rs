@@ -17,7 +17,7 @@
 //! - The upstream response is forwarded verbatim: a full body (non-stream) or an UNBUFFERED SSE
 //!   stream. A non-2xx upstream (OpenAI's own error envelope) passes through unchanged.
 //! - The mid-stream terminal error and the cancel-on-drop contract are described on
-//!   [`terminal_sse_error_stream`](super::chat::terminal_sse_error_stream).
+//!   [`terminal_sse_error_stream`](super::relay::terminal_sse_error_stream).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,9 +31,9 @@ use paigasus_gateway_core::{Format, Limits};
 use paigasus_observability::names;
 
 use super::AppState;
-use super::chat::terminal_sse_error_stream;
 use super::error::GatewayError;
 use super::interception::{self, ToolInterception};
+use super::relay::terminal_sse_error_stream;
 use super::usage::{BodyUsage, StreamUsage};
 use crate::adapters::openai::{ChatResponse, OpenAiError, UpstreamRoute};
 use crate::domain::{CallerContext, Credential};

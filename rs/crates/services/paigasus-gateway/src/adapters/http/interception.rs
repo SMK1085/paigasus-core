@@ -29,7 +29,7 @@ use paigasus_gateway_core::{
 };
 use paigasus_observability::names;
 
-use crate::adapters::http::chat::{feed_scan, finish_scan};
+use crate::adapters::http::relay::{feed_scan, finish_scan};
 use crate::adapters::http::usage::StreamUsage;
 use crate::adapters::openai::OpenAiByteStream;
 use crate::application::charge_guard::ChargeGuard;
