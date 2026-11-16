@@ -16,7 +16,7 @@ export default async function PublicHome(): Promise<ReactElement> {
   await connection();
   if ((await cookies()).has(SESSION_COOKIE)) redirect('/overview');
   return (
-    <PublicShell brand={{ label: 'Paigasus AI Gateway', href: '/gateway' }}>
+    <PublicShell brand={{ label: 'AI Gateway', href: '/gateway' }}>
       <section className="p-8" data-testid="public-home">
         <h1 className="mb-2 text-2xl font-semibold">Paigasus AI Gateway</h1>
         <p className="text-muted-foreground text-sm">Sign in to view the gateway's status and usage.</p>
