@@ -48,14 +48,16 @@ jobs:
       #
       # SMA-777: the current ubuntu-latest image has a 145 GB root disk with 85 to 89 GB free
       # at job start (measured on 29 runs on 2026-11-16), and the removal took 1m15s to 3m17s
-      # of every run. The step now removes only when free space is below FLOOR_GB. 60 GB is
-      # twice the ~29 GB of headroom that the old failure had. A smaller runner image, or a
-      # change back to a small disk, therefore still gets the removal. The last step of the
-      # job prints the disk use at the end, so the margin stays visible in each log.
-      # Errors are tolerated (paths shift across runner images).
+      # of every run. The step now removes only when free space is below FLOOR_GB. The highest
+      # job use measured on PR 483 was 52 GB (86 GB free at the start, 34 GB at the end), on a
+      # run that restored the 9.2 GB main entry. 80 GB leaves at least 28 GB above that, about
+      # the ~29 GB headroom of the old failure. A runner with less free space still gets the
+      # removal, and then has more than 100 GB free. The last step of the job prints the disk
+      # use at the end, so the margin stays visible in each log. That is the use at the end of
+      # the job, not the peak. Errors are tolerated (paths shift across runner images).
       - name: Reclaim runner disk when free space is low (drop unused preinstalled toolchains)
         env:
-          FLOOR_GB: '60'
+          FLOOR_GB: '80'
         run: |
           df -h /
           avail_kb="$(df --output=avail -k / | sed -n 2p | tr -d ' ')"
@@ -424,8 +426,12 @@ jobs:
         if: always()
         run: |
           df -h /
+          # One du call per level: du counts each directory once, so a parent and its children
+          # in one call print only the parent.
           du -sh ~/.cargo/registry ~/.cargo/git rs/target rs/tools/paigasus-policy-compiler/target \
-            rs/target/* rs/target/debug/* 2>/dev/null || true
+            2>/dev/null || true
+          du -sh rs/target/* 2>/dev/null || true
+          du -sh rs/target/debug/* 2>/dev/null || true
 
       # SMA-777: the only writer of the Rust cache. A push to main saves; a PR never does (see the
       # restore step for the measured eviction). A green run only: this step has no `if:`
