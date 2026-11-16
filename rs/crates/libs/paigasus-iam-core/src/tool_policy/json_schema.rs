@@ -88,7 +88,9 @@ fn map_type(schema: &Value, depth: usize, max_depth: usize, path: &str, dropped:
         }
     }
     if let Some(any) = obj.get("anyOf") {
-        return nullable_any_of(any, depth, max_depth, path, dropped);
+        let mut siblings = obj.clone();
+        siblings.remove("anyOf");
+        return nullable_any_of(any, &siblings, depth, max_depth, path, dropped);
     }
     match obj.get("type") {
         Some(Value::String(t)) => map_named(t, obj, depth, max_depth, path, dropped, false),
@@ -105,7 +107,10 @@ fn map_type(schema: &Value, depth: usize, max_depth: usize, path: &str, dropped:
     }
 }
 
-fn nullable_any_of(any: &Value, depth: usize, max_depth: usize, path: &str, dropped: &mut Vec<DroppedField>) -> Result<Option<Mapped>, MappingError> {
+/// A nullable `anyOf: [T, {"type": "null"}]`. JSON Schema applies the keywords next to `anyOf`
+/// together with each branch, so T is mapped with those siblings merged in. A sibling `type`
+/// must allow the type of T, and the result allows `null` only when that `type` allows it.
+fn nullable_any_of(any: &Value, siblings: &Map<String, Value>, depth: usize, max_depth: usize, path: &str, dropped: &mut Vec<DroppedField>) -> Result<Option<Mapped>, MappingError> {
     let Some(list) = any.as_array() else {
         return Ok(drop_field(path, "anyOf is not mapped", dropped));
     };
@@ -114,9 +119,57 @@ fn nullable_any_of(any: &Value, depth: usize, max_depth: usize, path: &str, drop
         && list.iter().filter(|v| is_null(v)).count() == 1
         && let Some(other) = list.iter().find(|v| !is_null(v))
     {
-        return Ok(map_type(other, depth, max_depth, path, dropped)?.map(|m| Mapped { ty: m.ty, nullable: true }));
+        let Some(branch) = other.as_object() else {
+            return Ok(drop_field(path, "the schema is not an object", dropped));
+        };
+        let parent_type = siblings.get("type");
+        let allows = |name: &str| match parent_type {
+            None => true,
+            Some(Value::String(t)) => t == name,
+            Some(Value::Array(list)) => list.iter().any(|t| t.as_str() == Some(name)),
+            Some(_) => false,
+        };
+        if let Some(t) = branch.get("type").and_then(Value::as_str)
+            && !allows(t)
+        {
+            return Ok(drop_field(path, "the anyOf branch type does not match the type next to anyOf", dropped));
+        }
+        let merged = merge_siblings(siblings, branch);
+        let nullable = allows("null");
+        return Ok(map_type(&Value::Object(merged), depth, max_depth, path, dropped)?.map(|m| Mapped { ty: m.ty, nullable }));
     }
     Ok(drop_field(path, "this anyOf is not mapped", dropped))
+}
+
+/// The branch with the sibling keywords of its `anyOf` merged in. The `properties` maps are
+/// joined and the `required` lists are joined. For any other keyword, and for a property that
+/// both name, the branch wins. The sibling `type` is replaced by the type of the branch, which
+/// the caller has checked against it; a branch with no `type` keeps the sibling `type`.
+fn merge_siblings(siblings: &Map<String, Value>, branch: &Map<String, Value>) -> Map<String, Value> {
+    let mut merged = siblings.clone();
+    if branch.contains_key("type") {
+        merged.remove("type");
+    }
+    for (key, value) in branch {
+        match (key.as_str(), merged.get_mut(key), value) {
+            ("properties", Some(Value::Object(mine)), Value::Object(theirs)) => {
+                for (k, v) in theirs {
+                    mine.insert(k.clone(), v.clone());
+                }
+            }
+            ("required", Some(Value::Array(mine)), Value::Array(theirs)) => {
+                for v in theirs {
+                    if !mine.contains(v) {
+                        mine.push(v.clone());
+                    }
+                }
+            }
+            _ => {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    merged
 }
 
 fn map_named(t: &str, obj: &Map<String, Value>, depth: usize, max_depth: usize, path: &str, dropped: &mut Vec<DroppedField>, nullable: bool) -> Result<Option<Mapped>, MappingError> {
@@ -211,6 +264,38 @@ mod tests {
         assert!(dropped.is_empty());
         assert_eq!(attrs(&rec)["a"], json!({"type": "String", "required": false}));
         assert_eq!(attrs(&rec)["b"], json!({"type": "String", "required": false}));
+    }
+
+    #[test]
+    fn the_keywords_next_to_a_nullable_any_of_apply_to_its_branch() {
+        let (rec, dropped) = map(json!({
+            "type": "object",
+            "properties": {
+                // The object form of the review finding: `q` sits next to `anyOf`.
+                "o": {
+                    "properties": {"q": {"type": "string"}, "n": {"type": "number"}},
+                    "required": ["q"],
+                    "anyOf": [{"type": "object", "properties": {"r": {"type": "integer"}}}, {"type": "null"}]
+                },
+                // A `type` next to `anyOf` that does not allow null makes the attribute required.
+                "s": {"type": "string", "anyOf": [{"type": "string"}, {"type": "null"}]},
+                // A type list next to `anyOf` that allows null keeps it optional.
+                "t": {"type": ["string", "null"], "anyOf": [{"type": "string"}, {"type": "null"}]},
+                // A branch type that the `type` next to `anyOf` does not allow has no form.
+                "x": {"type": "string", "anyOf": [{"type": "integer"}, {"type": "null"}]}
+            },
+            "required": ["o", "s", "t", "x"]
+        }));
+        let a = attrs(&rec);
+        assert_eq!(a["o"]["required"], false);
+        assert_eq!(a["o"]["attributes"]["q"], json!({"type": "String", "required": true}));
+        assert_eq!(a["o"]["attributes"]["r"], json!({"type": "Long", "required": false}));
+        assert_eq!(a["s"], json!({"type": "String", "required": true}));
+        assert_eq!(a["t"], json!({"type": "String", "required": false}));
+        assert!(!a.contains_key("x"));
+        let mut paths: Vec<&str> = dropped.iter().map(|d| d.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, ["o.n", "x"], "the dropped field next to anyOf is reported: {dropped:?}");
     }
 
     #[test]
