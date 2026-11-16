@@ -329,6 +329,11 @@ JSON Schema maps to Cedar as follows:
 | `["T", "null"]`, or `anyOf: [T, {"type": "null"}]` | an optional attribute of type T |
 | `number`, other `oneOf` / `anyOf` / `allOf`, `$ref`, `additionalProperties` with no `properties`, `null` alone, other type lists, an `array` whose `items` allow `null` | not mapped |
 
+In the `anyOf` row, the keywords next to `anyOf` apply to T too, as JSON Schema says. So
+`properties` next to `anyOf` stay in the record of an object T. A `type` next to `anyOf` must
+allow the type of T, or the field is not mapped. The attribute is optional only when that `type`
+allows `null` or is absent.
+
 The nullable row matters, because OpenAI strict mode writes every optional field as
 `["string", "null"]`. A Cedar set cannot hold `null`, so an array whose `items` allow `null`
 (for example `["integer", "null"]`) is not mapped.
@@ -530,7 +535,8 @@ The child process runs with these limits. Each one has a test.
    `floor-`, and tenant `@id` values must not. So the slot names of the two sets cannot collide.
    The `@id` gives the distincter of the policy's `lower_many` entry (D1).
 2. Read `@scope` on each policy: `session` (the default), `principal` or `key`. Any other value
-   rejects the save.
+   rejects the save. A policy with more than one `@scope` annotation also rejects the save,
+   because the emitted Cedar keeps only one of them.
 3. Validate the set with Dogwood against the schema.
 4. Lower the whole set once: one `lower_many` call, one entry for each policy (§3.8, D1). A failed lowering rejects the
    save.
@@ -1064,3 +1070,12 @@ The second local review of PR 1 found three more gaps. Sven approved each fix.
   result too large. A 3 MiB default was measured and is too large for the 3 MiB result limit.
 - **§4.2.** `ListTools` reads the tools and the catalog revision in one consistent read. Before,
   two reads could return new tools with an old revision.
+
+## Changelog (2026-11-16 PR review)
+
+The first CodeRabbit round on PR 478 found two more gaps.
+
+- **§4.3.** The keywords next to a nullable `anyOf` apply to its branch. Before, `properties`
+  next to `anyOf` were lost with no dropped-field entry, and a `type` next to `anyOf` was ignored.
+- **§5.3 step 2.** A policy with more than one `@scope` rejects the save. Before, the history
+  condition used the first `@scope`, and the emitted Cedar kept the last one.
