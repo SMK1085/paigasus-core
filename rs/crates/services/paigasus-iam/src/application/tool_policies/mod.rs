@@ -143,6 +143,7 @@ impl SetTarget {
 fn origin_str(origin: VersionOrigin) -> &'static str {
     match origin {
         VersionOrigin::Save => "save",
+        VersionOrigin::Starter => "starter",
         VersionOrigin::CatalogChange => "catalog_change",
     }
 }

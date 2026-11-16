@@ -11,7 +11,8 @@ use crate::application::tenancy_nodes::TenancyNodes;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::tool_policy::{
-    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyState, ToolPolicyVersion, VersionStatus,
+    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState,
+    ToolPolicyVersion, VersionStatus,
 };
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
@@ -1948,6 +1949,7 @@ struct ToolPolicyData {
     states: HashMap<ToolPolicySetKey, ToolPolicyState>,
     catalogs: HashMap<Uuid, std::collections::BTreeMap<String, StoredTool>>,
     versions: HashMap<ToolPolicySetKey, Vec<ToolPolicyVersion>>,
+    settings: HashMap<Uuid, ToolPolicySettings>,
 }
 
 /// In-memory `ToolPolicyRepository`, faithful to the port: `insert_live_version_in` is a
@@ -1996,7 +1998,8 @@ impl InMemoryToolPolicies {
         }
     }
 
-    /// The calls of `apply_catalog_in` and `insert_live_version_in` that changed the store.
+    /// The calls of `apply_catalog_in`, `insert_live_version_in` and `upsert_settings_in` that
+    /// changed the store.
     pub fn writes(&self) -> usize {
         self.writes.load(Ordering::SeqCst)
     }
@@ -2127,6 +2130,19 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
             }
         }
         versions.push(v.clone());
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError> {
+        Ok(self.data.lock().unwrap().settings.get(&org).cloned())
+    }
+
+    async fn upsert_settings_in(&self, _tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError> {
+        if s.updated_at.is_none() || s.updated_by.is_none() {
+            return Err(RepositoryError::Backend("upsert_settings_in needs updated_at and updated_by".into()));
+        }
+        self.data.lock().unwrap().settings.insert(org, s.clone());
         self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

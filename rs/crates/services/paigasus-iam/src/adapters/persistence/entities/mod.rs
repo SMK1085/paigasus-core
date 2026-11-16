@@ -15,5 +15,6 @@ pub mod service_account;
 pub mod team;
 pub mod tool_catalog_entry;
 pub mod tool_policy_set_version;
+pub mod tool_policy_settings;
 pub mod tool_policy_state;
 pub mod user;

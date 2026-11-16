@@ -73,11 +73,13 @@ pub enum VersionStatus {
     Superseded,
 }
 
-/// What made a stored version. This release writes only these two. The database also allows
-/// `starter`, `recompile` and `accept`, for later releases.
+/// What made a stored version. This release writes only these three. The database also allows
+/// `recompile` and `accept`, for later releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionOrigin {
     Save,
+    /// The starter set that the first enable of a tenant stores.
+    Starter,
     CatalogChange,
 }
 
