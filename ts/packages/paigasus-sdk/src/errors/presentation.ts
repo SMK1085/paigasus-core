@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 71 keys rather than 70.
+// demanding an entry for it would make the table 86 keys rather than 85.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -103,6 +103,22 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.INVALID_PATH_SEGMENT]: 'from-transport',
   // SMA-700. A 401 from both services; the transport table already presents it as relogin.
   [ErrorReason.INVALID_DPOP_PROOF]: 'from-transport',
+  // SMA-774. The IAM tool catalog and tool policy set calls. The transport status table already
+  // presents each of their statuses (invalid input, conflict, not found, unavailable).
+  [ErrorReason.TOOL_POLICY_INVALID]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_SHAPE_UNSUPPORTED]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_LOWERING_FAILED]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_FLOOR_PERMIT]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_ID_INVALID]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_WINDOW_TOO_LONG]: 'from-transport',
+  [ErrorReason.TOOL_CATALOG_BREAKS_POLICY]: 'from-transport',
+  [ErrorReason.TOOL_CATALOG_INVALID]: 'from-transport',
+  [ErrorReason.TOOL_CATALOG_CONFLICT]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_VERSION_CONFLICT]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_RECOMPILE_PENDING]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_COMPILER_UNAVAILABLE]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_COMPILER_BUSY]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_VERSION_NOT_FOUND]: 'from-transport',
 };
 
 /**
