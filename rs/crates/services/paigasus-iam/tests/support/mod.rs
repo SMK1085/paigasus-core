@@ -1194,6 +1194,22 @@ pub fn fake_compiler_script(dir: &Path, result_json: &str) -> PathBuf {
     path
 }
 
+/// The path of the real `paigasus-policy-compiler`, from `PAIGASUS_POLICY_COMPILER_BIN`. The
+/// Moon `test` task of this crate always sets the variable, and builds the binary first. The
+/// helper never reads `CI` (`repo:iam-docker-policy-single-site` bans that in an IAM test).
+/// `None`, with a printed reason, when the variable is not set. A panic when it is set and the
+/// file is absent, so a wrong path cannot pass as a skip.
+#[allow(dead_code)]
+pub fn real_compiler_path(test: &str) -> Option<PathBuf> {
+    let Some(value) = std::env::var_os("PAIGASUS_POLICY_COMPILER_BIN") else {
+        eprintln!("{test} skipped: PAIGASUS_POLICY_COMPILER_BIN is not set");
+        return None;
+    };
+    let path = PathBuf::from(value);
+    assert!(path.is_file(), "PAIGASUS_POLICY_COMPILER_BIN is set to {}, and no file exists there", path.display());
+    Some(path)
+}
+
 /// Changes what the fake compiler of `dir` answers to the next `compile`.
 #[allow(dead_code)]
 pub fn set_compiler_result(dir: &Path, result_json: &str) {

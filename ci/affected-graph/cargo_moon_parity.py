@@ -99,7 +99,12 @@ ALLOW_NO_CARGO_BACKING: dict[tuple[str, str], str] = {}
 # Build-scope parents injected by a task dep (e.g. `contracts:generate`), never Cargo deps.
 # Used twice: A2 must not report them as unbacked Moon edges, and A6's closure walk must not demand
 # `src/**/*` + `Cargo.toml` globs for them — they have neither tree (SMA-528).
-NON_CARGO_PARENTS = {"contracts"}
+# `paigasus-policy-compiler-rs` (SMA-774) is the second kind: `paigasus-iam-rs:test` names its
+# `build` in `deps` so that the tests can run the binary. It is a separate cargo workspace under
+# `rs/tools/`, not a crate of the `rs/` workspace, so IAM has no Cargo dependency on it and
+# `fileGroups.upstreams` (the `rs/crates/` closure) must not list it. `paigasus-iam-rs:test`
+# keys on its sources, manifest and lock through its own `inputs`.
+NON_CARGO_PARENTS = {"contracts", "paigasus-policy-compiler-rs"}
 
 # SMA-534 — the workspace-level files `lint` must key on. `rs/` has no Moon project, so without
 # these declared on the inherited lint task a Cargo.lock-only change (every Dependabot Cargo PR)

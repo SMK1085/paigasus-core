@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod support;
+
 use paigasus_iam::adapters::policy_compiler::process::{ProcessLimits, STDERR_KEEP_BYTES, run_child};
 use paigasus_iam::adapters::policy_compiler::{ProcessPolicyCompiler, probe};
 use paigasus_iam::config::ToolPoliciesConfig;
@@ -364,13 +366,14 @@ async fn probe_returns_none_for_a_foreign_protocol_version() {
     }
 }
 
-/// The real compiler, end to end. It is not part of the default run, because the IAM test task
-/// does not build `rs/tools/paigasus-policy-compiler`. Run it with
-/// `PAIGASUS_POLICY_COMPILER=<path> cargo nextest run --run-ignored only …`.
+/// The real compiler, end to end. It runs when `PAIGASUS_POLICY_COMPILER_BIN` is set, which the
+/// Moon `test` task of this crate does after it builds the binary. It skips with a printed reason
+/// when the variable is not set, and it panics when the variable names a file that is absent.
 #[tokio::test]
-#[ignore = "needs a built paigasus-policy-compiler in PAIGASUS_POLICY_COMPILER"]
 async fn the_real_compiler_answers_every_fixture_request() {
-    let path = PathBuf::from(std::env::var("PAIGASUS_POLICY_COMPILER").expect("PAIGASUS_POLICY_COMPILER is set"));
+    let Some(path) = support::real_compiler_path("the_real_compiler_answers_every_fixture_request") else {
+        return;
+    };
     let compiler = probed(&path).await;
     for (req, res) in [
         ("request_tenant_accepted.json", "result_tenant_accepted.json"),
