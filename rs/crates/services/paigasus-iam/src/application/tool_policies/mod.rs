@@ -28,6 +28,7 @@
 pub mod catalog;
 pub mod rejection;
 pub mod sets;
+pub mod wire;
 
 use std::sync::Arc;
 
@@ -43,7 +44,7 @@ use paigasus_kernel::Prn;
 use serde_json::json;
 use uuid::Uuid;
 
-use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, stored_upserts};
+use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_catalog_size, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, size_check_time, stored_next, stored_upserts};
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
 use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled};
 use crate::application::authorize::Authorize;
@@ -59,6 +60,9 @@ pub struct ToolPolicyLimits {
     pub max_source_bytes: usize,
     /// The longest window that a temporal block may use.
     pub max_window_ms: u64,
+    /// The largest catalog, measured as the encoded size of all its tools in one
+    /// `ListToolsResponse`. A write over it is a `tool-catalog-invalid` rejection.
+    pub max_catalog_response_bytes: usize,
 }
 
 /// The ports and values that [`ToolPolicyService::new`] takes.
@@ -194,11 +198,13 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     /// One page of the catalog, sorted by match key, and the current catalog revision.
     pub async fn list_tools(&self, actor: &Prn, org: Uuid, page: Page) -> Result<(Vec<StoredTool>, u64), TenancyError> {
         self.authorize_org(actor, org, Action::ReadToolCatalog).await?;
-        let state = self.repo.state(&ToolPolicySetKey::Tenant(org)).await?;
-        let tools = self.repo.catalog(org).await?;
+        // One consistent read: two reads could pair the tools of a newer write with an older
+        // revision, and a caller that writes with that revision then gets a false conflict or
+        // trusts a stale page.
+        let (tools, catalog_revision) = self.repo.catalog_snapshot(org).await?;
         let offset = usize::try_from(page.offset).unwrap_or(usize::MAX);
         let limit = usize::try_from(page.limit).unwrap_or(usize::MAX);
-        Ok((tools.into_iter().skip(offset).take(limit).collect(), state.catalog_revision))
+        Ok((tools.into_iter().skip(offset).take(limit).collect(), catalog_revision))
     }
 
     /// Imports a batch of tools, all or nothing (spec section 4.2). With `replace`, the tools that
@@ -331,7 +337,13 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         if expected_version != state.live_version {
             return Err(TenancyError::ToolPolicyVersionConflict);
         }
-        if let Some(live) = self.repo.live(&target.key).await?
+        let live = self.repo.live(&target.key).await?;
+        // `state` and `live` are two reads. A save that commits between them makes a live row
+        // newer than `expected_version`, so this save is a conflict.
+        if live.as_ref().is_some_and(|l| l.version != state.live_version) {
+            return Err(TenancyError::ToolPolicyVersionConflict);
+        }
+        if let Some(live) = live
             && live.source == source
             && self.is_current(&live)
         {
@@ -396,6 +408,12 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         };
         let next = apply_plan(&current, &plan);
         if let Err(s) = check_tool_limit(&next, self.limits.catalog.max_tools) {
+            return stop(s);
+        }
+        // The size cap: the whole new catalog as one `ListToolsResponse`, with the revision that
+        // this write gives. It also bounds the compile request and the compiled schema.
+        let encoded = wire::catalog_response_len(&stored_next(&current, &plan, size_check_time(self.clock.now())), state.catalog_revision + 1);
+        if let Err(s) = check_catalog_size(encoded, self.limits.max_catalog_response_bytes) {
             return stop(s);
         }
 
@@ -538,6 +556,7 @@ mod tests {
     const ORG: u128 = 100;
     const MAX_SOURCE: usize = 4096;
     const MAX_WINDOW_MS: u64 = 3_600_000;
+    const DEFAULT_CATALOG_CAP: usize = 2_097_152;
     const SEARCH_POLICY: &str = "@id(\"search-q\")\nforbid(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.input.q == \"x\" };\n";
     const FLOOR_DENY: &str = "@id(\"floor-deny\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource);\n";
 
@@ -575,6 +594,11 @@ mod tests {
 
     /// A harness whose actor holds nothing.
     fn bare_harness() -> Harness {
+        bare_harness_with_cap(DEFAULT_CATALOG_CAP)
+    }
+
+    /// [`bare_harness`] with another catalog size cap.
+    fn bare_harness_with_cap(max_catalog_response_bytes: usize) -> Harness {
         let orgs = InMemoryOrgs::default();
         let org_id = seed_org(&orgs.0, ORG);
         let repo = InMemoryToolPolicies::default();
@@ -593,6 +617,7 @@ mod tests {
                 catalog: CatalogLimits::default(),
                 max_source_bytes: MAX_SOURCE,
                 max_window_ms: MAX_WINDOW_MS,
+                max_catalog_response_bytes,
             },
             ids: SeqIds::default(),
             clock: FixedClock::default(),
@@ -715,6 +740,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_identical_save_after_a_concurrent_commit_is_a_version_conflict() {
+        let h = harness();
+        let first = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        // Another writer stores version 2, with the same source, between `state` and `live`.
+        h.repo.store_live_before_next_live(ToolPolicyVersion { version: 2, ..first.clone() });
+        assert_eq!(
+            h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 1).await.unwrap_err(),
+            TenancyError::ToolPolicyVersionConflict
+        );
+        assert_eq!((h.compiler.calls(), h.repo.insert_attempts()), (1, 1));
+    }
+
+    #[tokio::test]
     async fn a_stale_expected_version_is_a_version_conflict() {
         let h = harness();
         assert_eq!(
@@ -816,6 +854,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_predicate_over_the_depth_limit_is_rejected_before_the_store() {
+        use paigasus_iam_core::tool_policy::MAX_PREDICATE_DEPTH;
+        use paigasus_iam_core::tool_policy::protocol::{CmpOp, EventKind, HistoryCondition, Predicate, Scope, Shape};
+        let h = harness();
+        let mut predicate = Predicate::EventKind { kind: EventKind::Request };
+        for _ in 0..MAX_PREDICATE_DEPTH {
+            predicate = Predicate::AllOf {
+                left: Box::new(predicate),
+                right: Box::new(Predicate::AnyCatalogTool),
+            };
+        }
+        h.compiler.push(Ok(CompileOutcome::Accepted(CompiledOutput {
+            cedar_policies: STARTER_TOOL_POLICY_SOURCE.to_owned(),
+            cedar_schema_json: tenant_schema_json(&[]),
+            conditions: vec![HistoryCondition {
+                slot: "s0".into(),
+                policy_id: "deep".into(),
+                scope: Scope::Session,
+                window_ms: 1,
+                shape: Shape::CountWithin {
+                    predicate,
+                    op: CmpOp::Ge,
+                    threshold: 1,
+                },
+            }],
+        })));
+        let rejections = rejected(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!((rejections[0].reason, rejections[0].policy_id.as_deref()), (RejectionReason::PolicyInvalid, Some("deep")));
+        assert!(rejections[0].message.contains("the limit is 32"), "{}", rejections[0].message);
+        assert_eq!((h.repo.insert_attempts(), h.uow.commits()), (0, 0));
+    }
+
+    #[tokio::test]
     async fn an_oversized_source_is_rejected_without_a_compile() {
         let h = harness();
         let source = "x".repeat(MAX_SOURCE + 1);
@@ -868,6 +940,97 @@ mod tests {
         assert_eq!((tools.len(), revision), (1, 1));
         assert_eq!(audit_actions(&h), vec!["PutTool".to_string()]);
         assert_eq!(h.audit.0.lock().unwrap()[0].detail, json!({"set": "tenant", "version": null, "origin": null, "catalog_revision": 1}));
+    }
+
+    /// The size that the cap check computes for a put of `search` into an empty catalog: one
+    /// `ListToolsResponse` with revision 1 and the largest encoding of the write time.
+    fn search_put_size() -> usize {
+        let entry = build_manual("search", ToolKind::Function, Some(search_schema()), &CatalogLimits::default()).unwrap();
+        let at = catalog::size_check_time(FixedClock::default().now());
+        let stored = StoredTool {
+            entry,
+            created_at: at,
+            updated_at: at,
+        };
+        wire::catalog_response_len(&[stored], 1)
+    }
+
+    /// Fix 2 (local review pass 2): a write that makes the catalog exactly the cap succeeds.
+    #[tokio::test]
+    async fn a_catalog_write_at_the_size_cap_is_accepted() {
+        let size = search_put_size();
+        let h = bare_harness_with_cap(size);
+        for action in [Action::ManageToolCatalog, Action::ReadToolCatalog] {
+            h.authz.allow(action, &h.org_prn);
+        }
+        let out = put_search(&h, 0).await;
+        assert_eq!(out.catalog_revision, 1);
+        // The stored catalog is not larger than the check measured.
+        let (tools, revision) = h.svc.list_tools(&h.actor, h.org, Page { limit: 10, offset: 0 }).await.unwrap();
+        assert!(wire::catalog_response_len(&tools, revision) <= size);
+    }
+
+    /// Fix 2: a write one byte over the cap is a `tool-catalog-invalid` rejection that names the
+    /// size and the cap, and it stores nothing.
+    #[tokio::test]
+    async fn a_catalog_write_over_the_size_cap_is_rejected() {
+        let size = search_put_size();
+        let h = bare_harness_with_cap(size - 1);
+        h.authz.allow(Action::ManageToolCatalog, &h.org_prn);
+        let rejections = rejected(h.svc.put_tool(&h.actor, h.org, "search", ToolKind::Function, Some(search_schema()), 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!(rejections[0].reason, RejectionReason::CatalogInvalid);
+        let message = &rejections[0].message;
+        assert!(message.contains(&format!("{size}-byte")) && message.contains(&format!("limit is {} bytes", size - 1)), "{message}");
+        assert_eq!(h.repo.writes(), 0);
+        assert_eq!(h.compiler.calls(), 0);
+    }
+
+    /// Fix 2: a catalog filled to the default cap encodes below 4 MiB as one `ListToolsResponse`,
+    /// so every `ListTools` page decodes in a default tonic client.
+    #[tokio::test]
+    async fn a_catalog_at_the_default_cap_encodes_below_4_mib() {
+        let h = harness();
+        // Each tool has a schema just below the 64 KiB limit.
+        let props: serde_json::Map<String, serde_json::Value> = (0..2400).map(|i| (format!("p{i:05}"), json!({"type": "string"}))).collect();
+        let schema = json!({"type": "object", "properties": props});
+        assert!(schema.to_string().len() < CatalogLimits::default().max_input_schema_bytes);
+        let mut revision = 0;
+        let mut rejected_at = None;
+        for i in 0..200 {
+            match h.svc.put_tool(&h.actor, h.org, &format!("t{i:03}"), ToolKind::Function, Some(schema.clone()), revision).await.unwrap() {
+                WriteResult::Accepted(a) => revision = a.catalog_revision,
+                WriteResult::Rejected(r) => {
+                    assert_eq!(r[0].reason, RejectionReason::CatalogInvalid, "{r:?}");
+                    rejected_at = Some(i);
+                    break;
+                }
+            }
+        }
+        assert!(rejected_at.is_some(), "the cap never stopped a write");
+        let (tools, rev) = h.svc.list_tools(&h.actor, h.org, Page { limit: 1000, offset: 0 }).await.unwrap();
+        let full = wire::catalog_response_len(&tools, rev);
+        let one = full / tools.len();
+        assert!(full <= DEFAULT_CATALOG_CAP && full + one > DEFAULT_CATALOG_CAP, "the catalog is not full: {full} bytes, {one} per tool");
+        assert!(full < crate::config::TONIC_DEFAULT_DECODE_LIMIT_BYTES, "{full} bytes");
+    }
+
+    /// Fix 3 (local review pass 2): a catalog write that commits during `list_tools` is in both
+    /// the tools and the revision, or in neither. Two reads gave the new tool with the old
+    /// revision.
+    #[tokio::test]
+    async fn list_tools_returns_the_tools_and_the_revision_of_one_observation() {
+        let h = harness();
+        put_search(&h, 0).await;
+        let mut extra = h.svc.list_tools(&h.actor, h.org, Page { limit: 10, offset: 0 }).await.unwrap().0.remove(0);
+        extra.entry.name = paigasus_iam_core::tool_policy::ToolName {
+            display: "fetch".to_string(),
+            name_key: "fetch".to_string(),
+        };
+        h.repo.write_before_next_catalog_read(h.org, extra);
+        let (tools, revision) = h.svc.list_tools(&h.actor, h.org, Page { limit: 10, offset: 0 }).await.unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t.entry.name.name_key.as_str()).collect();
+        assert_eq!((names, revision), (vec!["fetch", "search"], 2), "the tools and the revision come from two observations");
     }
 
     #[tokio::test]

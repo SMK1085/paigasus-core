@@ -62,7 +62,7 @@ evaluates that format.
 - A gateway that accepts a compiled set it cannot fully evaluate. A missing slot or a malformed
   set always fails closed.
 - A compiler child process that can read IAM's secrets, or can stop IAM through memory or
-  process exhaustion.
+  process exhaustion. §5.2 names the controls and their limits.
 
 ## 2. Constraints
 
@@ -227,6 +227,25 @@ increments it.
 Limits (my call, set in `iam.toml`): at most 500 tools per organization, 64 KiB per input schema,
 and a nesting depth of 8. A write over a limit is rejected.
 
+**The catalog size cap.** `max_catalog_response_bytes` (default 2 MiB = 2 097 152 bytes) limits
+the whole catalog of one organization. IAM measures the catalog after the write as one
+`ListToolsResponse` with all its tools, encoded with prost. The gRPC adapter uses the same `Tool`
+conversion. A write over the cap is a `tool-catalog-invalid` rejection. Its message names the size
+and the cap. The size check uses the second of the write time with the largest nanosecond value.
+So the stored catalog is never larger than the measured one. The value must be above 0 and below
+4 MiB, the default decode limit of tonic. So every `ListTools` page decodes in a default client.
+
+The cap also bounds the compile request and the compile result (§5.2). Measured with the release
+compiler and a catalog at the cap, the largest result is 2 233 057 bytes (string properties). The
+3 MiB `max_result_bytes` holds it. At a 3 MiB cap the same form gives a 3 262 597-byte result,
+which is over `max_result_bytes`. So the default is 2 MiB, not 3 MiB. An operator who raises the
+cap must also raise `max_result_bytes`.
+
+**A consistent list.** `ListTools` reads the tools and the catalog revision in one repository
+call (`catalog_snapshot`). Postgres runs it as one `REPEATABLE READ`, read-only transaction. So a
+catalog write that commits during the read is in both values or in neither. Two plain reads could
+return the new tools with the old revision.
+
 **Built-in tools.** The gateway sees more kinds of call than JSON functions (`Computer`,
 `LocalShell`, `Shell`, `ApplyPatch`, `ToolSearch`, `McpApprovalRequest` and others). An admin can
 add such a tool manually by the name that the gateway puts in `ToolCall`. It gets an empty input
@@ -305,13 +324,14 @@ JSON Schema maps to Cedar as follows:
 | `string` (any `format`) | `String` |
 | `integer` | `Long` |
 | `boolean` | `Bool` |
-| `array` with a mappable `items` | `Set<…>` |
+| `array` with a mappable `items` that do not allow `null` | `Set<…>` |
 | `object` with `properties` | a record. A property is required only if it is in `required`. |
 | `["T", "null"]`, or `anyOf: [T, {"type": "null"}]` | an optional attribute of type T |
-| `number`, other `oneOf` / `anyOf` / `allOf`, `$ref`, `additionalProperties` with no `properties`, `null` alone, other type lists | not mapped |
+| `number`, other `oneOf` / `anyOf` / `allOf`, `$ref`, `additionalProperties` with no `properties`, `null` alone, other type lists, an `array` whose `items` allow `null` | not mapped |
 
 The nullable row matters, because OpenAI strict mode writes every optional field as
-`["string", "null"]`.
+`["string", "null"]`. A Cedar set cannot hold `null`, so an array whose `items` allow `null`
+(for example `["integer", "null"]`) is not mapped.
 
 A field that does not map is left out of the record. It is listed in `dropped_fields`, and the
 import result returns it. A policy that reads such a field fails validation. The rejection then
@@ -348,7 +368,9 @@ audit trail of the rules.
 
 One save replaces the whole set and makes a new version. The whole set compiles as one unit,
 because validation and stable slot names work at set level. A save of a source that is
-byte-identical to the live source makes no new version and returns the live version. There is one
+byte-identical to the live source makes no new version and returns the live version. IAM reads
+the state and the live row in two reads. If the live row is newer than `expected_version`, the
+save is a `ToolPolicyVersionConflict`. There is one
 exception. If the compiler generation or the schema revision of the live version is not current,
 the save compiles the source again and makes a new version. In PR 1, this is the only way to clear
 `tool-policy-recompile-pending`.
@@ -466,8 +488,24 @@ control for the meaning.
 
 The child process runs with these limits. Each one has a test.
 
-- `env_clear()`: the child gets no environment from IAM, so it cannot read the database, NATS or
-  Redis credentials. It gets only `PATH` and `LANG`, if it needs them.
+- `env_clear()`: the child gets no environment of its own. This control alone does not hide the
+  database, NATS and Redis credentials of IAM. On Linux, a process under the same UID can read
+  `/proc/<IAM pid>/environ` and `/proc/<IAM pid>/mem` while IAM is dumpable.
+- IAM is not dumpable. When the feature is on, IAM calls `prctl(PR_SET_DUMPABLE, 0)` on Linux
+  before the boot probe starts the first child. Then the kernel refuses `/proc/<IAM pid>/environ`,
+  `/proc/<IAM pid>/mem` and `ptrace` to a process without `CAP_SYS_PTRACE`, also under the same
+  UID. If the call fails, IAM logs an error and keeps the feature off. IAM serves its other RPCs,
+  in the same way as after a failed probe: only the compiler child needs this control. IAM logs
+  the result once at boot.
+  - Side effects: the kernel writes no core dump of IAM, and the `/proc/<IAM pid>` files belong to
+    root. A debugger or a profiler that attaches to IAM needs `CAP_SYS_PTRACE`.
+  - Limits: the control does not stop a process with `CAP_SYS_PTRACE` or root with that
+    capability. The container must not grant it. macOS has no `PR_SET_DUMPABLE`. There, IAM logs a
+    warning, and the control is absent. macOS is a development host only.
+  - A test proves it on Linux. It runs a fake compiler that reads `/proc/$PPID/environ` through
+    the production spawn code. The read succeeds under a dumpable parent (the positive control)
+    and gives zero bytes under a non-dumpable parent. Each case runs in its own test process,
+    because the call cannot be undone.
 - An empty, temporary working directory, and no inherited file descriptors except the three
   pipes.
 - `RLIMIT_AS` (default 1 GiB) and `RLIMIT_CPU` (default 8 s), set in `pre_exec`. The CPU limit
@@ -478,13 +516,17 @@ The child process runs with these limits. Each one has a test.
 - IAM writes stdin and reads stdout and stderr at the same time, so the pipes cannot deadlock.
 - On a timeout, IAM kills and reaps the child (`kill_on_drop`).
 - Limits on the size: a 256 KiB source, a 3 MiB result, and a 10 s timeout. The defaults are set
-  in `iam.toml`.
+  in `iam.toml`. The catalog size cap (§4.2) bounds the schema in the request and the result.
+  Measured at the 2 MiB cap: a compile request of up to 1 278 659 bytes, a result of up to
+  2 233 057 bytes, and 1.6 s of wall time for the release compiler on the development Mac. A
+  debug build needs about 22 s, so it is over the 8 s CPU limit. The image ships a release build.
 - Stderr is captured, truncated and logged. It is never returned to the caller.
 
 ### 5.3 Compile steps
 
 1. Parse the source. Every policy must have a unique `@id`. A missing or duplicate `@id` rejects
-   the save. The `@id` grammar is `^[a-z0-9][a-z0-9_-]{0,63}$`. Floor `@id` values must start with
+   the save. A policy with more than one `@id` annotation also rejects the save, because the
+   emitted Cedar keeps only one of them. The `@id` grammar is `^[a-z0-9][a-z0-9_-]{0,63}$`. Floor `@id` values must start with
    `floor-`, and tenant `@id` values must not. So the slot names of the two sets cannot collide.
    The `@id` gives the distincter of the policy's `lower_many` entry (D1).
 2. Read `@scope` on each policy: `session` (the default), `principal` or `key`. Any other value
@@ -524,13 +566,17 @@ The plan also checks what Dogwood uses `rhai` for. If tenant source can reach `r
 validation or lowering, the plan sets operation limits for it, or the compiler rejects that
 syntax.
 
-IAM then does two more checks in its own process, with the `cedar-policy` 4.14 that
+IAM then does three more checks in its own process, with the `cedar-policy` 4.14 that
 `paigasus-iam-core` already links:
 
 9. Parse and validate `cedar_policies` against `cedar_schema`. A failure rejects the save with
    `tool-policy-invalid`. This catches a policy that passes under 4.11 but fails under the
    gateway's Cedar version.
 10. For the floor, check the `forbid` effect a second time.
+11. Check the depth of each history condition predicate. A predicate deeper than 32 nodes rejects
+    the save with `tool-policy-invalid`. Each `&&` term and each event argument adds one node.
+    prost does not decode a message that nests deeper than 100 levels, and each `all_of` adds two
+    levels. So a deeper set could be stored, but IAM and the gateway could not read it again.
 
 ### 5.4 Output: `CompiledToolPolicySet`
 
@@ -884,7 +930,8 @@ core NATS message is lost.
 - **PR 3:** identical, different and failed results; a restart that does not write a second held
   row; the advisory lock; the older-replica rule; accept, stale accept and discard.
 - **Mutation proof:** for each gate rule in this design (the shape check, both floor checks, the
-  4.14 check, the coupling check, the version check, the one-live index, `env_clear`), the plan
+  4.14 check, the coupling check, the version check, the one-live index, `env_clear`, the
+  non-dumpable parent, the catalog size cap, the consistent list), the plan
   deletes the rule once and shows that a test fails.
 
 ## 11. Left to the builder
@@ -996,3 +1043,24 @@ The final review of PR 1 found five more places where this spec did not agree wi
 - **§5.2.** The default `RLIMIT_CPU` is 8 s, not 15 s, so that it can fire before the 10 s timeout.
 - **§6.2.** Each attempt of the boot probe has its own 3 s limit. Before, one attempt could use the
   full 10 s compile timeout, and readiness could wait 32 s.
+
+The first local review of PR 1 found four more gaps.
+
+- **§4.3.** An array whose `items` allow `null` is not mapped. Before, it mapped to a set, and the
+  `null` element had no Cedar form.
+- **§4.4.** An identical save checks that the live row is not newer than `expected_version`.
+  Before, a concurrent save could make it return a newer version with no conflict.
+- **§5.3 step 1.** A policy with more than one `@id` rejects the save.
+- **§5.3 step 11.** New: a predicate deeper than 32 nodes rejects the save, so that every stored
+  set decodes again.
+
+The second local review of PR 1 found three more gaps. Sven approved each fix.
+
+- **§5.2.** IAM makes itself non-dumpable on Linux before the first compiler child starts.
+  Before, a child under the same UID could read `/proc/<IAM pid>/environ`, and the spec said that
+  the child "cannot read" the credentials.
+- **§4.2.** New: `max_catalog_response_bytes` (default 2 MiB) caps the whole catalog as one
+  `ListToolsResponse`. Before, a catalog could pass the 4 MiB tonic limit and make every compile
+  result too large. A 3 MiB default was measured and is too large for the 3 MiB result limit.
+- **§4.2.** `ListTools` reads the tools and the catalog revision in one consistent read. Before,
+  two reads could return new tools with an old revision.

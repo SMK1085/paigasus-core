@@ -47,6 +47,10 @@ pub trait ToolPolicyRepository: Send + Sync {
     async fn state(&self, key: &ToolPolicySetKey) -> Result<ToolPolicyState, RepositoryError>;
     /// The catalog of an organization, sorted by `name_key`.
     async fn catalog(&self, org: Uuid) -> Result<Vec<StoredTool>, RepositoryError>;
+    /// The catalog of an organization, sorted by `name_key`, and its catalog revision, from one
+    /// consistent read. A catalog write that commits during the call is in both values or in
+    /// neither. The revision is 0 when the set has no state row.
+    async fn catalog_snapshot(&self, org: Uuid) -> Result<(Vec<StoredTool>, u64), RepositoryError>;
     /// The live version of a set.
     async fn live(&self, key: &ToolPolicySetKey) -> Result<Option<ToolPolicyVersion>, RepositoryError>;
     /// One version of a set. Only a live or superseded version is returned.

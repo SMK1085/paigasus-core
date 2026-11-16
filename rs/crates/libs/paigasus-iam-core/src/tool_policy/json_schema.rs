@@ -142,6 +142,10 @@ fn map_named(t: &str, obj: &Map<String, Value>, depth: usize, max_depth: usize, 
                 };
                 return Ok(drop_field(path, &reason, dropped));
             };
+            // A Cedar set cannot hold null, so an element that allows null has no form.
+            if m.nullable {
+                return Ok(drop_field(path, "array items that allow null are not mapped", dropped));
+            }
             dropped.append(&mut inner);
             json!({ "type": "Set", "element": m.ty })
         }
@@ -243,6 +247,25 @@ mod tests {
         assert!(attrs(&rec).is_empty());
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped[0].path, "xs");
+    }
+
+    #[test]
+    fn an_array_of_nullable_items_is_dropped() {
+        let (rec, dropped) = map(json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "array", "items": {"type": ["integer", "null"]}},
+                "b": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+                "keep": {"type": ["array", "null"], "items": {"type": "integer"}}
+            }
+        }));
+        let a = attrs(&rec);
+        assert_eq!(a.keys().map(String::as_str).collect::<Vec<_>>(), ["keep"]);
+        assert_eq!(a["keep"], json!({"type": "Set", "element": {"type": "Long"}, "required": false}));
+        let mut paths: Vec<&str> = dropped.iter().map(|d| d.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, ["a", "b"]);
+        assert!(dropped.iter().all(|d| d.reason == "array items that allow null are not mapped"));
     }
 
     #[test]

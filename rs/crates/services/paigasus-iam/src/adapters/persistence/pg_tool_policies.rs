@@ -20,7 +20,9 @@ use paigasus_iam_core::tool_policy::{
 };
 use paigasus_iam_core::{ConflictKind, RepositoryError, Transaction};
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Statement};
+use sea_orm::{
+    AccessMode, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -237,6 +239,25 @@ impl ToolPolicyRepository for PgToolPolicies {
             .await
             .map_err(map_err)?;
         rows.into_iter().map(model_to_tool).collect()
+    }
+
+    async fn catalog_snapshot(&self, org: Uuid) -> Result<(Vec<StoredTool>, u64), RepositoryError> {
+        // REPEATABLE READ: both SELECTs read one snapshot, so a catalog write that commits between
+        // them is in neither. Two plain reads could return the new tools with the old revision.
+        let txn = self.db.begin_with_config(Some(IsolationLevel::RepeatableRead), Some(AccessMode::ReadOnly)).await.map_err(map_err)?;
+        let revision = match state::Entity::find_by_id(set_key(&ToolPolicySetKey::Tenant(org))).one(&txn).await.map_err(map_err)? {
+            Some(m) => model_to_state(&m)?.catalog_revision,
+            None => 0,
+        };
+        let rows = catalog::Entity::find()
+            .filter(catalog::Column::OrgId.eq(org))
+            .order_by_asc(catalog::Column::NameKey)
+            .all(&txn)
+            .await
+            .map_err(map_err)?;
+        txn.commit().await.map_err(map_err)?;
+        let tools = rows.into_iter().map(model_to_tool).collect::<Result<Vec<_>, _>>()?;
+        Ok((tools, revision))
     }
 
     async fn live(&self, key: &ToolPolicySetKey) -> Result<Option<ToolPolicyVersion>, RepositoryError> {

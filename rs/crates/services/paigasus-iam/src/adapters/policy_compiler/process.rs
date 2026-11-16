@@ -2,8 +2,10 @@
 
 //! One run of the policy compiler as a hardened child process (spec section 5.2).
 //!
-//! - `env_clear()`: the child gets no environment, so it cannot read the database, NATS or Redis
-//!   credentials of IAM.
+//! - `env_clear()`: the child gets no environment of its own. This does not hide the environment
+//!   of IAM: on Linux a process under the same UID can read `/proc/<pid>/environ` and
+//!   `/proc/<pid>/mem` of a dumpable process. So `main` calls [`make_parent_non_dumpable`] before
+//!   the boot probe starts the first child. Then the kernel refuses these reads to the child.
 //! - An empty, temporary working directory. The child inherits only the three pipes: Rust opens
 //!   every other descriptor with `O_CLOEXEC`.
 //! - `RLIMIT_CPU` everywhere, and `RLIMIT_AS` on Linux only (macOS refuses it), set in
@@ -70,6 +72,48 @@ impl ProcessLimits {
     /// Whether this OS applies `RLIMIT_AS` to the child.
     pub const fn rlimit_as_applied() -> bool {
         cfg!(target_os = "linux")
+    }
+}
+
+/// The result of [`make_parent_non_dumpable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentHardening {
+    /// Linux: IAM is not dumpable now. A child under the same UID cannot read
+    /// `/proc/<IAM pid>/environ` or `/proc/<IAM pid>/mem`.
+    Applied,
+    /// This OS has no `PR_SET_DUMPABLE`. IAM changed nothing.
+    NotSupported,
+}
+
+/// Makes the IAM process not dumpable (`prctl(PR_SET_DUMPABLE, 0)`), on Linux only.
+///
+/// The kernel then refuses `/proc/<pid>/environ`, `/proc/<pid>/mem` and `ptrace` to a process
+/// that has no `CAP_SYS_PTRACE`, also under the same UID. The kernel also gives the
+/// `/proc/<pid>` files to root and writes no core dump of IAM. The call cannot be undone in a
+/// useful way, so a test calls it in a separate process only.
+///
+/// # Errors
+///
+/// The `prctl` error, or an error when `PR_GET_DUMPABLE` does not report 0 after the call.
+pub fn make_parent_non_dumpable() -> std::io::Result<ParentHardening> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `prctl` with `PR_SET_DUMPABLE` and `PR_GET_DUMPABLE` reads and writes no memory
+        // of this process. The unused arguments are 0, as the man page requires.
+        let set = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong) };
+        if set != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: as above.
+        let now = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong) };
+        if now != 0 {
+            return Err(std::io::Error::other(format!("PR_GET_DUMPABLE reports {now} after PR_SET_DUMPABLE 0")));
+        }
+        Ok(ParentHardening::Applied)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(ParentHardening::NotSupported)
     }
 }
 

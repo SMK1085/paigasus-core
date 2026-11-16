@@ -85,6 +85,58 @@ async fn state_is_zero_for_an_org_with_no_row() {
     assert!(repo.catalog(org).await.unwrap().is_empty());
 }
 
+/// `catalog_snapshot` reads the tools and the revision in one snapshot. A writer adds one tool per
+/// write, so revision N always holds N tools. Readers run during the writes. Each read must give a
+/// matching pair. Two plain reads can give N+1 tools with revision N.
+#[tokio::test]
+async fn catalog_snapshot_pairs_the_tools_with_their_revision_during_writes() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    assert_eq!(repo.catalog_snapshot(org).await.unwrap(), (vec![], 0), "no state row gives revision 0");
+
+    const WRITES: usize = 150;
+    let writer = {
+        let repo = repo.clone();
+        let uow = SeaOrmUnitOfWork::new(db.clone());
+        tokio::spawn(async move {
+            for i in 0..WRITES {
+                let tx = uow.begin().await.unwrap();
+                repo.lock_state_in(&*tx, &ToolPolicySetKey::Tenant(org)).await.unwrap();
+                repo.apply_catalog_in(&*tx, org, &[tool(&format!("t{i:04}"), ToolKind::Custom, None, json!({}))], &[], Utc::now())
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        })
+    };
+    let mut readers = Vec::new();
+    for _ in 0..4 {
+        let repo = repo.clone();
+        readers.push(tokio::spawn(async move {
+            let mut reads = 0usize;
+            loop {
+                let (tools, revision) = repo.catalog_snapshot(org).await.unwrap();
+                assert_eq!(tools.len() as u64, revision, "the tools and the revision come from two snapshots");
+                reads += 1;
+                if revision as usize == WRITES {
+                    return reads;
+                }
+            }
+        }));
+    }
+    writer.await.unwrap();
+    let mut total = 0;
+    for r in readers {
+        total += r.await.unwrap();
+    }
+    assert!(total > WRITES, "the readers ran during the writes ({total} reads)");
+    let (tools, revision) = repo.catalog_snapshot(org).await.unwrap();
+    assert_eq!((tools.len(), revision), (WRITES, WRITES as u64));
+}
+
 #[tokio::test]
 async fn apply_catalog_upserts_deletes_and_bumps_the_revision() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {

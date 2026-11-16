@@ -359,6 +359,7 @@ impl AppState {
                 },
                 max_source_bytes: cfg.max_source_bytes,
                 max_window_ms: cfg.max_window_secs.saturating_mul(1000),
+                max_catalog_response_bytes: cfg.max_catalog_response_bytes,
             },
             ids: KernelIdGenerator,
             clock: SystemClock,

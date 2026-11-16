@@ -412,6 +412,44 @@ mod tests {
         assert_eq!((set.kind, set.org_id.as_str(), set.catalog_revision), (pb::ToolPolicySetKind::Floor as i32, "", 0));
     }
 
+    /// A compiled set with one condition whose predicate is a left-deep `all_of` chain of
+    /// `depth` nodes.
+    fn deep_set(depth: usize) -> Vec<u8> {
+        let mut predicate = Predicate::EventKind { kind: EventKind::Request };
+        for _ in 1..depth {
+            predicate = Predicate::AllOf {
+                left: Box::new(predicate),
+                right: Box::new(Predicate::Tool { name_key: "t".into() }),
+            };
+        }
+        let out = CompiledOutput {
+            cedar_policies: String::new(),
+            cedar_schema_json: json!({}),
+            conditions: vec![condition("s0", Scope::Session, 1, Shape::Formerly { predicate })],
+        };
+        let meta = CompiledMeta {
+            key: ToolPolicySetKey::Floor,
+            version: 1,
+            compiler_generation: 1,
+            schema_revision: 1,
+            catalog_revision: None,
+            max_window_ms: 1,
+            catalog_names: Vec::new(),
+        };
+        encode_compiled(&meta, &out)
+    }
+
+    /// The reason for `MAX_PREDICATE_DEPTH`: prost refuses a message nested more than 100
+    /// levels, and each `all_of` adds two. A set at the limit decodes again, with room for a
+    /// wrapper message. A set of 50 nodes (49 `all_of`) encodes, but never decodes again.
+    #[test]
+    fn a_set_at_the_predicate_depth_limit_decodes_and_a_deeper_one_does_not() {
+        use paigasus_iam_core::tool_policy::MAX_PREDICATE_DEPTH;
+        assert!(decode_compiled(&deep_set(MAX_PREDICATE_DEPTH)).is_ok());
+        assert!(decode_compiled(&deep_set(49)).is_ok());
+        assert_eq!(decode_compiled(&deep_set(50)), Err(TenancyError::Internal));
+    }
+
     #[test]
     fn bytes_that_are_not_a_compiled_set_are_internal() {
         assert_eq!(decode_compiled(&[0xff, 0xff, 0xff]), Err(TenancyError::Internal));

@@ -1958,6 +1958,8 @@ struct ToolPolicyData {
 pub struct InMemoryToolPolicies {
     data: Arc<Mutex<ToolPolicyData>>,
     concurrent: Arc<Mutex<Option<ConcurrentChange>>>,
+    live_before_next_live: Arc<Mutex<Option<ToolPolicyVersion>>>,
+    write_before_next_catalog_read: Arc<Mutex<Option<(Uuid, StoredTool)>>>,
     writes: Arc<AtomicUsize>,
     insert_attempts: Arc<AtomicUsize>,
 }
@@ -1968,6 +1970,30 @@ impl InMemoryToolPolicies {
     /// Make `change` inside the next `lock_state_in`.
     pub fn change_before_next_lock(&self, change: ConcurrentChange) {
         *self.concurrent.lock().unwrap() = Some(change);
+    }
+
+    /// Store `v` as the new live version inside the next `live` call, after the caller read
+    /// `state`: a save that another writer committed between the two reads.
+    pub fn store_live_before_next_live(&self, v: ToolPolicyVersion) {
+        *self.live_before_next_live.lock().unwrap() = Some(v);
+    }
+
+    /// Commit a catalog write (`tool` upserted into `org`, the catalog revision up by 1) at the
+    /// start of the next `catalog` or `catalog_snapshot` call: a write that another writer
+    /// committed after the caller read `state`. `catalog_snapshot` reads after the write, in one
+    /// observation, like the REPEATABLE READ transaction of the Postgres adapter.
+    pub fn write_before_next_catalog_read(&self, org: Uuid, tool: StoredTool) {
+        *self.write_before_next_catalog_read.lock().unwrap() = Some((org, tool));
+    }
+
+    fn apply_pending_catalog_write(&self, data: &mut ToolPolicyData) {
+        if let Some((org, tool)) = self.write_before_next_catalog_read.lock().unwrap().take() {
+            let key = ToolPolicySetKey::Tenant(org);
+            let mut state = Self::state_of(data, &key);
+            state.catalog_revision += 1;
+            data.states.insert(key, state);
+            data.catalogs.entry(org).or_default().insert(tool.entry.name.name_key.clone(), tool);
+        }
     }
 
     /// The calls of `apply_catalog_in` and `insert_live_version_in` that changed the store.
@@ -2011,11 +2037,33 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
     }
 
     async fn catalog(&self, org: Uuid) -> Result<Vec<StoredTool>, RepositoryError> {
-        Ok(self.data.lock().unwrap().catalogs.get(&org).map(|c| c.values().cloned().collect()).unwrap_or_default())
+        let mut data = self.data.lock().unwrap();
+        self.apply_pending_catalog_write(&mut data);
+        Ok(data.catalogs.get(&org).map(|c| c.values().cloned().collect()).unwrap_or_default())
+    }
+
+    async fn catalog_snapshot(&self, org: Uuid) -> Result<(Vec<StoredTool>, u64), RepositoryError> {
+        // One lock for both values: one observation.
+        let mut data = self.data.lock().unwrap();
+        self.apply_pending_catalog_write(&mut data);
+        let tools = data.catalogs.get(&org).map(|c| c.values().cloned().collect()).unwrap_or_default();
+        Ok((tools, Self::state_of(&data, &ToolPolicySetKey::Tenant(org)).catalog_revision))
     }
 
     async fn live(&self, key: &ToolPolicySetKey) -> Result<Option<ToolPolicyVersion>, RepositoryError> {
-        let data = self.data.lock().unwrap();
+        let mut data = self.data.lock().unwrap();
+        if let Some(v) = self.live_before_next_live.lock().unwrap().take() {
+            let mut state = Self::state_of(&data, &v.key);
+            state.live_version = v.version;
+            data.states.insert(v.key, state);
+            let versions = data.versions.entry(v.key).or_default();
+            for old in versions.iter_mut() {
+                if old.status == VersionStatus::Live {
+                    old.status = VersionStatus::Superseded;
+                }
+            }
+            versions.push(v);
+        }
         Ok(data.versions.get(key).and_then(|vs| vs.iter().find(|v| v.status == VersionStatus::Live).cloned()))
     }
 

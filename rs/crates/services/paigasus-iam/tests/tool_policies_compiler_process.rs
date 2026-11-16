@@ -522,3 +522,200 @@ async fn the_real_compiler_answers_every_fixture_request() {
         assert_eq!(got, want, "{req}");
     }
 }
+
+// ---- The catalog size cap (spec section 4.2) against the real compiler --------------------------
+
+/// The largest catalog of `make(i)` tools whose `ListToolsResponse` is at most `cap` bytes.
+fn catalog_at_cap(cap: usize, max_tools: usize, make: impl Fn(usize) -> paigasus_iam_core::tool_policy::ToolEntry) -> Vec<paigasus_iam_core::tool_policy::StoredTool> {
+    use paigasus_iam::application::tool_policies::wire::catalog_response_len;
+    let at = chrono::DateTime::from_timestamp(1_800_000_000, 999_999_999).expect("a time");
+    let mut tools = Vec::new();
+    for i in 0..max_tools {
+        tools.push(paigasus_iam_core::tool_policy::StoredTool {
+            entry: make(i),
+            created_at: at,
+            updated_at: at,
+        });
+        if catalog_response_len(&tools, 1) > cap {
+            tools.pop();
+            break;
+        }
+    }
+    tools
+}
+
+/// A catalog at the default `max_catalog_response_bytes` gives a compile request and a compiled
+/// result that the default limits accept. Five catalog forms: four with schemas near the 64 KiB
+/// limit (string, boolean, array and nested properties, so the Cedar type is a large part of the
+/// wire size), and one with the most tools of a small schema (the per-action overhead of the
+/// schema is the largest part). It prints the sizes and the wall time of each run.
+#[tokio::test]
+async fn a_catalog_at_the_size_cap_compiles_within_the_default_limits() {
+    use paigasus_iam::application::tool_policies::wire::catalog_response_len;
+    use paigasus_iam_core::tool_policy::{CatalogLimits, SetKind, ToolKind, build_manual, tenant_schema_json};
+    let Some(path) = support::real_compiler_path("a_catalog_at_the_size_cap_compiles_within_the_default_limits") else {
+        return;
+    };
+    let defaults = ToolPoliciesConfig::default();
+    let limits = CatalogLimits::default();
+    // One schema of `p00000: string` plus as many `property` values as fit in 60 000 bytes.
+    let filled = |property: Value| {
+        let mut props = serde_json::Map::new();
+        props.insert("p00000".to_string(), serde_json::json!({"type": "string"}));
+        for i in 1.. {
+            props.insert(format!("p{i:05}"), property.clone());
+            if serde_json::json!({"type": "object", "properties": props}).to_string().len() > 60_000 {
+                props.remove(&format!("p{i:05}"));
+                break;
+            }
+        }
+        serde_json::json!({"type": "object", "properties": props})
+    };
+    let forms = [
+        ("strings", filled(serde_json::json!({"type": "string"}))),
+        ("booleans", filled(serde_json::json!({"type": "boolean"}))),
+        ("arrays", filled(serde_json::json!({"type": "array", "items": {"type": "string"}}))),
+        (
+            "nested",
+            filled(serde_json::json!({"type": "object", "properties": {"a": {"type": "object", "properties": {"b": {"type": "string"}}}}})),
+        ),
+        ("small", serde_json::json!({"type": "object", "properties": {"p00000": {"type": "string"}, "n": {"type": "integer"}}})),
+    ];
+    // The image ships a release build (`rs/Dockerfile`), and the Moon task builds a debug binary.
+    // A debug build is about 14 times slower, so it runs only the form with the largest result
+    // (`strings`), and it does not check the default CPU and wall-clock limits.
+    let release = path.components().any(|c| c.as_os_str() == "release");
+    for (form, schema) in forms {
+        if !release && form != "strings" {
+            continue;
+        }
+        let tools = catalog_at_cap(defaults.max_catalog_response_bytes, limits.max_tools, |i| {
+            build_manual(&format!("t{i:03}"), ToolKind::Function, Some(schema.clone()), &limits).expect("a valid tool")
+        });
+        let wire = catalog_response_len(&tools, 1);
+        let entries: Vec<_> = tools.iter().map(|t| t.entry.clone()).collect();
+        // The source names a tool and holds a temporal block, so the result schema has a slot.
+        let source = "@id(\"t-rate\")\npermit (principal, action == Pgs::Gateway::Action::\"t000\", resource)\nwhen temporal { count_within(1h, Pgs::Gateway::Action::\"t000\"::request{ input.p00000: \"x\" }) <= 2 };\n".to_string();
+        let request = CompileRequest {
+            protocol_version: PROTOCOL_VERSION,
+            kind: SetKind::Tenant,
+            source,
+            schema_json: tenant_schema_json(&entries),
+            max_window_ms: defaults.max_window_secs * 1000,
+        };
+        let stdin = serde_json::to_vec(&request).expect("serialize");
+        // Measure the real stdout with high limits: a debug build of the compiler needs more than
+        // the default 8 s of CPU for a catalog near the cap.
+        let measure = ProcessLimits::from_config(&ToolPoliciesConfig {
+            max_result_bytes: 64 * 1024 * 1024,
+            compile_timeout_ms: 120_000,
+            rlimit_cpu_secs: 110,
+            ..defaults.clone()
+        });
+        let started = Instant::now();
+        let raw = run_child(&path, &["compile"], &stdin, &measure).await.expect("the compiler runs");
+        let elapsed_ms = started.elapsed().as_millis();
+        assert!(raw.status.success(), "{form}: status {:?}, stdin {} bytes: {}", raw.status, stdin.len(), raw.stderr_truncated);
+        let result: Value = serde_json::from_slice(&raw.stdout).expect("JSON");
+        assert_eq!(result["outcome"], "accepted", "{form}: {result}");
+        let schema_len = result["compiled"]["cedar_schema_json"].to_string().len();
+        println!(
+            "CAP_MEASURE form={form} tools={} list_tools_response={wire} compile_request={} result={} result_schema={schema_len} wall_ms={elapsed_ms} cap={} max_result={}",
+            tools.len(),
+            stdin.len(),
+            raw.stdout.len(),
+            defaults.max_catalog_response_bytes,
+            defaults.max_result_bytes
+        );
+        assert!(raw.stdout.len() <= defaults.max_result_bytes, "{form}: the result is {} bytes", raw.stdout.len());
+        if release {
+            let compiler = probed(&path).await;
+            assert!(
+                matches!(compiler.compile(&request).await, Ok(CompileOutcome::Accepted(_))),
+                "{form}: the default limits refuse the compile"
+            );
+        } else {
+            println!("CAP_MEASURE form={form}: not a release build, so the default CPU and time limits are not checked");
+        }
+    }
+}
+
+// ---- The parent environment (spec section 5.2): `make_parent_non_dumpable` -------------------
+//
+// `PR_SET_DUMPABLE 0` cannot be undone in a useful way, so each case runs in a new process of
+// this test binary: `parent_environ_case` below. The outer test starts it once as a dumpable
+// parent (the positive control) and once as a non-dumpable parent (the check).
+
+/// The variable that selects the case of [`parent_environ_case`]. Without it the case returns.
+#[cfg(target_os = "linux")]
+const ENVIRON_CASE: &str = "PAIGASUS_TEST_ENVIRON_CASE";
+/// The marker that the case process holds in its own environment.
+#[cfg(target_os = "linux")]
+const ENVIRON_MARKER: &str = "PAIGASUS_TEST_PARENT_SECRET=marker-7f3c1d";
+
+/// One case process. It is a no-op unless the outer test set [`ENVIRON_CASE`]. For
+/// `non-dumpable` it calls the production `make_parent_non_dumpable` first. Then it runs a fake
+/// compiler through the production `run_child`. The fake prints `/proc/$PPID/environ`, which is
+/// the environment of this process. The verdict line goes to stdout for the outer test.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn parent_environ_case() {
+    use paigasus_iam::adapters::policy_compiler::process::{ParentHardening, make_parent_non_dumpable};
+    let Ok(case) = std::env::var(ENVIRON_CASE) else { return };
+    match case.as_str() {
+        "dumpable" => {}
+        "non-dumpable" => assert_eq!(make_parent_non_dumpable().expect("prctl"), ParentHardening::Applied),
+        other => panic!("unknown case {other}"),
+    }
+    let dir = TempDir::new().expect("tempdir");
+    // The child has no PATH, so `/bin/cat` is absolute. A refused read prints nothing to stdout.
+    let path = script(&dir, "peek", "/bin/cat /proc/$PPID/environ 2>/dev/null\nexit 0");
+    let output = run_child(&path, &["compile"], b"", &limits(10_000)).await.expect("the fake runs");
+    assert!(output.status.success());
+    let marker = ENVIRON_MARKER.as_bytes();
+    let read = output.stdout.windows(marker.len()).any(|w| w == marker);
+    println!("ENVIRON_VERDICT case={case} bytes={} marker_read={read}", output.stdout.len());
+}
+
+/// Runs [`parent_environ_case`] in a new process of this test binary. Returns its verdict line.
+#[cfg(target_os = "linux")]
+fn run_environ_case(case: &str) -> String {
+    let exe = std::env::current_exe().expect("the test binary");
+    let (key, value) = ENVIRON_MARKER.split_once('=').expect("the marker");
+    let out = std::process::Command::new(exe)
+        .args(["--exact", "parent_environ_case", "--nocapture", "--test-threads", "1"])
+        .env(ENVIRON_CASE, case)
+        .env(key, value)
+        .output()
+        .expect("start the case process");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "the {case} case failed:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+    stdout
+        .lines()
+        .find(|l| l.contains("ENVIRON_VERDICT"))
+        .unwrap_or_else(|| panic!("the {case} case printed no verdict:\n{stdout}"))
+        .to_string()
+}
+
+/// Linux only. The positive control proves that the fake really reads the environ of a dumpable
+/// parent, so the check is not empty.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_compiler_child_cannot_read_the_environ_of_a_non_dumpable_parent() {
+    let control = run_environ_case("dumpable");
+    assert!(control.contains("marker_read=true"), "the positive control did not read the environ of the parent: {control}");
+    let check = run_environ_case("non-dumpable");
+    println!("{control}\n{check}");
+    assert!(
+        check.contains("marker_read=false") && check.contains("bytes=0"),
+        "the child read the environ of a non-dumpable parent: {check}"
+    );
+}
+
+/// Off Linux, `make_parent_non_dumpable` changes nothing and says so.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn make_parent_non_dumpable_is_not_supported_off_linux() {
+    use paigasus_iam::adapters::policy_compiler::process::{ParentHardening, make_parent_non_dumpable};
+    assert_eq!(make_parent_non_dumpable().expect("no error"), ParentHardening::NotSupported);
+}

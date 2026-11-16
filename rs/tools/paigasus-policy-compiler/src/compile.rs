@@ -179,6 +179,13 @@ pub fn compile_cedarschema(kind: SetKind, source: &str, cedarschema: &str, max_w
 fn check_id<'a>(kind: SetKind, unit: &'a PolicyUnit, seen: &mut BTreeSet<&'a str>, rejections: &mut Vec<Rejection>) -> Option<&'a str> {
     // The rejection names the policy only when its id is in the grammar.
     let reject = |rejections: &mut Vec<Rejection>, id: Option<&str>, message: String| rejections.push(Rejection::new(id, ReasonCode::ToolPolicyIdInvalid, message));
+    // Dogwood keeps every annotation, but the emitted Cedar annotation map keeps the LAST `@id`,
+    // and `unit.id` is the first. A second `@id` could make the checks and the slots use one id
+    // and the Cedar text another.
+    if unit.annotations.iter().filter(|(key, _)| key == "id").count() > 1 {
+        reject(rejections, None, format!("policy {} has more than one @id", unit.index));
+        return None;
+    }
     let Some(id) = unit.id.as_deref() else {
         reject(rejections, None, format!("policy {} has no @id value", unit.index));
         return None;

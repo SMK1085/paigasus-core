@@ -121,6 +121,38 @@ pub(crate) fn check_tool_limit(next: &[ToolEntry], max_tools: usize) -> Result<(
     Ok(())
 }
 
+/// The whole catalog after the plan as stored, sorted by `name_key`. A kept tool keeps its
+/// timestamps. An upserted tool gets `now` as in [`stored_upserts`].
+pub(crate) fn stored_next(current: &[StoredTool], plan: &CatalogPlan, now: DateTime<Utc>) -> Vec<StoredTool> {
+    let mut next: Vec<StoredTool> = current
+        .iter()
+        .filter(|s| !plan.deletes.contains(&s.entry.name.name_key) && !plan.upserts.iter().any(|u| u.name.name_key == s.entry.name.name_key))
+        .cloned()
+        .collect();
+    next.extend(stored_upserts(current, plan, now));
+    next.sort_by(|a, b| a.entry.name.name_key.cmp(&b.entry.name.name_key));
+    next
+}
+
+/// The write time for the size check: the second of `now` with the largest nanosecond value.
+/// The write stores a later `now`. Its second has the same varint length, and no nanosecond value
+/// encodes longer than 999 999 999. So the size of the check is an upper bound of the stored size.
+pub(crate) fn size_check_time(now: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp(now.timestamp(), 999_999_999).unwrap_or(now)
+}
+
+/// A catalog whose `ListToolsResponse` encoding (all tools, one response) is over `max_bytes` is a
+/// `tool-catalog-invalid` rejection.
+pub(crate) fn check_catalog_size(encoded: usize, max_bytes: usize) -> Result<(), PlanStop> {
+    if encoded > max_bytes {
+        return Err(PlanStop::Rejected(vec![ToolPolicyRejection::new(
+            RejectionReason::CatalogInvalid,
+            format!("the catalog would encode as a {encoded}-byte ListToolsResponse; the limit is {max_bytes} bytes (tool_policies.max_catalog_response_bytes)"),
+        )]));
+    }
+    Ok(())
+}
+
 /// The upserted entries as stored: an entry that replaces a stored one keeps its `created_at`.
 pub(crate) fn stored_upserts(current: &[StoredTool], plan: &CatalogPlan, now: DateTime<Utc>) -> Vec<StoredTool> {
     plan.upserts

@@ -222,6 +222,22 @@ fn a_missing_or_duplicate_or_malformed_id_is_rejected() {
     }
 }
 
+/// Dogwood keeps every annotation, but the emitted Cedar annotation map keeps only one `@id`.
+/// The compiler could then check one id and emit another, so a second `@id` is rejected.
+#[test]
+fn a_policy_with_two_ids_is_rejected() {
+    let block = format!("permit (principal, action == {GW}::\"search\", resource)\nwhen temporal {{ formerly within 1m {GW}::\"send\"::request{{}} }};\n");
+    for annotations in ["@id(\"a\")\n@id(\"b\")", "@id(\"a\")\n@id(\"a\")"] {
+        let source = format!("{annotations}\n{block}");
+        let rejection = only_rejection(tenant(&source), ReasonCode::ToolPolicyIdInvalid);
+        assert_eq!(rejection.policy_id, None, "{source}");
+        assert!(rejection.message.contains("more than one @id"), "{}", rejection.message);
+    }
+    // The same set with one `@id` compiles, and the second policy still has its own id.
+    let two_policies = format!("@id(\"a\")\n{block}@id(\"b\")\n{block}");
+    assert_eq!(accepted(tenant(&two_policies)).conditions.len(), 2);
+}
+
 #[test]
 fn an_empty_or_bare_id_is_rejected_like_a_malformed_one() {
     for annotation in ["@id(\"\")", "@id"] {

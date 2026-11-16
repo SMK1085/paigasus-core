@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The two checks that IAM runs on an accepted compile result in its own process, with the
-//! cedar-policy 4.14 that this crate links (spec section 5.3, steps 9 and 10). The compiler
+//! The checks that IAM runs on an accepted compile result in its own process, with the
+//! cedar-policy 4.14 that this crate links (spec section 5.3, steps 9 to 11). The compiler
 //! validates with Dogwood's cedar 4.11. These checks catch a policy that passes under 4.11 but
 //! fails under the gateway's Cedar version.
 
 use cedar_policy::{Effect, PolicyId, PolicySet, Schema, ValidationMode, ValidationWarning, Validator};
 
-use super::protocol::{CompiledOutput, Rejection, SetKind};
+use super::protocol::{CompiledOutput, Predicate, Rejection, SetKind, Shape};
 
 /// The reason code of a Cedar parse or validation failure (spec section 7).
 pub const REASON_INVALID: &str = "tool-policy-invalid";
 /// The reason code of a `permit` in a floor set (spec section 7).
 pub const REASON_FLOOR_PERMIT: &str = "tool-policy-floor-permit";
+
+/// The deepest predicate tree of one history condition, in predicate nodes along the longest
+/// path (spec section 5.3, step 11). Each `all_of` or `any_of` level adds two protobuf message
+/// levels, and prost refuses a message nested deeper than 100 levels. A chain of 49 `all_of`
+/// nodes in a `CompiledToolPolicySet` already fails to decode, so 32 leaves room for a wrapper
+/// message.
+pub const MAX_PREDICATE_DEPTH: usize = 32;
 
 /// Check a compiled output under cedar 4.14.
 ///
@@ -24,6 +31,9 @@ pub const REASON_FLOOR_PERMIT: &str = "tool-policy-floor-permit";
 /// does the same under 4.11.
 ///
 /// Step 10: for `Floor`, each `permit` is a `tool-policy-floor-permit` rejection.
+///
+/// Step 11: a condition whose predicate nests deeper than [`MAX_PREDICATE_DEPTH`] is a
+/// `tool-policy-invalid` rejection, so that a stored set always decodes again.
 ///
 /// A rejection names the policy by its `@id` annotation. A parse or schema failure has no
 /// policy id. The result lists every finding, in policy text order for each kind.
@@ -67,7 +77,29 @@ pub fn check_compiled(kind: SetKind, out: &CompiledOutput) -> Result<(), Vec<Rej
             rejections.push(rejection(id, REASON_FLOOR_PERMIT, message));
         }
     }
+    for condition in &out.conditions {
+        let predicate = match &condition.shape {
+            Shape::Formerly { predicate } | Shape::CountWithin { predicate, .. } | Shape::SumWithin { predicate, .. } => predicate,
+        };
+        let depth = predicate_depth(predicate);
+        if depth > MAX_PREDICATE_DEPTH {
+            let message = format!(
+                "the history condition {:?} has a predicate {depth} levels deep; the limit is {MAX_PREDICATE_DEPTH}. Use fewer `&&` terms or event arguments",
+                condition.slot
+            );
+            rejections.push(rejection(Some(condition.policy_id.clone()), REASON_INVALID, message));
+        }
+    }
     if rejections.is_empty() { Ok(()) } else { Err(rejections) }
+}
+
+/// The predicate nodes along the longest path of `p`. A leaf is 1.
+fn predicate_depth(p: &Predicate) -> usize {
+    match p {
+        Predicate::EventKind { .. } | Predicate::Tool { .. } | Predicate::AnyCatalogTool | Predicate::Field { .. } => 1,
+        Predicate::AllOf { left, right } | Predicate::AnyOf { left, right } => 1 + predicate_depth(left).max(predicate_depth(right)),
+        Predicate::Negation { inner } => 1 + predicate_depth(inner),
+    }
 }
 
 /// The `@id` annotation of the policy with the Cedar id `id`. The parser gives each policy an
@@ -89,6 +121,7 @@ fn rejection(policy_id: Option<String>, reason: &str, message: String) -> Reject
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_policy::protocol::{CmpOp, EventKind, HistoryCondition, Scope};
     use crate::tool_policy::{CatalogLimits, ToolKind, base_schema_json, build_manual, tenant_schema_json};
     use serde_json::{Value, json};
 
@@ -186,5 +219,52 @@ mod tests {
         let rejections = check_compiled(SetKind::Tenant, &out(anonymous, search_schema())).expect_err("a template fails");
         assert_eq!(rejections.len(), 1, "{rejections:?}");
         assert_eq!(rejections[0].policy_id, None);
+    }
+
+    /// A predicate of `depth` nodes: a left-deep `all_of` chain, as the compiler writes for an
+    /// event pattern with many arguments.
+    fn chain(depth: usize) -> Predicate {
+        let mut p = Predicate::EventKind { kind: EventKind::Request };
+        for _ in 1..depth {
+            p = Predicate::AllOf {
+                left: Box::new(p),
+                right: Box::new(Predicate::AnyCatalogTool),
+            };
+        }
+        p
+    }
+
+    fn with_condition(predicate: Predicate) -> CompiledOutput {
+        let policy = "@id(\"deep\")\npermit(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.input.q == \"x\" };";
+        CompiledOutput {
+            conditions: vec![HistoryCondition {
+                slot: "s0".into(),
+                policy_id: "deep".into(),
+                scope: Scope::Session,
+                window_ms: 1,
+                shape: Shape::CountWithin {
+                    predicate,
+                    op: CmpOp::Ge,
+                    threshold: 1,
+                },
+            }],
+            ..out(policy, search_schema())
+        }
+    }
+
+    #[test]
+    fn a_predicate_deeper_than_the_limit_is_invalid() {
+        assert_eq!(predicate_depth(&chain(MAX_PREDICATE_DEPTH)), MAX_PREDICATE_DEPTH);
+        assert_eq!(check_compiled(SetKind::Tenant, &with_condition(chain(MAX_PREDICATE_DEPTH))), Ok(()));
+        let rejections = check_compiled(SetKind::Tenant, &with_condition(chain(MAX_PREDICATE_DEPTH + 1))).expect_err("a deep predicate fails");
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!(rejections[0].policy_id.as_deref(), Some("deep"));
+        assert_eq!(rejections[0].reason, REASON_INVALID);
+        assert!(rejections[0].message.contains("33 levels deep; the limit is 32"), "{}", rejections[0].message);
+        // A negation counts as one level, the same as an all_of.
+        let negated = Predicate::Negation {
+            inner: Box::new(chain(MAX_PREDICATE_DEPTH)),
+        };
+        assert!(check_compiled(SetKind::Tenant, &with_condition(negated)).is_err());
     }
 }

@@ -339,6 +339,10 @@ pub struct AuthzConfig {
 /// coordinator ruled this ceiling for SMA-774 (the spec named 7 days).
 pub const MAX_TOOL_POLICY_WINDOW_SECS: u64 = 86_400;
 
+/// The default decode limit of a tonic client and server: 4 MiB. `validate` keeps
+/// `tool_policies.max_catalog_response_bytes` below it.
+pub const TONIC_DEFAULT_DECODE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
 /// Tool catalog and tool policy set config (SMA-774, spec sections 5.2 and 6.2). Like `[authz]`,
 /// every field has a default (see `ToolPoliciesDefaults`), so an absent `[tool_policies]` block
 /// is valid config.
@@ -374,6 +378,11 @@ pub struct ToolPoliciesConfig {
     pub max_input_schema_bytes: usize,
     /// The deepest nesting of one `input_schema`.
     pub max_schema_depth: usize,
+    /// The largest tool catalog of one organization in bytes: the encoded size of all its tools
+    /// in one `ListToolsResponse`. A catalog write over it is a `tool-catalog-invalid` rejection.
+    /// It must be above 0 and below the 4 MiB default decode limit of tonic, so that every
+    /// `ListTools` page decodes. It also bounds the compile request and the compiled schema.
+    pub max_catalog_response_bytes: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1085,6 +1094,7 @@ struct ToolPoliciesDefaults {
     max_tools: usize,
     max_input_schema_bytes: usize,
     max_schema_depth: usize,
+    max_catalog_response_bytes: usize,
 }
 
 impl Default for ToolPoliciesDefaults {
@@ -1102,6 +1112,7 @@ impl Default for ToolPoliciesDefaults {
             max_tools: 500,
             max_input_schema_bytes: 65_536,
             max_schema_depth: 8,
+            max_catalog_response_bytes: 2_097_152,
         }
     }
 }
@@ -1124,6 +1135,7 @@ impl Default for ToolPoliciesConfig {
             max_tools: d.max_tools,
             max_input_schema_bytes: d.max_input_schema_bytes,
             max_schema_depth: d.max_schema_depth,
+            max_catalog_response_bytes: d.max_catalog_response_bytes,
         }
     }
 }
@@ -1705,6 +1717,12 @@ impl IamConfig {
         }
         if tp.compile_timeout_ms == 0 {
             return Err("tool_policies.compile_timeout_ms must be at least 1 (0 makes every compile time out)".to_string());
+        }
+        if tp.max_catalog_response_bytes == 0 || tp.max_catalog_response_bytes >= TONIC_DEFAULT_DECODE_LIMIT_BYTES {
+            return Err(format!(
+                "tool_policies.max_catalog_response_bytes ({}) must be at least 1 and below {TONIC_DEFAULT_DECODE_LIMIT_BYTES} (the 4 MiB default decode limit of tonic): a larger catalog makes a ListTools response that a default client cannot decode",
+                tp.max_catalog_response_bytes
+            ));
         }
         if tp.rlimit_cpu_secs == 0 || tp.rlimit_cpu_secs.saturating_mul(1000) >= tp.compile_timeout_ms {
             return Err(format!(
@@ -4389,6 +4407,7 @@ mod tests {
         assert_eq!(d.max_tools, 500);
         assert_eq!(d.max_input_schema_bytes, 65_536);
         assert_eq!(d.max_schema_depth, 8);
+        assert_eq!(d.max_catalog_response_bytes, 2_097_152);
         // An absent block gives the same values through figment, and they validate.
         let cfg = tool_policies_config("").expect("the config loads");
         assert_eq!(cfg.tool_policies, d);
@@ -4445,6 +4464,22 @@ mod tests {
         }
         let cfg = tool_policies_config("[tool_policies]\nrlimit_cpu_secs = 9\n").expect("the config loads");
         cfg.validate().expect("9 s of CPU below a 10 s timeout validates");
+    }
+
+    /// Fix 2 (local review pass 2): the catalog cap must be above 0 and below the 4 MiB tonic limit.
+    #[test]
+    fn a_catalog_cap_of_zero_or_at_the_tonic_limit_is_refused() {
+        for block in [
+            "[tool_policies]\nmax_catalog_response_bytes = 0\n",
+            "[tool_policies]\nmax_catalog_response_bytes = 4194304\n",
+            "[tool_policies]\nmax_catalog_response_bytes = 9000000\n",
+        ] {
+            let cfg = tool_policies_config(block).expect("the config loads");
+            let err = cfg.validate().expect_err("the cap must be refused");
+            assert!(err.contains("tool_policies.max_catalog_response_bytes"), "unexpected error for {block}: {err}");
+        }
+        let cfg = tool_policies_config("[tool_policies]\nmax_catalog_response_bytes = 4194303\n").expect("the config loads");
+        cfg.validate().expect("one byte below 4 MiB validates");
     }
 
     #[test]

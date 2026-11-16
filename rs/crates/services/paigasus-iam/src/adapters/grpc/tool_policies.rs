@@ -17,7 +17,7 @@
 
 use std::time::Instant;
 
-use paigasus_iam_core::tool_policy::{DroppedField, ImportFormat, StoredTool, ToolKind, ToolPolicySetKey, ToolPolicyVersion, ToolSource};
+use paigasus_iam_core::tool_policy::{ImportFormat, ToolKind, ToolPolicySetKey, ToolPolicyVersion};
 use paigasus_kernel::Prn;
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1 as pb;
@@ -30,6 +30,7 @@ use crate::adapters::auth::AuthContext;
 use crate::adapters::http::{AppState, ToolPolicySvc};
 use crate::adapters::tool_policy_wire::{empty_set, version_to_pb};
 use crate::application::error::TenancyError;
+use crate::application::tool_policies::wire::tool_to_pb;
 use crate::application::tool_policies::{CatalogAccepted, RejectionReason, ToolPolicyRejection, WriteResult};
 
 /// The capability key in `capability-disabled` metadata.
@@ -102,35 +103,6 @@ pub(crate) fn rejection_to_pb(r: &ToolPolicyRejection) -> pb::ToolPolicyRejectio
 pub(crate) fn rejections_to_pb(rejections: &[ToolPolicyRejection]) -> pb::ToolPolicyRejections {
     pb::ToolPolicyRejections {
         rejections: rejections.iter().map(rejection_to_pb).collect(),
-    }
-}
-
-fn dropped_to_pb(d: &DroppedField) -> pb::DroppedField {
-    pb::DroppedField {
-        path: d.path.clone(),
-        reason: d.reason.clone(),
-    }
-}
-
-pub(crate) fn tool_to_pb(tool: &StoredTool) -> pb::Tool {
-    let entry = &tool.entry;
-    pb::Tool {
-        name_key: entry.name.name_key.clone(),
-        display_name: entry.name.display.clone(),
-        kind: match entry.kind {
-            ToolKind::Function => pb::ToolKind::Function,
-            ToolKind::Custom => pb::ToolKind::Custom,
-        } as i32,
-        input_schema_json: entry.input_schema.as_ref().map(ToString::to_string).unwrap_or_default(),
-        cedar_input_type_json: entry.cedar_input_type.to_string(),
-        dropped_fields: entry.dropped_fields.iter().map(dropped_to_pb).collect(),
-        source: match entry.source {
-            ToolSource::Manual => pb::ToolSource::Manual,
-            ToolSource::OpenAi => pb::ToolSource::Openai,
-            ToolSource::Mcp => pb::ToolSource::Mcp,
-        } as i32,
-        created_at: Some(convert::ts(tool.created_at)),
-        updated_at: Some(convert::ts(tool.updated_at)),
     }
 }
 
