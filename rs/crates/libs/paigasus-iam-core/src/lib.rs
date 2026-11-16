@@ -39,4 +39,3 @@ pub use service_account::{ServiceAccount, ServiceAccountRecord};
 pub use tenancy::{Membership, NAME_MAX_CHARS, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef, validate_name};
 pub use user::User;
 pub use value::{AUDIT_REASON_MAX_CHARS, AuditReason, DomainError, EXTERNAL_SUBJECT_MAX_CHARS, Email, ExternalSubject, PrincipalId, Stamp};
-// SMA-777 CI measurement probe: this comment is removed again before review.
