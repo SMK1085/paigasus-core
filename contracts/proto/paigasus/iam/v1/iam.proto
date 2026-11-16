@@ -985,8 +985,12 @@ message HistoryPredicate {
   }
 }
 
+// The tool action of an event. Exactly one of the two fields is set: a non-empty name_key, or
+// any_catalog_tool = true. A reader fails closed on any other combination.
 message ToolMatch {
+  // The match key of one catalog tool.
   string name_key = 1;
+  // True matches every tool in the catalog (the InvokeTool action).
   bool any_catalog_tool = 2;
 }
 
@@ -1032,9 +1036,14 @@ message SkippedImportEntry {
   string type = 2;
 }
 
+// One reason why a write was rejected. An empty policy_id, and a line or column of 0, mean
+// that the value is not known.
 message ToolPolicyRejection {
+  // The @id of the policy, or empty when not known.
   string policy_id = 1;
+  // The 1-based source line, or 0 when not known.
   uint32 line = 2;
+  // The 1-based source column, in characters, or 0 when not known.
   uint32 column = 3;
   // A registered reason code, for example "tool-policy-invalid".
   string reason = 4;
@@ -1156,6 +1165,8 @@ message PutFloorPolicySetResponse {
 message GetFloorPolicySetRequest {
   optional uint64 version = 1;
 }
+
+// With no live floor and no version requested: version = 0, empty source, no compiled.
 message GetFloorPolicySetResponse {
   ToolPolicySetVersion set = 1;
 }

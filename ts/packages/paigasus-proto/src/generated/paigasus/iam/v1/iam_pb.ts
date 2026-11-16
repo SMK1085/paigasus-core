@@ -3387,15 +3387,22 @@ export const HistoryPredicateSchema: GenMessage<HistoryPredicate> = /*@__PURE__*
   messageDesc(file_paigasus_iam_v1_iam, 122);
 
 /**
+ * The tool action of an event. Exactly one of the two fields is set: a non-empty name_key, or
+ * any_catalog_tool = true. A reader fails closed on any other combination.
+ *
  * @generated from message paigasus.iam.v1.ToolMatch
  */
 export type ToolMatch = Message<"paigasus.iam.v1.ToolMatch"> & {
   /**
+   * The match key of one catalog tool.
+   *
    * @generated from field: string name_key = 1;
    */
   nameKey: string;
 
   /**
+   * True matches every tool in the catalog (the InvokeTool action).
+   *
    * @generated from field: bool any_catalog_tool = 2;
    */
   anyCatalogTool: boolean;
@@ -3600,20 +3607,29 @@ export const SkippedImportEntrySchema: GenMessage<SkippedImportEntry> = /*@__PUR
   messageDesc(file_paigasus_iam_v1_iam, 129);
 
 /**
+ * One reason why a write was rejected. An empty policy_id, and a line or column of 0, mean
+ * that the value is not known.
+ *
  * @generated from message paigasus.iam.v1.ToolPolicyRejection
  */
 export type ToolPolicyRejection = Message<"paigasus.iam.v1.ToolPolicyRejection"> & {
   /**
+   * The @id of the policy, or empty when not known.
+   *
    * @generated from field: string policy_id = 1;
    */
   policyId: string;
 
   /**
+   * The 1-based source line, or 0 when not known.
+   *
    * @generated from field: uint32 line = 2;
    */
   line: number;
 
   /**
+   * The 1-based source column, in characters, or 0 when not known.
+   *
    * @generated from field: uint32 column = 3;
    */
   column: number;
@@ -4171,6 +4187,8 @@ export const GetFloorPolicySetRequestSchema: GenMessage<GetFloorPolicySetRequest
   messageDesc(file_paigasus_iam_v1_iam, 148);
 
 /**
+ * With no live floor and no version requested: version = 0, empty source, no compiled.
+ *
  * @generated from message paigasus.iam.v1.GetFloorPolicySetResponse
  */
 export type GetFloorPolicySetResponse = Message<"paigasus.iam.v1.GetFloorPolicySetResponse"> & {

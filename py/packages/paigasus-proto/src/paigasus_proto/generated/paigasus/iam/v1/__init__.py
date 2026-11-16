@@ -1405,6 +1405,10 @@ default_message_pool.register_message(
 
 @dataclass(eq=False, repr=False)
 class GetFloorPolicySetResponse(betterproto2.Message):
+    """
+    With no live floor and no version requested: version = 0, empty source, no compiled.
+    """
+
     set: "ToolPolicySetVersion | None" = betterproto2.field(
         1, betterproto2.TYPE_MESSAGE, optional=True
     )
@@ -3130,9 +3134,20 @@ default_message_pool.register_message("paigasus.iam.v1", "Tool", Tool)
 
 @dataclass(eq=False, repr=False)
 class ToolMatch(betterproto2.Message):
+    """
+    The tool action of an event. Exactly one of the two fields is set: a non-empty name_key, or
+    any_catalog_tool = true. A reader fails closed on any other combination.
+    """
+
     name_key: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+    """
+    The match key of one catalog tool.
+    """
 
     any_catalog_tool: "bool" = betterproto2.field(2, betterproto2.TYPE_BOOL)
+    """
+    True matches every tool in the catalog (the InvokeTool action).
+    """
 
 
 default_message_pool.register_message("paigasus.iam.v1", "ToolMatch", ToolMatch)
@@ -3140,11 +3155,25 @@ default_message_pool.register_message("paigasus.iam.v1", "ToolMatch", ToolMatch)
 
 @dataclass(eq=False, repr=False)
 class ToolPolicyRejection(betterproto2.Message):
+    """
+    One reason why a write was rejected. An empty policy_id, and a line or column of 0, mean
+    that the value is not known.
+    """
+
     policy_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+    """
+    The @id of the policy, or empty when not known.
+    """
 
     line: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+    """
+    The 1-based source line, or 0 when not known.
+    """
 
     column: "int" = betterproto2.field(3, betterproto2.TYPE_UINT32)
+    """
+    The 1-based source column, in characters, or 0 when not known.
+    """
 
     reason: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
     """
