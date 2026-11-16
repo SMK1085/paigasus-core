@@ -1,0 +1,9 @@
+{
+  "model": "gpt-4.1",
+  "input": "What is the weather in Paris?",
+  "tools": [
+    {"type": "function", "name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}},
+    {"type": "function", "name": "delete_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}},
+    {"type": "web_search"}
+  ]
+}

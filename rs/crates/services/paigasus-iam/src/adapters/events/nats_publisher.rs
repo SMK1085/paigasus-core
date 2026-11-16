@@ -22,7 +22,7 @@
 //!
 //! **Both the credential and the CA bundle are re-read from disk on every connection attempt**
 //! (SMA-493 D7/D8), not just the first — this is why `connect` installs an auth *callback*
-//! (`creds::auth_from_credentials`) instead of `ConnectOptions::with_credentials_file`, which
+//! (`paigasus_nats_creds::auth_from_credentials`) instead of `ConnectOptions::with_credentials_file`, which
 //! reads once and caches. `add_root_certificates` stores only the path at options-build time;
 //! the file itself is loaded fresh inside `try_connect_to_server`'s TLS setup on each attempt
 //! (`tls.rs::config_tls`, called from `connector.rs:501`/`544`), same as the auth callback is
@@ -163,7 +163,7 @@ pub enum NatsPublisherError {
     CredentialsParse {
         path: String,
         #[source]
-        source: crate::adapters::events::creds::CredsError,
+        source: paigasus_nats_creds::CredsError,
     },
     #[error("nats connect failed")]
     Connect(#[source] async_nats::ConnectError),
@@ -237,14 +237,14 @@ impl NatsEventPublisher {
         let mut opts = match &cfg.credentials_file {
             Some(path) => {
                 let raw = tokio::fs::read_to_string(path).await.map_err(|source| NatsPublisherError::Credentials { path: path.clone(), source })?;
-                crate::adapters::events::creds::parse_credentials(&raw).map_err(|source| NatsPublisherError::CredentialsParse { path: path.clone(), source })?;
+                paigasus_nats_creds::parse_credentials(&raw).map_err(|source| NatsPublisherError::CredentialsParse { path: path.clone(), source })?;
 
                 let path = path.clone();
                 async_nats::ConnectOptions::with_auth_callback(move |nonce| {
                     let path = path.clone();
                     // Nothing non-`Sync` is held across the await inside: the callback's future
                     // must be `Send + Sync + 'static` (`options.rs:207`).
-                    async move { crate::adapters::events::creds::auth_from_credentials(&path, &nonce).await }
+                    async move { paigasus_nats_creds::auth_from_credentials(&path, &nonce).await }
                 })
             }
             None => async_nats::ConnectOptions::new(),

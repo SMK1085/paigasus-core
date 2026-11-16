@@ -14,6 +14,9 @@ dependsOn:
   - 'paigasus-kernel-rs'
   - 'paigasus-gateway-core-rs'
   - 'paigasus-logging-rs'
+  # SMA-752 Task 18: the tool-policy NATS subscriber signs with the IAM creds callback (§ 6.3.5).
+  # `{ workspace = true }` in Cargo.toml, so this edge is hand-written.
+  - 'paigasus-nats-creds-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-service-info-rs'
   - 'paigasus-test-docker-rs'
@@ -30,6 +33,8 @@ fileGroups:
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
     - '/rs/crates/libs/paigasus-logging/src/**/*'
     - '/rs/crates/libs/paigasus-logging/Cargo.toml'
+    - '/rs/crates/libs/paigasus-nats-creds/src/**/*'
+    - '/rs/crates/libs/paigasus-nats-creds/Cargo.toml'
     - '/rs/crates/libs/paigasus-observability/src/**/*'
     - '/rs/crates/libs/paigasus-observability/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
@@ -44,10 +49,19 @@ fileGroups:
     - '/rs/crates/libs/paigasus-test-docker/Cargo.toml'
 
 tasks:
+  # SMA-752 F12: a test reads `tool-policies/floor.cedar` with `include_str!`, so an edit of it must
+  # re-key build, test and lint. Moon merges these inputs with the inherited ones.
   build:
     deps: ['^:build']
+    inputs:
+      - 'tool-policies/**/*'
+  lint:
+    inputs:
+      - 'tool-policies/**/*'
   test:
     deps: ['^:build']
+    inputs:
+      - 'tool-policies/**/*'
     # SMA-677 D22. This task now starts Redis containers. It shares one CI runner with the two
     # console e2e tasks, and SMA-718 showed that such overlap starves the browser, so it takes the
     # same mutex as paigasus-iam-rs:test.

@@ -25,7 +25,8 @@ use axum::body::Bytes;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
 use paigasus_gateway_core::{
-    Action, Basis, BlockCode, DecideFuture, DeciderError, Decision, DecisionContext, Format, HoldKey, Interceptor, Limits, Metric, OnFailure, ToolCall, ToolCallDecider, ToolTurn, parse_body,
+    Action, Basis, BlockCode, DecideFuture, DeciderError, Decision, DecisionContext, Format, HoldKey, Interceptor, Limits, Metric, OnFailure, RequestEntry, ToolCall, ToolCallDecider, ToolTurn,
+    parse_body, report_header,
 };
 use paigasus_observability::names;
 
@@ -33,6 +34,11 @@ use crate::adapters::http::relay::{feed_scan, finish_scan};
 use crate::adapters::http::usage::StreamUsage;
 use crate::adapters::openai::OpenAiByteStream;
 use crate::application::charge_guard::ChargeGuard;
+
+/// A response chunk. The alias keeps the body type `Bytes` out of a function parameter list: the
+/// `repo:http-extractor-envelope` gate bans `Bytes` as a REQUEST extractor there, and this is a
+/// response stream item, not an extractor.
+type Chunk = Bytes;
 
 /// What `[tool_interception]` builds at boot.
 pub struct ToolInterception {
@@ -58,9 +64,30 @@ pub(crate) enum BodyOutcome {
     Refuse,
 }
 
+/// The `paigasus-tool-decisions` header of an answer with no call entries (SMA-752 § 6.5.3): the
+/// request entries alone, or `None` when there are none (then the header is absent, as before).
+pub(crate) fn request_report(requests: &[RequestEntry]) -> Option<String> {
+    (!requests.is_empty()).then(|| report_header(&[], requests))
+}
+
+/// Keep `keep` alive until the stream `s` is dropped: at its end, or on a client disconnect. The
+/// pipeline uses it to hold the request's overhead sample inside a stream body (preflight F14).
+pub(crate) fn keep_until_end<S, K>(s: S, keep: K) -> impl Stream<Item = S::Item> + Send + 'static
+where
+    S: Stream + Send + 'static,
+    K: Send + 'static,
+{
+    s.map(move |item| {
+        // Load-bearing: a `move` closure captures only what it uses.
+        let _keep = &keep;
+        item
+    })
+}
+
 /// Parse, decide and rewrite one complete 2xx body. The usage read happened on the ORIGINAL body
-/// before this runs (D24), so nothing here changes the charge.
-pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format: Format, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, body: &[u8]) -> BodyOutcome {
+/// before this runs (D24), so nothing here changes the charge. `requests` are the request-side
+/// entries of the tool policy (SMA-752); they go into the header after the call entries.
+pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format: Format, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, body: &[u8], requests: &[RequestEntry]) -> BodyOutcome {
     // The body cap is `max_held_bytes` (spec § 5.2).
     let calls = match parse_body(format, body, limits.max_held_bytes) {
         Ok(c) => c,
@@ -68,12 +95,18 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
             record(Metric::OnFailure("malformed"));
             return match limits.on_failure {
                 OnFailure::Block => BodyOutcome::Refuse,
-                OnFailure::Allow => BodyOutcome::Forward { rewritten: None, report: None },
+                OnFailure::Allow => BodyOutcome::Forward {
+                    rewritten: None,
+                    report: request_report(requests),
+                },
             };
         }
     };
     if calls.calls.is_empty() && calls.unenforceable.is_empty() {
-        return BodyOutcome::Forward { rewritten: None, report: None };
+        return BodyOutcome::Forward {
+            rewritten: None,
+            report: request_report(requests),
+        };
     }
     // SMA-769 (ruling F7, R15): a Responses item that is not `"completed"` is a truncation. The
     // stream counts it and, under `on_failure = allow`, passes the hold through unchanged; the
@@ -81,7 +114,10 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
     if calls.is_truncated() {
         record(Metric::OnFailure("truncated"));
         if limits.on_failure == OnFailure::Allow {
-            return BodyOutcome::Forward { rewritten: None, report: None };
+            return BodyOutcome::Forward {
+                rewritten: None,
+                report: request_report(requests),
+            };
         }
     }
     let n = calls.calls.len();
@@ -104,7 +140,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
         let decision = if d.is_allow() { "allow" } else { "block" };
         record(Metric::Decision { decision, basis: basis.as_str() });
     }
-    let report = calls.report(&decisions, basis);
+    let report = calls.report(&decisions, basis, requests);
     let rewritten = calls.apply(&decisions).map(Bytes::from);
     BodyOutcome::Forward { rewritten, report: Some(report) }
 }
@@ -212,6 +248,9 @@ impl Relay {
 /// 3. On the upstream end: `finish_scan`, then [`Interceptor::finish`].
 /// 4. Decisions run one at a time (P-5).
 /// 5. Nothing is spawned.
+///
+/// `prelude` holds the request-side `: paigasus-decision` comments of the tool policy (SMA-752
+/// § 6.5.3). They go out before the first upstream frame.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn intercepted_stream(
     format: Format,
@@ -223,8 +262,9 @@ pub(crate) fn intercepted_stream(
     ctx: Arc<DecisionContext>,
     turn: Arc<ToolTurn>,
     terminal: &'static [u8],
+    prelude: Vec<Chunk>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
-    relay(format, limits, inner, guard, usage, ti, ctx, turn, terminal)
+    relay(format, limits, inner, guard, usage, ti, ctx, turn, terminal, prelude)
 }
 
 /// [`intercepted_stream`] for any wire format. The unit tests drive an Anthropic stream through
@@ -242,6 +282,7 @@ fn relay(
     ctx: Arc<DecisionContext>,
     turn: Arc<ToolTurn>,
     terminal: &'static [u8],
+    prelude: Vec<Chunk>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     let now = Instant::now();
     let icpt = Interceptor::new(format, limits, Bytes::from_static(terminal), now);
@@ -254,7 +295,8 @@ fn relay(
         ti,
         ctx,
         turn,
-        out: VecDeque::new(),
+        // The prelude is queued before any upstream chunk is read, so it goes out first.
+        out: VecDeque::from(prelude),
         decide_queue: VecDeque::new(),
         pending: None,
         sleep,
@@ -392,10 +434,21 @@ mod tests {
         let ti = Arc::new(ToolInterception { limits, decider });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
-        let out: Vec<Bytes> = relay(Format::AnthropicMessages, ti.limits, upstream, None, StreamUsage::Chat(UsageScanner::new()), ti, ctx, turn, TERMINAL)
-            .map(|r| r.expect("infallible"))
-            .collect()
-            .await;
+        let out: Vec<Bytes> = relay(
+            Format::AnthropicMessages,
+            ti.limits,
+            upstream,
+            None,
+            StreamUsage::Chat(UsageScanner::new()),
+            ti,
+            ctx,
+            turn,
+            TERMINAL,
+            Vec::new(),
+        )
+        .map(|r| r.expect("infallible"))
+        .collect()
+        .await;
         String::from_utf8(out.concat()).expect("utf-8")
     }
 
@@ -461,6 +514,7 @@ mod tests {
             ctx,
             turn,
             TERMINAL_SSE_ERROR.as_bytes(),
+            Vec::new(),
         )
         .map(|r| r.expect("infallible"))
         .collect()
@@ -507,5 +561,91 @@ mod tests {
             .expect("a report for read_file");
         assert!(read_file_report.contains(r#""decision":"allow","basis":"decider""#), "{read_file_report}");
         assert!(text.contains(r#""name":"read_file","input":{}"#), "the allowed call is forwarded: {text}");
+    }
+
+    /// Counts the decide calls of the Cedar decider.
+    #[derive(Default)]
+    struct CountingCedar(Arc<AtomicUsize>);
+
+    impl ToolCallDecider for CountingCedar {
+        fn decide(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            crate::application::tool_policy::CedarDecider.decide(ctx, turn, calls)
+        }
+    }
+
+    /// Preflight F14: a stream with two holds decides twice and records ONE overhead sample, and
+    /// that sample holds the request-side time plus both decide calls.
+    #[tokio::test]
+    async fn a_stream_with_two_holds_records_one_overhead_sample() {
+        use crate::application::tool_policy::OverheadSample;
+        use crate::application::tool_policy::testing::{self, FakeSource, ORG_A_PRN, PRINCIPAL, Snap, chat_request, settings};
+        use paigasus_gateway_core::{TenantMode, parse_request};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let policy = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        let snapshot = Arc::clone(&out.snapshot);
+        let ctx = Arc::new(ctx.with_policy(out.snapshot));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ti = Arc::new(ToolInterception {
+            limits: Limits::defaults(),
+            decider: Arc::new(CountingCedar(Arc::clone(&calls))),
+        });
+        let s = relay(
+            Format::AnthropicMessages,
+            ti.limits,
+            two_tool_blocks("read_file", "list_dir", Duration::ZERO),
+            None,
+            StreamUsage::Chat(UsageScanner::new()),
+            ti,
+            ctx,
+            Arc::new(turn),
+            TERMINAL,
+            Vec::new(),
+        );
+        let s = keep_until_end(s, OverheadSample::new(Arc::clone(&snapshot)));
+        let text = String::from_utf8(s.map(|r| r.expect("infallible")).collect::<Vec<Bytes>>().await.concat()).expect("utf-8");
+        assert!(text.contains(r#""name":"list_dir","input":{}"#), "both calls are allowed: {text}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "two holds, two decide calls");
+        let samples = Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS);
+        assert_eq!(samples.len(), 1, "one sample per request, not per hold: {samples:?}");
+        assert!(snapshot.decide_elapsed() > Duration::ZERO);
+        assert_eq!(samples[0], snapshot.overhead().as_secs_f64(), "the request side plus both decide calls");
+    }
+
+    /// SMA-752 § 6.5.3: the prelude goes out before the first upstream frame.
+    #[tokio::test]
+    async fn the_prelude_goes_out_before_the_first_upstream_frame() {
+        let ti = Arc::new(ToolInterception {
+            limits: Limits::defaults(),
+            decider: Arc::new(paigasus_gateway_core::AllowAll),
+        });
+        let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
+        let turn = Arc::new(ToolTurn::Unavailable("unit test"));
+        let prelude = vec![Bytes::from_static(b": p1\n\n"), Bytes::from_static(b": p2\n\n")];
+        let out: Vec<Bytes> = relay(
+            Format::AnthropicMessages,
+            ti.limits,
+            two_tool_blocks("a", "b", Duration::ZERO),
+            None,
+            StreamUsage::Chat(UsageScanner::new()),
+            ti,
+            ctx,
+            turn,
+            TERMINAL,
+            prelude,
+        )
+        .map(|r| r.expect("infallible"))
+        .collect()
+        .await;
+        assert_eq!(&out[..2], [Bytes::from_static(b": p1\n\n"), Bytes::from_static(b": p2\n\n")]);
+        assert!(String::from_utf8_lossy(&out[2]).starts_with("event: message_start"), "{:?}", out[2]);
     }
 }

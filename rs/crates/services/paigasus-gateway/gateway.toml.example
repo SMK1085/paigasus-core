@@ -181,3 +181,35 @@
 #   #    switches to pass-through. A completed call that the policy blocks, in the same
 #   #    response, can then reach the client. A stream and a body behave the same.
 #   # 6. Rollback: set "enabled" = false. The route then answers 404.
+#
+# SMA-752: Cedar tool-call decisions (spec 6.4). Off by default; with enabled = false the
+# gateway behaves as before. A misspelt key fails at start. Needs [tool_interception] enabled.
+#
+# WARNING: mode "enforce" with no tenant policies blocks every tool that is not on the floor.
+# Cedar denies by default, and no policy permits the call. Load a permit policy for an org
+# before you set its mode to "enforce". Use "log_only" first to see what the policy would block.
+# Some request shapes are not measured against the real upstream. See
+# rs/crates/libs/paigasus-gateway-core/tests/fixtures/request_rewrite/README.md. A
+# computer_call_output notice or a shell_call_output notice will most likely get an upstream
+# 400. That fails closed: the turn stops.
+#
+# [tool_policy]
+# enabled               = false      # env GATEWAY_TOOL_POLICY__ENABLED
+# on_policy_unavailable = "closed"   # REQUIRED when enabled: "open" | "closed" (D9, D34)
+# default_mode          = "off"      # "off" | "log_only" | "enforce"; the mode of an org with no entry (D8)
+# refresh_secs          = 30         # 1..=86400
+# max_stale_secs        = 300        # 1..=86400; >= refresh_secs
+# idle_evict_secs       = 3600       # 1..=86400
+# load_timeout_ms       = 1000       # must be < tool_interception.decide_timeout_secs * 1000 (D31)
+# source = { kind = "file", dir = "/etc/paigasus/tool-policies" }   # REQUIRED when enabled
+#   # The floor is always enforced when enabled (D33). There is no floor_mode.
+#
+# [tool_policy.nats]                 # optional: policy invalidation events
+# url        = "nats://nats:4222"    # never written to logs or dumps
+# creds_file = "/etc/nats/creds"
+# ca_file    = "/etc/nats/ca.pem"
+#
+# [[tool_policy.org]]                # TOML only; one entry per org (D7, D34)
+# id                    = "0190a100-0000-7000-8000-0000000000a1"
+# mode                  = "enforce"
+# on_policy_unavailable = "open"     # optional override of the global value

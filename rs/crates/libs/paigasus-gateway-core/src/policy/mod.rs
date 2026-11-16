@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The tool-policy side of the gateway core (SMA-752): the mapping from gateway-core request and
+//! call types into the kernel's tool-policy types, the per-request policy snapshot, and the call
+//! decisions. No I/O.
+
+mod calls;
+mod mapping;
+mod plan;
+mod raw;
+mod rewrite;
+mod snapshot;
+
+pub use calls::{CallOutcome, PolicyBasis, decide_calls};
+pub use mapping::{call_findings, ingress, invocation, name_collisions};
+pub use plan::{ChoiceRewrite, PlanItem, RequestPlan, ResultTarget, plan_request};
+pub use rewrite::{result_notice, rewrite_request};
+pub use snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
+
+/// The floor that ships with the file source (D15). This is the one copy in this crate
+/// (preflight F17). The gateway's `tool-policies/floor.cedar` holds the same policy.
+#[cfg(test)]
+pub(crate) const SHIPPED_FLOOR: &str = r#"@id("floor-name-collision") forbid(principal, action, resource) when { context.findings.contains("name_collision") };"#;

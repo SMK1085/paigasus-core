@@ -42,6 +42,37 @@ pub const GATEWAY_TOOL_INTERCEPTION_DECISIONS_TOTAL: &str = "gateway_tool_interc
 pub const GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL: &str = "gateway_tool_interception_on_failure_total";
 /// Seconds from a hold's first tool-call frame to its completion.
 pub const GATEWAY_TOOL_INTERCEPTION_HOLD_SECONDS: &str = "gateway_tool_interception_hold_seconds";
+/// Tool-policy loads (SMA-752). `result` = `ok` | `source_error` | `compile_error` | `timeout`.
+/// A `timeout` is counted once per load, not once per waiter.
+pub const GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL: &str = "gateway_tool_policy_cache_loads_total";
+/// Seconds one policy source call takes (floor or tenant).
+pub const GATEWAY_TOOL_POLICY_LOAD_SECONDS: &str = "gateway_tool_policy_load_seconds";
+/// Seconds one policy compile takes (floor or tenant).
+pub const GATEWAY_TOOL_POLICY_COMPILE_SECONDS: &str = "gateway_tool_policy_compile_seconds";
+/// Cache entries whose last refresh failed. They are served until `max_stale_secs`. Set by each refresh pass.
+pub const GATEWAY_TOOL_POLICY_STALE_ENTRIES: &str = "gateway_tool_policy_stale_entries";
+/// Tenant entries evicted because nobody used them for `idle_evict_secs`.
+pub const GATEWAY_TOOL_POLICY_EVICTIONS_TOTAL: &str = "gateway_tool_policy_evictions_total";
+/// Entries whose refresh failed (source error, compile error or timeout).
+pub const GATEWAY_TOOL_POLICY_REFRESH_ERRORS_TOTAL: &str = "gateway_tool_policy_refresh_errors_total";
+/// Tool-policy decisions (SMA-752 § 6.7). `side` = `request` | `response`; `mode` = `off` |
+/// `log_only` | `enforce`; `effect` = `allow` | `observe` | `block`; `basis` = `policy` |
+/// `errored_forbid` | `unavailable`.
+pub const GATEWAY_TOOL_POLICY_DECISIONS_TOTAL: &str = "gateway_tool_policy_decisions_total";
+/// Requests that the tool policy refused, or would refuse in enforce mode (D17, P-10). `mode` =
+/// `off` | `log_only` | `enforce` (an unreadable turn is never counted in `off`; an unknown
+/// `tool_choice` with an enforced floor removal is refused in every mode); `reason` =
+/// `unreadable_turn` | `unknown_tool_choice`.
+pub const GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL: &str = "gateway_tool_policy_request_refusals_total";
+/// Seconds the tool policy adds to one request: the request side plus the decider (preflight F14).
+pub const GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS: &str = "gateway_tool_policy_overhead_seconds";
+/// Tool-policy cache invalidations from NATS (SMA-752 § 6.3.5). `cause` = `message` (an event on
+/// `iam.policy.>`) | `connect` (a connect or a reconnect, because messages may have been missed) |
+/// `resubscribe` (a new subscription after the old one ended) | `slow_consumer` (the client
+/// dropped messages).
+pub const GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL: &str = "gateway_tool_policy_nats_invalidations_total";
+/// 1 while the tool-policy NATS client is connected, else 0. Set on each connect and disconnect event.
+pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_connected";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -292,6 +323,17 @@ pub const ALL: &[&str] = &[
     GATEWAY_TOOL_INTERCEPTION_DECISIONS_TOTAL,
     GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL,
     GATEWAY_TOOL_INTERCEPTION_HOLD_SECONDS,
+    GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL,
+    GATEWAY_TOOL_POLICY_LOAD_SECONDS,
+    GATEWAY_TOOL_POLICY_COMPILE_SECONDS,
+    GATEWAY_TOOL_POLICY_STALE_ENTRIES,
+    GATEWAY_TOOL_POLICY_EVICTIONS_TOTAL,
+    GATEWAY_TOOL_POLICY_REFRESH_ERRORS_TOTAL,
+    GATEWAY_TOOL_POLICY_DECISIONS_TOTAL,
+    GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
+    GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
+    GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
+    GATEWAY_TOOL_POLICY_NATS_CONNECTED,
     IAM_HTTP_REQUESTS_TOTAL,
     IAM_HTTP_REQUEST_DURATION_SECONDS,
     IAM_HTTP_INFLIGHT_REQUESTS,
@@ -362,6 +404,34 @@ mod tests {
             GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL,
             GATEWAY_TOOL_INTERCEPTION_HOLD_SECONDS,
         ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_gateway_tool_policy_cache_families_are_registered() {
+        for name in [
+            GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL,
+            GATEWAY_TOOL_POLICY_LOAD_SECONDS,
+            GATEWAY_TOOL_POLICY_COMPILE_SECONDS,
+            GATEWAY_TOOL_POLICY_STALE_ENTRIES,
+            GATEWAY_TOOL_POLICY_EVICTIONS_TOTAL,
+            GATEWAY_TOOL_POLICY_REFRESH_ERRORS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_gateway_tool_policy_decision_families_are_registered() {
+        for name in [GATEWAY_TOOL_POLICY_DECISIONS_TOTAL, GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_gateway_tool_policy_nats_families_are_registered() {
+        for name in [GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, GATEWAY_TOOL_POLICY_NATS_CONNECTED] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }
     }

@@ -11,6 +11,7 @@ mod interceptor;
 mod json;
 mod limits;
 mod openai;
+mod policy;
 mod protocol;
 mod report;
 mod responses;
@@ -23,6 +24,10 @@ pub use decider::{AllowAll, DecideFuture, DecisionContext, ToolCallDecider};
 pub use interceptor::{Action, DeciderError, Interceptor, Metric};
 pub use json::Malformed;
 pub use limits::{Limits, OnFailure};
-pub use report::{ReportDecision, ReportEntry, notice_line};
-pub use turn::{PriorCall, ToolDefinition, ToolResultRef, ToolTurn, TurnFacts, parse_request};
+pub use policy::{
+    CallOutcome, ChoiceRewrite, OnUnavailable, PlanItem, PolicyBasis, PolicySet, PolicySnapshot, RequestPlan, ResultTarget, TenantMode, TenantPart, call_findings, decide_calls, ingress, invocation,
+    name_collisions, plan_request, result_notice, rewrite_request,
+};
+pub use report::{ReportDecision, ReportEntry, RequestAction, RequestEntry, RequestReason, notice_line, reason_label, report_header, request_comments, sanitize_name};
+pub use turn::{PriorCall, ToolChoice, ToolDefinition, ToolResultRef, ToolTurn, TurnFacts, parse_request};
 pub use types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall, ToolCallKind};

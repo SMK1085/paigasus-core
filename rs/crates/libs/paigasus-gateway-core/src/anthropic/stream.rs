@@ -258,6 +258,8 @@ impl Protocol for AnthropicStream {
                             decision: ReportDecision::Unenforceable,
                             basis: None,
                             code: None,
+                            enforced: None,
+                            reason: None,
                         });
                     }
                     Kind::Text | Kind::Thinking => {}

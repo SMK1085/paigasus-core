@@ -1,6 +1,6 @@
-: paigasus-decision {"v":1,"choice":0,"position":0,"name":"read_file","name_sha256_8":"c9f8123b","decision":"allow","basis":"decider","code":null}
+: paigasus-decision {"v":2,"side":"response","choice":0,"position":0,"name":"read_file","name_sha256_8":"c9f8123b","decision":"allow","basis":"decider","code":null,"enforced":null,"reason":null}
 
-: paigasus-decision {"v":1,"choice":0,"position":1,"name":"blocked_rm","name_sha256_8":"e3b2180a","decision":"block","basis":"decider","code":"policy"}
+: paigasus-decision {"v":2,"side":"response","choice":0,"position":1,"name":"blocked_rm","name_sha256_8":"e3b2180a","decision":"block","basis":"decider","code":"policy","enforced":true,"reason":"tool-call-denied"}
 
 data: {"id":"chatcmpl-fx","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","system_fingerprint":"fp_fx","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_0_0","type":"function","function":{"name":"read_file","arguments":"{\"p\":1}"}}]},"finish_reason":null}]}
 

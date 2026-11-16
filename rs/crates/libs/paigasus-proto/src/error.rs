@@ -224,6 +224,10 @@ mod tests {
         "tool-interception-malformed-response",
         // Gateway Responses API ingress (SMA-769)
         "responses-stateful-not-supported",
+        // Gateway tool decisions (SMA-752)
+        "tool-call-denied",
+        "tool-result-blocked",
+        "tool-policy-unavailable",
         // Shared
         "internal",
         "invalid-request-body",
@@ -246,7 +250,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 71, "the registry should hold 71 reasons");
+        assert_eq!(actual.len(), 74, "the registry should hold 74 reasons");
     }
 
     #[test]

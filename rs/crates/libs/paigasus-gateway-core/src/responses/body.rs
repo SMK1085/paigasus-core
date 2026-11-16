@@ -56,6 +56,8 @@ pub(crate) fn calls(v: &Value) -> Result<(Vec<ToolCall>, Vec<ReportEntry>), Malf
                 decision: ReportDecision::Unenforceable,
                 basis: None,
                 code: None,
+                enforced: None,
+                reason: None,
             }),
             ItemClass::ClientRun(kind) => {
                 let call = tool_call(position, obj, kind)?;
