@@ -175,16 +175,20 @@ async fn every_error_code_reaches_the_http_envelope_with_its_status() {
     .await;
     assert_eq!((status, code(&body).as_str()), (StatusCode::SERVICE_UNAVAILABLE, "tool-policy-compiler-unavailable"));
 
-    // tool-policy-compiler-busy (429): three saves at once on a slow compiler with two permits.
+    // tool-policy-compiler-busy (429): two held compiles take both permits, then a third save comes.
     set_compiler_result(env.dir.path(), &tenant_accepted());
-    support::make_compiler_slow(env.dir.path());
+    support::hold_compiler(env.dir.path());
     let set_uri = env.set();
     let put = || send(&env.app, "PUT", &set_uri, Some(json!({"source": STARTER_TOOL_POLICY_SOURCE, "expected_version": 0})), Some(&env.admin));
-    let (a, b, c) = tokio::join!(put(), put(), put());
+    let (a, b, c) = tokio::join!(put(), put(), async {
+        support::wait_for_held_compiles(env.dir.path(), 2).await;
+        let third = put().await;
+        support::release_compiler(env.dir.path());
+        third
+    });
     let busy: Vec<_> = [a, b, c].into_iter().filter(|(status, _)| *status == StatusCode::TOO_MANY_REQUESTS).collect();
     assert!(!busy.is_empty(), "one of three saves must meet a full compiler");
     assert_eq!(code(&busy[0].1), "tool-policy-compiler-busy");
-    std::fs::remove_file(env.dir.path().join("slow")).expect("remove the slow marker");
 
     // tool-policy-recompile-pending (409).
     env.state

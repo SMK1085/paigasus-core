@@ -301,20 +301,24 @@ async fn every_error_code_reaches_the_wire_with_its_grpc_code() {
     let status = c.put_tool_policy_set(authed(put_set(&org, STARTER_TOOL_POLICY_SOURCE, 0), &env.admin)).await.unwrap_err();
     assert_status(&status, Code::Unavailable, "tool-policy-compiler-unavailable");
 
-    // tool-policy-compiler-busy: three saves at once on a slow compiler with two permits.
+    // tool-policy-compiler-busy: two held compiles take both permits, then a third save comes.
     set_compiler_result(env.dir.path(), &tenant_accepted());
-    support::make_compiler_slow(env.dir.path());
+    support::hold_compiler(env.dir.path());
     let (mut c1, mut c2, mut c3) = (env.client(), env.client(), env.client());
     let (a, b, d) = tokio::join!(
         c1.put_tool_policy_set(authed(put_set(&org, STARTER_TOOL_POLICY_SOURCE, 0), &env.admin)),
         c2.put_tool_policy_set(authed(put_set(&org, STARTER_TOOL_POLICY_SOURCE, 0), &env.admin)),
-        c3.put_tool_policy_set(authed(put_set(&org, STARTER_TOOL_POLICY_SOURCE, 0), &env.admin)),
+        async {
+            support::wait_for_held_compiles(env.dir.path(), 2).await;
+            let third = c3.put_tool_policy_set(authed(put_set(&org, STARTER_TOOL_POLICY_SOURCE, 0), &env.admin)).await;
+            support::release_compiler(env.dir.path());
+            third
+        },
     );
     let busy: Vec<Status> = [a, b, d].into_iter().filter_map(Result::err).filter(|s| s.code() == Code::ResourceExhausted).collect();
     assert!(!busy.is_empty(), "one of three saves must meet a full compiler");
     assert_status(&busy[0], Code::ResourceExhausted, "tool-policy-compiler-busy");
     assert_eq!(retryable_of(&busy[0]), "true");
-    std::fs::remove_file(env.dir.path().join("slow")).expect("remove the slow marker");
 
     // tool-policy-recompile-pending: the live set comes from an older compiler generation.
     env.state

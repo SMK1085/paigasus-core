@@ -1175,18 +1175,21 @@ const COMPILER_REVISION_JSON: &str = r#"{"compiler_generation":1,"protocol_versi
 
 /// Writes a fake `paigasus-policy-compiler` into `dir`: `revision` answers a good revision, and
 /// `compile` answers the content of `dir/result.json` (set by `result_json`, changed later with
-/// [`set_compiler_result`]). With a file `dir/slow` present, `compile` waits two seconds first.
-/// The child runs with an empty environment, so every program has an absolute path.
+/// [`set_compiler_result`]). With a file `dir/hold` present ([`hold_compiler`]), `compile` first
+/// writes `dir/started.<pid>` and then waits until the file `dir/hold` is gone, for at most 60
+/// seconds. The child runs with an empty environment, so every program has an absolute path.
 #[allow(dead_code)]
 pub fn fake_compiler_script(dir: &Path, result_json: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     set_compiler_result(dir, result_json);
     let result = dir.join("result.json");
-    let slow = dir.join("slow");
+    let hold = dir.join("hold");
+    let started = dir.join("started");
     let path = dir.join("compiler");
     let body = format!(
-        "#!/bin/sh\ncase \"$1\" in\n  revision) echo '{COMPILER_REVISION_JSON}' ;;\n  compile) /bin/cat > /dev/null; if [ -f '{slow}' ]; then /bin/sleep 2; fi; exec /bin/cat '{result}' ;;\n  *) exit 64 ;;\nesac\n",
-        slow = slow.display(),
+        "#!/bin/sh\ncase \"$1\" in\n  revision) echo '{COMPILER_REVISION_JSON}' ;;\n  compile) /bin/cat > /dev/null; if [ -f '{hold}' ]; then : > '{started}'.$$; n=0; while [ -f '{hold}' ] && [ $n -lt 600 ]; do /bin/sleep 0.1; n=$((n+1)); done; fi; exec /bin/cat '{result}' ;;\n  *) exit 64 ;;\nesac\n",
+        hold = hold.display(),
+        started = started.display(),
         result = result.display(),
     );
     std::fs::write(&path, body).expect("write the fake compiler");
@@ -1216,10 +1219,36 @@ pub fn set_compiler_result(dir: &Path, result_json: &str) {
     std::fs::write(dir.join("result.json"), result_json).expect("write the compile result");
 }
 
-/// Makes every later `compile` of the fake compiler of `dir` wait two seconds.
+/// Makes every later `compile` of the fake compiler of `dir` wait until [`release_compiler`].
+/// Each held `compile` writes a `started.<pid>` file, which [`wait_for_held_compiles`] counts.
 #[allow(dead_code)]
-pub fn make_compiler_slow(dir: &Path) {
-    std::fs::write(dir.join("slow"), b"").expect("write the slow marker");
+pub fn hold_compiler(dir: &Path) {
+    std::fs::write(dir.join("hold"), b"").expect("write the hold marker");
+}
+
+/// Lets every held `compile` of the fake compiler of `dir` continue.
+#[allow(dead_code)]
+pub fn release_compiler(dir: &Path) {
+    std::fs::remove_file(dir.join("hold")).expect("remove the hold marker");
+}
+
+/// Waits until `n` compiles of the fake compiler of `dir` are held. A held compile runs as a
+/// child process, so it holds one compiler permit. Panics after 30 seconds.
+#[allow(dead_code)]
+pub async fn wait_for_held_compiles(dir: &Path, n: usize) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let count = std::fs::read_dir(dir)
+            .expect("read the compiler directory")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("started."))
+            .count();
+        if count >= n {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{count} of {n} compiles are held after 30 seconds");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 /// A compile result that accepts, with generation 1 and no conditions.
