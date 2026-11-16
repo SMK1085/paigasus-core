@@ -35,6 +35,10 @@ pub struct Capabilities {
     pub apikeys_management: bool,
     /// `audit.query_enabled` -> `iam.audit`.
     pub audit_query: bool,
+    /// `iam.tool.policies` (SMA-774). True only when `tool_policies.enabled` is on AND the boot
+    /// probe found a working compiler. `from_config` leaves it false: the probe runs later, and
+    /// `AppState::with_tool_policies` sets it.
+    pub tool_policies: bool,
 }
 
 impl Capabilities {
@@ -44,6 +48,7 @@ impl Capabilities {
             authz_admin: cfg.authz.admin_enabled,
             apikeys_management: cfg.api_keys.management_enabled,
             audit_query: cfg.audit.query_enabled,
+            tool_policies: false,
         }
     }
 
@@ -67,6 +72,9 @@ impl Capabilities {
         }
         if self.audit_query {
             caps.push(Capability::IamAudit);
+        }
+        if self.tool_policies {
+            caps.push(Capability::IamToolPolicies);
         }
         caps.push(Capability::IamDeadletters);
         // SMA-633 D9: unconditional, for the same reason as `iam.deadletters`. The population
@@ -92,11 +100,12 @@ mod tests {
     use paigasus_proto::paigasus::common::v1::Capability;
     use std::collections::HashSet;
 
-    fn caps(authz_admin: bool, apikeys_management: bool, audit_query: bool) -> HashSet<Capability> {
+    fn caps(authz_admin: bool, apikeys_management: bool, audit_query: bool, tool_policies: bool) -> HashSet<Capability> {
         Capabilities {
             authz_admin,
             apikeys_management,
             audit_query,
+            tool_policies,
         }
         .enabled()
         .into_iter()
@@ -106,11 +115,12 @@ mod tests {
     #[test]
     fn all_enabled_advertises_every_iam_capability() {
         assert_eq!(
-            caps(true, true, true),
+            caps(true, true, true, true),
             HashSet::from([
                 Capability::IamAuthzCedar,
                 Capability::IamApikeys,
                 Capability::IamAudit,
+                Capability::IamToolPolicies,
                 Capability::IamDeadletters,
                 Capability::IamAuthnGrants
             ])
@@ -121,7 +131,7 @@ mod tests {
     /// has a config switch, so every flag off still advertises both unconditional keys.
     #[test]
     fn all_flags_off_advertises_only_the_unconditional_keys() {
-        assert_eq!(caps(false, false, false), HashSet::from([Capability::IamDeadletters, Capability::IamAuthnGrants]));
+        assert_eq!(caps(false, false, false, false), HashSet::from([Capability::IamDeadletters, Capability::IamAuthnGrants]));
     }
 
     /// AC 3's central assertion. Asserting only "the key is absent" would pass against an
@@ -130,16 +140,44 @@ mod tests {
     #[test]
     fn disabling_one_flag_removes_exactly_its_key() {
         assert_eq!(
-            caps(false, true, true),
-            HashSet::from([Capability::IamApikeys, Capability::IamAudit, Capability::IamDeadletters, Capability::IamAuthnGrants])
+            caps(false, true, true, true),
+            HashSet::from([
+                Capability::IamApikeys,
+                Capability::IamAudit,
+                Capability::IamToolPolicies,
+                Capability::IamDeadletters,
+                Capability::IamAuthnGrants
+            ])
         );
         assert_eq!(
-            caps(true, false, true),
-            HashSet::from([Capability::IamAuthzCedar, Capability::IamAudit, Capability::IamDeadletters, Capability::IamAuthnGrants])
+            caps(true, false, true, true),
+            HashSet::from([
+                Capability::IamAuthzCedar,
+                Capability::IamAudit,
+                Capability::IamToolPolicies,
+                Capability::IamDeadletters,
+                Capability::IamAuthnGrants
+            ])
         );
         assert_eq!(
-            caps(true, true, false),
-            HashSet::from([Capability::IamAuthzCedar, Capability::IamApikeys, Capability::IamDeadletters, Capability::IamAuthnGrants])
+            caps(true, true, false, true),
+            HashSet::from([
+                Capability::IamAuthzCedar,
+                Capability::IamApikeys,
+                Capability::IamToolPolicies,
+                Capability::IamDeadletters,
+                Capability::IamAuthnGrants
+            ])
+        );
+        assert_eq!(
+            caps(true, true, true, false),
+            HashSet::from([
+                Capability::IamAuthzCedar,
+                Capability::IamApikeys,
+                Capability::IamAudit,
+                Capability::IamDeadletters,
+                Capability::IamAuthnGrants
+            ])
         );
     }
 
@@ -150,12 +188,15 @@ mod tests {
         for authz in [false, true] {
             for apikeys in [false, true] {
                 for audit in [false, true] {
-                    let got = caps(authz, apikeys, audit);
-                    assert_eq!(got.contains(&Capability::IamAuthzCedar), authz);
-                    assert_eq!(got.contains(&Capability::IamApikeys), apikeys);
-                    assert_eq!(got.contains(&Capability::IamAudit), audit);
-                    assert!(got.contains(&Capability::IamDeadletters), "iam.deadletters must be advertised for ({authz}, {apikeys}, {audit})");
-                    assert!(got.contains(&Capability::IamAuthnGrants), "iam.authn.grants must be advertised for ({authz}, {apikeys}, {audit})");
+                    for tool_policies in [false, true] {
+                        let got = caps(authz, apikeys, audit, tool_policies);
+                        assert_eq!(got.contains(&Capability::IamToolPolicies), tool_policies);
+                        assert_eq!(got.contains(&Capability::IamAuthzCedar), authz);
+                        assert_eq!(got.contains(&Capability::IamApikeys), apikeys);
+                        assert_eq!(got.contains(&Capability::IamAudit), audit);
+                        assert!(got.contains(&Capability::IamDeadletters), "iam.deadletters must be advertised for ({authz}, {apikeys}, {audit})");
+                        assert!(got.contains(&Capability::IamAuthnGrants), "iam.authn.grants must be advertised for ({authz}, {apikeys}, {audit})");
+                    }
                 }
             }
         }
@@ -217,7 +258,8 @@ mod tests {
             Capabilities {
                 authz_admin: false,
                 apikeys_management: true,
-                audit_query: false
+                audit_query: false,
+                tool_policies: false
             }
         );
     }
@@ -228,6 +270,7 @@ mod tests {
             authz_admin: true,
             apikeys_management: true,
             audit_query: true,
+            tool_policies: true,
         }
         .descriptor();
         assert_eq!(info.service, "iam");
@@ -259,6 +302,7 @@ mod tests {
             authz_admin: true,
             apikeys_management: true,
             audit_query: true,
+            tool_policies: true,
         }
         .descriptor();
         for key in &info.capabilities {

@@ -375,6 +375,21 @@ async fn boot_deferred(
     // signature stays unchanged.
     let state = AppState::new(db.clone(), config).await?;
 
+    // SMA-774: the tool policy feature. The boot probe runs only when the toggle is on. A missing
+    // binary or a failed probe leaves IAM running with the feature off: the eight RPCs answer
+    // `capability-disabled`, the HTTP routes are 404, and `iam.tool.policies` is not advertised.
+    let compiler = if config.tool_policies.enabled {
+        paigasus_iam::adapters::policy_compiler::probe(&config.tool_policies).await
+    } else {
+        None
+    };
+    match &compiler {
+        Some(compiler) => tracing::info!(compiler_revision = %compiler.revision(), "tool policies: enabled"),
+        None if config.tool_policies.enabled => tracing::warn!("tool policies: disabled, because the policy compiler failed its boot probe"),
+        None => tracing::info!("tool policies: disabled by config (tool_policies.enabled = false)"),
+    }
+    let state = state.with_tool_policies(compiler.map(|c| Arc::new(c) as Arc<dyn paigasus_iam_core::tool_policy::PolicyCompiler>), &config.tool_policies);
+
     // Kept for the partition-maintenance task (SMA-467), spawned below.
     let db_for_maintenance = db.clone();
 

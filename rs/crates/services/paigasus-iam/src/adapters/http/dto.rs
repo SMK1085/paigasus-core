@@ -1053,3 +1053,63 @@ mod tests {
         assert_eq!((change.email, change.reason), (None, None));
     }
 }
+
+// --- SMA-774 Task 13: tool catalog and tool policy set DTOs ---------------------------------
+
+/// The `kind` of a tool on the wire.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKindDto {
+    Function,
+    Custom,
+}
+
+/// The `format` of an import on the wire.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportFormatDto {
+    OpenaiChatCompletions,
+    OpenaiResponses,
+    McpToolsList,
+}
+
+/// Body of `POST /v1/organizations/{id}/tools`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PutToolBody {
+    pub name: String,
+    pub kind: ToolKindDto,
+    #[serde(default)]
+    pub input_schema: Option<serde_json::Value>,
+    pub expected_catalog_revision: u64,
+}
+
+/// Query of `DELETE /v1/organizations/{id}/tools/{name}`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct DeleteToolQuery {
+    pub expected_catalog_revision: u64,
+}
+
+/// Body of `POST /v1/organizations/{id}/tool-imports`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportToolsBody {
+    pub format: ImportFormatDto,
+    pub document: serde_json::Value,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub replace: bool,
+    pub expected_catalog_revision: u64,
+}
+
+/// Body of `PUT .../tool-policy-set` and `PUT /v1/tool-policy-floor`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PutPolicySetBody {
+    pub source: String,
+    pub expected_version: u64,
+}
+
+/// Query of the two `GET` set routes.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct PolicySetVersionQuery {
+    pub version: Option<u64>,
+}

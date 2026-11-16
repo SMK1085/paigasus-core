@@ -81,6 +81,9 @@ path_field!(/// `{id}` on a user route (SMA-712) — the user's principal uuid.
 path_field!(/// `{identity_id}` on the unlink route (SMA-712) — an external identity's uuid.
     ExternalIdentityId => "external_identity_id");
 
+path_field!(/// `{name}` on a tool route (SMA-774) — a tool name, not a uuid.
+    ToolNameSegment => "tool_name");
+
 /// The `{field} must be a uuid` envelope response — the one construction point both extractors
 /// below use, so they cannot drift apart on status, code or shape.
 fn malformed_uuid(field: &'static str) -> Response {
@@ -195,6 +198,31 @@ impl<S: Send + Sync, F: PathField> FromRequestParts<S> for StringPath<F> {
             Err(rejection) if is_client_error(&rejection) => Err(malformed_segment(F::NAME)),
             Err(rejection) => Err(rejection.into_response()),
         }
+    }
+}
+
+/// A uuid segment followed by an opaque text segment, for `/{id}/tools/{name}` (SMA-774). The
+/// first segment is parsed as a uuid and named `F1::NAME` when it is malformed. The second is
+/// text: it needs no parse, and the service checks the name against the tool grammar.
+///
+/// Like [`UuidPathPair`], a rejection of the whole pair stays axum's own: a segment that does not
+/// percent-decode as UTF-8 cannot be tied to one of the two markers.
+pub(crate) struct UuidAndSegmentPath<F1: PathField, F2: PathField> {
+    pub id: Uuid,
+    pub segment: String,
+    _marker: PhantomData<(F1, F2)>,
+}
+
+impl<S: Send + Sync, F1: PathField, F2: PathField> FromRequestParts<S> for UuidAndSegmentPath<F1, F2> {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let (raw_id, segment) = match Path::<(String, String)>::from_request_parts(parts, state).await {
+            Ok(Path(pair)) => pair,
+            Err(rejection) => return Err(rejection.into_response()),
+        };
+        let id = Uuid::parse_str(&raw_id).map_err(|_| malformed_uuid(F1::NAME))?;
+        Ok(UuidAndSegmentPath { id, segment, _marker: PhantomData })
     }
 }
 

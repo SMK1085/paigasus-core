@@ -79,6 +79,14 @@ pub async fn probe(cfg: &ToolPoliciesConfig) -> Option<ProcessPolicyCompiler> {
     })
 }
 
+impl ProcessPolicyCompiler {
+    /// The revision string of the boot probe, for the boot log.
+    #[must_use]
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+}
+
 #[async_trait]
 impl PolicyCompiler for ProcessPolicyCompiler {
     fn generation(&self) -> u32 {
