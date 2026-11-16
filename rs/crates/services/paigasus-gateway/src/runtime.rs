@@ -11,15 +11,22 @@
 //! share one model.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use metrics::counter;
+use paigasus_gateway_core::{AllowAll, ToolCallDecider};
 use paigasus_observability::names;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::task::TaskTracker;
 
+use crate::adapters::nats::PolicyEvents;
+use crate::adapters::policy_source::file::FilePolicySource;
+use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy};
+use crate::config::{GatewayConfig, PolicySourceConfig};
 use crate::domain::limits::ChargeDropReason;
+use crate::domain::tool_policy::PolicySource;
 
 /// D16: how long shutdown waits for in-flight limit charges.
 pub const CHARGE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
@@ -97,6 +104,185 @@ pub async fn drain_charges(charges: &TaskTracker, budget: Duration) -> usize {
     counter!(names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL, "reason" => ChargeDropReason::Shutdown.as_label()).increment(u64::try_from(lost).unwrap_or(u64::MAX));
     tracing::warn!(lost, "shutdown: limit charges still running after the drain budget were dropped");
     lost
+}
+
+/// SMA-752 D19: what the composition root wires for the tool policy.
+pub struct ToolPolicyRuntime {
+    /// The cache (for its refresh task) and the request side. `None` with `[tool_policy] enabled = false`.
+    pub policy: Option<(Arc<PolicyCache>, Arc<RequestToolPolicy>)>,
+    /// The decider for tool interception. The Cedar decider only with the tool policy on: without
+    /// the request side there is no snapshot, and the Cedar decider would block every call (fail
+    /// closed). Otherwise `AllowAll`, as before SMA-752.
+    pub decider: Arc<dyn ToolCallDecider>,
+}
+
+/// Build the tool policy from a config that passed [`GatewayConfig::validate`]: `settings()` panics
+/// on an org id that `validate` refuses. With `enabled`, `validate` has made sure that tool
+/// interception is on, that `on_policy_unavailable` is set (D9) and that a source is set.
+///
+/// # Errors
+///
+/// `enabled = true` with no `[tool_policy.source]` (a config that skipped `validate`).
+pub fn build_tool_policy(config: &GatewayConfig) -> anyhow::Result<ToolPolicyRuntime> {
+    if !config.tool_policy.enabled {
+        return Ok(ToolPolicyRuntime {
+            policy: None,
+            decider: Arc::new(AllowAll),
+        });
+    }
+    let settings = config.tool_policy.settings();
+    let source: Arc<dyn PolicySource> = match &config.tool_policy.source {
+        Some(PolicySourceConfig::File { dir }) => Arc::new(FilePolicySource::new(dir)),
+        None => anyhow::bail!("tool_policy.enabled = true requires tool_policy.source"),
+    };
+    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
+    tracing::info!(
+        mode = settings.default_mode.as_str(),
+        "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies"
+    );
+    Ok(ToolPolicyRuntime {
+        policy: Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings)))),
+        decider: Arc::new(CedarDecider),
+    })
+}
+
+/// SMA-752 § 6.3.5: the NATS invalidation subscription for `cache`, only with `[tool_policy]
+/// enabled = true` AND a `[tool_policy.nats]` table. Otherwise `None`: the refresh alone keeps the
+/// cache current. The caller spawns [`PolicyEvents::run`] on the server `JoinSet`.
+///
+/// A broker that is down is not an error: the client connects in the background.
+///
+/// # Errors
+///
+/// [`crate::adapters::nats::NatsError`] (a creds file that cannot be read or parsed, or options
+/// that the client refuses).
+pub async fn build_policy_events(config: &GatewayConfig, cache: &Arc<PolicyCache>) -> anyhow::Result<Option<PolicyEvents>> {
+    let Some(nats) = config.tool_policy.nats.as_ref().filter(|_| config.tool_policy.enabled) else {
+        return Ok(None);
+    };
+    let target: Arc<dyn Invalidate> = Arc::clone(cache) as Arc<dyn Invalidate>;
+    Ok(Some(crate::adapters::nats::connect(nats, target).await?))
+}
+
+#[cfg(test)]
+// `figment::Jail::expect_with` fixes its closure's `Err` type to `figment::Error` (the
+// `config.rs` test module allows the size lint for the same reason).
+#[allow(clippy::result_large_err)]
+mod tool_policy_tests {
+    use super::*;
+    use paigasus_gateway_core::{BlockCode, Decision, DecisionContext, Format, parse_body, parse_request};
+
+    const PRINCIPAL: &str = "prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-000000000004";
+    const ORG_A_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
+    const BASE: &str = "[upstream.openai]\napi_key = \"sk-test-key\"\n";
+
+    /// A config read from `toml` alone, as `GatewayConfig::load` reads it. `validate` must pass
+    /// when `validated` is true, as in `main`.
+    fn config(toml: &str, validated: bool) -> GatewayConfig {
+        let mut out = None;
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", toml)?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            if validated {
+                cfg.validate().expect("the config validates");
+            }
+            out = Some(cfg);
+            Ok(())
+        });
+        out.expect("a config")
+    }
+
+    /// The decision of `decider` for one `read_file` call, with no policy snapshot in the context.
+    async fn decide_one(decider: &Arc<dyn ToolCallDecider>) -> Decision {
+        let body = serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [
+            {"id": "c0", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+        ]}, "finish_reason": "tool_calls"}]})
+        .to_string();
+        let calls = parse_body(Format::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
+        let turn = parse_request(Format::OpenAiChat, br#"{"model":"m","messages":[]}"#);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = decider.decide(Arc::new(ctx), Arc::new(turn), calls).await.expect("decide");
+        assert_eq!(out.len(), 1);
+        out[0]
+    }
+
+    /// SMA-752 D19, Task 16 ruling (b): with the tool policy off, nothing is built and the decider
+    /// is `AllowAll`, as before SMA-752.
+    #[tokio::test]
+    async fn the_tool_policy_off_builds_nothing_and_allows_every_call() {
+        let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
+        let rt = build_tool_policy(&cfg).expect("builds");
+        assert!(rt.policy.is_none());
+        assert_eq!(decide_one(&rt.decider).await, Decision::Allow);
+    }
+
+    /// With the tool policy on and a file source, the cache and the request side exist, and the
+    /// decider is the Cedar decider. Without the request's snapshot the Cedar decider fails closed,
+    /// which `AllowAll` never does: a regression that leaves `AllowAll` on reds here.
+    #[tokio::test]
+    async fn the_tool_policy_on_builds_the_request_side_and_the_cedar_decider() {
+        let cfg = config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n"
+            ),
+            true,
+        );
+        let rt = build_tool_policy(&cfg).expect("builds");
+        assert!(rt.policy.is_some());
+        assert_eq!(decide_one(&rt.decider).await, Decision::Block { code: BlockCode::PolicyUnavailable });
+    }
+
+    /// A config that skipped `validate` and has no source is an error, not a panic.
+    #[test]
+    fn the_tool_policy_on_without_a_source_is_an_error() {
+        let cfg = config(&format!("{BASE}[tool_policy]\nenabled = true\non_policy_unavailable = \"open\"\n"), false);
+        let err = build_tool_policy(&cfg).err().expect("an error");
+        assert!(err.to_string().contains("tool_policy.source"), "{err}");
+    }
+
+    /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.
+    fn tp_config(enabled: bool, nats: Option<&str>) -> GatewayConfig {
+        let nats = nats.map(|url| format!("[tool_policy.nats]\nurl = \"{url}\"\n")).unwrap_or_default();
+        config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = {enabled}\non_policy_unavailable = \"closed\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n{nats}"
+            ),
+            true,
+        )
+    }
+
+    /// A port that nothing listens on.
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("addr").port()
+    }
+
+    /// SMA-752 § 6.3.5, Task 18: the subscription exists only with the tool policy on AND a
+    /// `[tool_policy.nats]` table. A broker that is down is not a boot error.
+    #[tokio::test]
+    async fn the_nats_subscription_is_built_only_with_the_policy_on_and_a_nats_table() {
+        let url = format!("nats://127.0.0.1:{}", closed_port());
+        let cache = build_tool_policy(&tp_config(true, None)).expect("builds").policy.expect("on").0;
+
+        assert!(build_policy_events(&tp_config(true, None), &cache).await.expect("no error").is_none(), "no nats table: refresh only");
+        assert!(build_policy_events(&tp_config(false, Some(&url)), &cache).await.expect("no error").is_none(), "the tool policy is off");
+        let events = tokio::time::timeout(Duration::from_secs(5), build_policy_events(&tp_config(true, Some(&url)), &cache))
+            .await
+            .expect("the broker is not waited for")
+            .expect("a down broker is not an error");
+        assert!(events.is_some(), "on with a nats table: the subscription is built");
+    }
+
+    /// A creds file that does not exist is a boot error that names the path, not the URL.
+    #[tokio::test]
+    async fn a_missing_creds_file_is_a_boot_error_without_the_url() {
+        let mut cfg = tp_config(true, Some("nats://user:hunter2@127.0.0.1:1"));
+        cfg.tool_policy.nats.as_mut().expect("nats").creds_file = Some("/nonexistent/gw.creds".to_string());
+        let cache = build_tool_policy(&cfg).expect("builds").policy.expect("on").0;
+        let err = build_policy_events(&cfg, &cache).await.err().expect("an error");
+        let text = format!("{err:#}");
+        assert!(text.contains("/nonexistent/gw.creds"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+    }
 }
 
 #[cfg(test)]

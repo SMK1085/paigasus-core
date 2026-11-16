@@ -31,7 +31,7 @@ function renderShell(): string {
   return renderToStaticMarkup(
     <ZoneProvider zone="gateway" zones={{ gateway: '/gateway' }}>
       <SessionProvider value={{ principalPrn: null, displayName: 'Ada', email: null, grants: [], grantsAvailable: false }}>
-        <OrgSwitcherShell brand={{ label: 'Paigasus AI Gateway', href: '/gateway/overview' }} nav={[]} orgs={ORGS}>
+        <OrgSwitcherShell brand={{ label: 'AI Gateway', href: '/gateway/overview' }} nav={[]} orgs={ORGS}>
           <p>page</p>
         </OrgSwitcherShell>
       </SessionProvider>

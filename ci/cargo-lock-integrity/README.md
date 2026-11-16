@@ -77,6 +77,12 @@ reason is that an earlier task repaired the lock on disk:
 | `cargo tree -p paigasus-wasm --target wasm32-unknown-unknown -e no-dev` (`repo:wasm-getrandom-free`) | no | 176 to 548 | 0 |
 | `cargo deny --manifest-path rs/Cargo.toml check` (`repo:deny`) | no | 176 to 548 | 0 |
 
+The table records the commands of PR 181. Since SMA-601, `repo:wasm-getrandom-free` runs
+`cargo tree --locked`. Since SMA-752 (D21), the gate also guards Cedar: it runs
+`cargo tree --locked -p <crate> -e normal` for each of the three binding crates and fails when
+`cedar-policy` is in the tree. These commands are locked, so they cannot repair the lock. They
+are not measured in this table.
+
 An unlocked cargo invocation re-resolves and rewrites an inconsistent lock in place,
 mid-run, before any `--locked` task reaches it. The repaired lock exists only in the
 runner's workspace and is never committed, so `main` keeps the truncated file.

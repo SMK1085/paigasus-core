@@ -5,6 +5,7 @@
 //! the chat handler to log request metadata (never the prompt/response body or any other PII).
 
 pub mod limits;
+pub mod tool_policy;
 
 /// Which credential authenticated the request. `Oidc`, not `User`: an OIDC bearer can belong to a
 /// machine client, and IAM uses the same name (`paigasus-iam` `authn.rs:230`).

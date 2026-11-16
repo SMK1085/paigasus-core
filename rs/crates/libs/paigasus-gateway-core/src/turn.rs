@@ -27,6 +27,25 @@ pub struct TurnFacts {
     /// `false` when the request does not list every tool the model may call (spec § 7.2).
     /// The chat and Anthropic formats always list them, so they set `true`.
     pub definitions_complete: bool,
+    /// What the caller asked the model to do about tools (spec § 8).
+    pub tool_choice: ToolChoice,
+    /// Whether an Anthropic `tools[]` entry is a server tool, which `definitions` does not list. The
+    /// request plan needs it for § 6.5.1 step 5. `false` for the other formats.
+    pub server_tools: bool,
+}
+
+/// The caller's `tool_choice`. Names are display names (`ns.name` for a Responses namespace tool).
+/// A shape the parser does not know is `Unknown`, never a malformed request.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    None,
+    Required,
+    Named(String),
+    AllowedTools(Vec<String>),
+    Unknown,
 }
 
 impl Default for TurnFacts {
@@ -36,6 +55,8 @@ impl Default for TurnFacts {
             prior_calls: Vec::new(),
             tool_results: Vec::new(),
             definitions_complete: true,
+            tool_choice: ToolChoice::Auto,
+            server_tools: false,
         }
     }
 }
@@ -51,14 +72,32 @@ pub struct ToolDefinition {
     pub schema: Option<Value>,
 }
 
+impl ToolDefinition {
+    /// `"<namespace>.<name>"`, or `name` when the definition has no namespace.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match &self.namespace {
+            Some(ns) => format!("{ns}.{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
 /// A call the caller made on an earlier turn. `Debug` prints `arguments`, which may carry
 /// secrets; never log a prior call with `{:?}`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriorCall {
     pub id: Option<String>,
+    /// The display name, as `ToolCall::display_name` gives it: `ns.name` for a Responses
+    /// namespace call, `server_label.name` for an `mcp_approval_request`, else the bare name.
+    /// The request plan decides a result by this name, so it must match the call's name.
     pub name: String,
     pub arguments: String,
+    /// `true` for a Responses `local_shell_call`. Its result may name it by `id` alone.
+    pub local_shell: bool,
+    /// The item `id` of a Responses `local_shell_call`. `None` for every other call.
+    pub item_id: Option<String>,
 }
 
 /// A reference to a tool result. It never holds the result content.
@@ -67,6 +106,9 @@ pub struct PriorCall {
 pub struct ToolResultRef {
     pub call_id: Option<String>,
     pub name: Option<String>,
+    /// The item `id` of a Responses `local_shell_call_output`. The provider schema gives this item
+    /// an `id` that refers to its call, and no `call_id`. `None` for every other result.
+    pub item_id: Option<String>,
 }
 
 #[must_use]
@@ -100,7 +142,10 @@ fn req_str(o: &Map<String, Value>, k: &'static str) -> Result<String, Malformed>
 
 fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
-    let mut f = TurnFacts::default();
+    let mut f = TurnFacts {
+        tool_choice: chat_choice(top),
+        ..TurnFacts::default()
+    };
     for t in arr(top, "tools")? {
         let t = obj(t)?;
         match opt_str(t.get("type"), "type")?.as_deref() {
@@ -145,6 +190,8 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                         id: opt_str(c.get("id"), "id")?,
                         name,
                         arguments,
+                        local_shell: false,
+                        item_id: None,
                     });
                 }
                 if let Some(fc) = opt_obj(m.get("function_call"), "function_call")? {
@@ -152,16 +199,20 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                         id: None,
                         name: req_str(fc, "name")?,
                         arguments: opt_str(fc.get("arguments"), "arguments")?.unwrap_or_default(),
+                        local_shell: false,
+                        item_id: None,
                     });
                 }
             }
             Some("tool") => f.tool_results.push(ToolResultRef {
                 call_id: opt_str(m.get("tool_call_id"), "tool_call_id")?,
                 name: None,
+                item_id: None,
             }),
             Some("function") => f.tool_results.push(ToolResultRef {
                 call_id: None,
                 name: opt_str(m.get("name"), "name")?,
+                item_id: None,
             }),
             _ => {}
         }
@@ -193,7 +244,10 @@ fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
 /// id of an `mcp_approval_request` call is its item `id`. A string `input` has no items.
 fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
-    let mut f = TurnFacts::default();
+    let mut f = TurnFacts {
+        tool_choice: responses_choice(top.get("tool_choice")),
+        ..TurnFacts::default()
+    };
     for t in arr(top, "tools")? {
         let t = obj(t)?;
         let ty = req_str(t, "type")?;
@@ -241,11 +295,15 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
                 f.tool_results.push(ToolResultRef {
                     call_id: opt_str(item.get("call_id"), "call_id")?,
                     name: None,
+                    // Only a `local_shell_call_output` refers to its call by `id`. For the other
+                    // output types, `id` is the id of the output item itself.
+                    item_id: if ty == "local_shell_call_output" { opt_str(item.get("id"), "id")? } else { None },
                 });
             }
             "mcp_approval_response" => f.tool_results.push(ToolResultRef {
                 call_id: opt_str(item.get("approval_request_id"), "approval_request_id")?,
                 name: None,
+                item_id: None,
             }),
             _ => {
                 // An unknown type is client-run of kind `Other` for a response (fail closed), but in
@@ -254,16 +312,143 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
                     && kind != ToolCallKind::Other
                 {
                     let c = tool_call(u32::try_from(i).map_err(|_| Malformed("input"))?, item, kind)?;
+                    let local_shell = kind == ToolCallKind::LocalShell;
                     f.prior_calls.push(PriorCall {
-                        id: c.id.clone(),
-                        name: c.name,
+                        // The display name, so a result is decided as its call is (P-7).
+                        name: c.display_name(), // PRIOR-DISPLAY-NAME
+                        id: c.id,
                         arguments: c.arguments,
+                        local_shell,
+                        item_id: if local_shell { opt_str(item.get("id"), "id")? } else { None },
                     });
                 }
             }
         }
     }
     Ok(f)
+}
+
+/// A tool name from a `{"name": ..}` object, or `None` when it is absent or not a string.
+fn name_of(o: &Map<String, Value>) -> Option<String> {
+    o.get("name").and_then(Value::as_str).map(str::to_owned)
+}
+
+/// The `tool_choice` of a chat request, or the legacy `function_call` when `tool_choice` is absent.
+fn chat_choice(top: &Map<String, Value>) -> ToolChoice {
+    match top.get("tool_choice") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(s)) => return string_choice(s),
+        Some(Value::Object(o)) => return chat_object_choice(o),
+        Some(_) => return ToolChoice::Unknown,
+    }
+    match top.get("function_call") {
+        None | Some(Value::Null) => ToolChoice::Auto,
+        Some(Value::String(s)) if s == "auto" => ToolChoice::Auto,
+        Some(Value::String(s)) if s == "none" => ToolChoice::None,
+        Some(Value::Object(o)) => name_of(o).map_or(ToolChoice::Unknown, ToolChoice::Named),
+        Some(_) => ToolChoice::Unknown,
+    }
+}
+
+fn string_choice(s: &str) -> ToolChoice {
+    match s {
+        "auto" => ToolChoice::Auto,
+        "none" => ToolChoice::None,
+        "required" => ToolChoice::Required,
+        _ => ToolChoice::Unknown,
+    }
+}
+
+/// The name of a chat `{"type":"function","function":{"name":..}}` or `custom` entry.
+fn chat_entry_name(v: &Value) -> Option<String> {
+    chat_entry_name_of(v.as_object()?)
+}
+
+fn chat_entry_name_of(o: &Map<String, Value>) -> Option<String> {
+    let ty = o.get("type")?.as_str()?;
+    if !matches!(ty, "function" | "custom") {
+        return None;
+    }
+    name_of(o.get(ty)?.as_object()?)
+}
+
+fn chat_object_choice(o: &Map<String, Value>) -> ToolChoice {
+    let Some(ty) = o.get("type").and_then(Value::as_str) else { return ToolChoice::Unknown };
+    match ty {
+        "function" | "custom" => chat_entry_name_of(o).map_or(ToolChoice::Unknown, ToolChoice::Named),
+        "allowed_tools" => {
+            let tools = o.get("allowed_tools").and_then(Value::as_object).and_then(|a| a.get("tools")).and_then(Value::as_array);
+            tools
+                .and_then(|t| t.iter().map(chat_entry_name).collect::<Option<Vec<_>>>())
+                .map_or(ToolChoice::Unknown, ToolChoice::AllowedTools)
+        }
+        _ => ToolChoice::Unknown,
+    }
+}
+
+/// A Responses `function` or `custom` entry: its display name (`namespace.name` with a namespace).
+fn responses_entry_name(o: &Map<String, Value>) -> Option<String> {
+    let name = name_of(o)?;
+    match o.get("namespace").and_then(Value::as_str) {
+        Some(ns) => Some(format!("{ns}.{name}")),
+        None => Some(name),
+    }
+}
+
+fn responses_choice(v: Option<&Value>) -> ToolChoice {
+    match v {
+        None | Some(Value::Null) => ToolChoice::Auto,
+        Some(Value::String(s)) => string_choice(s),
+        Some(Value::Object(o)) => {
+            let Some(ty) = o.get("type").and_then(Value::as_str) else { return ToolChoice::Unknown };
+            match ty {
+                "function" | "custom" => responses_entry_name(o).map_or(ToolChoice::Unknown, ToolChoice::Named),
+                "allowed_tools" => {
+                    let tools = o.get("tools").and_then(Value::as_array);
+                    tools
+                        .and_then(|t| {
+                            t.iter()
+                                .map(|e| {
+                                    let e = e.as_object()?;
+                                    matches!(e.get("type").and_then(Value::as_str)?, "function" | "custom").then(|| responses_entry_name(e)).flatten()
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .map_or(ToolChoice::Unknown, ToolChoice::AllowedTools)
+                }
+                // A remote MCP tool is named by server and tool, not by a display name we can match.
+                "mcp" => ToolChoice::Unknown,
+                // A known built-in or hosted tool is named by its type; any other type is unknown.
+                "local_shell"
+                | "shell"
+                | "apply_patch"
+                | "computer"
+                | "computer_use_preview"
+                | "tool_search"
+                | "web_search"
+                | "web_search_preview"
+                | "file_search"
+                | "code_interpreter"
+                | "image_generation" => ToolChoice::Named(ty.to_owned()),
+                _ => ToolChoice::Unknown,
+            }
+        }
+        Some(_) => ToolChoice::Unknown,
+    }
+}
+
+fn anthropic_choice(v: Option<&Value>) -> ToolChoice {
+    match v {
+        None | Some(Value::Null) => ToolChoice::Auto,
+        Some(Value::Object(o)) => match o.get("type").and_then(Value::as_str) {
+            Some("auto") => ToolChoice::Auto,
+            Some("any") => ToolChoice::Required,
+            Some("none") => ToolChoice::None,
+            Some("tool") => name_of(o).map_or(ToolChoice::Unknown, ToolChoice::Named),
+            _ => ToolChoice::Unknown,
+        },
+        Some(_) => ToolChoice::Unknown,
+    }
 }
 
 fn responses_definition(t: &Map<String, Value>, ty: &str, namespace: Option<String>) -> Result<ToolDefinition, Malformed> {
@@ -278,7 +463,10 @@ fn responses_definition(t: &Map<String, Value>, ty: &str, namespace: Option<Stri
 
 fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
-    let mut f = TurnFacts::default();
+    let mut f = TurnFacts {
+        tool_choice: anthropic_choice(top.get("tool_choice")),
+        ..TurnFacts::default()
+    };
     for t in arr(top, "tools")? {
         let t = obj(t)?;
         match opt_str(t.get("type"), "type")?.as_deref() {
@@ -288,7 +476,7 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                 kind: ToolCallKind::AnthropicToolUse,
                 schema: t.get("input_schema").cloned(),
             }),
-            Some(_) => {} // a server tool
+            Some(_) => f.server_tools = true, // a server tool
         }
     }
     for m in arr(top, "messages")? {
@@ -301,10 +489,13 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                     id: opt_str(b.get("id"), "id")?,
                     name: req_str(b, "name")?,
                     arguments: b.get("input").map(Value::to_string).unwrap_or_default(),
+                    local_shell: false,
+                    item_id: None,
                 }),
                 Some("tool_result") => f.tool_results.push(ToolResultRef {
                     call_id: opt_str(b.get("tool_use_id"), "tool_use_id")?,
                     name: None,
+                    item_id: None,
                 }),
                 _ => {}
             }
@@ -364,11 +555,13 @@ mod tests {
             vec![
                 ToolResultRef {
                     call_id: Some("c1".into()),
-                    name: None
+                    name: None,
+                    item_id: None
                 },
                 ToolResultRef {
                     call_id: None,
-                    name: Some("old".into())
+                    name: Some("old".into()),
+                    item_id: None
                 }
             ]
         );
@@ -384,8 +577,11 @@ mod tests {
                                {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"SECRET"}]}]}),
         );
         assert_eq!(f.definitions.len(), 1);
+        assert!(f.server_tools);
         assert_eq!(f.prior_calls[0].arguments, r#"{"p":"/"}"#);
         assert_eq!(f.tool_results[0].call_id.as_deref(), Some("t1"));
+        let plain = facts(Format::AnthropicMessages, json!({"model":"c","tools":[{"name":"rm","input_schema":{}}],"messages":[]}));
+        assert!(!plain.server_tools);
     }
 
     /// Schemas and prior inputs are application data (I-1): PascalCase and `constructor` keys in
@@ -477,13 +673,37 @@ mod tests {
         assert!(f.definitions[0].schema.is_some() && f.definitions[1].schema.is_none());
         assert_eq!(
             f.prior_calls.iter().map(|c| (c.id.as_deref(), c.name.as_str())).collect::<Vec<_>>(),
-            [(Some("c1"), "read"), (Some("c2"), "sql"), (Some("c3"), "shell"), (Some("mcpr_1"), "rm")]
+            [(Some("c1"), "read"), (Some("c2"), "sql"), (Some("c3"), "shell"), (Some("mcpr_1"), "srv.rm")]
         );
         assert_eq!(f.prior_calls[0].arguments, "{\"p\":1}");
         assert_eq!(f.prior_calls[1].arguments, "SELECT 1");
         let ids: Vec<_> = f.tool_results.iter().map(|r| r.call_id.as_deref().unwrap()).collect();
         assert_eq!(ids, ["c1", "c2", "c3", "c4", "c5", "c6", "mcpr_1"]);
         assert!(!format!("{f:?}").contains("SECRET"), "tool result content is never kept");
+    }
+
+    #[test]
+    fn a_local_shell_call_and_output_keep_their_item_ids() {
+        let f = responses(&json!({"input":[
+            {"type":"local_shell_call","id":"ls_1","call_id":"c1","action":{"type":"exec","command":["ls"],"env":{}},"status":"completed"},
+            {"type":"local_shell_call_output","id":"ls_1","output":"x"},
+            {"type":"function_call_output","id":"fco_1","call_id":"c2","output":"x"}]}))
+        .unwrap();
+        assert_eq!(
+            f.prior_calls.iter().map(|c| (c.id.as_deref(), c.local_shell, c.item_id.as_deref())).collect::<Vec<_>>(),
+            [(Some("c1"), true, Some("ls_1"))]
+        );
+        // Only a `local_shell_call_output` refers to its call by `id`.
+        assert_eq!(
+            f.tool_results.iter().map(|r| (r.call_id.as_deref(), r.item_id.as_deref())).collect::<Vec<_>>(),
+            [(None, Some("ls_1")), (Some("c2"), None)]
+        );
+    }
+
+    #[test]
+    fn a_namespaced_prior_call_keeps_its_display_name() {
+        let f = responses(&json!({"input":[{"type":"function_call","call_id":"c1","namespace":"db","name":"query","arguments":"{}"}]})).unwrap();
+        assert_eq!(f.prior_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["db.query"]);
     }
 
     #[test]
@@ -541,5 +761,67 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+    }
+
+    fn choice(format: Format, v: serde_json::Value) -> ToolChoice {
+        facts(format, v).tool_choice
+    }
+
+    #[test]
+    fn chat_tool_choice() {
+        let c = |tc: serde_json::Value| choice(Format::OpenAiChat, json!({"tool_choice": tc}));
+        assert_eq!(choice(Format::OpenAiChat, json!({})), ToolChoice::Auto);
+        assert_eq!(c(json!("auto")), ToolChoice::Auto);
+        assert_eq!(c(json!("none")), ToolChoice::None);
+        assert_eq!(c(json!("required")), ToolChoice::Required);
+        assert_eq!(c(json!({"type":"function","function":{"name":"f"}})), ToolChoice::Named("f".into()));
+        assert_eq!(c(json!({"type":"custom","custom":{"name":"c"}})), ToolChoice::Named("c".into()));
+        assert_eq!(
+            c(json!({"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"a"}}]}})),
+            ToolChoice::AllowedTools(vec!["a".into()])
+        );
+        assert_eq!(c(json!("weird")), ToolChoice::Unknown);
+        assert_eq!(c(json!({"type":"mystery"})), ToolChoice::Unknown);
+        assert_eq!(c(json!({"type":"function"})), ToolChoice::Unknown);
+        let l = |fc: serde_json::Value| choice(Format::OpenAiChat, json!({"function_call": fc}));
+        assert_eq!(l(json!("auto")), ToolChoice::Auto);
+        assert_eq!(l(json!("none")), ToolChoice::None);
+        assert_eq!(l(json!({"name":"f"})), ToolChoice::Named("f".into()));
+        assert_eq!(l(json!("other")), ToolChoice::Unknown);
+        assert_eq!(l(json!(5)), ToolChoice::Unknown);
+    }
+
+    #[test]
+    fn responses_tool_choice() {
+        let c = |tc: serde_json::Value| choice(Format::OpenAiResponses, json!({"tool_choice": tc}));
+        assert_eq!(choice(Format::OpenAiResponses, json!({})), ToolChoice::Auto);
+        assert_eq!(c(json!("auto")), ToolChoice::Auto);
+        assert_eq!(c(json!("none")), ToolChoice::None);
+        assert_eq!(c(json!("required")), ToolChoice::Required);
+        assert_eq!(c(json!({"type":"function","name":"f"})), ToolChoice::Named("f".into()));
+        assert_eq!(c(json!({"type":"function","name":"f","namespace":"ns"})), ToolChoice::Named("ns.f".into()));
+        assert_eq!(c(json!({"type":"custom","name":"c"})), ToolChoice::Named("c".into()));
+        assert_eq!(
+            c(json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"a"}]})),
+            ToolChoice::AllowedTools(vec!["a".into()])
+        );
+        assert_eq!(c(json!({"type":"local_shell"})), ToolChoice::Named("local_shell".into()));
+        assert_eq!(c(json!({"type":"mcp","server_label":"s"})), ToolChoice::Unknown);
+        assert_eq!(c(json!({"type":"mystery"})), ToolChoice::Unknown);
+        assert_eq!(c(json!({"type":"web_search"})), ToolChoice::Named("web_search".into()));
+        assert_eq!(c(json!("weird")), ToolChoice::Unknown);
+    }
+
+    #[test]
+    fn anthropic_tool_choice() {
+        let c = |tc: serde_json::Value| choice(Format::AnthropicMessages, json!({"tool_choice": tc}));
+        assert_eq!(choice(Format::AnthropicMessages, json!({})), ToolChoice::Auto);
+        assert_eq!(c(json!({"type":"auto"})), ToolChoice::Auto);
+        assert_eq!(c(json!({"type":"any"})), ToolChoice::Required);
+        assert_eq!(c(json!({"type":"none"})), ToolChoice::None);
+        assert_eq!(c(json!({"type":"tool","name":"t"})), ToolChoice::Named("t".into()));
+        assert_eq!(c(json!({"type":"tool"})), ToolChoice::Unknown);
+        assert_eq!(c(json!({"type":"x"})), ToolChoice::Unknown);
+        assert_eq!(c(json!("auto")), ToolChoice::Unknown);
     }
 }

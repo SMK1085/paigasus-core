@@ -96,6 +96,7 @@ fn app(base_url: &str, o: Opts) -> Router {
         limits: o.limits,
         dpop_enabled: false,
         tool_interception: o.ti,
+        tool_policy: None,
         responses: o.responses.map(Arc::new),
     })
 }

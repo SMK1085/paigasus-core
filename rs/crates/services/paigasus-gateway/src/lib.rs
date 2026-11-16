@@ -19,11 +19,21 @@
 //! ## Tool-call interception (SMA-749)
 //! With `[tool_interception] enabled = true`, the chat relay runs every response through
 //! `paigasus-gateway-core`. Text streams at once. A tool call is held until it is complete, then
-//! decided, then forwarded or replaced with an assistant notice. This build's decider allows
-//! everything (SMA-752 adds policies). Off by default; off is payload-identical to the old relay. Decisions are
+//! decided, then forwarded or replaced with an assistant notice. Without `[tool_policy]` the
+//! decider allows everything. Off by default; off is payload-identical to the old relay. Decisions are
 //! reported in `: paigasus-decision` SSE comments or the `paigasus-tool-decisions` header. A
 //! non-stream answer the gateway cannot check is a 502 `tool-interception-malformed-response`
 //! under `on_failure = "block"`.
+//!
+//! ## Tool policy (SMA-752)
+//! With `[tool_policy] enabled = true` (it needs tool interception), the gateway checks tools
+//! against Cedar policies: a floor that is always enforced, and a tenant set per organization in
+//! the mode `off`, `log_only` or `enforce`. Before the limits, the request side removes denied tool
+//! definitions and replaces blocked tool results in `enforce` (a floor removal in every mode). It
+//! refuses a request whose tools it cannot read in `enforce` with a 400 `invalid-request-body`.
+//! The Cedar decider then decides each tool call with the same policy snapshot. The request
+//! entries are reported first in a stream, and in the `paigasus-tool-decisions` header of a full
+//! answer. Off by default; off keeps the gateway exactly as before.
 //!
 //! Under `on_failure = "block"`, the gateway only forwards a call that it has assembled in the one
 //! canonical form that every client SDK agrees on. Anything else is a deviation and is blocked.

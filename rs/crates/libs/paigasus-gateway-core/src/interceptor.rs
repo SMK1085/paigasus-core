@@ -15,7 +15,7 @@ use crate::anthropic::stream::AnthropicStream;
 use crate::limits::{Limits, OnFailure};
 use crate::openai::stream::OpenAiStream;
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
-use crate::report::{ReportDecision, ReportEntry, report_comment, report_entry};
+use crate::report::{ReportDecision, ReportEntry, reason_label, report_comment, report_entry};
 use crate::responses::stream::ResponsesStream;
 use crate::sse::{self, SseItem, SseSplitter};
 use crate::types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall};
@@ -382,7 +382,11 @@ impl Interceptor {
         }
         for (c, d) in calls.iter().zip(&decisions) {
             let (decision, code) = match d {
+                // An observed hold is already released as pass-through, so a block is not applied:
+                // the report says what happened, an allowed call with the would-be code.
+                Decision::Block { code } if observe => (ReportDecision::Allow, Some(*code)),
                 Decision::Block { code } => (ReportDecision::Block, Some(*code)),
+                Decision::Observe { would } => (ReportDecision::Allow, Some(*would)),
                 _ => (ReportDecision::Allow, None),
             };
             let label = if decision == ReportDecision::Block { "block" } else { "allow" };
@@ -421,6 +425,8 @@ impl Interceptor {
                 decision: ReportDecision::Block,
                 basis: Some(Basis::OnFailure),
                 code: Some(code),
+                enforced: Some(true),
+                reason: reason_label(code),
             };
             self.count(Metric::Decision {
                 decision: "block",
@@ -766,6 +772,19 @@ mod tests {
     }
 
     #[test]
+    fn observe_releases_the_call_and_reports_not_enforced() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::AnthropicMessages, limits(), Bytes::from_static(TERMINAL), t0);
+        for c in [tool_start(0, "read"), json_delta(0, "\"CANARY\""), block_stop(0)] {
+            i.push(c.as_bytes(), t0);
+        }
+        let out = emitted(&i.decided(HoldKey::Block(0), Ok(vec![Decision::Observe { would: BlockCode::Policy }]), t0));
+        assert!(out.contains("CANARY"), "the call is released unchanged: {out}");
+        assert!(!out.contains("[paigasus]"), "no notice: {out}");
+        assert!(out.contains(r#""enforced":false"#) && out.contains(r#""decision":"allow""#), "{out}");
+    }
+
+    #[test]
     fn eof_with_an_open_hold_is_truncated_not_complete() {
         let chunks = vec![call(0, 0, "read", "{\"CANARY\":")];
         let r = run_with(limits(), &chunks, allow);
@@ -959,6 +978,29 @@ mod tests {
         let acts = i.push(finish(0).as_bytes(), t0 + Duration::from_secs(302));
         let out = emitted(&acts);
         assert!(!out.contains("X1") && out.contains("(hold-limit)"), "{out}");
+    }
+
+    #[test]
+    fn a_block_for_a_hold_released_past_max_hold_is_reported_not_enforced() {
+        let t0 = Instant::now();
+        let lim = Limits {
+            on_failure: OnFailure::Allow,
+            ..limits()
+        };
+        let mut i = Interceptor::new(Format::OpenAiChat, lim, Bytes::from_static(TERMINAL), t0);
+        i.push(call(0, 0, "read", "\"X1\"").as_bytes(), t0);
+        let acts = i.tick(t0 + Duration::from_secs(301));
+        assert!(acts.contains(&Action::Count(Metric::OnFailure("hold_limit"))));
+        let mut out = emitted(&acts);
+        out.push_str(&emitted(&i.push(finish(0).as_bytes(), t0 + Duration::from_secs(302))));
+        out.push_str(&emitted(&i.decided(
+            HoldKey::Choice(0),
+            Ok(vec![Decision::Block { code: BlockCode::Policy }]),
+            t0 + Duration::from_secs(302),
+        )));
+        assert!(out.contains("X1") && !out.contains("[paigasus]"), "the released call is not blocked: {out}");
+        assert!(out.contains(r#""enforced":false"#) && out.contains(r#""decision":"allow""#), "{out}");
+        assert!(!out.contains(r#""enforced":true"#), "{out}");
     }
 
     #[test]

@@ -33,7 +33,7 @@ accounts {
         nkey: "{{CONSUMER_NKEY}}"
         permissions: {
           publish:   { allow: [ "$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.gateway-cache-invalidator", "$JS.API.CONSUMER.INFO.IAM_EVENTS.gateway-cache-invalidator", "$JS.ACK.IAM_EVENTS.gateway-cache-invalidator.>" ] }
-          subscribe: { allow: [ "_INBOX_GW.>" ] }
+          subscribe: { allow: [ "_INBOX_GW.>", "iam.policy.>" ] }
         }
       },
       {

@@ -9,7 +9,7 @@
 use serde_json::Value;
 
 use crate::json::{Malformed, ResponsesDoc, check_numbers, check_numbers_responses, parse_strict, parse_strict_responses};
-use crate::report::{ReportDecision, ReportEntry, header_value, report_entry};
+use crate::report::{ReportDecision, ReportEntry, RequestEntry, report_entry, report_header};
 use crate::types::{Basis, BlockCode, Decision, Format, ToolCall};
 use crate::{anthropic, openai, responses};
 
@@ -86,6 +86,17 @@ impl BodyCalls {
         }
     }
 
+    /// The code an `Observe` decision for call `i` would have blocked with.
+    fn observed(&self, decisions: &[Decision], i: usize) -> Option<BlockCode> {
+        if decisions.len() != self.calls.len() {
+            return None;
+        }
+        match decisions[i] {
+            Decision::Observe { would } => Some(would),
+            _ => None,
+        }
+    }
+
     /// Whether the body itself forces `Truncated` on a call (a Responses item that is not
     /// `"completed"`, ruling F7). The service reads it to apply `on_failure = allow` to such a
     /// body as the stream does to a truncation: the body goes through unchanged.
@@ -112,7 +123,7 @@ impl BodyCalls {
 
     /// The `paigasus-tool-decisions` header value (D22), including the unenforceable entries.
     #[must_use]
-    pub fn report(&self, decisions: &[Decision], basis: Basis) -> String {
+    pub fn report(&self, decisions: &[Decision], basis: Basis, requests: &[RequestEntry]) -> String {
         let mut entries: Vec<ReportEntry> = self
             .calls
             .iter()
@@ -120,11 +131,11 @@ impl BodyCalls {
             .map(|(i, c)| {
                 let code = self.code(decisions, i);
                 let decision = if code.is_some() { ReportDecision::Block } else { ReportDecision::Allow };
-                report_entry(c, decision, basis, code)
+                report_entry(c, decision, basis, code.or_else(|| self.observed(decisions, i)))
             })
             .collect();
         entries.extend(self.unenforceable.iter().cloned());
-        header_value(&entries)
+        report_header(&entries, requests)
     }
 }
 
@@ -163,6 +174,19 @@ mod tests {
         );
         assert_eq!(b.calls[1].arguments, "\"SECRET\"");
         assert_eq!(b.calls[1].id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn observe_keeps_the_body_bytes() {
+        let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
+        assert!(b.apply(&[Decision::Observe { would: BlockCode::Policy }, Decision::Allow]).is_none());
+        let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
+        let h: Vec<Value> = serde_json::from_str(&b.report(&[Decision::Observe { would: BlockCode::Policy }, Decision::Allow], Basis::Decider, &[])).unwrap();
+        assert_eq!(
+            (h[0]["decision"].as_str(), h[0]["code"].as_str(), h[0]["enforced"].as_bool()),
+            (Some("allow"), Some("policy"), Some(false))
+        );
+        assert!(h[1]["enforced"].is_null());
     }
 
     #[test]
@@ -343,7 +367,7 @@ mod tests {
         let b = parse_body(Format::AnthropicMessages, &body, MAX).unwrap();
         assert!(b.calls.is_empty());
         assert_eq!(b.unenforceable.len(), 2);
-        assert!(b.report(&[], Basis::Decider).contains("unenforceable"));
+        assert!(b.report(&[], Basis::Decider, &[]).contains("unenforceable"));
     }
 
     #[test]
@@ -384,7 +408,7 @@ mod tests {
     #[test]
     fn the_report_lists_each_decision() {
         let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
-        let h: Vec<Value> = serde_json::from_str(&b.report(&[Decision::Allow, block()], Basis::Decider)).unwrap();
+        let h: Vec<Value> = serde_json::from_str(&b.report(&[Decision::Allow, block()], Basis::Decider, &[])).unwrap();
         assert_eq!(h.len(), 2);
         assert_eq!(
             (h[0]["decision"].as_str(), h[1]["decision"].as_str(), h[1]["code"].as_str()),
@@ -407,7 +431,7 @@ mod tests {
     fn a_wrong_length_decision_vector_blocks_every_call() {
         for decisions in [vec![Decision::Allow], vec![Decision::Allow, Decision::Allow, Decision::Allow]] {
             let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
-            let h: Vec<Value> = serde_json::from_str(&b.report(&decisions, Basis::OnFailure)).unwrap();
+            let h: Vec<Value> = serde_json::from_str(&b.report(&decisions, Basis::OnFailure, &[])).unwrap();
             assert!(h.iter().all(|e| e["decision"] == "block" && e["code"] == "decider-error"), "{h:?}");
             let out = String::from_utf8(b.apply(&decisions).unwrap()).unwrap();
             let v: Value = serde_json::from_str(&out).unwrap();
@@ -482,7 +506,7 @@ mod tests {
         let b = parse_body(Format::OpenAiResponses, &body, MAX).unwrap();
         assert_eq!(b.calls.iter().map(|c| (c.position, c.display_name())).collect::<Vec<_>>(), [(1, "fs.rm".to_owned())]);
         assert_eq!(b.unenforceable.len(), 1);
-        assert!(b.report(&[block()], Basis::Decider).contains(r#""name":"fs.rm""#));
+        assert!(b.report(&[block()], Basis::Decider, &[]).contains(r#""name":"fs.rm""#));
         assert!(parse_body(Format::OpenAiResponses, &body, MAX).unwrap().apply(&[Decision::Allow]).is_none(), "allow keeps the bytes");
         let out = b.apply(&[block()]).unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
@@ -495,7 +519,7 @@ mod tests {
         // rewrite and in the report.
         let cut = responses_body(json!([{"type":"function_call","id":"fc_1","call_id":"c1","name":"rm","arguments":"{\"p\":\"SEC","status":"incomplete"}]));
         let b = parse_body(Format::OpenAiResponses, &cut, MAX).unwrap();
-        let report = b.report(&[Decision::Allow], Basis::Decider);
+        let report = b.report(&[Decision::Allow], Basis::Decider, &[]);
         assert!(report.contains(r#""decision":"block""#) && report.contains(r#""code":"truncated""#), "{report}");
         let v: Value = serde_json::from_slice(&b.apply(&[Decision::Allow]).unwrap()).unwrap();
         assert_eq!(v["output"][0]["content"][0]["text"], "[paigasus] tool call \"rm\" was blocked (truncated).");

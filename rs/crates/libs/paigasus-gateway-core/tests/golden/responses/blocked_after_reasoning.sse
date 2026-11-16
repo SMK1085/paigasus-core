@@ -25,7 +25,7 @@ data: {"type":"response.reasoning_summary_part.done","part":{"type":"summary_tex
 event: response.output_item.done
 data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_0","content":[],"encrypted_content":"enc-done-0","summary":[{"type":"summary_text","text":"Thinking."}]},"output_index":0,"sequence_number":8}
 
-: paigasus-decision {"v":1,"choice":0,"position":1,"name":"blocked_exfil","name_sha256_8":"7d49739c","decision":"block","basis":"decider","code":"policy"}
+: paigasus-decision {"v":2,"side":"response","choice":0,"position":1,"name":"blocked_exfil","name_sha256_8":"7d49739c","decision":"block","basis":"decider","code":"policy","enforced":true,"reason":"tool-call-denied"}
 
 event: response.output_item.added
 data: {"type":"response.output_item.added","output_index":1,"sequence_number":9,"item":{"type":"message","id":"msg_paigasus_1","role":"assistant","status":"in_progress","content":[]}}

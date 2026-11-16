@@ -24,6 +24,7 @@ use paigasus_gateway::adapters::iam::{CallerCredential, DpopContext, Iam, IamErr
 use paigasus_gateway::adapters::limits::MemoryLimitStore;
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::application::limits::Limits;
+use paigasus_gateway::application::tool_policy::RequestToolPolicy;
 use paigasus_gateway::config::OpenAiConfig;
 use paigasus_gateway::domain::limits::{BudgetPeriod, Clock, LimitDecision, LimitPolicy, LimitRules, LimitStore, LimitStoreError, LimitTicket, OrgOverride, UnavailableKind};
 use paigasus_gateway::service_info::Capabilities;
@@ -206,15 +207,28 @@ pub fn app(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>) -> Ro
 }
 
 pub fn app_with(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, first_byte: Duration, chat_stream: bool) -> Router {
-    build(iam, base_url, limits, first_byte, chat_stream, None)
+    build(iam, base_url, limits, first_byte, chat_stream, None, None)
 }
 
 /// SMA-749: the router with tool-call interception set.
 pub fn app_with_interception(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, ti: Option<Arc<ToolInterception>>) -> Router {
-    build(iam, base_url, limits, Duration::from_secs(30), true, ti)
+    build(iam, base_url, limits, Duration::from_secs(30), true, ti, None)
 }
 
-fn build(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, first_byte: Duration, chat_stream: bool, tool_interception: Option<Arc<ToolInterception>>) -> Router {
+/// SMA-752: the router with tool-call interception and the request side of the tool policy set.
+pub fn app_with_tool_policy(iam: Arc<dyn Iam>, base_url: &str, ti: Option<Arc<ToolInterception>>, tp: Option<Arc<RequestToolPolicy>>) -> Router {
+    build(iam, base_url, None, Duration::from_secs(30), true, ti, tp)
+}
+
+fn build(
+    iam: Arc<dyn Iam>,
+    base_url: &str,
+    limits: Option<Arc<Limits>>,
+    first_byte: Duration,
+    chat_stream: bool,
+    tool_interception: Option<Arc<ToolInterception>>,
+    tool_policy: Option<Arc<RequestToolPolicy>>,
+) -> Router {
     router(AppState {
         iam,
         openai: Arc::new(openai(base_url, first_byte)),
@@ -223,6 +237,7 @@ fn build(iam: Arc<dyn Iam>, base_url: &str, limits: Option<Arc<Limits>>, first_b
         limits,
         dpop_enabled: false,
         tool_interception,
+        tool_policy,
         responses: None,
     })
 }

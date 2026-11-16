@@ -229,8 +229,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   per-invocation split needs a shell parse the gate deliberately does not do for a task's own
   command field.
   Nothing is wrong today: exactly one task has more than one regex match
-  (`repo:wasm-getrandom-free`, whose second match sits inside an `echo`), and its real cargo call
-  is locked.
+  (`repo:wasm-getrandom-free`). Since SMA-752 (D21) it also guards Cedar, so it has two real
+  `cargo tree` calls (getrandom on wasm32, and `cedar-policy` for each binding crate). Its other
+  matches sit inside an `echo` or a comment, and both real cargo calls are locked.
 - **A9** (in `cargo_moon_parity.py`, SMA-604) is the only assertion in this file about a consumer
   OUTSIDE this repo. Every workspace crate must be reachable through **Dependabot's** expansion of
   `rs/Cargo.toml`'s `[workspace] members`, which is weaker than Cargo's: `expand_workspaces`
