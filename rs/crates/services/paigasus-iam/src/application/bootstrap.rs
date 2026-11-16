@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Boot-time reconciliation of the starter Cedar policy set + the eight system roles
+//! Boot-time reconciliation of the starter Cedar policy set + the nine system roles
 //! (SMA-444 Task 17; converge-to-code since SMA-477). Runs once per `AppState::new`, AFTER the
 //! policy store is constructed but BEFORE the initial `PolicySnapshot` compiles — so a fresh
 //! database is seeded before the first request is decided.
