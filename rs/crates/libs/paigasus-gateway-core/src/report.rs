@@ -186,15 +186,18 @@ fn omitted_summary(n: usize) -> String {
 /// entry (§ 6.5.3: "if any request entry is removed, one summary entry gives their count").
 #[must_use]
 pub fn report_header(calls: &[ReportEntry], requests: &[RequestEntry]) -> String {
-    // Room kept at the end of the call entries: the cut marker, and the summary of every request
-    // entry after it. The request loop needs room for its own summary only.
+    // Room kept after a call entry: the cut marker (only when a later call entry follows), and the
+    // summary of every request entry. The request loop needs room for its own summary only, and
+    // only when a later request entry follows.
     let summary = (!requests.is_empty()).then(|| omitted_summary(requests.len()));
-    let reserve = TRUNCATED.len() + summary.as_ref().map_or(0, |s| 1 + s.len());
+    let summary_room = summary.as_ref().map_or(0, |s| 1 + s.len());
     let mut out = String::from("[");
     for (i, e) in calls.iter().enumerate() {
         let json = e.to_json();
         let sep = usize::from(i > 0);
-        if out.len() + sep + json.len() + 1 + reserve + 1 > MAX_HEADER_BYTES {
+        let more_calls = i + 1 < calls.len();
+        let reserve = summary_room + if more_calls { 1 + TRUNCATED.len() } else { 0 };
+        if out.len() + sep + json.len() + reserve + 1 > MAX_HEADER_BYTES {
             if i > 0 {
                 out.push(',');
             }
@@ -214,8 +217,8 @@ pub fn report_header(calls: &[ReportEntry], requests: &[RequestEntry]) -> String
     for (i, r) in requests.iter().enumerate() {
         let json = r.to_json();
         let sep = usize::from(!out.ends_with('['));
-        let reserve = summary.as_ref().map_or(0, String::len);
-        if out.len() + sep + json.len() + 1 + reserve + 1 > MAX_HEADER_BYTES {
+        let reserve = if i + 1 < requests.len() { summary_room } else { 0 };
+        if out.len() + sep + json.len() + reserve + 1 > MAX_HEADER_BYTES {
             if sep == 1 {
                 out.push(',');
             }
@@ -424,6 +427,56 @@ mod tests {
         let h = report_header(&calls, &[]);
         let v: Vec<serde_json::Value> = serde_json::from_str(&h).unwrap();
         assert_eq!(v.last(), Some(&serde_json::json!({"truncated": true})));
+    }
+
+    /// The cut markers are reserved only when more entries follow. The last entry that fits stays.
+    /// The last name is padded so that the free space after it falls inside the window where the
+    /// old reserve (cut marker, or request summary, kept for the last entry too) dropped it.
+    #[test]
+    fn the_last_fitting_entry_is_kept() {
+        let joined = |parts: Vec<String>| format!("[{}]", parts.join(","));
+        // Call half. The old code dropped the last entry when fewer than TRUNCATED + 1 bytes stayed.
+        // `pad` sets the length of every name but the last, so the search can reach the window.
+        let calls = |pad: usize, n: usize, last: usize| -> Vec<ReportEntry> { (0..n).map(|i| entry(&"x".repeat(if i + 1 == n { last } else { pad }))).collect() };
+        let plain_calls = |c: &[ReportEntry]| joined(c.iter().map(ReportEntry::to_json).collect());
+        let window = TRUNCATED.len();
+        let (c, free) = (1..=40)
+            .flat_map(|pad| {
+                let n = (2..).take_while(|&n| plain_calls(&calls(pad, n, 1)).len() <= 2048).last().unwrap();
+                (1..=40).map(move |l| (pad, n, l))
+            })
+            .map(|(pad, n, l)| calls(pad, n, l))
+            .map(|c| {
+                let f = 2048_usize.saturating_sub(plain_calls(&c).len());
+                (c, f)
+            })
+            .find(|(c, f)| (1..=window).contains(f) && plain_calls(c).len() <= 2048)
+            .expect("a name length puts the free space in the window");
+        assert!((1..=window).contains(&free), "free space {free} must lie in 1..={window}");
+        assert_eq!(report_header(&c, &[]), plain_calls(&c));
+        // Request half. The old code dropped the last entry when fewer than summary + 1 bytes stayed.
+        let reqs = |pad: usize, m: usize, last: usize| -> Vec<RequestEntry> {
+            (0..m)
+                .map(|i| RequestEntry::new("x".repeat(if i + 1 == m { last } else { pad }), RequestAction::RemoveDefinition, true, RequestReason::ToolCallDenied))
+                .collect()
+        };
+        let plain_reqs = |r: &[RequestEntry]| joined(r.iter().map(RequestEntry::to_json).collect());
+        let (r, free, window) = (1..=40)
+            .flat_map(|pad| {
+                let m = (2..).take_while(|&m| plain_reqs(&reqs(pad, m, 1)).len() <= 2048).last().unwrap();
+                (1..=40).map(move |l| (pad, m, l))
+            })
+            .map(|(pad, m, l)| reqs(pad, m, l))
+            .filter_map(|r| {
+                let len = plain_reqs(&r).len();
+                let window = omitted_summary(r.len()).len();
+                let f = 2048_usize.checked_sub(len)?;
+                (1..=window).contains(&f).then_some((r, f, window))
+            })
+            .next()
+            .expect("a name length puts the free space in the window");
+        assert!((1..=window).contains(&free), "free space {free} must lie in 1..={window}");
+        assert_eq!(report_header(&[], &r), plain_reqs(&r));
     }
 
     #[test]

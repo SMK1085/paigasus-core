@@ -275,6 +275,18 @@ impl PolicyCache {
                 }
             }
         }
+        // The last round can end with a load that finished and is current. Read it before the
+        // failure fallback, which under `closed` serves nothing.
+        {
+            let mut inner = self.lock();
+            let now = Instant::now();
+            let gen_now = inner.gen_now;
+            if let Some(good) = inner.existing(key).and_then(|e| e.good.as_ref())
+                && good.usable(now, gen_now, self.settings.max_stale)
+            {
+                return Some(good.data.clone());
+            }
+        }
         self.fallback(key, on_unavailable)
     }
 
@@ -1000,6 +1012,26 @@ mod tests {
             assert!(matches!(set, Lookup::Ready(_)), "the second load finishes inside load_timeout");
             assert_eq!(src.tenant_calls(), 2, "the load that began before the invalidate is not served: {ou:?}");
             assert_eq!(cache.lock().tenants[&ORG].good.as_ref().map(|g| g.version.clone()).as_deref(), Some("t2"));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_last_round_load_is_read_when_it_finishes_current() {
+        for ou in [OnUnavailable::Closed, OnUnavailable::Open] {
+            let src = FakeSource::new();
+            let cache = PolicyCache::new(src.clone(), settings());
+            let floor = ready_floor(&cache, ou).await;
+            src.set_delay(Duration::from_millis(300));
+            let change = async {
+                // Two invalidations land during the first two of three loads.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                cache.invalidate_all();
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                cache.invalidate_all();
+            };
+            let (set, ()) = tokio::join!(cache.tenant(ORG, &floor, ou), change);
+            assert!(matches!(set, Lookup::Ready(_)), "the third load is current: {ou:?}");
+            assert_eq!(src.tenant_calls(), 3, "{ou:?}");
         }
     }
 
