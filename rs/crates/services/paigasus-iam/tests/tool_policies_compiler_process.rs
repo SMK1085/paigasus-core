@@ -236,20 +236,24 @@ async fn the_child_inherits_only_the_three_pipes() {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     let dir = TempDir::new().expect("tempdir");
-    // A file descriptor that the test process holds open must not reach the child. `dup2` gives
+    // A file descriptor that the test process holds open must not reach the child. `F_DUPFD` gives
     // the copy no `FD_CLOEXEC`, as a descriptor from outside Rust can lack it (CI held two such).
-    // The high number keeps it apart from what `ls` opens itself.
-    const HELD: i32 = 200;
+    // It picks the lowest unused number from 200 up, so it never closes a descriptor that the test
+    // process already holds. The high number keeps it apart from what `ls` opens itself.
     let file = std::fs::File::open(dir.path()).expect("open a descriptor");
-    // SAFETY: `dup2` writes no memory. The test owns `HELD` from here, and `_held` closes it.
-    assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), HELD) }, HELD, "dup2");
-    let _held = unsafe { OwnedFd::from_raw_fd(HELD) };
+    // SAFETY: `fcntl` with `F_DUPFD` writes no memory. The test owns the new descriptor, and
+    // `_held` closes it.
+    let raw = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 200) };
+    assert!(raw >= 200, "F_DUPFD");
+    let _held = unsafe { OwnedFd::from_raw_fd(raw) };
+    let flags = unsafe { libc::fcntl(raw, libc::F_GETFD) };
+    assert_eq!(flags & libc::FD_CLOEXEC, 0, "the held descriptor must lack FD_CLOEXEC");
     let listing = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
     let path = script(&dir, "fds", &format!("exec /bin/ls {listing}"));
     let output = run_child(&path, &[], b"", &limits(10_000)).await.expect("ls runs");
     assert!(output.status.success());
     let fds: Vec<String> = String::from_utf8_lossy(&output.stdout).split_whitespace().map(str::to_owned).collect();
-    assert!(!fds.contains(&HELD.to_string()), "the child holds the descriptor of the test: {fds:?}");
+    assert!(!fds.contains(&raw.to_string()), "the child holds the descriptor of the test: {fds:?}");
     // On Linux 0, 1 and 2 are the pipes and 3 is the directory that `ls` opens to list it. On
     // macOS `ls /dev/fd` opens two descriptors of its own, so only the check above applies.
     if cfg!(target_os = "linux") {
