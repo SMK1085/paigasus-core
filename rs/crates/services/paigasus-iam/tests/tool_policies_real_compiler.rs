@@ -47,8 +47,15 @@ impl Env {
 /// `None` when Docker is absent (the shared skip policy). The compiler path is the caller's.
 async fn setup(compiler: &Path) -> Option<Env> {
     let (node, db) = support::start_migrated_postgres().await?;
+    // The probe logs its reason at ERROR. Capture the logs so that a failure names it.
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs();
     let (state, idp) = support::state_with_tool_policies(db, true, compiler).await;
-    assert!(state.capabilities.tool_policies, "the boot probe did not accept the real compiler");
+    assert!(
+        state.capabilities.tool_policies,
+        "the boot probe did not accept the real compiler {}; logs:\n{}",
+        compiler.display(),
+        logs.text()
+    );
     let token = idp.bearer("real-admin", Some("real-admin@example.com"), "paigasus", 3600);
     let admin_prn = support::provision_platform_admin(&state, &token).await;
     let actor = Prn::parse(&admin_prn).expect("the admin prn");

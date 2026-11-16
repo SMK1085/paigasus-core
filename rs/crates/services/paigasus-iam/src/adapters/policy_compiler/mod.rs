@@ -3,7 +3,7 @@
 //! The [`PolicyCompiler`] adapter: it runs `paigasus-policy-compiler` as a child process
 //! (SMA-774, spec sections 5.2 and 6.2).
 //!
-//! [`probe`] runs `revision` once at boot. A missing binary, a failed call or another protocol
+//! [`probe`] runs `revision` at boot, with a bounded retry for a transient failure. A missing binary, a failed call or another protocol
 //! version gives `None`: IAM still boots, and the tool policy RPCs report `capability-disabled`.
 //! Each [`ProcessPolicyCompiler::compile`] checks that the result has the protocol version and
 //! the compiler generation of the boot probe.
@@ -12,6 +12,7 @@ pub mod process;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use paigasus_iam_core::tool_policy::{CompileOutcome, CompileRequest, CompileResult, CompilerFailure, PROTOCOL_VERSION, PolicyCompiler, REASON_INVALID, Rejection, RevisionOutput};
@@ -34,9 +35,23 @@ pub struct ProcessPolicyCompiler {
     revision: String,
 }
 
+/// The attempts of the boot probe. A transient failure (the child does not start, an I/O error,
+/// a timeout) gets up to this many tries. A permanent failure gets one.
+pub const PROBE_ATTEMPTS: u32 = 3;
+/// The wait between two attempts of the boot probe.
+pub const PROBE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 /// Runs `revision` on the configured binary. `None`, with an `error!` log, when the binary is
-/// missing, the call fails, or the compiler speaks another protocol version.
+/// missing, the call fails, or the compiler speaks another protocol version. A transient failure
+/// is tried again, at most [`PROBE_ATTEMPTS`] times in all, with [`PROBE_RETRY_DELAY`] between the
+/// attempts. A non-zero exit, a protocol version mismatch and a parse failure are not tried again.
 pub async fn probe(cfg: &ToolPoliciesConfig) -> Option<ProcessPolicyCompiler> {
+    probe_with_delay(cfg, PROBE_RETRY_DELAY).await
+}
+
+/// [`probe`] with its own wait between attempts. Tests use a short wait.
+#[doc(hidden)]
+pub async fn probe_with_delay(cfg: &ToolPoliciesConfig, retry_delay: Duration) -> Option<ProcessPolicyCompiler> {
     let limits = ProcessLimits::from_config(cfg);
     let path = cfg.compiler_path.as_path();
     if ProcessLimits::rlimit_as_applied() {
@@ -52,19 +67,29 @@ pub async fn probe(cfg: &ToolPoliciesConfig) -> Option<ProcessPolicyCompiler> {
             "this OS does not apply RLIMIT_AS, so the policy compiler runs under RLIMIT_CPU only"
         );
     }
-    let revision: RevisionOutput = match run_checked(path, &["revision"], b"", &limits).await {
-        Ok(revision) => revision,
-        Err(failure) => {
-            let message = match failure {
-                CompilerFailure::Unavailable(message) => message,
-                CompilerFailure::Busy => "busy".to_string(),
-            };
-            error!(compiler = %path.display(), reason = %message, "the policy compiler failed its boot probe; the tool policy feature is disabled");
-            return None;
+    let mut attempt = 0;
+    let revision: RevisionOutput = loop {
+        attempt += 1;
+        let (reason, transient) = match run_child(path, &["revision"], b"", &limits).await {
+            // The child did not run to the end (start, I/O, timeout): transient.
+            Err(failure) => (failure_text(failure), true),
+            // The child ran. A non-zero exit or a bad answer is permanent.
+            Ok(raw) => match check_output::<RevisionOutput>(path, raw) {
+                Ok(revision) => break revision,
+                Err(failure) => (failure_text(failure), false),
+            },
+        };
+        if transient && attempt < PROBE_ATTEMPTS {
+            warn!(compiler = %path.display(), attempt, attempts = PROBE_ATTEMPTS, reason = %reason, "the policy compiler boot probe failed; it will be tried again");
+            tokio::time::sleep(retry_delay).await;
+            continue;
         }
+        error!(compiler = %path.display(), attempt, reason = %reason, transient, "the policy compiler failed its boot probe; the tool policy feature is disabled");
+        return None;
     };
     info!(
         compiler = %path.display(),
+        attempts = attempt,
         compiler_generation = revision.compiler_generation,
         revision = %revision.revision,
         "the policy compiler passed its boot probe"
@@ -129,7 +154,19 @@ impl PolicyCompiler for ProcessPolicyCompiler {
 
 /// Runs the child, requires exit 0, checks `protocol_version`, then parses the typed result.
 async fn run_checked<T: DeserializeOwned>(path: &Path, args: &[&str], stdin: &[u8], limits: &ProcessLimits) -> Result<T, CompilerFailure> {
-    let RawOutput { status, stdout, stderr_truncated } = run_child(path, args, stdin, limits).await?;
+    check_output(path, run_child(path, args, stdin, limits).await?)
+}
+
+fn failure_text(failure: CompilerFailure) -> String {
+    match failure {
+        CompilerFailure::Unavailable(message) => message,
+        CompilerFailure::Busy => "busy".to_string(),
+    }
+}
+
+/// Requires exit 0, checks `protocol_version`, then parses the typed result.
+fn check_output<T: DeserializeOwned>(path: &Path, output: RawOutput) -> Result<T, CompilerFailure> {
+    let RawOutput { status, stdout, stderr_truncated } = output;
     if !stderr_truncated.is_empty() {
         warn!(compiler = %path.display(), stderr = %stderr_truncated, "the policy compiler wrote to stderr");
     }

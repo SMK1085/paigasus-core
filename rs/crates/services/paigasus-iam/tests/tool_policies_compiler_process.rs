@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 mod support;
 
 use paigasus_iam::adapters::policy_compiler::process::{ProcessLimits, STDERR_KEEP_BYTES, run_child};
-use paigasus_iam::adapters::policy_compiler::{ProcessPolicyCompiler, probe};
+use paigasus_iam::adapters::policy_compiler::{ProcessPolicyCompiler, probe, probe_with_delay};
 use paigasus_iam::config::ToolPoliciesConfig;
 use paigasus_iam_core::tool_policy::{CompileOutcome, CompileRequest, CompilerFailure, PROTOCOL_VERSION, PolicyCompiler, REASON_FLOOR_PERMIT};
 use serde_json::Value;
@@ -351,6 +351,63 @@ async fn probe_returns_none_for_a_missing_binary() {
 async fn probe_returns_none_for_a_failing_revision() {
     let dir = TempDir::new().expect("tempdir");
     assert!(probe(&config(&fake_compiler(&dir, "exit 2", "exit 1"))).await.is_none());
+}
+
+// ---- the boot probe retry (SMA-774 ruling 2) --------------------------------------------------
+
+/// A config with a short timeout, so that a hanging `revision` fails fast.
+fn quick_config(path: &Path) -> ToolPoliciesConfig {
+    ToolPoliciesConfig {
+        compile_timeout_ms: 300,
+        ..config(path)
+    }
+}
+
+/// The number of `revision` calls that a script counted: one line each in `counter`.
+fn attempts(counter: &Path) -> usize {
+    std::fs::read_to_string(counter).map_or(0, |text| text.lines().count())
+}
+
+const SHORT_WAIT: Duration = Duration::from_millis(20);
+
+#[tokio::test]
+async fn the_probe_retries_a_transient_failure_and_then_succeeds() {
+    let dir = TempDir::new().expect("tempdir");
+    let counter = dir.path().join("counter");
+    // The first two calls hang past the timeout. The third answers.
+    let body = format!(
+        "echo x >> {c}\nn=$(/usr/bin/wc -l < {c})\nif [ \"$n\" -lt 3 ]; then exec /bin/sleep 5; fi\n{REVISION_OK}",
+        c = counter.display()
+    );
+    let path = script(&dir, "flaky", &body);
+    let compiler = probe_with_delay(&quick_config(&path), SHORT_WAIT).await.expect("the third attempt passes");
+    assert_eq!(compiler.generation(), 1);
+    assert_eq!(attempts(&counter), 3);
+}
+
+#[tokio::test]
+async fn three_transient_failures_give_none() {
+    let dir = TempDir::new().expect("tempdir");
+    let counter = dir.path().join("counter");
+    let path = script(&dir, "hang", &format!("echo x >> {}\nexec /bin/sleep 5", counter.display()));
+    assert!(probe_with_delay(&quick_config(&path), SHORT_WAIT).await.is_none());
+    assert_eq!(attempts(&counter), 3, "the probe makes exactly three attempts");
+}
+
+#[tokio::test]
+async fn a_permanent_failure_is_not_retried() {
+    let dir = TempDir::new().expect("tempdir");
+    // A non-zero exit, a foreign protocol version and a bad answer: one attempt each.
+    for (name, body) in [
+        ("exit", "exit 2"),
+        ("version", r#"echo '{"compiler_generation":1,"protocol_version":2,"revision":"x"}'"#),
+        ("garbage", "echo nope"),
+    ] {
+        let counter = dir.path().join(format!("counter-{name}"));
+        let path = script(&dir, name, &format!("echo x >> {}\n{body}", counter.display()));
+        assert!(probe_with_delay(&quick_config(&path), SHORT_WAIT).await.is_none(), "{name}");
+        assert_eq!(attempts(&counter), 1, "{name} was tried again");
+    }
 }
 
 #[tokio::test]

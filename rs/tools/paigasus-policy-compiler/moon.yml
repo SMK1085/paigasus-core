@@ -25,6 +25,13 @@ language: 'rust'
 # `/rs/rustfmt.toml`, which rustfmt finds the same way.
 tasks:
   build:
+    # `paigasus-iam-rs:test` runs this binary. CI restores `.moon/cache` and the cargo `target/`
+    # through two caches with different keys. On a Moon hash hit the build does not run, and the
+    # restored `target/` may not hold the binary. Declaring it as an output makes Moon hydrate it
+    # from its own cache. No inherited task declares `outputs`, so Moon's default append merge
+    # adds nothing else.
+    outputs:
+      - 'target/debug/paigasus-policy-compiler'
     options:
       mergeInputs: 'replace'
     inputs:
