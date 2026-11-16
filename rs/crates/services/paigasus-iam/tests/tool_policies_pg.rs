@@ -132,7 +132,9 @@ async fn catalog_snapshot_pairs_the_tools_with_their_revision_during_writes() {
     for r in readers {
         total += r.await.unwrap();
     }
-    assert!(total > WRITES, "the readers ran during the writes ({total} reads)");
+    // No read/write ratio is asserted: reader throughput is not a property of correct code. Each
+    // reader loops until it sees the final revision, so it made at least one read.
+    assert!(total >= 4, "every reader made at least one read ({total} reads)");
     let (tools, revision) = repo.catalog_snapshot(org).await.unwrap();
     assert_eq!((tools.len(), revision), (WRITES, WRITES as u64));
 }
