@@ -135,7 +135,7 @@ MANIFEST = (
     ("rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs", "asserts", None,
      "NOT test-only — a production conversion path. Safe because every code leaves it through an "
      "ErrorReason LazyLock static, never through a literal, so a code absent from the registry is "
-     "unrepresentable here. It also hosts three membership tests."),
+     "unrepresentable here. It also hosts four membership tests."),
     ("rs/crates/libs/paigasus-proto/src/error.rs", "asserts", None,
      "EXPECTED_REASONS — the registry's own mirror, which this gate cross-checks against"),
     ("rs/crates/services/paigasus-iam/src/adapters/http/error.rs", "asserts", None, "test assertions only"),

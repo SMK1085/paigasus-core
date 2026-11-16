@@ -64,8 +64,8 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 /// They are non-restore writes, so they join the generated forbid list. `GetUser` is a read and
 /// does not change the content.
 ///
-/// `5`: SMA-774 added ManageToolCatalog, ManageToolPolicies and ManageToolPolicyFloor. They are
-/// non-restore writes, so they join the generated forbid list.
+/// `5`: SMA-774 added `ManageToolCatalog`, `ManageToolPolicies` and `ManageToolPolicyFloor`. They
+/// are non-restore writes, so they join the generated forbid list.
 pub const STARTER_POLICY_REVISION: u32 = 5;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
