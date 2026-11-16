@@ -46,6 +46,8 @@ struct Enforced<'p> {
     /// The notice for each legacy chat result name to replace. The name is matched exactly as the
     /// plan keyed it: raw, not normalised (`x` and `X` are two items).
     by_name: BTreeMap<&'p str, String>,
+    /// The notice for each `local_shell_call_output` `id` to replace.
+    by_shell_id: BTreeMap<&'p str, String>,
 }
 
 impl<'p> Enforced<'p> {
@@ -55,6 +57,7 @@ impl<'p> Enforced<'p> {
         let entries = plan.entries.iter().filter(|e| e.action == RequestAction::ReplaceResult);
         let mut by_id = BTreeMap::new();
         let mut by_name = BTreeMap::new();
+        let mut by_shell_id = BTreeMap::new();
         for (item, entry) in plan.replaced.iter().zip(entries) {
             if !item.enforced {
                 continue;
@@ -63,9 +66,10 @@ impl<'p> Enforced<'p> {
             match &item.target {
                 ResultTarget::CallId(id) => by_id.insert(id.as_str(), notice),
                 ResultTarget::Name(n) => by_name.insert(n.as_str(), notice),
+                ResultTarget::LocalShellId(id) => by_shell_id.insert(id.as_str(), notice),
             };
         }
-        Enforced { removed, by_id, by_name }
+        Enforced { removed, by_id, by_name, by_shell_id }
     }
 
     fn gone(&self, display_name: &str) -> bool {
@@ -75,6 +79,11 @@ impl<'p> Enforced<'p> {
     /// The notice for a result with this call id, if the plan replaces it.
     fn id_notice(&self, obj: &RawObject, key: &str) -> Option<&String> {
         obj.str(key).and_then(|id| self.by_id.get(id.as_str()))
+    }
+
+    /// The notice for a `local_shell_call_output` by its `id`, if the plan replaces it.
+    fn shell_notice(&self, obj: &RawObject) -> Option<&String> {
+        obj.str("id").and_then(|id| self.by_shell_id.get(id.as_str()))
     }
 }
 
@@ -315,7 +324,8 @@ fn responses(top: &RawObject, en: &Enforced, choice: &ChoiceRewrite, edit: &mut 
         let ty = item.str("type").unwrap_or_default();
         let mut e = item.edit();
         if RESPONSES_OUTPUTS.contains(&ty.as_str()) {
-            let Some(notice) = en.id_notice(&item, "call_id") else { continue };
+            let shell = || if ty == "local_shell_call_output" { en.shell_notice(&item) } else { None };
+            let Some(notice) = en.id_notice(&item, "call_id").or_else(shell) else { continue };
             e.set("output", notice.clone());
         } else if ty == "mcp_approval_response" {
             // The approval becomes a refusal, with the notice as its reason.

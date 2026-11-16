@@ -136,6 +136,28 @@ fn the_output_parses_back_to_the_planned_turn() {
     }
 }
 
+/// A `local_shell_call_output` with only `id` (the provider schema gives it no `call_id`) is
+/// replaced when that `id` is the `call_id` or the item `id` of a denied `local_shell_call`.
+#[test]
+fn an_id_only_local_shell_output_is_replaced() {
+    let notice = Value::from(result_notice("local_shell", RequestReason::ToolResultBlocked));
+    for out_id in ["ls_1", "c1"] {
+        let body = json!({"model": "m", "input": [
+            {"type": "local_shell_call", "id": "ls_1", "call_id": "c1", "action": {"type": "exec", "command": ["env"], "env": {}}, "status": "completed"},
+            {"type": "local_shell_call_output", "id": out_id, "output": "SECRET"},
+            {"type": "local_shell_call_output", "id": "ls_2", "output": "kept"}
+        ]})
+        .to_string();
+        let p = plan(&enforce(Format::OpenAiResponses, &["local_shell"]), Format::OpenAiResponses, body.as_bytes());
+        let out: Value = serde_json::from_str(&rewrite(Format::OpenAiResponses, body.as_bytes(), &p)).expect("json");
+        assert_eq!(out["input"][1]["output"], notice, "{out_id}");
+        assert_eq!(out["input"][2]["output"], json!("kept"), "{out_id}: an id that matches no call stays");
+        assert!(!out.to_string().contains("SECRET"), "{out_id}");
+        // An allowed `local_shell` changes nothing.
+        assert!(plan(&enforce(Format::OpenAiResponses, &["other"]), Format::OpenAiResponses, body.as_bytes()).is_noop());
+    }
+}
+
 #[test]
 fn a_noop_plan_returns_none() {
     let body = fixture("chat_tool_result_replaced", "in");

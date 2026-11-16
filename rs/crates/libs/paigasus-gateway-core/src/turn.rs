@@ -94,6 +94,10 @@ pub struct PriorCall {
     /// The request plan decides a result by this name, so it must match the call's name.
     pub name: String,
     pub arguments: String,
+    /// `true` for a Responses `local_shell_call`. Its result may name it by `id` alone.
+    pub local_shell: bool,
+    /// The item `id` of a Responses `local_shell_call`. `None` for every other call.
+    pub item_id: Option<String>,
 }
 
 /// A reference to a tool result. It never holds the result content.
@@ -102,6 +106,9 @@ pub struct PriorCall {
 pub struct ToolResultRef {
     pub call_id: Option<String>,
     pub name: Option<String>,
+    /// The item `id` of a Responses `local_shell_call_output`. The provider schema gives this item
+    /// an `id` that refers to its call, and no `call_id`. `None` for every other result.
+    pub item_id: Option<String>,
 }
 
 #[must_use]
@@ -183,6 +190,8 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                         id: opt_str(c.get("id"), "id")?,
                         name,
                         arguments,
+                        local_shell: false,
+                        item_id: None,
                     });
                 }
                 if let Some(fc) = opt_obj(m.get("function_call"), "function_call")? {
@@ -190,16 +199,20 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                         id: None,
                         name: req_str(fc, "name")?,
                         arguments: opt_str(fc.get("arguments"), "arguments")?.unwrap_or_default(),
+                        local_shell: false,
+                        item_id: None,
                     });
                 }
             }
             Some("tool") => f.tool_results.push(ToolResultRef {
                 call_id: opt_str(m.get("tool_call_id"), "tool_call_id")?,
                 name: None,
+                item_id: None,
             }),
             Some("function") => f.tool_results.push(ToolResultRef {
                 call_id: None,
                 name: opt_str(m.get("name"), "name")?,
+                item_id: None,
             }),
             _ => {}
         }
@@ -282,11 +295,15 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
                 f.tool_results.push(ToolResultRef {
                     call_id: opt_str(item.get("call_id"), "call_id")?,
                     name: None,
+                    // Only a `local_shell_call_output` refers to its call by `id`. For the other
+                    // output types, `id` is the id of the output item itself.
+                    item_id: if ty == "local_shell_call_output" { opt_str(item.get("id"), "id")? } else { None },
                 });
             }
             "mcp_approval_response" => f.tool_results.push(ToolResultRef {
                 call_id: opt_str(item.get("approval_request_id"), "approval_request_id")?,
                 name: None,
+                item_id: None,
             }),
             _ => {
                 // An unknown type is client-run of kind `Other` for a response (fail closed), but in
@@ -295,11 +312,14 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
                     && kind != ToolCallKind::Other
                 {
                     let c = tool_call(u32::try_from(i).map_err(|_| Malformed("input"))?, item, kind)?;
+                    let local_shell = kind == ToolCallKind::LocalShell;
                     f.prior_calls.push(PriorCall {
                         // The display name, so a result is decided as its call is (P-7).
                         name: c.display_name(), // PRIOR-DISPLAY-NAME
                         id: c.id,
                         arguments: c.arguments,
+                        local_shell,
+                        item_id: if local_shell { opt_str(item.get("id"), "id")? } else { None },
                     });
                 }
             }
@@ -469,10 +489,13 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                     id: opt_str(b.get("id"), "id")?,
                     name: req_str(b, "name")?,
                     arguments: b.get("input").map(Value::to_string).unwrap_or_default(),
+                    local_shell: false,
+                    item_id: None,
                 }),
                 Some("tool_result") => f.tool_results.push(ToolResultRef {
                     call_id: opt_str(b.get("tool_use_id"), "tool_use_id")?,
                     name: None,
+                    item_id: None,
                 }),
                 _ => {}
             }
@@ -532,11 +555,13 @@ mod tests {
             vec![
                 ToolResultRef {
                     call_id: Some("c1".into()),
-                    name: None
+                    name: None,
+                    item_id: None
                 },
                 ToolResultRef {
                     call_id: None,
-                    name: Some("old".into())
+                    name: Some("old".into()),
+                    item_id: None
                 }
             ]
         );
@@ -655,6 +680,24 @@ mod tests {
         let ids: Vec<_> = f.tool_results.iter().map(|r| r.call_id.as_deref().unwrap()).collect();
         assert_eq!(ids, ["c1", "c2", "c3", "c4", "c5", "c6", "mcpr_1"]);
         assert!(!format!("{f:?}").contains("SECRET"), "tool result content is never kept");
+    }
+
+    #[test]
+    fn a_local_shell_call_and_output_keep_their_item_ids() {
+        let f = responses(&json!({"input":[
+            {"type":"local_shell_call","id":"ls_1","call_id":"c1","action":{"type":"exec","command":["ls"],"env":{}},"status":"completed"},
+            {"type":"local_shell_call_output","id":"ls_1","output":"x"},
+            {"type":"function_call_output","id":"fco_1","call_id":"c2","output":"x"}]}))
+        .unwrap();
+        assert_eq!(
+            f.prior_calls.iter().map(|c| (c.id.as_deref(), c.local_shell, c.item_id.as_deref())).collect::<Vec<_>>(),
+            [(Some("c1"), true, Some("ls_1"))]
+        );
+        // Only a `local_shell_call_output` refers to its call by `id`.
+        assert_eq!(
+            f.tool_results.iter().map(|r| (r.call_id.as_deref(), r.item_id.as_deref())).collect::<Vec<_>>(),
+            [(None, Some("ls_1")), (Some("c2"), None)]
+        );
     }
 
     #[test]

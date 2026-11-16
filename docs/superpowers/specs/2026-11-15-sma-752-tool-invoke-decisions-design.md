@@ -601,6 +601,11 @@ Results (every type that `turn.rs:240-249` reads as a result):
   `local_shell_call_output`, `shell_call_output`, `apply_patch_call_output` (`output`), and
   `mcp_approval_response` (changed to a refusal).
 
+A result refers to its call by `call_id` (`tool_call_id`, `tool_use_id`, `approval_request_id`).
+A Responses `local_shell_call_output` can have only an `id`. That `id` is matched against both
+the `call_id` and the item `id` of every earlier `local_shell_call`, and the output is replaced
+when either one matches a denied call (fail-safe, CodeRabbit round 2 on PR 475).
+
 The notice replaces the whole content (ADR-0027 (c)). Its text is fixed and built from the reason
 and a cleaned tool name (SMA-749 D21).
 

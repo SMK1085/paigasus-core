@@ -25,6 +25,9 @@ pub enum ResultTarget {
     CallId(String),
     /// A legacy chat `role:"function"` result with this name (it has no call id).
     Name(String),
+    /// Every Responses `local_shell_call_output` whose `id` is this. The id matched the `call_id`
+    /// or the item `id` of an earlier `local_shell_call`.
+    LocalShellId(String),
 }
 
 /// The `tool_choice` after the enforced removals (§ 6.5.1 step 4).
@@ -118,6 +121,41 @@ impl Judge<'_> {
     }
 }
 
+/// Step 3: decides each result target once (P-7).
+struct ResultJudge<'j, 'p, 'k> {
+    judge: &'j mut Judge<'p>,
+    plan: &'j mut RequestPlan,
+    /// Every target decided so far, and whether it is replaced. A repeated target has the same
+    /// outcome, so it is not decided again.
+    seen: BTreeMap<(u8, &'k str), bool>,
+}
+
+impl<'k> ResultJudge<'_, '_, 'k> {
+    /// Whether the target is replaced: any of `names` is denied. A new replaced target adds one
+    /// plan item and one report entry.
+    fn decide(&mut self, key: (u8, &'k str), target: impl FnOnce() -> ResultTarget, names: &[&str]) -> bool {
+        if let Some(replaced) = self.seen.get(&key) {
+            return *replaced;
+        }
+        let mut hit: Option<(&str, bool)> = None;
+        for &name in names {
+            if let Some(enforced) = self.judge.denied(name) {
+                hit = Some(match hit {
+                    Some((first, e)) => (first, e || enforced),
+                    None => (name, enforced),
+                });
+            }
+        }
+        self.seen.insert(key, hit.is_some());
+        let Some((name, enforced)) = hit else { return false };
+        self.plan
+            .entries
+            .push(RequestEntry::new(name.to_owned(), RequestAction::ReplaceResult, enforced, RequestReason::ToolResultBlocked));
+        self.plan.replaced.push(PlanItem { target: target(), enforced });
+        true
+    }
+}
+
 /// The `tool_choice` after removing `removed` (normalised names): the rewrite, whether to refuse,
 /// and the name of the tool that caused a reset.
 fn choice_after(choice: &ToolChoice, removed: &BTreeSet<&str>) -> (ChoiceRewrite, bool, Option<String>) {
@@ -206,42 +244,35 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts)
     // it is replaced if any of them is denied. A legacy result carries its own name.
     // One index of the prior calls by id, built once. A duplicate id keeps every name in order.
     let mut by_id: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    // A `local_shell_call_output` can name its call by `id` alone. The provider schema does not say
+    // if that is the `call_id` or the item `id` of the call, so it is matched against both ids of
+    // every earlier `local_shell_call` (fail-safe).
+    let mut shell_ids: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for c in &turn.prior_calls {
         if let Some(id) = c.id.as_deref() {
             by_id.entry(id).or_default().push(c.name.as_str());
         }
+        if c.local_shell {
+            let ids: BTreeSet<&str> = c.id.iter().chain(&c.item_id).map(String::as_str).collect();
+            for id in ids {
+                shell_ids.entry(id).or_default().push(c.name.as_str());
+            }
+        }
     }
-    let mut targets: BTreeSet<(bool, String)> = BTreeSet::new();
+    let mut results = ResultJudge {
+        judge: &mut judge,
+        plan: &mut plan,
+        seen: BTreeMap::new(),
+    };
     for r in &turn.tool_results {
-        let (target, names) = match (&r.call_id, &r.name) {
-            (Some(id), _) => {
-                let names: Vec<&str> = by_id.get(id.as_str()).cloned().unwrap_or_default();
-                (ResultTarget::CallId(id.clone()), names)
-            }
-            (None, Some(name)) => (ResultTarget::Name(name.clone()), vec![name.as_str()]),
-            (None, None) => continue,
+        let replaced = match (&r.call_id, &r.name) {
+            (Some(id), _) => results.decide((0, id.as_str()), || ResultTarget::CallId(id.clone()), by_id.get(id.as_str()).map_or(&[][..], Vec::as_slice)),
+            (None, Some(name)) => results.decide((1, name.as_str()), || ResultTarget::Name(name.clone()), &[name.as_str()]),
+            (None, None) => false,
         };
-        let key = match &target {
-            ResultTarget::CallId(id) => (true, id.clone()),
-            ResultTarget::Name(n) => (false, n.clone()),
-        };
-        if targets.contains(&key) {
-            continue;
-        }
-        let mut hit: Option<(&str, bool)> = None;
-        for name in names {
-            if let Some(enforced) = judge.denied(name) {
-                hit = Some(match hit {
-                    Some((first, e)) => (first, e || enforced),
-                    None => (name, enforced),
-                });
-            }
-        }
-        if let Some((name, enforced)) = hit {
-            targets.insert(key);
-            plan.entries
-                .push(RequestEntry::new(name.to_owned(), RequestAction::ReplaceResult, enforced, RequestReason::ToolResultBlocked));
-            plan.replaced.push(PlanItem { target, enforced });
+        // The `id` form of a `local_shell_call_output`, when its `call_id` did not replace it.
+        if !replaced && let Some(id) = &r.item_id {
+            results.decide((2, id.as_str()), || ResultTarget::LocalShellId(id.clone()), shell_ids.get(id.as_str()).map_or(&[][..], Vec::as_slice));
         }
     }
 
@@ -330,6 +361,8 @@ mod tests {
             id: Some(id.to_owned()),
             name: name.to_owned(),
             arguments: "{}".to_owned(),
+            local_shell: false,
+            item_id: None,
         }
     }
 
@@ -337,6 +370,7 @@ mod tests {
         ToolResultRef {
             call_id: Some(id.to_owned()),
             name: None,
+            item_id: None,
         }
     }
 
@@ -504,6 +538,52 @@ mod tests {
     }
 
     #[test]
+    fn an_id_only_local_shell_result_matches_both_ids_of_the_call() {
+        let s = enforce(PERMIT_OK);
+        let shell = |name: &str| PriorCall {
+            id: Some("c1".to_owned()),
+            name: name.to_owned(),
+            arguments: "{}".to_owned(),
+            local_shell: true,
+            item_id: Some("ls_1".to_owned()),
+        };
+        let out = |id: &str| ToolResultRef {
+            call_id: None,
+            name: None,
+            item_id: Some(id.to_owned()),
+        };
+        let run = |prior_calls: Vec<PriorCall>, tool_results: Vec<ToolResultRef>| {
+            let mut t = turn(vec![]);
+            t.prior_calls = prior_calls;
+            t.tool_results = tool_results;
+            plan_request(&s, Format::OpenAiResponses, &t)
+        };
+        // The output `id` is the call's `call_id` or its item `id`: replaced either way.
+        for id in ["c1", "ls_1"] {
+            let p = run(vec![shell("x")], vec![out(id)]);
+            assert_eq!(p.replaced, [item(ResultTarget::LocalShellId(id.to_owned()), true)], "{id}");
+            assert_eq!(actions(&p), [(RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked)], "{id}");
+        }
+        // An allowed call, or an `id` that matches no call: not replaced.
+        assert!(run(vec![shell("ok")], vec![out("ls_1")]).replaced.is_empty());
+        assert!(run(vec![shell("x")], vec![out("ls_2")]).replaced.is_empty());
+        // Only a `local_shell_call` is matched by `id`.
+        let mut function = shell("x");
+        function.local_shell = false;
+        function.item_id = None;
+        assert!(run(vec![function], vec![out("c1")]).replaced.is_empty());
+        // A result with both ids: its `call_id` replaces it, with one entry.
+        let both = ToolResultRef {
+            call_id: Some("c1".to_owned()),
+            name: None,
+            item_id: Some("ls_1".to_owned()),
+        };
+        let p = run(vec![shell("x")], vec![both]);
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)]);
+        assert_eq!(p.entries.len(), 1);
+    }
+
+    #[test]
     fn result_replacement_by_call_id_and_by_earlier_call() {
         let s = enforce(PERMIT_OK);
         let replaced = |prior_calls: Vec<PriorCall>, tool_results: Vec<ToolResultRef>| {
@@ -529,13 +609,18 @@ mod tests {
         let legacy = ToolResultRef {
             call_id: None,
             name: Some("x".to_owned()),
+            item_id: None,
         };
         let p = replaced(vec![], vec![legacy]);
         assert_eq!(p.replaced, [item(ResultTarget::Name("x".to_owned()), true)]);
         // Two results for one call id: one item.
         assert_eq!(replaced(vec![prior("c1", "x")], vec![by_id("c1"), by_id("c1")]).replaced.len(), 1);
         // A result with neither id nor name: not replaced.
-        let none = ToolResultRef { call_id: None, name: None };
+        let none = ToolResultRef {
+            call_id: None,
+            name: None,
+            item_id: None,
+        };
         assert!(replaced(vec![], vec![none]).replaced.is_empty());
     }
 

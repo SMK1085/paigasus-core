@@ -243,7 +243,14 @@ early invalidation.
 `nsc add user` step fails, the script ignores the failure, and it issues credentials with the old
 permissions. Edit the existing user instead, so that it gets only the new grant:
 
+The file holds the user's private NKEY seed. Set `umask 077` before you write it, as
+`ops/nats/provision.sh` does. Set `OUT_DIR` to the directory for the new file. The default of the
+script is `ops/nats/out`. Run the commands from the repository root.
+
 ```bash
+OUT_DIR="${OUT_DIR:-ops/nats/out}"
+umask 077
+mkdir -p "$OUT_DIR"
 nsc edit user --account PAIGASUS_IAM --name gateway-consumer --allow-sub 'iam.policy.>'
 nsc generate creds --account PAIGASUS_IAM --name gateway-consumer > "$OUT_DIR/gateway-consumer.creds"
 chmod 600 "$OUT_DIR/gateway-consumer.creds"
