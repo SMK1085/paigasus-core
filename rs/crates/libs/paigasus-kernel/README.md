@@ -8,6 +8,13 @@ No I/O, no FFI, no adapters. The Python, Node and browser bindings live in
 [`rs/crates/bindings/`](https://github.com/SMK1085/paigasus-core/tree/main/rs/crates/bindings)
 and call into this crate rather than reimplementing it (ADR-0005).
 
+## The `tool-policy` feature
+
+The `tool-policy` feature is off by default (SMA-752). It adds the Cedar decision for a tool call
+(`tool_policy`). It pulls `cedar-policy`, `serde`, `serde_json` and `unicode-normalization`.
+Only the gateway turns it on. A binding crate (wasm, Python, Node) must not turn it on.
+The `repo:wasm-getrandom-free` gate fails if a binding crate pulls `cedar-policy` (D21).
+
 ## macOS wheels of version 0.2.0
 
 The `paigasus-py-bindings` 0.2.0 macOS wheels (arm64 and x86_64) have a Mach-O string table

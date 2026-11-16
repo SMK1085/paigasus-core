@@ -103,6 +103,11 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.INVALID_PATH_SEGMENT]: 'from-transport',
   // SMA-700. A 401 from both services; the transport table already presents it as relogin.
   [ErrorReason.INVALID_DPOP_PROOF]: 'from-transport',
+  // SMA-752. The tool-policy reasons appear in decision reports and notices, never as an HTTP
+  // error (D11), so the transport table's answer applies if one ever reaches a console.
+  [ErrorReason.TOOL_CALL_DENIED]: 'from-transport',
+  [ErrorReason.TOOL_RESULT_BLOCKED]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_UNAVAILABLE]: 'from-transport',
 };
 
 /**

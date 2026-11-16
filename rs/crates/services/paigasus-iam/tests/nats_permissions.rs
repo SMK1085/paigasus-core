@@ -161,15 +161,16 @@ fn cfg_for(fixture: &Fixture, identity: &Identity, inbox_prefix: &str) -> Publis
 /// A raw client for `identity`, with its [`async_nats::Event`]s piped into the returned channel so
 /// denials can be asserted on rather than inferred from a timeout.
 ///
-/// Authenticates through the adapter's own `auth_from_credentials` — the same callback body
-/// `NatsEventPublisher::connect` installs — so a fixture client and the production client cannot
-/// diverge in how they present a credential.
+/// Authenticates through `paigasus_nats_creds::auth_from_credentials` — the shared crate whose
+/// callback body `NatsEventPublisher::connect` (and the gateway's tool-policy subscription) also
+/// installs — so a fixture client and the production client cannot diverge in how they present a
+/// credential.
 async fn client_for(fixture: &Fixture, identity: &Identity, inbox_prefix: &str) -> (async_nats::Client, mpsc::UnboundedReceiver<String>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let path = identity.seed_path.to_string_lossy().to_string();
     let client = async_nats::ConnectOptions::with_auth_callback(move |nonce| {
         let path = path.clone();
-        async move { paigasus_iam::adapters::events::auth_from_credentials(&path, &nonce).await }
+        async move { paigasus_nats_creds::auth_from_credentials(&path, &nonce).await }
     })
     .custom_inbox_prefix(inbox_prefix.to_string())
     .event_callback(move |event| {
@@ -413,9 +414,11 @@ async fn the_consumer_grant_covers_pulling_and_acking_from_the_provisioned_durab
     msg.double_ack().await.expect("the consumer grant must cover $JS.ACK on its own durable");
 }
 
-/// The control that makes D5's filter binding. The consumer is narrowed by the PRE-PROVISIONED
-/// durable's `filter_subjects`, not by any subject permission — pull deliveries arrive on its inbox,
-/// never on `iam.*` — so that narrowing is only binding while the consumer cannot run a CREATE verb
+/// The control that makes D5's filter binding. The consumer's PULL path is narrowed by the
+/// PRE-PROVISIONED durable's `filter_subjects`, not by any subject permission — pull deliveries
+/// arrive on its inbox, never on `iam.*`. (Its one subject-level subscribe grant, the SMA-752 core
+/// subscription on `iam.policy.>`, is a separate path and does not narrow this one; it is the only
+/// subscribe grant outside the inbox.) So that narrowing is only binding while the consumer cannot run a CREATE verb
 /// against the stream. nats-server 2.10 lets CREATE **update** an existing consumer's
 /// `filter_subjects`, so a consumer that can CREATE can rewrite its own filter to `iam.>` and read
 /// the entire authorization change graph using nothing but the `MSG.NEXT` grant it already holds.
@@ -454,7 +457,8 @@ async fn the_consumer_cannot_create_a_wider_consumer_in_any_form() {
 }
 
 /// The consumer is a reader of ONE filtered durable, not of the stream and not of the account: it
-/// can neither subscribe to the event subjects directly nor forge an event onto them.
+/// can neither subscribe to the event subjects as a whole nor forge an event onto them. Its only
+/// direct subscription is `iam.policy.>` (SMA-752); see the three policy tests below.
 #[tokio::test]
 async fn the_consumer_cannot_subscribe_to_or_forge_events() {
     let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
@@ -465,6 +469,80 @@ async fn the_consumer_cannot_subscribe_to_or_forge_events() {
     expect_permissions_violation(&mut events, "iam.>").await;
 
     expect_publish_denied(&client, &mut events, "iam.role.granted").await;
+}
+
+/// SMA-752 D24 (Q1-A): the measurement the gateway's policy-cache invalidation rests on. The
+/// consumer's ONE subject-level subscribe grant, `iam.policy.>`, must be enough for a core
+/// subscriber to receive a JetStream publish on `iam.policy.put`. A JetStream publish is an
+/// ordinary core message that the stream also captures, so every core subscriber of the subject
+/// gets it. The publish goes through [`NatsEventPublisher`], the production path, and its `Ok` means
+/// that the stream acked it.
+#[tokio::test]
+async fn the_consumer_core_subscription_receives_a_jetstream_policy_publish() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    provision(&fixture).await;
+
+    let (client, mut events) = client_for(&fixture, &fixture.consumer, CONSUMER_INBOX).await;
+    let mut sub = client.subscribe("iam.policy.>").await.expect("subscribe is accepted locally");
+    // The flush is a PING/PONG round trip, so the server has the SUB before the publish below.
+    client.flush().await.expect("flush");
+
+    let publisher = NatsEventPublisher::connect(&cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX)).await.expect("connect publisher");
+    publisher.publish(&event(1, EventType::PolicyPut)).await.expect("a JetStream publish on iam.policy.put is acked");
+
+    match tokio::time::timeout(VIOLATION_BUDGET, sub.next()).await {
+        Ok(Some(msg)) => assert_eq!(msg.subject.as_str(), "iam.policy.put"),
+        Ok(None) => panic!("the subscription closed; events: {:?}", drain(&mut events)),
+        Err(_) => panic!("no iam.policy.put delivery within {VIOLATION_BUDGET:?}; events: {:?}", drain(&mut events)),
+    }
+}
+
+/// Every event the client has seen so far, for a panic message.
+fn drain(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
+    let mut seen = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        seen.push(event);
+    }
+    seen
+}
+
+/// SMA-752 § 6.3.5: the policy grant is `iam.policy.>` and nothing wider. The other IAM subjects
+/// stay closed to a core subscription: a key revocation and a role grant are not the gateway's
+/// to read directly. `iam.>` itself is asserted in `the_consumer_cannot_subscribe_to_or_forge_events`.
+#[tokio::test]
+async fn the_consumer_cannot_subscribe_to_other_iam_subjects() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.consumer, CONSUMER_INBOX).await;
+
+    for subject in ["iam.api_key.>", "iam.role.granted"] {
+        let _sub = client.subscribe(subject).await.expect("accepted locally, refused by the server");
+        client.flush().await.expect("flush");
+        expect_permissions_violation(&mut events, subject).await;
+    }
+}
+
+/// SMA-752 § 6.3.5 (D4, Q1-A, Sven): the new grant is a core subscribe only. It adds no publish
+/// right (so no forged policy event), no CREATE or UPDATE form on the durable, and no subscribe
+/// to the JetStream API space. The durable's filter therefore stays binding.
+#[tokio::test]
+async fn the_policy_grant_adds_no_jetstream_right() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    provision(&fixture).await;
+    let (client, mut events) = client_for(&fixture, &fixture.consumer, CONSUMER_INBOX).await;
+
+    for subject in [
+        "iam.policy.put",
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.gateway-cache-invalidator",
+        "$JS.API.CONSUMER.UPDATE.IAM_EVENTS.gateway-cache-invalidator",
+        // The filtered-create form (`CREATE.<stream>.<consumer>.<filter>`), with a policy filter.
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.gateway-cache-invalidator.iam.policy.put",
+    ] {
+        expect_publish_denied(&client, &mut events, subject).await;
+    }
+
+    let _sub = client.subscribe("$JS.>").await.expect("accepted locally, refused by the server");
+    client.flush().await.expect("flush");
+    expect_permissions_violation(&mut events, "$JS.>").await;
 }
 
 /// **The claim D4 actually rests on**, and the only case here that is about the inbox space rather

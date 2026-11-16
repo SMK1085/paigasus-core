@@ -33,6 +33,7 @@ fn app_for(base_url: &str) -> Router {
         limits: Some(limits(rules(Some(1), None, None), Arc::new(MemoryLimitStore::new()))),
         dpop_enabled: false,
         tool_interception: None,
+        tool_policy: None,
         responses: Some(Arc::new(ResponsesSettings {
             max_request_bytes: 1_048_576,
             max_record_bytes: 1_048_576,

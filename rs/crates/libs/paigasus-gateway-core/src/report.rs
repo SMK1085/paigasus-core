@@ -18,7 +18,7 @@ const TRUNCATED: &str = r#"{"truncated":true}"#;
 
 /// The first 128 bytes of `name`, every byte outside `[A-Za-z0-9_.:-]` replaced by `_`.
 #[must_use]
-pub(crate) fn sanitize_name(name: &str) -> String {
+pub fn sanitize_name(name: &str) -> String {
     name.bytes()
         .take(MAX_NAME_BYTES)
         .map(|b| if b.is_ascii_alphanumeric() || b"_.:-".contains(&b) { b as char } else { '_' })
@@ -55,6 +55,16 @@ impl ReportDecision {
     }
 }
 
+/// The registry reason a block code reports (SMA-752 D10), or `None` when it has none.
+#[must_use]
+pub fn reason_label(code: BlockCode) -> Option<&'static str> {
+    match code {
+        BlockCode::Policy => Some("tool-call-denied"),
+        BlockCode::PolicyUnavailable => Some("tool-policy-unavailable"),
+        BlockCode::Detector | BlockCode::HoldLimit | BlockCode::Malformed | BlockCode::Truncated | BlockCode::DeciderError => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportEntry {
     pub choice: u32,
@@ -64,14 +74,19 @@ pub struct ReportEntry {
     pub decision: ReportDecision,
     pub basis: Option<Basis>,
     pub code: Option<BlockCode>,
+    /// `Some(true)` for a block, `Some(false)` for an observed call, `None` otherwise.
+    pub enforced: Option<bool>,
+    /// The registry reason for `code`, when it has one.
+    pub reason: Option<&'static str>,
 }
 
 impl ReportEntry {
-    /// The § 4.6 schema. Every field is ASCII by construction.
+    /// The § 4.6 schema, version 2. Every field is ASCII by construction.
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::json!({
-            "v": 1,
+            "v": 2,
+            "side": "response",
             "choice": self.choice,
             "position": self.position,
             "name": sanitize_name(&self.name),
@@ -79,28 +94,139 @@ impl ReportEntry {
             "decision": self.decision.as_str(),
             "basis": self.basis.map(Basis::as_str),
             "code": self.code.map(BlockCode::as_kebab),
+            "enforced": self.enforced,
+            "reason": self.reason,
         })
         .to_string()
     }
 }
 
-/// The `paigasus-tool-decisions` header value (D22).
+/// What the gateway did to the request (SMA-752).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestAction {
+    RemoveDefinition,
+    ReplaceResult,
+    ResetToolChoice,
+}
+
+impl RequestAction {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequestAction::RemoveDefinition => "remove-definition",
+            RequestAction::ReplaceResult => "replace-result",
+            RequestAction::ResetToolChoice => "reset-tool-choice",
+        }
+    }
+}
+
+/// Why the gateway changed the request.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestReason {
+    ToolCallDenied,
+    ToolResultBlocked,
+}
+
+impl RequestReason {
+    /// Every reason, for tests that must cover them all.
+    pub const ALL: [RequestReason; 2] = [RequestReason::ToolCallDenied, RequestReason::ToolResultBlocked];
+
+    /// The registry reason string.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequestReason::ToolCallDenied => "tool-call-denied",
+            RequestReason::ToolResultBlocked => "tool-result-blocked",
+        }
+    }
+}
+
+/// One change to the request, for the report (P-11).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestEntry {
+    /// The raw tool name. Serialized only through `sanitize_name` and `name_sha256_8`.
+    pub tool: String,
+    pub action: RequestAction,
+    pub enforced: bool,
+    pub reason: RequestReason,
+}
+
+impl RequestEntry {
+    #[must_use]
+    pub fn new(tool: String, action: RequestAction, enforced: bool, reason: RequestReason) -> Self {
+        RequestEntry { tool, action, enforced, reason }
+    }
+
+    /// The request-side report entry.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serde_json::json!({
+            "v": 2,
+            "side": "request",
+            "tool": sanitize_name(&self.tool),
+            "name_sha256_8": name_sha256_8(&self.tool),
+            "action": self.action.as_str(),
+            "enforced": self.enforced,
+            "reason": self.reason.as_str(),
+        })
+        .to_string()
+    }
+}
+
+fn omitted_summary(n: usize) -> String {
+    serde_json::json!({"v": 2, "side": "request", "omitted": n}).to_string()
+}
+
+/// The `paigasus-tool-decisions` header value (D22). Call entries come first. Request entries
+/// follow and are cut first when the header is full, with one summary entry. When the call
+/// entries alone fill the header, the call cut marker is followed by the summary of every request
+/// entry (§ 6.5.3: "if any request entry is removed, one summary entry gives their count").
 #[must_use]
-pub(crate) fn header_value(entries: &[ReportEntry]) -> String {
+pub fn report_header(calls: &[ReportEntry], requests: &[RequestEntry]) -> String {
+    // Room kept after a call entry: the cut marker (only when a later call entry follows), and the
+    // summary of every request entry. The request loop needs room for its own summary only, and
+    // only when a later request entry follows.
+    let summary = (!requests.is_empty()).then(|| omitted_summary(requests.len()));
+    let summary_room = summary.as_ref().map_or(0, |s| 1 + s.len());
     let mut out = String::from("[");
-    for (i, e) in entries.iter().enumerate() {
+    for (i, e) in calls.iter().enumerate() {
         let json = e.to_json();
         let sep = usize::from(i > 0);
-        // Room for this entry, then a separator, TRUNCATED and the closing bracket.
-        if out.len() + sep + json.len() + 1 + TRUNCATED.len() + 1 > MAX_HEADER_BYTES {
+        let more_calls = i + 1 < calls.len();
+        let reserve = summary_room + if more_calls { 1 + TRUNCATED.len() } else { 0 };
+        if out.len() + sep + json.len() + reserve + 1 > MAX_HEADER_BYTES {
             if i > 0 {
                 out.push(',');
             }
             out.push_str(TRUNCATED);
+            if let Some(s) = &summary {
+                out.push(',');
+                out.push_str(s);
+            }
             out.push(']');
             return out;
         }
         if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&json);
+    }
+    for (i, r) in requests.iter().enumerate() {
+        let json = r.to_json();
+        let sep = usize::from(!out.ends_with('['));
+        let reserve = if i + 1 < requests.len() { summary_room } else { 0 };
+        if out.len() + sep + json.len() + reserve + 1 > MAX_HEADER_BYTES {
+            if sep == 1 {
+                out.push(',');
+            }
+            out.push_str(&omitted_summary(requests.len() - i));
+            out.push(']');
+            return out;
+        }
+        if sep == 1 {
             out.push(',');
         }
         out.push_str(&json);
@@ -110,8 +236,20 @@ pub(crate) fn header_value(entries: &[ReportEntry]) -> String {
     out
 }
 
-/// The report entry for one call. The name is the qualified `display_name()`.
+/// One `: paigasus-decision` SSE comment per request entry.
+#[must_use]
+pub fn request_comments(requests: &[RequestEntry]) -> Vec<Bytes> {
+    requests.iter().map(|r| sse::comment(&format!("paigasus-decision {}", r.to_json()))).collect()
+}
+
+/// The report entry for one call. The name is the qualified `display_name()`. A `Block` is
+/// enforced. An `Allow` that carries a code is an observed call and is not enforced.
 pub(crate) fn report_entry(c: &ToolCall, decision: ReportDecision, basis: Basis, code: Option<BlockCode>) -> ReportEntry {
+    let enforced = match (decision, code) {
+        (ReportDecision::Block, _) => Some(true),
+        (ReportDecision::Allow, Some(_)) => Some(false),
+        _ => None,
+    };
     ReportEntry {
         choice: c.choice,
         position: c.position,
@@ -119,6 +257,8 @@ pub(crate) fn report_entry(c: &ToolCall, decision: ReportDecision, basis: Basis,
         decision,
         basis: Some(basis),
         code,
+        enforced,
+        reason: code.and_then(reason_label),
     }
 }
 
@@ -139,6 +279,30 @@ mod tests {
             decision: ReportDecision::Block,
             basis: Some(Basis::Decider),
             code: Some(BlockCode::Policy),
+            enforced: Some(true),
+            reason: Some("tool-call-denied"),
+        }
+    }
+
+    fn call_entry(name: &str) -> ReportEntry {
+        entry(name)
+    }
+
+    fn many_request_entries(n: usize) -> Vec<RequestEntry> {
+        (0..n)
+            .map(|i| RequestEntry::new(format!("tool_{i}"), RequestAction::RemoveDefinition, true, RequestReason::ToolCallDenied))
+            .collect()
+    }
+
+    fn tc() -> ToolCall {
+        ToolCall {
+            choice: 0,
+            position: 0,
+            id: None,
+            name: "x".to_owned(),
+            namespace: None,
+            kind: crate::types::ToolCallKind::Function,
+            arguments: String::new(),
         }
     }
 
@@ -168,12 +332,14 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&entry("x y").to_json()).unwrap();
         assert_eq!(
             v,
-            serde_json::json!({"v":1,"choice":0,"position":1,"name":"x_y","name_sha256_8":name_sha256_8("x y"),"decision":"block","basis":"decider","code":"policy"})
+            serde_json::json!({"v":2,"side":"response","choice":0,"position":1,"name":"x_y","name_sha256_8":name_sha256_8("x y"),"decision":"block","basis":"decider","code":"policy","enforced":true,"reason":"tool-call-denied"})
         );
         let u = ReportEntry {
             decision: ReportDecision::Unenforceable,
             basis: None,
             code: None,
+            enforced: None,
+            reason: None,
             ..entry("web_search")
         };
         let v: serde_json::Value = serde_json::from_str(&u.to_json()).unwrap();
@@ -183,16 +349,163 @@ mod tests {
 
     #[test]
     fn the_header_is_ascii_and_capped() {
-        let one = header_value(&[entry("é")]);
+        let one = report_header_calls(&[entry("é")]);
         assert!(one.is_ascii());
         assert!(one.starts_with('[') && one.ends_with(']'));
         let many: Vec<ReportEntry> = (0..200).map(|i| entry(&format!("tool_{i}"))).collect();
-        let h = header_value(&many);
+        let h = report_header_calls(&many);
         assert!(h.len() <= 2048, "{}", h.len());
         assert!(h.ends_with(r#"{"truncated":true}]"#));
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&h).unwrap();
         assert!(parsed.len() < 200);
-        assert_eq!(header_value(&[]), "[]");
+        assert_eq!(report_header_calls(&[]), "[]");
+    }
+
+    fn report_header_calls(e: &[ReportEntry]) -> String {
+        report_header(e, &[])
+    }
+
+    #[test]
+    fn v2_call_entries() {
+        let j = |d, code| {
+            let e = report_entry(&tc(), d, Basis::Decider, code);
+            serde_json::from_str::<serde_json::Value>(&e.to_json()).unwrap()
+        };
+        let v = j(ReportDecision::Block, Some(BlockCode::Policy));
+        assert_eq!(
+            (v["v"].as_u64(), v["side"].as_str(), v["decision"].as_str(), v["code"].as_str()),
+            (Some(2), Some("response"), Some("block"), Some("policy"))
+        );
+        assert_eq!((v["enforced"].as_bool(), v["reason"].as_str()), (Some(true), Some("tool-call-denied")));
+        let v = j(ReportDecision::Allow, Some(BlockCode::Policy));
+        assert_eq!((v["decision"].as_str(), v["code"].as_str(), v["enforced"].as_bool()), (Some("allow"), Some("policy"), Some(false)));
+        assert_eq!(v["reason"].as_str(), Some("tool-call-denied"));
+        let v = j(ReportDecision::Block, Some(BlockCode::PolicyUnavailable));
+        assert_eq!(v["reason"].as_str(), Some("tool-policy-unavailable"));
+        let v = j(ReportDecision::Block, Some(BlockCode::HoldLimit));
+        assert!(v["reason"].is_null());
+        let v = j(ReportDecision::Allow, None);
+        assert!(v["enforced"].is_null() && v["reason"].is_null() && v["code"].is_null());
+    }
+
+    #[test]
+    fn request_entries_go_after_call_entries_and_are_cut_first() {
+        let h = report_header(&[call_entry("a")], &many_request_entries(60));
+        let v: Vec<serde_json::Value> = serde_json::from_str(&h).unwrap();
+        assert!(h.len() <= 2048, "{}", h.len());
+        assert_eq!(v[0]["side"], "response");
+        let last = v.last().unwrap();
+        assert_eq!(last["side"], "request");
+        assert!(last["omitted"].as_u64().unwrap() > 0);
+        let few = report_header(&[call_entry("a")], &many_request_entries(2));
+        let v: Vec<serde_json::Value> = serde_json::from_str(&few).unwrap();
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[2]["action"], "remove-definition");
+    }
+
+    #[test]
+    fn many_calls_still_fit_with_requests_present() {
+        let calls: Vec<ReportEntry> = (0..200).map(|i| entry(&format!("tool_{i}"))).collect();
+        let h = report_header(&calls, &many_request_entries(5));
+        assert!(h.len() <= 2048);
+        serde_json::from_str::<Vec<serde_json::Value>>(&h).unwrap();
+    }
+
+    /// § 6.5.3: when the call entries alone fill the header, every request entry is removed, and
+    /// one summary entry still gives their count.
+    #[test]
+    fn calls_that_fill_the_header_still_leave_the_request_summary() {
+        let calls: Vec<ReportEntry> = (0..200).map(|i| entry(&format!("tool_{i}"))).collect();
+        let h = report_header(&calls, &many_request_entries(5));
+        assert!(h.len() <= 2048, "{}", h.len());
+        let v: Vec<serde_json::Value> = serde_json::from_str(&h).unwrap();
+        let n = v.len();
+        assert_eq!(v[n - 2], serde_json::json!({"truncated": true}), "{h}");
+        assert_eq!(v[n - 1], serde_json::json!({"v": 2, "side": "request", "omitted": 5}), "{h}");
+        assert!(v.iter().all(|e| e.get("action").is_none()), "no request entry fits: {h}");
+        // Without request entries, the cut marker alone ends the header.
+        let h = report_header(&calls, &[]);
+        let v: Vec<serde_json::Value> = serde_json::from_str(&h).unwrap();
+        assert_eq!(v.last(), Some(&serde_json::json!({"truncated": true})));
+    }
+
+    /// The cut markers are reserved only when more entries follow. The last entry that fits stays.
+    /// The last name is padded so that the free space after it falls inside the window where the
+    /// old reserve (cut marker, or request summary, kept for the last entry too) dropped it.
+    #[test]
+    fn the_last_fitting_entry_is_kept() {
+        let joined = |parts: Vec<String>| format!("[{}]", parts.join(","));
+        // Call half. The old code dropped the last entry when fewer than TRUNCATED + 1 bytes stayed.
+        // `pad` sets the length of every name but the last, so the search can reach the window.
+        let calls = |pad: usize, n: usize, last: usize| -> Vec<ReportEntry> { (0..n).map(|i| entry(&"x".repeat(if i + 1 == n { last } else { pad }))).collect() };
+        let plain_calls = |c: &[ReportEntry]| joined(c.iter().map(ReportEntry::to_json).collect());
+        let window = TRUNCATED.len();
+        let (c, free) = (1..=40)
+            .flat_map(|pad| {
+                let n = (2..).take_while(|&n| plain_calls(&calls(pad, n, 1)).len() <= 2048).last().unwrap();
+                (1..=40).map(move |l| (pad, n, l))
+            })
+            .map(|(pad, n, l)| calls(pad, n, l))
+            .map(|c| {
+                let f = 2048_usize.saturating_sub(plain_calls(&c).len());
+                (c, f)
+            })
+            .find(|(c, f)| (1..=window).contains(f) && plain_calls(c).len() <= 2048)
+            .expect("a name length puts the free space in the window");
+        assert!((1..=window).contains(&free), "free space {free} must lie in 1..={window}");
+        assert_eq!(report_header(&c, &[]), plain_calls(&c));
+        // Request half. The old code dropped the last entry when fewer than summary + 1 bytes stayed.
+        let reqs = |pad: usize, m: usize, last: usize| -> Vec<RequestEntry> {
+            (0..m)
+                .map(|i| RequestEntry::new("x".repeat(if i + 1 == m { last } else { pad }), RequestAction::RemoveDefinition, true, RequestReason::ToolCallDenied))
+                .collect()
+        };
+        let plain_reqs = |r: &[RequestEntry]| joined(r.iter().map(RequestEntry::to_json).collect());
+        let (r, free, window) = (1..=40)
+            .flat_map(|pad| {
+                let m = (2..).take_while(|&m| plain_reqs(&reqs(pad, m, 1)).len() <= 2048).last().unwrap();
+                (1..=40).map(move |l| (pad, m, l))
+            })
+            .map(|(pad, m, l)| reqs(pad, m, l))
+            .filter_map(|r| {
+                let len = plain_reqs(&r).len();
+                let window = omitted_summary(r.len()).len();
+                let f = 2048_usize.checked_sub(len)?;
+                (1..=window).contains(&f).then_some((r, f, window))
+            })
+            .next()
+            .expect("a name length puts the free space in the window");
+        assert!((1..=window).contains(&free), "free space {free} must lie in 1..={window}");
+        assert_eq!(report_header(&[], &r), plain_reqs(&r));
+    }
+
+    #[test]
+    fn request_actions_have_stable_labels() {
+        let a = [RequestAction::RemoveDefinition, RequestAction::ReplaceResult, RequestAction::ResetToolChoice];
+        assert_eq!(a.map(RequestAction::as_str), ["remove-definition", "replace-result", "reset-tool-choice"]);
+    }
+
+    #[test]
+    fn request_comments_are_sse_comments() {
+        let cs = request_comments(&many_request_entries(3));
+        assert_eq!(cs.len(), 3);
+        for c in cs {
+            assert!(c.starts_with(b": paigasus-decision {"));
+            assert!(c.ends_with(b"\n\n"));
+        }
+    }
+
+    #[test]
+    fn every_report_reason_is_declared_in_the_canonical_registry() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        let from_codes = BlockCode::ALL.iter().filter_map(|c| reason_label(*c));
+        let from_requests = RequestReason::ALL.iter().map(|r| r.as_str());
+        let mut seen = 0;
+        for r in from_codes.chain(from_requests) {
+            seen += 1;
+            assert!(ErrorReason::from_wire_reason(r).is_some(), "{r} is not declared in common/v1/error.proto");
+        }
+        assert!(seen >= 4, "the loops must cover the reasons: {seen}");
     }
 
     #[test]

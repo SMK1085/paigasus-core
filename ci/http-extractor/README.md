@@ -171,3 +171,5 @@ cannot read this shape. A `macro_rules!` matcher (`fn $n:ident`) is the known ca
 support this change adds also makes `_FN` match inside a matcher arm like
 `macro_rules! r { (fn $n:ident) => {...} }`, which is not a function declaration and is never
 followed by `(` — and it must be handled explicitly rather than skipped.
+
+**L8 — A type alias of `Bytes` in a helper is not caught, and that is allowed for non-extractor helpers.** `paigasus-gateway/src/adapters/http/interception.rs` declares `type Chunk = Bytes;` so that a response stream item can appear in a parameter list (SMA-752). The text scan matches the name `Bytes`, not what an alias resolves to, so `chunk: Chunk` is not seen. That is accepted for a helper whose parameter is a response chunk or another value that is not a request extractor. An alias used for a request-body extractor is the L1 case and must not be written.

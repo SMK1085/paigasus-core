@@ -1,0 +1,7 @@
+{
+  "model": "gpt-4.1",
+  "messages": [
+    {"role": "user", "content": "Clean up the build directory."}
+  ],
+  "temperature": 0.2
+}

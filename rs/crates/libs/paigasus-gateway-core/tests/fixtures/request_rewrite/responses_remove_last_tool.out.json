@@ -1,0 +1,5 @@
+{
+  "model": "gpt-4.1",
+  "input": "Clean up the build directory.",
+  "store": false
+}

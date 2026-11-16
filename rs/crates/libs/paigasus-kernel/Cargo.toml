@@ -27,6 +27,19 @@ publish = true
 [dependencies]
 uuid = { workspace = true }
 thiserror = { workspace = true }
+# Feature `tool-policy` only (SMA-752): the InvokeTool decision of ADR-0027 (e). Off by default,
+# so the wasm and the FFI binding trees never get Cedar (D2, D21).
+cedar-policy = { workspace = true, optional = true }
+# `serde` is named only for the duplicate-key visitor in `tool_policy::input`.
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, features = ["raw_value"], optional = true }
+unicode-normalization = { version = "0.1.25", optional = true }
+
+[features]
+tool-policy = ["dep:cedar-policy", "dep:serde", "dep:serde_json", "dep:unicode-normalization"]
+
+[package.metadata.docs.rs]
+features = ["tool-policy"]
 
 [dev-dependencies]
 proptest.workspace = true

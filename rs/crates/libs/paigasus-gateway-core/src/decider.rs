@@ -9,17 +9,23 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::interceptor::DeciderError;
+use crate::policy::PolicySnapshot;
 use crate::turn::ToolTurn;
 use crate::types::{Decision, ToolCall};
 
 /// Who is asking, captured in the handler. Inside the stream `current_ids()` is `None`
 /// (SMA-504 § 4.3), so the request id comes in here.
+///
+/// No `PartialEq`: the policy snapshot holds a Cedar policy set, and nothing compares a context
+/// (preflight F7).
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DecisionContext {
     pub principal: String,
     pub scope: String,
     pub request_id: Option<String>,
+    /// The request's policy snapshot (D30). `None` when the tool policy is off.
+    pub policy: Option<Arc<PolicySnapshot>>,
 }
 
 impl DecisionContext {
@@ -29,7 +35,15 @@ impl DecisionContext {
             principal: principal.into(),
             scope: scope.into(),
             request_id,
+            policy: None,
         }
+    }
+
+    /// Attach the request's policy snapshot (D30).
+    #[must_use]
+    pub fn with_policy(mut self, snapshot: Arc<PolicySnapshot>) -> Self {
+        self.policy = Some(snapshot);
+        self
     }
 }
 
@@ -82,6 +96,16 @@ mod tests {
     fn allow_all_allows_every_call() {
         let fut = AllowAll.decide(Arc::new(DecisionContext::new("p", "s", None)), Arc::new(ToolTurn::Unavailable("test")), vec![call(), call()]);
         assert_eq!(ready(fut), Ok(vec![Decision::Allow, Decision::Allow]));
+    }
+
+    #[test]
+    fn a_new_context_has_no_policy_and_with_policy_sets_it() {
+        use crate::policy::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode};
+        let ctx = DecisionContext::new("p", "s", None);
+        assert!(ctx.policy.is_none());
+        let snap = Arc::new(PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Enforce, OnUnavailable::Closed));
+        let ctx = ctx.with_policy(Arc::clone(&snap));
+        assert!(ctx.policy.as_ref().is_some_and(|p| Arc::ptr_eq(p, &snap)));
     }
 
     // Compile-time proof that the trait is object safe (the gateway holds it as `Arc<dyn …>`).

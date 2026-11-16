@@ -1,0 +1,11 @@
+{
+  "model": "gpt-4.1",
+  "messages": [
+    {"role": "user", "content": "Clean up the build directory."}
+  ],
+  "functions": [
+    {"name": "delete_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+  ],
+  "function_call": {"name": "delete_file"},
+  "temperature": 0.2
+}

@@ -94,13 +94,20 @@ impl ToolCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
-    Block { code: BlockCode },
+    Block {
+        code: BlockCode,
+    },
+    /// Allowed, but a block with `would` would have applied. The call goes through and the
+    /// report shows `enforced: false` (SMA-752 D28).
+    Observe {
+        would: BlockCode,
+    },
 }
 
 impl Decision {
     #[must_use]
     pub fn is_allow(self) -> bool {
-        matches!(self, Decision::Allow)
+        matches!(self, Decision::Allow | Decision::Observe { .. })
     }
 }
 
@@ -120,9 +127,22 @@ pub enum BlockCode {
     Truncated,
     /// The decider failed, timed out, or returned the wrong number of decisions (D18).
     DeciderError,
+    /// The tool policy could not be evaluated (SMA-752).
+    PolicyUnavailable,
 }
 
 impl BlockCode {
+    /// Every code, for tests that must cover them all.
+    pub const ALL: [BlockCode; 7] = [
+        BlockCode::Policy,
+        BlockCode::Detector,
+        BlockCode::HoldLimit,
+        BlockCode::Malformed,
+        BlockCode::Truncated,
+        BlockCode::DeciderError,
+        BlockCode::PolicyUnavailable,
+    ];
+
     /// The kebab-case label used in the notice and in reports (§ 4.5).
     #[must_use]
     pub fn as_kebab(self) -> &'static str {
@@ -133,6 +153,7 @@ impl BlockCode {
             BlockCode::Malformed => "malformed",
             BlockCode::Truncated => "truncated",
             BlockCode::DeciderError => "decider-error",
+            BlockCode::PolicyUnavailable => "policy-unavailable",
         }
     }
 }
@@ -187,9 +208,16 @@ mod tests {
             BlockCode::Malformed,
             BlockCode::Truncated,
             BlockCode::DeciderError,
+            BlockCode::PolicyUnavailable,
         ];
+        assert_eq!(all, BlockCode::ALL);
         let labels: Vec<&str> = all.iter().map(|c| c.as_kebab()).collect();
-        assert_eq!(labels, ["policy", "detector", "hold-limit", "malformed", "truncated", "decider-error"]);
+        assert_eq!(labels, ["policy", "detector", "hold-limit", "malformed", "truncated", "decider-error", "policy-unavailable"]);
+    }
+
+    #[test]
+    fn observe_is_an_allow() {
+        assert!(Decision::Observe { would: BlockCode::Policy }.is_allow());
     }
 
     #[test]

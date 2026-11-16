@@ -68,6 +68,10 @@ pub struct AppState {
     /// SMA-749: tool-call interception, or `None` when `[tool_interception] enabled = false`.
     /// `None` keeps the relay exactly as it was (D27).
     pub tool_interception: Option<Arc<interception::ToolInterception>>,
+    /// SMA-752: the request side of the tool policy, or `None` when `[tool_policy] enabled = false`.
+    /// `None` keeps the pipeline exactly as it was. `GatewayConfig::validate` refuses an enabled
+    /// tool policy without tool interception, so `Some` comes with `tool_interception: Some`.
+    pub tool_policy: Option<Arc<crate::application::tool_policy::RequestToolPolicy>>,
     /// SMA-769: the `POST /v1/responses` route, or `None` when `[responses] enabled = false`
     /// (D8). [`router`] mounts the route only when this is `Some`.
     pub responses: Option<Arc<ResponsesSettings>>,
@@ -296,6 +300,7 @@ mod tests {
             limits: None,
             dpop_enabled: false,
             tool_interception: None,
+            tool_policy: None,
             responses: None,
         }
     }

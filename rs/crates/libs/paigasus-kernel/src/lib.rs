@@ -11,12 +11,16 @@
 //! bindings under `rs/crates/bindings/` call into this crate rather than reimplementing
 //! it (ADR-0005). The hidden [`wire`] module fixes the shape of a multi-value FFI return in one
 //! place for those bindings (SMA-673). It has no FFI dependency, and only the bindings use it.
+//!
+//! `tool_policy` (feature `tool-policy`): the InvokeTool decision of ADR-0027 (e).
 
 pub mod cedar;
 // The PRN value type lives in `resource_name`, NOT `prn`: `prn` (PRN) is a Windows reserved device
 // name, so a `prn.rs` file cannot be checked out on Windows (git fails with "invalid path"). Do not
 // rename this back to `prn`. The public type is still `Prn` (re-exported below).
 pub mod resource_name;
+#[cfg(feature = "tool-policy")]
+pub mod tool_policy;
 pub mod uuid7;
 // Binding-only wire forms (SMA-673, Sven accepted it on 2026-10-02 as Q7). Hidden from the docs,
 // and NOT re-exported at the crate root: a consumer uses `Prn`.

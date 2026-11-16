@@ -129,8 +129,9 @@ retries = 1
 
 [[profile.default.overrides]]
 # SMA-677 D22: the gateway's Redis-backed binaries, named one by one so the crate's pure unit
-# tests keep retries = 0. Same retry budget and container cap as paigasus-iam's suites.
-filter = 'package(=paigasus-gateway) and (binary(docker_preflight) or binary(limits_store_redis) or binary(limits_redis_e2e))'
+# tests keep retries = 0. Same retry budget and container cap as paigasus-iam's suites. SMA-752
+# Task 18 adds the NATS-backed `tool_policy_nats`.
+filter = 'package(=paigasus-gateway) and (binary(docker_preflight) or binary(limits_store_redis) or binary(limits_redis_e2e) or binary(tool_policy_nats))'
 retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
 test-group = 'docker-containers'
 

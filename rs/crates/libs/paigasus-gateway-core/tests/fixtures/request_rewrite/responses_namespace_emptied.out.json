@@ -1,0 +1,10 @@
+{
+  "model": "gpt-4.1",
+  "input": "Run the report query.",
+  "tools": [
+    {"type": "function", "name": "query", "parameters": {"type": "object", "properties": {}}},
+    {"type": "namespace", "name": "fs", "description": "File tools.", "tools": [
+      {"type": "function", "name": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+    ]}
+  ]
+}

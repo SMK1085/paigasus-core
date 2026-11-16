@@ -91,6 +91,9 @@ async fn serve() -> anyhow::Result<()> {
         Duration::from_secs(config.stream_idle_timeout_secs),
     )?;
 
+    // SMA-752 D19: the tool policy. Only after `validate` above (see `build_tool_policy`).
+    let runtime::ToolPolicyRuntime { policy: tool_policy, decider } = runtime::build_tool_policy(&config)?;
+
     let state = AppState {
         iam: Arc::new(iam),
         openai: Arc::new(openai),
@@ -100,11 +103,13 @@ async fn serve() -> anyhow::Result<()> {
         dpop_enabled: config.dpop.enabled,
         tool_interception: config.tool_interception.enabled.then(|| {
             tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
+            // SMA-752: the Cedar decider only with the tool policy on (`build_tool_policy`).
             Arc::new(ToolInterception {
                 limits: config.tool_interception.limits(),
-                decider: Arc::new(paigasus_gateway_core::AllowAll),
+                decider,
             })
         }),
+        tool_policy: tool_policy.as_ref().map(|(_, tp)| Arc::clone(tp)),
         responses: config.responses.enabled.then(|| {
             tracing::info!("the responses route is on (SMA-769)");
             Arc::new(ResponsesSettings {
@@ -191,6 +196,20 @@ async fn serve() -> anyhow::Result<()> {
         });
     }
 
+    // SMA-752 § 6.3.3: the tool-policy cache refresh, on the same shutdown watch. § 6.3.5: with a
+    // `[tool_policy.nats]` table, also the NATS invalidation subscription. A broker that is down
+    // does not stop the boot; the client connects in the background.
+    if let Some((cache, _)) = tool_policy {
+        if let Some(events) = runtime::build_policy_events(&config, &cache).await? {
+            servers.spawn(events.run(rx.clone()));
+        }
+        let rx = rx.clone();
+        servers.spawn(async move {
+            cache.run_refresh(rx).await;
+            Ok(())
+        });
+    }
+
     tracing::info!(%config.http_addr, "paigasus-gateway started");
 
     // Supervise: stop on the first of a shutdown signal or any task ending, broadcast graceful
@@ -251,6 +270,35 @@ fn describe_gateway_metrics() {
         names::GATEWAY_REDIS_BREAKER_TRANSITIONS_TOTAL,
         "Transitions of the limits Redis circuit breaker, labeled by role and to."
     );
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL,
+        "Tool-policy loads, labeled by result (ok, source_error, compile_error, timeout). A timeout counts once per load."
+    );
+    describe_histogram!(names::GATEWAY_TOOL_POLICY_LOAD_SECONDS, "Seconds one tool-policy source call takes.");
+    describe_histogram!(names::GATEWAY_TOOL_POLICY_COMPILE_SECONDS, "Seconds one tool-policy compile takes.");
+    describe_gauge!(
+        names::GATEWAY_TOOL_POLICY_STALE_ENTRIES,
+        "Tool-policy cache entries whose last refresh failed. They are served until max_stale_secs."
+    );
+    describe_counter!(names::GATEWAY_TOOL_POLICY_EVICTIONS_TOTAL, "Tool-policy tenant entries evicted for idleness.");
+    describe_counter!(names::GATEWAY_TOOL_POLICY_REFRESH_ERRORS_TOTAL, "Tool-policy cache entries whose refresh failed.");
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_DECISIONS_TOTAL,
+        "Tool-policy decisions, labeled by side (request, response), mode, effect (allow, observe, block) and basis (policy, errored_forbid, unavailable)."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
+        "Requests the tool policy refused (mode enforce) or would refuse (mode log_only), labeled by mode and reason (unreadable_turn, unknown_tool_choice)."
+    );
+    describe_histogram!(
+        names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
+        "Seconds the tool policy adds to one request: the request side plus the decider."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
+        "Tool-policy cache invalidations from NATS, labeled by cause (message, connect, resubscribe, slow_consumer)."
+    );
+    describe_gauge!(names::GATEWAY_TOOL_POLICY_NATS_CONNECTED, "1 while the tool-policy NATS client is connected, else 0.");
 }
 
 async fn shutdown_signal() {
