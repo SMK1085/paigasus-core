@@ -518,6 +518,118 @@ async fn only_platform_admin_can_read_the_floor() {
     }
 }
 
+/// I1 (SMA-774 final review): an org admin of organization A holds every tool policy action at A,
+/// and none at B. Each of the six tenant RPCs on B answers `forbidden`, and B's catalog and set do
+/// not change. The authorizer is the real Cedar one, so this pins that every handler authorizes
+/// at the stored PRN of the organization in the request.
+#[tokio::test]
+async fn an_org_admin_of_one_org_is_denied_every_tenant_rpc_on_another_org() {
+    let Some(env) = setup(true, true, &tenant_accepted()).await else { return };
+    let mut c = env.client();
+    let org_a = env.org_prn.clone();
+    // The admin is already provisioned, so this only returns its PRN.
+    let admin_prn = support::provision(&env.state, &env.admin).await;
+    let org_b = env
+        .state
+        .orgs
+        .create(&PrincipalId::from_prn(Prn::parse(&admin_prn).unwrap()), "globex", "Globex")
+        .await
+        .expect("create the second organization")
+        .organization
+        .id
+        .canonical();
+
+    // B holds one tool (catalog revision 1) and a live set at version 1.
+    c.put_tool(authed(put_tool(&org_b, "search", 0), &env.admin)).await.expect("seed B's tool");
+    let saved = c
+        .put_tool_policy_set(authed(put_set(&org_b, STARTER_TOOL_POLICY_SOURCE, 0), &env.admin))
+        .await
+        .expect("seed B's set")
+        .into_inner();
+    assert!(matches!(saved.result, Some(put_tool_policy_set_response::Result::Accepted(_))));
+
+    let org_admin = env.principal_with("tp-org-admin-a", "org_admin").await;
+    // The control: the same token works on A.
+    let own = c
+        .put_tool(authed(put_tool(&org_a, "search", 0), &org_admin))
+        .await
+        .expect("the org admin writes the catalog of its own organization")
+        .into_inner();
+    assert!(matches!(own.result, Some(put_tool_response::Result::Accepted(_))), "{own:?}");
+
+    let t = &org_admin;
+    let answers: Vec<(&str, Status)> = vec![
+        ("PutTool", c.put_tool(authed(put_tool(&org_b, "other", 1), t)).await.unwrap_err()),
+        (
+            "DeleteTool",
+            c.delete_tool(authed(
+                DeleteToolRequest {
+                    org_prn: org_b.clone(),
+                    name: "search".into(),
+                    expected_catalog_revision: 1,
+                },
+                t,
+            ))
+            .await
+            .unwrap_err(),
+        ),
+        (
+            "ListTools",
+            c.list_tools(authed(
+                ListToolsRequest {
+                    org_prn: org_b.clone(),
+                    limit: 0,
+                    offset: 0,
+                },
+                t,
+            ))
+            .await
+            .unwrap_err(),
+        ),
+        (
+            "ImportTools",
+            c.import_tools(authed(
+                ImportToolsRequest {
+                    org_prn: org_b.clone(),
+                    format: ToolImportFormat::OpenaiResponses as i32,
+                    document_json: "[]".into(),
+                    namespace: String::new(),
+                    replace: true,
+                    expected_catalog_revision: 1,
+                },
+                t,
+            ))
+            .await
+            .unwrap_err(),
+        ),
+        ("PutToolPolicySet", c.put_tool_policy_set(authed(put_set(&org_b, STARTER_TOOL_POLICY_SOURCE, 1), t)).await.unwrap_err()),
+        ("GetToolPolicySet", c.get_tool_policy_set(authed(get_set(&org_b, None), t)).await.unwrap_err()),
+    ];
+    assert_eq!(answers.len(), 6);
+    for (rpc, status) in &answers {
+        assert_eq!((status.code(), support::reason_of(status).as_str()), (Code::PermissionDenied, "forbidden"), "{rpc}: {status:?}");
+    }
+
+    // B is unchanged: one tool at revision 1, and the live set at version 1.
+    let listed = c
+        .list_tools(authed(
+            ListToolsRequest {
+                org_prn: org_b.clone(),
+                limit: 0,
+                offset: 0,
+            },
+            &env.admin,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.catalog_revision, 1);
+    assert_eq!(listed.tools.iter().map(|t| t.name_key.as_str()).collect::<Vec<_>>(), vec!["search"]);
+    let set = c.get_tool_policy_set(authed(get_set(&org_b, None), &env.admin)).await.unwrap().into_inner().set.unwrap();
+    assert_eq!(set.version, 1);
+    assert_eq!(set.org_id, support::principal_uuid(&org_b).to_string());
+}
+
 /// The floor RPCs carry no organization. The service authorizes them at Root, so an org admin,
 /// who holds every tool policy action at the organization, is still denied (carried item 3).
 #[tokio::test]

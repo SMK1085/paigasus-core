@@ -423,3 +423,92 @@ async fn insert_live_version_refuses_a_status_that_is_not_live() {
     drop(tx);
     assert_unchanged_at_two(&repo, &key).await;
 }
+
+/// A version of `key` whose source names its organization, so that a read of the wrong org's row
+/// shows in the source.
+fn tagged_version(key: ToolPolicySetKey, n: u64, tag: &str) -> ToolPolicyVersion {
+    ToolPolicyVersion {
+        source: format!("// {tag} v{n}"),
+        ..version(key, n, VersionStatus::Live, Utc::now())
+    }
+}
+
+/// I1 (SMA-774 final review): two organizations hold catalogs and versions side by side. Each
+/// read, list and write sees and changes only the rows of its own organization.
+#[tokio::test]
+async fn two_orgs_never_see_or_change_each_others_rows() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (a, b) = (seed_org(&db).await, seed_org(&db).await);
+    let (key_a, key_b) = (ToolPolicySetKey::Tenant(a), ToolPolicySetKey::Tenant(b));
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let now = Utc::now();
+
+    // A: tools "alpha" and "shared", catalog revision 1, versions 1 and 2 (live 2).
+    // B: tools "beta" and "shared", catalog revision 1, version 1 (live 1).
+    let tx = uow.begin().await.unwrap();
+    repo.apply_catalog_in(
+        &*tx,
+        a,
+        &[tool("alpha", ToolKind::Custom, None, json!({})), tool("shared", ToolKind::Custom, None, json!({"org": "a"}))],
+        &[],
+        now,
+    )
+    .await
+    .unwrap();
+    repo.apply_catalog_in(
+        &*tx,
+        b,
+        &[tool("beta", ToolKind::Custom, None, json!({})), tool("shared", ToolKind::Custom, None, json!({"org": "b"}))],
+        &[],
+        now,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    for (key, tag, n) in [(key_a, "a", 1u64), (key_a, "a", 2), (key_b, "b", 1)] {
+        let tx = uow.begin().await.unwrap();
+        repo.lock_state_in(&*tx, &key).await.unwrap();
+        repo.insert_live_version_in(&*tx, &tagged_version(key, n, tag)).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let names = |cat: Vec<paigasus_iam_core::tool_policy::StoredTool>| cat.into_iter().map(|t| (t.entry.name.name_key, t.entry.cedar_input_type)).collect::<Vec<_>>();
+    assert_eq!(names(repo.catalog(a).await.unwrap()), [("alpha".to_string(), json!({})), ("shared".to_string(), json!({"org": "a"}))]);
+    assert_eq!(names(repo.catalog(b).await.unwrap()), [("beta".to_string(), json!({})), ("shared".to_string(), json!({"org": "b"}))]);
+    let (st_a, st_b) = (repo.state(&key_a).await.unwrap(), repo.state(&key_b).await.unwrap());
+    assert_eq!((st_a.catalog_revision, st_a.live_version), (1, 2));
+    assert_eq!((st_b.catalog_revision, st_b.live_version), (1, 1));
+    assert_eq!(repo.live(&key_a).await.unwrap().unwrap().source, "// a v2");
+    assert_eq!(repo.live(&key_b).await.unwrap().unwrap().source, "// b v1");
+    assert_eq!(repo.version(&key_a, 1).await.unwrap().unwrap().source, "// a v1");
+    assert_eq!(repo.version(&key_b, 1).await.unwrap().unwrap().source, "// b v1");
+    assert!(repo.version(&key_b, 2).await.unwrap().is_none(), "B must not see A's version 2");
+
+    // A deletes "shared" and upserts "beta". B's "shared" stays, and B's "beta" keeps its value.
+    let tx = uow.begin().await.unwrap();
+    let rev = repo
+        .apply_catalog_in(&*tx, a, &[tool("beta", ToolKind::Custom, None, json!({"org": "a"}))], &["shared".to_string()], now)
+        .await
+        .unwrap();
+    assert_eq!(rev, 2);
+    tx.commit().await.unwrap();
+    assert_eq!(names(repo.catalog(a).await.unwrap()), [("alpha".to_string(), json!({})), ("beta".to_string(), json!({"org": "a"}))]);
+    assert_eq!(names(repo.catalog(b).await.unwrap()), [("beta".to_string(), json!({})), ("shared".to_string(), json!({"org": "b"}))]);
+    assert_eq!(repo.state(&key_b).await.unwrap().catalog_revision, 1, "A's write must not bump B's revision");
+
+    // B saves version 2. A's live version 2 stays live, and A's version 1 stays superseded.
+    let tx = uow.begin().await.unwrap();
+    repo.lock_state_in(&*tx, &key_b).await.unwrap();
+    repo.insert_live_version_in(&*tx, &tagged_version(key_b, 2, "b")).await.unwrap();
+    tx.commit().await.unwrap();
+    let live_a = repo.live(&key_a).await.unwrap().unwrap();
+    assert_eq!((live_a.version, live_a.status, live_a.source.as_str()), (2, VersionStatus::Live, "// a v2"));
+    assert_eq!(repo.version(&key_a, 1).await.unwrap().unwrap().status, VersionStatus::Superseded);
+    assert_eq!(repo.version(&key_b, 1).await.unwrap().unwrap().status, VersionStatus::Superseded);
+    assert_eq!(repo.version(&key_b, 2).await.unwrap().unwrap().source, "// b v2");
+    assert_eq!(repo.state(&key_a).await.unwrap().live_version, 2);
+    assert_eq!(repo.state(&key_b).await.unwrap().live_version, 2);
+}
