@@ -23,7 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     # 45, not 30 (SMA-718). The heavy-integration mutex runs paigasus-iam-rs:test and the two
     # console test-e2e tasks one after another, and a run that selects all three passed 30 minutes.
-    timeout-minutes: 45
+    # 60, not 45: a run with a cold Rust cache that selects the IAM suites and the policy
+    # compiler took 41 to 45 minutes, and the cache saves only after a green run.
+    timeout-minutes: 60
     # cedar-policy + its crypto/parser tree (SMA-444) balloons the debug `target/` past even
     # the reclaimed headroom below → `rustc-LLVM ERROR: ... No space left on device` mid-link
     # of the paigasus-iam test binaries. Trim debug info to line tables (panic line numbers are
