@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01HQoBqdsW9qH7JYaXJXqKvr",
+  "agent_id": "ad9789d632e55be64",
+  "subagent_type": "Explore",
+  "task_description": "Find error-code registration chain",
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 41707,
+    "cache_read_tokens": 104162,
+    "output_tokens": 2927,
+    "api_call_count": 4
+  },
+  "started_at": "2026-11-14T16:04:37.049518+01:00",
+  "completed_at": "2026-11-14T16:04:55.04543+01:00"
+}

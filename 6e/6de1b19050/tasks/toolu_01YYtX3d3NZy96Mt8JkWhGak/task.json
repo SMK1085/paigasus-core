@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01YYtX3d3NZy96Mt8JkWhGak",
+  "agent_id": "acedae9e16d9ff5ce",
+  "subagent_type": "general-purpose",
+  "task_description": "Builder check on SMA-769 spec",
+  "token_usage": {
+    "input_tokens": 4,
+    "cache_creation_tokens": 79450,
+    "cache_read_tokens": 59561,
+    "output_tokens": 2649,
+    "api_call_count": 2
+  },
+  "started_at": "2026-11-14T15:02:47.011432+01:00",
+  "completed_at": "2026-11-14T15:03:12.896043+01:00"
+}

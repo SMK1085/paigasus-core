@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01L21VL6nv3CYujNKdfDEmCF",
+  "agent_id": "a25cea234c5e94095",
+  "subagent_type": "general-purpose",
+  "task_description": "Merge main and re-run gates",
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 145922,
+    "cache_read_tokens": 1387538,
+    "output_tokens": 6441,
+    "api_call_count": 20
+  },
+  "started_at": "2026-11-15T04:09:45.910114+01:00",
+  "completed_at": "2026-11-15T04:10:43.325712+01:00"
+}

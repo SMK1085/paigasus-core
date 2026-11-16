@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01Sj4XyYTubrwoh4KCDAvnuM",
+  "agent_id": "a1a7979989d27a00b",
+  "subagent_type": "general-purpose",
+  "task_description": "Final whole-branch review",
+  "token_usage": {
+    "input_tokens": 116,
+    "cache_creation_tokens": 309316,
+    "cache_read_tokens": 13035287,
+    "output_tokens": 45994,
+    "api_call_count": 58
+  },
+  "started_at": "2026-11-15T03:04:37.884569+01:00",
+  "completed_at": "2026-11-15T03:17:19.814828+01:00"
+}

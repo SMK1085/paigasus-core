@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_017t4X8RZjKkFJKvz3JtCLFQ",
+  "agent_id": "a0fe0f16997b86501",
+  "subagent_type": "general-purpose",
+  "task_description": "Stage 5 local CodeRabbit review",
+  "token_usage": {
+    "input_tokens": 110,
+    "cache_creation_tokens": 388502,
+    "cache_read_tokens": 5839934,
+    "output_tokens": 31446,
+    "api_call_count": 52
+  },
+  "started_at": "2026-11-15T03:29:27.834201+01:00",
+  "completed_at": "2026-11-15T03:32:59.349121+01:00"
+}

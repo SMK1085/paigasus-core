@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_015u6kohnfATk1wfKndkLFBN",
+  "agent_id": "a7153e0562ba30c93",
+  "subagent_type": "general-purpose",
+  "task_description": "Research Responses SDK accumulators",
+  "token_usage": {
+    "input_tokens": 62,
+    "cache_creation_tokens": 183190,
+    "cache_read_tokens": 3868997,
+    "output_tokens": 32399,
+    "api_call_count": 31
+  },
+  "started_at": "2026-11-14T14:53:05.87074+01:00",
+  "completed_at": "2026-11-14T14:57:56.192631+01:00"
+}

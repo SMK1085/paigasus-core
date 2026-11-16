@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01R7xw2EdvFjX6FrgxCSJ77Z",
+  "agent_id": "a98f1ab36ccf2129a",
+  "subagent_type": "general-purpose",
+  "task_description": "Preflight conflict scan of plan",
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 130917,
+    "cache_read_tokens": 585078,
+    "output_tokens": 29241,
+    "api_call_count": 6
+  },
+  "started_at": "2026-11-14T16:29:39.397415+01:00",
+  "completed_at": "2026-11-14T16:33:12.614274+01:00"
+}

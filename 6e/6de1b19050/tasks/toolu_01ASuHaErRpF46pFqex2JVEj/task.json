@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01ASuHaErRpF46pFqex2JVEj",
+  "agent_id": "a9f7e8807485da261",
+  "subagent_type": "Explore",
+  "task_description": "Map gateway chat-completions path",
+  "token_usage": {
+    "input_tokens": 32,
+    "cache_creation_tokens": 139328,
+    "cache_read_tokens": 1282144,
+    "output_tokens": 17643,
+    "api_call_count": 16
+  },
+  "started_at": "2026-11-14T14:37:36.013148+01:00",
+  "completed_at": "2026-11-14T14:39:41.583068+01:00"
+}
