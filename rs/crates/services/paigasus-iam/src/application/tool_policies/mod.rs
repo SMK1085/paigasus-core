@@ -862,7 +862,7 @@ mod tests {
         for _ in 0..MAX_PREDICATE_DEPTH {
             predicate = Predicate::AllOf {
                 left: Box::new(predicate),
-                right: Box::new(Predicate::AnyCatalogTool),
+                right: Box::new(Predicate::AnyCatalogTool {}),
             };
         }
         h.compiler.push(Ok(CompileOutcome::Accepted(CompiledOutput {

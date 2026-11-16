@@ -173,7 +173,7 @@ fn predicate_to_pb(p: &Predicate) -> pb::HistoryPredicate {
             name_key: name_key.clone(),
             any_catalog_tool: false,
         }),
-        Predicate::AnyCatalogTool => Node::Tool(pb::ToolMatch {
+        Predicate::AnyCatalogTool {} => Node::Tool(pb::ToolMatch {
             name_key: String::new(),
             any_catalog_tool: true,
         }),
@@ -211,7 +211,7 @@ fn predicate_from_pb(p: Option<pb::HistoryPredicate>) -> Result<Predicate, Tenan
                 _ => return Err(corrupt("a predicate has an unknown event kind")),
             },
         },
-        Node::Tool(t) if t.any_catalog_tool && t.name_key.is_empty() => Predicate::AnyCatalogTool,
+        Node::Tool(t) if t.any_catalog_tool && t.name_key.is_empty() => Predicate::AnyCatalogTool {},
         Node::Tool(t) if !t.any_catalog_tool && !t.name_key.is_empty() => Predicate::Tool { name_key: t.name_key },
         Node::Tool(_) => return Err(corrupt("a tool match sets both or neither of its fields")),
         Node::Field(f) => {
@@ -343,7 +343,7 @@ mod tests {
                     Scope::Principal,
                     60_000,
                     Shape::CountWithin {
-                        predicate: Predicate::AnyCatalogTool,
+                        predicate: Predicate::AnyCatalogTool {},
                         op: CmpOp::Le,
                         threshold: 3,
                     },

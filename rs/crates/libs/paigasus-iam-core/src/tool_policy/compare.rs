@@ -73,7 +73,7 @@ mod tests {
                 scope: Scope::Session,
                 window_ms: 60_000,
                 shape: Shape::CountWithin {
-                    predicate: Predicate::AnyCatalogTool,
+                    predicate: Predicate::AnyCatalogTool {},
                     op: CmpOp::Le,
                     threshold,
                 },

@@ -165,8 +165,10 @@ pub enum Predicate {
     Tool {
         name_key: String,
     },
-    /// The event is a call of any tool in the catalog (`InvokeTool`).
-    AnyCatalogTool,
+    /// The event is a call of any tool in the catalog (`InvokeTool`). The empty braces are
+    /// load-bearing: serde ignores an unknown field next to the tag of a unit variant, and
+    /// `deny_unknown_fields` applies to a struct variant only.
+    AnyCatalogTool {},
     /// The argument field at `path` (below `input`) compares with `value`.
     Field {
         path: Vec<String>,
@@ -287,6 +289,9 @@ mod tests {
             condition(json!({"type": "formerly", "predicate": {"type": "error"}})),
             condition(json!({"type": "count_within", "predicate": {"type": "any_catalog_tool"}, "op": "like", "threshold": 1})),
             condition(json!({"type": "formerly", "predicate": {"type": "event_kind", "kind": "error"}})),
+            // An unknown field next to a predicate tag, with and without named fields.
+            condition(json!({"type": "formerly", "predicate": {"type": "any_catalog_tool", "extra": 1}})),
+            condition(json!({"type": "formerly", "predicate": {"type": "tool", "name_key": "search", "extra": 1}})),
             json!({"slot": "s", "policy_id": "p", "scope": "tenant", "window_ms": 1, "shape": {"type": "formerly", "predicate": {"type": "any_catalog_tool"}}}),
             json!({"slot": "s", "policy_id": "p", "scope": "session", "window_ms": 1, "extra": 1, "shape": {"type": "formerly", "predicate": {"type": "any_catalog_tool"}}}),
         ] {

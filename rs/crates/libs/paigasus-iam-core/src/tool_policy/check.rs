@@ -96,7 +96,7 @@ pub fn check_compiled(kind: SetKind, out: &CompiledOutput) -> Result<(), Vec<Rej
 /// The predicate nodes along the longest path of `p`. A leaf is 1.
 fn predicate_depth(p: &Predicate) -> usize {
     match p {
-        Predicate::EventKind { .. } | Predicate::Tool { .. } | Predicate::AnyCatalogTool | Predicate::Field { .. } => 1,
+        Predicate::EventKind { .. } | Predicate::Tool { .. } | Predicate::AnyCatalogTool {} | Predicate::Field { .. } => 1,
         Predicate::AllOf { left, right } | Predicate::AnyOf { left, right } => 1 + predicate_depth(left).max(predicate_depth(right)),
         Predicate::Negation { inner } => 1 + predicate_depth(inner),
     }
@@ -228,7 +228,7 @@ mod tests {
         for _ in 1..depth {
             p = Predicate::AllOf {
                 left: Box::new(p),
-                right: Box::new(Predicate::AnyCatalogTool),
+                right: Box::new(Predicate::AnyCatalogTool {}),
             };
         }
         p
