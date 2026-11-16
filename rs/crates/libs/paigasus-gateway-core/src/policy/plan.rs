@@ -127,13 +127,13 @@ struct ResultJudge<'j, 'p, 'k> {
     plan: &'j mut RequestPlan,
     /// Every target decided so far, and whether it is replaced. A repeated target has the same
     /// outcome, so it is not decided again.
-    seen: BTreeMap<(u8, &'k str), bool>,
+    seen: BTreeMap<(u8, &'k str), Option<bool>>,
 }
 
 impl<'k> ResultJudge<'_, '_, 'k> {
-    /// Whether the target is replaced: any of `names` is denied. A new replaced target adds one
-    /// plan item and one report entry.
-    fn decide(&mut self, key: (u8, &'k str), target: impl FnOnce() -> ResultTarget, names: &[&str]) -> bool {
+    /// `Some(enforced)` when the target is replaced (any of `names` is denied), else `None`. A new
+    /// replaced target adds one plan item and one report entry.
+    fn decide(&mut self, key: (u8, &'k str), target: impl FnOnce() -> ResultTarget, names: &[&str]) -> Option<bool> {
         if let Some(replaced) = self.seen.get(&key) {
             return *replaced;
         }
@@ -146,13 +146,13 @@ impl<'k> ResultJudge<'_, '_, 'k> {
                 });
             }
         }
-        self.seen.insert(key, hit.is_some());
-        let Some((name, enforced)) = hit else { return false };
+        self.seen.insert(key, hit.map(|(_, enforced)| enforced));
+        let (name, enforced) = hit?;
         self.plan
             .entries
             .push(RequestEntry::new(name.to_owned(), RequestAction::ReplaceResult, enforced, RequestReason::ToolResultBlocked));
         self.plan.replaced.push(PlanItem { target: target(), enforced });
-        true
+        Some(enforced)
     }
 }
 
@@ -268,10 +268,14 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts)
         let replaced = match (&r.call_id, &r.name) {
             (Some(id), _) => results.decide((0, id.as_str()), || ResultTarget::CallId(id.clone()), by_id.get(id.as_str()).map_or(&[][..], Vec::as_slice)),
             (None, Some(name)) => results.decide((1, name.as_str()), || ResultTarget::Name(name.clone()), &[name.as_str()]),
-            (None, None) => false,
+            (None, None) => None,
         };
-        // The `id` form of a `local_shell_call_output`, when its `call_id` did not replace it.
-        if !replaced && let Some(id) = &r.item_id {
+        // The `id` form of a `local_shell_call_output`, unless its `call_id` already replaced it
+        // with an enforced item. An unenforced `call_id` item changes nothing, so a floor-denied
+        // `id` must still be planned (fail-safe: enforced wins).
+        if replaced != Some(true)
+            && let Some(id) = &r.item_id
+        {
             results.decide((2, id.as_str()), || ResultTarget::LocalShellId(id.clone()), shell_ids.get(id.as_str()).map_or(&[][..], Vec::as_slice));
         }
     }
@@ -581,6 +585,40 @@ mod tests {
         let p = run(vec![shell("x")], vec![both]);
         assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)]);
         assert_eq!(p.entries.len(), 1);
+    }
+
+    #[test]
+    fn an_enforced_local_shell_id_is_planned_after_an_unenforced_call_id() {
+        // The floor denies "rm" (enforced); the tenant denies "x" in log-only (not enforced).
+        let s = snap(RM_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly);
+        let shell = |id: &str, item: &str, name: &str| PriorCall {
+            id: Some(id.to_owned()),
+            name: name.to_owned(),
+            arguments: "{}".to_owned(),
+            local_shell: true,
+            item_id: Some(item.to_owned()),
+        };
+        let mut t = turn(vec![]);
+        t.prior_calls = vec![shell("c1", "ls_1", "x"), shell("c2", "ls_2", "rm")];
+        // `call_id` matches the unenforced call, `id` matches the floor-denied call.
+        t.tool_results = vec![ToolResultRef {
+            call_id: Some("c1".to_owned()),
+            name: None,
+            item_id: Some("ls_2".to_owned()),
+        }];
+        let p = plan_request(&s, Format::OpenAiResponses, &t);
+        assert_eq!(
+            p.replaced,
+            [item(ResultTarget::CallId("c1".to_owned()), false), item(ResultTarget::LocalShellId("ls_2".to_owned()), true)]
+        );
+        assert_eq!(
+            actions(&p),
+            [
+                (RequestAction::ReplaceResult, false, RequestReason::ToolResultBlocked),
+                (RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked)
+            ]
+        );
+        assert!(!p.is_noop());
     }
 
     #[test]

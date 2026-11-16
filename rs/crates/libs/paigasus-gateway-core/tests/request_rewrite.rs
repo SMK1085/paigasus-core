@@ -158,6 +158,26 @@ fn an_id_only_local_shell_output_is_replaced() {
     }
 }
 
+/// A `local_shell_call_output` with a `call_id` that matches a call denied only in log-only and an
+/// `id` that matches a floor-denied `local_shell_call`: the enforced replacement wins, once.
+#[test]
+fn an_enforced_local_shell_id_wins_over_an_unenforced_call_id() {
+    let notice = Value::from(result_notice("local_shell", RequestReason::ToolResultBlocked));
+    let body = json!({"model": "m", "input": [
+        {"type": "function_call", "call_id": "c1", "name": "x", "arguments": "{}"},
+        {"type": "local_shell_call", "id": "ls_2", "call_id": "c2", "action": {"type": "exec", "command": ["env"], "env": {}}, "status": "completed"},
+        {"type": "local_shell_call_output", "call_id": "c1", "id": "ls_2", "output": "SECRET"}
+    ]})
+    .to_string();
+    let floor = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"local_shell", resource);"#;
+    let snap = snapshot(Format::OpenAiResponses, floor, &forbid_text(&["x"]), TenantMode::LogOnly);
+    let p = plan(&snap, Format::OpenAiResponses, body.as_bytes());
+    assert!(!p.is_noop());
+    let out: Value = serde_json::from_str(&rewrite(Format::OpenAiResponses, body.as_bytes(), &p)).expect("json");
+    assert_eq!(out["input"][2]["output"], notice);
+    assert!(!out.to_string().contains("SECRET"));
+}
+
 #[test]
 fn a_noop_plan_returns_none() {
     let body = fixture("chat_tool_result_replaced", "in");
