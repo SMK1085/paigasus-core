@@ -512,7 +512,8 @@ The child process runs with these limits. Each one has a test.
     and gives zero bytes under a non-dumpable parent. Each case runs in its own test process,
     because the call cannot be undone.
 - An empty, temporary working directory, and no inherited file descriptors except the three
-  pipes.
+  pipes. In `pre_exec`, IAM sets `FD_CLOEXEC` on every descriptor from 3 up, so `exec` closes
+  each descriptor that IAM itself got without the flag.
 - `RLIMIT_AS` (default 1 GiB) and `RLIMIT_CPU` (default 8 s), set in `pre_exec`. The CPU limit
   must be below the 10 s timeout. CPU time does not run faster than the wall clock, so a CPU limit
   at or above the timeout never fires. IAM refuses such a config at boot.
@@ -1079,3 +1080,5 @@ The first CodeRabbit round on PR 478 found two more gaps.
   next to `anyOf` were lost with no dropped-field entry, and a `type` next to `anyOf` was ignored.
 - **§5.3 step 2.** A policy with more than one `@scope` rejects the save. Before, the history
   condition used the first `@scope`, and the emitted Cedar kept the last one.
+- **§5.2.** IAM sets `FD_CLOEXEC` on every descriptor from 3 up before `exec`: `close_range` on
+  Linux, an `fcntl` loop elsewhere. Before, CI saw two descriptors without the flag reach the child.

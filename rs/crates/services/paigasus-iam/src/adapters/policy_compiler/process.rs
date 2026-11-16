@@ -6,8 +6,10 @@
 //!   of IAM: on Linux a process under the same UID can read `/proc/<pid>/environ` and
 //!   `/proc/<pid>/mem` of a dumpable process. So `main` calls [`make_parent_non_dumpable`] before
 //!   the boot probe starts the first child. Then the kernel refuses these reads to the child.
-//! - An empty, temporary working directory. The child inherits only the three pipes: Rust opens
-//!   every other descriptor with `O_CLOEXEC`.
+//! - An empty, temporary working directory. The child inherits only the three pipes. Rust opens
+//!   its own descriptors with `O_CLOEXEC`, but a descriptor from another source can lack the flag
+//!   (for example a jobserver pipe from the parent of IAM). So `pre_exec` sets `FD_CLOEXEC` on
+//!   every descriptor from 3 up, and `exec` closes them all. See [`cloexec_from_3`].
 //! - `RLIMIT_CPU` everywhere, and `RLIMIT_AS` on Linux only (macOS refuses it), set in
 //!   `pre_exec`.
 //! - IAM writes stdin and reads stdout and stderr at the same time, so the pipes cannot deadlock.
@@ -117,6 +119,51 @@ pub fn make_parent_non_dumpable() -> std::io::Result<ParentHardening> {
     }
 }
 
+/// The highest descriptor number plus 1 that [`cloexec_from_3`] must cover on the fallback path:
+/// the `RLIMIT_NOFILE` soft limit, at most [`MAX_FD_SCAN`].
+fn descriptor_limit() -> libc::c_int {
+    let mut nofile = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: `getrlimit` writes only into `nofile`, which is a valid `rlimit`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) } != 0 {
+        return MAX_FD_SCAN;
+    }
+    libc::c_int::try_from(nofile.rlim_cur).map_or(MAX_FD_SCAN, |limit| limit.min(MAX_FD_SCAN))
+}
+
+/// The upper bound of the fallback loop in [`cloexec_from_3`]. An unlimited `RLIMIT_NOFILE`
+/// would otherwise make the loop run for minutes. 2^20 is the default Linux `nr_open`.
+const MAX_FD_SCAN: libc::c_int = 1 << 20;
+
+/// Sets `FD_CLOEXEC` on every descriptor from 3 up, so that `exec` closes each of them. The
+/// child then keeps only stdin, stdout and stderr, which `std` has moved to 0, 1 and 2 already.
+///
+/// The function sets the flag and does not close the descriptors: `std` keeps an internal
+/// `O_CLOEXEC` pipe open until `exec`, and it reports an `exec` error through that pipe.
+///
+/// Linux uses one `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` call. A kernel before 5.11 refuses
+/// it (`ENOSYS` or `EINVAL`), and every other OS has no such call. Then a loop calls `fcntl` on
+/// each number below `limit`. The loop ignores `EBADF` for a number that is not open.
+///
+/// It runs in the forked child, so it is async-signal-safe: it allocates nothing and takes no
+/// lock.
+fn cloexec_from_3(limit: libc::c_int) {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `close_range` takes integers only and touches no memory of this process.
+        let done = unsafe { libc::syscall(libc::SYS_close_range, 3 as libc::c_uint, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC) };
+        if done == 0 {
+            return;
+        }
+    }
+    for fd in 3..limit {
+        // SAFETY: `fcntl` with `F_SETFD` changes only the descriptor flags of `fd`. A number
+        // that is not open gives `EBADF` and changes nothing.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+}
+
 /// What a child that ran to its end gave back.
 #[derive(Debug)]
 pub struct RawOutput {
@@ -145,10 +192,13 @@ pub async fn run_child(path: &Path, args: &[&str], stdin: &[u8], limits: &Proces
     let rlimit_cpu = limits.rlimit_cpu;
     #[cfg(target_os = "linux")]
     let rlimit_as = limits.rlimit_as;
+    // Read before the fork: the child must not call more than it needs.
+    let fd_limit = descriptor_limit();
     // SAFETY: the closure runs in the forked child before `exec`. It only calls `setrlimit`,
-    // which is async-signal-safe, and it allocates nothing.
+    // `fcntl` and `close_range`, which are async-signal-safe, and it allocates nothing.
     unsafe {
         command.pre_exec(move || {
+            cloexec_from_3(fd_limit);
             let cpu = libc::rlimit {
                 rlim_cur: rlimit_cpu,
                 rlim_max: rlimit_cpu,

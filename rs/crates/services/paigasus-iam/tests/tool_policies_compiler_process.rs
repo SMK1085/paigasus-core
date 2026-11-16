@@ -231,18 +231,42 @@ async fn the_stderr_of_a_child_over_the_stdout_limit_is_logged() {
     assert!(text.contains("stderr-marker-before-the-flood"), "the stderr was not logged: {text}");
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_child_inherits_only_the_three_pipes() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
     let dir = TempDir::new().expect("tempdir");
-    // A file descriptor that the test process holds open must not reach the child.
-    let _held = std::fs::File::open(dir.path()).expect("open a descriptor");
-    let path = script(&dir, "fds", "exec /bin/ls /proc/self/fd");
+    // A file descriptor that the test process holds open must not reach the child. `dup2` gives
+    // the copy no `FD_CLOEXEC`, as a descriptor from outside Rust can lack it (CI held two such).
+    // The high number keeps it apart from what `ls` opens itself.
+    const HELD: i32 = 200;
+    let file = std::fs::File::open(dir.path()).expect("open a descriptor");
+    // SAFETY: `dup2` writes no memory. The test owns `HELD` from here, and `_held` closes it.
+    assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), HELD) }, HELD, "dup2");
+    let _held = unsafe { OwnedFd::from_raw_fd(HELD) };
+    let listing = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+    let path = script(&dir, "fds", &format!("exec /bin/ls {listing}"));
     let output = run_child(&path, &[], b"", &limits(10_000)).await.expect("ls runs");
     assert!(output.status.success());
     let fds: Vec<String> = String::from_utf8_lossy(&output.stdout).split_whitespace().map(str::to_owned).collect();
-    // 0, 1 and 2 are the pipes. 3 is the directory that `ls` opens to list it.
-    assert_eq!(fds, ["0", "1", "2", "3"], "the child holds other descriptors");
+    assert!(!fds.contains(&HELD.to_string()), "the child holds the descriptor of the test: {fds:?}");
+    // On Linux 0, 1 and 2 are the pipes and 3 is the directory that `ls` opens to list it. On
+    // macOS `ls /dev/fd` opens two descriptors of its own, so only the check above applies.
+    if cfg!(target_os = "linux") {
+        assert_eq!(fds, ["0", "1", "2", "3"], "the child holds other descriptors");
+    }
+}
+
+/// The child marks its descriptors `FD_CLOEXEC` and does not close them, so `std` still reports
+/// an `exec` failure through its own pipe as a spawn error.
+#[tokio::test]
+async fn an_exec_failure_is_a_spawn_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let missing = dir.path().join("no-such-compiler");
+    match run_child(&missing, &[], b"", &limits(10_000)).await {
+        Err(CompilerFailure::Unavailable(message)) => assert!(message.starts_with("start "), "{message}"),
+        other => panic!("expected Unavailable, got {:?}", other.map(|o| o.status)),
+    }
 }
 
 #[cfg(target_os = "linux")]
