@@ -348,7 +348,10 @@ audit trail of the rules.
 
 One save replaces the whole set and makes a new version. The whole set compiles as one unit,
 because validation and stable slot names work at set level. A save of a source that is
-byte-identical to the live source makes no new version and returns the live version.
+byte-identical to the live source makes no new version and returns the live version. There is one
+exception. If the compiler generation or the schema revision of the live version is not current,
+the save compiles the source again and makes a new version. In PR 1, this is the only way to clear
+`tool-policy-recompile-pending`.
 
 An empty source is a valid tenant set. It permits nothing, so every tool call is blocked in
 `enforce` mode.
@@ -467,7 +470,9 @@ The child process runs with these limits. Each one has a test.
   Redis credentials. It gets only `PATH` and `LANG`, if it needs them.
 - An empty, temporary working directory, and no inherited file descriptors except the three
   pipes.
-- `RLIMIT_AS` (default 1 GiB) and `RLIMIT_CPU` (default 15 s), set in `pre_exec`.
+- `RLIMIT_AS` (default 1 GiB) and `RLIMIT_CPU` (default 8 s), set in `pre_exec`. The CPU limit
+  must be below the 10 s timeout. CPU time does not run faster than the wall clock, so a CPU limit
+  at or above the timeout never fires. IAM refuses such a config at boot.
 - A global semaphore (default 2 permits) in front of the compiler. When it is full, the RPC
   returns `tool-policy-compiler-busy`, which is retryable.
 - IAM writes stdin and reads stdout and stderr at the same time, so the pipes cannot deadlock.
@@ -497,7 +502,9 @@ The child process runs with these limits. Each one has a test.
    schema. This finds a lowering defect early.
 7. For the floor, check that every lowered policy has the `forbid` effect.
 8. Check the window: `W` must not be more than the window limit in the request. IAM's
-   `tool_policies.max_window` defaults to 24 h. It cannot be set above 7 days (ADR-0027 (g)).
+   `tool_policies.max_window` defaults to 24 h. It cannot be set above 24 h, because Dogwood caps
+   every window at 24 h. A larger limit can never take effect. ADR-0027 (g) permits 7 days. This
+   spec narrows that limit to 24 h.
 
 The predicate in a history condition may use only:
 
@@ -505,7 +512,10 @@ The predicate in a history condition may use only:
   rejects the save in v1;
 - the tool action: one tool, or `InvokeTool`;
 - equality and comparison of argument fields to constants;
-- `&&`, `||` and `!`.
+- `&&` and `!`.
+
+Dogwood temporal source has no `||`. The proto contract keeps an `AnyOf` arm for a later version,
+but no Dogwood source can reach it in v1.
 
 Any other expression in a predicate rejects the save. The plan lists the exact Dogwood syntax-tree
 nodes that map to this subset, from the Dogwood source.
@@ -600,8 +610,10 @@ The compiler also prints a revision string for logs:
 `<generation>+dogwood.<12-char commit>+proto.<protocol version>`. The integers are the only values
 that the job compares.
 
-IAM reads the compiler generation once at boot, with `paigasus-policy-compiler revision`. If the
-binary is missing or the command fails, IAM still boots. The tool-policy write RPCs then return
+IAM reads the compiler generation once at boot, with `paigasus-policy-compiler revision`. The
+probe tries a transient failure up to 3 times, with 1 s between the attempts. Each attempt has a
+limit of 3 s, or the compile timeout if that is shorter. So a binary that hangs delays readiness by
+about 11 s at most. If the binary is missing or the command fails, IAM still boots. The tool-policy write RPCs then return
 `capability-disabled`, and `ServiceInfo` does not advertise the capability. IAM's other features
 are not affected.
 
@@ -972,3 +984,15 @@ Sven confirmed these two corrections after the plan review.
 - **D5.** The Cedar principal type is `Pgs::Iam::Principal`, because every IAM principal PRN has the
   resource type `principal`. The earlier examples `Pgs::Iam::User` and `Pgs::Iam::ServiceAccount`
   were wrong.
+
+The final review of PR 1 found five more places where this spec did not agree with the code.
+
+- **§5.3 step 8.** `max_window` cannot be set above 24 h, because Dogwood caps every window at 24 h.
+  The 7 days of ADR-0027 (g) is narrowed.
+- **§4.4.** An identical save makes a new version when the live version has an old compiler
+  generation or schema revision. This is how PR 1 clears `tool-policy-recompile-pending`.
+- **§5.3 predicate subset.** `||` is removed. Dogwood source cannot make it. The `AnyOf` arm stays
+  only for the proto contract.
+- **§5.2.** The default `RLIMIT_CPU` is 8 s, not 15 s, so that it can fire before the 10 s timeout.
+- **§6.2.** Each attempt of the boot probe has its own 3 s limit. Before, one attempt could use the
+  full 10 s compile timeout, and readiness could wait 32 s.
