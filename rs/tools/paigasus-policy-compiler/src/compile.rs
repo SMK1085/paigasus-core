@@ -215,6 +215,12 @@ fn is_valid_id(id: &str) -> bool {
 
 /// The `@scope` rule: absent (session), or one of `session`, `principal`, `key`.
 fn check_scope(unit: &PolicyUnit, id: Option<&str>, rejections: &mut Vec<Rejection>) -> Option<Scope> {
+    // As for `@id`: the emitted Cedar annotation map keeps the LAST `@scope`, and this check reads
+    // the first. Two values could make the history condition and the Cedar text disagree.
+    if unit.annotations.iter().filter(|(key, _)| key == "scope").count() > 1 {
+        rejections.push(Rejection::new(id, ReasonCode::ToolPolicyIdInvalid, format!("policy {} has more than one @scope", unit.index)));
+        return None;
+    }
     let Some((_, value)) = unit.annotations.iter().find(|(key, _)| key == "scope") else {
         return Some(Scope::Session);
     };

@@ -276,6 +276,19 @@ fn an_unknown_scope_is_rejected() {
     }
 }
 
+/// Dogwood keeps every annotation, but the emitted Cedar annotation map keeps only the last
+/// `@scope`. The condition could then use one scope and the Cedar text another.
+#[test]
+fn a_policy_with_two_scopes_is_rejected() {
+    let block = format!("formerly within 10m {GW}::\"send\"::response{{}}");
+    for annotations in ["@scope(\"session\")\n@scope(\"principal\")", "@scope(\"key\")\n@scope(\"key\")"] {
+        let source = format!("{annotations}\n{}", one_block("a", &block));
+        let rejection = only_rejection(tenant(&source), ReasonCode::ToolPolicyIdInvalid);
+        assert_eq!(rejection.policy_id.as_deref(), Some("a"), "{source}");
+        assert!(rejection.message.contains("more than one @scope"), "{}", rejection.message);
+    }
+}
+
 #[test]
 fn scope_defaults_to_session() {
     let block = format!("formerly within 10m {GW}::\"send\"::response{{}}");
