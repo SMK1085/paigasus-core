@@ -382,6 +382,9 @@ impl Interceptor {
         }
         for (c, d) in calls.iter().zip(&decisions) {
             let (decision, code) = match d {
+                // An observed hold is already released as pass-through, so a block is not applied:
+                // the report says what happened, an allowed call with the would-be code.
+                Decision::Block { code } if observe => (ReportDecision::Allow, Some(*code)),
                 Decision::Block { code } => (ReportDecision::Block, Some(*code)),
                 Decision::Observe { would } => (ReportDecision::Allow, Some(*would)),
                 _ => (ReportDecision::Allow, None),
@@ -975,6 +978,29 @@ mod tests {
         let acts = i.push(finish(0).as_bytes(), t0 + Duration::from_secs(302));
         let out = emitted(&acts);
         assert!(!out.contains("X1") && out.contains("(hold-limit)"), "{out}");
+    }
+
+    #[test]
+    fn a_block_for_a_hold_released_past_max_hold_is_reported_not_enforced() {
+        let t0 = Instant::now();
+        let lim = Limits {
+            on_failure: OnFailure::Allow,
+            ..limits()
+        };
+        let mut i = Interceptor::new(Format::OpenAiChat, lim, Bytes::from_static(TERMINAL), t0);
+        i.push(call(0, 0, "read", "\"X1\"").as_bytes(), t0);
+        let acts = i.tick(t0 + Duration::from_secs(301));
+        assert!(acts.contains(&Action::Count(Metric::OnFailure("hold_limit"))));
+        let mut out = emitted(&acts);
+        out.push_str(&emitted(&i.push(finish(0).as_bytes(), t0 + Duration::from_secs(302))));
+        out.push_str(&emitted(&i.decided(
+            HoldKey::Choice(0),
+            Ok(vec![Decision::Block { code: BlockCode::Policy }]),
+            t0 + Duration::from_secs(302),
+        )));
+        assert!(out.contains("X1") && !out.contains("[paigasus]"), "the released call is not blocked: {out}");
+        assert!(out.contains(r#""enforced":false"#) && out.contains(r#""decision":"allow""#), "{out}");
+        assert!(!out.contains(r#""enforced":true"#), "{out}");
     }
 
     #[test]

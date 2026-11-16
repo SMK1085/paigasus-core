@@ -197,9 +197,14 @@ impl PolicyCache {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The compiled floor.
+    /// The compiled floor. The wait ends `load_timeout` from now.
     pub async fn floor(self: &Arc<Self>, on_unavailable: OnUnavailable) -> Lookup<FloorEntry> {
-        match self.lookup(Key::Floor, None, on_unavailable).await {
+        self.floor_until(on_unavailable, Instant::now() + self.settings.load_timeout).await
+    }
+
+    /// The compiled floor. The wait ends at `deadline`; the `open` fallback still runs then.
+    pub async fn floor_until(self: &Arc<Self>, on_unavailable: OnUnavailable, deadline: Instant) -> Lookup<FloorEntry> {
+        match self.lookup(Key::Floor, None, on_unavailable, deadline).await {
             Some(Data::Floor(entry)) => Lookup::Ready(entry),
             _ => Lookup::Unavailable,
         }
@@ -207,8 +212,15 @@ impl PolicyCache {
 
     /// The tenant policy set, compiled against `floor`. A tenant set that does not compile is
     /// `Unavailable` for the tenant only; the floor stays usable (§ 6.1.2).
+    /// The wait ends `load_timeout` from now.
     pub async fn tenant(self: &Arc<Self>, org: Uuid, floor: &FloorEntry, on_unavailable: OnUnavailable) -> Lookup<Arc<ToolPolicies>> {
-        let Some(Data::Tenant(data)) = self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable).await else {
+        self.tenant_until(org, floor, on_unavailable, Instant::now() + self.settings.load_timeout).await
+    }
+
+    /// The tenant policy set, as [`Self::tenant`]. The wait ends at `deadline`; the `open`
+    /// fallback still runs then, so a caller with a shared deadline keeps the last good set.
+    pub async fn tenant_until(self: &Arc<Self>, org: Uuid, floor: &FloorEntry, on_unavailable: OnUnavailable, deadline: Instant) -> Lookup<Arc<ToolPolicies>> {
+        let Some(Data::Tenant(data)) = self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, deadline).await else {
             return Lookup::Unavailable;
         };
         if Arc::ptr_eq(&data.floor, &floor.floor) {
@@ -248,9 +260,9 @@ impl PolicyCache {
         self.lock().gen_now += 1;
     }
 
-    /// The generic lookup. `None` means unavailable.
-    async fn lookup(self: &Arc<Self>, key: Key, floor: Option<Arc<FloorPolicies>>, on_unavailable: OnUnavailable) -> Option<Data> {
-        let deadline = Instant::now() + self.settings.load_timeout;
+    /// The generic lookup. `None` means unavailable. Every wait ends at `deadline`, and the
+    /// failure fallback runs after it, so the lookup returns at `deadline` at the latest.
+    async fn lookup(self: &Arc<Self>, key: Key, floor: Option<Arc<FloorPolicies>>, on_unavailable: OnUnavailable, deadline: Instant) -> Option<Data> {
         for _ in 0..MAX_ROUNDS {
             let inflight = {
                 let mut inner = self.lock();
@@ -320,10 +332,11 @@ impl PolicyCache {
         let flag = Arc::clone(&timed_out);
         let handle = tokio::spawn(async move {
             // The cap keeps a hung source from blocking every later load of this entry. It is one
-            // refresh interval, so a hung call delays recovery for no longer than that.
-            let run = AssertUnwindSafe(tokio::time::timeout(cache.settings.refresh.min(cache.settings.max_stale), cache.load(key, floor, gen_now)))
-                .catch_unwind()
-                .await;
+            // refresh interval, so a hung call delays recovery for no longer than that. It is never
+            // shorter than `load_timeout`: a load that a waiter may still accept must not be
+            // cancelled first.
+            let cap = cache.settings.refresh.min(cache.settings.max_stale).max(cache.settings.load_timeout);
+            let run = AssertUnwindSafe(tokio::time::timeout(cap, cache.load(key, floor, gen_now))).catch_unwind().await;
             let ok = match run {
                 Ok(Ok(ok)) => ok,
                 Ok(Err(_elapsed)) => {
@@ -994,6 +1007,22 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1)).await;
         assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)), "a new load started and the source answered");
         assert_eq!(src.floor_calls(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_cap_is_never_shorter_than_load_timeout() {
+        // `refresh_secs = 1` with `load_timeout = 4 s` passes validation. A 1.5 s load is inside
+        // the waiter deadline, so the background cap must not cancel it at one refresh interval.
+        let src = FakeSource::new();
+        let s = CacheSettings {
+            refresh: secs(1),
+            load_timeout: secs(4),
+            ..settings()
+        };
+        let cache = PolicyCache::new(src.clone(), s);
+        src.set_floor_delay(Duration::from_millis(1500));
+        assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)), "the load ends inside load_timeout");
+        assert_eq!(src.floor_calls(), 1);
     }
 
     #[tokio::test(start_paused = true)]

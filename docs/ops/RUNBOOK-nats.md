@@ -239,6 +239,16 @@ policy early (SMA-752). The `gateway-consumer` identity needs a subscribe grant 
 `ServerError` (permissions violation) from the server. The gateway still works. It only loses the
 early invalidation.
 
-**Remediation.** Run `ops/nats/provision.sh` again for the deployment, so the new grant reaches the
-account. Then restart the gateway. Check the log for the `ServerError` line. Do not look for a
-metric: none exists.
+**Remediation.** Do not run `ops/nats/provision.sh` again for this. For a user that exists, its
+`nsc add user` step fails, the script ignores the failure, and it issues credentials with the old
+permissions. Edit the existing user instead, so that it gets only the new grant:
+
+```bash
+nsc edit user --account PAIGASUS_IAM --name gateway-consumer --allow-sub 'iam.policy.>'
+nsc generate creds --account PAIGASUS_IAM --name gateway-consumer > "$OUT_DIR/gateway-consumer.creds"
+chmod 600 "$OUT_DIR/gateway-consumer.creds"
+```
+
+Deploy the new `gateway-consumer.creds` with the gateway. Then restart the gateway: the server
+reads the permissions from the user JWT when the client connects. Check that the log has no new
+`ServerError` line. Do not look for a metric: none exists.

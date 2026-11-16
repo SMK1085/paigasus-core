@@ -114,16 +114,18 @@ impl RequestToolPolicy {
             return PolicySet::Unavailable;
         };
         let deadline = tokio::time::Instant::now() + self.settings.load_timeout;
-        let Ok(Lookup::Ready(floor)) = tokio::time::timeout_at(deadline, self.cache.floor(on)).await else {
+        // The cache ends each wait at `deadline` and then runs its `open` fallback, so no outer
+        // timeout is needed: an outer one would drop that fallback (CodeRabbit, PR 475).
+        let Lookup::Ready(floor) = self.cache.floor_until(on, deadline).await else {
             return PolicySet::Unavailable;
         };
         let (policies, tenant): (Arc<ToolPolicies>, TenantPart) = if mode == TenantMode::Off {
             // The tenant set is not consulted in mode off (P-4).
             (Arc::clone(&floor.floor_only), TenantPart::Off)
         } else {
-            match tokio::time::timeout_at(deadline, self.cache.tenant(org, &floor, on)).await {
-                Ok(Lookup::Ready(t)) => (t, TenantPart::Evaluated),
-                Ok(Lookup::Unavailable) | Err(_) => (Arc::clone(&floor.floor_only), TenantPart::Unavailable),
+            match self.cache.tenant_until(org, &floor, on, deadline).await {
+                Lookup::Ready(t) => (t, TenantPart::Evaluated),
+                Lookup::Unavailable => (Arc::clone(&floor.floor_only), TenantPart::Unavailable),
             }
         };
         let facts = Facts::new(to_cedar_uid(&principal), org, RequestInfo::new(ctx.scope.clone(), ingress(format), model), SessionInfo::placeholder());
@@ -370,6 +372,27 @@ mod tests {
         let waited = started.elapsed();
         assert!(waited <= Duration::from_millis(1100), "waited {waited:?}");
         assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn open_keeps_the_last_good_tenant_set_when_a_reload_is_slow() {
+        // § 6.3.3: after an invalidation, a slow reload under `open` still serves the last good
+        // tenant set up to `max_stale`. The shared request deadline must not drop that fallback.
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        let mut s = settings(TenantMode::Enforce);
+        s.on_policy_unavailable = OnUnavailable::Open;
+        let policy = testing::policy(&source, s);
+        let first = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
+        assert!(matches!(first.snapshot.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }));
+        assert_eq!(tool_names(&first.body), ["y"], "the tenant forbids x");
+
+        policy.cache().invalidate_all();
+        source.set_tenant_delay(Duration::from_secs(30));
+        let started = tokio::time::Instant::now();
+        let out = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
+        assert!(started.elapsed() <= Duration::from_millis(1100), "waited {:?}", started.elapsed());
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }), "the last good tenant set");
+        assert_eq!(tool_names(&out.body), ["y"], "the tenant forbid still applies");
     }
 
     #[tokio::test]

@@ -36,31 +36,61 @@ impl FilePolicySource {
     }
 
     /// The tenant read. `between` runs after the directory is resolved and before the first file
-    /// is read. A test uses it to swap a symlink at that point.
+    /// is read, on the first attempt only. A test uses it to swap a symlink at that point.
     async fn tenant_inner<F: Future<Output = ()>>(&self, org: Uuid, between: F) -> Result<TenantPolicies, SourceError> {
         let link = self.dir.join(TENANTS_DIR).join(org.hyphenated().to_string());
-        // Resolve the real path once. Both files are read under it (a ConfigMap symlink swap).
-        let real = match tokio::fs::canonicalize(&link).await {
-            Ok(path) => path,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                return Ok(TenantPolicies {
-                    text: String::new(),
-                    catalog: Vec::new(),
-                    version: version_of(&[b"", b""]),
-                });
+        let mut between = Some(between);
+        for _ in 0..SNAPSHOT_ATTEMPTS {
+            // Resolve the real path once. Both files are read under it (a ConfigMap symlink swap).
+            let real = match tokio::fs::canonicalize(&link).await {
+                Ok(path) => path,
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    return Ok(TenantPolicies {
+                        text: String::new(),
+                        catalog: Vec::new(),
+                        version: version_of(&[b"", b""]),
+                    });
+                }
+                Err(err) => return Err(io_error("tenant directory", &err)),
+            };
+            if let Some(b) = between.take() {
+                b.await;
             }
-            Err(err) => return Err(io_error("tenant directory", &err)),
-        };
-        between.await;
-        let policies = read_optional(&real.join(POLICIES_FILE), "tenant policies").await?;
-        let catalog_raw = read_optional(&real.join(CATALOG_FILE), "tenant catalog").await?;
-        let catalog = if catalog_raw.trim().is_empty() {
-            Vec::new()
-        } else {
-            serde_json::from_str::<Vec<String>>(&catalog_raw).map_err(|_| SourceError::Malformed("tenant catalog is not an array of strings".to_owned()))?
-        };
-        let version = version_of(&[policies.as_bytes(), catalog_raw.as_bytes()]);
-        Ok(TenantPolicies { text: policies, catalog, version })
+            let policies = read_optional(&real.join(POLICIES_FILE), "tenant policies").await?;
+            let catalog_raw = read_optional(&real.join(CATALOG_FILE), "tenant catalog").await?;
+            // A file can be absent because the snapshot directory was removed during the read (a
+            // ConfigMap update removes the old one after the link swap). That is not an empty
+            // tenant: resolve the link again. An absent file in a directory that still exists
+            // reads as empty.
+            if (policies.is_none() || catalog_raw.is_none()) && !dir_exists(&real).await? {
+                continue;
+            }
+            return parse_tenant(policies.unwrap_or_default(), catalog_raw.unwrap_or_default());
+        }
+        Err(SourceError::Io("tenant directory: changed during every read attempt".to_owned()))
+    }
+}
+
+/// How many times a tenant read resolves the directory again after its snapshot disappeared.
+const SNAPSHOT_ATTEMPTS: usize = 3;
+
+/// The tenant set from the two file texts. An empty catalog text is an empty catalog.
+fn parse_tenant(policies: String, catalog_raw: String) -> Result<TenantPolicies, SourceError> {
+    let catalog = if catalog_raw.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str::<Vec<String>>(&catalog_raw).map_err(|_| SourceError::Malformed("tenant catalog is not an array of strings".to_owned()))?
+    };
+    let version = version_of(&[policies.as_bytes(), catalog_raw.as_bytes()]);
+    Ok(TenantPolicies { text: policies, catalog, version })
+}
+
+/// `true` when the resolved directory still exists.
+async fn dir_exists(path: &Path) -> Result<bool, SourceError> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(io_error("tenant directory", &err)),
     }
 }
 
@@ -83,11 +113,11 @@ impl PolicySource for FilePolicySource {
     }
 }
 
-/// A file that may be absent. An absent file reads as an empty string.
-async fn read_optional(path: &Path, what: &str) -> Result<String, SourceError> {
+/// A file that may be absent. An absent file is `None`.
+async fn read_optional(path: &Path, what: &str) -> Result<Option<String>, SourceError> {
     match tokio::fs::read_to_string(path).await {
-        Ok(text) => Ok(text),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(String::new()),
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
         Err(err) => Err(io_error(what, &err)),
     }
 }
@@ -201,6 +231,31 @@ mod tests {
         // A later read sees v2 whole.
         let later = src.tenant(ORG).await.unwrap();
         assert_eq!((later.text.as_str(), later.catalog.as_slice()), ("// v2", &["two".to_owned()][..]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_snapshot_removed_during_the_read_is_resolved_again_not_read_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("v1").join(POLICIES_FILE), "// v1");
+        write(&root.join("v1").join(CATALOG_FILE), r#"["one"]"#);
+        write(&root.join("v2").join(POLICIES_FILE), "// v2");
+        write(&root.join("v2").join(CATALOG_FILE), r#"["two"]"#);
+        std::fs::create_dir_all(root.join(TENANTS_DIR)).unwrap();
+        let link = tenant_dir(root);
+        std::os::unix::fs::symlink(root.join("v1"), &link).unwrap();
+
+        let src = FilePolicySource::new(root);
+        // A ConfigMap update: swap the link to v2, then remove the old directory, after the
+        // directory is resolved and before the first read.
+        let swap = async {
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(root.join("v2"), &link).unwrap();
+            std::fs::remove_dir_all(root.join("v1")).unwrap();
+        };
+        let tenant = src.tenant_inner(ORG, swap).await.unwrap();
+        assert_eq!((tenant.text.as_str(), tenant.catalog.as_slice()), ("// v2", &["two".to_owned()][..]));
     }
 
     #[tokio::test]

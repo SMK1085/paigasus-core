@@ -422,6 +422,9 @@ tasks:
       - 'rs/crates/libs/paigasus-test-docker/src/**/*'
       - 'rs/crates/libs/paigasus-test-docker/Cargo.toml'
       - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
+      # The permission tests authenticate through this crate (SMA-752 moved the creds code here).
+      - 'rs/crates/libs/paigasus-nats-creds/src/**/*'
+      - 'rs/crates/libs/paigasus-nats-creds/Cargo.toml'
       - 'rs/crates/services/paigasus-iam/src/config.rs'
       - 'rs/crates/services/paigasus-iam/Cargo.toml'
       - 'rs/Cargo.lock'

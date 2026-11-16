@@ -204,11 +204,18 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts)
 
     // Step 3: results. A result with a call id takes the names of the earlier calls with that id;
     // it is replaced if any of them is denied. A legacy result carries its own name.
+    // One index of the prior calls by id, built once. A duplicate id keeps every name in order.
+    let mut by_id: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for c in &turn.prior_calls {
+        if let Some(id) = c.id.as_deref() {
+            by_id.entry(id).or_default().push(c.name.as_str());
+        }
+    }
     let mut targets: BTreeSet<(bool, String)> = BTreeSet::new();
     for r in &turn.tool_results {
         let (target, names) = match (&r.call_id, &r.name) {
             (Some(id), _) => {
-                let names: Vec<&str> = turn.prior_calls.iter().filter(|c| c.id.as_deref() == Some(id.as_str())).map(|c| c.name.as_str()).collect();
+                let names: Vec<&str> = by_id.get(id.as_str()).cloned().unwrap_or_default();
                 (ResultTarget::CallId(id.clone()), names)
             }
             (None, Some(name)) => (ResultTarget::Name(name.clone()), vec![name.as_str()]),
