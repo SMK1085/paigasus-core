@@ -198,6 +198,14 @@ mod settings_tests {
         for f in [FailMode::Open, FailMode::Closed] {
             assert_eq!(FailMode::parse(f.as_str()), Some(f));
         }
+        for (m, s) in [(ToolPolicyMode::Off, "off"), (ToolPolicyMode::LogOnly, "log_only"), (ToolPolicyMode::Enforce, "enforce")] {
+            assert_eq!(m.as_str(), s);
+            assert_eq!(ToolPolicyMode::parse(s), Some(m));
+        }
+        for (f, s) in [(FailMode::Open, "open"), (FailMode::Closed, "closed")] {
+            assert_eq!(f.as_str(), s);
+            assert_eq!(FailMode::parse(s), Some(f));
+        }
         assert_eq!(ToolPolicyMode::parse("Enforce"), None);
         assert_eq!(FailMode::parse(""), None);
     }
