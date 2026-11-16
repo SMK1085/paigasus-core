@@ -1959,6 +1959,7 @@ pub struct InMemoryToolPolicies {
     data: Arc<Mutex<ToolPolicyData>>,
     concurrent: Arc<Mutex<Option<ConcurrentChange>>>,
     writes: Arc<AtomicUsize>,
+    insert_attempts: Arc<AtomicUsize>,
 }
 
 const NO_STATE: ToolPolicyState = ToolPolicyState { catalog_revision: 0, live_version: 0 };
@@ -1972,6 +1973,13 @@ impl InMemoryToolPolicies {
     /// The calls of `apply_catalog_in` and `insert_live_version_in` that changed the store.
     pub fn writes(&self) -> usize {
         self.writes.load(Ordering::SeqCst)
+    }
+
+    /// The calls of `insert_live_version_in`, also the calls that the compare-and-set refused.
+    /// A test that expects the step-3 recheck to stop a write asserts 0: the compare-and-set
+    /// gives the same conflict, so `writes()` alone cannot see a missing recheck.
+    pub fn insert_attempts(&self) -> usize {
+        self.insert_attempts.load(Ordering::SeqCst)
     }
 
     /// Every stored version of a set, oldest first.
@@ -2053,6 +2061,7 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
     }
 
     async fn insert_live_version_in(&self, _tx: &dyn Transaction, v: &ToolPolicyVersion) -> Result<(), RepositoryError> {
+        self.insert_attempts.fetch_add(1, Ordering::SeqCst);
         if v.status != VersionStatus::Live {
             return Err(RepositoryError::Backend("insert_live_version_in needs a live version".into()));
         }

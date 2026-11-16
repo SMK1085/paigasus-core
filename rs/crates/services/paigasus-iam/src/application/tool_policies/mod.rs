@@ -734,6 +734,9 @@ mod tests {
             TenancyError::ToolPolicyVersionConflict
         );
         assert_eq!((h.compiler.calls(), h.repo.writes(), h.audit.0.lock().unwrap().len(), h.uow.commits()), (1, 0, 0, 0));
+        // The step-3 recheck stops the save before the insert. The insert's compare-and-set
+        // would give the same conflict, so only this count shows that the recheck ran.
+        assert_eq!(h.repo.insert_attempts(), 0);
     }
 
     #[tokio::test]
