@@ -85,8 +85,8 @@ pub enum Action {
     ReadToolPolicyFloor,
     /// Write the tool policy settings of an organization (SMA-775).
     ManageToolPolicySettings,
-    /// Read the compiled tool policies of an organization or the floor (SMA-775). Held by
-    /// `tool_policy_reader` only.
+    /// Read the compiled tool policies of an organization or the floor (SMA-775).
+    /// Of the scoped roles, only `tool_policy_reader` holds it; `platform_admin` also holds it.
     ReadCompiledToolPolicies,
 }
 

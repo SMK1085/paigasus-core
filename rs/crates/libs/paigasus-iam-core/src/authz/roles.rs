@@ -227,7 +227,7 @@ const PROJECT_MEMBER_ACTIONS: &[Action] = &[Action::GetProject];
 const GATEWAY_USER_ACTIONS: &[Action] = &[Action::InvokeModel];
 
 /// `tool_policy_reader`: only [ReadCompiledToolPolicies], at Root, for the gateway's service
-/// identity (SMA-775). No other role holds it.
+/// identity (SMA-775). Of the scoped roles, only this one holds it; `platform_admin` also holds it.
 const TOOL_POLICY_READER_ACTIONS: &[Action] = &[Action::ReadCompiledToolPolicies];
 
 /// The nine system roles (design §3.2), each `system = true` and immutable via the policy/role
@@ -838,7 +838,7 @@ mod tests {
                 expect: Effect::Deny,
             },
             Case {
-                name: "forbid-archived-writes denies ManageToolPolicySettings on an archived org even for org_admin (SMA-775)",
+                name: "forbid-archived-writes denies ManageToolPolicySettings on an archived project in the org even for org_admin (SMA-775)",
                 grants: vec![grant(137, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
                 action: Action::ManageToolPolicySettings,
                 resource: uni.archived_project_in_o.prn().clone(),
