@@ -30,7 +30,7 @@ use super::path::{OrganizationId, ToolNameSegment, UuidAndSegmentPath, UuidPath}
 use super::query::EnvelopeQuery;
 use super::{AppState, ToolPolicySvc};
 use crate::adapters::auth::AuthContext;
-use crate::adapters::grpc::tool_policies::{empty_set, version_to_pb};
+use crate::adapters::tool_policy_wire::{empty_set, version_to_pb};
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 use crate::application::tool_policies::{CatalogAccepted, ToolPolicyRejection, WriteResult};
@@ -92,9 +92,8 @@ fn catalog_response(r: WriteResult<CatalogAccepted>) -> Json<Value> {
     }
 }
 
-/// The set as JSON, from the same wire message gRPC serves. The compiled history conditions are
-/// not part of this JSON form.
-fn set_json(v: &pb::ToolPolicySetVersion) -> Value {
+/// The set as JSON, from the same wire message gRPC serves. The compiled message keeps its proto field names.
+fn set_json(v: &pb::ToolPolicySetVersion) -> Result<Value, ApiError> {
     let kind = if v.kind == pb::ToolPolicySetKind::Floor as i32 { "floor" } else { "tenant" };
     let status = match pb::ToolPolicyVersionStatus::try_from(v.status) {
         Ok(pb::ToolPolicyVersionStatus::Live) => Some("live"),
@@ -111,19 +110,8 @@ fn set_json(v: &pb::ToolPolicySetVersion) -> Value {
         Ok(pb::ToolPolicyVersionOrigin::Accept) => Some("accept"),
         _ => None,
     };
-    let compiled = v.compiled.as_ref().map(|c| {
-        json!({
-            "version": c.version,
-            "compiler_generation": c.compiler_generation,
-            "schema_revision": c.schema_revision,
-            "catalog_revision": c.catalog_revision,
-            "cedar_policies": c.cedar_policies,
-            "cedar_schema": serde_json::from_str::<Value>(&c.cedar_schema).unwrap_or(Value::Null),
-            "max_window_ms": c.max_window_ms,
-            "catalog_names": c.catalog_names,
-        })
-    });
-    json!({
+    let compiled = v.compiled.as_ref().map(compiled_json).transpose()?;
+    Ok(json!({
         "kind": kind,
         "org_id": v.org_id,
         "version": v.version,
@@ -136,12 +124,85 @@ fn set_json(v: &pb::ToolPolicySetVersion) -> Value {
         "created_by": v.created_by,
         "created_at": v.created_at.as_ref().and_then(|t| chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).unwrap_or(0))).map(|t| t.to_rfc3339()),
         "compiled": compiled,
-    })
+    }))
+}
+
+/// The name of a proto enum value, or its number when the value is unknown.
+fn enum_name<E: TryFrom<i32>>(raw: i32, name: impl Fn(&E) -> &'static str) -> String {
+    E::try_from(raw).map_or_else(|_| raw.to_string(), |e| name(&e).to_string())
+}
+
+fn predicate_json(p: &pb::HistoryPredicate) -> Value {
+    use pb::history_predicate::Node;
+    let pair = |pair: &pb::PredicatePair| json!({"left": pair.left.as_deref().map(predicate_json), "right": pair.right.as_deref().map(predicate_json)});
+    match &p.node {
+        None => json!({}),
+        Some(Node::EventKind(k)) => json!({"event_kind": enum_name::<pb::HistoryEventKind>(*k, pb::HistoryEventKind::as_str_name)}),
+        Some(Node::Tool(t)) => json!({"tool": {"name_key": t.name_key, "any_catalog_tool": t.any_catalog_tool}}),
+        Some(Node::Field(f)) => {
+            use pb::literal_value::Value as Lit;
+            let value = f.value.as_ref().and_then(|v| v.value.as_ref()).map(|v| match v {
+                Lit::LongValue(n) => json!({"long_value": n}),
+                Lit::StringValue(x) => json!({"string_value": x}),
+                Lit::BoolValue(b) => json!({"bool_value": b}),
+                Lit::DecimalValue(d) => json!({"decimal_value": d}),
+            });
+            json!({"field": {"path": f.path, "op": enum_name::<pb::ComparisonOp>(f.op, pb::ComparisonOp::as_str_name), "value": value}})
+        }
+        Some(Node::AllOf(x)) => json!({"all_of": pair(x)}),
+        Some(Node::AnyOf(x)) => json!({"any_of": pair(x)}),
+        Some(Node::Negation(x)) => json!({"negation": predicate_json(x)}),
+    }
+}
+
+fn condition_json(c: &pb::HistoryCondition) -> Value {
+    use pb::history_condition::Shape;
+    let op = |raw: i32| enum_name::<pb::ComparisonOp>(raw, pb::ComparisonOp::as_str_name);
+    let shape = match &c.shape {
+        None => json!({}),
+        Some(Shape::Formerly(f)) => json!({"formerly": {"predicate": f.predicate.as_ref().map(predicate_json)}}),
+        Some(Shape::CountWithin(x)) => json!({"count_within": {"predicate": x.predicate.as_ref().map(predicate_json), "op": op(x.op), "threshold": x.threshold}}),
+        Some(Shape::SumWithin(x)) => {
+            json!({"sum_within": {"predicate": x.predicate.as_ref().map(predicate_json), "field_path": x.field_path, "op": op(x.op), "threshold": x.threshold}})
+        }
+    };
+    let mut out = json!({
+        "slot": c.slot,
+        "policy_id": c.policy_id,
+        "scope": enum_name::<pb::HistoryScope>(c.scope, pb::HistoryScope::as_str_name),
+        "window_ms": c.window_ms,
+    });
+    if let (Some(out), Some(shape)) = (out.as_object_mut(), shape.as_object()) {
+        out.extend(shape.clone());
+    }
+    out
+}
+
+/// The compiled message as JSON, with the proto field names. A schema text that is not JSON is a
+/// storage defect: it is logged and answered as `Internal`, as `version_to_pb` does.
+fn compiled_json(c: &pb::CompiledToolPolicySet) -> Result<Value, ApiError> {
+    let cedar_schema = serde_json::from_str::<Value>(&c.cedar_schema).map_err(|error| {
+        tracing::error!(error = %error, version = c.version, "the stored compiled schema is not JSON");
+        ApiError(TenancyError::Internal)
+    })?;
+    Ok(json!({
+        "kind": enum_name::<pb::ToolPolicySetKind>(c.kind, pb::ToolPolicySetKind::as_str_name),
+        "org_id": c.org_id,
+        "version": c.version,
+        "compiler_generation": c.compiler_generation,
+        "schema_revision": c.schema_revision,
+        "catalog_revision": c.catalog_revision,
+        "cedar_policies": c.cedar_policies,
+        "cedar_schema": cedar_schema,
+        "conditions": c.conditions.iter().map(condition_json).collect::<Vec<_>>(),
+        "max_window_ms": c.max_window_ms,
+        "catalog_names": c.catalog_names,
+    }))
 }
 
 fn set_response(r: WriteResult<paigasus_iam_core::tool_policy::ToolPolicyVersion>) -> Result<Json<Value>, ApiError> {
     match r {
-        WriteResult::Accepted(v) => Ok(Json(json!({"result": "accepted", "set": set_json(&version_to_pb(&v)?)}))),
+        WriteResult::Accepted(v) => Ok(Json(json!({"result": "accepted", "set": set_json(&version_to_pb(&v)?)?}))),
         WriteResult::Rejected(rejections) => Ok(rejected(&rejections)),
     }
 }
@@ -151,7 +212,7 @@ fn read_response(found: Option<paigasus_iam_core::tool_policy::ToolPolicyVersion
         Some(v) => version_to_pb(&v)?,
         None => empty_set(key),
     };
-    Ok(Json(set_json(&wire)))
+    Ok(Json(set_json(&wire)?))
 }
 
 async fn list_tools(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>, EnvelopeQuery(q): EnvelopeQuery<PageQuery>) -> Result<Json<Value>, ApiError> {

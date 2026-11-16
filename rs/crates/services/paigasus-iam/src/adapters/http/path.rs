@@ -205,8 +205,11 @@ impl<S: Send + Sync, F: PathField> FromRequestParts<S> for StringPath<F> {
 /// first segment is parsed as a uuid and named `F1::NAME` when it is malformed. The second is
 /// text: it needs no parse, and the service checks the name against the tool grammar.
 ///
-/// Like [`UuidPathPair`], a rejection of the whole pair stays axum's own: a segment that does not
-/// percent-decode as UTF-8 cannot be tied to one of the two markers.
+/// A rejection that the caller caused (a segment that does not percent-decode as UTF-8) cannot be
+/// tied to one of the two segments, because axum raises it before any position is known. It is
+/// answered in the error envelope as `invalid-path-segment`, and it names `F2`: the text segment is
+/// the one that can hold arbitrary bytes, and a malformed uuid segment is already reported by
+/// `F1` when it parses. A rejection that axum classes 5xx keeps axum's own response.
 pub(crate) struct UuidAndSegmentPath<F1: PathField, F2: PathField> {
     pub id: Uuid,
     pub segment: String,
@@ -219,6 +222,7 @@ impl<S: Send + Sync, F1: PathField, F2: PathField> FromRequestParts<S> for UuidA
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let (raw_id, segment) = match Path::<(String, String)>::from_request_parts(parts, state).await {
             Ok(Path(pair)) => pair,
+            Err(rejection) if is_client_error(&rejection) => return Err(malformed_segment(F2::NAME)),
             Err(rejection) => return Err(rejection.into_response()),
         };
         let id = Uuid::parse_str(&raw_id).map_err(|_| malformed_uuid(F1::NAME))?;

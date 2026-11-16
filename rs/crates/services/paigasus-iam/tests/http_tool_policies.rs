@@ -19,7 +19,7 @@ use paigasus_proto::paigasus::iam::v1::GetToolPolicySetRequest;
 use paigasus_proto::paigasus::iam::v1::tool_policy_service_client::ToolPolicyServiceClient;
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde_json::{Value, json};
-use support::{MockIdp, accepted_result, fake_compiler_script, rejected_result, send, set_compiler_result};
+use support::{MockIdp, accepted_result, fake_compiler_script, rejected_result, send, send_bytes, set_compiler_result};
 use tempfile::TempDir;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
@@ -68,8 +68,12 @@ async fn setup_with(enabled: bool, compiler_present: bool, result: &str) -> Opti
     } else {
         dir.path().join("no-such-compiler")
     };
-    let (state, idp) = support::state_with_tool_policies(db, enabled, &path).await;
-    let app = router(state.clone());
+    let (app, state, idp) = if enabled {
+        support::app_with_tool_policies(db, &path).await
+    } else {
+        let (state, idp) = support::state_with_tool_policies(db, false, &path).await;
+        (router(state.clone()), state, idp)
+    };
     let admin = idp.bearer("tp-admin", Some("tp-admin@example.com"), "paigasus", 3600);
     let admin_prn = support::provision_platform_admin(&state, &admin).await;
     let out = state
@@ -324,4 +328,63 @@ async fn a_bad_kind_or_format_is_a_validation_error() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// The compile result fixture that holds two history conditions.
+fn fixture_result() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tools/paigasus-policy-compiler/protocol/fixtures/result_tenant_accepted.json");
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
+#[tokio::test]
+async fn a_saved_set_returns_the_compiled_kind_and_conditions() {
+    let Some(env) = setup(true, &fixture_result()).await else { return };
+    let (status, put) = send(&env.app, "PUT", &env.set(), Some(json!({"source": "x", "expected_version": 0})), Some(&env.admin)).await;
+    assert_eq!((status, put["result"].as_str()), (StatusCode::OK, Some("accepted")), "{put}");
+    let (status, got) = send(&env.app, "GET", &env.set(), None, Some(&env.admin)).await;
+    assert_eq!(status, StatusCode::OK);
+    let compiled = &got["compiled"];
+    assert_eq!(compiled["kind"], "TOOL_POLICY_SET_KIND_TENANT");
+    let conditions = compiled["conditions"].as_array().expect("conditions");
+    assert_eq!(conditions.len(), 2);
+    let formerly = &conditions[0];
+    assert_eq!(formerly["slot"], "p_no_hsend_hafter_hsearch_0__temporal_0");
+    assert_eq!(formerly["policy_id"], "no-send-after-search");
+    assert_eq!((formerly["scope"].as_str(), formerly["window_ms"].as_u64()), (Some("HISTORY_SCOPE_SESSION"), Some(600_000)));
+    let all_of = &formerly["formerly"]["predicate"]["all_of"];
+    assert_eq!(all_of["left"]["all_of"]["left"]["event_kind"], "HISTORY_EVENT_KIND_RESPONSE");
+    assert_eq!(all_of["left"]["all_of"]["right"]["tool"]["name_key"], "search");
+    assert_eq!(all_of["right"]["field"]["path"], json!(["q"]));
+    assert_eq!(all_of["right"]["field"]["op"], "COMPARISON_OP_EQ");
+    assert_eq!(all_of["right"]["field"]["value"]["string_value"], "secret");
+    let count = &conditions[1];
+    assert_eq!(count["scope"], "HISTORY_SCOPE_PRINCIPAL");
+    assert_eq!(
+        (count["count_within"]["op"].as_str(), count["count_within"]["threshold"].as_i64()),
+        (Some("COMPARISON_OP_GT"), Some(50))
+    );
+}
+
+#[tokio::test]
+async fn malformed_input_answers_in_the_error_envelope() {
+    let Some(env) = setup(true, &tenant_accepted()).await else { return };
+    let code = |body: &Value| body["error"]["code"].as_str().unwrap_or_default().to_string();
+
+    // A malformed organization uuid, on a one-segment route and on the two-segment route.
+    let (status, body) = send(&env.app, "GET", "/v1/organizations/not-a-uuid/tools", None, Some(&env.admin)).await;
+    assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-uuid"));
+    let (status, body) = send(&env.app, "DELETE", "/v1/organizations/not-a-uuid/tools/x?expected_catalog_revision=0", None, Some(&env.admin)).await;
+    assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-uuid"));
+
+    // A tool segment that is not UTF-8 after percent-decoding names the tool segment.
+    let uri = format!("{}/%FF?expected_catalog_revision=0", env.tools());
+    let (status, body) = send(&env.app, "DELETE", &uri, None, Some(&env.admin)).await;
+    assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-path-segment"));
+    assert!(body["error"]["message"].as_str().unwrap_or_default().contains("tool_name"), "{body}");
+
+    // A body that is not JSON.
+    let (status, body) = send_bytes(&env.app, "POST", &env.tools(), Some("application/json"), b"{not json", Some(&env.admin)).await;
+    assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-request-body"));
+    let (status, body) = send_bytes(&env.app, "PUT", &env.set(), Some("application/json"), b"{not json", Some(&env.admin)).await;
+    assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-request-body"));
 }
