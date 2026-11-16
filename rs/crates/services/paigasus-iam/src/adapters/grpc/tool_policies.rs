@@ -339,11 +339,11 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    /// All eight rejection reasons reach the wire message with their registered code.
+    /// All nine rejection reasons reach the wire message with their registered code.
     #[test]
     fn every_rejection_reason_converts_with_its_code() {
         let reasons: Vec<RejectionReason> = RejectionReason::iter().collect();
-        assert_eq!(reasons.len(), 8);
+        assert_eq!(reasons.len(), 9);
         for reason in reasons {
             let wire = rejection_to_pb(&ToolPolicyRejection::new(reason, "m"));
             assert_eq!(wire.reason, reason.code());

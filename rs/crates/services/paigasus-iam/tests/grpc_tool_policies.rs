@@ -372,6 +372,25 @@ async fn every_rejection_reason_reaches_the_wire_in_the_rejected_oneof() {
         panic!("expected rejected, got {response:?}")
     };
     assert_eq!(rejected.rejections[0].reason, "tool-catalog-breaks-policy");
+
+    // tool-policy-history-unsupported: IAM's own reason, for a compiled set with a history
+    // condition (SMA-753 removes it).
+    set_compiler_result(env.dir.path(), &history_accepted());
+    let response = c.put_tool_policy_set(authed(put_set(&org, "x", 1), &env.admin)).await.expect("a rejection is a result").into_inner();
+    let Some(put_tool_policy_set_response::Result::Rejected(rejected)) = response.result else {
+        panic!("expected rejected, got {response:?}")
+    };
+    let got: Vec<(&str, &str)> = rejected.rejections.iter().map(|r| (r.reason.as_str(), r.policy_id.as_str())).collect();
+    assert_eq!(
+        got,
+        vec![("tool-policy-history-unsupported", "no-send-after-search"), ("tool-policy-history-unsupported", "search-rate")]
+    );
+}
+
+/// The compile result fixture that holds two history conditions.
+fn history_accepted() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tools/paigasus-policy-compiler/protocol/fixtures/result_tenant_accepted.json");
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
 // ---- the sets -------------------------------------------------------------------------------

@@ -340,33 +340,19 @@ fn fixture_result() -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
+// SMA-753: IAM refuses a set with a history condition until the gateway evaluates one. When
+// SMA-753 lifts that, restore the save-and-read test that renders `compiled.conditions` here.
+// A unit test in `src/adapters/http/tool_policies.rs` covers the rendering until then.
 #[tokio::test]
-async fn a_saved_set_returns_the_compiled_kind_and_conditions() {
+async fn a_history_rule_is_200_with_result_rejected_and_its_code() {
     let Some(env) = setup(true, &fixture_result()).await else { return };
     let (status, put) = send(&env.app, "PUT", &env.set(), Some(json!({"source": "x", "expected_version": 0})), Some(&env.admin)).await;
-    assert_eq!((status, put["result"].as_str()), (StatusCode::OK, Some("accepted")), "{put}");
-    let (status, got) = send(&env.app, "GET", &env.set(), None, Some(&env.admin)).await;
-    assert_eq!(status, StatusCode::OK);
-    let compiled = &got["compiled"];
-    assert_eq!(compiled["kind"], "TOOL_POLICY_SET_KIND_TENANT");
-    let conditions = compiled["conditions"].as_array().expect("conditions");
-    assert_eq!(conditions.len(), 2);
-    let formerly = &conditions[0];
-    assert_eq!(formerly["slot"], "p_no_hsend_hafter_hsearch_0__temporal_0");
-    assert_eq!(formerly["policy_id"], "no-send-after-search");
-    assert_eq!((formerly["scope"].as_str(), formerly["window_ms"].as_u64()), (Some("HISTORY_SCOPE_SESSION"), Some(600_000)));
-    let all_of = &formerly["formerly"]["predicate"]["all_of"];
-    assert_eq!(all_of["left"]["all_of"]["left"]["event_kind"], "HISTORY_EVENT_KIND_RESPONSE");
-    assert_eq!(all_of["left"]["all_of"]["right"]["tool"]["name_key"], "search");
-    assert_eq!(all_of["right"]["field"]["path"], json!(["q"]));
-    assert_eq!(all_of["right"]["field"]["op"], "COMPARISON_OP_EQ");
-    assert_eq!(all_of["right"]["field"]["value"]["string_value"], "secret");
-    let count = &conditions[1];
-    assert_eq!(count["scope"], "HISTORY_SCOPE_PRINCIPAL");
-    assert_eq!(
-        (count["count_within"]["op"].as_str(), count["count_within"]["threshold"].as_i64()),
-        (Some("COMPARISON_OP_GT"), Some(50))
-    );
+    assert_eq!((status, put["result"].as_str()), (StatusCode::OK, Some("rejected")), "{put}");
+    let rejections = put["rejections"].as_array().expect("rejections");
+    let reasons: Vec<&str> = rejections.iter().map(|r| r["reason"].as_str().unwrap_or_default()).collect();
+    let ids: Vec<&str> = rejections.iter().map(|r| r["policy_id"].as_str().unwrap_or_default()).collect();
+    assert_eq!(reasons, vec!["tool-policy-history-unsupported"; 2]);
+    assert_eq!(ids, vec!["no-send-after-search", "search-rate"]);
 }
 
 #[tokio::test]

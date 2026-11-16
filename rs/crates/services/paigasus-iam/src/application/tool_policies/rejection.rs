@@ -22,6 +22,9 @@ pub enum RejectionReason {
     CatalogBreaksPolicy,
     /// IAM only: a tool name breaks the grammar, or a write breaks a catalog limit.
     CatalogInvalid,
+    /// IAM only, temporary: the compiled set has a history condition, and the gateway cannot
+    /// enforce one yet. SMA-753 removes this reason with the check in `sets.rs`.
+    HistoryUnsupported,
 }
 
 impl RejectionReason {
@@ -36,6 +39,7 @@ impl RejectionReason {
             Self::WindowTooLong => "tool-policy-window-too-long",
             Self::CatalogBreaksPolicy => "tool-catalog-breaks-policy",
             Self::CatalogInvalid => "tool-catalog-invalid",
+            Self::HistoryUnsupported => "tool-policy-history-unsupported",
         }
     }
 
@@ -110,7 +114,7 @@ mod tests {
             );
             seen += 1;
         }
-        assert_eq!(seen, 8);
+        assert_eq!(seen, 9);
     }
 
     #[test]
@@ -119,6 +123,7 @@ mod tests {
         assert_eq!(parsed.len(), 6, "{parsed:?}");
         assert_eq!(RejectionReason::from_wire(RejectionReason::CatalogBreaksPolicy.code()), None);
         assert_eq!(RejectionReason::from_wire(RejectionReason::CatalogInvalid.code()), None);
+        assert_eq!(RejectionReason::from_wire(RejectionReason::HistoryUnsupported.code()), None);
         assert_eq!(RejectionReason::from_wire("TOOL-POLICY-INVALID"), None);
         assert_eq!(RejectionReason::from_wire("tool-policy-unknown"), None);
     }

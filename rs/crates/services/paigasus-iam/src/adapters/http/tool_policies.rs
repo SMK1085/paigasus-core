@@ -286,3 +286,53 @@ async fn get_floor(State(s): State<AppState>, Extension(ctx): Extension<AuthCont
     let svc = svc(&s)?;
     read_response(svc.get_floor(&actor_prn(&ctx), q.version).await?, ToolPolicySetKey::Floor)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::tool_policies::sets::{CompiledMeta, encode_compiled};
+    use paigasus_iam_core::tool_policy::CompiledOutput;
+    use prost::Message;
+
+    /// The compile result fixture that holds two history conditions.
+    const TENANT_ACCEPTED: &str = include_str!("../../../../../../tools/paigasus-policy-compiler/protocol/fixtures/result_tenant_accepted.json");
+
+    /// IAM stores no set with a history condition until SMA-753, so the save path cannot reach
+    /// this rendering. The test builds the stored bytes directly. SMA-753 may move it back to
+    /// `tests/http_tool_policies.rs` as a save-and-read test.
+    #[test]
+    fn a_stored_set_renders_the_compiled_kind_and_conditions() {
+        let fixture: Value = serde_json::from_str(TENANT_ACCEPTED).expect("the fixture parses");
+        let out: CompiledOutput = serde_json::from_value(fixture["compiled"].clone()).expect("the compiled output parses");
+        let meta = CompiledMeta {
+            key: ToolPolicySetKey::Tenant(uuid::Uuid::nil()),
+            version: 1,
+            compiler_generation: 1,
+            schema_revision: 1,
+            catalog_revision: Some(0),
+            max_window_ms: 3_600_000,
+            catalog_names: Vec::new(),
+        };
+        let compiled = pb::CompiledToolPolicySet::decode(encode_compiled(&meta, &out).as_slice()).expect("decode");
+        let compiled = compiled_json(&compiled).unwrap_or_else(|_| panic!("the compiled set renders"));
+        assert_eq!(compiled["kind"], "TOOL_POLICY_SET_KIND_TENANT");
+        let conditions = compiled["conditions"].as_array().expect("conditions");
+        assert_eq!(conditions.len(), 2);
+        let formerly = &conditions[0];
+        assert_eq!(formerly["slot"], "p_no_hsend_hafter_hsearch_0__temporal_0");
+        assert_eq!(formerly["policy_id"], "no-send-after-search");
+        assert_eq!((formerly["scope"].as_str(), formerly["window_ms"].as_u64()), (Some("HISTORY_SCOPE_SESSION"), Some(600_000)));
+        let all_of = &formerly["formerly"]["predicate"]["all_of"];
+        assert_eq!(all_of["left"]["all_of"]["left"]["event_kind"], "HISTORY_EVENT_KIND_RESPONSE");
+        assert_eq!(all_of["left"]["all_of"]["right"]["tool"]["name_key"], "search");
+        assert_eq!(all_of["right"]["field"]["path"], json!(["q"]));
+        assert_eq!(all_of["right"]["field"]["op"], "COMPARISON_OP_EQ");
+        assert_eq!(all_of["right"]["field"]["value"]["string_value"], "secret");
+        let count = &conditions[1];
+        assert_eq!(count["scope"], "HISTORY_SCOPE_PRINCIPAL");
+        assert_eq!(
+            (count["count_within"]["op"].as_str(), count["count_within"]["threshold"].as_i64()),
+            (Some("COMPARISON_OP_GT"), Some(50))
+        );
+    }
+}

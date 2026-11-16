@@ -46,7 +46,7 @@ use uuid::Uuid;
 
 use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_catalog_size, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, size_check_time, stored_next, stored_upserts};
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
-use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled};
+use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, reject_history_until_gateway_supports_it};
 use crate::application::authorize::Authorize;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -301,7 +301,12 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         };
         let raw = match self.compiler.compile(&request).await {
             Ok(CompileOutcome::Accepted(out)) => match check_compiled(kind, &out) {
-                Ok(()) => return Ok(Compiled::Accepted(out)),
+                Ok(()) => {
+                    // SMA-753: remove this check with `reject_history_until_gateway_supports_it`
+                    // when the gateway evaluates history conditions.
+                    let history = reject_history_until_gateway_supports_it(&out);
+                    return Ok(if history.is_empty() { Compiled::Accepted(out) } else { Compiled::Rejected(history) });
+                }
                 // IAM's own checks: their reasons are `tool-policy-invalid` and
                 // `tool-policy-floor-permit`, and they pass through unchanged.
                 Err(rejections) => rejections,
@@ -886,6 +891,76 @@ mod tests {
         assert_eq!((rejections[0].reason, rejections[0].policy_id.as_deref()), (RejectionReason::PolicyInvalid, Some("deep")));
         assert!(rejections[0].message.contains("the limit is 32"), "{}", rejections[0].message);
         assert_eq!((h.repo.insert_attempts(), h.uow.commits()), (0, 0));
+    }
+
+    /// A compile result that holds one count_within condition for each id in `ids`.
+    fn output_with_history(cedar: &str, schema: serde_json::Value, ids: &[&str]) -> CompiledOutput {
+        use paigasus_iam_core::tool_policy::protocol::{CmpOp, HistoryCondition, Predicate, Scope, Shape};
+        CompiledOutput {
+            cedar_policies: cedar.to_owned(),
+            cedar_schema_json: schema,
+            conditions: ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| HistoryCondition {
+                    slot: format!("s{i}"),
+                    policy_id: (*id).to_owned(),
+                    scope: Scope::Session,
+                    window_ms: 1,
+                    shape: Shape::CountWithin {
+                        predicate: Predicate::AnyCatalogTool {},
+                        op: CmpOp::Ge,
+                        threshold: 1,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tenant_save_with_a_history_condition_is_rejected_and_stores_nothing() {
+        let h = harness();
+        h.compiler
+            .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["rate"]))));
+        let rejections = rejected(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!((rejections[0].reason, rejections[0].policy_id.as_deref()), (RejectionReason::HistoryUnsupported, Some("rate")));
+        assert_eq!((rejections[0].line, rejections[0].column), (None, None));
+        assert_eq!(
+            rejections[0].message,
+            "policy rate uses a history rule (formerly, count_within or sum_within). The gateway cannot enforce history rules yet, so this set cannot be saved. Remove the temporal block, or wait for history support."
+        );
+        assert_eq!((h.repo.writes(), h.repo.insert_attempts(), h.uow.commits()), (0, 0, 0));
+        assert!(audit_actions(&h).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_floor_save_with_a_history_condition_is_rejected_and_stores_nothing() {
+        let h = harness();
+        h.compiler.push(Ok(CompileOutcome::Accepted(output_with_history(FLOOR_DENY, base_schema_json(), &["floor-rate"]))));
+        let rejections = rejected(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!((rejections[0].reason, rejections[0].policy_id.as_deref()), (RejectionReason::HistoryUnsupported, Some("floor-rate")));
+        assert_eq!((h.repo.writes(), h.repo.insert_attempts(), h.uow.commits()), (0, 0, 0));
+        assert!(audit_actions(&h).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_set_with_no_history_condition_still_saves() {
+        let h = harness();
+        let v = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        assert_eq!(v.version, 1);
+        assert!(decode_compiled(&v.compiled).unwrap().conditions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_policy_with_a_history_condition_gets_one_rejection() {
+        let h = harness();
+        h.compiler
+            .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["b", "a", "a"]))));
+        let rejections = rejected(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let ids: Vec<Option<&str>> = rejections.iter().map(|r| r.policy_id.as_deref()).collect();
+        assert_eq!(ids, vec![Some("a"), Some("b")]);
     }
 
     #[tokio::test]
