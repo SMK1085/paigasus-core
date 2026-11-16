@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 mod support;
 
 use paigasus_iam::adapters::policy_compiler::process::{ProcessLimits, STDERR_KEEP_BYTES, run_child};
-use paigasus_iam::adapters::policy_compiler::{ProcessPolicyCompiler, probe, probe_with_delay};
+use paigasus_iam::adapters::policy_compiler::{PROBE_ATTEMPT_TIMEOUT, PROBE_ATTEMPTS, PROBE_RETRY_DELAY, ProcessPolicyCompiler, probe, probe_with, probe_with_delay};
 use paigasus_iam::config::ToolPoliciesConfig;
 use paigasus_iam_core::tool_policy::{CompileOutcome, CompileRequest, CompilerFailure, PROTOCOL_VERSION, PolicyCompiler, REASON_FLOOR_PERMIT};
 use serde_json::Value;
@@ -258,6 +258,42 @@ async fn rlimit_as_stops_a_large_allocation() {
     assert_unavailable(compiler.compile(&request("request_tenant_accepted.json")).await);
 }
 
+/// I2 (SMA-774 final review): `RLIMIT_CPU` ends a busy child before the wall-clock timeout. The
+/// child spins with a 1 s CPU limit under a 60 s timeout. Without `setrlimit(RLIMIT_CPU)` it runs
+/// to the timeout, and the message says "timeout".
+#[tokio::test]
+async fn rlimit_cpu_stops_a_busy_child_before_the_timeout() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = TempDir::new().expect("tempdir");
+    let spin = "while :; do :; done";
+    let cpu_limited = |timeout_ms| {
+        ProcessLimits::from_config(&ToolPoliciesConfig {
+            compile_timeout_ms: timeout_ms,
+            rlimit_cpu_secs: 1,
+            ..ToolPoliciesConfig::default()
+        })
+    };
+    let path = script(&dir, "spin", spin);
+    let started = Instant::now();
+    let output = run_child(&path, &["compile"], b"", &cpu_limited(60_000)).await.expect("the child ends by a signal, not by the timeout");
+    let elapsed = started.elapsed();
+    // Linux sends SIGKILL when the soft and the hard limit are equal; macOS sends SIGXCPU.
+    let signal = output.status.signal();
+    assert!(matches!(signal, Some(libc::SIGXCPU) | Some(libc::SIGKILL)), "expected SIGXCPU or SIGKILL, got {:?}", output.status);
+    assert!(elapsed < Duration::from_secs(45), "the CPU limit did not fire before the timeout: {elapsed:?}");
+
+    // The adapter fails closed: the compile is unavailable, and the reason is the exit, not a timeout.
+    let compiler = probe(&ToolPoliciesConfig {
+        compile_timeout_ms: 60_000,
+        rlimit_cpu_secs: 1,
+        ..config(&fake_compiler(&dir, REVISION_OK, spin))
+    })
+    .await
+    .expect("the fake compiler passes the boot probe");
+    let message = assert_unavailable(compiler.compile(&request("request_tenant_accepted.json")).await);
+    assert!(message.contains("exited") && !message.contains("timeout"), "{message}");
+}
+
 #[tokio::test]
 async fn the_semaphore_answers_busy() {
     let dir = TempDir::new().expect("tempdir");
@@ -358,7 +394,7 @@ async fn probe_returns_none_for_a_failing_revision() {
 /// A config with a short timeout, so that a hanging `revision` fails fast.
 fn quick_config(path: &Path) -> ToolPoliciesConfig {
     ToolPoliciesConfig {
-        compile_timeout_ms: 300,
+        compile_timeout_ms: 1_000,
         ..config(path)
     }
 }
@@ -392,6 +428,41 @@ async fn three_transient_failures_give_none() {
     let path = script(&dir, "hang", &format!("echo x >> {}\nexec /bin/sleep 5", counter.display()));
     assert!(probe_with_delay(&quick_config(&path), SHORT_WAIT).await.is_none());
     assert_eq!(attempts(&counter), 3, "the probe makes exactly three attempts");
+}
+
+/// M5 (SMA-774 final review): the probe bounds each attempt by its own short limit, not by the
+/// 10 s `compile_timeout_ms`. With a 200 ms attempt limit, three hanging attempts end in well
+/// under one compile timeout.
+#[tokio::test]
+async fn the_probe_attempt_limit_bounds_a_hanging_binary() {
+    let dir = TempDir::new().expect("tempdir");
+    let counter = dir.path().join("counter");
+    let path = script(&dir, "hang", &format!("echo x >> {}\nexec /bin/sleep 60", counter.display()));
+    let cfg = config(&path);
+    assert_eq!(cfg.compile_timeout_ms, 10_000, "the test needs the default compile timeout");
+    let started = Instant::now();
+    assert!(probe_with(&cfg, SHORT_WAIT, Duration::from_millis(200)).await.is_none());
+    let elapsed = started.elapsed();
+    assert_eq!(attempts(&counter), 3);
+    assert!(elapsed < Duration::from_secs(5), "the probe took {elapsed:?}; the compile timeout bounded it");
+}
+
+/// The default per-attempt limit of the probe, and the boot delay it gives on a hanging binary.
+#[tokio::test]
+async fn the_default_probe_attempt_limit_is_3_s() {
+    assert_eq!(PROBE_ATTEMPT_TIMEOUT, Duration::from_secs(3));
+    assert!(PROBE_ATTEMPT_TIMEOUT < Duration::from_millis(ToolPoliciesConfig::default().compile_timeout_ms));
+    let worst = PROBE_ATTEMPT_TIMEOUT * PROBE_ATTEMPTS + PROBE_RETRY_DELAY * (PROBE_ATTEMPTS - 1);
+    assert_eq!(worst, Duration::from_secs(11));
+
+    // probe_with_delay uses the default limit: three hanging attempts take about 9 s, not 30 s.
+    let dir = TempDir::new().expect("tempdir");
+    let path = script(&dir, "hang", "exec /bin/sleep 60");
+    let started = Instant::now();
+    assert!(probe_with_delay(&config(&path), SHORT_WAIT).await.is_none());
+    let elapsed = started.elapsed();
+    assert!(elapsed >= PROBE_ATTEMPT_TIMEOUT * PROBE_ATTEMPTS, "the probe took {elapsed:?}");
+    assert!(elapsed < PROBE_ATTEMPT_TIMEOUT * PROBE_ATTEMPTS + Duration::from_secs(3), "the probe took {elapsed:?}");
 }
 
 #[tokio::test]

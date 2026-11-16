@@ -266,7 +266,8 @@
 #                                  # tool-policy-compiler-unavailable
 # rlimit_as_bytes        = 1073741824  # default shown (1 GiB); RLIMIT_AS of the child, Linux only
 #                                  # (macOS refuses it, and IAM logs a warning at boot)
-# rlimit_cpu_secs        = 15      # default shown; RLIMIT_CPU of the child
+# rlimit_cpu_secs        = 8       # default shown; RLIMIT_CPU of the child, in seconds of CPU time.
+#                                  # Must be >= 1 and below compile_timeout_ms, or it can never fire.
 # compiler_permits       = 2       # default shown; compiler runs at the same time. A full semaphore
 #                                  # answers tool-policy-compiler-busy (retryable). Must be >= 1.
 # max_window_secs        = 86400   # default shown (24 h); the longest window of a temporal block.

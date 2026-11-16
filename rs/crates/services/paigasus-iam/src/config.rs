@@ -358,7 +358,10 @@ pub struct ToolPoliciesConfig {
     pub max_result_bytes: usize,
     /// `RLIMIT_AS` of the child. Linux only: macOS refuses it, and IAM logs that at boot.
     pub rlimit_as_bytes: u64,
-    /// `RLIMIT_CPU` of the child.
+    /// `RLIMIT_CPU` of the child, in seconds of CPU time. The kernel ends the child with a
+    /// signal at this limit. Keep it below `compile_timeout_ms`: CPU time never runs faster than
+    /// the wall clock, so a CPU limit at or above the wall-clock limit never fires. `validate`
+    /// refuses 0 and a value that is not below `compile_timeout_ms`.
     pub rlimit_cpu_secs: u64,
     /// The number of compiler runs at the same time. A full semaphore answers
     /// `tool-policy-compiler-busy`.
@@ -1093,7 +1096,7 @@ impl Default for ToolPoliciesDefaults {
             max_source_bytes: 262_144,
             max_result_bytes: 3_145_728,
             rlimit_as_bytes: 1_073_741_824,
-            rlimit_cpu_secs: 15,
+            rlimit_cpu_secs: 8,
             compiler_permits: 2,
             max_window_secs: 86_400,
             max_tools: 500,
@@ -1702,6 +1705,12 @@ impl IamConfig {
         }
         if tp.compile_timeout_ms == 0 {
             return Err("tool_policies.compile_timeout_ms must be at least 1 (0 makes every compile time out)".to_string());
+        }
+        if tp.rlimit_cpu_secs == 0 || tp.rlimit_cpu_secs.saturating_mul(1000) >= tp.compile_timeout_ms {
+            return Err(format!(
+                "tool_policies.rlimit_cpu_secs ({}) must be at least 1 and below tool_policies.compile_timeout_ms ({} ms): CPU time never runs faster than the wall clock, so a larger CPU limit never fires",
+                tp.rlimit_cpu_secs, tp.compile_timeout_ms
+            ));
         }
 
         Ok(())
@@ -4374,7 +4383,7 @@ mod tests {
         assert_eq!(d.max_source_bytes, 262_144);
         assert_eq!(d.max_result_bytes, 3_145_728);
         assert_eq!(d.rlimit_as_bytes, 1_073_741_824);
-        assert_eq!(d.rlimit_cpu_secs, 15);
+        assert_eq!(d.rlimit_cpu_secs, 8);
         assert_eq!(d.compiler_permits, 2);
         assert_eq!(d.max_window_secs, 86_400);
         assert_eq!(d.max_tools, 500);
@@ -4417,6 +4426,25 @@ mod tests {
         }
         let cfg = tool_policies_config("[tool_policies]\ncompiler_path = \"/opt/compiler\"\n").expect("the config loads");
         cfg.validate().expect("an absolute path validates");
+    }
+
+    /// I2 (SMA-774 final review): the CPU limit must be able to fire before the wall clock.
+    #[test]
+    fn a_cpu_limit_that_cannot_fire_before_the_timeout_is_refused() {
+        let d = ToolPoliciesConfig::default();
+        assert!(d.rlimit_cpu_secs * 1000 < d.compile_timeout_ms, "the default CPU limit must be below the default timeout");
+        for block in [
+            "[tool_policies]\nrlimit_cpu_secs = 0\n",
+            "[tool_policies]\nrlimit_cpu_secs = 10\n",
+            "[tool_policies]\nrlimit_cpu_secs = 15\n",
+            "[tool_policies]\ncompile_timeout_ms = 8000\n",
+        ] {
+            let cfg = tool_policies_config(block).expect("the config loads");
+            let err = cfg.validate().expect_err("a CPU limit that cannot fire must be refused");
+            assert!(err.contains("tool_policies.rlimit_cpu_secs"), "unexpected error for {block}: {err}");
+        }
+        let cfg = tool_policies_config("[tool_policies]\nrlimit_cpu_secs = 9\n").expect("the config loads");
+        cfg.validate().expect("9 s of CPU below a 10 s timeout validates");
     }
 
     #[test]

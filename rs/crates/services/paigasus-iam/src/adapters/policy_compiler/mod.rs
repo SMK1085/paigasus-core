@@ -40,6 +40,11 @@ pub struct ProcessPolicyCompiler {
 pub const PROBE_ATTEMPTS: u32 = 3;
 /// The wait between two attempts of the boot probe.
 pub const PROBE_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// The wall-clock limit of one attempt of the boot probe. `revision` does no compile work, so it
+/// does not need the full `compile_timeout_ms`. 3 s leaves headroom for a cold host. A shorter
+/// `compile_timeout_ms` wins. So a hanging binary delays readiness by at most
+/// `PROBE_ATTEMPTS * 3 s + (PROBE_ATTEMPTS - 1) * PROBE_RETRY_DELAY`, about 11 s.
+pub const PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Runs `revision` on the configured binary. `None`, with an `error!` log, when the binary is
 /// missing, the call fails, or the compiler speaks another protocol version. A transient failure
@@ -52,7 +57,15 @@ pub async fn probe(cfg: &ToolPoliciesConfig) -> Option<ProcessPolicyCompiler> {
 /// [`probe`] with its own wait between attempts. Tests use a short wait.
 #[doc(hidden)]
 pub async fn probe_with_delay(cfg: &ToolPoliciesConfig, retry_delay: Duration) -> Option<ProcessPolicyCompiler> {
+    probe_with(cfg, retry_delay, PROBE_ATTEMPT_TIMEOUT).await
+}
+
+/// [`probe`] with its own wait between attempts and its own per-attempt limit. Each attempt runs
+/// under the smaller of `attempt_timeout` and `compile_timeout_ms`. Tests use short values.
+#[doc(hidden)]
+pub async fn probe_with(cfg: &ToolPoliciesConfig, retry_delay: Duration, attempt_timeout: Duration) -> Option<ProcessPolicyCompiler> {
     let limits = ProcessLimits::from_config(cfg);
+    let probe_limits = limits.with_timeout(attempt_timeout.min(limits.timeout()));
     let path = cfg.compiler_path.as_path();
     if ProcessLimits::rlimit_as_applied() {
         info!(
@@ -70,7 +83,7 @@ pub async fn probe_with_delay(cfg: &ToolPoliciesConfig, retry_delay: Duration) -
     let mut attempt = 0;
     let revision: RevisionOutput = loop {
         attempt += 1;
-        let (reason, transient) = match run_child(path, &["revision"], b"", &limits).await {
+        let (reason, transient) = match run_child(path, &["revision"], b"", &probe_limits).await {
             // The child did not run to the end (start, I/O, timeout): transient.
             Err(failure) => (failure_text(failure), true),
             // The child ran. A non-zero exit or a bad answer is permanent.

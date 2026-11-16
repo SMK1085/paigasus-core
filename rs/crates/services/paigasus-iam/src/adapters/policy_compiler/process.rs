@@ -51,6 +51,17 @@ impl ProcessLimits {
         }
     }
 
+    /// The same limits with another wall-clock timeout. The boot probe uses it.
+    #[must_use]
+    pub fn with_timeout(&self, timeout: Duration) -> Self {
+        ProcessLimits { timeout, ..self.clone() }
+    }
+
+    /// The wall-clock timeout of one run.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// The `RLIMIT_AS` value. The boot log reads it on every OS, also where it is not applied.
     pub fn rlimit_as(&self) -> u64 {
         self.rlimit_as
