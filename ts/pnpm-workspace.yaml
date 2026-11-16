@@ -203,7 +203,7 @@ catalog:
   vite-plugin-wasm: ^3.6.0
   # OIDC relying party for @paigasus/auth (SMA-506). v6 is the line ADR-0017 decision 4 names.
   # Protocol handling — PKCE, state, nonce, discovery, JWKS, token exchange — stays in the library.
-  openid-client: ^6.8.9
+  openid-client: ^6.9.0
   # JOSE primitives. Used ONLY by tests, to mint a local JWKS and sign fixture tokens (AC 6).
   # Production token verification is openid-client's job; this is never imported from src/.
   jose: ^6.2.17
@@ -249,7 +249,7 @@ catalog:
   # FocusScope focuses its first item. The effect depends on test order inside one vitest file,
   # because jsdom's Window is shared per file. 5 paigasus-app-shell-ts tests failed. Bisected:
   # only this entry changed, 30.0.1 passes 186/186 and 30.1.0 fails 5. Re-check on a jsdom bump.
-  jsdom: 31.0.0
+  jsdom: 31.0.1
   '@testing-library/react': ^16.3.3
   '@testing-library/dom': ^10.4.2
   '@testing-library/user-event': ^14.6.10
