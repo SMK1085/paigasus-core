@@ -585,6 +585,19 @@ class ErrorReason(betterproto2.Enum):
     not live or superseded. gRPC NOT_FOUND, HTTP 404.
     """
 
+    TOOL_POLICY_MODE_TRANSITION_INVALID = 61
+    """
+    "tool-policy-mode-transition-invalid" — the mode change is not allowed: an organization with no
+    tool policy set must go to log_only first (spec §9.2). gRPC FAILED_PRECONDITION, HTTP 409.
+    """
+
+    TOOL_POLICY_HISTORY_UNSUPPORTED = 62
+    """
+    "tool-policy-history-unsupported" — rejection: the set has a history rule (formerly,
+    count_within, sum_within). The gateway cannot enforce history rules yet, so IAM does not store
+    them. Temporary; removed by SMA-753 (R19). Carried inside the rejected oneof.
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -842,6 +855,8 @@ class ErrorReason(betterproto2.Enum):
             58: "ERROR_REASON_TOOL_POLICY_COMPILER_UNAVAILABLE",
             59: "ERROR_REASON_TOOL_POLICY_COMPILER_BUSY",
             60: "ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND",
+            61: "ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID",
+            62: "ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -936,6 +951,8 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_TOOL_POLICY_COMPILER_UNAVAILABLE": 58,
             "ERROR_REASON_TOOL_POLICY_COMPILER_BUSY": 59,
             "ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND": 60,
+            "ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID": 61,
+            "ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED": 62,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,

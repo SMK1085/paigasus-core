@@ -308,6 +308,30 @@ impl ToolPolicyService for ToolPolicyGrpc {
         record_grpc("ToolPolicy", "GetFloorPolicySet", started, &result);
         result
     }
+
+    // Stub until the fetch and settings task (SMA-775) wires the application service.
+    async fn get_tool_policy_settings(&self, _request: Request<pb::GetToolPolicySettingsRequest>) -> Result<Response<pb::GetToolPolicySettingsResponse>, Status> {
+        self.svc()?;
+        Err(Status::unimplemented("GetToolPolicySettings is not wired yet"))
+    }
+
+    // Stub until the fetch and settings task (SMA-775) wires the application service.
+    async fn put_tool_policy_settings(&self, _request: Request<pb::PutToolPolicySettingsRequest>) -> Result<Response<pb::PutToolPolicySettingsResponse>, Status> {
+        self.svc()?;
+        Err(Status::unimplemented("PutToolPolicySettings is not wired yet"))
+    }
+
+    // Stub until the fetch and settings task (SMA-775) wires the application service.
+    async fn get_compiled_tool_policies(&self, _request: Request<pb::GetCompiledToolPoliciesRequest>) -> Result<Response<pb::GetCompiledToolPoliciesResponse>, Status> {
+        self.svc()?;
+        Err(Status::unimplemented("GetCompiledToolPolicies is not wired yet"))
+    }
+
+    // Stub until the fetch and settings task (SMA-775) wires the application service.
+    async fn get_compiled_floor_policies(&self, _request: Request<pb::GetCompiledFloorPoliciesRequest>) -> Result<Response<pb::GetCompiledFloorPoliciesResponse>, Status> {
+        self.svc()?;
+        Err(Status::unimplemented("GetCompiledFloorPolicies is not wired yet"))
+    }
 }
 
 #[cfg(test)]
