@@ -382,6 +382,11 @@ async fn malformed_input_answers_in_the_error_envelope() {
     assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-path-segment"));
     assert!(body["error"]["message"].as_str().unwrap_or_default().contains("tool_name"), "{body}");
 
+    // An organization segment that is not UTF-8 names the organization segment, not the tool.
+    let (status, body) = send(&env.app, "DELETE", "/v1/organizations/%FF/tools/x?expected_catalog_revision=0", None, Some(&env.admin)).await;
+    assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-path-segment"));
+    assert_eq!(body["error"]["message"].as_str().unwrap_or_default(), "organization_id is not a valid path segment", "{body}");
+
     // A body that is not JSON.
     let (status, body) = send_bytes(&env.app, "POST", &env.tools(), Some("application/json"), b"{not json", Some(&env.admin)).await;
     assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-request-body"));
