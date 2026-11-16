@@ -52,3 +52,4 @@ pub mod capability;
 
 /// Wire-string helpers for the canonical error registry (`common::v1::ErrorReason`/`ErrorDomain`).
 pub mod error;
+// SMA-777 CI measurement probe: this comment is removed again before review.
