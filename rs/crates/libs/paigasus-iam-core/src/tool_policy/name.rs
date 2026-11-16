@@ -27,11 +27,11 @@ pub enum NameError {
 
 /// The match key of a qualified name.
 ///
-/// This is ASCII lowercase. On the ASCII name grammar it equals the kernel normaliser
-/// (trim, NFC, lowercase, NFC), because trim and NFC do nothing for these characters.
-/// PR 2 changes this function to call the kernel normaliser (D4).
+/// This calls the kernel normaliser, so the catalog and the gateway use one function
+/// (spec section 4.1, ADR-0005). The name grammar is ASCII, so the result equals ASCII
+/// lowercase: trim and NFC do nothing for these characters.
 pub fn name_key(qualified: &str) -> String {
-    qualified.to_ascii_lowercase()
+    paigasus_kernel::tool_policy::normalise(qualified)
 }
 
 fn check_part(part: &str) -> Result<(), NameError> {
@@ -122,5 +122,12 @@ mod tests {
     #[test]
     fn a_qualified_name_with_two_dots_is_rejected() {
         assert!(parse_qualified("a.b.c").is_err());
+    }
+
+    #[test]
+    fn name_key_equals_ascii_lowercase_on_the_grammar() {
+        for n in ["GitHub.Search", "a_B-9", "X"] {
+            assert_eq!(name_key(n), n.to_ascii_lowercase());
+        }
     }
 }
