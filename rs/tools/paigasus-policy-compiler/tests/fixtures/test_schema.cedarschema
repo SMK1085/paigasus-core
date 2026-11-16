@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+// A minimal action schema for the scope-lowering proof (tests/scope_proof.rs). Test-only.
+
+namespace Pgs::Iam {
+  entity Principal;
+  entity Organization;
+}
+
+namespace Pgs::Gateway {
+  action "InvokeTool";
+
+  action "search" in ["InvokeTool"] appliesTo {
+    principal: [Pgs::Iam::Principal],
+    resource: [Pgs::Iam::Organization],
+    context: {
+      input: {
+        q: String,
+        n: Long
+      }
+    }
+  };
+
+  action "send" in ["InvokeTool"] appliesTo {
+    principal: [Pgs::Iam::Principal],
+    resource: [Pgs::Iam::Organization],
+    context: {
+      input: {
+        to: String,
+        amount: Long
+      }
+    }
+  };
+}

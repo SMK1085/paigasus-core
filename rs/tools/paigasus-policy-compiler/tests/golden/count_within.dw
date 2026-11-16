@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// count_within: at most 5 searches for "x" in an hour.
+@id("search-rate")
+permit (principal, action == Pgs::Gateway::Action::"search", resource)
+when temporal { count_within(1h, Pgs::Gateway::Action::"search"::request{ input.q: "x" }) <= 5 };

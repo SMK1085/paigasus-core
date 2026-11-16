@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
+// The starter policy (spec section 6.3), byte for byte after this header.
+@id("starter-allow-all")
+permit (principal, action in Pgs::Gateway::Action::"InvokeTool", resource);

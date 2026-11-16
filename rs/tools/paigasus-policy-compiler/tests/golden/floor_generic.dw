@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// A generic floor: it names only the InvokeTool and Unregistered groups.
+@id("floor-no-unregistered")
+forbid (principal, action in Pgs::Gateway::Action::"Unregistered", resource);
+@id("floor-name-collision")
+forbid (principal, action in Pgs::Gateway::Action::"InvokeTool", resource)
+when { context.findings.contains("name_collision") };

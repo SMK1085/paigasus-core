@@ -1,0 +1,35 @@
+{
+  "outcome": "rejected",
+  "protocol_version": 1,
+  "compiler_generation": 1,
+  "rejections": [
+    {
+      "policy_id": "floor-after-error",
+      "line": null,
+      "column": null,
+      "reason": "tool-policy-shape-unsupported",
+      "message": "policy \"floor-after-error\": the temporal block p_floor_hafter_herror_0__temporal_0 uses the unsupported shape `error-event`: an `error` event pattern is not supported in v1"
+    },
+    {
+      "policy_id": "floor-missing-field",
+      "line": null,
+      "column": null,
+      "reason": "tool-policy-invalid",
+      "message": "Cedar validation: for policy `p_floor_hmissing_hfield_0`, policy is impossible: the policy expression evaluates to false for all valid requests; a guarded field may be missing from the schema"
+    },
+    {
+      "policy_id": "floor-permit",
+      "line": null,
+      "column": null,
+      "reason": "tool-policy-floor-permit",
+      "message": "the floor policy \"floor-permit\" is a permit; a floor policy must be a forbid"
+    },
+    {
+      "policy_id": "floor-long-window",
+      "line": null,
+      "column": null,
+      "reason": "tool-policy-window-too-long",
+      "message": "the window of p_floor_hlong_hwindow_0__temporal_0 is 7200000 ms, more than the limit of 3600000 ms"
+    }
+  ]
+}

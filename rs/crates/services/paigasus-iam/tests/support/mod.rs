@@ -41,7 +41,9 @@ use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::application::authenticate_token::Provisioning;
-use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, DpopConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
+use paigasus_iam::config::{
+    ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, DpopConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig, ToolPoliciesConfig,
+};
 use paigasus_iam_core::{
     ApiKey, ApiKeyStatus, Clock, GrantScope, IdGenerator, OrganizationId, Principal, PrincipalId, PrincipalKind, PrincipalStatus, RoleGrant, ServiceAccount, TenancyNodeRef, display_prefix,
 };
@@ -52,6 +54,7 @@ use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbB
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
@@ -511,6 +514,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
         api_keys: ApiKeyConfig::with_test_pepper(test_api_key_pepper()),
         audit: AuditConfig::default(),
         outbox: OutboxConfig::default(),
+        tool_policies: ToolPoliciesConfig::default(),
         metrics: MetricsConfig::default(),
         migration: MigrationConfig::default(),
     }
@@ -793,18 +797,24 @@ pub async fn seed_platform_admin(state: &AppState, principal_prn: &str) {
 /// `seed_platform_admin`'s bypass-`RoleService::grant` posture.
 #[allow(dead_code)]
 pub async fn seed_org_admin(state: &AppState, principal_prn: &str, org_prn: &str) {
+    seed_org_role(state, principal_prn, org_prn, "org_admin").await;
+}
+
+/// [`seed_org_admin`] for any system role key (for example `org_member`), scoped to `org_prn`.
+#[allow(dead_code)]
+pub async fn seed_org_role(state: &AppState, principal_prn: &str, org_prn: &str, role_key: &str) {
     let principal = PrincipalId::from_prn(Prn::parse(principal_prn).expect("valid principal prn"));
     let scope = TenancyNodeRef::from_prn(Prn::parse(org_prn).expect("valid org prn")).expect("org_prn names a tenancy node");
     let grant_id = next_grant_id();
     let grant = RoleGrant {
         id: grant_id,
         principal,
-        role_key: "org_admin".to_string(),
+        role_key: role_key.to_string(),
         scope: GrantScope::Node(scope),
         linked_policy_id: format!("grant:{grant_id}"),
         created_at: Utc::now(),
     };
-    state.role_grant_store.grant(&grant).await.expect("seed org_admin grant");
+    state.role_grant_store.grant(&grant).await.expect("seed the role grant");
 }
 
 /// Convenience: [`provision`] + [`seed_platform_admin`] in one call — the common case for a
@@ -1156,3 +1166,138 @@ pub const JIT_FAILURE_LINE: &str = "just-in-time provisioning failed";
 /// for the same reason as `JIT_FAILURE_LINE`.
 #[allow(dead_code)]
 pub const JIT_DISABLED_LINE: &str = "request refused: the identity is not provisioned";
+
+// --- SMA-774 Task 13: the tool policy transports ----------------------------------------------
+
+/// The answer of a good fake compiler to `revision`.
+#[allow(dead_code)]
+const COMPILER_REVISION_JSON: &str = r#"{"compiler_generation":1,"protocol_version":1,"revision":"1+dogwood.000000000000+proto.1"}"#;
+
+/// Writes a fake `paigasus-policy-compiler` into `dir`: `revision` answers a good revision, and
+/// `compile` answers the content of `dir/result.json` (set by `result_json`, changed later with
+/// [`set_compiler_result`]). With a file `dir/hold` present ([`hold_compiler`]), `compile` first
+/// writes `dir/started.<pid>` and then waits until the file `dir/hold` is gone, for at most 60
+/// seconds. The child runs with an empty environment, so every program has an absolute path.
+#[allow(dead_code)]
+pub fn fake_compiler_script(dir: &Path, result_json: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    set_compiler_result(dir, result_json);
+    let result = dir.join("result.json");
+    let hold = dir.join("hold");
+    let started = dir.join("started");
+    let path = dir.join("compiler");
+    let body = format!(
+        "#!/bin/sh\ncase \"$1\" in\n  revision) echo '{COMPILER_REVISION_JSON}' ;;\n  compile) /bin/cat > /dev/null; if [ -f '{hold}' ]; then : > '{started}'.$$; n=0; while [ -f '{hold}' ] && [ $n -lt 600 ]; do /bin/sleep 0.1; n=$((n+1)); done; fi; exec /bin/cat '{result}' ;;\n  *) exit 64 ;;\nesac\n",
+        hold = hold.display(),
+        started = started.display(),
+        result = result.display(),
+    );
+    std::fs::write(&path, body).expect("write the fake compiler");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod the fake compiler");
+    path
+}
+
+/// The path of the real `paigasus-policy-compiler`, from `PAIGASUS_POLICY_COMPILER_BIN`. The
+/// Moon `test` task of this crate always sets the variable, and builds the binary first. The
+/// helper never reads `CI` (`repo:iam-docker-policy-single-site` bans that in an IAM test).
+/// `None`, with a printed reason, when the variable is not set. A panic when it is set and the
+/// file is absent, so a wrong path cannot pass as a skip.
+#[allow(dead_code)]
+pub fn real_compiler_path(test: &str) -> Option<PathBuf> {
+    let Some(value) = std::env::var_os("PAIGASUS_POLICY_COMPILER_BIN") else {
+        eprintln!("{test} skipped: PAIGASUS_POLICY_COMPILER_BIN is not set");
+        return None;
+    };
+    let path = PathBuf::from(value);
+    assert!(path.is_file(), "PAIGASUS_POLICY_COMPILER_BIN is set to {}, and no file exists there", path.display());
+    Some(path)
+}
+
+/// Changes what the fake compiler of `dir` answers to the next `compile`.
+#[allow(dead_code)]
+pub fn set_compiler_result(dir: &Path, result_json: &str) {
+    std::fs::write(dir.join("result.json"), result_json).expect("write the compile result");
+}
+
+/// Makes every later `compile` of the fake compiler of `dir` wait until [`release_compiler`].
+/// Each held `compile` writes a `started.<pid>` file, which [`wait_for_held_compiles`] counts.
+#[allow(dead_code)]
+pub fn hold_compiler(dir: &Path) {
+    std::fs::write(dir.join("hold"), b"").expect("write the hold marker");
+}
+
+/// Lets every held `compile` of the fake compiler of `dir` continue.
+#[allow(dead_code)]
+pub fn release_compiler(dir: &Path) {
+    std::fs::remove_file(dir.join("hold")).expect("remove the hold marker");
+}
+
+/// Waits until `n` compiles of the fake compiler of `dir` are held. A held compile runs as a
+/// child process, so it holds one compiler permit. Panics after 30 seconds.
+#[allow(dead_code)]
+pub async fn wait_for_held_compiles(dir: &Path, n: usize) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let count = std::fs::read_dir(dir)
+            .expect("read the compiler directory")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("started."))
+            .count();
+        if count >= n {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{count} of {n} compiles are held after 30 seconds");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// A compile result that accepts, with generation 1 and no conditions.
+#[allow(dead_code)]
+pub fn accepted_result(cedar_policies: &str, cedar_schema_json: &Value) -> String {
+    serde_json::json!({
+        "outcome": "accepted",
+        "protocol_version": 1,
+        "compiler_generation": 1,
+        "compiled": {"cedar_policies": cedar_policies, "cedar_schema_json": cedar_schema_json, "conditions": []}
+    })
+    .to_string()
+}
+
+/// A compile result that rejects, with generation 1. Each entry is `(reason, message)`.
+#[allow(dead_code)]
+pub fn rejected_result(rejections: &[(&str, &str)]) -> String {
+    let rejections: Vec<Value> = rejections
+        .iter()
+        .map(|(reason, message)| serde_json::json!({"policy_id": "p1", "line": 2, "column": 5, "reason": reason, "message": message}))
+        .collect();
+    serde_json::json!({"outcome": "rejected", "protocol_version": 1, "compiler_generation": 1, "rejections": rejections}).to_string()
+}
+
+/// The wiring of `main.rs` for the tool policy feature: probe only when the toggle is on, then
+/// `AppState::with_tool_policies`. Returns the state and the mock IdP.
+#[allow(dead_code)]
+pub async fn state_with_tool_policies(db: DatabaseConnection, enabled: bool, compiler_path: &Path) -> (AppState, MockIdp) {
+    let idp = start_mock_idp().await;
+    let mut cfg = test_config(&idp);
+    cfg.tool_policies = ToolPoliciesConfig {
+        enabled,
+        compiler_path: compiler_path.to_path_buf(),
+        ..ToolPoliciesConfig::default()
+    };
+    let state = AppState::new(db, &cfg).await.expect("AppState::new");
+    let compiler = if enabled {
+        paigasus_iam::adapters::policy_compiler::probe(&cfg.tool_policies)
+            .await
+            .map(|compiler| Arc::new(compiler) as Arc<dyn paigasus_iam_core::tool_policy::PolicyCompiler>)
+    } else {
+        None
+    };
+    (state.with_tool_policies(compiler, &cfg.tool_policies), idp)
+}
+
+/// [`app_with_state`] with the tool policy feature on and the compiler at `compiler_path`.
+#[allow(dead_code)]
+pub async fn app_with_tool_policies(db: DatabaseConnection, compiler_path: &Path) -> (Router, AppState, MockIdp) {
+    let (state, idp) = state_with_tool_policies(db, true, compiler_path).await;
+    (router(state.clone()), state, idp)
+}

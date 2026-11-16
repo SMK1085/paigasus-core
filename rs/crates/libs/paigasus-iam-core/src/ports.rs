@@ -26,6 +26,9 @@ pub enum ConflictKind {
     ExternalIdentityExists,
     ServiceAccountNameTaken,
     ApiKeyHashCollision,
+    /// A tool policy version write lost a race or skipped a version (SMA-774). The service maps
+    /// it to `tool-policy-version-conflict`.
+    ToolPolicyVersion,
     Other,
 }
 

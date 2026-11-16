@@ -158,11 +158,14 @@ assert_pins() {
   # documented merge order), so nothing observable changes. The final (last, unnamed
   # `FROM scratch`) stage may therefore COPY exactly two things: the chiseled rootfs and the
   # compiled service binary. Anything else fails closed here rather than shipping silently.
+  # SMA-774 adds ONE more exact line: `/out/extra/` holds the compiled policy compiler binary
+  # for the IAM image and is empty for the gateway image. The builder stage writes only that
+  # binary into it, and it is a program, not deployment config.
   local final_from_line final_stage copy_lines bad_copy
   final_from_line="$(grep -niE '^FROM[[:space:]]' "$dockerfile" | tail -1 | cut -d: -f1)"
   final_stage="$(sed -n "${final_from_line},\$p" "$dockerfile")"
   copy_lines="$(grep -iE '^[[:space:]]*COPY[[:space:]]+' <<<"$final_stage")"
-  bad_copy="$(grep -vxE 'COPY --from=rootfs /rootfs /|COPY --from=builder /out/service /usr/local/bin/paigasus-service' <<<"$copy_lines" || true)"
+  bad_copy="$(grep -vxE 'COPY --from=rootfs /rootfs /|COPY --from=builder /out/service /usr/local/bin/paigasus-service|COPY --from=builder /out/extra/ /usr/local/bin/' <<<"$copy_lines" || true)"
   if [ -n "$bad_copy" ]; then
     echo "::error::rs/Dockerfile's final stage COPYs something beyond the rootfs and the service binary — this can bake deployment config beneath runtime env, invisible to both the ENV check above and the smoke suite:" >&2
     echo "$bad_copy" >&2

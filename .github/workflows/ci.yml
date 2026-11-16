@@ -23,7 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     # 45, not 30 (SMA-718). The heavy-integration mutex runs paigasus-iam-rs:test and the two
     # console test-e2e tasks one after another, and a run that selects all three passed 30 minutes.
-    timeout-minutes: 45
+    # 60, not 45: a run with a cold Rust cache that selects the IAM suites and the policy
+    # compiler took 41 to 45 minutes, and the cache saves only after a green run.
+    timeout-minutes: 60
     # cedar-policy + its crypto/parser tree (SMA-444) balloons the debug `target/` past even
     # the reclaimed headroom below → `rustc-LLVM ERROR: ... No space left on device` mid-link
     # of the paigasus-iam test binaries. Trim debug info to line tables (panic line numbers are
@@ -87,6 +89,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rs/target
+            rs/tools/paigasus-policy-compiler/target
           # Toolchain hash in the key + restore-key prefix so a rustc bump (rs/rust-toolchain.toml)
           # can't restore stale cross-version target artifacts (E0514 on prost/tonic rmeta, SMA-389).
           # `line-tables-only` segment so a cache written before the CARGO_PROFILE_*_DEBUG trim
@@ -107,7 +110,9 @@ jobs:
           # older prefixes keep that first run — which builds far more than any before it — from
           # starting fully cold. All three keep the toolchain hash and `-line-tables-only-`, so
           # neither the SMA-389 cross-version guard nor the debuginfo-bloat guard is weakened.
-          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-upstream-inputs-${{ hashFiles('rs/Cargo.lock', 'rs/Cargo.toml') }}
+          # SMA-774 adds the policy compiler, a second cargo workspace with its own target/ and
+          # Cargo.lock. Its lock joins the hash, so the key changes and the enlarged cache saves.
+          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-upstream-inputs-${{ hashFiles('rs/Cargo.lock', 'rs/Cargo.toml', 'rs/tools/paigasus-policy-compiler/Cargo.lock') }}
           restore-keys: |
             rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-upstream-inputs-
             rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-

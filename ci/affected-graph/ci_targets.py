@@ -310,9 +310,13 @@ SELF_TASK_EXPECTED_GLOBS = {
         "rs/release-plz.toml",
         "rs/rust-toolchain.toml",
     ),
+    # SMA-774 — the policy compiler under rs/tools/ emits error codes too, so the gate keys on its
+    # sources and tests (the `moon.yml` task lists both globs).
     "error-code-single-site": (
         "ci/error-registry/**/*",
         "rs/crates/**/src/**/*.rs",
+        "rs/tools/**/src/**/*.rs",
+        "rs/tools/**/tests/**/*.rs",
         "contracts/proto/paigasus/common/v1/error.proto",
     ),
     # SMA-587/SMA-572. An EXPECTED entry, not an exemption: unlike release-parity's

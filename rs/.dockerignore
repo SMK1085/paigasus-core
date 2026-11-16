@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Keep the build context small. `target/` alone is gigabytes on any machine that has ever run
 # `cargo build`, and every byte of it is uploaded to the daemon on every build.
-target/
+# `**/` so the target/ of the policy compiler workspace (tools/paigasus-policy-compiler, SMA-774)
+# stays out too. A bare `target/` matches only the top-level directory.
+**/target/
 **/*.node
 **/*.wasm
 .git/

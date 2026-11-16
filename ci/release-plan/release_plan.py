@@ -184,22 +184,72 @@ def workspace_members(rs_root: Path) -> list[str]:
     ws = cfg.get("workspace")
     if not isinstance(ws, dict):
         raise InconclusiveError(f"{rs_root}/Cargo.toml declares no [workspace] table")
-    # `exclude` SHRINKS the member set, and this function does not model it. Reading it as absent
-    # would over-derive — demanding a tag for a non-member, which only ever BUILDS, so it is
-    # fail-safe at runtime — but it would also make the skip permanently unreachable, silently.
-    # Refusing loudly is the conscious-re-baseline direction this repo prefers: at runtime it
-    # builds, and under --assert it exits 3 and reds check 11 until somebody teaches this
-    # function about exclusion.
-    excluded = ws.get("exclude")
-    if isinstance(excluded, list) and excluded:
-        raise InconclusiveError(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r}; "
-                           "workspace_members() does not model member exclusion")
     members = ws.get("members")
     if not isinstance(members, list) or not members or \
             not all(isinstance(m, str) and m for m in members):
         raise InconclusiveError(f"{rs_root}/Cargo.toml has no usable [workspace] members list "
                            f"(got {members!r})")
+    # `exclude` can SHRINK the member set. This function models exactly ONE case of it (SMA-774):
+    # every `members` entry is a literal path (SMA-663) and no entry is at or under an excluded
+    # path. Then the exclusion removes nothing from the member set, so `members` is returned
+    # unchanged. The policy compiler workspace at `tools/paigasus-policy-compiler` is that case:
+    # it is excluded and it is not a member. Every other shape is still refused.
+    # Cargo's rule, MEASURED on cargo 1.95.0 (SMA-774 review): a package is excluded only when it
+    # is NOT an explicit member. A literal member at or under an excluded path stays a member
+    # (`members = ["crates/a"]` with `exclude = ["crates"]` or `["crates/a"]`: `a` is still in
+    # `workspace_members`). A directory that only a GLOB member matches IS removed
+    # (`members = ["crates/*"]`, `exclude = ["crates/b"]`: only `a` remains). So the refusal of a
+    # covered literal member is conservative: that member set would be correct, but a config that
+    # names one path in both lists is contradictory and is refused for a re-baseline. The glob
+    # case is a real shrink, which this function does not compute. Reading it as "no effect"
+    # would over-derive — demanding a tag for a non-member, which only ever BUILDS, so it is
+    # fail-safe at runtime — but it would also make the skip permanently unreachable, silently.
+    # Refusing loudly is the conscious-re-baseline direction this repo prefers: at runtime it
+    # builds, and under --assert it exits 3 and reds check 11.
+    excluded = ws.get("exclude")
+    if excluded is not None:
+        if not isinstance(excluded, list) or \
+                not all(isinstance(e, str) and e for e in excluded):
+            raise InconclusiveError(f"{rs_root}/Cargo.toml has an unusable [workspace] exclude "
+                               f"list (got {excluded!r})")
+        if excluded:
+            _refuse_effective_exclusion(rs_root, members, excluded)
     return members
+
+
+def _norm_rel(path: str) -> str:
+    """A Cargo `members`/`exclude` entry as a plain relative path: no `./`, no trailing `/`."""
+    parts = [p for p in path.split("/") if p not in ("", ".")]
+    return "/".join(parts)
+
+
+def _refuse_effective_exclusion(rs_root: Path, members: list[str], excluded: list[str]) -> None:
+    """Raise InconclusiveError unless `exclude` provably removes no member (SMA-774).
+
+    "Provably" means: every member is a literal path (no `*`, `?` or `[`), and no member is equal
+    to an excluded path or lies under one. Anything else is the shape workspace_members() does
+    not model, and it is refused with the old marker text.
+    """
+    # A `..` component can name a directory outside the path prefix that the test below compares,
+    # so the "no member under it" proof does not hold. Fail-safe: refuse it.
+    dotted = [ex for ex in excluded if ".." in ex.split("/")]
+    if dotted:
+        raise InconclusiveError(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r} "
+                           f"with a `..` path component in {dotted!r}; workspace_members() does "
+                           "not model member exclusion")
+    globbed = [m for m in members if any(c in m for c in "*?[")]
+    if globbed:
+        raise InconclusiveError(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r} "
+                           f"with glob members {globbed!r}; workspace_members() does not model "
+                           "member exclusion")
+    for ex in excluded:
+        ex_n = _norm_rel(ex)
+        for m in members:
+            m_n = _norm_rel(m)
+            if not ex_n or m_n == ex_n or m_n.startswith(ex_n + "/"):
+                raise InconclusiveError(f"{rs_root}/Cargo.toml sets [workspace] exclude={excluded!r}, "
+                                   f"which covers the member {m!r}; workspace_members() does "
+                                   "not model member exclusion")
 
 
 def crate_manifests(rs_root: Path) -> dict[str, Path]:
@@ -653,6 +703,103 @@ def _unresolvable_member_is_inconclusive() -> str | None:
         return "releasable_packages did not raise InconclusiveError for an unresolvable member"
     finally:
         shutil.rmtree(tmp)
+
+
+def _exclude_tree(tmp: str, members: list[str], exclude: list[str]) -> Path:
+    """An rs/ tree with one literal member `crates/libs/a` and the given members/exclude lists."""
+    rs_root = Path(tmp) / "rs"
+    rs_root.mkdir()
+    (rs_root / "release-plz.toml").write_text("")
+    toml_list = lambda xs: "[" + ", ".join(f'"{x}"' for x in xs) + "]"  # noqa: E731
+    (rs_root / "Cargo.toml").write_text(
+        f"[workspace]\nmembers = {toml_list(members)}\nexclude = {toml_list(exclude)}\n")
+    d = rs_root / "crates" / "libs" / "a"
+    d.mkdir(parents=True)
+    (d / "Cargo.toml").write_text('[package]\nname = "a"\nversion = "1.0.0"\npublish = true\n')
+    return rs_root
+
+
+def _exclude_of_a_non_member_is_modelled() -> str | None:
+    """SMA-774: an `exclude` that covers no literal member leaves the member set unchanged.
+
+    This is the real tree's shape: `tools/paigasus-policy-compiler` is excluded and is not a
+    member. Mutation: restore the unconditional refusal of a non-empty `exclude`, and this row reds.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = _exclude_tree(tmp, ["crates/libs/a"], ["tools/compiler"])
+        try:
+            got = releasable_packages(rs_root)
+        except InconclusiveError as exc:
+            return f"releasable_packages refused an exclude that covers no member: {exc!r}"
+        if got != {"a": "1.0.0"}:
+            return f"releasable_packages returned {got!r} for an exclude of a non-member, want {{'a': '1.0.0'}}"
+        return None
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _exclude_of_a_member_is_inconclusive() -> str | None:
+    """SMA-774: an `exclude` that covers a member, or any `exclude` beside a glob member, is
+    still refused. Both checks are asserted, each with its own marker, so a mutation that drops
+    either one reds this row.
+    """
+    cases = (
+        (["crates/libs/a"], ["crates/libs/a"], "which covers the member"),
+        (["crates/libs/a"], ["./crates/libs/"], "which covers the member"),
+        (["crates/libs/a"], ["crates"], "which covers the member"),
+        (["crates/libs/*"], ["tools/compiler"], "with glob members"),
+    )
+    for members, exclude, marker in cases:
+        tmp = tempfile.mkdtemp()
+        try:
+            rs_root = _exclude_tree(tmp, members, exclude)
+            try:
+                releasable_packages(rs_root)
+            except InconclusiveError as exc:
+                if marker in str(exc) and "does not model member exclusion" in str(exc):
+                    continue
+                return (f"members={members!r} exclude={exclude!r}: InconclusiveError for the wrong "
+                        f"reason: {exc!r} (expected a message naming {marker!r})")
+            return f"members={members!r} exclude={exclude!r}: releasable_packages did not refuse it"
+        finally:
+            shutil.rmtree(tmp)
+    # A near miss is NOT covered: `crates/libs/a` shares a string prefix with `crates/lib` but is
+    # not under it. Mutation: drop the `/` from the prefix test, and this case reds.
+    tmp = tempfile.mkdtemp()
+    try:
+        rs_root = _exclude_tree(tmp, ["crates/libs/a"], ["crates/lib"])
+        try:
+            releasable_packages(rs_root)
+        except InconclusiveError as exc:
+            return f"an exclude that only shares a string prefix with a member was refused: {exc!r}"
+    finally:
+        shutil.rmtree(tmp)
+    return None
+
+
+def _exclude_with_dotdot_is_inconclusive() -> str | None:
+    """SMA-774 review: an `exclude` entry with a `..` path component is refused.
+
+    `tools/../crates/libs/a` names the member `crates/libs/a`, but the string-prefix test does not
+    see that. Mutation: remove the `..` check, and this row reds.
+    """
+    for exclude in (["tools/../crates/libs/a"], [".."], ["../rs/crates"]):
+        tmp = tempfile.mkdtemp()
+        try:
+            rs_root = _exclude_tree(tmp, ["crates/libs/a"], exclude)
+            try:
+                releasable_packages(rs_root)
+            except InconclusiveError as exc:
+                if "a `..` path component" in str(exc) and \
+                        "does not model member exclusion" in str(exc):
+                    continue
+                return (f"exclude={exclude!r}: InconclusiveError for the wrong reason: {exc!r} "
+                        f"(expected a message naming 'a `..` path component')")
+            return f"exclude={exclude!r}: releasable_packages did not refuse it"
+        finally:
+            shutil.rmtree(tmp)
+    return None
 
 
 def _malformed_config_asserts_three() -> str | None:
@@ -1690,6 +1837,12 @@ COLLECTION_ROWS: tuple[tuple[str, Callable[[], str | None]], ...] = (
     ("a git_tag_name override is inconclusive", _tag_name_override_is_inconclusive),
     ("a member outside crates/*/* is still demanded a tag", _member_outside_crates_is_seen),
     ("an unresolvable workspace member is inconclusive", _unresolvable_member_is_inconclusive),
+    ("SMA-774 an exclude that covers no literal member is modelled",
+     _exclude_of_a_non_member_is_modelled),
+    ("SMA-774 an exclude that covers a member, or beside a glob member, is inconclusive",
+     _exclude_of_a_member_is_inconclusive),
+    ("SMA-774 an exclude with a `..` path component is inconclusive",
+     _exclude_with_dotdot_is_inconclusive),
     ("a malformed release-plz.toml makes --assert exit 3, not 1",
      _malformed_config_asserts_three),
     ("a non-table [workspace] is inconclusive", _workspace_not_a_table_is_inconclusive),
@@ -1783,8 +1936,8 @@ def self_test() -> int:
     # The floor tracks the table (SMA-709). When the row count changes, in either direction, set
     # the floor to one below `--collection-count`. Change the twin in ci/actionlint/run.sh
     # check 11 in the same commit.
-    if len(COLLECTION_ROWS) < 37:
-        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 37 — "
+    if len(COLLECTION_ROWS) < 40:
+        print(f"FAIL COLLECTION_ROWS has only {len(COLLECTION_ROWS)} row(s); the floor is 40 — "
               "something emptied or gutted the collection-layer table; if the removal is "
               "intended, lower both floors in the same commit (SMA-709)", file=sys.stderr)
         rc = 3

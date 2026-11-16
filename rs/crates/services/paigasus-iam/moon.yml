@@ -57,7 +57,20 @@ tasks:
     # --profile iam`) — verified via `moon task paigasus-iam-rs:test --json`. Appending only the
     # new flags is correct BECAUSE of that same append behavior.
     args: ['--profile', 'iam']
-    deps: ['^:build']
+    # SMA-774 — `tests/tool_policies_real_compiler.rs` and `tests/tool_policies_compiler_process.rs`
+    # run the real policy compiler. It is a separate cargo workspace, so `^:build` does not build
+    # it: the task names its build here, and `env` gives the tests the path of the binary.
+    deps: ['^:build', 'paigasus-policy-compiler-rs:build']
+    env:
+      PAIGASUS_POLICY_COMPILER_BIN: '$workspaceRoot/rs/tools/paigasus-policy-compiler/target/debug/paigasus-policy-compiler'
+    # The two tests above read the protocol fixtures of the policy compiler, which is outside this
+    # project. They also run its binary, so its sources, manifest and lock are inputs. It is a task
+    # dep, not a `dependsOn` project: `fileGroups.upstreams` is for the crates of the `rs/` workspace.
+    inputs:
+      - '/rs/tools/paigasus-policy-compiler/protocol/**/*'
+      - '/rs/tools/paigasus-policy-compiler/src/**/*'
+      - '/rs/tools/paigasus-policy-compiler/Cargo.toml'
+      - '/rs/tools/paigasus-policy-compiler/Cargo.lock'
     # This task and the two console e2e tasks share one CI runner. This task runs about 520 s of
     # Docker-backed nextest suites, Keycloak e2e included. Overlap starves the browser, so React
     # never hydrates in the console e2e tasks (SMA-718). The mutex stops the three tasks from

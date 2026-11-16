@@ -19,6 +19,7 @@ pub mod dead_letters;
 pub mod service_accounts;
 pub mod service_info;
 pub mod tenancy;
+pub mod tool_policies;
 pub mod users;
 
 use tonic::transport::Server;
@@ -39,10 +40,12 @@ use paigasus_proto::paigasus::iam::v1::authorization_service_server::Authorizati
 use paigasus_proto::paigasus::iam::v1::outbox_service_server::OutboxServiceServer;
 use paigasus_proto::paigasus::iam::v1::service_account_service_server::ServiceAccountServiceServer;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_server::TenancyServiceServer;
+use paigasus_proto::paigasus::iam::v1::tool_policy_service_server::ToolPolicyServiceServer;
 use paigasus_proto::paigasus::iam::v1::user_service_server::UserServiceServer;
 use service_accounts::ServiceAccountGrpc;
 use service_info::ServiceInfoGrpc;
 use tenancy::TenancyGrpc;
+use tool_policies::ToolPolicyGrpc;
 use users::UserGrpc;
 
 /// Build a health service with the overall server marked SERVING, plus its reporter.
@@ -98,7 +101,12 @@ pub async fn routes(state: AppState) -> tonic::service::Routes {
         // rows — a break-glass surface must not be disable-able, because the moment you need it
         // is the moment a config flag is hardest to change. HTTP mounts `dead_letters::router()`
         // ungated too (see its module doc), so gating gRPC alone would itself be a divergence.
-        .add_service(OutboxServiceServer::new(OutboxGrpc::new(state.clone())));
+        .add_service(OutboxServiceServer::new(OutboxGrpc::new(state.clone())))
+        // SMA-774: ALWAYS registered, unlike `AuditService`. Each of the eight RPCs checks
+        // `state.capabilities.tool_policies` first and answers `capability-disabled` when the
+        // feature is off (spec section 6.2, ruling D8), so a client of a deployment without a
+        // compiler gets a typed reason and not a bare `UNIMPLEMENTED`.
+        .add_service(ToolPolicyServiceServer::new(ToolPolicyGrpc::new(state.clone())));
     // `AuditService` is WHOLLY within `iam.audit`, so it is not registered at all when the
     // capability is off — a client then gets `UNIMPLEMENTED`, exactly as it would from a build
     // predating the service.
@@ -177,6 +185,19 @@ mod tests {
             production.contains(".http2_max_header_list_size(grpc::grpc_max_header_list_size(max_token_bytes))"),
             "main.rs must size the production gRPC header list with grpc_max_header_list_size(max_token_bytes)"
         );
+    }
+
+    /// SMA-774: production wires the tool policy feature in `main.rs`, which no integration test
+    /// reaches. This test reads `main.rs` (comments removed) and pins the probe, which runs only
+    /// under the toggle, and the `with_tool_policies` call that turns the capability on.
+    #[test]
+    fn production_probes_the_compiler_and_wires_tool_policies() {
+        const MAIN: &str = include_str!("../../main.rs");
+        let production = MAIN.split("\n#[cfg(test)]").next().expect("main.rs must have a production part");
+        let production = production.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(production.contains("if config.tool_policies.enabled {"), "the probe must run only when the toggle is on");
+        assert!(production.contains("policy_compiler::probe(&config.tool_policies)"), "main.rs must probe the compiler at boot");
+        assert!(production.contains(".with_tool_policies("), "main.rs must hand the probe result to AppState::with_tool_policies");
     }
 
     /// SMA-571 D8: service registration must live at exactly ONE site. tonic's `Router` keeps its

@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: Apache-2.0
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+# SMA-774 — the policy compiler is a SEPARATE cargo workspace (spec 2026-11-15
+# iam-tool-policy-sets, section 5.1). `rs/Cargo.toml` lists it under `exclude`, and it has its
+# own Cargo.lock and its own deny.toml. Every task runs cargo in this directory, so cargo reads
+# THIS workspace and THIS lock.
+id: 'paigasus-policy-compiler-rs'
+layer: 'tool'
+language: 'rust'
+
+# The inherited tasks of `.moon/tasks/rust.yml` key on `/rs/Cargo.lock`, `/rs/Cargo.toml`,
+# `/rs/.config/nextest.toml` and `@group(upstreams)`. None of them is an input of this workspace:
+# - `/rs/Cargo.lock` and `/rs/Cargo.toml` are the OTHER workspace. Keeping them would put this
+#   project into the `lockfile->all-lint` set of `ci/affected-graph/run.sh` and would re-run
+#   the compiler on every rs/ Dependabot PR, for no change in its result.
+# - nextest reads `.config/nextest.toml` from THIS workspace root, not from `rs/`, so
+#   `/rs/.config/nextest.toml` would be a dead input.
+# - this project has no in-tree cargo dependency, so it has no upstreams.
+# So each inherited task REPLACES its inputs (`mergeInputs: 'replace'`) with this workspace's own.
+# The fixture trees (`protocol/`, `tests/golden/`, `corpus/`) are read by the sources with
+# `include_str!` or by the tests at run time, so they key every task.
+# `/rs/rust-toolchain.toml` selects the compiler, and `/rs/.cargo/config.toml` (the darwin
+# rustflags) applies here because cargo walks up from this directory (A10). `fmt` keys on
+# `/rs/rustfmt.toml`, which rustfmt finds the same way.
+tasks:
+  build:
+    # `paigasus-iam-rs:test` runs this binary. CI restores `.moon/cache` and the cargo `target/`
+    # through two caches with different keys. On a Moon hash hit the build does not run, and the
+    # restored `target/` may not hold the binary. Declaring it as an output makes Moon hydrate it
+    # from its own cache. No inherited task declares `outputs`, so Moon's default append merge
+    # adds nothing else.
+    outputs:
+      - 'target/debug/paigasus-policy-compiler'
+    options:
+      mergeInputs: 'replace'
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'protocol/**/*'
+      - 'tests/golden/**/*'
+      - 'corpus/**/*'
+      - '/rs/rust-toolchain.toml'
+      - '/rs/.cargo/config.toml'
+  build-release:
+    options:
+      mergeInputs: 'replace'
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'protocol/**/*'
+      - 'tests/golden/**/*'
+      - 'corpus/**/*'
+      - '/rs/rust-toolchain.toml'
+      - '/rs/.cargo/config.toml'
+  test:
+    options:
+      mergeInputs: 'replace'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'protocol/**/*'
+      - 'tests/golden/**/*'
+      - 'corpus/**/*'
+      - '/rs/rust-toolchain.toml'
+      - '/rs/.cargo/config.toml'
+  lint:
+    options:
+      mergeInputs: 'replace'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'protocol/**/*'
+      - 'tests/golden/**/*'
+      - 'corpus/**/*'
+      - '/rs/rust-toolchain.toml'
+      - '/rs/.cargo/config.toml'
+  fmt:
+    options:
+      mergeInputs: 'replace'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'protocol/**/*'
+      - 'tests/golden/**/*'
+      - 'corpus/**/*'
+      - '/rs/rust-toolchain.toml'
+      - '/rs/.cargo/config.toml'
+      - '/rs/rustfmt.toml'
+  # `repo:deny` runs `cargo deny --manifest-path rs/Cargo.toml`, so it reads only the rs/
+  # workspace and its lock. This task covers the compiler lock under `:deny`, with the
+  # compiler's own deny.toml (spec section 5.1).
+  deny:
+    command: 'cargo deny --locked check'
+    toolchain: 'system'
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+  # `repo:machete` runs `cargo machete rs`, which is recursive and so already scans this
+  # directory. This task keys the same check on the compiler's own inputs, so a compiler-only
+  # change selects it under `:machete`.
+  machete:
+    command: 'cargo machete .'
+    toolchain: 'system'
+    inputs:
+      - 'Cargo.toml'
+      - '@group(sources)'
+      - '@group(tests)'

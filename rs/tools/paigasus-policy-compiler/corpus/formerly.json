@@ -1,0 +1,204 @@
+{
+  "shape": "formerly",
+  "schema": "tests/fixtures/test_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-formerly\")\npermit (principal, action == Pgs::Gateway::Action::\"search\", resource)\nwhen temporal { formerly within 10m Pgs::Gateway::Action::\"search\"::request{ input.q: \"unlock\" } };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-formerly\")\npermit(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.p_corpus_hformerly_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long"
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String"
+                      }
+                    }
+                  },
+                  "p_corpus_hformerly_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long"
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_hformerly_0__temporal_0",
+        "policy_id": "corpus-formerly",
+        "scope": "session",
+        "window_ms": 600000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "search"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "q"
+              ],
+              "op": "eq",
+              "value": {
+                "type": "string",
+                "value": "unlock"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "hello",
+        "n": 1
+      }
+    },
+    {
+      "ts": 100,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "unlock",
+        "n": 1
+      }
+    },
+    {
+      "ts": 200,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "hello",
+        "n": 1
+      }
+    },
+    {
+      "ts": 700,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "hello",
+        "n": 1
+      }
+    },
+    {
+      "ts": 701,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "hello",
+        "n": 1
+      }
+    }
+  ],
+  "decisions": [
+    "deny",
+    "allow",
+    "allow",
+    "allow",
+    "deny"
+  ],
+  "notes": [
+    "call 1 is the first matching call: its decision shows whether `formerly` sees the event being decided",
+    "call 3 is exactly 600 s after the matching call and call 4 is 601 s after it: the window is closed"
+  ],
+  "paigasus_differs": []
+}

@@ -152,6 +152,11 @@ enum Capability {
   // grants" (SMA-633 D9). `IntrospectApiKey` returns an empty `role_grants` by design even when
   // this key is present (SMA-633 D2) — this key does not promise grants on that path.
   CAPABILITY_IAM_AUTHN_GRANTS = 6;
+
+  // "iam.tool.policies" — the tool catalog and the tool policy sets can be administered
+  // (ToolPolicyService). Absent when tool_policies.enabled is false or the compiler binary is
+  // missing.
+  CAPABILITY_IAM_TOOL_POLICIES = 7;
 }
 
 message GetServiceInfoRequest {}

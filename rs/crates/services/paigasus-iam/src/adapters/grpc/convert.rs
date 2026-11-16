@@ -127,6 +127,9 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
         ErrorClass::Conflict => Code::AlreadyExists,
         ErrorClass::Precondition => Code::FailedPrecondition,
         ErrorClass::Forbidden => Code::PermissionDenied,
+        ErrorClass::Aborted => Code::Aborted,
+        ErrorClass::Unavailable => Code::Unavailable,
+        ErrorClass::Exhausted => Code::ResourceExhausted,
         ErrorClass::Internal => {
             tracing::error!(error = %e, code = e.code(), "internal error handling gRPC request");
             Code::Internal
@@ -677,6 +680,19 @@ mod tests {
     use super::*;
     use paigasus_iam_core::{ProjectId, Slug, TeamId};
 
+    /// Membership test for `repo:error-code-single-site` (SMA-774). The guard for
+    /// `paigasus-iam-core`'s `tool_policy/check.rs` lives here, not in that crate: this crate
+    /// depends on `paigasus-proto`, and Moon selects this task when `error.proto` changes.
+    #[test]
+    fn every_tool_policy_check_reason_is_in_the_canonical_registry() {
+        use paigasus_iam_core::tool_policy::{REASON_FLOOR_PERMIT, REASON_INVALID};
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        for code in [REASON_INVALID, REASON_FLOOR_PERMIT] {
+            assert!(ErrorReason::from_wire_reason(code).is_some(), "{code} is not declared in common/v1/error.proto");
+        }
+    }
+
     /// A deterministic `PrincipalId` for audit-actor test fields — mirrors the `actor`/`principal`
     /// helpers used throughout `application::*`'s own test modules.
     fn principal(n: u128) -> PrincipalId {
@@ -1054,6 +1070,27 @@ mod tests {
                 ErrorReason::from_wire_reason(code).is_some(),
                 "TenancyError::{err:?} emits {code:?}, which is not declared in common/v1/error.proto"
             );
+        }
+    }
+
+    /// SMA-774: the three new classes reach gRPC with their codes, and only the busy compiler is
+    /// retryable.
+    #[test]
+    fn the_tool_policy_errors_map_to_their_grpc_codes() {
+        for (err, code, retryable) in [
+            (TenancyError::ToolCatalogConflict, Code::AlreadyExists, "false"),
+            (TenancyError::ToolPolicyVersionConflict, Code::Aborted, "false"),
+            (TenancyError::ToolPolicyRecompilePending, Code::FailedPrecondition, "false"),
+            (TenancyError::ToolPolicyCompilerUnavailable, Code::Unavailable, "unknown"),
+            (TenancyError::ToolPolicyCompilerBusy, Code::ResourceExhausted, "true"),
+            (TenancyError::ToolPolicyVersionNotFound, Code::NotFound, "false"),
+        ] {
+            let wire = err.code();
+            let status = status_to_grpc(err);
+            assert_eq!(status.code(), code, "{wire}");
+            let info = status.get_error_details().error_info().cloned().expect("every IAM status carries ErrorInfo");
+            assert_eq!(info.reason, wire);
+            assert_eq!(info.metadata.get("retryable").map(String::as_str), Some(retryable), "{wire}");
         }
     }
 

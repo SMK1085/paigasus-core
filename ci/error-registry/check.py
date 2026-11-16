@@ -77,6 +77,28 @@ def mirror_codes(text):
 SCAN_GLOB = "**/src/**/*.rs"
 SCAN_ROOT = REPO / "rs/crates"
 
+# The standalone tool workspaces under rs/tools (SMA-774: the policy compiler emits the six
+# compiler rejection reasons). ONE crate level only, and only its `src/` and `tests/`: each tool
+# workspace keeps its own `target/` next to `src/`, and a `**` below rs/tools would scan cargo's
+# build output. Emission is scanned in `src/`; a guard may also live in `tests/`, because the
+# compiler's membership test is an integration test. moon.yml's inputs cover the same trees.
+TOOLS_ROOT = REPO / "rs/tools"
+TOOLS_SCAN_GLOB = "*/src/**/*.rs"
+TOOLS_GUARD_GLOBS = ("*/src/**/*.rs", "*/tests/**/*.rs")
+
+
+def scanned_files():
+    """Every file the emission scan reads: rs/crates at any depth, plus each rs/tools crate's src."""
+    return sorted(set(SCAN_ROOT.glob(SCAN_GLOB)) | set(TOOLS_ROOT.glob(TOOLS_SCAN_GLOB)))
+
+
+def guard_files():
+    """Every file a guard may live in: the scanned files, plus each rs/tools crate's tests."""
+    files = set(scanned_files())
+    for pattern in TOOLS_GUARD_GLOBS:
+        files |= set(TOOLS_ROOT.glob(pattern))
+    return sorted(files)
+
 # Files permitted to spell a registry code.
 #   emits    — puts a code on the wire. `guard` names the membership test proving its codes are
 #              all declared; check.py asserts that test still exists.
@@ -98,6 +120,14 @@ MANIFEST = (
      "MIGRATING — the deferred boot router's app-route 503, emitted before any AppState exists"),
     ("rs/crates/services/paigasus-iam/src/adapters/http/system_retirement.rs", "emits",
      "every_system_retirement_code_is_declared_in_the_canonical_registry", "the two 409 refusals"),
+    ("rs/crates/libs/paigasus-iam-core/src/tool_policy/check.rs", "emits",
+     "every_tool_policy_check_reason_is_in_the_canonical_registry",
+     "the Cedar 4.14 check's two rejection reasons (SMA-774); the guard lives in paigasus-iam grpc/convert.rs"),
+    ("rs/crates/services/paigasus-iam/src/application/tool_policies/rejection.rs", "emits",
+     "every_rejection_reason_is_declared_in_the_canonical_registry", "RejectionReason::code()"),
+    ("rs/tools/paigasus-policy-compiler/src/compile.rs", "emits",
+     "every_rejection_reason_matches_the_shared_fixture",
+     "ReasonCode::as_wire() — checked against the shared protocol fixture, which IAM checks against the registry"),
     ("rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs", "emits",
      "the_terminal_sse_frame_carries_a_registered_code", "the terminal SSE error frame"),
     ("rs/crates/services/paigasus-gateway/src/adapters/http/responses.rs", "emits",
@@ -107,7 +137,7 @@ MANIFEST = (
     ("rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs", "asserts", None,
      "NOT test-only — a production conversion path. Safe because every code leaves it through an "
      "ErrorReason LazyLock static, never through a literal, so a code absent from the registry is "
-     "unrepresentable here. It also hosts three membership tests."),
+     "unrepresentable here. It also hosts four membership tests."),
     ("rs/crates/libs/paigasus-proto/src/error.rs", "asserts", None,
      "EXPECTED_REASONS — the registry's own mirror, which this gate cross-checks against"),
     ("rs/crates/services/paigasus-iam/src/adapters/http/error.rs", "asserts", None, "test assertions only"),
@@ -147,7 +177,7 @@ def scan(codes):
     """
     pattern = code_pattern(codes)
     hits = {}
-    for path in sorted(SCAN_ROOT.glob(SCAN_GLOB)):
+    for path in scanned_files():
         found = len(pattern.findall(path.read_text(encoding="utf-8")))
         if found:
             hits[path.relative_to(REPO).as_posix()] = found
@@ -155,7 +185,7 @@ def scan(codes):
 
 
 def guard_exists(guard):
-    """Is `guard` still a test function somewhere under rs/crates?
+    """Is `guard` still a test function somewhere under rs/crates, or in an rs/tools crate?
 
     Cheap, and it recovers the only load-bearing part of the scheduling task this design dropped:
     deleting a membership test now reds THIS gate, even though nothing here runs it.
@@ -171,7 +201,7 @@ def guard_exists(guard):
     guard alive (CodeRabbit, owner/repo PR 142).
     """
     decl = _fn_decl_pattern(guard)
-    for path in SCAN_ROOT.glob(SCAN_GLOB):
+    for path in guard_files():
         lines = path.read_text(encoding="utf-8").splitlines()
         for idx, line in enumerate(lines):
             if decl.match(line.strip()) and _is_test_fn(lines, idx):
@@ -442,6 +472,24 @@ def self_test():
     if unreachable:
         print(f"  FAIL [scan scope] {len(unreachable)} .rs file(s) under a src/ tree are unreachable "
               f"by SCAN_GLOB, so their emission sites are invisible: {unreachable[:3]}", file=sys.stderr)
+        rc = 1
+
+    # The same for each rs/tools crate's own `src/` tree. Its `target/` must stay out: cargo's
+    # build output is not authored. The compiler's compile.rs is the sentinel that it is reached.
+    tools_reachable = set(TOOLS_ROOT.glob(TOOLS_SCAN_GLOB))
+    tools_src = {p for p in TOOLS_ROOT.rglob("*.rs")
+                 if len(p.relative_to(TOOLS_ROOT).parts) > 2 and p.relative_to(TOOLS_ROOT).parts[1] == "src"}
+    if tools_src - tools_reachable:
+        print(f"  FAIL [scan scope] rs/tools src file(s) unreachable by TOOLS_SCAN_GLOB: "
+              f"{sorted(p.relative_to(REPO).as_posix() for p in tools_src - tools_reachable)[:3]}", file=sys.stderr)
+        rc = 1
+    leaked = sorted(p.relative_to(REPO).as_posix() for p in tools_reachable if "/target/" in p.as_posix())
+    if leaked:
+        print(f"  FAIL [scan scope] TOOLS_SCAN_GLOB reaches cargo output: {leaked[:3]}", file=sys.stderr)
+        rc = 1
+    sentinel_tool = TOOLS_ROOT / "paigasus-policy-compiler/src/compile.rs"
+    if sentinel_tool not in tools_reachable:
+        print("  FAIL [scan scope] TOOLS_SCAN_GLOB does not reach the policy compiler's src/compile.rs", file=sys.stderr)
         rc = 1
 
     if not code_pattern({"upstream-error"}).search(r'\"code\":\"upstream-error\"'):

@@ -22,6 +22,10 @@ impl IntoResponse for ApiError {
             ErrorClass::NotFound => StatusCode::NOT_FOUND,
             ErrorClass::Conflict | ErrorClass::Precondition => StatusCode::CONFLICT,
             ErrorClass::Forbidden => StatusCode::FORBIDDEN,
+            // SMA-774: a version conflict is a 409 like the other conflicts (spec section 7).
+            ErrorClass::Aborted => StatusCode::CONFLICT,
+            ErrorClass::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorClass::Exhausted => StatusCode::TOO_MANY_REQUESTS,
             ErrorClass::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -107,6 +111,25 @@ mod tests {
         let body = body_json(ApiError(TenancyError::SlugConflict).into_response()).await;
         let keys: std::collections::BTreeSet<&str> = body["error"].as_object().expect("an object").keys().map(String::as_str).collect();
         assert_eq!(keys, ["code", "message"].into_iter().collect::<std::collections::BTreeSet<_>>());
+    }
+
+    /// SMA-774: the three new classes have their HTTP status and retryable header (spec section 7).
+    #[tokio::test]
+    async fn the_tool_policy_errors_map_to_their_http_status() {
+        for (err, status, retryable) in [
+            (TenancyError::ToolCatalogConflict, StatusCode::CONFLICT, "false"),
+            (TenancyError::ToolPolicyVersionConflict, StatusCode::CONFLICT, "false"),
+            (TenancyError::ToolPolicyRecompilePending, StatusCode::CONFLICT, "false"),
+            (TenancyError::ToolPolicyCompilerUnavailable, StatusCode::SERVICE_UNAVAILABLE, "unknown"),
+            (TenancyError::ToolPolicyCompilerBusy, StatusCode::TOO_MANY_REQUESTS, "true"),
+            (TenancyError::ToolPolicyVersionNotFound, StatusCode::NOT_FOUND, "false"),
+        ] {
+            let code = err.code();
+            let resp = ApiError(err).into_response();
+            assert_eq!(resp.status(), status, "{code}");
+            assert_eq!(resp.headers()["paigasus-retryable"], retryable, "{code}");
+            assert_eq!(body_json(resp).await["error"]["code"], code);
+        }
     }
 
     #[tokio::test]

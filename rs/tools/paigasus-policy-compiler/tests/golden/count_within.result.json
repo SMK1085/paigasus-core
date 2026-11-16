@@ -1,0 +1,306 @@
+{
+  "outcome": "accepted",
+  "protocol_version": 1,
+  "compiler_generation": 1,
+  "compiled": {
+    "cedar_policies": "@id(\"search-rate\")\npermit(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.p_search_hrate_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "commonTypes": {
+          "CallInfo": {
+            "type": "Record",
+            "attributes": {
+              "declared": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              }
+            }
+          },
+          "RequestInfo": {
+            "type": "Record",
+            "attributes": {
+              "ingress": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              },
+              "model": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              },
+              "scope": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              }
+            }
+          },
+          "SessionInfo": {
+            "type": "Record",
+            "attributes": {
+              "id": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              },
+              "turn": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::Long"
+              }
+            }
+          }
+        },
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "call": {
+                    "type": "EntityOrCommon",
+                    "name": "CallInfo"
+                  },
+                  "findings": {
+                    "type": "Set",
+                    "element": {
+                      "type": "EntityOrCommon",
+                      "name": "__cedar::String"
+                    }
+                  },
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "input_text": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::String",
+                    "required": false
+                  },
+                  "request": {
+                    "type": "EntityOrCommon",
+                    "name": "RequestInfo"
+                  },
+                  "session": {
+                    "type": "EntityOrCommon",
+                    "name": "SessionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "Unregistered": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "call": {
+                    "type": "EntityOrCommon",
+                    "name": "CallInfo"
+                  },
+                  "findings": {
+                    "type": "Set",
+                    "element": {
+                      "type": "EntityOrCommon",
+                      "name": "__cedar::String"
+                    }
+                  },
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "input_text": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::String",
+                    "required": false
+                  },
+                  "request": {
+                    "type": "EntityOrCommon",
+                    "name": "RequestInfo"
+                  },
+                  "session": {
+                    "type": "EntityOrCommon",
+                    "name": "SessionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "call": {
+                    "type": "EntityOrCommon",
+                    "name": "CallInfo"
+                  },
+                  "findings": {
+                    "type": "Set",
+                    "element": {
+                      "type": "EntityOrCommon",
+                      "name": "__cedar::String"
+                    }
+                  },
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "__cedar::Long"
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "__cedar::String"
+                      }
+                    }
+                  },
+                  "input_text": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::String",
+                    "required": false
+                  },
+                  "p_search_hrate_0__temporal_0": {
+                    "type": "Boolean"
+                  },
+                  "request": {
+                    "type": "EntityOrCommon",
+                    "name": "RequestInfo"
+                  },
+                  "session": {
+                    "type": "EntityOrCommon",
+                    "name": "SessionInfo"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool",
+                "type": "Action"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "call": {
+                    "type": "EntityOrCommon",
+                    "name": "CallInfo"
+                  },
+                  "findings": {
+                    "type": "Set",
+                    "element": {
+                      "type": "EntityOrCommon",
+                      "name": "__cedar::String"
+                    }
+                  },
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "__cedar::Long"
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "__cedar::String"
+                      }
+                    }
+                  },
+                  "input_text": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::String",
+                    "required": false
+                  },
+                  "request": {
+                    "type": "EntityOrCommon",
+                    "name": "RequestInfo"
+                  },
+                  "session": {
+                    "type": "EntityOrCommon",
+                    "name": "SessionInfo"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool",
+                "type": "Action"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_search_hrate_0__temporal_0",
+        "policy_id": "search-rate",
+        "scope": "session",
+        "window_ms": 3600000,
+        "shape": {
+          "type": "count_within",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "search"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "q"
+              ],
+              "op": "eq",
+              "value": {
+                "type": "string",
+                "value": "x"
+              }
+            }
+          },
+          "op": "le",
+          "threshold": 5
+        }
+      }
+    ]
+  }
+}

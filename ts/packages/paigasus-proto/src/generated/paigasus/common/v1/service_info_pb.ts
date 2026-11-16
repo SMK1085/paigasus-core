@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file paigasus/common/v1/service_info.proto.
  */
 export const file_paigasus_common_v1_service_info: GenFile = /*@__PURE__*/
-  fileDesc("CiVwYWlnYXN1cy9jb21tb24vdjEvc2VydmljZV9pbmZvLnByb3RvEhJwYWlnYXN1cy5jb21tb24udjEiRQoLU2VydmljZUluZm8SDwoHc2VydmljZRgBIAEoCRIPCgd2ZXJzaW9uGAIgASgJEhQKDGNhcGFiaWxpdGllcxgDIAMoCSIXChVHZXRTZXJ2aWNlSW5mb1JlcXVlc3QiTwoWR2V0U2VydmljZUluZm9SZXNwb25zZRI1CgxzZXJ2aWNlX2luZm8YASABKAsyHy5wYWlnYXN1cy5jb21tb24udjEuU2VydmljZUluZm8q4wEKCkNhcGFiaWxpdHkSGgoWQ0FQQUJJTElUWV9VTlNQRUNJRklFRBAAEh4KGkNBUEFCSUxJVFlfSUFNX0FVVEhaX0NFREFSEAESGgoWQ0FQQUJJTElUWV9JQU1fQVBJS0VZUxACEhgKFENBUEFCSUxJVFlfSUFNX0FVRElUEAMSIgoeQ0FQQUJJTElUWV9HQVRFV0FZX0NIQVRfU1RSRUFNEAQSHgoaQ0FQQUJJTElUWV9JQU1fREVBRExFVFRFUlMQBRIfChtDQVBBQklMSVRZX0lBTV9BVVRITl9HUkFOVFMQBjJ9ChJTZXJ2aWNlSW5mb1NlcnZpY2USZwoOR2V0U2VydmljZUluZm8SKS5wYWlnYXN1cy5jb21tb24udjEuR2V0U2VydmljZUluZm9SZXF1ZXN0GioucGFpZ2FzdXMuY29tbW9uLnYxLkdldFNlcnZpY2VJbmZvUmVzcG9uc2ViBnByb3RvMw");
+  fileDesc("CiVwYWlnYXN1cy9jb21tb24vdjEvc2VydmljZV9pbmZvLnByb3RvEhJwYWlnYXN1cy5jb21tb24udjEiRQoLU2VydmljZUluZm8SDwoHc2VydmljZRgBIAEoCRIPCgd2ZXJzaW9uGAIgASgJEhQKDGNhcGFiaWxpdGllcxgDIAMoCSIXChVHZXRTZXJ2aWNlSW5mb1JlcXVlc3QiTwoWR2V0U2VydmljZUluZm9SZXNwb25zZRI1CgxzZXJ2aWNlX2luZm8YASABKAsyHy5wYWlnYXN1cy5jb21tb24udjEuU2VydmljZUluZm8qhQIKCkNhcGFiaWxpdHkSGgoWQ0FQQUJJTElUWV9VTlNQRUNJRklFRBAAEh4KGkNBUEFCSUxJVFlfSUFNX0FVVEhaX0NFREFSEAESGgoWQ0FQQUJJTElUWV9JQU1fQVBJS0VZUxACEhgKFENBUEFCSUxJVFlfSUFNX0FVRElUEAMSIgoeQ0FQQUJJTElUWV9HQVRFV0FZX0NIQVRfU1RSRUFNEAQSHgoaQ0FQQUJJTElUWV9JQU1fREVBRExFVFRFUlMQBRIfChtDQVBBQklMSVRZX0lBTV9BVVRITl9HUkFOVFMQBhIgChxDQVBBQklMSVRZX0lBTV9UT09MX1BPTElDSUVTEAcyfQoSU2VydmljZUluZm9TZXJ2aWNlEmcKDkdldFNlcnZpY2VJbmZvEikucGFpZ2FzdXMuY29tbW9uLnYxLkdldFNlcnZpY2VJbmZvUmVxdWVzdBoqLnBhaWdhc3VzLmNvbW1vbi52MS5HZXRTZXJ2aWNlSW5mb1Jlc3BvbnNlYgZwcm90bzM");
 
 /**
  * @generated from message paigasus.common.v1.ServiceInfo
@@ -174,6 +174,15 @@ export enum Capability {
    * @generated from enum value: CAPABILITY_IAM_AUTHN_GRANTS = 6;
    */
   IAM_AUTHN_GRANTS = 6,
+
+  /**
+   * "iam.tool.policies" — the tool catalog and the tool policy sets can be administered
+   * (ToolPolicyService). Absent when tool_policies.enabled is false or the compiler binary is
+   * missing.
+   *
+   * @generated from enum value: CAPABILITY_IAM_TOOL_POLICIES = 7;
+   */
+  IAM_TOOL_POLICIES = 7,
 }
 
 /**

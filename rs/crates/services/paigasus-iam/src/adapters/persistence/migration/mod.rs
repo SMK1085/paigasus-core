@@ -14,6 +14,7 @@ mod m0009_outbox_dead_letter_columns;
 mod m0010_policy_reconcile_columns;
 mod m0011_audit_stamp_columns;
 mod m0012_role_grant_scope_index;
+mod m0013_create_tool_policies;
 
 pub struct Migrator;
 
@@ -33,6 +34,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0010_policy_reconcile_columns::Migration),
             Box::new(m0011_audit_stamp_columns::Migration),
             Box::new(m0012_role_grant_scope_index::Migration),
+            Box::new(m0013_create_tool_policies::Migration),
         ]
     }
 }
