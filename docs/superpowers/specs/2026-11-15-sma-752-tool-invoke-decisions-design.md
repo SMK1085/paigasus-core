@@ -279,7 +279,8 @@ impl ToolPolicies {
 - Each policy needs an `@id`. The merged policy ID is `floor/<id>` or `tenant/<id>` (D29).
 - A floor policy with the effect `permit` is a `CompileError` (ADR-0027 (d)).
 - An action literal in either set that is not in normal form (`normalise(id) != id`, for example
-  `Action::"Send_Email"`) is a `CompileError`, because it would never match.
+  `Action::"Send_Email"`) is a `CompileError`, because it would never match. The two group
+  identifiers `InvokeTool` and `Unregistered` are exempt from this rule.
 - The catalog is normalised. Two catalog names with the same normal form, or a catalog name equal
   to `invoketool` or `unregistered`, are a `CompileError`.
 - Action entities (D22): the groups `Pgs::Gateway::Action::"InvokeTool"` and
@@ -449,7 +450,8 @@ pub trait PolicySource: Send + Sync {
 
 1. Read the snapshot from `DecisionContext` (D30). The snapshot holds the floor, the tenant
    policies (or "unavailable"), the modes and the request facts.
-2. If the tenant mode is `off`, evaluate the floor alone (D33). The floor is never skipped.
+2. If the tenant mode is `off`, evaluate the floor alone (D33). The floor is never skipped. The
+   result is `Allow` unless a floor `forbid` matches. This path needs no `permit`.
 3. For each call: build the `ToolInvocation`, `Facts` and `Findings`, and call `decide`.
 4. Map the verdict per § 6.4.
 
