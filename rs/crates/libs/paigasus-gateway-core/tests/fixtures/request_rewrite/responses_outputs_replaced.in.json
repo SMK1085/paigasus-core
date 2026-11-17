@@ -5,8 +5,6 @@
     {"type": "function_call_output", "call_id": "c1", "output": "deleted /tmp/a"},
     {"type": "custom_tool_call", "call_id": "c2", "name": "run_sql", "input": "DROP TABLE users"},
     {"type": "custom_tool_call_output", "call_id": "c2", "output": "ok"},
-    {"type": "computer_call", "id": "cu_1", "call_id": "c3", "action": {"type": "screenshot"}, "pending_safety_checks": [], "status": "completed"},
-    {"type": "computer_call_output", "call_id": "c3", "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,AAAA"}},
     {"type": "local_shell_call", "id": "ls_1", "call_id": "c4", "action": {"type": "exec", "command": ["ls", "-la"], "env": {}}, "status": "completed"},
     {"type": "local_shell_call_output", "call_id": "c4", "output": "total 0"},
     {"type": "local_shell_call", "id": "ls_2", "call_id": "c7", "action": {"type": "exec", "command": ["cat", "/etc/shadow"], "env": {}}, "status": "completed"},

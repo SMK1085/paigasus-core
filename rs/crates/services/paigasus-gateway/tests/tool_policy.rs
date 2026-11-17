@@ -1169,9 +1169,12 @@ async fn tool_result_replacement_for_each_result_type() {
         } else {
             let items = up["input"].as_array().expect("input");
             assert_eq!(items[2]["output"], "OK-F0", "{ep:?}");
-            for i in [4, 6, 8, 10, 12] {
+            for i in [4, 6, 8, 12] {
                 assert!(is_notice(&items[i]["output"]), "{ep:?} item {i}: {}", items[i]);
             }
+            let notice = items[10]["output"][0]["stderr"].clone();
+            assert!(is_notice(&notice), "{ep:?}: {}", items[10]);
+            assert_eq!(items[10]["output"], json!([{"stdout": "", "stderr": notice, "outcome": {"type": "exit", "exit_code": 1}}]), "{ep:?}");
             assert_eq!(items[14]["approve"], false, "{ep:?}: an mcp approval becomes a refusal");
             let mut have = request_entries(&ex.entries);
             have.sort();
