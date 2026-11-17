@@ -1287,6 +1287,7 @@ message HeldToolPolicyVersion {
 // ManageToolPolicyRecompile. Only HELD rows are listed.
 message ListHeldToolPolicyVersionsRequest {
   string org_prn = 1;
+  // 0 => server default 50; above 200 is invalid-pagination.
   uint32 limit = 2;
   uint64 offset = 3;
 }

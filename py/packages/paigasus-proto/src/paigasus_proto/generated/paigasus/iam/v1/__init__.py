@@ -2502,6 +2502,9 @@ class ListHeldToolPolicyVersionsRequest(betterproto2.Message):
     org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
     limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+    """
+    0 => server default 50; above 200 is invalid-pagination.
+    """
 
     offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
 

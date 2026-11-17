@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `ToolPolicyGrpc`: the `ToolPolicyService` gRPC server (12 RPCs, SMA-774 Task 13 and SMA-775, spec sections
+//! `ToolPolicyGrpc`: the `ToolPolicyService` gRPC server (16 RPCs, SMA-774 Task 13, SMA-775 and SMA-781, spec sections
 //! 6.2, 7 and 9.1). A thin adapter over `AppState.tool_policies`: check the capability, parse the
 //! wire values, call the service with the bearer-resolved actor, convert the result.
 //!
@@ -28,10 +28,10 @@ use uuid::Uuid;
 use super::convert;
 use crate::adapters::auth::AuthContext;
 use crate::adapters::http::{AppState, ToolPolicySvc};
-use crate::adapters::tool_policy_wire::{compiled_or_empty, empty_set, version_to_pb};
+use crate::adapters::tool_policy_wire::{compiled_or_empty, empty_set, held_to_pb, run_to_pb, version_to_pb};
 use crate::application::error::TenancyError;
 use crate::application::tool_policies::wire::tool_to_pb;
-use crate::application::tool_policies::{CatalogAccepted, RejectionReason, ToolPolicyRejection, WriteResult};
+use crate::application::tool_policies::{CatalogAccepted, HeldTarget, RejectionReason, ToolPolicyRejection, WriteResult};
 
 /// The capability key in `capability-disabled` metadata.
 const CAPABILITY: &str = "iam.tool.policies";
@@ -73,6 +73,28 @@ fn kind_from_wire(raw: i32) -> Result<ToolKind, Status> {
         Ok(pb::ToolKind::Function) => Ok(ToolKind::Function),
         Ok(pb::ToolKind::Custom) => Ok(ToolKind::Custom),
         _ => Err(convert::status_to_grpc(TenancyError::MissingRequiredField("kind"))),
+    }
+}
+
+/// The set that a held-row RPC names. `UNSPECIFIED` and an unknown kind are a missing field. A
+/// tenant needs an organization. The floor takes none: a non-empty `org_prn` is
+/// `mutually-exclusive-fields`.
+fn held_target_from_wire(raw: i32, org_prn: &str) -> Result<HeldTarget, Status> {
+    match pb::ToolPolicySetKind::try_from(raw) {
+        Ok(pb::ToolPolicySetKind::Tenant) if org_prn.is_empty() => Err(convert::status_to_grpc(TenancyError::MissingRequiredField("org_prn"))),
+        Ok(pb::ToolPolicySetKind::Tenant) => Ok(HeldTarget::Tenant(org_uuid(org_prn)?)),
+        Ok(pb::ToolPolicySetKind::Floor) if !org_prn.is_empty() => Err(convert::status_to_grpc(TenancyError::MutuallyExclusiveFields("org_prn"))),
+        Ok(pb::ToolPolicySetKind::Floor) => Ok(HeldTarget::Floor),
+        _ => Err(convert::status_to_grpc(TenancyError::MissingRequiredField("kind"))),
+    }
+}
+
+/// The held version number. 0 is a missing field.
+fn held_version_from_wire(raw: u64) -> Result<u64, Status> {
+    if raw == 0 {
+        Err(convert::status_to_grpc(TenancyError::MissingRequiredField("held_version")))
+    } else {
+        Ok(raw)
     }
 }
 
@@ -422,24 +444,75 @@ impl ToolPolicyService for ToolPolicyGrpc {
         result
     }
 
-    // Stub: the handler lands in a later task of the same pull request.
-    async fn list_held_tool_policy_versions(&self, _request: Request<pb::ListHeldToolPolicyVersionsRequest>) -> Result<Response<pb::ListHeldToolPolicyVersionsResponse>, Status> {
-        Err(Status::unimplemented("ListHeldToolPolicyVersions is not implemented yet"))
+    /// Lists the held rows. An empty `org_prn` lists every set, the floor included, and needs
+    /// `ManageToolPolicyRecompile`. `limit` 0 is the default page size of 50. A `limit` above 200
+    /// is `invalid-pagination`. These are the limits of every other IAM list RPC.
+    async fn list_held_tool_policy_versions(&self, request: Request<pb::ListHeldToolPolicyVersionsRequest>) -> Result<Response<pb::ListHeldToolPolicyVersionsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ListHeldToolPolicyVersionsResponse>, Status> = async {
+            let svc = self.svc()?;
+            let actor = actor(&request)?;
+            let req = request.into_inner();
+            let org = if req.org_prn.is_empty() { None } else { Some(org_uuid(&req.org_prn)?) };
+            let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
+            let held = svc.list_held(&actor, org, page).await.map_err(convert::status_to_grpc)?;
+            let versions = held.iter().map(held_to_pb).collect::<Result<Vec<_>, _>>().map_err(convert::status_to_grpc)?;
+            Ok(Response::new(pb::ListHeldToolPolicyVersionsResponse { versions }))
+        }
+        .await;
+        record_grpc("ToolPolicy", "ListHeldToolPolicyVersions", started, &result);
+        result
     }
 
-    // Stub: the handler lands in a later task of the same pull request.
-    async fn accept_held_tool_policy_version(&self, _request: Request<pb::AcceptHeldToolPolicyVersionRequest>) -> Result<Response<pb::AcceptHeldToolPolicyVersionResponse>, Status> {
-        Err(Status::unimplemented("AcceptHeldToolPolicyVersion is not implemented yet"))
+    async fn accept_held_tool_policy_version(&self, request: Request<pb::AcceptHeldToolPolicyVersionRequest>) -> Result<Response<pb::AcceptHeldToolPolicyVersionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::AcceptHeldToolPolicyVersionResponse>, Status> = async {
+            let svc = self.svc()?;
+            let actor = actor(&request)?;
+            let req = request.into_inner();
+            let target = held_target_from_wire(req.kind, &req.org_prn)?;
+            let held_version = held_version_from_wire(req.held_version)?;
+            let version = svc.accept_held(&actor, target, held_version).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(pb::AcceptHeldToolPolicyVersionResponse {
+                accepted: Some(version_to_pb(&version).map_err(convert::status_to_grpc)?),
+            }))
+        }
+        .await;
+        record_grpc("ToolPolicy", "AcceptHeldToolPolicyVersion", started, &result);
+        result
     }
 
-    // Stub: the handler lands in a later task of the same pull request.
-    async fn discard_held_tool_policy_version(&self, _request: Request<pb::DiscardHeldToolPolicyVersionRequest>) -> Result<Response<pb::DiscardHeldToolPolicyVersionResponse>, Status> {
-        Err(Status::unimplemented("DiscardHeldToolPolicyVersion is not implemented yet"))
+    async fn discard_held_tool_policy_version(&self, request: Request<pb::DiscardHeldToolPolicyVersionRequest>) -> Result<Response<pb::DiscardHeldToolPolicyVersionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::DiscardHeldToolPolicyVersionResponse>, Status> = async {
+            let svc = self.svc()?;
+            let actor = actor(&request)?;
+            let req = request.into_inner();
+            let target = held_target_from_wire(req.kind, &req.org_prn)?;
+            let held_version = held_version_from_wire(req.held_version)?;
+            let held = svc.discard_held(&actor, target, held_version).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(pb::DiscardHeldToolPolicyVersionResponse {
+                discarded: Some(held_to_pb(&held).map_err(convert::status_to_grpc)?),
+            }))
+        }
+        .await;
+        record_grpc("ToolPolicy", "DiscardHeldToolPolicyVersion", started, &result);
+        result
     }
 
-    // Stub: the handler lands in a later task of the same pull request.
-    async fn run_tool_policy_recompile(&self, _request: Request<pb::RunToolPolicyRecompileRequest>) -> Result<Response<pb::RunToolPolicyRecompileResponse>, Status> {
-        Err(Status::unimplemented("RunToolPolicyRecompile is not implemented yet"))
+    /// Runs the re-compile job once and waits for it. A caller needs `ManageToolPolicyRecompile`.
+    /// The run can last longer than the request timeout of the server when many sets are stale.
+    async fn run_tool_policy_recompile(&self, request: Request<pb::RunToolPolicyRecompileRequest>) -> Result<Response<pb::RunToolPolicyRecompileResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::RunToolPolicyRecompileResponse>, Status> = async {
+            let svc = self.svc()?;
+            let actor = actor(&request)?;
+            let run = svc.run_recompile(&actor).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(run_to_pb(&run)))
+        }
+        .await;
+        record_grpc("ToolPolicy", "RunToolPolicyRecompile", started, &result);
+        result
     }
 }
 

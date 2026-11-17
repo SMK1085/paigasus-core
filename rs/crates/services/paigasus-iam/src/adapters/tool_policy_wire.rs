@@ -3,12 +3,13 @@
 //! Conversions that the gRPC and the HTTP tool policy adapters both use (SMA-774): the stored
 //! version as the wire message, and the wire answer of a read with no live set.
 
-use paigasus_iam_core::tool_policy::{ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus};
+use paigasus_iam_core::tool_policy::{HeldReport, HeldResult, HeldStatus, HeldVersion, NameDiff, ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus};
 use paigasus_proto::paigasus::iam::v1 as pb;
 use prost::Message;
 
 use crate::adapters::grpc::convert;
 use crate::application::error::TenancyError;
+use crate::application::tool_policies::{RecompileOutcome, RecompileRun, SetRecompile};
 
 /// The stored version as the wire message. Bytes that do not decode are a storage defect.
 pub(crate) fn version_to_pb(v: &ToolPolicyVersion) -> Result<pb::ToolPolicySetVersion, TenancyError> {
@@ -73,5 +74,110 @@ pub(crate) fn compiled_or_empty(found: Option<&ToolPolicyVersion>, key: ToolPoli
             } as i32,
             ..Default::default()
         }),
+    }
+}
+
+fn name_diff_to_pb(d: &NameDiff) -> pb::NameDiff {
+    pb::NameDiff {
+        added: d.added.clone(),
+        removed: d.removed.clone(),
+        changed: d.changed.clone(),
+    }
+}
+
+fn report_to_pb(r: &HeldReport) -> pb::HeldToolPolicyReport {
+    pb::HeldToolPolicyReport {
+        result: match r.result {
+            HeldResult::Different => pb::HeldToolPolicyResult::Different,
+            HeldResult::Failed => pb::HeldToolPolicyResult::Failed,
+        } as i32,
+        policies: Some(name_diff_to_pb(&r.policies)),
+        conditions: Some(name_diff_to_pb(&r.conditions)),
+        schema: Some(name_diff_to_pb(&r.schema)),
+        rejections: Some(pb::ToolPolicyRejections {
+            rejections: r
+                .rejections
+                .iter()
+                .map(|x| pb::ToolPolicyRejection {
+                    policy_id: x.policy_id.clone().unwrap_or_default(),
+                    line: 0,
+                    column: 0,
+                    reason: x.code.clone(),
+                    message: x.message.clone(),
+                })
+                .collect(),
+        }),
+    }
+}
+
+/// The held row as the wire message. `compiled` is decoded from the stored bytes, as
+/// `version_to_pb` does, and is absent for a failed compile. Bytes that do not decode are a
+/// storage defect.
+pub(crate) fn held_to_pb(h: &HeldVersion) -> Result<pb::HeldToolPolicyVersion, TenancyError> {
+    let compiled = h.compiled.as_deref().map(pb::CompiledToolPolicySet::decode).transpose().map_err(|error| {
+        tracing::error!(error = %error, version = h.version, "the stored held tool policy set does not decode");
+        TenancyError::Internal
+    })?;
+    let (kind, org_id) = match h.key {
+        ToolPolicySetKey::Tenant(org) => (pb::ToolPolicySetKind::Tenant, org.to_string()),
+        ToolPolicySetKey::Floor => (pb::ToolPolicySetKind::Floor, String::new()),
+    };
+    Ok(pb::HeldToolPolicyVersion {
+        kind: kind as i32,
+        org_id,
+        version: h.version,
+        base_version: h.base_version,
+        source: h.source.clone(),
+        status: match h.status {
+            HeldStatus::Held => pb::ToolPolicyVersionStatus::Held,
+            HeldStatus::Discarded => pb::ToolPolicyVersionStatus::Discarded,
+        } as i32,
+        compiler_generation: h.compiler_generation,
+        schema_revision: h.schema_revision,
+        catalog_revision: h.catalog_revision.unwrap_or(0),
+        report: Some(report_to_pb(&h.report)),
+        created_by: h.created_by.clone(),
+        created_at: Some(convert::ts(h.created_at)),
+        compiled,
+    })
+}
+
+fn set_recompile_to_pb(r: &SetRecompile) -> pb::RecompileSetResult {
+    let (kind, org_id) = match r.key {
+        ToolPolicySetKey::Tenant(org) => (pb::ToolPolicySetKind::Tenant, org.to_string()),
+        ToolPolicySetKey::Floor => (pb::ToolPolicySetKind::Floor, String::new()),
+    };
+    let (outcome, version) = match r.outcome {
+        RecompileOutcome::Identical { version } => (pb::RecompileOutcome::Identical, version),
+        RecompileOutcome::HeldDifferent { version } => (pb::RecompileOutcome::HeldDifferent, version),
+        RecompileOutcome::HeldFailed { version } => (pb::RecompileOutcome::HeldFailed, version),
+        RecompileOutcome::AlreadyProposed => (pb::RecompileOutcome::AlreadyProposed, 0),
+        RecompileOutcome::Conflict => (pb::RecompileOutcome::Conflict, 0),
+        RecompileOutcome::Error => (pb::RecompileOutcome::Error, 0),
+    };
+    pb::RecompileSetResult {
+        kind: kind as i32,
+        org_id,
+        base_version: r.base_version,
+        outcome: outcome as i32,
+        version,
+    }
+}
+
+/// The run as the wire answer. `AlreadyRunning` and `OlderReplica` have no results.
+pub(crate) fn run_to_pb(run: &RecompileRun) -> pb::RunToolPolicyRecompileResponse {
+    match run {
+        RecompileRun::Ran(results) => pb::RunToolPolicyRecompileResponse {
+            status: pb::RecompileRunStatus::Ran as i32,
+            results: results.iter().map(set_recompile_to_pb).collect(),
+        },
+        RecompileRun::AlreadyRunning => pb::RunToolPolicyRecompileResponse {
+            status: pb::RecompileRunStatus::AlreadyRunning as i32,
+            results: Vec::new(),
+        },
+        RecompileRun::OlderReplica { .. } => pb::RunToolPolicyRecompileResponse {
+            status: pb::RecompileRunStatus::OlderReplica as i32,
+            results: Vec::new(),
+        },
     }
 }
