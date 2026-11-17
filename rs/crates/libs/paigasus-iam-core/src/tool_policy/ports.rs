@@ -100,3 +100,20 @@ pub trait ToolPolicyRepository: Send + Sync {
     /// `first_enabled_at` is written once: a stored non-null value is kept, whatever `s` holds.
     async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError>;
 }
+
+/// A lock that lets one re-compile job run at a time across replicas (spec section 8).
+#[async_trait]
+pub trait RecompileLock: Send + Sync {
+    /// `None` when another holder has the lock. Never waits.
+    async fn try_acquire(&self) -> Result<Option<Box<dyn RecompileLockGuard>>, RepositoryError>;
+}
+
+/// A held re-compile lock. The guard is `Send`, so a spawned task can own it.
+///
+/// Call `release` on every path. A guard that is only dropped also frees the lock, but that is a
+/// backstop: the drop of a database transaction can panic under connection contention.
+#[async_trait]
+pub trait RecompileLockGuard: Send {
+    /// End the lock. An error means the end of the lock is not confirmed.
+    async fn release(self: Box<Self>) -> Result<(), RepositoryError>;
+}

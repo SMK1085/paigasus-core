@@ -26,7 +26,7 @@ pub use model::{
     ToolSource, VersionOrigin, VersionStatus,
 };
 pub use name::{NameError, RESERVED_NAME_KEYS, ToolName, name_key, parse_qualified, parse_tool_name};
-pub use ports::{CompileOutcome, CompilerFailure, PolicyCompiler, ToolPolicyRepository};
+pub use ports::{CompileOutcome, CompilerFailure, PolicyCompiler, RecompileLock, RecompileLockGuard, ToolPolicyRepository};
 pub use protocol::{CompileRequest, CompileResult, CompiledOutput, PROTOCOL_VERSION, Rejection, RevisionOutput, SetKind};
 pub use report::{HeldReport, HeldResult, NameDiff, ReportRejection, diff_outputs, failed_report};
 pub use schema::{ACTION_NAMESPACE, TOOL_SCHEMA_REVISION, base_schema_json, catalog_names, tenant_schema_json};

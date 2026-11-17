@@ -10,8 +10,8 @@ mod support;
 
 use chrono::{DateTime, Utc};
 use paigasus_iam::adapters::persistence::migration::m0015_tool_policy_held_versions::M0015_BACKFILL_SQL;
-use paigasus_iam::adapters::persistence::{PgToolPolicies, SeaOrmUnitOfWork};
-use paigasus_iam_core::tool_policy::{HeldStatus, HeldVersion, ReportRejection, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus, failed_report};
+use paigasus_iam::adapters::persistence::{PgRecompileLock, PgToolPolicies, SeaOrmUnitOfWork};
+use paigasus_iam_core::tool_policy::{HeldStatus, HeldVersion, RecompileLock, ReportRejection, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus, failed_report};
 use paigasus_iam_core::{ConflictKind, RepositoryError, UnitOfWork};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use uuid::Uuid;
@@ -417,4 +417,54 @@ async fn down_removes_held_rows_above_the_live_version_and_a_pr2_save_succeeds()
     )
     .await
     .expect("a PR 2 save takes live_version + 1");
+}
+
+/// Postgres frees the lock when the dropped guard's rollback reaches the connection. Poll a
+/// short time, because the drop path sends the rollback without waiting.
+async fn acquire_within(lock: &PgRecompileLock) -> bool {
+    for _ in 0..50 {
+        if let Some(g) = lock.try_acquire().await.unwrap() {
+            g.release().await.unwrap();
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_second_try_acquire_gets_none_until_the_first_guard_is_released() {
+    let Some(e) = env().await else { return };
+    let lock = PgRecompileLock::new(e.db.clone());
+    let first = lock.try_acquire().await.unwrap().expect("the first acquire gets the lock");
+    assert!(lock.try_acquire().await.unwrap().is_none(), "a second holder must not get the lock");
+    first.release().await.unwrap();
+    let again = lock.try_acquire().await.unwrap();
+    assert!(again.is_some(), "the lock is free after release");
+    again.unwrap().release().await.unwrap();
+}
+
+/// Backstop only: the job releases explicitly. A drop must still free the lock.
+#[tokio::test]
+async fn a_dropped_guard_frees_the_lock() {
+    let Some(e) = env().await else { return };
+    let lock = PgRecompileLock::new(e.db.clone());
+    let guard = lock.try_acquire().await.unwrap().expect("acquire");
+    assert!(lock.try_acquire().await.unwrap().is_none());
+    drop(guard);
+    assert!(acquire_within(&lock).await, "a dropped guard must free the lock");
+}
+
+#[tokio::test]
+async fn the_lock_does_not_block_a_tool_policy_write() {
+    let Some(e) = env().await else { return };
+    let key = ToolPolicySetKey::Tenant(seed_org(&e.db).await);
+    let lock = PgRecompileLock::new(e.db.clone());
+    let guard = lock.try_acquire().await.unwrap().expect("acquire");
+    tokio::time::timeout(std::time::Duration::from_secs(10), e.put_live(&live(key, 1, VersionOrigin::Save)))
+        .await
+        .expect("a write must not wait for the re-compile lock")
+        .unwrap();
+    assert_eq!(e.repo.state(&key).await.unwrap().live_version, 1);
+    guard.release().await.unwrap();
 }
