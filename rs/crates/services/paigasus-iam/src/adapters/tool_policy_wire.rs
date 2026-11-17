@@ -60,7 +60,10 @@ pub(crate) fn empty_set(key: ToolPolicySetKey) -> pb::ToolPolicySetVersion {
 /// kind set, `version` 0, an empty `org_id` and nothing else.
 pub(crate) fn compiled_or_empty(found: Option<&ToolPolicyVersion>, key: ToolPolicySetKey) -> Result<pb::CompiledToolPolicySet, TenancyError> {
     match found {
-        Some(v) => version_to_pb(v)?.compiled.ok_or(TenancyError::Internal),
+        Some(v) => version_to_pb(v)?.compiled.ok_or_else(|| {
+            tracing::error!(key = ?v.key, version = v.version, "the stored tool policy version has no compiled message");
+            TenancyError::Internal
+        }),
         None => Ok(pb::CompiledToolPolicySet {
             kind: match key {
                 ToolPolicySetKey::Tenant(_) => pb::ToolPolicySetKind::Tenant,

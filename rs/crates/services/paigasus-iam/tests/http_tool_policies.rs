@@ -440,6 +440,8 @@ async fn http_and_grpc_return_the_same_compiled_set() {
         (status, floor["set"]["version"].as_u64(), floor["set"]["kind"].as_str()),
         (StatusCode::OK, Some(0), Some("TOOL_POLICY_SET_KIND_FLOOR"))
     );
+    assert!(floor["set"]["cedar_schema"].is_null(), "the empty floor has a null schema: {floor}");
+    assert!(!http["set"]["cedar_schema"].is_null(), "a stored version keeps its schema");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -192,8 +192,9 @@ fn condition_json(c: &pb::HistoryCondition) -> Value {
 /// The compiled message as JSON, with the proto field names. A schema text that is not JSON is a
 /// storage defect: it is logged and answered as `Internal`, as `version_to_pb` does.
 fn compiled_json(c: &pb::CompiledToolPolicySet) -> Result<Value, ApiError> {
-    // An empty set (version 0, nothing stored) has no schema text: it renders as `null`.
-    let cedar_schema = if c.cedar_schema.is_empty() {
+    // The empty answer (version 0, nothing stored) has no schema text: it renders as `null`.
+    // A stored version starts at 1, so an empty schema text on a stored version stays a defect.
+    let cedar_schema = if c.version == 0 && c.cedar_schema.is_empty() {
         Value::Null
     } else {
         serde_json::from_str::<Value>(&c.cedar_schema).map_err(|error| {
