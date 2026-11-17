@@ -153,8 +153,10 @@ impl RequestToolPolicy {
         let Lookup::Ready(floor) = self.cache.floor_until(global, deadline).await else {
             return (PolicySet::Unavailable, fin_of());
         };
-        let tenant = self.cache.tenant_until(org, &floor, pre.on_unavailable, deadline).await;
-        let fin = fin_of();
+        // The set and the settings come from one cache entry, so a load that lands between two
+        // reads cannot pair a set with the mode of another load.
+        let (tenant, settings) = self.cache.tenant_with_settings_until(org, &floor, pre.on_unavailable, deadline).await;
+        let fin = settings.unwrap_or(pre);
         let (policies, part): (Arc<ToolPolicies>, TenantPart) = if fin.mode == TenantMode::Off {
             // The tenant set is not consulted in mode off (P-4), even when the lookup returned one.
             (Arc::clone(&floor.floor_only), TenantPart::Off)
