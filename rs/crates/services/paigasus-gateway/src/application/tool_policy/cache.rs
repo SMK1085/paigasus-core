@@ -223,6 +223,10 @@ impl PolicyCache {
         let Some(Data::Tenant(data)) = self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, deadline).await else {
             return Lookup::Unavailable;
         };
+        // R5: a refused set is never compiled, also not against a new floor.
+        if data.source.refused {
+            return Lookup::Unavailable;
+        }
         if Arc::ptr_eq(&data.floor, &floor.floor) {
             return data.compiled.map_or(Lookup::Unavailable, Lookup::Ready);
         }
@@ -408,6 +412,10 @@ impl PolicyCache {
             Fetched::Floor(p) => p.version.clone(),
             Fetched::Tenant(t) => t.version.clone(),
         };
+        let fetched = match fetched {
+            Fetched::Tenant(t) if t.refused => return self.store_refused(key, t, floor, version, gen_at_load),
+            other => other,
+        };
 
         // An unchanged version needs no compile: the stored set stays.
         {
@@ -472,6 +480,33 @@ impl PolicyCache {
                 false
             }
         }
+    }
+
+    /// R5, final review I-1: the source answered with the settings, but it refused the set. The
+    /// answer replaces the entry, also a last good set: the new settings decide, and the set is
+    /// unavailable. It counts as a source error, and the result is `false` (no usable set).
+    fn store_refused(&self, key: Key, t: TenantPolicies, floor: Option<Arc<FloorPolicies>>, version: String, gen_at_load: u64) -> bool {
+        counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "source_error").increment(1);
+        tracing::warn!(?key, kind = "refused", "tool-policy source refused the tenant set");
+        let Some(floor) = floor else {
+            self.mark_stale(key);
+            return false;
+        };
+        let mut inner = self.lock();
+        if let Some(entry) = inner.existing(key) {
+            entry.good = Some(Good {
+                data: Data::Tenant(TenantData {
+                    source: Arc::new(t),
+                    floor,
+                    compiled: None,
+                }),
+                version,
+                loaded_at: Instant::now(),
+                gen_at_load,
+                stale: false,
+            });
+        }
+        false
     }
 
     /// Compile a fetched set. On failure the `Err` holds the tenant data with `compiled: None`.
@@ -625,6 +660,8 @@ mod tests {
         floor_text: Mutex<(String, String)>,
         tenant_text: Mutex<(String, String)>,
         tenant_settings: Mutex<Option<TenantSettings>>,
+        /// The next tenant answers are refused (R5).
+        refused: AtomicBool,
     }
 
     impl FakeSource {
@@ -638,6 +675,7 @@ mod tests {
                 floor_text: Mutex::new((FLOOR.into(), "f1".into())),
                 tenant_text: Mutex::new((TENANT.into(), "t1".into())),
                 tenant_settings: Mutex::new(None),
+                refused: AtomicBool::new(false),
             })
         }
         fn floor_calls(&self) -> usize {
@@ -663,6 +701,9 @@ mod tests {
         }
         fn set_tenant(&self, text: &str, version: &str) {
             *self.tenant_text.lock().unwrap() = (text.into(), version.into());
+        }
+        fn set_refused(&self, refused: bool) {
+            self.refused.store(refused, Ordering::SeqCst);
         }
         async fn pause(&self, extra: Duration) -> Result<(), SourceError> {
             let d = (*self.delay.lock().unwrap()).max(extra);
@@ -692,6 +733,7 @@ mod tests {
                 catalog: vec!["read_file".into()],
                 version,
                 settings: *self.tenant_settings.lock().unwrap(),
+                refused: self.refused.load(Ordering::SeqCst),
             })
         }
     }
@@ -1144,5 +1186,37 @@ mod tests {
         tokio::time::advance(secs(3601)).await;
         cache.refresh_once().await;
         assert_eq!(cache.tenant_settings(ORG), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_set_replaces_the_last_good_set_and_is_never_compiled() {
+        // R5, final review I-1: the settings of a refused answer decide; the set is unavailable.
+        const LOG_ONLY_CLOSED: TenantSettings = TenantSettings {
+            mode: TenantMode::LogOnly,
+            on_unavailable: OnUnavailable::Closed,
+        };
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_tenant(&cache, &floor, OnUnavailable::Open).await;
+        // The next answer is refused, with new settings and a new version.
+        src.set_refused(true);
+        src.set_settings(LOG_ONLY_CLOSED);
+        src.set_tenant("", "t2:log_only:closed");
+        cache.invalidate_all();
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable), "not the last good set");
+        assert_eq!(cache.tenant_settings(ORG), Some(LOG_ONLY_CLOSED), "the settings of the refused answer");
+        assert_eq!(src.tenant_calls(), 2);
+        // The stored answer serves the next lookup with no source call.
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable));
+        assert_eq!(src.tenant_calls(), 2, "the refused answer is stored");
+        // A new floor does not compile the refused set. The floor entry is from before the
+        // invalidation, so it reloads; the tenant entry is current, so it does not.
+        src.set_floor(r#"@id("f2") forbid(principal, action == Pgs::Gateway::Action::"send_email", resource);"#, "f2");
+        let new_floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(!Arc::ptr_eq(&floor.floor, &new_floor.floor));
+        assert!(matches!(cache.tenant(ORG, &new_floor, OnUnavailable::Open).await, Lookup::Unavailable));
+        assert_eq!(src.tenant_calls(), 2, "no tenant source call");
     }
 }

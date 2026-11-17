@@ -39,6 +39,10 @@ pub struct TenantPolicies {
     pub version: String,
     /// The tenant settings. `None` from a source with no settings.
     pub settings: Option<TenantSettings>,
+    /// The source refused the set (R5: a history condition, until SMA-753). The settings still
+    /// apply. The cache keeps them, but it never compiles the set, so the tenant set is
+    /// unavailable and the tenant fail mode decides.
+    pub refused: bool,
 }
 
 /// Why a source could not supply a policy set. The messages hold no policy text and no tool name.

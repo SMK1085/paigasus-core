@@ -258,8 +258,12 @@ mod tests {
     use paigasus_gateway_core::{BlockCode, Decision, Format as Fmt, RequestReason, decide_calls, parse_body, parse_request};
 
     use super::*;
+    use crate::adapters::policy_source::iam::tenant_from_response;
     use crate::application::tool_policy::testing::{self, FakeSource, ORG_A_PRN, PRINCIPAL, Snap, chat_request, settings, settings_from_source};
-    use crate::domain::tool_policy::TenantSettings;
+    use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
+    use paigasus_proto::paigasus::iam::v1::{
+        CompiledToolPolicySet, GetCompiledToolPoliciesResponse, HistoryCondition, ToolPolicyFailMode, ToolPolicyMode, ToolPolicySetKind, ToolPolicySettings as ProtoSettings,
+    };
 
     const FORBID_X: &str = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"x", resource);"#;
 
@@ -618,6 +622,93 @@ mod tests {
         assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }), "the last good set");
         assert_eq!(out.snapshot.on_unavailable, OnUnavailable::Open);
         assert_eq!(tool_names(&out.body), ["y"]);
+    }
+
+    /// A source that answers as IAM does: a proto answer, mapped by the IAM adapter. Its tenant set
+    /// holds a history condition, so R5 refuses it (final review I-1).
+    struct IamHistoryAnswer(GetCompiledToolPoliciesResponse);
+
+    #[async_trait::async_trait]
+    impl PolicySource for IamHistoryAnswer {
+        async fn floor(&self) -> Result<PolicyText, SourceError> {
+            Ok(PolicyText {
+                text: testing::FLOOR.to_owned(),
+                version: "f1".to_owned(),
+            })
+        }
+        async fn tenant(&self, org: Uuid) -> Result<TenantPolicies, SourceError> {
+            tenant_from_response(org, self.0.clone())
+        }
+    }
+
+    /// The request side over an IAM answer with a history set, `mode`, `fail` and the global value.
+    fn history_policy(mode: ToolPolicyMode, fail: ToolPolicyFailMode, global: OnUnavailable) -> RequestToolPolicy {
+        let answer = GetCompiledToolPoliciesResponse {
+            set: Some(CompiledToolPolicySet {
+                kind: ToolPolicySetKind::Tenant as i32,
+                org_id: testing::ORG_A.hyphenated().to_string(),
+                version: 2,
+                cedar_policies: testing::PERMIT_ALL.to_owned(),
+                conditions: vec![HistoryCondition {
+                    slot: "h0".to_owned(),
+                    policy_id: "p".to_owned(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            settings: Some(ProtoSettings {
+                mode: mode as i32,
+                fail_mode: fail as i32,
+                ..Default::default()
+            }),
+            floor_version: 1,
+        };
+        let mut s = settings_from_source(TenantMode::Enforce);
+        s.on_policy_unavailable = global;
+        let cache = PolicyCache::new(Arc::new(IamHistoryAnswer(answer)), crate::application::tool_policy::CacheSettings::from_settings(&s));
+        RequestToolPolicy::new(cache, s)
+    }
+
+    /// The decision on one call to the tool `y` under `snapshot`.
+    fn decide_y(snapshot: &PolicySnapshot) -> Decision {
+        let body = r#"{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"y","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let calls = parse_body(Fmt::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
+        let turn = parse_request(Format::OpenAiChat, &chat_request(&["y"], ""));
+        let outcomes = decide_calls(snapshot, &turn, &calls);
+        assert_eq!(outcomes.len(), 1);
+        outcomes[0].decision
+    }
+
+    #[tokio::test]
+    async fn an_org_in_mode_off_with_a_history_set_is_not_blocked_under_a_global_closed() {
+        let policy = history_policy(ToolPolicyMode::Off, ToolPolicyFailMode::Closed, OnUnavailable::Closed);
+        let out = run(&policy, chat_request(&["x", "rm", "y"], "")).await.expect("apply");
+        assert_eq!(out.snapshot.mode, TenantMode::Off, "the mode from IAM, not the R2 enforce");
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Off, .. }));
+        assert_eq!(tool_names(&out.body), ["x", "y"], "the floor still applies");
+        assert_eq!(decide_y(&out.snapshot), Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn an_org_in_log_only_with_a_history_set_is_not_blocked_under_a_global_closed() {
+        let policy = history_policy(ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, OnUnavailable::Closed);
+        let out = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
+        assert_eq!(out.snapshot.mode, TenantMode::LogOnly);
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
+        assert_eq!(decide_y(&out.snapshot), Decision::Observe { would: BlockCode::PolicyUnavailable });
+    }
+
+    #[tokio::test]
+    async fn the_tenant_fail_mode_decides_for_an_enforced_history_set() {
+        // The global value is the opposite of the tenant value in each case, so it cannot decide.
+        let open = history_policy(ToolPolicyMode::Enforce, ToolPolicyFailMode::Open, OnUnavailable::Closed);
+        let out = run(&open, chat_request(&["y"], "")).await.expect("apply");
+        assert_eq!((out.snapshot.mode, out.snapshot.on_unavailable), (TenantMode::Enforce, OnUnavailable::Open));
+        assert_eq!(decide_y(&out.snapshot), Decision::Observe { would: BlockCode::PolicyUnavailable });
+        let closed = history_policy(ToolPolicyMode::Enforce, ToolPolicyFailMode::Closed, OnUnavailable::Open);
+        let out = run(&closed, chat_request(&["y"], "")).await.expect("apply");
+        assert_eq!((out.snapshot.mode, out.snapshot.on_unavailable), (TenantMode::Enforce, OnUnavailable::Closed));
+        assert_eq!(decide_y(&out.snapshot), Decision::Block { code: BlockCode::PolicyUnavailable });
     }
 
     #[tokio::test]

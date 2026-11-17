@@ -50,6 +50,7 @@ impl FilePolicySource {
                         catalog: Vec::new(),
                         version: version_of(&[b"", b""]),
                         settings: None,
+                        refused: false,
                     });
                 }
                 Err(err) => return Err(io_error("tenant directory", &err)),
@@ -88,6 +89,7 @@ fn parse_tenant(policies: String, catalog_raw: String) -> Result<TenantPolicies,
         catalog,
         version,
         settings: None,
+        refused: false,
     })
 }
 

@@ -126,6 +126,7 @@ impl PolicySource for FakeSource {
             catalog: Vec::new(),
             version: version.to_string(),
             settings: *self.tenant_settings.lock().unwrap(),
+            refused: false,
         })
     }
 }

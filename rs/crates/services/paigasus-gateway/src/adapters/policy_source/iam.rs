@@ -107,12 +107,19 @@ fn malformed(why: &str) -> SourceError {
     SourceError::Malformed(why.to_owned())
 }
 
-/// The checks that the floor set and the tenant set share. R5: a set with a history condition is
-/// refused until SMA-753 (IAM refuses to save such a set; this is defence in depth).
-fn check_set(set: &CompiledToolPolicySet, kind: ToolPolicySetKind) -> Result<(), SourceError> {
+/// The kind check that the floor set and the tenant set share.
+fn check_kind(set: &CompiledToolPolicySet, kind: ToolPolicySetKind) -> Result<(), SourceError> {
     if ToolPolicySetKind::try_from(set.kind) != Ok(kind) {
         return Err(malformed("the set has the wrong kind"));
     }
+    Ok(())
+}
+
+/// The checks of a set with no settings (the floor). R5: a set with a history condition is
+/// refused until SMA-753 (IAM refuses to save such a set; this is defence in depth). For the
+/// floor, the global fail mode then decides.
+fn check_set(set: &CompiledToolPolicySet, kind: ToolPolicySetKind) -> Result<(), SourceError> {
+    check_kind(set, kind)?;
     if !set.conditions.is_empty() {
         return Err(malformed("history conditions need SMA-753"));
     }
@@ -120,10 +127,15 @@ fn check_set(set: &CompiledToolPolicySet, kind: ToolPolicySetKind) -> Result<(),
 }
 
 /// The tenant part of a `GetCompiledToolPolicies` answer. Version 0 is a valid empty set.
+///
+/// The settings are read before the history check (final review I-1). R5 refuses a tenant set
+/// with a history condition, but the settings in the same answer still decide. In mode `off` the
+/// set is not used, so the answer is an empty set. In `log_only` and `enforce` the answer is
+/// `refused`: the tenant set is unavailable and the tenant's own fail mode decides.
 pub(crate) fn tenant_from_response(org: Uuid, r: GetCompiledToolPoliciesResponse) -> Result<TenantPolicies, SourceError> {
     let set = r.set.ok_or_else(|| malformed("the answer has no set"))?;
     let settings = r.settings.ok_or_else(|| malformed("the answer has no settings"))?;
-    check_set(&set, ToolPolicySetKind::Tenant)?;
+    check_kind(&set, ToolPolicySetKind::Tenant)?;
     if set.version > 0 && Uuid::try_parse(&set.org_id).ok() != Some(org) {
         return Err(malformed("the set belongs to another organization"));
     }
@@ -140,11 +152,25 @@ pub(crate) fn tenant_from_response(org: Uuid, r: GetCompiledToolPoliciesResponse
     };
     // R7: a change of the set version, the mode or the fail mode changes the token. The catalog
     // and the text change only with the set version.
+    let version = format!("t{}:{}:{}", set.version, mode.as_str(), fail);
+    let settings = Some(TenantSettings { mode, on_unavailable });
+    if !set.conditions.is_empty() {
+        // R5: the gateway never uses a set with a history condition, so the text and the catalog
+        // are dropped. Mode `off` does not use the set: an empty set, not a refusal.
+        return Ok(TenantPolicies {
+            text: String::new(),
+            catalog: Vec::new(),
+            version,
+            settings,
+            refused: mode != TenantMode::Off,
+        });
+    }
     Ok(TenantPolicies {
         text: set.cedar_policies,
         catalog: set.catalog_names,
-        version: format!("t{}:{}:{}", set.version, mode.as_str(), fail),
-        settings: Some(TenantSettings { mode, on_unavailable }),
+        version,
+        settings,
+        refused: false,
     })
 }
 
@@ -246,11 +272,41 @@ mod tests {
     }
 
     #[test]
-    fn a_set_with_a_history_condition_is_malformed() {
+    fn a_set_with_a_history_condition_is_refused_but_keeps_its_settings() {
+        // R5 and final review I-1: the set is never used, and the settings of the answer stay.
+        for (mode, fail, token) in [
+            (ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, "t2:log_only:closed"),
+            (ToolPolicyMode::Enforce, ToolPolicyFailMode::Open, "t2:enforce:open"),
+        ] {
+            let mut s = set(2);
+            s.conditions.push(condition());
+            let t = tenant_from_response(org(), response(s, settings(mode, fail))).expect("the settings are known");
+            assert!(t.refused, "{token}");
+            assert_eq!((t.text.as_str(), t.catalog.len(), t.version.as_str()), ("", 0, token));
+            assert!(t.settings.is_some());
+        }
+        // Mode off does not use the set: an empty set, not a refusal.
         let mut s = set(2);
         s.conditions.push(condition());
-        let err = tenant_from_response(org(), response(s, settings(ToolPolicyMode::Enforce, ToolPolicyFailMode::Open))).expect_err("refused");
-        assert!(err.to_string().contains("history conditions need SMA-753"), "{err}");
+        let t = tenant_from_response(org(), response(s, settings(ToolPolicyMode::Off, ToolPolicyFailMode::Closed))).expect("off");
+        assert!(!t.refused);
+        assert_eq!((t.text.as_str(), t.catalog.len(), t.version.as_str()), ("", 0, "t2:off:closed"));
+        assert_eq!(
+            t.settings,
+            Some(TenantSettings {
+                mode: TenantMode::Off,
+                on_unavailable: OnUnavailable::Closed
+            })
+        );
+        // The org check and the kind check still refuse a set with a condition.
+        let mut other = set(2);
+        other.conditions.push(condition());
+        other.org_id = "0190a100-0000-7000-8000-0000000000b2".to_owned();
+        assert!(is_malformed(tenant_from_response(org(), response(other, settings(ToolPolicyMode::Off, ToolPolicyFailMode::Open)))));
+        let mut floor_kind = set(2);
+        floor_kind.conditions.push(condition());
+        floor_kind.kind = ToolPolicySetKind::Floor as i32;
+        assert!(is_malformed(tenant_from_response(org(), response(floor_kind, settings(ToolPolicyMode::Off, ToolPolicyFailMode::Open)))));
     }
 
     #[test]
