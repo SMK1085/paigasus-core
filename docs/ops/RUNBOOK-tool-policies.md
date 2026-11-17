@@ -70,9 +70,30 @@ gateway never takes mode values from the event.
 ## 3. Rotation
 
 1. Issue a new key for the same account (step 3 above).
-2. Write the new token to the credential file.
-3. Wait one refresh interval (`tool_policy.refresh_secs`).
-4. Revoke the old key: `DELETE /v1/service-accounts/{sa}/api-keys/{id}` (`RevokeApiKey`).
+2. Write the new token to the credential file of every gateway replica. Record the time.
+3. On every replica, make sure that the file holds the new token. Compare a hash of the file content
+   with a hash of the new token, for example with `sha256sum`. Remove the white space at both ends
+   first, because the gateway does the same. Do not print the token. A mounted secret
+   can reach each replica at a different time.
+4. On every replica, confirm a good fetch with the new token. Read the metrics of each replica
+   separately. Do not add them across replicas. Use only a full refresh interval
+   (`tool_policy.refresh_secs`) that starts at least one refresh interval after step 3. In that
+   interval, all of these must be true:
+
+   - `gateway_tool_policy_cache_loads_total{result="ok"}` increases.
+   - `gateway_tool_policy_refresh_errors_total` does not increase.
+   - `gateway_tool_policy_cache_loads_total{result="source_error"}` does not increase.
+   - The log has no `tool-policy source failed` line. A bad token gives this line, and its
+     field `kind` is `io`. The line does not show the IAM status.
+
+   The gateway fetches only the sets that it has loaded. A replica that has served no request since
+   it started has no set, so it makes no fetch and the counter stays the same. Send one model
+   request through that replica, then look again. A fetch that started before step 3 can end in
+   the interval with the old token. The wait of one refresh interval stops this, unless a fetch
+   hangs for longer than that wait.
+5. Revoke the old key only when step 4 is true on every replica:
+   `DELETE /v1/service-accounts/{sa}/api-keys/{id}` (`RevokeApiKey`). If a replica fails step 4,
+   keep the old key. Write the old token back to the file of that replica, and find the cause.
 
 No restart is needed. The gateway reads the file again on every fetch. The file must be 4 KiB (4096
 bytes) or smaller. The gateway trims white space at both ends. A file that is empty, too large or
