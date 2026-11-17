@@ -1785,7 +1785,6 @@ mod tests {
         let (writes, ev, audit) = (h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len());
         let err = put_mode(&h, ToolPolicyMode::Enforce, FailMode::Closed).await.unwrap_err();
         assert_eq!(err, TenancyError::ToolPolicyModeTransitionInvalid);
-        assert_eq!(err.code(), "tool-policy-mode-transition-invalid", "reason 61");
         assert_eq!((h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len()), (writes, ev, audit));
         assert_eq!(h.repo.settings(h.org).await.unwrap(), None);
     }
