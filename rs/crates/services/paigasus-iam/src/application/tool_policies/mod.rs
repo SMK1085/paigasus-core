@@ -30,6 +30,7 @@
 pub mod catalog;
 mod events;
 mod fetch;
+mod held;
 pub mod rejection;
 pub mod sets;
 mod settings;
@@ -51,6 +52,7 @@ use uuid::Uuid;
 
 use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_catalog_size, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, size_check_time, stored_next, stored_upserts};
 pub use self::fetch::CompiledTenant;
+pub use self::held::HeldTarget;
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
 use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, reject_history_until_gateway_supports_it};
 use self::settings::check_transition;
@@ -499,23 +501,36 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         corr: Uuid,
         now: DateTime<Utc>,
     ) -> Result<ToolPolicyVersion, TenancyError> {
-        let locked = self.repo.lock_state_in(tx, &target.key).await?;
-        // Only these two counters count (plan H3). A held row moves `last_version` and is no conflict.
-        if locked.live_version != state.live_version || locked.catalog_revision != state.catalog_revision {
-            return Err(TenancyError::ToolPolicyVersionConflict);
-        }
+        let locked = self.lock_and_recheck(tx, &target.key, state).await?;
         let catalog_revision = match target.key {
             ToolPolicySetKey::Tenant(_) => Some(state.catalog_revision),
             ToolPolicySetKey::Floor => None,
         };
         let version = self.new_version(actor, &target.key, locked.next_version(), source, out, catalog_revision, catalog, origin, now);
-        self.repo.insert_live_version_in(tx, &version).await?;
+        self.store_live_version(tx, actor, target, &version, corr, now).await?;
+        Ok(version)
+    }
+
+    /// Locks the state row of the set and compares it with `state` (the read before the write).
+    /// Only `live_version` and `catalog_revision` count (plan H3): a held row moves `last_version`
+    /// and is no conflict. A difference is `ToolPolicyVersionConflict`. Returns the locked state.
+    async fn lock_and_recheck(&self, tx: &dyn Transaction, key: &ToolPolicySetKey, state: &ToolPolicyState) -> Result<ToolPolicyState, TenancyError> {
+        let locked = self.repo.lock_state_in(tx, key).await?;
+        if locked.live_version != state.live_version || locked.catalog_revision != state.catalog_revision {
+            return Err(TenancyError::ToolPolicyVersionConflict);
+        }
+        Ok(locked)
+    }
+
+    /// Stores `version` as the live version of the set and enqueues its published event.
+    async fn store_live_version(&self, tx: &dyn Transaction, actor: &Prn, target: &SetTarget, version: &ToolPolicyVersion, corr: Uuid, now: DateTime<Utc>) -> Result<(), TenancyError> {
+        self.repo.insert_live_version_in(tx, version).await?;
         let event = match target.key {
-            ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, actor, &target.resource, org, &version, now),
-            ToolPolicySetKey::Floor => events::floor_published(&*self.ids, corr, actor, &version, now),
+            ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, actor, &target.resource, org, version, now),
+            ToolPolicySetKey::Floor => events::floor_published(&*self.ids, corr, actor, version, now),
         };
         self.outbox.enqueue(tx, &event).await?;
-        Ok(version)
+        Ok(())
     }
 
     /// A catalog write (spec sections 4.2, 4.5 and 4.6). `plan` turns the current catalog into
@@ -684,12 +699,12 @@ mod tests {
 
     const ORG: u128 = 100;
     const MAX_SOURCE: usize = 4096;
-    const MAX_WINDOW_MS: u64 = 3_600_000;
+    pub(super) const MAX_WINDOW_MS: u64 = 3_600_000;
     const DEFAULT_CATALOG_CAP: usize = 2_097_152;
     const SEARCH_POLICY: &str = "@id(\"search-q\")\nforbid(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.input.q == \"x\" };\n";
     const FLOOR_DENY: &str = "@id(\"floor-deny\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource);\n";
 
-    fn principal(n: u128) -> Prn {
+    pub(super) fn principal(n: u128) -> Prn {
         Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap()
     }
 
@@ -697,22 +712,22 @@ mod tests {
         json!({"type": "object", "properties": {"q": {"type": "string"}, "price": {"type": "number"}}, "required": ["q"]})
     }
 
-    struct Harness {
-        svc: ToolPolicyService<SeqIds, FixedClock>,
-        clock: FixedClock,
-        repo: InMemoryToolPolicies,
-        compiler: FakePolicyCompiler,
-        authz: FakeAuthorizer,
-        audit: FakeAuditLog,
-        outbox: FakeOutbox,
-        uow: FakeUnitOfWork,
-        org: Uuid,
-        org_prn: Prn,
-        actor: Prn,
+    pub(super) struct Harness {
+        pub(super) svc: ToolPolicyService<SeqIds, FixedClock>,
+        pub(super) clock: FixedClock,
+        pub(super) repo: InMemoryToolPolicies,
+        pub(super) compiler: FakePolicyCompiler,
+        pub(super) authz: FakeAuthorizer,
+        pub(super) audit: FakeAuditLog,
+        pub(super) outbox: FakeOutbox,
+        pub(super) uow: FakeUnitOfWork,
+        pub(super) org: Uuid,
+        pub(super) org_prn: Prn,
+        pub(super) actor: Prn,
     }
 
     /// A harness whose actor holds every tenant action at the org and every floor action at Root.
-    fn harness() -> Harness {
+    pub(super) fn harness() -> Harness {
         let h = bare_harness();
         for action in [
             Action::ManageToolCatalog,
@@ -730,7 +745,7 @@ mod tests {
     }
 
     /// A harness whose actor holds nothing.
-    fn bare_harness() -> Harness {
+    pub(super) fn bare_harness() -> Harness {
         bare_harness_with_cap(DEFAULT_CATALOG_CAP)
     }
 
@@ -777,11 +792,11 @@ mod tests {
         }
     }
 
-    fn tenant(h: &Harness) -> ToolPolicySetKey {
+    pub(super) fn tenant(h: &Harness) -> ToolPolicySetKey {
         ToolPolicySetKey::Tenant(h.org)
     }
 
-    fn accepted<T: std::fmt::Debug>(r: Result<WriteResult<T>, TenancyError>) -> T {
+    pub(super) fn accepted<T: std::fmt::Debug>(r: Result<WriteResult<T>, TenancyError>) -> T {
         match r {
             Ok(WriteResult::Accepted(v)) => v,
             other => panic!("expected Accepted, got {other:?}"),
@@ -795,7 +810,7 @@ mod tests {
         }
     }
 
-    fn audit_actions(h: &Harness) -> Vec<String> {
+    pub(super) fn audit_actions(h: &Harness) -> Vec<String> {
         h.audit.0.lock().unwrap().iter().map(|e| e.action.clone()).collect()
     }
 
@@ -814,7 +829,7 @@ mod tests {
     }
 
     /// A live tenant version stored with no service call, at `generation` and `schema_revision`.
-    fn seed_live_tenant(h: &Harness, source: &str, generation: u32, schema_revision: u32) {
+    pub(super) fn seed_live_tenant(h: &Harness, source: &str, generation: u32, schema_revision: u32) {
         let out = CompiledOutput {
             cedar_policies: source.to_owned(),
             cedar_schema_json: tenant_schema_json(&[]),
