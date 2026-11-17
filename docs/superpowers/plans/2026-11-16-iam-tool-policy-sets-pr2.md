@@ -503,7 +503,7 @@ Add one Postgres check to `tests/tool_policies_pg.rs` or the existing outbox-rea
   - `validate` with `enabled` and kind `iam`: `iam.service_credential_file` required and not blank; any `[[tool_policy.org]]` entry → error naming `tool_policy.org` and "kind = \"iam\"" (R3). With kind `file`, nothing changes.
 - Request side (`request.rs`), only when `settings_from_source`:
   1. `pre` = `cache.tenant_settings(org)`, else `TenantSettings { mode: Enforce, on_unavailable: global }` (R2).
-  2. Look up the floor with `pre.on_unavailable`, then ALWAYS look up the tenant (also when `pre.mode` is `Off`), so a fresh load can change the mode.
+  2. Look up the floor with the GLOBAL fail mode, never `pre.on_unavailable` (F6, spec §3.4, §9.3), then ALWAYS look up the tenant (also when `pre.mode` is `Off`), so a fresh load can change the mode.
   3. `fin` = `cache.tenant_settings(org)` after the lookup, else `pre`.
   4. Use `fin.mode` and `fin.on_unavailable` for the snapshot, the refusal check (D17) and the metrics. If `fin.mode == Off`, the tenant part is `TenantPart::Off` with `floor.floor_only` (P-4), even when the tenant lookup returned a set.
   5. A scope with no org keeps `default_mode` and the global value, as today.

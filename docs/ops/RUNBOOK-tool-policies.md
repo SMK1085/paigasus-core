@@ -49,6 +49,9 @@ organization archives the account.
 [iam]
 service_credential_file = "/run/secrets/paigasus-gateway-iam-key"
 
+[tool_interception]
+enabled = true   # Tool policies need tool interception.
+
 [tool_policy]
 enabled = true
 on_policy_unavailable = "closed"   # "open" or "closed". Required.
@@ -57,6 +60,8 @@ source = { kind = "iam" }
 
 The gateway refuses to start in these cases.
 
+- `tool_policy.enabled = true` with `tool_interception.enabled = false` or with no
+  `[tool_interception]` table.
 - `kind = "iam"` with no `iam.service_credential_file`.
 - A `service_credential_file` that is empty or has leading or trailing white space.
 - A `[[tool_policy.org]]` entry with `kind = "iam"`. IAM holds the mode and the fail mode of each

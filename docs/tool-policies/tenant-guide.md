@@ -33,6 +33,13 @@ In `log_only` mode, the gateway does not block a call when it cannot load your s
 records the call. In `off` mode, the gateway does not use your set, so your fail mode has no
 effect.
 
+The gateway must load your settings from IAM one time before they apply. Until that first good
+load, the gateway uses mode `enforce` and the fail mode of the platform operator's global setting.
+For example, this occurs when IAM is not available at a cold start of the gateway. After one good
+load, the tables above apply. If a later load fails, the gateway keeps the last settings that it
+loaded. The gateway removes the cache entry of an organization that sends no request for a long
+time. After that, the rule for the first load applies again.
+
 Your fail mode does not apply to the platform floor (section 2). When the gateway cannot load the
 floor, the platform operator's global setting decides, in every mode. This includes `off`.
 
@@ -155,6 +162,28 @@ when { context.input has amount && context.input.amount <= 100 };
 
 The compiler also accepts the same policy with no `has` guard. Do not write it that way. The
 compiler does not check what the model sends at run time.
+
+A `has` guard in a `forbid` has a different effect. If the argument is absent, `has` is false, so
+the `forbid` does not apply. A `permit` that matches then allows the call. For example, this
+`forbid` does not stop a call with no `amount`:
+
+```
+@id("deny-big")
+forbid (principal, action == Pgs::Gateway::Action::"pay", resource)
+when { context.input has amount && context.input.amount >= 1000 };
+```
+
+Do one of these:
+
+- Put the limit in the allow list. Use a `permit` with a `has` guard, as in `pay-small` above. A
+  call with no `amount` then matches no `permit`, so the gateway blocks it.
+- Add a second `forbid` for a required argument that is absent:
+
+```
+@id("deny-no-amount")
+forbid (principal, action == Pgs::Gateway::Action::"pay", resource)
+unless { context.input has amount };
+```
 
 ### History rules are not yet available
 
