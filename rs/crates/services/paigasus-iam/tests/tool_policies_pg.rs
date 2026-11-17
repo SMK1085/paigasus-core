@@ -616,18 +616,23 @@ async fn a_committed_save_leaves_one_outbox_row_with_the_four_segment_subject() 
 }
 
 /// A compiler that accepts every source: the Cedar text is the source and the schema is the
-/// request schema. It waits a short time, so that two writers are both inside the compile step
-/// before either of them locks the state.
-struct SlowIdentityCompiler;
+/// request schema. Each compile waits at a two-party barrier, so neither writer leaves the compile
+/// step before both have done their first reads. This cannot deadlock: a writer that waits at the
+/// barrier has not committed, so the other writer reads live version 0 and no `first_enabled_at`,
+/// and it must compile the starter too. The wait has a limit, so a writer that fails before its
+/// compile makes the test fail, not hang.
+struct BarrierIdentityCompiler(tokio::sync::Barrier);
 
 #[async_trait::async_trait]
-impl paigasus_iam_core::tool_policy::PolicyCompiler for SlowIdentityCompiler {
+impl paigasus_iam_core::tool_policy::PolicyCompiler for BarrierIdentityCompiler {
     fn generation(&self) -> u32 {
         1
     }
 
     async fn compile(&self, req: &paigasus_iam_core::tool_policy::CompileRequest) -> Result<paigasus_iam_core::tool_policy::CompileOutcome, paigasus_iam_core::tool_policy::CompilerFailure> {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), self.0.wait())
+            .await
+            .expect("the second writer did not reach the compile step");
         Ok(paigasus_iam_core::tool_policy::CompileOutcome::Accepted(paigasus_iam_core::tool_policy::CompiledOutput {
             cedar_policies: req.source.clone(),
             cedar_schema_json: req.schema_json.clone(),
@@ -681,7 +686,7 @@ async fn two_concurrent_first_enables_write_one_starter() {
     let svc = ToolPolicyService::new(ToolPolicyServiceDeps {
         repo: std::sync::Arc::new(PgToolPolicies::new(db.clone())),
         orgs: std::sync::Arc::new(PgOrganizationRepository::new(db.clone(), Generations::memory())),
-        compiler: std::sync::Arc::new(SlowIdentityCompiler),
+        compiler: std::sync::Arc::new(BarrierIdentityCompiler(tokio::sync::Barrier::new(2))),
         authorize: Authorize::new(std::sync::Arc::new(AllowAll)),
         uow: std::sync::Arc::new(SeaOrmUnitOfWork::new(db.clone())),
         audit: std::sync::Arc::new(PgAuditLog::new(db.clone())),
