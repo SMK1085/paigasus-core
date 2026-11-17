@@ -1307,6 +1307,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_catalog_write_over_a_live_history_set_is_rejected_with_the_history_code() {
+        // F17: a live set that PR 1 stored with a history rule. The coupling compile of a catalog
+        // write gives the history rule again, so R19 refuses it as `tool-catalog-breaks-policy`.
+        let h = harness();
+        seed_live_tenant(&h, STARTER_TOOL_POLICY_SOURCE, 1, TOOL_SCHEMA_REVISION);
+        h.compiler
+            .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["rate"]))));
+        let rejections = rejected(h.svc.put_tool(&h.actor, h.org, "search", ToolKind::Function, Some(search_schema()), 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!((rejections[0].reason, rejections[0].policy_id.as_deref()), (RejectionReason::CatalogBreaksPolicy, Some("rate")));
+        assert!(rejections[0].message.ends_with("(tool-policy-history-unsupported)"), "{}", rejections[0].message);
+        assert_eq!(h.compiler.calls(), 1, "the coupling compile ran");
+        assert_eq!((h.repo.writes(), h.uow.commits()), (0, 0));
+        assert!(h.repo.catalog(h.org).await.unwrap().is_empty(), "the catalog write stored nothing");
+    }
+
+    #[tokio::test]
     async fn a_live_set_from_an_older_generation_blocks_catalog_writes() {
         let h = harness();
         seed_live_tenant(&h, STARTER_TOOL_POLICY_SOURCE, 0, TOOL_SCHEMA_REVISION);

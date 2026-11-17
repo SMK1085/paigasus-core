@@ -4,8 +4,11 @@
 //! against real Postgres (SMA-775). Each test starts its own container and seeds one
 //! organization.
 //!
-//! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker daemon is
-//! a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note.
+//! Runs against an ephemeral Postgres in Docker. The Docker gating goes through the shared
+//! policy (`support::start_migrated_postgres` calls `start_or_skip` of `paigasus-test-docker`,
+//! SMA-538); this file does not restate it and does not read `CI`. A container failure with a
+//! reachable daemon is a hard failure. An unreachable daemon skips locally, and the
+//! `tests/docker_preflight.rs` canary makes that skip visible.
 
 mod support;
 

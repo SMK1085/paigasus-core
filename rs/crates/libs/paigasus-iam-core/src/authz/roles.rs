@@ -420,8 +420,8 @@ mod tests {
 
     /// One shared entity universe for the whole table: the synthetic `Root`, two orgs
     /// (`org_o`, `org_other`) each with one team (`team_o`, `team_other`) and one active
-    /// project under it, a third ("archived") project under `org_o`'s team, and the one
-    /// principal every case grants roles to.
+    /// project under it, a third ("archived") project under `org_o`'s team, a third org that is
+    /// archived (`archived_org`), and the one principal every case grants roles to.
     struct Universe {
         org_o: OrganizationId,
         team_o: TeamId,
@@ -429,6 +429,7 @@ mod tests {
         project_in_o: ProjectId,
         project_in_other: ProjectId,
         archived_project_in_o: ProjectId,
+        archived_org: OrganizationId,
         principal: Prn,
         slice: EntitySlice,
     }
@@ -441,6 +442,7 @@ mod tests {
         let project_in_o = ProjectId::from_parts(org_o.uuid(), u(20));
         let project_in_other = ProjectId::from_parts(org_other.uuid(), u(21));
         let archived_project_in_o = ProjectId::from_parts(org_o.uuid(), u(22));
+        let archived_org = OrganizationId::from_uuid(u(3));
         let principal = principal_prn(100);
 
         let mut entities = vec![SliceEntity {
@@ -455,6 +457,7 @@ mod tests {
         entities.push(node_entity(project_in_o.prn(), cedar_tuple(team_o.prn()), "active"));
         entities.push(node_entity(project_in_other.prn(), cedar_tuple(team_other.prn()), "active"));
         entities.push(node_entity(archived_project_in_o.prn(), cedar_tuple(team_o.prn()), "archived"));
+        entities.push(node_entity(archived_org.prn(), root_tuple(), "archived"));
 
         let principal_uid = to_cedar_uid(&principal);
         entities.push(SliceEntity {
@@ -473,6 +476,7 @@ mod tests {
             project_in_o,
             project_in_other,
             archived_project_in_o,
+            archived_org,
             principal,
             slice: EntitySlice { entities },
         }
@@ -842,6 +846,14 @@ mod tests {
                 grants: vec![grant(137, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
                 action: Action::ManageToolPolicySettings,
                 resource: uni.archived_project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                // `PutToolPolicySettings` authorizes at the org PRN, so the archived node is the org.
+                name: "forbid-archived-writes denies ManageToolPolicySettings on an archived org even for its org_admin (SMA-775)",
+                grants: vec![grant(138, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.archived_org.clone())))],
+                action: Action::ManageToolPolicySettings,
+                resource: uni.archived_org.prn().clone(),
                 expect: Effect::Deny,
             },
             // -- SMA-635 D4 and D10. The gateway authorizes a user's InvokeModel against the ORG
