@@ -1945,6 +1945,9 @@ pub enum ConcurrentChange {
     /// The re-compile job stored a held row: it takes the next number, and `last_version`
     /// goes up. `live_version` does not change.
     HeldRow,
+    /// An admin discarded the held row of the set: its status becomes discarded. No counter
+    /// changes.
+    HeldDiscarded,
 }
 
 #[derive(Default)]
@@ -2154,6 +2157,9 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
                 };
                 state.last_version = held.version;
                 Self::push_held(&mut data, held);
+            }
+            Some(ConcurrentChange::HeldDiscarded) => {
+                Self::discard_held_of(&mut data, key, None);
             }
             None => {}
         }

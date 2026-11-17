@@ -72,6 +72,12 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         // Steps 2 to 4: lock and recheck, then write the version and its event. No compile.
         let tx = self.uow.begin().await?;
         let locked = self.lock_and_recheck(&*tx, &target.key, &state).await?;
+        // A discard moves neither counter. Take the row under the lock: a row that another admin
+        // discarded since the read is not found, and a new held row cannot be discarded by H7
+        // while a discarded one goes live.
+        if !self.repo.discard_held_in(&*tx, &target.key, held_version).await? {
+            return Err(TenancyError::ToolPolicyVersionNotFound);
+        }
         let now = self.clock.now();
         let corr = self.ids.new_correlation_id();
         let number = locked.next_version();
@@ -382,6 +388,30 @@ mod tests {
         assert_eq!(err.code(), TenancyError::ToolPolicyVersionConflict.code());
         assert_eq!(h.repo.insert_attempts(), 0);
         assert_eq!(h.uow.commits(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_discard_between_the_accept_read_and_the_lock_is_version_not_found() {
+        let h = harness();
+        live_and_held(&h);
+        h.repo.change_before_next_lock(ConcurrentChange::HeldDiscarded);
+        let err = h.svc.accept_held(&h.actor, HeldTarget::Tenant(h.org), 2).await.unwrap_err();
+        assert_eq!(err.code(), TenancyError::ToolPolicyVersionNotFound.code());
+        assert_nothing_written(&h, 1);
+        assert_eq!(h.repo.held_rows(&tenant(&h))[0].status, HeldStatus::Discarded);
+    }
+
+    #[tokio::test]
+    async fn a_tenant_accept_and_discard_need_manage_tool_policies() {
+        let h = bare_harness();
+        h.authz.allow(Action::ReadToolPolicies, &h.org_prn);
+        live_and_held(&h);
+        let accept = h.svc.accept_held(&h.actor, HeldTarget::Tenant(h.org), 2).await.unwrap_err();
+        assert_eq!(accept.code(), TenancyError::Forbidden.code());
+        let discard = h.svc.discard_held(&h.actor, HeldTarget::Tenant(h.org), 2).await.unwrap_err();
+        assert_eq!(discard.code(), TenancyError::Forbidden.code());
+        assert_nothing_written(&h, 1);
+        assert_eq!(h.repo.held(&tenant(&h)).await.unwrap().map(|r| r.version), Some(2));
     }
 
     #[tokio::test]
