@@ -224,6 +224,7 @@ async fn nats_down_never_blocks_a_request() {
         idle_evict: Duration::from_secs(3600),
         load_timeout: Duration::from_secs(60),
         orgs: std::collections::HashMap::new(),
+        settings_from_source: false,
     };
     let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
 

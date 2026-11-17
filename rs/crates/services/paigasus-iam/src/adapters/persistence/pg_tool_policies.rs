@@ -10,16 +10,17 @@
 //!
 //! Database errors map through `persistence::map_err`.
 
-use super::entities::{tool_catalog_entry as catalog, tool_policy_set_version as versions, tool_policy_state as state};
+use super::entities::{tool_catalog_entry as catalog, tool_policy_set_version as versions, tool_policy_settings as settings_rows, tool_policy_state as state};
 use super::map_err;
 use super::uow::recover_txn;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::tool_policy::{
-    DroppedField, StoredTool, ToolEntry, ToolKind, ToolName, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyState, ToolPolicyVersion, ToolSource, VersionOrigin, VersionStatus,
+    DroppedField, FailMode, StoredTool, ToolEntry, ToolKind, ToolName, ToolPolicyMode, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, ToolSource,
+    VersionOrigin, VersionStatus,
 };
 use paigasus_iam_core::{ConflictKind, RepositoryError, Transaction};
-use sea_orm::sea_query::OnConflict;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     AccessMode, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
 };
@@ -123,6 +124,7 @@ fn status_from_str(s: &str) -> Result<VersionStatus, RepositoryError> {
 fn origin_str(o: VersionOrigin) -> &'static str {
     match o {
         VersionOrigin::Save => "save",
+        VersionOrigin::Starter => "starter",
         VersionOrigin::CatalogChange => "catalog_change",
     }
 }
@@ -130,6 +132,7 @@ fn origin_str(o: VersionOrigin) -> &'static str {
 fn origin_from_str(s: &str) -> Result<VersionOrigin, RepositoryError> {
     match s {
         "save" => Ok(VersionOrigin::Save),
+        "starter" => Ok(VersionOrigin::Starter),
         "catalog_change" => Ok(VersionOrigin::CatalogChange),
         _ => Err(corrupt("a readable version row has an unexpected origin")),
     }
@@ -386,6 +389,55 @@ impl ToolPolicyRepository for PgToolPolicies {
         };
         versions::Entity::insert(row).exec_without_returning(txn).await.map_err(map_err)?;
 
+        Ok(())
+    }
+
+    async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError> {
+        let row = settings_rows::Entity::find_by_id(org).one(&self.db).await.map_err(map_err)?;
+        row.map(|m| {
+            Ok(ToolPolicySettings {
+                mode: ToolPolicyMode::parse(&m.mode).ok_or_else(|| corrupt("a settings row has an unknown mode"))?,
+                fail_mode: FailMode::parse(&m.fail_mode).ok_or_else(|| corrupt("a settings row has an unknown fail mode"))?,
+                updated_at: Some(m.updated_at),
+                updated_by: Some(m.updated_by),
+                first_enabled_at: m.first_enabled_at,
+            })
+        })
+        .transpose()
+    }
+
+    async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError> {
+        let (Some(updated_at), Some(updated_by)) = (s.updated_at, s.updated_by.as_ref()) else {
+            return Err(corrupt("upsert_settings_in needs updated_at and updated_by"));
+        };
+        let txn = recover_txn(tx)?;
+        let row = settings_rows::ActiveModel {
+            org_id: Set(org),
+            mode: Set(s.mode.as_str().to_string()),
+            fail_mode: Set(s.fail_mode.as_str().to_string()),
+            updated_at: Set(updated_at),
+            updated_by: Set(updated_by.clone()),
+            first_enabled_at: Set(s.first_enabled_at),
+        };
+        settings_rows::Entity::insert(row)
+            .on_conflict(
+                OnConflict::column(settings_rows::Column::OrgId)
+                    .update_columns([
+                        settings_rows::Column::Mode,
+                        settings_rows::Column::FailMode,
+                        settings_rows::Column::UpdatedAt,
+                        settings_rows::Column::UpdatedBy,
+                    ])
+                    // Written once: a stored value wins over the new one, also under a race.
+                    .value(
+                        settings_rows::Column::FirstEnabledAt,
+                        Expr::cust(r#"COALESCE("tool_policy_settings"."first_enabled_at", EXCLUDED."first_enabled_at")"#),
+                    )
+                    .to_owned(),
+            )
+            .exec_without_returning(txn)
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 }

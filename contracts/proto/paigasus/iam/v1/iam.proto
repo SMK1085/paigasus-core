@@ -1171,6 +1171,77 @@ message GetFloorPolicySetResponse {
   ToolPolicySetVersion set = 1;
 }
 
+enum ToolPolicyMode {
+  TOOL_POLICY_MODE_UNSPECIFIED = 0;
+  TOOL_POLICY_MODE_OFF = 1;
+  TOOL_POLICY_MODE_LOG_ONLY = 2;
+  TOOL_POLICY_MODE_ENFORCE = 3;
+}
+
+enum ToolPolicyFailMode {
+  TOOL_POLICY_FAIL_MODE_UNSPECIFIED = 0;
+  TOOL_POLICY_FAIL_MODE_OPEN = 1;
+  TOOL_POLICY_FAIL_MODE_CLOSED = 2;
+}
+
+// With no row, IAM answers OFF / CLOSED and no updated_at. The mode and the fail mode apply only
+// to the tenant set; the floor is enforced in every mode (spec §3.4). UNSPECIFIED in a response is
+// malformed: a reader fails closed.
+message ToolPolicySettings {
+  ToolPolicyMode mode = 1;
+  ToolPolicyFailMode fail_mode = 2;
+  google.protobuf.Timestamp updated_at = 3;
+  string updated_by = 4;
+}
+
+message GetToolPolicySettingsRequest {
+  string org_prn = 1;
+}
+
+message GetToolPolicySettingsResponse {
+  ToolPolicySettings settings = 1;
+}
+
+// The first change away from OFF must be to LOG_ONLY, also when a tenant set was saved in OFF.
+// With no tenant set, it saves the starter as version 1. A change to ENFORCE, from any mode,
+// needs an earlier change away from OFF and a saved tenant set. An ENFORCE without both is
+// tool-policy-mode-transition-invalid (spec §9.2). UNSPECIFIED is missing-required-field.
+message PutToolPolicySettingsRequest {
+  string org_prn = 1;
+  ToolPolicyMode mode = 2;
+  ToolPolicyFailMode fail_mode = 3;
+}
+
+// starter_version is 0 when the write did not save the starter.
+message PutToolPolicySettingsResponse {
+  ToolPolicySettings settings = 1;
+  uint64 starter_version = 2;
+}
+
+message GetCompiledToolPoliciesRequest {
+  string org_prn = 1;
+  optional uint64 version = 2;
+}
+
+// An org with no tenant set gets a set with version = 0, empty cedar_policies and no conditions.
+// A held or discarded version is never returned (tool-policy-version-not-found). floor_version is
+// the live floor version at the time of the read; the floor is fetched with
+// GetCompiledFloorPolicies, so one response stays below 4 MiB.
+message GetCompiledToolPoliciesResponse {
+  CompiledToolPolicySet set = 1;
+  ToolPolicySettings settings = 2;
+  uint64 floor_version = 3;
+}
+
+message GetCompiledFloorPoliciesRequest {
+  optional uint64 version = 1;
+}
+
+// A platform with no floor gets version = 0.
+message GetCompiledFloorPoliciesResponse {
+  CompiledToolPolicySet set = 1;
+}
+
 service ToolPolicyService {
   rpc PutTool(PutToolRequest) returns (PutToolResponse);
   rpc DeleteTool(DeleteToolRequest) returns (DeleteToolResponse);
@@ -1180,4 +1251,8 @@ service ToolPolicyService {
   rpc GetToolPolicySet(GetToolPolicySetRequest) returns (GetToolPolicySetResponse);
   rpc PutFloorPolicySet(PutFloorPolicySetRequest) returns (PutFloorPolicySetResponse);
   rpc GetFloorPolicySet(GetFloorPolicySetRequest) returns (GetFloorPolicySetResponse);
+  rpc GetToolPolicySettings(GetToolPolicySettingsRequest) returns (GetToolPolicySettingsResponse);
+  rpc PutToolPolicySettings(PutToolPolicySettingsRequest) returns (PutToolPolicySettingsResponse);
+  rpc GetCompiledToolPolicies(GetCompiledToolPoliciesRequest) returns (GetCompiledToolPoliciesResponse);
+  rpc GetCompiledFloorPolicies(GetCompiledFloorPoliciesRequest) returns (GetCompiledFloorPoliciesResponse);
 }

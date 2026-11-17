@@ -83,6 +83,11 @@ pub enum Action {
     ManageToolPolicyFloor,
     /// Read the platform tool policy floor (SMA-774). Held by `platform_admin` only.
     ReadToolPolicyFloor,
+    /// Write the tool policy settings of an organization (SMA-775).
+    ManageToolPolicySettings,
+    /// Read the compiled tool policies of an organization or the floor (SMA-775).
+    /// Of the scoped roles, only `tool_policy_reader` holds it; `platform_admin` also holds it.
+    ReadCompiledToolPolicies,
 }
 
 impl Action {
@@ -139,6 +144,8 @@ impl Action {
         Action::ReadToolPolicies,
         Action::ManageToolPolicyFloor,
         Action::ReadToolPolicyFloor,
+        Action::ManageToolPolicySettings,
+        Action::ReadCompiledToolPolicies,
     ];
 
     /// The exact Cedar action id, verbatim from `SCHEMA_SRC` — this string doubles as
@@ -197,6 +204,8 @@ impl Action {
             Action::ReadToolPolicies => "ReadToolPolicies",
             Action::ManageToolPolicyFloor => "ManageToolPolicyFloor",
             Action::ReadToolPolicyFloor => "ReadToolPolicyFloor",
+            Action::ManageToolPolicySettings => "ManageToolPolicySettings",
+            Action::ReadCompiledToolPolicies => "ReadCompiledToolPolicies",
         }
     }
 
@@ -235,7 +244,8 @@ impl Action {
             | Action::GetUser
             | Action::ReadToolCatalog
             | Action::ReadToolPolicies
-            | Action::ReadToolPolicyFloor => false,
+            | Action::ReadToolPolicyFloor
+            | Action::ReadCompiledToolPolicies => false,
             Action::CreateOrganization
             | Action::RenameOrganization
             | Action::ArchiveOrganization
@@ -268,7 +278,8 @@ impl Action {
             | Action::ChangeUserEmail
             | Action::ManageToolCatalog
             | Action::ManageToolPolicies
-            | Action::ManageToolPolicyFloor => true,
+            | Action::ManageToolPolicyFloor
+            | Action::ManageToolPolicySettings => true,
         }
     }
 
@@ -362,7 +373,9 @@ mod tests {
                 | Action::ManageToolPolicies
                 | Action::ReadToolPolicies
                 | Action::ManageToolPolicyFloor
-                | Action::ReadToolPolicyFloor => {}
+                | Action::ReadToolPolicyFloor
+                | Action::ManageToolPolicySettings
+                | Action::ReadCompiledToolPolicies => {}
             }
         }
         for a in Action::ALL {
@@ -370,8 +383,8 @@ mod tests {
         }
         assert_eq!(
             Action::ALL.len(),
-            51,
-            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies"
+            53,
+            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies + 2 SMA-775 tool policy settings"
         );
     }
     #[test]
@@ -449,5 +462,18 @@ mod tests {
             assert_eq!(Action::parse(a.as_wire()), Some(a), "{} must round-trip", a.as_wire());
             assert!(Action::ALL.contains(&a), "{} must be in ALL", a.as_wire());
         }
+    }
+    /// SMA-775: the settings write is a non-restore write, the compiled read is a read, and both round-trip.
+    #[test]
+    fn the_tool_policy_settings_actions_are_classified_and_round_trip() {
+        assert!(Action::ManageToolPolicySettings.is_write());
+        assert!(!Action::ManageToolPolicySettings.is_restore());
+        assert!(!Action::ReadCompiledToolPolicies.is_write());
+        for a in [Action::ManageToolPolicySettings, Action::ReadCompiledToolPolicies] {
+            assert_eq!(Action::parse(a.as_wire()), Some(a), "{} must round-trip", a.as_wire());
+            assert!(Action::ALL.contains(&a), "{} must be in ALL", a.as_wire());
+        }
+        assert_eq!(Action::ManageToolPolicySettings.as_wire(), "ManageToolPolicySettings");
+        assert_eq!(Action::ReadCompiledToolPolicies.as_wire(), "ReadCompiledToolPolicies");
     }
 }

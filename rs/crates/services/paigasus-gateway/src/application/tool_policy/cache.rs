@@ -27,7 +27,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::config::ToolPolicySettings;
-use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies};
+use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 
 /// How many tenant reloads one refresh pass runs at the same time.
 const REFRESH_CONCURRENCY: usize = 16;
@@ -204,8 +204,8 @@ impl PolicyCache {
 
     /// The compiled floor. The wait ends at `deadline`; the `open` fallback still runs then.
     pub async fn floor_until(self: &Arc<Self>, on_unavailable: OnUnavailable, deadline: Instant) -> Lookup<FloorEntry> {
-        match self.lookup(Key::Floor, None, on_unavailable, deadline).await {
-            Some(Data::Floor(entry)) => Lookup::Ready(entry),
+        match self.lookup(Key::Floor, None, on_unavailable, false, deadline).await {
+            Ok(Data::Floor(entry)) => Lookup::Ready(entry),
             _ => Lookup::Unavailable,
         }
     }
@@ -220,14 +220,39 @@ impl PolicyCache {
     /// The tenant policy set, as [`Self::tenant`]. The wait ends at `deadline`; the `open`
     /// fallback still runs then, so a caller with a shared deadline keeps the last good set.
     pub async fn tenant_until(self: &Arc<Self>, org: Uuid, floor: &FloorEntry, on_unavailable: OnUnavailable, deadline: Instant) -> Lookup<Arc<ToolPolicies>> {
-        let Some(Data::Tenant(data)) = self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, deadline).await else {
+        match self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, false, deadline).await {
+            Ok(Data::Tenant(data)) => self.tenant_set(org, &data, floor),
+            _ => Lookup::Unavailable,
+        }
+    }
+
+    /// The tenant policy set and the tenant settings, as [`Self::tenant_until`]. When the lookup
+    /// serves an entry, the settings come from that same entry, so the set and the settings are
+    /// always from one load. When it serves nothing, the settings are those of the stored entry
+    /// that the failure fallback read, the last known value.
+    ///
+    /// `on_unavailable` is only the default: when the stored entry has settings, the failure
+    /// fallback uses the fail mode of that entry, read under the same lock. A settings change
+    /// that lands after the caller read its fail mode thus cannot pair a fallback decision with
+    /// the settings of another load (CodeRabbit, PR 485).
+    pub async fn tenant_with_settings_until(self: &Arc<Self>, org: Uuid, floor: &FloorEntry, on_unavailable: OnUnavailable, deadline: Instant) -> (Lookup<Arc<ToolPolicies>>, Option<TenantSettings>) {
+        match self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, true, deadline).await {
+            Ok(Data::Tenant(data)) => (self.tenant_set(org, &data, floor), data.source.settings),
+            Ok(Data::Floor(_)) => (Lookup::Unavailable, None),
+            Err(seen) => (Lookup::Unavailable, seen),
+        }
+    }
+
+    fn tenant_set(&self, org: Uuid, data: &TenantData, floor: &FloorEntry) -> Lookup<Arc<ToolPolicies>> {
+        // R5: a refused set is never compiled, also not against a new floor.
+        if data.source.refused {
             return Lookup::Unavailable;
-        };
+        }
         if Arc::ptr_eq(&data.floor, &floor.floor) {
-            return data.compiled.map_or(Lookup::Unavailable, Lookup::Ready);
+            return data.compiled.clone().map_or(Lookup::Unavailable, Lookup::Ready);
         }
         // The floor changed after the tenant set was compiled: compile again from the stored text.
-        self.recompile(org, &data, floor)
+        self.recompile(org, data, floor)
     }
 
     fn recompile(&self, org: Uuid, data: &TenantData, floor: &FloorEntry) -> Lookup<Arc<ToolPolicies>> {
@@ -255,14 +280,28 @@ impl PolicyCache {
         compiled.map_or(Lookup::Unavailable, Lookup::Ready)
     }
 
+    /// The settings of the last stored answer for this tenant, whatever its age and its `stale`
+    /// flag: the last known value (spec §9.3). A refused answer and an answer with a set that does
+    /// not compile are stored too, so their settings apply. It never starts a load. An evicted tenant, or a tenant
+    /// that never loaded, has none. A source with no settings gives none.
+    #[must_use]
+    pub fn tenant_settings(&self, org: Uuid) -> Option<TenantSettings> {
+        let mut inner = self.lock();
+        match &inner.existing(Key::Tenant(org))?.good.as_ref()?.data {
+            Data::Tenant(t) => t.source.settings,
+            Data::Floor(_) => None,
+        }
+    }
+
     /// D16: mark every entry as invalidated. The next request reloads.
     pub fn invalidate_all(&self) {
         self.lock().gen_now += 1;
     }
 
-    /// The generic lookup. `None` means unavailable. Every wait ends at `deadline`, and the
-    /// failure fallback runs after it, so the lookup returns at `deadline` at the latest.
-    async fn lookup(self: &Arc<Self>, key: Key, floor: Option<Arc<FloorPolicies>>, on_unavailable: OnUnavailable, deadline: Instant) -> Option<Data> {
+    /// The generic lookup. `Err` means unavailable; see [`Self::fallback`] for its value and for
+    /// `follow_entry`. Every wait ends at `deadline`, and the failure fallback runs after it, so
+    /// the lookup returns at `deadline` at the latest.
+    async fn lookup(self: &Arc<Self>, key: Key, floor: Option<Arc<FloorPolicies>>, on_unavailable: OnUnavailable, follow_entry: bool, deadline: Instant) -> Result<Data, Option<TenantSettings>> {
         for _ in 0..MAX_ROUNDS {
             let inflight = {
                 let mut inner = self.lock();
@@ -273,7 +312,7 @@ impl PolicyCache {
                 if let Some(good) = &entry.good
                     && good.usable(now, gen_now, self.settings.max_stale)
                 {
-                    return Some(good.data.clone());
+                    return Ok(good.data.clone());
                 }
                 self.start_or_join(&mut inner, key, floor.clone(), now)
             };
@@ -296,22 +335,35 @@ impl PolicyCache {
             if let Some(good) = inner.existing(key).and_then(|e| e.good.as_ref())
                 && good.usable(now, gen_now, self.settings.max_stale)
             {
-                return Some(good.data.clone());
+                return Ok(good.data.clone());
             }
         }
-        self.fallback(key, on_unavailable)
+        self.fallback(key, on_unavailable, follow_entry)
     }
 
     /// A load failed, timed out or was too old. Under `open`, the last good entry still serves up
     /// to `max_stale` after its load. Under `closed`, nothing serves (§ 6.3.3).
-    fn fallback(&self, key: Key, on_unavailable: OnUnavailable) -> Option<Data> {
-        if on_unavailable != OnUnavailable::Open {
-            return None;
-        }
+    ///
+    /// With `follow_entry`, a stored tenant entry with settings decides by its own fail mode, not
+    /// by `on_unavailable`, and `Err` carries those settings: the decision and the settings come
+    /// from one read under one lock. An entry with no settings (the file source) uses
+    /// `on_unavailable`.
+    fn fallback(&self, key: Key, on_unavailable: OnUnavailable, follow_entry: bool) -> Result<Data, Option<TenantSettings>> {
         let mut inner = self.lock();
         let now = Instant::now();
-        let good = inner.existing(key)?.good.as_ref()?;
-        (now.saturating_duration_since(good.loaded_at) <= self.settings.max_stale).then(|| good.data.clone())
+        let Some(good) = inner.existing(key).and_then(|e| e.good.as_ref()) else {
+            return Err(None);
+        };
+        let seen = match &good.data {
+            Data::Tenant(t) if follow_entry => t.source.settings,
+            _ => None,
+        };
+        let on = seen.map_or(on_unavailable, |s| s.on_unavailable);
+        if on == OnUnavailable::Open && now.saturating_duration_since(good.loaded_at) <= self.settings.max_stale {
+            Ok(good.data.clone())
+        } else {
+            Err(seen)
+        }
     }
 
     fn count_timeout(&self, inflight: &Inflight) {
@@ -396,6 +448,10 @@ impl PolicyCache {
             Fetched::Floor(p) => p.version.clone(),
             Fetched::Tenant(t) => t.version.clone(),
         };
+        let fetched = match fetched {
+            Fetched::Tenant(t) if t.refused => return self.store_refused(key, t, floor, version, gen_at_load),
+            other => other,
+        };
 
         // An unchanged version needs no compile: the stored set stays.
         {
@@ -442,24 +498,65 @@ impl PolicyCache {
                 let mut inner = self.lock();
                 if let Some(entry) = inner.existing(key) {
                     match (&mut entry.good, failed) {
-                        // A bad new version: keep the last good set.
-                        (Some(good), _) => good.stale = true,
-                        // A first load with a bad tenant set: remember it, so each request does not compile it again.
-                        (None, Some(data)) => {
-                            entry.good = Some(Good {
-                                data,
-                                version,
-                                loaded_at: Instant::now(),
-                                gen_at_load,
-                                stale: false,
-                            })
+                        // Store the bad tenant set, so each request does not compile it again, in two cases:
+                        // - A first load.
+                        // - An answer that holds the settings (the IAM source). As for a refused answer
+                        //   (I-1, `store_refused`), the answer is the current truth: its settings decide, and
+                        //   the set is unavailable, so the new fail mode applies. The last good set must not
+                        //   serve under the new settings, because the set and the settings come from one load
+                        //   (spec §9.3). Without this, a change to `enforce` and `closed` that comes with a set
+                        //   that does not compile would leave the old mode in effect.
+                        (None, Some(data)) => Self::store_bad(&mut entry.good, data, version, gen_at_load),
+                        (Some(_), Some(data)) if matches!(&data, Data::Tenant(t) if t.source.settings.is_some()) => {
+                            Self::store_bad(&mut entry.good, data, version, gen_at_load);
                         }
+                        // A bad new version from a source with no settings (the file source): keep the
+                        // last good set.
+                        (Some(good), _) => good.stale = true,
                         (None, None) => {}
                     }
                 }
                 false
             }
         }
+    }
+
+    /// Store a tenant set that does not compile as the entry, with `compiled: None`.
+    fn store_bad(slot: &mut Option<Good>, data: Data, version: String, gen_at_load: u64) {
+        *slot = Some(Good {
+            data,
+            version,
+            loaded_at: Instant::now(),
+            gen_at_load,
+            stale: false,
+        });
+    }
+
+    /// R5, final review I-1: the source answered with the settings, but it refused the set. The
+    /// answer replaces the entry, also a last good set: the new settings decide, and the set is
+    /// unavailable. It counts as a source error, and the result is `false` (no usable set).
+    fn store_refused(&self, key: Key, t: TenantPolicies, floor: Option<Arc<FloorPolicies>>, version: String, gen_at_load: u64) -> bool {
+        counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "source_error").increment(1);
+        tracing::warn!(?key, kind = "refused", "tool-policy source refused the tenant set");
+        let Some(floor) = floor else {
+            self.mark_stale(key);
+            return false;
+        };
+        let mut inner = self.lock();
+        if let Some(entry) = inner.existing(key) {
+            entry.good = Some(Good {
+                data: Data::Tenant(TenantData {
+                    source: Arc::new(t),
+                    floor,
+                    compiled: None,
+                }),
+                version,
+                loaded_at: Instant::now(),
+                gen_at_load,
+                stale: false,
+            });
+        }
+        false
     }
 
     /// Compile a fetched set. On failure the `Err` holds the tenant data with `compiled: None`.
@@ -582,6 +679,7 @@ mod tests {
 
     use async_trait::async_trait;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+    use paigasus_gateway_core::TenantMode;
 
     use super::*;
 
@@ -611,6 +709,9 @@ mod tests {
         floor_delay: Mutex<Duration>,
         floor_text: Mutex<(String, String)>,
         tenant_text: Mutex<(String, String)>,
+        tenant_settings: Mutex<Option<TenantSettings>>,
+        /// The next tenant answers are refused (R5).
+        refused: AtomicBool,
     }
 
     impl FakeSource {
@@ -623,6 +724,8 @@ mod tests {
                 floor_delay: Mutex::new(Duration::ZERO),
                 floor_text: Mutex::new((FLOOR.into(), "f1".into())),
                 tenant_text: Mutex::new((TENANT.into(), "t1".into())),
+                tenant_settings: Mutex::new(None),
+                refused: AtomicBool::new(false),
             })
         }
         fn floor_calls(&self) -> usize {
@@ -643,8 +746,14 @@ mod tests {
         fn set_floor(&self, text: &str, version: &str) {
             *self.floor_text.lock().unwrap() = (text.into(), version.into());
         }
+        fn set_settings(&self, settings: TenantSettings) {
+            *self.tenant_settings.lock().unwrap() = Some(settings);
+        }
         fn set_tenant(&self, text: &str, version: &str) {
             *self.tenant_text.lock().unwrap() = (text.into(), version.into());
+        }
+        fn set_refused(&self, refused: bool) {
+            self.refused.store(refused, Ordering::SeqCst);
         }
         async fn pause(&self, extra: Duration) -> Result<(), SourceError> {
             let d = (*self.delay.lock().unwrap()).max(extra);
@@ -673,6 +782,8 @@ mod tests {
                 text,
                 catalog: vec!["read_file".into()],
                 version,
+                settings: *self.tenant_settings.lock().unwrap(),
+                refused: self.refused.load(Ordering::SeqCst),
             })
         }
     }
@@ -1081,5 +1192,190 @@ mod tests {
         assert_eq!(s.loads("compile_error"), 1, "the same bad version is a compile error again");
         assert_eq!(s.loads("ok"), 1, "only the floor reload is ok");
         assert_eq!(s.gauge(names::GATEWAY_TOOL_POLICY_STALE_ENTRIES), Some(1.0));
+    }
+    const ENFORCE_OPEN: TenantSettings = TenantSettings {
+        mode: TenantMode::Enforce,
+        on_unavailable: OnUnavailable::Open,
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn tenant_settings_are_none_before_the_first_load() {
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        assert_eq!(cache.tenant_settings(ORG), None);
+        assert_eq!(src.tenant_calls(), 0, "the read starts no load");
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert_eq!(cache.tenant_settings(ORG), None, "the floor load is not a tenant load");
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tenant_settings_survive_a_failed_reload() {
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        src.set_fail(true);
+        cache.invalidate_all();
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Unavailable));
+        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN), "the last known value");
+        tokio::time::advance(secs(400)).await;
+        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN), "whatever its age");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_evicted_tenant_has_no_settings() {
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        tokio::time::advance(secs(3601)).await;
+        cache.refresh_once().await;
+        assert_eq!(cache.tenant_settings(ORG), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_set_replaces_the_last_good_set_and_is_never_compiled() {
+        // R5, final review I-1: the settings of a refused answer decide; the set is unavailable.
+        const LOG_ONLY_CLOSED: TenantSettings = TenantSettings {
+            mode: TenantMode::LogOnly,
+            on_unavailable: OnUnavailable::Closed,
+        };
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_tenant(&cache, &floor, OnUnavailable::Open).await;
+        // The next answer is refused, with new settings and a new version.
+        src.set_refused(true);
+        src.set_settings(LOG_ONLY_CLOSED);
+        src.set_tenant("", "t2:log_only:closed");
+        cache.invalidate_all();
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable), "not the last good set");
+        assert_eq!(cache.tenant_settings(ORG), Some(LOG_ONLY_CLOSED), "the settings of the refused answer");
+        assert_eq!(src.tenant_calls(), 2);
+        // The stored answer serves the next lookup with no source call.
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable));
+        assert_eq!(src.tenant_calls(), 2, "the refused answer is stored");
+        // A new floor does not compile the refused set. The floor entry is from before the
+        // invalidation, so it reloads; the tenant entry is current, so it does not.
+        src.set_floor(r#"@id("f2") forbid(principal, action == Pgs::Gateway::Action::"send_email", resource);"#, "f2");
+        let new_floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(!Arc::ptr_eq(&floor.floor, &new_floor.floor));
+        assert!(matches!(cache.tenant(ORG, &new_floor, OnUnavailable::Open).await, Lookup::Unavailable));
+        assert_eq!(src.tenant_calls(), 2, "no tenant source call");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bad_set_with_new_settings_replaces_the_last_good_set() {
+        // A new answer with new settings and a set that does not compile: the new settings decide,
+        // and the set is unavailable, as for a refused answer (I-1).
+        const LOG_ONLY_OPEN: TenantSettings = TenantSettings {
+            mode: TenantMode::LogOnly,
+            on_unavailable: OnUnavailable::Open,
+        };
+        const ENFORCE_CLOSED: TenantSettings = TenantSettings {
+            mode: TenantMode::Enforce,
+            on_unavailable: OnUnavailable::Closed,
+        };
+        let src = FakeSource::new();
+        src.set_settings(LOG_ONLY_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_tenant(&cache, &floor, OnUnavailable::Open).await;
+        src.set_settings(ENFORCE_CLOSED);
+        src.set_tenant("permit((", "t2:enforce:closed");
+        cache.invalidate_all();
+        let deadline = Instant::now() + secs(5);
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, deadline).await;
+        assert!(matches!(set, Lookup::Unavailable), "not the last good set");
+        assert_eq!(got, Some(ENFORCE_CLOSED), "the settings of the new answer");
+        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_CLOSED));
+        // The bad answer is stored: the next lookup makes no source call.
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable));
+        assert_eq!(src.tenant_calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bad_set_with_no_settings_keeps_the_last_good_set() {
+        // The file source has no settings: a bad new version keeps the last good set.
+        let src = FakeSource::new();
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        let good = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        src.set_tenant("permit((", "bad");
+        tokio::time::advance(secs(30)).await;
+        cache.refresh_once().await;
+        let again = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        assert!(Arc::ptr_eq(&good, &again), "the last good set still serves");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_fallback_follows_the_fail_mode_of_the_stored_entry() {
+        // CodeRabbit, PR 485: the caller reads its fail mode before the floor wait. A load that
+        // lands after that read stores new settings. When the next reload fails, the fallback must
+        // use the fail mode of the stored entry, not the caller's older value.
+        const ENFORCE_CLOSED: TenantSettings = TenantSettings {
+            mode: TenantMode::Enforce,
+            on_unavailable: OnUnavailable::Closed,
+        };
+        let deadline = || Instant::now() + secs(5);
+        // Closed -> Open: the caller still has `closed`, the entry says `open`. The last good set serves.
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        let good = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        src.set_fail(true);
+        cache.invalidate_all();
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Closed, deadline()).await;
+        assert!(matches!(&set, Lookup::Ready(t) if Arc::ptr_eq(t, &good)), "the entry's `open` keeps the last good set");
+        assert_eq!(got, Some(ENFORCE_OPEN));
+        // Open -> Closed: the caller still has `open`, the entry says `closed`. Nothing serves.
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_CLOSED);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        src.set_fail(true);
+        cache.invalidate_all();
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, deadline()).await;
+        assert!(matches!(set, Lookup::Unavailable), "the entry's `closed` serves nothing");
+        assert_eq!(got, Some(ENFORCE_CLOSED));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_set_and_the_settings_come_from_one_entry() {
+        const LOG_ONLY_CLOSED: TenantSettings = TenantSettings {
+            mode: TenantMode::LogOnly,
+            on_unavailable: OnUnavailable::Closed,
+        };
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        let deadline = || Instant::now() + secs(5);
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Closed, deadline()).await;
+        assert!(matches!(set, Lookup::Ready(_)));
+        assert_eq!(got, Some(ENFORCE_OPEN), "the settings of the load that gave the set");
+        // I-1: a refused answer gives no set and its own settings.
+        src.set_refused(true);
+        src.set_settings(LOG_ONLY_CLOSED);
+        src.set_tenant("", "t2:log_only:closed");
+        cache.invalidate_all();
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, deadline()).await;
+        assert!(matches!(set, Lookup::Unavailable));
+        assert_eq!(got, Some(LOG_ONLY_CLOSED), "the settings of the refused answer");
+        // A failed reload under `closed` serves no entry: the settings are the last known value.
+        src.set_fail(true);
+        cache.invalidate_all();
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Closed, deadline()).await;
+        assert!(matches!(set, Lookup::Unavailable));
+        assert_eq!(got, Some(LOG_ONLY_CLOSED), "the last known value");
+        assert_eq!(got, cache.tenant_settings(ORG));
     }
 }

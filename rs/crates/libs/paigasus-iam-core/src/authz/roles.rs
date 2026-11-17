@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Starter Cedar policy set + the eight system roles (ADR-0013, design §3.2): the base
+//! Starter Cedar policy set + the nine system roles (ADR-0013, design §3.2): the base
 //! `forbid-archived-writes` static policy, one policy template per system role, and the
 //! `Role` catalog those templates back.
 //!
@@ -66,7 +66,10 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 ///
 /// `5`: SMA-774 added `ManageToolCatalog`, `ManageToolPolicies` and `ManageToolPolicyFloor`. They
 /// are non-restore writes, so they join the generated forbid list.
-pub const STARTER_POLICY_REVISION: u32 = 5;
+///
+/// `6`: SMA-775 added `ManageToolPolicySettings` (a non-restore write, so it joins the generated
+/// forbid list) and the `tool_policy_reader` role template.
+pub const STARTER_POLICY_REVISION: u32 = 6;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
 /// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
@@ -82,6 +85,7 @@ pub const STARTER_POLICY_IDS: &[&str] = &[
     "project_admin",
     "project_member",
     "gateway_user",
+    "tool_policy_reader",
 ];
 
 /// Whether `id` is one of the code-owned starter policy ids. The public `PutPolicy` API
@@ -94,7 +98,7 @@ pub fn is_starter_policy_id(id: &str) -> bool {
 
 /// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
 #[cfg(test)]
-const EXPECTED_STARTER_CONTENT_HASH: &str = "1137ee53e6c94330257a0dc6a4533e305fd6b204fbdc67c6b5176575ad2518f3";
+const EXPECTED_STARTER_CONTENT_HASH: &str = "36634c63d11b82675f9a1f2443bad6e63a8e1e9655616aefd9befb25b4ce100e";
 
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
@@ -143,6 +147,7 @@ const ORG_ADMIN_ACTIONS: &[Action] = &[
     Action::ReadToolCatalog,
     Action::ManageToolPolicies,
     Action::ReadToolPolicies,
+    Action::ManageToolPolicySettings,
 ];
 
 /// `org_member`: org/team/project reads only (design §3.2) — no membership rosters, no grant
@@ -221,7 +226,11 @@ const PROJECT_MEMBER_ACTIONS: &[Action] = &[Action::GetProject];
 /// a spend-capable action never dilutes the read-only `*_member` roles).
 const GATEWAY_USER_ACTIONS: &[Action] = &[Action::InvokeModel];
 
-/// The eight system roles (design §3.2), each `system = true` and immutable via the policy/role
+/// `tool_policy_reader`: only [ReadCompiledToolPolicies], at Root, for the gateway's service
+/// identity (SMA-775). Of the scoped roles, only this one holds it; `platform_admin` also holds it.
+const TOOL_POLICY_READER_ACTIONS: &[Action] = &[Action::ReadCompiledToolPolicies];
+
+/// The nine system roles (design §3.2), each `system = true` and immutable via the policy/role
 /// CRUD API. Every `template_id` equals the role's own `key` (see module docs).
 #[must_use]
 pub fn system_roles() -> Vec<Role> {
@@ -282,6 +291,13 @@ pub fn system_roles() -> Vec<Role> {
             description: "Invoke models within a scope subtree (org/team/project).".to_string(),
             system: true,
         },
+        Role {
+            key: "tool_policy_reader".to_string(),
+            template_id: "tool_policy_reader".to_string(),
+            scope_kinds: vec![NodeKind::Root],
+            description: "Read the compiled tool policies of every organization and the floor (the gateway's service identity).".to_string(),
+            system: true,
+        },
     ]
 }
 
@@ -337,7 +353,7 @@ fn forbid_archived_writes_source() -> String {
 /// explicitly.
 ///
 /// # Panics
-/// If `key` doesn't name one of the eight roles this module defines. Every call site in this
+/// If `key` doesn't name one of the nine roles this module defines. Every call site in this
 /// module passes a key from [`system_roles`]'s own output, so this can never actually happen.
 fn template_source(key: &str) -> String {
     if key == PLATFORM_ADMIN_KEY {
@@ -351,6 +367,7 @@ fn template_source(key: &str) -> String {
         "project_admin" => PROJECT_ADMIN_ACTIONS,
         "project_member" => PROJECT_MEMBER_ACTIONS,
         "gateway_user" => GATEWAY_USER_ACTIONS,
+        "tool_policy_reader" => TOOL_POLICY_READER_ACTIONS,
         other => panic!("template_source: unknown system role key {other:?}"),
     };
     format!("permit(principal == ?principal, action in [{}], resource in ?resource);", action_refs(actions))
@@ -403,8 +420,8 @@ mod tests {
 
     /// One shared entity universe for the whole table: the synthetic `Root`, two orgs
     /// (`org_o`, `org_other`) each with one team (`team_o`, `team_other`) and one active
-    /// project under it, a third ("archived") project under `org_o`'s team, and the one
-    /// principal every case grants roles to.
+    /// project under it, a third ("archived") project under `org_o`'s team, a third org that is
+    /// archived (`archived_org`), and the one principal every case grants roles to.
     struct Universe {
         org_o: OrganizationId,
         team_o: TeamId,
@@ -412,6 +429,7 @@ mod tests {
         project_in_o: ProjectId,
         project_in_other: ProjectId,
         archived_project_in_o: ProjectId,
+        archived_org: OrganizationId,
         principal: Prn,
         slice: EntitySlice,
     }
@@ -424,6 +442,7 @@ mod tests {
         let project_in_o = ProjectId::from_parts(org_o.uuid(), u(20));
         let project_in_other = ProjectId::from_parts(org_other.uuid(), u(21));
         let archived_project_in_o = ProjectId::from_parts(org_o.uuid(), u(22));
+        let archived_org = OrganizationId::from_uuid(u(3));
         let principal = principal_prn(100);
 
         let mut entities = vec![SliceEntity {
@@ -438,6 +457,7 @@ mod tests {
         entities.push(node_entity(project_in_o.prn(), cedar_tuple(team_o.prn()), "active"));
         entities.push(node_entity(project_in_other.prn(), cedar_tuple(team_other.prn()), "active"));
         entities.push(node_entity(archived_project_in_o.prn(), cedar_tuple(team_o.prn()), "archived"));
+        entities.push(node_entity(archived_org.prn(), root_tuple(), "archived"));
 
         let principal_uid = to_cedar_uid(&principal);
         entities.push(SliceEntity {
@@ -456,6 +476,7 @@ mod tests {
             project_in_o,
             project_in_other,
             archived_project_in_o,
+            archived_org,
             principal,
             slice: EntitySlice { entities },
         }
@@ -770,6 +791,71 @@ mod tests {
                 resource: uni.archived_project_in_o.prn().clone(),
                 expect: Effect::Deny,
             },
+            // -- SMA-775: the settings write, the compiled read and the reader role.
+            Case {
+                name: "org_admin allows ManageToolPolicySettings on its own org (SMA-775)",
+                grants: vec![grant(130, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageToolPolicySettings,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "org_member denies ManageToolPolicySettings on its org (SMA-775)",
+                grants: vec![grant(131, &uni.principal, "org_member", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageToolPolicySettings,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "tool_policy_reader at Root allows ReadCompiledToolPolicies on any org (SMA-775)",
+                grants: vec![grant(132, &uni.principal, "tool_policy_reader", GrantScope::Root)],
+                action: Action::ReadCompiledToolPolicies,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "tool_policy_reader at Root allows ReadCompiledToolPolicies at Root (SMA-775)",
+                grants: vec![grant(133, &uni.principal, "tool_policy_reader", GrantScope::Root)],
+                action: Action::ReadCompiledToolPolicies,
+                resource: root_prn(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "tool_policy_reader at Root denies ReadToolPolicies on an org (SMA-775)",
+                grants: vec![grant(134, &uni.principal, "tool_policy_reader", GrantScope::Root)],
+                action: Action::ReadToolPolicies,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "gateway_user denies ReadCompiledToolPolicies on its org (SMA-775)",
+                grants: vec![grant(135, &uni.principal, "gateway_user", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ReadCompiledToolPolicies,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "org_admin denies ReadCompiledToolPolicies on its own org (SMA-775)",
+                grants: vec![grant(136, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ReadCompiledToolPolicies,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "forbid-archived-writes denies ManageToolPolicySettings on an archived project in the org even for org_admin (SMA-775)",
+                grants: vec![grant(137, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageToolPolicySettings,
+                resource: uni.archived_project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                // `PutToolPolicySettings` authorizes at the org PRN, so the archived node is the org.
+                name: "forbid-archived-writes denies ManageToolPolicySettings on an archived org even for its org_admin (SMA-775)",
+                grants: vec![grant(138, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.archived_org.clone())))],
+                action: Action::ManageToolPolicySettings,
+                resource: uni.archived_org.prn().clone(),
+                expect: Effect::Deny,
+            },
             // -- SMA-635 D4 and D10. The gateway authorizes a user's InvokeModel against the ORG
             // PRN, and org_admin does not carry InvokeModel: a person needs a gateway_user grant,
             // made out of band with GrantRole. Pinned so a change to either role becomes a
@@ -960,5 +1046,19 @@ mod tests {
                 "{name} is a read and must not appear in forbid-archived-writes"
             );
         }
+    }
+
+    /// SMA-775: the settings write reaches the generated forbid list. The compiled read does not.
+    #[test]
+    fn the_settings_write_is_in_the_generated_forbid_source_and_the_compiled_read_is_not() {
+        let src = forbid_archived_writes_source();
+        assert!(src.contains(r#"Pgs::Iam::Action::"ManageToolPolicySettings""#), "ManageToolPolicySettings is a write");
+        assert!(!src.contains(r#"Pgs::Iam::Action::"ReadCompiledToolPolicies""#), "ReadCompiledToolPolicies is a read");
+    }
+
+    /// SMA-775: `tool_policy_reader` is a Root-only role.
+    #[test]
+    fn tool_policy_reader_is_root_only() {
+        assert_eq!(role("tool_policy_reader").unwrap().scope_kinds, vec![NodeKind::Root]);
     }
 }

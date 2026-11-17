@@ -31,6 +31,7 @@ pub(crate) fn version_to_pb(v: &ToolPolicyVersion) -> Result<pb::ToolPolicySetVe
         } as i32,
         origin: match v.origin {
             VersionOrigin::Save => pb::ToolPolicyVersionOrigin::Save,
+            VersionOrigin::Starter => pb::ToolPolicyVersionOrigin::Starter,
             VersionOrigin::CatalogChange => pb::ToolPolicyVersionOrigin::CatalogChange,
         } as i32,
         compiler_generation: v.compiler_generation,
@@ -52,5 +53,23 @@ pub(crate) fn empty_set(key: ToolPolicySetKey) -> pb::ToolPolicySetVersion {
         kind: kind as i32,
         org_id,
         ..Default::default()
+    }
+}
+
+/// The compiled message of a stored version, or the wire answer of a read with no version: the
+/// kind set, `version` 0, an empty `org_id` and nothing else.
+pub(crate) fn compiled_or_empty(found: Option<&ToolPolicyVersion>, key: ToolPolicySetKey) -> Result<pb::CompiledToolPolicySet, TenancyError> {
+    match found {
+        Some(v) => version_to_pb(v)?.compiled.ok_or_else(|| {
+            tracing::error!(key = ?v.key, version = v.version, "the stored tool policy version has no compiled message");
+            TenancyError::Internal
+        }),
+        None => Ok(pb::CompiledToolPolicySet {
+            kind: match key {
+                ToolPolicySetKey::Tenant(_) => pb::ToolPolicySetKind::Tenant,
+                ToolPolicySetKey::Floor => pb::ToolPolicySetKind::Floor,
+            } as i32,
+            ..Default::default()
+        }),
     }
 }

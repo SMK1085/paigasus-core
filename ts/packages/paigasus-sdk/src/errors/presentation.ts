@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 89 keys rather than 88.
+// demanding an entry for it would make the table 91 keys rather than 90.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -119,6 +119,8 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.TOOL_POLICY_COMPILER_UNAVAILABLE]: 'from-transport',
   [ErrorReason.TOOL_POLICY_COMPILER_BUSY]: 'from-transport',
   [ErrorReason.TOOL_POLICY_VERSION_NOT_FOUND]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_MODE_TRANSITION_INVALID]: 'from-transport',
+  [ErrorReason.TOOL_POLICY_HISTORY_UNSUPPORTED]: 'from-transport',
   // SMA-752. The tool-policy reasons appear in decision reports and notices, never as an HTTP
   // error (D11), so the transport table's answer applies if one ever reaches a console.
   [ErrorReason.TOOL_CALL_DENIED]: 'from-transport',

@@ -1108,6 +1108,30 @@ pub struct PutPolicySetBody {
     pub expected_version: u64,
 }
 
+/// The `mode` of the tool policy settings on the wire.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPolicyModeDto {
+    Off,
+    LogOnly,
+    Enforce,
+}
+
+/// The `fail_mode` of the tool policy settings on the wire.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailModeDto {
+    Open,
+    Closed,
+}
+
+/// Body of `PUT .../tool-policy-settings`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct PutToolPolicySettingsBody {
+    pub mode: ToolPolicyModeDto,
+    pub fail_mode: FailModeDto,
+}
+
 /// Query of the two `GET` set routes.
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct PolicySetVersionQuery {

@@ -317,7 +317,7 @@ async fn provision(fixture: &Fixture) {
 /// variant, and (b) a variant that ever renders OUTSIDE the `iam.` prefix — the one case the
 /// wildcard does not absorb, and the one that would otherwise ship silently unpublishable. Read it
 /// as cheap breadth, not as the guarantee that a specific event type is permitted — `EventType::ALL`
-/// is 22 variants now (SMA-606), not the eight it was when this note was first written.
+/// is 25 variants now (SMA-606, SMA-775), not the eight it was when this note was first written.
 ///
 /// The ack path is the substantive assertion here, and it is why a "write-only" publisher still
 /// needs a `subscribe` grant at all: `publish` returns `Ok` only after JetStream's ack lands on the
@@ -494,6 +494,39 @@ async fn the_consumer_core_subscription_receives_a_jetstream_policy_publish() {
         Ok(Some(msg)) => assert_eq!(msg.subject.as_str(), "iam.policy.put"),
         Ok(None) => panic!("the subscription closed; events: {:?}", drain(&mut events)),
         Err(_) => panic!("no iam.policy.put delivery within {VIOLATION_BUDGET:?}; events: {:?}", drain(&mut events)),
+    }
+}
+
+/// SMA-775: the three tool policy events sit under `iam.policy.>`, so the consumer's one core
+/// subscription must receive all of them from the production publisher.
+#[tokio::test]
+async fn the_consumer_core_subscription_receives_each_tool_policy_event() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    provision(&fixture).await;
+
+    let (client, mut events) = client_for(&fixture, &fixture.consumer, CONSUMER_INBOX).await;
+    let mut sub = client.subscribe("iam.policy.>").await.expect("subscribe is accepted locally");
+    client.flush().await.expect("flush");
+
+    let publisher = NatsEventPublisher::connect(&cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX)).await.expect("connect publisher");
+    let types = [EventType::ToolPolicySetPublished, EventType::ToolFloorPublished, EventType::ToolPolicySettingsChanged];
+    for (i, et) in types.into_iter().enumerate() {
+        publisher
+            .publish(&event(i as u128 + 1, et))
+            .await
+            .unwrap_or_else(|e| panic!("publishing {} must be acked: {e}", et.as_wire()));
+    }
+
+    let mut got = Vec::new();
+    for _ in 0..types.len() {
+        match tokio::time::timeout(VIOLATION_BUDGET, sub.next()).await {
+            Ok(Some(msg)) => got.push(msg.subject.to_string()),
+            Ok(None) => panic!("the subscription closed; events: {:?}", drain(&mut events)),
+            Err(_) => panic!("only {got:?} arrived within {VIOLATION_BUDGET:?}; events: {:?}", drain(&mut events)),
+        }
+    }
+    for et in types {
+        assert!(got.iter().any(|s| s == et.as_wire()), "{} was not delivered; got {got:?}", et.as_wire());
     }
 }
 

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::model::{StoredTool, ToolEntry, ToolPolicySetKey, ToolPolicyState, ToolPolicyVersion};
+use super::model::{StoredTool, ToolEntry, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion};
 use super::protocol::{CompileRequest, CompiledOutput, Rejection};
 use crate::{RepositoryError, Transaction};
 
@@ -67,4 +67,10 @@ pub trait ToolPolicyRepository: Send + Sync {
     /// That check is a compare-and-set on the state row. It is a backstop. The caller must still
     /// call `lock_state_in` first: the row lock is what makes writers run one after the other.
     async fn insert_live_version_in(&self, tx: &dyn Transaction, v: &ToolPolicyVersion) -> Result<(), RepositoryError>;
+    /// The settings of an organization. `None` when the organization has no settings row.
+    async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError>;
+    /// Insert the settings of an organization, or replace them. `s.updated_at` and
+    /// `s.updated_by` must be set: a `None` is an error (`Backend`), not a panic.
+    /// `first_enabled_at` is written once: a stored non-null value is kept, whatever `s` holds.
+    async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError>;
 }

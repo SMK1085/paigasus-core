@@ -1301,3 +1301,46 @@ pub async fn app_with_tool_policies(db: DatabaseConnection, compiler_path: &Path
     let (state, idp) = state_with_tool_policies(db, true, compiler_path).await;
     (router(state.clone()), state, idp)
 }
+
+// --- SMA-775 Task 9: the gateway service identity ----------------------------------------------
+
+/// Runs steps 1-4 of the operator runbook for the gateway service identity, in the runbook order,
+/// through the same application services that the RPCs use, all as `platform_admin`:
+/// (1) create the organization `paigasus-platform`; (2) create the service account
+/// `paigasus-gateway` owned by it; (3) issue an API key with the platform organization as scope,
+/// no expiry, and no `scope_actions` or `scope_roles`; (4) grant `tool_policy_reader` to the
+/// account at Root. Returns the platform organization id and the plaintext key.
+#[allow(dead_code)]
+pub async fn gateway_reader_key(state: &AppState, platform_admin: &Prn) -> (Uuid, String) {
+    let (org_id, key, sa_prn) = gateway_key_without_grant(state, platform_admin).await;
+    state
+        .roles
+        .grant(platform_admin, &sa_prn, "tool_policy_reader", &paigasus_iam_core::authz::model::root_prn().canonical())
+        .await
+        .expect("runbook step 4: grant tool_policy_reader at Root");
+    (org_id, key)
+}
+
+/// Runbook steps 1-3 only. Returns the platform organization id, the plaintext key and the PRN of
+/// the service account. The account has no grant.
+#[allow(dead_code)]
+pub async fn gateway_key_without_grant(state: &AppState, platform_admin: &Prn) -> (Uuid, String, String) {
+    let created = state
+        .orgs
+        .create(&PrincipalId::from_prn(platform_admin.clone()), "paigasus-platform", "Paigasus Platform")
+        .await
+        .expect("runbook step 1: create the platform organization");
+    let org = TenancyNodeRef::Organization(created.organization.id.clone());
+    let account = state
+        .service_accounts
+        .create(platform_admin, org.clone(), "paigasus-gateway")
+        .await
+        .expect("runbook step 2: create the service account");
+    let sa_id = account.account.principal_id.clone();
+    let issued = state
+        .api_keys
+        .issue(platform_admin, &sa_id, org, None, Vec::new(), Vec::new())
+        .await
+        .expect("runbook step 3: issue the API key");
+    (created.organization.id.uuid(), issued.plaintext, sa_id.canonical())
+}

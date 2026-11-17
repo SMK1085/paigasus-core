@@ -566,3 +566,166 @@ async fn two_orgs_never_see_or_change_each_others_rows() {
     assert_eq!(repo.state(&key_a).await.unwrap().live_version, 2);
     assert_eq!(repo.state(&key_b).await.unwrap().live_version, 2);
 }
+
+/// A save through the real service: the new live version, its outbox row and its audit row
+/// commit together, and the row carries the four-segment event type (SMA-775).
+#[tokio::test]
+async fn a_committed_save_leaves_one_outbox_row_with_the_four_segment_subject() {
+    use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox};
+    use paigasus_iam_core::PrincipalId;
+    use paigasus_iam_core::tool_policy::{STARTER_TOOL_POLICY_SOURCE, tenant_schema_json};
+    use paigasus_kernel::Prn;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let result = support::accepted_result(STARTER_TOOL_POLICY_SOURCE, &tenant_schema_json(&[]));
+    let compiler = support::fake_compiler_script(dir.path(), &result);
+    let (state, idp) = support::state_with_tool_policies(db.clone(), true, &compiler).await;
+    let token = idp.bearer("tp-pg-admin", Some("tp-pg-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision_platform_admin(&state, &token).await;
+    let actor = Prn::parse(&admin_prn).unwrap();
+    let out = state.orgs.create(&PrincipalId::from_prn(actor.clone()), "acme", "Acme").await.expect("create the organization");
+    let org = out.organization.id.uuid();
+    let svc = state.tool_policies.as_ref().expect("the tool policy service");
+
+    svc.put_set(&actor, org, STARTER_TOOL_POLICY_SOURCE, 0).await.expect("save");
+
+    let rows = event_outbox::Entity::find()
+        .filter(event_outbox::Column::EventType.eq("iam.policy.tool_set.published"))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let corr = rows[0].correlation_id.expect("the event has a correlation id");
+    let audit = audit_log::Entity::find().filter(audit_log::Column::CorrelationId.eq(corr)).all(&db).await.unwrap();
+    assert_eq!(audit.len(), 1, "the audit row shares the correlation id");
+    assert_eq!(audit[0].action, "PutToolPolicySet");
+
+    // An identical save stores nothing and writes no second row.
+    svc.put_set(&actor, org, STARTER_TOOL_POLICY_SOURCE, 1).await.expect("identical save");
+    let count = event_outbox::Entity::find()
+        .filter(event_outbox::Column::EventType.eq("iam.policy.tool_set.published"))
+        .all(&db)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(count, 1);
+}
+
+/// A compiler that accepts every source: the Cedar text is the source and the schema is the
+/// request schema. Each compile waits at a two-party barrier, so neither writer leaves the compile
+/// step before both have done their first reads. This cannot deadlock: a writer that waits at the
+/// barrier has not committed, so the other writer reads live version 0 and no `first_enabled_at`,
+/// and it must compile the starter too. The wait has a limit, so a writer that fails before its
+/// compile makes the test fail, not hang.
+struct BarrierIdentityCompiler(tokio::sync::Barrier);
+
+#[async_trait::async_trait]
+impl paigasus_iam_core::tool_policy::PolicyCompiler for BarrierIdentityCompiler {
+    fn generation(&self) -> u32 {
+        1
+    }
+
+    async fn compile(&self, req: &paigasus_iam_core::tool_policy::CompileRequest) -> Result<paigasus_iam_core::tool_policy::CompileOutcome, paigasus_iam_core::tool_policy::CompilerFailure> {
+        tokio::time::timeout(std::time::Duration::from_secs(30), self.0.wait())
+            .await
+            .expect("the second writer did not reach the compile step");
+        Ok(paigasus_iam_core::tool_policy::CompileOutcome::Accepted(paigasus_iam_core::tool_policy::CompiledOutput {
+            cedar_policies: req.source.clone(),
+            cedar_schema_json: req.schema_json.clone(),
+            conditions: Vec::new(),
+        }))
+    }
+}
+
+/// An authorizer that allows every request.
+struct AllowAll;
+
+#[async_trait::async_trait]
+impl paigasus_iam_core::Authorizer for AllowAll {
+    async fn is_authorized(&self, _req: &paigasus_iam_core::AccessRequest) -> Result<paigasus_iam_core::Decision, paigasus_iam_core::AuthzError> {
+        Ok(paigasus_iam_core::Decision {
+            effect: paigasus_iam_core::Effect::Allow,
+            determining_policies: vec![],
+        })
+    }
+}
+
+/// Two first enables at the same time (SMA-775). Both read live version 0 and both compile the
+/// starter. The state lock lets one commit. The other then sees the new state and gets the
+/// version conflict. One starter version, one event, one state row at version 1.
+///
+/// The service is built on the Postgres adapters with an allow-all authorizer. The full
+/// `AppState` service cannot run this race: its first authorization of the second writer ends
+/// only after the first writer has committed (measured), so the second writer reads version 1
+/// and writes no starter. That is a property of the test harness, not of the write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_first_enables_write_one_starter() {
+    use paigasus_iam::adapters::authz::Generations;
+    use paigasus_iam::adapters::clock::SystemClock;
+    use paigasus_iam::adapters::id::KernelIdGenerator;
+    use paigasus_iam::adapters::persistence::entities::event_outbox;
+    use paigasus_iam::adapters::persistence::{PgAuditLog, PgOrganizationRepository, PgOutbox};
+    use paigasus_iam::application::authorize::Authorize;
+    use paigasus_iam::application::error::TenancyError;
+    use paigasus_iam::application::tool_policies::{ToolPolicyLimits, ToolPolicyService, ToolPolicyServiceDeps};
+    use paigasus_iam_core::tool_policy::{CatalogLimits, FailMode, ToolPolicyMode};
+    use paigasus_kernel::Prn;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org_ref = support::seed_org_ref(&db).await;
+    let org = org_ref.resource_uuid();
+    let org_prn = org_ref.canonical();
+    let actor = Prn::build("iam", "", None, "principal", Uuid::from_u128(1)).unwrap();
+    let svc = ToolPolicyService::new(ToolPolicyServiceDeps {
+        repo: std::sync::Arc::new(PgToolPolicies::new(db.clone())),
+        orgs: std::sync::Arc::new(PgOrganizationRepository::new(db.clone(), Generations::memory())),
+        compiler: std::sync::Arc::new(BarrierIdentityCompiler(tokio::sync::Barrier::new(2))),
+        authorize: Authorize::new(std::sync::Arc::new(AllowAll)),
+        uow: std::sync::Arc::new(SeaOrmUnitOfWork::new(db.clone())),
+        audit: std::sync::Arc::new(PgAuditLog::new(db.clone())),
+        outbox: std::sync::Arc::new(PgOutbox::new(false)),
+        limits: ToolPolicyLimits {
+            catalog: CatalogLimits::default(),
+            max_source_bytes: 65_536,
+            max_window_ms: 3_600_000,
+            max_catalog_response_bytes: 2_097_152,
+        },
+        ids: KernelIdGenerator,
+        clock: SystemClock,
+    });
+
+    let (a, b) = tokio::join!(
+        svc.put_settings(&actor, org, ToolPolicyMode::LogOnly, FailMode::Closed),
+        svc.put_settings(&actor, org, ToolPolicyMode::LogOnly, FailMode::Closed),
+    );
+    let (ok, err) = match (a, b) {
+        (Ok(ok), Err(err)) | (Err(err), Ok(ok)) => (ok, err),
+        (a, b) => panic!("expected exactly one Ok and one Err, got {a:?} and {b:?}"),
+    };
+    assert_eq!(ok.starter_version, 1);
+    assert_eq!(err, TenancyError::ToolPolicyVersionConflict);
+
+    let count = |sql: String| {
+        let db = db.clone();
+        async move {
+            let row = db.query_one_raw(Statement::from_string(DbBackend::Postgres, sql)).await.unwrap().expect("a row");
+            row.try_get_by_index::<i64>(0).unwrap()
+        }
+    };
+    assert_eq!(count(format!("SELECT count(*) FROM tool_policy_set_version WHERE org_id = '{org}'")).await, 1);
+    assert_eq!(count(format!("SELECT live_version FROM tool_policy_state WHERE org_id = '{org}'")).await, 1);
+    let events = event_outbox::Entity::find()
+        .filter(event_outbox::Column::EventType.eq("iam.policy.tool_set.published"))
+        .filter(event_outbox::Column::AggregatePrn.eq(org_prn))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+}

@@ -11,7 +11,8 @@ use crate::application::tenancy_nodes::TenancyNodes;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::tool_policy::{
-    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyState, ToolPolicyVersion, VersionStatus,
+    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState,
+    ToolPolicyVersion, VersionStatus,
 };
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
@@ -1948,6 +1949,7 @@ struct ToolPolicyData {
     states: HashMap<ToolPolicySetKey, ToolPolicyState>,
     catalogs: HashMap<Uuid, std::collections::BTreeMap<String, StoredTool>>,
     versions: HashMap<ToolPolicySetKey, Vec<ToolPolicyVersion>>,
+    settings: HashMap<Uuid, ToolPolicySettings>,
 }
 
 /// In-memory `ToolPolicyRepository`, faithful to the port: `insert_live_version_in` is a
@@ -1962,6 +1964,7 @@ pub struct InMemoryToolPolicies {
     write_before_next_catalog_read: Arc<Mutex<Option<(Uuid, StoredTool)>>>,
     writes: Arc<AtomicUsize>,
     insert_attempts: Arc<AtomicUsize>,
+    read_log: Arc<Mutex<Vec<&'static str>>>,
 }
 
 const NO_STATE: ToolPolicyState = ToolPolicyState { catalog_revision: 0, live_version: 0 };
@@ -1996,7 +1999,8 @@ impl InMemoryToolPolicies {
         }
     }
 
-    /// The calls of `apply_catalog_in` and `insert_live_version_in` that changed the store.
+    /// The calls of `apply_catalog_in`, `insert_live_version_in` and `upsert_settings_in` that
+    /// changed the store.
     pub fn writes(&self) -> usize {
         self.writes.load(Ordering::SeqCst)
     }
@@ -2006,6 +2010,11 @@ impl InMemoryToolPolicies {
     /// gives the same conflict, so `writes()` alone cannot see a missing recheck.
     pub fn insert_attempts(&self) -> usize {
         self.insert_attempts.load(Ordering::SeqCst)
+    }
+
+    /// The names of the `settings`, `live` and `state` calls, in call order.
+    pub fn read_log(&self) -> Vec<&'static str> {
+        self.read_log.lock().unwrap().clone()
     }
 
     /// Every stored version of a set, oldest first.
@@ -2033,6 +2042,7 @@ impl InMemoryToolPolicies {
 #[async_trait]
 impl ToolPolicyRepository for InMemoryToolPolicies {
     async fn state(&self, key: &ToolPolicySetKey) -> Result<ToolPolicyState, RepositoryError> {
+        self.read_log.lock().unwrap().push("state");
         Ok(Self::state_of(&self.data.lock().unwrap(), key))
     }
 
@@ -2051,6 +2061,7 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
     }
 
     async fn live(&self, key: &ToolPolicySetKey) -> Result<Option<ToolPolicyVersion>, RepositoryError> {
+        self.read_log.lock().unwrap().push("live");
         let mut data = self.data.lock().unwrap();
         if let Some(v) = self.live_before_next_live.lock().unwrap().take() {
             let mut state = Self::state_of(&data, &v.key);
@@ -2127,6 +2138,26 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
             }
         }
         versions.push(v.clone());
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError> {
+        self.read_log.lock().unwrap().push("settings");
+        Ok(self.data.lock().unwrap().settings.get(&org).cloned())
+    }
+
+    async fn upsert_settings_in(&self, _tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError> {
+        if s.updated_at.is_none() || s.updated_by.is_none() {
+            return Err(RepositoryError::Backend("upsert_settings_in needs updated_at and updated_by".into()));
+        }
+        let mut data = self.data.lock().unwrap();
+        // `first_enabled_at` is written once, as in the Pg adapter.
+        let kept = data.settings.get(&org).and_then(|old| old.first_enabled_at);
+        let mut row = s.clone();
+        row.first_enabled_at = kept.or(s.first_enabled_at);
+        data.settings.insert(org, row);
+        drop(data);
         self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

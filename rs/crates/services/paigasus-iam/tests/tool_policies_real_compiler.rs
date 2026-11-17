@@ -112,28 +112,18 @@ async fn the_real_compiler_compiles_a_generic_floor() {
     assert!(compiled.cedar_policies.contains("floor-no-unregistered"), "{}", compiled.cedar_policies);
 }
 
+// SMA-753: IAM refuses a history rule until the gateway evaluates one. When SMA-753 lifts that,
+// restore the round-trip test (slot, policy id, window and threshold of the stored condition).
 #[tokio::test]
-async fn a_count_within_policy_round_trips_through_the_real_compiler() {
-    let Some(path) = support::real_compiler_path("a_count_within_policy_round_trips_through_the_real_compiler") else {
+async fn a_count_within_policy_is_refused_until_the_gateway_supports_history() {
+    let Some(path) = support::real_compiler_path("a_count_within_policy_is_refused_until_the_gateway_supports_history") else {
         return;
     };
     let Some(env) = setup(&path).await else { return };
     assert!(matches!(put_tool(&env, "search", Some(search_schema()), 0).await, WriteResult::Accepted(_)));
-    let WriteResult::Accepted(version) = env.service().put_set(&env.actor, env.org, COUNT_POLICY, 0).await.expect("put_set") else {
-        panic!("the count policy was rejected")
-    };
-    let compiled = pb::CompiledToolPolicySet::decode(version.compiled.as_slice()).expect("decode");
-    assert_eq!(compiled.conditions.len(), 1, "{compiled:?}");
-    let condition = &compiled.conditions[0];
-    assert!(condition.slot.starts_with("p_search_hrate_"), "{}", condition.slot);
-    assert_eq!(condition.policy_id, "search-rate");
-    assert_eq!(condition.window_ms, 3_600_000);
-    let Some(pb::history_condition::Shape::CountWithin(shape)) = &condition.shape else {
-        panic!("expected count_within, got {condition:?}")
-    };
-    assert_eq!(shape.threshold, 2);
-    assert!(compiled.cedar_schema.contains(&condition.slot), "the schema holds the slot");
-    assert_eq!(compiled.catalog_names, vec!["search".to_string()]);
+    let (reasons, message) = rejection_text(env.service().put_set(&env.actor, env.org, COUNT_POLICY, 0).await.expect("put_set"));
+    assert_eq!(reasons, vec!["tool-policy-history-unsupported"], "{message}");
+    assert!(message.contains("policy search-rate uses a history rule"), "{message}");
 }
 
 #[tokio::test]

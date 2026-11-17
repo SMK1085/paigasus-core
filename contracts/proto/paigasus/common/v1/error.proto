@@ -261,6 +261,13 @@ enum ErrorReason {
   // "tool-policy-version-not-found" — a fetch asked for a version that does not exist, or that is
   // not live or superseded. gRPC NOT_FOUND, HTTP 404.
   ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND = 60;
+  // "tool-policy-mode-transition-invalid" — the mode change is not allowed: an organization with no
+  // tool policy set must go to log_only first (spec §9.2). gRPC FAILED_PRECONDITION, HTTP 409.
+  ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID = 61;
+  // "tool-policy-history-unsupported" — rejection: the set has a history rule (formerly,
+  // count_within, sum_within). The gateway cannot enforce history rules yet, so IAM does not store
+  // them. Temporary; removed by SMA-753 (R19). Carried inside the rejected oneof.
+  ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED = 62;
 
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and

@@ -14,7 +14,9 @@
 //! expected value that is not current is `tool-policy-version-conflict` at once. (2) Compile with
 //! no transaction open. (3) Open a transaction, lock the state row and check that `live_version`
 //! and `catalog_revision` did not change; a change drops the transaction and is a version
-//! conflict. (4) Write, record one audit entry, commit. PR 1 writes no outbox event (D9).
+//! conflict. (4) Write, enqueue one outbox event for a new live version, record one audit entry, commit.
+//! The event and the audit entry share one correlation id. A write that stores no new live version
+//! enqueues no event.
 //!
 //! **A rejection is a successful result** ([`WriteResult::Rejected`]). It stores nothing and
 //! writes no audit entry. A compiler that answers with a reason that is not one of its six codes
@@ -26,8 +28,11 @@
 //! 6.2, Task 13).
 
 pub mod catalog;
+mod events;
+mod fetch;
 pub mod rejection;
 pub mod sets;
+mod settings;
 pub mod wire;
 
 use std::sync::Arc;
@@ -35,18 +40,20 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::tool_policy::{
-    CatalogLimits, CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, ImportFormat, PROTOCOL_VERSION, PolicyCompiler, SetKind, StoredTool, TOOL_SCHEMA_REVISION, ToolEntry, ToolKind,
-    ToolPolicyRepository, ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus, base_schema_json, build_manual, catalog_names, check_compiled, outputs_identical, parse_import,
-    tenant_schema_json,
+    CatalogLimits, CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, FailMode, ImportFormat, PROTOCOL_VERSION, PolicyCompiler, STARTER_TOOL_POLICY_SOURCE, SetKind, StoredTool,
+    TOOL_SCHEMA_REVISION, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, VersionOrigin, VersionStatus,
+    base_schema_json, build_manual, catalog_names, check_compiled, outputs_identical, parse_import, tenant_schema_json,
 };
-use paigasus_iam_core::{Action, AuditEntry, AuditLog, AuditOutcome, Clock, IdGenerator, OrganizationRepository, UnitOfWork};
+use paigasus_iam_core::{Action, AuditEntry, AuditLog, AuditOutcome, Clock, IdGenerator, OrganizationRepository, Outbox, Transaction, UnitOfWork};
 use paigasus_kernel::Prn;
 use serde_json::json;
 use uuid::Uuid;
 
 use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_catalog_size, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, size_check_time, stored_next, stored_upserts};
+pub use self::fetch::CompiledTenant;
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
-use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled};
+use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, reject_history_until_gateway_supports_it};
+use self::settings::check_transition;
 use crate::application::authorize::Authorize;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -73,6 +80,7 @@ pub struct ToolPolicyServiceDeps<I, C> {
     pub authorize: Authorize,
     pub uow: Arc<dyn UnitOfWork>,
     pub audit: Arc<dyn AuditLog>,
+    pub outbox: Arc<dyn Outbox>,
     pub limits: ToolPolicyLimits,
     pub ids: I,
     pub clock: C,
@@ -97,6 +105,14 @@ pub struct CatalogAccepted {
     pub skipped: Vec<(usize, String)>,
 }
 
+/// An accepted settings write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsAccepted {
+    pub settings: ToolPolicySettings,
+    /// The version of the starter set that this write saved. 0 when it saved none.
+    pub starter_version: u64,
+}
+
 /// The tool catalog and tool policy set use cases.
 #[derive(Clone)]
 pub struct ToolPolicyService<I, C> {
@@ -106,6 +122,7 @@ pub struct ToolPolicyService<I, C> {
     authorize: Authorize,
     uow: Arc<dyn UnitOfWork>,
     audit: Arc<dyn AuditLog>,
+    outbox: Arc<dyn Outbox>,
     limits: ToolPolicyLimits,
     ids: Arc<I>,
     clock: Arc<C>,
@@ -143,6 +160,7 @@ impl SetTarget {
 fn origin_str(origin: VersionOrigin) -> &'static str {
     match origin {
         VersionOrigin::Save => "save",
+        VersionOrigin::Starter => "starter",
         VersionOrigin::CatalogChange => "catalog_change",
     }
 }
@@ -163,6 +181,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             authorize: deps.authorize,
             uow: deps.uow,
             audit: deps.audit,
+            outbox: deps.outbox,
             limits: deps.limits,
             ids: Arc::new(deps.ids),
             clock: Arc::new(deps.clock),
@@ -262,6 +281,84 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         self.read_version(&ToolPolicySetKey::Floor, version).await
     }
 
+    /// The tool policy settings of `org`. An organization with no row is `off` and `closed`.
+    pub async fn get_settings(&self, actor: &Prn, org: Uuid) -> Result<ToolPolicySettings, TenancyError> {
+        self.authorize_org(actor, org, Action::ReadToolPolicies).await?;
+        Ok(self.repo.settings(org).await?.unwrap_or_else(ToolPolicySettings::default_for_absent_row))
+    }
+
+    /// Writes the tool policy settings of `org` (spec section 9.2). The first change away from
+    /// `off` must be to `log_only`; with no set, it also saves the starter set as version 1.
+    /// `enforce` before a first change away from `off`, or with no set, is
+    /// `tool-policy-mode-transition-invalid` (final review I-2). The first change away from
+    /// `off` stores `first_enabled_at` in the same transaction.
+    pub async fn put_settings(&self, actor: &Prn, org: Uuid, mode: ToolPolicyMode, fail_mode: FailMode) -> Result<SettingsAccepted, TenancyError> {
+        let org_prn = self.authorize_org(actor, org, Action::ManageToolPolicySettings).await?;
+        let key = ToolPolicySetKey::Tenant(org);
+
+        // Step 1: the state, and the decision.
+        let state = self.repo.state(&key).await?;
+        let first_enabled_at = self.repo.settings(org).await?.and_then(|s| s.first_enabled_at);
+        let save_starter = check_transition(mode, state.live_version > 0, first_enabled_at.is_some())?;
+
+        // Step 2: compile the starter, with no transaction open.
+        let starter = if save_starter {
+            let catalog: Vec<ToolEntry> = self.repo.catalog(org).await?.into_iter().map(|s| s.entry).collect();
+            match self.compile(SetKind::Tenant, STARTER_TOOL_POLICY_SOURCE, &catalog).await? {
+                Compiled::Accepted(out) => Some((out, catalog)),
+                Compiled::Rejected(rejections) => {
+                    tracing::error!(?rejections, "the compiler rejected the starter tool policy; this must not happen");
+                    return Err(TenancyError::Internal);
+                }
+            }
+        } else {
+            None
+        };
+
+        // Steps 3 and 4: a settings write with no starter does not depend on the set, so it takes
+        // no state lock. The starter write locks and rechecks inside the helper.
+        let tx = self.uow.begin().await?;
+        let now = self.clock.now();
+        // One correlation id for every event and the audit entry.
+        let corr = self.ids.new_correlation_id();
+        let mut starter_version = 0;
+        if let Some((out, catalog)) = &starter {
+            let target = SetTarget { key, resource: org_prn.clone() };
+            let version = self
+                .write_new_live_version(&*tx, actor, &target, &state, STARTER_TOOL_POLICY_SOURCE, out, catalog, VersionOrigin::Starter, corr, now)
+                .await?;
+            starter_version = version.version;
+        }
+        let settings = ToolPolicySettings {
+            mode,
+            fail_mode,
+            updated_at: Some(now),
+            updated_by: Some(actor.canonical()),
+            // Written once: the repository keeps a stored value (also under a concurrent write).
+            first_enabled_at: first_enabled_at.or((mode != ToolPolicyMode::Off).then_some(now)),
+        };
+        self.repo.upsert_settings_in(&*tx, org, &settings).await?;
+        self.outbox.enqueue(&*tx, &events::settings_changed(&*self.ids, corr, actor, &org_prn, org, &settings, now)).await?;
+        let entry = AuditEntry {
+            id: self.ids.new_audit_id(),
+            occurred_at: now,
+            actor_prn: Some(actor.canonical()),
+            action: "PutToolPolicySettings".to_owned(),
+            resource_prn: Some(org_prn.canonical()),
+            outcome: AuditOutcome::Committed,
+            determining_policies: vec![],
+            detail: json!({
+                "mode": mode.as_str(),
+                "fail_mode": fail_mode.as_str(),
+                "starter_version": (starter_version > 0).then_some(starter_version),
+            }),
+            correlation_id: Some(corr),
+        };
+        self.audit.record(&*tx, &entry).await?;
+        tx.commit().await?;
+        Ok(SettingsAccepted { settings, starter_version })
+    }
+
     /// Looks up the organization (`NotFound` when it does not exist) and authorizes `action` at
     /// its stored PRN. Returns that PRN.
     async fn authorize_org(&self, actor: &Prn, org: Uuid, action: Action) -> Result<Prn, TenancyError> {
@@ -300,7 +397,12 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         };
         let raw = match self.compiler.compile(&request).await {
             Ok(CompileOutcome::Accepted(out)) => match check_compiled(kind, &out) {
-                Ok(()) => return Ok(Compiled::Accepted(out)),
+                Ok(()) => {
+                    // SMA-753: remove this check with `reject_history_until_gateway_supports_it`
+                    // when the gateway evaluates history conditions.
+                    let history = reject_history_until_gateway_supports_it(&out);
+                    return Ok(if history.is_empty() { Compiled::Accepted(out) } else { Compiled::Rejected(history) });
+                }
                 // IAM's own checks: their reasons are `tool-policy-invalid` and
                 // `tool-policy-floor-permit`, and they pass through unchanged.
                 Err(rejections) => rejections,
@@ -362,26 +464,55 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             Compiled::Rejected(rejections) => return Ok(WriteResult::Rejected(rejections)),
         };
 
-        // Step 3: lock and recheck.
+        // Steps 3 and 4: lock and recheck, then write the version and its event.
         let tx = self.uow.begin().await?;
-        let locked = self.repo.lock_state_in(&*tx, &target.key).await?;
-        if locked != state {
-            drop(tx);
-            return Err(TenancyError::ToolPolicyVersionConflict);
-        }
-
-        // Step 4: write, audit, commit.
         let catalog_revision = match target.key {
             ToolPolicySetKey::Tenant(_) => Some(state.catalog_revision),
             ToolPolicySetKey::Floor => None,
         };
         let now = self.clock.now();
-        let version = self.new_version(actor, &target.key, state.live_version + 1, source, &out, catalog_revision, &catalog, VersionOrigin::Save, now);
-        self.repo.insert_live_version_in(&*tx, &version).await?;
-        let entry = self.audit_entry(actor, target.audit_action(), &target.resource, target.audit_set(), Some(&version), catalog_revision, now);
+        let corr = self.ids.new_correlation_id();
+        let version = self.write_new_live_version(&*tx, actor, target, &state, source, &out, &catalog, VersionOrigin::Save, corr, now).await?;
+        let entry = self.audit_entry(actor, target.audit_action(), &target.resource, target.audit_set(), Some(&version), catalog_revision, now, corr);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(WriteResult::Accepted(version))
+    }
+
+    /// Locks the state of the set and compares it with `state` (the read before the compile). A
+    /// difference is `ToolPolicyVersionConflict` and nothing is written. Then stores `source` as
+    /// the next live version and enqueues its published event. The audit entry and the commit
+    /// belong to the caller, with the same `corr`.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_new_live_version(
+        &self,
+        tx: &dyn Transaction,
+        actor: &Prn,
+        target: &SetTarget,
+        state: &ToolPolicyState,
+        source: &str,
+        out: &CompiledOutput,
+        catalog: &[ToolEntry],
+        origin: VersionOrigin,
+        corr: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<ToolPolicyVersion, TenancyError> {
+        let locked = self.repo.lock_state_in(tx, &target.key).await?;
+        if locked != *state {
+            return Err(TenancyError::ToolPolicyVersionConflict);
+        }
+        let catalog_revision = match target.key {
+            ToolPolicySetKey::Tenant(_) => Some(state.catalog_revision),
+            ToolPolicySetKey::Floor => None,
+        };
+        let version = self.new_version(actor, &target.key, state.live_version + 1, source, out, catalog_revision, catalog, origin, now);
+        self.repo.insert_live_version_in(tx, &version).await?;
+        let event = match target.key {
+            ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, actor, &target.resource, org, &version, now),
+            ToolPolicySetKey::Floor => events::floor_published(&*self.ids, corr, actor, &version, now),
+        };
+        self.outbox.enqueue(tx, &event).await?;
+        Ok(version)
     }
 
     /// A catalog write (spec sections 4.2, 4.5 and 4.6). `plan` turns the current catalog into
@@ -472,7 +603,12 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             }
             None => None,
         };
-        let entry = self.audit_entry(actor, action, org_prn, "tenant", version.as_ref(), Some(catalog_revision), now);
+        let corr = self.ids.new_correlation_id();
+        if let Some(v) = &version {
+            let event = events::set_published(&*self.ids, corr, actor, org_prn, org, v, now);
+            self.outbox.enqueue(&*tx, &event).await?;
+        }
+        let entry = self.audit_entry(actor, action, org_prn, "tenant", version.as_ref(), Some(catalog_revision), now, corr);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(WriteResult::Accepted(CatalogAccepted {
@@ -524,7 +660,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     /// One audit entry (spec section 9.6): the RPC name, the org PRN or `root_prn()`, and the set,
     /// the version, the origin and the catalog revision.
     #[allow(clippy::too_many_arguments)]
-    fn audit_entry(&self, actor: &Prn, action: &str, resource: &Prn, set: &str, version: Option<&ToolPolicyVersion>, catalog_revision: Option<u64>, now: DateTime<Utc>) -> AuditEntry {
+    fn audit_entry(&self, actor: &Prn, action: &str, resource: &Prn, set: &str, version: Option<&ToolPolicyVersion>, catalog_revision: Option<u64>, now: DateTime<Utc>, corr: Uuid) -> AuditEntry {
         AuditEntry {
             id: self.ids.new_audit_id(),
             occurred_at: now,
@@ -539,7 +675,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
                 "origin": version.map(|v| origin_str(v.origin)),
                 "catalog_revision": catalog_revision,
             }),
-            correlation_id: Some(self.ids.new_correlation_id()),
+            correlation_id: Some(corr),
         }
     }
 }
@@ -547,7 +683,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{ConcurrentChange, FakeAuditLog, FakeAuthorizer, FakePolicyCompiler, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryToolPolicies, SeqIds, seed_org};
+    use crate::application::fakes::{ConcurrentChange, FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyCompiler, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryToolPolicies, SeqIds, seed_org};
     use crate::application::tool_policies::sets::{CompiledMeta, decode_compiled, encode_compiled};
     use paigasus_iam_core::tool_policy::{CompileOutcome, CompiledOutput, CompilerFailure, Rejection, STARTER_TOOL_POLICY_SOURCE, ToolPolicyRepository, VersionStatus};
     use paigasus_iam_core::tool_policy::{SetKind, base_schema_json, tenant_schema_json};
@@ -570,10 +706,12 @@ mod tests {
 
     struct Harness {
         svc: ToolPolicyService<SeqIds, FixedClock>,
+        clock: FixedClock,
         repo: InMemoryToolPolicies,
         compiler: FakePolicyCompiler,
         authz: FakeAuthorizer,
         audit: FakeAuditLog,
+        outbox: FakeOutbox,
         uow: FakeUnitOfWork,
         org: Uuid,
         org_prn: Prn,
@@ -583,7 +721,13 @@ mod tests {
     /// A harness whose actor holds every tenant action at the org and every floor action at Root.
     fn harness() -> Harness {
         let h = bare_harness();
-        for action in [Action::ManageToolCatalog, Action::ReadToolCatalog, Action::ManageToolPolicies, Action::ReadToolPolicies] {
+        for action in [
+            Action::ManageToolCatalog,
+            Action::ReadToolCatalog,
+            Action::ManageToolPolicies,
+            Action::ReadToolPolicies,
+            Action::ManageToolPolicySettings,
+        ] {
             h.authz.allow(action, &h.org_prn);
         }
         for action in [Action::ManageToolPolicyFloor, Action::ReadToolPolicyFloor] {
@@ -605,7 +749,9 @@ mod tests {
         let compiler = FakePolicyCompiler::default();
         let authz = FakeAuthorizer::default();
         let audit = FakeAuditLog::default();
+        let outbox = FakeOutbox::default();
         let uow = FakeUnitOfWork::default();
+        let clock = FixedClock::default();
         let svc = ToolPolicyService::new(ToolPolicyServiceDeps {
             repo: Arc::new(repo.clone()),
             orgs: Arc::new(orgs),
@@ -613,6 +759,7 @@ mod tests {
             authorize: Authorize::new(Arc::new(authz.clone())),
             uow: Arc::new(uow.clone()),
             audit: Arc::new(audit.clone()),
+            outbox: Arc::new(outbox.clone()),
             limits: ToolPolicyLimits {
                 catalog: CatalogLimits::default(),
                 max_source_bytes: MAX_SOURCE,
@@ -620,14 +767,16 @@ mod tests {
                 max_catalog_response_bytes,
             },
             ids: SeqIds::default(),
-            clock: FixedClock::default(),
+            clock: clock.clone(),
         });
         Harness {
             svc,
+            clock,
             repo,
             compiler,
             authz,
             audit,
+            outbox,
             uow,
             org: org_id.uuid(),
             org_prn: org_id.prn().clone(),
@@ -887,6 +1036,76 @@ mod tests {
         assert_eq!((h.repo.insert_attempts(), h.uow.commits()), (0, 0));
     }
 
+    /// A compile result that holds one count_within condition for each id in `ids`.
+    fn output_with_history(cedar: &str, schema: serde_json::Value, ids: &[&str]) -> CompiledOutput {
+        use paigasus_iam_core::tool_policy::protocol::{CmpOp, HistoryCondition, Predicate, Scope, Shape};
+        CompiledOutput {
+            cedar_policies: cedar.to_owned(),
+            cedar_schema_json: schema,
+            conditions: ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| HistoryCondition {
+                    slot: format!("s{i}"),
+                    policy_id: (*id).to_owned(),
+                    scope: Scope::Session,
+                    window_ms: 1,
+                    shape: Shape::CountWithin {
+                        predicate: Predicate::AnyCatalogTool {},
+                        op: CmpOp::Ge,
+                        threshold: 1,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tenant_save_with_a_history_condition_is_rejected_and_stores_nothing() {
+        let h = harness();
+        h.compiler
+            .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["rate"]))));
+        let rejections = rejected(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!((rejections[0].reason, rejections[0].policy_id.as_deref()), (RejectionReason::HistoryUnsupported, Some("rate")));
+        assert_eq!((rejections[0].line, rejections[0].column), (None, None));
+        assert_eq!(
+            rejections[0].message,
+            "policy rate uses a history rule (formerly, count_within or sum_within). The gateway cannot enforce history rules yet, so this set cannot be saved. Remove the temporal block, or wait for history support."
+        );
+        assert_eq!((h.repo.writes(), h.repo.insert_attempts(), h.uow.commits()), (0, 0, 0));
+        assert!(audit_actions(&h).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_floor_save_with_a_history_condition_is_rejected_and_stores_nothing() {
+        let h = harness();
+        h.compiler.push(Ok(CompileOutcome::Accepted(output_with_history(FLOOR_DENY, base_schema_json(), &["floor-rate"]))));
+        let rejections = rejected(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!((rejections[0].reason, rejections[0].policy_id.as_deref()), (RejectionReason::HistoryUnsupported, Some("floor-rate")));
+        assert_eq!((h.repo.writes(), h.repo.insert_attempts(), h.uow.commits()), (0, 0, 0));
+        assert!(audit_actions(&h).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_set_with_no_history_condition_still_saves() {
+        let h = harness();
+        let v = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        assert_eq!(v.version, 1);
+        assert!(decode_compiled(&v.compiled).unwrap().conditions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_policy_with_a_history_condition_gets_one_rejection() {
+        let h = harness();
+        h.compiler
+            .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["b", "a", "a"]))));
+        let rejections = rejected(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let ids: Vec<Option<&str>> = rejections.iter().map(|r| r.policy_id.as_deref()).collect();
+        assert_eq!(ids, vec![Some("a"), Some("b")]);
+    }
+
     #[tokio::test]
     async fn an_oversized_source_is_rejected_without_a_compile() {
         let h = harness();
@@ -1096,6 +1315,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_catalog_write_over_a_live_history_set_is_rejected_with_the_history_code() {
+        // F17: a live set that PR 1 stored with a history rule. The coupling compile of a catalog
+        // write gives the history rule again, so R19 refuses it as `tool-catalog-breaks-policy`.
+        let h = harness();
+        seed_live_tenant(&h, STARTER_TOOL_POLICY_SOURCE, 1, TOOL_SCHEMA_REVISION);
+        h.compiler
+            .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["rate"]))));
+        let rejections = rejected(h.svc.put_tool(&h.actor, h.org, "search", ToolKind::Function, Some(search_schema()), 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!((rejections[0].reason, rejections[0].policy_id.as_deref()), (RejectionReason::CatalogBreaksPolicy, Some("rate")));
+        assert!(rejections[0].message.ends_with("(tool-policy-history-unsupported)"), "{}", rejections[0].message);
+        assert_eq!(h.compiler.calls(), 1, "the coupling compile ran");
+        assert_eq!((h.repo.writes(), h.uow.commits()), (0, 0));
+        assert!(h.repo.catalog(h.org).await.unwrap().is_empty(), "the catalog write stored nothing");
+    }
+
+    #[tokio::test]
     async fn a_live_set_from_an_older_generation_blocks_catalog_writes() {
         let h = harness();
         seed_live_tenant(&h, STARTER_TOOL_POLICY_SOURCE, 0, TOOL_SCHEMA_REVISION);
@@ -1125,6 +1361,96 @@ mod tests {
         assert_eq!((v.version, v.compiler_generation, v.origin), (2, 1, VersionOrigin::Save));
         let out = put_search(&h, 0).await;
         assert_eq!(out.catalog_revision, 1);
+    }
+
+    fn events(h: &Harness) -> Vec<paigasus_iam_core::DomainEvent> {
+        h.outbox.0.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_tenant_save_writes_one_set_published_event() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let ev = events(&h);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].event_type.as_wire(), "iam.policy.tool_set.published");
+        assert_eq!(ev[0].aggregate_prn, h.org_prn.canonical());
+        assert_eq!(ev[0].schema_version, 1);
+        assert_eq!(ev[0].actor_prn, Some(h.actor.canonical()));
+        assert_eq!(ev[0].payload, json!({"org_id": h.org.to_string(), "version": 1, "origin": "save"}));
+    }
+
+    #[tokio::test]
+    async fn a_floor_save_writes_one_floor_published_event() {
+        let h = harness();
+        accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        let ev = events(&h);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].event_type.as_wire(), "iam.policy.tool_floor.published");
+        assert_eq!(ev[0].aggregate_prn, root_prn().canonical());
+        assert_eq!(ev[0].payload, json!({"version": 1, "origin": "save"}));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_change_version_writes_a_set_published_event() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        put_search(&h, 0).await;
+        let ev = events(&h);
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[1].event_type.as_wire(), "iam.policy.tool_set.published");
+        assert_eq!(ev[1].aggregate_prn, h.org_prn.canonical());
+        assert_eq!(ev[1].payload, json!({"org_id": h.org.to_string(), "version": 2, "origin": "catalog_change"}));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_write_with_identical_output_writes_no_event() {
+        let h = harness();
+        put_search(&h, 0).await;
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let before = events(&h).len();
+        let out = put_search(&h, 1).await;
+        assert_eq!(out.set_version, 0);
+        assert_eq!(events(&h).len(), before);
+    }
+
+    #[tokio::test]
+    async fn a_byte_identical_save_writes_no_event() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 1).await);
+        assert_eq!(events(&h).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_or_conflicting_write_writes_no_event() {
+        let h = harness();
+        h.compiler.push(Ok(CompileOutcome::Accepted(output_with_history(FLOOR_DENY, base_schema_json(), &["floor-rate"]))));
+        rejected(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        assert!(events(&h).is_empty(), "a rejection");
+        assert!(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 5).await.is_err());
+        assert!(events(&h).is_empty(), "a stale expected version");
+        h.repo.change_before_next_lock(ConcurrentChange::LiveVersion);
+        assert_eq!(
+            h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await.unwrap_err(),
+            TenancyError::ToolPolicyVersionConflict
+        );
+        assert!(events(&h).is_empty(), "a conflict between compile and lock");
+    }
+
+    #[tokio::test]
+    async fn the_event_and_the_audit_entry_share_one_correlation_id() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        put_search(&h, 0).await;
+        let (ev, entries) = (events(&h), h.audit.0.lock().unwrap().clone());
+        assert_eq!(ev.len(), 3);
+        assert_eq!(entries.len(), 3);
+        for (e, a) in ev.iter().zip(entries.iter()) {
+            assert!(e.correlation_id.is_some());
+            assert_eq!(e.correlation_id, a.correlation_id);
+        }
     }
 
     #[tokio::test]
@@ -1389,5 +1715,325 @@ mod tests {
         let v = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
         assert_eq!(h.svc.get_set(&h.actor, h.org, Some(1)).await.unwrap(), Some(v.clone()));
         assert_eq!(h.svc.get_set(&h.actor, h.org, None).await.unwrap(), Some(v));
+    }
+
+    // ---- SMA-775: the settings ----
+
+    use paigasus_iam_core::tool_policy::{FailMode, ToolPolicyMode};
+
+    async fn put_mode(h: &Harness, mode: ToolPolicyMode, fail_mode: FailMode) -> Result<SettingsAccepted, TenancyError> {
+        h.svc.put_settings(&h.actor, h.org, mode, fail_mode).await
+    }
+
+    #[tokio::test]
+    async fn get_settings_of_an_org_with_no_row_is_off_and_closed() {
+        let h = harness();
+        let s = h.svc.get_settings(&h.actor, h.org).await.unwrap();
+        assert_eq!(s, ToolPolicySettings::default_for_absent_row());
+    }
+
+    #[tokio::test]
+    async fn the_first_enable_to_log_only_saves_the_starter_as_version_1() {
+        let h = harness();
+        let r = put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Open).await.unwrap();
+        assert_eq!(r.starter_version, 1);
+        assert_eq!((r.settings.mode, r.settings.fail_mode), (ToolPolicyMode::LogOnly, FailMode::Open));
+        let live = h.repo.live(&tenant(&h)).await.unwrap().unwrap();
+        assert_eq!((live.version, live.origin, live.status), (1, VersionOrigin::Starter, VersionStatus::Live));
+        assert_eq!(live.source, STARTER_TOOL_POLICY_SOURCE);
+        assert_eq!(live.created_by, h.actor.canonical());
+        assert_eq!(h.svc.get_settings(&h.actor, h.org).await.unwrap(), r.settings);
+    }
+
+    #[tokio::test]
+    async fn the_first_enable_writes_two_events_and_one_audit_entry() {
+        let h = harness();
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        let ev = events(&h);
+        let wire: Vec<&str> = ev.iter().map(|e| e.event_type.as_wire()).collect();
+        assert_eq!(wire, vec!["iam.policy.tool_set.published", "iam.policy.tool_settings.changed"]);
+        assert_eq!(ev[0].payload, json!({"org_id": h.org.to_string(), "version": 1, "origin": "starter"}));
+        assert_eq!(ev[1].payload, json!({"org_id": h.org.to_string(), "mode": "log_only", "fail_mode": "closed"}));
+        let entries = h.audit.0.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "PutToolPolicySettings");
+        assert_eq!(entries[0].resource_prn, Some(h.org_prn.canonical()));
+        assert_eq!(entries[0].detail, json!({"mode": "log_only", "fail_mode": "closed", "starter_version": 1}));
+        for e in &ev {
+            assert!(e.correlation_id.is_some());
+            assert_eq!(e.correlation_id, entries[0].correlation_id);
+        }
+        assert_eq!(h.uow.commits(), 1);
+    }
+
+    #[tokio::test]
+    async fn off_to_enforce_with_no_set_is_a_mode_transition_error_and_writes_nothing() {
+        let h = harness();
+        assert_eq!(
+            put_mode(&h, ToolPolicyMode::Enforce, FailMode::Closed).await.unwrap_err(),
+            TenancyError::ToolPolicyModeTransitionInvalid
+        );
+        assert_eq!((h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len(), h.compiler.calls()), (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn off_to_enforce_with_a_set_saved_in_off_is_a_mode_transition_error() {
+        // I-2 (strict spec 9.2): the first change away from `off` must be `log_only`, also when
+        // the org saved a set while in `off`.
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let (writes, ev, audit) = (h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len());
+        let err = put_mode(&h, ToolPolicyMode::Enforce, FailMode::Closed).await.unwrap_err();
+        assert_eq!(err, TenancyError::ToolPolicyModeTransitionInvalid);
+        assert_eq!((h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len()), (writes, ev, audit));
+        assert_eq!(h.repo.settings(h.org).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn off_to_enforce_after_an_earlier_enable_with_a_set_is_allowed_and_saves_no_starter() {
+        let h = harness();
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        put_mode(&h, ToolPolicyMode::Off, FailMode::Closed).await.unwrap();
+        let r = put_mode(&h, ToolPolicyMode::Enforce, FailMode::Closed).await.unwrap();
+        assert_eq!((r.settings.mode, r.starter_version), (ToolPolicyMode::Enforce, 0));
+        assert_eq!(h.repo.versions(&tenant(&h)).len(), 1, "only the starter of the first enable");
+    }
+
+    #[tokio::test]
+    async fn the_first_enable_sets_first_enabled_at_and_a_later_write_keeps_it() {
+        let h = harness();
+        put_mode(&h, ToolPolicyMode::Off, FailMode::Closed).await.unwrap();
+        assert_eq!(h.repo.settings(h.org).await.unwrap().unwrap().first_enabled_at, None, "off is not an enable");
+        let first = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH + chrono::Duration::seconds(100);
+        h.clock.set(first);
+        let r = put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        assert_eq!(r.settings.first_enabled_at, Some(first));
+        assert_eq!(h.repo.settings(h.org).await.unwrap().unwrap().first_enabled_at, Some(first));
+        for (secs, mode) in [(200, ToolPolicyMode::Enforce), (300, ToolPolicyMode::Off), (400, ToolPolicyMode::LogOnly)] {
+            h.clock.set(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH + chrono::Duration::seconds(secs));
+            let r = put_mode(&h, mode, FailMode::Open).await.unwrap();
+            assert_eq!(r.settings.first_enabled_at, Some(first), "{mode:?}");
+            assert_eq!(h.repo.settings(h.org).await.unwrap().unwrap().first_enabled_at, Some(first), "{mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn log_only_with_an_existing_set_saves_no_starter() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let calls = h.compiler.calls();
+        let r = put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        assert_eq!(r.starter_version, 0);
+        assert_eq!(h.compiler.calls(), calls);
+        assert_eq!(h.repo.versions(&tenant(&h)).len(), 1);
+        // The save wrote one event; the settings write wrote one more, and no set event.
+        let wire: Vec<&str> = events(&h).iter().map(|e| e.event_type.as_wire()).collect();
+        assert_eq!(wire, vec!["iam.policy.tool_set.published", "iam.policy.tool_settings.changed"]);
+        assert_eq!(h.audit.0.lock().unwrap().last().unwrap().detail["starter_version"], json!(null));
+    }
+
+    #[tokio::test]
+    async fn a_fail_mode_change_alone_is_allowed_in_every_mode() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        for mode in [ToolPolicyMode::Off, ToolPolicyMode::LogOnly, ToolPolicyMode::Enforce] {
+            for fail in [FailMode::Open, FailMode::Closed] {
+                let r = put_mode(&h, mode, fail).await.unwrap();
+                assert_eq!((r.settings.mode, r.settings.fail_mode, r.starter_version), (mode, fail, 0));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn any_mode_can_go_to_off() {
+        let h = harness();
+        // From the absent row.
+        put_mode(&h, ToolPolicyMode::Off, FailMode::Open).await.unwrap();
+        assert_eq!(h.repo.versions(&tenant(&h)).len(), 0);
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Open).await.unwrap();
+        put_mode(&h, ToolPolicyMode::Enforce, FailMode::Open).await.unwrap();
+        put_mode(&h, ToolPolicyMode::Off, FailMode::Open).await.unwrap();
+        assert_eq!(h.svc.get_settings(&h.actor, h.org).await.unwrap().mode, ToolPolicyMode::Off);
+    }
+
+    #[tokio::test]
+    async fn a_set_saved_during_the_first_enable_is_a_version_conflict() {
+        let h = harness();
+        h.repo.change_before_next_lock(ConcurrentChange::LiveVersion);
+        assert_eq!(put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap_err(), TenancyError::ToolPolicyVersionConflict);
+        assert_eq!(
+            (h.repo.writes(), h.repo.insert_attempts(), events(&h).len(), h.audit.0.lock().unwrap().len(), h.uow.commits()),
+            (0, 0, 0, 0, 0)
+        );
+        assert_eq!(h.repo.settings(h.org).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_busy_compiler_during_the_first_enable_writes_nothing() {
+        let h = harness();
+        h.compiler.push(Err(CompilerFailure::Busy));
+        assert_eq!(put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap_err(), TenancyError::ToolPolicyCompilerBusy);
+        assert_eq!((h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len(), h.uow.commits()), (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_starter_is_an_internal_error_and_writes_nothing() {
+        let h = harness();
+        h.compiler
+            .push(Ok(CompileOutcome::Rejected(vec![compiler_rejection(None, RejectionReason::PolicyInvalid.code(), "x")])));
+        assert_eq!(put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap_err(), TenancyError::Internal);
+        assert_eq!((h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len()), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_settings_write_with_no_starter_takes_no_state_lock() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        // I-2: `enforce` needs an earlier change away from `off`.
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        // A concurrent change would conflict if the write locked and compared the state.
+        h.repo.change_before_next_lock(ConcurrentChange::CatalogRevision);
+        put_mode(&h, ToolPolicyMode::Enforce, FailMode::Closed).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_write_with_the_stored_values_still_writes() {
+        let h = harness();
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        let (ev, audit) = (events(&h).len(), h.audit.0.lock().unwrap().len());
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        assert_eq!((events(&h).len(), h.audit.0.lock().unwrap().len()), (ev + 1, audit + 1));
+    }
+
+    #[tokio::test]
+    async fn the_settings_methods_check_their_actions() {
+        for write in [false, true] {
+            let h = bare_harness();
+            let (result, action) = if write {
+                (put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.map(|_| ()), Action::ManageToolPolicySettings)
+            } else {
+                (h.svc.get_settings(&h.actor, h.org).await.map(|_| ()), Action::ReadToolPolicies)
+            };
+            assert_eq!(result, Err(TenancyError::Forbidden));
+            assert_eq!(h.authz.checks(), vec![(action, h.org_prn.canonical())]);
+            assert_eq!((h.compiler.calls(), h.repo.writes(), h.audit.0.lock().unwrap().len()), (0, 0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_org_is_not_found() {
+        let h = harness();
+        let absent = Uuid::from_u128(999);
+        assert_eq!(h.svc.get_settings(&h.actor, absent).await.unwrap_err(), TenancyError::NotFound);
+        assert_eq!(h.svc.put_settings(&h.actor, absent, ToolPolicyMode::Off, FailMode::Closed).await.unwrap_err(), TenancyError::NotFound);
+    }
+
+    // ---- SMA-775: the compiled-policy fetch ----
+
+    fn allow_compiled(h: &Harness) {
+        h.authz.allow(Action::ReadCompiledToolPolicies, &h.org_prn);
+        h.authz.allow(Action::ReadCompiledToolPolicies, &root_prn());
+    }
+
+    #[tokio::test]
+    async fn get_compiled_of_an_org_with_no_set_is_none_with_default_settings() {
+        let h = bare_harness();
+        allow_compiled(&h);
+        let r = h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
+        assert_eq!(r.set, None);
+        assert_eq!(r.settings, ToolPolicySettings::default_for_absent_row());
+        assert_eq!(r.floor_version, 0);
+    }
+
+    #[tokio::test]
+    async fn get_compiled_returns_the_live_set_the_settings_and_the_floor_version() {
+        let h = harness();
+        allow_compiled(&h);
+        let v = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        // I-2: `enforce` needs an earlier change away from `off`.
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Open).await.unwrap();
+        put_mode(&h, ToolPolicyMode::Enforce, FailMode::Open).await.unwrap();
+        let r = h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
+        assert_eq!(r.set, Some(v));
+        assert_eq!((r.settings.mode, r.settings.fail_mode), (ToolPolicyMode::Enforce, FailMode::Open));
+        assert_eq!(r.floor_version, 1);
+    }
+
+    #[tokio::test]
+    async fn get_compiled_by_version_returns_a_superseded_version() {
+        let h = harness();
+        allow_compiled(&h);
+        let v1 = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let other = format!("{STARTER_TOOL_POLICY_SOURCE}\n");
+        let v2 = accepted(h.svc.put_set(&h.actor, h.org, &other, 1).await);
+        assert_eq!(v2.version, 2);
+        let r = h.svc.get_compiled(&h.actor, h.org, Some(1)).await.unwrap();
+        assert_eq!(r.set.as_ref().map(|s| (s.version, s.status)), Some((1, VersionStatus::Superseded)));
+        assert_eq!(r.set.unwrap().compiled, v1.compiled);
+        assert_eq!(h.svc.get_compiled(&h.actor, h.org, Some(9)).await.unwrap_err(), TenancyError::ToolPolicyVersionNotFound);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, Some(9)).await.unwrap_err(), TenancyError::ToolPolicyVersionNotFound);
+    }
+
+    #[tokio::test]
+    async fn the_fetch_of_an_org_in_mode_off_returns_the_floor_version() {
+        let h = harness();
+        allow_compiled(&h);
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        let other = format!("{FLOOR_DENY}\n");
+        accepted(h.svc.put_floor(&h.actor, &other, 1).await);
+        let r = h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
+        assert_eq!(r.settings.mode, ToolPolicyMode::Off);
+        assert_eq!(r.floor_version, 2);
+        assert_eq!(r.set.map(|s| s.version), Some(1));
+    }
+
+    #[tokio::test]
+    async fn get_compiled_floor_with_no_floor_is_none() {
+        let h = bare_harness();
+        allow_compiled(&h);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, None).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn get_compiled_floor_returns_the_live_floor() {
+        let h = harness();
+        allow_compiled(&h);
+        let v = accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, None).await.unwrap(), Some(v.clone()));
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, Some(1)).await.unwrap(), Some(v));
+    }
+
+    #[tokio::test]
+    async fn the_fetch_methods_check_read_compiled_tool_policies() {
+        let h = bare_harness();
+        assert_eq!(h.svc.get_compiled(&h.actor, h.org, None).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, None).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!(
+            h.authz.checks(),
+            vec![(Action::ReadCompiledToolPolicies, h.org_prn.canonical()), (Action::ReadCompiledToolPolicies, root_prn().canonical())]
+        );
+        // A grant of the other read actions does not allow the fetch.
+        h.authz.allow(Action::ReadToolPolicies, &h.org_prn);
+        h.authz.allow(Action::ReadToolPolicyFloor, &root_prn());
+        assert_eq!(h.svc.get_compiled(&h.actor, h.org, None).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, None).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!((h.repo.writes(), h.audit.0.lock().unwrap().len(), h.uow.commits()), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn get_compiled_of_an_absent_org_is_not_found() {
+        let h = harness();
+        allow_compiled(&h);
+        assert_eq!(h.svc.get_compiled(&h.actor, Uuid::from_u128(999), None).await.unwrap_err(), TenancyError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn get_compiled_reads_the_settings_before_the_set_and_the_floor_version() {
+        let h = bare_harness();
+        allow_compiled(&h);
+        h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
+        assert_eq!(h.repo.read_log(), vec!["settings", "live", "state"]);
     }
 }
