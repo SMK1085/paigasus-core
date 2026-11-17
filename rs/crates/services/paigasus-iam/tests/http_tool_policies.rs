@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::id::KernelIdGenerator;
-use paigasus_iam_core::tool_policy::{STARTER_TOOL_POLICY_SOURCE, tenant_schema_json};
+use paigasus_iam_core::tool_policy::{STARTER_TOOL_POLICY_SOURCE, base_schema_json, tenant_schema_json};
 use paigasus_iam_core::{IdGenerator, PrincipalId};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::tool_policy_service_client::ToolPolicyServiceClient;
@@ -600,4 +600,77 @@ async fn a_held_not_acceptable_accept_is_409_with_its_code() {
     assert_eq!(status, StatusCode::OK, "{run}");
     let (status, body) = send(&env.app, "POST", &format!("{}/2/accept", env.held()), None, Some(&env.admin)).await;
     assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("tool-policy-held-not-acceptable")), "{body}");
+}
+
+const FLOOR_SOURCE: &str = "@id(\"floor-deny\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource);\n";
+
+impl Env {
+    /// Makes the live floor stale (raw SQL), then runs the job so that it holds another output.
+    /// Returns the held version.
+    async fn hold_floor(&self) -> u64 {
+        self.state
+            .db
+            .execute_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "UPDATE tool_policy_set_version SET compiler_generation = 0 WHERE kind = 'floor' AND status = 'live'".to_string(),
+            ))
+            .await
+            .expect("age the floor");
+        set_compiler_result(self.dir.path(), &accepted_result(OTHER_SOURCE, &base_schema_json()));
+        let (status, run) = send(&self.app, "POST", "/v1/tool-policy-recompile", None, Some(&self.admin)).await;
+        assert_eq!(
+            (status, run["results"][0]["outcome"].as_str(), run["results"][0]["kind"].as_str()),
+            (StatusCode::OK, Some("RECOMPILE_OUTCOME_HELD_DIFFERENT"), Some("floor")),
+            "{run}"
+        );
+        run["results"][0]["version"].as_u64().expect("a held version")
+    }
+}
+
+#[tokio::test]
+async fn the_floor_held_routes_accept_and_discard_by_their_own_action() {
+    let Some(env) = setup(true, &tenant_accepted()).await else { return };
+    set_compiler_result(env.dir.path(), &accepted_result(FLOOR_SOURCE, &base_schema_json()));
+    let (status, put) = send(&env.app, "PUT", "/v1/tool-policy-floor", Some(json!({"source": FLOOR_SOURCE, "expected_version": 0})), Some(&env.admin)).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    let first = env.hold_floor().await;
+
+    // An org admin has no floor right.
+    let org_admin = env.token_with("tp-org-admin", "org_admin").await;
+    for action in ["accept", "discard"] {
+        let (status, denied) = send(&env.app, "POST", &format!("/v1/tool-policy-floor/held-versions/{first}/{action}"), None, Some(&org_admin)).await;
+        assert_eq!((status, denied["error"]["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{action}: {denied}");
+    }
+
+    // Discard changes no live version.
+    let (status, out) = send(&env.app, "POST", &format!("/v1/tool-policy-floor/held-versions/{first}/discard"), None, Some(&env.admin)).await;
+    assert_eq!(
+        (status, out["discarded"]["status"].as_str(), out["discarded"]["kind"].as_str()),
+        (StatusCode::OK, Some("discarded"), Some("floor")),
+        "{out}"
+    );
+    let (_, floor) = send(&env.app, "GET", "/v1/tool-policy-floor", None, Some(&env.admin)).await;
+    assert_eq!(floor["version"].as_u64(), Some(1), "a discard does not go live: {floor}");
+
+    // A new save makes a new live floor. Stale it, hold again, and accept the new row.
+    set_compiler_result(env.dir.path(), &accepted_result(FLOOR_SOURCE, &base_schema_json()));
+    let (status, put) = send(&env.app, "PUT", "/v1/tool-policy-floor", Some(json!({"source": FLOOR_SOURCE, "expected_version": 1})), Some(&env.admin)).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    let second = env.hold_floor().await;
+    let (status, accepted) = send(&env.app, "POST", &format!("/v1/tool-policy-floor/held-versions/{second}/accept"), None, Some(&env.admin)).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!((accepted["accepted"]["origin"].as_str(), accepted["accepted"]["kind"].as_str()), (Some("accept"), Some("floor")));
+    assert_eq!(accepted["accepted"]["version"].as_u64(), Some(second + 1));
+}
+
+#[tokio::test]
+async fn the_recompile_route_needs_the_recompile_right() {
+    let Some(env) = setup(true, &tenant_accepted()).await else { return };
+    for (sub, role) in [("tp-org-admin", "org_admin"), ("tp-member", "org_member")] {
+        let token = env.token_with(sub, role).await;
+        let (status, body) = send(&env.app, "POST", "/v1/tool-policy-recompile", None, Some(&token)).await;
+        assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{role}: {body}");
+    }
+    let (status, body) = send(&env.app, "POST", "/v1/tool-policy-recompile", None, Some(&env.admin)).await;
+    assert_eq!((status, body["status"].as_str()), (StatusCode::OK, Some("ran")), "{body}");
 }

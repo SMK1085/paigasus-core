@@ -609,6 +609,28 @@ async fn a_concurrent_accept_and_discard_has_one_winner() {
     }
 }
 
+/// A tenant list returns only the rows of that tenant, and an admin of A cannot list B.
+#[tokio::test]
+async fn a_tenant_list_holds_only_its_own_rows_and_another_tenant_is_forbidden() {
+    let Some(env) = setup(true).await else { return };
+    let org_a = env.org_prn.clone();
+    make_held_tenant(&env, &org_a).await;
+    let org_b = second_org(&env, "beta").await;
+    make_held_tenant(&env, &org_b).await;
+    let (uuid_a, uuid_b) = (support::principal_uuid(&org_a).to_string(), support::principal_uuid(&org_b).to_string());
+
+    let all = list(&env, &env.admin, "").await;
+    assert_eq!(all.len(), 2, "the all-sets list holds both rows");
+    let only_a = list(&env, &env.admin, &org_a).await;
+    assert_eq!(only_a.iter().map(|h| h.org_id.as_str()).collect::<Vec<_>>(), vec![uuid_a.as_str()]);
+    let only_b = list(&env, &env.admin, &org_b).await;
+    assert_eq!(only_b.iter().map(|h| h.org_id.as_str()).collect::<Vec<_>>(), vec![uuid_b.as_str()]);
+
+    let token_a = env.principal_with("tp-org-admin", "org_admin").await;
+    let status = env.client().list_held_tool_policy_versions(authed(list_req(&org_b), &token_a)).await.unwrap_err();
+    assert_status(&status, Code::PermissionDenied, "forbidden");
+}
+
 #[tokio::test]
 async fn two_concurrent_accepts_make_one_live_version() {
     let Some(env) = setup(true).await else { return };

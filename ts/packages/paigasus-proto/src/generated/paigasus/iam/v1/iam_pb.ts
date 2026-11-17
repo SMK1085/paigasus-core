@@ -4582,6 +4582,8 @@ export type ListHeldToolPolicyVersionsRequest = Message<"paigasus.iam.v1.ListHel
   orgPrn: string;
 
   /**
+   * 0 => server default 50; above 200 is invalid-pagination.
+   *
    * @generated from field: uint32 limit = 2;
    */
   limit: number;
