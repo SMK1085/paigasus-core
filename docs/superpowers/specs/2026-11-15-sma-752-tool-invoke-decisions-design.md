@@ -201,7 +201,7 @@ Sven can change at Gate 1. "Challenge" marks a call that the adversarial challen
 | D8 | A tenant that is not in the config uses `default_mode`, default `off`. The ADR-0027 (d) start state (log-only, allow-everything starter policy) belongs to IAM (SMA-751). | Call |
 | D9 | `on_policy_unavailable` (`open` or `closed`) has no default. With `[tool_policy] enabled = true` and no value, the gateway does not start. | Call |
 | D10 | The error reasons: `ERROR_REASON_TOOL_CALL_DENIED = 315` ("tool-call-denied"), `ERROR_REASON_TOOL_RESULT_BLOCKED = 316` ("tool-result-blocked"), `ERROR_REASON_TOOL_POLICY_UNAVAILABLE = 317` ("tool-policy-unavailable"). The issue's `GATEWAY_` prefix comes from the `ErrorDomain`. "tool-policy" makes the name specific in a global registry. | Challenge |
-| D11 | A blocked call or result does not fail the request (ADR-0027 (c)). The reasons appear in the notice and the decision report. The only new HTTP error is the refusal of D17. | Call |
+| D11 | A blocked call or result does not fail the request (ADR-0027 (c)). The reasons appear in the notice and the decision report. The only new HTTP error is the refusal of D17. Exception (SMA-776 § 5.1): an enforced block of a Responses `computer_call_output` refuses the request with a 400 `tool-result-unreplaceable` (318). No field of that item can carry the notice. | Call |
 | D12 | `context.input` mapping per § 6.1.4: by value, not by spelling. | Challenge |
 | D13 | `context.findings` is a set of strings, one per finding kind. | Call |
 | D14 | `context.session` is `{ id: "", turn: 0 }` until SMA-753. The issue asks for the placeholder. A policy must not read it before SMA-753. | Call |
@@ -546,9 +546,11 @@ decide timeout and a decider panic. The two settings are separate.
 
 `pipeline.rs::proxy` builds the interception tuple: it calls `parse_request` and makes the
 `DecisionContext`. Directly after that, before `limits.admit_for` and before `state.openai.send`,
-it calls `RequestToolPolicy::apply(ctx, format, &turn, body) -> Result<RequestOutcome, Refusal>`.
+it calls `RequestToolPolicy::apply(ctx, format, &turn, body) -> Result<RequestOutcome, Refused>`.
 
-- `Refusal` is the D17 400.
+- `Refusal` is the D17 400. Since SMA-776 it is also the 400 `tool-result-unreplaceable` for an
+  enforced block of a `computer_call_output`. `Refused` carries the `Refusal` and the plan entries,
+  so the refusal carries the decision header.
 - `RequestOutcome` holds the body to send (original or rewritten), the request-side report
   entries, and the snapshot that goes into `DecisionContext` (D30).
 
@@ -560,7 +562,8 @@ With policies available, and an effective mode that is not `off`:
 2. For each definition, call `decide_tool`. A `DeniedForAllInputs` definition is planned for
    removal.
 3. For each tool result, call `decide_tool` with the result's tool name. A `DeniedForAllInputs`
-   result is planned for replacement. Where the result names no tool (a Chat `role:"tool"`
+   result is planned for replacement. An enforced block of a `computer_call_output` adds a
+   refusal cause instead (SMA-776 § 6.2). Where the result names no tool (a Chat `role:"tool"`
    message has only the call id), the name comes from the earlier assistant call with that id in
    the same request. If two earlier calls have that id, use each name and plan the replacement
    if any of them is denied. With no such call, the result is not changed.
@@ -593,7 +596,7 @@ Definitions:
   client-run tools (`local_shell`, `shell`, `apply_patch`, `computer`). A hosted tool that the
   provider runs (for example `web_search`) has no call that the client runs, and is not removed.
 
-Results (every type that `turn.rs:240-249` reads as a result):
+Results (every type that `responses_result_shape` in `turn.rs` reads as a result):
 
 - Chat: `role:"tool"` (`content`), legacy `role:"function"`.
 - Anthropic: `tool_result` blocks (`content`, and `is_error: true` is set).
@@ -606,7 +609,17 @@ A Responses `local_shell_call_output` can have only an `id`. That `id` is matche
 the `call_id` and the item `id` of every earlier `local_shell_call`, and the output is replaced
 when either one matches a denied call (fail-safe, CodeRabbit round 2 on PR 475).
 
-The notice replaces the whole content (ADR-0027 (c)). Its text is fixed and built from the reason
+The replacement depends on the result type (SMA-776 spec § 6.1):
+
+| `ResultShape` | item types | replacement |
+|---|---|---|
+| `Text` | Chat `role:"tool"`, `role:"function"`; Anthropic `tool_result`; Responses `function_call_output`, `custom_tool_call_output`, `local_shell_call_output`, `apply_patch_call_output` | the notice string (Anthropic also sets `is_error: true`) |
+| `ShellChunks` | Responses `shell_call_output` | one notice chunk |
+| `Screenshot` | Responses `computer_call_output` | none: the request is refused |
+| `Approval` | Responses `mcp_approval_response` | `approve: false`, `reason` = the notice |
+
+See the SMA-776 spec (`2026-11-16-sma-776-blocked-structured-results-design.md`).
+The text of the notice is fixed and built from the reason
 and a cleaned tool name (SMA-749 D21).
 
 #### 6.5.3 Reporting
@@ -620,7 +633,10 @@ it has `tool` (the cleaned name) and `action` (`remove-definition`, `replace-res
 - Order: call entries first, then request entries, so the 2 KiB header cap removes request
   entries first. If any request entry is removed, one summary entry gives their count.
 - Non-stream: the `paigasus-tool-decisions` header is sent whenever an entry exists, also on a
-  non-2xx upstream answer and on a body with no calls.
+  non-2xx upstream answer, on a request-side refusal (SMA-776) and on a body with no calls.
+- On a refused request, the header is sent when the plan has entries, stream or not. An entry with
+  `enforced: true` then means that the gateway would apply it. The gateway refused the request in
+  place of the change (SMA-776 § 6.2).
 - Stream: the request entries go out as `: paigasus-decision` comments before the first upstream
   frame.
 - Log-only reports tell the caller what its own tenant's policies would block. That is accepted:
@@ -632,6 +648,10 @@ it has `tool` (the cleaned name) and `action` (`remove-definition`, `replace-res
 Append to the gateway range of `contracts/proto/paigasus/common/v1/error.proto`, under a new
 banner "Tool decisions (SMA-752)", the three values of D10. Run `buf format -w` and
 `contracts:generate`.
+
+SMA-776 adds `ERROR_REASON_TOOL_RESULT_UNREPLACEABLE = 318` (`tool-result-unreplaceable`) under the
+same banner. It is the only code of that banner that is an HTTP error. `adapters/http/error.rs`
+already has an `emits` row, so it needs no new `MANIFEST` row.
 
 `MANIFEST` rows in `ci/error-registry/check.py`: an `emits` row for each source file that spells
 a new code (at least `paigasus-gateway-core/src/report.rs` and the gateway's
@@ -692,7 +712,8 @@ stream) and `/v1/responses`:
 - An argument policy (`read_file` only under `/workspace/`): an allowed and a denied path.
 - Definition removal, each `tool_choice` case of § 6.5.1 step 4, each last-definition case of
   step 5, and no removal when an input-reading permit exists.
-- Tool result replacement for each result type, including the Chat case where the name comes
+- Tool result replacement for each result type. An enforced block of a `computer_call_output`
+  adds a refusal cause instead (SMA-776 § 6.2). Include the Chat case where the name comes
   from the earlier call.
 - `name_collision` with the shipped floor.
 - An `Unavailable` turn: refused in enforce mode before the limits, forwarded and counted in

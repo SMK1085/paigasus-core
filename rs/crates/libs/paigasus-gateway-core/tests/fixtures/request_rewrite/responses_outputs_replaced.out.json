@@ -5,8 +5,6 @@
     {"type": "function_call_output", "call_id": "c1", "output": "[paigasus] tool result for \"delete_file\" was replaced (tool-result-blocked)."},
     {"type": "custom_tool_call", "call_id": "c2", "name": "run_sql", "input": "DROP TABLE users"},
     {"type": "custom_tool_call_output", "call_id": "c2", "output": "[paigasus] tool result for \"run_sql\" was replaced (tool-result-blocked)."},
-    {"type": "computer_call", "id": "cu_1", "call_id": "c3", "action": {"type": "screenshot"}, "pending_safety_checks": [], "status": "completed"},
-    {"type": "computer_call_output", "call_id": "c3", "output": "[paigasus] tool result for \"computer\" was replaced (tool-result-blocked)."},
     {"type": "local_shell_call", "id": "ls_1", "call_id": "c4", "action": {"type": "exec", "command": ["ls", "-la"], "env": {}}, "status": "completed"},
     {"type": "local_shell_call_output", "call_id": "c4", "output": "[paigasus] tool result for \"local_shell\" was replaced (tool-result-blocked)."},
     {"type": "local_shell_call", "id": "ls_2", "call_id": "c7", "action": {"type": "exec", "command": ["cat", "/etc/shadow"], "env": {}}, "status": "completed"},
@@ -15,7 +13,7 @@
     {"type": "local_shell_call_output", "id": "c8", "output": "[paigasus] tool result for \"local_shell\" was replaced (tool-result-blocked)."},
     {"type": "local_shell_call_output", "id": "ls_9", "output": "unrelated"},
     {"type": "shell_call", "id": "sh_1", "call_id": "c5", "action": {"commands": ["cat /etc/hosts"]}, "status": "completed"},
-    {"type": "shell_call_output", "call_id": "c5", "output": "[paigasus] tool result for \"shell\" was replaced (tool-result-blocked)."},
+    {"type": "shell_call_output", "call_id": "c5", "output": [{"stdout":"","stderr":"[paigasus] tool result for \"shell\" was replaced (tool-result-blocked).","outcome":{"type":"exit","exit_code":1}}]},
     {"type": "apply_patch_call", "id": "ap_1", "call_id": "c6", "operation": {"type": "delete_file", "path": "README.md"}, "status": "completed"},
     {"type": "apply_patch_call_output", "call_id": "c6", "status": "completed", "output": "[paigasus] tool result for \"apply_patch\" was replaced (tool-result-blocked)."},
     {"role": "user", "content": "Continue."}

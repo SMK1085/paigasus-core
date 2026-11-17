@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use metrics::{counter, histogram};
-use paigasus_gateway_core::{DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, plan_request, rewrite_request};
+use paigasus_gateway_core::{
+    DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, plan_request, rewrite_request,
+};
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
 use paigasus_kernel::{Prn, to_cedar_uid};
 use paigasus_observability::names;
@@ -21,7 +23,9 @@ use super::cache::{Lookup, PolicyCache};
 use crate::config::ToolPolicySettings;
 use crate::domain::org_of;
 
-/// Why the request side refuses a request. Both are a 400 `BadRequestBody` (P-10).
+/// Why the request side refuses a request. Each refusal is a 400 (P-10, SMA-776).
+/// `UnreadableTurn` and `UnknownToolChoice` are a 400 `invalid-request-body`.
+/// `UnreplaceableResult` is a 400 `tool-result-unreplaceable` (SMA-776).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The turn is `ToolTurn::Unavailable` and the tenant mode is `enforce` (D17). Also used when
@@ -30,16 +34,36 @@ pub enum Refusal {
     /// The `tool_choice` has a shape the gateway does not know, and an enforced removal exists
     /// (§ 6.5.1 step 4).
     UnknownToolChoice,
+    /// An enforced block of a result that the gateway cannot replace with a notice (SMA-776).
+    UnreplaceableResult,
 }
 
 impl Refusal {
+    /// The refusal for a plan cause. A cause that this service does not know fails closed (§ 6.4).
+    fn from_cause(cause: RefusalCause) -> Self {
+        match cause {
+            RefusalCause::UnreplaceableResult => Refusal::UnreplaceableResult,
+            RefusalCause::UnknownToolChoice => Refusal::UnknownToolChoice,
+            _ => Refusal::UnreadableTurn,
+        }
+    }
+
     /// The `reason` metric label.
     fn label(&self) -> &'static str {
         match self {
             Refusal::UnreadableTurn => "unreadable_turn",
             Refusal::UnknownToolChoice => "unknown_tool_choice",
+            Refusal::UnreplaceableResult => "unreplaceable_result",
         }
     }
+}
+
+/// A refused request: why, and the plan entries for the decision header (SMA-776 § 6.5).
+/// `entries` is empty when no plan exists (an unreadable turn).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub refusal: Refusal,
+    pub entries: Vec<RequestEntry>,
 }
 
 /// What the request side gives back: the body to send, the request-side report entries, and the
@@ -60,10 +84,10 @@ pub struct RequestToolPolicy {
 /// Count and log a refusal, or a refusal that enforce mode would make (P-10, D17: log-only is
 /// "forwarded, logged and counted"). `refused` says whether the request is refused (400) or
 /// forwarded. `cause` names the branch (`unreadable_turn`, `unknown_tool_choice`,
-/// `rewrite_failed`). The line holds the request id, the mode and the reason only: no body
+/// `unreplaceable_result`, `rewrite_failed`). The line holds the request id, the mode and the reason only: no body
 /// content and no tool name (ADR-0027 (i)).
 fn refusal_event(ctx: &DecisionContext, mode: TenantMode, refusal: &Refusal, cause: &'static str, refused: bool) {
-    counter!(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, "mode" => mode.as_str(), "reason" => refusal.label()).increment(1);
+    counter!(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, "mode" => mode.as_str(), "reason" => refusal.label(), "refused" => if refused { "true" } else { "false" }).increment(1);
     tracing::warn!(
         request_id = ctx.request_id.as_deref().unwrap_or("-"),
         mode = mode.as_str(),
@@ -137,9 +161,10 @@ impl RequestToolPolicy {
     ///
     /// # Errors
     ///
-    /// A [`Refusal`] when the request must be refused with a 400 (D17, § 6.5.1 step 4). A refused
-    /// request records its overhead sample here: it has no snapshot to hold (preflight F14).
-    pub async fn apply(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes) -> Result<RequestOutcome, Refusal> {
+    /// A [`Refused`] when the request must be refused with a 400 (D17, § 6.5.1 step 4, SMA-776).
+    /// It carries the plan entries for the header. A refused request records its overhead sample
+    /// here: it has no snapshot to hold (preflight F14).
+    pub async fn apply(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes) -> Result<RequestOutcome, Refused> {
         let started = Instant::now();
         let out = self.apply_inner(ctx, model, format, turn, body, started).await;
         if out.is_err() {
@@ -148,7 +173,7 @@ impl RequestToolPolicy {
         out
     }
 
-    async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refusal> {
+    async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refused> {
         let org = org_of(&ctx.scope);
         // D7, D34: the settings of the scope's org; without an org, the global values.
         let (mode, on) = org.map_or((self.settings.default_mode, self.settings.on_policy_unavailable), |o| self.settings.tenant(o));
@@ -157,7 +182,10 @@ impl RequestToolPolicy {
         if !matches!(turn, ToolTurn::Parsed(_)) && mode != TenantMode::Off {
             refusal_event(ctx, mode, &Refusal::UnreadableTurn, "unreadable_turn", mode == TenantMode::Enforce);
             if mode == TenantMode::Enforce {
-                return Err(Refusal::UnreadableTurn);
+                return Err(Refused {
+                    refusal: Refusal::UnreadableTurn,
+                    entries: Vec::new(),
+                });
             }
         }
 
@@ -166,9 +194,10 @@ impl RequestToolPolicy {
 
         let (body, entries) = if let ToolTurn::Parsed(facts) = turn {
             let plan = plan_request(&snapshot, format, facts);
-            if plan.refuse {
-                refusal_event(ctx, mode, &Refusal::UnknownToolChoice, "unknown_tool_choice", true);
-                return Err(Refusal::UnknownToolChoice);
+            if let Some(cause) = plan.refusal() {
+                let refusal = Refusal::from_cause(cause);
+                refusal_event(ctx, mode, &refusal, refusal.label(), true);
+                return Err(Refused { refusal, entries: plan.entries });
             }
             let body = if plan.is_noop() {
                 body
@@ -176,9 +205,18 @@ impl RequestToolPolicy {
                 rewritten
             } else {
                 // Never send the original bytes for an enforced plan (controller ruling, Task 10).
+                // This request is refused, so it counts once: the unenforced causes stay silent.
                 refusal_event(ctx, mode, &Refusal::UnreadableTurn, "rewrite_failed", true);
-                return Err(Refusal::UnreadableTurn);
+                return Err(Refused {
+                    refusal: Refusal::UnreadableTurn,
+                    entries: plan.entries,
+                });
             };
+            // The request goes on: report each cause that the mode did not enforce (G5).
+            for cause in plan.refusals.keys() {
+                let refusal = Refusal::from_cause(*cause);
+                refusal_event(ctx, mode, &refusal, refusal.label(), false);
+            }
             (body, plan.entries)
         } else {
             (body, Vec::new())
@@ -210,7 +248,39 @@ mod tests {
         DecisionContext::new(PRINCIPAL, ORG_A_PRN, Some("req-1".into()))
     }
 
-    async fn run(policy: &RequestToolPolicy, body: Bytes) -> Result<RequestOutcome, Refusal> {
+    const FORBID_COMPUTER: &str = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
+    const FLOOR_COMPUTER: &str = r#"@id("floor-computer") forbid(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
+
+    /// A Responses request with one computer call and its screenshot output.
+    fn computer_request(extra: &str) -> Bytes {
+        Bytes::from(format!(
+            r#"{{"model":"m"{extra},"input":[{{"type":"computer_call","id":"cu_1","call_id":"c3","actions":[{{"type":"screenshot"}}],"status":"completed"}},{{"type":"computer_call_output","call_id":"c3","output":{{"type":"computer_screenshot","image_url":"data:image/png;base64,SECRET"}}}}]}}"#
+        ))
+    }
+
+    fn refusals(m: &Snap, mode: &str, reason: &str, refused: &str) -> u64 {
+        m.counter(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, &[("mode", mode), ("reason", reason), ("refused", refused)])
+    }
+
+    async fn run_responses(policy: &RequestToolPolicy, body: Bytes) -> Result<RequestOutcome, Refused> {
+        let turn = parse_request(Format::OpenAiResponses, &body);
+        policy.apply(&ctx(), "m", Format::OpenAiResponses, &turn, body).await
+    }
+
+    #[tokio::test]
+    async fn a_blocked_computer_result_is_refused_in_enforce_and_by_the_floor_in_log_only() {
+        let enforce = testing::policy(&FakeSource::new(testing::FLOOR, FORBID_COMPUTER), settings(TenantMode::Enforce));
+        let refused = run_responses(&enforce, computer_request("")).await.expect_err("refused");
+        assert_eq!(refused.refusal, Refusal::UnreplaceableResult);
+        assert_eq!(
+            refused.entries.iter().map(|e| (e.tool.as_str(), e.action, e.enforced)).collect::<Vec<_>>(),
+            [("computer", RequestAction::ReplaceResult, true)]
+        );
+        let floor = testing::policy(&FakeSource::new(FLOOR_COMPUTER, testing::PERMIT_ALL), settings(TenantMode::LogOnly));
+        assert_eq!(run_responses(&floor, computer_request("")).await.err().map(|r| r.refusal), Some(Refusal::UnreplaceableResult));
+    }
+
+    async fn run(policy: &RequestToolPolicy, body: Bytes) -> Result<RequestOutcome, Refused> {
         let turn = parse_request(Format::OpenAiChat, &body);
         policy.apply(&ctx(), "m", Format::OpenAiChat, &turn, body).await
     }
@@ -230,25 +300,28 @@ mod tests {
         let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
         // A duplicate key: the strict parse fails, so the turn is unavailable (C13).
         let body = Bytes::from_static(br#"{"model":"m","model":"n","messages":[]}"#);
-        let refusals = |m: &Snap, mode: &str| m.counter(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, &[("mode", mode), ("reason", "unreadable_turn")]);
 
         let enforce = testing::policy(&source, settings(TenantMode::Enforce));
-        assert_eq!(run(&enforce, body.clone()).await.err(), Some(Refusal::UnreadableTurn));
+        assert_eq!(run(&enforce, body.clone()).await.err().map(|r| r.refusal), Some(Refusal::UnreadableTurn));
         let m = Snap::take(&snapshotter);
-        assert_eq!(refusals(&m, "enforce"), 1);
+        assert_eq!((refusals(&m, "enforce", "unreadable_turn", "true"), refusals(&m, "enforce", "unreadable_turn", "false")), (1, 0));
 
         let log_only = testing::policy(&source, settings(TenantMode::LogOnly));
         let out = run(&log_only, body.clone()).await.expect("log_only forwards");
         assert_eq!(out.body.as_ptr(), body.as_ptr(), "the original bytes");
         assert!(out.entries.is_empty());
         let m = Snap::take(&snapshotter);
-        assert_eq!(refusals(&m, "log_only"), 1, "counted as enforce would refuse (P-10)");
+        assert_eq!(
+            (refusals(&m, "log_only", "unreadable_turn", "false"), refusals(&m, "log_only", "unreadable_turn", "true")),
+            (1, 0),
+            "counted as enforce would refuse (P-10)"
+        );
 
         let off = testing::policy(&source, settings(TenantMode::Off));
         let out = run(&off, body.clone()).await.expect("off forwards");
         assert_eq!(out.body.as_ptr(), body.as_ptr());
         let m = Snap::take(&snapshotter);
-        assert_eq!(refusals(&m, "off"), 0);
+        assert_eq!(refusals(&m, "off", "unreadable_turn", "true") + refusals(&m, "off", "unreadable_turn", "false"), 0);
     }
 
     #[tokio::test]
@@ -256,14 +329,74 @@ mod tests {
         let source = FakeSource::new(testing::FLOOR, FORBID_X);
         let body = chat_request(&["x", "y"], r#","tool_choice":"weird""#);
         let enforce = testing::policy(&source, settings(TenantMode::Enforce));
-        assert_eq!(run(&enforce, body.clone()).await.err(), Some(Refusal::UnknownToolChoice));
+        assert_eq!(run(&enforce, body.clone()).await.err().map(|r| r.refusal), Some(Refusal::UnknownToolChoice));
         // Log-only: the tenant removal is not enforced, so the request goes out unchanged.
         let log_only = testing::policy(&source, settings(TenantMode::LogOnly));
         let out = run(&log_only, body.clone()).await.expect("log_only");
         assert_eq!(out.body, body);
         // A floor removal is enforced in every mode (D33), so log-only refuses it too.
         let floor_body = chat_request(&["rm", "y"], r#","tool_choice":"weird""#);
-        assert_eq!(run(&log_only, floor_body).await.err(), Some(Refusal::UnknownToolChoice));
+        assert_eq!(run(&log_only, floor_body).await.err().map(|r| r.refusal), Some(Refusal::UnknownToolChoice));
+    }
+
+    #[tokio::test]
+    async fn a_computer_block_is_counted_as_refused_or_as_not_enforced() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let source = FakeSource::new(testing::FLOOR, FORBID_COMPUTER);
+        let enforce = testing::policy(&source, settings(TenantMode::Enforce));
+        assert_eq!(run_responses(&enforce, computer_request("")).await.err().map(|r| r.refusal), Some(Refusal::UnreplaceableResult));
+        let m = Snap::take(&snapshotter);
+        assert_eq!(
+            (refusals(&m, "enforce", "unreplaceable_result", "true"), refusals(&m, "enforce", "unreplaceable_result", "false")),
+            (1, 0)
+        );
+
+        let log_only = testing::policy(&source, settings(TenantMode::LogOnly));
+        let body = computer_request("");
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::INFO);
+        let out = run_responses(&log_only, body.clone()).await.expect("log_only forwards");
+        assert_eq!(out.body.as_ptr(), body.as_ptr(), "the original bytes");
+        let m = Snap::take(&snapshotter);
+        assert_eq!(
+            (refusals(&m, "log_only", "unreplaceable_result", "true"), refusals(&m, "log_only", "unreplaceable_result", "false")),
+            (0, 1)
+        );
+        let line = one_line(&logs.text(), "tool-policy request refusal");
+        for want in ["req-1", "log_only", "unreplaceable_result", "refused=false"] {
+            assert!(line.contains(want), "{want:?} in {line}");
+        }
+        assert!(!line.contains("SECRET") && !line.contains("computer\""), "{line}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_choice_with_a_log_only_removal_is_counted_not_refused() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let log_only = testing::policy(&FakeSource::new(testing::FLOOR, FORBID_X), settings(TenantMode::LogOnly));
+        let body = chat_request(&["x", "y"], r#","tool_choice":"weird""#);
+        let out = run(&log_only, body.clone()).await.expect("log_only forwards");
+        assert_eq!(out.body, body);
+        let m = Snap::take(&snapshotter);
+        assert_eq!(refusals(&m, "log_only", "unknown_tool_choice", "false"), 1);
+        assert_eq!(refusals(&m, "log_only", "unknown_tool_choice", "true"), 0);
+    }
+
+    /// A request with two enforced causes counts one refused sample, not one per cause.
+    #[tokio::test]
+    async fn a_request_with_two_enforced_causes_counts_once() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let tenant = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action in [Pgs::Gateway::Action::"x", Pgs::Gateway::Action::"computer"], resource);"#;
+        let enforce = testing::policy(&FakeSource::new(testing::FLOOR, tenant), settings(TenantMode::Enforce));
+        let body = computer_request(r#","tools":[{"type":"function","name":"x","parameters":{}}],"tool_choice":{"type":"a_future_kind"}"#);
+        assert_eq!(run_responses(&enforce, body).await.err().map(|r| r.refusal), Some(Refusal::UnreplaceableResult));
+        let m = Snap::take(&snapshotter);
+        assert_eq!(refusals(&m, "enforce", "unreplaceable_result", "true"), 1);
+        assert_eq!(refusals(&m, "enforce", "unknown_tool_choice", "true") + refusals(&m, "enforce", "unknown_tool_choice", "false"), 0);
     }
 
     /// The single line of `logs` that holds `needle`.
@@ -420,6 +553,30 @@ mod tests {
         );
     }
 
+    /// A refusal because the rewrite failed counts once. The unenforced computer cause of the same
+    /// request stays silent: the request is refused, not forwarded. The body passed to `apply`
+    /// is not the body the turn came from, so the rewrite cannot edit it.
+    #[tokio::test]
+    async fn a_failed_rewrite_counts_one_refusal_and_no_unenforced_cause() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let log_only = testing::policy(&FakeSource::new(testing::FLOOR, FORBID_COMPUTER), settings(TenantMode::LogOnly));
+        // The floor removes `rm` in every mode: an enforced plan. The tenant block of the computer
+        // result is not enforced in log-only: an unenforced cause.
+        let good = computer_request(r#","tools":[{"type":"function","name":"rm","parameters":{}}]"#);
+        let turn = parse_request(Format::OpenAiResponses, &good);
+        let refused = log_only
+            .apply(&ctx(), "m", Format::OpenAiResponses, &turn, Bytes::from_static(b"{"))
+            .await
+            .expect_err("the rewrite fails");
+        assert_eq!(refused.refusal, Refusal::UnreadableTurn);
+        assert_eq!(refused.entries.len(), 2, "the plan entries are kept for the header: {:?}", refused.entries);
+        let m = Snap::take(&snapshotter);
+        assert_eq!(refusals(&m, "log_only", "unreadable_turn", "true"), 1);
+        assert_eq!(refusals(&m, "log_only", "unreplaceable_result", "false") + refusals(&m, "log_only", "unreplaceable_result", "true"), 0);
+    }
+
     #[tokio::test]
     async fn a_refused_request_records_one_sample() {
         let recorder = DebuggingRecorder::new();
@@ -428,7 +585,7 @@ mod tests {
         let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
         let enforce = testing::policy(&source, settings(TenantMode::Enforce));
         let body = Bytes::from_static(br#"{"model":"m","model":"n","messages":[]}"#);
-        assert_eq!(run(&enforce, body).await.err(), Some(Refusal::UnreadableTurn));
+        assert_eq!(run(&enforce, body).await.err().map(|r| r.refusal), Some(Refusal::UnreadableTurn));
         assert_eq!(Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).len(), 1);
     }
 }

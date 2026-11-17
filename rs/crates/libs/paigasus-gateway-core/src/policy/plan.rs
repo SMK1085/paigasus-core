@@ -10,7 +10,7 @@ use paigasus_kernel::tool_policy::{Facts, Findings, NAME_COLLISION, ToolPolicies
 use super::mapping::{definition_call_name, name_collisions};
 use super::snapshot::{PolicySet, PolicySnapshot, TenantMode, TenantPart};
 use crate::report::{RequestAction, RequestEntry, RequestReason};
-use crate::turn::{ToolChoice, ToolDefinition, TurnFacts};
+use crate::turn::{ResultShape, ToolChoice, ToolDefinition, TurnFacts};
 use crate::types::{Format, ToolCallKind};
 
 /// The Responses built-in client-run tools that the plan may remove (P-15). Every other
@@ -50,6 +50,16 @@ pub struct PlanItem<T> {
     pub enforced: bool,
 }
 
+/// Why the plan refuses the request (SMA-776 § 6.2). The order is the order of the plan steps.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefusalCause {
+    /// A blocked result has a shape that the gateway cannot replace with a notice.
+    UnreplaceableResult,
+    /// The `tool_choice` has an unknown shape and a removal exists (D17).
+    UnknownToolChoice,
+}
+
 /// The request-side plan.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +70,8 @@ pub struct RequestPlan {
     pub replaced: Vec<PlanItem<ResultTarget>>,
     /// Computed from the enforced removals only.
     pub choice: ChoiceRewrite,
-    /// The choice is `Unknown` and an enforced removal exists: refuse the request (D17).
-    pub refuse: bool,
+    /// Each cause that the plan found, and whether it is enforced (SMA-776 § 6.2).
+    pub refusals: BTreeMap<RefusalCause, bool>,
     /// The report entries, in the order: removals, replacements, the `tool_choice` reset.
     pub entries: Vec<RequestEntry>,
 }
@@ -72,15 +82,26 @@ impl RequestPlan {
             removed: Vec::new(),
             replaced: Vec::new(),
             choice: ChoiceRewrite::Keep,
-            refuse: false,
+            refusals: BTreeMap::new(),
             entries: Vec::new(),
         }
+    }
+
+    /// The first enforced cause in map order, or `None`.
+    #[must_use]
+    pub fn refusal(&self) -> Option<RefusalCause> {
+        self.refusals.iter().find_map(|(c, e)| e.then_some(*c))
+    }
+
+    /// Add a cause; `enforced` is ORed into the value.
+    fn add_refusal(&mut self, cause: RefusalCause, enforced: bool) {
+        *self.refusals.entry(cause).or_insert(false) |= enforced;
     }
 
     /// Whether the plan changes nothing that is enforced: the body goes out as it came in.
     #[must_use]
     pub fn is_noop(&self) -> bool {
-        !self.refuse && self.choice == ChoiceRewrite::Keep && !self.removed.iter().any(|i| i.enforced) && !self.replaced.iter().any(|i| i.enforced)
+        self.refusal().is_none() && self.choice == ChoiceRewrite::Keep && !self.removed.iter().any(|i| i.enforced) && !self.replaced.iter().any(|i| i.enforced)
     }
 }
 
@@ -264,12 +285,19 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts)
         plan: &mut plan,
         seen: BTreeMap::new(),
     };
+    // The enforced flags of the unreplaceable results, added after the loop (`results` holds `plan`).
+    let mut unreplaceable: Vec<bool> = Vec::new();
     for r in &turn.tool_results {
         let replaced = match (&r.call_id, &r.name) {
             (Some(id), _) => results.decide((0, id.as_str()), || ResultTarget::CallId(id.clone()), by_id.get(id.as_str()).map_or(&[][..], Vec::as_slice)),
             (None, Some(name)) => results.decide((1, name.as_str()), || ResultTarget::Name(name.clone()), &[name.as_str()]),
             (None, None) => None,
         };
+        if r.shape == ResultShape::Screenshot
+            && let Some(enforced) = replaced
+        {
+            unreplaceable.push(enforced);
+        }
         // The `id` form of a `local_shell_call_output`, unless its `call_id` already replaced it
         // with an enforced item. An unenforced `call_id` item changes nothing, so a floor-denied
         // `id` must still be planned (fail-safe: enforced wins).
@@ -280,21 +308,30 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts)
         }
     }
 
+    for enforced in unreplaceable {
+        plan.add_refusal(RefusalCause::UnreplaceableResult, enforced);
+    }
+
     // Step 4: `tool_choice`, from the enforced removals. A reset that only all removals together
     // would make is reported once, not enforced (P-9).
     let enforced: BTreeSet<&str> = plan.removed.iter().filter(|i| i.enforced).map(|i| i.target.as_str()).collect();
     // The kept Anthropic definition stays in the request, so it does not count here either.
     let all: BTreeSet<&str> = plan.removed.iter().map(|i| i.target.as_str()).filter(|t| kept.as_deref() != Some(*t)).collect();
     let (choice, refuse, reset) = choice_after(&turn.tool_choice, &enforced);
+    let (_, refuse_all, reset_all) = choice_after(&turn.tool_choice, &all);
     let reset_entry = match reset {
         Some(tool) => Some((tool, true)),
-        None => choice_after(&turn.tool_choice, &all).2.map(|tool| (tool, false)),
+        None => reset_all.map(|tool| (tool, false)),
     };
     if let Some((tool, enforced)) = reset_entry {
         plan.entries.push(RequestEntry::new(tool, RequestAction::ResetToolChoice, enforced, RequestReason::ToolCallDenied));
     }
     plan.choice = choice;
-    plan.refuse = refuse;
+    if refuse {
+        plan.add_refusal(RefusalCause::UnknownToolChoice, true);
+    } else if refuse_all {
+        plan.add_refusal(RefusalCause::UnknownToolChoice, false);
+    }
     plan
 }
 
@@ -309,7 +346,7 @@ mod tests {
     use super::*;
     use crate::policy::SHIPPED_FLOOR;
     use crate::policy::snapshot::OnUnavailable;
-    use crate::turn::{PriorCall, ToolResultRef, ToolTurn, parse_request};
+    use crate::turn::{PriorCall, ResultShape, ToolResultRef, ToolTurn, parse_request};
 
     const NO_FLOOR: &str = "";
     const RM_FLOOR: &str = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"rm", resource);"#;
@@ -375,6 +412,7 @@ mod tests {
             call_id: Some(id.to_owned()),
             name: None,
             item_id: None,
+            shape: ResultShape::Text,
         }
     }
 
@@ -469,7 +507,7 @@ mod tests {
         assert_eq!(removed(&p), [("x", false)]);
         assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), false)]);
         assert_eq!(p.choice, ChoiceRewrite::Keep);
-        assert!(!p.refuse);
+        assert_eq!(p.refusal(), None);
         assert_eq!(p.entries.len(), 3);
         assert!(p.entries.iter().all(|e| !e.enforced));
         assert!(p.is_noop());
@@ -555,6 +593,7 @@ mod tests {
             call_id: None,
             name: None,
             item_id: Some(id.to_owned()),
+            shape: ResultShape::Text,
         };
         let run = |prior_calls: Vec<PriorCall>, tool_results: Vec<ToolResultRef>| {
             let mut t = turn(vec![]);
@@ -581,6 +620,7 @@ mod tests {
             call_id: Some("c1".to_owned()),
             name: None,
             item_id: Some("ls_1".to_owned()),
+            shape: ResultShape::Text,
         };
         let p = run(vec![shell("x")], vec![both]);
         assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)]);
@@ -605,6 +645,7 @@ mod tests {
             call_id: Some("c1".to_owned()),
             name: None,
             item_id: Some("ls_2".to_owned()),
+            shape: ResultShape::Text,
         }];
         let p = plan_request(&s, Format::OpenAiResponses, &t);
         assert_eq!(
@@ -648,6 +689,7 @@ mod tests {
             call_id: None,
             name: Some("x".to_owned()),
             item_id: None,
+            shape: ResultShape::Text,
         };
         let p = replaced(vec![], vec![legacy]);
         assert_eq!(p.replaced, [item(ResultTarget::Name("x".to_owned()), true)]);
@@ -658,6 +700,7 @@ mod tests {
             call_id: None,
             name: None,
             item_id: None,
+            shape: ResultShape::Text,
         };
         assert!(replaced(vec![], vec![none]).replaced.is_empty());
     }
@@ -693,7 +736,7 @@ mod tests {
         let allowed = |n: &[&str]| ToolChoice::AllowedTools(n.iter().map(|x| (*x).to_owned()).collect());
 
         let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "ok"], named("A")));
-        assert_eq!((p.choice.clone(), p.refuse), (ChoiceRewrite::Auto, false));
+        assert_eq!((p.choice.clone(), p.refusal()), (ChoiceRewrite::Auto, None));
         assert_eq!(resets(&p), [("A".to_owned(), true)]);
 
         let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a", "ok"], named("ok")));
@@ -714,20 +757,20 @@ mod tests {
 
         for c in [ToolChoice::Auto, ToolChoice::None, ToolChoice::Required] {
             let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a"], c));
-            assert_eq!((p.choice.clone(), p.refuse), (ChoiceRewrite::Keep, false));
+            assert_eq!((p.choice.clone(), p.refusal()), (ChoiceRewrite::Keep, None));
             assert!(resets(&p).is_empty());
         }
 
         let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["a"], ToolChoice::Unknown));
-        assert!(p.refuse);
+        assert_eq!(p.refusal(), Some(RefusalCause::UnknownToolChoice));
         assert!(!p.is_noop());
         assert!(resets(&p).is_empty());
         let p = plan_request(&s, Format::OpenAiChat, &with_choice(&["ok"], ToolChoice::Unknown));
-        assert!(!p.refuse);
+        assert_eq!(p.refusal(), None);
 
         let log_only = snap(NO_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly);
         let p = plan_request(&log_only, Format::OpenAiChat, &with_choice(&["a"], ToolChoice::Unknown));
-        assert!(!p.refuse);
+        assert_eq!(p.refusal(), None);
         assert!(p.is_noop());
     }
 
@@ -847,5 +890,108 @@ mod tests {
         let two = serde_json::json!([{"name":"a","input_schema":{}},{"name":"b","input_schema":{}}]);
         let p = plan_request(&s, Format::AnthropicMessages, &anthropic(two, true, None));
         assert_eq!(removed(&p), [("a", false), ("b", false)]);
+    }
+
+    const COMPUTER_FLOOR: &str = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
+
+    fn shot(id: &str) -> ToolResultRef {
+        ToolResultRef {
+            call_id: Some(id.to_owned()),
+            name: None,
+            item_id: None,
+            shape: ResultShape::Screenshot,
+        }
+    }
+
+    fn computer_turn() -> TurnFacts {
+        let mut t = turn(vec![]);
+        t.prior_calls = vec![prior("c1", "computer")];
+        t.tool_results = vec![shot("c1")];
+        t
+    }
+
+    fn causes(p: &RequestPlan) -> Vec<(RefusalCause, bool)> {
+        p.refusals.iter().map(|(c, e)| (*c, *e)).collect()
+    }
+
+    #[test]
+    fn an_enforced_block_of_a_screenshot_result_is_an_enforced_refusal() {
+        let p = plan_request(&forbid("computer"), Format::OpenAiResponses, &computer_turn());
+        assert_eq!(causes(&p), [(RefusalCause::UnreplaceableResult, true)]);
+        assert_eq!(p.refusal(), Some(RefusalCause::UnreplaceableResult));
+        assert!(!p.is_noop());
+        // The report entry stays, so the caller sees which tool caused the refusal.
+        assert_eq!(actions(&p), [(RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked)]);
+        // An allowed computer call gives no cause.
+        let p = plan_request(&forbid("other"), Format::OpenAiResponses, &computer_turn());
+        assert!(p.refusals.is_empty() && p.is_noop());
+    }
+
+    #[test]
+    fn a_log_only_block_of_a_screenshot_result_is_an_unenforced_cause() {
+        let p = plan_request(&snap(NO_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly), Format::OpenAiResponses, &computer_turn());
+        assert_eq!(causes(&p), [(RefusalCause::UnreplaceableResult, false)]);
+        assert_eq!(p.refusal(), None);
+        assert!(p.is_noop());
+    }
+
+    #[test]
+    fn a_floor_block_of_a_screenshot_result_is_enforced_in_log_only_and_without_a_tenant_part() {
+        for s in [
+            snap(COMPUTER_FLOOR, PERMIT_ALL, TenantPart::Evaluated, TenantMode::LogOnly),
+            snap(COMPUTER_FLOOR, "", TenantPart::Unavailable, TenantMode::LogOnly),
+            snap(COMPUTER_FLOOR, "", TenantPart::Unavailable, TenantMode::Enforce),
+        ] {
+            let p = plan_request(&s, Format::OpenAiResponses, &computer_turn());
+            assert_eq!(causes(&p), [(RefusalCause::UnreplaceableResult, true)]);
+        }
+    }
+
+    #[test]
+    fn a_screenshot_result_gives_the_cause_in_both_orders_of_one_call_id() {
+        for results in [vec![shot("c1"), by_id("c1")], vec![by_id("c1"), shot("c1")]] {
+            let mut t = computer_turn();
+            t.tool_results = results;
+            let p = plan_request(&forbid("computer"), Format::OpenAiResponses, &t);
+            assert_eq!(p.replaced.len(), 1, "one target");
+            assert_eq!(causes(&p), [(RefusalCause::UnreplaceableResult, true)]);
+        }
+    }
+
+    /// Review Focus 1: the value is enforced when any finding of the cause is enforced.
+    #[test]
+    fn two_findings_of_one_cause_are_enforced_when_any_is() {
+        let s = snap(RM_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly);
+        for results in [vec![shot("c1"), shot("c2")], vec![shot("c2"), shot("c1")]] {
+            let mut t = turn(vec![]);
+            // "computer" is a log-only tenant deny; "rm" is a floor deny.
+            t.prior_calls = vec![prior("c1", "computer"), prior("c2", "rm")];
+            t.tool_results = results;
+            let p = plan_request(&s, Format::OpenAiResponses, &t);
+            assert_eq!(causes(&p), [(RefusalCause::UnreplaceableResult, true)]);
+        }
+    }
+
+    #[test]
+    fn an_unknown_tool_choice_with_only_log_only_removals_is_an_unenforced_cause() {
+        let log_only = snap(NO_FLOOR, PERMIT_OK, TenantPart::Evaluated, TenantMode::LogOnly);
+        let p = plan_request(&log_only, Format::OpenAiChat, &with_choice(&["a"], ToolChoice::Unknown));
+        assert_eq!(causes(&p), [(RefusalCause::UnknownToolChoice, false)]);
+        assert_eq!(p.refusal(), None);
+        assert!(p.is_noop());
+        // No removal at all: no cause.
+        let p = plan_request(&log_only, Format::OpenAiChat, &with_choice(&["ok"], ToolChoice::Unknown));
+        assert!(p.refusals.is_empty());
+    }
+
+    #[test]
+    fn the_refusal_is_the_first_enforced_cause_in_plan_order() {
+        let mut t = with_choice(&["computer"], ToolChoice::Unknown);
+        t.definitions = vec![other("computer")];
+        t.prior_calls = vec![prior("c1", "computer")];
+        t.tool_results = vec![shot("c1")];
+        let p = plan_request(&forbid("computer"), Format::OpenAiResponses, &t);
+        assert_eq!(causes(&p), [(RefusalCause::UnreplaceableResult, true), (RefusalCause::UnknownToolChoice, true)]);
+        assert_eq!(p.refusal(), Some(RefusalCause::UnreplaceableResult));
     }
 }
