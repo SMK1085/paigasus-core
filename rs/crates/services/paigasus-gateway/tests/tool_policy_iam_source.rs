@@ -384,6 +384,45 @@ async fn an_org_in_mode_off_still_gets_the_floor() {
     assert_eq!(out.snapshot.mode, TenantMode::Off);
 }
 
+/// R7 end to end: the real IAM source and the policy cache. Only the mode changes at IAM, and
+/// the set version stays the same. The cache keeps a stored set when the version token is
+/// unchanged, so the next load applies the new mode only if the token covers the settings.
+#[tokio::test]
+async fn a_mode_change_alone_at_iam_applies_on_the_next_load() {
+    const FORBID_X: &str = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"x", resource);"#;
+    let s = start().await;
+    s.script_floor(Ok(floor_response(1, FLOOR_RM)));
+    s.script_tenant(Ok(tenant_response(3, pb::ToolPolicyMode::LogOnly, FORBID_X)));
+    let (_dir, path) = credential("K");
+    let cfg = settings();
+    let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg));
+    let policy = RequestToolPolicy::new(Arc::clone(&cache), cfg);
+
+    let body = Bytes::from_static(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"x","parameters":{}}},{"type":"function","function":{"name":"y","parameters":{}}}]}"#);
+    let ctx = DecisionContext::new(PRINCIPAL, ORG_PRN, Some("req-1".into()));
+    let names = |out: &[u8]| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_slice(out).expect("json");
+        v["tools"].as_array().expect("tools").iter().map(|t| t["function"]["name"].as_str().expect("name").to_owned()).collect()
+    };
+
+    let first = policy
+        .apply(&ctx, "m", Format::OpenAiChat, &parse_request(Format::OpenAiChat, &body), body.clone())
+        .await
+        .expect("apply");
+    assert_eq!(first.snapshot.mode, TenantMode::LogOnly);
+    assert_eq!(names(&first.body), ["x", "y"], "log_only removes nothing");
+
+    // The mode changes at IAM; the set version stays 3.
+    s.script_tenant(Ok(tenant_response(3, pb::ToolPolicyMode::Enforce, FORBID_X)));
+    cache.invalidate_all();
+    let second = policy
+        .apply(&ctx, "m", Format::OpenAiChat, &parse_request(Format::OpenAiChat, &body), body.clone())
+        .await
+        .expect("apply");
+    assert_eq!(second.snapshot.mode, TenantMode::Enforce, "the new mode applies on the next load");
+    assert_eq!(names(&second.body), ["y"], "enforce removes x");
+}
+
 // `figment::Jail::expect_with` fixes its closure's `Err` type to `figment::Error`.
 #[allow(clippy::result_large_err)]
 #[tokio::test]
