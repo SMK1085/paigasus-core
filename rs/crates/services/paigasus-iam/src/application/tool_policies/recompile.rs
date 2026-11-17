@@ -60,7 +60,10 @@ pub enum RecompileOutcome {
     AlreadyProposed,
     /// The set changed after the read, or its organization is gone. Nothing was written.
     Conflict,
-    /// The compiler was busy or unavailable. Nothing was written; the next run tries again.
+    /// The set could not be done: the compiler was busy or unavailable, or a read or a write of
+    /// this set failed (for example a live row whose compiled bytes do not decode). Nothing was
+    /// written, a warning names the set, and the next run tries again. The job goes on with the
+    /// next set.
     Error,
 }
 
@@ -179,7 +182,7 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
                 tracing::info!(done = results.len(), "tool policy re-compile: stopped between two sets");
                 break;
             }
-            let outcome = self.recompile_set(author, &live).await?;
+            let outcome = self.recompile_set(author, &live).await;
             if let Some(label) = outcome_label(&outcome) {
                 metrics::counter!(names::IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL, "result" => label).increment(1);
             }
@@ -199,8 +202,22 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
         Ok(RecompileRun::Ran(results))
     }
 
-    /// One stale set (spec section 8, steps a to e).
-    async fn recompile_set(&self, author: &Author, live: &ToolPolicyVersion) -> Result<RecompileOutcome, TenancyError> {
+    /// One stale set. An error of this set is its outcome, not an error of the run: one bad set
+    /// must not stop the sets after it (a stale tenant set refuses every catalog write).
+    async fn recompile_set(&self, author: &Author, live: &ToolPolicyVersion) -> RecompileOutcome {
+        match self.try_recompile_set(author, live).await {
+            Ok(outcome) => outcome,
+            Err(TenancyError::ToolPolicyVersionConflict) => RecompileOutcome::Conflict,
+            Err(error) => {
+                tracing::warn!(set = %set_label(&live.key), base_version = live.version, error = ?error, "tool policy re-compile: the set failed; it stays out of date");
+                RecompileOutcome::Error
+            }
+        }
+    }
+
+    /// One stale set (spec section 8, steps a to e). A version conflict of the write is `Err`;
+    /// the caller maps it to `Conflict`.
+    async fn try_recompile_set(&self, author: &Author, live: &ToolPolicyVersion) -> Result<RecompileOutcome, TenancyError> {
         // a. A proposal for this live version and these compiler values exists (H6).
         if self.repo.proposal_exists(&live.key, live.version, self.compiler.generation(), TOOL_SCHEMA_REVISION).await? {
             return Ok(RecompileOutcome::AlreadyProposed);
@@ -226,18 +243,11 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
             ToolPolicySetKey::Floor => Vec::new(),
         };
 
-        // c. Compile, with no transaction open.
-        let compiled = match self.compile(target.kind(), &live.source, &catalog).await {
-            Ok(compiled) => compiled,
-            Err(error @ (TenancyError::ToolPolicyCompilerBusy | TenancyError::ToolPolicyCompilerUnavailable)) => {
-                tracing::warn!(set = %set_label(&live.key), error = ?error, "tool policy re-compile: the compiler failed; the set stays out of date");
-                return Ok(RecompileOutcome::Error);
-            }
-            Err(error) => return Err(error),
-        };
+        // c. Compile, with no transaction open. A busy or unavailable compiler is `Error`.
+        let compiled = self.compile(target.kind(), &live.source, &catalog).await?;
 
         // d and e. Write one result.
-        let written = match &compiled {
+        match &compiled {
             Compiled::Accepted(out) => {
                 let old = decode_compiled(&live.compiled)?;
                 if outputs_identical(&old, out) {
@@ -269,10 +279,6 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
                 };
                 self.write_held(author, &target, &state, live, write, &catalog).await
             }
-        };
-        match written {
-            Err(TenancyError::ToolPolicyVersionConflict) => Ok(RecompileOutcome::Conflict),
-            other => other,
         }
     }
 
@@ -361,7 +367,7 @@ mod tests {
     use std::task::Poll;
     use std::time::Duration;
 
-    use super::super::tests::{FLOOR_DENY, Harness, MAX_WINDOW_MS, audit_actions, bare_harness, harness, output_with_history, tenant};
+    use super::super::tests::{FLOOR_DENY, Harness, MAX_WINDOW_MS, accepted, audit_actions, bare_harness, harness, output_with_history, tenant};
     use super::*;
     use crate::application::fakes::ConcurrentChange;
     use crate::application::tool_policies::RejectionReason;
@@ -674,6 +680,106 @@ mod tests {
         assert_eq!(ran(boot_run(&h).await), one(gone, RecompileOutcome::Conflict));
         assert_eq!(h.compiler.calls(), 0);
         assert_nothing_written(&h);
+    }
+
+    #[tokio::test]
+    async fn a_set_that_fails_to_read_is_an_error_and_the_job_goes_on() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let h = harness();
+        // The floor goes first. Its compiled bytes do not decode.
+        h.repo.seed_live(ToolPolicyVersion {
+            key: ToolPolicySetKey::Floor,
+            version: 1,
+            source: FLOOR_DENY.to_owned(),
+            compiled: vec![0xff; 4],
+            compiler_generation: 0,
+            schema_revision: TOOL_SCHEMA_REVISION,
+            catalog_revision: None,
+            status: VersionStatus::Live,
+            origin: VersionOrigin::Save,
+            created_by: h.actor.canonical(),
+            created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        });
+        stale_tenant(&h);
+        let results = ran(boot_run(&h).await);
+        assert_eq!(
+            results,
+            vec![
+                SetRecompile {
+                    key: ToolPolicySetKey::Floor,
+                    base_version: 1,
+                    outcome: RecompileOutcome::Error,
+                },
+                SetRecompile {
+                    key: tenant(&h),
+                    base_version: 1,
+                    outcome: RecompileOutcome::Identical { version: 2 },
+                },
+            ]
+        );
+        assert_eq!(live(&h, &ToolPolicySetKey::Floor).await.version, 1);
+        assert_eq!(h.lock.releases(), 1);
+        let mut samples: Vec<Sample> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(k, _, _, v)| (k.key().name().to_owned(), k.key().labels().map(|l| (l.key().to_owned(), l.value().to_owned())).collect(), v))
+            .collect();
+        samples.sort_by(|a, b| a.1.cmp(&b.1));
+        let name = names::IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL.to_owned();
+        assert_eq!(
+            samples,
+            vec![
+                (name.clone(), vec![("result".to_owned(), "error".to_owned())], DebugValue::Counter(1)),
+                (name, vec![("result".to_owned(), "identical".to_owned())], DebugValue::Counter(1)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_save_of_a_later_set_during_the_run_is_a_conflict_and_the_save_stays() {
+        const SAVED: &str = "@id(\"saved\")\nforbid(principal, action, resource);\n";
+        let h = harness();
+        stale_floor(&h);
+        stale_tenant(&h);
+        let gate = h.compiler.gate();
+        let svc = h.svc.clone();
+        let job = tokio::spawn(async move { svc.run_recompile_at_boot(pending()).await });
+        // The job read the stale sets and waits in the compile of the floor.
+        for _ in 0..1000 {
+            if h.compiler.calls() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(h.compiler.calls(), 1);
+        // An admin saves the tenant set now.
+        h.compiler.remove_gate();
+        let saved = accepted(h.svc.put_set(&h.actor, h.org, SAVED, 1).await);
+        assert_eq!(saved.version, 2);
+        gate.add_permits(1);
+        let results = ran(job.await.unwrap().unwrap());
+        assert_eq!(
+            results,
+            vec![
+                SetRecompile {
+                    key: ToolPolicySetKey::Floor,
+                    base_version: 1,
+                    outcome: RecompileOutcome::Identical { version: 2 },
+                },
+                SetRecompile {
+                    key: tenant(&h),
+                    base_version: 1,
+                    outcome: RecompileOutcome::Conflict,
+                },
+            ]
+        );
+        let v = live(&h, &tenant(&h)).await;
+        assert_eq!((v.version, v.source.as_str(), v.origin), (2, SAVED, VersionOrigin::Save));
+        // The job did not compile the tenant set.
+        assert_eq!(h.compiler.calls(), 2);
     }
 
     #[tokio::test]

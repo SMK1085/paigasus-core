@@ -2362,6 +2362,12 @@ impl FakePolicyCompiler {
         *self.gate.lock().unwrap() = Some(gate.clone());
         gate
     }
+
+    /// From now on, `compile` does not wait. A call that already waits at the gate still waits
+    /// for its permit.
+    pub fn remove_gate(&self) {
+        *self.gate.lock().unwrap() = None;
+    }
 }
 
 #[async_trait]
