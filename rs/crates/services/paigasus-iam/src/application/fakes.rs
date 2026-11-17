@@ -2151,7 +2151,13 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         if s.updated_at.is_none() || s.updated_by.is_none() {
             return Err(RepositoryError::Backend("upsert_settings_in needs updated_at and updated_by".into()));
         }
-        self.data.lock().unwrap().settings.insert(org, s.clone());
+        let mut data = self.data.lock().unwrap();
+        // `first_enabled_at` is written once, as in the Pg adapter.
+        let kept = data.settings.get(&org).and_then(|old| old.first_enabled_at);
+        let mut row = s.clone();
+        row.first_enabled_at = kept.or(s.first_enabled_at);
+        data.settings.insert(org, row);
+        drop(data);
         self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

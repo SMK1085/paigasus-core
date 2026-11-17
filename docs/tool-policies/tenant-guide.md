@@ -28,11 +28,15 @@ The `org_admin` role has both.
 
 Follow these rules for the first enable.
 
-- The first change away from `off` must go to `log_only`, if your organization has no set.
-- A change to `enforce` in that state fails with reason 61 `tool-policy-mode-transition-invalid`
-  (HTTP 409, gRPC `FAILED_PRECONDITION`).
-- The first change to `log_only` saves the starter set as version 1.
-- A later change from `off` to `enforce` is allowed when your organization has a live set.
+- The first change away from `off` must go to `log_only`. This rule also applies when your
+  organization saved a set while it was in `off`.
+- A change to `enforce` before that first change fails with reason 61
+  `tool-policy-mode-transition-invalid` (HTTP 409, gRPC `FAILED_PRECONDITION`).
+- The first change to `log_only` saves the starter set as version 1, if your organization has no
+  set. If it has a set, IAM keeps that set.
+- A later change from `off` to `enforce` is allowed when your organization left `off` before and
+  has a live set.
+- A change from `off` to `log_only` is always allowed.
 
 The starter set is this text, byte for byte (`STARTER_TOOL_POLICY_SOURCE`):
 

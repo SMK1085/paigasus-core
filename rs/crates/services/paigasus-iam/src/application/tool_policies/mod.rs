@@ -287,16 +287,19 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         Ok(self.repo.settings(org).await?.unwrap_or_else(ToolPolicySettings::default_for_absent_row))
     }
 
-    /// Writes the tool policy settings of `org` (spec section 9.2). The first enable to
-    /// `log_only` also saves the starter set as version 1. The first enable to `enforce`, with
-    /// no set, is `tool-policy-mode-transition-invalid`.
+    /// Writes the tool policy settings of `org` (spec section 9.2). The first change away from
+    /// `off` must be to `log_only`; with no set, it also saves the starter set as version 1.
+    /// `enforce` before a first change away from `off`, or with no set, is
+    /// `tool-policy-mode-transition-invalid` (final review I-2). The first change away from
+    /// `off` stores `first_enabled_at` in the same transaction.
     pub async fn put_settings(&self, actor: &Prn, org: Uuid, mode: ToolPolicyMode, fail_mode: FailMode) -> Result<SettingsAccepted, TenancyError> {
         let org_prn = self.authorize_org(actor, org, Action::ManageToolPolicySettings).await?;
         let key = ToolPolicySetKey::Tenant(org);
 
         // Step 1: the state, and the decision.
         let state = self.repo.state(&key).await?;
-        let save_starter = check_transition(mode, state.live_version > 0)?;
+        let first_enabled_at = self.repo.settings(org).await?.and_then(|s| s.first_enabled_at);
+        let save_starter = check_transition(mode, state.live_version > 0, first_enabled_at.is_some())?;
 
         // Step 2: compile the starter, with no transaction open.
         let starter = if save_starter {
@@ -331,6 +334,8 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             fail_mode,
             updated_at: Some(now),
             updated_by: Some(actor.canonical()),
+            // Written once: the repository keeps a stored value (also under a concurrent write).
+            first_enabled_at: first_enabled_at.or((mode != ToolPolicyMode::Off).then_some(now)),
         };
         self.repo.upsert_settings_in(&*tx, org, &settings).await?;
         self.outbox.enqueue(&*tx, &events::settings_changed(&*self.ids, corr, actor, &org_prn, org, &settings, now)).await?;
@@ -701,6 +706,7 @@ mod tests {
 
     struct Harness {
         svc: ToolPolicyService<SeqIds, FixedClock>,
+        clock: FixedClock,
         repo: InMemoryToolPolicies,
         compiler: FakePolicyCompiler,
         authz: FakeAuthorizer,
@@ -745,6 +751,7 @@ mod tests {
         let audit = FakeAuditLog::default();
         let outbox = FakeOutbox::default();
         let uow = FakeUnitOfWork::default();
+        let clock = FixedClock::default();
         let svc = ToolPolicyService::new(ToolPolicyServiceDeps {
             repo: Arc::new(repo.clone()),
             orgs: Arc::new(orgs),
@@ -760,10 +767,11 @@ mod tests {
                 max_catalog_response_bytes,
             },
             ids: SeqIds::default(),
-            clock: FixedClock::default(),
+            clock: clock.clone(),
         });
         Harness {
             svc,
+            clock,
             repo,
             compiler,
             authz,
@@ -1769,12 +1777,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn off_to_enforce_with_a_set_is_allowed_and_saves_no_starter() {
+    async fn off_to_enforce_with_a_set_saved_in_off_is_a_mode_transition_error() {
+        // I-2 (strict spec 9.2): the first change away from `off` must be `log_only`, also when
+        // the org saved a set while in `off`.
         let h = harness();
         accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let (writes, ev, audit) = (h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len());
+        let err = put_mode(&h, ToolPolicyMode::Enforce, FailMode::Closed).await.unwrap_err();
+        assert_eq!(err, TenancyError::ToolPolicyModeTransitionInvalid);
+        assert_eq!(err.code(), "tool-policy-mode-transition-invalid", "reason 61");
+        assert_eq!((h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len()), (writes, ev, audit));
+        assert_eq!(h.repo.settings(h.org).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn off_to_enforce_after_an_earlier_enable_with_a_set_is_allowed_and_saves_no_starter() {
+        let h = harness();
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        put_mode(&h, ToolPolicyMode::Off, FailMode::Closed).await.unwrap();
         let r = put_mode(&h, ToolPolicyMode::Enforce, FailMode::Closed).await.unwrap();
-        assert_eq!(r.starter_version, 0);
-        assert_eq!(h.repo.versions(&tenant(&h)).len(), 1);
+        assert_eq!((r.settings.mode, r.starter_version), (ToolPolicyMode::Enforce, 0));
+        assert_eq!(h.repo.versions(&tenant(&h)).len(), 1, "only the starter of the first enable");
+    }
+
+    #[tokio::test]
+    async fn the_first_enable_sets_first_enabled_at_and_a_later_write_keeps_it() {
+        let h = harness();
+        put_mode(&h, ToolPolicyMode::Off, FailMode::Closed).await.unwrap();
+        assert_eq!(h.repo.settings(h.org).await.unwrap().unwrap().first_enabled_at, None, "off is not an enable");
+        let first = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH + chrono::Duration::seconds(100);
+        h.clock.set(first);
+        let r = put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
+        assert_eq!(r.settings.first_enabled_at, Some(first));
+        assert_eq!(h.repo.settings(h.org).await.unwrap().unwrap().first_enabled_at, Some(first));
+        for (secs, mode) in [(200, ToolPolicyMode::Enforce), (300, ToolPolicyMode::Off), (400, ToolPolicyMode::LogOnly)] {
+            h.clock.set(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH + chrono::Duration::seconds(secs));
+            let r = put_mode(&h, mode, FailMode::Open).await.unwrap();
+            assert_eq!(r.settings.first_enabled_at, Some(first), "{mode:?}");
+            assert_eq!(h.repo.settings(h.org).await.unwrap().unwrap().first_enabled_at, Some(first), "{mode:?}");
+        }
     }
 
     #[tokio::test]
@@ -1849,6 +1890,8 @@ mod tests {
     async fn a_settings_write_with_no_starter_takes_no_state_lock() {
         let h = harness();
         accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        // I-2: `enforce` needs an earlier change away from `off`.
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Closed).await.unwrap();
         // A concurrent change would conflict if the write locked and compared the state.
         h.repo.change_before_next_lock(ConcurrentChange::CatalogRevision);
         put_mode(&h, ToolPolicyMode::Enforce, FailMode::Closed).await.unwrap();
@@ -1909,6 +1952,8 @@ mod tests {
         allow_compiled(&h);
         let v = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
         accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        // I-2: `enforce` needs an earlier change away from `off`.
+        put_mode(&h, ToolPolicyMode::LogOnly, FailMode::Open).await.unwrap();
         put_mode(&h, ToolPolicyMode::Enforce, FailMode::Open).await.unwrap();
         let r = h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
         assert_eq!(r.set, Some(v));

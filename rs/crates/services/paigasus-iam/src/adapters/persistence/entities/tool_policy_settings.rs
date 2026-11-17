@@ -13,6 +13,7 @@ pub struct Model {
     pub fail_mode: String,
     pub updated_at: DateTimeUtc,
     pub updated_by: String,
+    pub first_enabled_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

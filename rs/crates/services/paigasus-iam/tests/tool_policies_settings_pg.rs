@@ -33,6 +33,7 @@ fn settings(mode: ToolPolicyMode, fail_mode: FailMode, by: &str) -> ToolPolicySe
         fail_mode,
         updated_at: Some(Utc::now()),
         updated_by: Some(by.to_string()),
+        first_enabled_at: None,
     }
 }
 
@@ -82,6 +83,44 @@ async fn upsert_inserts_then_updates_one_row() {
     assert_eq!((got.mode, got.fail_mode, got.updated_by.as_deref()), (ToolPolicyMode::Enforce, FailMode::Open, Some("bob")));
     assert!(got.updated_at.is_some());
     assert_eq!(row_count(&db, org).await, 1, "an upsert keeps one row");
+}
+
+#[tokio::test]
+async fn first_enabled_at_round_trips_and_survives_a_later_write() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let write = |s: ToolPolicySettings| {
+        let (repo, uow) = (repo.clone(), uow.clone());
+        async move {
+            let tx = uow.begin().await.unwrap();
+            repo.upsert_settings_in(&*tx, org, &s).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    // A row in `off` that was never enabled stores NULL.
+    write(settings(ToolPolicyMode::Off, FailMode::Closed, "alice")).await;
+    assert_eq!(repo.settings(org).await.unwrap().unwrap().first_enabled_at, None);
+    // The first enable stores the time. Postgres keeps microseconds.
+    let first = chrono::DateTime::parse_from_rfc3339("2026-11-17T10:00:00.123456Z").unwrap().to_utc();
+    write(ToolPolicySettings {
+        first_enabled_at: Some(first),
+        ..settings(ToolPolicyMode::LogOnly, FailMode::Closed, "alice")
+    })
+    .await;
+    assert_eq!(repo.settings(org).await.unwrap().unwrap().first_enabled_at, Some(first));
+    // A later write with another value, and one with none, keep the stored value.
+    write(ToolPolicySettings {
+        first_enabled_at: Some(Utc::now()),
+        ..settings(ToolPolicyMode::Enforce, FailMode::Open, "bob")
+    })
+    .await;
+    write(settings(ToolPolicyMode::Off, FailMode::Open, "bob")).await;
+    let got = repo.settings(org).await.unwrap().unwrap();
+    assert_eq!((got.mode, got.first_enabled_at), (ToolPolicyMode::Off, Some(first)));
 }
 
 #[tokio::test]

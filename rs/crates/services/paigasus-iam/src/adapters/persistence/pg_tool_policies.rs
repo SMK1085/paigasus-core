@@ -20,7 +20,7 @@ use paigasus_iam_core::tool_policy::{
     VersionOrigin, VersionStatus,
 };
 use paigasus_iam_core::{ConflictKind, RepositoryError, Transaction};
-use sea_orm::sea_query::OnConflict;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     AccessMode, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
 };
@@ -400,6 +400,7 @@ impl ToolPolicyRepository for PgToolPolicies {
                 fail_mode: FailMode::parse(&m.fail_mode).ok_or_else(|| corrupt("a settings row has an unknown fail mode"))?,
                 updated_at: Some(m.updated_at),
                 updated_by: Some(m.updated_by),
+                first_enabled_at: m.first_enabled_at,
             })
         })
         .transpose()
@@ -416,6 +417,7 @@ impl ToolPolicyRepository for PgToolPolicies {
             fail_mode: Set(s.fail_mode.as_str().to_string()),
             updated_at: Set(updated_at),
             updated_by: Set(updated_by.clone()),
+            first_enabled_at: Set(s.first_enabled_at),
         };
         settings_rows::Entity::insert(row)
             .on_conflict(
@@ -426,6 +428,11 @@ impl ToolPolicyRepository for PgToolPolicies {
                         settings_rows::Column::UpdatedAt,
                         settings_rows::Column::UpdatedBy,
                     ])
+                    // Written once: a stored value wins over the new one, also under a race.
+                    .value(
+                        settings_rows::Column::FirstEnabledAt,
+                        Expr::cust(r#"COALESCE("tool_policy_settings"."first_enabled_at", EXCLUDED."first_enabled_at")"#),
+                    )
                     .to_owned(),
             )
             .exec_without_returning(txn)

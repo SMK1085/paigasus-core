@@ -174,6 +174,9 @@ pub struct ToolPolicySettings {
     pub fail_mode: FailMode,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_by: Option<String>,
+    /// When the organization first left `off` (spec section 9.2). `None` until then. It is
+    /// written once: a later write keeps the stored value.
+    pub first_enabled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ToolPolicySettings {
@@ -184,6 +187,7 @@ impl ToolPolicySettings {
             fail_mode: FailMode::Closed,
             updated_at: None,
             updated_by: None,
+            first_enabled_at: None,
         }
     }
 }

@@ -4,7 +4,9 @@
 //!
 //! One table, `tool_policy_settings`, with one row for each organization. An organization with
 //! no row has the default settings: mode `off`, fail mode `closed`. The CHECK lists hold every
-//! value of `ToolPolicyMode` and `FailMode`.
+//! value of `ToolPolicyMode` and `FailMode`. `first_enabled_at` is the time of the first change
+//! away from `off`, NULL until then. It is written once, and a later `off` -> `enforce` needs it
+//! (spec section 9.2).
 //!
 //! `SET LOCAL lock_timeout` mirrors m0013. The statement creates a new table only, so the
 //! timeout bounds the foreign-key lock on `organization`.
@@ -25,7 +27,8 @@ impl MigrationTrait for Migration {
                  mode TEXT NOT NULL CHECK (mode IN ('off','log_only','enforce')),
                  fail_mode TEXT NOT NULL CHECK (fail_mode IN ('open','closed')),
                  updated_at TIMESTAMPTZ NOT NULL,
-                 updated_by TEXT NOT NULL
+                 updated_by TEXT NOT NULL,
+                 first_enabled_at TIMESTAMPTZ
                );"#,
         )
         .await?;

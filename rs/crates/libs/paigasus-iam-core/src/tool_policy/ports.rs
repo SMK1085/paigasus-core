@@ -71,5 +71,6 @@ pub trait ToolPolicyRepository: Send + Sync {
     async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError>;
     /// Insert the settings of an organization, or replace them. `s.updated_at` and
     /// `s.updated_by` must be set: a `None` is an error (`Backend`), not a panic.
+    /// `first_enabled_at` is written once: a stored non-null value is kept, whatever `s` holds.
     async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError>;
 }
