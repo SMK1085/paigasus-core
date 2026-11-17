@@ -21,7 +21,8 @@
 # guard, and it fails when a shipped importer reaches the waived package.
 #
 # The first waiver is GHSA-vfj7-8cjw-p6xm (braces, SMA-733). Every earlier finding was
-# fixed by upgrading.
+# fixed by upgrading. The second is GHSA-fc5q-39xc-vjpf (picomatch, SMA-778). It is NOT in
+# SHIPPED_FREE_WAIVERS, because app devDependencies reach it; its comment says why.
 
 # GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, severity 8.7): "braces vulnerable to
 # stack-exhaustion denial of service through deeply nested patterns". It affects
@@ -52,3 +53,38 @@
 id = "GHSA-vfj7-8cjw-p6xm"
 ignoreUntil = 2027-01-02
 reason = "No fixed braces release. Only root dev tooling (ESLint Next plugin, semantic-release) reaches it, on repo-authored glob patterns; no shipped package does, and ci/osv/shipped_reachability.py enforces that (SMA-733)."
+
+# GHSA-fc5q-39xc-vjpf (CVE-2026-112366, severity 8.7): "picomatch vulnerable to ReDoS
+# through single-branch repeated extglobs". It affects picomatch@2.3.2 and picomatch@4.0.7
+# in ts/pnpm-lock.yaml. An attacker must control the GLOB PATTERN, for example `+(*)`.
+#
+# No fix: the GitHub advisory lists no patched version for <= 4.0.7, and 4.0.7 is the newest
+# picomatch on npm (checked 2026-11-17). No pnpm override can raise it.
+#
+# Who reaches it: only devDependencies and root tooling. picomatch@4.0.7 comes through
+# vitest, vite (fdir, tinyglobby), msw, typescript-eslint and semantic-release.
+# picomatch@2.3.2 comes only through micromatch@4.0.8 under root devDependencies.
+# No app production dependency reaches either version.
+#
+# Why this waiver is NOT in SHIPPED_FREE_WAIVERS: ci/osv/shipped_reachability.py counts app
+# devDependencies as shipped, and apps/gateway-console > vitest > picomatch@4.0.7 makes it
+# exit 3. The guard is right that ts/Dockerfile installs those devDependencies in the BUILDER
+# stage. The final distroless stage copies only /app, which holds the Next.js standalone
+# output (an nft trace of the files that app code requires). Nothing measured the final image
+# contents for this waiver; that fact comes from ts/Dockerfile.
+#
+# Threat model: no source file in ts/apps or ts/packages imports picomatch, micromatch,
+# tinyglobby, fast-glob or minimatch. The test and build tools match only repo-authored
+# patterns. Next.js ships its own vendored picomatch (next/dist/compiled/picomatch, version
+# unknown). At runtime it compiles only images.remotePatterns and images.localPatterns from
+# next.config, and this repo sets neither. A request controls only the string that is
+# matched, never the pattern.
+#
+# Residual: nothing reds if an app later passes an untrusted pattern to a glob library, or
+# adds a production dependency that does. The short ignoreUntil makes someone re-check this
+# within 30 days. When upstream ships a fix, delete this waiver and add a range-scoped
+# override in ts/pnpm-workspace.yaml (SMA-778).
+[[IgnoredVulns]]
+id = "GHSA-fc5q-39xc-vjpf"
+ignoreUntil = 2026-12-17
+reason = "No fixed picomatch release. Only devDependencies and root tooling (vitest, vite, msw, ESLint, semantic-release) reach it, on repo-authored patterns; the final image copies only the Next standalone output, and no runtime code passes an untrusted glob pattern (SMA-778)."
