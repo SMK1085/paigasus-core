@@ -14,7 +14,9 @@
 //! expected value that is not current is `tool-policy-version-conflict` at once. (2) Compile with
 //! no transaction open. (3) Open a transaction, lock the state row and check that `live_version`
 //! and `catalog_revision` did not change; a change drops the transaction and is a version
-//! conflict. (4) Write, record one audit entry, commit. PR 1 writes no outbox event (D9).
+//! conflict. (4) Write, enqueue one outbox event for a new live version, record one audit entry, commit.
+//! The event and the audit entry share one correlation id. A write that stores no new live version
+//! enqueues no event.
 //!
 //! **A rejection is a successful result** ([`WriteResult::Rejected`]). It stores nothing and
 //! writes no audit entry. A compiler that answers with a reason that is not one of its six codes
@@ -26,6 +28,7 @@
 //! 6.2, Task 13).
 
 pub mod catalog;
+mod events;
 pub mod rejection;
 pub mod sets;
 pub mod wire;
@@ -39,7 +42,7 @@ use paigasus_iam_core::tool_policy::{
     ToolPolicyRepository, ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus, base_schema_json, build_manual, catalog_names, check_compiled, outputs_identical, parse_import,
     tenant_schema_json,
 };
-use paigasus_iam_core::{Action, AuditEntry, AuditLog, AuditOutcome, Clock, IdGenerator, OrganizationRepository, UnitOfWork};
+use paigasus_iam_core::{Action, AuditEntry, AuditLog, AuditOutcome, Clock, IdGenerator, OrganizationRepository, Outbox, UnitOfWork};
 use paigasus_kernel::Prn;
 use serde_json::json;
 use uuid::Uuid;
@@ -73,6 +76,7 @@ pub struct ToolPolicyServiceDeps<I, C> {
     pub authorize: Authorize,
     pub uow: Arc<dyn UnitOfWork>,
     pub audit: Arc<dyn AuditLog>,
+    pub outbox: Arc<dyn Outbox>,
     pub limits: ToolPolicyLimits,
     pub ids: I,
     pub clock: C,
@@ -106,6 +110,7 @@ pub struct ToolPolicyService<I, C> {
     authorize: Authorize,
     uow: Arc<dyn UnitOfWork>,
     audit: Arc<dyn AuditLog>,
+    outbox: Arc<dyn Outbox>,
     limits: ToolPolicyLimits,
     ids: Arc<I>,
     clock: Arc<C>,
@@ -164,6 +169,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             authorize: deps.authorize,
             uow: deps.uow,
             audit: deps.audit,
+            outbox: deps.outbox,
             limits: deps.limits,
             ids: Arc::new(deps.ids),
             clock: Arc::new(deps.clock),
@@ -384,7 +390,13 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         let now = self.clock.now();
         let version = self.new_version(actor, &target.key, state.live_version + 1, source, &out, catalog_revision, &catalog, VersionOrigin::Save, now);
         self.repo.insert_live_version_in(&*tx, &version).await?;
-        let entry = self.audit_entry(actor, target.audit_action(), &target.resource, target.audit_set(), Some(&version), catalog_revision, now);
+        let corr = self.ids.new_correlation_id();
+        let event = match target.key {
+            ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, actor, &target.resource, org, &version, now),
+            ToolPolicySetKey::Floor => events::floor_published(&*self.ids, corr, actor, &version, now),
+        };
+        self.outbox.enqueue(&*tx, &event).await?;
+        let entry = self.audit_entry(actor, target.audit_action(), &target.resource, target.audit_set(), Some(&version), catalog_revision, now, corr);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(WriteResult::Accepted(version))
@@ -478,7 +490,12 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             }
             None => None,
         };
-        let entry = self.audit_entry(actor, action, org_prn, "tenant", version.as_ref(), Some(catalog_revision), now);
+        let corr = self.ids.new_correlation_id();
+        if let Some(v) = &version {
+            let event = events::set_published(&*self.ids, corr, actor, org_prn, org, v, now);
+            self.outbox.enqueue(&*tx, &event).await?;
+        }
+        let entry = self.audit_entry(actor, action, org_prn, "tenant", version.as_ref(), Some(catalog_revision), now, corr);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(WriteResult::Accepted(CatalogAccepted {
@@ -530,7 +547,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     /// One audit entry (spec section 9.6): the RPC name, the org PRN or `root_prn()`, and the set,
     /// the version, the origin and the catalog revision.
     #[allow(clippy::too_many_arguments)]
-    fn audit_entry(&self, actor: &Prn, action: &str, resource: &Prn, set: &str, version: Option<&ToolPolicyVersion>, catalog_revision: Option<u64>, now: DateTime<Utc>) -> AuditEntry {
+    fn audit_entry(&self, actor: &Prn, action: &str, resource: &Prn, set: &str, version: Option<&ToolPolicyVersion>, catalog_revision: Option<u64>, now: DateTime<Utc>, corr: Uuid) -> AuditEntry {
         AuditEntry {
             id: self.ids.new_audit_id(),
             occurred_at: now,
@@ -545,7 +562,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
                 "origin": version.map(|v| origin_str(v.origin)),
                 "catalog_revision": catalog_revision,
             }),
-            correlation_id: Some(self.ids.new_correlation_id()),
+            correlation_id: Some(corr),
         }
     }
 }
@@ -553,7 +570,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{ConcurrentChange, FakeAuditLog, FakeAuthorizer, FakePolicyCompiler, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryToolPolicies, SeqIds, seed_org};
+    use crate::application::fakes::{ConcurrentChange, FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyCompiler, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryToolPolicies, SeqIds, seed_org};
     use crate::application::tool_policies::sets::{CompiledMeta, decode_compiled, encode_compiled};
     use paigasus_iam_core::tool_policy::{CompileOutcome, CompiledOutput, CompilerFailure, Rejection, STARTER_TOOL_POLICY_SOURCE, ToolPolicyRepository, VersionStatus};
     use paigasus_iam_core::tool_policy::{SetKind, base_schema_json, tenant_schema_json};
@@ -580,6 +597,7 @@ mod tests {
         compiler: FakePolicyCompiler,
         authz: FakeAuthorizer,
         audit: FakeAuditLog,
+        outbox: FakeOutbox,
         uow: FakeUnitOfWork,
         org: Uuid,
         org_prn: Prn,
@@ -611,6 +629,7 @@ mod tests {
         let compiler = FakePolicyCompiler::default();
         let authz = FakeAuthorizer::default();
         let audit = FakeAuditLog::default();
+        let outbox = FakeOutbox::default();
         let uow = FakeUnitOfWork::default();
         let svc = ToolPolicyService::new(ToolPolicyServiceDeps {
             repo: Arc::new(repo.clone()),
@@ -619,6 +638,7 @@ mod tests {
             authorize: Authorize::new(Arc::new(authz.clone())),
             uow: Arc::new(uow.clone()),
             audit: Arc::new(audit.clone()),
+            outbox: Arc::new(outbox.clone()),
             limits: ToolPolicyLimits {
                 catalog: CatalogLimits::default(),
                 max_source_bytes: MAX_SOURCE,
@@ -634,6 +654,7 @@ mod tests {
             compiler,
             authz,
             audit,
+            outbox,
             uow,
             org: org_id.uuid(),
             org_prn: org_id.prn().clone(),
@@ -1201,6 +1222,96 @@ mod tests {
         assert_eq!((v.version, v.compiler_generation, v.origin), (2, 1, VersionOrigin::Save));
         let out = put_search(&h, 0).await;
         assert_eq!(out.catalog_revision, 1);
+    }
+
+    fn events(h: &Harness) -> Vec<paigasus_iam_core::DomainEvent> {
+        h.outbox.0.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_tenant_save_writes_one_set_published_event() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let ev = events(&h);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].event_type.as_wire(), "iam.policy.tool_set.published");
+        assert_eq!(ev[0].aggregate_prn, h.org_prn.canonical());
+        assert_eq!(ev[0].schema_version, 1);
+        assert_eq!(ev[0].actor_prn, Some(h.actor.canonical()));
+        assert_eq!(ev[0].payload, json!({"org_id": h.org.to_string(), "version": 1, "origin": "save"}));
+    }
+
+    #[tokio::test]
+    async fn a_floor_save_writes_one_floor_published_event() {
+        let h = harness();
+        accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        let ev = events(&h);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].event_type.as_wire(), "iam.policy.tool_floor.published");
+        assert_eq!(ev[0].aggregate_prn, root_prn().canonical());
+        assert_eq!(ev[0].payload, json!({"version": 1, "origin": "save"}));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_change_version_writes_a_set_published_event() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        put_search(&h, 0).await;
+        let ev = events(&h);
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[1].event_type.as_wire(), "iam.policy.tool_set.published");
+        assert_eq!(ev[1].aggregate_prn, h.org_prn.canonical());
+        assert_eq!(ev[1].payload, json!({"org_id": h.org.to_string(), "version": 2, "origin": "catalog_change"}));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_write_with_identical_output_writes_no_event() {
+        let h = harness();
+        put_search(&h, 0).await;
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let before = events(&h).len();
+        let out = put_search(&h, 1).await;
+        assert_eq!(out.set_version, 0);
+        assert_eq!(events(&h).len(), before);
+    }
+
+    #[tokio::test]
+    async fn a_byte_identical_save_writes_no_event() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 1).await);
+        assert_eq!(events(&h).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_or_conflicting_write_writes_no_event() {
+        let h = harness();
+        h.compiler.push(Ok(CompileOutcome::Accepted(output_with_history(FLOOR_DENY, base_schema_json(), &["floor-rate"]))));
+        rejected(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        assert!(events(&h).is_empty(), "a rejection");
+        assert!(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 5).await.is_err());
+        assert!(events(&h).is_empty(), "a stale expected version");
+        h.repo.change_before_next_lock(ConcurrentChange::LiveVersion);
+        assert_eq!(
+            h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await.unwrap_err(),
+            TenancyError::ToolPolicyVersionConflict
+        );
+        assert!(events(&h).is_empty(), "a conflict between compile and lock");
+    }
+
+    #[tokio::test]
+    async fn the_event_and_the_audit_entry_share_one_correlation_id() {
+        let h = harness();
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        put_search(&h, 0).await;
+        let (ev, entries) = (events(&h), h.audit.0.lock().unwrap().clone());
+        assert_eq!(ev.len(), 3);
+        assert_eq!(entries.len(), 3);
+        for (e, a) in ev.iter().zip(entries.iter()) {
+            assert!(e.correlation_id.is_some());
+            assert_eq!(e.correlation_id, a.correlation_id);
+        }
     }
 
     #[tokio::test]

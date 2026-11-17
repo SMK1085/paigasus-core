@@ -566,3 +566,51 @@ async fn two_orgs_never_see_or_change_each_others_rows() {
     assert_eq!(repo.state(&key_a).await.unwrap().live_version, 2);
     assert_eq!(repo.state(&key_b).await.unwrap().live_version, 2);
 }
+
+/// A save through the real service: the new live version, its outbox row and its audit row
+/// commit together, and the row carries the four-segment event type (SMA-775).
+#[tokio::test]
+async fn a_committed_save_leaves_one_outbox_row_with_the_four_segment_subject() {
+    use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox};
+    use paigasus_iam_core::PrincipalId;
+    use paigasus_iam_core::tool_policy::{STARTER_TOOL_POLICY_SOURCE, tenant_schema_json};
+    use paigasus_kernel::Prn;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let result = support::accepted_result(STARTER_TOOL_POLICY_SOURCE, &tenant_schema_json(&[]));
+    let compiler = support::fake_compiler_script(dir.path(), &result);
+    let (state, idp) = support::state_with_tool_policies(db.clone(), true, &compiler).await;
+    let token = idp.bearer("tp-pg-admin", Some("tp-pg-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision_platform_admin(&state, &token).await;
+    let actor = Prn::parse(&admin_prn).unwrap();
+    let out = state.orgs.create(&PrincipalId::from_prn(actor.clone()), "acme", "Acme").await.expect("create the organization");
+    let org = out.organization.id.uuid();
+    let svc = state.tool_policies.as_ref().expect("the tool policy service");
+
+    svc.put_set(&actor, org, STARTER_TOOL_POLICY_SOURCE, 0).await.expect("save");
+
+    let rows = event_outbox::Entity::find()
+        .filter(event_outbox::Column::EventType.eq("iam.policy.tool_set.published"))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let corr = rows[0].correlation_id.expect("the event has a correlation id");
+    let audit = audit_log::Entity::find().filter(audit_log::Column::CorrelationId.eq(corr)).all(&db).await.unwrap();
+    assert_eq!(audit.len(), 1, "the audit row shares the correlation id");
+    assert_eq!(audit[0].action, "PutToolPolicySet");
+
+    // An identical save stores nothing and writes no second row.
+    svc.put_set(&actor, org, STARTER_TOOL_POLICY_SOURCE, 1).await.expect("identical save");
+    let count = event_outbox::Entity::find()
+        .filter(event_outbox::Column::EventType.eq("iam.policy.tool_set.published"))
+        .all(&db)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(count, 1);
+}
