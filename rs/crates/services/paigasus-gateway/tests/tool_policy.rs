@@ -38,6 +38,10 @@ const MIB: usize = 1 << 20;
 const FLOOR: &str = "// SPDX-License-Identifier: Apache-2.0\n@id(\"floor-rm\") forbid(principal, action == Pgs::Gateway::Action::\"floor_rm\", resource);\n";
 /// The shipped floor (D15, P-14).
 const SHIPPED_FLOOR: &str = include_str!("../tool-policies/floor.cedar");
+/// A floor that forbids the `computer` action in every mode (SMA-776).
+const FLOOR_COMPUTER: &str = "// SPDX-License-Identifier: Apache-2.0\n@id(\"floor-computer\") forbid(principal, action == Pgs::Gateway::Action::\"computer\", resource);\n";
+/// A tenant set: permit every IAM principal, forbid `computer`.
+const TENANT_COMPUTER: &str = r#"@id("p") permit(principal is Pgs::Iam::Principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
 /// The tenant set: permit every IAM principal, forbid `blocked_rm`.
 const TENANT: &str = r#"@id("p") permit(principal is Pgs::Iam::Principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"blocked_rm", resource);"#;
 /// A team and a project in `ORG_A`, and a team in another org.
@@ -549,7 +553,13 @@ async fn an_unavailable_turn_is_refused_in_enforce_and_counted_in_log_only() {
     let snapshotter = recorder.snapshotter();
     let _local = metrics::set_default_local_recorder(&recorder);
     let dir = policy_dir(FLOOR, TENANT);
-    let refusals = |mode: &str| counter_value(&snapshotter, names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, &[("mode", mode), ("reason", "unreadable_turn")]);
+    let refusals = |mode: &str| {
+        counter_value(
+            &snapshotter,
+            names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
+            &[("mode", mode), ("reason", "unreadable_turn"), ("refused", if mode == "enforce" { "true" } else { "false" })],
+        )
+    };
     for ep in EPS {
         let body = if ep.chat() {
             // A duplicate key the chat DTO ignores, but the strict request parse refuses (C13).
@@ -574,6 +584,7 @@ async fn an_unavailable_turn_is_refused_in_enforce_and_counted_in_log_only() {
         let sent = send_to(&app, ep.path(), &body).await;
         assert_eq!(sent.status, StatusCode::BAD_REQUEST, "{ep:?}: {}", sent.text());
         assert_eq!(sent.json()["error"]["code"], "invalid-request-body", "{ep:?}");
+        assert!(sent.headers.get("paigasus-tool-decisions").is_none(), "no plan, no header ({ep:?})");
         assert_eq!(mock.request_count(), 0, "nothing goes upstream ({ep:?})");
         assert_eq!(store.checks(), 0, "the limits never ran ({ep:?})");
         assert_eq!(refusals("enforce"), 1, "{ep:?}");
@@ -594,6 +605,47 @@ async fn an_unavailable_turn_is_refused_in_enforce_and_counted_in_log_only() {
             "the floor tool stays: no plan for an unreadable turn ({ep:?})"
         );
         assert_eq!(refusals("log_only"), 1, "log-only counts what enforce would refuse ({ep:?})");
+    }
+}
+
+/// A Responses request with a computer call and its screenshot output.
+fn computer_body(ep: Ep) -> String {
+    ep.body(json!({"model":"gpt-6","tools":responses_tools(&["read_file"]),"input":[
+        {"role":"user","content":"hi"},
+        {"type":"computer_call","id":"cc_1","call_id":"cc1","actions":[{"type":"screenshot"}],"status":"completed"},
+        {"type":"computer_call_output","call_id":"cc1","output":{"type":"computer_screenshot","image_url":"SECRET-SCREEN"}}]}))
+}
+
+/// SMA-776 G2, § 6.5: an enforced computer block is a 400 before the upstream, with the header.
+/// The floor enforces it in log-only too (D33). A log-only tenant block is forwarded unchanged.
+#[tokio::test]
+async fn a_blocked_computer_result_is_refused_before_the_upstream() {
+    const MESSAGE: &str = "A blocked computer_call_output cannot be replaced. Remove the computer call and its output from the input.";
+    for ep in [Ep::RespJson, Ep::RespSse] {
+        for (floor, tenant, mode) in [(FLOOR, TENANT_COMPUTER, TenantMode::Enforce), (FLOOR_COMPUTER, TENANT, TenantMode::LogOnly)] {
+            let dir = policy_dir(floor, tenant);
+            let ex = exchange(ep, ORG_A_PRN, tool_policy(&dir, mode), &computer_body(ep), &[]).await;
+            let case = format!("{ep:?} {mode:?}");
+            assert_eq!(ex.status, StatusCode::BAD_REQUEST, "{case}: {}", ex.text);
+            // A refused stream request is a JSON answer, not SSE.
+            assert!(ex.sent.header("content-type").starts_with("application/json"), "{case}");
+            let err = &ex.sent.json()["error"];
+            assert_eq!(
+                (err["code"].as_str(), err["param"].as_str(), err["type"].as_str(), err["message"].as_str()),
+                (Some("tool-result-unreplaceable"), Some("input"), Some("invalid_request_error"), Some(MESSAGE)),
+                "{case}"
+            );
+            assert_eq!(request_entries(&ex.entries), [req("computer", "replace-result", true)], "{case}");
+            assert!(ex.upstream.is_none(), "{case}: nothing goes upstream");
+            assert!(!ex.text.contains("SECRET"), "{case}");
+        }
+        // A log-only tenant block is not enforced: the original bytes go upstream.
+        let dir = policy_dir(FLOOR, TENANT_COMPUTER);
+        let body = computer_body(ep);
+        let ex = exchange(ep, ORG_A_PRN, tool_policy(&dir, TenantMode::LogOnly), &body, &[]).await;
+        assert_eq!(ex.status, StatusCode::OK, "{ep:?}: {}", ex.text);
+        assert_eq!(ex.upstream.as_deref(), Some(body.as_bytes()), "{ep:?}");
+        assert_eq!(request_entries(&ex.entries), [req("computer", "replace-result", false)], "{ep:?}");
     }
 }
 
@@ -1019,6 +1071,7 @@ async fn definition_removal_and_each_tool_choice_case() {
         assert_eq!(ex.status, StatusCode::BAD_REQUEST, "{ep:?}");
         assert_eq!(ex.sent.json()["error"]["code"], "invalid-request-body", "{ep:?}");
         assert!(ex.upstream.is_none(), "{ep:?}");
+        assert_eq!(request_entries(&ex.entries), [req("blocked_rm", "remove-definition", true)], "{ep:?}");
         // The same unknown choice with no removal passes unchanged.
         v["tools"] = if ep.chat() { chat_tools(&["read_file"]) } else { responses_tools(&["read_file"]) };
         let body = ep.body(v);
@@ -1137,8 +1190,6 @@ async fn tool_result_replacement_for_each_result_type() {
                 {"type":"function_call_output","call_id":"f1","output":"SECRET-F1"},
                 {"type":"custom_tool_call","id":"ctc_1","call_id":"cu1","name":"blocked_sql","input":"SELECT 1"},
                 {"type":"custom_tool_call_output","call_id":"cu1","output":"SECRET-CUSTOM"},
-                {"type":"computer_call","id":"cc_1","call_id":"cc1","actions":[{"type":"screenshot"}],"status":"completed"},
-                {"type":"computer_call_output","call_id":"cc1","output":{"type":"computer_screenshot","image_url":"SECRET-SCREEN"}},
                 {"type":"local_shell_call","id":"lsh_1","call_id":"ls1","action":{"type":"exec","command":["ls"]},"status":"completed"},
                 {"type":"local_shell_call_output","call_id":"ls1","output":"SECRET-LOCAL"},
                 {"type":"shell_call","id":"sh_1","call_id":"sh1","action":{"commands":["ls"]},"status":"completed"},
@@ -1172,13 +1223,16 @@ async fn tool_result_replacement_for_each_result_type() {
         } else {
             let items = up["input"].as_array().expect("input");
             assert_eq!(items[2]["output"], "OK-F0", "{ep:?}");
-            for i in [4, 6, 8, 10, 12, 14] {
+            for i in [4, 6, 8, 12] {
                 assert!(is_notice(&items[i]["output"]), "{ep:?} item {i}: {}", items[i]);
             }
-            assert_eq!(items[16]["approve"], false, "{ep:?}: an mcp approval becomes a refusal");
+            let notice = items[10]["output"][0]["stderr"].clone();
+            assert!(is_notice(&notice), "{ep:?}: {}", items[10]);
+            assert_eq!(items[10]["output"], json!([{"stdout": "", "stderr": notice, "outcome": {"type": "exit", "exit_code": 1}}]), "{ep:?}");
+            assert_eq!(items[14]["approve"], false, "{ep:?}: an mcp approval becomes a refusal");
             let mut have = request_entries(&ex.entries);
             have.sort();
-            let mut want: Vec<_> = ["blocked_rm", "blocked_sql", "computer", "local_shell", "shell", "apply_patch", "srv.rm"]
+            let mut want: Vec<_> = ["blocked_rm", "blocked_sql", "local_shell", "shell", "apply_patch", "srv.rm"]
                 .iter()
                 .map(|t| req(t, "replace-result", true))
                 .collect();

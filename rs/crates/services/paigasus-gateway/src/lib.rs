@@ -31,6 +31,8 @@
 //! the mode `off`, `log_only` or `enforce`. Before the limits, the request side removes denied tool
 //! definitions and replaces blocked tool results in `enforce` (a floor removal in every mode). It
 //! refuses a request whose tools it cannot read in `enforce` with a 400 `invalid-request-body`.
+//! It refuses a request with an enforced block of a `computer_call_output` with a 400
+//! `tool-result-unreplaceable`, because that item has no field for the notice (SMA-776).
 //! The Cedar decider then decides each tool call with the same policy snapshot. The request
 //! entries are reported first in a stream, and in the `paigasus-tool-decisions` header of a full
 //! answer. Off by default; off keeps the gateway exactly as before.

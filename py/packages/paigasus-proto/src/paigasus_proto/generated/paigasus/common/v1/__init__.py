@@ -693,6 +693,7 @@ class ErrorReason(betterproto2.Enum):
     TOOL_CALL_DENIED = 315
     """
     ---- Gateway: tool decisions (SMA-752) ----
+    315-317 never reach the caller as an HTTP error (D11). 318 is the one exception (SMA-776).
     "tool-call-denied" — the tool policy denied a tool call or a tool definition. It appears in decision reports and notices, never as an HTTP error (D11).
     """
 
@@ -704,6 +705,11 @@ class ErrorReason(betterproto2.Enum):
     TOOL_POLICY_UNAVAILABLE = 317
     """
     "tool-policy-unavailable" — the tool policy could not be evaluated. It appears in decision reports and notices, never as an HTTP error (D11).
+    """
+
+    TOOL_RESULT_UNREPLACEABLE = 318
+    """
+    "tool-result-unreplaceable" — the tool policy blocked a Responses computer_call_output, and that item has no field that can carry the notice, so the gateway refused the request (400, OpenAI type "invalid_request_error", param "input"). It is the only code of this banner that is an HTTP error (SMA-776).
     """
 
     INTERNAL = 900
@@ -875,6 +881,7 @@ class ErrorReason(betterproto2.Enum):
             315: "ERROR_REASON_TOOL_CALL_DENIED",
             316: "ERROR_REASON_TOOL_RESULT_BLOCKED",
             317: "ERROR_REASON_TOOL_POLICY_UNAVAILABLE",
+            318: "ERROR_REASON_TOOL_RESULT_UNREPLACEABLE",
             900: "ERROR_REASON_INTERNAL",
             901: "ERROR_REASON_INVALID_REQUEST_BODY",
             902: "ERROR_REASON_REQUEST_TOO_LARGE",
@@ -971,6 +978,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_TOOL_CALL_DENIED": 315,
             "ERROR_REASON_TOOL_RESULT_BLOCKED": 316,
             "ERROR_REASON_TOOL_POLICY_UNAVAILABLE": 317,
+            "ERROR_REASON_TOOL_RESULT_UNREPLACEABLE": 318,
             "ERROR_REASON_INTERNAL": 900,
             "ERROR_REASON_INVALID_REQUEST_BODY": 901,
             "ERROR_REASON_REQUEST_TOO_LARGE": 902,
