@@ -188,10 +188,10 @@
 # WARNING: mode "enforce" with no tenant policies blocks every tool that is not on the floor.
 # Cedar denies by default, and no policy permits the call. Load a permit policy for an org
 # before you set its mode to "enforce". Use "log_only" first to see what the policy would block.
-# Some request shapes are not measured against the real upstream. See
-# rs/crates/libs/paigasus-gateway-core/tests/fixtures/request_rewrite/README.md. A
-# computer_call_output notice or a shell_call_output notice will most likely get an upstream
-# 400. That fails closed: the turn stops.
+# A blocked shell_call_output becomes one notice chunk; the real upstream accepts it (SMA-776).
+# A blocked computer_call_output has no field for the notice. An enforced block refuses the
+# request with a 400 tool-result-unreplaceable. A floor block of "computer" does this in every
+# mode. See rs/crates/libs/paigasus-gateway-core/tests/fixtures/request_rewrite/README.md.
 #
 # [tool_policy]
 # enabled               = false      # env GATEWAY_TOOL_POLICY__ENABLED
