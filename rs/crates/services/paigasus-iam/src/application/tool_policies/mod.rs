@@ -162,6 +162,8 @@ fn origin_str(origin: VersionOrigin) -> &'static str {
         VersionOrigin::Save => "save",
         VersionOrigin::Starter => "starter",
         VersionOrigin::CatalogChange => "catalog_change",
+        VersionOrigin::Recompile => "recompile",
+        VersionOrigin::Accept => "accept",
     }
 }
 
@@ -498,14 +500,15 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         now: DateTime<Utc>,
     ) -> Result<ToolPolicyVersion, TenancyError> {
         let locked = self.repo.lock_state_in(tx, &target.key).await?;
-        if locked != *state {
+        // Only these two counters count (plan H3). A held row moves `last_version` and is no conflict.
+        if locked.live_version != state.live_version || locked.catalog_revision != state.catalog_revision {
             return Err(TenancyError::ToolPolicyVersionConflict);
         }
         let catalog_revision = match target.key {
             ToolPolicySetKey::Tenant(_) => Some(state.catalog_revision),
             ToolPolicySetKey::Floor => None,
         };
-        let version = self.new_version(actor, &target.key, state.live_version + 1, source, out, catalog_revision, catalog, origin, now);
+        let version = self.new_version(actor, &target.key, locked.next_version(), source, out, catalog_revision, catalog, origin, now);
         self.repo.insert_live_version_in(tx, &version).await?;
         let event = match target.key {
             ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, actor, &target.resource, org, &version, now),
@@ -577,7 +580,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         // Step 3: lock and recheck.
         let tx = self.uow.begin().await?;
         let locked = self.repo.lock_state_in(&*tx, &key).await?;
-        if locked != state {
+        if locked.live_version != state.live_version || locked.catalog_revision != state.catalog_revision {
             drop(tx);
             return Err(TenancyError::ToolPolicyVersionConflict);
         }
@@ -587,17 +590,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         let catalog_revision = self.repo.apply_catalog_in(&*tx, org, &plan.upserts, &plan.deletes, now).await?;
         let version = match coupled {
             Some((live, out)) => {
-                let v = self.new_version(
-                    actor,
-                    &key,
-                    state.live_version + 1,
-                    &live.source,
-                    &out,
-                    Some(catalog_revision),
-                    &next,
-                    VersionOrigin::CatalogChange,
-                    now,
-                );
+                let v = self.new_version(actor, &key, locked.next_version(), &live.source, &out, Some(catalog_revision), &next, VersionOrigin::CatalogChange, now);
                 self.repo.insert_live_version_in(&*tx, &v).await?;
                 Some(v)
             }
@@ -924,6 +917,17 @@ mod tests {
         // The step-3 recheck stops the save before the insert. The insert's compare-and-set
         // would give the same conflict, so only this count shows that the recheck ran.
         assert_eq!(h.repo.insert_attempts(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_held_row_stored_during_a_save_does_not_make_the_save_a_conflict() {
+        let h = harness();
+        h.repo.change_before_next_lock(ConcurrentChange::HeldRow);
+        let v = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        // The held row took number 1, so the save takes number 2 and discards the held row.
+        assert_eq!(v.version, 2);
+        assert!(h.repo.held(&tenant(&h)).await.unwrap().is_none());
+        assert_eq!(h.repo.state(&tenant(&h)).await.unwrap().next_version(), 3);
     }
 
     #[tokio::test]

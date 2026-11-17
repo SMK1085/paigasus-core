@@ -11,8 +11,8 @@ use crate::application::tenancy_nodes::TenancyNodes;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::tool_policy::{
-    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState,
-    ToolPolicyVersion, VersionStatus,
+    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, HeldStatus, HeldVersion, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings,
+    ToolPolicyState, ToolPolicyVersion, VersionStatus, failed_report,
 };
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
@@ -1942,6 +1942,9 @@ pub enum ConcurrentChange {
     LiveVersion,
     /// Another catalog write committed: `catalog_revision` goes up by 1.
     CatalogRevision,
+    /// The re-compile job stored a held row: it takes the next number, and `last_version`
+    /// goes up. `live_version` does not change.
+    HeldRow,
 }
 
 #[derive(Default)]
@@ -1949,6 +1952,7 @@ struct ToolPolicyData {
     states: HashMap<ToolPolicySetKey, ToolPolicyState>,
     catalogs: HashMap<Uuid, std::collections::BTreeMap<String, StoredTool>>,
     versions: HashMap<ToolPolicySetKey, Vec<ToolPolicyVersion>>,
+    held: HashMap<ToolPolicySetKey, Vec<HeldVersion>>,
     settings: HashMap<Uuid, ToolPolicySettings>,
 }
 
@@ -2038,8 +2042,49 @@ impl InMemoryToolPolicies {
         data.versions.entry(v.key).or_default().push(v);
     }
 
+    /// Store `h` as a held row with no checks. Another held row of the set becomes discarded,
+    /// and `last_version` is at least the number of `h`.
+    pub fn seed_held(&self, h: HeldVersion) {
+        let mut data = self.data.lock().unwrap();
+        Self::push_held(&mut data, h);
+    }
+
+    /// Every held or discarded row of a set, oldest first.
+    pub fn held_rows(&self, key: &ToolPolicySetKey) -> Vec<HeldVersion> {
+        self.data.lock().unwrap().held.get(key).cloned().unwrap_or_default()
+    }
+
+    fn push_held(data: &mut ToolPolicyData, h: HeldVersion) {
+        let rows = data.held.entry(h.key).or_default();
+        for old in rows.iter_mut() {
+            if old.status == HeldStatus::Held {
+                old.status = HeldStatus::Discarded;
+            }
+        }
+        let state = data.states.entry(h.key).or_insert(NO_STATE);
+        state.last_version = state.last_version.max(h.version);
+        rows.push(h);
+    }
+
+    fn discard_held_of(data: &mut ToolPolicyData, key: &ToolPolicySetKey, only: Option<u64>) -> bool {
+        let mut any = false;
+        for row in data.held.entry(*key).or_default().iter_mut() {
+            if row.status == HeldStatus::Held && only.is_none_or(|v| v == row.version) {
+                row.status = HeldStatus::Discarded;
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// The state of a set. `last_version` is the largest number that any stored row holds, so
+    /// it stays right for every write path of this fake.
     fn state_of(data: &ToolPolicyData, key: &ToolPolicySetKey) -> ToolPolicyState {
-        data.states.get(key).copied().unwrap_or(NO_STATE)
+        let mut state = data.states.get(key).copied().unwrap_or(NO_STATE);
+        let live_max = data.versions.get(key).into_iter().flatten().map(|v| v.version).max().unwrap_or(0);
+        let held_max = data.held.get(key).into_iter().flatten().map(|v| v.version).max().unwrap_or(0);
+        state.last_version = state.last_version.max(live_max).max(held_max);
+        state
     }
 }
 
@@ -2092,6 +2137,24 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         match self.concurrent.lock().unwrap().take() {
             Some(ConcurrentChange::LiveVersion) => state.live_version += 1,
             Some(ConcurrentChange::CatalogRevision) => state.catalog_revision += 1,
+            Some(ConcurrentChange::HeldRow) => {
+                let held = HeldVersion {
+                    key: *key,
+                    version: state.next_version(),
+                    base_version: state.live_version,
+                    source: String::new(),
+                    compiled: None,
+                    compiler_generation: 0,
+                    schema_revision: 0,
+                    catalog_revision: None,
+                    status: HeldStatus::Held,
+                    report: failed_report(Vec::new()),
+                    created_by: "job".to_owned(),
+                    created_at: DateTime::<Utc>::UNIX_EPOCH,
+                };
+                state.last_version = held.version;
+                Self::push_held(&mut data, held);
+            }
             None => {}
         }
         data.states.insert(*key, state);
@@ -2130,11 +2193,13 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         }
         let mut data = self.data.lock().unwrap();
         let mut state = Self::state_of(&data, &v.key);
-        if v.version != state.live_version + 1 {
+        if v.version != state.next_version() {
             return Err(RepositoryError::Conflict(ConflictKind::ToolPolicyVersion));
         }
         state.live_version = v.version;
+        state.last_version = v.version;
         data.states.insert(v.key, state);
+        Self::discard_held_of(&mut data, &v.key, None);
         let versions = data.versions.entry(v.key).or_default();
         for old in versions.iter_mut() {
             if old.status == VersionStatus::Live {
@@ -2144,6 +2209,81 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         versions.push(v.clone());
         self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn stale_live_versions(&self, compiler_generation: u32, schema_revision: u32) -> Result<Vec<ToolPolicyVersion>, RepositoryError> {
+        let data = self.data.lock().unwrap();
+        let mut stale: Vec<ToolPolicyVersion> = data
+            .versions
+            .values()
+            .flatten()
+            .filter(|v| v.status == VersionStatus::Live && (v.compiler_generation != compiler_generation || v.schema_revision != schema_revision))
+            .cloned()
+            .collect();
+        stale.sort_by_key(|v| match v.key {
+            ToolPolicySetKey::Floor => (0, Uuid::nil()),
+            ToolPolicySetKey::Tenant(org) => (1, org),
+        });
+        Ok(stale)
+    }
+
+    async fn max_stored_revisions(&self) -> Result<(u32, u32), RepositoryError> {
+        let data = self.data.lock().unwrap();
+        let live = data.versions.values().flatten().map(|v| (v.compiler_generation, v.schema_revision));
+        let held = data.held.values().flatten().map(|h| (h.compiler_generation, h.schema_revision));
+        Ok(live.chain(held).fold((0, 0), |(g, s), (vg, vs)| (g.max(vg), s.max(vs))))
+    }
+
+    async fn held(&self, key: &ToolPolicySetKey) -> Result<Option<HeldVersion>, RepositoryError> {
+        Ok(self.data.lock().unwrap().held.get(key).and_then(|rows| rows.iter().find(|h| h.status == HeldStatus::Held).cloned()))
+    }
+
+    async fn list_held(&self, org: Option<Uuid>) -> Result<Vec<HeldVersion>, RepositoryError> {
+        let data = self.data.lock().unwrap();
+        let mut rows: Vec<HeldVersion> = data
+            .held
+            .values()
+            .flatten()
+            .filter(|h| h.status == HeldStatus::Held)
+            .filter(|h| org.is_none_or(|o| h.key == ToolPolicySetKey::Tenant(o)))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|h| match h.key {
+            ToolPolicySetKey::Floor => (0, Uuid::nil()),
+            ToolPolicySetKey::Tenant(org) => (1, org),
+        });
+        Ok(rows)
+    }
+
+    async fn proposal_exists(&self, key: &ToolPolicySetKey, base_version: u64, compiler_generation: u32, schema_revision: u32) -> Result<bool, RepositoryError> {
+        Ok(self.data.lock().unwrap().held.get(key).is_some_and(|rows| {
+            rows.iter()
+                .any(|h| h.base_version == base_version && h.compiler_generation == compiler_generation && h.schema_revision == schema_revision)
+        }))
+    }
+
+    async fn insert_held_in(&self, _tx: &dyn Transaction, h: &HeldVersion) -> Result<(), RepositoryError> {
+        if h.status != HeldStatus::Held {
+            return Err(RepositoryError::Backend("insert_held_in needs a held version".into()));
+        }
+        let mut data = self.data.lock().unwrap();
+        if h.version != Self::state_of(&data, &h.key).next_version() {
+            return Err(RepositoryError::Conflict(ConflictKind::ToolPolicyVersion));
+        }
+        Self::push_held(&mut data, h.clone());
+        drop(data);
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn discard_held_in(&self, _tx: &dyn Transaction, key: &ToolPolicySetKey, version: u64) -> Result<bool, RepositoryError> {
+        let mut data = self.data.lock().unwrap();
+        let changed = Self::discard_held_of(&mut data, key, Some(version));
+        drop(data);
+        if changed {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(changed)
     }
 
     async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError> {

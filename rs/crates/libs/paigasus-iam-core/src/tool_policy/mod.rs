@@ -22,8 +22,8 @@ pub use compare::outputs_identical;
 pub use import::{CatalogProblem, ImportFormat, ImportedTools, build_manual, parse_import};
 pub use json_schema::{MappingError, map_input_schema};
 pub use model::{
-    CatalogLimits, DroppedField, FailMode, StoredTool, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, ToolSource, VersionOrigin,
-    VersionStatus,
+    CatalogLimits, DroppedField, FailMode, HeldStatus, HeldVersion, StoredTool, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion,
+    ToolSource, VersionOrigin, VersionStatus,
 };
 pub use name::{NameError, RESERVED_NAME_KEYS, ToolName, name_key, parse_qualified, parse_tool_name};
 pub use ports::{CompileOutcome, CompilerFailure, PolicyCompiler, ToolPolicyRepository};

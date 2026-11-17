@@ -58,9 +58,10 @@ async fn raw(db: &DatabaseConnection, sql: String) -> Result<(), sea_orm::DbErr>
 fn raw_version_sql(kind: &str, org: Option<Uuid>, version: i64, status: &str) -> String {
     let org_sql = org.map_or("NULL".to_string(), |o| format!("'{o}'"));
     let rev = if kind == "floor" { "NULL" } else { "0" };
+    // A held row needs a base version and a report (CHECK ck_tool_policy_version_held_fields).
     format!(
-        "INSERT INTO tool_policy_set_version (kind, org_id, version, source, compiled, compiler_generation, schema_revision, catalog_revision, status, origin, created_by, created_at) \
-         VALUES ('{kind}', {org_sql}, {version}, 's', '\\x00', 1, 1, {rev}, '{status}', 'save', 't', now())"
+        "INSERT INTO tool_policy_set_version (kind, org_id, version, source, compiled, compiler_generation, schema_revision, catalog_revision, status, origin, base_version, report, created_by, created_at) \
+         VALUES ('{kind}', {org_sql}, {version}, 's', '\\x00', 1, 1, {rev}, '{status}', 'save', 1, '{{}}'::jsonb, 't', now())"
     )
 }
 

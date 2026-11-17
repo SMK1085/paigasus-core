@@ -33,6 +33,8 @@ pub(crate) fn version_to_pb(v: &ToolPolicyVersion) -> Result<pb::ToolPolicySetVe
             VersionOrigin::Save => pb::ToolPolicyVersionOrigin::Save,
             VersionOrigin::Starter => pb::ToolPolicyVersionOrigin::Starter,
             VersionOrigin::CatalogChange => pb::ToolPolicyVersionOrigin::CatalogChange,
+            VersionOrigin::Recompile => pb::ToolPolicyVersionOrigin::Recompile,
+            VersionOrigin::Accept => pb::ToolPolicyVersionOrigin::Accept,
         } as i32,
         compiler_generation: v.compiler_generation,
         schema_revision: v.schema_revision,

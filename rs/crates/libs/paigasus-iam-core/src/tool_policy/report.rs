@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::compare::{canonical_json, outputs_identical};
-use super::protocol::CompiledOutput;
+use super::protocol::{CompiledOutput, HistoryCondition};
 
 /// The key in `policies.changed` when a Cedar text does not parse and the two texts differ.
 const UNPARSED_KEY: &str = "<unparsed>";
@@ -106,7 +106,12 @@ fn policy_texts(text: &str) -> Option<BTreeMap<String, String>> {
 }
 
 fn condition_map(output: &CompiledOutput) -> BTreeMap<String, String> {
-    output.conditions.iter().map(|c| (c.slot.clone(), format!("{c:?}"))).collect()
+    output.conditions.iter().map(|c| (c.slot.clone(), condition_key(c))).collect()
+}
+
+/// A stable comparison key of one condition: its canonical JSON, not its `Debug` text.
+fn condition_key(condition: &HistoryCondition) -> String {
+    serde_json::to_value(condition).map_or_else(|_| format!("{condition:?}"), |v| canonical_json(&v))
 }
 
 /// The schema entries keyed by `<namespace>::<entityTypes|actions|commonTypes>::<name>`. The
