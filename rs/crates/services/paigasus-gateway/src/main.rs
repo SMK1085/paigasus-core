@@ -288,7 +288,7 @@ fn describe_gateway_metrics() {
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
-        "Requests the tool policy refused (mode enforce) or would refuse (mode log_only), labeled by mode and reason (unreadable_turn, unknown_tool_choice)."
+        "Requests the tool policy refused, and refusals that the mode did not enforce, labeled by mode, reason (unreadable_turn, unknown_tool_choice, unreplaceable_result) and refused (true, false)."
     );
     describe_histogram!(
         names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,

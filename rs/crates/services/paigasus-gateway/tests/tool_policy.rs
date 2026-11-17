@@ -548,7 +548,13 @@ async fn an_unavailable_turn_is_refused_in_enforce_and_counted_in_log_only() {
     let snapshotter = recorder.snapshotter();
     let _local = metrics::set_default_local_recorder(&recorder);
     let dir = policy_dir(FLOOR, TENANT);
-    let refusals = |mode: &str| counter_value(&snapshotter, names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, &[("mode", mode), ("reason", "unreadable_turn")]);
+    let refusals = |mode: &str| {
+        counter_value(
+            &snapshotter,
+            names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
+            &[("mode", mode), ("reason", "unreadable_turn"), ("refused", if mode == "enforce" { "true" } else { "false" })],
+        )
+    };
     for ep in EPS {
         let body = if ep.chat() {
             // A duplicate key the chat DTO ignores, but the strict request parse refuses (C13).
