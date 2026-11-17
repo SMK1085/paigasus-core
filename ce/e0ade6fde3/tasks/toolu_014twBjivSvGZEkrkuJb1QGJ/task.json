@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_014twBjivSvGZEkrkuJb1QGJ",
+  "agent_id": "a71b04beb6bef0f8d",
+  "task_description": "Triage PR 464 kind failure",
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 104200,
+    "cache_read_tokens": 865947,
+    "output_tokens": 7370,
+    "api_call_count": 11
+  },
+  "started_at": "2026-11-16T11:59:23.100947+01:00",
+  "completed_at": "2026-11-16T12:00:34.394471+01:00"
+}

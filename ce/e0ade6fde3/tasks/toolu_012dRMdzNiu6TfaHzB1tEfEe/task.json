@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_012dRMdzNiu6TfaHzB1tEfEe",
+  "agent_id": "ac699d0e41f5f8ce3",
+  "subagent_type": "general-purpose",
+  "task_description": "Assess picomatch runtime reachability",
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 86217,
+    "cache_read_tokens": 541662,
+    "output_tokens": 6242,
+    "api_call_count": 8
+  },
+  "started_at": "2026-11-17T18:01:55.632257+01:00",
+  "completed_at": "2026-11-17T18:03:03.193905+01:00"
+}
