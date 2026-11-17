@@ -81,8 +81,12 @@ the key or the file content.
 
 ## 4. When IAM is down
 
-The gateway keeps the last loaded sets and settings. A loaded set is valid until `max_stale_secs`
-after its load. After that, or when no set was ever loaded, the gateway uses the fail mode.
+The gateway keeps the last loaded sets and settings. With no NATS event, a loaded set stays in use
+until `max_stale_secs` after its load, also when a refresh fails. An event makes the gateway load
+each set again. If that load fails, the fail mode that applies to the set decides. Under `closed`,
+an event makes a loaded set unusable until the next good load. Under `open`, the last good set
+serves up to `max_stale_secs` after its load. After that, or when no set was ever loaded, the
+gateway uses the fail mode.
 
 - **The floor is unavailable.** The global `tool_policy.on_policy_unavailable` decides. `closed`
   blocks every call. `open` allows the call and reports it. The tenant fail mode never decides
@@ -103,6 +107,12 @@ the gateway can enforce them (SMA-753). The gateway also refuses a stored set th
 treats such a set as malformed. Under a global `closed`, a floor with a history rule blocks every
 call of every tenant.
 
+For a tenant set with a history rule, the settings of that organization from IAM still decide. In
+mode `off`, the gateway does not use the set, so the set blocks no call. In mode `log_only`, the
+gateway records the set as unavailable and does not block the call. In mode `enforce`, the tenant
+`fail_mode` decides. The global `on_policy_unavailable` does not decide this case. The floor
+applies in every mode.
+
 A set saved before this change can hold such a rule. Do these steps.
 
 1. Read the floor (`GET /v1/tool-policy-floor`) and the set of each tenant
@@ -119,7 +129,13 @@ version conflict (HTTP 409, gRPC `ABORTED`, `tool-policy-version-conflict`). IAM
 that request. The change of the other request is saved. The client reads the settings and sends its
 request again if it still needs a change. The retry succeeds. This is not a fault.
 
-## 7. Not done yet
+## 7. Rollback
+
+Do not roll back IAM to a release before this one after the first enable of any organization.
+The first enable saves a version with `origin = starter`. An older IAM reads that origin as
+`corrupt`, so `GetToolPolicySet` and every catalog write fail for each enabled organization.
+
+## 8. Not done yet
 
 The Helm chart does not mount the credential file. It does not set `iam.service_credential_file`.
 Until a later change adds this, mount the file and set the key by your own means.

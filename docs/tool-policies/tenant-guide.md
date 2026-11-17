@@ -12,7 +12,8 @@ stores the set and compiles it. The gateway fetches the compiled set and enforce
 Each organization has two settings. Write them with
 `PUT /v1/organizations/{id}/tool-policy-settings` (gRPC `PutToolPolicySettings`). The body is
 `{"mode": "...", "fail_mode": "..."}`. Read them with `GET` on the same route. You need the
-`ManageToolPolicySettings` action for the write. The `org_admin` role has it.
+`ManageToolPolicySettings` action for the write and the `ReadToolPolicies` action for the read.
+The `org_admin` role has both.
 
 | `mode` | What the gateway does with your set |
 |---|---|
