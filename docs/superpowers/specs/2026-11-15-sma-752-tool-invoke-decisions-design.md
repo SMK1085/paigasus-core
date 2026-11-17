@@ -562,7 +562,8 @@ With policies available, and an effective mode that is not `off`:
 2. For each definition, call `decide_tool`. A `DeniedForAllInputs` definition is planned for
    removal.
 3. For each tool result, call `decide_tool` with the result's tool name. A `DeniedForAllInputs`
-   result is planned for replacement. Where the result names no tool (a Chat `role:"tool"`
+   result is planned for replacement. An enforced block of a `computer_call_output` adds a
+   refusal cause instead (SMA-776 § 6.2). Where the result names no tool (a Chat `role:"tool"`
    message has only the call id), the name comes from the earlier assistant call with that id in
    the same request. If two earlier calls have that id, use each name and plan the replacement
    if any of them is denied. With no such call, the result is not changed.
@@ -595,7 +596,7 @@ Definitions:
   client-run tools (`local_shell`, `shell`, `apply_patch`, `computer`). A hosted tool that the
   provider runs (for example `web_search`) has no call that the client runs, and is not removed.
 
-Results (every type that `turn.rs:240-249` reads as a result):
+Results (every type that `responses_result_shape` in `turn.rs` reads as a result):
 
 - Chat: `role:"tool"` (`content`), legacy `role:"function"`.
 - Anthropic: `tool_result` blocks (`content`, and `is_error: true` is set).
@@ -617,7 +618,8 @@ The replacement depends on the result type (SMA-776 spec § 6.1):
 | `Screenshot` | Responses `computer_call_output` | none: the request is refused |
 | `Approval` | Responses `mcp_approval_response` | `approve: false`, `reason` = the notice |
 
-See the SMA-776 spec (`2026-11-16-sma-776-blocked-structured-results-design.md`). The text of the notice is fixed and built from the reason
+See the SMA-776 spec (`2026-11-16-sma-776-blocked-structured-results-design.md`).
+The text of the notice is fixed and built from the reason
 and a cleaned tool name (SMA-749 D21).
 
 #### 6.5.3 Reporting
@@ -710,7 +712,8 @@ stream) and `/v1/responses`:
 - An argument policy (`read_file` only under `/workspace/`): an allowed and a denied path.
 - Definition removal, each `tool_choice` case of § 6.5.1 step 4, each last-definition case of
   step 5, and no removal when an input-reading permit exists.
-- Tool result replacement for each result type, including the Chat case where the name comes
+- Tool result replacement for each result type. An enforced block of a `computer_call_output`
+  adds a refusal cause instead (SMA-776 § 6.2). Include the Chat case where the name comes
   from the earlier call.
 - `name_collision` with the shipped floor.
 - An `Unavailable` turn: refused in enforce mode before the limits, forwarded and counted in

@@ -62,7 +62,8 @@ pub const GATEWAY_TOOL_POLICY_DECISIONS_TOTAL: &str = "gateway_tool_policy_decis
 /// Requests that the tool policy refused, and refusals that the mode did not enforce (D17, P-10,
 /// SMA-776 G5). `mode` = `off` | `log_only` | `enforce`; `reason` = `unreadable_turn` |
 /// `unknown_tool_choice` | `unreplaceable_result`; `refused` = `true` (a 400) | `false`
-/// (forwarded; enforce mode would refuse it).
+/// (forwarded; enforce mode would refuse it). The metric never counts an unreadable turn in mode
+/// `off`. An unknown `tool_choice` with an enforced floor removal is refused in every mode.
 pub const GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL: &str = "gateway_tool_policy_request_refusals_total";
 /// Seconds the tool policy adds to one request: the request side plus the decider (preflight F14).
 pub const GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS: &str = "gateway_tool_policy_overhead_seconds";

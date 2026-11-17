@@ -66,5 +66,3 @@ More facts from the same session:
   `shell_call_output` chunk has three required members: `stdout`, `stderr`, `outcome`. `outcome`
   is `{"type":"exit","exit_code":<int>}` or `{"type":"timeout"}`. The screenshot object has no
   text member.
-
-`local_shell_call_output`: not measured, because `gpt-6-sol` rejects the `local_shell_call` item.

@@ -84,7 +84,7 @@ pub struct RequestToolPolicy {
 /// Count and log a refusal, or a refusal that enforce mode would make (P-10, D17: log-only is
 /// "forwarded, logged and counted"). `refused` says whether the request is refused (400) or
 /// forwarded. `cause` names the branch (`unreadable_turn`, `unknown_tool_choice`,
-/// `rewrite_failed`). The line holds the request id, the mode and the reason only: no body
+/// `unreplaceable_result`, `rewrite_failed`). The line holds the request id, the mode and the reason only: no body
 /// content and no tool name (ADR-0027 (i)).
 fn refusal_event(ctx: &DecisionContext, mode: TenantMode, refusal: &Refusal, cause: &'static str, refused: bool) {
     counter!(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, "mode" => mode.as_str(), "reason" => refusal.label(), "refused" => if refused { "true" } else { "false" }).increment(1);
