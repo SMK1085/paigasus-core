@@ -13,6 +13,7 @@ pub mod model;
 pub mod name;
 pub mod ports;
 pub mod protocol;
+pub mod report;
 pub mod schema;
 pub mod starter;
 
@@ -27,5 +28,6 @@ pub use model::{
 pub use name::{NameError, RESERVED_NAME_KEYS, ToolName, name_key, parse_qualified, parse_tool_name};
 pub use ports::{CompileOutcome, CompilerFailure, PolicyCompiler, ToolPolicyRepository};
 pub use protocol::{CompileRequest, CompileResult, CompiledOutput, PROTOCOL_VERSION, Rejection, RevisionOutput, SetKind};
+pub use report::{HeldReport, HeldResult, NameDiff, ReportRejection, diff_outputs, failed_report};
 pub use schema::{ACTION_NAMESPACE, TOOL_SCHEMA_REVISION, base_schema_json, catalog_names, tenant_schema_json};
 pub use starter::{STARTER_TOOL_POLICY_ID, STARTER_TOOL_POLICY_SOURCE};

@@ -1967,7 +1967,11 @@ pub struct InMemoryToolPolicies {
     read_log: Arc<Mutex<Vec<&'static str>>>,
 }
 
-const NO_STATE: ToolPolicyState = ToolPolicyState { catalog_revision: 0, live_version: 0 };
+const NO_STATE: ToolPolicyState = ToolPolicyState {
+    catalog_revision: 0,
+    live_version: 0,
+    last_version: 0,
+};
 
 impl InMemoryToolPolicies {
     /// Make `change` inside the next `lock_state_in`.

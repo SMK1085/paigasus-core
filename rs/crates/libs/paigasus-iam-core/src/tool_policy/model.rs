@@ -88,6 +88,16 @@ pub enum VersionOrigin {
 pub struct ToolPolicyState {
     pub catalog_revision: u64,
     pub live_version: u64,
+    /// The highest version number that any row of the set holds, held and discarded rows
+    /// included. 0 when the set has no row.
+    pub last_version: u64,
+}
+
+impl ToolPolicyState {
+    /// The number of the next version: one above the larger of the two counters (plan H2).
+    pub fn next_version(&self) -> u64 {
+        self.live_version.max(self.last_version) + 1
+    }
 }
 
 /// One stored version of a tool policy set.
@@ -221,5 +231,32 @@ mod settings_tests {
         let s = ToolPolicySettings::default_for_absent_row();
         assert_eq!((s.mode, s.fail_mode), (ToolPolicyMode::Off, FailMode::Closed));
         assert!(s.updated_at.is_none() && s.updated_by.is_none());
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn next_version_is_one_above_the_larger_counter() {
+        assert_eq!(
+            ToolPolicyState {
+                catalog_revision: 0,
+                live_version: 4,
+                last_version: 5
+            }
+            .next_version(),
+            6
+        );
+        assert_eq!(
+            ToolPolicyState {
+                catalog_revision: 0,
+                live_version: 6,
+                last_version: 5
+            }
+            .next_version(),
+            7
+        );
     }
 }

@@ -198,6 +198,7 @@ fn model_to_state(m: &state::Model) -> Result<ToolPolicyState, RepositoryError> 
     Ok(ToolPolicyState {
         catalog_revision: from_i64(m.catalog_revision)?,
         live_version: from_i64(m.live_version)?,
+        last_version: 0,
     })
 }
 
@@ -230,7 +231,11 @@ impl ToolPolicyRepository for PgToolPolicies {
     async fn state(&self, key: &ToolPolicySetKey) -> Result<ToolPolicyState, RepositoryError> {
         match state::Entity::find_by_id(set_key(key)).one(&self.db).await.map_err(map_err)? {
             Some(m) => model_to_state(&m),
-            None => Ok(ToolPolicyState { catalog_revision: 0, live_version: 0 }),
+            None => Ok(ToolPolicyState {
+                catalog_revision: 0,
+                live_version: 0,
+                last_version: 0,
+            }),
         }
     }
 
