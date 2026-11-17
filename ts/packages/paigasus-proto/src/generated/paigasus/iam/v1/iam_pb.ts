@@ -4277,8 +4277,8 @@ export const GetToolPolicySettingsResponseSchema: GenMessage<GetToolPolicySettin
 
 /**
  * The first change away from OFF must be to LOG_ONLY, also when a tenant set was saved in OFF.
- * With no tenant set, it saves the starter as version 1. A later OFF to ENFORCE needs an earlier
- * change away from OFF and a saved tenant set. Any other ENFORCE is
+ * With no tenant set, it saves the starter as version 1. A change to ENFORCE, from any mode,
+ * needs an earlier change away from OFF and a saved tenant set. An ENFORCE without both is
  * tool-policy-mode-transition-invalid (spec §9.2). UNSPECIFIED is missing-required-field.
  *
  * @generated from message paigasus.iam.v1.PutToolPolicySettingsRequest
