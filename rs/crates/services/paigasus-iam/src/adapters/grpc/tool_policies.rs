@@ -364,9 +364,9 @@ impl ToolPolicyService for ToolPolicyGrpc {
     /// starter set, and `starter_version` names it.
     ///
     /// **A race on the first enable.** When two first enables run at the same time, the loser
-    /// gets a version conflict (the gRPC code `ABORTED`, HTTP 409). The winner has already
-    /// applied the mode that the loser asked for, so the loser can read the settings, or retry.
-    /// A retry succeeds.
+    /// gets a version conflict (the gRPC code `ABORTED`, HTTP 409). IAM writes nothing for the
+    /// loser. The change of the winner is saved. The loser reads the settings and sends its
+    /// request again if it still needs a change. The retry succeeds.
     async fn put_tool_policy_settings(&self, request: Request<pb::PutToolPolicySettingsRequest>) -> Result<Response<pb::PutToolPolicySettingsResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::PutToolPolicySettingsResponse>, Status> = async {

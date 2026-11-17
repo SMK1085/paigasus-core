@@ -1,5 +1,3 @@
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-
 # RUNBOOK: tool policies and the gateway service identity (SMA-775)
 
 This runbook is for the platform operator. It explains how to give the AI Gateway an IAM identity
@@ -24,8 +22,9 @@ steps in this order. Each step shows the HTTP route and the gRPC method.
    `prn` and the UUID of the account from the response.
 3. **Issue an API key.** `POST /v1/service-accounts/{sa}/api-keys` (`IssueApiKey`), where `{sa}` is
    the UUID of the account. Set `scope_prn` to the PRN of the platform organization. Leave
-   `scope_actions` and `scope_roles` empty. Set no `expires_at` for a key with no expiry. If IAM has
-   a default key expiry, an unset `expires_at` gets that default. The key scope does not limit the
+   `scope_actions` and `scope_roles` empty. Check `api_keys.default_expiry_days` in the IAM
+   config. If it is set, the key expires, and the gateway fetch fails after that date. Put the
+   expiry date in the rotation plan. The key scope does not limit the
    fetch. The Root grant in step 4 does. Store the `token` from the response at once. IAM shows it
    one time only.
 4. **Grant the reader role at Root.** `POST /v1/authz/role-grants` (`GrantRole`). The body is
@@ -116,8 +115,9 @@ Until a tenant does this, that tenant cannot write its tool catalog. The write i
 ## 6. Concurrent first enables
 
 Two admins can enable tool policies for one organization at the same time. One request gets a
-version conflict (HTTP 409, gRPC `ABORTED`, `tool-policy-version-conflict`). The mode of that
-request was applied. A retry succeeds. This is not a fault.
+version conflict (HTTP 409, gRPC `ABORTED`, `tool-policy-version-conflict`). IAM writes nothing for
+that request. The change of the other request is saved. The client reads the settings and sends its
+request again if it still needs a change. The retry succeeds. This is not a fault.
 
 ## 7. Not done yet
 

@@ -13,8 +13,9 @@
 //!
 //! **The settings and the compiled-policy fetch (SMA-775).** `PUT .../tool-policy-settings` writes
 //! the mode and the fail mode. The first enable to `log_only` also saves the starter set. When
-//! two first enables race, the loser gets a version conflict (409) although the winner already
-//! applied its target mode. A retry succeeds. `GET .../compiled-tool-policies` and
+//! two first enables race, the loser gets a version conflict (409). IAM writes nothing for the
+//! loser, and the change of the winner is saved. The loser reads the settings and retries if it
+//! still needs a change. The retry succeeds. `GET .../compiled-tool-policies` and
 //! `GET /v1/compiled-tool-policy-floor` are the reads of the gateway service identity.
 //!
 //! **The floor routes take no organization.** The service authorizes them at Root.
@@ -247,7 +248,8 @@ async fn get_settings(State(s): State<AppState>, Extension(ctx): Extension<AuthC
 }
 
 /// Writes the settings. A first enable that races with another first enable can answer 409
-/// `tool-policy-version-conflict` although the winner applied the same mode. Retry.
+/// `tool-policy-version-conflict`. IAM writes nothing for that request. Read the settings, and
+/// retry if the change is still needed.
 async fn put_settings(
     State(s): State<AppState>,
     Extension(ctx): Extension<AuthContext>,

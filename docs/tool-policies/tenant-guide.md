@@ -1,5 +1,3 @@
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-
 # Tool policies: tenant guide (SMA-775)
 
 This guide is for an organization admin. It explains how to turn on tool policies and how to
@@ -47,8 +45,9 @@ permitted. In `enforce` mode the gateway blocks it. In `log_only` mode the gatew
 An empty set permits nothing, so in `enforce` mode it blocks every call.
 
 If two admins make the first enable at the same time, one of them can get a version conflict
-(`tool-policy-version-conflict`, HTTP 409, gRPC `ABORTED`). The mode of that request was applied
-anyway. Send the request again. The second request succeeds.
+(`tool-policy-version-conflict`, HTTP 409, gRPC `ABORTED`). IAM writes nothing for that request.
+The change of the other request is saved. Read the settings. If you still need a change, send
+your request again. The second request succeeds.
 
 ## 2. The platform floor
 
