@@ -69,7 +69,10 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 ///
 /// `6`: SMA-775 added `ManageToolPolicySettings` (a non-restore write, so it joins the generated
 /// forbid list) and the `tool_policy_reader` role template.
-pub const STARTER_POLICY_REVISION: u32 = 6;
+///
+/// `7`: SMA-781 added `ManageToolPolicyRecompile`. It is a non-restore write, so it joins the
+/// generated forbid list.
+pub const STARTER_POLICY_REVISION: u32 = 7;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
 /// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
@@ -98,7 +101,7 @@ pub fn is_starter_policy_id(id: &str) -> bool {
 
 /// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
 #[cfg(test)]
-const EXPECTED_STARTER_CONTENT_HASH: &str = "36634c63d11b82675f9a1f2443bad6e63a8e1e9655616aefd9befb25b4ce100e";
+const EXPECTED_STARTER_CONTENT_HASH: &str = "d40bd1a20359beb48dc1c0a7bc5a529bd1c49cb96cbfdf9fab2317e329a1141e";
 
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
@@ -856,6 +859,35 @@ mod tests {
                 resource: uni.archived_org.prn().clone(),
                 expect: Effect::Deny,
             },
+            // -- SMA-781: the re-compile action.
+            Case {
+                name: "platform_admin allows ManageToolPolicyRecompile at Root (SMA-781)",
+                grants: vec![grant(139, &uni.principal, "platform_admin", GrantScope::Root)],
+                action: Action::ManageToolPolicyRecompile,
+                resource: root_prn(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "org_admin denies ManageToolPolicyRecompile at Root (SMA-781)",
+                grants: vec![grant(140, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageToolPolicyRecompile,
+                resource: root_prn(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "org_admin denies ManageToolPolicyRecompile on its own org (SMA-781)",
+                grants: vec![grant(141, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageToolPolicyRecompile,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "tool_policy_reader denies ManageToolPolicyRecompile at Root (SMA-781)",
+                grants: vec![grant(142, &uni.principal, "tool_policy_reader", GrantScope::Root)],
+                action: Action::ManageToolPolicyRecompile,
+                resource: root_prn(),
+                expect: Effect::Deny,
+            },
             // -- SMA-635 D4 and D10. The gateway authorizes a user's InvokeModel against the ORG
             // PRN, and org_admin does not carry InvokeModel: a person needs a gateway_user grant,
             // made out of band with GrantRole. Pinned so a change to either role becomes a
@@ -1054,6 +1086,15 @@ mod tests {
         let src = forbid_archived_writes_source();
         assert!(src.contains(r#"Pgs::Iam::Action::"ManageToolPolicySettings""#), "ManageToolPolicySettings is a write");
         assert!(!src.contains(r#"Pgs::Iam::Action::"ReadCompiledToolPolicies""#), "ReadCompiledToolPolicies is a read");
+    }
+
+    /// SMA-781: the re-compile action is a non-restore write, so it reaches the generated forbid list.
+    #[test]
+    fn the_recompile_action_is_in_the_generated_forbid_source() {
+        assert!(
+            forbid_archived_writes_source().contains(r#"Pgs::Iam::Action::"ManageToolPolicyRecompile""#),
+            "ManageToolPolicyRecompile is a write, so it must appear in forbid-archived-writes"
+        );
     }
 
     /// SMA-775: `tool_policy_reader` is a Root-only role.
