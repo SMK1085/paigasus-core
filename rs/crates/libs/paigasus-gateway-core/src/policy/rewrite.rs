@@ -81,7 +81,7 @@ impl<'p> Enforced<'p> {
 /// Apply the enforced items of `plan` to `body` (§ 6.5.1 step 6). `None` when the plan changes
 /// nothing (`is_noop`), and also when `body` is not one JSON object; the caller plans only from a
 /// body that `parse_request` read, so the second case does not occur. The caller handles
-/// `plan.refuse` before it calls this function.
+/// `plan.refusal()` before it calls this function.
 #[must_use]
 pub fn rewrite_request(format: Format, body: &[u8], plan: &RequestPlan) -> Option<Bytes> {
     if plan.is_noop() {

@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use metrics::{counter, histogram};
-use paigasus_gateway_core::{DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, plan_request, rewrite_request};
+use paigasus_gateway_core::{
+    DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, plan_request, rewrite_request,
+};
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
 use paigasus_kernel::{Prn, to_cedar_uid};
 use paigasus_observability::names;
@@ -21,7 +23,7 @@ use super::cache::{Lookup, PolicyCache};
 use crate::config::ToolPolicySettings;
 use crate::domain::org_of;
 
-/// Why the request side refuses a request. Both are a 400 `BadRequestBody` (P-10).
+/// Why the request side refuses a request. Each refusal is a 400 (P-10, SMA-776).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The turn is `ToolTurn::Unavailable` and the tenant mode is `enforce` (D17). Also used when
@@ -30,14 +32,26 @@ pub enum Refusal {
     /// The `tool_choice` has a shape the gateway does not know, and an enforced removal exists
     /// (§ 6.5.1 step 4).
     UnknownToolChoice,
+    /// An enforced block of a result that the gateway cannot replace with a notice (SMA-776).
+    UnreplaceableResult,
 }
 
 impl Refusal {
+    /// The refusal for a plan cause. A cause that this service does not know fails closed (§ 6.4).
+    fn from_cause(cause: RefusalCause) -> Self {
+        match cause {
+            RefusalCause::UnreplaceableResult => Refusal::UnreplaceableResult,
+            RefusalCause::UnknownToolChoice => Refusal::UnknownToolChoice,
+            _ => Refusal::UnreadableTurn,
+        }
+    }
+
     /// The `reason` metric label.
     fn label(&self) -> &'static str {
         match self {
             Refusal::UnreadableTurn => "unreadable_turn",
             Refusal::UnknownToolChoice => "unknown_tool_choice",
+            Refusal::UnreplaceableResult => "unreplaceable_result",
         }
     }
 }
@@ -166,9 +180,10 @@ impl RequestToolPolicy {
 
         let (body, entries) = if let ToolTurn::Parsed(facts) = turn {
             let plan = plan_request(&snapshot, format, facts);
-            if plan.refuse {
-                refusal_event(ctx, mode, &Refusal::UnknownToolChoice, "unknown_tool_choice", true);
-                return Err(Refusal::UnknownToolChoice);
+            if let Some(cause) = plan.refusal() {
+                let refusal = Refusal::from_cause(cause);
+                refusal_event(ctx, mode, &refusal, refusal.label(), true);
+                return Err(refusal);
             }
             let body = if plan.is_noop() {
                 body
@@ -208,6 +223,29 @@ mod tests {
 
     fn ctx() -> DecisionContext {
         DecisionContext::new(PRINCIPAL, ORG_A_PRN, Some("req-1".into()))
+    }
+
+    const FORBID_COMPUTER: &str = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
+    const FLOOR_COMPUTER: &str = r#"@id("floor-computer") forbid(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
+
+    /// A Responses request with one computer call and its screenshot output.
+    fn computer_request(extra: &str) -> Bytes {
+        Bytes::from(format!(
+            r#"{{"model":"m"{extra},"input":[{{"type":"computer_call","id":"cu_1","call_id":"c3","actions":[{{"type":"screenshot"}}],"status":"completed"}},{{"type":"computer_call_output","call_id":"c3","output":{{"type":"computer_screenshot","image_url":"data:image/png;base64,SECRET"}}}}]}}"#
+        ))
+    }
+
+    async fn run_responses(policy: &RequestToolPolicy, body: Bytes) -> Result<RequestOutcome, Refusal> {
+        let turn = parse_request(Format::OpenAiResponses, &body);
+        policy.apply(&ctx(), "m", Format::OpenAiResponses, &turn, body).await
+    }
+
+    #[tokio::test]
+    async fn a_blocked_computer_result_is_refused_in_enforce_and_by_the_floor_in_log_only() {
+        let enforce = testing::policy(&FakeSource::new(testing::FLOOR, FORBID_COMPUTER), settings(TenantMode::Enforce));
+        assert_eq!(run_responses(&enforce, computer_request("")).await.err(), Some(Refusal::UnreplaceableResult));
+        let floor = testing::policy(&FakeSource::new(FLOOR_COMPUTER, testing::PERMIT_ALL), settings(TenantMode::LogOnly));
+        assert_eq!(run_responses(&floor, computer_request("")).await.err(), Some(Refusal::UnreplaceableResult));
     }
 
     async fn run(policy: &RequestToolPolicy, body: Bytes) -> Result<RequestOutcome, Refusal> {

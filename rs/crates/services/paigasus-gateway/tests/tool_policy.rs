@@ -1136,8 +1136,6 @@ async fn tool_result_replacement_for_each_result_type() {
                 {"type":"function_call_output","call_id":"f1","output":"SECRET-F1"},
                 {"type":"custom_tool_call","id":"ctc_1","call_id":"cu1","name":"blocked_sql","input":"SELECT 1"},
                 {"type":"custom_tool_call_output","call_id":"cu1","output":"SECRET-CUSTOM"},
-                {"type":"computer_call","id":"cc_1","call_id":"cc1","actions":[{"type":"screenshot"}],"status":"completed"},
-                {"type":"computer_call_output","call_id":"cc1","output":{"type":"computer_screenshot","image_url":"SECRET-SCREEN"}},
                 {"type":"local_shell_call","id":"lsh_1","call_id":"ls1","action":{"type":"exec","command":["ls"]},"status":"completed"},
                 {"type":"local_shell_call_output","call_id":"ls1","output":"SECRET-LOCAL"},
                 {"type":"shell_call","id":"sh_1","call_id":"sh1","action":{"commands":["ls"]},"status":"completed"},
@@ -1171,13 +1169,13 @@ async fn tool_result_replacement_for_each_result_type() {
         } else {
             let items = up["input"].as_array().expect("input");
             assert_eq!(items[2]["output"], "OK-F0", "{ep:?}");
-            for i in [4, 6, 8, 10, 12, 14] {
+            for i in [4, 6, 8, 10, 12] {
                 assert!(is_notice(&items[i]["output"]), "{ep:?} item {i}: {}", items[i]);
             }
-            assert_eq!(items[16]["approve"], false, "{ep:?}: an mcp approval becomes a refusal");
+            assert_eq!(items[14]["approve"], false, "{ep:?}: an mcp approval becomes a refusal");
             let mut have = request_entries(&ex.entries);
             have.sort();
-            let mut want: Vec<_> = ["blocked_rm", "blocked_sql", "computer", "local_shell", "shell", "apply_patch", "srv.rm"]
+            let mut want: Vec<_> = ["blocked_rm", "blocked_sql", "local_shell", "shell", "apply_patch", "srv.rm"]
                 .iter()
                 .map(|t| req(t, "replace-result", true))
                 .collect();
