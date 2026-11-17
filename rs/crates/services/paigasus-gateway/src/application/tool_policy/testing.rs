@@ -4,7 +4,7 @@
 //! request bodies and a metrics reader.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::{CacheSettings, PolicyCache, RequestToolPolicy};
 use crate::config::ToolPolicySettings;
-use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies};
+use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 
 pub(crate) const ORG_A: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
 pub(crate) const ORG_A_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
@@ -36,6 +36,12 @@ pub(crate) struct FakeSource {
     tenant_delay: Mutex<Duration>,
     floor_delay: Mutex<Duration>,
     tenant_calls: AtomicUsize,
+    /// The settings that the source returns with the tenant set. `None`: a source with no settings.
+    tenant_settings: Mutex<Option<TenantSettings>>,
+    /// When set, only the tenant load fails (preflight F10).
+    fail_tenant: AtomicBool,
+    /// When set, the floor load fails.
+    fail_floor: AtomicBool,
 }
 
 impl FakeSource {
@@ -46,6 +52,9 @@ impl FakeSource {
             tenant_delay: Mutex::new(Duration::ZERO),
             floor_delay: Mutex::new(Duration::ZERO),
             tenant_calls: AtomicUsize::new(0),
+            tenant_settings: Mutex::new(None),
+            fail_tenant: AtomicBool::new(false),
+            fail_floor: AtomicBool::new(false),
         })
     }
 
@@ -53,6 +62,23 @@ impl FakeSource {
     pub(crate) fn set_tenant(&self, text: &str) {
         let mut t = self.tenant.lock().unwrap();
         *t = (text.to_owned(), t.1 + 1);
+    }
+
+    /// Replace the settings of the tenant; the version changes (the IAM token covers the settings).
+    pub(crate) fn set_settings(&self, settings: Option<TenantSettings>) {
+        *self.tenant_settings.lock().unwrap() = settings;
+        let mut t = self.tenant.lock().unwrap();
+        t.1 += 1;
+    }
+
+    /// Fail only the tenant load. The floor load still works.
+    pub(crate) fn set_fail_tenant(&self, fail: bool) {
+        self.fail_tenant.store(fail, Ordering::SeqCst);
+    }
+
+    /// Fail the floor load.
+    pub(crate) fn set_fail_floor(&self, fail: bool) {
+        self.fail_floor.store(fail, Ordering::SeqCst);
     }
 
     pub(crate) fn set_tenant_delay(&self, d: Duration) {
@@ -71,6 +97,9 @@ impl FakeSource {
 #[async_trait]
 impl PolicySource for FakeSource {
     async fn floor(&self) -> Result<PolicyText, SourceError> {
+        if self.fail_floor.load(Ordering::SeqCst) {
+            return Err(SourceError::Io("floor down".to_owned()));
+        }
         let text = self.floor.lock().unwrap().clone();
         let delay = *self.floor_delay.lock().unwrap();
         if !delay.is_zero() {
@@ -84,6 +113,9 @@ impl PolicySource for FakeSource {
 
     async fn tenant(&self, _org: Uuid) -> Result<TenantPolicies, SourceError> {
         self.tenant_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_tenant.load(Ordering::SeqCst) {
+            return Err(SourceError::Io("tenant down".to_owned()));
+        }
         let (text, version) = self.tenant.lock().unwrap().clone();
         let delay = *self.tenant_delay.lock().unwrap();
         if !delay.is_zero() {
@@ -93,6 +125,7 @@ impl PolicySource for FakeSource {
             text,
             catalog: Vec::new(),
             version: version.to_string(),
+            settings: *self.tenant_settings.lock().unwrap(),
         })
     }
 }
@@ -108,6 +141,15 @@ pub(crate) fn settings(default_mode: TenantMode) -> ToolPolicySettings {
         idle_evict: Duration::from_secs(3600),
         load_timeout: Duration::from_secs(1),
         orgs: HashMap::new(),
+        settings_from_source: false,
+    }
+}
+
+/// `settings(default_mode)` for a source that returns the tenant settings (the IAM source).
+pub(crate) fn settings_from_source(default_mode: TenantMode) -> ToolPolicySettings {
+    ToolPolicySettings {
+        settings_from_source: true,
+        ..settings(default_mode)
     }
 }
 

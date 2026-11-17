@@ -27,7 +27,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::config::ToolPolicySettings;
-use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies};
+use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 
 /// How many tenant reloads one refresh pass runs at the same time.
 const REFRESH_CONCURRENCY: usize = 16;
@@ -253,6 +253,18 @@ impl PolicyCache {
             }
         }
         compiled.map_or(Lookup::Unavailable, Lookup::Ready)
+    }
+
+    /// The settings of the last good load of this tenant, whatever its age and its `stale` flag:
+    /// the last known value (spec §9.3). It never starts a load. An evicted tenant, or a tenant
+    /// that never loaded, has none. A source with no settings gives none.
+    #[must_use]
+    pub fn tenant_settings(&self, org: Uuid) -> Option<TenantSettings> {
+        let mut inner = self.lock();
+        match &inner.existing(Key::Tenant(org))?.good.as_ref()?.data {
+            Data::Tenant(t) => t.source.settings,
+            Data::Floor(_) => None,
+        }
     }
 
     /// D16: mark every entry as invalidated. The next request reloads.
@@ -582,6 +594,7 @@ mod tests {
 
     use async_trait::async_trait;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+    use paigasus_gateway_core::TenantMode;
 
     use super::*;
 
@@ -611,6 +624,7 @@ mod tests {
         floor_delay: Mutex<Duration>,
         floor_text: Mutex<(String, String)>,
         tenant_text: Mutex<(String, String)>,
+        tenant_settings: Mutex<Option<TenantSettings>>,
     }
 
     impl FakeSource {
@@ -623,6 +637,7 @@ mod tests {
                 floor_delay: Mutex::new(Duration::ZERO),
                 floor_text: Mutex::new((FLOOR.into(), "f1".into())),
                 tenant_text: Mutex::new((TENANT.into(), "t1".into())),
+                tenant_settings: Mutex::new(None),
             })
         }
         fn floor_calls(&self) -> usize {
@@ -642,6 +657,9 @@ mod tests {
         }
         fn set_floor(&self, text: &str, version: &str) {
             *self.floor_text.lock().unwrap() = (text.into(), version.into());
+        }
+        fn set_settings(&self, settings: TenantSettings) {
+            *self.tenant_settings.lock().unwrap() = Some(settings);
         }
         fn set_tenant(&self, text: &str, version: &str) {
             *self.tenant_text.lock().unwrap() = (text.into(), version.into());
@@ -673,6 +691,7 @@ mod tests {
                 text,
                 catalog: vec!["read_file".into()],
                 version,
+                settings: *self.tenant_settings.lock().unwrap(),
             })
         }
     }
@@ -1081,5 +1100,49 @@ mod tests {
         assert_eq!(s.loads("compile_error"), 1, "the same bad version is a compile error again");
         assert_eq!(s.loads("ok"), 1, "only the floor reload is ok");
         assert_eq!(s.gauge(names::GATEWAY_TOOL_POLICY_STALE_ENTRIES), Some(1.0));
+    }
+    const ENFORCE_OPEN: TenantSettings = TenantSettings {
+        mode: TenantMode::Enforce,
+        on_unavailable: OnUnavailable::Open,
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn tenant_settings_are_none_before_the_first_load() {
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        assert_eq!(cache.tenant_settings(ORG), None);
+        assert_eq!(src.tenant_calls(), 0, "the read starts no load");
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert_eq!(cache.tenant_settings(ORG), None, "the floor load is not a tenant load");
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tenant_settings_survive_a_failed_reload() {
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        src.set_fail(true);
+        cache.invalidate_all();
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Unavailable));
+        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN), "the last known value");
+        tokio::time::advance(secs(400)).await;
+        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN), "whatever its age");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_evicted_tenant_has_no_settings() {
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        tokio::time::advance(secs(3601)).await;
+        cache.refresh_once().await;
+        assert_eq!(cache.tenant_settings(ORG), None);
     }
 }

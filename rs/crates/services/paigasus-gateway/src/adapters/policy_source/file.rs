@@ -49,6 +49,7 @@ impl FilePolicySource {
                         text: String::new(),
                         catalog: Vec::new(),
                         version: version_of(&[b"", b""]),
+                        settings: None,
                     });
                 }
                 Err(err) => return Err(io_error("tenant directory", &err)),
@@ -82,7 +83,12 @@ fn parse_tenant(policies: String, catalog_raw: String) -> Result<TenantPolicies,
         serde_json::from_str::<Vec<String>>(&catalog_raw).map_err(|_| SourceError::Malformed("tenant catalog is not an array of strings".to_owned()))?
     };
     let version = version_of(&[policies.as_bytes(), catalog_raw.as_bytes()]);
-    Ok(TenantPolicies { text: policies, catalog, version })
+    Ok(TenantPolicies {
+        text: policies,
+        catalog,
+        version,
+        settings: None,
+    })
 }
 
 /// `true` when the resolved directory still exists.

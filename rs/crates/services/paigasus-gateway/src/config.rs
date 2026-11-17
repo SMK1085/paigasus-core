@@ -831,6 +831,8 @@ impl ToolPolicyConfig {
                     (id, (e.mode.into(), e.on_policy_unavailable.map(OnUnavailable::from)))
                 })
                 .collect(),
+            // SMA-775 Task 11 sets this from the source kind. The file source has no settings.
+            settings_from_source: false,
         }
     }
 }
@@ -848,6 +850,9 @@ pub struct ToolPolicySettings {
     pub load_timeout: Duration,
     /// Per org: the mode and the optional `on_policy_unavailable` override.
     pub orgs: HashMap<Uuid, (TenantMode, Option<OnUnavailable>)>,
+    /// The source returns the tenant mode and fail mode (the IAM source). The request side then
+    /// takes them from the cache, and `default_mode` and `orgs` do not apply to an org scope.
+    pub settings_from_source: bool,
 }
 
 impl ToolPolicySettings {

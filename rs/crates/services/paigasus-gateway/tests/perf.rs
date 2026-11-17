@@ -64,6 +64,7 @@ fn settings() -> ToolPolicySettings {
         idle_evict: Duration::from_secs(3600),
         load_timeout: Duration::from_secs(60),
         orgs: HashMap::new(),
+        settings_from_source: false,
     }
 }
 

@@ -83,6 +83,7 @@ fn tp_settings(mode: TenantMode) -> ToolPolicySettings {
         // host must never miss it. Only the hanging-source test sets a short value.
         load_timeout: Duration::from_secs(60),
         orgs: HashMap::new(),
+        settings_from_source: false,
     }
 }
 
