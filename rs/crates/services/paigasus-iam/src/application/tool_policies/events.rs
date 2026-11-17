@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::tool_policy::ToolPolicyVersion;
+use paigasus_iam_core::tool_policy::{ToolPolicySettings, ToolPolicyVersion};
 use paigasus_iam_core::{DomainEvent, EventType, IdGenerator};
 use paigasus_kernel::Prn;
 use serde_json::json;
@@ -25,6 +25,20 @@ pub(crate) fn set_published(ids: &impl IdGenerator, corr: Uuid, actor: &Prn, org
         actor_prn: Some(actor.canonical()),
         occurred_at: now,
         payload: json!({"org_id": org.to_string(), "version": v.version, "origin": origin_str(v.origin)}),
+        correlation_id: Some(corr),
+    }
+}
+
+/// `iam.policy.tool_settings.changed`: the settings of `org` were written.
+pub(crate) fn settings_changed(ids: &impl IdGenerator, corr: Uuid, actor: &Prn, org_prn: &Prn, org: Uuid, s: &ToolPolicySettings, now: DateTime<Utc>) -> DomainEvent {
+    DomainEvent {
+        id: ids.new_event_id(),
+        event_type: EventType::ToolPolicySettingsChanged,
+        schema_version: 1,
+        aggregate_prn: org_prn.canonical(),
+        actor_prn: Some(actor.canonical()),
+        occurred_at: now,
+        payload: json!({"org_id": org.to_string(), "mode": s.mode.as_str(), "fail_mode": s.fail_mode.as_str()}),
         correlation_id: Some(corr),
     }
 }

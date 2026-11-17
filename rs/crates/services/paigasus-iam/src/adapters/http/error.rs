@@ -123,6 +123,7 @@ mod tests {
             (TenancyError::ToolPolicyCompilerUnavailable, StatusCode::SERVICE_UNAVAILABLE, "unknown"),
             (TenancyError::ToolPolicyCompilerBusy, StatusCode::TOO_MANY_REQUESTS, "true"),
             (TenancyError::ToolPolicyVersionNotFound, StatusCode::NOT_FOUND, "false"),
+            (TenancyError::ToolPolicyModeTransitionInvalid, StatusCode::CONFLICT, "false"),
         ] {
             let code = err.code();
             let resp = ApiError(err).into_response();

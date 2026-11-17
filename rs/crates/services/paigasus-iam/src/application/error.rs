@@ -210,6 +210,9 @@ pub enum TenancyError {
     /// SMA-774. The requested version does not exist, or it is not live or superseded.
     #[error("the tool policy set version does not exist")]
     ToolPolicyVersionNotFound,
+    /// SMA-775. The first enable to `enforce` has no tool policy set to enforce (spec section 9.2).
+    #[error("the tool policy mode cannot change this way: save a tool policy set first")]
+    ToolPolicyModeTransitionInvalid,
     #[error("internal server error")]
     Internal,
 }
@@ -263,6 +266,7 @@ impl TenancyError {
             Self::ToolPolicyCompilerUnavailable => "tool-policy-compiler-unavailable",
             Self::ToolPolicyCompilerBusy => "tool-policy-compiler-busy",
             Self::ToolPolicyVersionNotFound => "tool-policy-version-not-found",
+            Self::ToolPolicyModeTransitionInvalid => "tool-policy-mode-transition-invalid",
             Self::Internal => "internal",
         }
     }
@@ -309,7 +313,8 @@ impl TenancyError {
             | Self::NotSystemOwned(_)
             | Self::FleetNotConverged
             | Self::CannotUnlinkOwnIdentity
-            | Self::ToolPolicyRecompilePending => ErrorClass::Precondition,
+            | Self::ToolPolicyRecompilePending
+            | Self::ToolPolicyModeTransitionInvalid => ErrorClass::Precondition,
             Self::ToolPolicyVersionConflict => ErrorClass::Aborted,
             Self::ToolPolicyCompilerUnavailable => ErrorClass::Unavailable,
             Self::ToolPolicyCompilerBusy => ErrorClass::Exhausted,
@@ -382,6 +387,7 @@ impl TenancyError {
             | Self::ToolPolicyCompilerUnavailable
             | Self::ToolPolicyCompilerBusy
             | Self::ToolPolicyVersionNotFound
+            | Self::ToolPolicyModeTransitionInvalid
             | Self::Internal => None,
         }
     }
@@ -506,6 +512,7 @@ mod tests {
             (TenancyError::ToolPolicyCompilerUnavailable, "tool-policy-compiler-unavailable", ErrorClass::Unavailable),
             (TenancyError::ToolPolicyCompilerBusy, "tool-policy-compiler-busy", ErrorClass::Exhausted),
             (TenancyError::ToolPolicyVersionNotFound, "tool-policy-version-not-found", ErrorClass::NotFound),
+            (TenancyError::ToolPolicyModeTransitionInvalid, "tool-policy-mode-transition-invalid", ErrorClass::Precondition),
         ] {
             assert_eq!(err.code(), code);
             assert_eq!(err.class(), class, "{code}");
