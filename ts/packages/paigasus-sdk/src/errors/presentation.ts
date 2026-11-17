@@ -108,6 +108,9 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.TOOL_CALL_DENIED]: 'from-transport',
   [ErrorReason.TOOL_RESULT_BLOCKED]: 'from-transport',
   [ErrorReason.TOOL_POLICY_UNAVAILABLE]: 'from-transport',
+  // SMA-776. The only tool-decision reason that is an HTTP error: the gateway refuses a request
+  // with a blocked computer_call_output. A 400, so the transport table's answer applies.
+  [ErrorReason.TOOL_RESULT_UNREPLACEABLE]: 'from-transport',
 };
 
 /**

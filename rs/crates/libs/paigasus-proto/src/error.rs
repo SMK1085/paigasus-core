@@ -228,6 +228,8 @@ mod tests {
         "tool-call-denied",
         "tool-result-blocked",
         "tool-policy-unavailable",
+        // Gateway tool decisions: the one HTTP error of the banner (SMA-776)
+        "tool-result-unreplaceable",
         // Shared
         "internal",
         "invalid-request-body",
@@ -250,7 +252,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 74, "the registry should hold 74 reasons");
+        assert_eq!(actual.len(), 75, "the registry should hold 75 reasons");
     }
 
     #[test]
