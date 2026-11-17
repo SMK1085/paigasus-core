@@ -31,6 +31,7 @@ pub mod catalog;
 mod events;
 mod fetch;
 mod held;
+mod recompile;
 pub mod rejection;
 pub mod sets;
 mod settings;
@@ -41,9 +42,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::tool_policy::{
-    CatalogLimits, CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, FailMode, ImportFormat, PROTOCOL_VERSION, PolicyCompiler, STARTER_TOOL_POLICY_SOURCE, SetKind, StoredTool,
-    TOOL_SCHEMA_REVISION, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, VersionOrigin, VersionStatus,
-    base_schema_json, build_manual, catalog_names, check_compiled, outputs_identical, parse_import, tenant_schema_json,
+    CatalogLimits, CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, FailMode, ImportFormat, PROTOCOL_VERSION, PolicyCompiler, RecompileLock, STARTER_TOOL_POLICY_SOURCE, SetKind,
+    StoredTool, TOOL_SCHEMA_REVISION, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, VersionOrigin,
+    VersionStatus, base_schema_json, build_manual, catalog_names, check_compiled, outputs_identical, parse_import, tenant_schema_json,
 };
 use paigasus_iam_core::{Action, AuditEntry, AuditLog, AuditOutcome, Clock, IdGenerator, OrganizationRepository, Outbox, Transaction, UnitOfWork};
 use paigasus_kernel::Prn;
@@ -53,6 +54,7 @@ use uuid::Uuid;
 use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_catalog_size, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, size_check_time, stored_next, stored_upserts};
 pub use self::fetch::CompiledTenant;
 pub use self::held::HeldTarget;
+pub use self::recompile::{RECOMPILE_JOB_ACTOR, RecompileOutcome, RecompileRun, SetRecompile};
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
 use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, reject_history_until_gateway_supports_it};
 use self::settings::check_transition;
@@ -83,6 +85,8 @@ pub struct ToolPolicyServiceDeps<I, C> {
     pub uow: Arc<dyn UnitOfWork>,
     pub audit: Arc<dyn AuditLog>,
     pub outbox: Arc<dyn Outbox>,
+    /// The lock that lets one re-compile job run at a time across replicas (SMA-781).
+    pub recompile_lock: Arc<dyn RecompileLock>,
     pub limits: ToolPolicyLimits,
     pub ids: I,
     pub clock: C,
@@ -116,7 +120,6 @@ pub struct SettingsAccepted {
 }
 
 /// The tool catalog and tool policy set use cases.
-#[derive(Clone)]
 pub struct ToolPolicyService<I, C> {
     repo: Arc<dyn ToolPolicyRepository>,
     orgs: Arc<dyn OrganizationRepository>,
@@ -125,9 +128,55 @@ pub struct ToolPolicyService<I, C> {
     uow: Arc<dyn UnitOfWork>,
     audit: Arc<dyn AuditLog>,
     outbox: Arc<dyn Outbox>,
+    recompile_lock: Arc<dyn RecompileLock>,
     limits: ToolPolicyLimits,
     ids: Arc<I>,
     clock: Arc<C>,
+}
+
+// By hand: a derive would need `I: Clone` and `C: Clone`, and both live behind an `Arc`. The
+// re-compile RPC clones the service into a spawned task (F15).
+impl<I, C> Clone for ToolPolicyService<I, C> {
+    fn clone(&self) -> Self {
+        Self {
+            repo: self.repo.clone(),
+            orgs: self.orgs.clone(),
+            compiler: self.compiler.clone(),
+            authorize: self.authorize.clone(),
+            uow: self.uow.clone(),
+            audit: self.audit.clone(),
+            outbox: self.outbox.clone(),
+            recompile_lock: self.recompile_lock.clone(),
+            limits: self.limits,
+            ids: self.ids.clone(),
+            clock: self.clock.clone(),
+        }
+    }
+}
+
+/// Who writes (plan H15): the principal of the call, or nobody for the boot run of the
+/// re-compile job. Audit entries and events carry `actor_prn`; a new row carries `created_by`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Author {
+    actor_prn: Option<String>,
+    created_by: String,
+}
+
+impl Author {
+    /// `None` is the boot run of the re-compile job: no actor, and `created_by` is
+    /// [`RECOMPILE_JOB_ACTOR`].
+    fn of(actor: Option<&Prn>) -> Self {
+        match actor {
+            Some(actor) => Self {
+                actor_prn: Some(actor.canonical()),
+                created_by: actor.canonical(),
+            },
+            None => Self {
+                actor_prn: None,
+                created_by: RECOMPILE_JOB_ACTOR.to_owned(),
+            },
+        }
+    }
 }
 
 /// One set of the two kinds, with the PRN that its methods authorize at.
@@ -186,6 +235,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             uow: deps.uow,
             audit: deps.audit,
             outbox: deps.outbox,
+            recompile_lock: deps.recompile_lock,
             limits: deps.limits,
             ids: Arc::new(deps.ids),
             clock: Arc::new(deps.clock),
@@ -329,7 +379,18 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         if let Some((out, catalog)) = &starter {
             let target = SetTarget { key, resource: org_prn.clone() };
             let version = self
-                .write_new_live_version(&*tx, actor, &target, &state, STARTER_TOOL_POLICY_SOURCE, out, catalog, VersionOrigin::Starter, corr, now)
+                .write_new_live_version(
+                    &*tx,
+                    &Author::of(Some(actor)),
+                    &target,
+                    &state,
+                    STARTER_TOOL_POLICY_SOURCE,
+                    out,
+                    catalog,
+                    VersionOrigin::Starter,
+                    corr,
+                    now,
+                )
                 .await?;
             starter_version = version.version;
         }
@@ -476,8 +537,12 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         };
         let now = self.clock.now();
         let corr = self.ids.new_correlation_id();
-        let version = self.write_new_live_version(&*tx, actor, target, &state, source, &out, &catalog, VersionOrigin::Save, corr, now).await?;
-        let entry = self.audit_entry(actor, target.audit_action(), &target.resource, target.audit_set(), Some(&version), catalog_revision, now, corr);
+        let author = Author::of(Some(actor));
+        let version = self
+            .write_new_live_version(&*tx, &author, target, &state, source, &out, &catalog, VersionOrigin::Save, corr, now)
+            .await?;
+        let detail = set_detail(target.audit_set(), Some(&version), catalog_revision);
+        let entry = self.audit_entry(&author, target.audit_action(), &target.resource, detail, now, corr);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(WriteResult::Accepted(version))
@@ -491,7 +556,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     async fn write_new_live_version(
         &self,
         tx: &dyn Transaction,
-        actor: &Prn,
+        author: &Author,
         target: &SetTarget,
         state: &ToolPolicyState,
         source: &str,
@@ -506,8 +571,8 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             ToolPolicySetKey::Tenant(_) => Some(state.catalog_revision),
             ToolPolicySetKey::Floor => None,
         };
-        let version = self.new_version(actor, &target.key, locked.next_version(), source, out, catalog_revision, catalog, origin, now);
-        self.store_live_version(tx, actor, target, &version, corr, now).await?;
+        let version = self.new_version(author, &target.key, locked.next_version(), source, out, catalog_revision, catalog, origin, now);
+        self.store_live_version(tx, author, target, &version, corr, now).await?;
         Ok(version)
     }
 
@@ -523,11 +588,11 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     }
 
     /// Stores `version` as the live version of the set and enqueues its published event.
-    async fn store_live_version(&self, tx: &dyn Transaction, actor: &Prn, target: &SetTarget, version: &ToolPolicyVersion, corr: Uuid, now: DateTime<Utc>) -> Result<(), TenancyError> {
+    async fn store_live_version(&self, tx: &dyn Transaction, author: &Author, target: &SetTarget, version: &ToolPolicyVersion, corr: Uuid, now: DateTime<Utc>) -> Result<(), TenancyError> {
         self.repo.insert_live_version_in(tx, version).await?;
         let event = match target.key {
-            ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, actor, &target.resource, org, version, now),
-            ToolPolicySetKey::Floor => events::floor_published(&*self.ids, corr, actor, version, now),
+            ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, author, &target.resource, org, version, now),
+            ToolPolicySetKey::Floor => events::floor_published(&*self.ids, corr, author, version, now),
         };
         self.outbox.enqueue(tx, &event).await?;
         Ok(())
@@ -602,10 +667,21 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
 
         // Step 4: write, audit, commit.
         let now = self.clock.now();
+        let author = Author::of(Some(actor));
         let catalog_revision = self.repo.apply_catalog_in(&*tx, org, &plan.upserts, &plan.deletes, now).await?;
         let version = match coupled {
             Some((live, out)) => {
-                let v = self.new_version(actor, &key, locked.next_version(), &live.source, &out, Some(catalog_revision), &next, VersionOrigin::CatalogChange, now);
+                let v = self.new_version(
+                    &author,
+                    &key,
+                    locked.next_version(),
+                    &live.source,
+                    &out,
+                    Some(catalog_revision),
+                    &next,
+                    VersionOrigin::CatalogChange,
+                    now,
+                );
                 self.repo.insert_live_version_in(&*tx, &v).await?;
                 Some(v)
             }
@@ -613,10 +689,10 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         };
         let corr = self.ids.new_correlation_id();
         if let Some(v) = &version {
-            let event = events::set_published(&*self.ids, corr, actor, org_prn, org, v, now);
+            let event = events::set_published(&*self.ids, corr, &author, org_prn, org, v, now);
             self.outbox.enqueue(&*tx, &event).await?;
         }
-        let entry = self.audit_entry(actor, action, org_prn, "tenant", version.as_ref(), Some(catalog_revision), now, corr);
+        let entry = self.audit_entry(&author, action, org_prn, set_detail("tenant", version.as_ref(), Some(catalog_revision)), now, corr);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(WriteResult::Accepted(CatalogAccepted {
@@ -630,7 +706,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     #[allow(clippy::too_many_arguments)]
     fn new_version(
         &self,
-        actor: &Prn,
+        author: &Author,
         key: &ToolPolicySetKey,
         version: u64,
         source: &str,
@@ -641,57 +717,70 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         now: DateTime<Utc>,
     ) -> ToolPolicyVersion {
         let compiler_generation = self.compiler.generation();
-        let meta = CompiledMeta {
-            key: *key,
-            version,
-            compiler_generation,
-            schema_revision: TOOL_SCHEMA_REVISION,
-            catalog_revision,
-            max_window_ms: self.limits.max_window_ms,
-            catalog_names: catalog_names(catalog),
-        };
         ToolPolicyVersion {
             key: *key,
             version,
             source: source.to_owned(),
-            compiled: encode_compiled(&meta, out),
+            compiled: self.encode_output(key, version, out, catalog_revision, catalog),
             compiler_generation,
             schema_revision: TOOL_SCHEMA_REVISION,
             catalog_revision,
             status: VersionStatus::Live,
             origin,
-            created_by: actor.canonical(),
+            created_by: author.created_by.clone(),
             created_at: now,
         }
     }
 
-    /// One audit entry (spec section 9.6): the RPC name, the org PRN or `root_prn()`, and the set,
-    /// the version, the origin and the catalog revision.
-    #[allow(clippy::too_many_arguments)]
-    fn audit_entry(&self, actor: &Prn, action: &str, resource: &Prn, set: &str, version: Option<&ToolPolicyVersion>, catalog_revision: Option<u64>, now: DateTime<Utc>, corr: Uuid) -> AuditEntry {
+    /// The `CompiledToolPolicySet` bytes of `out` as version `version` of the set, at the
+    /// running compiler generation and schema revision.
+    fn encode_output(&self, key: &ToolPolicySetKey, version: u64, out: &CompiledOutput, catalog_revision: Option<u64>, catalog: &[ToolEntry]) -> Vec<u8> {
+        let meta = CompiledMeta {
+            key: *key,
+            version,
+            compiler_generation: self.compiler.generation(),
+            schema_revision: TOOL_SCHEMA_REVISION,
+            catalog_revision,
+            max_window_ms: self.limits.max_window_ms,
+            catalog_names: catalog_names(catalog),
+        };
+        encode_compiled(&meta, out)
+    }
+
+    /// One audit entry (spec section 9.6): the RPC name, the org PRN or `root_prn()`, and the
+    /// detail. A set write passes [`set_detail`]; the held and re-compile writes pass their own
+    /// fields.
+    fn audit_entry(&self, author: &Author, action: &str, resource: &Prn, detail: serde_json::Value, now: DateTime<Utc>, corr: Uuid) -> AuditEntry {
         AuditEntry {
             id: self.ids.new_audit_id(),
             occurred_at: now,
-            actor_prn: Some(actor.canonical()),
+            actor_prn: author.actor_prn.clone(),
             action: action.to_owned(),
             resource_prn: Some(resource.canonical()),
             outcome: AuditOutcome::Committed,
             determining_policies: vec![],
-            detail: json!({
-                "set": set,
-                "version": version.map(|v| v.version),
-                "origin": version.map(|v| origin_str(v.origin)),
-                "catalog_revision": catalog_revision,
-            }),
+            detail,
             correlation_id: Some(corr),
         }
     }
 }
 
+/// The audit detail of a set write: the set, the version, the origin and the catalog revision.
+fn set_detail(set: &str, version: Option<&ToolPolicyVersion>, catalog_revision: Option<u64>) -> serde_json::Value {
+    json!({
+        "set": set,
+        "version": version.map(|v| v.version),
+        "origin": version.map(|v| origin_str(v.origin)),
+        "catalog_revision": catalog_revision,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{ConcurrentChange, FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyCompiler, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryToolPolicies, SeqIds, seed_org};
+    use crate::application::fakes::{
+        ConcurrentChange, FakeAuditLog, FakeAuthorizer, FakeOutbox, FakePolicyCompiler, FakeRecompileLock, FakeUnitOfWork, FixedClock, InMemoryOrgs, InMemoryToolPolicies, SeqIds, seed_org,
+    };
     use crate::application::tool_policies::sets::{CompiledMeta, decode_compiled, encode_compiled};
     use paigasus_iam_core::tool_policy::{CompileOutcome, CompiledOutput, CompilerFailure, Rejection, STARTER_TOOL_POLICY_SOURCE, ToolPolicyRepository, VersionStatus};
     use paigasus_iam_core::tool_policy::{SetKind, base_schema_json, tenant_schema_json};
@@ -702,7 +791,7 @@ mod tests {
     pub(super) const MAX_WINDOW_MS: u64 = 3_600_000;
     const DEFAULT_CATALOG_CAP: usize = 2_097_152;
     const SEARCH_POLICY: &str = "@id(\"search-q\")\nforbid(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.input.q == \"x\" };\n";
-    const FLOOR_DENY: &str = "@id(\"floor-deny\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource);\n";
+    pub(super) const FLOOR_DENY: &str = "@id(\"floor-deny\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource);\n";
 
     pub(super) fn principal(n: u128) -> Prn {
         Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap()
@@ -721,6 +810,7 @@ mod tests {
         pub(super) audit: FakeAuditLog,
         pub(super) outbox: FakeOutbox,
         pub(super) uow: FakeUnitOfWork,
+        pub(super) lock: FakeRecompileLock,
         pub(super) org: Uuid,
         pub(super) org_prn: Prn,
         pub(super) actor: Prn,
@@ -759,6 +849,7 @@ mod tests {
         let audit = FakeAuditLog::default();
         let outbox = FakeOutbox::default();
         let uow = FakeUnitOfWork::default();
+        let lock = FakeRecompileLock::default();
         let clock = FixedClock::default();
         let svc = ToolPolicyService::new(ToolPolicyServiceDeps {
             repo: Arc::new(repo.clone()),
@@ -768,6 +859,7 @@ mod tests {
             uow: Arc::new(uow.clone()),
             audit: Arc::new(audit.clone()),
             outbox: Arc::new(outbox.clone()),
+            recompile_lock: Arc::new(lock.clone()),
             limits: ToolPolicyLimits {
                 catalog: CatalogLimits::default(),
                 max_source_bytes: MAX_SOURCE,
@@ -786,6 +878,7 @@ mod tests {
             audit,
             outbox,
             uow,
+            lock,
             org: org_id.uuid(),
             org_prn: org_id.prn().clone(),
             actor: principal(1),
@@ -1056,7 +1149,7 @@ mod tests {
     }
 
     /// A compile result that holds one count_within condition for each id in `ids`.
-    fn output_with_history(cedar: &str, schema: serde_json::Value, ids: &[&str]) -> CompiledOutput {
+    pub(super) fn output_with_history(cedar: &str, schema: serde_json::Value, ids: &[&str]) -> CompiledOutput {
         use paigasus_iam_core::tool_policy::protocol::{CmpOp, HistoryCondition, Predicate, Scope, Shape};
         CompiledOutput {
             cedar_policies: cedar.to_owned(),

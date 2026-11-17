@@ -11,8 +11,8 @@ use crate::application::tenancy_nodes::TenancyNodes;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::tool_policy::{
-    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, HeldStatus, HeldVersion, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings,
-    ToolPolicyState, ToolPolicyVersion, VersionStatus, failed_report,
+    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, HeldStatus, HeldVersion, PolicyCompiler, RecompileLock, RecompileLockGuard, StoredTool, ToolEntry, ToolPolicyRepository,
+    ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, VersionStatus, failed_report,
 };
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
@@ -2322,6 +2322,7 @@ pub struct FakePolicyCompiler {
     generation: Arc<AtomicU32>,
     script: Arc<Mutex<VecDeque<Result<CompileOutcome, CompilerFailure>>>>,
     requests: Arc<Mutex<Vec<CompileRequest>>>,
+    gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
 }
 
 impl Default for FakePolicyCompiler {
@@ -2330,6 +2331,7 @@ impl Default for FakePolicyCompiler {
             generation: Arc::new(AtomicU32::new(1)),
             script: Arc::default(),
             requests: Arc::default(),
+            gate: Arc::default(),
         }
     }
 }
@@ -2352,6 +2354,14 @@ impl FakePolicyCompiler {
     pub fn calls(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
+
+    /// From now on, each `compile` call records its request and then waits for one permit of the
+    /// returned semaphore (it starts with none).
+    pub fn gate(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self.gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
 }
 
 #[async_trait]
@@ -2362,6 +2372,10 @@ impl PolicyCompiler for FakePolicyCompiler {
 
     async fn compile(&self, req: &CompileRequest) -> Result<CompileOutcome, CompilerFailure> {
         self.requests.lock().unwrap().push(req.clone());
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.expect("the compile gate is never closed").forget();
+        }
         if let Some(answer) = self.script.lock().unwrap().pop_front() {
             return answer;
         }
@@ -2370,5 +2384,57 @@ impl PolicyCompiler for FakePolicyCompiler {
             cedar_schema_json: req.schema_json.clone(),
             conditions: Vec::new(),
         }))
+    }
+}
+
+/// In-memory `RecompileLock`: one flag. A held flag makes `try_acquire` answer `None`. `release`
+/// clears the flag and counts the call; a guard that is only dropped also clears it.
+#[derive(Clone, Default)]
+pub struct FakeRecompileLock {
+    held: Arc<AtomicBool>,
+    releases: Arc<AtomicUsize>,
+}
+
+impl FakeRecompileLock {
+    pub fn held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
+    }
+
+    /// The calls of `release`. A guard that is only dropped does not count.
+    pub fn releases(&self) -> usize {
+        self.releases.load(Ordering::SeqCst)
+    }
+}
+
+struct FakeRecompileGuard {
+    held: Arc<AtomicBool>,
+    releases: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl RecompileLock for FakeRecompileLock {
+    async fn try_acquire(&self) -> Result<Option<Box<dyn RecompileLockGuard>>, RepositoryError> {
+        if self.held.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(FakeRecompileGuard {
+            held: self.held.clone(),
+            releases: self.releases.clone(),
+        })))
+    }
+}
+
+#[async_trait]
+impl RecompileLockGuard for FakeRecompileGuard {
+    async fn release(self: Box<Self>) -> Result<(), RepositoryError> {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        self.held.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl Drop for FakeRecompileGuard {
+    fn drop(&mut self) {
+        self.held.store(false, Ordering::SeqCst);
     }
 }

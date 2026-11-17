@@ -10,7 +10,7 @@ mod support;
 
 use chrono::{DateTime, Utc};
 use paigasus_iam::adapters::persistence::uow::recover_txn;
-use paigasus_iam::adapters::persistence::{PgToolPolicies, SeaOrmUnitOfWork};
+use paigasus_iam::adapters::persistence::{PgRecompileLock, PgToolPolicies, SeaOrmUnitOfWork};
 use paigasus_iam_core::tool_policy::{ToolEntry, ToolKind, ToolPolicyRepository, ToolPolicySetKey, ToolPolicyVersion, ToolSource, VersionOrigin, VersionStatus, parse_tool_name};
 use paigasus_iam_core::{ConflictKind, RepositoryError, UnitOfWork};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, SqlErr, Statement};
@@ -692,6 +692,7 @@ async fn two_concurrent_first_enables_write_one_starter() {
         uow: std::sync::Arc::new(SeaOrmUnitOfWork::new(db.clone())),
         audit: std::sync::Arc::new(PgAuditLog::new(db.clone())),
         outbox: std::sync::Arc::new(PgOutbox::new(false)),
+        recompile_lock: std::sync::Arc::new(PgRecompileLock::new(db.clone())),
         limits: ToolPolicyLimits {
             catalog: CatalogLimits::default(),
             max_source_bytes: 65_536,

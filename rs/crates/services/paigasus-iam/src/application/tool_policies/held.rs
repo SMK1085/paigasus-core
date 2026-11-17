@@ -17,13 +17,13 @@
 
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::tool_policy::{HeldStatus, HeldVersion, TOOL_SCHEMA_REVISION, ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus};
-use paigasus_iam_core::{Action, AuditEntry, AuditOutcome, Clock, IdGenerator};
+use paigasus_iam_core::{Action, Clock, IdGenerator};
 use paigasus_kernel::Prn;
 use serde_json::json;
 use uuid::Uuid;
 
 use super::sets::restamp_version;
-use super::{SetTarget, ToolPolicyService, origin_str};
+use super::{Author, SetTarget, ToolPolicyService, origin_str};
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 
@@ -70,6 +70,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         }
 
         // Steps 2 to 4: lock and recheck, then write the version and its event. No compile.
+        let author = Author::of(Some(actor));
         let tx = self.uow.begin().await?;
         let locked = self.lock_and_recheck(&*tx, &target.key, &state).await?;
         // A discard moves neither counter. Take the row under the lock: a row that another admin
@@ -91,10 +92,10 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             catalog_revision: held.catalog_revision,
             status: VersionStatus::Live,
             origin: VersionOrigin::Accept,
-            created_by: actor.canonical(),
+            created_by: author.created_by.clone(),
             created_at: now,
         };
-        self.store_live_version(&*tx, actor, &target, &version, corr, now).await?;
+        self.store_live_version(&*tx, &author, &target, &version, corr, now).await?;
         let detail = json!({
             "set": target.audit_set(),
             "version": number,
@@ -102,7 +103,9 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             "held_version": held.version,
             "base_version": held.base_version,
         });
-        self.record_held_audit(&*tx, actor, &target, "AcceptHeldToolPolicyVersion", detail, now, corr).await?;
+        self.audit
+            .record(&*tx, &self.audit_entry(&author, "AcceptHeldToolPolicyVersion", &target.resource, detail, now, corr))
+            .await?;
         tx.commit().await?;
         Ok(version)
     }
@@ -127,7 +130,8 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             "held_version": held.version,
             "base_version": held.base_version,
         });
-        self.record_held_audit(&*tx, actor, &target, "DiscardHeldToolPolicyVersion", detail, now, corr).await?;
+        let entry = self.audit_entry(&Author::of(Some(actor)), "DiscardHeldToolPolicyVersion", &target.resource, detail, now, corr);
+        self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         held.status = HeldStatus::Discarded;
         Ok(held)
@@ -161,32 +165,6 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             Some(held) if held.version == held_version => Ok(held),
             _ => Err(TenancyError::ToolPolicyVersionNotFound),
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn record_held_audit(
-        &self,
-        tx: &dyn paigasus_iam_core::Transaction,
-        actor: &Prn,
-        target: &SetTarget,
-        action: &str,
-        detail: serde_json::Value,
-        now: chrono::DateTime<chrono::Utc>,
-        corr: Uuid,
-    ) -> Result<(), TenancyError> {
-        let entry = AuditEntry {
-            id: self.ids.new_audit_id(),
-            occurred_at: now,
-            actor_prn: Some(actor.canonical()),
-            action: action.to_owned(),
-            resource_prn: Some(target.resource.canonical()),
-            outcome: AuditOutcome::Committed,
-            determining_policies: vec![],
-            detail,
-            correlation_id: Some(corr),
-        };
-        self.audit.record(tx, &entry).await?;
-        Ok(())
     }
 }
 
