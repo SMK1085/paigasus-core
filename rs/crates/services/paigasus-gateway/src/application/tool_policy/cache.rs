@@ -273,8 +273,9 @@ impl PolicyCache {
         compiled.map_or(Lookup::Unavailable, Lookup::Ready)
     }
 
-    /// The settings of the last good load of this tenant, whatever its age and its `stale` flag:
-    /// the last known value (spec §9.3). It never starts a load. An evicted tenant, or a tenant
+    /// The settings of the last stored answer for this tenant, whatever its age and its `stale`
+    /// flag: the last known value (spec §9.3). A refused answer and an answer with a set that does
+    /// not compile are stored too, so their settings apply. It never starts a load. An evicted tenant, or a tenant
     /// that never loaded, has none. A source with no settings gives none.
     #[must_use]
     pub fn tenant_settings(&self, org: Uuid) -> Option<TenantSettings> {
@@ -476,24 +477,38 @@ impl PolicyCache {
                 let mut inner = self.lock();
                 if let Some(entry) = inner.existing(key) {
                     match (&mut entry.good, failed) {
-                        // A bad new version: keep the last good set.
-                        (Some(good), _) => good.stale = true,
-                        // A first load with a bad tenant set: remember it, so each request does not compile it again.
-                        (None, Some(data)) => {
-                            entry.good = Some(Good {
-                                data,
-                                version,
-                                loaded_at: Instant::now(),
-                                gen_at_load,
-                                stale: false,
-                            })
+                        // Store the bad tenant set, so each request does not compile it again, in two cases:
+                        // - A first load.
+                        // - An answer that holds the settings (the IAM source). As for a refused answer
+                        //   (I-1, `store_refused`), the answer is the current truth: its settings decide, and
+                        //   the set is unavailable, so the new fail mode applies. The last good set must not
+                        //   serve under the new settings, because the set and the settings come from one load
+                        //   (spec §9.3). Without this, a change to `enforce` and `closed` that comes with a set
+                        //   that does not compile would leave the old mode in effect.
+                        (None, Some(data)) => Self::store_bad(&mut entry.good, data, version, gen_at_load),
+                        (Some(_), Some(data)) if matches!(&data, Data::Tenant(t) if t.source.settings.is_some()) => {
+                            Self::store_bad(&mut entry.good, data, version, gen_at_load);
                         }
+                        // A bad new version from a source with no settings (the file source): keep the
+                        // last good set.
+                        (Some(good), _) => good.stale = true,
                         (None, None) => {}
                     }
                 }
                 false
             }
         }
+    }
+
+    /// Store a tenant set that does not compile as the entry, with `compiled: None`.
+    fn store_bad(slot: &mut Option<Good>, data: Data, version: String, gen_at_load: u64) {
+        *slot = Some(Good {
+            data,
+            version,
+            loaded_at: Instant::now(),
+            gen_at_load,
+            stale: false,
+        });
     }
 
     /// R5, final review I-1: the source answered with the settings, but it refused the set. The
@@ -1232,6 +1247,50 @@ mod tests {
         assert!(!Arc::ptr_eq(&floor.floor, &new_floor.floor));
         assert!(matches!(cache.tenant(ORG, &new_floor, OnUnavailable::Open).await, Lookup::Unavailable));
         assert_eq!(src.tenant_calls(), 2, "no tenant source call");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bad_set_with_new_settings_replaces_the_last_good_set() {
+        // A new answer with new settings and a set that does not compile: the new settings decide,
+        // and the set is unavailable, as for a refused answer (I-1).
+        const LOG_ONLY_OPEN: TenantSettings = TenantSettings {
+            mode: TenantMode::LogOnly,
+            on_unavailable: OnUnavailable::Open,
+        };
+        const ENFORCE_CLOSED: TenantSettings = TenantSettings {
+            mode: TenantMode::Enforce,
+            on_unavailable: OnUnavailable::Closed,
+        };
+        let src = FakeSource::new();
+        src.set_settings(LOG_ONLY_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_tenant(&cache, &floor, OnUnavailable::Open).await;
+        src.set_settings(ENFORCE_CLOSED);
+        src.set_tenant("permit((", "t2:enforce:closed");
+        cache.invalidate_all();
+        let deadline = Instant::now() + secs(5);
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, deadline).await;
+        assert!(matches!(set, Lookup::Unavailable), "not the last good set");
+        assert_eq!(got, Some(ENFORCE_CLOSED), "the settings of the new answer");
+        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_CLOSED));
+        // The bad answer is stored: the next lookup makes no source call.
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable));
+        assert_eq!(src.tenant_calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bad_set_with_no_settings_keeps_the_last_good_set() {
+        // The file source has no settings: a bad new version keeps the last good set.
+        let src = FakeSource::new();
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        let good = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        src.set_tenant("permit((", "bad");
+        tokio::time::advance(secs(30)).await;
+        cache.refresh_once().await;
+        let again = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        assert!(Arc::ptr_eq(&good, &again), "the last good set still serves");
     }
 
     #[tokio::test(start_paused = true)]
