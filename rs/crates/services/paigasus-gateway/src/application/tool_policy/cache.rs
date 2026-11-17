@@ -204,8 +204,8 @@ impl PolicyCache {
 
     /// The compiled floor. The wait ends at `deadline`; the `open` fallback still runs then.
     pub async fn floor_until(self: &Arc<Self>, on_unavailable: OnUnavailable, deadline: Instant) -> Lookup<FloorEntry> {
-        match self.lookup(Key::Floor, None, on_unavailable, deadline).await {
-            Some(Data::Floor(entry)) => Lookup::Ready(entry),
+        match self.lookup(Key::Floor, None, on_unavailable, false, deadline).await {
+            Ok(Data::Floor(entry)) => Lookup::Ready(entry),
             _ => Lookup::Unavailable,
         }
     }
@@ -220,19 +220,26 @@ impl PolicyCache {
     /// The tenant policy set, as [`Self::tenant`]. The wait ends at `deadline`; the `open`
     /// fallback still runs then, so a caller with a shared deadline keeps the last good set.
     pub async fn tenant_until(self: &Arc<Self>, org: Uuid, floor: &FloorEntry, on_unavailable: OnUnavailable, deadline: Instant) -> Lookup<Arc<ToolPolicies>> {
-        match self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, deadline).await {
-            Some(Data::Tenant(data)) => self.tenant_set(org, &data, floor),
+        match self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, false, deadline).await {
+            Ok(Data::Tenant(data)) => self.tenant_set(org, &data, floor),
             _ => Lookup::Unavailable,
         }
     }
 
     /// The tenant policy set and the tenant settings, as [`Self::tenant_until`]. When the lookup
     /// serves an entry, the settings come from that same entry, so the set and the settings are
-    /// always from one load. When it serves nothing, the settings are [`Self::tenant_settings`].
+    /// always from one load. When it serves nothing, the settings are those of the stored entry
+    /// that the failure fallback read, the last known value.
+    ///
+    /// `on_unavailable` is only the default: when the stored entry has settings, the failure
+    /// fallback uses the fail mode of that entry, read under the same lock. A settings change
+    /// that lands after the caller read its fail mode thus cannot pair a fallback decision with
+    /// the settings of another load (CodeRabbit, PR 485).
     pub async fn tenant_with_settings_until(self: &Arc<Self>, org: Uuid, floor: &FloorEntry, on_unavailable: OnUnavailable, deadline: Instant) -> (Lookup<Arc<ToolPolicies>>, Option<TenantSettings>) {
-        match self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, deadline).await {
-            Some(Data::Tenant(data)) => (self.tenant_set(org, &data, floor), data.source.settings),
-            _ => (Lookup::Unavailable, self.tenant_settings(org)),
+        match self.lookup(Key::Tenant(org), Some(Arc::clone(&floor.floor)), on_unavailable, true, deadline).await {
+            Ok(Data::Tenant(data)) => (self.tenant_set(org, &data, floor), data.source.settings),
+            Ok(Data::Floor(_)) => (Lookup::Unavailable, None),
+            Err(seen) => (Lookup::Unavailable, seen),
         }
     }
 
@@ -291,9 +298,10 @@ impl PolicyCache {
         self.lock().gen_now += 1;
     }
 
-    /// The generic lookup. `None` means unavailable. Every wait ends at `deadline`, and the
-    /// failure fallback runs after it, so the lookup returns at `deadline` at the latest.
-    async fn lookup(self: &Arc<Self>, key: Key, floor: Option<Arc<FloorPolicies>>, on_unavailable: OnUnavailable, deadline: Instant) -> Option<Data> {
+    /// The generic lookup. `Err` means unavailable; see [`Self::fallback`] for its value and for
+    /// `follow_entry`. Every wait ends at `deadline`, and the failure fallback runs after it, so
+    /// the lookup returns at `deadline` at the latest.
+    async fn lookup(self: &Arc<Self>, key: Key, floor: Option<Arc<FloorPolicies>>, on_unavailable: OnUnavailable, follow_entry: bool, deadline: Instant) -> Result<Data, Option<TenantSettings>> {
         for _ in 0..MAX_ROUNDS {
             let inflight = {
                 let mut inner = self.lock();
@@ -304,7 +312,7 @@ impl PolicyCache {
                 if let Some(good) = &entry.good
                     && good.usable(now, gen_now, self.settings.max_stale)
                 {
-                    return Some(good.data.clone());
+                    return Ok(good.data.clone());
                 }
                 self.start_or_join(&mut inner, key, floor.clone(), now)
             };
@@ -327,22 +335,35 @@ impl PolicyCache {
             if let Some(good) = inner.existing(key).and_then(|e| e.good.as_ref())
                 && good.usable(now, gen_now, self.settings.max_stale)
             {
-                return Some(good.data.clone());
+                return Ok(good.data.clone());
             }
         }
-        self.fallback(key, on_unavailable)
+        self.fallback(key, on_unavailable, follow_entry)
     }
 
     /// A load failed, timed out or was too old. Under `open`, the last good entry still serves up
     /// to `max_stale` after its load. Under `closed`, nothing serves (§ 6.3.3).
-    fn fallback(&self, key: Key, on_unavailable: OnUnavailable) -> Option<Data> {
-        if on_unavailable != OnUnavailable::Open {
-            return None;
-        }
+    ///
+    /// With `follow_entry`, a stored tenant entry with settings decides by its own fail mode, not
+    /// by `on_unavailable`, and `Err` carries those settings: the decision and the settings come
+    /// from one read under one lock. An entry with no settings (the file source) uses
+    /// `on_unavailable`.
+    fn fallback(&self, key: Key, on_unavailable: OnUnavailable, follow_entry: bool) -> Result<Data, Option<TenantSettings>> {
         let mut inner = self.lock();
         let now = Instant::now();
-        let good = inner.existing(key)?.good.as_ref()?;
-        (now.saturating_duration_since(good.loaded_at) <= self.settings.max_stale).then(|| good.data.clone())
+        let Some(good) = inner.existing(key).and_then(|e| e.good.as_ref()) else {
+            return Err(None);
+        };
+        let seen = match &good.data {
+            Data::Tenant(t) if follow_entry => t.source.settings,
+            _ => None,
+        };
+        let on = seen.map_or(on_unavailable, |s| s.on_unavailable);
+        if on == OnUnavailable::Open && now.saturating_duration_since(good.loaded_at) <= self.settings.max_stale {
+            Ok(good.data.clone())
+        } else {
+            Err(seen)
+        }
     }
 
     fn count_timeout(&self, inflight: &Inflight) {
@@ -1291,6 +1312,40 @@ mod tests {
         cache.refresh_once().await;
         let again = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
         assert!(Arc::ptr_eq(&good, &again), "the last good set still serves");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_fallback_follows_the_fail_mode_of_the_stored_entry() {
+        // CodeRabbit, PR 485: the caller reads its fail mode before the floor wait. A load that
+        // lands after that read stores new settings. When the next reload fails, the fallback must
+        // use the fail mode of the stored entry, not the caller's older value.
+        const ENFORCE_CLOSED: TenantSettings = TenantSettings {
+            mode: TenantMode::Enforce,
+            on_unavailable: OnUnavailable::Closed,
+        };
+        let deadline = || Instant::now() + secs(5);
+        // Closed -> Open: the caller still has `closed`, the entry says `open`. The last good set serves.
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_OPEN);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        let good = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        src.set_fail(true);
+        cache.invalidate_all();
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Closed, deadline()).await;
+        assert!(matches!(&set, Lookup::Ready(t) if Arc::ptr_eq(t, &good)), "the entry's `open` keeps the last good set");
+        assert_eq!(got, Some(ENFORCE_OPEN));
+        // Open -> Closed: the caller still has `open`, the entry says `closed`. Nothing serves.
+        let src = FakeSource::new();
+        src.set_settings(ENFORCE_CLOSED);
+        let cache = PolicyCache::new(src.clone(), settings());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
+        src.set_fail(true);
+        cache.invalidate_all();
+        let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, deadline()).await;
+        assert!(matches!(set, Lookup::Unavailable), "the entry's `closed` serves nothing");
+        assert_eq!(got, Some(ENFORCE_CLOSED));
     }
 
     #[tokio::test(start_paused = true)]

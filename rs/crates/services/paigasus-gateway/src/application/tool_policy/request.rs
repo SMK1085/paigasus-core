@@ -178,7 +178,8 @@ impl RequestToolPolicy {
             return (PolicySet::Unavailable, fin_of());
         };
         // The set and the settings come from one cache entry, so a load that lands between two
-        // reads cannot pair a set with the mode of another load.
+        // reads cannot pair a set with the mode of another load. `pre.on_unavailable` is only the
+        // default: a stored entry with settings decides the fallback by its own fail mode.
         let (tenant, settings) = self.cache.tenant_with_settings_until(org, &floor, pre.on_unavailable, deadline).await;
         let fin = settings.unwrap_or(pre);
         let (policies, part): (Arc<ToolPolicies>, TenantPart) = if fin.mode == TenantMode::Off {
