@@ -29,6 +29,7 @@
 
 pub mod catalog;
 mod events;
+mod fetch;
 pub mod rejection;
 pub mod sets;
 mod settings;
@@ -49,6 +50,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_catalog_size, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, size_check_time, stored_next, stored_upserts};
+pub use self::fetch::CompiledTenant;
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
 use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, reject_history_until_gateway_supports_it};
 use self::settings::check_transition;
@@ -1865,5 +1867,104 @@ mod tests {
         let absent = Uuid::from_u128(999);
         assert_eq!(h.svc.get_settings(&h.actor, absent).await.unwrap_err(), TenancyError::NotFound);
         assert_eq!(h.svc.put_settings(&h.actor, absent, ToolPolicyMode::Off, FailMode::Closed).await.unwrap_err(), TenancyError::NotFound);
+    }
+
+    // ---- SMA-775: the compiled-policy fetch ----
+
+    fn allow_compiled(h: &Harness) {
+        h.authz.allow(Action::ReadCompiledToolPolicies, &h.org_prn);
+        h.authz.allow(Action::ReadCompiledToolPolicies, &root_prn());
+    }
+
+    #[tokio::test]
+    async fn get_compiled_of_an_org_with_no_set_is_none_with_default_settings() {
+        let h = bare_harness();
+        allow_compiled(&h);
+        let r = h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
+        assert_eq!(r.set, None);
+        assert_eq!(r.settings, ToolPolicySettings::default_for_absent_row());
+        assert_eq!(r.floor_version, 0);
+    }
+
+    #[tokio::test]
+    async fn get_compiled_returns_the_live_set_the_settings_and_the_floor_version() {
+        let h = harness();
+        allow_compiled(&h);
+        let v = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        put_mode(&h, ToolPolicyMode::Enforce, FailMode::Open).await.unwrap();
+        let r = h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
+        assert_eq!(r.set, Some(v));
+        assert_eq!((r.settings.mode, r.settings.fail_mode), (ToolPolicyMode::Enforce, FailMode::Open));
+        assert_eq!(r.floor_version, 1);
+    }
+
+    #[tokio::test]
+    async fn get_compiled_by_version_returns_a_superseded_version() {
+        let h = harness();
+        allow_compiled(&h);
+        let v1 = accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let other = format!("{STARTER_TOOL_POLICY_SOURCE}\n");
+        let v2 = accepted(h.svc.put_set(&h.actor, h.org, &other, 1).await);
+        assert_eq!(v2.version, 2);
+        let r = h.svc.get_compiled(&h.actor, h.org, Some(1)).await.unwrap();
+        assert_eq!(r.set.as_ref().map(|s| (s.version, s.status)), Some((1, VersionStatus::Superseded)));
+        assert_eq!(r.set.unwrap().compiled, v1.compiled);
+        assert_eq!(h.svc.get_compiled(&h.actor, h.org, Some(9)).await.unwrap_err(), TenancyError::ToolPolicyVersionNotFound);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, Some(9)).await.unwrap_err(), TenancyError::ToolPolicyVersionNotFound);
+    }
+
+    #[tokio::test]
+    async fn the_fetch_of_an_org_in_mode_off_returns_the_floor_version() {
+        let h = harness();
+        allow_compiled(&h);
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        let other = format!("{FLOOR_DENY}\n");
+        accepted(h.svc.put_floor(&h.actor, &other, 1).await);
+        let r = h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
+        assert_eq!(r.settings.mode, ToolPolicyMode::Off);
+        assert_eq!(r.floor_version, 2);
+        assert_eq!(r.set.map(|s| s.version), Some(1));
+    }
+
+    #[tokio::test]
+    async fn get_compiled_floor_with_no_floor_is_none() {
+        let h = bare_harness();
+        allow_compiled(&h);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, None).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn get_compiled_floor_returns_the_live_floor() {
+        let h = harness();
+        allow_compiled(&h);
+        let v = accepted(h.svc.put_floor(&h.actor, FLOOR_DENY, 0).await);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, None).await.unwrap(), Some(v.clone()));
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, Some(1)).await.unwrap(), Some(v));
+    }
+
+    #[tokio::test]
+    async fn the_fetch_methods_check_read_compiled_tool_policies() {
+        let h = bare_harness();
+        assert_eq!(h.svc.get_compiled(&h.actor, h.org, None).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, None).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!(
+            h.authz.checks(),
+            vec![(Action::ReadCompiledToolPolicies, h.org_prn.canonical()), (Action::ReadCompiledToolPolicies, root_prn().canonical())]
+        );
+        // A grant of the other read actions does not allow the fetch.
+        h.authz.allow(Action::ReadToolPolicies, &h.org_prn);
+        h.authz.allow(Action::ReadToolPolicyFloor, &root_prn());
+        assert_eq!(h.svc.get_compiled(&h.actor, h.org, None).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!(h.svc.get_compiled_floor(&h.actor, None).await.unwrap_err(), TenancyError::Forbidden);
+        assert_eq!((h.repo.writes(), h.audit.0.lock().unwrap().len(), h.uow.commits()), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn get_compiled_of_an_absent_org_is_not_found() {
+        let h = harness();
+        allow_compiled(&h);
+        assert_eq!(h.svc.get_compiled(&h.actor, Uuid::from_u128(999), None).await.unwrap_err(), TenancyError::NotFound);
     }
 }
