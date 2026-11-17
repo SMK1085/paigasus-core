@@ -607,9 +607,9 @@ No commit in this task unless Step 2 needs a fix. A fix gets its own `fix(<scope
 
 ---
 
-## Questions for the product owner
+## Decisions of the product owner (2026-11-17)
 
-Each question has a recommended answer. The plan follows the recommendation until the product owner decides otherwise.
+The product owner accepted the recommended answer for Q1, Q2 and Q3 on 2026-11-17. The plan follows these answers.
 
 - **Q1. After an admin discards a held version, should the job propose it again on the next run?** Spec §8 skips a set only when a held row exists, so a discarded proposal comes back at each boot and each run. **Recommended: no.** The job skips a proposal with the same live version and the same compiler values that is held or discarded (H6). A new compiler bump, a save or an accept makes a new proposal possible. To get the proposal back, the admin saves the set.
 - **Q2. Should `RunToolPolicyRecompile` wait for the job, or start it and return at once?** **Recommended: wait (H18).** The boot run normally does the work, so the RPC usually has few sets. It returns one row per set, which an operator can read at once. An asynchronous run needs a status RPC and a stored run record, which this PR does not have.
