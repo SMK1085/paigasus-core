@@ -255,7 +255,7 @@ mod tests {
     use std::time::Duration;
 
     use metrics_util::debugging::DebuggingRecorder;
-    use paigasus_gateway_core::{RequestReason, parse_request};
+    use paigasus_gateway_core::{BlockCode, Decision, Format as Fmt, RequestReason, decide_calls, parse_body, parse_request};
 
     use super::*;
     use crate::application::tool_policy::testing::{self, FakeSource, ORG_A_PRN, PRINCIPAL, Snap, chat_request, settings, settings_from_source};
@@ -555,7 +555,38 @@ mod tests {
             assert_eq!(out.snapshot.on_unavailable, global, "no settings known: the global fail mode");
             assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
             assert_eq!(tool_names(&out.body), ["x", "y"], "the floor still applies ({global:?})");
+            // End to end: one call to a tool of the tenant. Closed blocks it. Open allows it and reports it.
+            let body = r#"{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"y","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+            let calls = parse_body(Fmt::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
+            let turn = parse_request(Format::OpenAiChat, &chat_request(&["y"], ""));
+            let outcomes = decide_calls(&out.snapshot, &turn, &calls);
+            let want = if global == OnUnavailable::Closed {
+                Decision::Block { code: BlockCode::PolicyUnavailable }
+            } else {
+                Decision::Observe { would: BlockCode::PolicyUnavailable }
+            };
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].decision, want, "{global:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_tenant_is_looked_up_in_mode_off_so_a_new_mode_applies() {
+        // The source says `off`: the first request loads it and applies the floor alone.
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        source.set_settings(from_source(TenantMode::Off, OnUnavailable::Closed));
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Enforce));
+        let body = chat_request(&["x", "y"], "");
+        let first = run(&policy, body.clone()).await.expect("apply");
+        assert_eq!(first.body, body, "mode off: the tenant forbid does not apply");
+        assert_eq!(source.tenant_calls(), 1);
+        // The event path: the mode changes at the source and the cache is invalidated.
+        source.set_settings(from_source(TenantMode::Enforce, OnUnavailable::Closed));
+        policy.cache().invalidate_all();
+        let second = run(&policy, body.clone()).await.expect("apply");
+        assert_eq!(source.tenant_calls(), 2, "the cached mode off did not stop the tenant lookup");
+        assert_eq!(tool_names(&second.body), ["y"], "the new mode applies in the request that reloads");
+        assert_eq!(second.snapshot.mode, TenantMode::Enforce);
     }
 
     #[tokio::test]
