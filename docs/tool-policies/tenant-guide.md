@@ -21,10 +21,20 @@ The `org_admin` role has both.
 | `log_only` | The gateway evaluates your set and records a block, but it does not block the call. |
 | `enforce` | The gateway blocks every call that your set does not permit. |
 
-| `fail_mode` | What the gateway does when it cannot load your set |
+The fail mode applies only in `enforce` mode. It tells the gateway what to do when it cannot load
+your set.
+
+| `fail_mode` | What the gateway does in `enforce` mode when it cannot load your set |
 |---|---|
 | `closed` | The gateway blocks the call. This is the default. |
 | `open` | The gateway allows the call and reports it. |
+
+In `log_only` mode, the gateway does not block a call when it cannot load your set. It only
+records the call. In `off` mode, the gateway does not use your set, so your fail mode has no
+effect.
+
+Your fail mode does not apply to the platform floor (section 2). When the gateway cannot load the
+floor, the platform operator's global setting decides, in every mode. This includes `off`.
 
 Follow these rules for the first enable.
 
@@ -107,11 +117,34 @@ The gateway maps the arguments of a call by value, not by your schema.
 - A decimal number with at most four fraction digits becomes `decimal`.
 - Any other number becomes a `String`.
 
-If the model sends a value of another type than your schema, a comparison is false or it errors.
-An errored `permit` is skipped, so it permits nothing. An errored `forbid` denies the call. A type
-mismatch never allows a call that your policy would deny. But it can make a `permit` inert.
+The compiler checks your policy against the schema of your catalog. But the compiler cannot check
+what the model sends at run time. If the model sends a value of another type than
+your schema, the result depends on the operator:
 
-So guard every argument read with `has`, and use a comparison that fits the type. This example
+- `<`, `<=`, `>`, `>=` and `like` cause an error. An errored `permit` is skipped, so it permits
+  nothing. An errored `forbid` denies the call. The gateway records the basis `errored_forbid`.
+- `==` and `contains` give `false`. They do not cause an error.
+- `!=` gives `true`. It does not cause an error.
+
+So a type mismatch can allow a call that your policy would deny:
+
+- A `forbid` with `==` or `contains` does not match. A `permit` that matches then allows the call.
+  For example, `forbid ... when { context.input.amount == 1000 }` does not stop the string
+  `"1000"`.
+- A `permit` with `!=` matches. For example, `permit ... when { context.input.amount != 0 }`
+  allows the string `"0"`.
+
+Write rules that fail closed:
+
+- Prefer an allow list. A `permit` with `==`, `contains`, `like` or an ordering operator permits
+  nothing when the type is wrong.
+- Do not use `!=` or `!` in a `permit`.
+- Do not use a `forbid` with `==` or `contains` as your only control. Add an allow list that
+  permits only the values that you accept.
+- In a `forbid` on a number, prefer an ordering operator. For example, use `>= 1000` instead of
+  `== 1000`. A wrong type then causes an error, and the errored `forbid` denies the call.
+
+Guard every argument read with `has`, and use a comparison that fits the type. This example
 allows a payment of 100 or less:
 
 ```

@@ -96,18 +96,31 @@ gateway uses the fail mode.
 - **The gateway never loaded the organization.** The gateway uses mode `enforce` with the global
   `on_policy_unavailable`.
 
-Watch the metric `gateway_tool_policy_cache_loads_total`. The label `result="source_error"` counts a
-failed fetch from IAM. Other results are `ok`, `compile_error` and `timeout`. A rising
-`source_error` with a wrong or revoked key looks the same as an IAM outage. Check the key first.
+Watch the metric `gateway_tool_policy_cache_loads_total`. Its results are `ok`, `source_error`,
+`compile_error` and `timeout`. The label `result="source_error"` has two causes:
+
+- A fetch from IAM failed. The gateway logs `tool-policy source failed` with the field `kind`
+  set to `not_found`, `io` or `malformed`. A wrong or revoked key looks the same as an IAM
+  outage (`kind="io"`). Check the key first.
+- IAM answered, but the gateway refused the tenant set because it holds a history rule
+  (section 5). The gateway logs `tool-policy source refused the tenant set` with
+  `kind="refused"` and the organization in the field `key`. This occurs on every load of that set
+  while the organization is in mode `log_only` or `enforce`. In mode `off`, the gateway does not
+  refuse the set.
+
+Before you look at IAM or the key, read the field `kind` of the log line. If it is `refused`, IAM
+is healthy. Do the steps in section 5 for that organization.
 
 ## 5. History rules
 
 IAM refuses a save that holds a history rule (reason 62 `tool-policy-history-unsupported`) until
-the gateway can enforce them (SMA-753). The gateway also refuses a stored set that holds one. It
-treats such a set as malformed. Under a global `closed`, a floor with a history rule blocks every
-call of every tenant.
+the gateway can enforce them (SMA-753). The gateway also refuses a stored set that holds one. The
+floor and a tenant set are refused in different ways. The gateway treats a floor with a history
+rule as malformed, so the floor is unavailable. Under a global `closed`, such a floor blocks
+every call of every tenant.
 
-For a tenant set with a history rule, the settings of that organization from IAM still decide. In
+The gateway does not treat a tenant set with a history rule as malformed. It treats the answer
+as refused, and the settings of that organization from IAM in the same answer still decide. In
 mode `off`, the gateway does not use the set, so the set blocks no call. In mode `log_only`, the
 gateway records the set as unavailable and does not block the call. In mode `enforce`, the tenant
 `fail_mode` decides. The global `on_policy_unavailable` does not decide this case. The floor
