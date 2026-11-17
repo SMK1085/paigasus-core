@@ -40,10 +40,10 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::tool_policy::{
     CatalogLimits, CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, FailMode, ImportFormat, PROTOCOL_VERSION, PolicyCompiler, STARTER_TOOL_POLICY_SOURCE, SetKind, StoredTool,
-    TOOL_SCHEMA_REVISION, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyVersion, VersionOrigin, VersionStatus, base_schema_json,
-    build_manual, catalog_names, check_compiled, outputs_identical, parse_import, tenant_schema_json,
+    TOOL_SCHEMA_REVISION, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, VersionOrigin, VersionStatus,
+    base_schema_json, build_manual, catalog_names, check_compiled, outputs_identical, parse_import, tenant_schema_json,
 };
-use paigasus_iam_core::{Action, AuditEntry, AuditLog, AuditOutcome, Clock, IdGenerator, OrganizationRepository, Outbox, UnitOfWork};
+use paigasus_iam_core::{Action, AuditEntry, AuditLog, AuditOutcome, Clock, IdGenerator, OrganizationRepository, Outbox, Transaction, UnitOfWork};
 use paigasus_kernel::Prn;
 use serde_json::json;
 use uuid::Uuid;
@@ -310,35 +310,18 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             None
         };
 
-        // Step 3: lock and recheck, for the starter only. A settings write with no starter does
-        // not depend on the set, so it needs no lock.
+        // Steps 3 and 4: a settings write with no starter does not depend on the set, so it takes
+        // no state lock. The starter write locks and rechecks inside the helper.
         let tx = self.uow.begin().await?;
-        if starter.is_some() {
-            let locked = self.repo.lock_state_in(&*tx, &key).await?;
-            if locked != state {
-                drop(tx);
-                return Err(TenancyError::ToolPolicyVersionConflict);
-            }
-        }
-
-        // Step 4: write, audit, commit. One correlation id for every event and the audit entry.
         let now = self.clock.now();
+        // One correlation id for every event and the audit entry.
         let corr = self.ids.new_correlation_id();
         let mut starter_version = 0;
         if let Some((out, catalog)) = &starter {
-            let version = self.new_version(
-                actor,
-                &key,
-                state.live_version + 1,
-                STARTER_TOOL_POLICY_SOURCE,
-                out,
-                Some(state.catalog_revision),
-                catalog,
-                VersionOrigin::Starter,
-                now,
-            );
-            self.repo.insert_live_version_in(&*tx, &version).await?;
-            self.outbox.enqueue(&*tx, &events::set_published(&*self.ids, corr, actor, &org_prn, org, &version, now)).await?;
+            let target = SetTarget { key, resource: org_prn.clone() };
+            let version = self
+                .write_new_live_version(&*tx, actor, &target, &state, STARTER_TOOL_POLICY_SOURCE, out, catalog, VersionOrigin::Starter, corr, now)
+                .await?;
             starter_version = version.version;
         }
         let settings = ToolPolicySettings {
@@ -474,32 +457,55 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             Compiled::Rejected(rejections) => return Ok(WriteResult::Rejected(rejections)),
         };
 
-        // Step 3: lock and recheck.
+        // Steps 3 and 4: lock and recheck, then write the version and its event.
         let tx = self.uow.begin().await?;
-        let locked = self.repo.lock_state_in(&*tx, &target.key).await?;
-        if locked != state {
-            drop(tx);
-            return Err(TenancyError::ToolPolicyVersionConflict);
-        }
-
-        // Step 4: write, audit, commit.
         let catalog_revision = match target.key {
             ToolPolicySetKey::Tenant(_) => Some(state.catalog_revision),
             ToolPolicySetKey::Floor => None,
         };
         let now = self.clock.now();
-        let version = self.new_version(actor, &target.key, state.live_version + 1, source, &out, catalog_revision, &catalog, VersionOrigin::Save, now);
-        self.repo.insert_live_version_in(&*tx, &version).await?;
         let corr = self.ids.new_correlation_id();
-        let event = match target.key {
-            ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, actor, &target.resource, org, &version, now),
-            ToolPolicySetKey::Floor => events::floor_published(&*self.ids, corr, actor, &version, now),
-        };
-        self.outbox.enqueue(&*tx, &event).await?;
+        let version = self.write_new_live_version(&*tx, actor, target, &state, source, &out, &catalog, VersionOrigin::Save, corr, now).await?;
         let entry = self.audit_entry(actor, target.audit_action(), &target.resource, target.audit_set(), Some(&version), catalog_revision, now, corr);
         self.audit.record(&*tx, &entry).await?;
         tx.commit().await?;
         Ok(WriteResult::Accepted(version))
+    }
+
+    /// Locks the state of the set and compares it with `state` (the read before the compile). A
+    /// difference is `ToolPolicyVersionConflict` and nothing is written. Then stores `source` as
+    /// the next live version and enqueues its published event. The audit entry and the commit
+    /// belong to the caller, with the same `corr`.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_new_live_version(
+        &self,
+        tx: &dyn Transaction,
+        actor: &Prn,
+        target: &SetTarget,
+        state: &ToolPolicyState,
+        source: &str,
+        out: &CompiledOutput,
+        catalog: &[ToolEntry],
+        origin: VersionOrigin,
+        corr: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<ToolPolicyVersion, TenancyError> {
+        let locked = self.repo.lock_state_in(tx, &target.key).await?;
+        if locked != *state {
+            return Err(TenancyError::ToolPolicyVersionConflict);
+        }
+        let catalog_revision = match target.key {
+            ToolPolicySetKey::Tenant(_) => Some(state.catalog_revision),
+            ToolPolicySetKey::Floor => None,
+        };
+        let version = self.new_version(actor, &target.key, state.live_version + 1, source, out, catalog_revision, catalog, origin, now);
+        self.repo.insert_live_version_in(tx, &version).await?;
+        let event = match target.key {
+            ToolPolicySetKey::Tenant(org) => events::set_published(&*self.ids, corr, actor, &target.resource, org, &version, now),
+            ToolPolicySetKey::Floor => events::floor_published(&*self.ids, corr, actor, &version, now),
+        };
+        self.outbox.enqueue(tx, &event).await?;
+        Ok(version)
     }
 
     /// A catalog write (spec sections 4.2, 4.5 and 4.6). `plan` turns the current catalog into
