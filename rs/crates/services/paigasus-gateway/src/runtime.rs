@@ -21,8 +21,10 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::task::TaskTracker;
 
+use crate::adapters::iam::client::build_channel;
 use crate::adapters::nats::PolicyEvents;
 use crate::adapters::policy_source::file::FilePolicySource;
+use crate::adapters::policy_source::iam::IamPolicySource;
 use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy};
 use crate::config::{GatewayConfig, PolicySourceConfig};
 use crate::domain::limits::ChargeDropReason;
@@ -133,6 +135,15 @@ pub fn build_tool_policy(config: &GatewayConfig) -> anyhow::Result<ToolPolicyRun
     let settings = config.tool_policy.settings();
     let source: Arc<dyn PolicySource> = match &config.tool_policy.source {
         Some(PolicySourceConfig::File { dir }) => Arc::new(FilePolicySource::new(dir)),
+        // The channel is lazy: an IAM that is down at boot does not stop the gateway.
+        Some(PolicySourceConfig::Iam {}) => {
+            let credential_file = config
+                .iam
+                .service_credential_file
+                .clone()
+                .expect("GatewayConfig::validate requires iam.service_credential_file with tool_policy.source kind = \"iam\"");
+            Arc::new(IamPolicySource::new(build_channel(&config.iam)?, credential_file))
+        }
         None => anyhow::bail!("tool_policy.enabled = true requires tool_policy.source"),
     };
     let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));

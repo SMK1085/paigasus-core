@@ -112,6 +112,9 @@ paigasus-nats-creds = { workspace = true }
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a
 # dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
+# SMA-775: the in-process fake `ToolPolicyService` server of `tests/tool_policy_iam_source.rs`
+# wraps a `TcpListener` into the `Stream` that `serve_with_incoming` takes (as paigasus-iam does).
+tokio-stream = { workspace = true, features = ["net"] }
 # SMA-752 Task 13: `#[tokio::test(start_paused = true)]` for the policy-cache refresh, stale and timeout tests.
 tokio = { workspace = true, features = ["test-util"] }
 # SMA-677: the blackhole listener and the lazy / open-breaker handles for the fail-open tests.

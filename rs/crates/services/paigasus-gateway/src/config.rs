@@ -66,6 +66,12 @@ pub struct GatewayConfig {
 pub struct IamClientConfig {
     pub grpc_addr: String,
     pub tls: IamTlsConfig,
+    /// SMA-775: the file that holds the gateway service credential (an IAM API key with the
+    /// `tool_policy_reader` role). The IAM policy source sends it on the two policy fetch calls and
+    /// on no other call. The file is read again on every fetch, so a rotation needs no restart.
+    /// Required when `tool_policy.source` is `kind = "iam"`.
+    #[serde(default)]
+    pub service_credential_file: Option<String>,
 }
 
 /// D8: TLS is the default transport to `paigasus-iam`'s gRPC endpoint — the introspect call
@@ -99,6 +105,7 @@ impl Default for IamClientConfig {
         IamClientConfig {
             grpc_addr: "https://127.0.0.1:9090".to_string(),
             tls: IamTlsConfig::default(),
+            service_credential_file: None,
         }
     }
 }
@@ -617,6 +624,15 @@ impl GatewayConfig {
         self.tool_interception.validate()?;
         self.responses.validate()?;
         self.tool_policy.validate(&self.tool_interception)?;
+        // SMA-775: the cross-table rule that `ToolPolicyConfig::validate` cannot see (it has no `iam`).
+        if self.tool_policy.enabled && matches!(self.tool_policy.source, Some(PolicySourceConfig::Iam {})) {
+            match self.iam.service_credential_file.as_deref() {
+                None => return Err("iam.service_credential_file is required when tool_policy.source kind = \"iam\"".to_string()),
+                Some(p) if p.trim().is_empty() => return Err("iam.service_credential_file must not be empty".to_string()),
+                Some(p) if p != p.trim() => return Err("iam.service_credential_file has leading or trailing whitespace, which is never valid config".to_string()),
+                Some(_) => {}
+            }
+        }
         Ok(())
     }
 }
@@ -684,6 +700,10 @@ pub enum OnUnavailableConfig {
 pub enum PolicySourceConfig {
     /// A directory of policy files.
     File { dir: String },
+    /// SMA-775: the compiled sets and the tenant settings from paigasus-iam over gRPC. It needs
+    /// `iam.service_credential_file`, and it refuses `[[tool_policy.org]]` entries (IAM holds the
+    /// mode and the fail mode of each org).
+    Iam {},
 }
 
 /// `[tool_policy.nats]`: the invalidation subscription.
@@ -780,6 +800,11 @@ impl ToolPolicyConfig {
                 return Err(format!("tool_policy.org[{i}].id {:?} names an org that an earlier [[tool_policy.org]] entry already lists", entry.id));
             }
         }
+        // SMA-775: with the IAM source, IAM holds the mode and the fail mode of each org. An entry
+        // here would look as if it applied, so it is refused.
+        if matches!(self.source, Some(PolicySourceConfig::Iam {})) && !self.org.is_empty() {
+            return Err("[[tool_policy.org]] entries are not allowed with tool_policy.source kind = \"iam\": IAM holds the mode and the fail mode of each org (remove the entries)".to_string());
+        }
         if let Some(nats) = &self.nats {
             if nats.url.expose_secret().trim().is_empty() {
                 return Err("tool_policy.nats.url must not be empty (omit the [tool_policy.nats] table to run without invalidation events)".to_string());
@@ -831,8 +856,8 @@ impl ToolPolicyConfig {
                     (id, (e.mode.into(), e.on_policy_unavailable.map(OnUnavailable::from)))
                 })
                 .collect(),
-            // SMA-775 Task 11 sets this from the source kind. The file source has no settings.
-            settings_from_source: false,
+            // Only the IAM source returns the tenant settings. The file source has none.
+            settings_from_source: matches!(self.source, Some(PolicySourceConfig::Iam {})),
         }
     }
 }
@@ -1609,6 +1634,48 @@ mod tests {
         ] {
             assert!(tp_load(&tp_toml(&body)).is_err(), "must fail: {body}");
         }
+    }
+
+    // --- SMA-775 the IAM policy source ---------------------------------------------------------
+
+    fn tp_iam_toml(iam: &str, extra: &str) -> String {
+        format!(
+            "{}\n[iam]\n{iam}\n[tool_interception]\nenabled = true\n\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\nsource = {{ kind = \"iam\" }}\n{extra}\n",
+            valid_toml()
+        )
+    }
+
+    #[test]
+    fn the_iam_source_loads_validates_and_takes_the_settings_from_the_source() {
+        let cfg = tp_load(&tp_iam_toml("service_credential_file = \"/run/secrets/gw-key\"", "")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        assert_eq!(cfg.tool_policy.source, Some(PolicySourceConfig::Iam {}));
+        assert_eq!(cfg.iam.service_credential_file.as_deref(), Some("/run/secrets/gw-key"));
+        assert!(cfg.tool_policy.settings().settings_from_source);
+    }
+
+    #[test]
+    fn the_file_source_and_no_source_do_not_take_the_settings_from_the_source() {
+        let cfg = tp_load(&tp_enabled_toml("")).expect("loads");
+        assert!(!cfg.tool_policy.settings().settings_from_source);
+        assert!(!tp_load(valid_toml()).expect("loads").tool_policy.settings().settings_from_source);
+    }
+
+    #[test]
+    fn the_iam_source_needs_a_credential_file() {
+        let err = tp_load(&tp_iam_toml("", "")).expect("loads").validate().expect_err("needs a file");
+        assert!(err.contains("iam.service_credential_file"), "{err}");
+        for bad in ["service_credential_file = \"  \"", "service_credential_file = \" /k\""] {
+            let err = tp_load(&tp_iam_toml(bad, "")).expect("loads").validate().expect_err("bad path");
+            assert!(err.contains("iam.service_credential_file"), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_iam_source_refuses_org_entries() {
+        let org = "[[tool_policy.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nmode = \"enforce\"";
+        let err = tp_load(&tp_iam_toml("service_credential_file = \"/k\"", org)).expect("loads").validate().expect_err("org entries");
+        assert!(err.contains("tool_policy.org") && err.contains("iam"), "{err}");
     }
 
     #[test]
