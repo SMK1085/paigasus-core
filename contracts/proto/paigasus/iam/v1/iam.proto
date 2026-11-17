@@ -1202,9 +1202,10 @@ message GetToolPolicySettingsResponse {
   ToolPolicySettings settings = 1;
 }
 
-// The first change away from OFF with no tenant set must be to LOG_ONLY, and it saves the starter
-// as version 1; OFF to ENFORCE with no tenant set is tool-policy-mode-transition-invalid (spec
-// §9.2). UNSPECIFIED is missing-required-field.
+// The first change away from OFF must be to LOG_ONLY, also when a tenant set was saved in OFF.
+// With no tenant set, it saves the starter as version 1. A later OFF to ENFORCE needs an earlier
+// change away from OFF and a saved tenant set. Any other ENFORCE is
+// tool-policy-mode-transition-invalid (spec §9.2). UNSPECIFIED is missing-required-field.
 message PutToolPolicySettingsRequest {
   string org_prn = 1;
   ToolPolicyMode mode = 2;
