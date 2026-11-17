@@ -1,0 +1,191 @@
+{
+  "shape": "sum_within",
+  "schema": "tests/fixtures/test_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-sum\")\npermit (principal, action == Pgs::Gateway::Action::\"send\", resource)\nwhen temporal { sum_within(a, 1h, Pgs::Gateway::Action::\"send\"::request{ input.amount: a }) <= 100 };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-sum\")\npermit(principal, action == Pgs::Gateway::Action::\"send\", resource) when { context.p_corpus_hsum_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long"
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long"
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String"
+                      }
+                    }
+                  },
+                  "p_corpus_hsum_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_hsum_0__temporal_0",
+        "policy_id": "corpus-sum",
+        "scope": "session",
+        "window_ms": 3600000,
+        "shape": {
+          "type": "sum_within",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "event_kind",
+              "kind": "request"
+            },
+            "right": {
+              "type": "tool",
+              "name_key": "send"
+            }
+          },
+          "field_path": [
+            "amount"
+          ],
+          "op": "le",
+          "threshold": 100
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 60
+      }
+    },
+    {
+      "ts": 10,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 50
+      }
+    },
+    {
+      "ts": 20,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": -30
+      }
+    },
+    {
+      "ts": 3611,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 10
+      }
+    }
+  ],
+  "decisions": [
+    "allow",
+    "deny",
+    "allow",
+    "allow"
+  ],
+  "notes": [
+    "call 1: 60 + 50 = 110, more than 100",
+    "call 2 has a negative amount: Dogwood sums 110 - 30 = 80 and allows",
+    "call 3 at 3611 s: the window [11, 3611] holds calls 2 and 3 only"
+  ],
+  "paigasus_differs": [
+    {
+      "event": 2,
+      "dogwood": "allow",
+      "paigasus": "deny",
+      "rule": "a negative value adds 0 (spec section 5.4): Paigasus sums 110 + 0 = 110 and denies"
+    }
+  ]
+}

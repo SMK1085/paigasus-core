@@ -33,10 +33,21 @@ COPY . .
 # the resulting layer, so `COPY --from=builder /src/target/...` in a later stage finds nothing.
 # Distinct cache ids per binary — the default sharing mode is `shared`, so two concurrent builds
 # would otherwise contend on cargo's lock.
+# SMA-774: the IAM image also holds the policy compiler at /usr/local/bin/paigasus-policy-compiler
+# (IAM's default `compiler_path`). It is a SEPARATE cargo workspace with its own Cargo.lock, so it
+# is a second `cargo auditable build` with `--manifest-path`, and its own target cache id. Its
+# Dogwood dependency is a git dependency, so cargo's git checkouts get a cache mount too.
+# `/out/extra` is made for every BIN: the final stage copies it, and for the gateway it is empty.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=target-${BIN},target=/src/target \
+    --mount=type=cache,id=target-policy-compiler,target=/src/tools/paigasus-policy-compiler/target \
     cargo auditable build --release --locked -p "${BIN}" --bin "${BIN}" \
- && mkdir -p /out && cp "/src/target/release/${BIN}" /out/service
+ && mkdir -p /out/extra && cp "/src/target/release/${BIN}" /out/service \
+ && if [ "${BIN}" = "paigasus-iam" ]; then \
+      cargo auditable build --release --locked --manifest-path tools/paigasus-policy-compiler/Cargo.toml \
+      && cp tools/paigasus-policy-compiler/target/release/paigasus-policy-compiler /out/extra/; \
+    fi
 
 FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS rootfs
 ARG CHISEL_VERSION=v1.4.2
@@ -90,6 +101,8 @@ COPY --from=rootfs /rootfs /
 # parameterized Dockerfile possible; logs and metrics take the service name from the binary
 # itself (paigasus_logging::init), not from argv[0].
 COPY --from=builder /out/service /usr/local/bin/paigasus-service
+# SMA-774: the policy compiler for the IAM image. The directory is empty for the gateway image.
+COPY --from=builder /out/extra/ /usr/local/bin/
 # `FROM scratch` leaves Config.Env empty. Docker injects a default PATH; containerd/CRI does not
 # reliably, so a Kubernetes exec probe using a bare command name would fail there without this.
 ENV PATH=/usr/local/bin

@@ -41,6 +41,7 @@ mod service_accounts;
 mod service_info;
 mod system_retirement;
 mod teams;
+mod tool_policies;
 mod users;
 
 use async_trait::async_trait;
@@ -67,7 +68,7 @@ use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
     PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgIdentityLinkStore, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore,
-    PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, SeaOrmUnitOfWork,
+    PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, PgToolPolicies, SeaOrmUnitOfWork,
 };
 use crate::adapters::redis_role::RedisRole;
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
@@ -89,14 +90,19 @@ use crate::application::service_accounts::{ServiceAccountService, ServiceAccount
 use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
 use crate::application::teams::{TeamService, TeamServiceDeps};
 use crate::application::tenancy_nodes::TenancyNodes;
+use crate::application::tool_policies::{ToolPolicyLimits, ToolPolicyService, ToolPolicyServiceDeps};
 use crate::application::user_identities::{UserIdentityDeps, UserIdentityService};
-use crate::config::{ApiKeyCacheBackend, AuthnConfig, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
+use crate::config::{ApiKeyCacheBackend, AuthnConfig, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl, ToolPoliciesConfig};
+use paigasus_iam_core::tool_policy::{CatalogLimits, PolicyCompiler};
 use paigasus_iam_core::{
     ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntityGenBumper, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore,
     SystemPolicyReconciler, SystemRoleReconciler, TeamRepository, UnitOfWork,
 };
 use paigasus_redis::RedisHandle;
 
+/// The tool catalog and tool policy set use cases (SMA-774). Present on `AppState` only when the
+/// feature is on and the boot probe found a working compiler.
+pub type ToolPolicySvc = ToolPolicyService<KernelIdGenerator, SystemClock>;
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
 pub type ProjectSvc = ProjectService<PgProjectRepository, PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -278,6 +284,12 @@ pub struct AppState {
     /// guards, and by both descriptor handlers — one source of truth, derived on demand rather
     /// than cached as a pre-computed key list.
     pub capabilities: crate::service_info::Capabilities,
+    /// The tool catalog and tool policy set use case (SMA-774). `Some` exactly when
+    /// `capabilities.tool_policies` is true. The transports check the capability first, so a
+    /// `None` here never reaches a handler.
+    pub tool_policies: Option<ToolPolicySvc>,
+    /// The `Generations` handle of `AppState::new`, kept for services built after it.
+    gens: Generations,
     /// The persistent audit-log sink (`PgAuditLog`) the denial-audit [`DenialAuditDrain`]
     /// drains buffered denials into (SMA-446 Task A12) — the SAME `Arc<dyn AuditLog>` handle
     /// `audit_query` reads through. Exposed via [`AppState::audit_sink`] so `main.rs` (or a
@@ -317,6 +329,43 @@ impl AppState {
     #[must_use]
     pub fn take_denial_drain(&self) -> Option<DenialAuditDrain> {
         self.denial_drain.lock().expect("denial-drain slot mutex not poisoned").take()
+    }
+
+    /// Turns the tool policy feature on or leaves it off (SMA-774, spec section 6.2). `compiler`
+    /// is the result of the boot probe, and `main` calls the probe only when the toggle is on. The
+    /// feature is on only when `cfg.enabled` AND `compiler` is `Some`. Then `ToolPolicyService`
+    /// is built and `capabilities.tool_policies` is true. Otherwise the service is absent, the
+    /// capability is not advertised, and each tool policy RPC answers `capability-disabled`
+    /// on gRPC and 404 on HTTP.
+    #[must_use]
+    pub fn with_tool_policies(mut self, compiler: Option<Arc<dyn PolicyCompiler>>, cfg: &ToolPoliciesConfig) -> Self {
+        let Some(compiler) = compiler.filter(|_| cfg.enabled) else {
+            self.tool_policies = None;
+            self.capabilities.tool_policies = false;
+            return self;
+        };
+        self.tool_policies = Some(ToolPolicyService::new(ToolPolicyServiceDeps {
+            repo: Arc::new(PgToolPolicies::new(self.db.clone())),
+            orgs: Arc::new(PgOrganizationRepository::new(self.db.clone(), self.gens.clone())),
+            compiler,
+            authorize: self.authorize.clone(),
+            uow: Arc::new(SeaOrmUnitOfWork::new(self.db.clone())),
+            audit: self.audit_log.clone(),
+            limits: ToolPolicyLimits {
+                catalog: CatalogLimits {
+                    max_tools: cfg.max_tools,
+                    max_input_schema_bytes: cfg.max_input_schema_bytes,
+                    max_depth: cfg.max_schema_depth,
+                },
+                max_source_bytes: cfg.max_source_bytes,
+                max_window_ms: cfg.max_window_secs.saturating_mul(1000),
+                max_catalog_response_bytes: cfg.max_catalog_response_bytes,
+            },
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        }));
+        self.capabilities.tool_policies = true;
+        self
     }
 
     /// Builds every tenancy service from `db` (each wired to its own Postgres repository —
@@ -880,6 +929,8 @@ impl AppState {
             user_identities,
             retirement,
             capabilities: crate::service_info::Capabilities::from_config(cfg),
+            tool_policies: None,
+            gens: gens.clone(),
             audit_log,
             denial_drain: Arc::new(Mutex::new(Some(denial_drain))),
         })
@@ -1006,6 +1057,9 @@ fn app_routes(state: AppState) -> Router {
     if caps.audit_query {
         protected = protected.merge(audit::router());
     }
+    if caps.tool_policies {
+        protected = protected.merge(tool_policies::router());
+    }
     let protected = protected
         // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
@@ -1126,6 +1180,7 @@ mod tests {
                     if audit_query {
                         r = r.merge(audit::router());
                     }
+                    r = r.merge(tool_policies::router());
                     let _ = r;
                 }
             }

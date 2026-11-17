@@ -32,7 +32,9 @@ paigasus-kernel = { workspace = true }
 # skipped — the root Cargo.toml already anticipates this crate as cedar-policy's second
 # consumer alongside `paigasus-iam-core` (SMA-444 Task 13).
 cedar-policy = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+# `process` and `io-util`: `adapters::policy_compiler::process` runs the policy compiler as a
+# child process and writes its stdin and reads its stdout and stderr at the same time (SMA-774).
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "process", "io-util"] }
 figment = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
@@ -80,6 +82,10 @@ tonic-types = { workspace = true }
 paigasus-proto = { workspace = true }
 # `adapters::grpc::convert::ts` — builds the `AuditMetadata.created_at`/`modified_at` fields.
 prost-types = { workspace = true }
+# `application::tool_policies::sets` — `Message::encode_to_vec` and `decode` of the stored
+# `CompiledToolPolicySet` bytes (SMA-774, spec section 5.4). Already in `rs/Cargo.lock` through
+# `paigasus-proto`.
+prost = { workspace = true }
 # `adapters::persistence::migration` — sea-orm-migration's `SchemaManager`/`MigrationTrait`
 # build the m0001 DDL (production code, not test-only: `PgPrincipalRepository` + the
 # migrator are wired at boot, not just under `#[cfg(test)]`).
@@ -127,6 +133,15 @@ paigasus-nats-creds = { workspace = true }
 # `service_info` — the shared ServiceInfo builder + HTTP DTO (SMA-505). This crate supplies
 # only the wire invariants; the config -> capability projection lives in `src/service_info.rs`.
 paigasus-service-info = { workspace = true }
+# `adapters::policy_compiler::process` — `setrlimit` in `pre_exec` sets `RLIMIT_CPU` and, on Linux,
+# `RLIMIT_AS` on the compiler child (SMA-774, spec section 5.2). Already in `rs/Cargo.lock`.
+libc = "0.2"
+# `adapters::policy_compiler::process` — the empty, temporary working directory of the compiler
+# child, removed on drop (SMA-774). Moved here from `[dev-dependencies]`. The tests that need a
+# real file on disk use the same entry: the NATS seed and creds files of
+# `tests/nats_permissions.rs`, the publisher tests in `adapters::events::nats_publisher`, the JWKS
+# file tests in `adapters::oidc::jwks`, and `tests/tool_policies_compiler_process.rs`.
+tempfile = "3"
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
@@ -158,7 +173,7 @@ p256 = { version = "0.14", features = ["pkcs8", "pem"] }
 # auto-selection everywhere AND adding a native cmake build dep (see the jsonwebtoken
 # note above for the workspace's pure-Rust posture).
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
-axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
 # `adapters::authz::denial_audit` tests — `#[tokio::test(start_paused = true)]` deterministically
 # fast-forwards past `AUDIT_PERSIST_TIMEOUT` instead of a real multi-second sleep (feature-only
 # addition: `tokio` is already a normal dependency above, unified with this for test builds).
@@ -171,10 +186,6 @@ tokio = { workspace = true, features = ["test-util"] }
 # recency/registry/storage, so "debugging" is turned on explicitly here — dev-only, unified
 # into test builds and never the shipped binary.
 metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
-# Real files on disk: the NATS seed and creds files of `tests/nats_permissions.rs` and the
-# publisher tests in `adapters::events::nats_publisher`, and the JWKS file tests in
-# `adapters::oidc::jwks`. The creds loader tests themselves moved to `paigasus-nats-creds`.
-tempfile = "3"
 # `tests/nats_permissions.rs` makes a fresh user nkey seed for each fixture identity, so no key
 # material is committed. The production auth path is `paigasus-nats-creds` (SMA-752).
 nkeys = { workspace = true }

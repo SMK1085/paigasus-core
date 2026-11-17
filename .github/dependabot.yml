@@ -47,6 +47,35 @@ updates:
           - minor
           - patch
 
+  # ---- Rust: the policy compiler, a second Cargo workspace (SMA-774) ----
+  # rs/tools/paigasus-policy-compiler is excluded from the rs/ workspace and has its own
+  # Cargo.lock (spec 2026-11-15 iam-tool-policy-sets, section 5.1). The /rs entry above does not
+  # read that lock, so without this entry nothing watches it. Schedule and commit prefix mirror
+  # the /rs entry.
+  - package-ecosystem: cargo
+    directory: /rs/tools/paigasus-policy-compiler
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      policy-compiler-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    # Spec section 3.2: no Dogwood bump before PR 3. The compiler pins Dogwood to one commit,
+    # because its lowering output is part of the IAM contract. cedar-policy must stay at 4.11.0,
+    # the version that the pinned Dogwood commit pins. A bump of either one is a deliberate,
+    # reviewed change, never an automatic one.
+    ignore:
+      - dependency-name: "dogwood-language"
+      - dependency-name: "cedar-policy"
+
   # ---- JS/TS: pnpm workspace + catalog at ts/ ----
   - package-ecosystem: npm
     directory: /ts

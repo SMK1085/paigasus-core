@@ -1,0 +1,205 @@
+{
+  "shape": "count_within",
+  "schema": "tests/fixtures/test_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-count\")\npermit (principal, action == Pgs::Gateway::Action::\"search\", resource)\nwhen temporal { count_within(1m, Pgs::Gateway::Action::\"search\"::request{}) <= 3 };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-count\")\npermit(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.p_corpus_hcount_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long"
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String"
+                      }
+                    }
+                  },
+                  "p_corpus_hcount_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long"
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_hcount_0__temporal_0",
+        "policy_id": "corpus-count",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "count_within",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "event_kind",
+              "kind": "request"
+            },
+            "right": {
+              "type": "tool",
+              "name_key": "search"
+            }
+          },
+          "op": "le",
+          "threshold": 3
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "a",
+        "n": 1
+      }
+    },
+    {
+      "ts": 10,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "b",
+        "n": 1
+      }
+    },
+    {
+      "ts": 20,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "c",
+        "n": 1
+      }
+    },
+    {
+      "ts": 30,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "d",
+        "n": 1
+      }
+    },
+    {
+      "ts": 60,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "e",
+        "n": 1
+      }
+    },
+    {
+      "ts": 91,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "f",
+        "n": 1
+      }
+    }
+  ],
+  "decisions": [
+    "allow",
+    "allow",
+    "allow",
+    "deny",
+    "deny",
+    "allow"
+  ],
+  "notes": [
+    "call 3 is the fourth call in the window: the event being decided counts",
+    "call 4 is a denied call at 60 s; it still counts, and the window [0, 60] holds five calls",
+    "call 5 at 91 s: the window [31, 91] holds calls 4 and 5 only"
+  ],
+  "paigasus_differs": []
+}

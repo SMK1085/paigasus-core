@@ -15,5 +15,7 @@ pub mod http;
 pub mod id;
 pub mod oidc;
 pub mod persistence;
+pub mod policy_compiler;
 pub(crate) mod redis_role;
 pub(crate) mod retryable;
+pub(crate) mod tool_policy_wire;

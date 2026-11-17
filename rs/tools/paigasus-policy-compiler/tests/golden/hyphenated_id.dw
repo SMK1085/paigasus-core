@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// A hyphenated @id with a temporal block, and a field comparison.
+@id("rate-limit-big-sends")
+forbid (principal, action == Pgs::Gateway::Action::"send", resource)
+when temporal { count_within(1h, exists (v: Long). (Pgs::Gateway::Action::"send"::request{ input.amount: v } && v > 500)) >= 3 };

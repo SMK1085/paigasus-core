@@ -887,6 +887,10 @@ tasks:
     toolchain: 'system'
     inputs:
       - 'rs/crates/**/src/**/*.rs'
+      # SMA-774: check.py also scans each rs/tools crate's `src/` and looks up guards in its
+      # `tests/` (the policy compiler emits the six compiler rejection reasons).
+      - 'rs/tools/**/src/**/*.rs'
+      - 'rs/tools/**/tests/**/*.rs'
       - 'contracts/proto/paigasus/common/v1/error.proto'
       - 'ci/error-registry/**/*'
 

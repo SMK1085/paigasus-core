@@ -30,8 +30,9 @@
 
 use std::marker::PhantomData;
 
+use axum::extract::path::ErrorKind;
 use axum::extract::rejection::PathRejection;
-use axum::extract::{FromRequestParts, Path};
+use axum::extract::{FromRequestParts, MatchedPath, Path};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
@@ -80,6 +81,9 @@ path_field!(/// `{id}` on a user route (SMA-712) — the user's principal uuid.
     UserId => "user_id");
 path_field!(/// `{identity_id}` on the unlink route (SMA-712) — an external identity's uuid.
     ExternalIdentityId => "external_identity_id");
+
+path_field!(/// `{name}` on a tool route (SMA-774) — a tool name, not a uuid.
+    ToolNameSegment => "tool_name");
 
 /// The `{field} must be a uuid` envelope response — the one construction point both extractors
 /// below use, so they cannot drift apart on status, code or shape.
@@ -196,6 +200,71 @@ impl<S: Send + Sync, F: PathField> FromRequestParts<S> for StringPath<F> {
             Err(rejection) => Err(rejection.into_response()),
         }
     }
+}
+
+/// A uuid segment followed by an opaque text segment, for `/{id}/tools/{name}` (SMA-774). The
+/// first segment is parsed as a uuid and named `F1::NAME` when it is malformed. The second is
+/// text: it needs no parse, and the service checks the name against the tool grammar.
+///
+/// A rejection that the caller caused (a segment that does not percent-decode as UTF-8) is
+/// answered in the error envelope as `invalid-path-segment`. axum's
+/// `ErrorKind::InvalidUtf8InPathParam` names the route key of the bad segment. The extractor
+/// finds that key in the matched route pattern: the first parameter is `F1`, the second is `F2`.
+/// If the kind, the matched pattern or the key is not available, the message names
+/// [`UNKNOWN_SEGMENT`] and does not guess a field. A rejection that axum classes 5xx keeps
+/// axum's own response.
+pub(crate) struct UuidAndSegmentPath<F1: PathField, F2: PathField> {
+    pub id: Uuid,
+    pub segment: String,
+    _marker: PhantomData<(F1, F2)>,
+}
+
+impl<S: Send + Sync, F1: PathField, F2: PathField> FromRequestParts<S> for UuidAndSegmentPath<F1, F2> {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let (raw_id, segment) = match Path::<(String, String)>::from_request_parts(parts, state).await {
+            Ok(Path(pair)) => pair,
+            Err(rejection) if is_client_error(&rejection) => return Err(malformed_segment(undecodable_field::<F1, F2>(parts, &rejection))),
+            Err(rejection) => return Err(rejection.into_response()),
+        };
+        let id = Uuid::parse_str(&raw_id).map_err(|_| malformed_uuid(F1::NAME))?;
+        Ok(UuidAndSegmentPath { id, segment, _marker: PhantomData })
+    }
+}
+
+/// The neutral field name of an undecodable segment that cannot be tied to `F1` or `F2`.
+pub(crate) const UNKNOWN_SEGMENT: &str = "path";
+
+/// The field of the segment that does not percent-decode as UTF-8, for [`UuidAndSegmentPath`].
+///
+/// axum names the route key of that segment. Its position among the parameters of the matched
+/// route pattern gives the marker: position 0 is `F1`, position 1 is `F2`. Any other case gives
+/// [`UNKNOWN_SEGMENT`].
+fn undecodable_field<F1: PathField, F2: PathField>(parts: &Parts, rejection: &PathRejection) -> &'static str {
+    let PathRejection::FailedToDeserializePathParams(error) = rejection else {
+        return UNKNOWN_SEGMENT;
+    };
+    let ErrorKind::InvalidUtf8InPathParam { key } = error.kind() else {
+        return UNKNOWN_SEGMENT;
+    };
+    let Some(matched) = parts.extensions.get::<MatchedPath>() else {
+        return UNKNOWN_SEGMENT;
+    };
+    match route_param_position(matched.as_str(), key) {
+        Some(0) => F1::NAME,
+        Some(1) => F2::NAME,
+        _ => UNKNOWN_SEGMENT,
+    }
+}
+
+/// The position of `{key}` (or `{*key}`) among the parameters of the route `pattern`.
+fn route_param_position(pattern: &str, key: &str) -> Option<usize> {
+    pattern
+        .split('/')
+        .filter_map(|segment| segment.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')))
+        .map(|name| name.trim_start_matches('*'))
+        .position(|name| name == key)
 }
 
 #[cfg(test)]
@@ -342,6 +411,42 @@ mod tests {
         );
     }
 
+    async fn ok_segment(path: UuidAndSegmentPath<OrganizationId, ToolNameSegment>) -> String {
+        format!("{} {}", path.id, path.segment)
+    }
+
+    /// M2 (SMA-774): an undecodable segment on the uuid-and-text route names the field of the
+    /// segment that holds the bad bytes, read from axum's `InvalidUtf8InPathParam { key }`.
+    #[tokio::test]
+    async fn an_undecodable_segment_of_a_uuid_and_text_pair_names_its_own_field() {
+        let valid = uuid::Uuid::from_u128(1);
+        let route = || Router::new().route("/x/{id}/tools/{name}", get(ok_segment));
+
+        let (status, bytes) = probe(route(), "/x/%FF/tools/search").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], invalid_path_segment_wire());
+        assert_eq!(body["error"]["message"], "organization_id is not a valid path segment", "a bad FIRST segment must name the first field");
+
+        let (status, bytes) = probe(route(), &format!("/x/{valid}/tools/%FF")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], invalid_path_segment_wire());
+        assert_eq!(body["error"]["message"], "tool_name is not a valid path segment", "a bad SECOND segment must name the second field");
+
+        let (status, bytes) = probe(route(), &format!("/x/{valid}/tools/search")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(String::from_utf8(bytes).unwrap(), format!("{valid} search"));
+    }
+
+    #[test]
+    fn a_route_param_position_comes_from_the_pattern() {
+        assert_eq!(route_param_position("/v1/organizations/{id}/tools/{name}", "id"), Some(0));
+        assert_eq!(route_param_position("/v1/organizations/{id}/tools/{name}", "name"), Some(1));
+        assert_eq!(route_param_position("/x/{a}/{*rest}", "rest"), Some(1));
+        assert_eq!(route_param_position("/v1/organizations/{id}/tools/{name}", "other"), None);
+    }
+
     /// A rename tripwire, nothing more: every marker's `NAME` is pinned to the literal its
     /// routes' errors carry, so renaming one is a deliberate edit here rather than a silent
     /// wire-contract change. It does NOT look at a route, so it cannot see a marker attached to
@@ -367,5 +472,6 @@ mod tests {
         assert_eq!(PolicyId::NAME, "policy_id");
         assert_eq!(UserId::NAME, "user_id");
         assert_eq!(ExternalIdentityId::NAME, "external_identity_id");
+        assert_eq!(ToolNameSegment::NAME, "tool_name");
     }
 }

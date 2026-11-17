@@ -1,0 +1,255 @@
+{
+  "Pgs::Gateway": {
+    "actions": {
+      "InvokeTool": {
+        "appliesTo": {
+          "context": {
+            "attributes": {
+              "call": {
+                "required": true,
+                "type": "CallInfo"
+              },
+              "findings": {
+                "element": {
+                  "type": "String"
+                },
+                "required": true,
+                "type": "Set"
+              },
+              "input": {
+                "attributes": {},
+                "required": true,
+                "type": "Record"
+              },
+              "input_text": {
+                "required": false,
+                "type": "String"
+              },
+              "request": {
+                "required": true,
+                "type": "RequestInfo"
+              },
+              "session": {
+                "required": true,
+                "type": "SessionInfo"
+              }
+            },
+            "type": "Record"
+          },
+          "principalTypes": [
+            "Pgs::Iam::Principal"
+          ],
+          "resourceTypes": [
+            "Pgs::Iam::Organization"
+          ]
+        }
+      },
+      "Unregistered": {
+        "appliesTo": {
+          "context": {
+            "attributes": {
+              "call": {
+                "required": true,
+                "type": "CallInfo"
+              },
+              "findings": {
+                "element": {
+                  "type": "String"
+                },
+                "required": true,
+                "type": "Set"
+              },
+              "input": {
+                "attributes": {},
+                "required": true,
+                "type": "Record"
+              },
+              "input_text": {
+                "required": false,
+                "type": "String"
+              },
+              "request": {
+                "required": true,
+                "type": "RequestInfo"
+              },
+              "session": {
+                "required": true,
+                "type": "SessionInfo"
+              }
+            },
+            "type": "Record"
+          },
+          "principalTypes": [
+            "Pgs::Iam::Principal"
+          ],
+          "resourceTypes": [
+            "Pgs::Iam::Organization"
+          ]
+        }
+      },
+      "search": {
+        "appliesTo": {
+          "context": {
+            "attributes": {
+              "call": {
+                "required": true,
+                "type": "CallInfo"
+              },
+              "findings": {
+                "element": {
+                  "type": "String"
+                },
+                "required": true,
+                "type": "Set"
+              },
+              "input": {
+                "attributes": {
+                  "n": {
+                    "required": true,
+                    "type": "Long"
+                  },
+                  "q": {
+                    "required": true,
+                    "type": "String"
+                  }
+                },
+                "required": true,
+                "type": "Record"
+              },
+              "input_text": {
+                "required": false,
+                "type": "String"
+              },
+              "request": {
+                "required": true,
+                "type": "RequestInfo"
+              },
+              "session": {
+                "required": true,
+                "type": "SessionInfo"
+              }
+            },
+            "type": "Record"
+          },
+          "principalTypes": [
+            "Pgs::Iam::Principal"
+          ],
+          "resourceTypes": [
+            "Pgs::Iam::Organization"
+          ]
+        },
+        "memberOf": [
+          {
+            "id": "InvokeTool"
+          }
+        ]
+      },
+      "send": {
+        "appliesTo": {
+          "context": {
+            "attributes": {
+              "call": {
+                "required": true,
+                "type": "CallInfo"
+              },
+              "findings": {
+                "element": {
+                  "type": "String"
+                },
+                "required": true,
+                "type": "Set"
+              },
+              "input": {
+                "attributes": {
+                  "amount": {
+                    "required": true,
+                    "type": "Long"
+                  },
+                  "to": {
+                    "required": true,
+                    "type": "String"
+                  }
+                },
+                "required": true,
+                "type": "Record"
+              },
+              "input_text": {
+                "required": false,
+                "type": "String"
+              },
+              "request": {
+                "required": true,
+                "type": "RequestInfo"
+              },
+              "session": {
+                "required": true,
+                "type": "SessionInfo"
+              }
+            },
+            "type": "Record"
+          },
+          "principalTypes": [
+            "Pgs::Iam::Principal"
+          ],
+          "resourceTypes": [
+            "Pgs::Iam::Organization"
+          ]
+        },
+        "memberOf": [
+          {
+            "id": "InvokeTool"
+          }
+        ]
+      }
+    },
+    "commonTypes": {
+      "CallInfo": {
+        "attributes": {
+          "declared": {
+            "required": true,
+            "type": "String"
+          }
+        },
+        "type": "Record"
+      },
+      "RequestInfo": {
+        "attributes": {
+          "ingress": {
+            "required": true,
+            "type": "String"
+          },
+          "model": {
+            "required": true,
+            "type": "String"
+          },
+          "scope": {
+            "required": true,
+            "type": "String"
+          }
+        },
+        "type": "Record"
+      },
+      "SessionInfo": {
+        "attributes": {
+          "id": {
+            "required": true,
+            "type": "String"
+          },
+          "turn": {
+            "required": true,
+            "type": "Long"
+          }
+        },
+        "type": "Record"
+      }
+    },
+    "entityTypes": {}
+  },
+  "Pgs::Iam": {
+    "actions": {},
+    "entityTypes": {
+      "Organization": {},
+      "Principal": {}
+    }
+  }
+}

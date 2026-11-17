@@ -1,0 +1,147 @@
+{
+  "kind": "floor",
+  "max_window_ms": 86400000,
+  "protocol_version": 1,
+  "schema_json": {
+    "Pgs::Gateway": {
+      "actions": {
+        "InvokeTool": {
+          "appliesTo": {
+            "context": {
+              "attributes": {
+                "call": {
+                  "required": true,
+                  "type": "CallInfo"
+                },
+                "findings": {
+                  "element": {
+                    "type": "String"
+                  },
+                  "required": true,
+                  "type": "Set"
+                },
+                "input": {
+                  "attributes": {},
+                  "required": true,
+                  "type": "Record"
+                },
+                "input_text": {
+                  "required": false,
+                  "type": "String"
+                },
+                "request": {
+                  "required": true,
+                  "type": "RequestInfo"
+                },
+                "session": {
+                  "required": true,
+                  "type": "SessionInfo"
+                }
+              },
+              "type": "Record"
+            },
+            "principalTypes": [
+              "Pgs::Iam::Principal"
+            ],
+            "resourceTypes": [
+              "Pgs::Iam::Organization"
+            ]
+          }
+        },
+        "Unregistered": {
+          "appliesTo": {
+            "context": {
+              "attributes": {
+                "call": {
+                  "required": true,
+                  "type": "CallInfo"
+                },
+                "findings": {
+                  "element": {
+                    "type": "String"
+                  },
+                  "required": true,
+                  "type": "Set"
+                },
+                "input": {
+                  "attributes": {},
+                  "required": true,
+                  "type": "Record"
+                },
+                "input_text": {
+                  "required": false,
+                  "type": "String"
+                },
+                "request": {
+                  "required": true,
+                  "type": "RequestInfo"
+                },
+                "session": {
+                  "required": true,
+                  "type": "SessionInfo"
+                }
+              },
+              "type": "Record"
+            },
+            "principalTypes": [
+              "Pgs::Iam::Principal"
+            ],
+            "resourceTypes": [
+              "Pgs::Iam::Organization"
+            ]
+          }
+        }
+      },
+      "commonTypes": {
+        "CallInfo": {
+          "attributes": {
+            "declared": {
+              "required": true,
+              "type": "String"
+            }
+          },
+          "type": "Record"
+        },
+        "RequestInfo": {
+          "attributes": {
+            "ingress": {
+              "required": true,
+              "type": "String"
+            },
+            "model": {
+              "required": true,
+              "type": "String"
+            },
+            "scope": {
+              "required": true,
+              "type": "String"
+            }
+          },
+          "type": "Record"
+        },
+        "SessionInfo": {
+          "attributes": {
+            "id": {
+              "required": true,
+              "type": "String"
+            },
+            "turn": {
+              "required": true,
+              "type": "Long"
+            }
+          },
+          "type": "Record"
+        }
+      },
+      "entityTypes": {}
+    },
+    "Pgs::Iam": {
+      "actions": {},
+      "entityTypes": {
+        "Organization": {},
+        "Principal": {}
+      }
+    }
+  },
+  "source": "@id(\"floor-no-unregistered\")\nforbid (principal, action in Pgs::Gateway::Action::\"Unregistered\", resource);\n@id(\"floor-call-burst\")\n@scope(\"key\")\nforbid (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource)\nwhen temporal { count_within(1m, Pgs::Gateway::Action::\"InvokeTool\"::request{}) > 50 };\n"
+}

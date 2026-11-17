@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# This file is rs/deny.toml with only the entries that apply to this graph, plus the SMA-774 additions.
+# SMA-774: the policy compiler workspace (spec 2026-11-15 iam-tool-policy-sets, section 5.1).
+[graph]
+all-features = true   # see the full dep surface (service tokio/reqwest features, etc.)
+
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"             # reject crates yanked from crates.io
+# vulnerability advisories are deny-by-default in v2 — no separate key needed
+unmaintained = "workspace"  # police crates we pull in, not every deep transitive (noise control)
+
+[licenses]
+allow = [                   # v2: anything NOT listed is denied
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",        # older Unicode data-files license (pre-3.0 unicode-* crates)
+  "Zlib",
+  "MPL-2.0",                # Apache-compatible weak file-level copyleft (review F4)
+]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"   # don't warn on allowlist entries no crate matches yet (near-empty lock)
+exceptions = [
+  # SMA-774 (spec D3): tiny-keccak is CC0-1.0 (a public-domain dedication: permissive, no
+  # copyleft). It comes in through `rhai`, which is a mandatory dependency of Dogwood. Scoped
+  # here rather than globally allowed so a future CC0-1.0 dependency is a conscious decision.
+  { name = "tiny-keccak", allow = ["CC0-1.0"] },
+]
+
+[bans]
+multiple-versions = "warn"  # duplicates common early-stage — surface, don't block
+wildcards = "deny"          # "*" version reqs are a hygiene smell; the catalog uses none
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# SMA-774 (spec section 3.7): Dogwood is not on crates.io. Cargo.toml pins it as a git
+# dependency at one commit, and `unknown-git = "deny"` above refuses every other repository.
+allow-git = ["https://github.com/dogwood-policy/dogwood"]

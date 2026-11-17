@@ -1,0 +1,175 @@
+{
+  "outcome": "accepted",
+  "protocol_version": 1,
+  "compiler_generation": 1,
+  "compiled": {
+    "cedar_policies": "@id(\"floor-no-unregistered\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource) when { true };\n@id(\"floor-call-burst\")\n@scope(\"key\")\nforbid(principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource) when { context.p_floor_hcall_hburst_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "commonTypes": {
+          "CallInfo": {
+            "type": "Record",
+            "attributes": {
+              "declared": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              }
+            }
+          },
+          "RequestInfo": {
+            "type": "Record",
+            "attributes": {
+              "ingress": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              },
+              "model": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              },
+              "scope": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              }
+            }
+          },
+          "SessionInfo": {
+            "type": "Record",
+            "attributes": {
+              "id": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::String"
+              },
+              "turn": {
+                "type": "EntityOrCommon",
+                "name": "__cedar::Long"
+              }
+            }
+          }
+        },
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "call": {
+                    "type": "EntityOrCommon",
+                    "name": "CallInfo"
+                  },
+                  "findings": {
+                    "type": "Set",
+                    "element": {
+                      "type": "EntityOrCommon",
+                      "name": "__cedar::String"
+                    }
+                  },
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "input_text": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::String",
+                    "required": false
+                  },
+                  "p_floor_hcall_hburst_0__temporal_0": {
+                    "type": "Boolean"
+                  },
+                  "request": {
+                    "type": "EntityOrCommon",
+                    "name": "RequestInfo"
+                  },
+                  "session": {
+                    "type": "EntityOrCommon",
+                    "name": "SessionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "Unregistered": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "call": {
+                    "type": "EntityOrCommon",
+                    "name": "CallInfo"
+                  },
+                  "findings": {
+                    "type": "Set",
+                    "element": {
+                      "type": "EntityOrCommon",
+                      "name": "__cedar::String"
+                    }
+                  },
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "input_text": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::String",
+                    "required": false
+                  },
+                  "request": {
+                    "type": "EntityOrCommon",
+                    "name": "RequestInfo"
+                  },
+                  "session": {
+                    "type": "EntityOrCommon",
+                    "name": "SessionInfo"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_floor_hcall_hburst_0__temporal_0",
+        "policy_id": "floor-call-burst",
+        "scope": "key",
+        "window_ms": 60000,
+        "shape": {
+          "type": "count_within",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "event_kind",
+              "kind": "request"
+            },
+            "right": {
+              "type": "any_catalog_tool"
+            }
+          },
+          "op": "gt",
+          "threshold": 50
+        }
+      }
+    ]
+  }
+}

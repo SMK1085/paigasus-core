@@ -35,8 +35,16 @@ declared anywhere outside it was invisible, no tag was ever demanded for it, and
 its tag still uncut read as "every releasable package is already tagged" — a silent skip.
 `--assert`'s strict-equality pin could not catch that, because both sides of its comparison come
 from the same function. An unresolvable member pattern is `InconclusiveError`, which builds. A
-`[workspace] exclude` list is refused outright rather than ignored: this function does not model
-exclusion, and reading it as absent would make the skip permanently unreachable in silence.
+`[workspace] exclude` list is modelled in ONE case only (SMA-774): every `members` entry is a
+literal path, and no entry is at or under an excluded path. Then the exclusion removes no member,
+and the member list is used unchanged. This is the case of the policy compiler workspace
+`tools/paigasus-policy-compiler`, which is excluded and is not a member. Every other `exclude` is
+refused rather than ignored: an exclude that covers a member, an exclude beside a glob member, and an
+exclude entry with a `..` path component. Cargo's rule, measured on cargo 1.95.0: an explicit member
+is never excluded, and a directory that only a glob member matches is removed. So the first refusal
+is conservative (the member set would be correct, but the two lists contradict each other), and the
+second is a real shrink that this function does not compute. Reading it as absent would make the
+skip permanently unreachable in silence.
 
 ## Fail-safe direction
 
@@ -93,8 +101,8 @@ refuses to guess and builds instead.
 `run.sh` has four modes, and one of them is required:
 
 - `--self-test` — runs `release_plan.py --self-test` in-process: the pure `decide()` fixture
-  table (nine rows) plus thirty-eight collection-layer rows (SMA-688 raised this from fifteen;
-  SMA-708 added one).
+  table (nine rows) plus forty-one collection-layer rows (SMA-688 raised this from fifteen;
+  SMA-708 added one; SMA-774 added three, for the `[workspace] exclude` branches).
   Most collection rows build a throwaway tree under `tempfile.mkdtemp()` to exercise a path the
   pure `decide()` fixture cannot reach. The first fifteen rows are the original set. The original
   six: a missing `release-plz.toml`, a `version.workspace = true` inheritance, a `git_tag_name` override,

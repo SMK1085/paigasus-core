@@ -215,6 +215,53 @@ enum ErrorReason {
   // "rate-limited".
   ERROR_REASON_DPOP_QUOTA_EXCEEDED = 46;
 
+  // ---- IAM: tool policies (1-299) ------------------------------------------
+  // SMA-774. Emitted by the tool catalog and tool policy set RPCs (ToolPolicyService).
+
+  // "tool-policy-invalid" — Dogwood validation or Cedar validation failed. This is a rejection
+  // reason in a ToolPolicyRejection, not a gRPC error.
+  ERROR_REASON_TOOL_POLICY_INVALID = 47;
+  // "tool-policy-shape-unsupported" — a block is not one of the three shapes, has two shapes, or
+  // uses a predicate node outside the subset. This is a rejection reason in a ToolPolicyRejection,
+  // not a gRPC error.
+  ERROR_REASON_TOOL_POLICY_SHAPE_UNSUPPORTED = 48;
+  // "tool-policy-lowering-failed" — Dogwood's lower failed. This is a rejection reason in a
+  // ToolPolicyRejection, not a gRPC error.
+  ERROR_REASON_TOOL_POLICY_LOWERING_FAILED = 49;
+  // "tool-policy-floor-permit" — a floor set contains a permit. This is a rejection reason in a
+  // ToolPolicyRejection, not a gRPC error.
+  ERROR_REASON_TOOL_POLICY_FLOOR_PERMIT = 50;
+  // "tool-policy-id-invalid" — a missing, duplicate or malformed @id, a wrong floor- prefix, or an
+  // unknown @scope. This is a rejection reason in a ToolPolicyRejection, not a gRPC error.
+  ERROR_REASON_TOOL_POLICY_ID_INVALID = 51;
+  // "tool-policy-window-too-long" — a window is longer than the limit. This is a rejection reason
+  // in a ToolPolicyRejection, not a gRPC error.
+  ERROR_REASON_TOOL_POLICY_WINDOW_TOO_LONG = 52;
+  // "tool-catalog-breaks-policy" — a catalog write would break the live tenant set. This is a
+  // rejection reason in a ToolPolicyRejection, not a gRPC error.
+  ERROR_REASON_TOOL_CATALOG_BREAKS_POLICY = 53;
+  // "tool-catalog-invalid" — a tool name breaks the grammar, or a write breaks a limit. This is a
+  // rejection reason in a ToolPolicyRejection, not a gRPC error.
+  ERROR_REASON_TOOL_CATALOG_INVALID = 54;
+  // "tool-catalog-conflict" — two tool names have the same match key. gRPC ALREADY_EXISTS, HTTP
+  // 409.
+  ERROR_REASON_TOOL_CATALOG_CONFLICT = 55;
+  // "tool-policy-version-conflict" — the expected version or catalog revision is not current. gRPC
+  // ABORTED, HTTP 409.
+  ERROR_REASON_TOOL_POLICY_VERSION_CONFLICT = 56;
+  // "tool-policy-recompile-pending" — the live set is from an older compiler or schema. gRPC
+  // FAILED_PRECONDITION, HTTP 409.
+  ERROR_REASON_TOOL_POLICY_RECOMPILE_PENDING = 57;
+  // "tool-policy-compiler-unavailable" — the compiler crashed, timed out, or broke the protocol.
+  // gRPC UNAVAILABLE, HTTP 503.
+  ERROR_REASON_TOOL_POLICY_COMPILER_UNAVAILABLE = 58;
+  // "tool-policy-compiler-busy" — the compiler semaphore is full. Retryable. gRPC
+  // RESOURCE_EXHAUSTED, HTTP 429.
+  ERROR_REASON_TOOL_POLICY_COMPILER_BUSY = 59;
+  // "tool-policy-version-not-found" — a fetch asked for a version that does not exist, or that is
+  // not live or superseded. gRPC NOT_FOUND, HTTP 404.
+  ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND = 60;
+
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
   // keeps its OpenAI semantics.
