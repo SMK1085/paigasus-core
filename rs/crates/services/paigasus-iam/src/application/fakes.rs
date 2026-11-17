@@ -1964,6 +1964,7 @@ pub struct InMemoryToolPolicies {
     write_before_next_catalog_read: Arc<Mutex<Option<(Uuid, StoredTool)>>>,
     writes: Arc<AtomicUsize>,
     insert_attempts: Arc<AtomicUsize>,
+    read_log: Arc<Mutex<Vec<&'static str>>>,
 }
 
 const NO_STATE: ToolPolicyState = ToolPolicyState { catalog_revision: 0, live_version: 0 };
@@ -2011,6 +2012,11 @@ impl InMemoryToolPolicies {
         self.insert_attempts.load(Ordering::SeqCst)
     }
 
+    /// The names of the `settings`, `live` and `state` calls, in call order.
+    pub fn read_log(&self) -> Vec<&'static str> {
+        self.read_log.lock().unwrap().clone()
+    }
+
     /// Every stored version of a set, oldest first.
     pub fn versions(&self, key: &ToolPolicySetKey) -> Vec<ToolPolicyVersion> {
         self.data.lock().unwrap().versions.get(key).cloned().unwrap_or_default()
@@ -2036,6 +2042,7 @@ impl InMemoryToolPolicies {
 #[async_trait]
 impl ToolPolicyRepository for InMemoryToolPolicies {
     async fn state(&self, key: &ToolPolicySetKey) -> Result<ToolPolicyState, RepositoryError> {
+        self.read_log.lock().unwrap().push("state");
         Ok(Self::state_of(&self.data.lock().unwrap(), key))
     }
 
@@ -2054,6 +2061,7 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
     }
 
     async fn live(&self, key: &ToolPolicySetKey) -> Result<Option<ToolPolicyVersion>, RepositoryError> {
+        self.read_log.lock().unwrap().push("live");
         let mut data = self.data.lock().unwrap();
         if let Some(v) = self.live_before_next_live.lock().unwrap().take() {
             let mut state = Self::state_of(&data, &v.key);
@@ -2135,6 +2143,7 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
     }
 
     async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError> {
+        self.read_log.lock().unwrap().push("settings");
         Ok(self.data.lock().unwrap().settings.get(&org).cloned())
     }
 

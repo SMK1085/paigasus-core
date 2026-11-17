@@ -27,10 +27,17 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     /// The compiled tenant set (`version = None` is the live version), the settings and the
     /// live floor version. Authorized as `ReadCompiledToolPolicies` at the organization.
     /// `tool-policy-version-not-found` for a version that is not stored or not readable.
+    ///
+    /// The three reads are not one snapshot. The settings are read first, then the set, then the
+    /// floor version. A first enable writes the starter set and the new mode in one transaction.
+    /// With this order, the only tear that a concurrent first enable can cause is the starter set
+    /// with mode `off`. That tear is harmless. The reverse order could return no set with mode
+    /// `log_only` or `enforce`. The gateway version token names exactly what this call returned,
+    /// and the outbox event of the concurrent commit causes a fresh load.
     pub async fn get_compiled(&self, actor: &Prn, org: Uuid, version: Option<u64>) -> Result<CompiledTenant, TenancyError> {
         self.authorize_org(actor, org, Action::ReadCompiledToolPolicies).await?;
-        let set = self.read_version(&ToolPolicySetKey::Tenant(org), version).await?;
         let settings = self.repo.settings(org).await?.unwrap_or_else(ToolPolicySettings::default_for_absent_row);
+        let set = self.read_version(&ToolPolicySetKey::Tenant(org), version).await?;
         let floor_version = self.repo.state(&ToolPolicySetKey::Floor).await?.live_version;
         Ok(CompiledTenant { set, settings, floor_version })
     }

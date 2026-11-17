@@ -1967,4 +1967,12 @@ mod tests {
         allow_compiled(&h);
         assert_eq!(h.svc.get_compiled(&h.actor, Uuid::from_u128(999), None).await.unwrap_err(), TenancyError::NotFound);
     }
+
+    #[tokio::test]
+    async fn get_compiled_reads_the_settings_before_the_set_and_the_floor_version() {
+        let h = bare_harness();
+        allow_compiled(&h);
+        h.svc.get_compiled(&h.actor, h.org, None).await.unwrap();
+        assert_eq!(h.repo.read_log(), vec!["settings", "live", "state"]);
+    }
 }
