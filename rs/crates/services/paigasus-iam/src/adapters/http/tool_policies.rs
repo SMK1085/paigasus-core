@@ -11,6 +11,12 @@
 //! **A rejection is `200 {"result":"rejected","rejections":[...]}`**, and an accept is
 //! `200 {"result":"accepted", ...}`. Bodies use the snake_case field names of the proto messages.
 //!
+//! **The settings and the compiled-policy fetch (SMA-775).** `PUT .../tool-policy-settings` writes
+//! the mode and the fail mode. The first enable to `log_only` also saves the starter set. When
+//! two first enables race, the loser gets a version conflict (409) although the winner already
+//! applied its target mode. A retry succeeds. `GET .../compiled-tool-policies` and
+//! `GET /v1/compiled-tool-policy-floor` are the reads of the gateway service identity.
+//!
 //! **The floor routes take no organization.** The service authorizes them at Root.
 //! Import has its own path, `/tool-imports`, so a tool named `import` stays reachable at
 //! `/tools/import`.
@@ -18,19 +24,21 @@
 use axum::extract::State;
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
-use paigasus_iam_core::tool_policy::{ImportFormat, StoredTool, ToolKind, ToolPolicySetKey, ToolSource};
+use paigasus_iam_core::tool_policy::{FailMode, ImportFormat, StoredTool, ToolKind, ToolPolicyMode, ToolPolicySetKey, ToolPolicySettings, ToolSource};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1 as pb;
 use serde_json::{Value, json};
 
-use super::dto::{DeleteToolQuery, ImportFormatDto, ImportToolsBody, PageQuery, PolicySetVersionQuery, PutPolicySetBody, PutToolBody, ToolKindDto};
+use super::dto::{
+    DeleteToolQuery, FailModeDto, ImportFormatDto, ImportToolsBody, PageQuery, PolicySetVersionQuery, PutPolicySetBody, PutToolBody, PutToolPolicySettingsBody, ToolKindDto, ToolPolicyModeDto,
+};
 use super::error::ApiError;
 use super::json::EnvelopeJson;
 use super::path::{OrganizationId, ToolNameSegment, UuidAndSegmentPath, UuidPath};
 use super::query::EnvelopeQuery;
 use super::{AppState, ToolPolicySvc};
 use crate::adapters::auth::AuthContext;
-use crate::adapters::tool_policy_wire::{empty_set, version_to_pb};
+use crate::adapters::tool_policy_wire::{compiled_or_empty, empty_set, version_to_pb};
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 use crate::application::tool_policies::{CatalogAccepted, ToolPolicyRejection, WriteResult};
@@ -42,6 +50,9 @@ pub fn router() -> Router<AppState> {
         .route("/v1/organizations/{id}/tool-imports", post(import_tools))
         .route("/v1/organizations/{id}/tool-policy-set", put(put_set).get(get_set))
         .route("/v1/tool-policy-floor", put(put_floor).get(get_floor))
+        .route("/v1/organizations/{id}/tool-policy-settings", put(put_settings).get(get_settings))
+        .route("/v1/organizations/{id}/compiled-tool-policies", get(get_compiled))
+        .route("/v1/compiled-tool-policy-floor", get(get_compiled_floor))
 }
 
 fn actor_prn(ctx: &AuthContext) -> Prn {
@@ -181,10 +192,15 @@ fn condition_json(c: &pb::HistoryCondition) -> Value {
 /// The compiled message as JSON, with the proto field names. A schema text that is not JSON is a
 /// storage defect: it is logged and answered as `Internal`, as `version_to_pb` does.
 fn compiled_json(c: &pb::CompiledToolPolicySet) -> Result<Value, ApiError> {
-    let cedar_schema = serde_json::from_str::<Value>(&c.cedar_schema).map_err(|error| {
-        tracing::error!(error = %error, version = c.version, "the stored compiled schema is not JSON");
-        ApiError(TenancyError::Internal)
-    })?;
+    // An empty set (version 0, nothing stored) has no schema text: it renders as `null`.
+    let cedar_schema = if c.cedar_schema.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str::<Value>(&c.cedar_schema).map_err(|error| {
+            tracing::error!(error = %error, version = c.version, "the stored compiled schema is not JSON");
+            ApiError(TenancyError::Internal)
+        })?
+    };
     Ok(json!({
         "kind": enum_name::<pb::ToolPolicySetKind>(c.kind, pb::ToolPolicySetKind::as_str_name),
         "org_id": c.org_id,
@@ -213,6 +229,63 @@ fn read_response(found: Option<paigasus_iam_core::tool_policy::ToolPolicyVersion
         None => empty_set(key),
     };
     Ok(Json(set_json(&wire)?))
+}
+
+fn settings_json(s: &ToolPolicySettings) -> Value {
+    json!({
+        "mode": s.mode.as_str(),
+        "fail_mode": s.fail_mode.as_str(),
+        "updated_at": s.updated_at.map(|t| t.to_rfc3339()),
+        "updated_by": s.updated_by,
+    })
+}
+
+async fn get_settings(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>) -> Result<Json<Value>, ApiError> {
+    let svc = svc(&s)?;
+    Ok(Json(settings_json(&svc.get_settings(&actor_prn(&ctx), path.id).await?)))
+}
+
+/// Writes the settings. A first enable that races with another first enable can answer 409
+/// `tool-policy-version-conflict` although the winner applied the same mode. Retry.
+async fn put_settings(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<OrganizationId>,
+    EnvelopeJson(b): EnvelopeJson<PutToolPolicySettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    let svc = svc(&s)?;
+    let mode = match b.mode {
+        ToolPolicyModeDto::Off => ToolPolicyMode::Off,
+        ToolPolicyModeDto::LogOnly => ToolPolicyMode::LogOnly,
+        ToolPolicyModeDto::Enforce => ToolPolicyMode::Enforce,
+    };
+    let fail_mode = match b.fail_mode {
+        FailModeDto::Open => FailMode::Open,
+        FailModeDto::Closed => FailMode::Closed,
+    };
+    let accepted = svc.put_settings(&actor_prn(&ctx), path.id, mode, fail_mode).await?;
+    Ok(Json(json!({"settings": settings_json(&accepted.settings), "starter_version": accepted.starter_version})))
+}
+
+async fn get_compiled(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<OrganizationId>,
+    EnvelopeQuery(q): EnvelopeQuery<PolicySetVersionQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let svc = svc(&s)?;
+    let fetched = svc.get_compiled(&actor_prn(&ctx), path.id, q.version).await?;
+    let set = compiled_or_empty(fetched.set.as_ref(), ToolPolicySetKey::Tenant(path.id))?;
+    Ok(Json(
+        json!({"set": compiled_json(&set)?, "settings": settings_json(&fetched.settings), "floor_version": fetched.floor_version}),
+    ))
+}
+
+async fn get_compiled_floor(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<PolicySetVersionQuery>) -> Result<Json<Value>, ApiError> {
+    let svc = svc(&s)?;
+    let floor = svc.get_compiled_floor(&actor_prn(&ctx), q.version).await?;
+    let set = compiled_or_empty(floor.as_ref(), ToolPolicySetKey::Floor)?;
+    Ok(Json(json!({"set": compiled_json(&set)?})))
 }
 
 async fn list_tools(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>, EnvelopeQuery(q): EnvelopeQuery<PageQuery>) -> Result<Json<Value>, ApiError> {

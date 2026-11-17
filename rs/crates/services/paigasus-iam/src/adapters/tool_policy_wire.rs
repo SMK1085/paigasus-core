@@ -55,3 +55,18 @@ pub(crate) fn empty_set(key: ToolPolicySetKey) -> pb::ToolPolicySetVersion {
         ..Default::default()
     }
 }
+
+/// The compiled message of a stored version, or the wire answer of a read with no version: the
+/// kind set, `version` 0, an empty `org_id` and nothing else.
+pub(crate) fn compiled_or_empty(found: Option<&ToolPolicyVersion>, key: ToolPolicySetKey) -> Result<pb::CompiledToolPolicySet, TenancyError> {
+    match found {
+        Some(v) => version_to_pb(v)?.compiled.ok_or(TenancyError::Internal),
+        None => Ok(pb::CompiledToolPolicySet {
+            kind: match key {
+                ToolPolicySetKey::Tenant(_) => pb::ToolPolicySetKind::Tenant,
+                ToolPolicySetKey::Floor => pb::ToolPolicySetKind::Floor,
+            } as i32,
+            ..Default::default()
+        }),
+    }
+}

@@ -15,8 +15,8 @@ use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam_core::tool_policy::{STARTER_TOOL_POLICY_SOURCE, tenant_schema_json};
 use paigasus_iam_core::{IdGenerator, PrincipalId};
 use paigasus_kernel::Prn;
-use paigasus_proto::paigasus::iam::v1::GetToolPolicySetRequest;
 use paigasus_proto::paigasus::iam::v1::tool_policy_service_client::ToolPolicyServiceClient;
+use paigasus_proto::paigasus::iam::v1::{GetCompiledToolPoliciesRequest, GetToolPolicySetRequest};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde_json::{Value, json};
 use support::{MockIdp, accepted_result, fake_compiler_script, rejected_result, send, send_bytes, set_compiler_result};
@@ -382,4 +382,88 @@ async fn malformed_input_answers_in_the_error_envelope() {
     assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-request-body"));
     let (status, body) = send_bytes(&env.app, "PUT", &env.set(), Some("application/json"), b"{not json", Some(&env.admin)).await;
     assert_eq!((status, code(&body).as_str()), (StatusCode::BAD_REQUEST, "invalid-request-body"));
+}
+
+// ---- the settings and the compiled-policy fetch (SMA-775 Task 9) -----------------------------
+
+impl Env {
+    fn settings(&self) -> String {
+        format!("/v1/organizations/{}/tool-policy-settings", self.org)
+    }
+
+    fn compiled(&self) -> String {
+        format!("/v1/organizations/{}/compiled-tool-policies", self.org)
+    }
+}
+
+#[tokio::test]
+async fn the_settings_and_fetch_routes_are_404_when_the_capability_is_off() {
+    for (enabled, present) in [(false, true), (true, false)] {
+        let Some(env) = setup_with(enabled, present, &tenant_accepted()).await else { return };
+        assert!(!env.state.capabilities.tool_policies);
+        let calls: Vec<(&str, String, Option<Value>)> = vec![
+            ("GET", env.settings(), None),
+            ("PUT", env.settings(), Some(json!({"mode": "log_only", "fail_mode": "closed"}))),
+            ("GET", env.compiled(), None),
+            ("GET", "/v1/compiled-tool-policy-floor".to_string(), None),
+        ];
+        for (method, uri, body) in calls {
+            let (status, _) = send(&env.app, method, &uri, body, Some(&env.admin)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri} (enabled={enabled})");
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_and_grpc_return_the_same_compiled_set() {
+    let Some(env) = setup(true, &tenant_accepted()).await else { return };
+    let (status, none) = send(&env.app, "GET", &env.settings(), None, Some(&env.admin)).await;
+    assert_eq!(
+        (status, none["mode"].as_str(), none["fail_mode"].as_str(), none["updated_at"].is_null()),
+        (StatusCode::OK, Some("off"), Some("closed"), true)
+    );
+    let (status, put) = send(&env.app, "PUT", &env.settings(), Some(json!({"mode": "log_only", "fail_mode": "open"})), Some(&env.admin)).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(
+        (put["starter_version"].as_u64(), put["settings"]["mode"].as_str(), put["settings"]["fail_mode"].as_str()),
+        (Some(1), Some("log_only"), Some("open"))
+    );
+
+    let (status, http) = send(&env.app, "GET", &env.compiled(), None, Some(&env.admin)).await;
+    assert_eq!(status, StatusCode::OK, "{http}");
+    assert_eq!(
+        (http["set"]["version"].as_u64(), http["floor_version"].as_u64(), http["settings"]["mode"].as_str()),
+        (Some(1), Some(0), Some("log_only"))
+    );
+    let (status, floor) = send(&env.app, "GET", "/v1/compiled-tool-policy-floor", None, Some(&env.admin)).await;
+    assert_eq!(
+        (status, floor["set"]["version"].as_u64(), floor["set"]["kind"].as_str()),
+        (StatusCode::OK, Some(0), Some("TOOL_POLICY_SET_KIND_FLOOR"))
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let grpc_router = grpc::router(env.state.clone(), Duration::from_secs(10)).await;
+    let server = tokio::spawn(async move { grpc_router.serve_with_incoming(incoming).await.unwrap() });
+    let ch = tonic::transport::Endpoint::new(format!("http://{addr}")).unwrap().connect().await.unwrap();
+    let mut request = tonic::Request::new(GetCompiledToolPoliciesRequest {
+        org_prn: env.org_prn.clone(),
+        version: None,
+    });
+    support::grpc_bearer(&mut request, &env.admin);
+    let over_grpc = ToolPolicyServiceClient::new(ch).get_compiled_tool_policies(request).await.unwrap().into_inner();
+    server.abort();
+    let set = over_grpc.set.expect("a set");
+    assert_eq!(set.version, http["set"]["version"].as_u64().unwrap());
+    assert_eq!(set.cedar_policies, http["set"]["cedar_policies"].as_str().unwrap());
+    assert_eq!(set.catalog_revision, http["set"]["catalog_revision"].as_u64().unwrap());
+    assert_eq!(over_grpc.floor_version, http["floor_version"].as_u64().unwrap());
+}
+
+#[tokio::test]
+async fn a_mode_transition_error_is_409_with_its_code() {
+    let Some(env) = setup(true, &tenant_accepted()).await else { return };
+    let (status, body) = send(&env.app, "PUT", &env.settings(), Some(json!({"mode": "enforce", "fail_mode": "closed"})), Some(&env.admin)).await;
+    assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("tool-policy-mode-transition-invalid")), "{body}");
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `ToolPolicyGrpc`: the `ToolPolicyService` gRPC server (8 RPCs, SMA-774 Task 13, spec sections
+//! `ToolPolicyGrpc`: the `ToolPolicyService` gRPC server (12 RPCs, SMA-774 Task 13 and SMA-775, spec sections
 //! 6.2, 7 and 9.1). A thin adapter over `AppState.tool_policies`: check the capability, parse the
 //! wire values, call the service with the bearer-resolved actor, convert the result.
 //!
@@ -17,7 +17,7 @@
 
 use std::time::Instant;
 
-use paigasus_iam_core::tool_policy::{ImportFormat, ToolKind, ToolPolicySetKey, ToolPolicyVersion};
+use paigasus_iam_core::tool_policy::{FailMode, ImportFormat, ToolKind, ToolPolicyMode, ToolPolicySetKey, ToolPolicySettings, ToolPolicyVersion};
 use paigasus_kernel::Prn;
 use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1 as pb;
@@ -28,7 +28,7 @@ use uuid::Uuid;
 use super::convert;
 use crate::adapters::auth::AuthContext;
 use crate::adapters::http::{AppState, ToolPolicySvc};
-use crate::adapters::tool_policy_wire::{empty_set, version_to_pb};
+use crate::adapters::tool_policy_wire::{compiled_or_empty, empty_set, version_to_pb};
 use crate::application::error::TenancyError;
 use crate::application::tool_policies::wire::tool_to_pb;
 use crate::application::tool_policies::{CatalogAccepted, RejectionReason, ToolPolicyRejection, WriteResult};
@@ -73,6 +73,40 @@ fn kind_from_wire(raw: i32) -> Result<ToolKind, Status> {
         Ok(pb::ToolKind::Function) => Ok(ToolKind::Function),
         Ok(pb::ToolKind::Custom) => Ok(ToolKind::Custom),
         _ => Err(convert::status_to_grpc(TenancyError::MissingRequiredField("kind"))),
+    }
+}
+
+/// The wire mode. `UNSPECIFIED` and an unknown number are a missing field.
+fn mode_from_wire(raw: i32) -> Result<ToolPolicyMode, Status> {
+    match pb::ToolPolicyMode::try_from(raw) {
+        Ok(pb::ToolPolicyMode::Off) => Ok(ToolPolicyMode::Off),
+        Ok(pb::ToolPolicyMode::LogOnly) => Ok(ToolPolicyMode::LogOnly),
+        Ok(pb::ToolPolicyMode::Enforce) => Ok(ToolPolicyMode::Enforce),
+        _ => Err(convert::status_to_grpc(TenancyError::MissingRequiredField("mode"))),
+    }
+}
+
+fn fail_mode_from_wire(raw: i32) -> Result<FailMode, Status> {
+    match pb::ToolPolicyFailMode::try_from(raw) {
+        Ok(pb::ToolPolicyFailMode::Open) => Ok(FailMode::Open),
+        Ok(pb::ToolPolicyFailMode::Closed) => Ok(FailMode::Closed),
+        _ => Err(convert::status_to_grpc(TenancyError::MissingRequiredField("fail_mode"))),
+    }
+}
+
+fn settings_to_pb(s: &ToolPolicySettings) -> pb::ToolPolicySettings {
+    pb::ToolPolicySettings {
+        mode: match s.mode {
+            ToolPolicyMode::Off => pb::ToolPolicyMode::Off,
+            ToolPolicyMode::LogOnly => pb::ToolPolicyMode::LogOnly,
+            ToolPolicyMode::Enforce => pb::ToolPolicyMode::Enforce,
+        } as i32,
+        fail_mode: match s.fail_mode {
+            FailMode::Open => pb::ToolPolicyFailMode::Open,
+            FailMode::Closed => pb::ToolPolicyFailMode::Closed,
+        } as i32,
+        updated_at: s.updated_at.map(convert::ts),
+        updated_by: s.updated_by.clone().unwrap_or_default(),
     }
 }
 
@@ -309,28 +343,83 @@ impl ToolPolicyService for ToolPolicyGrpc {
         result
     }
 
-    // Stub until the fetch and settings task (SMA-775) wires the application service.
-    async fn get_tool_policy_settings(&self, _request: Request<pb::GetToolPolicySettingsRequest>) -> Result<Response<pb::GetToolPolicySettingsResponse>, Status> {
-        self.svc()?;
-        Err(Status::unimplemented("GetToolPolicySettings is not wired yet"))
+    async fn get_tool_policy_settings(&self, request: Request<pb::GetToolPolicySettingsRequest>) -> Result<Response<pb::GetToolPolicySettingsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::GetToolPolicySettingsResponse>, Status> = async {
+            let svc = self.svc()?;
+            let actor = actor(&request)?;
+            let req = request.into_inner();
+            let org = org_uuid(&req.org_prn)?;
+            let settings = svc.get_settings(&actor, org).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(pb::GetToolPolicySettingsResponse {
+                settings: Some(settings_to_pb(&settings)),
+            }))
+        }
+        .await;
+        record_grpc("ToolPolicy", "GetToolPolicySettings", started, &result);
+        result
     }
 
-    // Stub until the fetch and settings task (SMA-775) wires the application service.
-    async fn put_tool_policy_settings(&self, _request: Request<pb::PutToolPolicySettingsRequest>) -> Result<Response<pb::PutToolPolicySettingsResponse>, Status> {
-        self.svc()?;
-        Err(Status::unimplemented("PutToolPolicySettings is not wired yet"))
+    /// Writes the settings of one organization. The first enable to `LOG_ONLY` also saves the
+    /// starter set, and `starter_version` names it.
+    ///
+    /// **A race on the first enable.** When two first enables run at the same time, the loser
+    /// gets a version conflict (the gRPC code `ABORTED`, HTTP 409). The winner has already
+    /// applied the mode that the loser asked for, so the loser can read the settings, or retry.
+    /// A retry succeeds.
+    async fn put_tool_policy_settings(&self, request: Request<pb::PutToolPolicySettingsRequest>) -> Result<Response<pb::PutToolPolicySettingsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::PutToolPolicySettingsResponse>, Status> = async {
+            let svc = self.svc()?;
+            let actor = actor(&request)?;
+            let req = request.into_inner();
+            let org = org_uuid(&req.org_prn)?;
+            let mode = mode_from_wire(req.mode)?;
+            let fail_mode = fail_mode_from_wire(req.fail_mode)?;
+            let accepted = svc.put_settings(&actor, org, mode, fail_mode).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(pb::PutToolPolicySettingsResponse {
+                settings: Some(settings_to_pb(&accepted.settings)),
+                starter_version: accepted.starter_version,
+            }))
+        }
+        .await;
+        record_grpc("ToolPolicy", "PutToolPolicySettings", started, &result);
+        result
     }
 
-    // Stub until the fetch and settings task (SMA-775) wires the application service.
-    async fn get_compiled_tool_policies(&self, _request: Request<pb::GetCompiledToolPoliciesRequest>) -> Result<Response<pb::GetCompiledToolPoliciesResponse>, Status> {
-        self.svc()?;
-        Err(Status::unimplemented("GetCompiledToolPolicies is not wired yet"))
+    async fn get_compiled_tool_policies(&self, request: Request<pb::GetCompiledToolPoliciesRequest>) -> Result<Response<pb::GetCompiledToolPoliciesResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::GetCompiledToolPoliciesResponse>, Status> = async {
+            let svc = self.svc()?;
+            let actor = actor(&request)?;
+            let req = request.into_inner();
+            let org = org_uuid(&req.org_prn)?;
+            let fetched = svc.get_compiled(&actor, org, req.version).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(pb::GetCompiledToolPoliciesResponse {
+                set: Some(compiled_or_empty(fetched.set.as_ref(), ToolPolicySetKey::Tenant(org)).map_err(convert::status_to_grpc)?),
+                settings: Some(settings_to_pb(&fetched.settings)),
+                floor_version: fetched.floor_version,
+            }))
+        }
+        .await;
+        record_grpc("ToolPolicy", "GetCompiledToolPolicies", started, &result);
+        result
     }
 
-    // Stub until the fetch and settings task (SMA-775) wires the application service.
-    async fn get_compiled_floor_policies(&self, _request: Request<pb::GetCompiledFloorPoliciesRequest>) -> Result<Response<pb::GetCompiledFloorPoliciesResponse>, Status> {
-        self.svc()?;
-        Err(Status::unimplemented("GetCompiledFloorPolicies is not wired yet"))
+    async fn get_compiled_floor_policies(&self, request: Request<pb::GetCompiledFloorPoliciesRequest>) -> Result<Response<pb::GetCompiledFloorPoliciesResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::GetCompiledFloorPoliciesResponse>, Status> = async {
+            let svc = self.svc()?;
+            let actor = actor(&request)?;
+            let req = request.into_inner();
+            let floor = svc.get_compiled_floor(&actor, req.version).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(pb::GetCompiledFloorPoliciesResponse {
+                set: Some(compiled_or_empty(floor.as_ref(), ToolPolicySetKey::Floor).map_err(convert::status_to_grpc)?),
+            }))
+        }
+        .await;
+        record_grpc("ToolPolicy", "GetCompiledFloorPolicies", started, &result);
+        result
     }
 }
 
