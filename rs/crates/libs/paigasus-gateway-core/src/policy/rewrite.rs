@@ -13,17 +13,8 @@ use paigasus_kernel::tool_policy::normalise;
 use super::plan::{ChoiceRewrite, REMOVABLE_BUILT_INS, RequestPlan, ResultTarget};
 use super::raw::{ObjectEdit, RawArray, RawObject, top_level};
 use crate::report::{RequestAction, RequestReason, sanitize_name};
+use crate::turn::{ResultShape, responses_result_shape};
 use crate::types::Format;
-
-/// The Responses input items whose `output` is a tool result (§ 6.5.2).
-const RESPONSES_OUTPUTS: [&str; 6] = [
-    "function_call_output",
-    "custom_tool_call_output",
-    "computer_call_output",
-    "local_shell_call_output",
-    "shell_call_output",
-    "apply_patch_call_output",
-];
 
 /// The fixed notice that replaces a tool result (§ 6.5.2, ADR-0027 (c)). It is built only from the
 /// reason and the cleaned tool name, never from the result content (SMA-749 D21).
@@ -323,11 +314,11 @@ fn responses(top: &RawObject, en: &Enforced, choice: &ChoiceRewrite, edit: &mut 
         let Some(item) = RawObject::parse(el.value.get()) else { continue };
         let ty = item.str("type").unwrap_or_default();
         let mut e = item.edit();
-        if RESPONSES_OUTPUTS.contains(&ty.as_str()) {
+        if let Some(ResultShape::Text | ResultShape::ShellChunks | ResultShape::Screenshot) = responses_result_shape(&ty) {
             let shell = || if ty == "local_shell_call_output" { en.shell_notice(&item) } else { None };
             let Some(notice) = en.id_notice(&item, "call_id").or_else(shell) else { continue };
             e.set("output", notice.clone());
-        } else if ty == "mcp_approval_response" {
+        } else if responses_result_shape(&ty) == Some(ResultShape::Approval) {
             // The approval becomes a refusal, with the notice as its reason.
             let Some(notice) = en.id_notice(&item, "approval_request_id") else { continue };
             e.set("approve", "false".to_owned());

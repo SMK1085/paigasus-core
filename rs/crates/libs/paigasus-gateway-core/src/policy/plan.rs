@@ -309,7 +309,7 @@ mod tests {
     use super::*;
     use crate::policy::SHIPPED_FLOOR;
     use crate::policy::snapshot::OnUnavailable;
-    use crate::turn::{PriorCall, ToolResultRef, ToolTurn, parse_request};
+    use crate::turn::{PriorCall, ResultShape, ToolResultRef, ToolTurn, parse_request};
 
     const NO_FLOOR: &str = "";
     const RM_FLOOR: &str = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"rm", resource);"#;
@@ -375,6 +375,7 @@ mod tests {
             call_id: Some(id.to_owned()),
             name: None,
             item_id: None,
+            shape: ResultShape::Text,
         }
     }
 
@@ -555,6 +556,7 @@ mod tests {
             call_id: None,
             name: None,
             item_id: Some(id.to_owned()),
+            shape: ResultShape::Text,
         };
         let run = |prior_calls: Vec<PriorCall>, tool_results: Vec<ToolResultRef>| {
             let mut t = turn(vec![]);
@@ -581,6 +583,7 @@ mod tests {
             call_id: Some("c1".to_owned()),
             name: None,
             item_id: Some("ls_1".to_owned()),
+            shape: ResultShape::Text,
         };
         let p = run(vec![shell("x")], vec![both]);
         assert_eq!(p.replaced, [item(ResultTarget::CallId("c1".to_owned()), true)]);
@@ -605,6 +608,7 @@ mod tests {
             call_id: Some("c1".to_owned()),
             name: None,
             item_id: Some("ls_2".to_owned()),
+            shape: ResultShape::Text,
         }];
         let p = plan_request(&s, Format::OpenAiResponses, &t);
         assert_eq!(
@@ -648,6 +652,7 @@ mod tests {
             call_id: None,
             name: Some("x".to_owned()),
             item_id: None,
+            shape: ResultShape::Text,
         };
         let p = replaced(vec![], vec![legacy]);
         assert_eq!(p.replaced, [item(ResultTarget::Name("x".to_owned()), true)]);
@@ -658,6 +663,7 @@ mod tests {
             call_id: None,
             name: None,
             item_id: None,
+            shape: ResultShape::Text,
         };
         assert!(replaced(vec![], vec![none]).replaced.is_empty());
     }
