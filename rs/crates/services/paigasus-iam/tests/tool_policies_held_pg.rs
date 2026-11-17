@@ -389,3 +389,32 @@ async fn a_rolled_back_held_insert_leaves_no_row_and_the_old_counter() {
     assert_eq!(e.repo.state(&key).await.unwrap().last_version, 1);
     assert_eq!(scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version WHERE version = 2".into(), "n").await, 0);
 }
+
+/// `down` removes the held and discarded rows above the live version, so a PR 2 save
+/// (`live_version + 1`) does not hit the unique index.
+#[tokio::test]
+async fn down_removes_held_rows_above_the_live_version_and_a_pr2_save_succeeds() {
+    use paigasus_iam::adapters::persistence::Migrator;
+    use sea_orm_migration::MigratorTrait;
+    let Some(e) = env().await else { return };
+    let key = ToolPolicySetKey::Tenant(seed_org(&e.db).await);
+    e.put_live(&live(key, 1, VersionOrigin::Save)).await.unwrap();
+    e.put_held(&held(key, 2, 1)).await.unwrap(); // becomes discarded
+    e.put_held(&held(key, 3, 1)).await.unwrap(); // stays held
+    Migrator::down(&e.db, Some(1)).await.unwrap();
+    assert_eq!(scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version".into(), "n").await, 1, "only the live row stays");
+    raw(&e.db, "UPDATE tool_policy_set_version SET status = 'superseded'".into()).await.unwrap();
+    let org = match key {
+        ToolPolicySetKey::Tenant(o) => o,
+        ToolPolicySetKey::Floor => unreachable!(),
+    };
+    raw(
+        &e.db,
+        format!(
+            "INSERT INTO tool_policy_set_version (kind, org_id, version, source, compiled, compiler_generation, schema_revision, catalog_revision, status, origin, created_by, created_at) \
+             VALUES ('tenant', '{org}', 2, 's', '\\x00', 1, 1, 0, 'live', 'save', 't', now())"
+        ),
+    )
+    .await
+    .expect("a PR 2 save takes live_version + 1");
+}

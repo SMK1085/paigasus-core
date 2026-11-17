@@ -51,6 +51,14 @@ impl MigrationTrait for Migration {
             .await?;
         conn.execute_unprepared(r#"ALTER TABLE "tool_policy_set_version" DROP CONSTRAINT IF EXISTS ck_tool_policy_version_compiled;"#)
             .await?;
+        // PR 2 code numbers a save `live_version + 1`. A held or discarded row above the live
+        // version would hold that number, so every save of the set would hit the unique index.
+        conn.execute_unprepared(
+            r#"DELETE FROM "tool_policy_set_version" v USING "tool_policy_state" s
+                 WHERE v.status IN ('held','discarded') AND v.version > s.live_version
+                   AND v.kind = s.kind AND v.org_id IS NOT DISTINCT FROM s.org_id;"#,
+        )
+        .await?;
         conn.execute_unprepared(r#"DELETE FROM "tool_policy_set_version" WHERE compiled IS NULL;"#).await?;
         conn.execute_unprepared(r#"ALTER TABLE "tool_policy_set_version" ALTER COLUMN compiled SET NOT NULL;"#).await?;
         conn.execute_unprepared(r#"ALTER TABLE "tool_policy_state" DROP COLUMN IF EXISTS last_version;"#).await?;
