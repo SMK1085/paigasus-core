@@ -210,8 +210,9 @@ pub enum TenancyError {
     /// SMA-774. The requested version does not exist, or it is not live or superseded.
     #[error("the tool policy set version does not exist")]
     ToolPolicyVersionNotFound,
-    /// SMA-775. The first enable to `enforce` has no tool policy set to enforce (spec section 9.2).
-    #[error("the tool policy mode cannot change this way: save a tool policy set first")]
+    /// SMA-775. A change to `enforce` that spec section 9.2 refuses: the organization never left
+    /// `off` (the first change away from `off` must be to `log_only`), or it has no tool policy set.
+    #[error("the tool policy mode cannot change this way: change the mode to log_only first; enforce also needs a saved tool policy set")]
     ToolPolicyModeTransitionInvalid,
     #[error("internal server error")]
     Internal,

@@ -48,4 +48,13 @@ mod tests {
         assert_eq!(check_transition(Enforce, true, false), Err(TenancyError::ToolPolicyModeTransitionInvalid));
         assert_eq!(check_transition(Enforce, true, true), Ok(false));
     }
+
+    /// The one client message covers both causes of the refusal: no earlier change away from
+    /// `off`, and no saved set.
+    #[test]
+    fn the_refusal_message_names_both_causes() {
+        let message = TenancyError::ToolPolicyModeTransitionInvalid.to_string();
+        assert!(message.contains("log_only first"), "{message}");
+        assert!(message.contains("saved tool policy set"), "{message}");
+    }
 }
