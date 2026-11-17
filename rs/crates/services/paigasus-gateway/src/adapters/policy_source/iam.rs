@@ -18,6 +18,7 @@ use paigasus_proto::paigasus::iam::v1::{
     CompiledToolPolicySet, GetCompiledFloorPoliciesRequest, GetCompiledFloorPoliciesResponse, GetCompiledToolPoliciesRequest, GetCompiledToolPoliciesResponse, ToolPolicyFailMode, ToolPolicyMode,
     ToolPolicySetKind,
 };
+use tokio::io::AsyncReadExt;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::{Code, Request};
@@ -25,6 +26,9 @@ use uuid::Uuid;
 
 use crate::adapters::iam::client::with_correlation;
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
+
+/// The largest credential file that the source reads. A real API key is far smaller.
+const MAX_CREDENTIAL_BYTES: u64 = 4096;
 
 /// Fetches the tool policies from IAM.
 #[derive(Debug, Clone)]
@@ -44,7 +48,14 @@ impl IamPolicySource {
 
     /// Read the credential file now (R8: on every fetch). The error text holds the error kind only.
     async fn bearer(&self) -> Result<MetadataValue<tonic::metadata::Ascii>, SourceError> {
-        let raw = tokio::fs::read(&self.credential_file).await.map_err(|e| credential_error(&e.kind().to_string()))?;
+        // Read at most one byte more than the cap, so an oversized file is detected without
+        // reading it whole.
+        let file = tokio::fs::File::open(&self.credential_file).await.map_err(|e| credential_error(&e.kind().to_string()))?;
+        let mut raw = Vec::new();
+        file.take(MAX_CREDENTIAL_BYTES + 1).read_to_end(&mut raw).await.map_err(|e| credential_error(&e.kind().to_string()))?;
+        if raw.len() as u64 > MAX_CREDENTIAL_BYTES {
+            return Err(credential_error("too large (over 4096 bytes)"));
+        }
         let key = std::str::from_utf8(&raw).map_err(|_| credential_error("invalid data"))?.trim_matches(|c: char| c.is_ascii_whitespace());
         if key.is_empty() {
             return Err(credential_error("empty"));

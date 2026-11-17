@@ -625,13 +625,15 @@ impl GatewayConfig {
         self.responses.validate()?;
         self.tool_policy.validate(&self.tool_interception)?;
         // SMA-775: the cross-table rule that `ToolPolicyConfig::validate` cannot see (it has no `iam`).
-        if self.tool_policy.enabled && matches!(self.tool_policy.source, Some(PolicySourceConfig::Iam {})) {
-            match self.iam.service_credential_file.as_deref() {
-                None => return Err("iam.service_credential_file is required when tool_policy.source kind = \"iam\"".to_string()),
-                Some(p) if p.trim().is_empty() => return Err("iam.service_credential_file must not be empty".to_string()),
-                Some(p) if p != p.trim() => return Err("iam.service_credential_file has leading or trailing whitespace, which is never valid config".to_string()),
-                Some(_) => {}
-            }
+        // A blank or padded path is refused at all times (as a blank `tool_policy.nats.creds_file` is).
+        // Only "the file is required" waits for `enabled`.
+        match self.iam.service_credential_file.as_deref() {
+            Some(p) if p.trim().is_empty() => return Err("iam.service_credential_file must not be empty (omit the key to use none)".to_string()),
+            Some(p) if p != p.trim() => return Err("iam.service_credential_file has leading or trailing whitespace, which is never valid config".to_string()),
+            _ => {}
+        }
+        if self.tool_policy.enabled && matches!(self.tool_policy.source, Some(PolicySourceConfig::Iam {})) && self.iam.service_credential_file.is_none() {
+            return Err("iam.service_credential_file is required when tool_policy.source kind = \"iam\"".to_string());
         }
         Ok(())
     }
@@ -1676,6 +1678,26 @@ mod tests {
         let org = "[[tool_policy.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nmode = \"enforce\"";
         let err = tp_load(&tp_iam_toml("service_credential_file = \"/k\"", org)).expect("loads").validate().expect_err("org entries");
         assert!(err.contains("tool_policy.org") && err.contains("iam"), "{err}");
+    }
+
+    #[test]
+    fn the_iam_source_refuses_org_entries_also_when_disabled() {
+        let org = "[[tool_policy.org]]\nid = \"0190a100-0000-7000-8000-0000000000a1\"\nmode = \"enforce\"";
+        let toml = tp_iam_toml("service_credential_file = \"/k\"", org).replace("enabled = true\n\n[tool_policy]\nenabled = true", "enabled = true\n\n[tool_policy]\nenabled = false");
+        assert!(toml.contains("enabled = false"));
+        let err = tp_load(&toml).expect("loads").validate().expect_err("org entries");
+        assert!(err.contains("tool_policy.org") && err.contains("iam"), "{err}");
+    }
+
+    #[test]
+    fn a_blank_or_padded_credential_file_fails_also_when_disabled() {
+        for bad in ["service_credential_file = \"  \"", "service_credential_file = \" /k\""] {
+            let toml = format!("{}\n[iam]\n{bad}\n", valid_toml());
+            let err = tp_load(&toml).expect("loads").validate().expect_err("bad path");
+            assert!(err.contains("iam.service_credential_file"), "{err}");
+        }
+        // "Required" still waits for `enabled`.
+        assert!(tp_load(valid_toml()).expect("loads").validate().is_ok());
     }
 
     #[test]

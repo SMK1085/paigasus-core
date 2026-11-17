@@ -313,6 +313,20 @@ async fn a_missing_credential_file_is_an_io_error_without_the_path_content() {
 }
 
 #[tokio::test]
+async fn an_oversized_credential_file_is_an_io_error_without_its_content() {
+    let s = start().await;
+    s.script_floor(Ok(floor_response(1, "")));
+    let (_d, big) = credential(&"SECRETSECRET".repeat(5 * 1024 / 12 + 1));
+    let err = s.source(&big).floor().await.expect_err("too large");
+    assert!(matches!(&err, SourceError::Io(m) if m.starts_with("service credential file: too large")), "{err}");
+    assert!(!err.to_string().contains("SECRET"), "{err}");
+    assert!(s.calls().is_empty());
+    // A file of exactly 4096 bytes is accepted.
+    let (_d2, edge) = credential(&"K".repeat(4096));
+    s.source(&edge).floor().await.expect("4096 bytes is within the cap");
+}
+
+#[tokio::test]
 async fn not_found_maps_to_not_found_and_other_codes_to_io() {
     let s = start().await;
     let (_dir, path) = credential("K");
