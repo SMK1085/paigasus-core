@@ -268,6 +268,9 @@ enum ErrorReason {
   // count_within, sum_within). The gateway cannot enforce history rules yet, so IAM does not store
   // them. Temporary; removed by SMA-753 (R19). Carried inside the rejected oneof.
   ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED = 62;
+  // "tool-policy-held-not-acceptable" — the held version has no compiled output, because its
+  // compile failed. Discard it, or save the set again. gRPC FAILED_PRECONDITION, HTTP 409.
+  ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE = 63;
 
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and

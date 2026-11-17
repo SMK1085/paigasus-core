@@ -598,6 +598,12 @@ class ErrorReason(betterproto2.Enum):
     them. Temporary; removed by SMA-753 (R19). Carried inside the rejected oneof.
     """
 
+    TOOL_POLICY_HELD_NOT_ACCEPTABLE = 63
+    """
+    "tool-policy-held-not-acceptable" — the held version has no compiled output, because its
+    compile failed. Discard it, or save the set again. gRPC FAILED_PRECONDITION, HTTP 409.
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -863,6 +869,7 @@ class ErrorReason(betterproto2.Enum):
             60: "ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND",
             61: "ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID",
             62: "ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED",
+            63: "ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -960,6 +967,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND": 60,
             "ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID": 61,
             "ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED": 62,
+            "ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE": 63,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,

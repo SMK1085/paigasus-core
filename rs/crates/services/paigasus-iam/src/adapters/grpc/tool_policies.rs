@@ -421,6 +421,26 @@ impl ToolPolicyService for ToolPolicyGrpc {
         record_grpc("ToolPolicy", "GetCompiledFloorPolicies", started, &result);
         result
     }
+
+    // Stub: the handler lands in a later task of the same pull request.
+    async fn list_held_tool_policy_versions(&self, _request: Request<pb::ListHeldToolPolicyVersionsRequest>) -> Result<Response<pb::ListHeldToolPolicyVersionsResponse>, Status> {
+        Err(Status::unimplemented("ListHeldToolPolicyVersions is not implemented yet"))
+    }
+
+    // Stub: the handler lands in a later task of the same pull request.
+    async fn accept_held_tool_policy_version(&self, _request: Request<pb::AcceptHeldToolPolicyVersionRequest>) -> Result<Response<pb::AcceptHeldToolPolicyVersionResponse>, Status> {
+        Err(Status::unimplemented("AcceptHeldToolPolicyVersion is not implemented yet"))
+    }
+
+    // Stub: the handler lands in a later task of the same pull request.
+    async fn discard_held_tool_policy_version(&self, _request: Request<pb::DiscardHeldToolPolicyVersionRequest>) -> Result<Response<pb::DiscardHeldToolPolicyVersionResponse>, Status> {
+        Err(Status::unimplemented("DiscardHeldToolPolicyVersion is not implemented yet"))
+    }
+
+    // Stub: the handler lands in a later task of the same pull request.
+    async fn run_tool_policy_recompile(&self, _request: Request<pb::RunToolPolicyRecompileRequest>) -> Result<Response<pb::RunToolPolicyRecompileResponse>, Status> {
+        Err(Status::unimplemented("RunToolPolicyRecompile is not implemented yet"))
+    }
 }
 
 #[cfg(test)]

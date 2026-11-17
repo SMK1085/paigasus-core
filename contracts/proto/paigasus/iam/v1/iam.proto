@@ -1242,6 +1242,116 @@ message GetCompiledFloorPoliciesResponse {
   CompiledToolPolicySet set = 1;
 }
 
+// The result of a held re-compile.
+enum HeldToolPolicyResult {
+  HELD_TOOL_POLICY_RESULT_UNSPECIFIED = 0;
+  HELD_TOOL_POLICY_RESULT_DIFFERENT = 1;
+  HELD_TOOL_POLICY_RESULT_FAILED = 2;
+}
+
+// A list of names that differ between the live output and the held output.
+message NameDiff {
+  repeated string added = 1;
+  repeated string removed = 2;
+  repeated string changed = 3;
+}
+
+message HeldToolPolicyReport {
+  HeldToolPolicyResult result = 1;
+  NameDiff policies = 2;
+  NameDiff conditions = 3;
+  NameDiff schema = 4;
+  ToolPolicyRejections rejections = 5;
+}
+
+// A held row is never enforced and never returned by GetCompiledToolPolicies. Any new live version
+// of its set makes it DISCARDED. At most one HELD row exists for each set.
+message HeldToolPolicyVersion {
+  ToolPolicySetKind kind = 1;
+  string org_id = 2;
+  uint64 version = 3;
+  uint64 base_version = 4;
+  string source = 5;
+  ToolPolicyVersionStatus status = 6;
+  uint32 compiler_generation = 7;
+  uint32 schema_revision = 8;
+  uint64 catalog_revision = 9;
+  HeldToolPolicyReport report = 10;
+  string created_by = 11;
+  google.protobuf.Timestamp created_at = 12;
+  // Absent for a FAILED result.
+  CompiledToolPolicySet compiled = 13;
+}
+
+// An empty org_prn lists every held row of every set, the floor included, and needs
+// ManageToolPolicyRecompile. Only HELD rows are listed.
+message ListHeldToolPolicyVersionsRequest {
+  string org_prn = 1;
+  uint32 limit = 2;
+  uint64 offset = 3;
+}
+
+message ListHeldToolPolicyVersionsResponse {
+  repeated HeldToolPolicyVersion versions = 1;
+}
+
+// kind = FLOOR needs an empty org_prn. UNSPECIFIED is missing-required-field. Accept of a stale
+// row is tool-policy-version-conflict: run the job again (spec section 8).
+message AcceptHeldToolPolicyVersionRequest {
+  ToolPolicySetKind kind = 1;
+  string org_prn = 2;
+  uint64 held_version = 3;
+}
+
+message AcceptHeldToolPolicyVersionResponse {
+  ToolPolicySetVersion accepted = 1;
+}
+
+// kind = FLOOR needs an empty org_prn. UNSPECIFIED is missing-required-field.
+message DiscardHeldToolPolicyVersionRequest {
+  ToolPolicySetKind kind = 1;
+  string org_prn = 2;
+  uint64 held_version = 3;
+}
+
+message DiscardHeldToolPolicyVersionResponse {
+  HeldToolPolicyVersion discarded = 1;
+}
+
+enum RecompileRunStatus {
+  RECOMPILE_RUN_STATUS_UNSPECIFIED = 0;
+  RECOMPILE_RUN_STATUS_RAN = 1;
+  RECOMPILE_RUN_STATUS_ALREADY_RUNNING = 2;
+  RECOMPILE_RUN_STATUS_OLDER_REPLICA = 3;
+}
+
+enum RecompileOutcome {
+  RECOMPILE_OUTCOME_UNSPECIFIED = 0;
+  RECOMPILE_OUTCOME_IDENTICAL = 1;
+  RECOMPILE_OUTCOME_HELD_DIFFERENT = 2;
+  RECOMPILE_OUTCOME_HELD_FAILED = 3;
+  RECOMPILE_OUTCOME_ALREADY_PROPOSED = 4;
+  RECOMPILE_OUTCOME_CONFLICT = 5;
+  RECOMPILE_OUTCOME_ERROR = 6;
+}
+
+message RecompileSetResult {
+  ToolPolicySetKind kind = 1;
+  string org_id = 2;
+  uint64 base_version = 3;
+  RecompileOutcome outcome = 4;
+  // The new live or held version; 0 otherwise.
+  uint64 version = 5;
+}
+
+message RunToolPolicyRecompileRequest {}
+
+// ALREADY_RUNNING and OLDER_REPLICA write nothing and have no results.
+message RunToolPolicyRecompileResponse {
+  RecompileRunStatus status = 1;
+  repeated RecompileSetResult results = 2;
+}
+
 service ToolPolicyService {
   rpc PutTool(PutToolRequest) returns (PutToolResponse);
   rpc DeleteTool(DeleteToolRequest) returns (DeleteToolResponse);
@@ -1255,4 +1365,8 @@ service ToolPolicyService {
   rpc PutToolPolicySettings(PutToolPolicySettingsRequest) returns (PutToolPolicySettingsResponse);
   rpc GetCompiledToolPolicies(GetCompiledToolPoliciesRequest) returns (GetCompiledToolPoliciesResponse);
   rpc GetCompiledFloorPolicies(GetCompiledFloorPoliciesRequest) returns (GetCompiledFloorPoliciesResponse);
+  rpc ListHeldToolPolicyVersions(ListHeldToolPolicyVersionsRequest) returns (ListHeldToolPolicyVersionsResponse);
+  rpc AcceptHeldToolPolicyVersion(AcceptHeldToolPolicyVersionRequest) returns (AcceptHeldToolPolicyVersionResponse);
+  rpc DiscardHeldToolPolicyVersion(DiscardHeldToolPolicyVersionRequest) returns (DiscardHeldToolPolicyVersionResponse);
+  rpc RunToolPolicyRecompile(RunToolPolicyRecompileRequest) returns (RunToolPolicyRecompileResponse);
 }
