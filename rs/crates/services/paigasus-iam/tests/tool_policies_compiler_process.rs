@@ -19,7 +19,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 /// The answer of a good fake to `revision`.
-const REVISION_OK: &str = r#"echo '{"compiler_generation":1,"protocol_version":1,"revision":"1+dogwood.000000000000+proto.1"}'"#;
+const REVISION_OK: &str = r#"echo '{"compiler_generation":2,"protocol_version":1,"revision":"2+dogwood.000000000000+proto.1"}'"#;
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tools/paigasus-policy-compiler/protocol/fixtures")
@@ -125,7 +125,7 @@ async fn bad_json_is_unavailable() {
 #[tokio::test]
 async fn a_malformed_result_with_the_right_version_is_unavailable() {
     let dir = TempDir::new().expect("tempdir");
-    let compiler = probed(&fake_compiler(&dir, REVISION_OK, r#"echo '{"outcome":"accepted","protocol_version":1,"compiler_generation":1}'"#)).await;
+    let compiler = probed(&fake_compiler(&dir, REVISION_OK, r#"echo '{"outcome":"accepted","protocol_version":1,"compiler_generation":2}'"#)).await;
     let message = assert_unavailable(compiler.compile(&request("request_tenant_accepted.json")).await);
     assert!(!message.contains("protocol version"), "a malformed result is not a version mismatch: {message}");
 }
@@ -138,7 +138,7 @@ async fn a_result_of_another_protocol_version_names_both_versions() {
     let compiler = probed(&fake_compiler(
         &dir,
         REVISION_OK,
-        r#"echo '{"outcome":"accepted","protocol_version":2,"compiler_generation":1,"a_new_field":true}'"#,
+        r#"echo '{"outcome":"accepted","protocol_version":2,"compiler_generation":2,"a_new_field":true}'"#,
     ))
     .await;
     let message = assert_unavailable(compiler.compile(&request("request_tenant_accepted.json")).await);
@@ -364,7 +364,7 @@ async fn fixture_results_pass_through() {
         let result_file = dir.path().join(name);
         std::fs::write(&result_file, serde_json::to_vec(&fixture(name)).expect("serialize")).expect("write the result");
         let compiler = probed(&fake_compiler(&dir, REVISION_OK, &format!("/bin/cat > /dev/null; exec /bin/cat {}", result_file.display()))).await;
-        assert_eq!(compiler.generation(), 1);
+        assert_eq!(compiler.generation(), 2);
         match compiler.compile(&request("request_tenant_accepted.json")).await {
             Ok(CompileOutcome::Accepted(compiled)) if accepted => assert!(!compiled.cedar_policies.is_empty()),
             Ok(CompileOutcome::Rejected(rejections)) if !accepted => {
@@ -445,7 +445,7 @@ async fn the_probe_retries_a_transient_failure_and_then_succeeds() {
     );
     let path = script(&dir, "flaky", &body);
     let compiler = probe_with_delay(&quick_config(&path), SHORT_WAIT).await.expect("the third attempt passes");
-    assert_eq!(compiler.generation(), 1);
+    assert_eq!(compiler.generation(), 2);
     assert_eq!(attempts(&counter), 3);
 }
 
