@@ -267,6 +267,42 @@ tests:
         alertname: GatewayDecisionLogRelayStalled
         exp_alerts: []
 
+  # GatewayDecisionLogRelayStalled backlog is max, not sum: two replicas that sample the same stream at 30000 each
+  # must stay quiet (a sum would read 60000).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total{instance="gw-1"}'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_published_total{instance="gw-1"}'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_backlog{instance="gw-1"}'
+        values: '30000x30'
+      - series: 'gateway_decision_log_written_total{instance="gw-2"}'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_published_total{instance="gw-2"}'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_backlog{instance="gw-2"}'
+        values: '30000x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+
+  # GatewayDecisionLogRelayStalled quiet: an idle gateway (written and published both flat at 0, small backlog)
+  # does not fire the `written > 0` branch.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0x30'
+      - series: 'gateway_decision_log_published_total'
+        values: '0x30'
+      - series: 'gateway_decision_log_backlog'
+        values: '3x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+
   # GatewayDecisionLogRedisBreakerOpen: the decision_log breaker reads 2 (open) for 5 minutes.
   - interval: 1m
     input_series:
