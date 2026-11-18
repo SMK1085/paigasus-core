@@ -2,6 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** executed on 2026-11-18. The Notion pages and the Linear update exist. Do not run
+Tasks 1 to 4 again: that would make duplicate pages.
+
 **Goal:** Publish the approved agent-host decisions as ADR-0028 (Proposed), a Helikon decision entry
 (Proposed) and a Linear project description update, and record the spec in the repo.
 

@@ -104,7 +104,8 @@ primitives (SMA-787 onward) do not each make them again in a different way.
   does not wrap the loop in Temporal. Reason: `TemporalRunner` v0 rejects hooks, guardrails and
   handoffs, and the permission layer (SMA-793) needs hooks and guardrails.
 - Times that decide correctness (lease expiry, due timers, backoff) use the database clock
-  (`now()`), never the worker clock.
+  (`now()`, or `clock_timestamp()` inside a transaction that can wait on a lock), never the worker
+  clock.
 
 ### (b) Run lifecycle and the atomic commit
 
@@ -123,16 +124,22 @@ No transaction or database connection stays open across the model loop.
 (`commit(RunOutcome, LeaseToken) -> Result<Committed, LeaseLost>`), so the domain does not see
 SeaORM:
 
-1. `UPDATE run SET status = <outcome> WHERE id = $run AND status = 'running'`, joined with a check
-   that the lease token still matches. Zero rows means "already committed, or lease lost". Roll
-   back and discard. This also makes a retried commit (a lost COMMIT acknowledgement) harmless.
-2. Append the run's session events (`PgRunSession`, below).
-3. Insert or update the `thread` row (`last_run_at`).
-4. Insert outbox messages. Insert new timers. Cancel timers the run cancelled (for example an
+1. Lock the lease row (`SELECT … FROM inbox_lease WHERE inbox_id = $1 FOR UPDATE`) and check that
+   `token = $t AND expires_at > clock_timestamp()`. `clock_timestamp()`, not `now()`, because
+   `now()` is the start time of the transaction and the commit can wait on the lock. The lock
+   serialises the commit with a lease take, which
+   updates the same row. A matching token on an expired lease does not pass, even when no other
+   worker has taken the lease yet.
+2. `UPDATE run SET status = <outcome> WHERE id = $run AND status = 'running'`. Zero rows, or a
+   failed lease check in step 1, means "already committed, or lease lost". Roll back and discard.
+   This also makes a retried commit (a lost COMMIT acknowledgement) harmless.
+3. Append the run's session events (`PgRunSession`, below).
+4. Insert or update the `thread` row (`last_run_at`).
+5. Insert outbox messages. Insert new timers. Cancel timers the run cancelled (for example an
    approval expiry).
-5. Insert or resolve `pending_tool_call` rows (decision (g)).
-6. Write the buffered memory changes of the Postgres memory adapter.
-7. Mark the claimed and folded inbox events `done`.
+6. Insert or resolve `pending_tool_call` rows (decision (g)).
+7. Write the buffered memory changes of the Postgres memory adapter.
+8. Mark the claimed and folded inbox events `done`.
 
 **Outcomes.** `completed`, `deferred`, `stopped`, `failed`, `discarded`.
 
@@ -163,8 +170,13 @@ SeaORM:
 **Side-effect guarantee, stated as it is.** A run commits once, at the end. If a worker crashes
 at turn 10, the next attempt runs turns 1 to 10 again. The model can make new `call_id`s and
 different args. So a side-effect tool is **at-least-once per run attempt, with possibly different
-args**. A tool that must not repeat must defer (decision (g)) or keep its own idempotency check on
-the business key. Messages to the user always go through the outbox, so they are never sent twice.
+args**. A deferral does not prevent a repeat: an approved call runs before the commit of the
+resumed run, so a crash there runs it again. An approved call keeps its `call_id` across attempts,
+because the `call_id` comes from the deferred run's log. A tool that must not repeat keeps its own
+idempotency check, on the business key or on that `call_id`. Messages to the user go through the
+outbox, so a re-run never sends them twice. The dispatcher itself is at-least-once: a crash after
+a send and before the delivery record can send a message again. It passes the outbox message id
+as an idempotency key to channels that support one (SMA-792).
 A per-turn commit would bound the repeat to one turn. It is not chosen for v1 (section 6).
 
 The S3 memory adapter cannot join the transaction. Its writes are at-least-once and can survive a
@@ -179,14 +191,19 @@ discarded run. The Postgres memory adapter is the default.
   also works for a new inbox that has no lease row. The candidate inbox is selected with the
   claimable predicate of (f), with `FOR UPDATE OF inbox_lease SKIP LOCKED` when the query joins
   `inbox_event`.
-- **Heartbeat.** `UPDATE inbox_lease SET expires_at = now() + ttl WHERE inbox_id = $1 AND token =
-  $t`. `lease_ttl` is at least three heartbeat intervals.
+- **Heartbeat.** `UPDATE inbox_lease SET expires_at = clock_timestamp() + ttl WHERE inbox_id = $1
+  AND token = $t AND expires_at > clock_timestamp()`. A heartbeat after `expires_at` does not
+  revive the lease: zero rows means the lease is lost. `lease_ttl` is at least three heartbeat
+  intervals.
 - **Lease lost** means: no successful heartbeat before `expires_at`. Zero rows updated and a
   database timeout both count, once `expires_at` has passed. On a lost lease the worker cancels the
   run **at once** with the `CancellationToken` and discards it. A cancel inside a tool call is no
   worse than the re-run that follows.
 - **Interrupt.** The run stops at the turn boundary (decision (h)), commits, keeps the lease, and
-  claims again at once.
+  claims again at once. Every claim under a held lease rotates the token first
+  (`UPDATE inbox_lease SET token = token + 1 … WHERE token = $t AND expires_at >
+  clock_timestamp()`), so the next run commits under a new token and the goal "at most one
+  committed run per lease token" stays true.
 - One worker process serves many inboxes at the same time, up to a concurrency limit.
 
 ### (d) Inbox granularity, tenancy and routing
@@ -201,6 +218,11 @@ discarded run. The Postgres memory adapter is the default.
   configuration that maps it to exactly one inbox. An event that names no principal (for example
   an org-wide webhook) is routed by its channel configuration. A channel that cannot name one inbox
   is rejected at configuration time.
+- **Ingress authorisation.** Authentication alone does not let a caller write to an inbox. Before
+  the insert, the host checks that the caller may write to the named inbox: a Cedar check through
+  IAM (`IsAuthorized`, an `agents` action on the inbox resource) for HTTP ingress, and the channel
+  binding for every other channel. A caller that fails the check gets `403`, and no row is
+  written.
 
 ### (e) Event envelope and ingress trust
 
@@ -217,8 +239,10 @@ discarded run. The Postgres memory adapter is the default.
 - **The host, not the caller, sets the trust-bearing fields:**
   - `source` comes from the authenticated channel configuration.
   - `actorprn` is the authenticated caller, set by the host.
-  - A raw webhook without a CloudEvents `id` gets an `id` from the provider's delivery id. If there
-    is none, the `id` is a hash of the content.
+  - A raw webhook without a CloudEvents `id` gets an `id` from the provider's delivery id, read from
+    the header that the channel configuration names. A content hash is used only when the channel
+    configuration selects it, for a provider whose identical payloads are always retries. Otherwise
+    the host makes a new `id`, and that channel has no retry dedup.
   - A `threadid` is kept only if that thread belongs to the same inbox. Otherwise the host drops
     it, and the event starts a fresh thread.
 - Each channel configuration names how its caller is authenticated (an IAM API key, a webhook
@@ -246,8 +270,12 @@ discarded run. The Postgres memory adapter is the default.
 - **Claim.** Take the oldest claimable event of the inbox (by `received_at`).
   - If it has a live `threadid`, claim the claimable events of that thread, in `received_at`
     order, up to the batch limit. The run resumes that thread.
-  - If it has no `threadid`, or its thread is not live, claim the claimable events that have no
-    live thread, up to the batch limit. The run starts a fresh session under a new thread.
+  - If it has a `threadid` whose thread is not live, claim the claimable events with that same
+    `threadid`, up to the batch limit. The run starts a fresh session under a new thread. Events
+    of two different expired threads never share a run.
+  - If it has no `threadid` (or the host dropped it, decision (e)), claim the claimable events
+    that have no `threadid`, up to the batch limit. The run starts a fresh session under a new
+    thread.
   - Events of other threads stay pending for the next claim. So several messages in one thread
     still produce one reply, and no run mixes threads.
 - A timer event with a `threadid` follows the same rule. If its thread is not live, it starts a
