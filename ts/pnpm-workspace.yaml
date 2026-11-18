@@ -134,7 +134,7 @@ catalog:
   next: ^16.4.6
   # TypeScript + ESLint + Prettier
   typescript: ^6.0.3
-  eslint: ^10.14.0
+  eslint: ^10.15.0
   '@eslint/js': ^10.0.1
   '@eslint-react/eslint-plugin': ^5.30.2
   'eslint-plugin-react-hooks': ^7.1.1
@@ -213,7 +213,7 @@ catalog:
   redis: ^6.3.1
   # E2E tier for @paigasus/auth. A real browser is the only thing that can prove SameSite behaviour
   # on the cross-site redirect back from the IdP, and __Host- cookie-prefix enforcement.
-  '@playwright/test': ^1.65.0
+  '@playwright/test': ^1.65.1
   # Starts Keycloak and Redis for the E2E tier. The Rust side uses testcontainers-modules; this is
   # the TS equivalent. GitHub Actions `services:` cannot do the cert copy and realm import.
   testcontainers: ^12.2.1
@@ -259,4 +259,4 @@ catalog:
   # `fetch` — @paigasus/discovery's `GET /v1/service-info` probe. It cannot intercept the SDK's gRPC
   # calls over node:http2; an in-process fake server answers those. 2.15.0 was released 2026-07-08.
   # Pinned EXACTLY, not a caret range (the Global Constraints): a later 2.x must not install silently.
-  msw: 3.0.5
+  msw: 3.0.6
