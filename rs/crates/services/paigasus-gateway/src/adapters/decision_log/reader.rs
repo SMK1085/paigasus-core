@@ -30,6 +30,9 @@ pub enum ReaderError {
     /// No URL. Exit 1.
     #[error("no NATS URL: give --nats-url-file or set {URL_ENV}")]
     NoUrl,
+    /// The raw message count passed `2 x --max-events` before the end of the read. Exit 4.
+    #[error("more than twice --max-events messages in the read window: use a smaller range")]
+    TooMany,
     /// A file could not be read. The text names the path, never the content.
     #[error("{what} {path} could not be read")]
     File { what: &'static str, path: String },
@@ -42,6 +45,7 @@ impl ReaderError {
     fn exit(&self) -> Exit {
         match self {
             ReaderError::NoUrl => Exit::BadArgs,
+            ReaderError::TooMany => Exit::TooMany,
             ReaderError::File { .. } | ReaderError::Nats(_) => Exit::Nats,
         }
     }
@@ -84,7 +88,12 @@ async fn connect(args: &ExportArgs, url: &str) -> Result<async_nats::Client, Rea
 }
 
 /// Read the events of `args.org` that JetStream stored from `since - max_lag` on, in stream order. The end of
-/// the read is the `num_pending` of the consumer at its creation (P-13).
+/// the read is the first of three limits (P-13):
+/// - the `num_pending` of the consumer at its creation;
+/// - the first message that JetStream stored after `until + max_lag` (symmetric to the start at
+///   `since - max_lag`; that message is not returned);
+/// - a raw count above `2 x max_events` (saturating), which is `ReaderError::TooMany` (exit 4). This keeps
+///   the buffer bounded before `export` makes its exact check of the unique events in the range.
 ///
 /// # Errors
 ///
@@ -112,6 +121,9 @@ pub async fn read(args: &ExportArgs) -> Result<Vec<Exported>, ReaderError> {
         return Ok(out);
     }
     let mut messages = consumer.messages().await.map_err(|e| nats("start read", e.kind()))?;
+    let cap = args.max_events.saturating_mul(2);
+    // `None` when the bound does not fit into a `SystemTime`: then there is no time bound.
+    let stop_after = args.until.checked_add(args.max_lag);
     while (out.len() as u64) < pending {
         let next = tokio::time::timeout(IDLE_TIMEOUT, messages.next())
             .await
@@ -122,10 +134,17 @@ pub async fn read(args: &ExportArgs) -> Result<Vec<Exported>, ReaderError> {
             None => return Err(ReaderError::Nats("read: the stream ended".to_owned())),
         };
         let info = msg.info().map_err(|e| ReaderError::Nats(format!("read: bad message info: {e}")))?;
+        let stored_at = SystemTime::from(info.published);
+        if stop_after.is_some_and(|bound| stored_at > bound) {
+            break;
+        }
         out.push(Exported {
-            stored_at: SystemTime::from(info.published),
+            stored_at,
             bytes: msg.message.payload.clone(),
         });
+        if out.len() > cap {
+            return Err(ReaderError::TooMany);
+        }
     }
     Ok(out)
 }
