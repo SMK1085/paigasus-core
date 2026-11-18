@@ -3235,7 +3235,7 @@ dependencies = [
  "paigasus-test-docker",
  "prost",
  "prost-types",
- "rand 0.10.3",
+ "rand 0.10.4",
  "rcgen",
  "redis",
  "reqwest",
