@@ -36,6 +36,7 @@ plugins:
       - 'message_attribute=.paigasus.iam.v1.ApiKey=#[derive(::paigasus_proto::audit::Auditable)]'
       - 'message_attribute=.paigasus.iam.v1.User=#[derive(::paigasus_proto::audit::Auditable)]'
       - 'message_attribute=.paigasus.iam.v1.ExternalIdentity=#[derive(::paigasus_proto::audit::Auditable)]'
+      - 'message_attribute=.paigasus.gateway.v1.ToolDecisionEvent=#[derive(::paigasus_proto::audit::Auditable)]'
   - remote: buf.build/community/neoeinstein-tonic:v0.5.0
     out: ../rs/crates/libs/paigasus-proto/src/generated
     opt:

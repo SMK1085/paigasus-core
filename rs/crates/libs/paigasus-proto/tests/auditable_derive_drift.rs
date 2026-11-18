@@ -149,8 +149,8 @@ fn every_audit_bearing_generated_struct_carries_the_derive() {
     );
     // Guards against the whole check passing vacuously if the walk or the parse silently
     // yields nothing. Seven messages embedded AuditMetadata as of SMA-438; SMA-712 added
-    // User and ExternalIdentity, for nine.
-    assert_eq!(total, 9, "expected exactly 9 audit-bearing generated structs, found {total}");
+    // User and ExternalIdentity, for nine. SMA-755 added ToolDecisionEvent, for ten.
+    assert_eq!(total, 10, "expected exactly 10 audit-bearing generated structs, found {total}");
 }
 
 // ─── Negative controls ───────────────────────────────────────────────────────────────────────
