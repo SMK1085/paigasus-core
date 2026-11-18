@@ -231,7 +231,9 @@ again. IAM changes a live set by itself only when the new output is the same.
   results with `GET /v1/held-tool-policy-versions` and in the IAM log. At a shutdown of the
   replica, the job stops between two sets, and the replica waits for it to release the lock
   before it exits. The replica waits a maximum of 30 s after the shutdown signal, below the 45 s
-  `terminationGracePeriodSeconds`, and then exits with a warning. This is safe: the transaction of
+  `terminationGracePeriodSeconds`. This limit covers all of the shutdown: the servers, the boot
+  run and the runs on request. At the limit, the replica logs one warning that names what is
+  still open, and exits. This is safe: the transaction of
   the open set rolls back, and Postgres releases the advisory lock when the connection closes.
 - After a rolling deploy that changes the compiler generation or the schema revision, do one more
   step. When every replica runs the new release, start the job one more time with

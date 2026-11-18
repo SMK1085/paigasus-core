@@ -1211,35 +1211,41 @@ mod tests {
         // The RPC runs go into the process-owned tasks, and the shutdown joins them after the
         // servers stopped, so the process does not end before a job released its lock (F15).
         assert!(code.contains(".with_recompile_tasks("), "main.rs must give the tool policy service its re-compile tasks");
-        // The join comes after the END of the drain loop: a request that is still in flight can
-        // start a job until its server stopped.
-        let result = code.find("let mut result = early_error.map_or(").expect("main.rs drains the servers at shutdown");
-        let drain = result
-            + code[result..]
-                .find("while let Some(joined) = servers.join_next().await {")
-                .expect("main.rs drains the servers in a loop");
-        let drain_end = drain + code[drain..].find("\n    }\n").expect("the drain loop ends");
-        let join = code
-            .find("tokio::time::timeout_at(recompile_deadline, recompile_tasks.join())")
-            .expect("main.rs must join the re-compile tasks at shutdown, bounded by the deadline");
-        assert!(join > drain_end, "main.rs must join the re-compile tasks after the end of the server drain");
-        // The bound: the join ends before the pod's 45 s terminationGracePeriodSeconds, so the
-        // process logs and exits instead of a SIGKILL. A cut-off job is safe: its set transaction
-        // rolls back, and Postgres releases the advisory lock when the connection closes.
+        // One deadline bounds the whole graceful shutdown: it starts at the shutdown broadcast, and
+        // `drain_until` gets it.
+        let broadcast = code.find("let _ = tx.send(());\n    let shutdown_deadline").expect("main.rs broadcasts the shutdown");
         let deadline = code
-            .find("let recompile_deadline = tokio::time::Instant::now() + RECOMPILE_SHUTDOWN_TIMEOUT;")
-            .expect("main.rs must start the re-compile deadline at the shutdown");
-        let broadcast = code[..deadline].rfind("tx.send(())").expect("main.rs broadcasts the shutdown before the deadline");
-        assert!(
-            broadcast < deadline && deadline < drain,
-            "the re-compile deadline must start after the shutdown broadcast and before the server drain"
-        );
+            .find("let shutdown_deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;")
+            .expect("main.rs must start the shutdown deadline at the broadcast");
+        let call = code
+            .find("drain_until(&mut servers, &recompile_tasks, boot_recompile.as_ref(), shutdown_deadline,")
+            .expect("main.rs must drain with the shutdown deadline");
+        assert!(broadcast < deadline && deadline < call, "the shutdown deadline must start after the broadcast and before the drain");
+        // In `drain_until`, the server drain (with the boot run) is bounded by the deadline: a boot
+        // run that waits on a row lock must not keep the drain open past it.
+        let body = code.find("async fn drain_until(").expect("main.rs defines drain_until");
+        let bounded = body
+            + code[body..]
+                .find("let drained = tokio::time::timeout_at(deadline, async {\n        while let Some(joined) = servers.join_next().await {")
+                .expect("drain_until must bound the server drain with the deadline");
+        let drain_end = bounded + code[bounded..].find("\n    .await\n    .is_ok();").expect("the bounded drain ends");
+        // The join of the RPC runs comes after the END of the drain: a request that is still in
+        // flight can start a run until its server stopped. It has the same deadline.
+        let join = body
+            + code[body..]
+                .find("tokio::time::timeout_at(deadline, recompile_tasks.join())")
+                .expect("drain_until must join the re-compile tasks, bounded by the deadline");
+        assert!(join > drain_end, "main.rs must join the re-compile tasks after the end of the server drain");
+        assert!(code[body..].contains("servers.abort_all();"), "drain_until must abort what is still open at the deadline");
+        // The bound is below the pod's 45 s terminationGracePeriodSeconds, so the process logs and
+        // exits instead of a SIGKILL. A cut-off job is safe: its set transaction rolls back, and
+        // Postgres releases the advisory lock when the connection closes.
         let secs: u64 = code
-            .split("const RECOMPILE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(")
+            .split("const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(")
             .nth(1)
             .and_then(|rest| rest.split(')').next())
             .and_then(|n| n.parse().ok())
-            .expect("main.rs defines RECOMPILE_SHUTDOWN_TIMEOUT in seconds");
-        assert!(secs < 45, "RECOMPILE_SHUTDOWN_TIMEOUT must be below the 45 s grace period, is {secs} s");
+            .expect("main.rs defines SHUTDOWN_TIMEOUT in seconds");
+        assert!(secs < 45, "SHUTDOWN_TIMEOUT must be below the 45 s grace period, is {secs} s");
     }
 }

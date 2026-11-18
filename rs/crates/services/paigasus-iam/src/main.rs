@@ -274,7 +274,7 @@ async fn serve() -> anyhow::Result<()> {
             // transaction-scoped lock by construction.
             tracing::info!("shutdown signal received during boot");
             shutting_down = true;
-            Ok(())
+            Ok(None)
         }
     };
     if outcome.is_err() || shutting_down {
@@ -289,8 +289,10 @@ async fn serve() -> anyhow::Result<()> {
         if tokio::time::timeout(DRAIN_TIMEOUT, recompile_tasks.join()).await.is_err() {
             tracing::warn!("drain timed out with a tool policy re-compile run not yet stopped");
         }
-        return outcome;
+        return outcome.map(|_| ());
     }
+    // `Ok` here: the branch above returned on an error.
+    let boot_recompile = outcome?;
 
     tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");
 
@@ -318,31 +320,50 @@ async fn serve() -> anyhow::Result<()> {
         }
     };
 
-    // Ask any still-running server to shut down gracefully.
+    // Ask any still-running server to shut down gracefully. One deadline, started here, bounds
+    // the whole graceful shutdown (SMA-781).
     let _ = tx.send(());
-    let recompile_deadline = tokio::time::Instant::now() + RECOMPILE_SHUTDOWN_TIMEOUT;
+    let shutdown_deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+    let result = early_error.map_or(Ok(()), Err);
+    drain_until(&mut servers, &recompile_tasks, boot_recompile.as_ref(), shutdown_deadline, result).await
+}
 
-    // Drain the remaining server task(s); surface the first error.
-    let mut result = early_error.map_or(Ok(()), Err);
-    while let Some(joined) = servers.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) if result.is_ok() => result = Err(e),
-            Ok(Err(_)) => {}
-            Err(join_err) if result.is_ok() => result = Err(join_err.into()),
-            Err(_) => {}
+/// The graceful shutdown after the boot (SMA-781). Drains the server tasks (the boot re-compile
+/// run is one of them) and surfaces the first error, then joins the RPC runs of the re-compile
+/// job: a request that is still in flight can start a run until its server stopped. Both waits
+/// end at `deadline`. A re-compile set can wait on a row lock and does not see the shutdown
+/// watch then. At the deadline one warning names what is still open, the server tasks are
+/// aborted, and the process exits. That is safe: the set transaction rolls back, and Postgres
+/// releases the advisory lock when the connection closes.
+async fn drain_until(
+    servers: &mut JoinSet<anyhow::Result<()>>,
+    recompile_tasks: &RecompileTasks,
+    boot_recompile: Option<&tokio::task::AbortHandle>,
+    deadline: tokio::time::Instant,
+    mut result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let drained = tokio::time::timeout_at(deadline, async {
+        while let Some(joined) = servers.join_next().await {
+            match joined {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) if result.is_ok() => result = Err(e),
+                Ok(Err(_)) => {}
+                Err(join_err) if result.is_ok() => result = Err(join_err.into()),
+                Err(_) => {}
+            }
         }
-    }
-    // SMA-781: an RPC run of the re-compile job can outlive its request (F15). The shutdown watch
-    // stops it between two sets; wait for that, so that it releases its lock before the exit.
-    // Bounded: a set can wait on a row lock and does not see the watch then. At the deadline the
-    // process exits anyway. That is safe: the set transaction rolls back, and Postgres releases
-    // the advisory lock when the connection closes.
-    if tokio::time::timeout_at(recompile_deadline, recompile_tasks.join()).await.is_err() {
+    })
+    .await
+    .is_ok();
+    let joined = drained && tokio::time::timeout_at(deadline, recompile_tasks.join()).await.is_ok();
+    if !joined {
         tracing::warn!(
-            open_runs = recompile_tasks.open_runs(),
-            "shutdown: a tool policy re-compile run did not stop before the deadline; exiting anyway"
+            unreaped_server_tasks = servers.len(),
+            boot_recompile_open = boot_recompile.is_some_and(|handle| !handle.is_finished()),
+            open_rpc_recompile_runs = recompile_tasks.open_runs(),
+            "shutdown: the deadline passed with tasks still open; aborting them and exiting"
         );
+        servers.abort_all();
     }
     result
 }
@@ -351,10 +372,11 @@ async fn serve() -> anyhow::Result<()> {
 /// an unbounded drain turns a boot failure into a process that serves 503 forever (SMA-571 §4.6).
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the graceful shutdown waits for the RPC runs of the tool policy re-compile job,
-/// counted from the shutdown signal (SMA-781). Below the chart's 45 s
-/// `terminationGracePeriodSeconds`, so that IAM exits before a SIGKILL.
-const RECOMPILE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the graceful shutdown after the boot waits in total, counted from the shutdown
+/// broadcast: the server drain (with the boot re-compile run) and the RPC re-compile runs
+/// (SMA-781). Below the chart's 45 s `terminationGracePeriodSeconds`, so that IAM exits before a
+/// SIGKILL.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Everything between the bind and "ready": the migration, `AppState::new`, the publisher dial,
 /// and every background task. Returns `Err` rather than `?`-ing out of `serve()` so its single
@@ -375,7 +397,7 @@ async fn boot_deferred(
     rx: &tokio::sync::watch::Receiver<()>,
     recompile_tasks: &RecompileTasks,
     request_timeout: Duration,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<tokio::task::AbortHandle>> {
     // SMA-559: serialised against a concurrently starting replica by a transaction-scoped
     // advisory lock. A waiter blocks here — but since SMA-571 it does so with all three
     // listeners already bound, answering `/readyz` 503 `migrating` and gRPC `UNAVAILABLE`
@@ -707,9 +729,10 @@ async fn boot_deferred(
     // if an earlier step fails, `main` drops the JoinSet, and that would end the job in the
     // middle of a set (F16). The run is a background task, so it does not delay readiness, and an
     // error does not stop IAM.
+    let mut boot_recompile = None;
     if let Some(service) = recompile_at_boot {
         let mut rx = rx.clone();
-        servers.spawn(async move {
+        boot_recompile = Some(servers.spawn(async move {
             let mut stop_rx = rx.clone();
             let stop = async move {
                 let _ = stop_rx.changed().await;
@@ -730,9 +753,9 @@ async fn boot_deferred(
             // `main` stops when any `servers` task ends, so this task waits for the shutdown.
             let _ = rx.changed().await;
             Ok(())
-        });
+        }));
     }
-    Ok(())
+    Ok(boot_recompile)
 }
 
 /// Drain `servers`, bounded. Returns how many tasks were still UNREAPED at the timeout so the
@@ -941,8 +964,8 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
 
-    /// SMA-571 §4.6: the boot-failure drain MUST be bounded. `main.rs`'s shutdown-path drain has
-    /// no timeout; reused unchanged for a boot failure, a task that never observes the watch would
+    /// SMA-571 §4.6: the boot-failure drain MUST be bounded. Before SMA-781, `main.rs`'s
+    /// shutdown-path drain had no timeout; reused unchanged for a boot failure, a task that never observes the watch would
     /// hang the process with three listening sockets serving 503 FOREVER — CrashLoopBackOff never
     /// happens and the replica is indistinguishable from a slow migration, which is exactly the
     /// state D4 rejects.
@@ -981,5 +1004,30 @@ mod tests {
         }
         let _ = tx.send(());
         assert_eq!(drain_bounded(&mut servers, Duration::from_secs(5)).await, 0);
+    }
+
+    /// SMA-781: a boot re-compile run that waits on a row lock does not see the shutdown watch.
+    /// The graceful shutdown still returns at its deadline, and it aborts the run.
+    #[tokio::test]
+    async fn drain_until_returns_at_the_deadline_when_the_boot_run_is_blocked() {
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
+        let mut good = rx.clone();
+        servers.spawn(async move {
+            let _ = good.changed().await;
+            Ok(())
+        });
+        let blocked = servers.spawn(async move {
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let _ = tx.send(());
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_millis(200);
+        let watchdog = tokio::time::timeout(Duration::from_secs(5), drain_until(&mut servers, &RecompileTasks::new(), Some(&blocked), deadline, Ok(()))).await;
+        assert!(watchdog.expect("must return at the deadline, not hang").is_ok());
+        assert!(started.elapsed() < Duration::from_secs(2), "must return at the deadline");
+        let joined = servers.join_next().await.expect("the blocked run is still in the set");
+        assert!(joined.expect_err("the blocked run is aborted").is_cancelled());
     }
 }
