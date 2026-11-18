@@ -27,7 +27,7 @@ namespace Pgs::Iam {
          CreateUser, GetUser, LinkExternalIdentity, UnlinkExternalIdentity, ChangeUserEmail,
          ManageToolCatalog, ReadToolCatalog, ManageToolPolicies, ReadToolPolicies,
          ManageToolPolicyFloor, ReadToolPolicyFloor, ManageToolPolicySettings,
-         ReadCompiledToolPolicies
+         ReadCompiledToolPolicies, ManageToolPolicyRecompile
     appliesTo { principal: [Principal], resource: [Root, Organization, Team, Project] };
 }
 "#;
@@ -99,6 +99,7 @@ mod tests {
             "ReadToolPolicyFloor",
             "ManageToolPolicySettings",
             "ReadCompiledToolPolicies",
+            "ManageToolPolicyRecompile",
         ] {
             let src = format!(r#"permit(principal, action == Pgs::Iam::Action::"{name}", resource);"#);
             assert!(validate_policy(&src).is_ok(), "{name} must be declared in SCHEMA_SRC");

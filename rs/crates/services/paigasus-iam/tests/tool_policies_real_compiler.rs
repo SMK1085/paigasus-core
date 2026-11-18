@@ -192,3 +192,38 @@ async fn a_dropped_nested_field_gets_a_note_in_the_real_rejection() {
     let message = dropped_field_message(&env, policy).await;
     assert!(message.contains("the field `order.total` of the tool `orders` is not in the schema"), "{message}");
 }
+
+/// The job against the real compiler: a floor that an older generation compiled gets a new live
+/// version of the same output, with the origin `recompile` (F23: the composed check).
+#[tokio::test]
+async fn the_job_applies_an_identical_result_with_the_real_compiler() {
+    use paigasus_iam::adapters::persistence::PgToolPolicies;
+    use paigasus_iam::application::tool_policies::{RecompileOutcome, RecompileRun};
+    use paigasus_iam_core::tool_policy::{ToolPolicyRepository, ToolPolicySetKey, VersionOrigin};
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let Some(path) = support::real_compiler_path("the_job_applies_an_identical_result_with_the_real_compiler") else {
+        return;
+    };
+    let Some(env) = setup(&path).await else { return };
+    let WriteResult::Accepted(saved) = env.service().put_floor(&env.actor, FLOOR_GENERIC, 0).await.expect("put_floor") else {
+        panic!("the generic floor was rejected")
+    };
+    assert_eq!(saved.version, 1);
+    // An older compiler generation made the stored row: the run must compile it again.
+    let stale = "UPDATE tool_policy_set_version SET compiler_generation = compiler_generation - 1 WHERE kind = 'floor' AND status = 'live'";
+    env.state
+        .db
+        .execute_raw(Statement::from_string(DbBackend::Postgres, stale.to_owned()))
+        .await
+        .expect("make the floor stale");
+    let RecompileRun::Ran(results) = env.service().run_recompile_at_boot(std::future::pending()).await.expect("run") else {
+        panic!("the run did not happen")
+    };
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0].key, ToolPolicySetKey::Floor);
+    assert_eq!(results[0].outcome, RecompileOutcome::Identical { version: 2 });
+    let repo = PgToolPolicies::new(env.state.db.clone());
+    let live = repo.live(&ToolPolicySetKey::Floor).await.unwrap().expect("a live floor");
+    assert_eq!((live.version, live.origin, live.compiler_generation), (2, VersionOrigin::Recompile, 1));
+}

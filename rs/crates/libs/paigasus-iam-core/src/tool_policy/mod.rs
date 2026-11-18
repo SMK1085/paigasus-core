@@ -13,6 +13,7 @@ pub mod model;
 pub mod name;
 pub mod ports;
 pub mod protocol;
+pub mod report;
 pub mod schema;
 pub mod starter;
 
@@ -21,11 +22,12 @@ pub use compare::outputs_identical;
 pub use import::{CatalogProblem, ImportFormat, ImportedTools, build_manual, parse_import};
 pub use json_schema::{MappingError, map_input_schema};
 pub use model::{
-    CatalogLimits, DroppedField, FailMode, StoredTool, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, ToolSource, VersionOrigin,
-    VersionStatus,
+    CatalogLimits, DroppedField, FailMode, HeldStatus, HeldVersion, StoredTool, ToolEntry, ToolKind, ToolPolicyMode, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion,
+    ToolSource, VersionOrigin, VersionStatus,
 };
 pub use name::{NameError, RESERVED_NAME_KEYS, ToolName, name_key, parse_qualified, parse_tool_name};
-pub use ports::{CompileOutcome, CompilerFailure, PolicyCompiler, ToolPolicyRepository};
+pub use ports::{CompileOutcome, CompilerFailure, PolicyCompiler, RecompileLock, RecompileLockGuard, ToolPolicyRepository};
 pub use protocol::{CompileRequest, CompileResult, CompiledOutput, PROTOCOL_VERSION, Rejection, RevisionOutput, SetKind};
+pub use report::{HeldReport, HeldResult, NameDiff, ReportRejection, diff_outputs, failed_report};
 pub use schema::{ACTION_NAMESPACE, TOOL_SCHEMA_REVISION, base_schema_json, catalog_names, tenant_schema_json};
 pub use starter::{STARTER_TOOL_POLICY_ID, STARTER_TOOL_POLICY_SOURCE};

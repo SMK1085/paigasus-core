@@ -16,6 +16,7 @@ mod m0011_audit_stamp_columns;
 mod m0012_role_grant_scope_index;
 mod m0013_create_tool_policies;
 mod m0014_create_tool_policy_settings;
+pub mod m0015_tool_policy_held_versions;
 
 pub struct Migrator;
 
@@ -37,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0012_role_grant_scope_index::Migration),
             Box::new(m0013_create_tool_policies::Migration),
             Box::new(m0014_create_tool_policy_settings::Migration),
+            Box::new(m0015_tool_policy_held_versions::Migration),
         ]
     }
 }

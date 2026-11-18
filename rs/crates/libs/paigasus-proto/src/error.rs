@@ -222,6 +222,7 @@ mod tests {
         "tool-policy-version-not-found",
         "tool-policy-mode-transition-invalid",
         "tool-policy-history-unsupported",
+        "tool-policy-held-not-acceptable",
         // Gateway
         "missing-authorization",
         "invalid-api-key",
@@ -269,7 +270,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 91, "the registry should hold 91 reasons");
+        assert_eq!(actual.len(), 92, "the registry should hold 92 reasons");
     }
 
     #[test]
@@ -455,5 +456,7 @@ mod tests {
         assert_eq!(ErrorReason::ToolPolicyModeTransitionInvalid as i32, 61);
         assert_eq!(ErrorReason::from_wire_reason("tool-policy-history-unsupported"), Some(ErrorReason::ToolPolicyHistoryUnsupported));
         assert_eq!(ErrorReason::ToolPolicyHistoryUnsupported as i32, 62);
+        assert_eq!(ErrorReason::from_wire_reason("tool-policy-held-not-acceptable"), Some(ErrorReason::ToolPolicyHeldNotAcceptable));
+        assert_eq!(ErrorReason::ToolPolicyHeldNotAcceptable as i32, 63);
     }
 }

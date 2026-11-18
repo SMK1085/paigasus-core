@@ -100,6 +100,7 @@ mod tests {
         assert_eq!(tenancy_retryable(TenancyError::ToolPolicyCompilerBusy.class()), Retryable::Yes);
         assert_eq!(tenancy_retryable(TenancyError::ToolPolicyVersionConflict.class()), Retryable::No);
         assert_eq!(tenancy_retryable(TenancyError::ToolPolicyModeTransitionInvalid.class()), Retryable::No);
+        assert_eq!(tenancy_retryable(TenancyError::ToolPolicyHeldNotAcceptable.class()), Retryable::No);
     }
 
     /// SMA-700 D10: a quota hit is a rate limit, so it is retryable like `Unavailable`. A bad proof

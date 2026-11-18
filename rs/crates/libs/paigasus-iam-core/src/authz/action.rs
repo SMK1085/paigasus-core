@@ -88,6 +88,9 @@ pub enum Action {
     /// Read the compiled tool policies of an organization or the floor (SMA-775).
     /// Of the scoped roles, only `tool_policy_reader` holds it; `platform_admin` also holds it.
     ReadCompiledToolPolicies,
+    /// Run the tool policy re-compile job and read its outcome (SMA-781). Held by `platform_admin`
+    /// only, through its every-action template.
+    ManageToolPolicyRecompile,
 }
 
 impl Action {
@@ -146,6 +149,7 @@ impl Action {
         Action::ReadToolPolicyFloor,
         Action::ManageToolPolicySettings,
         Action::ReadCompiledToolPolicies,
+        Action::ManageToolPolicyRecompile,
     ];
 
     /// The exact Cedar action id, verbatim from `SCHEMA_SRC` — this string doubles as
@@ -206,6 +210,7 @@ impl Action {
             Action::ReadToolPolicyFloor => "ReadToolPolicyFloor",
             Action::ManageToolPolicySettings => "ManageToolPolicySettings",
             Action::ReadCompiledToolPolicies => "ReadCompiledToolPolicies",
+            Action::ManageToolPolicyRecompile => "ManageToolPolicyRecompile",
         }
     }
 
@@ -279,7 +284,8 @@ impl Action {
             | Action::ManageToolCatalog
             | Action::ManageToolPolicies
             | Action::ManageToolPolicyFloor
-            | Action::ManageToolPolicySettings => true,
+            | Action::ManageToolPolicySettings
+            | Action::ManageToolPolicyRecompile => true,
         }
     }
 
@@ -375,7 +381,8 @@ mod tests {
                 | Action::ManageToolPolicyFloor
                 | Action::ReadToolPolicyFloor
                 | Action::ManageToolPolicySettings
-                | Action::ReadCompiledToolPolicies => {}
+                | Action::ReadCompiledToolPolicies
+                | Action::ManageToolPolicyRecompile => {}
             }
         }
         for a in Action::ALL {
@@ -383,8 +390,8 @@ mod tests {
         }
         assert_eq!(
             Action::ALL.len(),
-            53,
-            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies + 2 SMA-775 tool policy settings"
+            54,
+            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies + 2 SMA-775 tool policy settings + 1 SMA-781 tool policy re-compile"
         );
     }
     #[test]
@@ -462,6 +469,16 @@ mod tests {
             assert_eq!(Action::parse(a.as_wire()), Some(a), "{} must round-trip", a.as_wire());
             assert!(Action::ALL.contains(&a), "{} must be in ALL", a.as_wire());
         }
+    }
+    /// SMA-781: the re-compile action is a non-restore write and round-trips.
+    #[test]
+    fn the_recompile_action_is_classified_and_round_trips() {
+        let a = Action::ManageToolPolicyRecompile;
+        assert!(a.is_write(), "the job writes new versions");
+        assert!(!a.is_restore());
+        assert_eq!(a.as_wire(), "ManageToolPolicyRecompile");
+        assert_eq!(Action::parse(a.as_wire()), Some(a));
+        assert!(Action::ALL.contains(&a));
     }
     /// SMA-775: the settings write is a non-restore write, the compiled read is a read, and both round-trip.
     #[test]

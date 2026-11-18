@@ -99,6 +99,14 @@ pub(crate) fn decode_compiled(bytes: &[u8]) -> Result<CompiledOutput, TenancyErr
     })
 }
 
+/// The stored bytes with the `version` field set to `version`. Every other field stays as it is.
+/// Bytes that do not decode are a storage defect: `Internal` (as [`decode_compiled`]).
+pub(crate) fn restamp_version(bytes: &[u8], version: u64) -> Result<Vec<u8>, TenancyError> {
+    let mut set = pb::CompiledToolPolicySet::decode(bytes).map_err(|error| corrupt(&format!("the compiled bytes do not decode: {error}")))?;
+    set.version = version;
+    Ok(set.encode_to_vec())
+}
+
 fn corrupt(what: &str) -> TenancyError {
     tracing::error!(reason = %what, "a stored tool policy set version is corrupt");
     TenancyError::Internal
@@ -370,6 +378,40 @@ mod tests {
             window_ms,
             shape,
         }
+    }
+
+    #[test]
+    fn restamp_changes_only_the_version() {
+        let org = Uuid::from_u128(7);
+        let out = CompiledOutput {
+            cedar_policies: "@id(\"p\")\npermit(principal, action, resource);\n".to_owned(),
+            cedar_schema_json: json!({"Pgs::Gateway": {}}),
+            conditions: vec![HistoryCondition {
+                slot: "c1".into(),
+                policy_id: "p".into(),
+                scope: Scope::Principal,
+                window_ms: 1000,
+                shape: Shape::Formerly {
+                    predicate: Predicate::EventKind { kind: EventKind::Request },
+                },
+            }],
+        };
+        let meta = CompiledMeta {
+            key: ToolPolicySetKey::Tenant(org),
+            version: 2,
+            compiler_generation: 3,
+            schema_revision: 4,
+            catalog_revision: Some(5),
+            max_window_ms: 6,
+            catalog_names: vec!["a".into(), "b".into()],
+        };
+        let bytes = encode_compiled(&meta, &out);
+        let restamped = restamp_version(&bytes, 9).unwrap();
+        let before = pb::CompiledToolPolicySet::decode(bytes.as_slice()).unwrap();
+        let after = pb::CompiledToolPolicySet::decode(restamped.as_slice()).unwrap();
+        assert_eq!((before.version, after.version), (2, 9));
+        assert_eq!(pb::CompiledToolPolicySet { version: 9, ..before }, after);
+        assert!(matches!(restamp_version(&[0xff, 0xff], 1), Err(TenancyError::Internal)));
     }
 
     #[test]

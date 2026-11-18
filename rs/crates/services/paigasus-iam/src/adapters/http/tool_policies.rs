@@ -35,14 +35,14 @@ use super::dto::{
 };
 use super::error::ApiError;
 use super::json::EnvelopeJson;
-use super::path::{OrganizationId, ToolNameSegment, UuidAndSegmentPath, UuidPath};
+use super::path::{HeldVersionSegment, OrganizationId, StringPath, ToolNameSegment, UuidAndSegmentPath, UuidPath};
 use super::query::EnvelopeQuery;
 use super::{AppState, ToolPolicySvc};
 use crate::adapters::auth::AuthContext;
-use crate::adapters::tool_policy_wire::{compiled_or_empty, empty_set, version_to_pb};
+use crate::adapters::tool_policy_wire::{compiled_or_empty, empty_set, held_to_pb, run_to_pb, version_to_pb};
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
-use crate::application::tool_policies::{CatalogAccepted, ToolPolicyRejection, WriteResult};
+use crate::application::tool_policies::{CatalogAccepted, HeldTarget, ToolPolicyRejection, WriteResult};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -54,6 +54,13 @@ pub fn router() -> Router<AppState> {
         .route("/v1/organizations/{id}/tool-policy-settings", put(put_settings).get(get_settings))
         .route("/v1/organizations/{id}/compiled-tool-policies", get(get_compiled))
         .route("/v1/compiled-tool-policy-floor", get(get_compiled_floor))
+        .route("/v1/organizations/{id}/held-tool-policy-versions", get(list_held_tenant))
+        .route("/v1/held-tool-policy-versions", get(list_held_all))
+        .route("/v1/organizations/{id}/held-tool-policy-versions/{version}/accept", post(accept_held_tenant))
+        .route("/v1/tool-policy-floor/held-versions/{version}/accept", post(accept_held_floor))
+        .route("/v1/organizations/{id}/held-tool-policy-versions/{version}/discard", post(discard_held_tenant))
+        .route("/v1/tool-policy-floor/held-versions/{version}/discard", post(discard_held_floor))
+        .route("/v1/tool-policy-recompile", post(run_recompile))
 }
 
 fn actor_prn(ctx: &AuthContext) -> Prn {
@@ -137,6 +144,52 @@ fn set_json(v: &pb::ToolPolicySetVersion) -> Result<Value, ApiError> {
         "created_at": v.created_at.as_ref().and_then(|t| chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).unwrap_or(0))).map(|t| t.to_rfc3339()),
         "compiled": compiled,
     }))
+}
+
+fn name_diff_json(d: Option<&pb::NameDiff>) -> Value {
+    let d = d.cloned().unwrap_or_default();
+    json!({"added": d.added, "removed": d.removed, "changed": d.changed})
+}
+
+/// The held row as JSON, from the same wire message gRPC serves.
+fn held_json(h: &pb::HeldToolPolicyVersion) -> Result<Value, ApiError> {
+    let kind = if h.kind == pb::ToolPolicySetKind::Floor as i32 { "floor" } else { "tenant" };
+    let status = match pb::ToolPolicyVersionStatus::try_from(h.status) {
+        Ok(pb::ToolPolicyVersionStatus::Held) => Some("held"),
+        Ok(pb::ToolPolicyVersionStatus::Discarded) => Some("discarded"),
+        _ => None,
+    };
+    let report = h.report.as_ref().map(|r| {
+        json!({
+            "result": enum_name::<pb::HeldToolPolicyResult>(r.result, pb::HeldToolPolicyResult::as_str_name),
+            "policies": name_diff_json(r.policies.as_ref()),
+            "conditions": name_diff_json(r.conditions.as_ref()),
+            "schema": name_diff_json(r.schema.as_ref()),
+            "rejections": r.rejections.as_ref().map(|x| x.rejections.iter().map(|r| json!({"policy_id": r.policy_id, "line": r.line, "column": r.column, "reason": r.reason, "message": r.message})).collect::<Vec<_>>()).unwrap_or_default(),
+        })
+    });
+    let compiled = h.compiled.as_ref().map(compiled_json).transpose()?;
+    Ok(json!({
+        "kind": kind,
+        "org_id": h.org_id,
+        "version": h.version,
+        "base_version": h.base_version,
+        "source": h.source,
+        "status": status,
+        "compiler_generation": h.compiler_generation,
+        "schema_revision": h.schema_revision,
+        "catalog_revision": h.catalog_revision,
+        "report": report,
+        "created_by": h.created_by,
+        "created_at": h.created_at.as_ref().and_then(|t| chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).unwrap_or(0))).map(|t| t.to_rfc3339()),
+        "compiled": compiled,
+    }))
+}
+
+/// The held version number of a path segment. A segment that is not a positive number is
+/// `invalid-path-segment`.
+fn held_version(segment: &str) -> Result<u64, ApiError> {
+    segment.parse::<u64>().ok().filter(|v| *v > 0).ok_or(ApiError(TenancyError::InvalidPathSegment("held_version")))
 }
 
 /// The name of a proto enum value, or its number when the value is unknown.
@@ -363,12 +416,113 @@ async fn get_floor(State(s): State<AppState>, Extension(ctx): Extension<AuthCont
     read_response(svc.get_floor(&actor_prn(&ctx), q.version).await?, ToolPolicySetKey::Floor)
 }
 
+/// Lists the held rows of one organization. `limit` defaults to 50 and is at most 200, as on
+/// every IAM list route.
+async fn list_held_tenant(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<OrganizationId>,
+    EnvelopeQuery(q): EnvelopeQuery<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    list_held(&s, &ctx, Some(path.id), q).await
+}
+
+/// Lists the held rows of every set, the floor included. Needs `ManageToolPolicyRecompile`.
+async fn list_held_all(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<PageQuery>) -> Result<Json<Value>, ApiError> {
+    list_held(&s, &ctx, None, q).await
+}
+
+async fn list_held(s: &AppState, ctx: &AuthContext, org: Option<uuid::Uuid>, q: PageQuery) -> Result<Json<Value>, ApiError> {
+    let svc = svc(s)?;
+    let page = Page::new(q.limit, q.offset)?;
+    let held = svc.list_held(&actor_prn(ctx), org, page).await?;
+    let versions = held.iter().map(|h| held_json(&held_to_pb(h)?)).collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(Json(json!({"versions": versions})))
+}
+
+async fn accept_held_tenant(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidAndSegmentPath<OrganizationId, HeldVersionSegment>) -> Result<Json<Value>, ApiError> {
+    accept_held(&s, &ctx, HeldTarget::Tenant(path.id), &path.segment).await
+}
+
+async fn accept_held_floor(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: StringPath<HeldVersionSegment>) -> Result<Json<Value>, ApiError> {
+    accept_held(&s, &ctx, HeldTarget::Floor, &path.value).await
+}
+
+async fn accept_held(s: &AppState, ctx: &AuthContext, target: HeldTarget, segment: &str) -> Result<Json<Value>, ApiError> {
+    let svc = svc(s)?;
+    let version = svc.accept_held(&actor_prn(ctx), target, held_version(segment)?).await?;
+    Ok(Json(json!({"accepted": set_json(&version_to_pb(&version)?)?})))
+}
+
+async fn discard_held_tenant(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidAndSegmentPath<OrganizationId, HeldVersionSegment>) -> Result<Json<Value>, ApiError> {
+    discard_held(&s, &ctx, HeldTarget::Tenant(path.id), &path.segment).await
+}
+
+async fn discard_held_floor(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: StringPath<HeldVersionSegment>) -> Result<Json<Value>, ApiError> {
+    discard_held(&s, &ctx, HeldTarget::Floor, &path.value).await
+}
+
+async fn discard_held(s: &AppState, ctx: &AuthContext, target: HeldTarget, segment: &str) -> Result<Json<Value>, ApiError> {
+    let svc = svc(s)?;
+    let held = svc.discard_held(&actor_prn(ctx), target, held_version(segment)?).await?;
+    Ok(Json(json!({"discarded": held_json(&held_to_pb(&held)?)?})))
+}
+
+/// The HTTP name of a run status. Each status has its own arm. `run_to_pb` never sets
+/// `UNSPECIFIED` or a number outside the enum, so either one is a defect of this release: it is a
+/// 500, not a guess such as `older_replica`.
+fn run_status_name(status: i32) -> Result<&'static str, ApiError> {
+    match pb::RecompileRunStatus::try_from(status) {
+        Ok(pb::RecompileRunStatus::Ran) => Ok("ran"),
+        Ok(pb::RecompileRunStatus::AlreadyRunning) => Ok("already_running"),
+        Ok(pb::RecompileRunStatus::OlderReplica) => Ok("older_replica"),
+        Ok(pb::RecompileRunStatus::Unspecified) | Err(_) => {
+            tracing::error!(status, "a re-compile run has no known status");
+            Err(ApiError(TenancyError::Internal))
+        }
+    }
+}
+
+/// Runs the re-compile job once and waits for it. A run with many stale sets can last longer than
+/// the request timeout of the server.
+async fn run_recompile(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>) -> Result<Json<Value>, ApiError> {
+    let svc = svc(&s)?;
+    let run = run_to_pb(&svc.run_recompile(&actor_prn(&ctx)).await?);
+    let status = run_status_name(run.status)?;
+    let results: Vec<Value> = run
+        .results
+        .iter()
+        .map(|r| {
+            json!({
+                "kind": if r.kind == pb::ToolPolicySetKind::Floor as i32 { "floor" } else { "tenant" },
+                "org_id": r.org_id,
+                "base_version": r.base_version,
+                "outcome": enum_name::<pb::RecompileOutcome>(r.outcome, pb::RecompileOutcome::as_str_name),
+                "version": r.version,
+            })
+        })
+        .collect();
+    Ok(Json(json!({"status": status, "results": results})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::tool_policies::sets::{CompiledMeta, encode_compiled};
     use paigasus_iam_core::tool_policy::CompiledOutput;
     use prost::Message;
+
+    /// Each run status has its own HTTP name. `UNSPECIFIED` and an unknown number are a 500.
+    #[test]
+    fn each_run_status_has_its_own_name_and_an_unknown_one_is_internal() {
+        assert_eq!(run_status_name(pb::RecompileRunStatus::Ran as i32).ok(), Some("ran"));
+        assert_eq!(run_status_name(pb::RecompileRunStatus::AlreadyRunning as i32).ok(), Some("already_running"));
+        assert_eq!(run_status_name(pb::RecompileRunStatus::OlderReplica as i32).ok(), Some("older_replica"));
+        for unknown in [pb::RecompileRunStatus::Unspecified as i32, 99] {
+            let code = run_status_name(unknown).err().map(|e| e.0.code());
+            assert_eq!(code, Some(TenancyError::Internal.code()), "status {unknown}");
+        }
+    }
 
     /// The compile result fixture that holds two history conditions.
     const TENANT_ACCEPTED: &str = include_str!("../../../../../../tools/paigasus-policy-compiler/protocol/fixtures/result_tenant_accepted.json");

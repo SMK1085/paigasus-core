@@ -17,7 +17,8 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub version: i64,
     pub source: String,
-    pub compiled: Vec<u8>,
+    /// `None` only for a held or discarded row (a CHECK enforces it).
+    pub compiled: Option<Vec<u8>>,
     pub compiler_generation: i32,
     pub schema_revision: i32,
     pub catalog_revision: Option<i64>,
