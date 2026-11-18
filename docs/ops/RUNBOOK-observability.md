@@ -265,8 +265,13 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `GatewayHighErrorRate` | `sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `GatewayIamDependencyUnavailable` | `rate(gateway_iam_calls_total{result="unavailable"}[5m]) > 0` for 5m | critical |
 | `GatewayUpstreamErrors` | `sum(rate(gateway_upstream_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_upstream_requests_total[5m])) > 0.05` for 10m | warning |
-| `GatewayLimitsRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state) != 0` for 2m | warning |
+| `GatewayLimitsRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state{role="limits"}) != 0` for 2m | warning |
 | `GatewayLimitStoreUnavailable` | `sum by (job, op, kind) (increase(gateway_limit_store_unavailable_total[10m])) > 0` | warning |
+| `GatewayDecisionLogDrops` | `sum(increase(gateway_decision_log_dropped_total{reason!="shutdown"}[15m])) > 0` | warning |
+| `GatewayDecisionLogRedisReset` | `sum(increase(gateway_decision_log_redis_resets_total[15m])) > 0` | warning |
+| `GatewayDecisionLogRelayStalled` | `(sum(increase(gateway_decision_log_written_total[10m])) > 0 and sum(increase(gateway_decision_log_published_total[10m])) == 0) or sum(gateway_decision_log_backlog) > 50000` for 10m | warning |
+| `GatewayDecisionLogRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state{role="decision_log"}) != 0` for 2m | warning |
+| `GatewayDecisionLogTaskRestarts` | `sum(increase(gateway_decision_log_task_restarts_total[15m])) > 0` | warning |
 | `TargetDown` | `up == 0` for 2m | critical |
 
 ### `IamDenialAuditDrops` — denial-audit rows being dropped
@@ -1822,6 +1827,73 @@ that does not send `stream_options.include_usage` is charged an estimate.
 
 **Latency when Redis is unreachable (D20).** The first three requests that meet an unreachable
 Redis each wait about 2.1 s. Then the breaker opens.
+
+### Gateway decision log
+
+The decision log (SMA-755) records one event for each tool-call decision. The gateway writes the
+event to a Redis stream. The relay reads the stream and publishes to the JetStream stream
+`GATEWAY_DECISIONS`. A failure of the decision log never stops or changes a tool call. The cost is
+a gap in the audit trail. The five alerts below cover the gaps.
+
+#### `GatewayDecisionLogDrops` (warning)
+
+**Meaning.** The gateway dropped decision events in the last 15m. The alert does not count
+`reason="shutdown"`, because each deploy can drop the events that are still in the queue.
+
+**Confirm:** read `gateway_decision_log_dropped_total` by `reason`. `queue_full`: the writer
+is slower than the decisions. `redis_unavailable`, `write_error` and `breaker_open`: Redis is down
+or slow. `backlog_full`: the stream holds `stream_max_len` entries, because the relay does not
+publish. `publish_rejected` and `redis_deleted`: see the relay logs.
+
+**Remediation:** make Redis healthy, or make the relay healthy (see `GatewayDecisionLogRelayStalled`).
+The dropped events are lost. A drop is the signal that the audit trail has a gap.
+
+#### `GatewayDecisionLogRedisReset` (warning)
+
+**Meaning.** The relay found that the Redis decision stream or its consumer group did not exist
+(`NOGROUP`). The relay made the group again. The events that were in the stream are lost.
+`gateway_decision_log_lost_estimate_total` gives an upper bound of the lost events.
+
+**Confirm:** did Redis restart without persistence, run `FLUSHALL`, or evict the key? Check the
+Redis `maxmemory-policy`. It must be `noeviction` for this key.
+
+**Remediation:** fix the cause. A restore of Redis from an older snapshot keeps the group, and this
+alert does not detect it. The export of the decisions shows the gaps.
+
+#### `GatewayDecisionLogRelayStalled` (warning)
+
+**Meaning.** For 10m, the writer put events in the stream but the relay published none, or the
+backlog (`gateway_decision_log_backlog`) is above 50000. The value 50000 is 50 percent of the
+default `stream_max_len`. If you change `stream_max_len`, change the threshold in
+`ops/observability/prometheus/rules/gateway.rules.yml` too.
+
+**Confirm:** is NATS reachable from the gateway? Does the `PAIGASUS_GATEWAY` account have disk? Does
+the stream `GATEWAY_DECISIONS` exist? Read `gateway_decision_log_publish_seconds` and the relay logs.
+When the backlog reaches `stream_max_len`, the gateway drops new events (`backlog_full`).
+
+**Remediation:** make NATS or the account healthy. The relay then publishes the backlog.
+
+#### `GatewayDecisionLogRedisBreakerOpen` (warning)
+
+**Meaning.** The decision-log Redis circuit breaker
+(`gateway_redis_breaker_state{role="decision_log"}`) has been open or half-open for 2m. The
+gateway drops decision events (`reason="breaker_open"`). Tool calls are not affected, and the limits
+are not affected. `GatewayLimitsRedisBreakerOpen` does not fire for this role.
+
+**Confirm:** is the Redis of the decision log up and reachable? See the Redis checks for
+`GatewayLimitsRedisBreakerOpen`.
+
+**Remediation:** make Redis healthy. The breaker closes by itself.
+
+#### `GatewayDecisionLogTaskRestarts` (warning)
+
+**Meaning.** A decision-log task (`task="writer"` or `task="relay"`) caught a panic in the last
+15m and went on. This is a defect. Events can be lost.
+
+**Confirm:** find the panic in the gateway logs for the `task` label.
+
+**Remediation:** report the defect with the log lines. Do not restart the gateway as a fix. The task
+already restarted by itself.
 
 ### `TargetDown` — a scrape target is unreachable (critical)
 
