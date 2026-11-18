@@ -1028,5 +1028,12 @@ mod tests {
         assert!(code.contains(".with_shutdown("), "main.rs must give the tool policy service the shutdown watch");
         assert!(code.contains("in RECOMPILE_RESULT_LABELS"), "main.rs must prime each result series at zero");
         assert!(code.contains(".run_recompile_at_boot("), "main.rs must run the re-compile job at boot");
+        // The RPC run needs the service with the watch in the state, not only the boot run.
+        assert!(code.contains("state.tool_policies = Some("), "main.rs must store the watched service in the state");
+        // The boot run starts after the last fallible boot step, so a failed boot step cannot drop
+        // the job in the middle of a set (F16).
+        let install = code.find("slot.install(").expect("main.rs installs the boot slot");
+        let run = code.find(".run_recompile_at_boot(").expect("main.rs runs the job at boot");
+        assert!(run > install, "main.rs must start the boot re-compile run after slot.install");
     }
 }

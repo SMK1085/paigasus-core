@@ -413,36 +413,15 @@ async fn boot_deferred(
 
     // SMA-781: the re-compile job. The RPC run gets the shutdown watch as its stop, so that a
     // runtime shutdown ends it between two sets, not in the middle of a set (F16). The boot run
-    // is a background task: it does not delay readiness, and an error does not stop IAM.
+    // starts below, after `slot.install`.
+    let mut recompile_at_boot = None;
     if let Some(service) = state.tool_policies.take() {
         let service = service.with_shutdown(rx.clone());
         state.tool_policies = Some(service.clone());
         for label in RECOMPILE_RESULT_LABELS {
             metrics::counter!(names::IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL, "result" => label).increment(0);
         }
-        let mut rx = rx.clone();
-        servers.spawn(async move {
-            let mut stop_rx = rx.clone();
-            let stop = async move {
-                let _ = stop_rx.changed().await;
-            };
-            match service.run_recompile_at_boot(stop).await {
-                Ok(RecompileRun::Ran(results)) => tracing::info!(sets = results.len(), "tool policy re-compile at boot: done"),
-                Ok(RecompileRun::AlreadyRunning) => tracing::info!("tool policy re-compile at boot: another replica runs the job"),
-                Ok(RecompileRun::OlderReplica {
-                    stored_generation,
-                    stored_schema_revision,
-                }) => tracing::warn!(
-                    stored_generation,
-                    stored_schema_revision,
-                    "tool policy re-compile at boot: a stored row is newer than this replica; nothing written"
-                ),
-                Err(error) => tracing::error!(error = ?error, "tool policy re-compile at boot failed; IAM keeps serving"),
-            }
-            // `main` stops when any `servers` task ends, so this task waits for the shutdown.
-            let _ = rx.changed().await;
-            Ok(())
-        });
+        recompile_at_boot = Some(service);
     }
 
     // Kept for the partition-maintenance task (SMA-467), spawned below.
@@ -699,6 +678,36 @@ async fn boot_deferred(
 
     slot.install(boot::Serving::new(state, request_timeout).await).await?;
     tracing::info!("boot slot installed; serving");
+
+    // SMA-781: the boot run of the re-compile job. It starts after the last fallible boot step:
+    // if an earlier step fails, `main` drops the JoinSet, and that would end the job in the
+    // middle of a set (F16). The run is a background task, so it does not delay readiness, and an
+    // error does not stop IAM.
+    if let Some(service) = recompile_at_boot {
+        let mut rx = rx.clone();
+        servers.spawn(async move {
+            let mut stop_rx = rx.clone();
+            let stop = async move {
+                let _ = stop_rx.changed().await;
+            };
+            match service.run_recompile_at_boot(stop).await {
+                Ok(RecompileRun::Ran(results)) => tracing::info!(sets = results.len(), "tool policy re-compile at boot: done"),
+                Ok(RecompileRun::AlreadyRunning) => tracing::info!("tool policy re-compile at boot: another replica runs the job"),
+                Ok(RecompileRun::OlderReplica {
+                    stored_generation,
+                    stored_schema_revision,
+                }) => tracing::warn!(
+                    stored_generation,
+                    stored_schema_revision,
+                    "tool policy re-compile at boot: a stored row is newer than this replica; nothing written"
+                ),
+                Err(error) => tracing::error!(error = ?error, "tool policy re-compile at boot failed; IAM keeps serving"),
+            }
+            // `main` stops when any `servers` task ends, so this task waits for the shutdown.
+            let _ = rx.changed().await;
+            Ok(())
+        });
+    }
     Ok(())
 }
 
