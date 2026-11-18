@@ -13,6 +13,7 @@ data:
   # one zone, and console-core's descriptor cache needs Redis regardless. A knob whose only other
   # setting crash-loops the pod is not a knob.
   PAIGASUS_SESSION_STORE: "redis"
+
 ---
 # Source: paigasus/templates/zonemap-configmap.yaml
 apiVersion: v1
@@ -25,6 +26,7 @@ data:
   # disagrees, but it does not check the other zones' entries, so this is the control, not it.
   PAIGASUS_ZONES: "{\"iam\":\"/iam\"}"
   PAIGASUS_SERVICES: "{\"iam\":\"http://paigasus-paigasus-iam-backend:8080\"}"
+
 ---
 # Source: paigasus/templates/backend-service.yaml
 apiVersion: v1
@@ -47,6 +49,7 @@ spec:
     - name: grpc
       port: 9090
       targetPort: grpc
+
 ---
 # Source: paigasus/templates/console-service.yaml
 apiVersion: v1
@@ -62,6 +65,7 @@ spec:
     - name: http
       port: 3000
       targetPort: http
+
 ---
 # Source: paigasus/templates/backend-deployment.yaml
 apiVersion: apps/v1
@@ -175,6 +179,7 @@ spec:
               port: http         # size it for a steady-state database blip.
             periodSeconds: 10
             failureThreshold: 3
+
 ---
 # Source: paigasus/templates/console-deployment.yaml
 apiVersion: apps/v1
@@ -265,6 +270,7 @@ spec:
               port: http
             periodSeconds: 10
             failureThreshold: 3
+
 ---
 # Source: paigasus/templates/ingress.yaml
 apiVersion: networking.k8s.io/v1
