@@ -2342,7 +2342,7 @@ pub struct FakePolicyCompiler {
     script: Arc<Mutex<VecDeque<Result<CompileOutcome, CompilerFailure>>>>,
     requests: Arc<Mutex<Vec<CompileRequest>>>,
     gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
-    arrivals: Arc<tokio::sync::Notify>,
+    arrivals: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for FakePolicyCompiler {
@@ -2352,7 +2352,7 @@ impl Default for FakePolicyCompiler {
             script: Arc::default(),
             requests: Arc::default(),
             gate: Arc::default(),
-            arrivals: Arc::default(),
+            arrivals: Arc::new(tokio::sync::Semaphore::new(0)),
         }
     }
 }
@@ -2384,10 +2384,11 @@ impl FakePolicyCompiler {
         gate
     }
 
-    /// Resolves when a `compile` call reached the gate. Each call that waits at the gate gives one
-    /// signal, and a signal given before this call is kept.
+    /// Resolves when a `compile` call reached the gate. Each call that waits at the gate adds one
+    /// permit to a counter, and each call of this method takes one. So N arrivals before the calls
+    /// give N returns, and no arrival is lost.
     pub async fn reached_gate(&self) {
-        self.arrivals.notified().await;
+        self.arrivals.acquire().await.expect("the arrivals counter is never closed").forget();
     }
 
     /// From now on, `compile` does not wait. A call that already waits at the gate still waits
@@ -2407,7 +2408,7 @@ impl PolicyCompiler for FakePolicyCompiler {
         self.requests.lock().unwrap().push(req.clone());
         let gate = self.gate.lock().unwrap().clone();
         if let Some(gate) = gate {
-            self.arrivals.notify_one();
+            self.arrivals.add_permits(1);
             gate.acquire().await.expect("the compile gate is never closed").forget();
         }
         if let Some(answer) = self.script.lock().unwrap().pop_front() {
@@ -2470,5 +2471,41 @@ impl RecompileLockGuard for FakeRecompileGuard {
 impl Drop for FakeRecompileGuard {
     fn drop(&mut self) {
         self.held.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod policy_compiler_gate_tests {
+    use super::*;
+    use paigasus_iam_core::tool_policy::{PROTOCOL_VERSION, SetKind};
+    use std::time::Duration;
+
+    fn request() -> CompileRequest {
+        CompileRequest {
+            protocol_version: PROTOCOL_VERSION,
+            kind: SetKind::Floor,
+            source: String::new(),
+            schema_json: serde_json::json!({}),
+            max_window_ms: 0,
+        }
+    }
+
+    /// Two gated arrivals before any `reached_gate` call give two returns of `reached_gate`.
+    #[tokio::test]
+    async fn two_gated_arrivals_give_two_reached_gate_returns() {
+        let compiler = FakePolicyCompiler::default();
+        let gate = compiler.gate();
+        let (a, b) = (compiler.clone(), compiler.clone());
+        let first = tokio::spawn(async move { a.compile(&request()).await });
+        let second = tokio::spawn(async move { b.compile(&request()).await });
+        while compiler.calls() < 2 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::timeout(Duration::from_secs(5), compiler.reached_gate()).await.expect("the first arrival");
+        tokio::time::timeout(Duration::from_secs(5), compiler.reached_gate()).await.expect("the second arrival");
+        assert!(tokio::time::timeout(Duration::from_millis(50), compiler.reached_gate()).await.is_err(), "only two arrivals happened");
+        gate.add_permits(2);
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
     }
 }
