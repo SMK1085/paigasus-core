@@ -4,8 +4,10 @@
 //! the proto, encodes it and puts it into a bounded queue. The writer task (`writer`) moves the queue into a
 //! Redis stream. The connect loop (`redis_conn`) makes the Redis connection without a block of the boot.
 
+pub mod jetstream;
 pub mod proto;
 pub mod redis_conn;
+pub mod relay;
 pub mod supervised;
 pub mod writer;
 
@@ -19,6 +21,7 @@ use tokio::sync::mpsc;
 use crate::domain::decision_log::{DecisionLog, log_line};
 
 pub use redis_conn::{DECISION_LOG_BREAKER_ROLE, RedisSlot, connect_loop};
+pub use relay::{RelaySettings, run_relay};
 pub use supervised::run_supervised;
 pub use writer::{WriterSettings, run_writer};
 
@@ -72,11 +75,13 @@ pub fn count_dropped(reason: DropReason, n: u64) {
     }
 }
 
-/// Register every decision-log series at zero, so that `increase()` sees the first event. The relay series
-/// of Task 11 are primed by the relay.
+/// Register every decision-log counter at zero, so that `increase()` sees the first event.
 pub fn prime_decision_log_metrics() {
     counter!(names::GATEWAY_DECISION_LOG_RECORDED_TOTAL).increment(0);
     counter!(names::GATEWAY_DECISION_LOG_WRITTEN_TOTAL).increment(0);
+    counter!(names::GATEWAY_DECISION_LOG_PUBLISHED_TOTAL).increment(0);
+    counter!(names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL).increment(0);
+    counter!(names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL).increment(0);
     for reason in DropReason::ALL {
         counter!(names::GATEWAY_DECISION_LOG_DROPPED_TOTAL, "reason" => reason.as_label()).increment(0);
     }
@@ -219,7 +224,14 @@ mod tests {
         }
         assert_eq!(snapshot_counter(&snap, names::GATEWAY_DECISION_LOG_RECORDED_TOTAL, &[]), Some(0));
         assert_eq!(snapshot_counter(&snap, names::GATEWAY_DECISION_LOG_WRITTEN_TOTAL, &[]), Some(0));
-        assert_eq!(snap.len(), 9 + 2 + 2);
+        for name in [
+            names::GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+            names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+            names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+        ] {
+            assert_eq!(snapshot_counter(&snap, name, &[]), Some(0), "{name}");
+        }
+        assert_eq!(snap.len(), 9 + 2 + 2 + 3);
     }
 
     #[test]

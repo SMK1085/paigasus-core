@@ -87,6 +87,16 @@ pub const GATEWAY_DECISION_LOG_WRITTEN_TOTAL: &str = "gateway_decision_log_writt
 pub const GATEWAY_DECISION_LOG_DROPPED_TOTAL: &str = "gateway_decision_log_dropped_total";
 /// Panics that a decision-log task caught and survived; `task` = `writer` | `relay`.
 pub const GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL: &str = "gateway_decision_log_task_restarts_total";
+/// Events with a JetStream PubAck (the relay).
+pub const GATEWAY_DECISION_LOG_PUBLISHED_TOTAL: &str = "gateway_decision_log_published_total";
+/// Redis losses that the relay detected (`NOGROUP`, then the group was made again). One per incident.
+pub const GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL: &str = "gateway_decision_log_redis_resets_total";
+/// An upper-bound estimate of the events in the Redis losses (the last `XLEN` sample of the relay).
+pub const GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL: &str = "gateway_decision_log_lost_estimate_total";
+/// Seconds from the publish of an event to its PubAck.
+pub const GATEWAY_DECISION_LOG_PUBLISH_SECONDS: &str = "gateway_decision_log_publish_seconds";
+/// `XLEN` of the decision stream, sampled every 15 s by the relay.
+pub const GATEWAY_DECISION_LOG_BACKLOG: &str = "gateway_decision_log_backlog";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -358,6 +368,11 @@ pub const ALL: &[&str] = &[
     GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
     GATEWAY_DECISION_LOG_DROPPED_TOTAL,
     GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
+    GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+    GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+    GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+    GATEWAY_DECISION_LOG_PUBLISH_SECONDS,
+    GATEWAY_DECISION_LOG_BACKLOG,
     IAM_HTTP_REQUESTS_TOTAL,
     IAM_HTTP_REQUEST_DURATION_SECONDS,
     IAM_HTTP_INFLIGHT_REQUESTS,
@@ -466,6 +481,11 @@ mod tests {
             GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
             GATEWAY_DECISION_LOG_DROPPED_TOTAL,
             GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
+            GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+            GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+            GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+            GATEWAY_DECISION_LOG_PUBLISH_SECONDS,
+            GATEWAY_DECISION_LOG_BACKLOG,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

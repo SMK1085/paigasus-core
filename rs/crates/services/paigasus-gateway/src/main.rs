@@ -309,6 +309,20 @@ fn describe_gateway_metrics() {
         names::GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
         "Panics that a decision-log task caught and survived, labeled by task (writer, relay)."
     );
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+        "Tool decision events that the relay published to JetStream and that got a PubAck."
+    );
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+        "Redis losses of the decision stream that the relay detected (the consumer group was gone). One per incident."
+    );
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+        "An upper-bound estimate of the decision events in the Redis losses: the last 15 s XLEN sample of the relay."
+    );
+    describe_histogram!(names::GATEWAY_DECISION_LOG_PUBLISH_SECONDS, "Seconds from the publish of a decision event to its JetStream PubAck.");
+    describe_gauge!(names::GATEWAY_DECISION_LOG_BACKLOG, "Entries in the decision stream in Redis (XLEN), sampled every 15 s by the relay.");
 }
 
 async fn shutdown_signal() {

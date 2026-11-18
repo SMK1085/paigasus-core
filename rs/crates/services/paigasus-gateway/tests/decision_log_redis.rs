@@ -8,17 +8,23 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
+use async_nats::jetstream;
 use bytes::Bytes;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use paigasus_gateway::adapters::decision_log::jetstream as dl_js;
 use paigasus_gateway::adapters::decision_log::redis_conn::breaker_metrics;
-use paigasus_gateway::adapters::decision_log::{RedisDecisionLog, RedisSlot, WriterSettings, connect_loop, proto, run_writer};
+use paigasus_gateway::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, proto, run_relay, run_writer};
+use paigasus_gateway::config::DecisionLogNatsConfig;
 use paigasus_gateway::domain::decision_log::DecisionLog;
 use paigasus_gateway_core::decision_log::{DecisionRecord, RecordHeader, ReportedCall, build_response};
 use paigasus_gateway_core::{Basis, BlockCode, DecisionContext, ReportDecision, ReportEntry};
 use prost::Message;
 use secrecy::SecretString;
+use testcontainers_modules::nats::{Nats, NatsServerCmd};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::core::{ExecCommand, IntoContainerPort};
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
@@ -61,11 +67,12 @@ fn hex(bytes: &[u8]) -> String {
 
 type SeriesKey = (String, Vec<(String, String)>);
 
-/// A running total of the counters. `Snapshotter::snapshot` resets each counter it reads, so a poll must add
-/// each snapshot to a total.
+/// A running total of the counters and the histogram counts, and the last value of each gauge.
+/// `Snapshotter::snapshot` resets each counter it reads, so a poll must add each snapshot to a total.
 struct Tally {
     snapshotter: Snapshotter,
     totals: RefCell<HashMap<SeriesKey, u64>>,
+    gauges: RefCell<HashMap<SeriesKey, f64>>,
 }
 
 impl Tally {
@@ -73,22 +80,39 @@ impl Tally {
         Tally {
             snapshotter,
             totals: RefCell::new(HashMap::new()),
+            gauges: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn poll(&self) {
+        let mut totals = self.totals.borrow_mut();
+        let mut gauges = self.gauges.borrow_mut();
+        for (key, _, _, value) in self.snapshotter.snapshot().into_vec() {
+            let key = key.key();
+            let mut have: Vec<(String, String)> = key.labels().map(|l| (l.key().to_owned(), l.value().to_owned())).collect();
+            have.sort();
+            let id = (key.name().to_owned(), have);
+            match value {
+                DebugValue::Counter(n) => *totals.entry(id).or_insert(0) += n,
+                DebugValue::Histogram(samples) => *totals.entry(id).or_insert(0) += samples.len() as u64,
+                DebugValue::Gauge(v) => {
+                    gauges.insert(id, v.into_inner());
+                }
+            }
         }
     }
 
     fn get(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
-        let mut totals = self.totals.borrow_mut();
-        for (key, _, _, value) in self.snapshotter.snapshot().into_vec() {
-            if let DebugValue::Counter(n) = value {
-                let key = key.key();
-                let mut have: Vec<(String, String)> = key.labels().map(|l| (l.key().to_owned(), l.value().to_owned())).collect();
-                have.sort();
-                *totals.entry((key.name().to_owned(), have)).or_insert(0) += n;
-            }
-        }
+        self.poll();
         let mut want: Vec<(String, String)> = labels.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
         want.sort();
-        totals.get(&(name.to_owned(), want)).copied().unwrap_or(0)
+        self.totals.borrow().get(&(name.to_owned(), want)).copied().unwrap_or(0)
+    }
+
+    /// The last value of the gauge `name`, or `None` before its first set.
+    fn gauge(&self, name: &str) -> Option<f64> {
+        self.poll();
+        self.gauges.borrow().get(&(name.to_owned(), Vec::new())).copied()
     }
 
     fn dropped(&self, reason: &str) -> u64 {
@@ -97,6 +121,10 @@ impl Tally {
 
     fn written(&self) -> u64 {
         self.get("gateway_decision_log_written_total", &[])
+    }
+
+    fn published(&self) -> u64 {
+        self.get("gateway_decision_log_published_total", &[])
     }
 }
 
@@ -324,4 +352,410 @@ async fn shutdown_with_a_budget_writes_what_is_queued() {
     assert_eq!(xlen(&node).await, 3);
     assert_eq!(snap.written(), 3);
     assert_eq!(snap.dropped("shutdown"), 0);
+}
+
+// ---- The relay (SMA-755 Task 11, § 5.7, § 5.8) ----
+
+const ORG_A: &str = "0190a100-0000-7000-8000-0000000000a1";
+const ORG_B: &str = "0190a100-0000-7000-8000-0000000000b2";
+
+fn event_with_org(seq: u64, org: &str) -> Vec<u8> {
+    let mut e = proto::to_event(&record(seq));
+    e.org_id = org.to_owned();
+    e.encode_to_vec()
+}
+
+fn decision_id(seq: u64) -> String {
+    Uuid::from_u128(u128::from(seq) + 1).to_string()
+}
+
+/// Add `bytes` (and `pad` zero bytes after them) to the stream through a Lua script, so that binary bytes pass
+/// through `redis-cli`. Returns the entry id.
+async fn xadd(node: &ContainerAsync<Redis>, bytes: &[u8], pad: usize) -> String {
+    let lua = "local b = ARGV[1]:gsub('..', function(c) return string.char(tonumber(c, 16)) end) .. string.rep(string.char(0), tonumber(ARGV[2])) \
+               return redis.call('XADD', KEYS[1], '*', 'e', b)";
+    redis_cli(node, &["EVAL", lua, "1", KEY, &hex(bytes), &pad.to_string()]).await
+}
+
+fn varint(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+async fn start_nats(port: Option<u16>, what: &str) -> Option<(ContainerAsync<Nats>, String)> {
+    let cmd = NatsServerCmd::default().with_jetstream();
+    let image = Nats::default().with_cmd(&cmd);
+    let node = match port {
+        Some(p) => paigasus_test_docker::start_or_skip(image.with_mapped_port(p, 4222.tcp()), what).await?,
+        None => paigasus_test_docker::start_or_skip(image, what).await?,
+    };
+    let port = paigasus_test_docker::mapped_port(&node, 4222, what).await;
+    Some((node, format!("nats://127.0.0.1:{port}")))
+}
+
+fn free_port() -> u16 {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a probe port");
+    probe.local_addr().expect("the probe address").port()
+}
+
+async fn relay_js(url: &str, violations: Arc<AtomicBool>) -> jetstream::Context {
+    let cfg = DecisionLogNatsConfig {
+        url: SecretString::from(url.to_owned()),
+        creds_file: None,
+        ca_file: None,
+    };
+    dl_js::connect(&cfg, violations).await.expect("the relay NATS client is made")
+}
+
+fn fast(consumer: &str) -> RelaySettings {
+    let mut s = RelaySettings::new(KEY.to_owned(), consumer.to_owned());
+    s.claim_idle = Duration::from_millis(300);
+    s.claim_every = Duration::from_millis(100);
+    s.sample_every = Duration::from_millis(200);
+    s.idle_sleep = Duration::from_millis(20);
+    s.backoff_start = Duration::from_millis(200);
+    s.backoff_max = Duration::from_secs(1);
+    s
+}
+
+struct Relay {
+    stop: watch::Sender<()>,
+    task: JoinHandle<()>,
+}
+
+impl Relay {
+    fn start(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Arc<AtomicBool>) -> Relay {
+        let (stop, shutdown) = watch::channel(());
+        let task = tokio::spawn(run_relay(slot, js, s, violations, shutdown, Duration::from_secs(2)));
+        Relay { stop, task }
+    }
+
+    async fn shut_down(self) {
+        self.stop.send(()).expect("the relay is alive");
+        self.task.await.expect("the relay task ends");
+    }
+}
+
+/// One message of the stream.
+struct Published {
+    subject: String,
+    msg_id: String,
+    payload: Vec<u8>,
+}
+
+async fn stream_messages(js: &jetstream::Context) -> Vec<Published> {
+    let mut stream = js.get_stream(dl_js::STREAM).await.expect("the stream exists");
+    let last = stream.info().await.expect("stream info").state.last_sequence;
+    let mut out = Vec::new();
+    for seq in 1..=last {
+        if let Ok(m) = stream.get_raw_message(seq).await {
+            out.push(Published {
+                subject: m.subject.to_string(),
+                msg_id: m.headers.get("Nats-Msg-Id").map(|v| v.as_str().to_owned()).unwrap_or_default(),
+                payload: m.payload.to_vec(),
+            });
+        }
+    }
+    out
+}
+
+/// A client of its own for the assertions.
+async fn test_js(url: &str) -> jetstream::Context {
+    jetstream::new(async_nats::connect(url).await.expect("the assertion client connects"))
+}
+
+#[tokio::test]
+async fn n_records_give_n_messages_with_the_right_subjects_and_bytes() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay messages").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay messages").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let want = [(1, ORG_A), (2, ORG_B), (3, ""), (4, ORG_A)];
+    for (seq, org) in want {
+        xadd(&node, &event_with_org(seq, org), 0).await;
+    }
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    wait_for("four events published", || async { snap.published() == 4 && xlen(&node).await == 0 }).await;
+    let got = stream_messages(&test_js(&nats_url).await).await;
+    assert_eq!(got.len(), 4);
+    for (seq, org) in want {
+        let m = got.iter().find(|m| m.msg_id == decision_id(seq)).unwrap_or_else(|| panic!("no message for record {seq}"));
+        let subject = if org.is_empty() { "gateway.decision._none".to_owned() } else { format!("gateway.decision.{org}") };
+        assert_eq!(m.subject, subject);
+        assert_eq!(m.payload, event_with_org(seq, org), "the payload is the stream bytes");
+    }
+    assert!(snap.get("gateway_decision_log_publish_seconds", &[]) >= 4, "the publish time is recorded for each event");
+    assert_eq!(snap.dropped("publish_rejected"), 0);
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn nats_down_keeps_the_events_in_redis_until_it_returns() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay nats down").await else {
+        return;
+    };
+    let port = free_port();
+    let Some((nats, nats_url)) = start_nats(Some(port), "decision_log_redis relay nats down").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    nats.stop().await.expect("stop NATS");
+    for seq in 1..=4 {
+        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(xlen(&node).await, 4, "the events stay in Redis while NATS is down");
+    assert_eq!(snap.published(), 0);
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a transport failure is not a rejection");
+    nats.start().await.expect("start NATS");
+    wait_for("all four events published", || async { snap.published() == 4 && xlen(&node).await == 0 }).await;
+    let got = stream_messages(&test_js(&nats_url).await).await;
+    let mut ids: Vec<_> = got.iter().map(|m| m.msg_id.clone()).collect();
+    ids.sort();
+    let mut want: Vec<_> = (1..=4).map(decision_id).collect();
+    want.sort();
+    assert_eq!(ids, want, "each event once");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_poison_entry_is_rejected_and_the_next_publishes() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay poison").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay poison").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // A valid event plus an unknown length-delimited field (number 98) of 70 KiB: above the 64 KiB stream limit.
+    let pad = 70 * 1024;
+    let mut poison = event_with_org(1, ORG_A);
+    poison.extend(varint((98 << 3) | 2));
+    poison.extend(varint(pad as u64));
+    xadd(&node, &poison, pad).await;
+    xadd(&node, &event_with_org(2, ORG_A), 0).await;
+    xadd(&node, &event_with_org(3, ORG_A), 0).await;
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    wait_for("one rejection and two publishes", || async {
+        snap.dropped("publish_rejected") == 1 && snap.published() == 2 && xlen(&node).await == 0
+    })
+    .await;
+    let got = stream_messages(&test_js(&nats_url).await).await;
+    assert_eq!(got.len(), 2);
+    assert!(got.iter().all(|m| m.msg_id != decision_id(1)), "the poison event is not in the stream");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_non_canonical_org_id_is_rejected_and_never_published() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay org").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay org").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    for (seq, org) in [(1, "0190A100-0000-7000-8000-0000000000A1"), (2, "{0190a100-0000-7000-8000-0000000000a1}"), (3, "a.b"), (4, "*")] {
+        xadd(&node, &event_with_org(seq, org), 0).await;
+    }
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    wait_for("four rejections", || async { snap.dropped("publish_rejected") == 4 && xlen(&node).await == 0 }).await;
+    assert_eq!(snap.published(), 0);
+    assert!(stream_messages(&test_js(&nats_url).await).await.is_empty(), "no message reached gateway.decision.>");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn an_unknown_field_survives_the_relay_byte_for_byte() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay unknown field").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay unknown field").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // Field 99, varint 1: a field that a newer gateway could add.
+    let mut bytes = event_with_org(1, ORG_A);
+    bytes.extend(varint(99 << 3));
+    bytes.extend(varint(1));
+    xadd(&node, &bytes, 0).await;
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    wait_for("one publish", || async { snap.published() == 1 }).await;
+    let got = stream_messages(&test_js(&nats_url).await).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].payload, bytes, "the published payload is the stream bytes, with the unknown field");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn flushall_with_two_relays_counts_one_reset() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay flushall").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // The entries are in Redis before the relays start, so that the first XLEN sample of each relay is 3. NATS
+    // is unreachable, so that no entry is published and deleted. A long sample interval keeps that sample the
+    // last one until the flush.
+    for seq in 1..=3 {
+        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+    }
+    let dead = format!("nats://127.0.0.1:{}", free_port());
+    let mut relays = Vec::new();
+    for name in ["i1", "i2"] {
+        let v = Arc::new(AtomicBool::new(false));
+        let mut s = fast(name);
+        s.sample_every = Duration::from_secs(120);
+        relays.push(Relay::start(connected_slot(&redis_url).await, relay_js(&dead, Arc::clone(&v)).await, s, v));
+    }
+    wait_for("the backlog gauge reads 3", || async { snap.gauge("gateway_decision_log_backlog") == Some(3.0) }).await;
+    redis_cli(&node, &["FLUSHALL"]).await;
+    wait_for("one reset", || async { snap.get("gateway_decision_log_redis_resets_total", &[]) >= 1 }).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(snap.get("gateway_decision_log_redis_resets_total", &[]), 1, "two relays count one incident");
+    assert_eq!(snap.get("gateway_decision_log_lost_estimate_total", &[]), 3, "the estimate is the last XLEN sample");
+    for r in relays {
+        r.shut_down().await;
+    }
+}
+
+/// Make the group and read `n` entries as a consumer that dies before it acks.
+async fn read_as_dead_instance(node: &ContainerAsync<Redis>, n: u64) -> Vec<String> {
+    redis_cli(node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    let mut ids = Vec::new();
+    for seq in 1..=n {
+        ids.push(xadd(node, &event_with_org(seq, ORG_A), 0).await);
+    }
+    // The entries hold binary bytes, so the script returns the ids only.
+    let lua = "local r = redis.call('XREADGROUP', 'GROUP', 'relay', 'dead', 'COUNT', 10, 'STREAMS', KEYS[1], '>') \
+               local out = {} for i, e in ipairs(r[1][2]) do out[i] = e[1] end return table.concat(out, ' ')";
+    let read = redis_cli(node, &["EVAL", lua, "1", KEY]).await;
+    assert_eq!(read, ids.join(" "), "the dead instance read every entry");
+    ids
+}
+
+#[tokio::test]
+async fn a_dead_instance_pending_entries_are_claimed_once() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay claim").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay claim").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    read_as_dead_instance(&node, 3).await;
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("b"), v);
+    wait_for("three claimed entries published", || async { snap.published() == 3 && xlen(&node).await == 0 }).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let got = stream_messages(&test_js(&nats_url).await).await;
+    let mut ids: Vec<_> = got.iter().map(|m| m.msg_id.clone()).collect();
+    ids.sort();
+    let mut want: Vec<_> = (1..=3).map(decision_id).collect();
+    want.sort();
+    assert_eq!(ids, want, "each entry once, by Nats-Msg-Id");
+    assert_eq!(snap.published(), 3);
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_deleted_pending_id_counts_redis_deleted() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay deleted").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay deleted").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let ids = read_as_dead_instance(&node, 2).await;
+    redis_cli(&node, &["XDEL", KEY, &ids[0]]).await;
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("b"), v);
+    wait_for("one deleted id and one publish", || async { snap.dropped("redis_deleted") == 1 && snap.published() == 1 }).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(snap.dropped("redis_deleted"), 1, "the deleted id counts once");
+    assert_eq!(snap.published(), 1);
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay stream").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay stream").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    let admin = test_js(&nats_url).await;
+
+    // No stream: the relay makes one with the expected config.
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    wait_for("one publish", || async { snap.published() == 1 }).await;
+    let mut stream = admin.get_stream(dl_js::STREAM).await.expect("the relay made the stream");
+    let live = stream.info().await.expect("stream info").config.clone();
+    let want = dl_js::stream_config();
+    assert_eq!(live.max_bytes, want.max_bytes);
+    assert_eq!(live.max_age, want.max_age);
+    assert_eq!(live.max_message_size, want.max_message_size);
+    assert_eq!(live.duplicate_window, want.duplicate_window);
+    assert_eq!(live.discard, want.discard);
+    assert!(live.max_bytes > 0, "the stream is bounded");
+    assert!(!logs.text().contains("differs from the expected config"), "no drift warning for a matching stream");
+    relay.shut_down().await;
+
+    // A stream with no byte limit: the relay warns and does not change it.
+    admin.delete_stream(dl_js::STREAM).await.expect("delete the stream");
+    let mut drifted = dl_js::stream_config();
+    drifted.max_bytes = -1;
+    admin.create_stream(drifted).await.expect("make the drifted stream");
+    xadd(&node, &event_with_org(2, ORG_A), 0).await;
+    let v = Arc::new(AtomicBool::new(false));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i2"), v);
+    wait_for("the second publish", || async { snap.published() == 2 }).await;
+    let text = logs.text();
+    assert!(
+        text.contains("differs from the expected config") && text.contains("max_bytes"),
+        "the drift warning names max_bytes: {text}"
+    );
+    let mut stream = admin.get_stream(dl_js::STREAM).await.expect("the stream exists");
+    assert_eq!(stream.info().await.expect("stream info").config.max_bytes, -1, "the relay did not change the stream");
+    relay.shut_down().await;
 }
