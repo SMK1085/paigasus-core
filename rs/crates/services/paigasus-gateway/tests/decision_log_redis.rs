@@ -537,6 +537,37 @@ async fn nats_down_keeps_the_events_in_redis_until_it_returns() {
 }
 
 #[tokio::test]
+async fn a_deleted_stream_is_transient_and_the_relay_makes_it_again() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay stream deleted").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay stream deleted").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let v = Arc::new(AtomicU64::new(0));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    // The first event makes the relay create the stream.
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    wait_for("the first event is published", || async { snap.published() == 1 && xlen(&node).await == 0 }).await;
+    // The stream goes away while the relay runs. A JetStream that is not ready answers the same way (R9).
+    let js = test_js(&nats_url).await;
+    js.delete_stream(dl_js::STREAM).await.expect("delete the stream");
+    xadd(&node, &event_with_org(2, ORG_A), 0).await;
+    // The relay makes the stream again and publishes the entry. It never counts the entry as rejected.
+    wait_for("the second event is published after the stream is made again", || async {
+        snap.published() == 2 && xlen(&node).await == 0
+    })
+    .await;
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a missing stream is not a rejection");
+    let got = stream_messages(&js).await;
+    assert!(got.iter().any(|m| m.msg_id == decision_id(2)), "the event that met the missing stream is on the new stream");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
 async fn a_poison_entry_is_rejected_and_the_next_publishes() {
     let Some((node, redis_url)) = redis_7_4("decision_log_redis relay poison").await else {
         return;

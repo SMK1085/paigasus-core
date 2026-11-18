@@ -94,8 +94,11 @@ struct Entry {
 
 enum Outcome {
     Published,
-    Rejected(&'static str),
+    Rejected,
     Transient,
+    /// A transient error that says the stream is gone, or JetStream is not ready (R9). The relay keeps the entry
+    /// and makes the stream again before the next publish.
+    StreamGone,
 }
 
 struct Inner {
@@ -292,14 +295,14 @@ impl State {
 
     async fn publish_one(&self, e: &Entry) -> Outcome {
         let Some(bytes) = e.bytes.clone() else {
-            return Outcome::Rejected("no_payload");
+            return Outcome::Rejected;
         };
         // The event is decoded only to read the two fields. The ORIGINAL bytes go out.
         let Ok(event) = pb::ToolDecisionEvent::decode(bytes.clone()) else {
-            return Outcome::Rejected("decode_failed");
+            return Outcome::Rejected;
         };
         let Some(subject) = subject_for(&event.org_id) else {
-            return Outcome::Rejected("bad_org_id");
+            return Outcome::Rejected;
         };
         let mut msg = PublishMessage::build().payload(bytes);
         if !event.decision_id.is_empty() {
@@ -319,8 +322,9 @@ impl State {
             Err(err) => match classify(err.kind(), violation_since(&self.violations, generation)) {
                 PublishClass::Permanent(class) => {
                     tracing::warn!(class, "the relay rejects an event that JetStream cannot take");
-                    Outcome::Rejected(class)
+                    Outcome::Rejected
                 }
+                PublishClass::Transient if err.kind() == jetstream::context::PublishErrorKind::StreamNotFound => Outcome::StreamGone,
                 PublishClass::Transient => Outcome::Transient,
             },
         }
@@ -432,14 +436,15 @@ impl State {
                     counter!(names::GATEWAY_DECISION_LOG_PUBLISHED_TOTAL).increment(1);
                     e.done = true;
                 }
-                Some(Outcome::Rejected(class)) => {
-                    if class == "stream_not_found" {
-                        inner.stream_ready = false;
-                    }
+                Some(Outcome::Rejected) => {
                     count_dropped(DropReason::PublishRejected, 1);
                     e.done = true;
                 }
                 Some(Outcome::Transient) => transient = true,
+                Some(Outcome::StreamGone) => {
+                    transient = true;
+                    inner.stream_ready = false;
+                }
             }
             kept.push(e);
         }

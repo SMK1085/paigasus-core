@@ -3,6 +3,9 @@
 //! The JetStream side of the decision log (SMA-755 § 5.7, § 5.10). It holds the stream constants, the subject
 //! of an event, the NATS connection of the relay and the classification of a publish error (P-14, P-20).
 //!
+//! A missing stream is a TRANSIENT publish error (R9): `async-nats` reports a JetStream that is not ready (a restart,
+//! a leader election) as `StreamNotFound`. So the relay keeps the entry and makes the stream again.
+//!
 //! The stream values live once in `ops/nats/subjects.env`. A unit test below pins these constants to that file.
 
 use std::path::PathBuf;
@@ -121,9 +124,11 @@ pub enum PublishClass {
 pub fn classify(kind: PublishErrorKind, violation_seen: bool) -> PublishClass {
     match kind {
         PublishErrorKind::MaxPayloadExceeded => PublishClass::Permanent("max_payload_exceeded"),
-        PublishErrorKind::StreamNotFound => PublishClass::Permanent("stream_not_found"),
         PublishErrorKind::TimedOut if violation_seen => PublishClass::Permanent("permission_violation"),
-        PublishErrorKind::TimedOut | PublishErrorKind::BrokenPipe | PublishErrorKind::MaxAckPending => PublishClass::Transient,
+        // `async-nats` maps a NO_RESPONDERS reply to `StreamNotFound`. A JetStream that is not ready (a restart, a
+        // leader election) answers that way, so "no stream for the subject" is retried (R9). The relay makes the
+        // stream again with `get_or_create_stream` on the next iteration.
+        PublishErrorKind::StreamNotFound | PublishErrorKind::TimedOut | PublishErrorKind::BrokenPipe | PublishErrorKind::MaxAckPending => PublishClass::Transient,
         // `Other` covers a refused subject and a PubAck error, for example a message above the stream limit.
         // The relay never sets an expected last id or sequence, so those two kinds are not expected either.
         PublishErrorKind::Other | PublishErrorKind::WrongLastMessageId | PublishErrorKind::WrongLastSequence => PublishClass::Permanent("other"),
@@ -230,7 +235,7 @@ mod tests {
         use PublishErrorKind::*;
         let table = [
             (MaxPayloadExceeded, PublishClass::Permanent("max_payload_exceeded"), PublishClass::Permanent("max_payload_exceeded")),
-            (StreamNotFound, PublishClass::Permanent("stream_not_found"), PublishClass::Permanent("stream_not_found")),
+            (StreamNotFound, PublishClass::Transient, PublishClass::Transient),
             (Other, PublishClass::Permanent("other"), PublishClass::Permanent("other")),
             (WrongLastMessageId, PublishClass::Permanent("other"), PublishClass::Permanent("other")),
             (WrongLastSequence, PublishClass::Permanent("other"), PublishClass::Permanent("other")),

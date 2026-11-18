@@ -1869,7 +1869,8 @@ default `stream_max_len`. If you change `stream_max_len`, change the threshold i
 `ops/observability/prometheus/rules/gateway.rules.yml` too.
 
 **Confirm:** is NATS reachable from the gateway? Does the `PAIGASUS_GATEWAY` account have disk? Does
-the stream `GATEWAY_DECISIONS` exist? Read `gateway_decision_log_publish_seconds` and the relay logs.
+the stream `GATEWAY_DECISIONS` exist? The relay makes a missing stream again and keeps the events in Redis
+until then (a missing stream is not a rejection). Read `gateway_decision_log_publish_seconds` and the relay logs.
 When the backlog reaches `stream_max_len`, the gateway drops new events (`backlog_full`).
 
 **Remediation:** make NATS or the account healthy. The relay then publishes the backlog.

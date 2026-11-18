@@ -508,8 +508,10 @@ pub trait DecisionLog: Send + Sync {
 - **Publish errors are classified.**
   - A transport error or a timeout: the relay stops reading, keeps the entries in Redis, and
     tries again with a backoff from 1 s to 30 s.
-  - A permanent error (the payload is above `max_payload`, an invalid subject, no stream for the
-    subject, a permission error): the relay acks and deletes that entry, counts
+    No stream for the subject is retried too, because async-nats reports a JetStream that is not
+    ready the same way (R9). The relay makes the stream again before the next publish.
+  - A permanent error (the payload is above `max_payload`, an invalid subject, a permission
+    error): the relay acks and deletes that entry, counts
     `dropped{reason="publish_rejected"}`, logs the error class, and goes on. One poison entry
     must not stop the relay.
   - An entry whose `org_id` fails the check is a permanent error too. Anybody with Redis write
