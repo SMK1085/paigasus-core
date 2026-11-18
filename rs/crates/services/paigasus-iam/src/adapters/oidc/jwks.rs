@@ -99,9 +99,9 @@ pub enum IdpTls<'a> {
     /// DISABLES verification for every fetch the client makes, which is a full authentication
     /// bypass in production.
     AcceptInvalid,
-    /// Verify normally. The client's trust anchors are the compiled-in webpki Mozilla roots, the
-    /// platform store (`/etc/ssl/certs`), AND every certificate in `extra_bundle` if set — all
-    /// three unioned (SMA-558 D1).
+    /// Verify normally. The client's trust anchors are the platform store (through reqwest's
+    /// `rustls-platform-verifier`, since reqwest 0.13) AND every certificate in `extra_bundle`
+    /// if set, unioned (SMA-558 D1). reqwest 0.13 has no compiled-in webpki roots (SMA-809).
     Verify { extra_bundle: Option<&'a str> },
 }
 
@@ -176,6 +176,9 @@ fn build_failure_message(attribution: &Attribution<'_>, chain: &str) -> String {
 /// future option is added here (SMA-570 D6). `ClientBuilder` is not `Clone`, so this must be a
 /// function rather than a shared value.
 fn base_builder(timeout: Duration) -> reqwest::ClientBuilder {
+    // reqwest 0.13 `rustls-no-provider` panics at `build()` unless a provider is installed. Every
+    // build goes through here (SMA-809). `Err` means one is already installed: fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder().timeout(timeout)
 }
 

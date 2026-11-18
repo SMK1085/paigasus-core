@@ -201,6 +201,9 @@ fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
 /// The client's non-TLS options, in ONE place so the control build differs from the real one by
 /// exactly the added anchors (SMA-570 D6). `ClientBuilder` is not `Clone`, hence a function.
 fn base_builder(connect_timeout: Duration, stream_idle_timeout: Duration) -> reqwest::ClientBuilder {
+    // reqwest 0.13 `rustls-no-provider` panics at `build()` unless a provider is installed. Every
+    // build goes through here (SMA-809). `Err` means one is already installed: fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder().connect_timeout(connect_timeout).read_timeout(stream_idle_timeout)
 }
 
@@ -494,6 +497,7 @@ mod tests {
         // untouched by SMA-570. Minted from a real failed build so the variant is exercised, not
         // just quoted.
         let bad = reqwest::Certificate::from_pem_bundle(INVALID_DER_PEM).expect("parses as one cert");
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut b = reqwest::Client::builder();
         for c in bad {
             b = b.add_root_certificate(c);

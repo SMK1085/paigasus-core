@@ -60,6 +60,7 @@ tower-http = { workspace = true }
 sea-orm = { workspace = true }
 # `adapters::oidc::jwks::HttpJwksFetcher` — discovery + JWKS document fetch over HTTPS
 # (rustls, per the workspace baseline); first service consumer (SMA-443 Task 6).
+rustls = { workspace = true }
 reqwest = { workspace = true }
 # `adapters::oidc::jwks` — `jsonwebtoken::jwk::{Jwk, JwkSet}` is the JWKS cache/rotation
 # payload type; the validator (Task 7) additionally uses `DecodingKey`/`decode`/`Validation`,
