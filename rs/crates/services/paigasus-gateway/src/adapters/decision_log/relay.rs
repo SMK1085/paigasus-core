@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_nats::jetstream::{self, message::PublishMessage};
@@ -24,7 +24,7 @@ use redis::streams::{StreamAutoClaimReply, StreamInfoConsumersReply, StreamReadR
 use tokio::sync::{Mutex, watch};
 use tokio::time::Instant;
 
-use super::jetstream::{PublishClass, classify, stream_config, subject_for};
+use super::jetstream::{PublishClass, classify, stream_config, subject_for, violation_since};
 use super::redis_conn::RedisSlot;
 use super::supervised::run_supervised;
 use super::{DropReason, count_dropped};
@@ -111,7 +111,7 @@ struct State {
     slot: RedisSlot,
     js: jetstream::Context,
     s: RelaySettings,
-    violations: Arc<AtomicBool>,
+    violations: Arc<AtomicU64>,
     /// The last `XLEN` sample. `None` until the first one.
     sample: StdMutex<Option<u64>>,
     inner: Mutex<Inner>,
@@ -305,6 +305,7 @@ impl State {
         if !event.decision_id.is_empty() {
             msg = msg.message_id(&event.decision_id);
         }
+        let generation = self.violations.load(Ordering::SeqCst);
         let started = Instant::now();
         let result = match self.js.send_publish(subject, msg).await {
             Ok(ack) => ack.await.map(|_| ()),
@@ -313,10 +314,9 @@ impl State {
         match result {
             Ok(()) => {
                 histogram!(names::GATEWAY_DECISION_LOG_PUBLISH_SECONDS).record(started.elapsed().as_secs_f64());
-                self.violations.store(false, Ordering::SeqCst);
                 Outcome::Published
             }
-            Err(err) => match classify(err.kind(), self.violations.load(Ordering::SeqCst)) {
+            Err(err) => match classify(err.kind(), violation_since(&self.violations, generation)) {
                 PublishClass::Permanent(class) => {
                     tracing::warn!(class, "the relay rejects an event that JetStream cannot take");
                     Outcome::Rejected(class)
@@ -483,7 +483,7 @@ impl State {
 
 /// Run the relay until the shutdown signal. The batch in flight gets `budget` after the signal. The entries
 /// that are not acked stay in Redis for the next instance.
-pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Arc<AtomicBool>, shutdown: watch::Receiver<()>, budget: Duration) {
+pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Arc<AtomicU64>, shutdown: watch::Receiver<()>, budget: Duration) {
     let now = Instant::now();
     let state = Arc::new(State {
         slot,

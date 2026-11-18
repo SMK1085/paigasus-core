@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_nats::jetstream::{self, context::PublishErrorKind};
@@ -27,8 +27,21 @@ pub const NO_ORG_TOKEN: &str = "_none";
 pub const INBOX_PREFIX: &str = "_INBOX_GW_DEC";
 /// The client name that the broker shows for this connection.
 const CLIENT_NAME: &str = "paigasus-gateway-decision-relay";
-/// The text that the broker sends when a publish is not allowed.
-const PERMISSION_VIOLATION: &str = "Permissions Violation for Publication";
+/// The lower-case start of the text that the broker sends when a publish is not allowed. The broker text is
+/// `Permissions Violation for Publish to "<subject>"`; the prefix also covers the older `... for Publication`.
+const PERMISSION_VIOLATION: &str = "permissions violation for publ";
+
+/// Whether a server error text is a refused publish. The match is case-insensitive.
+#[must_use]
+pub fn is_publish_violation(text: &str) -> bool {
+    text.to_lowercase().contains(PERMISSION_VIOLATION)
+}
+
+/// Whether the broker reported a refused publish since the generation `before` was read.
+#[must_use]
+pub fn violation_since(generation: &AtomicU64, before: u64) -> bool {
+    generation.load(Ordering::SeqCst) != before
+}
 
 /// 30 days (P-20).
 pub const MAX_AGE_SECS: u64 = 2_592_000;
@@ -120,12 +133,13 @@ pub fn classify(kind: PublishErrorKind, violation_seen: bool) -> PublishClass {
 /// Make the JetStream context. The creds file is read and parsed once here, so a missing or bad file is a boot
 /// error that names the path. Then the callback re-reads it on every connect attempt, so a rotation takes
 /// effect on the next reconnect. A broker that is down is not an error: the client connects in the background.
-/// `violations` is set when the broker reports a refused publish.
+/// `violations` is a generation counter: the event callback adds 1 each time that the broker reports a refused
+/// publish. A publish reads it before it starts and calls a `TimedOut` permanent only if it changed (P-14).
 ///
 /// # Errors
 ///
 /// [`NatsError`] when the creds file cannot be read or parsed, or when the options are refused.
-pub async fn connect(cfg: &DecisionLogNatsConfig, violations: Arc<AtomicBool>) -> Result<jetstream::Context, NatsError> {
+pub async fn connect(cfg: &DecisionLogNatsConfig, violations: Arc<AtomicU64>) -> Result<jetstream::Context, NatsError> {
     let mut opts = match &cfg.creds_file {
         Some(path) => {
             let raw = tokio::fs::read_to_string(path).await.map_err(|source| NatsError::Credentials { path: path.clone(), source })?;
@@ -146,8 +160,8 @@ pub async fn connect(cfg: &DecisionLogNatsConfig, violations: Arc<AtomicBool>) -
         let violations = Arc::clone(&violations);
         async move {
             match &event {
-                async_nats::Event::ServerError(err) if err.to_string().contains(PERMISSION_VIOLATION) => {
-                    violations.store(true, Ordering::SeqCst);
+                async_nats::Event::ServerError(err) if is_publish_violation(&err.to_string()) => {
+                    violations.fetch_add(1, Ordering::SeqCst);
                     tracing::error!("the decision-log NATS publisher has no permission to publish");
                 }
                 async_nats::Event::Connected => tracing::info!("the decision-log NATS client is connected"),
@@ -182,6 +196,33 @@ mod tests {
         ] {
             assert_eq!(subject_for(bad), None, "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn the_violation_matcher_covers_both_broker_spellings() {
+        assert!(is_publish_violation("nats: Permissions Violation for Publish to \"gateway.decision.x\""));
+        assert!(is_publish_violation("nats: Permissions Violation for Publication to \"x\""));
+        assert!(is_publish_violation("PERMISSIONS VIOLATION FOR PUBLISH TO \"x\""));
+        assert!(!is_publish_violation("nats: Permissions Violation for Subscription to \"x\""));
+        assert!(!is_publish_violation("nats: authorization violation"));
+    }
+
+    #[test]
+    fn a_timeout_is_permanent_only_when_a_violation_came_during_that_publish() {
+        let generation = AtomicU64::new(0);
+        // A violation that came before this publish started does not count.
+        generation.fetch_add(1, Ordering::SeqCst);
+        let before = generation.load(Ordering::SeqCst);
+        assert_eq!(classify(PublishErrorKind::TimedOut, violation_since(&generation, before)), PublishClass::Transient);
+        // A violation during the publish does.
+        generation.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            classify(PublishErrorKind::TimedOut, violation_since(&generation, before)),
+            PublishClass::Permanent("permission_violation")
+        );
+        // The next publish reads the new generation and is transient again.
+        let before = generation.load(Ordering::SeqCst);
+        assert_eq!(classify(PublishErrorKind::TimedOut, violation_since(&generation, before)), PublishClass::Transient);
     }
 
     #[test]

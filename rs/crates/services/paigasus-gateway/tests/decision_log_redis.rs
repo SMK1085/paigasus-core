@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, SystemTime};
 
 use async_nats::jetstream;
@@ -406,7 +406,7 @@ fn free_port() -> u16 {
     probe.local_addr().expect("the probe address").port()
 }
 
-async fn relay_js(url: &str, violations: Arc<AtomicBool>) -> jetstream::Context {
+async fn relay_js(url: &str, violations: Arc<AtomicU64>) -> jetstream::Context {
     let cfg = DecisionLogNatsConfig {
         url: SecretString::from(url.to_owned()),
         creds_file: None,
@@ -432,7 +432,7 @@ struct Relay {
 }
 
 impl Relay {
-    fn start(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Arc<AtomicBool>) -> Relay {
+    fn start(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Arc<AtomicU64>) -> Relay {
         let (stop, shutdown) = watch::channel(());
         let task = tokio::spawn(run_relay(slot, js, s, violations, shutdown, Duration::from_secs(2)));
         Relay { stop, task }
@@ -487,7 +487,7 @@ async fn n_records_give_n_messages_with_the_right_subjects_and_bytes() {
     for (seq, org) in want {
         xadd(&node, &event_with_org(seq, org), 0).await;
     }
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
     wait_for("four events published", || async { snap.published() == 4 && xlen(&node).await == 0 }).await;
     let got = stream_messages(&test_js(&nats_url).await).await;
@@ -515,7 +515,7 @@ async fn nats_down_keeps_the_events_in_redis_until_it_returns() {
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
     nats.stop().await.expect("stop NATS");
     for seq in 1..=4 {
@@ -555,7 +555,7 @@ async fn a_poison_entry_is_rejected_and_the_next_publishes() {
     xadd(&node, &poison, pad).await;
     xadd(&node, &event_with_org(2, ORG_A), 0).await;
     xadd(&node, &event_with_org(3, ORG_A), 0).await;
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
     wait_for("one rejection and two publishes", || async {
         snap.dropped("publish_rejected") == 1 && snap.published() == 2 && xlen(&node).await == 0
@@ -581,7 +581,7 @@ async fn a_non_canonical_org_id_is_rejected_and_never_published() {
     for (seq, org) in [(1, "0190A100-0000-7000-8000-0000000000A1"), (2, "{0190a100-0000-7000-8000-0000000000a1}"), (3, "a.b"), (4, "*")] {
         xadd(&node, &event_with_org(seq, org), 0).await;
     }
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
     wait_for("four rejections", || async { snap.dropped("publish_rejected") == 4 && xlen(&node).await == 0 }).await;
     assert_eq!(snap.published(), 0);
@@ -605,7 +605,7 @@ async fn an_unknown_field_survives_the_relay_byte_for_byte() {
     bytes.extend(varint(99 << 3));
     bytes.extend(varint(1));
     xadd(&node, &bytes, 0).await;
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
     wait_for("one publish", || async { snap.published() == 1 }).await;
     let got = stream_messages(&test_js(&nats_url).await).await;
@@ -631,7 +631,7 @@ async fn flushall_with_two_relays_counts_one_reset() {
     let dead = format!("nats://127.0.0.1:{}", free_port());
     let mut relays = Vec::new();
     for name in ["i1", "i2"] {
-        let v = Arc::new(AtomicBool::new(false));
+        let v = Arc::new(AtomicU64::new(0));
         let mut s = fast(name);
         s.sample_every = Duration::from_secs(120);
         relays.push(Relay::start(connected_slot(&redis_url).await, relay_js(&dead, Arc::clone(&v)).await, s, v));
@@ -674,7 +674,7 @@ async fn a_dead_instance_pending_entries_are_claimed_once() {
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
     read_as_dead_instance(&node, 3).await;
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("b"), v);
     wait_for("three claimed entries published", || async { snap.published() == 3 && xlen(&node).await == 0 }).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -701,7 +701,7 @@ async fn a_deleted_pending_id_counts_redis_deleted() {
     let _local = metrics::set_default_local_recorder(&recorder);
     let ids = read_as_dead_instance(&node, 2).await;
     redis_cli(&node, &["XDEL", KEY, &ids[0]]).await;
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("b"), v);
     wait_for("one deleted id and one publish", || async { snap.dropped("redis_deleted") == 1 && snap.published() == 1 }).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -726,7 +726,7 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
 
     // No stream: the relay makes one with the expected config.
     xadd(&node, &event_with_org(1, ORG_A), 0).await;
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
     wait_for("one publish", || async { snap.published() == 1 }).await;
     let mut stream = admin.get_stream(dl_js::STREAM).await.expect("the relay made the stream");
@@ -747,7 +747,7 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
     drifted.max_bytes = -1;
     admin.create_stream(drifted).await.expect("make the drifted stream");
     xadd(&node, &event_with_org(2, ORG_A), 0).await;
-    let v = Arc::new(AtomicBool::new(false));
+    let v = Arc::new(AtomicU64::new(0));
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i2"), v);
     wait_for("the second publish", || async { snap.published() == 2 }).await;
     let text = logs.text();
@@ -757,5 +757,75 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
     );
     let mut stream = admin.get_stream(dl_js::STREAM).await.expect("the stream exists");
     assert_eq!(stream.info().await.expect("stream info").config.max_bytes, -1, "the relay did not change the stream");
+    relay.shut_down().await;
+}
+
+/// A broker config with two users. `admin` can do anything. `gw` is the user of a client that sends no credentials
+/// (`no_auth_user`), and has the grants of the relay identity minus the
+/// right to publish to `gateway.decision.>`: it can read and make the stream and read its PubAck inbox only.
+const NO_PUBLISH_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js" }
+authorization {
+  users = [
+    { user: "admin", password: "admin" }
+    { user: "gw", password: "gw", permissions: {
+        publish: { allow: ["$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "$JS.API.STREAM.CREATE.GATEWAY_DECISIONS"] }
+        subscribe: { allow: ["_INBOX_GW_DEC.>"] }
+    } }
+  ]
+}
+no_auth_user: gw
+"#;
+
+#[tokio::test]
+async fn a_real_permission_refusal_is_rejected_and_a_later_outage_is_not() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay permission").await else {
+        return;
+    };
+    let port = free_port();
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", NO_PUBLISH_CONF.as_bytes().to_vec())
+        .with_mapped_port(port, 4222.tcp());
+    let Some(nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis relay permission").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // The stream exists already, made by `admin`. The relay user can only read it.
+    let admin = jetstream::new(
+        async_nats::ConnectOptions::with_user_and_password("admin".into(), "admin".into())
+            .connect(format!("nats://127.0.0.1:{port}"))
+            .await
+            .expect("the admin client connects"),
+    );
+    admin.create_stream(dl_js::stream_config()).await.expect("the admin makes the stream");
+
+    // Part 1: a real broker refuses the publish. The violation generation rises, and the entry is rejected and deleted.
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    let violations = Arc::new(AtomicU64::new(0));
+    let relay = Relay::start(
+        connected_slot(&redis_url).await,
+        relay_js(&format!("nats://127.0.0.1:{port}"), Arc::clone(&violations)).await,
+        fast("i1"),
+        Arc::clone(&violations),
+    );
+    wait_for("the refused entry is rejected and deleted", || async {
+        snap.dropped("publish_rejected") == 1 && xlen(&node).await == 0
+    })
+    .await;
+    assert!(violations.load(std::sync::atomic::Ordering::SeqCst) >= 1, "the event callback saw the permission violation");
+    assert_eq!(snap.published(), 0);
+
+    // Part 2: the broker goes down. A timeout with no new violation is a transport failure: the entries stay in
+    // Redis and nothing counts as rejected.
+    nats.stop().await.expect("stop NATS");
+    xadd(&node, &event_with_org(2, ORG_A), 0).await;
+    xadd(&node, &event_with_org(3, ORG_A), 0).await;
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    assert_eq!(xlen(&node).await, 2, "the entries stay in Redis during the outage");
+    assert_eq!(snap.dropped("publish_rejected"), 1, "an outage after a violation is not a rejection");
     relay.shut_down().await;
 }
