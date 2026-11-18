@@ -69,7 +69,7 @@ updates:
           - minor
           - patch
     # Spec section 3.2: no Dogwood bump before PR 3. The compiler pins Dogwood to one commit,
-    # because its lowering output is part of the IAM contract. cedar-policy must stay at 4.11.0,
+    # because its lowering output is part of the IAM contract. cedar-policy must stay at 4.14.0,
     # the version that the pinned Dogwood commit pins. A bump of either one is a deliberate,
     # reviewed change, never an automatic one.
     ignore:

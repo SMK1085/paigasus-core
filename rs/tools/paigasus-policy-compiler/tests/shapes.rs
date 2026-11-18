@@ -343,8 +343,14 @@ fn a_non_normal_action_literal_in_a_when_body_is_rejected() {
     // because a non-normal literal is never an action of a generated schema.
     for literal in ["Send", "invoketool", "sénd"] {
         let source = format!("@id(\"a\")\npermit (principal, action, resource)\nwhen {{ action == {GW}::\"{literal}\" }};\n");
-        let rejection = only_rejection(tenant(&source), ReasonCode::ToolPolicyInvalid);
-        assert_eq!(rejection.policy_id.as_deref(), Some("a"), "{source}");
+        // Dogwood 1.2.0 (SMA-800) also reports that the policy is impossible, so there are two
+        // rejections. Every one must be `tool-policy-invalid` and must name the policy.
+        let rejections = rejected(tenant(&source));
+        assert!(!rejections.is_empty(), "{source}");
+        for rejection in &rejections {
+            assert_eq!(rejection.reason, ReasonCode::ToolPolicyInvalid, "{rejections:#?}");
+            assert_eq!(rejection.policy_id.as_deref(), Some("a"), "{source}");
+        }
     }
 }
 
