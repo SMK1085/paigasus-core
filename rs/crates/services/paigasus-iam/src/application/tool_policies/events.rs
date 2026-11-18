@@ -13,16 +13,17 @@ use paigasus_kernel::Prn;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::origin_str;
+use super::{Author, origin_str};
 
-/// `iam.policy.tool_set.published`: a new live version of the tenant set of `org`.
-pub(crate) fn set_published(ids: &impl IdGenerator, corr: Uuid, actor: &Prn, org_prn: &Prn, org: Uuid, v: &ToolPolicyVersion, now: DateTime<Utc>) -> DomainEvent {
+/// `iam.policy.tool_set.published`: a new live version of the tenant set of `org`. The boot run of
+/// the re-compile job has no actor (plan H15).
+pub(crate) fn set_published(ids: &impl IdGenerator, corr: Uuid, author: &Author, org_prn: &Prn, org: Uuid, v: &ToolPolicyVersion, now: DateTime<Utc>) -> DomainEvent {
     DomainEvent {
         id: ids.new_event_id(),
         event_type: EventType::ToolPolicySetPublished,
         schema_version: 1,
         aggregate_prn: org_prn.canonical(),
-        actor_prn: Some(actor.canonical()),
+        actor_prn: author.actor_prn.clone(),
         occurred_at: now,
         payload: json!({"org_id": org.to_string(), "version": v.version, "origin": origin_str(v.origin)}),
         correlation_id: Some(corr),
@@ -44,13 +45,13 @@ pub(crate) fn settings_changed(ids: &impl IdGenerator, corr: Uuid, actor: &Prn, 
 }
 
 /// `iam.policy.tool_floor.published`: a new live version of the floor set.
-pub(crate) fn floor_published(ids: &impl IdGenerator, corr: Uuid, actor: &Prn, v: &ToolPolicyVersion, now: DateTime<Utc>) -> DomainEvent {
+pub(crate) fn floor_published(ids: &impl IdGenerator, corr: Uuid, author: &Author, v: &ToolPolicyVersion, now: DateTime<Utc>) -> DomainEvent {
     DomainEvent {
         id: ids.new_event_id(),
         event_type: EventType::ToolFloorPublished,
         schema_version: 1,
         aggregate_prn: root_prn().canonical(),
-        actor_prn: Some(actor.canonical()),
+        actor_prn: author.actor_prn.clone(),
         occurred_at: now,
         payload: json!({"version": v.version, "origin": origin_str(v.origin)}),
         correlation_id: Some(corr),

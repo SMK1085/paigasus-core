@@ -82,6 +82,8 @@ path_field!(/// `{id}` on a user route (SMA-712) — the user's principal uuid.
 path_field!(/// `{identity_id}` on the unlink route (SMA-712) — an external identity's uuid.
     ExternalIdentityId => "external_identity_id");
 
+path_field!(/// `{version}` on a held tool policy version route (SMA-781) — a version number, not a uuid.
+    HeldVersionSegment => "held_version");
 path_field!(/// `{name}` on a tool route (SMA-774) — a tool name, not a uuid.
     ToolNameSegment => "tool_name");
 

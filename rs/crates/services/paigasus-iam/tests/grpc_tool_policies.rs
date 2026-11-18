@@ -940,8 +940,8 @@ async fn a_held_version_is_not_found_over_grpc() {
     let org_uuid = support::principal_uuid(&org);
     for (version, status) in [(2, "held"), (3, "discarded")] {
         let sql = format!(
-            "INSERT INTO tool_policy_set_version (kind, org_id, version, source, compiled, compiler_generation, schema_revision, catalog_revision, status, origin, created_by, created_at) \
-             VALUES ('tenant', '{org_uuid}', {version}, 's', '\\x00', 1, 1, 0, '{status}', 'save', 't', now())"
+            "INSERT INTO tool_policy_set_version (kind, org_id, version, source, compiled, compiler_generation, schema_revision, catalog_revision, status, origin, base_version, report, created_by, created_at) \
+             VALUES ('tenant', '{org_uuid}', {version}, 's', '\\x00', 1, 1, 0, '{status}', 'save', 1, '{{}}'::jsonb, 't', now())"
         );
         env.state.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql)).await.expect("seed the row");
     }

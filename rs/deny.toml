@@ -29,6 +29,13 @@ ignore = [
   # Remove this entry only when the locked graph has no affected crypto-bigint version and
   # `cargo deny check` passes without it. A new jsonwebtoken release alone is not enough.
   "RUSTSEC-2026-0387",
+  # RUSTSEC-2026-0543: "chrono is unmaintained". It is informational, not a vulnerability, and
+  # it lists no patched version. The advisory recommends `jiff` or `time`. paigasus-gateway,
+  # paigasus-iam and paigasus-iam-core use chrono directly. cedar-policy-core, sea-orm,
+  # sea-query and sqlx also need it, so a migration of our own crates does not remove chrono
+  # from the graph. Remove this entry when those upstream crates no longer need chrono, and
+  # move our crates off it then (SMA-784).
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; no patched version; cedar-policy, sea-orm and sqlx still need it (SMA-784)" },
 ]
 
 [licenses]

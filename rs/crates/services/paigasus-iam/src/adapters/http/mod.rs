@@ -68,7 +68,8 @@ use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
     PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgIdentityLinkStore, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore,
-    PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, PgToolPolicies, SeaOrmUnitOfWork,
+    PgPrincipalRepository, PgProjectRepository, PgRecompileLock, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, PgToolPolicies,
+    SeaOrmUnitOfWork,
 };
 use crate::adapters::redis_role::RedisRole;
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
@@ -355,6 +356,7 @@ impl AppState {
             uow: Arc::new(SeaOrmUnitOfWork::new(self.db.clone())),
             audit: self.audit_log.clone(),
             outbox: self.tool_policy_outbox.clone(),
+            recompile_lock: Arc::new(PgRecompileLock::new(self.db.clone())),
             limits: ToolPolicyLimits {
                 catalog: CatalogLimits {
                     max_tools: cfg.max_tools,

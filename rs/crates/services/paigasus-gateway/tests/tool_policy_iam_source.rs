@@ -131,6 +131,22 @@ impl ToolPolicyService for Fake {
     async fn get_compiled_floor_policies(&self, _: Request<pb::GetCompiledFloorPoliciesRequest>) -> Result<Response<pb::GetCompiledFloorPoliciesResponse>, Status> {
         self.0.floor.lock().unwrap().clone().unwrap_or_else(|| Err(Status::internal("no script"))).map(Response::new)
     }
+
+    async fn list_held_tool_policy_versions(&self, _: Request<pb::ListHeldToolPolicyVersionsRequest>) -> Result<Response<pb::ListHeldToolPolicyVersionsResponse>, Status> {
+        unimplemented()
+    }
+
+    async fn accept_held_tool_policy_version(&self, _: Request<pb::AcceptHeldToolPolicyVersionRequest>) -> Result<Response<pb::AcceptHeldToolPolicyVersionResponse>, Status> {
+        unimplemented()
+    }
+
+    async fn discard_held_tool_policy_version(&self, _: Request<pb::DiscardHeldToolPolicyVersionRequest>) -> Result<Response<pb::DiscardHeldToolPolicyVersionResponse>, Status> {
+        unimplemented()
+    }
+
+    async fn run_tool_policy_recompile(&self, _: Request<pb::RunToolPolicyRecompileRequest>) -> Result<Response<pb::RunToolPolicyRecompileResponse>, Status> {
+        unimplemented()
+    }
 }
 
 /// A running fake: its address, the script and the call log.

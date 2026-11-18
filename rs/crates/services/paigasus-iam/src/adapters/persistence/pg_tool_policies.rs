@@ -16,8 +16,8 @@ use super::uow::recover_txn;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::tool_policy::{
-    DroppedField, FailMode, StoredTool, ToolEntry, ToolKind, ToolName, ToolPolicyMode, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, ToolSource,
-    VersionOrigin, VersionStatus,
+    DroppedField, FailMode, HeldReport, HeldStatus, HeldVersion, StoredTool, ToolEntry, ToolKind, ToolName, ToolPolicyMode, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings,
+    ToolPolicyState, ToolPolicyVersion, ToolSource, VersionOrigin, VersionStatus,
 };
 use paigasus_iam_core::{ConflictKind, RepositoryError, Transaction};
 use sea_orm::sea_query::{Expr, OnConflict};
@@ -126,6 +126,8 @@ fn origin_str(o: VersionOrigin) -> &'static str {
         VersionOrigin::Save => "save",
         VersionOrigin::Starter => "starter",
         VersionOrigin::CatalogChange => "catalog_change",
+        VersionOrigin::Recompile => "recompile",
+        VersionOrigin::Accept => "accept",
     }
 }
 
@@ -134,6 +136,8 @@ fn origin_from_str(s: &str) -> Result<VersionOrigin, RepositoryError> {
         "save" => Ok(VersionOrigin::Save),
         "starter" => Ok(VersionOrigin::Starter),
         "catalog_change" => Ok(VersionOrigin::CatalogChange),
+        "recompile" => Ok(VersionOrigin::Recompile),
+        "accept" => Ok(VersionOrigin::Accept),
         _ => Err(corrupt("a readable version row has an unexpected origin")),
     }
 }
@@ -183,7 +187,7 @@ fn model_to_version(m: versions::Model) -> Result<ToolPolicyVersion, RepositoryE
         key: key_from_parts(&m.kind, m.org_id)?,
         version: from_i64(m.version)?,
         source: m.source,
-        compiled: m.compiled,
+        compiled: m.compiled.ok_or_else(|| corrupt("a live or superseded version row has no compiled bytes"))?,
         compiler_generation: u32::try_from(m.compiler_generation).map_err(|_| corrupt("negative compiler_generation"))?,
         schema_revision: u32::try_from(m.schema_revision).map_err(|_| corrupt("negative schema_revision"))?,
         catalog_revision: m.catalog_revision.map(from_i64).transpose()?,
@@ -198,7 +202,53 @@ fn model_to_state(m: &state::Model) -> Result<ToolPolicyState, RepositoryError> 
     Ok(ToolPolicyState {
         catalog_revision: from_i64(m.catalog_revision)?,
         live_version: from_i64(m.live_version)?,
+        last_version: from_i64(m.last_version)?,
     })
+}
+
+fn held_status_from_str(s: &str) -> Result<HeldStatus, RepositoryError> {
+    match s {
+        "held" => Ok(HeldStatus::Held),
+        "discarded" => Ok(HeldStatus::Discarded),
+        _ => Err(corrupt("a held version row has an unexpected status")),
+    }
+}
+
+fn model_to_held(m: versions::Model) -> Result<HeldVersion, RepositoryError> {
+    let report = m.report.ok_or_else(|| corrupt("a held version row has no report"))?;
+    let report: HeldReport = serde_json::from_value(report).map_err(|_| corrupt("a held version report is malformed"))?;
+    Ok(HeldVersion {
+        key: key_from_parts(&m.kind, m.org_id)?,
+        version: from_i64(m.version)?,
+        base_version: from_i64(m.base_version.ok_or_else(|| corrupt("a held version row has no base_version"))?)?,
+        source: m.source,
+        compiled: m.compiled,
+        compiler_generation: u32::try_from(m.compiler_generation).map_err(|_| corrupt("negative compiler_generation"))?,
+        schema_revision: u32::try_from(m.schema_revision).map_err(|_| corrupt("negative schema_revision"))?,
+        catalog_revision: m.catalog_revision.map(from_i64).transpose()?,
+        status: held_status_from_str(&m.status)?,
+        report,
+        created_by: m.created_by,
+        created_at: m.created_at,
+    })
+}
+
+/// Set the held row of a set to discarded, if there is one (only the row `only_version` when
+/// it is given). Returns the number of rows changed.
+async fn discard_held_rows(txn: &impl ConnectionTrait, key: &ToolPolicySetKey, only_version: Option<i64>) -> Result<u64, RepositoryError> {
+    let (kind, org) = key_parts(key);
+    let mut q = versions::Entity::update_many()
+        .col_expr(versions::Column::Status, Expr::value("discarded"))
+        .filter(versions::Column::Kind.eq(kind))
+        .filter(versions::Column::Status.eq("held"));
+    q = match org {
+        Some(org) => q.filter(versions::Column::OrgId.eq(org)),
+        None => q.filter(versions::Column::OrgId.is_null()),
+    };
+    if let Some(v) = only_version {
+        q = q.filter(versions::Column::Version.eq(v));
+    }
+    Ok(q.exec(txn).await.map_err(map_err)?.rows_affected)
 }
 
 /// The filter of the version rows of one set.
@@ -230,7 +280,11 @@ impl ToolPolicyRepository for PgToolPolicies {
     async fn state(&self, key: &ToolPolicySetKey) -> Result<ToolPolicyState, RepositoryError> {
         match state::Entity::find_by_id(set_key(key)).one(&self.db).await.map_err(map_err)? {
             Some(m) => model_to_state(&m),
-            None => Ok(ToolPolicyState { catalog_revision: 0, live_version: 0 }),
+            None => Ok(ToolPolicyState {
+                catalog_revision: 0,
+                live_version: 0,
+                last_version: 0,
+            }),
         }
     }
 
@@ -347,13 +401,14 @@ impl ToolPolicyRepository for PgToolPolicies {
         let (kind, org) = key_parts(&v.key);
         let version = to_i64(v.version)?;
         // Compare-and-set on the state row, before any other write. It succeeds only if the
-        // stored live version is exactly one below the new one. It is the backstop: the caller
-        // must still hold the row lock from `lock_state_in`. A stale writer, a skipped version
-        // and a missing state row all change no row and give the version conflict.
+        // larger of the two counters is exactly one below the new version. It is the backstop: the
+        // caller must still hold the row lock from `lock_state_in`. A stale writer, a skipped
+        // version and a missing state row all change no row and give the version conflict.
         let swapped = state::Entity::update_many()
-            .col_expr(state::Column::LiveVersion, sea_orm::sea_query::Expr::value(version))
+            .col_expr(state::Column::LiveVersion, Expr::value(version))
+            .col_expr(state::Column::LastVersion, Expr::value(version))
             .filter(state::Column::SetKey.eq(set_key(&v.key)))
-            .filter(state::Column::LiveVersion.eq(version - 1))
+            .filter(Expr::cust_with_values("GREATEST(live_version, last_version) = $1", [version - 1]))
             .exec(txn)
             .await
             .map_err(map_err)?;
@@ -370,13 +425,15 @@ impl ToolPolicyRepository for PgToolPolicies {
             None => supersede.filter(versions::Column::OrgId.is_null()),
         };
         supersede.exec(txn).await.map_err(map_err)?;
+        // Any new live version discards the held row of the set (plan H7).
+        discard_held_rows(txn, &v.key, None).await?;
 
         let row = versions::ActiveModel {
             kind: Set(kind.to_string()),
             org_id: Set(org),
             version: Set(version),
             source: Set(v.source.clone()),
-            compiled: Set(v.compiled.clone()),
+            compiled: Set(Some(v.compiled.clone())),
             compiler_generation: Set(i32::try_from(v.compiler_generation).map_err(|_| corrupt("compiler_generation does not fit in an INTEGER"))?),
             schema_revision: Set(i32::try_from(v.schema_revision).map_err(|_| corrupt("schema_revision does not fit in an INTEGER"))?),
             catalog_revision: Set(v.catalog_revision.map(to_i64).transpose()?),
@@ -390,6 +447,126 @@ impl ToolPolicyRepository for PgToolPolicies {
         versions::Entity::insert(row).exec_without_returning(txn).await.map_err(map_err)?;
 
         Ok(())
+    }
+
+    async fn stale_live_versions(&self, compiler_generation: u32, schema_revision: u32) -> Result<Vec<ToolPolicyVersion>, RepositoryError> {
+        let generation = i32::try_from(compiler_generation).map_err(|_| corrupt("compiler_generation does not fit in an INTEGER"))?;
+        let revision = i32::try_from(schema_revision).map_err(|_| corrupt("schema_revision does not fit in an INTEGER"))?;
+        let rows = versions::Entity::find()
+            .filter(versions::Column::Status.eq("live"))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(versions::Column::CompilerGeneration.ne(generation))
+                    .add(versions::Column::SchemaRevision.ne(revision)),
+            )
+            .order_by_asc(versions::Column::Kind)
+            .order_by_asc(versions::Column::OrgId)
+            .all(&self.db)
+            .await
+            .map_err(map_err)?;
+        rows.into_iter().map(model_to_version).collect()
+    }
+
+    async fn max_stored_revisions(&self) -> Result<(u32, u32), RepositoryError> {
+        let row = self
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT COALESCE(MAX(compiler_generation), 0) AS g, COALESCE(MAX(schema_revision), 0) AS s FROM tool_policy_set_version",
+            ))
+            .await
+            .map_err(map_err)?
+            .ok_or_else(|| corrupt("an aggregate query returned no row"))?;
+        let g = row.try_get::<i32>("", "g").map_err(map_err)?;
+        let s = row.try_get::<i32>("", "s").map_err(map_err)?;
+        Ok((
+            u32::try_from(g).map_err(|_| corrupt("negative compiler_generation"))?,
+            u32::try_from(s).map_err(|_| corrupt("negative schema_revision"))?,
+        ))
+    }
+
+    async fn held(&self, key: &ToolPolicySetKey) -> Result<Option<HeldVersion>, RepositoryError> {
+        let row = version_filter(key).filter(versions::Column::Status.eq("held")).one(&self.db).await.map_err(map_err)?;
+        row.map(model_to_held).transpose()
+    }
+
+    async fn list_held(&self, org: Option<Uuid>, limit: u64, offset: u64) -> Result<Vec<HeldVersion>, RepositoryError> {
+        let mut q = versions::Entity::find().filter(versions::Column::Status.eq("held"));
+        if let Some(org) = org {
+            q = q.filter(versions::Column::Kind.eq("tenant")).filter(versions::Column::OrgId.eq(org));
+        }
+        // ORDER BY kind, org_id: 'floor' sorts before 'tenant', so the floor comes first. The
+        // page is in SQL, so a page does not read every held row with its blob and source.
+        let rows = q
+            .order_by_asc(versions::Column::Kind)
+            .order_by_asc(versions::Column::OrgId)
+            .limit(limit)
+            .offset(offset)
+            .all(&self.db)
+            .await
+            .map_err(map_err)?;
+        rows.into_iter().map(model_to_held).collect()
+    }
+
+    async fn proposal_exists(&self, key: &ToolPolicySetKey, base_version: u64, compiler_generation: u32, schema_revision: u32) -> Result<bool, RepositoryError> {
+        let generation = i32::try_from(compiler_generation).map_err(|_| corrupt("compiler_generation does not fit in an INTEGER"))?;
+        let revision = i32::try_from(schema_revision).map_err(|_| corrupt("schema_revision does not fit in an INTEGER"))?;
+        let row = version_filter(key)
+            .filter(versions::Column::Status.is_in(["held", "discarded"]))
+            .filter(versions::Column::BaseVersion.eq(to_i64(base_version)?))
+            .filter(versions::Column::CompilerGeneration.eq(generation))
+            .filter(versions::Column::SchemaRevision.eq(revision))
+            .one(&self.db)
+            .await
+            .map_err(map_err)?;
+        Ok(row.is_some())
+    }
+
+    async fn insert_held_in(&self, tx: &dyn Transaction, h: &HeldVersion) -> Result<(), RepositoryError> {
+        if h.status != HeldStatus::Held {
+            return Err(corrupt("insert_held_in needs a version with the status Held"));
+        }
+        let txn = recover_txn(tx)?;
+        let (kind, org) = key_parts(&h.key);
+        let version = to_i64(h.version)?;
+        // Compare-and-set on the state row: the number must be `next_version()`. Only the
+        // counter `last_version` moves.
+        let swapped = state::Entity::update_many()
+            .col_expr(state::Column::LastVersion, Expr::value(version))
+            .filter(state::Column::SetKey.eq(set_key(&h.key)))
+            .filter(Expr::cust_with_values("GREATEST(live_version, last_version) = $1", [version - 1]))
+            .exec(txn)
+            .await
+            .map_err(map_err)?;
+        if swapped.rows_affected == 0 {
+            return Err(RepositoryError::Conflict(ConflictKind::ToolPolicyVersion));
+        }
+        // The one-held index allows one held row for each set: the older one goes first (H8).
+        discard_held_rows(txn, &h.key, None).await?;
+        let report = serde_json::to_value(&h.report).map_err(|_| corrupt("a held report does not serialize"))?;
+        let row = versions::ActiveModel {
+            kind: Set(kind.to_string()),
+            org_id: Set(org),
+            version: Set(version),
+            source: Set(h.source.clone()),
+            compiled: Set(h.compiled.clone()),
+            compiler_generation: Set(i32::try_from(h.compiler_generation).map_err(|_| corrupt("compiler_generation does not fit in an INTEGER"))?),
+            schema_revision: Set(i32::try_from(h.schema_revision).map_err(|_| corrupt("schema_revision does not fit in an INTEGER"))?),
+            catalog_revision: Set(h.catalog_revision.map(to_i64).transpose()?),
+            status: Set("held".to_string()),
+            origin: Set(origin_str(VersionOrigin::Recompile).to_string()),
+            base_version: Set(Some(to_i64(h.base_version)?)),
+            report: Set(Some(report)),
+            created_by: Set(h.created_by.clone()),
+            created_at: Set(h.created_at),
+        };
+        versions::Entity::insert(row).exec_without_returning(txn).await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn discard_held_in(&self, tx: &dyn Transaction, key: &ToolPolicySetKey, version: u64) -> Result<bool, RepositoryError> {
+        let txn = recover_txn(tx)?;
+        Ok(discard_held_rows(txn, key, Some(to_i64(version)?)).await? > 0)
     }
 
     async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError> {

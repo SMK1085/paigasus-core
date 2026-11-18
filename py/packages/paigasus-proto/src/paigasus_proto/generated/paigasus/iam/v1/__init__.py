@@ -4,6 +4,8 @@
 # This file has been @generated
 
 __all__ = (
+    "AcceptHeldToolPolicyVersionRequest",
+    "AcceptHeldToolPolicyVersionResponse",
     "ApiKey",
     "ApiKeyStatus",
     "ArchiveOrganizationRequest",
@@ -47,6 +49,8 @@ __all__ = (
     "DetachMembershipResponse",
     "DiscardDeadLetterRequest",
     "DiscardDeadLetterResponse",
+    "DiscardHeldToolPolicyVersionRequest",
+    "DiscardHeldToolPolicyVersionResponse",
     "DpopContext",
     "DroppedField",
     "ExternalIdentity",
@@ -74,6 +78,9 @@ __all__ = (
     "GetToolPolicySettingsResponse",
     "GrantRoleRequest",
     "GrantRoleResponse",
+    "HeldToolPolicyReport",
+    "HeldToolPolicyResult",
+    "HeldToolPolicyVersion",
     "HistoryCondition",
     "HistoryEventKind",
     "HistoryPredicate",
@@ -96,6 +103,8 @@ __all__ = (
     "ListAuditEntriesResponse",
     "ListDeadLettersRequest",
     "ListDeadLettersResponse",
+    "ListHeldToolPolicyVersionsRequest",
+    "ListHeldToolPolicyVersionsResponse",
     "ListMembershipsRequest",
     "ListMembershipsResponse",
     "ListOrganizationsRequest",
@@ -114,6 +123,7 @@ __all__ = (
     "ListToolsResponse",
     "LiteralValue",
     "Membership",
+    "NameDiff",
     "NodeStatus",
     "Organization",
     "OutboxServiceStub",
@@ -131,6 +141,9 @@ __all__ = (
     "PutToolPolicySettingsResponse",
     "PutToolRequest",
     "PutToolResponse",
+    "RecompileOutcome",
+    "RecompileRunStatus",
+    "RecompileSetResult",
     "RenameOrganizationRequest",
     "RenameOrganizationResponse",
     "RenameProjectRequest",
@@ -156,6 +169,8 @@ __all__ = (
     "RevokeRoleResponse",
     "RoleGrant",
     "RoleGrantRef",
+    "RunToolPolicyRecompileRequest",
+    "RunToolPolicyRecompileResponse",
     "ServiceAccount",
     "ServiceAccountServiceStub",
     "ServiceInfo",
@@ -266,6 +281,34 @@ class ComparisonOp(betterproto2.Enum):
             "COMPARISON_OP_GE": 4,
             "COMPARISON_OP_GT": 5,
             "COMPARISON_OP_NE": 6,
+        }
+
+
+class HeldToolPolicyResult(betterproto2.Enum):
+    """
+    The result of a held re-compile.
+    """
+
+    UNSPECIFIED = 0
+
+    DIFFERENT = 1
+
+    FAILED = 2
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "HELD_TOOL_POLICY_RESULT_UNSPECIFIED",
+            1: "HELD_TOOL_POLICY_RESULT_DIFFERENT",
+            2: "HELD_TOOL_POLICY_RESULT_FAILED",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "HELD_TOOL_POLICY_RESULT_UNSPECIFIED": 0,
+            "HELD_TOOL_POLICY_RESULT_DIFFERENT": 1,
+            "HELD_TOOL_POLICY_RESULT_FAILED": 2,
         }
 
 
@@ -380,6 +423,74 @@ class PrincipalKind(betterproto2.Enum):
             "PRINCIPAL_KIND_UNSPECIFIED": 0,
             "PRINCIPAL_KIND_USER": 1,
             "PRINCIPAL_KIND_SERVICE_ACCOUNT": 2,
+        }
+
+
+class RecompileOutcome(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    IDENTICAL = 1
+
+    HELD_DIFFERENT = 2
+
+    HELD_FAILED = 3
+
+    ALREADY_PROPOSED = 4
+
+    CONFLICT = 5
+
+    ERROR = 6
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "RECOMPILE_OUTCOME_UNSPECIFIED",
+            1: "RECOMPILE_OUTCOME_IDENTICAL",
+            2: "RECOMPILE_OUTCOME_HELD_DIFFERENT",
+            3: "RECOMPILE_OUTCOME_HELD_FAILED",
+            4: "RECOMPILE_OUTCOME_ALREADY_PROPOSED",
+            5: "RECOMPILE_OUTCOME_CONFLICT",
+            6: "RECOMPILE_OUTCOME_ERROR",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "RECOMPILE_OUTCOME_UNSPECIFIED": 0,
+            "RECOMPILE_OUTCOME_IDENTICAL": 1,
+            "RECOMPILE_OUTCOME_HELD_DIFFERENT": 2,
+            "RECOMPILE_OUTCOME_HELD_FAILED": 3,
+            "RECOMPILE_OUTCOME_ALREADY_PROPOSED": 4,
+            "RECOMPILE_OUTCOME_CONFLICT": 5,
+            "RECOMPILE_OUTCOME_ERROR": 6,
+        }
+
+
+class RecompileRunStatus(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    RAN = 1
+
+    ALREADY_RUNNING = 2
+
+    OLDER_REPLICA = 3
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "RECOMPILE_RUN_STATUS_UNSPECIFIED",
+            1: "RECOMPILE_RUN_STATUS_RAN",
+            2: "RECOMPILE_RUN_STATUS_ALREADY_RUNNING",
+            3: "RECOMPILE_RUN_STATUS_OLDER_REPLICA",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "RECOMPILE_RUN_STATUS_UNSPECIFIED": 0,
+            "RECOMPILE_RUN_STATUS_RAN": 1,
+            "RECOMPILE_RUN_STATUS_ALREADY_RUNNING": 2,
+            "RECOMPILE_RUN_STATUS_OLDER_REPLICA": 3,
         }
 
 
@@ -609,6 +720,43 @@ class ToolSource(betterproto2.Enum):
             "TOOL_SOURCE_OPENAI": 2,
             "TOOL_SOURCE_MCP": 3,
         }
+
+
+@dataclass(eq=False, repr=False)
+class AcceptHeldToolPolicyVersionRequest(betterproto2.Message):
+    """
+    kind = FLOOR needs an empty org_prn. UNSPECIFIED is missing-required-field. Accept of a stale
+    row is tool-policy-version-conflict: run the job again (spec section 8).
+    """
+
+    kind: "ToolPolicySetKind" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicySetKind(0)
+    )
+
+    org_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    held_version: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1",
+    "AcceptHeldToolPolicyVersionRequest",
+    AcceptHeldToolPolicyVersionRequest,
+)
+
+
+@dataclass(eq=False, repr=False)
+class AcceptHeldToolPolicyVersionResponse(betterproto2.Message):
+    accepted: "ToolPolicySetVersion | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1",
+    "AcceptHeldToolPolicyVersionResponse",
+    AcceptHeldToolPolicyVersionResponse,
+)
 
 
 @dataclass(eq=False, repr=False)
@@ -1344,6 +1492,42 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class DiscardHeldToolPolicyVersionRequest(betterproto2.Message):
+    """
+    kind = FLOOR needs an empty org_prn. UNSPECIFIED is missing-required-field.
+    """
+
+    kind: "ToolPolicySetKind" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicySetKind(0)
+    )
+
+    org_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    held_version: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1",
+    "DiscardHeldToolPolicyVersionRequest",
+    DiscardHeldToolPolicyVersionRequest,
+)
+
+
+@dataclass(eq=False, repr=False)
+class DiscardHeldToolPolicyVersionResponse(betterproto2.Message):
+    discarded: "HeldToolPolicyVersion | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1",
+    "DiscardHeldToolPolicyVersionResponse",
+    DiscardHeldToolPolicyVersionResponse,
+)
+
+
+@dataclass(eq=False, repr=False)
 class DpopContext(betterproto2.Message):
     """
     The DPoP context of a client request that the gateway authenticates (RFC 9449, SMA-700).
@@ -1718,6 +1902,89 @@ class GrantRoleResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "GrantRoleResponse", GrantRoleResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class HeldToolPolicyReport(betterproto2.Message):
+    result: "HeldToolPolicyResult" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, default_factory=lambda: HeldToolPolicyResult(0)
+    )
+
+    policies: "NameDiff | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    conditions: "NameDiff | None" = betterproto2.field(
+        3, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    schema: "NameDiff | None" = betterproto2.field(
+        4, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    rejections: "ToolPolicyRejections | None" = betterproto2.field(
+        5, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "HeldToolPolicyReport", HeldToolPolicyReport
+)
+
+
+@dataclass(eq=False, repr=False)
+class HeldToolPolicyVersion(betterproto2.Message):
+    """
+    A held row is never enforced and never returned by GetCompiledToolPolicies. Any new live version
+    of its set makes it DISCARDED. At most one HELD row exists for each set.
+    """
+
+    kind: "ToolPolicySetKind" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicySetKind(0)
+    )
+
+    org_id: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    version: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+    base_version: "int" = betterproto2.field(4, betterproto2.TYPE_UINT64)
+
+    source: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+    status: "ToolPolicyVersionStatus" = betterproto2.field(
+        6, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicyVersionStatus(0)
+    )
+
+    compiler_generation: "int" = betterproto2.field(7, betterproto2.TYPE_UINT32)
+
+    schema_revision: "int" = betterproto2.field(8, betterproto2.TYPE_UINT32)
+
+    catalog_revision: "int" = betterproto2.field(9, betterproto2.TYPE_UINT64)
+
+    report: "HeldToolPolicyReport | None" = betterproto2.field(
+        10, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    created_by: "str" = betterproto2.field(11, betterproto2.TYPE_STRING)
+
+    created_at: "datetime.datetime | None" = betterproto2.field(
+        12,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    compiled: "CompiledToolPolicySet | None" = betterproto2.field(
+        13, betterproto2.TYPE_MESSAGE, optional=True
+    )
+    """
+    Absent for a FAILED result.
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "HeldToolPolicyVersion", HeldToolPolicyVersion
 )
 
 
@@ -2226,6 +2493,44 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class ListHeldToolPolicyVersionsRequest(betterproto2.Message):
+    """
+    An empty org_prn lists every held row of every set, the floor included, and needs
+    ManageToolPolicyRecompile. Only HELD rows are listed.
+    """
+
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+    """
+    0 => server default 50; above 200 is invalid-pagination.
+    """
+
+    offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1",
+    "ListHeldToolPolicyVersionsRequest",
+    ListHeldToolPolicyVersionsRequest,
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListHeldToolPolicyVersionsResponse(betterproto2.Message):
+    versions: "list[HeldToolPolicyVersion]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1",
+    "ListHeldToolPolicyVersionsResponse",
+    ListHeldToolPolicyVersionsResponse,
+)
+
+
+@dataclass(eq=False, repr=False)
 class ListMembershipsRequest(betterproto2.Message):
     """
 
@@ -2522,6 +2827,26 @@ default_message_pool.register_message("paigasus.iam.v1", "Membership", Membershi
 
 
 @dataclass(eq=False, repr=False)
+class NameDiff(betterproto2.Message):
+    """
+    A list of names that differ between the live output and the held output.
+    """
+
+    added: "list[str]" = betterproto2.field(1, betterproto2.TYPE_STRING, repeated=True)
+
+    removed: "list[str]" = betterproto2.field(
+        2, betterproto2.TYPE_STRING, repeated=True
+    )
+
+    changed: "list[str]" = betterproto2.field(
+        3, betterproto2.TYPE_STRING, repeated=True
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "NameDiff", NameDiff)
+
+
+@dataclass(eq=False, repr=False)
 class Organization(betterproto2.Message):
     prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -2782,6 +3107,31 @@ class PutToolResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "PutToolResponse", PutToolResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class RecompileSetResult(betterproto2.Message):
+    kind: "ToolPolicySetKind" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicySetKind(0)
+    )
+
+    org_id: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    base_version: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+    outcome: "RecompileOutcome" = betterproto2.field(
+        4, betterproto2.TYPE_ENUM, default_factory=lambda: RecompileOutcome(0)
+    )
+
+    version: "int" = betterproto2.field(5, betterproto2.TYPE_UINT64)
+    """
+    The new live or held version; 0 otherwise.
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RecompileSetResult", RecompileSetResult
 )
 
 
@@ -3145,6 +3495,36 @@ class RoleGrantRef(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "RoleGrantRef", RoleGrantRef)
+
+
+@dataclass(eq=False, repr=False)
+class RunToolPolicyRecompileRequest(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RunToolPolicyRecompileRequest", RunToolPolicyRecompileRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RunToolPolicyRecompileResponse(betterproto2.Message):
+    """
+    ALREADY_RUNNING and OLDER_REPLICA write nothing and have no results.
+    """
+
+    status: "RecompileRunStatus" = betterproto2.field(
+        1, betterproto2.TYPE_ENUM, default_factory=lambda: RecompileRunStatus(0)
+    )
+
+    results: "list[RecompileSetResult]" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RunToolPolicyRecompileResponse", RunToolPolicyRecompileResponse
+)
 
 
 @dataclass(eq=False, repr=False)
@@ -4651,6 +5031,81 @@ class ToolPolicyServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.ToolPolicyService/GetCompiledFloorPolicies",
             message,
             GetCompiledFloorPoliciesResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_held_tool_policy_versions(
+        self,
+        message: "ListHeldToolPolicyVersionsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListHeldToolPolicyVersionsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/ListHeldToolPolicyVersions",
+            message,
+            ListHeldToolPolicyVersionsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def accept_held_tool_policy_version(
+        self,
+        message: "AcceptHeldToolPolicyVersionRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "AcceptHeldToolPolicyVersionResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/AcceptHeldToolPolicyVersion",
+            message,
+            AcceptHeldToolPolicyVersionResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def discard_held_tool_policy_version(
+        self,
+        message: "DiscardHeldToolPolicyVersionRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "DiscardHeldToolPolicyVersionResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/DiscardHeldToolPolicyVersion",
+            message,
+            DiscardHeldToolPolicyVersionResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def run_tool_policy_recompile(
+        self,
+        message: "RunToolPolicyRecompileRequest | None" = None,
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RunToolPolicyRecompileResponse":
+
+        if message is None:
+            message = RunToolPolicyRecompileRequest()
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ToolPolicyService/RunToolPolicyRecompile",
+            message,
+            RunToolPolicyRecompileResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,

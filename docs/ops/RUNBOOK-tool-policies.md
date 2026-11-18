@@ -174,7 +174,180 @@ Do not roll back IAM to a release before this one after the first enable of any 
 The first enable saves a version with `origin = starter`. An older IAM reads that origin as
 `corrupt`, so `GetToolPolicySet` and every catalog write fail for each enabled organization.
 
+The re-compile job (section 9) adds two more origins, `recompile` and `accept`. It also adds two
+statuses, `held` and `discarded`. An older IAM reads a live version with the origin `recompile` or
+`accept` as `corrupt`. The effect is the same as for `starter`.
+
+The `down` step of the migration `m0015_tool_policy_held_versions` does two deletions.
+
+1. It deletes every held or discarded row with a version above the live version of its set.
+   An older IAM numbers a save `live_version + 1`. A row above the live version holds that number,
+   and every save of the set would fail.
+2. It deletes every row that has no compiled output. These are the held rows of a failed compile.
+
+So a rollback loses each pending proposal. The job makes them again after the next upgrade.
+
+### Rollback of a compiler change
+
+This case is a rollback between two releases that both have the re-compile job, from compiler
+generation G+1 back to G. The same applies to a schema revision. The `down` step of the migration
+does not run.
+
+- The job reads the largest generation and schema revision over every stored row of every status:
+  live, superseded, held and discarded. The rows that G+1 wrote stay. So every run on a G replica,
+  at boot and on request, returns `older_replica` and writes nothing. This continues until a
+  release with generation G+1 or higher ships again.
+- A set with a live version at G+1 is stale for a G replica. Each catalog write of that
+  organization is refused with `tool-policy-recompile-pending`. An admin saves the set to clear
+  it: a save compiles again at G and makes a new live version.
+- An accept of a held row from G+1 that has an output returns `tool-policy-version-conflict`,
+  because the generation of the row is not the running generation. Discard the row, or wait for the next upgrade.
+
 ## 8. Not done yet
 
 The Helm chart does not mount the credential file. It does not set `iam.service_credential_file`.
 Until a later change adds this, mount the file and set the key by your own means.
+
+## 9. Compiler or schema changes
+
+A new compiler generation or a new tool schema revision makes the live sets stale. A stale set is
+a live version that an older compiler or schema made. The re-compile job compiles each stale set
+again. IAM changes a live set by itself only when the new output is the same.
+
+### When the job runs
+
+- Each IAM replica starts the job in the background at boot, after the migration. The job does not
+  delay readiness. An error does not stop IAM.
+- An operator can start the job with `POST /v1/tool-policy-recompile` (gRPC
+  `RunToolPolicyRecompile`). The caller needs the action `ManageToolPolicyRecompile` at Root. The
+  `platform_admin` role has it.
+- One run at a time: the job takes a database advisory lock. A second run gets the status
+  "already running" and compiles nothing.
+- If a replica finds a stored row with a newer generation or schema revision, it is an older
+  replica. It writes nothing and logs a warning. So during a rolling deploy the older replicas do
+  not run the job.
+- A run on request can last longer than the 30 s request timeout of IAM when many sets are stale.
+  The caller then gets a timeout. The job continues in the background and finishes. Read the
+  results with `GET /v1/held-tool-policy-versions` and in the IAM log. At a shutdown of the
+  replica, the job stops between two sets, and the replica waits for it to release the lock
+  before it exits. The replica waits a maximum of 30 s after the shutdown signal, below the 45 s
+  `terminationGracePeriodSeconds`. This limit covers all of the shutdown: the servers, the boot
+  run and the runs on request. At the limit, the replica logs one warning that names what is
+  still open, and exits. Postgres releases the advisory lock when the connection closes.
+  A set whose transaction did not commit rolls back. The deadline can also end during a commit.
+  Then PostgreSQL can commit the set before IAM gets the reply. The new live version, the audit
+  entry and the outbox event stay, and the task reports no result. Do not assume a rollback.
+  After a shutdown timeout warning, check the stored state. List the held versions with
+  `GET /v1/held-tool-policy-versions`, or start the job again with
+  `POST /v1/tool-policy-recompile`. A new run is safe, because the job is idempotent.
+- After a rolling deploy that changes the compiler generation or the schema revision, do one more
+  step. When every replica runs the new release, start the job one more time with
+  `POST /v1/tool-policy-recompile`. The reason follows. The new replicas run the job at boot, but
+  the old replicas continue to serve until the rollout ends. A save or a catalog write on an old
+  replica after that boot run writes a live version at the old generation. No later run picks up
+  that version until a replica starts again or an operator starts the job. Until then, each
+  catalog write of that organization is refused with `tool-policy-recompile-pending`.
+
+### The run response
+
+`POST /v1/tool-policy-recompile` and gRPC `RunToolPolicyRecompile` wait for the run and return
+two fields.
+
+- `status` is the result of the run. The gRPC values are in the enum `RecompileRunStatus`. The
+  HTTP JSON uses the short name.
+
+  | gRPC `status` | HTTP `status` | Meaning |
+  |---|---|---|
+  | `RECOMPILE_RUN_STATUS_RAN` | `ran` | The job ran. `results` has one row for each stale set. |
+  | `RECOMPILE_RUN_STATUS_ALREADY_RUNNING` | `already_running` | Another run has the lock. This run compiled nothing. `results` is empty. |
+  | `RECOMPILE_RUN_STATUS_OLDER_REPLICA` | `older_replica` | A stored row is newer than this replica. This run wrote nothing. `results` is empty. |
+
+  IAM never sends `RECOMPILE_RUN_STATUS_UNSPECIFIED`.
+- `results` has one row for each stale set, in the order of the job: the floor first, then the
+  tenants by organization UUID. Each row has these fields.
+
+  | Field | Meaning |
+  |---|---|
+  | `kind` | `TOOL_POLICY_SET_KIND_FLOOR` or `TOOL_POLICY_SET_KIND_TENANT`. The HTTP JSON uses `floor` or `tenant`. |
+  | `org_id` | The organization UUID. It is empty for the floor. |
+  | `base_version` | The live version that the job compiled again. |
+  | `outcome` | The result of the set, from the enum `RecompileOutcome`, for example `RECOMPILE_OUTCOME_HELD_DIFFERENT`. The HTTP JSON uses the same name. |
+  | `version` | The new live version (`IDENTICAL`) or the new held version (`HELD_DIFFERENT`, `HELD_FAILED`). It is 0 for the other outcomes. |
+
+  `RECOMPILE_OUTCOME_ALREADY_PROPOSED` means that a held or discarded row already exists for this
+  live version and these compiler values. The job wrote nothing, and the metric does not count it.
+  The other outcomes are the `result` values of the metric in the next section.
+
+### The results
+
+The job counts one result for each set in the metric `iam_tool_policy_recompile_results_total`.
+The label is `result`.
+
+| `result` | Meaning | Action |
+|---|---|---|
+| `identical` | The new compile gives the same output. The job made a new live version with `origin = recompile`. | None. |
+| `held_different` | The output is different. The job made a held version. The old version stays live. | An admin accepts or discards it. |
+| `held_failed` | The compile rejected the set. The job made a held version with no output. | An admin fixes and saves the set, or discards the row. |
+| `conflict` | The set changed after the job read it, or the organization is gone. The job wrote nothing. | None. The next run reads the set again. |
+| `error` | The compiler was busy or unavailable, or a read or write of this set failed. For example, a compiled value does not decode. The job wrote nothing and logged a warning that names the set. | Make the compiler healthy. Then run the job again. |
+
+A non-zero `held_different` or `held_failed` needs an admin. An `error` result needs a second run
+after the compiler is healthy. The job continues with the next set after an `error`.
+
+### Held versions
+
+A held version is a proposal. The gateway never reads it. The live set keeps working.
+
+1. List the held versions. `GET /v1/held-tool-policy-versions` lists every set, the floor included.
+   It needs `ManageToolPolicyRecompile` at Root. A tenant admin lists its own with
+   `GET /v1/organizations/{id}/held-tool-policy-versions` (gRPC `ListHeldToolPolicyVersions`).
+2. Read the `report` of the row. It has the `result` and the difference of the policies,
+   conditions and schema names. A failed row has the `rejections` and no `compiled` output.
+3. Accept or discard the row. Use
+   `POST /v1/organizations/{id}/held-tool-policy-versions/{version}/accept` or `.../discard`. For
+   the floor use `POST /v1/tool-policy-floor/held-versions/{version}/accept` or `.../discard`.
+   The gRPC methods are `AcceptHeldToolPolicyVersion` and `DiscardHeldToolPolicyVersion`.
+   A floor row needs `ManageToolPolicyFloor`. A tenant row needs `ManageToolPolicies`.
+
+An accept makes the stored output the next live version with `origin = accept`. It runs no
+compile. These errors are possible:
+
+- `tool-policy-version-conflict` (409): the held row is stale. The live version, the compiler
+  generation, the schema revision or the catalog revision is not the same as when the job made the row.
+- `tool-policy-held-not-acceptable` (reason 63, 409): the row is a failed compile and has no output.
+  Fix the source, save the set, or discard the row.
+- `tool-policy-version-not-found`: another request already discarded or replaced the row.
+
+IAM publishes no event for a held version. A save or an accept of any live version of a set
+discards its held row.
+
+After a discard, the set stays at the old generation. A catalog write of that organization is
+refused with `tool-policy-recompile-pending` until the set is saved again. This error also appears
+while the set stays stale. The job does not make the same proposal again for
+the same live version and the same compiler values. A new compiler generation, a new schema
+revision or a new live version allows a new proposal.
+
+A set that holds a history rule (section 5) is held as failed. Remove the temporal block and save
+the set.
+
+### Rolling deploy and mixed replicas
+
+While replicas of the release before this one and of this release run together, an older replica
+returns `Internal` (HTTP 500) on every write to a set that has a held row, or a discarded row with
+a number above the live version. It also reads a live row with the origin `recompile` or `accept`
+as `corrupt`. Both stop when the older replicas are gone. If a newer replica writes a set while
+the job of an older replica runs, that job skips the set and logs it.
+
+A rolling deploy between two releases of this feature, from compiler generation G to G+1, has two
+more effects.
+
+- During the rollout, an old replica answers `tool-policy-recompile-pending` on a catalog write
+  for a set that the new job already moved to G+1. The old replica reads G+1 as stale. This stops
+  when the rollout ends.
+- A save or a catalog write on an old replica writes a live version at G. The boot runs of the new
+  replicas do not see it if they ran before the write. When every replica runs the new release,
+  start the job one more time with `POST /v1/tool-policy-recompile` (see "When the job runs").
+
+The first rollout of this release must finish before any compiler or schema change ships. No
+change of the Dogwood version and no change of the compiler output may merge without a bump of
+`COMPILER_GENERATION`. The golden test enforces this.

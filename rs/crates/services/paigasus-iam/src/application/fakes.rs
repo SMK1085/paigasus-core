@@ -11,8 +11,8 @@ use crate::application::tenancy_nodes::TenancyNodes;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::tool_policy::{
-    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, PolicyCompiler, StoredTool, ToolEntry, ToolPolicyRepository, ToolPolicySetKey, ToolPolicySettings, ToolPolicyState,
-    ToolPolicyVersion, VersionStatus,
+    CompileOutcome, CompileRequest, CompiledOutput, CompilerFailure, HeldStatus, HeldVersion, PolicyCompiler, RecompileLock, RecompileLockGuard, StoredTool, ToolEntry, ToolPolicyRepository,
+    ToolPolicySetKey, ToolPolicySettings, ToolPolicyState, ToolPolicyVersion, VersionStatus, failed_report,
 };
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
@@ -1942,6 +1942,12 @@ pub enum ConcurrentChange {
     LiveVersion,
     /// Another catalog write committed: `catalog_revision` goes up by 1.
     CatalogRevision,
+    /// The re-compile job stored a held row: it takes the next number, and `last_version`
+    /// goes up. `live_version` does not change.
+    HeldRow,
+    /// An admin discarded the held row of the set: its status becomes discarded. No counter
+    /// changes.
+    HeldDiscarded,
 }
 
 #[derive(Default)]
@@ -1949,6 +1955,7 @@ struct ToolPolicyData {
     states: HashMap<ToolPolicySetKey, ToolPolicyState>,
     catalogs: HashMap<Uuid, std::collections::BTreeMap<String, StoredTool>>,
     versions: HashMap<ToolPolicySetKey, Vec<ToolPolicyVersion>>,
+    held: HashMap<ToolPolicySetKey, Vec<HeldVersion>>,
     settings: HashMap<Uuid, ToolPolicySettings>,
 }
 
@@ -1961,13 +1968,18 @@ pub struct InMemoryToolPolicies {
     data: Arc<Mutex<ToolPolicyData>>,
     concurrent: Arc<Mutex<Option<ConcurrentChange>>>,
     live_before_next_live: Arc<Mutex<Option<ToolPolicyVersion>>>,
+    live_before_next_stale_list: Arc<Mutex<Option<ToolPolicyVersion>>>,
     write_before_next_catalog_read: Arc<Mutex<Option<(Uuid, StoredTool)>>>,
     writes: Arc<AtomicUsize>,
     insert_attempts: Arc<AtomicUsize>,
     read_log: Arc<Mutex<Vec<&'static str>>>,
 }
 
-const NO_STATE: ToolPolicyState = ToolPolicyState { catalog_revision: 0, live_version: 0 };
+const NO_STATE: ToolPolicyState = ToolPolicyState {
+    catalog_revision: 0,
+    live_version: 0,
+    last_version: 0,
+};
 
 impl InMemoryToolPolicies {
     /// Make `change` inside the next `lock_state_in`.
@@ -1979,6 +1991,13 @@ impl InMemoryToolPolicies {
     /// `state`: a save that another writer committed between the two reads.
     pub fn store_live_before_next_live(&self, v: ToolPolicyVersion) {
         *self.live_before_next_live.lock().unwrap() = Some(v);
+    }
+
+    /// Store `v` as the new live version at the start of the next `stale_live_versions` call,
+    /// after the caller read `max_stored_revisions`: a save that a newer replica committed
+    /// between the two reads of the re-compile job. An older live row of the set is superseded.
+    pub fn store_live_before_next_stale_list(&self, v: ToolPolicyVersion) {
+        *self.live_before_next_stale_list.lock().unwrap() = Some(v);
     }
 
     /// Commit a catalog write (`tool` upserted into `org`, the catalog revision up by 1) at the
@@ -2034,8 +2053,49 @@ impl InMemoryToolPolicies {
         data.versions.entry(v.key).or_default().push(v);
     }
 
+    /// Store `h` as a held row with no checks. Another held row of the set becomes discarded,
+    /// and `last_version` is at least the number of `h`.
+    pub fn seed_held(&self, h: HeldVersion) {
+        let mut data = self.data.lock().unwrap();
+        Self::push_held(&mut data, h);
+    }
+
+    /// Every held or discarded row of a set, oldest first.
+    pub fn held_rows(&self, key: &ToolPolicySetKey) -> Vec<HeldVersion> {
+        self.data.lock().unwrap().held.get(key).cloned().unwrap_or_default()
+    }
+
+    fn push_held(data: &mut ToolPolicyData, h: HeldVersion) {
+        let rows = data.held.entry(h.key).or_default();
+        for old in rows.iter_mut() {
+            if old.status == HeldStatus::Held {
+                old.status = HeldStatus::Discarded;
+            }
+        }
+        let state = data.states.entry(h.key).or_insert(NO_STATE);
+        state.last_version = state.last_version.max(h.version);
+        rows.push(h);
+    }
+
+    fn discard_held_of(data: &mut ToolPolicyData, key: &ToolPolicySetKey, only: Option<u64>) -> bool {
+        let mut any = false;
+        for row in data.held.entry(*key).or_default().iter_mut() {
+            if row.status == HeldStatus::Held && only.is_none_or(|v| v == row.version) {
+                row.status = HeldStatus::Discarded;
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// The state of a set. `last_version` is the largest number that any stored row holds, so
+    /// it stays right for every write path of this fake.
     fn state_of(data: &ToolPolicyData, key: &ToolPolicySetKey) -> ToolPolicyState {
-        data.states.get(key).copied().unwrap_or(NO_STATE)
+        let mut state = data.states.get(key).copied().unwrap_or(NO_STATE);
+        let live_max = data.versions.get(key).into_iter().flatten().map(|v| v.version).max().unwrap_or(0);
+        let held_max = data.held.get(key).into_iter().flatten().map(|v| v.version).max().unwrap_or(0);
+        state.last_version = state.last_version.max(live_max).max(held_max);
+        state
     }
 }
 
@@ -2088,6 +2148,27 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         match self.concurrent.lock().unwrap().take() {
             Some(ConcurrentChange::LiveVersion) => state.live_version += 1,
             Some(ConcurrentChange::CatalogRevision) => state.catalog_revision += 1,
+            Some(ConcurrentChange::HeldRow) => {
+                let held = HeldVersion {
+                    key: *key,
+                    version: state.next_version(),
+                    base_version: state.live_version,
+                    source: String::new(),
+                    compiled: None,
+                    compiler_generation: 0,
+                    schema_revision: 0,
+                    catalog_revision: None,
+                    status: HeldStatus::Held,
+                    report: failed_report(Vec::new()),
+                    created_by: "job".to_owned(),
+                    created_at: DateTime::<Utc>::UNIX_EPOCH,
+                };
+                state.last_version = held.version;
+                Self::push_held(&mut data, held);
+            }
+            Some(ConcurrentChange::HeldDiscarded) => {
+                Self::discard_held_of(&mut data, key, None);
+            }
             None => {}
         }
         data.states.insert(*key, state);
@@ -2126,11 +2207,13 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         }
         let mut data = self.data.lock().unwrap();
         let mut state = Self::state_of(&data, &v.key);
-        if v.version != state.live_version + 1 {
+        if v.version != state.next_version() {
             return Err(RepositoryError::Conflict(ConflictKind::ToolPolicyVersion));
         }
         state.live_version = v.version;
+        state.last_version = v.version;
         data.states.insert(v.key, state);
+        Self::discard_held_of(&mut data, &v.key, None);
         let versions = data.versions.entry(v.key).or_default();
         for old in versions.iter_mut() {
             if old.status == VersionStatus::Live {
@@ -2140,6 +2223,92 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         versions.push(v.clone());
         self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn stale_live_versions(&self, compiler_generation: u32, schema_revision: u32) -> Result<Vec<ToolPolicyVersion>, RepositoryError> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(v) = self.live_before_next_stale_list.lock().unwrap().take() {
+            for old in data.versions.entry(v.key).or_default().iter_mut() {
+                if old.status == VersionStatus::Live {
+                    old.status = VersionStatus::Superseded;
+                }
+            }
+            data.states.entry(v.key).or_insert(NO_STATE).live_version = v.version;
+            data.versions.entry(v.key).or_default().push(v);
+        }
+        let mut stale: Vec<ToolPolicyVersion> = data
+            .versions
+            .values()
+            .flatten()
+            .filter(|v| v.status == VersionStatus::Live && (v.compiler_generation != compiler_generation || v.schema_revision != schema_revision))
+            .cloned()
+            .collect();
+        stale.sort_by_key(|v| match v.key {
+            ToolPolicySetKey::Floor => (0, Uuid::nil()),
+            ToolPolicySetKey::Tenant(org) => (1, org),
+        });
+        Ok(stale)
+    }
+
+    async fn max_stored_revisions(&self) -> Result<(u32, u32), RepositoryError> {
+        let data = self.data.lock().unwrap();
+        let live = data.versions.values().flatten().map(|v| (v.compiler_generation, v.schema_revision));
+        let held = data.held.values().flatten().map(|h| (h.compiler_generation, h.schema_revision));
+        Ok(live.chain(held).fold((0, 0), |(g, s), (vg, vs)| (g.max(vg), s.max(vs))))
+    }
+
+    async fn held(&self, key: &ToolPolicySetKey) -> Result<Option<HeldVersion>, RepositoryError> {
+        Ok(self.data.lock().unwrap().held.get(key).and_then(|rows| rows.iter().find(|h| h.status == HeldStatus::Held).cloned()))
+    }
+
+    async fn list_held(&self, org: Option<Uuid>, limit: u64, offset: u64) -> Result<Vec<HeldVersion>, RepositoryError> {
+        let data = self.data.lock().unwrap();
+        let mut rows: Vec<HeldVersion> = data
+            .held
+            .values()
+            .flatten()
+            .filter(|h| h.status == HeldStatus::Held)
+            .filter(|h| org.is_none_or(|o| h.key == ToolPolicySetKey::Tenant(o)))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|h| match h.key {
+            ToolPolicySetKey::Floor => (0, Uuid::nil()),
+            ToolPolicySetKey::Tenant(org) => (1, org),
+        });
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        Ok(rows.into_iter().skip(offset).take(limit).collect())
+    }
+
+    async fn proposal_exists(&self, key: &ToolPolicySetKey, base_version: u64, compiler_generation: u32, schema_revision: u32) -> Result<bool, RepositoryError> {
+        Ok(self.data.lock().unwrap().held.get(key).is_some_and(|rows| {
+            rows.iter()
+                .any(|h| h.base_version == base_version && h.compiler_generation == compiler_generation && h.schema_revision == schema_revision)
+        }))
+    }
+
+    async fn insert_held_in(&self, _tx: &dyn Transaction, h: &HeldVersion) -> Result<(), RepositoryError> {
+        if h.status != HeldStatus::Held {
+            return Err(RepositoryError::Backend("insert_held_in needs a held version".into()));
+        }
+        let mut data = self.data.lock().unwrap();
+        if h.version != Self::state_of(&data, &h.key).next_version() {
+            return Err(RepositoryError::Conflict(ConflictKind::ToolPolicyVersion));
+        }
+        Self::push_held(&mut data, h.clone());
+        drop(data);
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn discard_held_in(&self, _tx: &dyn Transaction, key: &ToolPolicySetKey, version: u64) -> Result<bool, RepositoryError> {
+        let mut data = self.data.lock().unwrap();
+        let changed = Self::discard_held_of(&mut data, key, Some(version));
+        drop(data);
+        if changed {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(changed)
     }
 
     async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError> {
@@ -2172,6 +2341,8 @@ pub struct FakePolicyCompiler {
     generation: Arc<AtomicU32>,
     script: Arc<Mutex<VecDeque<Result<CompileOutcome, CompilerFailure>>>>,
     requests: Arc<Mutex<Vec<CompileRequest>>>,
+    gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+    arrivals: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for FakePolicyCompiler {
@@ -2180,6 +2351,8 @@ impl Default for FakePolicyCompiler {
             generation: Arc::new(AtomicU32::new(1)),
             script: Arc::default(),
             requests: Arc::default(),
+            gate: Arc::default(),
+            arrivals: Arc::new(tokio::sync::Semaphore::new(0)),
         }
     }
 }
@@ -2202,6 +2375,27 @@ impl FakePolicyCompiler {
     pub fn calls(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
+
+    /// From now on, each `compile` call records its request and then waits for one permit of the
+    /// returned semaphore (it starts with none).
+    pub fn gate(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self.gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    /// Resolves when a `compile` call reached the gate. Each call that waits at the gate adds one
+    /// permit to a counter, and each call of this method takes one. So N arrivals before the calls
+    /// give N returns, and no arrival is lost.
+    pub async fn reached_gate(&self) {
+        self.arrivals.acquire().await.expect("the arrivals counter is never closed").forget();
+    }
+
+    /// From now on, `compile` does not wait. A call that already waits at the gate still waits
+    /// for its permit.
+    pub fn remove_gate(&self) {
+        *self.gate.lock().unwrap() = None;
+    }
 }
 
 #[async_trait]
@@ -2212,6 +2406,11 @@ impl PolicyCompiler for FakePolicyCompiler {
 
     async fn compile(&self, req: &CompileRequest) -> Result<CompileOutcome, CompilerFailure> {
         self.requests.lock().unwrap().push(req.clone());
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            self.arrivals.add_permits(1);
+            gate.acquire().await.expect("the compile gate is never closed").forget();
+        }
         if let Some(answer) = self.script.lock().unwrap().pop_front() {
             return answer;
         }
@@ -2220,5 +2419,97 @@ impl PolicyCompiler for FakePolicyCompiler {
             cedar_schema_json: req.schema_json.clone(),
             conditions: Vec::new(),
         }))
+    }
+}
+
+/// In-memory `RecompileLock`: one flag. A held flag makes `try_acquire` answer `None`. `release`
+/// clears the flag and counts the call; a guard that is only dropped also clears it.
+#[derive(Clone, Default)]
+pub struct FakeRecompileLock {
+    held: Arc<AtomicBool>,
+    releases: Arc<AtomicUsize>,
+}
+
+impl FakeRecompileLock {
+    pub fn held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
+    }
+
+    /// The calls of `release`. A guard that is only dropped does not count.
+    pub fn releases(&self) -> usize {
+        self.releases.load(Ordering::SeqCst)
+    }
+}
+
+struct FakeRecompileGuard {
+    held: Arc<AtomicBool>,
+    releases: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl RecompileLock for FakeRecompileLock {
+    async fn try_acquire(&self) -> Result<Option<Box<dyn RecompileLockGuard>>, RepositoryError> {
+        if self.held.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(FakeRecompileGuard {
+            held: self.held.clone(),
+            releases: self.releases.clone(),
+        })))
+    }
+}
+
+#[async_trait]
+impl RecompileLockGuard for FakeRecompileGuard {
+    async fn release(self: Box<Self>) -> Result<(), RepositoryError> {
+        // `Drop` clears the flag once, when `self` ends here.
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl Drop for FakeRecompileGuard {
+    fn drop(&mut self) {
+        self.held.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod policy_compiler_gate_tests {
+    use super::*;
+    use paigasus_iam_core::tool_policy::{PROTOCOL_VERSION, SetKind};
+    use std::time::Duration;
+
+    fn request() -> CompileRequest {
+        CompileRequest {
+            protocol_version: PROTOCOL_VERSION,
+            kind: SetKind::Floor,
+            source: String::new(),
+            schema_json: serde_json::json!({}),
+            max_window_ms: 0,
+        }
+    }
+
+    /// Two gated arrivals before any `reached_gate` call give two returns of `reached_gate`.
+    #[tokio::test]
+    async fn two_gated_arrivals_give_two_reached_gate_returns() {
+        let compiler = FakePolicyCompiler::default();
+        let gate = compiler.gate();
+        let (a, b) = (compiler.clone(), compiler.clone());
+        let first = tokio::spawn(async move { a.compile(&request()).await });
+        let second = tokio::spawn(async move { b.compile(&request()).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while compiler.calls() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both arrivals must reach the compiler");
+        tokio::time::timeout(Duration::from_secs(5), compiler.reached_gate()).await.expect("the first arrival");
+        tokio::time::timeout(Duration::from_secs(5), compiler.reached_gate()).await.expect("the second arrival");
+        assert!(tokio::time::timeout(Duration::from_millis(50), compiler.reached_gate()).await.is_err(), "only two arrivals happened");
+        gate.add_permits(2);
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
     }
 }

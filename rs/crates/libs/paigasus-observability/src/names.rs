@@ -129,6 +129,11 @@ pub const IAM_JIT_PROVISIONING_FAILURES_TOTAL: &str = "iam_jit_provisioning_fail
 /// reconciliation error both land here under the identical label, distinguishable only via the
 /// accompanying ERROR log's `policy_id` vs `role_key` field, never via this metric alone.
 pub const IAM_STARTER_POLICY_RECONCILES_TOTAL: &str = "iam_starter_policy_reconciles_total";
+/// The tool policy re-compile job (SMA-781): one increment per set result, labeled `result`
+/// (`identical`, `held_different`, `held_failed`, `conflict`, `error`). `held_*` means an admin
+/// must accept or discard a held version. `error` also covers a per-set storage or decode fault
+/// (SMA-781).
+pub const IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL: &str = "iam_tool_policy_recompile_results_total";
 // IAM Redis circuit breaker (SMA-476)
 /// The circuit-breaker state for one Redis connection: `0` = closed (commands pass through),
 /// `1` = half_open (one probe admitted), `2` = open (every command short-circuits instantly).
@@ -351,6 +356,7 @@ pub const ALL: &[&str] = &[
     IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL,
     IAM_JIT_PROVISIONING_FAILURES_TOTAL,
     IAM_STARTER_POLICY_RECONCILES_TOTAL,
+    IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL,
     IAM_OUTBOX_RELAY_TICKS_TOTAL,
     IAM_OUTBOX_RELAY_DRAINED_TOTAL,
     IAM_OUTBOX_RELAY_PUBLISHED_TOTAL,
@@ -435,6 +441,11 @@ mod tests {
         for name in [GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL, GATEWAY_TOOL_POLICY_NATS_CONNECTED] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }
+    }
+
+    #[test]
+    fn the_iam_tool_policy_recompile_family_is_registered() {
+        assert!(ALL.contains(&IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL), "{IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL} is missing from ALL");
     }
 
     #[test]

@@ -214,6 +214,9 @@ pub enum TenancyError {
     /// `off` (the first change away from `off` must be to `log_only`), or it has no tool policy set.
     #[error("the tool policy mode cannot change this way: change the mode to log_only first; enforce also needs a saved tool policy set")]
     ToolPolicyModeTransitionInvalid,
+    /// SMA-781. The held tool policy version has no compile output, so an admin cannot accept it.
+    #[error("the held tool policy version has no compile output and cannot be accepted")]
+    ToolPolicyHeldNotAcceptable,
     #[error("internal server error")]
     Internal,
 }
@@ -268,6 +271,7 @@ impl TenancyError {
             Self::ToolPolicyCompilerBusy => "tool-policy-compiler-busy",
             Self::ToolPolicyVersionNotFound => "tool-policy-version-not-found",
             Self::ToolPolicyModeTransitionInvalid => "tool-policy-mode-transition-invalid",
+            Self::ToolPolicyHeldNotAcceptable => "tool-policy-held-not-acceptable",
             Self::Internal => "internal",
         }
     }
@@ -315,6 +319,7 @@ impl TenancyError {
             | Self::FleetNotConverged
             | Self::CannotUnlinkOwnIdentity
             | Self::ToolPolicyRecompilePending
+            | Self::ToolPolicyHeldNotAcceptable
             | Self::ToolPolicyModeTransitionInvalid => ErrorClass::Precondition,
             Self::ToolPolicyVersionConflict => ErrorClass::Aborted,
             Self::ToolPolicyCompilerUnavailable => ErrorClass::Unavailable,
@@ -389,6 +394,7 @@ impl TenancyError {
             | Self::ToolPolicyCompilerBusy
             | Self::ToolPolicyVersionNotFound
             | Self::ToolPolicyModeTransitionInvalid
+            | Self::ToolPolicyHeldNotAcceptable
             | Self::Internal => None,
         }
     }
@@ -514,6 +520,7 @@ mod tests {
             (TenancyError::ToolPolicyCompilerBusy, "tool-policy-compiler-busy", ErrorClass::Exhausted),
             (TenancyError::ToolPolicyVersionNotFound, "tool-policy-version-not-found", ErrorClass::NotFound),
             (TenancyError::ToolPolicyModeTransitionInvalid, "tool-policy-mode-transition-invalid", ErrorClass::Precondition),
+            (TenancyError::ToolPolicyHeldNotAcceptable, "tool-policy-held-not-acceptable", ErrorClass::Precondition),
         ] {
             assert_eq!(err.code(), code);
             assert_eq!(err.class(), class, "{code}");
