@@ -16,7 +16,7 @@
 import type { ReactElement, ReactNode } from 'react';
 import { connection } from 'next/server';
 import { toSessionView } from '@paigasus/auth/server';
-import { buildNavEntries, GATEWAY_BASE_PATH } from '../../lib/nav';
+import { buildConsoleEntries, buildNavEntries, GATEWAY_BASE_PATH } from '../../lib/nav';
 import { getPublicConfig } from '../../lib/config';
 import { currentSession, discovery, myScopes } from '../../lib/console';
 import { switcherOrgs } from '@paigasus/console-core';
@@ -30,10 +30,11 @@ export default async function ConsoleLayout({ children }: { children: ReactNode 
   const { zone, zones } = getPublicConfig();
   const probe = discovery();
   const [iam, gateway, scopes] = await Promise.all([probe.getServiceState('iam', session.accessToken), probe.getServiceState('gateway', session.accessToken), myScopes()]);
-  const nav = buildNavEntries({ iam, gateway, zones });
+  const nav = buildNavEntries({ gateway });
+  const consoles = buildConsoleEntries({ iam, gateway, zones });
   return (
     <Providers zone={zone} zones={zones} session={toSessionView(session)}>
-      <OrgSwitcherShell brand={{ label: 'AI Gateway', href: `${GATEWAY_BASE_PATH}/overview` }} nav={nav} orgs={switcherOrgs(scopes)}>
+      <OrgSwitcherShell brand={{ label: 'AI Gateway', href: `${GATEWAY_BASE_PATH}/overview` }} nav={nav} consoles={consoles} orgs={switcherOrgs(scopes)}>
         {children}
       </OrgSwitcherShell>
     </Providers>

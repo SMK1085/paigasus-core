@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The ONE function that builds PrimaryNav's entries (spec § 5.4). Every entry's `state` comes from
+// The ONE function that builds PrimaryNav's entries (spec § 5.4), and the one that builds the
+// console switcher's (SMA-783). Every entry's `state` comes from
 // @paigasus/app-shell's navStateOf(), which closes SMA-510 spec § 10.4's second gap: no entry here
 // decides its own visibility from a capability list.
 //
@@ -17,13 +18,15 @@ import type { ServiceState } from '@paigasus/discovery/types';
  */
 export const IAM_BASE_PATH = '/iam';
 
-export function buildNavEntries(input: { iam: ServiceState; gateway: ServiceState; zones: ZoneMap; auditAllowed: boolean; deadLettersAllowed: boolean }): NavEntry[] {
-  const entries: NavEntry[] = [{ zone: 'iam', href: `${IAM_BASE_PATH}/orgs`, label: 'Organizations', state: navStateOf(input.iam) }];
+export function buildNavEntries(input: { iam: ServiceState; auditAllowed: boolean; deadLettersAllowed: boolean }): NavEntry[] {
+  // Since SMA-783 the Primary nav lists this console's pages only, in groups; the Gateway is
+  // reached through the console switcher (buildConsoleEntries, below).
+  const entries: NavEntry[] = [{ zone: 'iam', href: `${IAM_BASE_PATH}/orgs`, label: 'Organizations', state: navStateOf(input.iam), group: 'Directory' }];
   // ListAuditEntries is Root-only (rs/crates/services/paigasus-iam/src/application/audit.rs:36-38),
   // so the layout asks mayI('ListAuditLog', ROOT_PRN) and omits the entry on a clear "no". The
   // capability decides the rest: absent without `iam.audit`, disabled when IAM is degraded.
   if (input.auditAllowed) {
-    entries.push({ zone: 'iam', href: `${IAM_BASE_PATH}/audit`, label: 'Audit', state: navStateOf(input.iam, 'iam.audit') });
+    entries.push({ zone: 'iam', href: `${IAM_BASE_PATH}/audit`, label: 'Audit', state: navStateOf(input.iam, 'iam.audit'), group: 'Administration' });
   }
   // SMA-629 § 6.1. Every OutboxService RPC is Root-only, so the layout asks
   // mayI('ListOutboxDeadLetters', ROOT_PRN). mayI() fails open, so during an IAM authz outage a
@@ -31,13 +34,21 @@ export function buildNavEntries(input: { iam: ServiceState; gateway: ServiceStat
   // capability decides the rest: absent without `iam.deadletters` (an older IAM, AC 2), disabled
   // with a reason whenever IAM is degraded, whatever the key (§ 8).
   if (input.deadLettersAllowed) {
-    entries.push({ zone: 'iam', href: `${IAM_BASE_PATH}/dead-letters`, label: 'Dead letters', state: navStateOf(input.iam, 'iam.deadletters') });
+    entries.push({ zone: 'iam', href: `${IAM_BASE_PATH}/dead-letters`, label: 'Dead letters', state: navStateOf(input.iam, 'iam.deadletters'), group: 'Administration' });
   }
-  // A cross-zone entry. PrimaryNav drops it when `gateway` is not a zone (its rule 1), and
-  // navStateOf answers `absent` when `gateway` is not a configured service.
+  return entries;
+}
+
+/**
+ * The console switcher's entries (SMA-783): every console, this one included, in the same order in
+ * every zone (gateway-console/lib/nav.ts mirrors it). The switcher drops a console whose zone is
+ * not in the map (its rule 1), and navStateOf answers `absent` for a service that is not configured.
+ */
+export function buildConsoleEntries(input: { iam: ServiceState; gateway: ServiceState; zones: ZoneMap }): NavEntry[] {
+  const entries: NavEntry[] = [{ zone: 'iam', href: `${IAM_BASE_PATH}/orgs`, label: 'IAM', state: navStateOf(input.iam) }];
   const gatewayBase = input.zones['gateway'];
   if (gatewayBase !== undefined) {
-    entries.push({ zone: 'gateway', href: `${gatewayBase}/`, label: 'Gateway', state: navStateOf(input.gateway) });
+    entries.push({ zone: 'gateway', href: `${gatewayBase}/`, label: 'AI Gateway', state: navStateOf(input.gateway) });
   }
   return entries;
 }

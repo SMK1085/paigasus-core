@@ -12,6 +12,7 @@ describe('the public surface (spec § 2)', () => {
     expect(Object.keys(surface).sort()).toEqual([
       'AppShell',
       'Breadcrumbs',
+      'OrganizationIcon',
       'PrimaryNav',
       'PublicShell',
       'Switcher',

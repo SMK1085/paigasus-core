@@ -39,7 +39,8 @@ test('R11: no single request makes more than one WhoAmI call (§ 5.3)', async ({
   // SMA-636 § 7.4: /gateway/orgs/<org> is the organization settings page now, not the zone overview.
   await expect(page.getByTestId('org-settings')).toBeVisible();
 
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'IAM', exact: true }).click();
+  await page.getByRole('banner').getByRole('button', { name: 'Switch console: Paigasus AI Gateway' }).click();
+  await page.getByRole('menuitem', { name: 'IAM', exact: true }).click();
   await page.waitForURL(`${harness.origin}/iam/orgs`);
   await expect(page.getByRole('region', { name: 'Your organizations' })).toBeVisible();
 

@@ -13,7 +13,7 @@ vi.mock('@paigasus/app-shell', async (importOriginal) => {
   return { ...actual, navStateOf };
 });
 
-const { GATEWAY_BASE_PATH, buildNavEntries, iamManageHref } = await import('../../lib/nav');
+const { GATEWAY_BASE_PATH, buildConsoleEntries, buildNavEntries, iamManageHref } = await import('../../lib/nav');
 
 const ZONES = { iam: '/iam', gateway: '/gateway' };
 
@@ -32,30 +32,44 @@ describe('buildNavEntries', () => {
     ['available', available('gateway')],
     ['degraded', degraded('gateway')],
     ['absent', absent('gateway')],
-  ])("always lists Overview, tracking the gateway's own %s state, whatever the zone map says", (_label, gateway) => {
-    const entries = buildNavEntries({ iam: absent('iam'), gateway, zones: {} });
+  ])("always lists Overview, tracking the gateway's own %s state", (_label, gateway) => {
+    const entries = buildNavEntries({ gateway });
     const overview = byLabel(entries)['Overview'];
     expect(overview).toBeDefined();
     expect(overview?.state).toEqual(navStateOf(gateway));
   });
 
-  it("Overview's href is /gateway/overview and does not depend on zones['gateway']", () => {
-    const entries = buildNavEntries({ iam: absent('iam'), gateway: available('gateway'), zones: { gateway: '/somewhere-else' } });
-    expect(byLabel(entries)['Overview']?.href).toBe('/gateway/overview');
+  it("Overview's href is /gateway/overview, and the nav holds no other console (SMA-783)", () => {
+    const entries = buildNavEntries({ gateway: available('gateway') });
+    expect(entries.map((e) => [e.label, e.zone, e.href])).toEqual([['Overview', 'gateway', '/gateway/overview']]);
+  });
+
+  it('takes EVERY entry’s state from navStateOf()', () => {
+    navStateOf.mockClear();
+    const entries = buildNavEntries({ gateway: available('gateway') });
+    expect(navStateOf).toHaveBeenCalledTimes(entries.length);
+    expect(navStateOf.mock.results.map((r) => r.value as unknown)).toEqual(entries.map((e) => e.state));
+  });
+});
+
+describe('buildConsoleEntries (SMA-783)', () => {
+  it("lists AI Gateway at /gateway/overview whatever zones['gateway'] says", () => {
+    const entries = buildConsoleEntries({ iam: available('iam'), gateway: available('gateway'), zones: { gateway: '/somewhere-else' } });
+    expect(byLabel(entries)['AI Gateway']?.href).toBe('/gateway/overview');
   });
 
   it('includes the IAM entry when the zone map has an iam key', () => {
-    const entries = byLabel(buildNavEntries({ iam: available('iam'), gateway: available('gateway'), zones: ZONES }));
+    const entries = byLabel(buildConsoleEntries({ iam: available('iam'), gateway: available('gateway'), zones: ZONES }));
     expect(entries['IAM']).toBeDefined();
   });
 
   it('omits the IAM entry when the zone map has no iam key, even when the IAM service is available', () => {
-    const entries = byLabel(buildNavEntries({ iam: available('iam'), gateway: available('gateway'), zones: {} }));
+    const entries = byLabel(buildConsoleEntries({ iam: available('iam'), gateway: available('gateway'), zones: {} }));
     expect(entries['IAM']).toBeUndefined();
   });
 
   it("the IAM entry's href is `${zones['iam']}/orgs`, honouring a non-default mount prefix", () => {
-    const entries = byLabel(buildNavEntries({ iam: available('iam'), gateway: available('gateway'), zones: { iam: '/identity' } }));
+    const entries = byLabel(buildConsoleEntries({ iam: available('iam'), gateway: available('gateway'), zones: { iam: '/identity' } }));
     expect(entries['IAM']?.href).toBe('/identity/orgs');
   });
 
@@ -64,18 +78,18 @@ describe('buildNavEntries', () => {
     ['degraded', degraded('iam')],
     ['absent', absent('iam')],
   ])("gives the IAM entry the IAM service's own %s state", (_label, iam) => {
-    const entries = byLabel(buildNavEntries({ iam, gateway: available('gateway'), zones: ZONES }));
+    const entries = byLabel(buildConsoleEntries({ iam, gateway: available('gateway'), zones: ZONES }));
     expect(entries['IAM']?.state).toEqual(navStateOf(iam));
   });
 
-  it('orders Overview first, IAM second', () => {
-    const entries = buildNavEntries({ iam: available('iam'), gateway: available('gateway'), zones: ZONES });
-    expect(entries.map((e) => e.label)).toEqual(['Overview', 'IAM']);
+  it('orders IAM first, AI Gateway second, the same order as the IAM zone', () => {
+    const entries = buildConsoleEntries({ iam: available('iam'), gateway: available('gateway'), zones: ZONES });
+    expect(entries.map((e) => e.label)).toEqual(['IAM', 'AI Gateway']);
   });
 
-  it('takes EVERY entry’s state from navStateOf()', () => {
+  it('takes EVERY console entry’s state from navStateOf()', () => {
     navStateOf.mockClear();
-    const entries = buildNavEntries({ iam: available('iam'), gateway: available('gateway'), zones: ZONES });
+    const entries = buildConsoleEntries({ iam: available('iam'), gateway: available('gateway'), zones: ZONES });
     expect(navStateOf).toHaveBeenCalledTimes(entries.length);
     expect(navStateOf.mock.results.map((r) => r.value as unknown)).toEqual(entries.map((e) => e.state));
   });

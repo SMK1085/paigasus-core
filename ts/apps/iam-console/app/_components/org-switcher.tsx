@@ -11,7 +11,7 @@
 
 import type { ReactElement, ReactNode } from 'react';
 import { useParams } from 'next/navigation';
-import { AppShell, useZone, type Brand, type NavEntry, type SwitcherItem } from '@paigasus/app-shell';
+import { AppShell, OrganizationIcon, useZone, type Brand, type NavEntry, type SwitcherItem } from '@paigasus/app-shell';
 
 /** One organization the switcher can list. Built on the server from myScopes(). */
 export type OrgSwitcherOrg = { readonly orgId: string; readonly label: string };
@@ -35,12 +35,29 @@ export function currentOrgId(params: Readonly<Record<string, string | string[] |
  * `switchers`: AppShell renders a switcher only from its `switchers` prop, so the component that
  * knows the current `[org]` (a client, through useParams()) must be the one that renders AppShell.
  */
-export function OrgSwitcherShell({ brand, nav, orgs, children }: { brand: Brand; nav: readonly NavEntry[]; orgs: readonly OrgSwitcherOrg[]; children: ReactNode }): ReactElement {
+export function OrgSwitcherShell({
+  brand,
+  nav,
+  consoles,
+  orgs,
+  children,
+}: {
+  brand: Brand;
+  nav: readonly NavEntry[];
+  consoles: readonly NavEntry[];
+  orgs: readonly OrgSwitcherOrg[];
+  children: ReactNode;
+}): ReactElement {
   const params = useParams();
   const { basePath } = useZone();
   const items = orgSwitcherItems(orgs, basePath);
   return (
-    <AppShell brand={brand} nav={nav} switchers={items.length === 0 ? [] : [{ label: 'Organization', items, currentId: currentOrgId(params) }]}>
+    <AppShell
+      brand={brand}
+      nav={nav}
+      consoles={consoles}
+      switchers={items.length === 0 ? [] : [{ label: 'Organization', initials: true, icon: <OrganizationIcon />, items, currentId: currentOrgId(params) }]}
+    >
       {children}
     </AppShell>
   );
