@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // SMA-514 scenario 2 (spec § 6): a logged-in user clicks the shell's link from /iam to /gateway
-// and back. Each click must be a hard navigation (a new document request), the session cookie must
-// not change, no request may go to the IdP, and no RSC request may leave its zone.
+// and back. Since SMA-783 that link is an item of the console switcher on the brand, not a Primary
+// nav entry. The step title "wait until the Gateway nav entry is a link" stays as pinned.
+// Each click must be a hard navigation (a new document request), the session cookie must not
+// change, no request may go to the IdP, and no RSC request may leave its zone.
 //
 // The gateway zone is `available` only after `ci/kind/run.sh stub up` (spec § 4). The seven step
 // titles are pinned by ci/kind/journeys-report.mjs (EXPECTED_STEPS).
@@ -102,8 +104,9 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
   const seen: Seen[] = [];
   const statuses = new Map<Request, number>();
   const failed = new Set<Request>();
-  const nav = page.getByRole('navigation', { name: 'Primary' });
-  const gateway = nav.getByRole('link', { name: 'Gateway', exact: true });
+  const iamSwitcher = page.getByRole('banner').getByRole('button', { name: 'Switch console: Paigasus IAM' });
+  // A prefix: a degraded item's accessible name is the label followed by its reason.
+  const gateway = page.getByRole('menuitem', { name: /^AI Gateway/ });
 
   await test.step('record every request of the context', () => {
     // Before anything else, so the recording includes the prefetches that hydration starts.
@@ -133,16 +136,19 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
   await test.step('wait until the Gateway nav entry is a link', async () => {
     const deadline = Date.now() + STUB_DEADLINE_MS;
     for (;;) {
+      // The menu items exist only while the switcher is open.
+      await iamSwitcher.click();
       await expect(gateway).toHaveCount(1);
       const tag = await gateway.evaluate((element) => element.tagName.toLowerCase());
       if (tag === 'a' && (await gateway.getAttribute('href')) !== null && (await gateway.getAttribute('aria-disabled')) === null) break;
       if (Date.now() >= deadline) {
         // The degraded reason tells `network` (stub not up), `bad-response` (wrong content type)
-        // and `not-implemented` (wrong path) apart (primary-nav.tsx:102-104).
-        const reasonId = await gateway.getAttribute('aria-describedby');
-        const reason = reasonId === null ? '(no reason element)' : ((await page.locator(`[id="${reasonId}"]`).textContent()) ?? '(empty reason)');
+        // and `not-implemented` (wrong path) apart. A degraded item holds the label, then the reason
+        // (console-switcher.tsx).
+        const reason = (await gateway.textContent()) ?? '(empty item)';
         throw new Error(`the Gateway nav entry is still disabled ${String(STUB_DEADLINE_MS / 1000)} s after 'run.sh stub up': "${reason}" (spec § 6 step 3, assumption A1)`);
       }
+      await page.keyboard.press('Escape');
       await page.waitForTimeout(2_000);
       await page.reload();
       await waitForHydration(page);
@@ -152,8 +158,8 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
   await test.step('RSC check after hydration, before any click', async () => {
     // Next 16.4.0 does not prefetch a link to the page that is open: the router keeps every
     // segment whose route and params are unchanged, so the request has nothing to fetch (measured
-    // on a dynamic page; 16.3.8 still sent the request). On /iam/orgs the only same-zone NextLinks
-    // (the brand link and "Organizations") point to /iam/orgs, so no RSC request came. Open the
+    // on a dynamic page; 16.3.8 still sent the request). On /iam/orgs the same-zone NextLinks
+    // ("Organizations"; since SMA-783 the brand is the switcher button, not a link) point to /iam/orgs, so no RSC request came. Open the
     // same list as /iam/orgs?offset=0 (the first page, the same content): a link to /iam/orgs is
     // then another page, and the router prefetches it. A hard load, not a click.
     await page.goto('/iam/orgs?offset=0');
@@ -169,8 +175,9 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
   await test.step('IAM to gateway: a hard navigation with the same session', async () => {
     const before = await sessionCookie(page);
     const mark = seen.length;
-    // href /gateway/ (iam-console/lib/nav.ts:40): the gateway public page redirects to /overview
+    // href /gateway/ (iam-console/lib/nav.ts:51): the gateway public page redirects to /overview
     // when the cookie exists (gateway-console/app/(public)/page.tsx:17).
+    await iamSwitcher.click();
     await gateway.click();
     await page.waitForURL((url) => url.hostname === CONSOLE_HOST && url.pathname === '/gateway/overview');
     const documents = consoleDocuments(seen.slice(mark));
@@ -193,7 +200,8 @@ test('J2: the shell links IAM to gateway and back with hard navigations, one ses
   await test.step('gateway to IAM: a hard navigation with the same session', async () => {
     const before = await sessionCookie(page);
     const mark = seen.length;
-    await nav.getByRole('link', { name: 'IAM', exact: true }).click();
+    await page.getByRole('banner').getByRole('button', { name: 'Switch console: Paigasus AI Gateway' }).click();
+    await page.getByRole('menuitem', { name: 'IAM', exact: true }).click();
     await page.waitForURL((url) => url.hostname === CONSOLE_HOST && url.pathname === '/iam/orgs');
     const documents = consoleDocuments(seen.slice(mark));
     test.info().annotations.push({
