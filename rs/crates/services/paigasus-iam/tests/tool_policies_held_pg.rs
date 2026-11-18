@@ -72,6 +72,8 @@ fn held(key: ToolPolicySetKey, n: u64, base: u64) -> HeldVersion {
         status: HeldStatus::Held,
         report: failed_report(vec![ReportRejection {
             policy_id: Some("p".into()),
+            line: Some(4),
+            column: Some(2),
             code: "c".into(),
             message: "m".into(),
         }]),

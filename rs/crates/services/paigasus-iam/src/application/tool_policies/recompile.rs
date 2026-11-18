@@ -281,6 +281,8 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
                         .iter()
                         .map(|r| ReportRejection {
                             policy_id: r.policy_id.clone(),
+                            line: r.line,
+                            column: r.column,
                             code: r.reason.code().to_owned(),
                             message: r.message.clone(),
                         })
@@ -573,6 +575,8 @@ mod tests {
             held.report.rejections,
             vec![ReportRejection {
                 policy_id: Some("p".to_owned()),
+                line: Some(2),
+                column: Some(5),
                 code: RejectionReason::PolicyInvalid.code().to_owned(),
                 message: "bad".to_owned(),
             }]

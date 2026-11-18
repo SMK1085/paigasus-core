@@ -42,9 +42,16 @@ impl NameDiff {
 }
 
 /// One rejection of a failed compile.
+///
+/// `line` and `column` are the 1-based source location from the compiler, or `None` when it is
+/// not known. A report stored before these fields existed has neither key, and decodes to `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportRejection {
     pub policy_id: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub column: Option<u32>,
     pub code: String,
     pub message: String,
 }
@@ -258,13 +265,40 @@ mod tests {
 
         let failed = failed_report(vec![ReportRejection {
             policy_id: Some("p".into()),
+            line: Some(3),
+            column: Some(7),
             code: "c".into(),
             message: "m".into(),
         }]);
         let value = serde_json::to_value(&failed).unwrap();
         assert_eq!(value["result"], "failed");
         assert_eq!(value["rejections"][0]["policy_id"], "p");
+        assert_eq!((value["rejections"][0]["line"].clone(), value["rejections"][0]["column"].clone()), (json!(3), json!(7)));
         assert!(failed.policies.is_empty() && failed.conditions.is_empty() && failed.schema.is_empty());
         assert_eq!(serde_json::from_value::<HeldReport>(value).unwrap(), failed);
+    }
+
+    /// A report that a release before the location fields stored has no `line` or `column` key.
+    /// It still decodes, and the location is not known.
+    #[test]
+    fn a_stored_report_without_a_location_still_decodes() {
+        let stored = json!({
+            "result": "failed",
+            "policies": {"added": [], "removed": [], "changed": []},
+            "conditions": {"added": [], "removed": [], "changed": []},
+            "schema": {"added": [], "removed": [], "changed": []},
+            "rejections": [{"policy_id": "p", "code": "c", "message": "m"}]
+        });
+        let report: HeldReport = serde_json::from_value(stored).unwrap();
+        assert_eq!(
+            report.rejections,
+            vec![ReportRejection {
+                policy_id: Some("p".into()),
+                line: None,
+                column: None,
+                code: "c".into(),
+                message: "m".into(),
+            }]
+        );
     }
 }

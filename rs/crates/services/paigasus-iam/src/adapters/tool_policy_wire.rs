@@ -100,8 +100,8 @@ fn report_to_pb(r: &HeldReport) -> pb::HeldToolPolicyReport {
                 .iter()
                 .map(|x| pb::ToolPolicyRejection {
                     policy_id: x.policy_id.clone().unwrap_or_default(),
-                    line: 0,
-                    column: 0,
+                    line: x.line.unwrap_or(0),
+                    column: x.column.unwrap_or(0),
                     reason: x.code.clone(),
                     message: x.message.clone(),
                 })
@@ -179,5 +179,40 @@ pub(crate) fn run_to_pb(run: &RecompileRun) -> pb::RunToolPolicyRecompileRespons
             status: pb::RecompileRunStatus::OlderReplica as i32,
             results: Vec::new(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paigasus_iam_core::tool_policy::{ReportRejection, failed_report};
+
+    /// The source location of a rejection in a held report reaches the wire message. A location
+    /// that is not known is 0, as the proto comment says.
+    #[test]
+    fn a_held_report_rejection_keeps_its_line_and_column() {
+        let rejection = |line, column| ReportRejection {
+            policy_id: Some("p".into()),
+            line,
+            column,
+            code: "c".into(),
+            message: "m".into(),
+        };
+        let held = HeldVersion {
+            key: ToolPolicySetKey::Floor,
+            version: 2,
+            base_version: 1,
+            source: String::new(),
+            compiled: None,
+            compiler_generation: 1,
+            schema_revision: 1,
+            catalog_revision: None,
+            status: HeldStatus::Held,
+            report: failed_report(vec![rejection(Some(3), Some(9)), rejection(None, None)]),
+            created_by: "job".into(),
+            created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        };
+        let wire = held_to_pb(&held).unwrap().report.unwrap().rejections.unwrap().rejections;
+        assert_eq!(wire.iter().map(|r| (r.line, r.column)).collect::<Vec<_>>(), vec![(3, 9), (0, 0)]);
     }
 }
