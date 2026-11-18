@@ -84,7 +84,7 @@
 # Exit codes: 0 pass | 1 assertion failed (the repo is wrong) | 2 infrastructure failed.
 # A broken invocation must NEVER read as "all checks passed".
 #
-# ALL cargo invocations run from rs/. rust-toolchain.toml (1.95.0) and .cargo/config.toml
+# ALL cargo invocations run from rs/. rust-toolchain.toml (1.100.0) and .cargo/config.toml
 # are discovered by walking up from CWD, NOT from --manifest-path (see the note in
 # rs/.cargo/config.toml and the E0514 incident recorded in rs/rust-toolchain.toml), and
 # there is no repo-root Cargo.toml. Every other cargo gate in moon.yml does the same.
