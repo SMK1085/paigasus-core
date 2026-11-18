@@ -333,8 +333,11 @@ async fn serve() -> anyhow::Result<()> {
 /// job: a request that is still in flight can start a run until its server stopped. Both waits
 /// end at `deadline`. A re-compile set can wait on a row lock and does not see the shutdown
 /// watch then. At the deadline one warning names what is still open, the server tasks are
-/// aborted, and the process exits. That is safe: the set transaction rolls back, and Postgres
-/// releases the advisory lock when the connection closes.
+/// aborted, and the process exits. Postgres releases the advisory lock when the connection
+/// closes. A set whose transaction had not committed rolls back. If the deadline ends during
+/// the commit, Postgres can commit the set (the version, the audit entry and the outbox event)
+/// before IAM gets the reply, and the task reports no result. So the operator must not assume
+/// a rollback: the job is idempotent, and a new run is safe.
 async fn drain_until(
     servers: &mut JoinSet<anyhow::Result<()>>,
     recompile_tasks: &RecompileTasks,
