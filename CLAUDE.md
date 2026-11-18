@@ -13,10 +13,11 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - `moon ci :build` / `moon ci :test` — affected build/test graph. **Moon 2.x needs explicit
   targets**; bare `moon ci` errors in non-TTY.
 - Task output style is set in `.moon/tasks.yml` (`taskOptions.outputStyle`,
-  currently `buffer-only-failure`). Moon 2.5.3 still has no per-invocation CLI flag
-  for it (re-checked on the 2.5.3 bump, SMA-595); to stream a specific task locally, set
-  `options.outputStyle: 'stream'` on the task definition. Note moon 2.4.3 changed the
-  setting to apply only to TRANSITIVE targets, not the primary one you name.
+  currently `buffer-only-failure`). Moon 2.6.0 added `--output-style <style>` to `moon run`,
+  `moon ci`, `moon check` and `moon exec` (SMA-807); it overrides every task, primary targets
+  included. Before 2.6 (2.5.3, SMA-595) no per-invocation flag existed, and the only way was
+  `options.outputStyle: 'stream'` on the task definition. Moon 2.4.3 changed the task setting
+  to apply only to TRANSITIVE targets, not the primary one you name.
 - Rust (in `rs/`): `cargo build --workspace`, `cargo fmt --check`,
   `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace`.
 
@@ -63,14 +64,23 @@ a gate. Do not copy it here.
 
 ### Moon and proto
 
-- Moon is 2.5.3 and proto is 0.61.1 (SMA-595): `vcs.client` (not `manager`), `codeowners.sync`
+- Moon is 2.6.5 and proto is 0.64.0 (SMA-807; 2.5.3 and 0.61.1 before, SMA-595): `vcs.client` (not `manager`), `codeowners.sync`
   (not `syncOnRun`), Python/uv toolchains keyed `unstable_python` + a separate `unstable_uv`.
   The two pins are **coupled**: moon 2.5.3's Python toolchain plugin requires proto >= 0.60.0,
-  and moon reads the proto CLI at the fixed path `~/.proto/bin/proto` — neither `PATH` order nor
+  and moon 2.5.3 reads the proto CLI at the fixed path `~/.proto/bin/proto` — neither `PATH` order nor
   the `.prototools` pin overrides that, so a moon bump can hard-fail with
   `proto::tool::minimum_version_requirement` until the local proto BINARY moves. `proto upgrade`
   reports the target version and then no-ops inside an agent session; upgrade it from a normal
   shell, or set `PROTO_HOME` to an isolated root and `proto install` into it.
+  **MEASURED on moon 2.6.5 and proto 0.64.0 (SMA-807):** moon honours `PROTO_HOME`. A proto 0.64.0
+  release tarball unpacked into an isolated `PROTO_HOME/bin`, then `proto install`, gave a working
+  moon 2.6.5 with no write to `~/.proto`. All 184 tasks and all 39 projects matched 2.5.3.
+  **proto 0.63 added config trust.** A local `.prototools` is untrusted outside CI. Its `proto`
+  pin, `[plugins]` and plugin tool pins are then silently ignored, so a bare `proto install`
+  skips `buf`, `cargo-nextest`, `lefthook` and every other vendored-plugin tool. Run
+  `proto trust` once in the repository, or set `PROTO_TRUSTED_PATHS` (an isolated home needs
+  this too). CI sets `CI` and is always trusted. A git worktree under `.claude/worktrees/`
+  also reads the parent checkout's `.prototools`, so trust the parent path.
 - **Standing rule: Export `PROTO_REPORTER=text` at the top of any gate script that captures
   `proto` output. A proto-SHIMMED tool is not exempt (SMA-609). Only `repo:release-parity` was
   ever affected, and the `unset AI_AGENT …` workaround is obsolete for these gates.**
@@ -114,7 +124,7 @@ a gate. Do not copy it here.
   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to
   the repo-pinned versions (shims first).
 - `moon query projects --json` **errors** on Moon 2.5.3 too (`unexpected argument '--json' found`,
-  re-checked on the 2.5.3 bump, SMA-595) —
+  re-checked on the 2.5.3 bump, SMA-595, and again on 2.6.5, SMA-807) —
   bare `moon query projects` already emits JSON. **Measure its exit status UNPIPED (2):** `jq`
   returns 0 on empty input, so `moon query projects --json | jq …` reports 0 unless `pipefail`
   is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
@@ -164,8 +174,8 @@ a gate. Do not copy it here.
   Moon does not count the staging directory as a project. The project count was 33, with or
   without a probe directory. **This error must not occur any more.** If it does, it is a new
   defect. Check first for a glob back in `members`, or a new crate path outside the list.
-- The procedure below is MEASURED on moon 2.5.3
-  (SMA-597); re-take it on a bump. It is for **local** runs — in CI see the note at the end.
+- The procedure below is MEASURED on moon 2.6.5
+  (SMA-807; first measured on 2.5.3, SMA-597); re-take it on a bump. It is for **local** runs — in CI see the note at the end.
   <!-- moon-diagnosis:begin -->
   **Step 0 — capture before you re-run anything.** A re-run overwrites every artifact holding the
   evidence, and a PASSING re-run is just as destructive as another failing one: it rewrites

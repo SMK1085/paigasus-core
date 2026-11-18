@@ -1,7 +1,7 @@
 # proto itself, pinned to the first release whose bundled schema engine (schema_tool
 # 0.18.0, moonrepo/plugins#151) supports [platform.*.arch] overrides — without this floor
 # the Linux-aarch64 fix in .proto/plugins/{buf,lefthook}.toml is silently inert. (SMA-411)
-proto = "0.61.1"
+proto = "0.64.0"
 actionlint = "1.7.12"
 buf = "1.75.0"
 cargo-deny = "0.21.0"
@@ -12,7 +12,7 @@ crane = "0.22.1"
 helm = "3.22.0"
 lefthook = "2.2.2"
 maturin = "1.16.0"
-moon = "2.5.3"
+moon = "2.6.5"
 osv-scanner = "2.7.1"
 promtool = "3.16.0"
 release-plz = "0.3.158"

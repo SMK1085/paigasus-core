@@ -2262,7 +2262,7 @@ def check_gate_inputs(projects, expected_table=SELF_TASK_EXPECTED_GLOBS):
         # D4 composition guard raises rc 2 with the accurate message, and the worst this
         # copy can do is red with a misleading "authored inputs changed".
         got = tuple(g for g in sorted(globs_raw or {})
-                    if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")
+                    if g != ".moon/{extensions,toolchains}.{yml,yaml,jsonc,json,pkl,hcl,toml}")
         # moon resolves a LITERAL path in `inputs:` into inputFiles, not inputGlobs, so the glob
         # tuple alone can still read as wired while the input set has in fact changed. Both buckets
         # are therefore compared, as ONE sequence in a fixed order — globs then files (SMA-576).
@@ -2306,7 +2306,7 @@ def check_contracts_generate_inputs(projects, expected=CONTRACTS_GENERATE_INPUTS
                 f"{type(raw).__name__}, expected an object"
             )
     got = tuple(g for g in sorted(globs_raw or {})
-                if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")
+                if g != ".moon/{extensions,toolchains}.{yml,yaml,jsonc,json,pkl,hcl,toml}")
     files = tuple(sorted(files_raw or {}))
     if got + files == tuple(expected):
         return []
@@ -4166,7 +4166,7 @@ def self_test():
     # missing from the payload, so the "wired" row would have fired on the absent second gate
     # rather than on what it was testing, and each negative row would have passed for that same
     # wrong reason. Deriving the payload from the table also means it cannot go stale.
-    injected = ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}"
+    injected = ".moon/{extensions,toolchains}.{yml,yaml,jsonc,json,pkl,hcl,toml}"
 
     def wired(overrides=None):
         repo = {}
@@ -4259,7 +4259,7 @@ def self_test():
     # frozen here. A change to the pin must be made in all three places or this self-test reds.
     cg_ok = {"contracts": {"generate": {
         "inputGlobs": {"contracts/proto/**/*": {},
-                       ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {}},
+                       ".moon/{extensions,toolchains}.{yml,yaml,jsonc,json,pkl,hcl,toml}": {}},
         "inputFiles": {"contracts/buf.gen.googleapis.yaml": {}, "contracts/buf.gen.yaml": {},
                        "contracts/buf.lock": {}, "contracts/buf.yaml": {}, ".prototools": {},
                        "ci/python-env/run.sh": {}, "py/uv.lock": {}},
