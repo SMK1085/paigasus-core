@@ -1968,6 +1968,7 @@ pub struct InMemoryToolPolicies {
     data: Arc<Mutex<ToolPolicyData>>,
     concurrent: Arc<Mutex<Option<ConcurrentChange>>>,
     live_before_next_live: Arc<Mutex<Option<ToolPolicyVersion>>>,
+    live_before_next_stale_list: Arc<Mutex<Option<ToolPolicyVersion>>>,
     write_before_next_catalog_read: Arc<Mutex<Option<(Uuid, StoredTool)>>>,
     writes: Arc<AtomicUsize>,
     insert_attempts: Arc<AtomicUsize>,
@@ -1990,6 +1991,13 @@ impl InMemoryToolPolicies {
     /// `state`: a save that another writer committed between the two reads.
     pub fn store_live_before_next_live(&self, v: ToolPolicyVersion) {
         *self.live_before_next_live.lock().unwrap() = Some(v);
+    }
+
+    /// Store `v` as the new live version at the start of the next `stale_live_versions` call,
+    /// after the caller read `max_stored_revisions`: a save that a newer replica committed
+    /// between the two reads of the re-compile job. An older live row of the set is superseded.
+    pub fn store_live_before_next_stale_list(&self, v: ToolPolicyVersion) {
+        *self.live_before_next_stale_list.lock().unwrap() = Some(v);
     }
 
     /// Commit a catalog write (`tool` upserted into `org`, the catalog revision up by 1) at the
@@ -2218,7 +2226,16 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
     }
 
     async fn stale_live_versions(&self, compiler_generation: u32, schema_revision: u32) -> Result<Vec<ToolPolicyVersion>, RepositoryError> {
-        let data = self.data.lock().unwrap();
+        let mut data = self.data.lock().unwrap();
+        if let Some(v) = self.live_before_next_stale_list.lock().unwrap().take() {
+            for old in data.versions.entry(v.key).or_default().iter_mut() {
+                if old.status == VersionStatus::Live {
+                    old.status = VersionStatus::Superseded;
+                }
+            }
+            data.states.entry(v.key).or_insert(NO_STATE).live_version = v.version;
+            data.versions.entry(v.key).or_default().push(v);
+        }
         let mut stale: Vec<ToolPolicyVersion> = data
             .versions
             .values()

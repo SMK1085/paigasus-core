@@ -16,7 +16,8 @@
 //!
 //! **An older replica writes nothing (H12).** When a stored row has a higher generation or
 //! schema revision than the running ones, this replica is older than another one, and the run
-//! stops with [`RecompileRun::OlderReplica`].
+//! stops with [`RecompileRun::OlderReplica`]. A set that a newer replica writes after that check
+//! and before the list of stale sets is skipped, with no outcome.
 //!
 //! **A proposal is made once (H6, Q1).** The job skips a set when a held or discarded row
 //! already exists for the same live version, generation and schema revision.
@@ -195,6 +196,20 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
             if stopped {
                 tracing::info!(done = results.len(), "tool policy re-compile: stopped between two sets");
                 break;
+            }
+            // A newer replica wrote this set after the check above (the two reads are not in one
+            // transaction). This replica must not write it again: skip it, with no outcome.
+            if live.compiler_generation > generation || live.schema_revision > TOOL_SCHEMA_REVISION {
+                tracing::info!(
+                    set = %set_label(&live.key),
+                    base_version = live.version,
+                    stored_generation = live.compiler_generation,
+                    stored_schema_revision = live.schema_revision,
+                    running_generation = generation,
+                    running_schema_revision = TOOL_SCHEMA_REVISION,
+                    "tool policy re-compile: a newer replica wrote this set; skipped"
+                );
+                continue;
             }
             let outcome = self.recompile_set(author, &live).await;
             if let Some(label) = outcome_label(&outcome) {
@@ -417,6 +432,12 @@ mod tests {
     /// A live version 1 of the set of `key`, stored with no service call. Its output is the
     /// identity output of `source`.
     fn seed(h: &Harness, key: ToolPolicySetKey, source: &str, generation: u32, schema_revision: u32) {
+        h.repo.seed_live(live_row(h, key, source, generation, schema_revision));
+    }
+
+    /// A live version 1 of the set of `key`, not stored. Its output is the identity output of
+    /// `source`.
+    fn live_row(h: &Harness, key: ToolPolicySetKey, source: &str, generation: u32, schema_revision: u32) -> ToolPolicyVersion {
         let catalog_revision = matches!(key, ToolPolicySetKey::Tenant(_)).then_some(0);
         let meta = CompiledMeta {
             key,
@@ -427,7 +448,7 @@ mod tests {
             max_window_ms: MAX_WINDOW_MS,
             catalog_names: Vec::new(),
         };
-        h.repo.seed_live(ToolPolicyVersion {
+        ToolPolicyVersion {
             key,
             version: 1,
             source: source.to_owned(),
@@ -439,7 +460,7 @@ mod tests {
             origin: VersionOrigin::Save,
             created_by: h.actor.canonical(),
             created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
-        });
+        }
     }
 
     /// A stale live tenant set (generation 0) with the starter source.
@@ -873,6 +894,28 @@ mod tests {
         assert_eq!(h.compiler.calls(), 0);
         assert_nothing_written(&h);
         assert_eq!(h.lock.releases(), 1);
+    }
+
+    /// A newer replica saves a set after the job read the stored revisions and before it lists
+    /// the stale sets. The job skips that set and goes on with the older ones.
+    #[tokio::test]
+    async fn a_set_that_a_newer_replica_wrote_during_the_run_is_skipped() {
+        for (generation, schema_revision) in [(2, TOOL_SCHEMA_REVISION), (1, TOOL_SCHEMA_REVISION + 1)] {
+            let h = harness();
+            stale_floor(&h);
+            let newer = live_row(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, generation, schema_revision);
+            h.repo.store_live_before_next_stale_list(newer.clone());
+            assert_eq!(ran(boot_run(&h).await), one(ToolPolicySetKey::Floor, RecompileOutcome::Identical { version: 2 }));
+            // The newer set: no compile, no new version, no held row, no event.
+            assert_eq!(h.compiler.calls(), 1);
+            assert_eq!(h.repo.versions(&tenant(&h)), vec![newer]);
+            assert!(h.repo.held_rows(&tenant(&h)).is_empty());
+            let events = events(&h);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].aggregate_prn, root_prn().canonical());
+            // The older set was done.
+            assert_eq!(live(&h, &ToolPolicySetKey::Floor).await.version, 2);
+        }
     }
 
     #[tokio::test]

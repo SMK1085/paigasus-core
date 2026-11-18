@@ -324,7 +324,8 @@ the set.
 While replicas of the release before this one and of this release run together, an older replica
 returns `Internal` (HTTP 500) on every write to a set that has a held row, or a discarded row with
 a number above the live version. It also reads a live row with the origin `recompile` or `accept`
-as `corrupt`. Both stop when the older replicas are gone.
+as `corrupt`. Both stop when the older replicas are gone. If a newer replica writes a set while
+the job of an older replica runs, that job skips the set and logs it.
 
 A rolling deploy between two releases of this feature, from compiler generation G to G+1, has two
 more effects.
