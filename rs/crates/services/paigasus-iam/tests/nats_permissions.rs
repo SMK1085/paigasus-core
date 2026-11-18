@@ -987,3 +987,27 @@ async fn a_gateway_account_user_cannot_see_iam_events() {
     let found = jetstream::new(pclient).get_stream(STREAM).await;
     assert!(found.is_err(), "IAM_EVENTS lives in another account and must not be visible");
 }
+
+/// After a reconnect, an ordered consumer calls `consumer.get_info()` (async-nats 0.52 `pull.rs:990`),
+/// which sends `$JS.API.CONSUMER.INFO.<stream>.<name>`. The reader grant must cover it.
+#[tokio::test]
+async fn the_decision_reader_can_read_its_consumer_info() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    jetstream::new(pclient)
+        .get_or_create_stream(gw_stream_config())
+        .await
+        .expect("the provisioner grant must cover stream creation");
+    let (client, _events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    let stream = jetstream::new(client).get_stream_no_info(GW_STREAM).await.expect("get_stream_no_info makes no network call");
+    let mut consumer = stream
+        .create_consumer(jetstream::consumer::pull::OrderedConfig {
+            filter_subject: "gateway.decision.>".to_string(),
+            deliver_policy: jetstream::consumer::DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .expect("create the ordered consumer");
+    let info = consumer.info().await.expect("the reader grant must cover CONSUMER.INFO on its own consumer");
+    assert_eq!(info.stream_name, GW_STREAM);
+}

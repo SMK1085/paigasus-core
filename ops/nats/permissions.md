@@ -275,7 +275,7 @@ three identities are in `subjects.env` (`GW_DEC_*`). This table renders that fil
 | identity | deployed as | publish (allow) | subscribe (allow) |
 |---|---|---|---|
 | `gateway-decision-publisher` | the gateway decision relay | `gateway.decision.>`, `$JS.API.STREAM.INFO.GATEWAY_DECISIONS`, `$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` | `_INBOX_GW_DEC.>` |
-| `gateway-decision-reader` | the export CLI of an operator; never the gateway | `$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS`, `…CREATE.GATEWAY_DECISIONS.>`, `$JS.API.CONSUMER.DELETE.GATEWAY_DECISIONS.*`, `$JS.API.CONSUMER.MSG.NEXT.GATEWAY_DECISIONS.*` | `_INBOX_GW_RD.>` |
+| `gateway-decision-reader` | the export CLI of an operator; never the gateway | `$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS`, `…CREATE.GATEWAY_DECISIONS.>`, `$JS.API.CONSUMER.DELETE.GATEWAY_DECISIONS.*`, `$JS.API.CONSUMER.MSG.NEXT.GATEWAY_DECISIONS.*`, `$JS.API.CONSUMER.INFO.GATEWAY_DECISIONS.*` | `_INBOX_GW_RD.>` |
 | `gateway-decision-provisioner` | nobody; operator tooling only | `$JS.API.INFO`, `$JS.API.STREAM.>` | `_INBOX_GW_PROV.>` |
 
 - The publisher subscribes only to its inbox, for the PubAck. It cannot read, delete or purge the
@@ -288,3 +288,8 @@ three identities are in `subjects.env` (`GW_DEC_*`). This table renders that fil
   publisher does not have. It is an operator artifact, as `iam-provisioner` is (§9).
 - A user in this account cannot see `IAM_EVENTS`: it is in another account. `tests/nats_permissions.rs`
   proves it. It also proves that an ordered consumer works under `max_mem: 0`.
+- The reader also has `$JS.API.CONSUMER.INFO.GATEWAY_DECISIONS.*`. After a client reconnect, the pull
+  stream of an ordered consumer in async-nats 0.52 calls `consumer.get_info()` (`consumer/pull.rs:990`).
+  Without this grant, a NATS reconnect during an export makes the export fail.
+- `provision-decisions.sh` passes `--inbox-prefix _INBOX_GW_PROV` to the `nats` CLI. The provisioner may
+  subscribe only to that prefix, so the default `_INBOX` reply subscription would be refused.

@@ -76,10 +76,10 @@ nsc push --account "$GATEWAY_ACCOUNT"
 # The stream is made only when it is absent: `stream add` on an existing stream with other values
 # fails, and an edit of a live stream is an operator decision (RUNBOOK-nats.md).
 prov_creds="$OUT_DIR/gateway-decision-provisioner.creds"
-if nats --server "$NATS_URL" --creds "$prov_creds" stream info "$DECISIONS_STREAM_NAME" >/dev/null 2>&1; then
+if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" stream info "$DECISIONS_STREAM_NAME" >/dev/null 2>&1; then
   echo "stream $DECISIONS_STREAM_NAME already exists; left unchanged"
 else
-  nats --server "$NATS_URL" --creds "$prov_creds" \
+  nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" \
     stream add "$DECISIONS_STREAM_NAME" \
     --subjects "$DECISIONS_SUBJECTS" \
     --storage file \
