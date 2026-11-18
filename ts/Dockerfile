@@ -17,7 +17,8 @@ FROM node:26.13.1-bookworm@sha256:b7087bc4d973034b30854b378ba107f9fab622b47514cb
 ARG APP
 ARG BASE_PATH
 WORKDIR /build
-RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
+# Node 25 and later do not bundle corepack, so the builder installs a pinned corepack first.
+RUN npm install -g corepack@0.36.0 && corepack enable && corepack prepare pnpm@11.3.0 --activate
 COPY . /build/
 # SMA-634. WORKDIR is /build, which is ts/, so @paigasus/kernel's `file:` specifiers
 # (../../../rs/crates/bindings/…) resolve to /rs/crates/bindings/…. The named context supplies
