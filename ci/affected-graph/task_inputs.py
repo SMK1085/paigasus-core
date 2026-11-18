@@ -48,7 +48,10 @@ INFRA_ERRORS = (
 # `repo:input-liveness`, which makes it 120 — deliberately not restated here as a number that would
 # just go stale again). So a "resolved input set" is never empty, and the
 # empty-inputs check (I3) asserts nothing until this is subtracted. D4.
-INJECTED_GLOB = ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}"
+# Moon 2.6.3 narrowed this from `.moon/*.{...}` (every file in `.moon/`) to the extensions and
+# toolchains configs only; a `.moon/workspace.*` edit no longer invalidates every task (SMA-807,
+# measured on 2.6.5). The gate pins ONE moon version, so it carries ONE glob.
+INJECTED_GLOB = ".moon/{extensions,toolchains}.{yml,yaml,jsonc,json,pkl,hcl,toml}"
 
 # The conservative charset a pattern must fall inside before it is handed to git. Doubles as the
 # pathspec-injection guard: a pattern starting with ':' would be read by git as pathspec magic, and

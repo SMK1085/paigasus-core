@@ -561,7 +561,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   *wired*. **I1** no glob matches zero tracked files; **I2** every file input is tracked, by exact
   set membership (a wildcard-free pathspec prefix-matches a directory, so asking git would pass for
   any directory path); **I3** every task declares at least one input of its own, after subtracting
-  Moon's injected `.moon/*.{…}` glob, which is present on every task and makes a "resolved" input
+  Moon's injected `.moon/{extensions,toolchains}.{…}` glob (`.moon/*.{…}` before moon 2.6.3, SMA-807), which is present on every task and makes a "resolved" input
   set never empty; **I4** every pattern is one the gate will evaluate — braces, character classes
   and pathspec magic are rejected loudly rather than skipped; **I5** the anti-vacuity floors,
   including a **composition** guard requiring the inputs common to every `repo` task to be exactly
