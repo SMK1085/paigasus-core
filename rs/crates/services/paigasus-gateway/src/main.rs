@@ -26,6 +26,10 @@ use tokio::task::JoinSet;
 ///
 /// Exit codes: 0 healthy, 1 unhealthy, 2 usage error.
 fn main() -> std::process::ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("decisions") {
+        return decisions(&argv[1..]);
+    }
     match paigasus_observability::health::dispatch(std::env::args().skip(1)) {
         Ok(paigasus_observability::health::Mode::Serve) => match serve() {
             Ok(()) => std::process::ExitCode::SUCCESS,
@@ -40,6 +44,25 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(2)
         }
     }
+}
+
+/// `decisions export` (SMA-755 § 5.11): the operator export of the decision log. Exit codes: 0 done, 1 bad
+/// arguments, 2 NATS or stream error, 3 an event of a wrong org, 4 more than `--max-events`.
+fn decisions(args: &[String]) -> std::process::ExitCode {
+    use paigasus_gateway::application::decision_export::{Exit, USAGE};
+    if args.first().map(String::as_str) != Some("export") {
+        eprintln!("{USAGE}");
+        return std::process::ExitCode::from(Exit::BadArgs.code());
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: no runtime: {e}");
+            return std::process::ExitCode::from(Exit::Nats.code());
+        }
+    };
+    let exit = runtime.block_on(paigasus_gateway::adapters::decision_log::reader::run(args[1..].to_vec()));
+    std::process::ExitCode::from(exit.code())
 }
 
 /// `load()` but deliberately NOT `validate()`: the probe needs only `http_addr`, and

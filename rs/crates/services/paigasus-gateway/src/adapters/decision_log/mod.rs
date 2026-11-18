@@ -6,6 +6,7 @@
 
 pub mod jetstream;
 pub mod proto;
+pub mod reader;
 pub mod redis_conn;
 pub mod relay;
 pub mod supervised;

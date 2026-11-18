@@ -115,6 +115,9 @@ async-nats = { workspace = true }
 # attempt, so a rotation is picked up on the next reconnect. `{ workspace = true }`, so `moon.yml`
 # hand-declares the `dependsOn` edge.
 paigasus-nats-creds = { workspace = true }
+# SMA-755 Task 13: RFC 3339 parsing of `--since`/`--until`, the summary text, and the start time of the
+# ordered consumer (async-nats names `time::OffsetDateTime`).
+time = { version = "0.3", features = ["parsing", "formatting"] }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a
