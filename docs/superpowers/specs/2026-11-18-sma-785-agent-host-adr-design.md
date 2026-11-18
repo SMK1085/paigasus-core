@@ -258,30 +258,37 @@ discarded run. The Postgres memory adapter is the default.
   the `threadid` of the deferred run.
 - **A thread is live** when it exists, is not `closed`, and its `last_run_at` is within the thread
   TTL. A thread with an open deferred call is always live. An operator can close a thread.
+- **The resolved thread.** An event's `threadid` resolves through `successor_id` to the last
+  thread of the chain. Every rule below uses the resolved thread, never the raw `threadid`. A run
+  commit sets `successor_id` only on a thread whose `successor_id` is empty, so it never overwrites
+  an existing link. (Storing the resolved id on the event is the builder's call.)
 - **The claimable predicate.** An event is claimable when its status is `pending`, `not_before`
-  has passed, it is not claimed by a `running` run under a live lease, and one of these is true:
-  - its thread has no open deferred call;
-  - it **resolves** that thread's open call: an approval reply that matches an open `call_id`, the
-    call's expiry timer event, or a user message on that thread (see (g), "superseded").
+  has passed, it is not claimed by a `running` run under a live lease, and one of these is true
+  for its **resolved** thread:
+  - the resolved thread has no open deferred call;
+  - the event **resolves** that thread's open call: an approval reply that matches an open
+    `call_id`, the call's expiry timer event, or a user message on that thread (see (g),
+    "superseded"). A stale event of an older thread in the chain does not resolve a call of its
+    successor.
 
   The predicate is used both to select an inbox and to claim events. The open-deferral state is a
   column on `thread`, written by the run commit, and indexed. So an inbox whose only pending events
   wait on an approval is idle and is not selected again.
-- **Claim.** Take the oldest claimable event of the inbox (by `received_at`).
-  - If it has a live `threadid`, claim the claimable events of that thread, in `received_at`
-    order, up to the batch limit. The run resumes that thread.
-  - If it has a `threadid` whose thread is not live, claim the claimable events with that same
-    `threadid`, up to the batch limit. The run starts a fresh session under a new thread. Events
-    of two different expired threads never share a run. The run commit sets `successor_id` on the
-    expired thread to the new thread. A later event with the expired `threadid` maps to its
-    successor, if the successor is live. So a backlog larger than the batch limit keeps its
-    session history across batches.
+- **Claim.** Take the oldest claimable event of the inbox (by `received_at`). Group and order
+  events by their resolved thread.
+  - If its resolved thread is live, claim the claimable events with the same resolved thread, in
+    `received_at` order, up to the batch limit. The run resumes that thread.
+  - If its resolved thread is not live, claim the claimable events with the same resolved thread,
+    up to the batch limit. The run starts a fresh session under a new thread, and the run commit
+    sets `successor_id` on the resolved thread to the new thread. Events of two different expired
+    threads never share a run. The rest of a backlog larger than the batch limit then resolves to
+    the new thread and keeps its session history.
   - If it has no `threadid` (or the host dropped it, decision (e)), claim the claimable events
     that have no `threadid`, up to the batch limit. The run starts a fresh session under a new
     thread. If more such events wait than the batch limit, each batch is a separate session on
     purpose: an event with no `threadid` does not continue earlier work.
-  - Events of other threads stay pending for the next claim. So several messages in one thread
-    still produce one reply, and no run mixes threads.
+  - Events of other resolved threads stay pending for the next claim. So several messages in one
+    thread still produce one reply, and no run mixes threads.
 - A timer event with a `threadid` follows the same rule. If its thread is not live, it starts a
   fresh thread.
 - **Compaction is a host step, not `CompactingSession`.** After a commit, under the same lease,
