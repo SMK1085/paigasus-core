@@ -28,6 +28,13 @@ impl CedarDecider {
     pub fn new(recorder: Arc<DecisionRecorder>) -> Self {
         Self { recorder }
     }
+
+    /// The recorder of this decider. A runtime test reads it to check that the decider, the request side and
+    /// the report site share one recorder (P-8).
+    #[must_use]
+    pub fn recorder(&self) -> &Arc<DecisionRecorder> {
+        &self.recorder
+    }
 }
 
 /// The finding kinds that `gateway_tool_policy_findings_total` labels (SMA-755 § 5.9).

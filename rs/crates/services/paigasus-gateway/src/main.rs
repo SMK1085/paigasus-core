@@ -13,8 +13,9 @@ use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::limits::build_limits;
 use paigasus_gateway::adapters::openai::OpenAiClient;
-use paigasus_gateway::application::decision_log::DecisionRecorder;
 use paigasus_gateway::config::GatewayConfig;
+use paigasus_gateway::domain::decision_log::OsEntropy;
+use paigasus_gateway::domain::limits::SystemClock;
 use paigasus_gateway::runtime;
 use paigasus_gateway::service_info::Capabilities;
 use paigasus_observability::names;
@@ -92,8 +93,10 @@ async fn serve() -> anyhow::Result<()> {
     )?;
 
     // SMA-752 D19: the tool policy. Only after `validate` above (see `build_tool_policy`).
-    let recorder = Arc::new(DecisionRecorder::tracing_with_digest(config.decision_log.digest_key()));
-    let tool_policy_runtime = runtime::build_tool_policy(&config, recorder)?;
+    // SMA-755: one recorder for the decider, the request side and the report site (P-8). The decision log
+    // never waits for Redis or NATS, so a broker that is down does not block the boot (spec § 5.6).
+    let decision_log = runtime::build_decision_log(&config, Arc::new(SystemClock), Arc::new(OsEntropy)).await?;
+    let tool_policy_runtime = runtime::build_tool_policy(&config, decision_log.recorder)?;
     let tool_interception = runtime::tool_interception(&config, &tool_policy_runtime);
     let tool_policy = tool_policy_runtime.policy;
 
@@ -210,7 +213,7 @@ async fn serve() -> anyhow::Result<()> {
 
     // Supervise: stop on the first of a shutdown signal or any task ending, broadcast graceful
     // shutdown to the rest, and surface the first error (SMA-463).
-    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks).await
+    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks, decision_log.tasks).await
 }
 
 /// Registers `# HELP`/`# TYPE` exposition text for the 14 metric families `paigasus-gateway`
