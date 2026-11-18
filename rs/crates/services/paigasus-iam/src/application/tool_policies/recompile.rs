@@ -86,6 +86,10 @@ pub enum RecompileRun {
     OlderReplica { stored_generation: u32, stored_schema_revision: u32 },
 }
 
+/// Every value of the `result` label of the metric. `main` primes each series at zero from this
+/// list, so that the first increment of a series is visible to `increase()`.
+pub const RECOMPILE_RESULT_LABELS: [&str; 5] = ["identical", "held_different", "held_failed", "conflict", "error"];
+
 /// The `result` label of the metric. `None` for `AlreadyProposed`, which writes nothing new.
 pub(crate) fn outcome_label(o: &RecompileOutcome) -> Option<&'static str> {
     match o {
@@ -127,7 +131,17 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
         self.authorize.check(actor, Action::ManageToolPolicyRecompile, &root_prn()).await?;
         let svc = self.clone();
         let actor = actor.clone();
-        let job = tokio::spawn(async move { svc.run_job(Some(&actor), std::future::pending()).await });
+        // The process shutdown stops the job between two sets, like the boot run.
+        let mut shutdown = self.shutdown.clone();
+        let stop = async move {
+            match shutdown.as_mut() {
+                Some(rx) => {
+                    let _ = rx.changed().await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        let job = tokio::spawn(async move { svc.run_job(Some(&actor), stop).await });
         job.await.map_err(|error| {
             tracing::error!(%error, "the tool policy re-compile task ended abnormally");
             TenancyError::Internal
@@ -979,5 +993,23 @@ mod tests {
         .map(outcome_label)
         .collect();
         assert_eq!(labels, vec![Some("identical"), Some("held_different"), Some("held_failed"), Some("conflict"), Some("error"), None]);
+        // The public list that `main` primes is the same set, in the same order.
+        let listed: Vec<Option<&str>> = RECOMPILE_RESULT_LABELS.iter().copied().map(Some).collect();
+        assert_eq!(listed[..], labels[..5]);
+    }
+
+    #[tokio::test]
+    async fn the_rpc_run_stops_between_two_sets_at_shutdown() {
+        let h = with_recompile_action(harness());
+        stale_floor(&h);
+        stale_tenant(&h);
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let svc = h.svc.clone().with_shutdown(rx);
+        // The shutdown fires before the first set: the run ends with no result and frees the lock.
+        tx.send(()).unwrap();
+        let results = ran(svc.run_recompile(&h.actor).await.unwrap());
+        assert!(results.is_empty());
+        assert_eq!(h.compiler.calls(), 0);
+        assert!(!h.lock.held());
     }
 }

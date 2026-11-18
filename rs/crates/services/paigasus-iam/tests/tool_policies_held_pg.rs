@@ -468,3 +468,115 @@ async fn the_lock_does_not_block_a_tool_policy_write() {
     assert_eq!(e.repo.state(&key).await.unwrap().live_version, 1);
     guard.release().await.unwrap();
 }
+
+/// A compiler that accepts every source. The Cedar text is the source plus `suffix`, so a
+/// non-empty `suffix` makes an output that differs from the stored one. Each compile waits `delay`.
+struct SlowCompiler {
+    generation: u32,
+    delay: std::time::Duration,
+    suffix: &'static str,
+}
+
+#[async_trait::async_trait]
+impl paigasus_iam_core::tool_policy::PolicyCompiler for SlowCompiler {
+    fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    async fn compile(&self, req: &paigasus_iam_core::tool_policy::CompileRequest) -> Result<paigasus_iam_core::tool_policy::CompileOutcome, paigasus_iam_core::tool_policy::CompilerFailure> {
+        tokio::time::sleep(self.delay).await;
+        Ok(paigasus_iam_core::tool_policy::CompileOutcome::Accepted(paigasus_iam_core::tool_policy::CompiledOutput {
+            cedar_policies: format!("{}{}", req.source, self.suffix),
+            cedar_schema_json: req.schema_json.clone(),
+            conditions: Vec::new(),
+        }))
+    }
+}
+
+/// An authorizer that allows every request.
+struct AllowAll;
+
+#[async_trait::async_trait]
+impl paigasus_iam_core::Authorizer for AllowAll {
+    async fn is_authorized(&self, _req: &paigasus_iam_core::AccessRequest) -> Result<paigasus_iam_core::Decision, paigasus_iam_core::AuthzError> {
+        Ok(paigasus_iam_core::Decision {
+            effect: paigasus_iam_core::Effect::Allow,
+            determining_policies: vec![],
+        })
+    }
+}
+
+/// A service on the Postgres adapters, with its own `PgRecompileLock` (so its lock is its own
+/// connection, like another replica) and an allow-all authorizer.
+fn service_with(db: &DatabaseConnection, compiler: SlowCompiler) -> paigasus_iam::adapters::http::ToolPolicySvc {
+    use paigasus_iam::adapters::authz::Generations;
+    use paigasus_iam::adapters::clock::SystemClock;
+    use paigasus_iam::adapters::id::KernelIdGenerator;
+    use paigasus_iam::adapters::persistence::{PgAuditLog, PgOrganizationRepository, PgOutbox};
+    use paigasus_iam::application::authorize::Authorize;
+    use paigasus_iam::application::tool_policies::{ToolPolicyLimits, ToolPolicyService, ToolPolicyServiceDeps};
+    use paigasus_iam_core::tool_policy::CatalogLimits;
+
+    ToolPolicyService::new(ToolPolicyServiceDeps {
+        repo: std::sync::Arc::new(PgToolPolicies::new(db.clone())),
+        orgs: std::sync::Arc::new(PgOrganizationRepository::new(db.clone(), Generations::memory())),
+        compiler: std::sync::Arc::new(compiler),
+        authorize: Authorize::new(std::sync::Arc::new(AllowAll)),
+        uow: std::sync::Arc::new(SeaOrmUnitOfWork::new(db.clone())),
+        audit: std::sync::Arc::new(PgAuditLog::new(db.clone())),
+        outbox: std::sync::Arc::new(PgOutbox::new(false)),
+        recompile_lock: std::sync::Arc::new(PgRecompileLock::new(db.clone())),
+        limits: ToolPolicyLimits {
+            catalog: CatalogLimits::default(),
+            max_source_bytes: 65_536,
+            max_window_ms: 3_600_000,
+            max_catalog_response_bytes: 2_097_152,
+        },
+        ids: KernelIdGenerator,
+        clock: SystemClock,
+    })
+}
+
+/// Two replicas start the job on one stale floor at the same time. One runs and writes the held
+/// row; the other sees the lock and does nothing. The compile takes 300 ms, so the two runs
+/// overlap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_runs_write_one_held_row() {
+    use paigasus_iam::application::tool_policies::{RecompileOutcome, RecompileRun, WriteResult};
+
+    let Some(e) = env().await else { return };
+    // Generation 1 saves the floor.
+    let saver = service_with(
+        &e.db,
+        SlowCompiler {
+            generation: 1,
+            delay: std::time::Duration::ZERO,
+            suffix: "",
+        },
+    );
+    let actor = paigasus_kernel::Prn::build("iam", "", None, "principal", Uuid::from_u128(1)).unwrap();
+    let saved = saver.put_floor(&actor, "// floor\n", 0).await.expect("save the floor");
+    assert!(matches!(saved, WriteResult::Accepted(_)));
+    // Generation 2 makes the floor stale and compiles it to another output.
+    let slow = |generation| SlowCompiler {
+        generation,
+        delay: std::time::Duration::from_millis(300),
+        suffix: "// changed\n",
+    };
+    let a = service_with(&e.db, slow(2));
+    let b = service_with(&e.db, slow(2));
+    let (ra, rb) = tokio::join!(a.run_recompile_at_boot(std::future::pending()), b.run_recompile_at_boot(std::future::pending()));
+    let (ra, rb) = (ra.expect("run a"), rb.expect("run b"));
+    let (ran, other) = match (ra, rb) {
+        (ran @ RecompileRun::Ran(_), other) | (other, ran @ RecompileRun::Ran(_)) => (ran, other),
+        (ra, rb) => panic!("expected one Ran, got {ra:?} and {rb:?}"),
+    };
+    assert_eq!(other, RecompileRun::AlreadyRunning);
+    let RecompileRun::Ran(results) = ran else { unreachable!() };
+    assert_eq!(results.len(), 1);
+    assert!(matches!(results[0].outcome, RecompileOutcome::HeldDifferent { .. }), "{:?}", results[0].outcome);
+    assert_eq!(scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version WHERE status = 'held'".into(), "n").await, 1);
+    // The lock is free again.
+    let lock = PgRecompileLock::new(e.db.clone());
+    assert!(acquire_within(&lock).await);
+}

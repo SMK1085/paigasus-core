@@ -54,7 +54,7 @@ use uuid::Uuid;
 use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_catalog_size, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, size_check_time, stored_next, stored_upserts};
 pub use self::fetch::CompiledTenant;
 pub use self::held::HeldTarget;
-pub use self::recompile::{RECOMPILE_JOB_ACTOR, RecompileOutcome, RecompileRun, SetRecompile};
+pub use self::recompile::{RECOMPILE_JOB_ACTOR, RECOMPILE_RESULT_LABELS, RecompileOutcome, RecompileRun, SetRecompile};
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
 use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, reject_history_until_gateway_supports_it};
 use self::settings::check_transition;
@@ -132,6 +132,9 @@ pub struct ToolPolicyService<I, C> {
     limits: ToolPolicyLimits,
     ids: Arc<I>,
     clock: Arc<C>,
+    /// The process shutdown signal. The RPC run of the re-compile job stops between two sets when
+    /// it fires. `None` (tests): the RPC run is never stopped.
+    shutdown: Option<tokio::sync::watch::Receiver<()>>,
 }
 
 // By hand: a derive would need `I: Clone` and `C: Clone`, and both live behind an `Arc`. The
@@ -150,6 +153,7 @@ impl<I, C> Clone for ToolPolicyService<I, C> {
             limits: self.limits,
             ids: self.ids.clone(),
             clock: self.clock.clone(),
+            shutdown: self.shutdown.clone(),
         }
     }
 }
@@ -239,7 +243,17 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             limits: deps.limits,
             ids: Arc::new(deps.ids),
             clock: Arc::new(deps.clock),
+            shutdown: None,
         }
+    }
+
+    /// Gives the service the process shutdown signal, so that the RPC run of the re-compile job
+    /// stops between two sets at shutdown, like the boot run. Without it, a runtime shutdown
+    /// drops the job in the middle of a set (the Drop hazard of F16).
+    #[must_use]
+    pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<()>) -> Self {
+        self.shutdown = Some(shutdown);
+        self
     }
 
     /// Adds or replaces one tool (spec section 4.2).

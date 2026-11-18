@@ -12,6 +12,7 @@ use paigasus_iam::adapters::events::{NatsEventPublisher, OutboxRelay, TracingEve
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, serve_http};
 use paigasus_iam::adapters::persistence::{OutboxRetentionPolicy, PgOutboxListener, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy, migrate_under_lock};
+use paigasus_iam::application::tool_policies::{RECOMPILE_RESULT_LABELS, RecompileRun};
 use paigasus_iam::config::{IamConfig, PublisherBackend};
 use paigasus_iam_core::EventPublisher;
 use paigasus_observability::names;
@@ -408,7 +409,41 @@ async fn boot_deferred(
         None if config.tool_policies.enabled => tracing::warn!("tool policies: disabled; the error above names the cause"),
         None => tracing::info!("tool policies: disabled by config (tool_policies.enabled = false)"),
     }
-    let state = state.with_tool_policies(compiler.map(|c| Arc::new(c) as Arc<dyn paigasus_iam_core::tool_policy::PolicyCompiler>), &config.tool_policies);
+    let mut state = state.with_tool_policies(compiler.map(|c| Arc::new(c) as Arc<dyn paigasus_iam_core::tool_policy::PolicyCompiler>), &config.tool_policies);
+
+    // SMA-781: the re-compile job. The RPC run gets the shutdown watch as its stop, so that a
+    // runtime shutdown ends it between two sets, not in the middle of a set (F16). The boot run
+    // is a background task: it does not delay readiness, and an error does not stop IAM.
+    if let Some(service) = state.tool_policies.take() {
+        let service = service.with_shutdown(rx.clone());
+        state.tool_policies = Some(service.clone());
+        for label in RECOMPILE_RESULT_LABELS {
+            metrics::counter!(names::IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL, "result" => label).increment(0);
+        }
+        let mut rx = rx.clone();
+        servers.spawn(async move {
+            let mut stop_rx = rx.clone();
+            let stop = async move {
+                let _ = stop_rx.changed().await;
+            };
+            match service.run_recompile_at_boot(stop).await {
+                Ok(RecompileRun::Ran(results)) => tracing::info!(sets = results.len(), "tool policy re-compile at boot: done"),
+                Ok(RecompileRun::AlreadyRunning) => tracing::info!("tool policy re-compile at boot: another replica runs the job"),
+                Ok(RecompileRun::OlderReplica {
+                    stored_generation,
+                    stored_schema_revision,
+                }) => tracing::warn!(
+                    stored_generation,
+                    stored_schema_revision,
+                    "tool policy re-compile at boot: a stored row is newer than this replica; nothing written"
+                ),
+                Err(error) => tracing::error!(error = ?error, "tool policy re-compile at boot failed; IAM keeps serving"),
+            }
+            // `main` stops when any `servers` task ends, so this task waits for the shutdown.
+            let _ = rx.changed().await;
+            Ok(())
+        });
+    }
 
     // Kept for the partition-maintenance task (SMA-467), spawned below.
     let db_for_maintenance = db.clone();
@@ -703,6 +738,10 @@ fn describe_iam_metrics() {
     describe_counter!(
         names::IAM_HTTP_REQUESTS_TOTAL,
         "HTTP requests handled by IAM's HTTP router, labeled by route, method, and status_class."
+    );
+    describe_counter!(
+        names::IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL,
+        "Tool policy re-compile job results, labeled by result (identical/held_different/held_failed/conflict/error). held_* means an admin must accept or discard a held version. error also covers a per-set storage or decode fault (SMA-781)."
     );
     describe_histogram!(names::IAM_HTTP_REQUEST_DURATION_SECONDS, "IAM HTTP request latency in seconds (full request-response cycle).");
     describe_gauge!(names::IAM_HTTP_INFLIGHT_REQUESTS, "Requests currently being handled on IAM's HTTP router.");
