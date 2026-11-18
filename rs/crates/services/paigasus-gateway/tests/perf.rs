@@ -207,3 +207,35 @@ async fn cold_load_and_compile_of_50_policies() {
     println!("cold load and compile of the floor and {POLICIES} policies = {:.3} ms", took.as_secs_f64() * 1e3);
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
+
+/// SMA-755 § 5.3: the cost of the HMAC-SHA256 argument digest at three sizes. The input is built outside the timed region.
+#[test]
+#[ignore = "a measurement in release mode"]
+fn argument_digest_at_1_kib_1_mib_and_32_mib() {
+    use paigasus_gateway::application::decision_log::DigestKey;
+
+    const RUNS: usize = 20;
+    let key = DigestKey::new("k1".into(), "k".repeat(32).into()).expect("key");
+    let median = |size: usize| -> Duration {
+        let input = vec![b'a'; size];
+        let mut samples: Vec<Duration> = (0..RUNS)
+            .map(|_| {
+                let started = Instant::now();
+                std::hint::black_box(key.digest(std::hint::black_box(&input)));
+                started.elapsed()
+            })
+            .collect();
+        samples.sort();
+        samples[RUNS / 2]
+    };
+    let small = median(1 << 10);
+    let medium = median(1 << 20);
+    let large = median(32 << 20);
+    println!(
+        "argument digest median of {RUNS}: 1 KiB = {:.3} ms, 1 MiB = {:.3} ms, 32 MiB = {:.3} ms",
+        small.as_secs_f64() * 1e3,
+        medium.as_secs_f64() * 1e3,
+        large.as_secs_f64() * 1e3
+    );
+    assert!(large < Duration::from_millis(50), "32 MiB digest {large:?}: move digests above 1 MiB to spawn_blocking (§ 5.3)");
+}
