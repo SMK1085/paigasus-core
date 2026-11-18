@@ -2498,9 +2498,13 @@ mod policy_compiler_gate_tests {
         let (a, b) = (compiler.clone(), compiler.clone());
         let first = tokio::spawn(async move { a.compile(&request()).await });
         let second = tokio::spawn(async move { b.compile(&request()).await });
-        while compiler.calls() < 2 {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while compiler.calls() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both arrivals must reach the compiler");
         tokio::time::timeout(Duration::from_secs(5), compiler.reached_gate()).await.expect("the first arrival");
         tokio::time::timeout(Duration::from_secs(5), compiler.reached_gate()).await.expect("the second arrival");
         assert!(tokio::time::timeout(Duration::from_millis(50), compiler.reached_gate()).await.is_err(), "only two arrivals happened");

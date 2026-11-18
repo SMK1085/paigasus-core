@@ -360,7 +360,7 @@ async fn drain_until(
         tracing::warn!(
             unreaped_server_tasks = servers.len(),
             boot_recompile_open = boot_recompile.is_some_and(|handle| !handle.is_finished()),
-            open_rpc_recompile_runs = recompile_tasks.open_runs(),
+            unreaped_rpc_recompile_tasks = recompile_tasks.open_runs(),
             "shutdown: the deadline passed with tasks still open; aborting them and exiting"
         );
         servers.abort_all();
@@ -1027,7 +1027,10 @@ mod tests {
         let watchdog = tokio::time::timeout(Duration::from_secs(5), drain_until(&mut servers, &RecompileTasks::new(), Some(&blocked), deadline, Ok(()))).await;
         assert!(watchdog.expect("must return at the deadline, not hang").is_ok());
         assert!(started.elapsed() < Duration::from_secs(2), "must return at the deadline");
-        let joined = servers.join_next().await.expect("the blocked run is still in the set");
+        let joined = tokio::time::timeout(Duration::from_secs(5), servers.join_next())
+            .await
+            .expect("the blocked run must be aborted, not hang")
+            .expect("the blocked run is still in the set");
         assert!(joined.expect_err("the blocked run is aborted").is_cancelled());
     }
 }
