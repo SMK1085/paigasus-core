@@ -145,7 +145,9 @@ async fn a_catalog_delete_that_breaks_a_live_policy_is_rejected_by_the_real_comp
 
 #[tokio::test]
 async fn the_boot_probe_reads_the_current_generation() {
-    let Some(path) = support::real_compiler_path("the_boot_probe_reads_the_current_generation") else { return };
+    let Some(path) = support::real_compiler_path("the_boot_probe_reads_the_current_generation") else {
+        return;
+    };
     assert!(path.is_file(), "{}", path.display());
     let config = ToolPoliciesConfig {
         enabled: true,
