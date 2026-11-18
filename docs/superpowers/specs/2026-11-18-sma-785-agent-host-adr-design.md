@@ -252,7 +252,7 @@ discarded run. The Postgres memory adapter is the default.
 ### (f) Session policy: one run serves one thread
 
 - A **thread** is a sequence of runs on one Helikon session. The thread id is the Helikon session
-  id. `thread (id, inbox_id, created_at, last_run_at, closed)`.
+  id. `thread (id, inbox_id, created_at, last_run_at, closed, successor_id)`.
 - Every outbox message carries the `threadid` of the run that sent it. A user reply carries it back
   (the channel adapter maps it, for example from email `In-Reply-To`). An approval reply carries
   the `threadid` of the deferred run.
@@ -272,10 +272,14 @@ discarded run. The Postgres memory adapter is the default.
     order, up to the batch limit. The run resumes that thread.
   - If it has a `threadid` whose thread is not live, claim the claimable events with that same
     `threadid`, up to the batch limit. The run starts a fresh session under a new thread. Events
-    of two different expired threads never share a run.
+    of two different expired threads never share a run. The run commit sets `successor_id` on the
+    expired thread to the new thread. A later event with the expired `threadid` maps to its
+    successor, if the successor is live. So a backlog larger than the batch limit keeps its
+    session history across batches.
   - If it has no `threadid` (or the host dropped it, decision (e)), claim the claimable events
     that have no `threadid`, up to the batch limit. The run starts a fresh session under a new
-    thread.
+    thread. If more such events wait than the batch limit, each batch is a separate session on
+    purpose: an event with no `threadid` does not continue earlier work.
   - Events of other threads stay pending for the next claim. So several messages in one thread
     still produce one reply, and no run mixes threads.
 - A timer event with a `threadid` follows the same rule. If its thread is not live, it starts a
