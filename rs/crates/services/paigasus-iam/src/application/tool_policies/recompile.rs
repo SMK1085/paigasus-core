@@ -138,7 +138,11 @@ impl RecompileTasks {
     /// Starts `task` and keeps it until it ends. Finished tasks are removed first.
     fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
         let mut set = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        while set.try_join_next().is_some() {}
+        while let Some(joined) = set.try_join_next() {
+            if let Err(error) = joined {
+                tracing::warn!(%error, "a tool policy re-compile task ended abnormally");
+            }
+        }
         set.spawn(task);
     }
 
@@ -157,6 +161,11 @@ impl RecompileTasks {
             }
         })
         .await;
+    }
+
+    /// The tasks that `join` has not seen end yet. `main` logs it when the shutdown stops waiting.
+    pub fn open_runs(&self) -> usize {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
     }
 }
 
@@ -1147,8 +1156,16 @@ mod tests {
         let tasks = RecompileTasks::new();
         let svc = h.svc.clone().with_shutdown(rx).with_recompile_tasks(tasks.clone());
         let gate = h.compiler.gate();
-        let timed_out = tokio::time::timeout(Duration::from_millis(50), svc.run_recompile(&h.actor)).await;
-        assert!(timed_out.is_err(), "the RPC must still wait for the gated compile");
+        // The request lives until the job reaches the compiler gate, and then it is dropped. The
+        // timeout is only a watchdog.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                run = svc.run_recompile(&h.actor) => panic!("the RPC must still wait for the gated compile, got {run:?}"),
+                () = h.compiler.reached_gate() => {}
+            }
+        })
+        .await
+        .expect("the job reaches the compiler gate");
         assert!(h.lock.held());
         tx.send(()).unwrap();
         let early = tokio::time::timeout(Duration::from_millis(50), tasks.join()).await;
@@ -1184,8 +1201,31 @@ mod tests {
         // The RPC runs go into the process-owned tasks, and the shutdown joins them after the
         // servers stopped, so the process does not end before a job released its lock (F15).
         assert!(code.contains(".with_recompile_tasks("), "main.rs must give the tool policy service its re-compile tasks");
-        let drain = code.find("let mut result = early_error.map_or(").expect("main.rs drains the servers at shutdown");
-        let join = code.find("\n    recompile_tasks.join().await;").expect("main.rs must join the re-compile tasks at shutdown");
-        assert!(join > drain, "main.rs must join the re-compile tasks after the servers stopped");
+        // The join comes after the END of the drain loop: a request that is still in flight can
+        // start a job until its server stopped.
+        let result = code.find("let mut result = early_error.map_or(").expect("main.rs drains the servers at shutdown");
+        let drain = result
+            + code[result..]
+                .find("while let Some(joined) = servers.join_next().await {")
+                .expect("main.rs drains the servers in a loop");
+        let drain_end = drain + code[drain..].find("\n    }\n").expect("the drain loop ends");
+        let join = code
+            .find("tokio::time::timeout_at(recompile_deadline, recompile_tasks.join())")
+            .expect("main.rs must join the re-compile tasks at shutdown, bounded by the deadline");
+        assert!(join > drain_end, "main.rs must join the re-compile tasks after the end of the server drain");
+        // The bound: the join ends before the pod's 45 s terminationGracePeriodSeconds, so the
+        // process logs and exits instead of a SIGKILL. A cut-off job is safe: its set transaction
+        // rolls back, and Postgres releases the advisory lock when the connection closes.
+        assert!(
+            code.contains("let recompile_deadline = tokio::time::Instant::now() + RECOMPILE_SHUTDOWN_TIMEOUT;"),
+            "main.rs must start the re-compile deadline at the shutdown"
+        );
+        let secs: u64 = code
+            .split("const RECOMPILE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .and_then(|n| n.parse().ok())
+            .expect("main.rs defines RECOMPILE_SHUTDOWN_TIMEOUT in seconds");
+        assert!(secs < 45, "RECOMPILE_SHUTDOWN_TIMEOUT must be below the 45 s grace period, is {secs} s");
     }
 }

@@ -320,6 +320,7 @@ async fn serve() -> anyhow::Result<()> {
 
     // Ask any still-running server to shut down gracefully.
     let _ = tx.send(());
+    let recompile_deadline = tokio::time::Instant::now() + RECOMPILE_SHUTDOWN_TIMEOUT;
 
     // Drain the remaining server task(s); surface the first error.
     let mut result = early_error.map_or(Ok(()), Err);
@@ -334,14 +335,26 @@ async fn serve() -> anyhow::Result<()> {
     }
     // SMA-781: an RPC run of the re-compile job can outlive its request (F15). The shutdown watch
     // stops it between two sets; wait for that, so that it releases its lock before the exit.
-    // Unbounded, like the drain of the boot run above.
-    recompile_tasks.join().await;
+    // Bounded: a set can wait on a row lock and does not see the watch then. At the deadline the
+    // process exits anyway. That is safe: the set transaction rolls back, and Postgres releases
+    // the advisory lock when the connection closes.
+    if tokio::time::timeout_at(recompile_deadline, recompile_tasks.join()).await.is_err() {
+        tracing::warn!(
+            open_runs = recompile_tasks.open_runs(),
+            "shutdown: a tool policy re-compile run did not stop before the deadline; exiting anyway"
+        );
+    }
     result
 }
 
 /// How long the boot-failure drain waits before giving up and returning anyway. Bounded because
 /// an unbounded drain turns a boot failure into a process that serves 503 forever (SMA-571 §4.6).
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the graceful shutdown waits for the RPC runs of the tool policy re-compile job,
+/// counted from the shutdown signal (SMA-781). Below the chart's 45 s
+/// `terminationGracePeriodSeconds`, so that IAM exits before a SIGKILL.
+const RECOMPILE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Everything between the bind and "ready": the migration, `AppState::new`, the publisher dial,
 /// and every background task. Returns `Err` rather than `?`-ing out of `serve()` so its single

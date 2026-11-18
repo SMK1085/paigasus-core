@@ -2342,6 +2342,7 @@ pub struct FakePolicyCompiler {
     script: Arc<Mutex<VecDeque<Result<CompileOutcome, CompilerFailure>>>>,
     requests: Arc<Mutex<Vec<CompileRequest>>>,
     gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+    arrivals: Arc<tokio::sync::Notify>,
 }
 
 impl Default for FakePolicyCompiler {
@@ -2351,6 +2352,7 @@ impl Default for FakePolicyCompiler {
             script: Arc::default(),
             requests: Arc::default(),
             gate: Arc::default(),
+            arrivals: Arc::default(),
         }
     }
 }
@@ -2382,6 +2384,12 @@ impl FakePolicyCompiler {
         gate
     }
 
+    /// Resolves when a `compile` call reached the gate. Each call that waits at the gate gives one
+    /// signal, and a signal given before this call is kept.
+    pub async fn reached_gate(&self) {
+        self.arrivals.notified().await;
+    }
+
     /// From now on, `compile` does not wait. A call that already waits at the gate still waits
     /// for its permit.
     pub fn remove_gate(&self) {
@@ -2399,6 +2407,7 @@ impl PolicyCompiler for FakePolicyCompiler {
         self.requests.lock().unwrap().push(req.clone());
         let gate = self.gate.lock().unwrap().clone();
         if let Some(gate) = gate {
+            self.arrivals.notify_one();
             gate.acquire().await.expect("the compile gate is never closed").forget();
         }
         if let Some(answer) = self.script.lock().unwrap().pop_front() {
