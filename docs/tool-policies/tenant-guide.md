@@ -225,9 +225,14 @@ An accept makes the held output your next live version. Your own save of the set
 held version, because it makes a new live version. A rejected set has no output and you cannot
 accept it. Change the source and save the set instead.
 
-IAM does not propose a discarded result again for the same live version and the same compiler.
-Until you save the set again, a write of your tool catalog is refused with
-`tool-policy-recompile-pending`.
+While a held version waits for your decision, your live set stays at the old compiler. After a
+discard, IAM does not propose the same result again for the same live version and the same
+compiler. In both cases, a write of your tool catalog is refused with
+`tool-policy-recompile-pending` until you accept the held version or save the set again.
+
+An accept of a held version that is no longer current returns `tool-policy-version-conflict`. This
+occurs when the live version, the compiler, the schema or the catalog changed after IAM made the
+held version. List the held versions again and use the current row, or save the set.
 
 ## 5. Error and rejection codes
 
