@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use metrics::counter;
-use paigasus_gateway_core::{DecideFuture, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls, sanitize_name};
+use paigasus_gateway_core::decision_log::{DecisionDetail, RecordBasis};
+use paigasus_gateway_core::{
+    DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls, sanitize_name,
+};
 use paigasus_kernel::tool_policy::{PolicyOrigin, PolicyRef};
 use paigasus_observability::names;
 
@@ -45,7 +48,7 @@ fn refs(list: &[PolicyRef]) -> String {
 
 /// Decide the calls from the snapshot of `ctx`. `None` is an unavailable set under `closed`: the
 /// tool policy is on, but the request side did not run, so every call is blocked (fail closed).
-fn decide_now(ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec<Decision> {
+fn decide_now(ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec<DecidedCall> {
     let started = Instant::now();
     let fallback;
     let snapshot = match ctx.policy.as_deref() {
@@ -55,7 +58,7 @@ fn decide_now(ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec
             &fallback
         }
     };
-    let outcomes = decide_calls(snapshot, turn, calls);
+    let outcomes = decide_calls(snapshot, turn, calls, &Instant::now);
     let mode = snapshot.mode.as_str();
     let request_id = ctx.request_id.as_deref().unwrap_or("");
     for (call, o) in calls.iter().zip(&outcomes) {
@@ -79,7 +82,11 @@ fn decide_now(ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec
     if let Some(s) = ctx.policy.as_deref() {
         s.add_decide_elapsed(started.elapsed());
     }
-    outcomes.into_iter().map(|o| o.decision).collect()
+    // Every call gets a detail for the decision log (SMA-755). The arguments digest is Task 8's.
+    outcomes
+        .into_iter()
+        .map(|o| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, None)))))
+        .collect()
 }
 
 impl ToolCallDecider for CedarDecider {
@@ -124,12 +131,44 @@ mod tests {
         (snapshot, decisions)
     }
 
-    async fn decide(ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<Decision> {
+    async fn decide_full(ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<DecidedCall> {
         let calls = calls(call_names);
         let n = calls.len();
         let out = CedarDecider.decide(Arc::new(ctx), Arc::new(turn), calls).await.expect("decide");
         assert_eq!(out.len(), n, "one decision per call");
         out
+    }
+
+    async fn decide(ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<Decision> {
+        decide_full(ctx, turn, call_names).await.into_iter().map(|d| d.decision).collect()
+    }
+
+    #[tokio::test]
+    async fn the_decider_attaches_a_detail_to_every_call() {
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let policy = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        let decided = decide_full(ctx.clone().with_policy(out.snapshot), turn, &["x", "y", "rm", "z"]).await;
+        assert_eq!(decided.len(), 4);
+        for d in &decided {
+            let detail = d.detail.as_ref().expect("a detail for every call");
+            assert_eq!(detail.basis, RecordBasis::Policy);
+            assert!(detail.cedar.is_some(), "a kernel verdict has a Cedar detail");
+            assert!(detail.arguments.is_none(), "the digest is added at the record site");
+        }
+        // `rm` is a floor deny: its detail says so, and its decision is the block.
+        assert_eq!(decided[2].decision, BLOCK_POLICY);
+        assert!(decided[2].detail.as_ref().and_then(|d| d.cedar.as_ref()).is_some_and(|c| c.floor_denied));
+        // An unavailable set has a basis and no Cedar detail.
+        let unavailable = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let decided = decide_full(unavailable, ToolTurn::Unavailable("test"), &["a", "b"]).await;
+        for d in &decided {
+            let detail = d.detail.as_ref().expect("a detail");
+            assert_eq!((detail.basis, detail.cedar.is_none()), (RecordBasis::Unavailable, true));
+        }
     }
 
     #[tokio::test]

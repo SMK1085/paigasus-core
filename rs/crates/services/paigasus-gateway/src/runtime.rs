@@ -223,7 +223,7 @@ mod tool_policy_tests {
         let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
         let out = decider.decide(Arc::new(ctx), Arc::new(turn), calls).await.expect("decide");
         assert_eq!(out.len(), 1);
-        out[0]
+        out[0].decision
     }
 
     /// SMA-752 D19, Task 16 ruling (b): with the tool policy off, nothing is built and the decider

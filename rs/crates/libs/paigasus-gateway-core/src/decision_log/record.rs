@@ -9,7 +9,7 @@ use paigasus_kernel::CedarUid;
 use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, PolicyRef, SessionInfo};
 use uuid::Uuid;
 
-use crate::policy::TenantMode;
+use crate::policy::{PolicyBasis, TenantMode};
 use crate::report::ReportEntry;
 use crate::types::{BlockCode, ToolCall, ToolCallKind};
 
@@ -49,6 +49,17 @@ impl RecordBasis {
             RecordBasis::ErroredForbid => "errored_forbid",
             RecordBasis::Unavailable => "unavailable",
             RecordBasis::OnFailure => "on_failure",
+        }
+    }
+}
+
+impl From<PolicyBasis> for RecordBasis {
+    /// The decider's basis is the record basis. `OnFailure` has no decider origin.
+    fn from(b: PolicyBasis) -> Self {
+        match b {
+            PolicyBasis::Policy => RecordBasis::Policy,
+            PolicyBasis::ErroredForbid => RecordBasis::ErroredForbid,
+            PolicyBasis::Unavailable => RecordBasis::Unavailable,
         }
     }
 }
@@ -250,4 +261,21 @@ pub struct DecisionRecord {
     pub request_action: Option<RecordedAction>,
     pub cedar: Option<CedarDetail>,
     pub arguments: Option<ArgumentDigest>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_policy_basis_maps_to_the_record_basis_with_the_same_label() {
+        for (b, want) in [
+            (PolicyBasis::Policy, RecordBasis::Policy),
+            (PolicyBasis::ErroredForbid, RecordBasis::ErroredForbid),
+            (PolicyBasis::Unavailable, RecordBasis::Unavailable),
+        ] {
+            assert_eq!(RecordBasis::from(b), want);
+            assert_eq!(RecordBasis::from(b).as_str(), b.as_str());
+        }
+    }
 }

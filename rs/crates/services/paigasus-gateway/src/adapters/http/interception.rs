@@ -25,8 +25,8 @@ use axum::body::Bytes;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
 use paigasus_gateway_core::{
-    Action, Basis, BlockCode, DecideFuture, DeciderError, Decision, DecisionContext, Format, HoldKey, Interceptor, Limits, Metric, OnFailure, RequestEntry, ToolCall, ToolCallDecider, ToolTurn,
-    parse_body, report_header,
+    Action, Basis, BlockCode, DecideFuture, DecidedCall, DeciderError, Decision, DecisionContext, Format, HoldKey, Interceptor, Limits, Metric, OnFailure, RequestEntry, ToolCall, ToolCallDecider,
+    ToolTurn, parse_body, report_header,
 };
 use paigasus_observability::names;
 
@@ -130,18 +130,19 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
             _ => {
                 record(Metric::OnFailure("decider_error"));
                 match limits.on_failure {
-                    OnFailure::Block => (vec![Decision::Block { code: BlockCode::DeciderError }; n], Basis::OnFailure),
-                    OnFailure::Allow => (vec![Decision::Allow; n], Basis::OnFailure),
+                    OnFailure::Block => (vec![DecidedCall::from(Decision::Block { code: BlockCode::DeciderError }); n], Basis::OnFailure),
+                    OnFailure::Allow => (vec![DecidedCall::from(Decision::Allow); n], Basis::OnFailure),
                 }
             }
         }
     };
     for d in &decisions {
-        let decision = if d.is_allow() { "allow" } else { "block" };
+        let decision = if d.decision.is_allow() { "allow" } else { "block" };
         record(Metric::Decision { decision, basis: basis.as_str() });
     }
     let report = calls.report(&decisions, basis, requests);
-    let rewritten = calls.apply(&decisions).map(Bytes::from);
+    let plain: Vec<Decision> = decisions.iter().map(|d| d.decision).collect();
+    let rewritten = calls.apply(&plain).map(Bytes::from);
     BodyOutcome::Forward { rewritten, report: Some(report) }
 }
 
@@ -166,7 +167,7 @@ struct Relay {
 
 /// What woke the relay.
 enum Event {
-    Decided(Result<Vec<Decision>, DeciderError>),
+    Decided(Result<Vec<DecidedCall>, DeciderError>),
     Wake,
     Upstream(Option<Result<Bytes, reqwest::Error>>),
 }
@@ -180,6 +181,8 @@ impl Relay {
                 // The core never returns a wake in the past, so this cannot spin.
                 Action::Wake(at) => self.sleep.as_mut().reset(tokio::time::Instant::from_std(at)),
                 Action::Count(m) => record(m),
+                // The decision log records here in a later task (SMA-755).
+                Action::Reported(_) => {}
             }
         }
         // A hold that is no longer deciding (a timeout ruled on it) needs no answer. Drop
@@ -469,7 +472,7 @@ mod tests {
                 count.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(30)).await;
                 in_flight.fetch_sub(1, Ordering::SeqCst);
-                Ok(vec![Decision::Allow; calls.len()])
+                Ok(vec![DecidedCall::from(Decision::Allow); calls.len()])
             })
         }
     }
@@ -482,7 +485,7 @@ mod tests {
             if calls.iter().any(|c| c.name.starts_with("hang_")) {
                 return Box::pin(std::future::pending());
             }
-            Box::pin(std::future::ready(Ok(vec![Decision::Allow; calls.len()])))
+            Box::pin(std::future::ready(Ok(vec![DecidedCall::from(Decision::Allow); calls.len()])))
         }
     }
 

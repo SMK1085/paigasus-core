@@ -8,6 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::decision_log::DecisionDetail;
 use crate::interceptor::DeciderError;
 use crate::policy::PolicySnapshot;
 use crate::turn::ToolTurn;
@@ -65,7 +66,29 @@ impl DecisionContext {
     }
 }
 
-pub type DecideFuture = Pin<Box<dyn Future<Output = Result<Vec<Decision>, DeciderError>> + Send + 'static>>;
+/// The decision of one call, with what the decider knows about it for the decision log (SMA-755).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecidedCall {
+    pub decision: Decision,
+    /// The detail for the record. `None` when the decider has nothing to add.
+    pub detail: Option<Arc<DecisionDetail>>,
+}
+
+impl DecidedCall {
+    #[must_use]
+    pub fn new(decision: Decision, detail: Option<Arc<DecisionDetail>>) -> Self {
+        Self { decision, detail }
+    }
+}
+
+impl From<Decision> for DecidedCall {
+    fn from(decision: Decision) -> Self {
+        Self { decision, detail: None }
+    }
+}
+
+pub type DecideFuture = Pin<Box<dyn Future<Output = Result<Vec<DecidedCall>, DeciderError>> + Send + 'static>>;
 
 /// Decides one completed hold. MUST return exactly one decision per call, in order: the
 /// interceptor treats any other length as a decider error (D18).
@@ -80,7 +103,7 @@ pub struct AllowAll;
 impl ToolCallDecider for AllowAll {
     fn decide(&self, _ctx: Arc<DecisionContext>, _turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
         let n = calls.len();
-        Box::pin(std::future::ready(Ok(vec![Decision::Allow; n])))
+        Box::pin(std::future::ready(Ok(vec![DecidedCall::from(Decision::Allow); n])))
     }
 }
 
@@ -101,13 +124,24 @@ mod tests {
         }
     }
 
-    fn ready(mut fut: DecideFuture) -> Result<Vec<Decision>, DeciderError> {
+    fn ready(fut: DecideFuture) -> Result<Vec<Decision>, DeciderError> {
+        ready_calls(fut).map(|v| v.into_iter().map(|d| d.decision).collect())
+    }
+
+    fn ready_calls(mut fut: DecideFuture) -> Result<Vec<DecidedCall>, DeciderError> {
         // The future is ready at once; poll it without a runtime.
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         match fut.as_mut().poll(&mut cx) {
             std::task::Poll::Ready(r) => r,
             std::task::Poll::Pending => panic!("pending"),
         }
+    }
+
+    #[test]
+    fn a_decision_converts_to_a_call_without_detail() {
+        let d = DecidedCall::from(Decision::Allow);
+        assert_eq!((d.decision, d.detail), (Decision::Allow, None));
+        assert_eq!(DecidedCall::new(Decision::Allow, None), DecidedCall::from(Decision::Allow));
     }
 
     #[test]

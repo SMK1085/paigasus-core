@@ -2,11 +2,13 @@
 //! The decisions of the calls of one hold, from a policy snapshot (§ 6.4, D33, D34, P-4 to P-6).
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use paigasus_kernel::tool_policy::{Effect, Verdict, decide};
 
 use super::mapping::{call_findings, invocation, name_collisions};
 use super::snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
+use crate::decision_log::CedarDetail;
 use crate::turn::ToolTurn;
 use crate::types::{BlockCode, Decision, ToolCall};
 
@@ -41,6 +43,8 @@ pub struct CallOutcome {
     pub decision: Decision,
     pub basis: PolicyBasis,
     pub verdict: Option<Verdict>,
+    /// The Cedar detail for the decision log (SMA-755). `Some` whenever a kernel verdict exists.
+    pub cedar: Option<CedarDetail>,
 }
 
 fn unavailable(on: OnUnavailable) -> Decision {
@@ -55,7 +59,7 @@ fn basis_of(v: &Verdict) -> PolicyBasis {
 }
 
 /// The gateway decision for one kernel verdict under the snapshot's tenant part and mode.
-fn outcome(v: Verdict, tenant: TenantPart, mode: TenantMode, on: OnUnavailable) -> CallOutcome {
+fn outcome(v: Verdict, cedar: CedarDetail, tenant: TenantPart, mode: TenantMode, on: OnUnavailable) -> CallOutcome {
     // D33: a floor deny is enforced in every tenant mode. The `if` below is the one statement
     // that the red-first proof deletes (preflight F1).
     // FLOOR-RULE begin
@@ -64,6 +68,7 @@ fn outcome(v: Verdict, tenant: TenantPart, mode: TenantMode, on: OnUnavailable) 
             decision: Decision::Block { code: BlockCode::Policy },
             basis: basis_of(&v),
             verdict: Some(v),
+            cedar: Some(cedar),
         };
     }
     // FLOOR-RULE end
@@ -76,13 +81,21 @@ fn outcome(v: Verdict, tenant: TenantPart, mode: TenantMode, on: OnUnavailable) 
         (TenantPart::Evaluated, TenantMode::LogOnly) => (Decision::Observe { would: BlockCode::Policy }, basis_of(&v)),
         (TenantPart::Evaluated, _) => (Decision::Block { code: BlockCode::Policy }, basis_of(&v)),
     };
-    CallOutcome { decision, basis, verdict: Some(v) }
+    CallOutcome {
+        decision,
+        basis,
+        verdict: Some(v),
+        cedar: Some(cedar),
+    }
 }
 
 /// One outcome per call, in order. The findings of a call are its request-level findings
 /// (`name_collision`); the kernel adds `unparsed_arguments` itself.
+///
+/// `now` is the only time source (P-7): it is read before and after each kernel `decide`, and the
+/// difference is the `decide_duration` of the call. The core reads no clock of its own.
 #[must_use]
-pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall]) -> Vec<CallOutcome> {
+pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
     let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
         // P-6: `closed` blocks in every tenant mode, `off` included.
         return calls
@@ -91,6 +104,7 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
                 decision: unavailable(snapshot.on_unavailable),
                 basis: PolicyBasis::Unavailable,
                 verdict: None,
+                cedar: None,
             })
             .collect();
     };
@@ -101,8 +115,21 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
     calls
         .iter()
         .map(|c| {
-            let v = decide(&invocation(c, turn), facts, &call_findings(c, &collisions), policies);
-            outcome(v, *tenant, snapshot.mode, snapshot.on_unavailable)
+            let inv = invocation(c, turn);
+            let started = now();
+            let v = decide(&inv, facts, &call_findings(c, &collisions), policies);
+            let duration = now().saturating_duration_since(started);
+            let cedar = CedarDetail::new(
+                v.decision,
+                v.determining.clone(),
+                v.errored.clone(),
+                v.floor_denied,
+                v.findings.clone(),
+                inv.declared,
+                v.action_group,
+                duration,
+            );
+            outcome(v, cedar, *tenant, snapshot.mode, snapshot.on_unavailable)
         })
         .collect()
 }
@@ -111,7 +138,7 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
 mod tests {
     use std::sync::Arc;
 
-    use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
+    use paigasus_kernel::tool_policy::{Declared, Facts, RequestInfo, SessionInfo, ToolPolicies};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use uuid::Uuid;
 
@@ -162,7 +189,7 @@ mod tests {
 
     fn one(set: PolicySet, mode: TenantMode, on: OnUnavailable, tool: &str) -> CallOutcome {
         let snap = PolicySnapshot::new(set, mode, on);
-        let mut out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call(tool)]);
+        let mut out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call(tool)], &Instant::now);
         assert_eq!(out.len(), 1);
         out.remove(0)
     }
@@ -270,12 +297,12 @@ mod tests {
     #[test]
     fn one_outcome_per_call_in_order() {
         let snap = PolicySnapshot::new(available(FLOOR, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed);
-        let out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call("ok"), call("danger"), call("tdeny")]);
+        let out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call("ok"), call("danger"), call("tdeny")], &Instant::now);
         assert_eq!(out.iter().map(|o| o.decision).collect::<Vec<_>>(), [Decision::Allow, BLOCK_POLICY, BLOCK_POLICY]);
         let floor_hit: Vec<bool> = out.iter().map(|o| o.verdict.as_ref().expect("verdict").floor_denied).collect();
         assert_eq!(floor_hit, [false, true, false]);
         let unavailable = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Enforce, OnUnavailable::Closed);
-        assert_eq!(decide_calls(&unavailable, &ToolTurn::Unavailable("test"), &[call("a"), call("b"), call("c")]).len(), 3);
+        assert_eq!(decide_calls(&unavailable, &ToolTurn::Unavailable("test"), &[call("a"), call("b"), call("c")], &Instant::now).len(), 3);
     }
 
     #[test]
@@ -292,8 +319,64 @@ mod tests {
             ..TurnFacts::default()
         });
         let snap = PolicySnapshot::new(available(SHIPPED_FLOOR, TenantPart::Off), TenantMode::Off, OnUnavailable::Open);
-        let out = decide_calls(&snap, &turn, &[call("send"), call("Send"), call("other")]);
+        let out = decide_calls(&snap, &turn, &[call("send"), call("Send"), call("other")], &Instant::now);
         assert_eq!(out.iter().map(|o| o.decision).collect::<Vec<_>>(), [BLOCK_POLICY, BLOCK_POLICY, Decision::Allow]);
+    }
+
+    #[test]
+    fn decide_calls_attaches_the_cedar_detail_and_the_duration() {
+        use std::cell::Cell;
+        use std::time::Duration;
+
+        let t = Instant::now();
+        // The clock reads four times for two calls: t, t+3ms, t+5ms, t+6ms.
+        let ticks = [0_u64, 3, 5, 6];
+        let next = Cell::new(0_usize);
+        let clock = || {
+            let i = next.get();
+            next.set(i + 1);
+            t + Duration::from_millis(ticks[i])
+        };
+        let snap = PolicySnapshot::new(available(FLOOR, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed);
+        let turn = ToolTurn::Parsed(TurnFacts {
+            definitions: vec![ToolDefinition {
+                name: "ok".to_owned(),
+                namespace: None,
+                kind: ToolCallKind::Function,
+                schema: None,
+            }],
+            definitions_complete: true,
+            ..TurnFacts::default()
+        });
+        let out = decide_calls(&snap, &turn, &[call("ok"), call("danger")], &clock);
+        assert_eq!(next.get(), 4, "two reads per call");
+        assert_eq!(out.len(), 2);
+        let durations: Vec<Duration> = out.iter().map(|o| o.cedar.as_ref().expect("cedar").decide_duration).collect();
+        assert_eq!(durations, [Duration::from_millis(3), Duration::from_millis(1)]);
+        for o in &out {
+            let v = o.verdict.as_ref().expect("verdict");
+            let c = o.cedar.as_ref().expect("cedar");
+            assert_eq!(c.findings, v.findings);
+            assert_eq!((c.effect, c.floor_denied, c.action_group), (v.decision, v.floor_denied, v.action_group));
+            assert_eq!((&c.determining, &c.errored), (&v.determining, &v.errored));
+        }
+        // `declared` comes from the turn: `ok` is a definition, `danger` is not.
+        assert_eq!(out[0].cedar.as_ref().expect("cedar").declared, Declared::Yes);
+        assert_eq!(out[1].cedar.as_ref().expect("cedar").declared, Declared::No);
+        assert!(out[1].cedar.as_ref().expect("cedar").floor_denied);
+    }
+
+    #[test]
+    fn an_unavailable_set_has_no_cedar_detail() {
+        let calls = [call("a"), call("b")];
+        for mode in MODES {
+            for on in ONS {
+                let snap = PolicySnapshot::new(PolicySet::Unavailable, mode, on);
+                let out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &calls, &Instant::now);
+                assert_eq!(out.len(), 2);
+                assert!(out.iter().all(|o| o.cedar.is_none() && o.verdict.is_none()), "{mode:?} {on:?}");
+            }
+        }
     }
 
     #[test]

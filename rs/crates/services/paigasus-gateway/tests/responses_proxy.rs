@@ -17,7 +17,7 @@ use paigasus_gateway::adapters::http::responses::RESPONSES_TERMINAL_SSE_ERROR;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::application::limits::Limits;
 use paigasus_gateway::service_info::Capabilities;
-use paigasus_gateway_core::{AllowAll, BlockCode, DecideFuture, Decision, DecisionContext, Limits as CoreLimits, OnFailure, ToolCall, ToolCallDecider, ToolTurn};
+use paigasus_gateway_core::{AllowAll, BlockCode, DecideFuture, DecidedCall, Decision, DecisionContext, Limits as CoreLimits, OnFailure, ToolCall, ToolCallDecider, ToolTurn};
 use serde_json::{Value, json};
 use support::MockOpenAi;
 use support::limits::{CALLER_KEY, ORG_A_PRN, PRINCIPAL_1, RecordingStore, ScopedIam, Sent, limits, openai, rules};
@@ -47,9 +47,9 @@ impl ToolCallDecider for BlockNamed {
             .iter()
             .map(|c| {
                 if c.name.starts_with("blocked_") {
-                    Decision::Block { code: BlockCode::Policy }
+                    DecidedCall::from(Decision::Block { code: BlockCode::Policy })
                 } else {
-                    Decision::Allow
+                    DecidedCall::from(Decision::Allow)
                 }
             })
             .collect();
