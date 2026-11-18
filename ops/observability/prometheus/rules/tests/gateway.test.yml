@@ -154,3 +154,181 @@ tests:
             exp_annotations:
               summary: "Gateway limits Redis circuit breaker is not closed (role limits)"
               description: "The gateway's limits Redis circuit breaker has been open or half-open for 2m. The rate limits and token budgets are NOT applied (fail-open), and the tokens used now are not charged to any budget. See RUNBOOK-observability.md, section \"Gateway limits: fail-open and Redis requirements\"."
+
+  # GatewayDecisionLogDrops: a non-shutdown drop rises after a series primed at 0. Fires at once (for: 0m).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_dropped_total{reason="queue_full"}'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDecisionLogDrops
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayDecisionLogDrops
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision log is dropping events"
+              description: "The gateway dropped decision-log events in the last 15m for a reason other than shutdown. The audit trail has gaps. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogDrops quiet: a reason="shutdown" rise does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_dropped_total{reason="shutdown"}'
+        values: '0 0 0 5 5 5 5'
+      - series: 'gateway_decision_log_dropped_total{reason="queue_full"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayDecisionLogDrops
+        exp_alerts: []
+
+  # GatewayDecisionLogRedisReset: a reset rises after a series primed at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_redis_resets_total'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision log lost its Redis stream"
+              description: "The relay found that the Redis decision stream was lost and made the consumer group again. Events in the stream were lost. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRedisReset quiet: the counter stays at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_redis_resets_total'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
+
+  # GatewayDecisionLogRelayStalled: written rises, published stays at 0, for 10m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0+10x20'
+      - series: 'gateway_decision_log_published_total'
+        values: '0x20'
+      - series: 'gateway_decision_log_backlog'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log relay is not publishing to NATS"
+              description: "The gateway writes decision events to Redis, but the relay does not publish them to JetStream, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRelayStalled backlog: the backlog rises above 50000, for 10m, while publishing continues.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_published_total'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_backlog'
+        values: '0 0 60000x28'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log relay is not publishing to NATS"
+              description: "The gateway writes decision events to Redis, but the relay does not publish them to JetStream, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRelayStalled quiet: written and published rise together, the backlog is small.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0+10x20'
+      - series: 'gateway_decision_log_published_total'
+        values: '0+10x20'
+      - series: 'gateway_decision_log_backlog'
+        values: '5x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+
+  # GatewayDecisionLogRedisBreakerOpen: the decision_log breaker reads 2 (open) for 5 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="decision_log"}'
+        values: '2x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: GatewayDecisionLogRedisBreakerOpen
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GatewayDecisionLogRedisBreakerOpen
+        exp_alerts:
+          - exp_labels: { severity: warning, job: gateway, role: decision_log }
+            exp_annotations:
+              summary: "Gateway decision-log Redis circuit breaker is not closed"
+              description: "The decision-log Redis circuit breaker has been open or half-open for 2m. The gateway drops decision events. Tool calls are not affected. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRedisBreakerOpen quiet: a closed breaker and a limits breaker at 2 do not fire it.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="decision_log"}'
+        values: '0x5'
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="limits"}'
+        values: '2x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayDecisionLogRedisBreakerOpen
+        exp_alerts: []
+
+  # GatewayLimitsRedisBreakerOpen quiet: a decision_log gauge at 2 does not fire it (SMA-755).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="decision_log"}'
+        values: '2x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayLimitsRedisBreakerOpen
+        exp_alerts: []
+
+  # GatewayDecisionLogTaskRestarts: a restart rises after a series primed at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_task_restarts_total{task="writer"}'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDecisionLogTaskRestarts
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayDecisionLogTaskRestarts
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "A gateway decision-log task panicked and restarted"
+              description: "A decision-log writer or relay task caught a panic in the last 15m. This is a defect. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogTaskRestarts quiet: the counter stays at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_task_restarts_total{task="writer"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayDecisionLogTaskRestarts
+        exp_alerts: []
