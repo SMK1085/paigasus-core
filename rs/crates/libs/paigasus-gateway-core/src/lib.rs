@@ -7,6 +7,7 @@
 mod anthropic;
 mod body;
 mod decider;
+pub mod decision_log;
 mod interceptor;
 mod json;
 mod limits;

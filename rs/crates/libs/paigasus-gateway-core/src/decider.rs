@@ -26,6 +26,12 @@ pub struct DecisionContext {
     pub request_id: Option<String>,
     /// The request's policy snapshot (D30). `None` when the tool policy is off.
     pub policy: Option<Arc<PolicySnapshot>>,
+    /// The id of the API key of the request, when it has one (SMA-755). Empty by default.
+    pub api_key_id: Option<String>,
+    /// The ingress label of the request (SMA-755). Empty by default.
+    pub ingress: String,
+    /// The model of the request (SMA-755). Empty by default.
+    pub model: String,
 }
 
 impl DecisionContext {
@@ -36,7 +42,19 @@ impl DecisionContext {
             scope: scope.into(),
             request_id,
             policy: None,
+            api_key_id: None,
+            ingress: String::new(),
+            model: String::new(),
         }
+    }
+
+    /// Attach the request facts that the decision log records (SMA-755).
+    #[must_use]
+    pub fn with_request(mut self, api_key_id: Option<String>, ingress: impl Into<String>, model: impl Into<String>) -> Self {
+        self.api_key_id = api_key_id;
+        self.ingress = ingress.into();
+        self.model = model.into();
+        self
     }
 
     /// Attach the request's policy snapshot (D30).
