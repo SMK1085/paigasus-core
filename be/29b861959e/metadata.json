@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.13.1",
+  "checkpoint_id": "be29b861959e",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-783-ts-console-shell-design-pass-console",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "ts/apps/iam-console/tests/cluster/journeys/zone-round-trip.spec.ts",
+    "ts/apps/iam-console/tests/cluster/phase-a/cross-zone.spec.ts",
+    "ts/apps/iam-console/tests/cluster/phase-a/nav-degraded.spec.ts",
+    "ts/apps/iam-console/tests/cluster/phase-b/zone-disabled.spec.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/be/29b861959e/0/metadata.json",
+      "transcript": "/be/29b861959e/0/full.jsonl",
+      "compact_transcript": "/be/29b861959e/0/transcript.jsonl",
+      "content_hash": "/be/29b861959e/0/content_hash.txt",
+      "prompt": "/be/29b861959e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 34,
+    "cache_creation_tokens": 102054,
+    "cache_read_tokens": 1445790,
+    "output_tokens": 10371,
+    "api_call_count": 15
+  },
+  "redaction": {
+    "replacements": 0,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 0,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
