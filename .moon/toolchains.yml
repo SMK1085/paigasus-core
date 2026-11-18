@@ -7,7 +7,7 @@ node:
   # Node 24 ("Krypton") is the Active LTS; 22 ("Jod") moved to Maintenance LTS.
   # Keep @types/node (ts catalog) on the matching major; bump both together at the
   # next LTS line.
-  version: '24.16.0'
+  version: '24.22.3'
 pnpm:
   version: '11.3.0'
 
@@ -31,7 +31,7 @@ rust:
 # the separate `unstable_uv` (the unprefixed `python` / package-manager keys are NOT built-in
 # in 2.2.5). The package manager VERSION pins under `unstable_uv`.
 unstable_python:
-  version: '3.12.13'
+  version: '3.12.16'
   packageManager: 'uv'
 unstable_uv:
   version: '0.11.16'
