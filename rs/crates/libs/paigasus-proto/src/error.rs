@@ -220,6 +220,9 @@ mod tests {
         "tool-policy-compiler-unavailable",
         "tool-policy-compiler-busy",
         "tool-policy-version-not-found",
+        "tool-policy-mode-transition-invalid",
+        "tool-policy-history-unsupported",
+        "tool-policy-held-not-acceptable",
         // Gateway
         "missing-authorization",
         "invalid-api-key",
@@ -243,6 +246,8 @@ mod tests {
         "tool-call-denied",
         "tool-result-blocked",
         "tool-policy-unavailable",
+        // Gateway tool decisions: the one HTTP error of the banner (SMA-776)
+        "tool-result-unreplaceable",
         // Shared
         "internal",
         "invalid-request-body",
@@ -265,7 +270,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 88, "the registry should hold 88 reasons");
+        assert_eq!(actual.len(), 92, "the registry should hold 92 reasons");
     }
 
     #[test]
@@ -447,5 +452,11 @@ mod tests {
         assert_eq!(ErrorReason::from_wire_reason("tool-policy-version-not-found"), Some(ErrorReason::ToolPolicyVersionNotFound));
         assert_eq!(ErrorReason::ToolPolicyInvalid as i32, 47);
         assert_eq!(ErrorReason::ToolPolicyVersionNotFound as i32, 60);
+        assert_eq!(ErrorReason::from_wire_reason("tool-policy-mode-transition-invalid"), Some(ErrorReason::ToolPolicyModeTransitionInvalid));
+        assert_eq!(ErrorReason::ToolPolicyModeTransitionInvalid as i32, 61);
+        assert_eq!(ErrorReason::from_wire_reason("tool-policy-history-unsupported"), Some(ErrorReason::ToolPolicyHistoryUnsupported));
+        assert_eq!(ErrorReason::ToolPolicyHistoryUnsupported as i32, 62);
+        assert_eq!(ErrorReason::from_wire_reason("tool-policy-held-not-acceptable"), Some(ErrorReason::ToolPolicyHeldNotAcceptable));
+        assert_eq!(ErrorReason::ToolPolicyHeldNotAcceptable as i32, 63);
     }
 }

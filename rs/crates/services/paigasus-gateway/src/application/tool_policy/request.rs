@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use metrics::{counter, histogram};
-use paigasus_gateway_core::{DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, plan_request, rewrite_request};
+use paigasus_gateway_core::{
+    DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, plan_request, rewrite_request,
+};
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
 use paigasus_kernel::{Prn, to_cedar_uid};
 use paigasus_observability::names;
@@ -20,8 +22,11 @@ use uuid::Uuid;
 use super::cache::{Lookup, PolicyCache};
 use crate::config::ToolPolicySettings;
 use crate::domain::org_of;
+use crate::domain::tool_policy::TenantSettings;
 
-/// Why the request side refuses a request. Both are a 400 `BadRequestBody` (P-10).
+/// Why the request side refuses a request. Each refusal is a 400 (P-10, SMA-776).
+/// `UnreadableTurn` and `UnknownToolChoice` are a 400 `invalid-request-body`.
+/// `UnreplaceableResult` is a 400 `tool-result-unreplaceable` (SMA-776).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The turn is `ToolTurn::Unavailable` and the tenant mode is `enforce` (D17). Also used when
@@ -30,16 +35,36 @@ pub enum Refusal {
     /// The `tool_choice` has a shape the gateway does not know, and an enforced removal exists
     /// (§ 6.5.1 step 4).
     UnknownToolChoice,
+    /// An enforced block of a result that the gateway cannot replace with a notice (SMA-776).
+    UnreplaceableResult,
 }
 
 impl Refusal {
+    /// The refusal for a plan cause. A cause that this service does not know fails closed (§ 6.4).
+    fn from_cause(cause: RefusalCause) -> Self {
+        match cause {
+            RefusalCause::UnreplaceableResult => Refusal::UnreplaceableResult,
+            RefusalCause::UnknownToolChoice => Refusal::UnknownToolChoice,
+            _ => Refusal::UnreadableTurn,
+        }
+    }
+
     /// The `reason` metric label.
     fn label(&self) -> &'static str {
         match self {
             Refusal::UnreadableTurn => "unreadable_turn",
             Refusal::UnknownToolChoice => "unknown_tool_choice",
+            Refusal::UnreplaceableResult => "unreplaceable_result",
         }
     }
+}
+
+/// A refused request: why, and the plan entries for the decision header (SMA-776 § 6.5).
+/// `entries` is empty when no plan exists (an unreadable turn).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub refusal: Refusal,
+    pub entries: Vec<RequestEntry>,
 }
 
 /// What the request side gives back: the body to send, the request-side report entries, and the
@@ -60,10 +85,10 @@ pub struct RequestToolPolicy {
 /// Count and log a refusal, or a refusal that enforce mode would make (P-10, D17: log-only is
 /// "forwarded, logged and counted"). `refused` says whether the request is refused (400) or
 /// forwarded. `cause` names the branch (`unreadable_turn`, `unknown_tool_choice`,
-/// `rewrite_failed`). The line holds the request id, the mode and the reason only: no body
+/// `unreplaceable_result`, `rewrite_failed`). The line holds the request id, the mode and the reason only: no body
 /// content and no tool name (ADR-0027 (i)).
 fn refusal_event(ctx: &DecisionContext, mode: TenantMode, refusal: &Refusal, cause: &'static str, refused: bool) {
-    counter!(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, "mode" => mode.as_str(), "reason" => refusal.label()).increment(1);
+    counter!(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, "mode" => mode.as_str(), "reason" => refusal.label(), "refused" => if refused { "true" } else { "false" }).increment(1);
     tracing::warn!(
         request_id = ctx.request_id.as_deref().unwrap_or("-"),
         mode = mode.as_str(),
@@ -132,14 +157,53 @@ impl RequestToolPolicy {
         PolicySet::Available { policies, tenant, facts }
     }
 
+    /// The policies of a request when the source returns the tenant settings (spec §9.3, R2).
+    ///
+    /// `pre` is the last known settings of the org, else `enforce` with the global fail mode. The
+    /// floor lookup always uses the GLOBAL fail mode: a floor outage never follows a tenant value
+    /// (spec §3.4, preflight F6). The tenant lookup always runs, also in mode `off`, because a
+    /// fresh load can change the mode. The settings after the lookup (`fin`) decide the mode.
+    async fn policy_set_from_source(&self, ctx: &DecisionContext, org: Uuid, model: &str, format: Format) -> (PolicySet, TenantSettings) {
+        let global = self.settings.on_policy_unavailable;
+        let pre = self.cache.tenant_settings(org).unwrap_or(TenantSettings {
+            mode: TenantMode::Enforce,
+            on_unavailable: global,
+        });
+        let fin_of = || self.cache.tenant_settings(org).unwrap_or(pre);
+        let Ok(principal) = Prn::parse(&ctx.principal) else {
+            return (PolicySet::Unavailable, fin_of());
+        };
+        let deadline = tokio::time::Instant::now() + self.settings.load_timeout;
+        let Lookup::Ready(floor) = self.cache.floor_until(global, deadline).await else {
+            return (PolicySet::Unavailable, fin_of());
+        };
+        // The set and the settings come from one cache entry, so a load that lands between two
+        // reads cannot pair a set with the mode of another load. `pre.on_unavailable` is only the
+        // default: a stored entry with settings decides the fallback by its own fail mode.
+        let (tenant, settings) = self.cache.tenant_with_settings_until(org, &floor, pre.on_unavailable, deadline).await;
+        let fin = settings.unwrap_or(pre);
+        let (policies, part): (Arc<ToolPolicies>, TenantPart) = if fin.mode == TenantMode::Off {
+            // The tenant set is not consulted in mode off (P-4), even when the lookup returned one.
+            (Arc::clone(&floor.floor_only), TenantPart::Off)
+        } else {
+            match tenant {
+                Lookup::Ready(t) => (t, TenantPart::Evaluated),
+                Lookup::Unavailable => (Arc::clone(&floor.floor_only), TenantPart::Unavailable),
+            }
+        };
+        let facts = Facts::new(to_cedar_uid(&principal), org, RequestInfo::new(ctx.scope.clone(), ingress(format), model), SessionInfo::placeholder());
+        (PolicySet::Available { policies, tenant: part, facts }, fin)
+    }
+
     /// Apply the tool policy to one request (§ 6.5). `turn` must be `parse_request(format, &body)`:
     /// the plan is made from the same bytes that the rewrite edits (controller ruling, Task 10).
     ///
     /// # Errors
     ///
-    /// A [`Refusal`] when the request must be refused with a 400 (D17, § 6.5.1 step 4). A refused
-    /// request records its overhead sample here: it has no snapshot to hold (preflight F14).
-    pub async fn apply(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes) -> Result<RequestOutcome, Refusal> {
+    /// A [`Refused`] when the request must be refused with a 400 (D17, § 6.5.1 step 4, SMA-776).
+    /// It carries the plan entries for the header. A refused request records its overhead sample
+    /// here: it has no snapshot to hold (preflight F14).
+    pub async fn apply(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes) -> Result<RequestOutcome, Refused> {
         let started = Instant::now();
         let out = self.apply_inner(ctx, model, format, turn, body, started).await;
         if out.is_err() {
@@ -148,27 +212,51 @@ impl RequestToolPolicy {
         out
     }
 
-    async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refusal> {
-        let org = org_of(&ctx.scope);
-        // D7, D34: the settings of the scope's org; without an org, the global values.
-        let (mode, on) = org.map_or((self.settings.default_mode, self.settings.on_policy_unavailable), |o| self.settings.tenant(o));
-
-        // D17, P-10: an unreadable turn is refused only in enforce mode; log-only counts it.
+    /// D17, P-10: an unreadable turn is refused only in enforce mode; log-only counts it.
+    fn check_turn(ctx: &DecisionContext, turn: &ToolTurn, mode: TenantMode) -> Result<(), Refused> {
         if !matches!(turn, ToolTurn::Parsed(_)) && mode != TenantMode::Off {
             refusal_event(ctx, mode, &Refusal::UnreadableTurn, "unreadable_turn", mode == TenantMode::Enforce);
             if mode == TenantMode::Enforce {
-                return Err(Refusal::UnreadableTurn);
+                return Err(Refused {
+                    refusal: Refusal::UnreadableTurn,
+                    entries: Vec::new(),
+                });
             }
         }
+        Ok(())
+    }
 
-        let set = self.policy_set(ctx, org, mode, on, model, format).await;
+    async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refused> {
+        let org = org_of(&ctx.scope);
+        let (set, mode, on) = match org {
+            // The source returns the tenant settings: they decide the mode and the fail mode. The
+            // turn check follows the lookup, because the lookup can change the mode.
+            Some(o) if self.settings.settings_from_source => {
+                let (set, fin) = self.policy_set_from_source(ctx, o, model, format).await;
+                // A floor outage follows the global value, never the tenant's (spec §3.4, F6).
+                let on = if matches!(set, PolicySet::Unavailable) {
+                    self.settings.on_policy_unavailable
+                } else {
+                    fin.on_unavailable
+                };
+                Self::check_turn(ctx, turn, fin.mode)?;
+                (set, fin.mode, on)
+            }
+            _ => {
+                // D7, D34: the settings of the scope's org; without an org, the global values.
+                let (mode, on) = org.map_or((self.settings.default_mode, self.settings.on_policy_unavailable), |o| self.settings.tenant(o));
+                Self::check_turn(ctx, turn, mode)?;
+                (self.policy_set(ctx, org, mode, on, model, format).await, mode, on)
+            }
+        };
         let snapshot = PolicySnapshot::new(set, mode, on);
 
         let (body, entries) = if let ToolTurn::Parsed(facts) = turn {
             let plan = plan_request(&snapshot, format, facts);
-            if plan.refuse {
-                refusal_event(ctx, mode, &Refusal::UnknownToolChoice, "unknown_tool_choice", true);
-                return Err(Refusal::UnknownToolChoice);
+            if let Some(cause) = plan.refusal() {
+                let refusal = Refusal::from_cause(cause);
+                refusal_event(ctx, mode, &refusal, refusal.label(), true);
+                return Err(Refused { refusal, entries: plan.entries });
             }
             let body = if plan.is_noop() {
                 body
@@ -176,9 +264,18 @@ impl RequestToolPolicy {
                 rewritten
             } else {
                 // Never send the original bytes for an enforced plan (controller ruling, Task 10).
+                // This request is refused, so it counts once: the unenforced causes stay silent.
                 refusal_event(ctx, mode, &Refusal::UnreadableTurn, "rewrite_failed", true);
-                return Err(Refusal::UnreadableTurn);
+                return Err(Refused {
+                    refusal: Refusal::UnreadableTurn,
+                    entries: plan.entries,
+                });
             };
+            // The request goes on: report each cause that the mode did not enforce (G5).
+            for cause in plan.refusals.keys() {
+                let refusal = Refusal::from_cause(*cause);
+                refusal_event(ctx, mode, &refusal, refusal.label(), false);
+            }
             (body, plan.entries)
         } else {
             (body, Vec::new())
@@ -199,10 +296,15 @@ mod tests {
     use std::time::Duration;
 
     use metrics_util::debugging::DebuggingRecorder;
-    use paigasus_gateway_core::{RequestReason, parse_request};
+    use paigasus_gateway_core::{BlockCode, Decision, Format as Fmt, RequestReason, decide_calls, parse_body, parse_request};
 
     use super::*;
-    use crate::application::tool_policy::testing::{self, FakeSource, ORG_A_PRN, PRINCIPAL, Snap, chat_request, settings};
+    use crate::adapters::policy_source::iam::tenant_from_response;
+    use crate::application::tool_policy::testing::{self, FakeSource, ORG_A_PRN, PRINCIPAL, Snap, chat_request, settings, settings_from_source};
+    use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
+    use paigasus_proto::paigasus::iam::v1::{
+        CompiledToolPolicySet, GetCompiledToolPoliciesResponse, HistoryCondition, ToolPolicyFailMode, ToolPolicyMode, ToolPolicySetKind, ToolPolicySettings as ProtoSettings,
+    };
 
     const FORBID_X: &str = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"x", resource);"#;
 
@@ -210,7 +312,39 @@ mod tests {
         DecisionContext::new(PRINCIPAL, ORG_A_PRN, Some("req-1".into()))
     }
 
-    async fn run(policy: &RequestToolPolicy, body: Bytes) -> Result<RequestOutcome, Refusal> {
+    const FORBID_COMPUTER: &str = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
+    const FLOOR_COMPUTER: &str = r#"@id("floor-computer") forbid(principal, action == Pgs::Gateway::Action::"computer", resource);"#;
+
+    /// A Responses request with one computer call and its screenshot output.
+    fn computer_request(extra: &str) -> Bytes {
+        Bytes::from(format!(
+            r#"{{"model":"m"{extra},"input":[{{"type":"computer_call","id":"cu_1","call_id":"c3","actions":[{{"type":"screenshot"}}],"status":"completed"}},{{"type":"computer_call_output","call_id":"c3","output":{{"type":"computer_screenshot","image_url":"data:image/png;base64,SECRET"}}}}]}}"#
+        ))
+    }
+
+    fn refusals(m: &Snap, mode: &str, reason: &str, refused: &str) -> u64 {
+        m.counter(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, &[("mode", mode), ("reason", reason), ("refused", refused)])
+    }
+
+    async fn run_responses(policy: &RequestToolPolicy, body: Bytes) -> Result<RequestOutcome, Refused> {
+        let turn = parse_request(Format::OpenAiResponses, &body);
+        policy.apply(&ctx(), "m", Format::OpenAiResponses, &turn, body).await
+    }
+
+    #[tokio::test]
+    async fn a_blocked_computer_result_is_refused_in_enforce_and_by_the_floor_in_log_only() {
+        let enforce = testing::policy(&FakeSource::new(testing::FLOOR, FORBID_COMPUTER), settings(TenantMode::Enforce));
+        let refused = run_responses(&enforce, computer_request("")).await.expect_err("refused");
+        assert_eq!(refused.refusal, Refusal::UnreplaceableResult);
+        assert_eq!(
+            refused.entries.iter().map(|e| (e.tool.as_str(), e.action, e.enforced)).collect::<Vec<_>>(),
+            [("computer", RequestAction::ReplaceResult, true)]
+        );
+        let floor = testing::policy(&FakeSource::new(FLOOR_COMPUTER, testing::PERMIT_ALL), settings(TenantMode::LogOnly));
+        assert_eq!(run_responses(&floor, computer_request("")).await.err().map(|r| r.refusal), Some(Refusal::UnreplaceableResult));
+    }
+
+    async fn run(policy: &RequestToolPolicy, body: Bytes) -> Result<RequestOutcome, Refused> {
         let turn = parse_request(Format::OpenAiChat, &body);
         policy.apply(&ctx(), "m", Format::OpenAiChat, &turn, body).await
     }
@@ -230,25 +364,28 @@ mod tests {
         let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
         // A duplicate key: the strict parse fails, so the turn is unavailable (C13).
         let body = Bytes::from_static(br#"{"model":"m","model":"n","messages":[]}"#);
-        let refusals = |m: &Snap, mode: &str| m.counter(names::GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, &[("mode", mode), ("reason", "unreadable_turn")]);
 
         let enforce = testing::policy(&source, settings(TenantMode::Enforce));
-        assert_eq!(run(&enforce, body.clone()).await.err(), Some(Refusal::UnreadableTurn));
+        assert_eq!(run(&enforce, body.clone()).await.err().map(|r| r.refusal), Some(Refusal::UnreadableTurn));
         let m = Snap::take(&snapshotter);
-        assert_eq!(refusals(&m, "enforce"), 1);
+        assert_eq!((refusals(&m, "enforce", "unreadable_turn", "true"), refusals(&m, "enforce", "unreadable_turn", "false")), (1, 0));
 
         let log_only = testing::policy(&source, settings(TenantMode::LogOnly));
         let out = run(&log_only, body.clone()).await.expect("log_only forwards");
         assert_eq!(out.body.as_ptr(), body.as_ptr(), "the original bytes");
         assert!(out.entries.is_empty());
         let m = Snap::take(&snapshotter);
-        assert_eq!(refusals(&m, "log_only"), 1, "counted as enforce would refuse (P-10)");
+        assert_eq!(
+            (refusals(&m, "log_only", "unreadable_turn", "false"), refusals(&m, "log_only", "unreadable_turn", "true")),
+            (1, 0),
+            "counted as enforce would refuse (P-10)"
+        );
 
         let off = testing::policy(&source, settings(TenantMode::Off));
         let out = run(&off, body.clone()).await.expect("off forwards");
         assert_eq!(out.body.as_ptr(), body.as_ptr());
         let m = Snap::take(&snapshotter);
-        assert_eq!(refusals(&m, "off"), 0);
+        assert_eq!(refusals(&m, "off", "unreadable_turn", "true") + refusals(&m, "off", "unreadable_turn", "false"), 0);
     }
 
     #[tokio::test]
@@ -256,14 +393,74 @@ mod tests {
         let source = FakeSource::new(testing::FLOOR, FORBID_X);
         let body = chat_request(&["x", "y"], r#","tool_choice":"weird""#);
         let enforce = testing::policy(&source, settings(TenantMode::Enforce));
-        assert_eq!(run(&enforce, body.clone()).await.err(), Some(Refusal::UnknownToolChoice));
+        assert_eq!(run(&enforce, body.clone()).await.err().map(|r| r.refusal), Some(Refusal::UnknownToolChoice));
         // Log-only: the tenant removal is not enforced, so the request goes out unchanged.
         let log_only = testing::policy(&source, settings(TenantMode::LogOnly));
         let out = run(&log_only, body.clone()).await.expect("log_only");
         assert_eq!(out.body, body);
         // A floor removal is enforced in every mode (D33), so log-only refuses it too.
         let floor_body = chat_request(&["rm", "y"], r#","tool_choice":"weird""#);
-        assert_eq!(run(&log_only, floor_body).await.err(), Some(Refusal::UnknownToolChoice));
+        assert_eq!(run(&log_only, floor_body).await.err().map(|r| r.refusal), Some(Refusal::UnknownToolChoice));
+    }
+
+    #[tokio::test]
+    async fn a_computer_block_is_counted_as_refused_or_as_not_enforced() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let source = FakeSource::new(testing::FLOOR, FORBID_COMPUTER);
+        let enforce = testing::policy(&source, settings(TenantMode::Enforce));
+        assert_eq!(run_responses(&enforce, computer_request("")).await.err().map(|r| r.refusal), Some(Refusal::UnreplaceableResult));
+        let m = Snap::take(&snapshotter);
+        assert_eq!(
+            (refusals(&m, "enforce", "unreplaceable_result", "true"), refusals(&m, "enforce", "unreplaceable_result", "false")),
+            (1, 0)
+        );
+
+        let log_only = testing::policy(&source, settings(TenantMode::LogOnly));
+        let body = computer_request("");
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::INFO);
+        let out = run_responses(&log_only, body.clone()).await.expect("log_only forwards");
+        assert_eq!(out.body.as_ptr(), body.as_ptr(), "the original bytes");
+        let m = Snap::take(&snapshotter);
+        assert_eq!(
+            (refusals(&m, "log_only", "unreplaceable_result", "true"), refusals(&m, "log_only", "unreplaceable_result", "false")),
+            (0, 1)
+        );
+        let line = one_line(&logs.text(), "tool-policy request refusal");
+        for want in ["req-1", "log_only", "unreplaceable_result", "refused=false"] {
+            assert!(line.contains(want), "{want:?} in {line}");
+        }
+        assert!(!line.contains("SECRET") && !line.contains("computer\""), "{line}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_choice_with_a_log_only_removal_is_counted_not_refused() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let log_only = testing::policy(&FakeSource::new(testing::FLOOR, FORBID_X), settings(TenantMode::LogOnly));
+        let body = chat_request(&["x", "y"], r#","tool_choice":"weird""#);
+        let out = run(&log_only, body.clone()).await.expect("log_only forwards");
+        assert_eq!(out.body, body);
+        let m = Snap::take(&snapshotter);
+        assert_eq!(refusals(&m, "log_only", "unknown_tool_choice", "false"), 1);
+        assert_eq!(refusals(&m, "log_only", "unknown_tool_choice", "true"), 0);
+    }
+
+    /// A request with two enforced causes counts one refused sample, not one per cause.
+    #[tokio::test]
+    async fn a_request_with_two_enforced_causes_counts_once() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let tenant = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action in [Pgs::Gateway::Action::"x", Pgs::Gateway::Action::"computer"], resource);"#;
+        let enforce = testing::policy(&FakeSource::new(testing::FLOOR, tenant), settings(TenantMode::Enforce));
+        let body = computer_request(r#","tools":[{"type":"function","name":"x","parameters":{}}],"tool_choice":{"type":"a_future_kind"}"#);
+        assert_eq!(run_responses(&enforce, body).await.err().map(|r| r.refusal), Some(Refusal::UnreplaceableResult));
+        let m = Snap::take(&snapshotter);
+        assert_eq!(refusals(&m, "enforce", "unreplaceable_result", "true"), 1);
+        assert_eq!(refusals(&m, "enforce", "unknown_tool_choice", "true") + refusals(&m, "enforce", "unknown_tool_choice", "false"), 0);
     }
 
     /// The single line of `logs` that holds `needle`.
@@ -420,6 +617,30 @@ mod tests {
         );
     }
 
+    /// A refusal because the rewrite failed counts once. The unenforced computer cause of the same
+    /// request stays silent: the request is refused, not forwarded. The body passed to `apply`
+    /// is not the body the turn came from, so the rewrite cannot edit it.
+    #[tokio::test]
+    async fn a_failed_rewrite_counts_one_refusal_and_no_unenforced_cause() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let log_only = testing::policy(&FakeSource::new(testing::FLOOR, FORBID_COMPUTER), settings(TenantMode::LogOnly));
+        // The floor removes `rm` in every mode: an enforced plan. The tenant block of the computer
+        // result is not enforced in log-only: an unenforced cause.
+        let good = computer_request(r#","tools":[{"type":"function","name":"rm","parameters":{}}]"#);
+        let turn = parse_request(Format::OpenAiResponses, &good);
+        let refused = log_only
+            .apply(&ctx(), "m", Format::OpenAiResponses, &turn, Bytes::from_static(b"{"))
+            .await
+            .expect_err("the rewrite fails");
+        assert_eq!(refused.refusal, Refusal::UnreadableTurn);
+        assert_eq!(refused.entries.len(), 2, "the plan entries are kept for the header: {:?}", refused.entries);
+        let m = Snap::take(&snapshotter);
+        assert_eq!(refusals(&m, "log_only", "unreadable_turn", "true"), 1);
+        assert_eq!(refusals(&m, "log_only", "unreplaceable_result", "false") + refusals(&m, "log_only", "unreplaceable_result", "true"), 0);
+    }
+
     #[tokio::test]
     async fn a_refused_request_records_one_sample() {
         let recorder = DebuggingRecorder::new();
@@ -428,7 +649,240 @@ mod tests {
         let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
         let enforce = testing::policy(&source, settings(TenantMode::Enforce));
         let body = Bytes::from_static(br#"{"model":"m","model":"n","messages":[]}"#);
-        assert_eq!(run(&enforce, body).await.err(), Some(Refusal::UnreadableTurn));
+        assert_eq!(run(&enforce, body).await.err().map(|r| r.refusal), Some(Refusal::UnreadableTurn));
         assert_eq!(Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).len(), 1);
+    }
+    fn from_source(mode: TenantMode, on_unavailable: OnUnavailable) -> Option<TenantSettings> {
+        Some(TenantSettings { mode, on_unavailable })
+    }
+
+    #[tokio::test]
+    async fn the_mode_from_the_source_overrides_the_default_mode() {
+        // Default mode `off`, source `enforce`: a forbidden call is removed.
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        source.set_settings(from_source(TenantMode::Enforce, OnUnavailable::Closed));
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Off));
+        let out = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
+        assert_eq!(tool_names(&out.body), ["y"]);
+        assert_eq!(out.snapshot.mode, TenantMode::Enforce);
+
+        // Default mode `enforce`, source `log_only`: the call is observed, not removed.
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        source.set_settings(from_source(TenantMode::LogOnly, OnUnavailable::Closed));
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Enforce));
+        let body = chat_request(&["x", "y"], "");
+        let out = run(&policy, body.clone()).await.expect("apply");
+        assert_eq!(out.body, body);
+        assert_eq!(out.snapshot.mode, TenantMode::LogOnly);
+        assert!(out.entries.iter().all(|e| !e.enforced));
+    }
+
+    #[tokio::test]
+    async fn a_changed_mode_from_the_source_applies_on_the_next_load() {
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        source.set_settings(from_source(TenantMode::LogOnly, OnUnavailable::Closed));
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Off));
+        let body = chat_request(&["x", "y"], "");
+        let first = run(&policy, body.clone()).await.expect("apply");
+        assert_eq!(first.body, body, "log_only removes nothing");
+        // The mode changes at the source. A mode change alone changes the version.
+        source.set_settings(from_source(TenantMode::Enforce, OnUnavailable::Closed));
+        policy.cache().invalidate_all();
+        let second = run(&policy, body.clone()).await.expect("apply");
+        assert_eq!(tool_names(&second.body), ["y"], "the new mode applies in the same request that reloads");
+        assert_eq!(second.snapshot.mode, TenantMode::Enforce);
+    }
+
+    #[tokio::test]
+    async fn mode_off_from_the_source_still_applies_the_floor() {
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        source.set_settings(from_source(TenantMode::Off, OnUnavailable::Closed));
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Enforce));
+        let out = run(&policy, chat_request(&["x", "rm", "y"], "")).await.expect("apply");
+        assert_eq!(tool_names(&out.body), ["x", "y"], "the floor removes rm, the tenant forbid on x does not apply");
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Off, .. }));
+        assert_eq!(out.snapshot.mode, TenantMode::Off);
+    }
+
+    #[tokio::test]
+    async fn with_no_known_settings_the_global_fail_mode_applies() {
+        // Only the tenant load fails: the floor loads. The default mode is `off`, so a mutation that
+        // used the default mode for "no settings known" would show here (preflight F10).
+        for global in [OnUnavailable::Closed, OnUnavailable::Open] {
+            let source = FakeSource::new(testing::FLOOR, FORBID_X);
+            source.set_fail_tenant(true);
+            let mut s = settings_from_source(TenantMode::Off);
+            s.on_policy_unavailable = global;
+            let policy = testing::policy(&source, s);
+            let out = run(&policy, chat_request(&["x", "rm", "y"], "")).await.expect("apply");
+            assert_eq!(out.snapshot.mode, TenantMode::Enforce, "no settings known: enforce ({global:?})");
+            assert_eq!(out.snapshot.on_unavailable, global, "no settings known: the global fail mode");
+            assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
+            assert_eq!(tool_names(&out.body), ["x", "y"], "the floor still applies ({global:?})");
+            // End to end: one call to a tool of the tenant. Closed blocks it. Open allows it and reports it.
+            let body = r#"{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"y","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+            let calls = parse_body(Fmt::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
+            let turn = parse_request(Format::OpenAiChat, &chat_request(&["y"], ""));
+            let outcomes = decide_calls(&out.snapshot, &turn, &calls);
+            let want = if global == OnUnavailable::Closed {
+                Decision::Block { code: BlockCode::PolicyUnavailable }
+            } else {
+                Decision::Observe { would: BlockCode::PolicyUnavailable }
+            };
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].decision, want, "{global:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_tenant_is_looked_up_in_mode_off_so_a_new_mode_applies() {
+        // The source says `off`: the first request loads it and applies the floor alone.
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        source.set_settings(from_source(TenantMode::Off, OnUnavailable::Closed));
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Enforce));
+        let body = chat_request(&["x", "y"], "");
+        let first = run(&policy, body.clone()).await.expect("apply");
+        assert_eq!(first.body, body, "mode off: the tenant forbid does not apply");
+        assert_eq!(source.tenant_calls(), 1);
+        // The event path: the mode changes at the source and the cache is invalidated.
+        source.set_settings(from_source(TenantMode::Enforce, OnUnavailable::Closed));
+        policy.cache().invalidate_all();
+        let second = run(&policy, body.clone()).await.expect("apply");
+        assert_eq!(source.tenant_calls(), 2, "the cached mode off did not stop the tenant lookup");
+        assert_eq!(tool_names(&second.body), ["y"], "the new mode applies in the request that reloads");
+        assert_eq!(second.snapshot.mode, TenantMode::Enforce);
+    }
+
+    #[tokio::test]
+    async fn the_global_fail_mode_decides_when_the_floor_is_unavailable() {
+        // Spec §3.4, §9.3, preflight F6: a floor outage never follows the tenant fail mode.
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        source.set_settings(from_source(TenantMode::Enforce, OnUnavailable::Open));
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Off));
+        run(&policy, chat_request(&["y"], "")).await.expect("apply: the tenant settings are known now");
+        policy.cache().invalidate_all();
+        source.set_fail_floor(true);
+        let out = run(&policy, chat_request(&["y"], "")).await.expect("apply");
+        assert!(matches!(out.snapshot.set, PolicySet::Unavailable), "the floor is down and `open` is the tenant value");
+        assert_eq!(out.snapshot.on_unavailable, OnUnavailable::Closed, "the global value, not the tenant's open");
+        assert_eq!(out.snapshot.mode, TenantMode::Enforce, "the last known mode");
+    }
+
+    #[tokio::test]
+    async fn the_last_known_fail_mode_applies_when_the_tenant_set_becomes_unavailable() {
+        // Global `closed`, tenant `open`: after a good load, a source error serves the last good set.
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        source.set_settings(from_source(TenantMode::Enforce, OnUnavailable::Open));
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Off));
+        let first = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
+        assert_eq!(tool_names(&first.body), ["y"]);
+        source.set_fail_tenant(true);
+        policy.cache().invalidate_all();
+        let out = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }), "the last good set");
+        assert_eq!(out.snapshot.on_unavailable, OnUnavailable::Open);
+        assert_eq!(tool_names(&out.body), ["y"]);
+    }
+
+    /// A source that answers as IAM does: a proto answer, mapped by the IAM adapter. Its tenant set
+    /// holds a history condition, so R5 refuses it (final review I-1).
+    struct IamHistoryAnswer(GetCompiledToolPoliciesResponse);
+
+    #[async_trait::async_trait]
+    impl PolicySource for IamHistoryAnswer {
+        async fn floor(&self) -> Result<PolicyText, SourceError> {
+            Ok(PolicyText {
+                text: testing::FLOOR.to_owned(),
+                version: "f1".to_owned(),
+            })
+        }
+        async fn tenant(&self, org: Uuid) -> Result<TenantPolicies, SourceError> {
+            tenant_from_response(org, self.0.clone())
+        }
+    }
+
+    /// The request side over an IAM answer with a history set, `mode`, `fail` and the global value.
+    fn history_policy(mode: ToolPolicyMode, fail: ToolPolicyFailMode, global: OnUnavailable) -> RequestToolPolicy {
+        let answer = GetCompiledToolPoliciesResponse {
+            set: Some(CompiledToolPolicySet {
+                kind: ToolPolicySetKind::Tenant as i32,
+                org_id: testing::ORG_A.hyphenated().to_string(),
+                version: 2,
+                cedar_policies: testing::PERMIT_ALL.to_owned(),
+                conditions: vec![HistoryCondition {
+                    slot: "h0".to_owned(),
+                    policy_id: "p".to_owned(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            settings: Some(ProtoSettings {
+                mode: mode as i32,
+                fail_mode: fail as i32,
+                ..Default::default()
+            }),
+            floor_version: 1,
+        };
+        let mut s = settings_from_source(TenantMode::Enforce);
+        s.on_policy_unavailable = global;
+        let cache = PolicyCache::new(Arc::new(IamHistoryAnswer(answer)), crate::application::tool_policy::CacheSettings::from_settings(&s));
+        RequestToolPolicy::new(cache, s)
+    }
+
+    /// The decision on one call to the tool `y` under `snapshot`.
+    fn decide_y(snapshot: &PolicySnapshot) -> Decision {
+        let body = r#"{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"y","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let calls = parse_body(Fmt::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
+        let turn = parse_request(Format::OpenAiChat, &chat_request(&["y"], ""));
+        let outcomes = decide_calls(snapshot, &turn, &calls);
+        assert_eq!(outcomes.len(), 1);
+        outcomes[0].decision
+    }
+
+    #[tokio::test]
+    async fn an_org_in_mode_off_with_a_history_set_is_not_blocked_under_a_global_closed() {
+        let policy = history_policy(ToolPolicyMode::Off, ToolPolicyFailMode::Closed, OnUnavailable::Closed);
+        let out = run(&policy, chat_request(&["x", "rm", "y"], "")).await.expect("apply");
+        assert_eq!(out.snapshot.mode, TenantMode::Off, "the mode from IAM, not the R2 enforce");
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Off, .. }));
+        assert_eq!(tool_names(&out.body), ["x", "y"], "the floor still applies");
+        assert_eq!(decide_y(&out.snapshot), Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn an_org_in_log_only_with_a_history_set_is_not_blocked_under_a_global_closed() {
+        let policy = history_policy(ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, OnUnavailable::Closed);
+        let out = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
+        assert_eq!(out.snapshot.mode, TenantMode::LogOnly);
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
+        assert_eq!(decide_y(&out.snapshot), Decision::Observe { would: BlockCode::PolicyUnavailable });
+    }
+
+    #[tokio::test]
+    async fn the_tenant_fail_mode_decides_for_an_enforced_history_set() {
+        // The global value is the opposite of the tenant value in each case, so it cannot decide.
+        let open = history_policy(ToolPolicyMode::Enforce, ToolPolicyFailMode::Open, OnUnavailable::Closed);
+        let out = run(&open, chat_request(&["y"], "")).await.expect("apply");
+        assert_eq!((out.snapshot.mode, out.snapshot.on_unavailable), (TenantMode::Enforce, OnUnavailable::Open));
+        assert_eq!(decide_y(&out.snapshot), Decision::Observe { would: BlockCode::PolicyUnavailable });
+        let closed = history_policy(ToolPolicyMode::Enforce, ToolPolicyFailMode::Closed, OnUnavailable::Open);
+        let out = run(&closed, chat_request(&["y"], "")).await.expect("apply");
+        assert_eq!((out.snapshot.mode, out.snapshot.on_unavailable), (TenantMode::Enforce, OnUnavailable::Closed));
+        assert_eq!(decide_y(&out.snapshot), Decision::Block { code: BlockCode::PolicyUnavailable });
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_turn_uses_the_mode_from_the_source() {
+        let body = Bytes::from_static(br#"{"model":"m","model":"n","messages":[]}"#);
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        source.set_settings(from_source(TenantMode::Enforce, OnUnavailable::Closed));
+        let enforce = testing::policy(&source, settings_from_source(TenantMode::Off));
+        assert_eq!(run(&enforce, body.clone()).await.err().map(|r| r.refusal), Some(Refusal::UnreadableTurn));
+
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        source.set_settings(from_source(TenantMode::LogOnly, OnUnavailable::Closed));
+        let log_only = testing::policy(&source, settings_from_source(TenantMode::Enforce));
+        let out = run(&log_only, body.clone()).await.expect("log_only forwards");
+        assert_eq!(out.body.as_ptr(), body.as_ptr());
     }
 }

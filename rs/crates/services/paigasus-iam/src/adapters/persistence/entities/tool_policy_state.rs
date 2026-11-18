@@ -13,6 +13,7 @@ pub struct Model {
     pub org_id: Option<Uuid>,
     pub catalog_revision: i64,
     pub live_version: i64,
+    pub last_version: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

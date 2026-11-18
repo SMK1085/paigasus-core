@@ -210,6 +210,13 @@ pub enum TenancyError {
     /// SMA-774. The requested version does not exist, or it is not live or superseded.
     #[error("the tool policy set version does not exist")]
     ToolPolicyVersionNotFound,
+    /// SMA-775. A change to `enforce` that spec section 9.2 refuses: the organization never left
+    /// `off` (the first change away from `off` must be to `log_only`), or it has no tool policy set.
+    #[error("the tool policy mode cannot change this way: change the mode to log_only first; enforce also needs a saved tool policy set")]
+    ToolPolicyModeTransitionInvalid,
+    /// SMA-781. The held tool policy version has no compile output, so an admin cannot accept it.
+    #[error("the held tool policy version has no compile output and cannot be accepted")]
+    ToolPolicyHeldNotAcceptable,
     #[error("internal server error")]
     Internal,
 }
@@ -263,6 +270,8 @@ impl TenancyError {
             Self::ToolPolicyCompilerUnavailable => "tool-policy-compiler-unavailable",
             Self::ToolPolicyCompilerBusy => "tool-policy-compiler-busy",
             Self::ToolPolicyVersionNotFound => "tool-policy-version-not-found",
+            Self::ToolPolicyModeTransitionInvalid => "tool-policy-mode-transition-invalid",
+            Self::ToolPolicyHeldNotAcceptable => "tool-policy-held-not-acceptable",
             Self::Internal => "internal",
         }
     }
@@ -309,7 +318,9 @@ impl TenancyError {
             | Self::NotSystemOwned(_)
             | Self::FleetNotConverged
             | Self::CannotUnlinkOwnIdentity
-            | Self::ToolPolicyRecompilePending => ErrorClass::Precondition,
+            | Self::ToolPolicyRecompilePending
+            | Self::ToolPolicyHeldNotAcceptable
+            | Self::ToolPolicyModeTransitionInvalid => ErrorClass::Precondition,
             Self::ToolPolicyVersionConflict => ErrorClass::Aborted,
             Self::ToolPolicyCompilerUnavailable => ErrorClass::Unavailable,
             Self::ToolPolicyCompilerBusy => ErrorClass::Exhausted,
@@ -382,6 +393,8 @@ impl TenancyError {
             | Self::ToolPolicyCompilerUnavailable
             | Self::ToolPolicyCompilerBusy
             | Self::ToolPolicyVersionNotFound
+            | Self::ToolPolicyModeTransitionInvalid
+            | Self::ToolPolicyHeldNotAcceptable
             | Self::Internal => None,
         }
     }
@@ -506,6 +519,8 @@ mod tests {
             (TenancyError::ToolPolicyCompilerUnavailable, "tool-policy-compiler-unavailable", ErrorClass::Unavailable),
             (TenancyError::ToolPolicyCompilerBusy, "tool-policy-compiler-busy", ErrorClass::Exhausted),
             (TenancyError::ToolPolicyVersionNotFound, "tool-policy-version-not-found", ErrorClass::NotFound),
+            (TenancyError::ToolPolicyModeTransitionInvalid, "tool-policy-mode-transition-invalid", ErrorClass::Precondition),
+            (TenancyError::ToolPolicyHeldNotAcceptable, "tool-policy-held-not-acceptable", ErrorClass::Precondition),
         ] {
             assert_eq!(err.code(), code);
             assert_eq!(err.class(), class, "{code}");

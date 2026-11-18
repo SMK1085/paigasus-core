@@ -147,7 +147,7 @@ impl Iam for IamClient {
 /// logs and IAM's audit rows (§4.4). A `None` scope (background work) attaches nothing rather
 /// than a nil UUID — IAM then mints its own. The request id is deliberately NOT forwarded: IAM
 /// mints its own per hop, which is what keeps the two distinguishable in a stitched trace.
-fn with_correlation<T>(mut req: Request<T>) -> Request<T> {
+pub(crate) fn with_correlation<T>(mut req: Request<T>) -> Request<T> {
     if let Some(ids) = paigasus_observability::current_ids()
         && let Ok(value) = ids.correlation_id.to_string().parse()
     {
@@ -207,7 +207,7 @@ fn self_authorize_request(caller: &CallerCredential, principal_prn: &str, action
 /// IS assembled eagerly here (tonic builds the TLS connector when `tls_config` is called), so a
 /// malformed cert/key or missing trust store fails fast at boot rather than silently on the first
 /// request.
-fn build_channel(cfg: &IamClientConfig) -> Result<Channel, IamError> {
+pub(crate) fn build_channel(cfg: &IamClientConfig) -> Result<Channel, IamError> {
     let endpoint = Channel::from_shared(cfg.grpc_addr.clone()).map_err(|e| IamError::Connect(format!("invalid iam.grpc_addr {:?}: {e}", cfg.grpc_addr)))?;
 
     let endpoint = match &cfg.tls {
@@ -406,6 +406,7 @@ mod tests {
         let cfg = IamClientConfig {
             grpc_addr: "http://127.0.0.1:9090".to_string(),
             tls: IamTlsConfig::LoopbackInsecure,
+            service_credential_file: None,
         };
         assert!(IamClient::connect(&cfg).await.is_ok(), "loopback-insecure connect is lazy and must not fail without a live server");
     }
@@ -434,6 +435,7 @@ mod tests {
                 client_cert_path: Some("does-not-need-to-exist-client.pem".to_string()),
                 client_key_path: None,
             },
+            service_credential_file: None,
         };
         let err = IamClient::connect(&cfg).await.expect_err("a client cert without a key must be rejected");
         assert!(matches!(err, IamError::Connect(_)), "expected IamError::Connect for the mTLS pairing violation, got {err:?}");
