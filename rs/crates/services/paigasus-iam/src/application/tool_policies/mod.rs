@@ -54,7 +54,7 @@ use uuid::Uuid;
 use self::catalog::{CatalogPlan, PlanStop, apply_plan, check_catalog_size, check_tool_limit, plan_delete, plan_import, plan_put, problems_to_stop, size_check_time, stored_next, stored_upserts};
 pub use self::fetch::CompiledTenant;
 pub use self::held::HeldTarget;
-pub use self::recompile::{RECOMPILE_JOB_ACTOR, RECOMPILE_RESULT_LABELS, RecompileOutcome, RecompileRun, SetRecompile};
+pub use self::recompile::{RECOMPILE_JOB_ACTOR, RECOMPILE_RESULT_LABELS, RecompileOutcome, RecompileRun, RecompileTasks, SetRecompile};
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
 use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, reject_history_until_gateway_supports_it};
 use self::settings::check_transition;
@@ -135,6 +135,8 @@ pub struct ToolPolicyService<I, C> {
     /// The process shutdown signal. The RPC run of the re-compile job stops between two sets when
     /// it fires. `None` (tests): the RPC run is never stopped.
     shutdown: Option<tokio::sync::watch::Receiver<()>>,
+    /// The tasks of the RPC runs of the re-compile job. `main` joins them at shutdown.
+    recompile_tasks: RecompileTasks,
 }
 
 // By hand: a derive would need `I: Clone` and `C: Clone`, and both live behind an `Arc`. The
@@ -154,6 +156,7 @@ impl<I, C> Clone for ToolPolicyService<I, C> {
             ids: self.ids.clone(),
             clock: self.clock.clone(),
             shutdown: self.shutdown.clone(),
+            recompile_tasks: self.recompile_tasks.clone(),
         }
     }
 }
@@ -244,6 +247,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             ids: Arc::new(deps.ids),
             clock: Arc::new(deps.clock),
             shutdown: None,
+            recompile_tasks: RecompileTasks::default(),
         }
     }
 
@@ -253,6 +257,14 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     #[must_use]
     pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<()>) -> Self {
         self.shutdown = Some(shutdown);
+        self
+    }
+
+    /// Gives the service the tasks of the RPC runs of the re-compile job, so that `main` can join
+    /// them at shutdown (F15). Without it, the service keeps its own tasks, which nobody joins.
+    #[must_use]
+    pub fn with_recompile_tasks(mut self, tasks: RecompileTasks) -> Self {
+        self.recompile_tasks = tasks;
         self
     }
 

@@ -12,7 +12,7 @@ use paigasus_iam::adapters::events::{NatsEventPublisher, OutboxRelay, TracingEve
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, serve_http};
 use paigasus_iam::adapters::persistence::{OutboxRetentionPolicy, PgOutboxListener, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy, migrate_under_lock};
-use paigasus_iam::application::tool_policies::{RECOMPILE_RESULT_LABELS, RecompileRun};
+use paigasus_iam::application::tool_policies::{RECOMPILE_RESULT_LABELS, RecompileRun, RecompileTasks};
 use paigasus_iam::config::{IamConfig, PublisherBackend};
 use paigasus_iam_core::EventPublisher;
 use paigasus_observability::names;
@@ -151,6 +151,9 @@ async fn serve() -> anyhow::Result<()> {
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());
     let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
+    // SMA-781: the tasks of the RPC runs of the tool policy re-compile job (F15). A request does
+    // not own its job, so the shutdown below joins these tasks after the servers stopped.
+    let recompile_tasks = RecompileTasks::new();
 
     // Same-port `/metrics` (SMA-446 Unit 3): merged into the boot router below, only when
     // enabled AND no separate `metrics.addr` is configured — `metrics.enabled = false`, or a
@@ -261,7 +264,7 @@ async fn serve() -> anyhow::Result<()> {
     let mut shutdown = std::pin::pin!(shutdown_signal());
     let mut shutting_down = false;
     let outcome = tokio::select! {
-        r = boot_deferred(&db, &config, &slot, &mut servers, &rx, request_timeout) => r,
+        r = boot_deferred(&db, &config, &slot, &mut servers, &rx, &recompile_tasks, request_timeout) => r,
         () = &mut shutdown => {
             // This window was unhandled before SMA-571 — but the pod is now PRESENT-and-unready
             // rather than absent, so a rolling update is far more likely to land here. Ignoring
@@ -282,6 +285,9 @@ async fn serve() -> anyhow::Result<()> {
         let outstanding = drain_bounded(&mut servers, DRAIN_TIMEOUT).await;
         if outstanding > 0 {
             tracing::warn!(unreaped = outstanding, "drain timed out with tasks not yet joined");
+        }
+        if tokio::time::timeout(DRAIN_TIMEOUT, recompile_tasks.join()).await.is_err() {
+            tracing::warn!("drain timed out with a tool policy re-compile run not yet stopped");
         }
         return outcome;
     }
@@ -326,6 +332,10 @@ async fn serve() -> anyhow::Result<()> {
             Err(_) => {}
         }
     }
+    // SMA-781: an RPC run of the re-compile job can outlive its request (F15). The shutdown watch
+    // stops it between two sets; wait for that, so that it releases its lock before the exit.
+    // Unbounded, like the drain of the boot run above.
+    recompile_tasks.join().await;
     result
 }
 
@@ -350,6 +360,7 @@ async fn boot_deferred(
     slot: &boot::BootSlot,
     servers: &mut JoinSet<anyhow::Result<()>>,
     rx: &tokio::sync::watch::Receiver<()>,
+    recompile_tasks: &RecompileTasks,
     request_timeout: Duration,
 ) -> anyhow::Result<()> {
     // SMA-559: serialised against a concurrently starting replica by a transaction-scoped
@@ -416,7 +427,7 @@ async fn boot_deferred(
     // starts below, after `slot.install`.
     let mut recompile_at_boot = None;
     if let Some(service) = state.tool_policies.take() {
-        let service = service.with_shutdown(rx.clone());
+        let service = service.with_shutdown(rx.clone()).with_recompile_tasks(recompile_tasks.clone());
         state.tool_policies = Some(service.clone());
         for label in RECOMPILE_RESULT_LABELS {
             metrics::counter!(names::IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL, "result" => label).increment(0);

@@ -228,7 +228,9 @@ again. IAM changes a live set by itself only when the new output is the same.
   not run the job.
 - A run on request can last longer than the 30 s request timeout of IAM when many sets are stale.
   The caller then gets a timeout. The job continues in the background and finishes. Read the
-  results with `GET /v1/held-tool-policy-versions` and in the IAM log.
+  results with `GET /v1/held-tool-policy-versions` and in the IAM log. At a shutdown of the
+  replica, the job stops between two sets, and the replica waits for it to release the lock
+  before it exits.
 - After a rolling deploy that changes the compiler generation or the schema revision, do one more
   step. When every replica runs the new release, start the job one more time with
   `POST /v1/tool-policy-recompile`. The reason follows. The new replicas run the job at boot, but

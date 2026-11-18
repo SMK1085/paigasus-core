@@ -24,9 +24,15 @@
 //!
 //! **The RPC run is its own task (F15).** IAM drops a request at a fixed 30 s timeout. The RPC
 //! spawns the job, and the task owns the lock guard, so a dropped RPC future does not stop the
-//! job. The caller then reads the results with `ListHeldToolPolicyVersions` and the log.
+//! job. The caller then reads the results with `ListHeldToolPolicyVersions` and the log. The
+//! task goes into [`RecompileTasks`], which `main` owns and joins at shutdown: the process does
+//! not end before the job stops between two sets and releases the lock.
 
 use std::future::Future;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::Poll;
+
+use tokio::task::JoinSet;
 
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::tool_policy::{
@@ -118,6 +124,42 @@ fn set_label(key: &ToolPolicySetKey) -> String {
     }
 }
 
+/// The tasks of the RPC runs of the job (F15). `main` makes one, gives it to the service with
+/// [`ToolPolicyService::with_recompile_tasks`] and calls [`RecompileTasks::join`] at shutdown,
+/// after the servers stopped. A clone shares the same tasks.
+#[derive(Clone, Default)]
+pub struct RecompileTasks(Arc<Mutex<JoinSet<()>>>);
+
+impl RecompileTasks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Starts `task` and keeps it until it ends. Finished tasks are removed first.
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut set = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        while set.try_join_next().is_some() {}
+        set.spawn(task);
+    }
+
+    /// Waits until every task ended. A panic of a task is a warning. To drop this future (for
+    /// example at a timeout) does not stop a task.
+    pub async fn join(&self) {
+        std::future::poll_fn(|cx| {
+            let mut set = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            loop {
+                match set.poll_join_next(cx) {
+                    Poll::Ready(Some(Ok(()))) => {}
+                    Poll::Ready(Some(Err(error))) => tracing::warn!(%error, "a tool policy re-compile task ended abnormally"),
+                    Poll::Ready(None) => return Poll::Ready(()),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        })
+        .await;
+    }
+}
+
 /// A held write: the output (`None` for a failed compile), the report and the outcome to give.
 struct HeldWrite<'a> {
     out: Option<&'a CompiledOutput>,
@@ -127,7 +169,8 @@ struct HeldWrite<'a> {
 
 impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
     /// The RPC entry: authorizes `ManageToolPolicyRecompile` at `root_prn()`, then runs. The job
-    /// runs in a spawned task that owns the lock guard (F15), and this call waits for it.
+    /// runs in a task of [`RecompileTasks`] that owns the lock guard (F15), and this call waits
+    /// for it.
     pub async fn run_recompile(&self, actor: &Prn) -> Result<RecompileRun, TenancyError> {
         self.authorize.check(actor, Action::ManageToolPolicyRecompile, &root_prn()).await?;
         let svc = self.clone();
@@ -142,9 +185,14 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
                 None => std::future::pending().await,
             }
         };
-        let job = tokio::spawn(async move { svc.run_job(Some(&actor), stop).await });
-        job.await.map_err(|error| {
-            tracing::error!(%error, "the tool policy re-compile task ended abnormally");
+        // The task is in the process-owned set, so `main` joins it at shutdown. The result goes
+        // back on a channel: a dropped request drops only the receiver, not the task.
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        self.recompile_tasks.spawn(async move {
+            let _ = result_tx.send(svc.run_job(Some(&actor), stop).await);
+        });
+        result_rx.await.map_err(|_| {
+            tracing::error!("the tool policy re-compile task ended abnormally");
             TenancyError::Internal
         })?
     }
@@ -1087,6 +1135,34 @@ mod tests {
         assert!(!h.lock.held());
     }
 
+    #[tokio::test]
+    async fn the_shutdown_join_waits_for_a_dropped_rpc_run_to_stop_and_release_the_lock() {
+        // F15 and the shutdown: the request timed out, so nobody waits for the job any more.
+        // `main` joins the tasks at shutdown, and the join must wait until the job stopped
+        // between two sets and released the lock.
+        let h = with_recompile_action(harness());
+        stale_floor(&h);
+        stale_tenant(&h);
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let tasks = RecompileTasks::new();
+        let svc = h.svc.clone().with_shutdown(rx).with_recompile_tasks(tasks.clone());
+        let gate = h.compiler.gate();
+        let timed_out = tokio::time::timeout(Duration::from_millis(50), svc.run_recompile(&h.actor)).await;
+        assert!(timed_out.is_err(), "the RPC must still wait for the gated compile");
+        assert!(h.lock.held());
+        tx.send(()).unwrap();
+        let early = tokio::time::timeout(Duration::from_millis(50), tasks.join()).await;
+        assert!(early.is_err(), "the shutdown join must wait for the set in progress");
+        assert!(h.lock.held());
+        gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), tasks.join()).await.expect("the job stops between two sets");
+        assert!(!h.lock.held());
+        assert_eq!(h.lock.releases(), 1);
+        assert_eq!(h.compiler.calls(), 1);
+        assert_eq!(live(&h, &ToolPolicySetKey::Floor).await.version, 2);
+        assert_eq!(live(&h, &tenant(&h)).await.version, 1);
+    }
+
     /// The composition root wires the job, and no other test reads `main.rs`: the suite stays
     /// green when `main` loses the boot run, the label priming or the shutdown watch of the RPC
     /// run. Modelled on `the_composition_root_still_migrates_under_the_lock` in `migration_lock.rs`:
@@ -1105,5 +1181,11 @@ mod tests {
         let install = code.find("slot.install(").expect("main.rs installs the boot slot");
         let run = code.find(".run_recompile_at_boot(").expect("main.rs runs the job at boot");
         assert!(run > install, "main.rs must start the boot re-compile run after slot.install");
+        // The RPC runs go into the process-owned tasks, and the shutdown joins them after the
+        // servers stopped, so the process does not end before a job released its lock (F15).
+        assert!(code.contains(".with_recompile_tasks("), "main.rs must give the tool policy service its re-compile tasks");
+        let drain = code.find("let mut result = early_error.map_or(").expect("main.rs drains the servers at shutdown");
+        let join = code.find("\n    recompile_tasks.join().await;").expect("main.rs must join the re-compile tasks at shutdown");
+        assert!(join > drain, "main.rs must join the re-compile tasks after the servers stopped");
     }
 }
