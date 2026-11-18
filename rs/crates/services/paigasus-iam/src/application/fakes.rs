@@ -2435,8 +2435,8 @@ impl RecompileLock for FakeRecompileLock {
 #[async_trait]
 impl RecompileLockGuard for FakeRecompileGuard {
     async fn release(self: Box<Self>) -> Result<(), RepositoryError> {
+        // `Drop` clears the flag once, when `self` ends here.
         self.releases.fetch_add(1, Ordering::SeqCst);
-        self.held.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
