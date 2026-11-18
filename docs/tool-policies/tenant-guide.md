@@ -202,7 +202,34 @@ set again without the temporal block. Then write the catalog.
 A catalog change that would break your live set is refused with `tool-catalog-breaks-policy`.
 Change the policy first, then change the catalog.
 
-## 4. Error and rejection codes
+## 4. Held versions
+
+A new compiler or schema version can change how IAM compiles your set. IAM compiles your live
+set again after such a change. If the output is the same, your set gets a new live version with no
+action from you. If the output is different, or the compile now rejects the set, IAM keeps your
+live version and stores a held version.
+
+A held version is a proposal. The gateway never reads it. Your live set keeps working with no
+change. IAM publishes no event for a held version.
+
+1. List the held versions of your organization with
+   `GET /v1/organizations/{id}/held-tool-policy-versions` (gRPC `ListHeldToolPolicyVersions`). You
+   need the `ReadToolPolicies` action.
+2. Read the `report` of each row. It shows the policies, conditions and schema names that differ.
+   For a rejected set, it shows the rejections.
+3. Accept the row with `POST /v1/organizations/{id}/held-tool-policy-versions/{version}/accept`
+   (gRPC `AcceptHeldToolPolicyVersion`). Discard it with the same route and `/discard` (gRPC
+   `DiscardHeldToolPolicyVersion`). You need the `ManageToolPolicies` action for both.
+
+An accept makes the held output your next live version. Your own save of the set also replaces the
+held version, because it makes a new live version. A rejected set has no output and you cannot
+accept it. Change the source and save the set instead.
+
+IAM does not propose a discarded result again for the same live version and the same compiler.
+Until you save the set again, a write of your tool catalog is refused with
+`tool-policy-recompile-pending`.
+
+## 5. Error and rejection codes
 
 A rejection is a successful response with the rejected list. An error uses the status shown.
 
@@ -221,6 +248,7 @@ A rejection is a successful response with the rejected list. An error uses the s
 | `tool-policy-recompile-pending` | error | 409 `FAILED_PRECONDITION` | The live set is from an older compiler or schema. |
 | `tool-policy-compiler-unavailable` | error | 503 `UNAVAILABLE` | The compiler crashed, timed out or broke the protocol. |
 | `tool-policy-compiler-busy` | error | 429 `RESOURCE_EXHAUSTED` | The compiler is busy. Try again. |
-| `tool-policy-version-not-found` | error | 404 `NOT_FOUND` | The version does not exist, or it is not live or superseded. |
+| `tool-policy-held-not-acceptable` | error | 409 `FAILED_PRECONDITION` | The held version has no output because its compile failed (reason 63). |
+| `tool-policy-version-not-found` | error | 404 `NOT_FOUND` | The version does not exist, or it is not live or superseded. It is also the answer for a held version that is gone. |
 | `tool-policy-mode-transition-invalid` | error | 409 `FAILED_PRECONDITION` | The first enable must go to `log_only` (reason 61). |
 | `tool-policy-history-unsupported` | rejection | - | The set has a history rule (reason 62). Not yet available. |

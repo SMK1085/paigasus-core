@@ -131,7 +131,8 @@ pub const IAM_JIT_PROVISIONING_FAILURES_TOTAL: &str = "iam_jit_provisioning_fail
 pub const IAM_STARTER_POLICY_RECONCILES_TOTAL: &str = "iam_starter_policy_reconciles_total";
 /// The tool policy re-compile job (SMA-781): one increment per set result, labeled `result`
 /// (`identical`, `held_different`, `held_failed`, `conflict`, `error`). `held_*` means an admin
-/// must accept or discard a held version.
+/// must accept or discard a held version. `error` also covers a per-set storage or decode fault
+/// (SMA-781).
 pub const IAM_TOOL_POLICY_RECOMPILE_RESULTS_TOTAL: &str = "iam_tool_policy_recompile_results_total";
 // IAM Redis circuit breaker (SMA-476)
 /// The circuit-breaker state for one Redis connection: `0` = closed (commands pass through),
