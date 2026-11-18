@@ -339,7 +339,7 @@ build itself — they bite the first operator who deploys without reading this s
 image has the same shape as the Rust service images:
 
 - **The runtime stage uses a distroless base.** The base is
-  `gcr.io/distroless/nodejs24-debian12:nonroot`, pinned by digest on the runtime `FROM` line of
+  `gcr.io/distroless/nodejs26-debian13:nonroot`, pinned by digest on the runtime `FROM` line of
   `ts/Dockerfile`. That line is the only record of the digest; this runbook does not copy it. The
   base has **no shell**. `smoke_consoles` in `ci/images/run.sh` checks the running container for
   a shell, not only the pin.
@@ -434,7 +434,7 @@ image has the same shape as the Rust service images:
   does not describe it. A change in `dependabot-core` can change it.
   - **The runtime base:** the tag `nonroot` holds no version, so Dependabot does not propose a
     different tag for it. It refreshes only the digest. The Node major is part of the image name
-    (`nodejs24-debian12`), so a Node major bump is a different image, and Dependabot does not
+    (`nodejs26-debian13`), so a Node major bump is a different image, and Dependabot does not
     propose it. The `semver-major` ignore on this entry thus does not apply today. It stays as a
     guard in case the tag changes to one that holds a version.
   - **The builder, `node`:** the `ignore` list blocks all three version update types (major, minor

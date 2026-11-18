@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "license": "Apache-2.0",
   "description": "Server-only console composition shared by the Paigasus zones: IAM clients, provisioning and the principal resolver, authorization self-queries, scopes, discovery, the error wrapper and the JSON-lines logger.",

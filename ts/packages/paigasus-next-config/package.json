@@ -6,7 +6,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "license": "Apache-2.0",
   "description": "Next.js config factory, request-time runtime configuration, and shared eslint/tsconfig presets for Paigasus console zones.",
