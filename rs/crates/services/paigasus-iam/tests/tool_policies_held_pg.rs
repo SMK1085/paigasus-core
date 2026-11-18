@@ -499,21 +499,31 @@ async fn the_lock_does_not_block_a_tool_policy_write() {
 }
 
 /// A compiler that accepts every source. The Cedar text is the source plus `suffix`, so a
-/// non-empty `suffix` makes an output that differs from the stored one. Each compile waits `delay`.
-struct SlowCompiler {
+/// non-empty `suffix` makes an output that differs from the stored one. With a `gate`, each
+/// compile signals `started` and then waits for a permit of `release`.
+struct GatedCompiler {
     generation: u32,
-    delay: std::time::Duration,
     suffix: &'static str,
+    gate: Option<std::sync::Arc<CompileGate>>,
+}
+
+/// Holds a compile until the test lets it go.
+struct CompileGate {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
 }
 
 #[async_trait::async_trait]
-impl paigasus_iam_core::tool_policy::PolicyCompiler for SlowCompiler {
+impl paigasus_iam_core::tool_policy::PolicyCompiler for GatedCompiler {
     fn generation(&self) -> u32 {
         self.generation
     }
 
     async fn compile(&self, req: &paigasus_iam_core::tool_policy::CompileRequest) -> Result<paigasus_iam_core::tool_policy::CompileOutcome, paigasus_iam_core::tool_policy::CompilerFailure> {
-        tokio::time::sleep(self.delay).await;
+        if let Some(gate) = &self.gate {
+            gate.started.notify_one();
+            gate.release.acquire().await.expect("the gate semaphore stays open").forget();
+        }
         Ok(paigasus_iam_core::tool_policy::CompileOutcome::Accepted(paigasus_iam_core::tool_policy::CompiledOutput {
             cedar_policies: format!("{}{}", req.source, self.suffix),
             cedar_schema_json: req.schema_json.clone(),
@@ -537,7 +547,7 @@ impl paigasus_iam_core::Authorizer for AllowAll {
 
 /// A service on the Postgres adapters, with its own `PgRecompileLock` (so its lock is its own
 /// connection, like another replica) and an allow-all authorizer.
-fn service_with(db: &DatabaseConnection, compiler: SlowCompiler) -> paigasus_iam::adapters::http::ToolPolicySvc {
+fn service_with(db: &DatabaseConnection, compiler: GatedCompiler) -> paigasus_iam::adapters::http::ToolPolicySvc {
     use paigasus_iam::adapters::authz::Generations;
     use paigasus_iam::adapters::clock::SystemClock;
     use paigasus_iam::adapters::id::KernelIdGenerator;
@@ -567,8 +577,8 @@ fn service_with(db: &DatabaseConnection, compiler: SlowCompiler) -> paigasus_iam
 }
 
 /// Two replicas start the job on one stale floor at the same time. One runs and writes the held
-/// row; the other sees the lock and does nothing. The compile takes 300 ms, so the two runs
-/// overlap.
+/// row; the other sees the lock and does nothing. A gate fixes the order, not a delay: run `a`
+/// holds the lock inside its compile until run `b` has returned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_concurrent_runs_write_one_held_row() {
     use paigasus_iam::application::tool_policies::{RecompileOutcome, RecompileRun, WriteResult};
@@ -577,31 +587,40 @@ async fn two_concurrent_runs_write_one_held_row() {
     // Generation 1 saves the floor.
     let saver = service_with(
         &e.db,
-        SlowCompiler {
+        GatedCompiler {
             generation: 1,
-            delay: std::time::Duration::ZERO,
             suffix: "",
+            gate: None,
         },
     );
     let actor = paigasus_kernel::Prn::build("iam", "", None, "principal", Uuid::from_u128(1)).unwrap();
     let saved = saver.put_floor(&actor, "// floor\n", 0).await.expect("save the floor");
     assert!(matches!(saved, WriteResult::Accepted(_)));
     // Generation 2 makes the floor stale and compiles it to another output.
-    let slow = |generation| SlowCompiler {
-        generation,
-        delay: std::time::Duration::from_millis(300),
+    let gate = std::sync::Arc::new(CompileGate {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let changed = |gate| GatedCompiler {
+        generation: 2,
         suffix: "// changed\n",
+        gate,
     };
-    let a = service_with(&e.db, slow(2));
-    let b = service_with(&e.db, slow(2));
-    let (ra, rb) = tokio::join!(a.run_recompile_at_boot(std::future::pending()), b.run_recompile_at_boot(std::future::pending()));
+    let a = service_with(&e.db, changed(Some(gate.clone())));
+    let b = service_with(&e.db, changed(None));
+    let run_b = async {
+        // Run `a` is in its compile, so it holds the lock.
+        tokio::time::timeout(std::time::Duration::from_secs(60), gate.started.notified())
+            .await
+            .expect("run a must reach its compile");
+        let rb = b.run_recompile_at_boot(std::future::pending()).await;
+        gate.release.add_permits(1);
+        rb
+    };
+    let (ra, rb) = tokio::join!(a.run_recompile_at_boot(std::future::pending()), run_b);
     let (ra, rb) = (ra.expect("run a"), rb.expect("run b"));
-    let (ran, other) = match (ra, rb) {
-        (ran @ RecompileRun::Ran(_), other) | (other, ran @ RecompileRun::Ran(_)) => (ran, other),
-        (ra, rb) => panic!("expected one Ran, got {ra:?} and {rb:?}"),
-    };
-    assert_eq!(other, RecompileRun::AlreadyRunning);
-    let RecompileRun::Ran(results) = ran else { unreachable!() };
+    assert_eq!(rb, RecompileRun::AlreadyRunning, "run b starts while run a holds the lock");
+    let RecompileRun::Ran(results) = ra else { panic!("expected run a to run, got {ra:?}") };
     assert_eq!(results.len(), 1);
     assert!(matches!(results[0].outcome, RecompileOutcome::HeldDifferent { .. }), "{:?}", results[0].outcome);
     assert_eq!(scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version WHERE status = 'held'".into(), "n").await, 1);
