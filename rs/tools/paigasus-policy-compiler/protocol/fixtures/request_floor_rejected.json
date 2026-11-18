@@ -143,5 +143,5 @@
       }
     }
   },
-  "source": "@id(\"floor-permit\")\npermit (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource);\n@id(\"floor-after-error\")\nforbid (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource)\nwhen temporal { formerly within 1m Pgs::Gateway::Action::\"InvokeTool\"::error{} };\n@id(\"floor-long-window\")\nforbid (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource)\nwhen temporal { count_within(2h, Pgs::Gateway::Action::\"InvokeTool\"::request{}) > 500 };\n@id(\"floor-missing-field\")\nforbid (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource)\nwhen { context.input has amount && context.input.amount > 1 };\n"
+  "source": "@id(\"floor-permit\")\npermit (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource);\n@id(\"floor-after-error\")\nforbid (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource)\nwhen temporal { formerly within 1m Pgs::Gateway::Action::\"InvokeTool\"::error{} };\n@id(\"floor-long-window\")\nforbid (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource)\nwhen temporal { count_within(2h, Pgs::Gateway::Action::\"InvokeTool\"::request{}) > 500 };\n"
 }

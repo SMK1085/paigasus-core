@@ -1,7 +1,7 @@
 {
   "outcome": "accepted",
   "protocol_version": 1,
-  "compiler_generation": 1,
+  "compiler_generation": 2,
   "compiled": {
     "cedar_policies": "@id(\"slots-first\")\nforbid(principal, action == Pgs::Gateway::Action::\"send\", resource) when { context.p_slots_hfirst_0__temporal_0 };\n@id(\"slots-second\")\npermit(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.p_slots_hsecond_0__temporal_0 };",
     "cedar_schema_json": {

@@ -93,7 +93,8 @@
   --pgs-muted-foreground: oklch(0.552 0.016 285.9);
   --pgs-border: oklch(0.92 0.004 286.3);
   --pgs-input: oklch(0.92 0.004 286.3);
-  --pgs-ring: oklch(0.705 0.015 286.1);
+  /* 3.6:1 on background, 3.3:1 on muted: a focus ring needs 3:1 (WCAG 1.4.11). It was 0.705 (2.6:1) until SMA-783. */
+  --pgs-ring: oklch(0.62 0.015 286.1);
   --pgs-primary: oklch(0.21 0.006 285.9);
   --pgs-primary-foreground: oklch(0.985 0 0);
   --pgs-destructive: oklch(0.577 0.245 27.3);
@@ -123,7 +124,7 @@
     --pgs-primary: oklch(0.985 0 0);
     --pgs-primary-foreground: oklch(0.21 0.006 285.9);
     --pgs-destructive: oklch(0.704 0.191 22.2);
-    --pgs-destructive-foreground: oklch(0.985 0 0);
+    --pgs-destructive-foreground: oklch(0.21 0.006 285.9); /* dark ink: white was 2.8:1 on this fill, this is 6.1:1 (SMA-783) */
     --pgs-popover: oklch(0.21 0.006 285.9);
     --pgs-popover-foreground: oklch(0.985 0 0);
     /* See the :root block's comment — the scrim intentionally does not vary by theme. */
@@ -143,7 +144,7 @@
   --pgs-primary: oklch(0.985 0 0);
   --pgs-primary-foreground: oklch(0.21 0.006 285.9);
   --pgs-destructive: oklch(0.704 0.191 22.2);
-  --pgs-destructive-foreground: oklch(0.985 0 0);
+  --pgs-destructive-foreground: oklch(0.21 0.006 285.9); /* dark ink: white was 2.8:1 on this fill, this is 6.1:1 (SMA-783) */
   --pgs-popover: oklch(0.21 0.006 285.9);
   --pgs-popover-foreground: oklch(0.985 0 0);
   /* See the :root block's comment — the scrim intentionally does not vary by theme. */

@@ -14,7 +14,7 @@ vi.mock('@paigasus/app-shell', async (importOriginal) => {
   return { ...actual, navStateOf };
 });
 
-const { buildNavEntries } = await import('../../lib/nav');
+const { buildConsoleEntries, buildNavEntries } = await import('../../lib/nav');
 
 const ZONES = { iam: '/iam', gateway: '/gateway' };
 const iamUp = (capabilities: string[]): ServiceState => ({ state: 'available', service: 'iam', descriptor: { service: 'iam', version: '1', capabilities }, capabilities });
@@ -29,58 +29,83 @@ const DEGRADED: NavEntry['state'] = { state: 'degraded', service: 'iam', reason:
 const byLabel = (entries: ReturnType<typeof buildNavEntries>) => Object.fromEntries(entries.map((entry) => [entry.label, entry]));
 
 describe('buildNavEntries', () => {
-  it('lists Organizations, Audit, Dead letters and Gateway, in that order, with full-path hrefs when everything is available', () => {
-    const entries = buildNavEntries({ iam: iamUp(['iam.audit', 'iam.deadletters']), gateway: GATEWAY_UP, zones: ZONES, auditAllowed: true, deadLettersAllowed: true });
+  it('lists Organizations, Audit and Dead letters, in that order, with full-path hrefs when everything is available, and no other console', () => {
+    const entries = buildNavEntries({ iam: iamUp(['iam.audit', 'iam.deadletters']), auditAllowed: true, deadLettersAllowed: true });
     expect(entries.map((e) => [e.label, e.zone, e.href, e.state.state])).toEqual([
       ['Organizations', 'iam', '/iam/orgs', 'available'],
       ['Audit', 'iam', '/iam/audit', 'available'],
       ['Dead letters', 'iam', '/iam/dead-letters', 'available'],
-      ['Gateway', 'gateway', '/gateway/', 'available'],
+    ]);
+  });
+
+  it('groups Organizations under Directory, and Audit and Dead letters under Administration (SMA-783)', () => {
+    const entries = buildNavEntries({ iam: iamUp(['iam.audit', 'iam.deadletters']), auditAllowed: true, deadLettersAllowed: true });
+    expect(entries.map((e) => [e.label, e.group])).toEqual([
+      ['Organizations', 'Directory'],
+      ['Audit', 'Administration'],
+      ['Dead letters', 'Administration'],
     ]);
   });
 
   it('makes Audit absent when IAM does not report iam.audit', () => {
-    const entries = byLabel(buildNavEntries({ iam: iamUp([]), gateway: GATEWAY_UP, zones: ZONES, auditAllowed: true, deadLettersAllowed: false }));
+    const entries = byLabel(buildNavEntries({ iam: iamUp([]), auditAllowed: true, deadLettersAllowed: false }));
     expect(entries['Audit']?.state).toEqual({ state: 'absent' });
     expect(entries['Organizations']?.state).toEqual({ state: 'available' });
   });
 
   it('omits Audit when mayI says no', () => {
-    const entries = byLabel(buildNavEntries({ iam: iamUp(['iam.audit']), gateway: GATEWAY_UP, zones: ZONES, auditAllowed: false, deadLettersAllowed: false }));
+    const entries = byLabel(buildNavEntries({ iam: iamUp(['iam.audit']), auditAllowed: false, deadLettersAllowed: false }));
     expect(entries['Audit']).toBeUndefined();
   });
 
   it('disables the IAM entries with a reason when IAM is degraded', () => {
-    const entries = byLabel(buildNavEntries({ iam: IAM_DOWN, gateway: GATEWAY_UP, zones: ZONES, auditAllowed: true, deadLettersAllowed: true }));
+    const entries = byLabel(buildNavEntries({ iam: IAM_DOWN, auditAllowed: true, deadLettersAllowed: true }));
     expect(entries['Organizations']?.state).toEqual(DEGRADED);
     expect(entries['Audit']?.state).toEqual(DEGRADED);
     expect(entries['Dead letters']?.state).toEqual(DEGRADED);
   });
 
   it('makes the IAM entries absent when IAM is absent', () => {
-    const entries = byLabel(buildNavEntries({ iam: IAM_ABSENT, gateway: GATEWAY_UP, zones: ZONES, auditAllowed: true, deadLettersAllowed: true }));
+    const entries = byLabel(buildNavEntries({ iam: IAM_ABSENT, auditAllowed: true, deadLettersAllowed: true }));
     expect(entries['Organizations']?.state).toEqual({ state: 'absent' });
     expect(entries['Audit']?.state).toEqual({ state: 'absent' });
     expect(entries['Dead letters']?.state).toEqual({ state: 'absent' });
   });
 
-  it('gives the Gateway entry the gateway’s own state: absent, or degraded with a reason', () => {
-    expect(byLabel(buildNavEntries({ iam: iamUp([]), gateway: GATEWAY_ABSENT, zones: ZONES, auditAllowed: false, deadLettersAllowed: false }))['Gateway']?.state).toEqual({ state: 'absent' });
-    expect(byLabel(buildNavEntries({ iam: iamUp([]), gateway: GATEWAY_DOWN, zones: ZONES, auditAllowed: false, deadLettersAllowed: false }))['Gateway']?.state).toEqual({
+  it('takes EVERY entry’s state from navStateOf()', () => {
+    navStateOf.mockClear();
+    const entries = buildNavEntries({ iam: iamUp(['iam.audit', 'iam.deadletters']), auditAllowed: true, deadLettersAllowed: true });
+    expect(navStateOf).toHaveBeenCalledTimes(entries.length);
+    expect(navStateOf.mock.results.map((r) => r.value as unknown)).toEqual(entries.map((e) => e.state));
+  });
+});
+
+describe('buildConsoleEntries (SMA-783)', () => {
+  it('lists IAM first, then AI Gateway, with full-path hrefs', () => {
+    const entries = buildConsoleEntries({ iam: iamUp([]), gateway: GATEWAY_UP, zones: ZONES });
+    expect(entries.map((e) => [e.label, e.zone, e.href, e.state.state])).toEqual([
+      ['IAM', 'iam', '/iam/orgs', 'available'],
+      ['AI Gateway', 'gateway', '/gateway/', 'available'],
+    ]);
+  });
+
+  it('gives the AI Gateway entry the gateway’s own state: absent, or degraded with a reason', () => {
+    expect(byLabel(buildConsoleEntries({ iam: iamUp([]), gateway: GATEWAY_ABSENT, zones: ZONES }))['AI Gateway']?.state).toEqual({ state: 'absent' });
+    expect(byLabel(buildConsoleEntries({ iam: iamUp([]), gateway: GATEWAY_DOWN, zones: ZONES }))['AI Gateway']?.state).toEqual({
       state: 'degraded',
       service: 'gateway',
       reason: 'network',
     });
   });
 
-  it('leaves out the Gateway entry when gateway is not a zone', () => {
-    const entries = byLabel(buildNavEntries({ iam: iamUp([]), gateway: GATEWAY_UP, zones: { iam: '/iam' }, auditAllowed: false, deadLettersAllowed: false }));
-    expect(entries['Gateway']).toBeUndefined();
+  it('leaves out the AI Gateway entry when gateway is not a zone, honouring a non-default prefix when it is', () => {
+    expect(byLabel(buildConsoleEntries({ iam: iamUp([]), gateway: GATEWAY_UP, zones: { iam: '/iam' } }))['AI Gateway']).toBeUndefined();
+    expect(byLabel(buildConsoleEntries({ iam: iamUp([]), gateway: GATEWAY_UP, zones: { iam: '/iam', gateway: '/ai' } }))['AI Gateway']?.href).toBe('/ai/');
   });
 
   it('takes EVERY entry’s state from navStateOf()', () => {
     navStateOf.mockClear();
-    const entries = buildNavEntries({ iam: iamUp(['iam.audit', 'iam.deadletters']), gateway: GATEWAY_UP, zones: ZONES, auditAllowed: true, deadLettersAllowed: true });
+    const entries = buildConsoleEntries({ iam: IAM_DOWN, gateway: GATEWAY_UP, zones: ZONES });
     expect(navStateOf).toHaveBeenCalledTimes(entries.length);
     expect(navStateOf.mock.results.map((r) => r.value as unknown)).toEqual(entries.map((e) => e.state));
   });
@@ -100,7 +125,7 @@ describe('the Dead letters entry', () => {
     ['denied, IAM degraded', iamDown(['iam.deadletters']), false, undefined],
     ['denied, IAM absent', IAM_ABSENT, false, undefined],
   ])('%s', (_label, iam, allowed, expected) => {
-    const entry = byLabel(buildNavEntries({ iam, gateway: GATEWAY_UP, zones: ZONES, auditAllowed: true, deadLettersAllowed: allowed }))['Dead letters'];
+    const entry = byLabel(buildNavEntries({ iam, auditAllowed: true, deadLettersAllowed: allowed }))['Dead letters'];
     expect(entry?.state).toEqual(expected);
     if (expected !== undefined) expect(entry?.href).toBe('/iam/dead-letters');
   });

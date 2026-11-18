@@ -2,6 +2,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { OrganizationIcon } from '../../src/shell/icons';
 import { Switcher, type SwitcherItem } from '../../src/shell/switcher';
 import { nextLinkClicks } from '../support/next-link-double';
 import { inZone } from '../support/providers';
@@ -22,6 +23,45 @@ describe('Switcher (spec § 8.3)', () => {
     render(inZone(<Switcher label="Organisation" items={[ACME, GLOBEX]} currentId="o2" />));
     const trigger = screen.getByRole('button', { name: 'Organisation: Globex' });
     expect(trigger).toHaveTextContent('Organisation: Globex');
+  });
+
+  it('with an icon, shows the icon (hidden from assistive tech) in place of the visible prefix, and keeps `${label}: ${current}` as the accessible name', () => {
+    render(inZone(<Switcher label="Organisation" icon={<OrganizationIcon />} items={[ACME, GLOBEX]} currentId="o2" />));
+    const trigger = screen.getByRole('button', { name: 'Organisation: Globex' });
+    const icon = trigger.querySelector('svg');
+    expect(icon).not.toBeNull();
+    expect(icon?.closest('[aria-hidden="true"]')).not.toBeNull();
+    // The prefix is screen-reader text only: the one visible text is the current item.
+    const visible = [...trigger.querySelectorAll('span')].filter((span) => !span.classList.contains('sr-only') && span.getAttribute('aria-hidden') !== 'true');
+    expect(visible.map((span) => span.textContent)).toEqual(['Globex']);
+    expect(trigger.querySelector('.sr-only')).toHaveTextContent('Organisation:');
+    expect(trigger).toHaveTextContent('Organisation: Globex');
+  });
+
+  it("with initials, shows a square badge of the current item's initials, truncates the name and hides it below md (SMA-783)", () => {
+    const NORTHWIND: SwitcherItem = { id: 'o3', label: 'Northwind Labs', href: '/iam/orgs/o3' };
+    render(inZone(<Switcher label="Organisation" initials icon={<OrganizationIcon />} items={[ACME, NORTHWIND]} currentId="o3" />));
+    const trigger = screen.getByRole('button', { name: 'Organisation: Northwind Labs' });
+    expect(trigger).toHaveAttribute('title', 'Organisation: Northwind Labs');
+    const badge = trigger.querySelector('[aria-hidden="true"]');
+    expect(badge).toHaveTextContent('NL');
+    expect(badge).toHaveClass('rounded-xs');
+    // The badge takes the icon's place.
+    expect(trigger.querySelector('svg')).toBeNull();
+    const name = screen.getByText('Northwind Labs');
+    expect(name).toHaveClass('truncate', 'max-w-48', 'max-md:sr-only');
+  });
+
+  it('with initials and nothing selected, falls back to the icon and shows "none selected" in full', () => {
+    render(inZone(<Switcher label="Organisation" initials icon={<OrganizationIcon />} items={[ACME, GLOBEX]} currentId={null} />));
+    const trigger = screen.getByRole('button', { name: 'Organisation: none selected' });
+    expect(trigger.querySelector('svg')).not.toBeNull();
+    expect(screen.getByText('none selected')).not.toHaveClass('max-md:sr-only');
+  });
+
+  it('without icon or initials, has no tooltip (the visible text is the whole name)', () => {
+    render(inZone(<Switcher label="Organisation" items={[ACME, GLOBEX]} currentId="o2" />));
+    expect(screen.getByRole('button', { name: 'Organisation: Globex' })).not.toHaveAttribute('title');
   });
 
   it('says "none selected" when currentId is null', () => {

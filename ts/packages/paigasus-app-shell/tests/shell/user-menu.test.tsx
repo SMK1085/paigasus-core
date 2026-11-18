@@ -15,17 +15,27 @@ function spyOnRequestSubmit() {
 }
 
 const IDENTITIES = [
-  ['displayName', { displayName: 'Ada Lovelace', email: 'ada@example.test' }, 'Ada Lovelace'],
-  ['email when displayName is null', { displayName: null, email: 'ada@example.test' }, 'ada@example.test'],
-  ['"Account" when both are null', { displayName: null, email: null }, 'Account'],
+  ['displayName', { displayName: 'Ada Lovelace', email: 'ada@example.test' }, 'Ada Lovelace', 'AL'],
+  ['email when displayName is null', { displayName: null, email: 'ada@example.test' }, 'ada@example.test', 'A'],
+  ['"Account" when both are null', { displayName: null, email: null }, 'Account', null],
 ] as const;
 
 describe('UserMenu (spec § 8.5)', () => {
-  it.each(IDENTITIES)('the trigger shows %s, and its visible text is its accessible name', (_label, identity, text) => {
+  it.each(IDENTITIES)('the trigger is an avatar; its accessible name and tooltip are the %s (SMA-783)', (_label, identity, name, initials) => {
     render(inShell(<UserMenu />, { session: { ...SESSION, ...identity } }));
-    const trigger = screen.getByRole('button', { name: text });
-    expect(trigger).toHaveTextContent(text);
+    const trigger = screen.getByRole('button', { name });
     expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
+    expect(trigger).toHaveAttribute('title', name);
+    const avatar = trigger.querySelector('[aria-hidden="true"]');
+    if (initials === null) {
+      // Neither a name nor an email: a decorative user glyph, no letters.
+      expect(avatar?.querySelector('svg')).not.toBeNull();
+      expect(avatar).toHaveTextContent(/^$/u);
+    } else {
+      expect(avatar).toHaveTextContent(initials);
+    }
+    // The full name is never visible text: it is screen-reader text only.
+    expect(trigger.querySelector('.sr-only')).toHaveTextContent(name);
   });
 
   it('the menu shows the name and the email, then Sign out', async () => {

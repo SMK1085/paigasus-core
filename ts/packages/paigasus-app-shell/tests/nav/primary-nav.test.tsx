@@ -19,7 +19,9 @@ const REASON = 'gateway is not answering (timed out)';
 const ADMIN = { scopePrn: 'prn:paigasus:iam::org/o1', roleKey: 'org.admin' };
 
 const USERS: NavEntry = { zone: 'iam', href: '/iam/users', label: 'Users', state: AVAILABLE };
-const GATEWAY: NavEntry = { zone: 'gateway', href: '/gateway/usage', label: 'Gateway', state: AVAILABLE };
+// A second entry of the CURRENT console (iam): since SMA-783 the Primary nav holds no other zone.
+const GATEWAY: NavEntry = { zone: 'iam', href: '/iam/gateway', label: 'Gateway', state: AVAILABLE };
+const OTHER_CONSOLE: NavEntry = { zone: 'gateway', href: '/gateway/usage', label: 'Usage', state: AVAILABLE };
 const BILLING: NavEntry = { zone: 'billing', href: '/billing/invoices', label: 'Billing', state: AVAILABLE };
 
 beforeEach(() => {
@@ -78,7 +80,7 @@ describe('PrimaryNav rules (spec § 7.2, in order)', () => {
 
   it('rule 4 fails OPEN: grantsAvailable false -> the entry is shown (F7)', () => {
     render(inShell(<PrimaryNav entries={[{ ...GATEWAY, requires: ADMIN }]} />, { session: { ...SESSION, grantsAvailable: false } }));
-    expect(screen.getByRole('link', { name: 'Gateway' })).toHaveAttribute('href', '/gateway/usage');
+    expect(screen.getByRole('link', { name: 'Gateway' })).toHaveAttribute('href', '/gateway');
   });
 
   it('rule 4: a matching grant -> the entry is shown', () => {
@@ -91,10 +93,20 @@ describe('PrimaryNav rules (spec § 7.2, in order)', () => {
     expect(screen.getByRole('link', { name: 'Gateway' })).toHaveAttribute('aria-disabled', 'true');
   });
 
-  it('rule 6: available renders a ZoneLink (a cross-zone entry is a plain <a>)', () => {
+  it('rule 2a: an entry for another configured zone throws ZoneLinkError: another console belongs in the console switcher (SMA-783)', () => {
+    silenceReactErrorLog();
+    expect(() => render(inShell(<PrimaryNav entries={[USERS, OTHER_CONSOLE]} />))).toThrow(ZoneLinkError);
+  });
+
+  it('rule 2a precedes rule 3: another zone throws even when absent', () => {
+    silenceReactErrorLog();
+    expect(() => render(inShell(<PrimaryNav entries={[USERS, { ...OTHER_CONSOLE, state: ABSENT }]} />))).toThrow(ZoneLinkError);
+  });
+
+  it('rule 6: available renders a ZoneLink', () => {
     render(inShell(<PrimaryNav entries={[USERS, GATEWAY]} />));
     expect(screen.getByRole('link', { name: 'Users' })).toHaveAttribute('data-next-link');
-    expect(screen.getByRole('link', { name: 'Gateway' })).not.toHaveAttribute('data-next-link');
+    expect(screen.getByRole('link', { name: 'Gateway' })).toHaveAttribute('data-next-link');
   });
 
   it('renders <nav aria-label="Primary"><ul>', () => {
@@ -134,12 +146,6 @@ describe('the active entry (spec § 7.4)', () => {
     render(inShell(<PrimaryNav entries={[HOME, USERS]} />));
     expect(screen.getByRole('link', { name: 'Home' })).not.toHaveAttribute('aria-current');
     expect(screen.getByRole('link', { name: 'Users' })).toHaveAttribute('aria-current', 'page');
-  });
-
-  it('a cross-zone entry is never current, even when its rest path equals the pathname', () => {
-    setPathname('/usage');
-    render(inShell(<PrimaryNav entries={[USERS, GATEWAY]} />));
-    expect(screen.getByRole('link', { name: 'Gateway' })).not.toHaveAttribute('aria-current');
   });
 
   it('a segment-edge near miss is not current', () => {
@@ -191,5 +197,35 @@ describe('the degraded entry (spec § 7.3)', () => {
     );
     const ids = screen.getAllByRole('link').map((el) => el.getAttribute('aria-describedby'));
     expect(new Set(ids).size).toBe(2);
+  });
+});
+
+describe('groups (SMA-783)', () => {
+  const AUDIT: NavEntry = { zone: 'iam', href: '/iam/audit', label: 'Audit', state: AVAILABLE, group: 'Administration' };
+  const ORGS: NavEntry = { zone: 'iam', href: '/iam/orgs', label: 'Orgs', state: AVAILABLE, group: 'Directory' };
+  const LETTERS: NavEntry = { zone: 'iam', href: '/iam/dead-letters', label: 'Dead letters', state: AVAILABLE, group: 'Administration' };
+
+  it('puts each group under a visible heading that names its list, groups in the order of their first entry', () => {
+    render(inShell(<PrimaryNav entries={[ORGS, AUDIT, LETTERS]} />));
+    const lists = screen.getAllByRole('list');
+    expect(lists.map((list) => (list.getAttribute('aria-labelledby') === null ? null : document.getElementById(list.getAttribute('aria-labelledby') ?? '')?.textContent))).toEqual([
+      'Directory',
+      'Administration',
+    ]);
+    expect(screen.getByRole('list', { name: 'Administration' })).toHaveTextContent('AuditDead letters');
+  });
+
+  it('gathers a group whose entries are not adjacent into one list', () => {
+    render(inShell(<PrimaryNav entries={[AUDIT, ORGS, LETTERS]} />));
+    expect(screen.getAllByText('Administration')).toHaveLength(1);
+    expect(screen.getByRole('list', { name: 'Administration' }).querySelectorAll('li')).toHaveLength(2);
+  });
+
+  it('puts ungrouped entries in an untitled list, and drops a group whose every entry is filtered', () => {
+    render(inShell(<PrimaryNav entries={[USERS, { ...AUDIT, state: ABSENT }, ORGS]} />));
+    const lists = screen.getAllByRole('list');
+    expect(lists).toHaveLength(2);
+    expect(lists[0]).not.toHaveAttribute('aria-labelledby');
+    expect(screen.queryByText('Administration')).not.toBeInTheDocument();
   });
 });

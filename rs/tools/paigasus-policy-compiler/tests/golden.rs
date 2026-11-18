@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The golden output, the generation pin (spec 2026-11-15 iam-tool-policy-sets, section 6.2),
-//! the base schema under cedar 4.11, and the binary over stdin.
+//! the base schema under cedar 4.14, and the binary over stdin.
 //!
 //! A golden `floor_*.dw` and `starter.dw` compile against `protocol/fixtures/base_schema.json`.
 //! Every other golden is a tenant set and compiles against `tests/golden/tenant_schema.json`.
@@ -21,7 +21,7 @@ const DAY_MS: u64 = 86_400_000;
 const BIN: &str = env!("CARGO_BIN_EXE_paigasus-policy-compiler");
 
 /// The `blake3` hash of the golden results that `COMPILER_GENERATION` pins.
-const EXPECTED_GOLDEN_HASH: &str = "0ea38dde1343ea0399b233a63f6680a0ba9b40f36bd51e8696f9ff43e34664d6";
+const EXPECTED_GOLDEN_HASH: &str = "a6febbf59a02503592af1cd03cab26535a8fdcd267e921bea0dad3a26e3e7385";
 
 fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -72,10 +72,10 @@ fn compile_golden(name: &str) -> Value {
 }
 
 #[test]
-fn the_base_schema_loads_under_cedar_4_11_and_a_starter_like_policy_validates() {
-    let schema = Schema::from_json_value(base_schema()).expect("the base schema parses under cedar 4.11");
+fn the_base_schema_loads_under_cedar_4_14_and_a_starter_like_policy_validates() {
+    let schema = Schema::from_json_value(base_schema()).expect("the base schema parses under cedar 4.14");
     let source = fs::read_to_string(golden_dir().join("starter.dw")).expect("the starter reads");
-    let policies: PolicySet = source.parse().expect("the starter parses under cedar 4.11");
+    let policies: PolicySet = source.parse().expect("the starter parses under cedar 4.14");
     let result = Validator::new(schema).validate(&policies, ValidationMode::Strict);
     assert!(result.validation_passed(), "{:?}", result.validation_errors().map(ToString::to_string).collect::<Vec<_>>());
     assert_eq!(result.validation_warnings().count(), 0);
@@ -134,7 +134,7 @@ fn golden_output_is_pinned_to_the_compiler_generation() {
     let actual_hash = hasher.finalize().to_hex().to_string();
     assert_eq!(
         (COMPILER_GENERATION, actual_hash.as_str()),
-        (1, EXPECTED_GOLDEN_HASH),
+        (2, EXPECTED_GOLDEN_HASH),
         "the golden compiler output changed. Do these three steps in order: \
          (1) bump COMPILER_GENERATION in src/lib.rs; \
          (2) rewrite the result files with PAIGASUS_WRITE_FIXTURES=1 cargo test --locked; \
@@ -261,7 +261,7 @@ fn revision_prints_generation_and_commit() {
     let actual: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
     assert_eq!(
         actual,
-        serde_json::json!({ "compiler_generation": 1, "protocol_version": 1, "revision": "1+dogwood.ff158506cfd9+proto.1" })
+        serde_json::json!({ "compiler_generation": 2, "protocol_version": 1, "revision": "2+dogwood.8ffd2106daf0+proto.1" })
     );
-    assert_eq!(revision_string(), "1+dogwood.ff158506cfd9+proto.1");
+    assert_eq!(revision_string(), "2+dogwood.8ffd2106daf0+proto.1");
 }
