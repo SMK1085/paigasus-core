@@ -65,6 +65,7 @@ fn ti_with(on_failure: OnFailure, decider: Arc<dyn ToolCallDecider>) -> Option<A
     Some(Arc::new(ToolInterception {
         limits: CoreLimits { on_failure, ..CoreLimits::defaults() },
         decider,
+        recorder: None,
     }))
 }
 

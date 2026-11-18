@@ -107,7 +107,11 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     let prepared = if state.tool_interception.is_some() || state.tool_policy.is_some() {
         let turn = paigasus_gateway_core::parse_request(endpoint.format, &body);
         let request_id = paigasus_observability::current_ids().map(|ids| ids.request_id.to_string());
-        let mut ctx = DecisionContext::new(caller.principal_prn.clone(), caller.scope_prn.clone(), request_id);
+        let api_key_id = match &caller.credential {
+            Credential::ApiKey { key_id } => Some(key_id.clone()),
+            _ => None,
+        };
+        let mut ctx = DecisionContext::new(caller.principal_prn.clone(), caller.scope_prn.clone(), request_id).with_request(api_key_id, paigasus_gateway_core::ingress(endpoint.format), model.clone());
         if let Some(tp) = &state.tool_policy {
             match tp.apply(&ctx, &model, endpoint.format, &turn, body).await {
                 Ok(outcome) => {

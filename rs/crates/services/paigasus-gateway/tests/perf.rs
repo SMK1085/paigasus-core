@@ -127,10 +127,15 @@ async fn p99_policy_overhead_with_50_policies() {
     write_policies(dir.path());
     let settings = settings();
     let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
-    let tp = Some(Arc::new(RequestToolPolicy::new(cache, settings)));
+    let tp = Some(Arc::new(RequestToolPolicy::new(
+        cache,
+        settings,
+        Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()),
+    )));
     let ti = Some(Arc::new(ToolInterception {
         limits: CoreLimits::defaults(),
-        decider: Arc::new(CedarDecider),
+        decider: Arc::new(CedarDecider::new(Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()))),
+        recorder: None,
     }));
     let mock = MockOpenAi::spawn_json(StatusCode::OK, response_body()).await;
     let app = app_with_tool_policy(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, ti, tp);

@@ -238,9 +238,19 @@ async fn nats_down_never_blocks_a_request() {
     let mock = MockOpenAi::spawn_json(StatusCode::OK, USAGE_BODY).await;
     let ti = Some(Arc::new(ToolInterception {
         limits: CoreLimits::defaults(),
-        decider: Arc::new(CedarDecider),
+        decider: Arc::new(CedarDecider::new(Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()))),
+        recorder: None,
     }));
-    let app = app_with_tool_policy(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, ti, Some(Arc::new(RequestToolPolicy::new(cache, settings))));
+    let app = app_with_tool_policy(
+        ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN),
+        &mock.base_url,
+        ti,
+        Some(Arc::new(RequestToolPolicy::new(
+            cache,
+            settings,
+            Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()),
+        ))),
+    );
     let sent = tokio::time::timeout(Duration::from_secs(10), send(&app, NON_STREAM_BODY)).await.expect("the request is answered");
     assert_eq!(sent.status, StatusCode::OK);
 }

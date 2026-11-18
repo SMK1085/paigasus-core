@@ -15,8 +15,8 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::domain::decision_log::{DecisionLog, Entropy};
-use crate::domain::limits::Clock;
+use crate::domain::decision_log::{DecisionLog, Entropy, OsEntropy, TracingDecisionLog};
+use crate::domain::limits::{Clock, SystemClock};
 use crate::domain::org_of;
 
 /// The least key length in bytes (the SHA-256 output size).
@@ -75,6 +75,13 @@ impl DecisionRecorder {
             instance_id,
             sequences: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The recorder of the default configuration: the tracing line only, no digest, the system
+    /// clock and the operating system entropy.
+    #[must_use]
+    pub fn tracing() -> Self {
+        Self::new(Arc::new(TracingDecisionLog), Arc::new(SystemClock), Arc::new(OsEntropy), None)
     }
 
     #[must_use]

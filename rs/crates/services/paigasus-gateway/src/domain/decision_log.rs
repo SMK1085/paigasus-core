@@ -180,6 +180,12 @@ mod tests {
     }
 
     #[test]
+    fn policy_ids_are_sanitized_in_logs() {
+        let r = [PolicyRef::new(PolicyOrigin::Floor, "f 1"), PolicyRef::new(PolicyOrigin::Tenant, "t\n2")];
+        assert_eq!(refs(&r), "floor:f_1,tenant:t_2");
+    }
+
+    #[test]
     fn the_memory_log_keeps_records_in_order() {
         let log = MemoryDecisionLog::new(true);
         assert!(log.wants_digest());

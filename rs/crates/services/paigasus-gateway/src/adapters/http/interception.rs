@@ -34,6 +34,7 @@ use crate::adapters::http::relay::{feed_scan, finish_scan};
 use crate::adapters::http::usage::StreamUsage;
 use crate::adapters::openai::OpenAiByteStream;
 use crate::application::charge_guard::ChargeGuard;
+use crate::application::decision_log::DecisionRecorder;
 
 /// A response chunk. The alias keeps the body type `Bytes` out of a function parameter list: the
 /// `repo:http-extractor-envelope` gate bans `Bytes` as a REQUEST extractor there, and this is a
@@ -44,6 +45,8 @@ type Chunk = Bytes;
 pub struct ToolInterception {
     pub limits: Limits,
     pub decider: Arc<dyn ToolCallDecider>,
+    /// The shared decision recorder (SMA-755, P-8). `None` with the tool policy off: nothing is recorded.
+    pub recorder: Option<Arc<DecisionRecorder>>,
 }
 
 /// Map one core metric to the registered names (P-9).
@@ -124,7 +127,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
     let (decisions, basis) = if n == 0 {
         (Vec::new(), Basis::Decider)
     } else {
-        let fut = ti.decider.decide(ctx, turn, calls.calls.clone());
+        let fut = ti.decider.decide(Arc::clone(&ctx), turn, calls.calls.clone());
         match tokio::time::timeout(limits.decide_timeout, fut).await {
             Ok(Ok(d)) if d.len() == n => (d, Basis::Decider),
             _ => {
@@ -140,7 +143,15 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
         let decision = if d.decision.is_allow() { "allow" } else { "block" };
         record(Metric::Decision { decision, basis: basis.as_str() });
     }
-    let report = calls.report(&decisions, basis, requests);
+    // One record per report entry, at the same place as the header (SMA-755 P-1).
+    let reported = calls.reported(&decisions, basis);
+    if let Some(recorder) = &ti.recorder {
+        for r in &reported {
+            recorder.record_response(&ctx, r);
+        }
+    }
+    let entries: Vec<_> = reported.into_iter().map(|r| r.entry).collect();
+    let report = report_header(&entries, requests);
     let plain: Vec<Decision> = decisions.iter().map(|d| d.decision).collect();
     let rewritten = calls.apply(&plain).map(Bytes::from);
     BodyOutcome::Forward { rewritten, report: Some(report) }
@@ -181,8 +192,12 @@ impl Relay {
                 // The core never returns a wake in the past, so this cannot spin.
                 Action::Wake(at) => self.sleep.as_mut().reset(tokio::time::Instant::from_std(at)),
                 Action::Count(m) => record(m),
-                // The decision log records here in a later task (SMA-755).
-                Action::Reported(_) => {}
+                // The decision log records at the report entry (SMA-755 P-1).
+                Action::Reported(r) => {
+                    if let Some(recorder) = &self.ti.recorder {
+                        recorder.record_response(&self.ctx, &r);
+                    }
+                }
             }
         }
         // A hold that is no longer deciding (a timeout ruled on it) needs no answer. Drop
@@ -397,6 +412,11 @@ mod tests {
     /// Two complete `tool_use` blocks: two holds, `Block(0)` and `Block(1)`, completed in order,
     /// with `gap` between the first block's end and the second block's start.
     fn two_tool_blocks(first: &str, second: &str, gap: Duration) -> OpenAiByteStream {
+        tool_blocks(&[first, second], gap)
+    }
+
+    /// One complete `tool_use` block per name, with `gap` before the second one starts.
+    fn tool_blocks(names: &[&str], gap: Duration) -> OpenAiByteStream {
         let ev = |name: &str, data: String| Ok(Bytes::from(format!("event: {name}\ndata: {data}\n\n")));
         let block = |i: u32, name: &str| {
             vec![
@@ -415,9 +435,13 @@ mod tests {
             "message_start",
             r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null}}"#.to_owned(),
         )];
-        chunks.extend(block(0, first));
-        let second_starts = chunks.len();
-        chunks.extend(block(1, second));
+        let mut second_starts = usize::MAX;
+        for (i, name) in names.iter().enumerate() {
+            if i == 1 {
+                second_starts = chunks.len();
+            }
+            chunks.extend(block(u32::try_from(i).expect("small"), name));
+        }
         chunks.push(ev(
             "message_delta",
             r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":7}}"#.to_owned(),
@@ -434,8 +458,12 @@ mod tests {
     }
 
     async fn run(decider: Arc<dyn ToolCallDecider>, limits: Limits, upstream: OpenAiByteStream) -> String {
-        let ti = Arc::new(ToolInterception { limits, decider });
+        let ti = Arc::new(ToolInterception { limits, decider, recorder: None });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
+        run_ctx(ti, ctx, upstream).await
+    }
+
+    async fn run_ctx(ti: Arc<ToolInterception>, ctx: Arc<DecisionContext>, upstream: OpenAiByteStream) -> String {
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
         let out: Vec<Bytes> = relay(
             Format::AnthropicMessages,
@@ -504,6 +532,7 @@ mod tests {
         let ti = Arc::new(ToolInterception {
             limits: Limits::defaults(),
             decider: Arc::new(paigasus_gateway_core::AllowAll),
+            recorder: None,
         });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
@@ -573,7 +602,7 @@ mod tests {
     impl ToolCallDecider for CountingCedar {
         fn decide(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
             self.0.fetch_add(1, Ordering::SeqCst);
-            crate::application::tool_policy::CedarDecider.decide(ctx, turn, calls)
+            crate::application::tool_policy::CedarDecider::new(Arc::new(DecisionRecorder::tracing())).decide(ctx, turn, calls)
         }
     }
 
@@ -600,6 +629,7 @@ mod tests {
         let ti = Arc::new(ToolInterception {
             limits: Limits::defaults(),
             decider: Arc::new(CountingCedar(Arc::clone(&calls))),
+            recorder: None,
         });
         let s = relay(
             Format::AnthropicMessages,
@@ -629,6 +659,7 @@ mod tests {
         let ti = Arc::new(ToolInterception {
             limits: Limits::defaults(),
             decider: Arc::new(paigasus_gateway_core::AllowAll),
+            recorder: None,
         });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
@@ -650,5 +681,222 @@ mod tests {
         .await;
         assert_eq!(&out[..2], [Bytes::from_static(b": p1\n\n"), Bytes::from_static(b": p2\n\n")]);
         assert!(String::from_utf8_lossy(&out[2]).starts_with("event: message_start"), "{:?}", out[2]);
+    }
+
+    // ---- the decision log (SMA-755) ------------------------------------------------------------
+
+    use paigasus_gateway_core::decision_log::{AppliedEffect, DecisionRecord, RecordBasis, Side};
+    use paigasus_kernel::tool_policy::Effect;
+
+    use crate::application::decision_log::DigestKey;
+    use crate::application::tool_policy::testing::{self, FakeSource, ORG_A_PRN, PRINCIPAL, chat_request, settings};
+    use crate::domain::decision_log::{MemoryDecisionLog, OsEntropy};
+    use crate::domain::limits::SystemClock;
+
+    /// A recorder over a memory log. `key` gives it a digest key.
+    fn memory_recorder(wants_digest: bool, key: bool) -> (Arc<MemoryDecisionLog>, Arc<DecisionRecorder>) {
+        let log = Arc::new(MemoryDecisionLog::new(wants_digest));
+        let key = key.then(|| DigestKey::new("k1".into(), "k".repeat(32).into()).expect("key"));
+        let rec = Arc::new(DecisionRecorder::new(log.clone(), Arc::new(SystemClock), Arc::new(OsEntropy), key));
+        (log, rec)
+    }
+
+    fn ti_with_recorder(limits: Limits, decider: Arc<dyn ToolCallDecider>, rec: &Arc<DecisionRecorder>) -> Arc<ToolInterception> {
+        Arc::new(ToolInterception {
+            limits,
+            decider,
+            recorder: Some(Arc::clone(rec)),
+        })
+    }
+
+    /// Blocks a call named `rm`, allows the rest. It adds no detail.
+    struct BlockRm;
+
+    impl ToolCallDecider for BlockRm {
+        fn decide(&self, _ctx: Arc<DecisionContext>, _turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
+            Box::pin(std::future::ready(Ok(calls
+                .iter()
+                .map(|c| DecidedCall::from(if c.name == "rm" { Decision::Block { code: BlockCode::Policy } } else { Decision::Allow }))
+                .collect())))
+        }
+    }
+
+    /// The Cedar decider, after a short wait.
+    struct SlowCedar(crate::application::tool_policy::CedarDecider);
+
+    impl ToolCallDecider for SlowCedar {
+        fn decide(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
+            let inner = self.0.decide(ctx, turn, calls);
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                inner.await
+            })
+        }
+    }
+
+    fn plain_ctx() -> Arc<DecisionContext> {
+        Arc::new(DecisionContext::new("principal", "scope", None))
+    }
+
+    /// A context with the request snapshot of the Cedar policy: the floor forbids `rm`.
+    async fn cedar_ctx(mode: paigasus_gateway_core::TenantMode) -> Arc<DecisionContext> {
+        use paigasus_gateway_core::{Format as Fmt, parse_request};
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let policy = testing::policy(&source, settings(mode));
+        let req = chat_request(&[], "");
+        let turn = parse_request(Fmt::OpenAiChat, &req);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Fmt::OpenAiChat, &turn, req).await.expect("apply");
+        Arc::new(ctx.with_policy(out.snapshot))
+    }
+
+    fn names_of(records: &[DecisionRecord]) -> Vec<String> {
+        records.iter().map(|r| r.tool.name.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn the_stream_path_records_once_per_report_entry() {
+        let (log, rec) = memory_recorder(false, false);
+        let ti = ti_with_recorder(Limits::defaults(), Arc::new(BlockRm), &rec);
+        let text = run_ctx(ti, plain_ctx(), tool_blocks(&["a", "rm", "b"], Duration::ZERO)).await;
+        assert!(text.contains(r#""name":"b","input":{}"#), "{text}");
+        let records = log.records();
+        assert_eq!(records.len(), 3, "one record per report entry: {records:?}");
+        assert_eq!(records.iter().map(|r| r.sequence).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(names_of(&records), ["a", "rm", "b"]);
+        assert_eq!(
+            records.iter().map(|r| r.applied).collect::<Vec<_>>(),
+            [AppliedEffect::Allow, AppliedEffect::Block, AppliedEffect::Allow]
+        );
+        assert!(records.iter().all(|r| r.side == Side::Response));
+    }
+
+    #[tokio::test]
+    async fn the_body_path_records_once_per_report_entry() {
+        let (log, rec) = memory_recorder(false, false);
+        let ti = ti_with_recorder(Limits::defaults(), Arc::new(BlockRm), &rec);
+        let calls: Vec<serde_json::Value> = ["a", "rm", "b"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| serde_json::json!({"id": format!("c{i}"), "type": "function", "function": {"name": n, "arguments": "{}"}}))
+            .collect();
+        let body = serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": calls}, "finish_reason": "tool_calls"}]}).to_string();
+        let out = intercept_body(&ti, ti.limits, Format::OpenAiChat, plain_ctx(), Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]).await;
+        assert!(matches!(out, BodyOutcome::Forward { report: Some(_), .. }));
+        let records = log.records();
+        assert_eq!(records.len(), 3, "{records:?}");
+        assert_eq!(records.iter().map(|r| r.sequence).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(names_of(&records), ["a", "rm", "b"]);
+        assert_eq!(records[1].applied, AppliedEffect::Block);
+    }
+
+    #[tokio::test]
+    async fn an_observed_hold_records_allow_with_a_cedar_block() {
+        let (log, rec) = memory_recorder(false, false);
+        let limits = Limits {
+            on_failure: OnFailure::Allow,
+            max_held_bytes: 330,
+            ..Limits::defaults()
+        };
+        // The decider is slow: the frames after the call make the hold limit fire while the hold is deciding.
+        let ti = ti_with_recorder(limits, Arc::new(SlowCedar(crate::application::tool_policy::CedarDecider::new(Arc::clone(&rec)))), &rec);
+        let ctx = cedar_ctx(paigasus_gateway_core::TenantMode::Enforce).await;
+        let text = run_ctx(ti, ctx, tool_blocks(&["rm"], Duration::ZERO)).await;
+        assert!(text.contains(r#""name":"rm","input":{}"#), "an observed hold is released: {text}");
+        let records = log.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        let r = &records[0];
+        assert_eq!(r.applied, AppliedEffect::Observe);
+        assert_eq!(r.block_code, Some(BlockCode::Policy));
+        assert_eq!(r.basis, RecordBasis::OnFailure);
+        assert_eq!(r.cedar.as_ref().map(|c| c.effect), Some(Effect::Deny));
+    }
+
+    #[tokio::test]
+    async fn a_truncation_under_block_records_on_failure() {
+        let (log, rec) = memory_recorder(false, false);
+        let ti = ti_with_recorder(Limits::defaults(), Arc::new(paigasus_gateway_core::AllowAll), &rec);
+        let ev = |name: &str, data: &str| Ok(Bytes::from(format!("event: {name}\ndata: {data}\n\n")));
+        let chunks = vec![
+            ev(
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null}}"#,
+            ),
+            ev(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_0","name":"rm","input":{}}}"#,
+            ),
+            ev(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"p\":"}}"#,
+            ),
+        ];
+        let _ = run_ctx(ti, plain_ctx(), futures::stream::iter(chunks).boxed()).await;
+        let records = log.records();
+        assert!(!records.is_empty(), "the truncated call is recorded");
+        for r in &records {
+            assert_eq!((r.block_code, r.basis, r.applied), (Some(BlockCode::Truncated), RecordBasis::OnFailure, AppliedEffect::Block), "{r:?}");
+            assert!(r.cedar.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hold_limit_block_has_no_cedar_detail() {
+        let (log, rec) = memory_recorder(false, false);
+        let limits = Limits {
+            max_held_bytes: 1,
+            ..Limits::defaults()
+        };
+        let ti = ti_with_recorder(limits, Arc::new(paigasus_gateway_core::AllowAll), &rec);
+        let _ = run_ctx(ti, plain_ctx(), tool_blocks(&["x"], Duration::ZERO)).await;
+        let records = log.records();
+        assert!(!records.is_empty());
+        for r in &records {
+            assert_eq!((r.block_code, r.basis, r.applied), (Some(BlockCode::HoldLimit), RecordBasis::OnFailure, AppliedEffect::Block), "{r:?}");
+            assert!(r.cedar.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_off_records_a_floor_block() {
+        use paigasus_gateway_core::TenantMode;
+        let (log, rec) = memory_recorder(false, false);
+        let ti = ti_with_recorder(Limits::defaults(), Arc::new(crate::application::tool_policy::CedarDecider::new(Arc::clone(&rec))), &rec);
+        let _ = run_ctx(ti, cedar_ctx(TenantMode::Off).await, tool_blocks(&["rm"], Duration::ZERO)).await;
+        let records = log.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        let r = &records[0];
+        assert_eq!((r.applied, r.mode), (AppliedEffect::Block, Some(TenantMode::Off)));
+        assert!(r.cedar.as_ref().is_some_and(|c| c.floor_denied), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn an_org_less_scope_records_no_org() {
+        let (log, rec) = memory_recorder(false, false);
+        let ti = ti_with_recorder(Limits::defaults(), Arc::new(paigasus_gateway_core::AllowAll), &rec);
+        let ctx = Arc::new(DecisionContext::new("principal", "prn:pgs:iam:::root/0190a1e5-0000-7000-8000-000000000004", None));
+        let _ = run_ctx(ti, ctx, tool_blocks(&["a"], Duration::ZERO)).await;
+        let records = log.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!((records[0].org, records[0].instance_id, records[0].sequence), (None, rec.instance_id(), 1));
+    }
+
+    #[tokio::test]
+    async fn the_digest_is_set_only_when_the_log_wants_it() {
+        use paigasus_gateway_core::TenantMode;
+        for wants in [true, false] {
+            let (log, rec) = memory_recorder(wants, true);
+            let ti = ti_with_recorder(Limits::defaults(), Arc::new(crate::application::tool_policy::CedarDecider::new(Arc::clone(&rec))), &rec);
+            let _ = run_ctx(ti, cedar_ctx(TenantMode::Enforce).await, tool_blocks(&["ok"], Duration::ZERO)).await;
+            let records = log.records();
+            assert_eq!(records.len(), 1, "{records:?}");
+            if wants {
+                let d = records[0].arguments.as_ref().expect("a digest");
+                assert_eq!(d.key_id, "k1");
+                assert_eq!(Some(d), rec.digest(r#"{"p":0}"#).as_ref(), "the HMAC of the call arguments");
+            } else {
+                assert!(records[0].arguments.is_none(), "the log does not want it");
+            }
+        }
     }
 }

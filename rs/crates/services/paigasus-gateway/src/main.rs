@@ -9,11 +9,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::limits::build_limits;
 use paigasus_gateway::adapters::openai::OpenAiClient;
+use paigasus_gateway::application::decision_log::DecisionRecorder;
 use paigasus_gateway::config::GatewayConfig;
 use paigasus_gateway::runtime;
 use paigasus_gateway::service_info::Capabilities;
@@ -92,7 +92,10 @@ async fn serve() -> anyhow::Result<()> {
     )?;
 
     // SMA-752 D19: the tool policy. Only after `validate` above (see `build_tool_policy`).
-    let runtime::ToolPolicyRuntime { policy: tool_policy, decider } = runtime::build_tool_policy(&config)?;
+    let recorder = Arc::new(DecisionRecorder::tracing());
+    let tool_policy_runtime = runtime::build_tool_policy(&config, recorder)?;
+    let tool_interception = runtime::tool_interception(&config, &tool_policy_runtime);
+    let tool_policy = tool_policy_runtime.policy;
 
     let state = AppState {
         iam: Arc::new(iam),
@@ -101,14 +104,7 @@ async fn serve() -> anyhow::Result<()> {
         capabilities: Capabilities::from_config(&config),
         limits: limits.limits,
         dpop_enabled: config.dpop.enabled,
-        tool_interception: config.tool_interception.enabled.then(|| {
-            tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
-            // SMA-752: the Cedar decider only with the tool policy on (`build_tool_policy`).
-            Arc::new(ToolInterception {
-                limits: config.tool_interception.limits(),
-                decider,
-            })
-        }),
+        tool_interception,
         tool_policy: tool_policy.as_ref().map(|(_, tp)| Arc::clone(tp)),
         responses: config.responses.enabled.then(|| {
             tracing::info!("the responses route is on (SMA-769)");
@@ -293,6 +289,10 @@ fn describe_gateway_metrics() {
     describe_histogram!(
         names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
         "Seconds the tool policy adds to one request: the request side plus the decider."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+        "Tool-policy findings, labeled by side (request, response) and kind (name_collision, unparsed_arguments, other)."
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,

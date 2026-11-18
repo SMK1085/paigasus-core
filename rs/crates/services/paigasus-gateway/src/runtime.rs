@@ -21,11 +21,13 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::task::TaskTracker;
 
+use crate::adapters::http::interception::ToolInterception;
 use crate::adapters::iam::client::build_channel;
 use crate::adapters::nats::PolicyEvents;
 use crate::adapters::policy_source::file::FilePolicySource;
 use crate::adapters::policy_source::iam::IamPolicySource;
-use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy};
+use crate::application::decision_log::DecisionRecorder;
+use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
 use crate::config::{GatewayConfig, PolicySourceConfig};
 use crate::domain::limits::ChargeDropReason;
 use crate::domain::tool_policy::PolicySource;
@@ -116,6 +118,24 @@ pub struct ToolPolicyRuntime {
     /// the request side there is no snapshot, and the Cedar decider would block every call (fail
     /// closed). Otherwise `AllowAll`, as before SMA-752.
     pub decider: Arc<dyn ToolCallDecider>,
+    /// The one decision recorder (P-8). `None` with the tool policy off: nothing is recorded.
+    pub recorder: Option<Arc<DecisionRecorder>>,
+}
+
+/// The tool interception of the composition root, only with `[tool_interception] enabled = true`.
+/// It holds the decider and the recorder of `rt`, so the report site records through the recorder
+/// of the decider and of the request side (P-8).
+#[must_use]
+pub fn tool_interception(config: &GatewayConfig, rt: &ToolPolicyRuntime) -> Option<Arc<ToolInterception>> {
+    config.tool_interception.enabled.then(|| {
+        tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
+        // SMA-752: the Cedar decider only with the tool policy on (`build_tool_policy`).
+        Arc::new(ToolInterception {
+            limits: config.tool_interception.limits(),
+            decider: Arc::clone(&rt.decider),
+            recorder: rt.recorder.clone(),
+        })
+    })
 }
 
 /// Build the tool policy from a config that passed [`GatewayConfig::validate`]: `settings()` panics
@@ -125,11 +145,12 @@ pub struct ToolPolicyRuntime {
 /// # Errors
 ///
 /// `enabled = true` with no `[tool_policy.source]` (a config that skipped `validate`).
-pub fn build_tool_policy(config: &GatewayConfig) -> anyhow::Result<ToolPolicyRuntime> {
+pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>) -> anyhow::Result<ToolPolicyRuntime> {
     if !config.tool_policy.enabled {
         return Ok(ToolPolicyRuntime {
             policy: None,
             decider: Arc::new(AllowAll),
+            recorder: None,
         });
     }
     let settings = config.tool_policy.settings();
@@ -160,9 +181,11 @@ pub fn build_tool_policy(config: &GatewayConfig) -> anyhow::Result<ToolPolicyRun
             "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies"
         );
     }
+    prime_tool_policy_metrics();
     Ok(ToolPolicyRuntime {
-        policy: Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings)))),
-        decider: Arc::new(CedarDecider),
+        policy: Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings, Arc::clone(&recorder))))),
+        decider: Arc::new(CedarDecider::new(Arc::clone(&recorder))),
+        recorder: Some(recorder),
     })
 }
 
@@ -231,7 +254,7 @@ mod tool_policy_tests {
     #[tokio::test]
     async fn the_tool_policy_off_builds_nothing_and_allows_every_call() {
         let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
-        let rt = build_tool_policy(&cfg).expect("builds");
+        let rt = build_tool_policy(&cfg, rec()).expect("builds");
         assert!(rt.policy.is_none());
         assert_eq!(decide_one(&rt.decider).await, Decision::Allow);
     }
@@ -247,7 +270,7 @@ mod tool_policy_tests {
             ),
             true,
         );
-        let rt = build_tool_policy(&cfg).expect("builds");
+        let rt = build_tool_policy(&cfg, rec()).expect("builds");
         assert!(rt.policy.is_some());
         assert_eq!(decide_one(&rt.decider).await, Decision::Block { code: BlockCode::PolicyUnavailable });
     }
@@ -256,8 +279,82 @@ mod tool_policy_tests {
     #[test]
     fn the_tool_policy_on_without_a_source_is_an_error() {
         let cfg = config(&format!("{BASE}[tool_policy]\nenabled = true\non_policy_unavailable = \"open\"\n"), false);
-        let err = build_tool_policy(&cfg).err().expect("an error");
+        let err = build_tool_policy(&cfg, rec()).err().expect("an error");
         assert!(err.to_string().contains("tool_policy.source"), "{err}");
+    }
+
+    fn rec() -> Arc<DecisionRecorder> {
+        Arc::new(DecisionRecorder::tracing())
+    }
+
+    fn enabled_config() -> GatewayConfig {
+        config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n"
+            ),
+            true,
+        )
+    }
+
+    /// P-8: one recorder serves the decider, the request side and the report site.
+    #[tokio::test]
+    async fn the_decider_the_request_side_and_the_report_site_share_one_recorder() {
+        use crate::application::decision_log::DigestKey;
+        use crate::domain::decision_log::{MemoryDecisionLog, OsEntropy};
+        use crate::domain::limits::SystemClock;
+
+        let key = DigestKey::new("k1".into(), "k".repeat(32).into()).expect("key");
+        let recorder = Arc::new(DecisionRecorder::new(Arc::new(MemoryDecisionLog::new(true)), Arc::new(SystemClock), Arc::new(OsEntropy), Some(key)));
+        let cfg = enabled_config();
+        let rt = build_tool_policy(&cfg, Arc::clone(&recorder)).expect("builds");
+        let (_, request_side) = rt.policy.as_ref().expect("on");
+        assert!(Arc::ptr_eq(request_side.recorder(), &recorder), "the request side");
+        assert!(Arc::ptr_eq(rt.recorder.as_ref().expect("a recorder"), &recorder), "the runtime");
+        let ti = tool_interception(&cfg, &rt).expect("interception is on");
+        assert!(Arc::ptr_eq(ti.recorder.as_ref().expect("a recorder"), &recorder), "the report site");
+        // The decider holds no accessor. It digests the arguments with the key of this recorder,
+        // and a recorder of its own (no key) would leave the digest empty.
+        let body = serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [
+            {"id": "c0", "type": "function", "function": {"name": "read_file", "arguments": "{\"a\":1}"}}
+        ]}, "finish_reason": "tool_calls"}]})
+        .to_string();
+        let calls = parse_body(Format::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
+        let turn = parse_request(Format::OpenAiChat, br#"{"model":"m","messages":[]}"#);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = rt.decider.decide(Arc::new(ctx), Arc::new(turn), calls).await.expect("decide");
+        let got = out[0].detail.as_ref().and_then(|d| d.arguments.clone());
+        assert_eq!(got, recorder.digest("{\"a\":1}"));
+        assert!(got.is_some());
+    }
+
+    /// With the tool policy off nothing is recorded: no recorder is kept.
+    #[test]
+    fn the_tool_policy_off_keeps_no_recorder() {
+        let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
+        let rt = build_tool_policy(&cfg, rec()).expect("builds");
+        assert!(rt.recorder.is_none());
+        assert!(tool_interception(&cfg, &rt).expect("on").recorder.is_none());
+    }
+
+    #[test]
+    fn prime_tool_policy_metrics_primes_six_series_at_zero() {
+        let debugging = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = debugging.snapshotter();
+        let _local = metrics::set_default_local_recorder(&debugging);
+        build_tool_policy(&enabled_config(), rec()).expect("builds");
+        for side in ["request", "response"] {
+            for kind in ["name_collision", "unparsed_arguments", "other"] {
+                let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
+                assert_eq!(v, Some(0), "{side}/{kind} is primed at 0");
+            }
+        }
+        let series = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL)
+            .count();
+        assert_eq!(series, 6);
     }
 
     /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.
@@ -281,7 +378,7 @@ mod tool_policy_tests {
     #[tokio::test]
     async fn the_nats_subscription_is_built_only_with_the_policy_on_and_a_nats_table() {
         let url = format!("nats://127.0.0.1:{}", closed_port());
-        let cache = build_tool_policy(&tp_config(true, None)).expect("builds").policy.expect("on").0;
+        let cache = build_tool_policy(&tp_config(true, None), rec()).expect("builds").policy.expect("on").0;
 
         assert!(build_policy_events(&tp_config(true, None), &cache).await.expect("no error").is_none(), "no nats table: refresh only");
         assert!(build_policy_events(&tp_config(false, Some(&url)), &cache).await.expect("no error").is_none(), "the tool policy is off");
@@ -297,7 +394,7 @@ mod tool_policy_tests {
     async fn a_missing_creds_file_is_a_boot_error_without_the_url() {
         let mut cfg = tp_config(true, Some("nats://user:hunter2@127.0.0.1:1"));
         cfg.tool_policy.nats.as_mut().expect("nats").creds_file = Some("/nonexistent/gw.creds".to_string());
-        let cache = build_tool_policy(&cfg).expect("builds").policy.expect("on").0;
+        let cache = build_tool_policy(&cfg, rec()).expect("builds").policy.expect("on").0;
         let err = build_policy_events(&cfg, &cache).await.err().expect("an error");
         let text = format!("{err:#}");
         assert!(text.contains("/nonexistent/gw.creds"), "{text}");

@@ -147,6 +147,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `gateway_tool_interception_decisions_total` | counter | `decision`, `basis` | One per decided tool call; `decision` ∈ `allow` / `block`, `basis` ∈ `decider` / `on_failure`. |
 | `gateway_tool_interception_on_failure_total` | counter | `code` | Failures that took the `on_failure` path; `code` ∈ `hold_limit` / `truncated` / `decider_error` / `malformed`. |
 | `gateway_tool_interception_hold_seconds` | histogram | — | Seconds from a hold's first tool-call frame to its completion. |
+| `gateway_tool_policy_findings_total` | counter | `side`, `kind` | SMA-755. Findings that the tool policy saw, per kind. `side` ∈ `request` (one per colliding tool name in the request) / `response` (one per finding of a decided call); `kind` ∈ `name_collision` / `unparsed_arguments` / `other` (a kind this service does not know). Primed at 0 for all six pairs with `[tool_policy] enabled = true`. |
 
 **The `chat completion metered` log line** (`info` when tokens > 0, `debug` otherwise) is the
 per-org spend record: fields `org`, `tokens`, `source`, `outcome` (`charged` / `store_unavailable`

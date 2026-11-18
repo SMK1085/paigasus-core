@@ -12,15 +12,45 @@ use std::time::Instant;
 
 use metrics::counter;
 use paigasus_gateway_core::decision_log::{DecisionDetail, RecordBasis};
-use paigasus_gateway_core::{
-    DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls, sanitize_name,
-};
-use paigasus_kernel::tool_policy::{PolicyOrigin, PolicyRef};
+use paigasus_gateway_core::{DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls};
 use paigasus_observability::names;
 
-/// The `ToolCallDecider` that evaluates the tool policies.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CedarDecider;
+use crate::application::decision_log::DecisionRecorder;
+
+/// The `ToolCallDecider` that evaluates the tool policies. It holds the one shared recorder, for
+/// the argument digest (SMA-755).
+pub struct CedarDecider {
+    recorder: Arc<DecisionRecorder>,
+}
+
+impl CedarDecider {
+    #[must_use]
+    pub fn new(recorder: Arc<DecisionRecorder>) -> Self {
+        Self { recorder }
+    }
+}
+
+/// The finding kinds that `gateway_tool_policy_findings_total` labels (SMA-755 § 5.9).
+pub const FINDING_KINDS: [&str; 3] = ["name_collision", "unparsed_arguments", "other"];
+
+/// The `kind` metric label of a finding. An unknown kind is `other`.
+#[must_use]
+pub fn finding_label(kind: &str) -> &'static str {
+    match kind {
+        "name_collision" => FINDING_KINDS[0],
+        "unparsed_arguments" => FINDING_KINDS[1],
+        _ => FINDING_KINDS[2],
+    }
+}
+
+/// Prime `gateway_tool_policy_findings_total` at zero for every label pair.
+pub fn prime_tool_policy_metrics() {
+    for side in ["request", "response"] {
+        for kind in FINDING_KINDS {
+            counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => side, "kind" => kind).absolute(0);
+        }
+    }
+}
 
 /// The `effect` metric label of a decision.
 pub(crate) fn effect_label(d: Decision) -> &'static str {
@@ -32,23 +62,9 @@ pub(crate) fn effect_label(d: Decision) -> &'static str {
     }
 }
 
-/// The policy ids for a log field: `<set>:<id>`, comma-separated, every id sanitized.
-fn refs(list: &[PolicyRef]) -> String {
-    list.iter()
-        .map(|r| {
-            let set = match r.set {
-                PolicyOrigin::Floor => "floor",
-                _ => "tenant",
-            };
-            format!("{set}:{}", sanitize_name(&r.id))
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 /// Decide the calls from the snapshot of `ctx`. `None` is an unavailable set under `closed`: the
 /// tool policy is on, but the request side did not run, so every call is blocked (fail closed).
-fn decide_now(ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec<DecidedCall> {
+fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec<DecidedCall> {
     let started = Instant::now();
     let fallback;
     let snapshot = match ctx.policy.as_deref() {
@@ -60,38 +76,34 @@ fn decide_now(ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec
     };
     let outcomes = decide_calls(snapshot, turn, calls, &Instant::now);
     let mode = snapshot.mode.as_str();
-    let request_id = ctx.request_id.as_deref().unwrap_or("");
-    for (call, o) in calls.iter().zip(&outcomes) {
+    // The digest is computed inside the timed region, so it is part of the overhead sample (§ 5.3).
+    let digests: Vec<_> = calls.iter().map(|c| recorder.digest(&c.arguments)).collect();
+    for o in &outcomes {
         let effect = effect_label(o.decision);
         let basis = o.basis.as_str();
         counter!(names::GATEWAY_TOOL_POLICY_DECISIONS_TOTAL, "side" => "response", "mode" => mode, "effect" => effect, "basis" => basis).increment(1);
-        let (determining, errored) = o.verdict.as_ref().map_or_else(|| (String::new(), String::new()), |v| (refs(&v.determining), refs(&v.errored)));
-        tracing::info!(
-            request_id,
-            tool = %sanitize_name(&call.display_name()),
-            verdict = effect,
-            basis,
-            mode,
-            determining = %determining,
-            errored = %errored,
-            "tool-policy decision"
-        );
+        if let Some(c) = &o.cedar {
+            for f in &c.findings {
+                counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "response", "kind" => finding_label(f)).increment(1);
+            }
+        }
     }
     // Preflight F14: the decider records no sample. It adds its time to the request's snapshot,
     // and the gateway records one sample per request (`OverheadSample`), however many holds.
     if let Some(s) = ctx.policy.as_deref() {
         s.add_decide_elapsed(started.elapsed());
     }
-    // Every call gets a detail for the decision log (SMA-755). The arguments digest is Task 8's.
+    // Every call gets a detail for the decision log (SMA-755).
     outcomes
         .into_iter()
-        .map(|o| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, None)))))
+        .zip(digests)
+        .map(|(o, digest)| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, digest)))))
         .collect()
 }
 
 impl ToolCallDecider for CedarDecider {
     fn decide(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
-        Box::pin(std::future::ready(Ok(decide_now(&ctx, &turn, &calls))))
+        Box::pin(std::future::ready(Ok(decide_now(&self.recorder, &ctx, &turn, &calls))))
     }
 }
 
@@ -134,7 +146,10 @@ mod tests {
     async fn decide_full(ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<DecidedCall> {
         let calls = calls(call_names);
         let n = calls.len();
-        let out = CedarDecider.decide(Arc::new(ctx), Arc::new(turn), calls).await.expect("decide");
+        let out = CedarDecider::new(Arc::new(DecisionRecorder::tracing()))
+            .decide(Arc::new(ctx), Arc::new(turn), calls)
+            .await
+            .expect("decide");
         assert_eq!(out.len(), n, "one decision per call");
         out
     }
@@ -157,7 +172,7 @@ mod tests {
             let detail = d.detail.as_ref().expect("a detail for every call");
             assert_eq!(detail.basis, RecordBasis::Policy);
             assert!(detail.cedar.is_some(), "a kernel verdict has a Cedar detail");
-            assert!(detail.arguments.is_none(), "the digest is added at the record site");
+            assert!(detail.arguments.is_none(), "no digest: the recorder has no key");
         }
         // `rm` is a floor deny: its detail says so, and its decision is the block.
         assert_eq!(decided[2].decision, BLOCK_POLICY);
@@ -169,6 +184,51 @@ mod tests {
             let detail = d.detail.as_ref().expect("a detail");
             assert_eq!((detail.basis, detail.cedar.is_none()), (RecordBasis::Unavailable, true));
         }
+    }
+
+    #[tokio::test]
+    async fn response_side_findings_are_counted() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let policy = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        let ctx = ctx.with_policy(out.snapshot);
+        // The arguments of the call are valid JSON but not an object.
+        let reply = serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [
+            {"id": "c0", "type": "function", "function": {"name": "ok", "arguments": "[1]"}},
+            {"id": "c1", "type": "function", "function": {"name": "ok", "arguments": "{}"}}
+        ]}, "finish_reason": "tool_calls"}]})
+        .to_string();
+        let calls = parse_body(Format::OpenAiChat, reply.as_bytes(), 1 << 20).expect("body").calls;
+        let decided = CedarDecider::new(Arc::new(DecisionRecorder::tracing()))
+            .decide(Arc::new(ctx), Arc::new(turn), calls)
+            .await
+            .expect("decide");
+        assert_eq!(decided.len(), 2);
+        let m = testing::Snap::take(&snapshotter);
+        let finding = |side: &str, kind: &str| m.counter(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
+        assert_eq!(
+            (
+                finding("response", "unparsed_arguments"),
+                finding("response", "name_collision"),
+                finding("request", "unparsed_arguments")
+            ),
+            (1, 0, 0)
+        );
+    }
+
+    #[test]
+    fn an_unknown_finding_kind_is_other() {
+        assert_eq!(finding_label("zz"), "other");
+        for k in ["name_collision", "unparsed_arguments"] {
+            assert_eq!(finding_label(k), k);
+        }
+        assert_eq!(FINDING_KINDS, ["name_collision", "unparsed_arguments", "other"]);
     }
 
     #[tokio::test]
@@ -297,11 +357,5 @@ mod tests {
         );
         assert!(snap.decide_elapsed() > Duration::ZERO, "the decide time is in the snapshot");
         assert!(snap.overhead() >= Duration::from_secs(5), "the overhead holds the request-side time");
-    }
-
-    #[test]
-    fn policy_ids_are_sanitized_in_logs() {
-        let r = [PolicyRef::new(PolicyOrigin::Floor, "f 1"), PolicyRef::new(PolicyOrigin::Tenant, "t\n2")];
-        assert_eq!(refs(&r), "floor:f_1,tenant:t_2");
     }
 }

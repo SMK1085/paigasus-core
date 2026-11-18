@@ -15,7 +15,10 @@ use paigasus_gateway_core::{OnUnavailable, TenantMode};
 use uuid::Uuid;
 
 use super::{CacheSettings, PolicyCache, RequestToolPolicy};
+use crate::application::decision_log::DecisionRecorder;
 use crate::config::ToolPolicySettings;
+use crate::domain::decision_log::{MemoryDecisionLog, OsEntropy};
+use crate::domain::limits::SystemClock;
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 
 pub(crate) const ORG_A: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
@@ -156,6 +159,18 @@ pub(crate) fn settings_from_source(default_mode: TenantMode) -> ToolPolicySettin
 
 /// The request-side service over a new cache of `source`.
 pub(crate) fn policy(source: &Arc<FakeSource>, settings: ToolPolicySettings) -> RequestToolPolicy {
+    policy_with(source, settings, Arc::new(DecisionRecorder::tracing()))
+}
+
+/// A recorder over a memory log, and the log.
+pub(crate) fn memory_recorder() -> (Arc<MemoryDecisionLog>, Arc<DecisionRecorder>) {
+    let log = Arc::new(MemoryDecisionLog::new(false));
+    let rec = Arc::new(DecisionRecorder::new(log.clone(), Arc::new(SystemClock), Arc::new(OsEntropy), None));
+    (log, rec)
+}
+
+/// [`policy`] with a chosen recorder.
+pub(crate) fn policy_with(source: &Arc<FakeSource>, settings: ToolPolicySettings, recorder: Arc<DecisionRecorder>) -> RequestToolPolicy {
     let cache = PolicyCache::new(
         Arc::clone(source) as Arc<dyn PolicySource>,
         CacheSettings {
@@ -165,7 +180,7 @@ pub(crate) fn policy(source: &Arc<FakeSource>, settings: ToolPolicySettings) -> 
             load_timeout: settings.load_timeout,
         },
     );
-    RequestToolPolicy::new(cache, settings)
+    RequestToolPolicy::new(cache, settings, recorder)
 }
 
 /// A chat request with these function tools. `extra` is more top-level members, each with a
