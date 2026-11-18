@@ -117,7 +117,8 @@ futures = "0.3"
 # `rustls-tls-native-roots`. Its `rustls` feature pulls `aws-lc-rs`, which would link a SECOND
 # rustls CryptoProvider, so this uses `rustls-no-provider`: TLS through rustls with no provider
 # chosen. The one provider is `ring`, enabled by `async-nats`/`sqlx`/`redis` (see the aws-lc-rs
-# note on `async-nats` below); rustls then selects it on its own. `cargo tree -i aws-lc-rs` must
+# note on `async-nats` below); reqwest calls `CryptoProvider::get_default()` and panics when no provider is installed, so the
+# explicit `ring` install before each `Client` build is what prevents the panic. `cargo tree -i aws-lc-rs` must
 # stay empty.
 #
 # Root store: reqwest 0.13 verifies through `rustls-platform-verifier` (the OS trust store) and

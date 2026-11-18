@@ -167,11 +167,12 @@ enum Attribution<'a> {
 /// client with the SAME options but no added anchors, and is called ONLY when a bundle is
 /// configured.
 ///
-/// Success proves the store did not cause THIS failure — not that it is healthy, since reqwest
-/// errors on the native store only when `valid_count == 0 && invalid_count > 0`, so an absent or
-/// empty store builds fine. Failure names BOTH, because reqwest adds user roots first and
-/// `?`-returns on the first bad one before reaching the native store block: with both broken, the
-/// real build dies on the bundle while the control dies on the store.
+/// Success proves the store did not cause THIS failure. reqwest 0.13 builds through
+/// `rustls-platform-verifier`, and on Linux an empty or absent system store with no extra bundle
+/// is itself a build error, so a failing control build points at the store. Failure names BOTH,
+/// because the added anchors are loaded first and a bad one fails the build before the store is
+/// consulted: with both broken, the real build dies on the bundle while the control dies on the
+/// store.
 fn attribute_build_failure<'a>(bundle: Option<&'a str>, control_build_ok: impl FnOnce() -> bool) -> Attribution<'a> {
     match bundle {
         None => Attribution::NoBundle,

@@ -126,9 +126,10 @@ enum Attribution<'a> {
 /// would cost a second `load_native_certs()` for nothing.
 ///
 /// The inference on success is narrow and deliberately so: the control build succeeding does NOT
-/// prove the platform store is healthy — reqwest errors on the native store only when
-/// `valid_count == 0 && invalid_count > 0`, so an ABSENT or EMPTY store builds fine. What it
-/// proves is that the store did not cause THIS failure, and since the two builds differ only in
+/// prove the platform store is healthy. reqwest 0.13 builds through `rustls-platform-verifier`,
+/// and on Linux an empty or absent system store with no extra bundle is itself a build error
+/// ("No CA certificates were loaded from the system"), so a failing control build points at the
+/// store. What a passing control build proves is that the store did not cause THIS failure, and since the two builds differ only in
 /// the added anchors (guaranteed by both going through `base_builder`), the anchors did.
 ///
 /// On failure the disjunction is genuinely incomplete, which is why that arm names both: reqwest
