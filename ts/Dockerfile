@@ -13,7 +13,7 @@ ARG BASE_PATH
 # The builder is digest-pinned like rs/Dockerfile's builder, and the digest is the multi-platform
 # manifest-list (index) digest so the pin resolves on both images.yml legs (amd64 and arm64).
 # Refresh with: PROTO_REPORTER=text crane digest node:X.Y.Z-bookworm
-FROM node:24.16.0-bookworm@sha256:40ad9f3064e67d6860b4bc3fe1880b2953934fd6320ada990e45fe0efa6badd7 AS builder
+FROM node:24.22.3-bookworm@sha256:9d266751ca3d7fdbe651c878ffd5ad0a42fed49a18c283509267c97f025b7496 AS builder
 ARG APP
 ARG BASE_PATH
 WORKDIR /build

@@ -646,7 +646,7 @@ Know these limits before you use the SBOM for a vulnerability scan:
 
 ### Tools
 
-The release tooling adds three CLIs: crane 0.22.1, cosign 3.1.3, and syft 1.52.0. Each tool is
+The release tooling adds three CLIs: crane 0.22.1, cosign 3.1.4, and syft 1.52.0. Each tool is
 pinned in `.prototools`. Each tool uses a vendored plugin file in `.proto/plugins/`. Install one
 tool with `proto install <tool>`, for example `proto install crane`. `ci.yml`'s bare
 `proto install` step now installs all three tools too.
