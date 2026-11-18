@@ -109,6 +109,30 @@ pub struct ToolResultRef {
     /// The item `id` of a Responses `local_shell_call_output`. The provider schema gives this item
     /// an `id` that refers to its call, and no `call_id`. `None` for every other result.
     pub item_id: Option<String>,
+    /// How a blocked result is replaced.
+    pub shape: ResultShape,
+}
+
+/// How a blocked tool result is replaced (SMA-776 § 6.1).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultShape {
+    Text,
+    ShellChunks,
+    Screenshot,
+    Approval,
+}
+
+/// The shape of a Responses input item of type `ty`, or `None` when the item is not a tool result.
+/// This is the one list of the Responses result types.
+pub(crate) fn responses_result_shape(ty: &str) -> Option<ResultShape> {
+    match ty {
+        "function_call_output" | "custom_tool_call_output" | "local_shell_call_output" | "apply_patch_call_output" => Some(ResultShape::Text),
+        "shell_call_output" => Some(ResultShape::ShellChunks),
+        "computer_call_output" => Some(ResultShape::Screenshot),
+        "mcp_approval_response" => Some(ResultShape::Approval),
+        _ => None,
+    }
 }
 
 #[must_use]
@@ -208,11 +232,13 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                 call_id: opt_str(m.get("tool_call_id"), "tool_call_id")?,
                 name: None,
                 item_id: None,
+                shape: ResultShape::Text,
             }),
             Some("function") => f.tool_results.push(ToolResultRef {
                 call_id: None,
                 name: opt_str(m.get("name"), "name")?,
                 item_id: None,
+                shape: ResultShape::Text,
             }),
             _ => {}
         }
@@ -240,7 +266,7 @@ fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
 /// `tool_search` tool makes the set incomplete, as do an `additional_tools` and a
 /// `tool_search_output` input item. The `input` items of the client-run types of § 6.2 are the
 /// prior calls (read as a response reads them, `assembly::tool_call`), and each output item is a
-/// tool result. An `mcp_approval_response` refers to its request by `approval_request_id`, and the
+/// tool result (`responses_result_shape` is the one list of the result types). An `mcp_approval_response` refers to its request by `approval_request_id`, and the
 /// id of an `mcp_approval_request` call is its item `id`. A string `input` has no items.
 fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
@@ -287,24 +313,23 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
         let item = obj(item)?;
         // A message in the short form has no `type`.
         let Some(ty) = opt_str(item.get("type"), "type")? else { continue };
+        if let Some(shape) = responses_result_shape(&ty) {
+            let key = if shape == ResultShape::Approval { "approval_request_id" } else { "call_id" };
+            // Only a `local_shell_call_output` refers to its call by `id`. For the other output
+            // types, `id` is the id of the output item itself.
+            let item_id = if ty == "local_shell_call_output" { opt_str(item.get("id"), "id")? } else { None };
+            f.tool_results.push(ToolResultRef {
+                call_id: opt_str(item.get(key), key)?,
+                name: None,
+                item_id,
+                shape,
+            });
+            continue;
+        }
         match ty.as_str() {
             // The referenced items are not in the request, so the history is unknown (D3, § 7.2).
             "item_reference" => return Err(Malformed("item_reference")),
             "additional_tools" | "tool_search_output" => f.definitions_complete = false,
-            "function_call_output" | "custom_tool_call_output" | "computer_call_output" | "local_shell_call_output" | "shell_call_output" | "apply_patch_call_output" => {
-                f.tool_results.push(ToolResultRef {
-                    call_id: opt_str(item.get("call_id"), "call_id")?,
-                    name: None,
-                    // Only a `local_shell_call_output` refers to its call by `id`. For the other
-                    // output types, `id` is the id of the output item itself.
-                    item_id: if ty == "local_shell_call_output" { opt_str(item.get("id"), "id")? } else { None },
-                });
-            }
-            "mcp_approval_response" => f.tool_results.push(ToolResultRef {
-                call_id: opt_str(item.get("approval_request_id"), "approval_request_id")?,
-                name: None,
-                item_id: None,
-            }),
             _ => {
                 // An unknown type is client-run of kind `Other` for a response (fail closed), but in
                 // a request it is just an item the gateway does not read (`message`, `reasoning`).
@@ -496,6 +521,7 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                     call_id: opt_str(b.get("tool_use_id"), "tool_use_id")?,
                     name: None,
                     item_id: None,
+                    shape: ResultShape::Text,
                 }),
                 _ => {}
             }
@@ -556,16 +582,39 @@ mod tests {
                 ToolResultRef {
                     call_id: Some("c1".into()),
                     name: None,
-                    item_id: None
+                    item_id: None,
+                    shape: ResultShape::Text
                 },
                 ToolResultRef {
                     call_id: None,
                     name: Some("old".into()),
-                    item_id: None
+                    item_id: None,
+                    shape: ResultShape::Text
                 }
             ]
         );
         assert!(!format!("{f:?}").contains("SECRET"), "tool result content is never kept");
+    }
+
+    #[test]
+    fn each_responses_result_type_has_its_shape() {
+        use ResultShape::{Approval, Screenshot, ShellChunks, Text};
+        let table = [
+            ("function_call_output", Some(Text)),
+            ("custom_tool_call_output", Some(Text)),
+            ("local_shell_call_output", Some(Text)),
+            ("apply_patch_call_output", Some(Text)),
+            ("shell_call_output", Some(ShellChunks)),
+            ("computer_call_output", Some(Screenshot)),
+            ("mcp_approval_response", Some(Approval)),
+            ("function_call", None),
+            ("computer_call", None),
+            ("mcp_call", None),
+            ("message", None),
+        ];
+        for (ty, shape) in table {
+            assert_eq!(responses_result_shape(ty), shape, "{ty}");
+        }
     }
 
     #[test]
@@ -576,6 +625,7 @@ mod tests {
                    "messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"rm","input":{"p":"/"}}]},
                                {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"SECRET"}]}]}),
         );
+        assert!(f.tool_results.iter().all(|r| r.shape == ResultShape::Text));
         assert_eq!(f.definitions.len(), 1);
         assert!(f.server_tools);
         assert_eq!(f.prior_calls[0].arguments, r#"{"p":"/"}"#);
@@ -680,6 +730,9 @@ mod tests {
         let ids: Vec<_> = f.tool_results.iter().map(|r| r.call_id.as_deref().unwrap()).collect();
         assert_eq!(ids, ["c1", "c2", "c3", "c4", "c5", "c6", "mcpr_1"]);
         assert!(!format!("{f:?}").contains("SECRET"), "tool result content is never kept");
+        let shapes: Vec<_> = f.tool_results.iter().map(|r| r.shape).collect();
+        use ResultShape::{Approval, Screenshot, ShellChunks, Text};
+        assert_eq!(shapes, [Text, Text, ShellChunks, Screenshot, Text, Text, Approval]);
     }
 
     #[test]

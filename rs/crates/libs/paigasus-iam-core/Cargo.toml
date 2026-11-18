@@ -8,7 +8,9 @@ authors.workspace = true
 publish = false
 
 [dependencies]
-paigasus-kernel = { workspace = true }
+# Feature `tool-policy`: the catalog match key uses the one kernel normaliser (spec section 4.1,
+# ADR-0005), not a copy.
+paigasus-kernel = { workspace = true, features = ["tool-policy"] }
 uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }

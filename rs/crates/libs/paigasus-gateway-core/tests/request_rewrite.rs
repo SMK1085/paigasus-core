@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The request rewrite (SMA-752 § 6.5, P-8, P-9). Each fixture pair in
-//! `tests/fixtures/request_rewrite/` is built from the provider API reference, not from a live
-//! call: every case is "not measured" (see the README there).
+//! The request rewrite (SMA-752 § 6.5, P-8, P-9). Each fixture pair is built from the provider API
+//! reference. The README there says which cases SMA-776 measured against the real upstream.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use paigasus_gateway_core::{
-    ChoiceRewrite, Format, OnUnavailable, PolicySet, PolicySnapshot, RequestPlan, RequestReason, TenantMode, TenantPart, ToolChoice, ToolTurn, TurnFacts, ingress, parse_request, plan_request,
-    result_notice, rewrite_request,
+    ChoiceRewrite, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestPlan, RequestReason, TenantMode, TenantPart, ToolChoice, ToolTurn, TurnFacts, ingress, parse_request,
+    plan_request, result_notice, rewrite_request,
 };
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies, normalise};
 use paigasus_kernel::{Prn, to_cedar_uid};
@@ -84,7 +83,7 @@ const CASES: &[(&str, Format, &[&str])] = &[
     (
         "responses_outputs_replaced",
         Format::OpenAiResponses,
-        &["delete_file", "run_sql", "computer", "local_shell", "shell", "apply_patch"],
+        &["delete_file", "run_sql", "local_shell", "shell", "apply_patch"],
     ),
     ("responses_mcp_approval_refused", Format::OpenAiResponses, &["srv.search"]),
     ("anthropic_remove_tool", Format::AnthropicMessages, &["delete_file"]),
@@ -331,4 +330,96 @@ fn a_hosted_tool_with_a_removed_name_stays() {
     let body = r#"{"model":"m","tools":[{"type":"function","name":"web_search"},{"type":"web_search"},{"type":"local_shell"}]}"#;
     let p = plan(&enforce(Format::OpenAiResponses, &["web_search", "local_shell"]), Format::OpenAiResponses, body.as_bytes());
     assert_eq!(rewrite(Format::OpenAiResponses, body.as_bytes(), &p), r#"{"model":"m","tools":[{"type":"web_search"}]}"#);
+}
+
+/// G3: each Responses output type keeps its schema after the rewrite.
+#[test]
+fn each_responses_output_type_keeps_its_schema() {
+    let input = fixture("responses_outputs_replaced", "in");
+    let tools = ["delete_file", "run_sql", "local_shell", "shell", "apply_patch"];
+    let p = plan(&enforce(Format::OpenAiResponses, &tools), Format::OpenAiResponses, input.as_bytes());
+    let out: Value = serde_json::from_str(&rewrite(Format::OpenAiResponses, input.as_bytes(), &p)).expect("json");
+    let notice = |t: &str| Value::from(result_notice(t, RequestReason::ToolResultBlocked));
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for item in out["input"].as_array().expect("input") {
+        let ty = item["type"].as_str().unwrap_or("message");
+        match ty {
+            "function_call_output" => assert_eq!(item["output"], notice("delete_file")),
+            "custom_tool_call_output" => assert_eq!(item["output"], notice("run_sql")),
+            "apply_patch_call_output" => assert_eq!(item["output"], notice("apply_patch")),
+            "local_shell_call_output" => assert!(item["output"].is_string(), "{item}"),
+            "shell_call_output" => {
+                assert_eq!(item["output"], json!([{"stdout": "", "stderr": notice("shell"), "outcome": {"type": "exit", "exit_code": 1}}]));
+                assert_eq!(item["output"][0].as_object().map(|o| o.len()), Some(3), "exactly stdout, stderr, outcome");
+            }
+            _ => continue,
+        }
+        *seen.entry(ty).or_default() += 1;
+    }
+    let want = [
+        ("apply_patch_call_output", 1),
+        ("custom_tool_call_output", 1),
+        ("function_call_output", 1),
+        ("local_shell_call_output", 4),
+        ("shell_call_output", 1),
+    ];
+    assert_eq!(seen, BTreeMap::from(want));
+    // The three replaced `local_shell_call_output` items carry the notice; the unrelated one stays.
+    let shells: Vec<&Value> = out["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .filter(|i| i["type"] == "local_shell_call_output")
+        .map(|i| &i["output"])
+        .collect();
+    assert_eq!(shells, [&notice("local_shell"), &notice("local_shell"), &notice("local_shell"), &json!("unrelated")]);
+}
+
+/// Review Focus 2: one chunk for two commands; every other member keeps its bytes.
+#[test]
+fn a_shell_notice_is_one_chunk_and_keeps_every_other_member() {
+    let body = concat!(
+        r#"{"model":"m","input":[{"type":"shell_call","id":"sh_1","call_id":"c5","action":{"commands":["ls","cat /etc/hosts"]},"status":"completed"},"#,
+        r#"{"type":"shell_call_output", "id" : "sho_1","call_id":"c5","status":"completed","max_output_length" : 10,"caller":{"type":"x"},"#,
+        r#""output":[{"stdout":"SECRET-1","stderr":"","outcome":{"type":"exit","exit_code":0}},{"stdout":"SECRET-2","stderr":"","outcome":{"type":"timeout"}}]}]}"#
+    );
+    let p = plan(&enforce(Format::OpenAiResponses, &["shell"]), Format::OpenAiResponses, body.as_bytes());
+    let out = rewrite(Format::OpenAiResponses, body.as_bytes(), &p);
+    assert!(!out.contains("SECRET"));
+    let item = |s: &str| -> String {
+        let top: BTreeMap<String, &RawValue> = serde_json::from_str(s).expect("object");
+        let items: Vec<&RawValue> = serde_json::from_str(top["input"].get()).expect("input");
+        items[1].get().to_owned()
+    };
+    let members = |s: String| {
+        serde_json::from_str::<BTreeMap<String, &RawValue>>(&s)
+            .expect("item")
+            .into_iter()
+            .map(|(k, v)| (k, v.get().to_owned()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let (mut a, mut b) = (members(item(body)), members(item(&out)));
+    let chunk = b.remove("output").expect("output");
+    a.remove("output");
+    assert_eq!(a, b, "every member except output keeps its bytes");
+    let notice = serde_json::to_string(&result_notice("shell", RequestReason::ToolResultBlocked)).expect("json");
+    assert_eq!(chunk, format!(r#"[{{"stdout":"","stderr":{notice},"outcome":{{"type":"exit","exit_code":1}}}}]"#));
+}
+
+/// Review Focus 3: a log-only computer block is a cause, not a failure of the other items.
+#[test]
+fn an_unenforced_computer_block_leaves_the_output_and_the_rest_applies() {
+    let body = json!({"model":"m","tools":[{"type":"function","name":"rm"},{"type":"function","name":"ok"}],"input":[
+        {"type":"computer_call","id":"cu_1","call_id":"c3","actions":[{"type":"screenshot"}],"status":"completed"},
+        {"type":"computer_call_output","call_id":"c3","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AAAA"}}]})
+    .to_string();
+    let floor = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"rm", resource);"#;
+    let snap = snapshot(Format::OpenAiResponses, floor, &forbid_text(&["computer"]), TenantMode::LogOnly);
+    let p = plan(&snap, Format::OpenAiResponses, body.as_bytes());
+    assert_eq!(p.refusals.iter().map(|(c, e)| (*c, *e)).collect::<Vec<_>>(), [(RefusalCause::UnreplaceableResult, false)]);
+    assert_eq!(p.refusal(), None);
+    let before: Value = serde_json::from_str(&body).expect("json");
+    let out: Value = serde_json::from_str(&rewrite(Format::OpenAiResponses, body.as_bytes(), &p)).expect("json");
+    assert_eq!(out["tools"], json!([{"type":"function","name":"ok"}]));
+    assert_eq!(out["input"], before["input"], "the screenshot is not changed");
 }

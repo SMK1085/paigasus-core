@@ -19,6 +19,7 @@ pub mod pg_outbox_maintainer;
 pub mod pg_partition_maintainer;
 pub mod pg_policies;
 pub mod pg_projects;
+pub mod pg_recompile_lock;
 pub mod pg_repository;
 pub mod pg_role_grants;
 pub mod pg_service_accounts;
@@ -44,6 +45,7 @@ pub use pg_outbox_maintainer::{OutboxRetentionPolicy, PgOutboxMaintainer, SweepR
 pub use pg_partition_maintainer::{PgPartitionMaintainer, RetentionPolicy};
 pub use pg_policies::PgPolicyStore;
 pub use pg_projects::PgProjectRepository;
+pub use pg_recompile_lock::{PgRecompileLock, TOOL_POLICY_RECOMPILE_LOCK_KEY};
 pub use pg_repository::PgPrincipalRepository;
 pub use pg_role_grants::PgRoleGrantStore;
 pub use pg_service_accounts::PgServiceAccountRepository;

@@ -12,4 +12,4 @@ pub(crate) mod testing;
 
 pub use cache::{CacheSettings, FloorEntry, Invalidate, Lookup, PolicyCache};
 pub use decider::CedarDecider;
-pub use request::{OverheadSample, Refusal, RequestOutcome, RequestToolPolicy};
+pub use request::{OverheadSample, Refusal, Refused, RequestOutcome, RequestToolPolicy};

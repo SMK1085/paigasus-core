@@ -207,6 +207,27 @@ describe("arm 3 — the gateway's OpenAI envelope", () => {
     expect(result.retryable).toBe(false);
   });
 
+  // SMA-776. A blocked computer_call_output cannot be replaced: a 400, never retryable.
+  it('maps tool-result-unreplaceable to from-transport, not retryable', () => {
+    const result = mapError({
+      kind: 'http',
+      status: 400,
+      headers: new Headers({ 'paigasus-retryable': 'false' }),
+      body: {
+        error: {
+          message: 'A blocked computer_call_output cannot be replaced. Remove the computer call and its output from the input.',
+          type: 'invalid_request_error',
+          param: 'input',
+          code: 'tool-result-unreplaceable',
+        },
+      },
+    });
+    expect(result.reason).toBe(ErrorReason.TOOL_RESULT_UNREPLACEABLE);
+    // The transport table presents a 400 as invalid input.
+    expect(result.presentation).toBe('invalid-input');
+    expect(result.retryable).toBe(false);
+  });
+
   // SMA-677. The gateway's own rate refusal keeps the transport table's `rate-limited`.
   it('maps rate-limited to rate-limited, retryable', () => {
     const result = mapError({

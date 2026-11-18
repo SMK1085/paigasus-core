@@ -34,6 +34,9 @@ pub enum EventType {
     ProjectRestored,
     MembershipAttached,
     MembershipDetached,
+    ToolPolicySetPublished,
+    ToolFloorPublished,
+    ToolPolicySettingsChanged,
 }
 
 impl EventType {
@@ -43,7 +46,7 @@ impl EventType {
     /// test cannot see a `#[cfg(test)]` constant. Kept exhaustive by
     /// `all_lists_every_event_type`, whose wildcard-free match stops compiling when a variant is
     /// added.
-    pub const ALL: [EventType; 22] = [
+    pub const ALL: [EventType; 25] = [
         Self::PrincipalCreated,
         Self::PrincipalArchived,
         Self::RoleGranted,
@@ -66,6 +69,9 @@ impl EventType {
         Self::ProjectRestored,
         Self::MembershipAttached,
         Self::MembershipDetached,
+        Self::ToolPolicySetPublished,
+        Self::ToolFloorPublished,
+        Self::ToolPolicySettingsChanged,
     ];
 
     pub fn as_wire(&self) -> &'static str {
@@ -92,6 +98,9 @@ impl EventType {
             Self::ProjectRestored => "iam.project.restored",
             Self::MembershipAttached => "iam.membership.attached",
             Self::MembershipDetached => "iam.membership.detached",
+            Self::ToolPolicySetPublished => "iam.policy.tool_set.published",
+            Self::ToolFloorPublished => "iam.policy.tool_floor.published",
+            Self::ToolPolicySettingsChanged => "iam.policy.tool_settings.changed",
         }
     }
 
@@ -119,6 +128,9 @@ impl EventType {
             "iam.project.restored" => Some(Self::ProjectRestored),
             "iam.membership.attached" => Some(Self::MembershipAttached),
             "iam.membership.detached" => Some(Self::MembershipDetached),
+            "iam.policy.tool_set.published" => Some(Self::ToolPolicySetPublished),
+            "iam.policy.tool_floor.published" => Some(Self::ToolFloorPublished),
+            "iam.policy.tool_settings.changed" => Some(Self::ToolPolicySettingsChanged),
             _ => None,
         }
     }
@@ -192,10 +204,22 @@ mod tests {
                 | EventType::ProjectArchived
                 | EventType::ProjectRestored
                 | EventType::MembershipAttached
-                | EventType::MembershipDetached => {}
+                | EventType::MembershipDetached
+                | EventType::ToolPolicySetPublished
+                | EventType::ToolFloorPublished
+                | EventType::ToolPolicySettingsChanged => {}
             }
         }
-        assert_eq!(EventType::ALL.len(), 22);
+        assert_eq!(EventType::ALL.len(), 25);
+    }
+
+    #[test]
+    fn the_tool_policy_events_have_four_segments_under_iam_policy() {
+        for et in [EventType::ToolPolicySetPublished, EventType::ToolFloorPublished, EventType::ToolPolicySettingsChanged] {
+            let w = et.as_wire();
+            assert!(w.starts_with("iam.policy."));
+            assert_eq!(w.split('.').count(), 4);
+        }
     }
 
     #[test]

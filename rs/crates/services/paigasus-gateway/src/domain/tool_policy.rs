@@ -2,10 +2,11 @@
 
 //! SMA-752: the port that supplies tool-policy text to the gateway. The file source is the first
 //! adapter (`adapters::policy_source`). The IAM source (SMA-751) returns the same three things for
-//! a tenant and for the floor: policy text, catalog names and a version. The port needs no change
-//! for it.
+//! a tenant and for the floor: policy text, catalog names and a version. It also returns the
+//! tenant settings (mode and fail mode, spec §9.2, §9.3). The file source has no settings.
 
 use async_trait::async_trait;
+use paigasus_gateway_core::{OnUnavailable, TenantMode};
 use uuid::Uuid;
 
 /// The floor policy text and its version.
@@ -17,6 +18,16 @@ pub struct PolicyText {
     pub version: String,
 }
 
+/// The tenant settings from the source (spec §9.2, §9.3). A source with no settings (the file
+/// source) returns `None` in [`TenantPolicies::settings`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TenantSettings {
+    /// The tenant mode.
+    pub mode: TenantMode,
+    /// What the gateway does when the tenant set is unavailable.
+    pub on_unavailable: OnUnavailable,
+}
+
 /// The policy text, the tool catalog and the version of one tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantPolicies {
@@ -24,8 +35,14 @@ pub struct TenantPolicies {
     pub text: String,
     /// The tool names that the tenant knows.
     pub catalog: Vec<String>,
-    /// A token that changes when the text or the catalog changes.
+    /// A token that changes when the text, the catalog or the settings change.
     pub version: String,
+    /// The tenant settings. `None` from a source with no settings.
+    pub settings: Option<TenantSettings>,
+    /// The source refused the set (R5: a history condition, until SMA-753). The settings still
+    /// apply. The cache keeps them, but it never compiles the set, so the tenant set is
+    /// unavailable and the tenant fail mode decides.
+    pub refused: bool,
 }
 
 /// Why a source could not supply a policy set. The messages hold no policy text and no tool name.

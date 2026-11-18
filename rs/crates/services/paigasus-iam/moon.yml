@@ -60,7 +60,9 @@ tasks:
     # SMA-774 — `tests/tool_policies_real_compiler.rs` and `tests/tool_policies_compiler_process.rs`
     # run the real policy compiler. It is a separate cargo workspace, so `^:build` does not build
     # it: the task names its build here, and `env` gives the tests the path of the binary.
-    deps: ['^:build', 'paigasus-policy-compiler-rs:build']
+    # SMA-777 — `test-build` compiles the test binaries before this task starts. This task holds
+    # the mutex below, so it then only runs the tests and does not compile under the lock.
+    deps: ['^:build', 'paigasus-policy-compiler-rs:build', 'test-build']
     env:
       PAIGASUS_POLICY_COMPILER_BIN: '$workspaceRoot/rs/tools/paigasus-policy-compiler/target/debug/paigasus-policy-compiler'
     # The two tests above read the protocol fixtures of the policy compiler, which is outside this
@@ -77,3 +79,26 @@ tasks:
     # running at the same time.
     options:
       mutex: 'heavy-integration'
+  # SMA-777 — compiles the test binaries of `test`, OUTSIDE the `heavy-integration` mutex. The
+  # mutex holder ran about 4.5 minutes of compilation in CI while the two console e2e tasks
+  # waited. `nextest run --no-run` calls cargo with the same arguments as `nextest run`, so `test`
+  # finds every binary fresh. The inputs are the full input list of `test`, so the two tasks are
+  # affected together. `cache: false`: a moon cache hit would skip this task while
+  # `rs/target` can be cold, and `test` would then compile under the lock again. A run with
+  # fresh binaries costs only the cargo freshness check.
+  test-build:
+    command: 'cargo nextest run --locked --no-run'
+    deps: ['^:build']
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'Cargo.toml'
+      - '/rs/.config/nextest.toml'
+      - '@group(upstreams)'
+      - '/rs/.cargo/config.toml'
+      - '/rs/tools/paigasus-policy-compiler/protocol/**/*'
+      - '/rs/tools/paigasus-policy-compiler/src/**/*'
+      - '/rs/tools/paigasus-policy-compiler/Cargo.toml'
+      - '/rs/tools/paigasus-policy-compiler/Cargo.lock'
+    options:
+      cache: false

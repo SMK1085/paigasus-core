@@ -68,7 +68,8 @@ use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
     PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgIdentityLinkStore, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore,
-    PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, PgToolPolicies, SeaOrmUnitOfWork,
+    PgPrincipalRepository, PgProjectRepository, PgRecompileLock, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, PgToolPolicies,
+    SeaOrmUnitOfWork,
 };
 use crate::adapters::redis_role::RedisRole;
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
@@ -288,6 +289,9 @@ pub struct AppState {
     /// `capabilities.tool_policies` is true. The transports check the capability first, so a
     /// `None` here never reaches a handler.
     pub tool_policies: Option<ToolPolicySvc>,
+    /// The outbox that `with_tool_policies` gives the tool policy service, so that a new live
+    /// version and its event commit together.
+    tool_policy_outbox: Arc<dyn Outbox>,
     /// The `Generations` handle of `AppState::new`, kept for services built after it.
     gens: Generations,
     /// The persistent audit-log sink (`PgAuditLog`) the denial-audit [`DenialAuditDrain`]
@@ -351,6 +355,8 @@ impl AppState {
             authorize: self.authorize.clone(),
             uow: Arc::new(SeaOrmUnitOfWork::new(self.db.clone())),
             audit: self.audit_log.clone(),
+            outbox: self.tool_policy_outbox.clone(),
+            recompile_lock: Arc::new(PgRecompileLock::new(self.db.clone())),
             limits: ToolPolicyLimits {
                 catalog: CatalogLimits {
                     max_tools: cfg.max_tools,
@@ -930,6 +936,7 @@ impl AppState {
             retirement,
             capabilities: crate::service_info::Capabilities::from_config(cfg),
             tool_policies: None,
+            tool_policy_outbox: Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit)),
             gens: gens.clone(),
             audit_log,
             denial_drain: Arc::new(Mutex::new(Some(denial_drain))),

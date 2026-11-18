@@ -21,8 +21,10 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::task::TaskTracker;
 
+use crate::adapters::iam::client::build_channel;
 use crate::adapters::nats::PolicyEvents;
 use crate::adapters::policy_source::file::FilePolicySource;
+use crate::adapters::policy_source::iam::IamPolicySource;
 use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy};
 use crate::config::{GatewayConfig, PolicySourceConfig};
 use crate::domain::limits::ChargeDropReason;
@@ -131,15 +133,33 @@ pub fn build_tool_policy(config: &GatewayConfig) -> anyhow::Result<ToolPolicyRun
         });
     }
     let settings = config.tool_policy.settings();
-    let source: Arc<dyn PolicySource> = match &config.tool_policy.source {
-        Some(PolicySourceConfig::File { dir }) => Arc::new(FilePolicySource::new(dir)),
+    let (source, kind): (Arc<dyn PolicySource>, &str) = match &config.tool_policy.source {
+        Some(PolicySourceConfig::File { dir }) => (Arc::new(FilePolicySource::new(dir)), "file"),
+        // The channel is lazy: an IAM that is down at boot does not stop the gateway.
+        Some(PolicySourceConfig::Iam {}) => {
+            let credential_file = config
+                .iam
+                .service_credential_file
+                .clone()
+                .expect("GatewayConfig::validate requires iam.service_credential_file with tool_policy.source kind = \"iam\"");
+            (Arc::new(IamPolicySource::new(build_channel(&config.iam)?, credential_file)), "iam")
+        }
         None => anyhow::bail!("tool_policy.enabled = true requires tool_policy.source"),
     };
     let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
-    tracing::info!(
-        mode = settings.default_mode.as_str(),
-        "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies"
-    );
+    if settings.settings_from_source {
+        // The source holds the mode of each org, so `default_mode` applies to no org (final review M-2).
+        tracing::info!(
+            source = kind,
+            "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies; the mode of each org comes from the source"
+        );
+    } else {
+        tracing::info!(
+            source = kind,
+            mode = settings.default_mode.as_str(),
+            "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies"
+        );
+    }
     Ok(ToolPolicyRuntime {
         policy: Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings)))),
         decider: Arc::new(CedarDecider),

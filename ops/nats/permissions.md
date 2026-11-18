@@ -58,7 +58,7 @@ So: `iam-publisher` is asymmetric, not write-only — it may publish to `iam.>` 
 `iam.api_key.revoked`, `iam.principal.archived`, `iam.policy.put`, `iam.policy.deleted`) — out of
 everything published to `iam.>`.
 
-> **The publishable surface is 22 subjects, not 8 (SMA-606, ADR-0016 amendment 2026-09-01).**
+> **The publishable surface is 25 subjects, not 8 (SMA-606, ADR-0016 amendment 2026-09-01).**
 > SMA-606 added fourteen tenancy event types —
 > `iam.{organization,team,project}.{created,renamed,archived,restored}` and
 > `iam.membership.{attached,detached}`. Nothing in this document changes: they all sit under
@@ -74,6 +74,10 @@ everything published to `iam.>`.
 > That is intended — a new `org_admin` grant does change authorization decisions — but it is
 > traffic SMA-492 did not size for. The event carries `"source": "organization_create"` so a
 > future consumer can tell it from a user-requested grant.
+>
+> SMA-775 added three more event types: `iam.policy.tool_set.published`,
+> `iam.policy.tool_floor.published` and `iam.policy.tool_settings.changed`. They sit under
+> `iam.>` and `iam.policy.>`. `subjects.env` does not change.
 
 The intuitive way to enforce that would be a `subscribe.allow`
 naming just those event subjects. That does not work, for a structural reason: a JetStream pull

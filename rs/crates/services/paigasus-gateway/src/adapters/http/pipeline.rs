@@ -117,10 +117,12 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                     // D30: the decider uses this snapshot; without it, every call fails closed.
                     ctx = ctx.with_policy(outcome.snapshot);
                 }
-                Err(refusal) => {
+                Err(refused) => {
                     // The refusal metric is the operator's signal; this line stays at debug.
-                    tracing::debug!(principal = %caller.principal_prn, scope = %caller.scope_prn, reason = ?refusal, endpoint = endpoint.name, "request refused by the tool policy");
-                    return GatewayError::BadRequestBody.into_response();
+                    tracing::debug!(principal = %caller.principal_prn, scope = %caller.scope_prn, reason = ?refused.refusal, endpoint = endpoint.name, "request refused by the tool policy");
+                    let mut resp = GatewayError::from(refused.refusal).into_response();
+                    add_request_report(&mut resp, &refused.entries);
+                    return resp;
                 }
             }
         }

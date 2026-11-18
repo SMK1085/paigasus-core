@@ -112,28 +112,18 @@ async fn the_real_compiler_compiles_a_generic_floor() {
     assert!(compiled.cedar_policies.contains("floor-no-unregistered"), "{}", compiled.cedar_policies);
 }
 
+// SMA-753: IAM refuses a history rule until the gateway evaluates one. When SMA-753 lifts that,
+// restore the round-trip test (slot, policy id, window and threshold of the stored condition).
 #[tokio::test]
-async fn a_count_within_policy_round_trips_through_the_real_compiler() {
-    let Some(path) = support::real_compiler_path("a_count_within_policy_round_trips_through_the_real_compiler") else {
+async fn a_count_within_policy_is_refused_until_the_gateway_supports_history() {
+    let Some(path) = support::real_compiler_path("a_count_within_policy_is_refused_until_the_gateway_supports_history") else {
         return;
     };
     let Some(env) = setup(&path).await else { return };
     assert!(matches!(put_tool(&env, "search", Some(search_schema()), 0).await, WriteResult::Accepted(_)));
-    let WriteResult::Accepted(version) = env.service().put_set(&env.actor, env.org, COUNT_POLICY, 0).await.expect("put_set") else {
-        panic!("the count policy was rejected")
-    };
-    let compiled = pb::CompiledToolPolicySet::decode(version.compiled.as_slice()).expect("decode");
-    assert_eq!(compiled.conditions.len(), 1, "{compiled:?}");
-    let condition = &compiled.conditions[0];
-    assert!(condition.slot.starts_with("p_search_hrate_"), "{}", condition.slot);
-    assert_eq!(condition.policy_id, "search-rate");
-    assert_eq!(condition.window_ms, 3_600_000);
-    let Some(pb::history_condition::Shape::CountWithin(shape)) = &condition.shape else {
-        panic!("expected count_within, got {condition:?}")
-    };
-    assert_eq!(shape.threshold, 2);
-    assert!(compiled.cedar_schema.contains(&condition.slot), "the schema holds the slot");
-    assert_eq!(compiled.catalog_names, vec!["search".to_string()]);
+    let (reasons, message) = rejection_text(env.service().put_set(&env.actor, env.org, COUNT_POLICY, 0).await.expect("put_set"));
+    assert_eq!(reasons, vec!["tool-policy-history-unsupported"], "{message}");
+    assert!(message.contains("policy search-rate uses a history rule"), "{message}");
 }
 
 #[tokio::test]
@@ -201,4 +191,39 @@ async fn a_dropped_nested_field_gets_a_note_in_the_real_rejection() {
     let policy = "@id(\"p\")\npermit (principal, action == Pgs::Gateway::Action::\"orders\", resource)\nwhen { context.input.order.total == 5 };\n";
     let message = dropped_field_message(&env, policy).await;
     assert!(message.contains("the field `order.total` of the tool `orders` is not in the schema"), "{message}");
+}
+
+/// The job against the real compiler: a floor that an older generation compiled gets a new live
+/// version of the same output, with the origin `recompile` (F23: the composed check).
+#[tokio::test]
+async fn the_job_applies_an_identical_result_with_the_real_compiler() {
+    use paigasus_iam::adapters::persistence::PgToolPolicies;
+    use paigasus_iam::application::tool_policies::{RecompileOutcome, RecompileRun};
+    use paigasus_iam_core::tool_policy::{ToolPolicyRepository, ToolPolicySetKey, VersionOrigin};
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let Some(path) = support::real_compiler_path("the_job_applies_an_identical_result_with_the_real_compiler") else {
+        return;
+    };
+    let Some(env) = setup(&path).await else { return };
+    let WriteResult::Accepted(saved) = env.service().put_floor(&env.actor, FLOOR_GENERIC, 0).await.expect("put_floor") else {
+        panic!("the generic floor was rejected")
+    };
+    assert_eq!(saved.version, 1);
+    // An older compiler generation made the stored row: the run must compile it again.
+    let stale = "UPDATE tool_policy_set_version SET compiler_generation = compiler_generation - 1 WHERE kind = 'floor' AND status = 'live'";
+    env.state
+        .db
+        .execute_raw(Statement::from_string(DbBackend::Postgres, stale.to_owned()))
+        .await
+        .expect("make the floor stale");
+    let RecompileRun::Ran(results) = env.service().run_recompile_at_boot(std::future::pending()).await.expect("run") else {
+        panic!("the run did not happen")
+    };
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0].key, ToolPolicySetKey::Floor);
+    assert_eq!(results[0].outcome, RecompileOutcome::Identical { version: 2 });
+    let repo = PgToolPolicies::new(env.state.db.clone());
+    let live = repo.live(&ToolPolicySetKey::Floor).await.unwrap().expect("a live floor");
+    assert_eq!((live.version, live.origin, live.compiler_generation), (2, VersionOrigin::Recompile, 1));
 }

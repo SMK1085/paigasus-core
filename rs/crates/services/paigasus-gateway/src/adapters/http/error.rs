@@ -132,6 +132,23 @@ pub enum GatewayError {
     /// for background mode → 400. `param` names the refused field. Not retryable: the same
     /// request is refused again.
     ResponsesStatefulNotSupported { param: &'static str },
+
+    // ---- blocked structured results (SMA-776) ------------------------------------------------
+    /// An enforced block of a `computer_call_output`, which has no field for a notice → 400,
+    /// `param: "input"`. Not retryable: the same request is refused again.
+    ToolResultUnreplaceable,
+}
+
+/// Map a request-side tool-policy refusal (SMA-776 § 6.5). An unreadable turn and an unknown
+/// `tool_choice` stay `invalid-request-body`.
+impl From<crate::application::tool_policy::Refusal> for GatewayError {
+    fn from(refusal: crate::application::tool_policy::Refusal) -> Self {
+        use crate::application::tool_policy::Refusal;
+        match refusal {
+            Refusal::UnreadableTurn | Refusal::UnknownToolChoice => GatewayError::BadRequestBody,
+            Refusal::UnreplaceableResult => GatewayError::ToolResultUnreplaceable,
+        }
+    }
 }
 
 /// Map a limit refusal (SMA-677 § 4.5). `Unscoped` is the D2 fail-closed case: a scope with no
@@ -275,6 +292,13 @@ impl GatewayError {
                 Some(param),
                 "Stateful Responses API requests are not supported by this gateway.",
             ),
+            GatewayError::ToolResultUnreplaceable => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("tool-result-unreplaceable"),
+                Some("input"),
+                "A blocked computer_call_output cannot be replaced. Remove the computer call and its output from the input.",
+            ),
         }
     }
 
@@ -314,6 +338,7 @@ impl GatewayError {
             | Self::InvalidOrgHeader
             | Self::OrgRequired
             | Self::ResponsesStatefulNotSupported { .. }
+            | Self::ToolResultUnreplaceable
             | Self::BudgetExhausted { .. } => Retryable::No,
         }
     }
@@ -632,6 +657,30 @@ mod tests {
         assert_eq!(body["error"]["code"], "responses-stateful-not-supported");
         assert_eq!(body["error"]["param"], "previous_response_id");
         assert_eq!(body["error"]["message"], "Stateful Responses API requests are not supported by this gateway.");
+    }
+
+    /// SMA-776: the computer refusal names `input`, and its message names no tool and no content.
+    #[tokio::test]
+    async fn the_unreplaceable_result_refusal_names_the_input() {
+        use paigasus_observability::Retryable;
+
+        use crate::application::tool_policy::Refusal;
+        assert_eq!(GatewayError::from(Refusal::UnreadableTurn), GatewayError::BadRequestBody);
+        assert_eq!(GatewayError::from(Refusal::UnknownToolChoice), GatewayError::BadRequestBody);
+        let err = GatewayError::from(Refusal::UnreplaceableResult);
+        assert_eq!(err, GatewayError::ToolResultUnreplaceable);
+        assert_eq!(err.retryable(), Retryable::No);
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "tool-result-unreplaceable");
+        assert_eq!(body["error"]["param"], "input");
+        assert_eq!(
+            body["error"]["message"],
+            "A blocked computer_call_output cannot be replaced. Remove the computer call and its output from the input."
+        );
     }
 
     #[tokio::test]

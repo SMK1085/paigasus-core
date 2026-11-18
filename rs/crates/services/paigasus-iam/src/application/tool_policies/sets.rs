@@ -12,8 +12,42 @@ use paigasus_iam_core::tool_policy::{CompiledOutput, ToolEntry, ToolPolicySetKey
 use paigasus_proto::paigasus::iam::v1 as pb;
 use prost::Message;
 
-use super::rejection::ToolPolicyRejection;
+use super::rejection::{RejectionReason, ToolPolicyRejection};
 use crate::application::error::TenancyError;
+
+/// SMA-753: set this to `true`, or delete it with `reject_history_until_gateway_supports_it`,
+/// when the gateway evaluates history conditions. Until then IAM stores no set with one (R19).
+///
+/// A live set that PR 1 stored with a history rule is not changed. It does block every later
+/// catalog write for that organization, because the catalog coupling compiles it again and
+/// gets this rejection (re-tagged `tool-catalog-breaks-policy`). The tenant must remove the
+/// temporal block first.
+pub(crate) const HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY: bool = false;
+
+/// One rejection per policy id that has a history condition, sorted by policy id. Empty when the
+/// gateway enforces history conditions.
+pub(crate) fn reject_history_until_gateway_supports_it(out: &CompiledOutput) -> Vec<ToolPolicyRejection> {
+    history_rejections(out, HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY)
+}
+
+fn history_rejections(out: &CompiledOutput, enforced_by_gateway: bool) -> Vec<ToolPolicyRejection> {
+    if enforced_by_gateway {
+        return Vec::new();
+    }
+    let ids: std::collections::BTreeSet<&str> = out.conditions.iter().map(|c| c.policy_id.as_str()).collect();
+    ids.into_iter()
+        .map(|id| {
+            let mut rejection = ToolPolicyRejection::new(
+                RejectionReason::HistoryUnsupported,
+                format!(
+                    "policy {id} uses a history rule (formerly, count_within or sum_within). The gateway cannot enforce history rules yet, so this set cannot be saved. Remove the temporal block, or wait for history support."
+                ),
+            );
+            rejection.policy_id = Some(id.to_owned());
+            rejection
+        })
+        .collect()
+}
 
 /// The values of a compiled set that do not come from the compiler output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +97,14 @@ pub(crate) fn decode_compiled(bytes: &[u8]) -> Result<CompiledOutput, TenancyErr
         cedar_schema_json,
         conditions,
     })
+}
+
+/// The stored bytes with the `version` field set to `version`. Every other field stays as it is.
+/// Bytes that do not decode are a storage defect: `Internal` (as [`decode_compiled`]).
+pub(crate) fn restamp_version(bytes: &[u8], version: u64) -> Result<Vec<u8>, TenancyError> {
+    let mut set = pb::CompiledToolPolicySet::decode(bytes).map_err(|error| corrupt(&format!("the compiled bytes do not decode: {error}")))?;
+    set.version = version;
+    Ok(set.encode_to_vec())
 }
 
 fn corrupt(what: &str) -> TenancyError {
@@ -307,6 +349,27 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
+    #[test]
+    fn the_history_check_is_empty_when_the_gateway_enforces_history() {
+        let out = CompiledOutput {
+            cedar_policies: String::new(),
+            cedar_schema_json: serde_json::Value::Null,
+            conditions: vec![HistoryCondition {
+                slot: "s0".into(),
+                policy_id: "p".into(),
+                scope: Scope::Session,
+                window_ms: 1,
+                shape: Shape::CountWithin {
+                    predicate: Predicate::AnyCatalogTool {},
+                    op: CmpOp::Ge,
+                    threshold: 1,
+                },
+            }],
+        };
+        assert_eq!(history_rejections(&out, false).len(), 1);
+        assert!(history_rejections(&out, true).is_empty());
+    }
+
     fn condition(slot: &str, scope: Scope, window_ms: u64, shape: Shape) -> HistoryCondition {
         HistoryCondition {
             slot: slot.into(),
@@ -315,6 +378,40 @@ mod tests {
             window_ms,
             shape,
         }
+    }
+
+    #[test]
+    fn restamp_changes_only_the_version() {
+        let org = Uuid::from_u128(7);
+        let out = CompiledOutput {
+            cedar_policies: "@id(\"p\")\npermit(principal, action, resource);\n".to_owned(),
+            cedar_schema_json: json!({"Pgs::Gateway": {}}),
+            conditions: vec![HistoryCondition {
+                slot: "c1".into(),
+                policy_id: "p".into(),
+                scope: Scope::Principal,
+                window_ms: 1000,
+                shape: Shape::Formerly {
+                    predicate: Predicate::EventKind { kind: EventKind::Request },
+                },
+            }],
+        };
+        let meta = CompiledMeta {
+            key: ToolPolicySetKey::Tenant(org),
+            version: 2,
+            compiler_generation: 3,
+            schema_revision: 4,
+            catalog_revision: Some(5),
+            max_window_ms: 6,
+            catalog_names: vec!["a".into(), "b".into()],
+        };
+        let bytes = encode_compiled(&meta, &out);
+        let restamped = restamp_version(&bytes, 9).unwrap();
+        let before = pb::CompiledToolPolicySet::decode(bytes.as_slice()).unwrap();
+        let after = pb::CompiledToolPolicySet::decode(restamped.as_slice()).unwrap();
+        assert_eq!((before.version, after.version), (2, 9));
+        assert_eq!(pb::CompiledToolPolicySet { version: 9, ..before }, after);
+        assert!(matches!(restamp_version(&[0xff, 0xff], 1), Err(TenancyError::Internal)));
     }
 
     #[test]

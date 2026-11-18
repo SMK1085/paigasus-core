@@ -1171,6 +1171,188 @@ message GetFloorPolicySetResponse {
   ToolPolicySetVersion set = 1;
 }
 
+enum ToolPolicyMode {
+  TOOL_POLICY_MODE_UNSPECIFIED = 0;
+  TOOL_POLICY_MODE_OFF = 1;
+  TOOL_POLICY_MODE_LOG_ONLY = 2;
+  TOOL_POLICY_MODE_ENFORCE = 3;
+}
+
+enum ToolPolicyFailMode {
+  TOOL_POLICY_FAIL_MODE_UNSPECIFIED = 0;
+  TOOL_POLICY_FAIL_MODE_OPEN = 1;
+  TOOL_POLICY_FAIL_MODE_CLOSED = 2;
+}
+
+// With no row, IAM answers OFF / CLOSED and no updated_at. The mode and the fail mode apply only
+// to the tenant set; the floor is enforced in every mode (spec §3.4). UNSPECIFIED in a response is
+// malformed: a reader fails closed.
+message ToolPolicySettings {
+  ToolPolicyMode mode = 1;
+  ToolPolicyFailMode fail_mode = 2;
+  google.protobuf.Timestamp updated_at = 3;
+  string updated_by = 4;
+}
+
+message GetToolPolicySettingsRequest {
+  string org_prn = 1;
+}
+
+message GetToolPolicySettingsResponse {
+  ToolPolicySettings settings = 1;
+}
+
+// The first change away from OFF must be to LOG_ONLY, also when a tenant set was saved in OFF.
+// With no tenant set, it saves the starter as version 1. A change to ENFORCE, from any mode,
+// needs an earlier change away from OFF and a saved tenant set. An ENFORCE without both is
+// tool-policy-mode-transition-invalid (spec §9.2). UNSPECIFIED is missing-required-field.
+message PutToolPolicySettingsRequest {
+  string org_prn = 1;
+  ToolPolicyMode mode = 2;
+  ToolPolicyFailMode fail_mode = 3;
+}
+
+// starter_version is 0 when the write did not save the starter.
+message PutToolPolicySettingsResponse {
+  ToolPolicySettings settings = 1;
+  uint64 starter_version = 2;
+}
+
+message GetCompiledToolPoliciesRequest {
+  string org_prn = 1;
+  optional uint64 version = 2;
+}
+
+// An org with no tenant set gets a set with version = 0, empty cedar_policies and no conditions.
+// A held or discarded version is never returned (tool-policy-version-not-found). floor_version is
+// the live floor version at the time of the read; the floor is fetched with
+// GetCompiledFloorPolicies, so one response stays below 4 MiB.
+message GetCompiledToolPoliciesResponse {
+  CompiledToolPolicySet set = 1;
+  ToolPolicySettings settings = 2;
+  uint64 floor_version = 3;
+}
+
+message GetCompiledFloorPoliciesRequest {
+  optional uint64 version = 1;
+}
+
+// A platform with no floor gets version = 0.
+message GetCompiledFloorPoliciesResponse {
+  CompiledToolPolicySet set = 1;
+}
+
+// The result of a held re-compile.
+enum HeldToolPolicyResult {
+  HELD_TOOL_POLICY_RESULT_UNSPECIFIED = 0;
+  HELD_TOOL_POLICY_RESULT_DIFFERENT = 1;
+  HELD_TOOL_POLICY_RESULT_FAILED = 2;
+}
+
+// A list of names that differ between the live output and the held output.
+message NameDiff {
+  repeated string added = 1;
+  repeated string removed = 2;
+  repeated string changed = 3;
+}
+
+message HeldToolPolicyReport {
+  HeldToolPolicyResult result = 1;
+  NameDiff policies = 2;
+  NameDiff conditions = 3;
+  NameDiff schema = 4;
+  ToolPolicyRejections rejections = 5;
+}
+
+// A held row is never enforced and never returned by GetCompiledToolPolicies. Any new live version
+// of its set makes it DISCARDED. At most one HELD row exists for each set.
+message HeldToolPolicyVersion {
+  ToolPolicySetKind kind = 1;
+  string org_id = 2;
+  uint64 version = 3;
+  uint64 base_version = 4;
+  string source = 5;
+  ToolPolicyVersionStatus status = 6;
+  uint32 compiler_generation = 7;
+  uint32 schema_revision = 8;
+  uint64 catalog_revision = 9;
+  HeldToolPolicyReport report = 10;
+  string created_by = 11;
+  google.protobuf.Timestamp created_at = 12;
+  // Absent for a FAILED result.
+  CompiledToolPolicySet compiled = 13;
+}
+
+// An empty org_prn lists every held row of every set, the floor included, and needs
+// ManageToolPolicyRecompile. Only HELD rows are listed.
+message ListHeldToolPolicyVersionsRequest {
+  string org_prn = 1;
+  // 0 => server default 50; above 200 is invalid-pagination.
+  uint32 limit = 2;
+  uint64 offset = 3;
+}
+
+message ListHeldToolPolicyVersionsResponse {
+  repeated HeldToolPolicyVersion versions = 1;
+}
+
+// kind = FLOOR needs an empty org_prn. UNSPECIFIED is missing-required-field. Accept of a stale
+// row is tool-policy-version-conflict: run the job again (spec section 8).
+message AcceptHeldToolPolicyVersionRequest {
+  ToolPolicySetKind kind = 1;
+  string org_prn = 2;
+  uint64 held_version = 3;
+}
+
+message AcceptHeldToolPolicyVersionResponse {
+  ToolPolicySetVersion accepted = 1;
+}
+
+// kind = FLOOR needs an empty org_prn. UNSPECIFIED is missing-required-field.
+message DiscardHeldToolPolicyVersionRequest {
+  ToolPolicySetKind kind = 1;
+  string org_prn = 2;
+  uint64 held_version = 3;
+}
+
+message DiscardHeldToolPolicyVersionResponse {
+  HeldToolPolicyVersion discarded = 1;
+}
+
+enum RecompileRunStatus {
+  RECOMPILE_RUN_STATUS_UNSPECIFIED = 0;
+  RECOMPILE_RUN_STATUS_RAN = 1;
+  RECOMPILE_RUN_STATUS_ALREADY_RUNNING = 2;
+  RECOMPILE_RUN_STATUS_OLDER_REPLICA = 3;
+}
+
+enum RecompileOutcome {
+  RECOMPILE_OUTCOME_UNSPECIFIED = 0;
+  RECOMPILE_OUTCOME_IDENTICAL = 1;
+  RECOMPILE_OUTCOME_HELD_DIFFERENT = 2;
+  RECOMPILE_OUTCOME_HELD_FAILED = 3;
+  RECOMPILE_OUTCOME_ALREADY_PROPOSED = 4;
+  RECOMPILE_OUTCOME_CONFLICT = 5;
+  RECOMPILE_OUTCOME_ERROR = 6;
+}
+
+message RecompileSetResult {
+  ToolPolicySetKind kind = 1;
+  string org_id = 2;
+  uint64 base_version = 3;
+  RecompileOutcome outcome = 4;
+  // The new live or held version; 0 otherwise.
+  uint64 version = 5;
+}
+
+message RunToolPolicyRecompileRequest {}
+
+// ALREADY_RUNNING and OLDER_REPLICA write nothing and have no results.
+message RunToolPolicyRecompileResponse {
+  RecompileRunStatus status = 1;
+  repeated RecompileSetResult results = 2;
+}
+
 service ToolPolicyService {
   rpc PutTool(PutToolRequest) returns (PutToolResponse);
   rpc DeleteTool(DeleteToolRequest) returns (DeleteToolResponse);
@@ -1180,4 +1362,12 @@ service ToolPolicyService {
   rpc GetToolPolicySet(GetToolPolicySetRequest) returns (GetToolPolicySetResponse);
   rpc PutFloorPolicySet(PutFloorPolicySetRequest) returns (PutFloorPolicySetResponse);
   rpc GetFloorPolicySet(GetFloorPolicySetRequest) returns (GetFloorPolicySetResponse);
+  rpc GetToolPolicySettings(GetToolPolicySettingsRequest) returns (GetToolPolicySettingsResponse);
+  rpc PutToolPolicySettings(PutToolPolicySettingsRequest) returns (PutToolPolicySettingsResponse);
+  rpc GetCompiledToolPolicies(GetCompiledToolPoliciesRequest) returns (GetCompiledToolPoliciesResponse);
+  rpc GetCompiledFloorPolicies(GetCompiledFloorPoliciesRequest) returns (GetCompiledFloorPoliciesResponse);
+  rpc ListHeldToolPolicyVersions(ListHeldToolPolicyVersionsRequest) returns (ListHeldToolPolicyVersionsResponse);
+  rpc AcceptHeldToolPolicyVersion(AcceptHeldToolPolicyVersionRequest) returns (AcceptHeldToolPolicyVersionResponse);
+  rpc DiscardHeldToolPolicyVersion(DiscardHeldToolPolicyVersionRequest) returns (DiscardHeldToolPolicyVersionResponse);
+  rpc RunToolPolicyRecompile(RunToolPolicyRecompileRequest) returns (RunToolPolicyRecompileResponse);
 }

@@ -1081,9 +1081,11 @@ mod tests {
             (TenancyError::ToolCatalogConflict, Code::AlreadyExists, "false"),
             (TenancyError::ToolPolicyVersionConflict, Code::Aborted, "false"),
             (TenancyError::ToolPolicyRecompilePending, Code::FailedPrecondition, "false"),
+            (TenancyError::ToolPolicyHeldNotAcceptable, Code::FailedPrecondition, "false"),
             (TenancyError::ToolPolicyCompilerUnavailable, Code::Unavailable, "unknown"),
             (TenancyError::ToolPolicyCompilerBusy, Code::ResourceExhausted, "true"),
             (TenancyError::ToolPolicyVersionNotFound, Code::NotFound, "false"),
+            (TenancyError::ToolPolicyModeTransitionInvalid, Code::FailedPrecondition, "false"),
         ] {
             let wire = err.code();
             let status = status_to_grpc(err);

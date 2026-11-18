@@ -13,17 +13,8 @@ use paigasus_kernel::tool_policy::normalise;
 use super::plan::{ChoiceRewrite, REMOVABLE_BUILT_INS, RequestPlan, ResultTarget};
 use super::raw::{ObjectEdit, RawArray, RawObject, top_level};
 use crate::report::{RequestAction, RequestReason, sanitize_name};
+use crate::turn::{ResultShape, responses_result_shape};
 use crate::types::Format;
-
-/// The Responses input items whose `output` is a tool result (§ 6.5.2).
-const RESPONSES_OUTPUTS: [&str; 6] = [
-    "function_call_output",
-    "custom_tool_call_output",
-    "computer_call_output",
-    "local_shell_call_output",
-    "shell_call_output",
-    "apply_patch_call_output",
-];
 
 /// The fixed notice that replaces a tool result (§ 6.5.2, ADR-0027 (c)). It is built only from the
 /// reason and the cleaned tool name, never from the result content (SMA-749 D21).
@@ -90,7 +81,9 @@ impl<'p> Enforced<'p> {
 /// Apply the enforced items of `plan` to `body` (§ 6.5.1 step 6). `None` when the plan changes
 /// nothing (`is_noop`), and also when `body` is not one JSON object; the caller plans only from a
 /// body that `parse_request` read, so the second case does not occur. The caller handles
-/// `plan.refuse` before it calls this function.
+/// `plan.refusal()` before it calls this function. `None` also when an enforced target is a
+/// `computer_call_output`: it has no replacement (SMA-776 § 6.3), so the caller must not send the
+/// body.
 #[must_use]
 pub fn rewrite_request(format: Format, body: &[u8], plan: &RequestPlan) -> Option<Bytes> {
     if plan.is_noop() {
@@ -103,7 +96,7 @@ pub fn rewrite_request(format: Format, body: &[u8], plan: &RequestPlan) -> Optio
     let mut edit = obj.edit();
     match format {
         Format::OpenAiChat => chat(&obj, &enforced, &plan.choice, &mut edit),
-        Format::OpenAiResponses => responses(&obj, &enforced, &plan.choice, &mut edit),
+        Format::OpenAiResponses => responses(&obj, &enforced, &plan.choice, &mut edit)?,
         Format::AnthropicMessages => anthropic(&obj, &enforced, &plan.choice, &mut edit),
     }
     let end = at + top.get().len();
@@ -250,7 +243,13 @@ fn chat_messages(top: &RawObject, en: &Enforced, edit: &mut ObjectEdit) {
     }
 }
 
-fn responses(top: &RawObject, en: &Enforced, choice: &ChoiceRewrite, edit: &mut ObjectEdit) {
+/// The one notice chunk of a blocked `shell_call_output`. `notice` is a JSON string literal.
+fn shell_chunk(notice: &str) -> String {
+    format!(r#"[{{"stdout":"","stderr":{notice},"outcome":{{"type":"exit","exit_code":1}}}}]"#)
+}
+
+/// `None` when an enforced target is a `computer_call_output` (fail closed).
+fn responses(top: &RawObject, en: &Enforced, choice: &ChoiceRewrite, edit: &mut ObjectEdit) -> Option<()> {
     let tools_gone = top.array("tools").is_some_and(|a| {
         let mut e = a.edit();
         for (i, el) in a.elements.iter().enumerate() {
@@ -317,29 +316,44 @@ fn responses(top: &RawObject, en: &Enforced, choice: &ChoiceRewrite, edit: &mut 
             }
         }
     }
-    let Some(items) = top.array("input") else { return };
+    let Some(items) = top.array("input") else { return Some(()) };
     let mut ie = items.edit();
     for (i, el) in items.elements.iter().enumerate() {
         let Some(item) = RawObject::parse(el.value.get()) else { continue };
         let ty = item.str("type").unwrap_or_default();
         let mut e = item.edit();
-        if RESPONSES_OUTPUTS.contains(&ty.as_str()) {
-            let shell = || if ty == "local_shell_call_output" { en.shell_notice(&item) } else { None };
-            let Some(notice) = en.id_notice(&item, "call_id").or_else(shell) else { continue };
-            e.set("output", notice.clone());
-        } else if ty == "mcp_approval_response" {
-            // The approval becomes a refusal, with the notice as its reason.
-            let Some(notice) = en.id_notice(&item, "approval_request_id") else { continue };
-            e.set("approve", "false".to_owned());
-            e.set("reason", notice.clone());
-        } else {
-            continue;
+        // One arm per shape: a new shape does not compile until it has an arm here.
+        match responses_result_shape(&ty) {
+            None => continue,
+            Some(ResultShape::Text) => {
+                let shell = || if ty == "local_shell_call_output" { en.shell_notice(&item) } else { None };
+                let Some(notice) = en.id_notice(&item, "call_id").or_else(shell) else { continue };
+                e.set("output", notice.clone());
+            }
+            Some(ResultShape::ShellChunks) => {
+                let Some(notice) = en.id_notice(&item, "call_id") else { continue };
+                e.set("output", shell_chunk(notice));
+            }
+            // A screenshot has no text member, so it has no replacement (SMA-776 § 6.3).
+            Some(ResultShape::Screenshot) => {
+                if en.id_notice(&item, "call_id").is_some() {
+                    return None;
+                }
+                continue;
+            }
+            Some(ResultShape::Approval) => {
+                // The approval becomes a refusal, with the notice as its reason.
+                let Some(notice) = en.id_notice(&item, "approval_request_id") else { continue };
+                e.set("approve", "false".to_owned());
+                e.set("reason", notice.clone());
+            }
         }
         ie.replace(i, e.render());
     }
     if ie.changed() {
         edit.replace("input", ie.render());
     }
+    Some(())
 }
 
 fn anthropic(top: &RawObject, en: &Enforced, choice: &ChoiceRewrite, edit: &mut ObjectEdit) {
@@ -386,5 +400,35 @@ fn anthropic(top: &RawObject, en: &Enforced, choice: &ChoiceRewrite, edit: &mut 
     }
     if me.changed() {
         edit.replace("messages", me.render());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::policy::plan::PlanItem;
+    use crate::report::RequestEntry;
+
+    /// A hand-made plan: the service refuses this plan before the rewrite, so only a direct call
+    /// can give the rewrite an enforced computer target (SMA-776 § 6.3, fail closed).
+    #[test]
+    fn an_enforced_computer_output_target_fails_closed() {
+        let body = br#"{"model":"m","input":[{"type":"computer_call","call_id":"c3","actions":[{"type":"screenshot"}]},{"type":"computer_call_output","call_id":"c3","output":{"type":"computer_screenshot","image_url":"SECRET"}},{"type":"function_call_output","call_id":"c3","output":"x"}]}"#;
+        let mut plan = RequestPlan {
+            removed: Vec::new(),
+            replaced: vec![PlanItem {
+                target: ResultTarget::CallId("c3".to_owned()),
+                enforced: true,
+            }],
+            choice: ChoiceRewrite::Keep,
+            refusals: BTreeMap::new(),
+            entries: vec![RequestEntry::new("computer".to_owned(), RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked)],
+        };
+        assert!(!plan.is_noop());
+        assert_eq!(rewrite_request(Format::OpenAiResponses, body, &plan), None);
+        plan.replaced[0].enforced = false;
+        assert_eq!(rewrite_request(Format::OpenAiResponses, body, &plan), None, "a no-op plan");
     }
 }

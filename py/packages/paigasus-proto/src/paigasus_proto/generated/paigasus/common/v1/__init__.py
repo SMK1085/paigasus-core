@@ -585,6 +585,25 @@ class ErrorReason(betterproto2.Enum):
     not live or superseded. gRPC NOT_FOUND, HTTP 404.
     """
 
+    TOOL_POLICY_MODE_TRANSITION_INVALID = 61
+    """
+    "tool-policy-mode-transition-invalid" — the mode change is not allowed: an organization with no
+    tool policy set must go to log_only first (spec §9.2). gRPC FAILED_PRECONDITION, HTTP 409.
+    """
+
+    TOOL_POLICY_HISTORY_UNSUPPORTED = 62
+    """
+    "tool-policy-history-unsupported" — rejection: the set has a history rule (formerly,
+    count_within, sum_within). The gateway cannot enforce history rules yet, so IAM does not store
+    them. Temporary; removed by SMA-753 (R19). Carried inside the rejected oneof.
+    """
+
+    TOOL_POLICY_HELD_NOT_ACCEPTABLE = 63
+    """
+    "tool-policy-held-not-acceptable" — the held version has no compiled output, because its
+    compile failed. Discard it, or save the set again. gRPC FAILED_PRECONDITION, HTTP 409.
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -680,6 +699,7 @@ class ErrorReason(betterproto2.Enum):
     TOOL_CALL_DENIED = 315
     """
     ---- Gateway: tool decisions (SMA-752) ----
+    315-317 never reach the caller as an HTTP error (D11). 318 is the one exception (SMA-776).
     "tool-call-denied" — the tool policy denied a tool call or a tool definition. It appears in decision reports and notices, never as an HTTP error (D11).
     """
 
@@ -691,6 +711,11 @@ class ErrorReason(betterproto2.Enum):
     TOOL_POLICY_UNAVAILABLE = 317
     """
     "tool-policy-unavailable" — the tool policy could not be evaluated. It appears in decision reports and notices, never as an HTTP error (D11).
+    """
+
+    TOOL_RESULT_UNREPLACEABLE = 318
+    """
+    "tool-result-unreplaceable" — the tool policy blocked a Responses computer_call_output, and that item has no field that can carry the notice, so the gateway refused the request (400, OpenAI type "invalid_request_error", param "input"). It is the only code of this banner that is an HTTP error (SMA-776).
     """
 
     INTERNAL = 900
@@ -842,6 +867,9 @@ class ErrorReason(betterproto2.Enum):
             58: "ERROR_REASON_TOOL_POLICY_COMPILER_UNAVAILABLE",
             59: "ERROR_REASON_TOOL_POLICY_COMPILER_BUSY",
             60: "ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND",
+            61: "ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID",
+            62: "ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED",
+            63: "ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -860,6 +888,7 @@ class ErrorReason(betterproto2.Enum):
             315: "ERROR_REASON_TOOL_CALL_DENIED",
             316: "ERROR_REASON_TOOL_RESULT_BLOCKED",
             317: "ERROR_REASON_TOOL_POLICY_UNAVAILABLE",
+            318: "ERROR_REASON_TOOL_RESULT_UNREPLACEABLE",
             900: "ERROR_REASON_INTERNAL",
             901: "ERROR_REASON_INVALID_REQUEST_BODY",
             902: "ERROR_REASON_REQUEST_TOO_LARGE",
@@ -936,6 +965,9 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_TOOL_POLICY_COMPILER_UNAVAILABLE": 58,
             "ERROR_REASON_TOOL_POLICY_COMPILER_BUSY": 59,
             "ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND": 60,
+            "ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID": 61,
+            "ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED": 62,
+            "ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE": 63,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,
@@ -954,6 +986,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_TOOL_CALL_DENIED": 315,
             "ERROR_REASON_TOOL_RESULT_BLOCKED": 316,
             "ERROR_REASON_TOOL_POLICY_UNAVAILABLE": 317,
+            "ERROR_REASON_TOOL_RESULT_UNREPLACEABLE": 318,
             "ERROR_REASON_INTERNAL": 900,
             "ERROR_REASON_INVALID_REQUEST_BODY": 901,
             "ERROR_REASON_REQUEST_TOO_LARGE": 902,

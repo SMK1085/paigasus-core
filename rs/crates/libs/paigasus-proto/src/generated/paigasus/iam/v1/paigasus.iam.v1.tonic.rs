@@ -5801,6 +5801,246 @@ pub mod tool_policy_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        ///
+        pub async fn get_tool_policy_settings(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetToolPolicySettingsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetToolPolicySettingsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.ToolPolicyService/GetToolPolicySettings",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.ToolPolicyService",
+                        "GetToolPolicySettings",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn put_tool_policy_settings(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PutToolPolicySettingsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutToolPolicySettingsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.ToolPolicyService/PutToolPolicySettings",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.ToolPolicyService",
+                        "PutToolPolicySettings",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn get_compiled_tool_policies(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetCompiledToolPoliciesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCompiledToolPoliciesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.ToolPolicyService/GetCompiledToolPolicies",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.ToolPolicyService",
+                        "GetCompiledToolPolicies",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn get_compiled_floor_policies(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetCompiledFloorPoliciesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCompiledFloorPoliciesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.ToolPolicyService/GetCompiledFloorPolicies",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.ToolPolicyService",
+                        "GetCompiledFloorPolicies",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn list_held_tool_policy_versions(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListHeldToolPolicyVersionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListHeldToolPolicyVersionsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.ToolPolicyService/ListHeldToolPolicyVersions",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.ToolPolicyService",
+                        "ListHeldToolPolicyVersions",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn accept_held_tool_policy_version(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AcceptHeldToolPolicyVersionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AcceptHeldToolPolicyVersionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.ToolPolicyService/AcceptHeldToolPolicyVersion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.ToolPolicyService",
+                        "AcceptHeldToolPolicyVersion",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn discard_held_tool_policy_version(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DiscardHeldToolPolicyVersionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DiscardHeldToolPolicyVersionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.ToolPolicyService/DiscardHeldToolPolicyVersion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.ToolPolicyService",
+                        "DiscardHeldToolPolicyVersion",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn run_tool_policy_recompile(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RunToolPolicyRecompileRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RunToolPolicyRecompileResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.ToolPolicyService/RunToolPolicyRecompile",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.ToolPolicyService",
+                        "RunToolPolicyRecompile",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -5875,6 +6115,70 @@ pub mod tool_policy_service_server {
             request: tonic::Request<super::GetFloorPolicySetRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetFloorPolicySetResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn get_tool_policy_settings(
+            &self,
+            request: tonic::Request<super::GetToolPolicySettingsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetToolPolicySettingsResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn put_tool_policy_settings(
+            &self,
+            request: tonic::Request<super::PutToolPolicySettingsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutToolPolicySettingsResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn get_compiled_tool_policies(
+            &self,
+            request: tonic::Request<super::GetCompiledToolPoliciesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCompiledToolPoliciesResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn get_compiled_floor_policies(
+            &self,
+            request: tonic::Request<super::GetCompiledFloorPoliciesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCompiledFloorPoliciesResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn list_held_tool_policy_versions(
+            &self,
+            request: tonic::Request<super::ListHeldToolPolicyVersionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListHeldToolPolicyVersionsResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn accept_held_tool_policy_version(
+            &self,
+            request: tonic::Request<super::AcceptHeldToolPolicyVersionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AcceptHeldToolPolicyVersionResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn discard_held_tool_policy_version(
+            &self,
+            request: tonic::Request<super::DiscardHeldToolPolicyVersionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DiscardHeldToolPolicyVersionResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn run_tool_policy_recompile(
+            &self,
+            request: tonic::Request<super::RunToolPolicyRecompileRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RunToolPolicyRecompileResponse>,
             tonic::Status,
         >;
     }
@@ -6317,6 +6621,417 @@ pub mod tool_policy_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetFloorPolicySetSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.ToolPolicyService/GetToolPolicySettings" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetToolPolicySettingsSvc<T: ToolPolicyService>(pub Arc<T>);
+                    impl<
+                        T: ToolPolicyService,
+                    > tonic::server::UnaryService<super::GetToolPolicySettingsRequest>
+                    for GetToolPolicySettingsSvc<T> {
+                        type Response = super::GetToolPolicySettingsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetToolPolicySettingsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ToolPolicyService>::get_tool_policy_settings(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetToolPolicySettingsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.ToolPolicyService/PutToolPolicySettings" => {
+                    #[allow(non_camel_case_types)]
+                    struct PutToolPolicySettingsSvc<T: ToolPolicyService>(pub Arc<T>);
+                    impl<
+                        T: ToolPolicyService,
+                    > tonic::server::UnaryService<super::PutToolPolicySettingsRequest>
+                    for PutToolPolicySettingsSvc<T> {
+                        type Response = super::PutToolPolicySettingsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::PutToolPolicySettingsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ToolPolicyService>::put_tool_policy_settings(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PutToolPolicySettingsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.ToolPolicyService/GetCompiledToolPolicies" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCompiledToolPoliciesSvc<T: ToolPolicyService>(pub Arc<T>);
+                    impl<
+                        T: ToolPolicyService,
+                    > tonic::server::UnaryService<super::GetCompiledToolPoliciesRequest>
+                    for GetCompiledToolPoliciesSvc<T> {
+                        type Response = super::GetCompiledToolPoliciesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::GetCompiledToolPoliciesRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ToolPolicyService>::get_compiled_tool_policies(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCompiledToolPoliciesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.ToolPolicyService/GetCompiledFloorPolicies" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCompiledFloorPoliciesSvc<T: ToolPolicyService>(pub Arc<T>);
+                    impl<
+                        T: ToolPolicyService,
+                    > tonic::server::UnaryService<super::GetCompiledFloorPoliciesRequest>
+                    for GetCompiledFloorPoliciesSvc<T> {
+                        type Response = super::GetCompiledFloorPoliciesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::GetCompiledFloorPoliciesRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ToolPolicyService>::get_compiled_floor_policies(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCompiledFloorPoliciesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.ToolPolicyService/ListHeldToolPolicyVersions" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListHeldToolPolicyVersionsSvc<T: ToolPolicyService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: ToolPolicyService,
+                    > tonic::server::UnaryService<
+                        super::ListHeldToolPolicyVersionsRequest,
+                    > for ListHeldToolPolicyVersionsSvc<T> {
+                        type Response = super::ListHeldToolPolicyVersionsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::ListHeldToolPolicyVersionsRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ToolPolicyService>::list_held_tool_policy_versions(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListHeldToolPolicyVersionsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.ToolPolicyService/AcceptHeldToolPolicyVersion" => {
+                    #[allow(non_camel_case_types)]
+                    struct AcceptHeldToolPolicyVersionSvc<T: ToolPolicyService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: ToolPolicyService,
+                    > tonic::server::UnaryService<
+                        super::AcceptHeldToolPolicyVersionRequest,
+                    > for AcceptHeldToolPolicyVersionSvc<T> {
+                        type Response = super::AcceptHeldToolPolicyVersionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::AcceptHeldToolPolicyVersionRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ToolPolicyService>::accept_held_tool_policy_version(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AcceptHeldToolPolicyVersionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.ToolPolicyService/DiscardHeldToolPolicyVersion" => {
+                    #[allow(non_camel_case_types)]
+                    struct DiscardHeldToolPolicyVersionSvc<T: ToolPolicyService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: ToolPolicyService,
+                    > tonic::server::UnaryService<
+                        super::DiscardHeldToolPolicyVersionRequest,
+                    > for DiscardHeldToolPolicyVersionSvc<T> {
+                        type Response = super::DiscardHeldToolPolicyVersionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::DiscardHeldToolPolicyVersionRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ToolPolicyService>::discard_held_tool_policy_version(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DiscardHeldToolPolicyVersionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.ToolPolicyService/RunToolPolicyRecompile" => {
+                    #[allow(non_camel_case_types)]
+                    struct RunToolPolicyRecompileSvc<T: ToolPolicyService>(pub Arc<T>);
+                    impl<
+                        T: ToolPolicyService,
+                    > tonic::server::UnaryService<super::RunToolPolicyRecompileRequest>
+                    for RunToolPolicyRecompileSvc<T> {
+                        type Response = super::RunToolPolicyRecompileResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RunToolPolicyRecompileRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ToolPolicyService>::run_tool_policy_recompile(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RunToolPolicyRecompileSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

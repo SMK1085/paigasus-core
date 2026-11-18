@@ -28,6 +28,11 @@
 
 # [iam]
 # grpc_addr = "https://127.0.0.1:9090"   # default shown
+# SMA-775: the file that holds the gateway service credential, an IAM API key with the
+# tool_policy_reader role. Required when tool_policy.source is kind = "iam". The gateway sends it
+# on the two policy fetch calls only, and reads the file again on every fetch, so a rotation needs
+# no restart. A trailing newline in the file is ignored. The value is never logged.
+# service_credential_file = "/run/secrets/paigasus-gateway-iam-key"
 
 # [iam.tls]
 # TLS is the DEFAULT and REQUIRED transport to paigasus-iam: the introspect call carries raw
@@ -188,10 +193,10 @@
 # WARNING: mode "enforce" with no tenant policies blocks every tool that is not on the floor.
 # Cedar denies by default, and no policy permits the call. Load a permit policy for an org
 # before you set its mode to "enforce". Use "log_only" first to see what the policy would block.
-# Some request shapes are not measured against the real upstream. See
-# rs/crates/libs/paigasus-gateway-core/tests/fixtures/request_rewrite/README.md. A
-# computer_call_output notice or a shell_call_output notice will most likely get an upstream
-# 400. That fails closed: the turn stops.
+# A blocked shell_call_output becomes one notice chunk; the real upstream accepts it (SMA-776).
+# A blocked computer_call_output has no field for the notice. An enforced block refuses the
+# request with a 400 tool-result-unreplaceable. A floor block of "computer" does this in every
+# mode. See rs/crates/libs/paigasus-gateway-core/tests/fixtures/request_rewrite/README.md.
 #
 # [tool_policy]
 # enabled               = false      # env GATEWAY_TOOL_POLICY__ENABLED
@@ -202,6 +207,9 @@
 # idle_evict_secs       = 3600       # 1..=86400
 # load_timeout_ms       = 1000       # must be < tool_interception.decide_timeout_secs * 1000 (D31)
 # source = { kind = "file", dir = "/etc/paigasus/tool-policies" }   # REQUIRED when enabled
+#   # SMA-775: source = { kind = "iam" } fetches the compiled sets and the tenant settings (mode and
+#   # fail mode) from paigasus-iam. It needs iam.service_credential_file. [[tool_policy.org]]
+#   # entries are refused with it, because IAM holds the mode and the fail mode of each org.
 #   # The floor is always enforced when enabled (D33). There is no floor_mode.
 #
 # [tool_policy.nats]                 # optional: policy invalidation events

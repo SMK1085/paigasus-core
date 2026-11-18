@@ -120,9 +120,11 @@ mod tests {
             (TenancyError::ToolCatalogConflict, StatusCode::CONFLICT, "false"),
             (TenancyError::ToolPolicyVersionConflict, StatusCode::CONFLICT, "false"),
             (TenancyError::ToolPolicyRecompilePending, StatusCode::CONFLICT, "false"),
+            (TenancyError::ToolPolicyHeldNotAcceptable, StatusCode::CONFLICT, "false"),
             (TenancyError::ToolPolicyCompilerUnavailable, StatusCode::SERVICE_UNAVAILABLE, "unknown"),
             (TenancyError::ToolPolicyCompilerBusy, StatusCode::TOO_MANY_REQUESTS, "true"),
             (TenancyError::ToolPolicyVersionNotFound, StatusCode::NOT_FOUND, "false"),
+            (TenancyError::ToolPolicyModeTransitionInvalid, StatusCode::CONFLICT, "false"),
         ] {
             let code = err.code();
             let resp = ApiError(err).into_response();

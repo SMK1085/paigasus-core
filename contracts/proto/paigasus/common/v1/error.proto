@@ -261,6 +261,16 @@ enum ErrorReason {
   // "tool-policy-version-not-found" — a fetch asked for a version that does not exist, or that is
   // not live or superseded. gRPC NOT_FOUND, HTTP 404.
   ERROR_REASON_TOOL_POLICY_VERSION_NOT_FOUND = 60;
+  // "tool-policy-mode-transition-invalid" — the mode change is not allowed: an organization with no
+  // tool policy set must go to log_only first (spec §9.2). gRPC FAILED_PRECONDITION, HTTP 409.
+  ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID = 61;
+  // "tool-policy-history-unsupported" — rejection: the set has a history rule (formerly,
+  // count_within, sum_within). The gateway cannot enforce history rules yet, so IAM does not store
+  // them. Temporary; removed by SMA-753 (R19). Carried inside the rejected oneof.
+  ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED = 62;
+  // "tool-policy-held-not-acceptable" — the held version has no compiled output, because its
+  // compile failed. Discard it, or save the set again. gRPC FAILED_PRECONDITION, HTTP 409.
+  ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE = 63;
 
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
@@ -312,12 +322,15 @@ enum ErrorReason {
   ERROR_REASON_RESPONSES_STATEFUL_NOT_SUPPORTED = 314;
 
   // ---- Gateway: tool decisions (SMA-752) ----
+  // 315-317 never reach the caller as an HTTP error (D11). 318 is the one exception (SMA-776).
   // "tool-call-denied" — the tool policy denied a tool call or a tool definition. It appears in decision reports and notices, never as an HTTP error (D11).
   ERROR_REASON_TOOL_CALL_DENIED = 315;
   // "tool-result-blocked" — the tool policy blocked a tool result. It appears in decision reports and notices, never as an HTTP error (D11).
   ERROR_REASON_TOOL_RESULT_BLOCKED = 316;
   // "tool-policy-unavailable" — the tool policy could not be evaluated. It appears in decision reports and notices, never as an HTTP error (D11).
   ERROR_REASON_TOOL_POLICY_UNAVAILABLE = 317;
+  // "tool-result-unreplaceable" — the tool policy blocked a Responses computer_call_output, and that item has no field that can carry the notice, so the gateway refused the request (400, OpenAI type "invalid_request_error", param "input"). It is the only code of this banner that is an HTTP error (SMA-776).
+  ERROR_REASON_TOOL_RESULT_UNREPLACEABLE = 318;
 
   // ---- Shared (900-999) ----------------------------------------------------
   // Any domain may emit these; `domain` is what distinguishes them.
