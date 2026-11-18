@@ -166,8 +166,6 @@ pub enum ExportError {
     WrongOrg(String),
     /// More events in the range than `--max-events`. Exit 4.
     TooMany,
-    /// An event that cannot be decoded. The stream holds a value that no gateway wrote. Exit 2.
-    Decode,
 }
 
 impl ExportError {
@@ -177,7 +175,6 @@ impl ExportError {
         match self {
             ExportError::WrongOrg(_) => Exit::WrongOrg,
             ExportError::TooMany => Exit::TooMany,
-            ExportError::Decode => Exit::Nats,
         }
     }
 }
@@ -187,7 +184,6 @@ impl fmt::Display for ExportError {
         match self {
             ExportError::WrongOrg(what) => write!(f, "an event of another org is in the stream for this org: {what}"),
             ExportError::TooMany => f.write_str("more events in the range than --max-events: use a smaller range"),
-            ExportError::Decode => f.write_str("an event in the stream cannot be decoded"),
         }
     }
 }
@@ -215,6 +211,8 @@ pub struct Summary {
     pub shared_second: usize,
     pub gaps: Vec<InstanceGaps>,
     pub unregistered: usize,
+    /// Events that could not be decoded or mapped: a newer gateway or a forged entry. They are not in the trace.
+    pub unmapped: usize,
 }
 
 /// The result of an export.
@@ -245,6 +243,10 @@ impl fmt::Display for Summary {
         } else {
             let parts: Vec<String> = self.skipped.iter().map(|(reason, n)| format!("{n} {}", reason.as_str())).collect();
             writeln!(f, "skipped {total}: {}", parts.join(", "))?;
+        }
+        if self.unmapped > 0 {
+            writeln!(f, "{} events could not be mapped (a newer gateway or a forged entry); they are not in the trace", self.unmapped)?;
+            writeln!(f, "WARNING: the trace misses {} events that this tool could not read.", self.unmapped)?;
         }
         writeln!(f, "removed {} duplicates; {} decisions arrived later than 10 min", self.duplicates, self.late)?;
         writeln!(f, "{} lines share a second with another line", self.shared_second)?;
@@ -300,15 +302,27 @@ fn gaps_of(seqs: &BTreeSet<u64>) -> (u64, Vec<u64>) {
 ///
 /// # Errors
 ///
-/// [`ExportError`]: a bad event, an event of another org, or too many events.
+/// [`ExportError`]: an event of another org, or too many events.
 pub fn export(args: &ExportArgs, events: impl IntoIterator<Item = Exported>) -> Result<Export, ExportError> {
     let mut seen: HashSet<Uuid> = HashSet::new();
     let mut sequences: BTreeMap<Uuid, BTreeSet<u64>> = BTreeMap::new();
     let mut kept = Vec::new();
-    let (mut duplicates, mut late) = (0usize, 0usize);
+    let (mut duplicates, mut late, mut unmapped) = (0usize, 0usize, 0usize);
     for ev in events {
-        let event = pb::ToolDecisionEvent::decode(ev.bytes.as_ref()).map_err(|_| ExportError::Decode)?;
-        let record = from_event(event).map_err(|_| ExportError::Decode)?;
+        // An event that cannot be decoded or mapped is skipped and counted: a newer gateway or a forged entry
+        // must not stop the export of the other events. The org check reads the raw `org_id` first, so an event
+        // of another org is exit 3 even when the rest of it cannot be mapped.
+        let Ok(event) = pb::ToolDecisionEvent::decode(ev.bytes.as_ref()) else {
+            unmapped += 1;
+            continue;
+        };
+        if Uuid::try_parse(&event.org_id).is_ok_and(|o| o != args.org) {
+            return Err(ExportError::WrongOrg(format!("decision {} has another org", event.decision_id)));
+        }
+        let Ok(record) = from_event(event) else {
+            unmapped += 1;
+            continue;
+        };
         if record.org != Some(args.org) {
             return Err(ExportError::WrongOrg(format!("decision {} has org {:?}", record.decision_id, record.org)));
         }
@@ -388,6 +402,7 @@ pub fn export(args: &ExportArgs, events: impl IntoIterator<Item = Exported>) -> 
             shared_second,
             gaps,
             unregistered,
+            unmapped,
         },
         lines,
     })
@@ -606,14 +621,42 @@ WARNING: the trace is one history for the org. A policy with @scope(\"session\")
     }
 
     #[test]
-    fn a_garbage_event_is_exit_2() {
+    fn a_garbage_event_is_skipped_and_counted() {
         let bad = Exported {
             stored_at: at(T0),
             bytes: Bytes::from_static(b"\xff\xff\xff"),
         };
-        let err = export(&args_of(&[]), vec![bad]).unwrap_err();
-        assert_eq!(err, ExportError::Decode);
-        assert_eq!(err.exit().code(), 2);
+        let out = export(&args_of(&[]), vec![bad, plain(T0 + 1, 1, 1)]).expect("a bad event does not stop the export");
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.summary.unmapped, 1);
+    }
+
+    /// An event with an enum value that this tool does not know.
+    fn unknown_enum(org: &str, id: u128) -> Exported {
+        let mut event = to_event(&record(org, T0 + 2, 1, 9, id));
+        event.side = 99;
+        Exported {
+            stored_at: at(T0 + 3),
+            bytes: Bytes::from(event.encode_to_vec()),
+        }
+    }
+
+    #[test]
+    fn an_unmappable_event_is_skipped_and_counted_with_a_warning() {
+        let out = export(&args_of(&[]), vec![plain(T0 + 1, 1, 1), unknown_enum(ORG, 2), plain(T0 + 3, 3, 3)]).expect("export");
+        assert_eq!(out.lines.len(), 2, "the other events are exported");
+        assert_eq!(out.summary.unmapped, 1);
+        let text = out.summary.to_string();
+        assert!(text.contains("1 events could not be mapped (a newer gateway or a forged entry); they are not in the trace\n"), "{text}");
+        assert!(text.contains("WARNING: the trace misses 1 events"), "{text}");
+        let none = export(&args_of(&[]), vec![plain(T0 + 1, 1, 1)]).expect("export");
+        assert!(!none.summary.to_string().contains("could not be mapped"));
+    }
+
+    #[test]
+    fn an_unmappable_event_of_another_org_is_still_exit_3() {
+        let err = export(&args_of(&[]), vec![unknown_enum(OTHER_ORG, 2)]).unwrap_err();
+        assert_eq!(err.exit(), Exit::WrongOrg);
     }
 
     fn base(extra: &[&str]) -> Vec<String> {
