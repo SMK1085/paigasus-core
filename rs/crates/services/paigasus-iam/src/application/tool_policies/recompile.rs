@@ -1012,4 +1012,17 @@ mod tests {
         assert_eq!(h.compiler.calls(), 0);
         assert!(!h.lock.held());
     }
+
+    /// The composition root wires the job, and no other test reads `main.rs`: the suite stays
+    /// green when `main` loses the boot run, the label priming or the shutdown watch of the RPC
+    /// run. Modelled on `the_composition_root_still_migrates_under_the_lock` in `migration_lock.rs`:
+    /// comment lines are stripped first, so a comment that names a call does not satisfy it.
+    #[test]
+    fn the_composition_root_still_runs_the_recompile_job() {
+        const MAIN: &str = include_str!("../../main.rs");
+        let code = MAIN.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(code.contains(".with_shutdown("), "main.rs must give the tool policy service the shutdown watch");
+        assert!(code.contains("in RECOMPILE_RESULT_LABELS"), "main.rs must prime each result series at zero");
+        assert!(code.contains(".run_recompile_at_boot("), "main.rs must run the re-compile job at boot");
+    }
 }
