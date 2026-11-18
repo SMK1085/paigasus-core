@@ -1226,9 +1226,13 @@ mod tests {
         // The bound: the join ends before the pod's 45 s terminationGracePeriodSeconds, so the
         // process logs and exits instead of a SIGKILL. A cut-off job is safe: its set transaction
         // rolls back, and Postgres releases the advisory lock when the connection closes.
+        let deadline = code
+            .find("let recompile_deadline = tokio::time::Instant::now() + RECOMPILE_SHUTDOWN_TIMEOUT;")
+            .expect("main.rs must start the re-compile deadline at the shutdown");
+        let broadcast = code[..deadline].rfind("tx.send(())").expect("main.rs broadcasts the shutdown before the deadline");
         assert!(
-            code.contains("let recompile_deadline = tokio::time::Instant::now() + RECOMPILE_SHUTDOWN_TIMEOUT;"),
-            "main.rs must start the re-compile deadline at the shutdown"
+            broadcast < deadline && deadline < drain,
+            "the re-compile deadline must start after the shutdown broadcast and before the server drain"
         );
         let secs: u64 = code
             .split("const RECOMPILE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(")
