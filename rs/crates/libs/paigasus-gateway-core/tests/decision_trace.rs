@@ -236,7 +236,7 @@ fn generated_ids() -> Vec<String> {
 const POLICY: &str = r#"// SPDX-License-Identifier: Apache-2.0
 // SMA-755: the policy that the decision-trace fixture replays. It permits `search` while at most
 // two searches fall in the last hour. The Authorizer records an event before it decides it, so the
-// counts at the five `search` events are 1, 2, 3, 4 and 1. `read_file` has no permit.
+// counts at the six `search` events are 1, 2, 3, 4, 1 and 1. `read_file` has no permit.
 @id("search-rate")
 permit (principal, action == Pgs::Gateway::Action::"search", resource)
 when temporal { count_within(1h, Pgs::Gateway::Action::"search"::request{}) <= 2 };
@@ -248,6 +248,19 @@ fn fixtures() -> Vec<(&'static str, String)> {
         writeln!(log, "{}", line(&rec(Duration::from_secs(secs), "search", "gpt-4o"))).unwrap();
     }
     writeln!(log, "{}", line(&rec(Duration::from_secs(9100), "read_file", "gpt (x) \"q\" \\ \n end"))).unwrap();
+    // A record with a Cedar detail: a non-empty `findings` list and `declared: "yes"` go through the real parser.
+    let mut with_cedar = rec(Duration::from_secs(20_000), "search", "gpt-4o");
+    with_cedar.cedar = Some(CedarDetail::new(
+        Effect::Allow,
+        vec![],
+        vec![],
+        false,
+        BTreeSet::from(["name_collision".to_owned(), "unparsed_arguments".to_owned()]),
+        Declared::Yes,
+        ActionGroup::Catalog,
+        Duration::ZERO,
+    ));
+    writeln!(log, "{}", line(&with_cedar)).unwrap();
 
     let ids = generated_ids();
     let mut ids_log = String::new();
@@ -260,7 +273,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     vec![
         ("decision-trace.log", log),
         ("decision-trace.dw", POLICY.to_owned()),
-        ("decision-trace.expected.json", "[\"ALLOW\",\"ALLOW\",\"DENY\",\"DENY\",\"ALLOW\",\"DENY\"]\n".to_owned()),
+        ("decision-trace.expected.json", "[\"ALLOW\",\"ALLOW\",\"DENY\",\"DENY\",\"ALLOW\",\"DENY\",\"ALLOW\"]\n".to_owned()),
         ("decision-trace-ids.log", ids_log),
         ("decision-trace-ids.json", ids_json),
     ]
