@@ -106,7 +106,7 @@ PINNED_LINES: dict[tuple[str, str], str] = {
     (".gitignore", ".venv/"): "ignore pattern: the name of the project environment directory that git must ignore",
     (".moon/toolchains.yml", "packageManager: 'uv'"): "Moon toolchain schema value: the schema accepts only the tool name here",
     (".moon/workspace.yml", "- '**/.venv/**'"): "Moon hasher ignore glob: it names the project environment directory",
-    (".prototools", 'uv = "0.11.16"'): "proto tool version pin: proto reads the tool name as the key",
+    (".prototools", 'uv = "0.13.9"'): "proto tool version pin: proto reads the tool name as the key",
     (
         "py/pyproject.toml",
         'exclude = ["**/__pycache__", "**/node_modules", "**/.venv", "**/dist", "**/build", "**/generated/**"]',
@@ -816,12 +816,12 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
 
     # G-toolchain (the SMA-765 R-toolchain fixtures, unchanged, and one `installArgs` row).
     for tc, want in (
-        ("unstable_uv:\n  version: '0.11.16'\n  syncArgs: ['--reinstall']\n", True),
+        ("unstable_uv:\n  version: '0.13.9'\n  syncArgs: ['--reinstall']\n", True),
         ("unstable_python:\n  venvArgs:\n    - '--clear'\n", True),
-        ("unstable_uv:\n  # syncArgs: ['--reinstall']\n  version: '0.11.16'\n", False),
-        ("unstable_uv: {version: '0.11.16', syncArgs: ['--reinstall']}\n", True),
+        ("unstable_uv:\n  # syncArgs: ['--reinstall']\n  version: '0.13.9'\n", False),
+        ("unstable_uv: {version: '0.13.9', syncArgs: ['--reinstall']}\n", True),
         ("unstable_uv:\n  \"syncArgs\": ['--reinstall']\n", True),
-        ("unstable_uv:\n  version: '0.11.16' # syncArgs: x\n", False),
+        ("unstable_uv:\n  version: '0.13.9' # syncArgs: x\n", False),
         ("{$schema: ' # local', unstable_uv: {syncArgs: ['--reinstall']}}\n", True),
         ('{$schema: " # local", unstable_uv: {syncArgs: [x]}}\n', True),
         ("{a: 'it''s # x', unstable_uv: {syncArgs: [x]}}\n", True),
