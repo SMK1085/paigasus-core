@@ -7,9 +7,11 @@ import process from 'node:process';
 // Enumerate Moon's resolved project graph. `moon query projects` outputs JSON by default
 // (it has no --json flag — passing one errors). Each entry has top-level id/source/root/
 // language/tasks, and tasks already reflects workspace.inheritedTasks.exclude.
+// The output is larger than Node's default 1 MiB maxBuffer: moon 2.6.5 prints 1,067,108 bytes
+// and the call then fails with ENOBUFS (SMA-807). 2.5.3 printed 1,046,093 bytes.
 let projects;
 try {
-  ({ projects } = JSON.parse(execFileSync('moon', ['query', 'projects'], { encoding: 'utf8' })));
+  ({ projects } = JSON.parse(execFileSync('moon', ['query', 'projects'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })));
 } catch (err) {
   process.stderr.write(`config-only guard: failed to run \`moon query projects\`: ${err.message}\n`);
   process.exit(1);
