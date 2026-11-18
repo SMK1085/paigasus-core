@@ -1002,6 +1002,33 @@ mod tests {
         assert_eq!(listed[..], labels[..5]);
     }
 
+    /// Every label that the job counts is a series that `main` primes at zero. The match has no
+    /// wildcard arm: a new outcome does not compile until it is in this list too.
+    #[test]
+    fn every_counted_outcome_label_is_a_primed_series() {
+        let all = [
+            RecompileOutcome::Identical { version: 1 },
+            RecompileOutcome::HeldDifferent { version: 1 },
+            RecompileOutcome::HeldFailed { version: 1 },
+            RecompileOutcome::AlreadyProposed,
+            RecompileOutcome::Conflict,
+            RecompileOutcome::Error,
+        ];
+        for outcome in &all {
+            match outcome {
+                RecompileOutcome::Identical { .. }
+                | RecompileOutcome::HeldDifferent { .. }
+                | RecompileOutcome::HeldFailed { .. }
+                | RecompileOutcome::AlreadyProposed
+                | RecompileOutcome::Conflict
+                | RecompileOutcome::Error => {}
+            }
+            if let Some(label) = outcome_label(outcome) {
+                assert!(RECOMPILE_RESULT_LABELS.contains(&label), "{outcome:?} counts {label}, which main does not prime");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn the_rpc_run_stops_between_two_sets_at_shutdown() {
         let h = with_recompile_action(harness());

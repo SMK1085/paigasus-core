@@ -627,6 +627,10 @@ async fn a_tenant_list_holds_only_its_own_rows_and_another_tenant_is_forbidden()
     assert_eq!(only_b.iter().map(|h| h.org_id.as_str()).collect::<Vec<_>>(), vec![uuid_b.as_str()]);
 
     let token_a = env.principal_with("tp-org-admin", "org_admin").await;
+    // The positive control: the same token lists its own org A, so the 403 below comes from the
+    // tenant scope, not from a token that can list nothing.
+    let own = list(&env, &token_a, &org_a).await;
+    assert_eq!(own.iter().map(|h| h.org_id.as_str()).collect::<Vec<_>>(), vec![uuid_a.as_str()]);
     let status = env.client().list_held_tool_policy_versions(authed(list_req(&org_b), &token_a)).await.unwrap_err();
     assert_status(&status, Code::PermissionDenied, "forbidden");
 }
