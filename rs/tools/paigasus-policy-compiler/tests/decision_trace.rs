@@ -6,7 +6,7 @@
 use dogwood_language::{Authorizer, Decision, PolicySchema, parse_trace};
 use paigasus_policy_compiler::lower::{lower_units, service_schema, split_policies};
 
-const SCHEMA: &str = include_str!("fixtures/test_schema.cedarschema");
+const SCHEMA: &str = include_str!("fixtures/decision-trace.cedarschema");
 const TRACE: &str = include_str!("fixtures/decision-trace.log");
 const POLICY: &str = include_str!("fixtures/decision-trace.dw");
 const EXPECTED: &str = include_str!("fixtures/decision-trace.expected.json");
