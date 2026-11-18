@@ -80,7 +80,8 @@ fn base(h: RecordHeader, ctx: &DecisionContext, side: Side, mode: Option<TenantM
         principal: principal_of(ctx),
         api_key_id: ctx.api_key_id.clone(),
         scope_prn: ctx.scope.clone(),
-        request_id: ctx.request_id.clone(),
+        // The cap sets nothing else: `tool.truncated` is about the tool and the fields of the tool call.
+        request_id: ctx.request_id.as_deref().map(|r| cap(r).0),
         session: session_of(ctx),
         side,
         tool,
@@ -174,7 +175,12 @@ pub fn build_request(h: RecordHeader, ctx: &DecisionContext, mode: Option<Tenant
     rec.applied = if e.enforced { AppliedEffect::Block } else { AppliedEffect::Observe };
     rec.block_code = Some(BlockCode::Policy);
     rec.basis = RecordBasis::Policy;
-    rec.prevention = if e.enforced { Prevention::Prevented } else { Prevention::NotApplicable };
+    // A replaced result is a result that the model already has: nothing was prevented (R10).
+    rec.prevention = if e.enforced && e.action != RequestAction::ReplaceResult {
+        Prevention::Prevented
+    } else {
+        Prevention::NotApplicable
+    };
     rec.request_action = Some(recorded(e.action));
     rec
 }
@@ -386,6 +392,34 @@ mod tests {
         let e = RequestEntry::new("x".into(), RequestAction::ResetToolChoice, true, RequestReason::ToolCallDenied);
         let rec = build_request(header(None), &ctx(), Some(TenantMode::Enforce), &e);
         assert_eq!((rec.applied, rec.mode), (AppliedEffect::Block, Some(TenantMode::Enforce)));
+    }
+
+    #[test]
+    fn a_request_side_replace_result_prevents_nothing() {
+        let mk = |action, enforced| {
+            build_request(
+                header(None),
+                &ctx(),
+                Some(TenantMode::Enforce),
+                &RequestEntry::new("x".into(), action, enforced, RequestReason::ToolCallDenied),
+            )
+        };
+        assert_eq!(mk(RequestAction::ReplaceResult, true).prevention, Prevention::NotApplicable);
+        assert_eq!(mk(RequestAction::RemoveDefinition, true).prevention, Prevention::Prevented);
+        assert_eq!(mk(RequestAction::ResetToolChoice, true).prevention, Prevention::Prevented);
+        assert_eq!(mk(RequestAction::RemoveDefinition, false).prevention, Prevention::NotApplicable);
+        assert_eq!(build_refusal(header(None), &ctx(), None).prevention, Prevention::Prevented);
+    }
+
+    #[test]
+    fn a_long_request_id_is_capped_on_a_character_boundary() {
+        let id = format!("{}é", "r".repeat(255));
+        let c = DecisionContext::new(PRN, SCOPE, Some(id));
+        let rec = build_refusal(header(None), &c, None);
+        assert_eq!(rec.request_id.as_deref(), Some("r".repeat(255).as_str()));
+        assert!(!rec.tool.truncated, "the request id cap sets no other flag");
+        let c = DecisionContext::new(PRN, SCOPE, Some("short".into()));
+        assert_eq!(build_refusal(header(None), &c, None).request_id.as_deref(), Some("short"));
     }
 
     #[test]
