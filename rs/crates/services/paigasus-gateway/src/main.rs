@@ -92,7 +92,7 @@ async fn serve() -> anyhow::Result<()> {
     )?;
 
     // SMA-752 D19: the tool policy. Only after `validate` above (see `build_tool_policy`).
-    let recorder = Arc::new(DecisionRecorder::tracing());
+    let recorder = Arc::new(DecisionRecorder::tracing_with_digest(config.decision_log.digest_key()));
     let tool_policy_runtime = runtime::build_tool_policy(&config, recorder)?;
     let tool_interception = runtime::tool_interception(&config, &tool_policy_runtime);
     let tool_policy = tool_policy_runtime.policy;

@@ -81,7 +81,14 @@ impl DecisionRecorder {
     /// clock and the operating system entropy.
     #[must_use]
     pub fn tracing() -> Self {
-        Self::new(Arc::new(TracingDecisionLog), Arc::new(SystemClock), Arc::new(OsEntropy), None)
+        Self::tracing_with_digest(None)
+    }
+
+    /// The tracing-only recorder with the digest key of `[decision_log]` (Task 9). The tracing log
+    /// ignores the digest, so no digest is computed until a Redis log takes its place.
+    #[must_use]
+    pub fn tracing_with_digest(digest: Option<DigestKey>) -> Self {
+        Self::new(Arc::new(TracingDecisionLog), Arc::new(SystemClock), Arc::new(OsEntropy), digest)
     }
 
     #[must_use]
