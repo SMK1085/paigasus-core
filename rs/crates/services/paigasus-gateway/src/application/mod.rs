@@ -5,5 +5,6 @@
 //! by SMA-752 spec § 6.3.
 
 pub mod charge_guard;
+pub mod decision_log;
 pub mod limits;
 pub mod tool_policy;
