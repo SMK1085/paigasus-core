@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// AC 1 and AC 3 through a real ingress (spec § 6.3 R2). The gateway zone's IAM link is a cross-zone
+// AC 1 and AC 3 through a real ingress (spec § 6.3 R2). The gateway zone's IAM link (since SMA-783 an
+// item of the console switcher on the brand, not a Primary nav entry) is a cross-zone
 // <ZoneLink>, a plain <a> with no client router (spec F2), so the click must make a new DOCUMENT
 // request; a same-zone link would not. "Your organizations" renders only when IAM accepted the
 // access token. A hydrated page on both sides proves each zone's `_next` assets load under its own
@@ -17,7 +18,8 @@ test('R2: the gateway zone links to IAM with a hard navigation, and both zones h
     const url = new URL(request.url());
     if (request.resourceType() === 'document' && url.hostname === CONSOLE_HOST) documents.push(url.pathname);
   });
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'IAM', exact: true }).click();
+  await page.getByRole('banner').getByRole('button', { name: 'Switch console: Paigasus AI Gateway' }).click();
+  await page.getByRole('menuitem', { name: 'IAM', exact: true }).click();
   await page.waitForURL((url) => url.pathname === '/iam/orgs');
 
   expect(documents, 'the IAM link must be a hard navigation (a new document request)').toContain('/iam/orgs');

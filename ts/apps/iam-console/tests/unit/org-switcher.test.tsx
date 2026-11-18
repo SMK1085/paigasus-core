@@ -27,11 +27,19 @@ const ORGS = [
   { orgId: GLOBEX, label: 'Globex' },
 ];
 
+/**
+ * The rendered markup's text, tags removed. The switcher's "Organization: " prefix is screen-reader
+ * text in its own span beside a decorative icon, so it is not contiguous with the label in markup.
+ */
+function textOf(markup: string): string {
+  return markup.replace(/<[^>]*>/g, '');
+}
+
 function renderShell(): string {
   return renderToStaticMarkup(
     <ZoneProvider zone="iam" zones={{ iam: '/iam' }}>
       <SessionProvider value={{ principalPrn: null, displayName: 'Ada', email: null, grants: [], grantsAvailable: false }}>
-        <OrgSwitcherShell brand={{ label: 'IAM', href: '/iam/orgs' }} nav={[]} orgs={ORGS}>
+        <OrgSwitcherShell brand={{ label: 'IAM', href: '/iam/orgs' }} nav={[]} consoles={[]} orgs={ORGS}>
           <p>page</p>
         </OrgSwitcherShell>
       </SessionProvider>
@@ -56,17 +64,30 @@ describe('the organization switcher', () => {
 
   it('marks the organization in the URL as current', () => {
     params.current = { org: GLOBEX };
-    expect(renderShell()).toContain('Organization: Globex');
+    expect(textOf(renderShell())).toContain('Organization: Globex');
+  });
+
+  it('shows the current organization as an initials badge, hidden from assistive tech, in place of the visible prefix', () => {
+    params.current = { org: GLOBEX };
+    const markup = renderShell();
+    expect(markup).toMatch(/<span aria-hidden="true"[^>]*>G<\/span>/);
+    expect(markup).toContain('<span class="sr-only">Organization:</span> <span class="max-w-48 truncate max-md:sr-only">Globex</span>');
+  });
+
+  it('falls back to the organization icon while no organization is selected', () => {
+    params.current = {};
+    const markup = renderShell();
+    expect(markup).toMatch(/<span aria-hidden="true"[^>]*><svg /);
   });
 
   it('reads an upper-case [org] segment as the lower-case id of its item, and marks it as current', () => {
     expect(currentOrgId({ org: GLOBEX.toUpperCase() })).toBe(GLOBEX);
     params.current = { org: GLOBEX.toUpperCase() };
-    expect(renderShell()).toContain('Organization: Globex');
+    expect(textOf(renderShell())).toContain('Organization: Globex');
   });
 
   it('marks nothing on a page outside one organization', () => {
     params.current = {};
-    expect(renderShell()).toContain('Organization: none selected');
+    expect(textOf(renderShell())).toContain('Organization: none selected');
   });
 });
