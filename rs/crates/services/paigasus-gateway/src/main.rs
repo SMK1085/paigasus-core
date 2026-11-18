@@ -239,8 +239,8 @@ async fn serve() -> anyhow::Result<()> {
     runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks, decision_log.tasks).await
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 14 metric families `paigasus-gateway`
-/// emits (spec §4.1), via the `names::` consts so this can't drift from `names::ALL`. Mirrors
+/// Registers `# HELP`/`# TYPE` exposition text for the 35 metric families listed below (SMA-755 counted
+/// them; the number is a plain count, not a gate). `paigasus-gateway` emits them (spec §4.1 and later), via the `names::` consts so this can't drift from `names::ALL`. Mirrors
 /// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.3.
 fn describe_gateway_metrics() {
     use metrics::{describe_counter, describe_gauge, describe_histogram};

@@ -4,8 +4,9 @@
 //! snapshot (D30): it never reads the cache. Evaluation is synchronous inside the future, and the
 //! decider spawns nothing (SMA-749 D25).
 //!
-//! Logs and metrics hold the sanitized tool name, the verdict and the policy ids. They never hold
-//! the arguments (ADR-0027 (i)).
+//! The decider writes no log line. It counts the decision metrics and computes the keyed argument digest for
+//! the decision log. The recorder writes the per-decision line (SMA-755). Metrics never hold the arguments
+//! (ADR-0027 (i)).
 
 use std::sync::Arc;
 use std::time::Instant;

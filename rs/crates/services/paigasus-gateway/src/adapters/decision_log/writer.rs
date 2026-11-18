@@ -4,10 +4,14 @@
 //! It never retries. A failed event counts as a drop. At or above `max_len` entries in the stream it drops each
 //! new event (the backlog cap).
 
+use std::any::Any;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::FutureExt;
 use metrics::counter;
 use paigasus_observability::names;
 use tokio::sync::{Mutex, mpsc, watch};
@@ -56,10 +60,29 @@ fn classify(err: &redis::RedisError) -> DropReason {
     }
 }
 
+/// Run `fut`, the write of a batch of `n` events. A panic inside it counts the batch as `write_error`: the batch
+/// already left the queue, so no other counter sees it. The panic is returned for the caller to handle.
+async fn counted<F: Future<Output = ()>>(n: u64, fut: F) -> Result<(), Box<dyn Any + Send>> {
+    let result = AssertUnwindSafe(fut).catch_unwind().await;
+    if result.is_err() {
+        count_dropped(DropReason::WriteError, n);
+    }
+    result
+}
+
 impl State {
-    /// Write one batch, or count each event of it as dropped.
-    async fn write_batch(&self, batch: Vec<Bytes>) {
+    /// Write one batch, or count each event of it as dropped. A panic counts the batch as `write_error`.
+    async fn write_batch(&self, batch: Vec<Bytes>) -> Result<(), Box<dyn Any + Send>> {
         let n = batch.len() as u64;
+        counted(n, self.write_batch_inner(batch)).await
+    }
+
+    async fn write_batch_inner(&self, batch: Vec<Bytes>) {
+        let n = batch.len() as u64;
+        #[cfg(test)]
+        if self.settings.key == tests::PANIC_KEY {
+            panic!("a test panic inside write_batch");
+        }
         let Some(handle) = self.slot.get() else {
             count_dropped(DropReason::RedisUnavailable, n);
             return;
@@ -128,7 +151,10 @@ impl State {
             }
         }
         drop(rx);
-        self.write_batch(batch).await;
+        // The batch is counted already. The panic goes on to the supervisor, which counts the restart.
+        if let Err(panic) = self.write_batch(batch).await {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     /// After the shutdown signal: close the queue, write what is left inside `budget`, and count the rest.
@@ -153,8 +179,10 @@ impl State {
                 continue;
             }
             // A timeout drops the batch that was in flight: its result is not known, so it counts as shutdown.
-            if tokio::time::timeout_at(deadline, self.write_batch(batch)).await.is_err() {
-                count_dropped(DropReason::Shutdown, n);
+            match tokio::time::timeout_at(deadline, self.write_batch(batch)).await {
+                Err(_) => count_dropped(DropReason::Shutdown, n),
+                Ok(Err(_)) => tracing::error!("a decision-log writer batch panicked while it drained"),
+                Ok(Ok(())) => {}
             }
         }
     }
@@ -177,4 +205,53 @@ pub async fn run_writer(rx: mpsc::Receiver<Bytes>, slot: RedisSlot, s: WriterSet
     })
     .await;
     state.drain(budget).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    /// A key that makes `write_batch_inner` panic.
+    pub(super) const PANIC_KEY: &str = "panic-in-write-batch";
+
+    #[tokio::test]
+    async fn a_panic_inside_write_batch_counts_the_batch_as_write_error() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let (tx, rx) = mpsc::channel(8);
+        for _ in 0..3 {
+            tx.send(Bytes::from_static(b"e")).await.expect("the queue is open");
+        }
+        let (stop, shutdown) = watch::channel(());
+        let task = tokio::spawn(run_writer(
+            rx,
+            RedisSlot::new(),
+            WriterSettings {
+                key: PANIC_KEY.to_owned(),
+                max_len: 10,
+            },
+            shutdown,
+            Duration::from_millis(100),
+        ));
+        // The three events are queued before the first read, so they are one batch.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        stop.send(()).expect("the writer is alive");
+        task.await.expect("the writer task ends");
+        // One snapshot: a read of the recorder resets the counters it returns.
+        let snap = snapshotter.snapshot().into_vec();
+        let value = |name: &str, label: (&str, &str)| {
+            snap.iter().find_map(|(key, _, _, v)| {
+                let key = key.key();
+                let same = key.name() == name && key.labels().any(|l| l.key() == label.0 && l.value() == label.1);
+                match (same, v) {
+                    (true, DebugValue::Counter(n)) => Some(*n),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(value(names::GATEWAY_DECISION_LOG_DROPPED_TOTAL, ("reason", "write_error")), Some(3));
+        assert_eq!(value(names::GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL, ("task", "writer")), Some(1));
+    }
 }

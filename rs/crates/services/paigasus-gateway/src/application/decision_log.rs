@@ -15,7 +15,7 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::domain::decision_log::{DecisionLog, Entropy, OsEntropy, TracingDecisionLog};
+use crate::domain::decision_log::{DecisionLog, Entropy, OsEntropy, TracingDecisionLog, log_line};
 use crate::domain::limits::{Clock, SystemClock};
 use crate::domain::org_of;
 
@@ -111,30 +111,37 @@ impl DecisionRecorder {
     }
 
     fn header(&self, org: Option<Uuid>) -> RecordHeader {
-        let now = self.clock.now();
-        let sequence = {
+        // The clock is read inside the sequence lock, so `decided_at` order equals `sequence` order per org.
+        let (now, sequence) = {
             let mut map = self.sequences.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = self.clock.now();
             let next = map.entry(org).or_insert(0);
             *next += 1;
-            *next
+            (now, *next)
         };
         RecordHeader::new(mint_uuid7(unix_ms(now), self.entropy.bytes10()), now, self.instance_id, sequence, org)
     }
 
-    fn emit(&self, org: Option<Uuid>, build: impl FnOnce(RecordHeader) -> DecisionRecord) {
-        self.log.record(build(self.header(org)));
+    /// Build the record, write the tracing line when `line` is set, and hand the record to the log.
+    fn emit(&self, org: Option<Uuid>, line: bool, build: impl FnOnce(RecordHeader) -> DecisionRecord) {
+        let record = build(self.header(org));
+        if line {
+            log_line(&record);
+        }
+        self.log.record(record);
     }
 
+    /// The tracing line is written exactly when the decider ran for this entry: `r.detail` is set (R11).
     pub fn record_response(&self, ctx: &DecisionContext, r: &ReportedCall) {
-        self.emit(response_org(ctx).or_else(|| org_of(&ctx.scope)), |h| build_response(h, ctx, r));
+        self.emit(response_org(ctx).or_else(|| org_of(&ctx.scope)), r.detail.is_some(), |h| build_response(h, ctx, r));
     }
 
     pub fn record_request(&self, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry) {
-        self.emit(org_of(&ctx.scope), |h| build_request(h, ctx, mode, e));
+        self.emit(org_of(&ctx.scope), false, |h| build_request(h, ctx, mode, e));
     }
 
     pub fn record_refusal(&self, ctx: &DecisionContext, mode: Option<TenantMode>) {
-        self.emit(org_of(&ctx.scope), |h| build_refusal(h, ctx, mode));
+        self.emit(org_of(&ctx.scope), false, |h| build_refusal(h, ctx, mode));
     }
 }
 
@@ -147,7 +154,9 @@ mod tests {
     use super::*;
     use crate::domain::decision_log::MemoryDecisionLog;
     use crate::test_support::{FixedClock, ORG_A, at};
+    use paigasus_gateway_core::decision_log::{DecisionDetail, RecordBasis};
     use paigasus_gateway_core::{Basis, BlockCode, ReportDecision, ReportEntry};
+    use paigasus_logging::test_support::capture_logs_at;
     use sha2::Digest;
 
     struct FixedEntropy(u8);
@@ -227,6 +236,130 @@ mod tests {
         assert_eq!(id, mint_uuid7(ms, [0xAB; 10]));
         assert_eq!(id.get_version_num(), 7);
         assert_eq!(rec.instance_id(), id, "the instance id comes from the same clock and entropy");
+    }
+
+    fn entry_of(decision: ReportDecision, basis: Option<Basis>, code: Option<BlockCode>, enforced: Option<bool>) -> ReportEntry {
+        ReportEntry {
+            choice: 0,
+            position: 0,
+            name: "Get_Weather".into(),
+            decision,
+            basis,
+            code,
+            enforced,
+            reason: None,
+        }
+    }
+
+    fn with_detail(entry: ReportEntry, basis: RecordBasis) -> ReportedCall {
+        ReportedCall::new(entry, None, Some(Arc::new(DecisionDetail::new(basis, None, None))))
+    }
+
+    /// The lines of the tracing capture that hold the decision message.
+    fn decision_lines(text: &str) -> Vec<String> {
+        text.lines().filter(|l| l.contains("tool-policy decision")).map(ToOwned::to_owned).collect()
+    }
+
+    fn has_field(line: &str, name: &str, value: &str) -> bool {
+        line.contains(&format!("{name}={value}")) || line.contains(&format!("{name}=\"{value}\""))
+    }
+
+    #[test]
+    fn a_decided_entry_writes_one_line_with_the_applied_verdict() {
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let s = scope(ORG_A);
+        let block = with_detail(entry_of(ReportDecision::Block, Some(Basis::Decider), Some(BlockCode::Policy), Some(true)), RecordBasis::Policy);
+        rec.record_response(&DecisionContext::new("prn:pgs:iam:::user/u", &s, Some("req-1".into())), &block);
+        let text = logs.text();
+        let lines = decision_lines(&text);
+        assert_eq!(lines.len(), 1, "{text}");
+        for (name, value) in [("request_id", "req-1"), ("tool", "Get_Weather"), ("verdict", "block"), ("basis", "policy")] {
+            assert!(has_field(&lines[0], name, value), "{name}={value} in {text}");
+        }
+        for field in ["mode=", "determining=", "errored="] {
+            assert!(text.contains(field), "{field} in {text}");
+        }
+    }
+
+    #[test]
+    fn an_observed_hold_writes_one_line_with_verdict_observe() {
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let observed = with_detail(entry_of(ReportDecision::Allow, Some(Basis::Decider), Some(BlockCode::Policy), Some(false)), RecordBasis::Policy);
+        rec.record_response(&ctx(&scope(ORG_A)), &observed);
+        let text = logs.text();
+        let lines = decision_lines(&text);
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(has_field(&lines[0], "verdict", "observe"), "{text}");
+    }
+
+    #[test]
+    fn an_unavailable_policy_decision_writes_one_line_with_basis_unavailable() {
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let c = with_detail(entry_of(ReportDecision::Block, Some(Basis::Decider), Some(BlockCode::Policy), Some(true)), RecordBasis::Unavailable);
+        rec.record_response(&ctx(&scope(ORG_A)), &c);
+        let text = logs.text();
+        let lines = decision_lines(&text);
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(has_field(&lines[0], "basis", "unavailable"), "{text}");
+    }
+
+    #[test]
+    fn an_unenforceable_a_block_all_and_a_request_record_write_no_line() {
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let c = ctx(&scope(ORG_A));
+        // A provider-executed tool (web_search_call): reported, never decided, so no detail.
+        rec.record_response(&c, &ReportedCall::new(entry_of(ReportDecision::Unenforceable, None, None, None), None, None));
+        // A hold-limit `block_all` entry: the decider did not run, so no detail.
+        rec.record_response(
+            &c,
+            &ReportedCall::new(entry_of(ReportDecision::Block, Some(Basis::OnFailure), Some(BlockCode::Policy), Some(true)), None, None),
+        );
+        rec.record_refusal(&c, None);
+        assert_eq!(log.records().len(), 3, "each entry is still recorded");
+        assert_eq!(decision_lines(&logs.text()), Vec::<String>::new(), "{}", logs.text());
+    }
+
+    /// A clock that records whether the sequence lock of the recorder was held while it was read.
+    struct LockProbe {
+        recorder: std::sync::OnceLock<Arc<DecisionRecorder>>,
+        reads_with_lock_free: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Clock for LockProbe {
+        fn now(&self) -> SystemTime {
+            if let Some(r) = self.recorder.get() {
+                // `try_lock` fails while another holder has the lock. The recorder holds it in `header`.
+                if r.sequences.try_lock().is_ok() {
+                    self.reads_with_lock_free.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            at("2026-11-18T10:00:00Z")
+        }
+    }
+
+    #[test]
+    fn the_clock_is_read_inside_the_sequence_lock() {
+        let probe = Arc::new(LockProbe {
+            recorder: std::sync::OnceLock::new(),
+            reads_with_lock_free: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = Arc::new(DecisionRecorder::new(log, probe.clone(), Arc::new(FixedEntropy(1)), None));
+        probe.recorder.set(Arc::clone(&rec)).ok().expect("set once");
+        rec.record_response(&ctx(&scope(ORG_A)), &reported());
+        assert_eq!(
+            probe.reads_with_lock_free.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "decided_at must be read under the sequence lock"
+        );
     }
 
     #[test]

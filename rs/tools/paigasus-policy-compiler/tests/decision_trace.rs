@@ -35,6 +35,7 @@ fn verdicts() -> Vec<String> {
 
 #[test]
 fn the_decision_trace_parses() {
+    // The generator writes seven records: see `decision-trace.expected.json`, which has one verdict for each.
     assert_eq!(parse_trace(TRACE).expect("parses").len(), 7);
 }
 
@@ -43,6 +44,8 @@ fn the_replay_gives_the_exact_verdict_sequence() {
     let expected: Vec<String> = serde_json::from_str(EXPECTED).expect("the expected file is a JSON array");
     let got = verdicts();
     assert_eq!(got, expected);
+    // The literal sequence too, so that a regenerated expected file cannot change it unseen.
+    assert_eq!(got, ["ALLOW", "ALLOW", "DENY", "DENY", "ALLOW", "DENY", "ALLOW"]);
     let first_deny = got.iter().position(|v| v == "DENY").expect("the sequence holds a DENY");
     assert!(got[first_deny..].iter().any(|v| v == "ALLOW"), "an ALLOW follows a DENY");
     // The last record has a Cedar detail (two findings, `declared: "yes"`) and is allowed.

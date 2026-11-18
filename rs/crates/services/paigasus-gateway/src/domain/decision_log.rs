@@ -5,7 +5,7 @@
 
 use std::sync::Mutex;
 
-use paigasus_gateway_core::decision_log::{AppliedEffect, DecisionRecord, RecordBasis, Side};
+use paigasus_gateway_core::decision_log::{AppliedEffect, DecisionRecord};
 use paigasus_gateway_core::sanitize_name;
 use paigasus_kernel::tool_policy::{PolicyOrigin, PolicyRef};
 
@@ -47,13 +47,12 @@ fn refs(list: &[PolicyRef]) -> String {
         .join(",")
 }
 
-/// The per-decision log line. It has the fields of the line that `decide_now` writes. It writes
-/// nothing for a request-side record and nothing for an `OnFailure` record, so the set of lines
-/// stays the same as before the decision log (P-10). It never holds the arguments (A1).
+/// The per-decision log line. It has the fields of the line that `decide_now` wrote before the decision log.
+/// The recorder writes it exactly when the decider ran for the report entry (`ReportedCall.detail` is set), so
+/// the set of lines stays the same as before the decision log (P-10, R11). A request-side record, an
+/// unenforceable entry and a `block_all` entry have no line. `verdict` is the applied effect: an observed hold
+/// writes `observe`. It never holds the arguments (A1).
 pub fn log_line(r: &DecisionRecord) {
-    if r.side != Side::Response || r.basis == RecordBasis::OnFailure {
-        return;
-    }
     let verdict = match r.applied {
         AppliedEffect::Allow => "allow",
         AppliedEffect::Observe => "observe",
@@ -72,7 +71,7 @@ pub fn log_line(r: &DecisionRecord) {
     );
 }
 
-/// The log of the default configuration: the tracing line only. It keeps no digest.
+/// The log of the default configuration: it keeps nothing (the recorder writes the tracing line). It keeps no digest.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TracingDecisionLog;
 
@@ -81,9 +80,7 @@ impl DecisionLog for TracingDecisionLog {
         false
     }
 
-    fn record(&self, record: DecisionRecord) {
-        log_line(&record);
-    }
+    fn record(&self, _record: DecisionRecord) {}
 }
 
 /// A log that keeps the records in memory, for tests. The runtime never builds it (P-9).
@@ -122,9 +119,8 @@ impl DecisionLog for MemoryDecisionLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paigasus_gateway_core::decision_log::{RecordHeader, ReportedCall, build_refusal, build_response};
-    use paigasus_gateway_core::{Basis, BlockCode, DecisionContext, ReportDecision, ReportEntry};
-    use paigasus_logging::test_support::capture_logs_at;
+    use paigasus_gateway_core::DecisionContext;
+    use paigasus_gateway_core::decision_log::{RecordHeader, build_refusal};
     use std::time::SystemTime;
     use uuid::Uuid;
 
@@ -132,51 +128,8 @@ mod tests {
         RecordHeader::new(Uuid::nil(), SystemTime::UNIX_EPOCH, Uuid::nil(), 1, None)
     }
 
-    fn entry(basis: Option<Basis>) -> ReportEntry {
-        ReportEntry {
-            choice: 0,
-            position: 0,
-            name: "Get_Weather".into(),
-            decision: ReportDecision::Block,
-            basis,
-            code: Some(BlockCode::Policy),
-            enforced: Some(true),
-            reason: None,
-        }
-    }
-
     fn ctx() -> DecisionContext {
         DecisionContext::new("prn:pgs:iam:::user/u", "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1", Some("req-1".into()))
-    }
-
-    #[test]
-    fn the_tracing_log_line_has_no_arguments() {
-        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
-        let rec = build_response(header(), &ctx(), &ReportedCall::new(entry(Some(Basis::Decider)), None, None));
-        TracingDecisionLog.record(rec);
-        let text = logs.text();
-        assert_eq!(text.lines().count(), 1, "{text}");
-        assert!(text.contains("tool-policy decision"), "{text}");
-        assert!(text.contains("request_id=\"req-1\"") || text.contains("request_id=req-1"), "{text}");
-        assert!(text.contains("tool=Get_Weather"), "{text}");
-        assert!(text.contains("verdict=\"block\"") || text.contains("verdict=block"), "{text}");
-        assert!(text.contains("basis=\"policy\"") || text.contains("basis=policy"), "{text}");
-        for field in ["mode=", "determining=", "errored="] {
-            assert!(text.contains(field), "{field} in {text}");
-        }
-        assert!(!text.contains("s3cr3t-canary"), "{text}");
-    }
-
-    #[test]
-    fn an_on_failure_or_request_record_writes_no_line() {
-        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
-        let on_failure = build_response(header(), &ctx(), &ReportedCall::new(entry(Some(Basis::OnFailure)), None, None));
-        assert_eq!(on_failure.basis, RecordBasis::OnFailure);
-        TracingDecisionLog.record(on_failure);
-        let request = build_refusal(header(), &ctx(), None);
-        assert_eq!(request.side, Side::Request);
-        TracingDecisionLog.record(request);
-        assert_eq!(logs.text(), "");
     }
 
     #[test]

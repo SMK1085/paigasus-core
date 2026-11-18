@@ -19,7 +19,7 @@ use paigasus_observability::names;
 use prost::Message;
 use tokio::sync::mpsc;
 
-use crate::domain::decision_log::{DecisionLog, log_line};
+use crate::domain::decision_log::DecisionLog;
 
 pub use redis_conn::{DECISION_LOG_BREAKER_ROLE, RedisSlot, connect_loop};
 pub use relay::{RelaySettings, run_relay};
@@ -112,7 +112,6 @@ impl DecisionLog for RedisDecisionLog {
     }
 
     fn record(&self, record: DecisionRecord) {
-        log_line(&record);
         let bytes = Bytes::from(proto::to_event(&record).encode_to_vec());
         counter!(names::GATEWAY_DECISION_LOG_RECORDED_TOTAL).increment(1);
         match self.tx.try_send(bytes) {
@@ -199,15 +198,13 @@ mod tests {
     }
 
     #[test]
-    fn the_encoded_event_holds_no_canary() {
+    fn the_encoded_event_carries_the_digest_bytes() {
         use paigasus_gateway_core::decision_log::ArgumentDigest;
-        // The record type has no field for arguments, only a keyed digest, so a canary in the call input
-        // cannot reach the event bytes. The digest is in the event and the canary is not.
-        let canary = "s3cr3t-canary";
+        // This test checks only that the keyed digest bytes reach the event. The proof that a canary in the
+        // arguments never leaves the gateway is `the_canary_never_leaves_the_gateway` in `decision_log_e2e.rs`.
         let mut r = record();
         r.arguments = Some(ArgumentDigest::new([7; 32], "k1"));
         let bytes = proto::to_event(&r).encode_to_vec();
-        assert!(!bytes.windows(canary.len()).any(|w| w == canary.as_bytes()));
         assert!(bytes.windows(32).any(|w| w == [7u8; 32]), "the digest is in the event");
     }
 
