@@ -79,9 +79,11 @@ pub trait ToolPolicyRepository: Send + Sync {
     async fn max_stored_revisions(&self) -> Result<(u32, u32), RepositoryError>;
     /// The held row of a set (status held only).
     async fn held(&self, key: &ToolPolicySetKey) -> Result<Option<HeldVersion>, RepositoryError>;
-    /// Every held row (status held only): of one tenant, or of every set when `org` is `None`.
-    /// The floor first, then by org UUID.
-    async fn list_held(&self, org: Option<Uuid>) -> Result<Vec<HeldVersion>, RepositoryError>;
+    /// One page of the held rows (status held only): of one tenant, or of every set when `org`
+    /// is `None`. The order is the floor first, then by org UUID. The method skips `offset` rows
+    /// and returns at most `limit` rows. The store applies the page, so a page does not read
+    /// every held row.
+    async fn list_held(&self, org: Option<Uuid>, limit: u64, offset: u64) -> Result<Vec<HeldVersion>, RepositoryError>;
     /// True when a held or discarded row of the set has this base version, generation and schema
     /// revision (plan H6).
     async fn proposal_exists(&self, key: &ToolPolicySetKey, base_version: u64, compiler_generation: u32, schema_revision: u32) -> Result<bool, RepositoryError>;

@@ -2244,7 +2244,7 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         Ok(self.data.lock().unwrap().held.get(key).and_then(|rows| rows.iter().find(|h| h.status == HeldStatus::Held).cloned()))
     }
 
-    async fn list_held(&self, org: Option<Uuid>) -> Result<Vec<HeldVersion>, RepositoryError> {
+    async fn list_held(&self, org: Option<Uuid>, limit: u64, offset: u64) -> Result<Vec<HeldVersion>, RepositoryError> {
         let data = self.data.lock().unwrap();
         let mut rows: Vec<HeldVersion> = data
             .held
@@ -2258,7 +2258,9 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
             ToolPolicySetKey::Floor => (0, Uuid::nil()),
             ToolPolicySetKey::Tenant(org) => (1, org),
         });
-        Ok(rows)
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        Ok(rows.into_iter().skip(offset).take(limit).collect())
     }
 
     async fn proposal_exists(&self, key: &ToolPolicySetKey, base_version: u64, compiler_generation: u32, schema_revision: u32) -> Result<bool, RepositoryError> {

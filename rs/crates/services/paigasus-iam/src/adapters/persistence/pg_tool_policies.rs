@@ -490,12 +490,21 @@ impl ToolPolicyRepository for PgToolPolicies {
         row.map(model_to_held).transpose()
     }
 
-    async fn list_held(&self, org: Option<Uuid>) -> Result<Vec<HeldVersion>, RepositoryError> {
+    async fn list_held(&self, org: Option<Uuid>, limit: u64, offset: u64) -> Result<Vec<HeldVersion>, RepositoryError> {
         let mut q = versions::Entity::find().filter(versions::Column::Status.eq("held"));
         if let Some(org) = org {
             q = q.filter(versions::Column::Kind.eq("tenant")).filter(versions::Column::OrgId.eq(org));
         }
-        let rows = q.order_by_asc(versions::Column::Kind).order_by_asc(versions::Column::OrgId).all(&self.db).await.map_err(map_err)?;
+        // ORDER BY kind, org_id: 'floor' sorts before 'tenant', so the floor comes first. The
+        // page is in SQL, so a page does not read every held row with its blob and source.
+        let rows = q
+            .order_by_asc(versions::Column::Kind)
+            .order_by_asc(versions::Column::OrgId)
+            .limit(limit)
+            .offset(offset)
+            .all(&self.db)
+            .await
+            .map_err(map_err)?;
         rows.into_iter().map(model_to_held).collect()
     }
 

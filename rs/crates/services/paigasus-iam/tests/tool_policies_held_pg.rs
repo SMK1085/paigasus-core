@@ -211,15 +211,42 @@ async fn insert_held_discards_an_older_held_row_first() {
     e.put_held(&held(key, 3, 1)).await.unwrap();
     let all = e
         .repo
-        .list_held(Some(match key {
-            ToolPolicySetKey::Tenant(o) => o,
-            ToolPolicySetKey::Floor => unreachable!(),
-        }))
+        .list_held(
+            Some(match key {
+                ToolPolicySetKey::Tenant(o) => o,
+                ToolPolicySetKey::Floor => unreachable!(),
+            }),
+            50,
+            0,
+        )
         .await
         .unwrap();
     assert_eq!(all.iter().map(|h| h.version).collect::<Vec<_>>(), vec![3]);
     assert_eq!(scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version WHERE status = 'held'".into(), "n").await, 1);
     assert_eq!(scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version WHERE status = 'discarded'".into(), "n").await, 1);
+}
+
+/// The query applies the page in SQL: the floor first, then tenants by org UUID, with LIMIT and
+/// OFFSET. Two tenants, so a limit of 1 and an offset of 1 each select one row.
+#[tokio::test]
+async fn list_held_pages_in_sql_with_the_floor_first() {
+    let Some(e) = env().await else { return };
+    let mut orgs = [seed_org(&e.db).await, seed_org(&e.db).await];
+    for key in orgs.iter().map(|o| ToolPolicySetKey::Tenant(*o)).chain([ToolPolicySetKey::Floor]) {
+        e.put_live(&live(key, 1, VersionOrigin::Save)).await.unwrap();
+        e.put_held(&held(key, 2, 1)).await.unwrap();
+    }
+    orgs.sort();
+    let keys = |rows: Vec<HeldVersion>| rows.into_iter().map(|r| r.key).collect::<Vec<_>>();
+    let all = keys(e.repo.list_held(None, 10, 0).await.unwrap());
+    assert_eq!(all, vec![ToolPolicySetKey::Floor, ToolPolicySetKey::Tenant(orgs[0]), ToolPolicySetKey::Tenant(orgs[1])]);
+    assert_eq!(keys(e.repo.list_held(None, 1, 0).await.unwrap()), vec![ToolPolicySetKey::Floor]);
+    assert_eq!(keys(e.repo.list_held(None, 1, 1).await.unwrap()), vec![ToolPolicySetKey::Tenant(orgs[0])]);
+    assert_eq!(keys(e.repo.list_held(None, 5, 2).await.unwrap()), vec![ToolPolicySetKey::Tenant(orgs[1])]);
+    assert!(e.repo.list_held(None, 5, 3).await.unwrap().is_empty());
+    // A tenant list: limit 1 gives the one row, offset 1 gives none.
+    assert_eq!(keys(e.repo.list_held(Some(orgs[1]), 1, 0).await.unwrap()), vec![ToolPolicySetKey::Tenant(orgs[1])]);
+    assert!(e.repo.list_held(Some(orgs[1]), 1, 1).await.unwrap().is_empty());
 }
 
 #[tokio::test]

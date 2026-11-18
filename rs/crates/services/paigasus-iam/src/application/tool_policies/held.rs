@@ -35,8 +35,9 @@ pub enum HeldTarget {
 }
 
 impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
-    /// The held rows (status held only) of one tenant, or of every set when `org` is `None`, in
-    /// the repository order (the floor first, then by org UUID), then one page.
+    /// One page of the held rows (status held only) of one tenant, or of every set when `org` is
+    /// `None`, in the repository order (the floor first, then by org UUID). The repository
+    /// applies the page.
     pub async fn list_held(&self, actor: &Prn, org: Option<Uuid>, page: Page) -> Result<Vec<HeldVersion>, TenancyError> {
         match org {
             Some(org) => {
@@ -44,9 +45,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             }
             None => self.authorize.check(actor, Action::ManageToolPolicyRecompile, &root_prn()).await?,
         }
-        let offset = usize::try_from(page.offset).unwrap_or(usize::MAX);
-        let limit = usize::try_from(page.limit).unwrap_or(usize::MAX);
-        Ok(self.repo.list_held(org).await?.into_iter().skip(offset).take(limit).collect())
+        Ok(self.repo.list_held(org, page.limit, page.offset).await?)
     }
 
     /// Makes the held row `held_version` the next live version of its set (spec section 8, H9).
@@ -546,6 +545,35 @@ mod tests {
         h.svc.discard_held(&h.actor, HeldTarget::Tenant(h.org), 2).await.unwrap();
         let after = h.svc.list_held(&h.actor, Some(h.org), Page::new(None, None).unwrap()).await.unwrap();
         assert!(after.is_empty());
+    }
+
+    /// The repository applies the page itself (the floor first, then tenants by org UUID), so a
+    /// page does not read every held row.
+    #[tokio::test]
+    async fn the_repository_pages_the_held_rows_in_the_floor_first_order() {
+        let h = bare_harness();
+        let (low, high) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        for org in [high, low] {
+            h.repo.seed_held(HeldVersion {
+                key: ToolPolicySetKey::Tenant(org),
+                ..held_row(&h, 2, 1)
+            });
+        }
+        h.repo.seed_held(HeldVersion {
+            key: ToolPolicySetKey::Floor,
+            catalog_revision: None,
+            ..held_row(&h, 2, 1)
+        });
+        let keys = |rows: Vec<HeldVersion>| rows.into_iter().map(|r| r.key).collect::<Vec<_>>();
+        let all = keys(h.repo.list_held(None, 10, 0).await.unwrap());
+        assert_eq!(all, vec![ToolPolicySetKey::Floor, ToolPolicySetKey::Tenant(low), ToolPolicySetKey::Tenant(high)]);
+        assert_eq!(keys(h.repo.list_held(None, 1, 0).await.unwrap()), vec![ToolPolicySetKey::Floor]);
+        assert_eq!(keys(h.repo.list_held(None, 1, 1).await.unwrap()), vec![ToolPolicySetKey::Tenant(low)]);
+        assert_eq!(keys(h.repo.list_held(None, 5, 2).await.unwrap()), vec![ToolPolicySetKey::Tenant(high)]);
+        assert!(h.repo.list_held(None, 5, 3).await.unwrap().is_empty());
+        // A tenant list pages the rows of that tenant only.
+        assert_eq!(keys(h.repo.list_held(Some(low), 1, 0).await.unwrap()), vec![ToolPolicySetKey::Tenant(low)]);
+        assert!(h.repo.list_held(Some(low), 1, 1).await.unwrap().is_empty());
     }
 
     #[tokio::test]
