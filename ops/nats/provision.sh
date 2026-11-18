@@ -82,6 +82,13 @@ add_user iam-publisher    PUBLISHER_PUB   PUBLISHER_SUB
 add_user gateway-consumer CONSUMER_PUB    CONSUMER_SUB
 add_user iam-provisioner  PROVISIONER_PUB PROVISIONER_SUB
 
+# --- 2b. The gateway decision-log account (SMA-755) ----------------------------------------------
+# A separate account with its own limits and three users. It is a child run of the same bash, with the
+# same OPERATOR, OUT_DIR, NATS_URL and PUSH. It is idempotent, so a re-run of this script is safe. On
+# pass two (PUSH=1) it also pushes its account and makes the GATEWAY_DECISIONS stream. It runs before the
+# resolver config below, so that the config holds both accounts.
+"${BASH:-bash}" "$here/provision-decisions.sh"
+
 # --- 3. Resolver config -----------------------------------------------------------------------
 # The broker needs this stanza to validate the account JWTs minted above. Without it, every
 # service authenticates against a server that has never heard of the account.

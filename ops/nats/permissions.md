@@ -263,3 +263,28 @@ truly immovable cases above.
 Keep `provision.sh`'s stream-add flags and `PublisherConfig::default()` in sync by hand; there is
 no automated gate cross-checking them the way `check-subjects.sh` cross-checks the permission
 lists (nothing in CI can reach a running broker to inspect a live stream's config).
+
+## 11. The `PAIGASUS_GATEWAY` account and the decision-log identities (SMA-755)
+
+The gateway tool decision log has its own account, `PAIGASUS_GATEWAY`. A full `GATEWAY_DECISIONS`
+stream can then not use the disk of `IAM_EVENTS` (anti-goal A6). The account has its own
+JetStream limits: no memory storage, a disk limit, 2 streams and 16 consumers. The lists of the
+three identities are in `subjects.env` (`GW_DEC_*`). This table renders that file; if they differ,
+`subjects.env` is correct.
+
+| identity | deployed as | publish (allow) | subscribe (allow) |
+|---|---|---|---|
+| `gateway-decision-publisher` | the gateway decision relay | `gateway.decision.>`, `$JS.API.STREAM.INFO.GATEWAY_DECISIONS`, `$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` | `_INBOX_GW_DEC.>` |
+| `gateway-decision-reader` | the export CLI of an operator; never the gateway | `$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS`, `…CREATE.GATEWAY_DECISIONS.>`, `$JS.API.CONSUMER.DELETE.GATEWAY_DECISIONS.*`, `$JS.API.CONSUMER.MSG.NEXT.GATEWAY_DECISIONS.*` | `_INBOX_GW_RD.>` |
+| `gateway-decision-provisioner` | nobody; operator tooling only | `$JS.API.INFO`, `$JS.API.STREAM.>` | `_INBOX_GW_PROV.>` |
+
+- The publisher subscribes only to its inbox, for the PubAck. It cannot read, delete or purge the
+  stream. A relay that reads its own stream would give a leak of the decisions a second path.
+- The reader uses an ordered consumer (P-13). The first create has no name. A recreate after a gap
+  has a name and a filter suffix, and it deletes the old consumer first. So the grants have both
+  `CREATE` forms and `DELETE`. There is no `$JS.ACK` grant: an ordered consumer has no acks. The
+  reader cannot publish to `gateway.decision.>` and cannot purge.
+- The provisioner makes the stream (P-15). The `nats` CLI calls `$JS.API.INFO` at start, which the
+  publisher does not have. It is an operator artifact, as `iam-provisioner` is (§9).
+- A user in this account cannot see `IAM_EVENTS`: it is in another account. `tests/nats_permissions.rs`
+  proves it. It also proves that an ordered consumer works under `max_mem: 0`.
