@@ -1066,17 +1066,27 @@ mod tests {
         let h = with_recompile_action(harness());
         stale_tenant(&h);
         let gate = h.compiler.gate();
-        let timed_out = tokio::time::timeout(Duration::from_millis(50), h.svc.run_recompile(&h.actor)).await;
-        assert!(timed_out.is_err(), "the RPC must still wait for the gated compile");
+        // The request lives until the job reaches the compiler gate, and then it is dropped. The
+        // timeout is only a watchdog.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                run = h.svc.run_recompile(&h.actor) => panic!("the RPC must still wait for the gated compile, got {run:?}"),
+                () = h.compiler.reached_gate() => {}
+            }
+        })
+        .await
+        .expect("the job reaches the compiler gate");
         assert!(h.lock.held());
         assert_eq!(h.compiler.calls(), 1);
         gate.add_permits(1);
-        for _ in 0..1000 {
-            if !h.lock.held() {
-                break;
+        // Nobody waits for the job now. The watchdog bounds the wait for the lock release.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while h.lock.held() {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
+        })
+        .await
+        .expect("the dropped job goes on and releases the lock");
         assert!(!h.lock.held());
         assert_eq!(h.lock.releases(), 1);
         let v = live(&h, &tenant(&h)).await;
