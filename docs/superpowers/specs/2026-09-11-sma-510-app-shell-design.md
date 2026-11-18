@@ -417,6 +417,10 @@ candidate.
 
 ### 8.1 `AppShell` — the authenticated shell
 
+> **Superseded in part by SMA-783** (`2026-11-18-sma-783-console-shell-design-pass-design.md`): the
+> Primary nav is now a collapsible sidebar beside `main`, not part of the header, and the brand can
+> be a console switcher (`consoles`).
+
 ```ts
 function AppShell(props: {
   brand: { label: string; href: string };  // href is a full path
