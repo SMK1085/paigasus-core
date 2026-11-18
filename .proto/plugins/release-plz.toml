@@ -28,6 +28,6 @@ download-url = "https://github.com/release-plz/release-plz/releases/download/rel
 
 [resolve]
 git-url = "https://github.com/release-plz/release-plz"
-# Tags are prefixed "release-plz-v" (e.g. release-plz-v0.3.158); the default
+# Tags are prefixed "release-plz-v" (e.g. release-plz-v0.4.3); the default
 # v? pattern matches nothing. This captures the semver portion directly.
 git-tag-pattern = "^release-plz-v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)$"

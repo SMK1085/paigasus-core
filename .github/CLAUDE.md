@@ -6,6 +6,17 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 
 ## release-plz
 
+- **The pin is 0.4.3 (SMA-814). Most `0.3.158` figures below are older measurements.** What was
+  re-checked on 0.4.3: `release-plz update` on this repo proposes the same versions and writes the
+  same files as 0.3.158 (`paigasus-kernel` 0.2.1 -> 0.3.0, `paigasus-proto` and
+  `paigasus-proto-derive` 0.7.0 -> 0.8.0); the config schema only gained keys; the default tag
+  name stays `<package>-v<version>`; `dependencies_update = false` is still honoured; the
+  `release` and `release-pr` JSON shapes read the same in the 0.4.3 source. Two things changed.
+  First, `release-plz release --forge` no longer defaults to `github`; it infers the forge from
+  the remote URL. Second, since 0.3.162 a version group moves together even without
+  `changelog_include`, so NC2 in `repo:release-parity` now reds on `G2-changelog`, not
+  `G2-version`. NOT re-measured on 0.4.3: the `release --dry-run` empty-array result (M6) and a
+  live `release-pr` or `release` run. Both need a forge. Re-take them on the first real release.
 - `rs/release-plz.toml` declares releasability **per package**, never workspace-wide. A
   `[workspace] release = false` makes release-plz hard-error (`no public packages found`). The
   "dependencies changed" cascade is unconditional (read from the 0.3.158 source, not measured):
