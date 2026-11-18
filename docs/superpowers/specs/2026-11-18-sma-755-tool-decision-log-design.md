@@ -774,7 +774,7 @@ digest_key_id = "2026-11"
 
 [decision_log.nats]
 url = "nats://…"                  # SecretString
-credentials_file = "/etc/paigasus/nats/gateway-decision-publisher.creds"
+creds_file = "/etc/paigasus/nats/gateway-decision-publisher.creds"   # the `[tool_policy.nats]` key name
 ca_file = "/etc/paigasus/nats/ca.pem"   # optional
 ```
 
