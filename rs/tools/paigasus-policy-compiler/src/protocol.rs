@@ -101,7 +101,7 @@ pub fn parse_request(text: &str) -> Result<CompileRequest, ProtocolError> {
 }
 
 /// Convert a Cedar JSON schema to the cedarschema text that Dogwood's `PolicySchema` reads
-/// (plan decision D6), with the cedar 4.11 API.
+/// (plan decision D6), with the cedar 4.14 API.
 pub fn cedarschema_from_json(schema_json: &Value) -> Result<String, String> {
     let fragment = SchemaFragment::from_json_value(schema_json.clone()).map_err(|error| error.to_string())?;
     fragment.to_cedarschema().map_err(|error| error.to_string())
