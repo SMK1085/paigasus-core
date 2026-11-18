@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SMA-755: the policy that the decision-trace fixture replays. It permits `search` while at most
+// two searches fall in the last hour. The Authorizer records an event before it decides it, so the
+// counts at the five `search` events are 1, 2, 3, 4 and 1. `read_file` has no permit.
+@id("search-rate")
+permit (principal, action == Pgs::Gateway::Action::"search", resource)
+when temporal { count_within(1h, Pgs::Gateway::Action::"search"::request{}) <= 2 };
