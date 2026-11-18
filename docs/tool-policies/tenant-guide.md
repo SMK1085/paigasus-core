@@ -228,7 +228,9 @@ accept it. Change the source and save the set instead.
 While a held version waits for your decision, your live set stays at the old compiler. After a
 discard, IAM does not propose the same result again for the same live version and the same
 compiler. In both cases, a write of your tool catalog is refused with
-`tool-policy-recompile-pending` until you accept the held version or save the set again.
+`tool-policy-recompile-pending`. In the first case, you accept the held version to clear this.
+In the second case, there is no held version, so you save the set again. In the first case, you
+can also save the set again.
 
 An accept of a held version that is no longer current returns `tool-policy-version-conflict`. This
 occurs when the live version, the compiler, the schema or the catalog changed after IAM made the
