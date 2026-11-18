@@ -468,16 +468,27 @@ async fn discard_held(s: &AppState, ctx: &AuthContext, target: HeldTarget, segme
     Ok(Json(json!({"discarded": held_json(&held_to_pb(&held)?)?})))
 }
 
+/// The HTTP name of a run status. Each status has its own arm. `run_to_pb` never sets
+/// `UNSPECIFIED` or a number outside the enum, so either one is a defect of this release: it is a
+/// 500, not a guess such as `older_replica`.
+fn run_status_name(status: i32) -> Result<&'static str, ApiError> {
+    match pb::RecompileRunStatus::try_from(status) {
+        Ok(pb::RecompileRunStatus::Ran) => Ok("ran"),
+        Ok(pb::RecompileRunStatus::AlreadyRunning) => Ok("already_running"),
+        Ok(pb::RecompileRunStatus::OlderReplica) => Ok("older_replica"),
+        Ok(pb::RecompileRunStatus::Unspecified) | Err(_) => {
+            tracing::error!(status, "a re-compile run has no known status");
+            Err(ApiError(TenancyError::Internal))
+        }
+    }
+}
+
 /// Runs the re-compile job once and waits for it. A run with many stale sets can last longer than
 /// the request timeout of the server.
 async fn run_recompile(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>) -> Result<Json<Value>, ApiError> {
     let svc = svc(&s)?;
     let run = run_to_pb(&svc.run_recompile(&actor_prn(&ctx)).await?);
-    let status = match pb::RecompileRunStatus::try_from(run.status) {
-        Ok(pb::RecompileRunStatus::Ran) => "ran",
-        Ok(pb::RecompileRunStatus::AlreadyRunning) => "already_running",
-        _ => "older_replica",
-    };
+    let status = run_status_name(run.status)?;
     let results: Vec<Value> = run
         .results
         .iter()
@@ -500,6 +511,18 @@ mod tests {
     use crate::application::tool_policies::sets::{CompiledMeta, encode_compiled};
     use paigasus_iam_core::tool_policy::CompiledOutput;
     use prost::Message;
+
+    /// Each run status has its own HTTP name. `UNSPECIFIED` and an unknown number are a 500.
+    #[test]
+    fn each_run_status_has_its_own_name_and_an_unknown_one_is_internal() {
+        assert_eq!(run_status_name(pb::RecompileRunStatus::Ran as i32).ok(), Some("ran"));
+        assert_eq!(run_status_name(pb::RecompileRunStatus::AlreadyRunning as i32).ok(), Some("already_running"));
+        assert_eq!(run_status_name(pb::RecompileRunStatus::OlderReplica as i32).ok(), Some("older_replica"));
+        for unknown in [pb::RecompileRunStatus::Unspecified as i32, 99] {
+            let code = run_status_name(unknown).err().map(|e| e.0.code());
+            assert_eq!(code, Some(TenancyError::Internal.code()), "status {unknown}");
+        }
+    }
 
     /// The compile result fixture that holds two history conditions.
     const TENANT_ACCEPTED: &str = include_str!("../../../../../../tools/paigasus-policy-compiler/protocol/fixtures/result_tenant_accepted.json");
