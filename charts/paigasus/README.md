@@ -393,8 +393,9 @@ merge, because the release runs only after the merge. So split it into two pull 
 `helm template` for the two valid zone subsets, and `tests/golden/iam-and-gateway-httproute.yaml`
 pins the HTTPRoute mode (SMA-694), rendered with a fixed `--kube-version` and a
 fixed set of required values (`tests/render.sh`'s `FIXED` array) so the files do not move with
-the local Helm binary's default Kubernetes version. They are pinned to **Helm v3.22.0+g144ca65**
-(`docs/superpowers/specs/2026-09-19-sma-513-measurements.md`, M2) — a Helm upgrade may change
+the local Helm binary's default Kubernetes version. They are pinned to **Helm v4.3.2+g8346aaa**
+(M2 of `docs/superpowers/specs/2026-09-19-sma-513-measurements.md` recorded v3.22.0; SMA-813
+re-baselined the files to Helm 4. Helm 4 writes one more blank line before each `---`) — a Helm upgrade may change
 unrelated rendering details (indentation, key order) and would need a deliberate re-baseline, not
 a silent regeneration.
 `tests/golden/iam-dpop.yaml` pins the DPoP projection of SMA-700 (DPoP on with two URLs).
