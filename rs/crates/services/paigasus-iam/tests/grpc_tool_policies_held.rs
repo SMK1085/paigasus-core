@@ -304,7 +304,7 @@ async fn an_identical_result_is_applied_and_the_fetch_sees_origin_recompile() {
         .into_inner()
         .set
         .expect("a set");
-    assert_eq!((got.version, got.origin, got.compiler_generation), (2, ToolPolicyVersionOrigin::Recompile as i32, 1));
+    assert_eq!((got.version, got.origin, got.compiler_generation), (2, ToolPolicyVersionOrigin::Recompile as i32, 2));
     assert_eq!(live_version(&env, &org).await, 2);
     assert!(list(&env, &env.admin, "").await.is_empty());
 }

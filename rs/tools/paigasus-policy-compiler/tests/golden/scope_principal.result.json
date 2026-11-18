@@ -1,7 +1,7 @@
 {
   "outcome": "accepted",
   "protocol_version": 1,
-  "compiler_generation": 1,
+  "compiler_generation": 2,
   "compiled": {
     "cedar_policies": "@id(\"principal-rate\")\n@scope(\"principal\")\npermit(principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource) when { context.p_principal_hrate_0__temporal_0 };",
     "cedar_schema_json": {

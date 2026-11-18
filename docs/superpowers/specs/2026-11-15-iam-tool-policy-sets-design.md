@@ -70,6 +70,10 @@ evaluates that format.
   `ff158506cfd9c7871385ed3a87d7435505fd24b1`, version 1.1.1) pins `cedar-policy` 4.11.0 exactly.
   It does not compile on 4.14. `rs/` resolves `cedar-policy` to 4.14.1. So Dogwood must live in a
   separate cargo workspace.
+  **Update (SMA-800, 2026-11-18):** the pin is now Dogwood 1.2.0, commit
+  `8ffd2106daf08cc3350a45b36866d75b41234ca3`, which pins `cedar-policy` 4.14.0 exactly. The
+  4.11.0 pin came from Dogwood 1.1.1's `cedar-policy-mcp-schema-generator` 0.6.x, not from Dogwood
+  itself. `rs/` still resolves a different `cedar-policy` patch, so the separate workspace stays.
 - Dogwood pulls about 135 crates, including `rhai` and `pest`. `cargo deny` rejects `tiny-keccak`
   (CC0-1.0), which `rhai` pulls in.
 - Dogwood's slot definitions exist only as an in-memory Rust syntax tree with no serde support.
@@ -547,7 +551,7 @@ The child process runs with these limits. Each one has a test.
    - `sum_within W` of one `Long` argument field, with a comparison to a constant.
    A block with any other shape, or with more than one shape, rejects the save. The rejection
    gives the policy id and the shape name.
-6. Validate the lowered Cedar again with `cedar-policy` 4.11 (Dogwood's own) against the lowered
+6. Validate the lowered Cedar again with `cedar-policy` 4.14.0 (Dogwood's own, SMA-800) against the lowered
    schema. This finds a lowering defect early.
 7. For the floor, check that every lowered policy has the `forbid` effect.
 8. Check the window: `W` must not be more than the window limit in the request. IAM's

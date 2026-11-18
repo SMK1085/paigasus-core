@@ -1,7 +1,7 @@
 {
   "outcome": "accepted",
   "protocol_version": 1,
-  "compiler_generation": 1,
+  "compiler_generation": 2,
   "compiled": {
     "cedar_policies": "@id(\"send-budget\")\npermit(principal, action == Pgs::Gateway::Action::\"send\", resource) when { context.p_send_hbudget_0__temporal_0 };",
     "cedar_schema_json": {
