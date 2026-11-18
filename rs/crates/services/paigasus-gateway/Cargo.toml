@@ -98,6 +98,10 @@ redis = { workspace = true }
 # SMA-677 D16: `TaskTracker` for the spawned charges and the 5 s shutdown drain. `rt` adds only
 # tokio/rt, tokio/sync and futures-util, all already in Cargo.lock.
 tokio-util = { version = "0.7", features = ["rt"] }
+# SMA-755: `adapters::decision_log::proto` maps a decision record to the generated `ToolDecisionEvent`
+# and encodes it (`prost::Message`); `prost-types` names its `Timestamp` and `Duration`.
+prost = { workspace = true }
+prost-types = { workspace = true }
 # SMA-752: the file policy source hashes file contents into the policy version.
 sha2 = "0.11"
 # SMA-755: the keyed (HMAC-SHA256) digest of the tool-call arguments in a decision record, and the

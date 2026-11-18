@@ -230,9 +230,11 @@ sea-orm-migration = { version = "2", default-features = false, features = [
 # the JWKS cache; rustls + bundled webpki roots match the reqwest posture above — no
 # second crypto provider). Default features (acl/streams/geospatial/script/num-bigint)
 # are all unneeded for a plain SET/GET cache, so trimmed — same "minimal baseline, add
-# per-crate" posture as reqwest/sea-orm above.
+# per-crate" posture as reqwest/sea-orm above. `streams` (SMA-755) is the one exception: the
+# gateway decision log writes a Redis Stream (`XADD`, and `XREADGROUP`/`XAUTOCLAIM` in the relay).
+# It adds the `redis::streams` types only and no crate (measured with `cargo tree -e features`).
 redis = { version = "1", default-features = false, features = [
-  "tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots",
+  "tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots", "streams",
 ] }
 # cedar-policy — embedded Cedar authorization engine (ADR-0013). Pure evaluation; consumed by
 # paigasus-iam-core + paigasus-iam, and by paigasus-kernel under its off-by-default feature

@@ -299,6 +299,16 @@ fn describe_gateway_metrics() {
         "Tool-policy cache invalidations from NATS, labeled by cause (message, connect, resubscribe, slow_consumer)."
     );
     describe_gauge!(names::GATEWAY_TOOL_POLICY_NATS_CONNECTED, "1 while the tool-policy NATS client is connected, else 0.");
+    describe_counter!(names::GATEWAY_DECISION_LOG_RECORDED_TOTAL, "Tool decision records that the decision log accepted.");
+    describe_counter!(names::GATEWAY_DECISION_LOG_WRITTEN_TOTAL, "Tool decision events that the writer put into the Redis stream.");
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_DROPPED_TOTAL,
+        "Tool decision events that the gateway dropped, labeled by reason (queue_full, closed, redis_unavailable, write_error, breaker_open, backlog_full, publish_rejected, redis_deleted, shutdown)."
+    );
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
+        "Panics that a decision-log task caught and survived, labeled by task (writer, relay)."
+    );
 }
 
 async fn shutdown_signal() {

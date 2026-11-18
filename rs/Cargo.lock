@@ -3204,6 +3204,8 @@ dependencies = [
  "paigasus-redis",
  "paigasus-service-info",
  "paigasus-test-docker",
+ "prost",
+ "prost-types",
  "rand 0.10.3",
  "rcgen",
  "redis",
