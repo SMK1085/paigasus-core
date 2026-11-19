@@ -954,6 +954,10 @@ async fn the_decision_reader_reads_with_an_ordered_consumer() {
         .expect("stream yields a message")
         .expect("message is Ok");
     assert_eq!(msg.subject.as_str(), subject);
+    // All three events share one subject and one payload. Only the stream sequence shows that the
+    // recreated consumer did not replay the first or the second event.
+    let info = msg.info().expect("a stream message carries its info");
+    assert_eq!(info.stream_sequence, 3, "the recreated consumer must read on from the third event");
 }
 
 #[tokio::test]

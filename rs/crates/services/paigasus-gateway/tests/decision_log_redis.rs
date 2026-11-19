@@ -201,7 +201,8 @@ async fn n_records_give_n_stream_entries_with_the_original_bytes() {
     for seq in 1..=5 {
         log.record(record(seq));
     }
-    wait_for("five stream entries", || async { xlen(&node).await == 5 }).await;
+    // `XLEN` can read 5 before the writer has counted the pipeline reply, so wait for both.
+    wait_for("five stream entries and five writes", || async { xlen(&node).await == 5 && snap.written() == 5 }).await;
     // Redis prints each entry as `e:<hex of the bytes>`, so that the comparison is byte exact.
     let lua = "local out = {} for i, e in ipairs(redis.call('XRANGE', KEYS[1], '-', '+')) do \
                out[i] = e[2][1] .. ':' .. (e[2][2]:gsub('.', function(c) return string.format('%02x', string.byte(c)) end)) end \
@@ -734,6 +735,14 @@ async fn flushall_with_two_relays_counts_one_reset() {
         relays.push(Relay::start(connected_slot(&redis_url).await, relay_js(&dead, Arc::clone(&v)).await, s, v));
     }
     wait_for("the backlog gauge reads 3", || async { snap.gauge("gateway_decision_log_backlog") == Some(3.0) }).await;
+    // Both relays must be in the group before the flush. A relay registers its consumer with its first
+    // `XREADGROUP`, after its group setup. Without this, a late relay could treat the group made after the
+    // flush as its own startup, and the test would pass without the dedup it claims to prove.
+    wait_for("both relays are consumers", || async {
+        let consumers = redis_cli(&node, &["XINFO", "CONSUMERS", KEY, "relay"]).await;
+        consumers.contains("i1") && consumers.contains("i2")
+    })
+    .await;
     redis_cli(&node, &["FLUSHALL"]).await;
     wait_for("one reset", || async { snap.get("gateway_decision_log_redis_resets_total", &[]) >= 1 }).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
