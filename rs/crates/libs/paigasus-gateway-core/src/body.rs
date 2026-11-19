@@ -137,8 +137,12 @@ impl BodyCalls {
             .map(|(i, c)| {
                 let code = self.code(&decisions, i);
                 let decision = if code.is_some() { ReportDecision::Block } else { ReportDecision::Allow };
+                // A forced `Truncated` is a hold-limit style block: `on_failure`, no Cedar detail
+                // (spec 5.4), as the stream path records it.
+                let forced = self.forced.get(i).copied().flatten().is_some();
+                let basis = if forced { Basis::OnFailure } else { basis };
                 let entry = report_entry(c, decision, basis, code.or_else(|| self.observed(&decisions, i)));
-                let detail = if aligned { decided[i].detail.clone() } else { None };
+                let detail = if aligned && !forced { decided[i].detail.clone() } else { None };
                 ReportedCall::new(entry, Some(CallFacts::of(c)), detail)
             })
             .collect();
@@ -544,6 +548,7 @@ mod tests {
         let b = parse_body(Format::OpenAiResponses, &cut, MAX).unwrap();
         let report = b.report(&plain(vec![Decision::Allow]), Basis::Decider, &[]);
         assert!(report.contains(r#""decision":"block""#) && report.contains(r#""code":"truncated""#), "{report}");
+        assert!(report.contains(r#""basis":"on_failure""#), "{report}");
         let v: Value = serde_json::from_slice(&b.apply(&[Decision::Allow]).unwrap()).unwrap();
         assert_eq!(v["output"][0]["content"][0]["text"], "[paigasus] tool call \"rm\" was blocked (truncated).");
         // The Responses profile, not the chat one: a `choices` body is malformed here.
@@ -567,8 +572,10 @@ mod tests {
         assert_eq!(reported[0].entry.code, Some(BlockCode::Truncated));
         assert_eq!(reported[0].entry.decision, ReportDecision::Block);
         assert_eq!(reported[0].call.as_ref().map(|c| (c.name.as_str(), c.id.as_deref())), Some(("rm", Some("c1"))));
-        assert!(reported[0].detail.as_ref().is_some_and(|d| Arc::ptr_eq(d, &detail)), "the detail travels to the entry");
+        assert_eq!(reported[0].entry.basis, Some(Basis::OnFailure), "a forced Truncated is on_failure");
+        assert!(reported[0].detail.is_none(), "a forced Truncated has no Cedar detail");
         assert_eq!(reported[1].entry.decision, ReportDecision::Allow);
+        assert_eq!(reported[1].entry.basis, Some(Basis::Decider), "an unforced call keeps the given basis");
         assert!(reported[1].call.is_some() && reported[1].detail.is_none());
         assert!(reported[2].call.is_none() && reported[2].detail.is_none(), "an unenforceable entry has no call facts");
         assert_eq!(reported[2].entry, b.unenforceable[0]);
