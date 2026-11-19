@@ -49,7 +49,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
       && cp tools/paigasus-policy-compiler/target/release/paigasus-policy-compiler /out/extra/; \
     fi
 
-FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS rootfs
+FROM ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 AS rootfs
 ARG CHISEL_VERSION=v1.4.2
 # One pinned checksum PER ARCHITECTURE: the release publishes a distinct tarball and a distinct
 # sha384 per arch, so a single checksum would either break arm64 or silently drop the check.
