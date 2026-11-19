@@ -345,7 +345,7 @@ fn describe_gateway_metrics() {
     );
     describe_counter!(
         names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
-        "An upper-bound estimate of the decision events in the Redis losses: the last 15 s XLEN sample of the relay."
+        "An estimate of the decision events in the Redis losses: the last 15 s XLEN sample of the relay. It can undercount or overcount."
     );
     describe_histogram!(names::GATEWAY_DECISION_LOG_PUBLISH_SECONDS, "Seconds from the publish of a decision event to its JetStream PubAck.");
     describe_gauge!(names::GATEWAY_DECISION_LOG_BACKLOG, "Entries in the decision stream in Redis (XLEN), sampled every 15 s by the relay.");

@@ -766,6 +766,8 @@ pub struct DecisionLogNatsConfig {
     #[serde(skip_serializing)]
     pub url: SecretString,
     pub creds_file: Option<String>,
+    /// A PEM bundle that REPLACES the system trust store: async-nats loads the native system roots only when no CA
+    /// file is set. Absent: the native system roots. The export CLI flag `--ca` behaves the same way.
     pub ca_file: Option<String>,
 }
 

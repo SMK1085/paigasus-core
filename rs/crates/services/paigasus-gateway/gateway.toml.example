@@ -239,4 +239,4 @@
 # [decision_log.nats]                            # required when enabled
 # url        = "nats://nats:4222"                # never written to logs or dumps
 # creds_file = "/etc/paigasus/nats/gateway-decision-publisher.creds"
-# ca_file    = "/etc/paigasus/nats/ca.pem"       # optional
+# ca_file    = "/etc/paigasus/nats/ca.pem"       # optional; REPLACES the system trust store (absent: system roots)

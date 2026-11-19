@@ -210,13 +210,14 @@ impl State {
         }
     }
 
-    /// Count one Redis reset and add the lost estimate (the last `XLEN` sample, an upper bound).
+    /// Count one Redis reset and add the lost estimate (the last `XLEN` sample). The sample is not a bound: writes
+    /// after it make it undercount, and publishes after it make it overcount.
     fn count_reset(&self, sample: Option<u64>) {
         counter!(names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL).increment(1);
         match sample {
             Some(n) => {
                 counter!(names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL).increment(n);
-                tracing::error!(lost_estimate_upper_bound = n, "Redis lost the decision stream; the lost events are an estimate (an upper bound)");
+                tracing::error!(lost_estimate = n, "Redis lost the decision stream; the lost events are an estimate (it can undercount or overcount)");
             }
             None => tracing::error!("Redis lost the decision stream; the number of lost events is unknown (no XLEN sample)"),
         }
@@ -442,6 +443,9 @@ impl State {
                 }
             }
         }
+        // While a carried batch waits for NATS, this block does not run: no `XAUTOCLAIM`, no `XREADGROUP`. So the
+        // loss of the Redis stream (`NOGROUP`) is found only when the carry is empty. During a NATS outage the
+        // carry stays full, so a `FLUSHALL` is counted (reset, lost estimate, alert) when the relay can publish again.
         if inner.carry.is_empty() {
             let now = Instant::now();
             if now >= inner.next_prune {

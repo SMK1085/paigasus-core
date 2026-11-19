@@ -91,7 +91,8 @@ pub const GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL: &str = "gateway_decision_log
 pub const GATEWAY_DECISION_LOG_PUBLISHED_TOTAL: &str = "gateway_decision_log_published_total";
 /// Redis losses that the relay detected (`NOGROUP`, then the group was made again). One per incident.
 pub const GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL: &str = "gateway_decision_log_redis_resets_total";
-/// An upper-bound estimate of the events in the Redis losses (the last `XLEN` sample of the relay).
+/// An estimate of the events in the Redis losses (the last `XLEN` sample of the relay). It can undercount (writes
+/// after the sample) or overcount (publishes after the sample).
 pub const GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL: &str = "gateway_decision_log_lost_estimate_total";
 /// Seconds from the publish of an event to its PubAck.
 pub const GATEWAY_DECISION_LOG_PUBLISH_SECONDS: &str = "gateway_decision_log_publish_seconds";

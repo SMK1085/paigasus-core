@@ -35,7 +35,8 @@ const MAX_LISTED_GAPS: usize = 20;
 pub const USAGE: &str = "usage: paigasus-gateway decisions export --org <uuid> --since <rfc3339> --until <rfc3339>\n    \
 [--principal <prn>] [--api-key <id>] [--max-lag <n>s|m|h] [--max-events <n>]\n    \
 [--out <file>] [--report <file>] [--nats-url-file <file>] [--creds <file>] [--ca <file>]\n\
-The NATS URL comes from --nats-url-file or from PAIGASUS_NATS_URL. It is never an argument.";
+The NATS URL comes from --nats-url-file or from PAIGASUS_NATS_URL. It is never an argument.\n\
+--ca is a PEM bundle that REPLACES the system trust store. Without it the system roots are used.";
 
 /// The exit codes of the command (§ 5.11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
