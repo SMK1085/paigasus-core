@@ -148,7 +148,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `gateway_tool_interception_on_failure_total` | counter | `code` | Failures that took the `on_failure` path; `code` ∈ `hold_limit` / `truncated` / `decider_error` / `malformed`. |
 | `gateway_tool_interception_hold_seconds` | histogram | — | Seconds from a hold's first tool-call frame to its completion. |
 | `gateway_tool_policy_findings_total` | counter | `side`, `kind` | SMA-755. Findings that the tool policy saw, per kind. `side` ∈ `request` (one per colliding tool name in the request) / `response` (one per finding of a decided call); `kind` ∈ `name_collision` / `unparsed_arguments` / `other` (a kind this service does not know). Primed at 0 for all six pairs with `[tool_policy] enabled = true`. |
-| `gateway_decision_log_recorded_total` | counter | — | SMA-755. Decision records that the decision log accepted from the recorder. It counts before the queue. Events that the writer dropped do not reach Redis, so `recorded` minus `written` minus `dropped{reason=~"queue_full|closed|redis_unavailable|write_error|breaker_open|backlog_full|shutdown"}` is the events that are still in the writer queue. Do not subtract `publish_rejected` or `redis_deleted`: the relay counts those after the write, and they are already in `written`. Primed at 0 with `[decision_log] enabled = true`. |
+| `gateway_decision_log_recorded_total` | counter | — | SMA-755. Decision records that the decision log accepted from the recorder. It counts before the queue. Events that the writer dropped do not reach Redis, so `recorded` minus `written` minus `dropped{reason=~"queue_full\|closed\|redis_unavailable\|write_error\|breaker_open\|backlog_full\|shutdown"}` is the events that are still in the writer queue. Do not subtract `publish_rejected` or `redis_deleted`: the relay counts those after the write, and they are already in `written`. Primed at 0 with `[decision_log] enabled = true`. |
 | `gateway_decision_log_written_total` | counter | — | SMA-755. Events that the writer put into the Redis stream (`<key_prefix>:decisions`). |
 | `gateway_decision_log_dropped_total` | counter | `reason` | SMA-755. Events that the gateway dropped. `reason` ∈ `queue_full` (the writer queue was full) / `closed` (the queue was closed after shutdown) / `redis_unavailable` (no Redis connection yet) / `write_error` (the write failed) / `breaker_open` (the decision-log Redis breaker was open) / `backlog_full` (the stream held `stream_max_len` entries) / `publish_rejected` / `redis_deleted` (relay reasons) / `shutdown` (still queued when the shutdown budget ended). Primed at 0 for all nine values. |
 | `gateway_decision_log_task_restarts_total` | counter | `task` | SMA-755. Panics that a decision-log task caught before it went on. `task` ∈ `writer` / `relay`. A value above 0 is a defect. Primed at 0 for both values. |
@@ -269,7 +269,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `GatewayLimitStoreUnavailable` | `sum by (job, op, kind) (increase(gateway_limit_store_unavailable_total[10m])) > 0` | warning |
 | `GatewayDecisionLogDrops` | `sum(increase(gateway_decision_log_dropped_total{reason!="shutdown"}[15m])) > 0` | warning |
 | `GatewayDecisionLogRedisReset` | `sum(increase(gateway_decision_log_redis_resets_total[15m])) > 0` | warning |
-| `GatewayDecisionLogRelayStalled` | `(max(gateway_decision_log_backlog) > 0 and sum(increase(gateway_decision_log_published_total[10m])) == 0) or max(gateway_decision_log_backlog) > 50000` for 10m | warning |
+| `GatewayDecisionLogRelayStalled` | `(max(gateway_decision_log_backlog) > 0 and sum(increase(gateway_decision_log_published_total[5m])) == 0) or max(gateway_decision_log_backlog) > 50000` for 5m | warning |
 | `GatewayDecisionLogRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state{role="decision_log"}) != 0` for 2m | warning |
 | `GatewayDecisionLogTaskRestarts` | `sum(increase(gateway_decision_log_task_restarts_total[15m])) > 0` | warning |
 | `TargetDown` | `up == 0` for 2m | critical |
@@ -1864,8 +1864,9 @@ alert does not detect it. The export of the decisions shows the gaps.
 
 #### `GatewayDecisionLogRelayStalled` (warning)
 
-**Meaning.** For 10m, the Redis stream held a backlog (`gateway_decision_log_backlog` above 0) and the relay
-published none, or the backlog is above 50000. A burst of events and then no traffic still fires it, because the
+**Meaning.** The Redis stream holds a backlog (`gateway_decision_log_backlog` above 0) and the relay
+published none in a 5m window, and this lasts 5m. The alert fires about 10m after the last publish. The second
+branch (the backlog is above 50000) also waits 5m, because both branches share one `for`. A burst of events and then no traffic still fires it, because the
 backlog stays while the relay is stalled. Every replica samples the same shared stream, so the
 alert uses `max` over the replicas, not `sum`. The value 50000 is 50 percent of the
 default `stream_max_len`. If you change `stream_max_len`, change the threshold in

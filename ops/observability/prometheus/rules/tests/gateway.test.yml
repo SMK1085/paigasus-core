@@ -211,7 +211,8 @@ tests:
         alertname: GatewayDecisionLogRedisReset
         exp_alerts: []
 
-  # GatewayDecisionLogRelayStalled: a backlog is held and published stays at 0, for 10m.
+  # GatewayDecisionLogRelayStalled: a backlog is held and published stays at 0. The backlog is above 0 from 2m,
+  # the 5m window reads 0, and `for` is 5m, so the alert is pending at 2m and fires at 7m.
   - interval: 1m
     input_series:
       - series: 'gateway_decision_log_written_total'
@@ -221,18 +222,44 @@ tests:
       - series: 'gateway_decision_log_backlog'
         values: '0 0 100x18'
     alert_rule_test:
-      - eval_time: 9m
+      - eval_time: 6m
         alertname: GatewayDecisionLogRelayStalled
         exp_alerts: []
-      - eval_time: 20m
+      - eval_time: 8m
         alertname: GatewayDecisionLogRelayStalled
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "Gateway decision-log relay is not publishing to NATS"
-              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream in 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
 
-  # GatewayDecisionLogRelayStalled backlog: the backlog rises above 50000, for 10m, while publishing continues.
+  # GatewayDecisionLogRelayStalled timing: the relay publishes until 5m and stops. The 5m window (left-open) reads 0
+  # from 9m, `for` is 5m, so the alert fires at 14m, about 9m to 10m after the last publish. It is quiet at 13m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0+10x5 50x20'
+      - series: 'gateway_decision_log_published_total'
+        values: '0+10x5 50x20'
+      - series: 'gateway_decision_log_backlog'
+        values: '100x25'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log relay is not publishing to NATS"
+              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRelayStalled backlog: the backlog rises above 50000 at 2m, while publishing continues.
+  # The branch shares the `for: 5m`, so it fires at 7m.
   - interval: 1m
     input_series:
       - series: 'gateway_decision_log_written_total'
@@ -242,16 +269,16 @@ tests:
       - series: 'gateway_decision_log_backlog'
         values: '0 0 60000x28'
     alert_rule_test:
-      - eval_time: 9m
+      - eval_time: 6m
         alertname: GatewayDecisionLogRelayStalled
         exp_alerts: []
-      - eval_time: 20m
+      - eval_time: 8m
         alertname: GatewayDecisionLogRelayStalled
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "Gateway decision-log relay is not publishing to NATS"
-              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream in 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
 
   # GatewayDecisionLogRelayStalled quiet: written and published rise together, the backlog is small.
   - interval: 1m
@@ -305,7 +332,7 @@ tests:
   # GatewayDecisionLogRelayStalled burst then idle (review round 1): 100 events are written once, the relay
   # published a few early and then stopped, and no more traffic comes. The written counter is flat again after
   # 10m, but the backlog of 100 stays. The alert must fire (the old `increase(written[10m]) > 0` branch was true
-  # for about one minute only).
+  # for about one minute only). The last publish is at 1m, so the 5m window reads 0 from 5m and it fires at 10m.
   - interval: 1m
     input_series:
       - series: 'gateway_decision_log_written_total'
@@ -315,16 +342,16 @@ tests:
       - series: 'gateway_decision_log_backlog'
         values: '0 0 100x28'
     alert_rule_test:
-      - eval_time: 15m
+      - eval_time: 9m
         alertname: GatewayDecisionLogRelayStalled
         exp_alerts: []
-      - eval_time: 25m
+      - eval_time: 11m
         alertname: GatewayDecisionLogRelayStalled
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "Gateway decision-log relay is not publishing to NATS"
-              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream in 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
 
   # GatewayDecisionLogRelayStalled recovery: the same burst, then the relay publishes and the backlog drains to 0.
   - interval: 1m
@@ -332,10 +359,13 @@ tests:
       - series: 'gateway_decision_log_written_total'
         values: '0 0 100x28'
       - series: 'gateway_decision_log_published_total'
-        values: '0 5 5x12 105x16'
+        values: '0 5 5x4 105x20'
       - series: 'gateway_decision_log_backlog'
-        values: '0 0 100x12 0x16'
+        values: '0 0 100x4 0x20'
     alert_rule_test:
+      - eval_time: 12m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
       - eval_time: 25m
         alertname: GatewayDecisionLogRelayStalled
         exp_alerts: []
