@@ -127,7 +127,12 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<ExportArgs,
             "--nats-url-file" => nats_url_file = Some(PathBuf::from(value()?)),
             "--creds" => creds = Some(PathBuf::from(value()?)),
             "--ca" => ca = Some(PathBuf::from(value()?)),
-            other => return Err(format!("unknown argument {other}")),
+            // Never print a value: argv can hold a URL with a secret (`--nats-url=nats://u:pw@h`).
+            other if other.starts_with("--") => {
+                let name = other.split_once('=').map_or(other, |(name, _)| name);
+                return Err(format!("unknown argument {name}"));
+            }
+            _ => return Err("unexpected positional argument (the value is not shown)".to_owned()),
         }
     }
     let org = org.ok_or("--org is required")?;
@@ -135,6 +140,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<ExportArgs,
     let until = until.ok_or("--until is required")?;
     if since >= until {
         return Err("--since must be before --until".to_owned());
+    }
+    // The summary write would replace the trace, and the command would still exit 0.
+    if out.is_some() && out == report {
+        return Err("--out and --report must be different files".to_owned());
     }
     Ok(ExportArgs {
         org,
@@ -717,6 +726,29 @@ WARNING: the trace is one history for the org. A policy with @scope(\"session\")
         let err = parse_args(v).unwrap_err();
         assert!(err.contains("unknown argument"), "{err}");
         assert!(!err.contains("pw"), "the value must not be echoed: {err}");
+    }
+
+    #[test]
+    fn an_unknown_argument_never_echoes_a_value() {
+        let range = ["--since", "2026-01-01T00:00:00Z", "--until", "2026-01-02T00:00:00Z"];
+        // An `=value` flag: only the name shows.
+        let mut v: Vec<&str> = range.to_vec();
+        v.push("--nats-url=nats://user:pw@host:4222");
+        let err = parse_args(base(&v)).unwrap_err();
+        assert!(err.contains("--nats-url") && !err.contains("pw") && !err.contains("nats://"), "{err}");
+        // A stray positional value: no content at all.
+        let mut v: Vec<&str> = range.to_vec();
+        v.push("nats://user:pw@host:4222");
+        let err = parse_args(base(&v)).unwrap_err();
+        assert!(err.contains("positional") && !err.contains("pw") && !err.contains("nats://"), "{err}");
+    }
+
+    #[test]
+    fn out_and_report_must_be_different_files() {
+        let range = ["--since", "2026-01-01T00:00:00Z", "--until", "2026-01-02T00:00:00Z"];
+        let mut v: Vec<&str> = range.to_vec();
+        v.extend(["--out", "t.log", "--report", "t.log"]);
+        assert!(parse_args(base(&v)).unwrap_err().contains("different files"));
     }
 
     #[test]
