@@ -269,7 +269,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `GatewayLimitStoreUnavailable` | `sum by (job, op, kind) (increase(gateway_limit_store_unavailable_total[10m])) > 0` | warning |
 | `GatewayDecisionLogDrops` | `sum(increase(gateway_decision_log_dropped_total{reason!="shutdown"}[15m])) > 0` | warning |
 | `GatewayDecisionLogRedisReset` | `sum(increase(gateway_decision_log_redis_resets_total[15m])) > 0` | warning |
-| `GatewayDecisionLogRelayStalled` | `(sum(increase(gateway_decision_log_written_total[10m])) > 0 and sum(increase(gateway_decision_log_published_total[10m])) == 0) or max(gateway_decision_log_backlog) > 50000` for 10m | warning |
+| `GatewayDecisionLogRelayStalled` | `(max(gateway_decision_log_backlog) > 0 and sum(increase(gateway_decision_log_published_total[10m])) == 0) or max(gateway_decision_log_backlog) > 50000` for 10m | warning |
 | `GatewayDecisionLogRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state{role="decision_log"}) != 0` for 2m | warning |
 | `GatewayDecisionLogTaskRestarts` | `sum(increase(gateway_decision_log_task_restarts_total[15m])) > 0` | warning |
 | `TargetDown` | `up == 0` for 2m | critical |
@@ -1862,8 +1862,9 @@ alert does not detect it. The export of the decisions shows the gaps.
 
 #### `GatewayDecisionLogRelayStalled` (warning)
 
-**Meaning.** For 10m, the writer put events in the stream but the relay published none, or the
-backlog (`gateway_decision_log_backlog`) is above 50000. Every replica samples the same shared stream, so the
+**Meaning.** For 10m, the Redis stream held a backlog (`gateway_decision_log_backlog` above 0) and the relay
+published none, or the backlog is above 50000. A burst of events and then no traffic still fires it, because the
+backlog stays while the relay is stalled. Every replica samples the same shared stream, so the
 alert uses `max` over the replicas, not `sum`. The value 50000 is 50 percent of the
 default `stream_max_len`. If you change `stream_max_len`, change the threshold in
 `ops/observability/prometheus/rules/gateway.rules.yml` too.

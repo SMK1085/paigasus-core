@@ -46,11 +46,13 @@ groups:
         annotations: { summary: "Gateway decision log lost its Redis stream", description: "The relay found that the Redis decision stream was lost and made the consumer group again. Events in the stream were lost. See RUNBOOK-observability.md, section \"Gateway decision log\"." }
       - alert: GatewayDecisionLogRelayStalled
         # SMA-755 § 5.9. 50000 is 50 percent of the default `stream_max_len`. Change it with that setting.
-        # The backlog branch uses max, not sum: every replica samples the same shared Redis stream, so a sum counts it N times.
-        expr: (sum(increase(gateway_decision_log_written_total[10m])) > 0 and sum(increase(gateway_decision_log_published_total[10m])) == 0) or max(gateway_decision_log_backlog) > 50000
+        # The first branch reads the backlog, not the write counter: a burst and then no traffic still leaves a retained
+        # backlog while the relay is stalled, and `increase(written[10m])` is 0 again after 10m.
+        # Both branches use max, not sum: every replica samples the same shared Redis stream, so a sum counts it N times.
+        expr: (max(gateway_decision_log_backlog) > 0 and sum(increase(gateway_decision_log_published_total[10m])) == 0) or max(gateway_decision_log_backlog) > 50000
         for: 10m
         labels: { severity: warning }
-        annotations: { summary: "Gateway decision-log relay is not publishing to NATS", description: "The gateway writes decision events to Redis, but the relay does not publish them to JetStream, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"." }
+        annotations: { summary: "Gateway decision-log relay is not publishing to NATS", description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream in 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"." }
       - alert: GatewayDecisionLogRedisBreakerOpen
         expr: max by (job, role) (gateway_redis_breaker_state{role="decision_log"}) != 0
         for: 2m
