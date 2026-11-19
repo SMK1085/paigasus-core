@@ -15,7 +15,7 @@ maturin = "1.16.0"
 moon = "2.6.5"
 osv-scanner = "2.7.1"
 promtool = "3.16.0"
-release-plz = "0.3.158"
+release-plz = "0.4.3"
 syft = "1.57.2"
 wasm-pack = "0.15.1"
 
