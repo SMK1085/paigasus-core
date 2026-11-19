@@ -143,7 +143,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<ExportArgs,
         return Err("--since must be before --until".to_owned());
     }
     // The summary write would replace the trace, and the command would still exit 0.
-    if out.is_some() && out == report {
+    if let (Some(o), Some(r)) = (&out, &report)
+        && same_destination(o, r)?
+    {
         return Err("--out and --report must be different files".to_owned());
     }
     Ok(ExportArgs {
@@ -160,6 +162,27 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<ExportArgs,
         creds,
         ca,
     })
+}
+
+/// The real destination of an output path: the canonical parent directory plus the file name. An empty
+/// parent is the current directory. If the file exists, its own canonical path wins, so a symlink to
+/// the file resolves to the file. The error names the flag, never the path.
+fn resolve_destination(path: &std::path::Path, flag: &str) -> Result<PathBuf, String> {
+    if let Ok(real) = path.canonicalize() {
+        return Ok(real);
+    }
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    let name = path.file_name().ok_or_else(|| format!("{flag} must name a file"))?;
+    let dir = parent.canonicalize().map_err(|_| format!("{flag}: the directory of the file cannot be resolved"))?;
+    Ok(dir.join(name))
+}
+
+/// True when the two paths write to the same file.
+fn same_destination(out: &std::path::Path, report: &std::path::Path) -> Result<bool, String> {
+    Ok(resolve_destination(out, "--out")? == resolve_destination(report, "--report")?)
 }
 
 /// One message of the stream: its payload and the time that JetStream stored it.
@@ -770,6 +793,58 @@ WARNING: the trace is one history for the org. A policy with @scope(\"session\")
         let mut v: Vec<&str> = range.to_vec();
         v.extend(["--out", "t.log", "--report", "t.log"]);
         assert!(parse_args(base(&v)).unwrap_err().contains("different files"));
+    }
+
+    fn export_args_with(out: &std::path::Path, report: &std::path::Path) -> Result<ExportArgs, String> {
+        let range = ["--since", "2026-01-01T00:00:00Z", "--until", "2026-01-02T00:00:00Z"];
+        let (o, r) = (out.to_str().unwrap(), report.to_str().unwrap());
+        let mut v: Vec<&str> = range.to_vec();
+        v.extend(["--out", o, "--report", r]);
+        parse_args(base(&v))
+    }
+
+    #[test]
+    fn out_and_report_that_resolve_to_one_file_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        // The same file through a `..` segment.
+        std::fs::create_dir(real.join("sub")).unwrap();
+        let alias = real.join("sub").join("..").join("trace.dw");
+        let err = export_args_with(&real.join("trace.dw"), &alias).unwrap_err();
+        assert!(err.contains("different files"), "{err}");
+        // A relative path against an absolute path to the same file (the current directory is not changed).
+        let cwd = std::env::current_dir().unwrap();
+        let name = format!("sma755-resolve-{}.dw", std::process::id());
+        let err = export_args_with(std::path::Path::new(&name), &cwd.join(&name)).unwrap_err();
+        assert!(err.contains("different files"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn out_and_report_that_alias_by_symlink_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let file = real.join("trace.dw");
+        std::fs::write(&file, b"x").unwrap();
+        let link = real.join("alias.dw");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let err = export_args_with(&file, &link).unwrap_err();
+        assert!(err.contains("different files"), "{err}");
+    }
+
+    #[test]
+    fn out_and_report_in_one_directory_with_different_names_are_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        assert!(export_args_with(&real.join("trace.dw"), &real.join("report.txt")).is_ok());
+    }
+
+    #[test]
+    fn an_unresolvable_output_directory_is_a_usage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let err = export_args_with(&real.join("missing").join("trace.dw"), &real.join("report.txt")).unwrap_err();
+        assert!(err.contains("--out") && err.contains("cannot be resolved"), "{err}");
     }
 
     #[test]
