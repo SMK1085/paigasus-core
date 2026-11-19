@@ -463,8 +463,8 @@ settle_gateway_404() {
   echo "  settled: /gateway/overview answers Traefik's 404"
 }
 
-# SMA-701: the IAM settle. Helm 3.22.0's --wait counts a Deployment as ready when readyReplicas >=
-# replicas - maxUnavailable. The IAM backend has replicas 1 and maxUnavailable 1 on purpose, so
+# SMA-701: the IAM settle. Helm 3.22.0's --wait counted a Deployment as ready when readyReplicas >=
+# replicas - maxUnavailable. Helm 4 (SMA-813) uses kstatus for a bare --wait; nobody measured it here yet. The IAM backend has replicas 1 and maxUnavailable 1 on purpose, so
 # `helm install --wait` can return while IAM has no Ready pod and its Service has no endpoint.
 # `kubectl wait --for=condition=Available` has the same floor; `rollout status` does not
 # (ci/kind/README.md, "The IAM settle"). Part A waits for the rollout. Part B asks IAM /readyz
