@@ -3187,7 +3187,7 @@ dependencies = [
  "chrono",
  "figment",
  "futures",
- "hmac 0.13.0",
+ "hmac",
  "metrics",
  "metrics-util",
  "paigasus-gateway-core",
