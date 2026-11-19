@@ -290,8 +290,10 @@ build itself — they bite the first operator who deploys without reading this s
   follow-up.
 - **Neither service terminates TLS.** Both require a TLS-terminating ingress in front of them.
 - **A private-CA identity provider is supported (SMA-558), and the routes are not equivalent.**
-  Both services' `reqwest` clients now trust the compiled-in Mozilla roots, the image's own store,
-  **and** any bundle you name — unioned, so no route costs you the public roots. Prefer them in
+  Both services' `reqwest` clients now trust the operating-system store (reqwest 0.13, via
+  `rustls-platform-verifier`; there is no compiled-in Mozilla floor) **and** any bundle you name —
+  unioned, so no route costs you the system roots. On Linux, an empty system store with no bundle is a
+  client build error ("No CA certificates were loaded from the system"). Prefer them in
   this order:
 
   1. **`authn.extra_ca_bundle_path`** (`IAM_AUTHN__EXTRA_CA_BUNDLE_PATH`), and
@@ -339,7 +341,7 @@ build itself — they bite the first operator who deploys without reading this s
 image has the same shape as the Rust service images:
 
 - **The runtime stage uses a distroless base.** The base is
-  `gcr.io/distroless/nodejs24-debian12:nonroot`, pinned by digest on the runtime `FROM` line of
+  `gcr.io/distroless/nodejs26-debian13:nonroot`, pinned by digest on the runtime `FROM` line of
   `ts/Dockerfile`. That line is the only record of the digest; this runbook does not copy it. The
   base has **no shell**. `smoke_consoles` in `ci/images/run.sh` checks the running container for
   a shell, not only the pin.
@@ -434,7 +436,7 @@ image has the same shape as the Rust service images:
   does not describe it. A change in `dependabot-core` can change it.
   - **The runtime base:** the tag `nonroot` holds no version, so Dependabot does not propose a
     different tag for it. It refreshes only the digest. The Node major is part of the image name
-    (`nodejs24-debian12`), so a Node major bump is a different image, and Dependabot does not
+    (`nodejs26-debian13`), so a Node major bump is a different image, and Dependabot does not
     propose it. The `semver-major` ignore on this entry thus does not apply today. It stays as a
     guard in case the tag changes to one that holds a version.
   - **The builder, `node`:** the `ignore` list blocks all three version update types (major, minor

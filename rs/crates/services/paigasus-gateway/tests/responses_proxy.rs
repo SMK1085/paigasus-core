@@ -714,6 +714,7 @@ async fn client_abort_cancels_upstream() {
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/responses"))
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {CALLER_KEY}"))

@@ -142,7 +142,9 @@ pub struct OpenAiConfig {
     /// Extra trust anchors for the outbound upstream calls, as a path to a PEM bundle.
     ///
     /// **This ADDS to the trust store, it does not replace it** — the client trusts the
-    /// compiled-in Mozilla roots, the image's own store, AND every certificate here. The
+    /// operating-system store (reqwest 0.13 uses `rustls-platform-verifier`; there is no
+    /// compiled-in Mozilla floor, and on Linux an empty system store with no bundle is a client
+    /// build error), AND every certificate here. The
     /// opposite of the sibling `iam.tls.ca_cert_path`, which PINS; hence the `extra_` prefix.
     /// For a self-hosted vLLM/LiteLLM upstream behind a corporate CA (SMA-558).
     ///
@@ -814,6 +816,15 @@ impl ToolPolicyConfig {
             for (key, v) in [("tool_policy.nats.creds_file", &nats.creds_file), ("tool_policy.nats.ca_file", &nats.ca_file)] {
                 if v.as_deref().is_some_and(|p| p.trim().is_empty()) {
                     return Err(format!("{key} must not be empty (omit the key to use none)"));
+                }
+            }
+            // async-nats 0.53: `add_root_certificates` implies `require_tls(true)`, so a CA file
+            // with a plain `nats://` url fails at every connect. Refuse it at boot.
+            if nats.ca_file.is_some() {
+                let url = nats.url.expose_secret().trim();
+                let scheme_is_tls = url.split_once("://").is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("tls"));
+                if !scheme_is_tls {
+                    return Err("tool_policy.nats.ca_file requires a tls:// url — async-nats 0.53 makes a named CA file imply require_tls(true), so a plain nats:// broker would fail to connect; remove ca_file or use a tls:// url".to_string());
                 }
             }
         }
@@ -1578,7 +1589,7 @@ mod tests {
     #[test]
     fn a_full_enabled_table_loads_and_validates() {
         let cfg = tp_load(&tp_enabled_toml(
-            "default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"nats://x:4222\"\ncreds_file = \"/c\"\nca_file = \"/ca\"",
+            "default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"tls://x:4222\"\ncreds_file = \"/c\"\nca_file = \"/ca\"",
         ))
         .expect("loads");
         assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
@@ -1586,6 +1597,19 @@ mod tests {
         assert_eq!(cfg.tool_policy.source, Some(PolicySourceConfig::File { dir: "/etc/policies".to_string() }));
         let json = serde_json::to_string(&cfg.tool_policy).expect("serialises");
         assert!(!json.contains("x:4222"), "the NATS url must not be serialised");
+    }
+
+    #[test]
+    fn a_ca_file_with_a_plaintext_nats_url_is_rejected() {
+        let cfg = tp_load(&tp_enabled_toml("default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"nats://x:4222\"\nca_file = \"/ca\"")).expect("loads");
+        let err = cfg.validate().expect_err("ca_file implies require_tls");
+        assert!(err.contains("tool_policy.nats.ca_file requires a tls:// url"), "{err}");
+    }
+
+    #[test]
+    fn a_plaintext_nats_url_without_a_ca_file_still_validates() {
+        let cfg = tp_load(&tp_enabled_toml("default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"nats://x:4222\"")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
     }
 
     #[test]

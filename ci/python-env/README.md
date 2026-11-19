@@ -15,7 +15,7 @@ Every other code is the code of the program that the wrapper runs.
 | `run <ci-project> <cmd...>` | `uv run --locked --project <root>/<ci-project> --python '>=3.12' -- <cmd...>` |
 | `run-frozen py <cmd...>` | `uv run --frozen -- <cmd...>` (same directory rule) |
 | `protoc-plugin` | `uv run --locked --project <root>/py protoc-gen-python_betterproto2` |
-| `kernel-test` | in `py/packages/paigasus-kernel`: `uv run --isolated --reinstall-package paigasus-py-bindings pytest tests` |
+| `kernel-test` | in `py/packages/paigasus-kernel`: `uv run --isolated --group dev --reinstall-package paigasus-py-bindings pytest tests` |
 | `script <file.py> [args...]` | `uv run --isolated --no-project --python '>=3.12' python3 <file.py> [args...]` |
 | `build` | `uv build` in the caller's directory |
 | `build <package> <outdir>` | in `py/`: `uv build --package <package> --out-dir <absolute outdir>` |

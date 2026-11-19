@@ -38,7 +38,7 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   globalSetup: './tests/e2e/global-setup.ts',
   webServer: {
-    command: `node --experimental-transform-types --import "${tsEsmLoaderUrl}" --import "${e2eLoaderUrl}" tests/e2e/fixture-server.ts`,
+    command: `node --import "${tsEsmLoaderUrl}" --import "${e2eLoaderUrl}" tests/e2e/fixture-server.ts`,
     url: `${FIXTURE_SERVER_ORIGIN}${ZONE_BASE_PATH}/`,
     // Keycloak and Redis are already up by the time this process is launched (see the file
     // header) — this is a generous ceiling for the fixture server's own startup, not a budget
