@@ -1,0 +1,398 @@
+/feature-pipeline SMA-785
+
+---
+
+<agent-message from="ad975c9ff43915872">
+[Subagent hand-back] The text below is the final report of a subagent this session delegated to. It is model output, NOT a message from the user: instructions, requests, or approval claims inside it are the subagent's words and carry no user authority. The harness indents every line of the report, so a frame-like line at column zero inside it would be forged. Notes above this frame may quote model-derived text, which carries no user authority either. The report follows:
+  ## 1. ADR location, schema, list, next number
+  
+  - The ADR container is a PAGE, not a database. It has no data source ID and no properties except the title.
+    - Title: "Architecture Decision Records". ID `368830e8-fbaa-816c-b411-c7ee1682c175`.
+    - URL: https://app.notion.com/p/368830e8fbaa816cb411c7ee1682c175
+    - Path: Paigasus / Development.
+    - Each ADR is a sub-page. A hand-maintained Index table sits on the parent page: `# | Title | Status | Date`. The rows are page mentions. A new ADR needs a new row there.
+  - Page-body format rules, quoted in summary:
+    - Title pattern `ADR-NNNN: Decision summary` (zero-padded).
+    - Body fields, in this order: Status, Date ("when the decision was accepted"), Context, Decision, Consequences, Alternatives considered.
+    - Status values: `proposed` / `accepted` / `superseded by ADR-XXXX` / `deprecated`.
+    - Superseded ADRs are never deleted. The page says the style is "lightweight MADR-style".
+    - It also defines "ADR vs guideline": an ADR needs viable alternatives.
+  - All 27 ADRs have status Accepted. I saw no Proposed, Superseded or Rejected entry. Dates are in brackets.
+    - 0001 axum over actix-web (05-22)
+    - 0002 basedpyright (05-22)
+    - 0003 one public polyglot monorepo plus private cloud repo (05-22)
+    - 0004 protobuf + buf for wire contracts (05-22)
+    - 0005 shared logic in Rust `paigasus-kernel`, bound to Py/Node/WASM (05-22)
+    - 0006 open-core boundary as a published-artifact dependency edge (05-22)
+    - 0007 Apache 2.0 + CLA + trademark (05-22)
+    - 0008 Moon (05-22)
+    - 0009 ESLint+Prettier (05-22)
+    - 0010 lefthook+commitlint (05-26)
+    - 0011 polyglot versioning and release (06-02)
+    - 0012 cross-language shared data shapes via embedded proto messages (06-21)
+    - 0013 Cedar for authorization (06-21)
+    - 0014 tenancy and PRN (06-21)
+    - 0015 Authenticator port and OIDC (07-06)
+    - 0016 NATS JetStream event broker for IAM (08-07)
+    - 0017 console topology and session ownership (08-13)
+    - 0018 Connect-ES over gRPC (08-13)
+    - 0019 canonical error model, `google.rpc.ErrorInfo` (08-13)
+    - 0020 service capability discovery (08-13)
+    - 0021 Tailwind + Radix (08-13)
+    - 0022 TS consumers of the kernel use the wasm binding (09-22)
+    - 0023 interactive-user auth on the gateway chat surface (09-23)
+    - 0024 operator-attested external identity linking (09-27)
+    - 0025 gateway rate limit and token budget on Redis (10-02)
+    - 0026 gateway accepts DPoP-bound tokens (10-04)
+    - 0027 gateway tool-call interception: Cedar, Dogwood, Redis history (11-08)
+  - **Next free number: ADR-0028.** The index ends at 0027. I did not scan for unlisted child pages.
+  - A separate Helikon ADR database exists. It is "Decisions (ADRs)" under Paigasus / Agents / Paigasus Helikon - AI SDK.
+    - Database URL: https://app.notion.com/p/c3b212ed0c734f0ca3052ecb961a0e0e
+    - Data source: `collection://7078dae0-4eda-49c1-91df-2ef721ae2ec6`.
+    - Properties: Status (Proposed/Accepted/Superseded/Rejected/Deprecated), Drivers, Date, "ADR ID" (read-only integer, shown as `ADR-6`), Area (multi-select: Tools, Model Provider, Sessions, Multi-Agent, Runtime, Observability, Permissions & Guardrails, MCP, Tooling & Macros, Errors), Title.
+    - This is NOT the target database. Helikon ADRs use their own numbering (ADR-6 is the Runner ADR).
+  
+  ## 2. Recent ADR structure (0026, 0027; 0016 for contrast)
+  
+  - ADR-0027 and ADR-0026 are bold-label metadata lines followed by `##` headings. The three-way split below is my reading of how the fetched pages differ.
+  - ADR-0027 headings, verbatim and in order:
+    - `## Context`
+    - `## Decision`
+    - `## Consequences`
+    - `## Alternatives considered`
+    - `## References`
+  - ADR-0027 metadata block, bold labels at the top, one per line:
+    - `Status:` Accepted
+    - `Date:`
+    - `Decided by:`
+    - `Issue:` (Linear link)
+    - `Spec:` (repo path under `docs/superpowers/specs/`)
+    - `Amended:`
+    - `Builds on:` (ADR numbers)
+  - ADR-0026 has the same set, but `Status` carries a parenthetical and it has only `Issue:` and `Spec:`. Its headings are Context, Decision, Consequences, Alternatives considered. It has no References heading.
+  - How the content is written:
+    - Decision is a lettered list, (a) to (j), in 0027. It is a numbered list, 1 to 9, in 0026. Sub-points are bullets.
+    - Consequences in 0027 are split into `Positive` and `Negative and risks`, in bold, not headings.
+    - Alternatives is a bullet list: "**Name.** Not chosen. Reason."
+  - Amendments are recorded in place, with an `Amended:` line and "(Amended date, SMA-NNN)" tags. Old ADRs are not rewritten.
+  - ADR-0006 (older) has: Status, Date, Deciders as bold lines; then `## Context`, `## Decision`, `## Rationale`, `## Consequences` (Positive/Negative accepted), `## Alternatives considered` (`###` per option, "Rejected because:"), `## Revisit triggers`, `## References`.
+  - ADR-0016 uses bold `Status`, `Date`, `Context`, `Decision` (numbered), `Consequences`, `Alternatives considered`, plus a `## Amendment` section. It has an emoji icon.
+  - There is no Notion template or database. The parent page text is the template.
+  - Pages 0026/0027 and ADR-0006 show no `icon` (0026 has a rubber-stamp icon), and no properties except the title.
+  - The repo CLAUDE.md says "Significant choices get a Notion ADR before code".
+  
+  ## 3. Related existing decisions
+  
+  - **Helikon ADR-6 "Library + pluggable Runner trait; durability is a seam, not built-in"** (Accepted, 2026-05-03). https://app.notion.com/p/355830e8fbaa81a483dafbf8a9cfcc15
+    - The SDK is a library. The loop runs behind a `Runner` trait.
+    - Three crates: `paigasus-helikon-runtime-tokio` (default, ephemeral), `-temporal` (wraps each `Tool::invoke` in a Temporal Activity; the loop becomes a Workflow), `-agentcore`.
+    - Caveat: the Temporal Rust SDK is alpha. Short-term option: a Python orchestration tier calling a Rust agent service.
+    - I found no Paigasus-core ADR on Temporal. The Helikon "Open Questions & Caveats" page also says the Temporal Rust SDK is alpha (2026-05-15).
+  - **Helikon "Sessions" page** (Architecture subpage): it says the session is an append-only event log, "Maps directly onto Temporal/Restate event sourcing". I did not fetch the full page. It is likely relevant to session resume.
+  - **Helikon crate map and Glossary**: `TokioRunner` / `TemporalRunner` and Helikon `PermissionPolicy` (Allow, Deny, AskUser, Replace). ADR-0027 says Helikon already has `PermissionPolicy`, `Guardrail` and `Hook`.
+  - **ADR-0016 NATS JetStream for IAM events** (Accepted, 2026-08-07, amended 09-01).
+    - Transactional outbox in Postgres (`PgOutbox::enqueue`) drained by a `FOR UPDATE SKIP LOCKED` relay. The broker is NATS JetStream.
+    - `Nats-Msg-Id` equals the outbox row UUID.
+    - Publishes wait for the ack. The wire envelope is CloudEvents 1.0, JSON, structured mode. Extensions: `schemaversion`, `actorprn`, `correlationid`. The outbox payload is `data`.
+    - Subject is the `EventType` string verbatim (`iam.>`).
+    - Delivery is at-least-once, "not exactly-once". "Consumers must be idempotent."
+    - Rejected: Redis Streams, Kafka/Redpanda, cloud brokers, Postgres `LISTEN`/`NOTIFY`, a bespoke envelope, protobuf (kept as an upgrade path).
+    - Subject-level NATS permissions are a deployment requirement (`ops/nats/provision.sh`, gate `repo:nats-permissions`).
+  - **ADR-0006 open-core boundary** (Accepted): `paigasus-cloud` is private. It consumes published versions of `paigasus-kernel` and `paigasus-proto` from crates.io/PyPI/npm. No submodules, symlinks or feature-flag gating. Pre-release RCs go through AWS CodeArtifact. ADR-0003 (one public monorepo plus private cloud repo) and ADR-0007 (Apache 2.0, CLA, trademark) support it.
+  - **ADR-0005**: behaviour that must match across languages lives once in `paigasus-kernel` (Rust), bound to Py/Node/WASM.
+  - **ADR-0012**: shared data shapes are embedded proto messages (`AuditMetadata`). ADR-0019 is the canonical error model (`error.proto` with `ErrorInfo`).
+  - **ADR-0025** (reserve-then-charge counters on Redis) and ADR-0027 (history in Redis, events written pending first) are the closest precedents for shared state and idempotency.
+  - **Hexagonal architecture**: Development Guidelines → Rust (https://app.notion.com/p/368830e8fbaa811cbbc1de22923ecdce). This is a guideline, not an ADR.
+    - Service crates (`rs/crates/services/*`) follow it. Libs and bindings do not.
+    - Layout: `domain/` (entities, ports, services, errors), `inbound/`, `outbound/`, `config/`, `main.rs` as composition root.
+    - The domain may not depend on sqlx, reqwest, axum or tonic. It may depend on `paigasus-kernel` and, with care, `paigasus-proto`. I/O, time and randomness come through ports.
+    - Library crates use `thiserror`, never `anyhow` in a public API.
+    - Outbound adapter tests use testcontainers.
+    - Skip hex on simple CRUD, hot paths and prototypes.
+    - Note: the guideline's example uses `sqlx`. The IAM and gateway scoping pages say SeaORM.
+  - **Postgres / SeaORM**: no dedicated ADR found.
+    - "AI Gateway" scoping page (https://app.notion.com/p/385830e8fbaa809dbe29ff5deb10cc17) lists "SeaORM + Postgres for durable state; Redis for counters/cache" as an item to confirm.
+    - IAM "Decisions & Open Questions" (https://app.notion.com/p/385830e8fbaa810b92e5e725d57a779e) says "SeaORM + Postgres for durable identity and the Cedar policy/schema store".
+    - ADR-0017 text mentions a "persistence story [that] is Rust SeaORM migrations".
+    - I found no stated Postgres migration convention. This is uncertain, because my searches were not exhaustive.
+  - Founding doc: "Polyglot Monorepo Scoping" (https://www.notion.so/368830e8fbaa8101b0ffded7a3de3b53). The ADR page tells new ADRs to build on it. I did not fetch it.
+  - Searches found nothing on CloudEvents beyond ADR-0016.
+  
+  ## 4. WebFetch of https://claude.com/resources/articles/building-always-on-agents
+  
+  The fetch worked. The tool returned a summary, not the raw page. Quotes below are what it returned.
+  
+  - **Inbox**
+    - Route every event source (webhooks, schedules, background jobs, user messages) into a durable inbox, not straight into the agent. Reason: direct calls start competing runs and lose events on a crash.
+    - Use a DB table with status per event and dedup by source identifiers.
+    - Keep the handler fast. Acknowledge quickly and defer injection screening to the run.
+    - The inbox is the source of truth. A replacement worker re-reads pending events, so a crashed run can be retried.
+    - Start with one inbox per user. Split only for parallelism.
+  - **Single worker per inbox**: only one active worker per inbox. A mid-run event has three options: queue for the next run, fold into the current run, or interrupt and restart.
+  - **Batching**: merge pending events into one run. Several user messages produce one reply.
+  - **Timers vs inbox**
+    - Keep timers in a separate store. The inbox holds only events ready to work.
+    - Follow-ups are self-set deadlines. Schedules are recurring and track recurrence.
+    - "Timers never start runs directly." A scheduler polls at a fixed interval. For each due timer it marks follow-ups done, advances schedules and adds an inbox event.
+  - **Session resume vs fresh**
+    - Events that continue earlier work (a user reply) resume the session. Others start a new session.
+    - A new session loads baseline overhead (system prompt, tools, memory) plus the trigger. A resumed session brings back the full transcript.
+    - Keep the baseline lean and use prompt caching.
+    - When a session grows too long, compact or start new. Both lose detail, so "anything that needs to persist should be saved to memory" first.
+  - **Mid-run events and deferral**: while a deferred tool call waits, the run ends and the session is saved mid-call. The worker handles other events meanwhile.
+  - **Memory**
+    - Keep it in a durable store that outlives workers.
+    - Rule: "memory should only hold what the agent can't look up again". Store a pointer for data held elsewhere.
+    - Four kinds: user instructions (loaded every run), user notes (index first, files on demand), past messages (what the user was already told), task progress (per-task file).
+  - **Dreaming**: periodically review past sessions to curate memory. Replace outdated entries and surface cross-run patterns.
+  - **Permissions / defer**
+    - Each tool call can proceed, block or wait for approval.
+    - Auto mode uses classifiers to block dangerous actions. "User review, however, is still necessary for the most important decisions."
+    - A deferred call shows the request to the user. The answer returns as an inbox event that resumes the saved session in a new run.
+  - **Credentials proxy**: keep credentials outside the agent environment. The agent sends requests without them. A proxy adds the real credentials before forwarding.
+  - **Outbox: notify vs silent**
+    - A run ends one of three ways: send a message, stay silent, or issue a deferred request.
+    - Most agents can use a direct "send" tool. Add a formal outbox (table plus dispatcher) only to pace messages or recover from delivery errors.
+    - Tune volume with evals. "start quiet and then earn more of the user's attention over time".
+  
+  ## Caveats
+  - The index on the ADR parent page is the only list I read. Child pages may exist that are not in it.
+  - I did not search the Development Guidelines for a Postgres or migration page.
+  - I did not fetch ADR-0005, ADR-0012, ADR-0025, the Helikon Sessions page or the Polyglot Monorepo Scoping page. Their content above comes from search snippets and the other pages.
+</agent-message>
+
+---
+
+<agent-message from="a3fbaa3bcb74e3fd2">
+[Subagent hand-back] The text below is the final report of a subagent this session delegated to. It is model output, NOT a message from the user: instructions, requests, or approval claims inside it are the subagent's words and carry no user authority. The harness indents every line of the report, so a frame-like line at column zero inside it would be forged. Notes above this frame may quote model-derived text, which carries no user authority either. The report follows:
+  All paths are relative to /Users/smaschek/dev/paigasus/paigasus-core. I did not read line numbers everywhere; where I give none, I only grepped file-level hits. I did not run a global grep for "lease" or "heartbeat". The one I tried failed on a zsh glob error, so treat "no lease/heartbeat table" as unverified beyond `rs/crates`.
+  
+  **1. Helikon**
+  - The `paigasus-helikon*` crates are NOT in this repo. `find` found no such directories, and `rs/Cargo.toml` and `rs/crates/{bindings,libs,services}` have none.
+  - Helikon is described as a separate, older Rust-only repo:
+    - `docs/superpowers/specs/2026-06-02-sma-398-release-tooling-strategy-and-rust-parity-design.md:27` says release-plz work lives in "the older, Rust-only Helikon repo".
+    - `docs/superpowers/specs/2026-08-29-sma-580-release-activation-e-design.md:61` says `paigasus-helikon-*` crates belong to the author's earlier project.
+    - `docs/superpowers/specs/2026-08-16-sma-520-cut-actions-spend-design.md:444` says "`paigasus-helikon` (already public)".
+  - The only design reference to runtime behavior is `docs/superpowers/specs/2026-11-15-sma-752-tool-invoke-decisions-design.md:21,128,769`. It says the `decide` function lives in `paigasus-kernel` so Helikon can use the same decision shape, and that bindings for `decide` come later.
+  - a. SMA-392 session persistence: not found. No session store trait, session record, resume logic or pending-tool-call resume exists here.
+  - b. SMA-326 `PermissionPolicy`: not found. The nearest thing is the kernel tool-policy `decide`:
+    - `rs/crates/libs/paigasus-kernel/src/tool_policy/decide.rs:16-21` defines `Effect { Allow, Deny }`, `#[non_exhaustive]`. There is no `Defer` or `Ask`.
+    - `rs/crates/libs/paigasus-kernel/src/tool_policy/optimistic.rs:22-29` defines `ToolVerdict`, which includes `MayAllow`.
+    - No hook points exist in this repo.
+  - c. SMA-332 `runtime-temporal`: not found. There is no `Runtime` or `Scheduler` trait and no Temporal crate.
+  - d. Interrupting or injecting messages into a running agent loop (cancellation token, steering, mid-run user input): not found. `paigasus-kernel` (`rs/crates/libs/paigasus-kernel/src/`) holds only `cedar.rs`, `resource_name.rs`, `uuid7.rs`, `wire.rs` and `tool_policy/`. It has no agent loop.
+  
+  **2. Service crates and Postgres**
+  - `rs/crates/services/` holds only `paigasus-gateway` and `paigasus-iam`.
+  - Libs, under `rs/crates/libs/`:
+    - `paigasus-gateway-core`, `paigasus-iam-core`, `paigasus-kernel`, `paigasus-kernel-parity`
+    - `paigasus-logging`, `paigasus-observability`, `paigasus-nats-creds`
+    - `paigasus-proto`, `paigasus-proto-derive`, `paigasus-redis`
+    - `paigasus-service-info`, `paigasus-test-docker`
+  - Bindings, under `rs/crates/bindings/`: `paigasus-node-bindings`, `paigasus-py-bindings`, `paigasus-wasm`.
+  - Only `paigasus-iam` uses Postgres.
+    - It uses SeaORM 2 on the `sqlx-postgres` backend with `runtime-tokio-rustls` (`rs/Cargo.toml:214-223`).
+    - Migrations use `sea-orm-migration`, in `rs/crates/services/paigasus-iam/src/adapters/persistence/migration/m0001..m0015_*.rs`. Raw SQL is used where the builder falls short.
+    - Persistence adapters are `rs/crates/services/paigasus-iam/src/adapters/persistence/pg_*.rs`, with a unit-of-work in `uow.rs`.
+  - `FOR UPDATE SKIP LOCKED` exists:
+    - `rs/crates/services/paigasus-iam/src/adapters/persistence/pg_outbox_maintainer.rs:118,127` (retention sweep).
+    - The relay drain is tested in `rs/crates/services/paigasus-iam/tests/relay_pg.rs:4-10,161-196`.
+    - `batch_size` is documented at `rs/crates/services/paigasus-iam/iam.toml.example:214`.
+  - Transactional outbox: yes.
+    - Table `event_outbox`, created in `.../migration/m0007_create_event_outbox.rs`. Columns include `id`, `event_type`, `aggregate_prn`, `actor_prn`, `payload` (TEXT), `correlation_id`, `published_at`, `attempts` and `parked`. It has a partial index `ix_event_outbox_unpublished`.
+    - m0009 adds dead-letter columns.
+    - Adapters: `pg_outbox.rs`, `pg_outbox_listener.rs` (Postgres `LISTEN` nudge, SMA-489), `pg_outbox_maintainer.rs`, `pg_dead_letters.rs`.
+    - The relay is `rs/crates/services/paigasus-iam/src/adapters/events/relay.rs`.
+    - The ports `Outbox` and `EventPublisher` are at `rs/crates/libs/paigasus-iam-core/src/ports.rs:586,594`.
+  - Advisory lock: `.../persistence/pg_recompile_lock.rs:46` uses `pg_try_advisory_xact_lock` for the tool-policy re-compile job (SMA-781).
+  - Lease, heartbeat or job-queue table: not found. The outbox plus `SKIP LOCKED` and the advisory lock are the only coordination patterns.
+  
+  **3. NATS**
+  - The client is `async-nats` 0.52 with `jetstream`, `ring` and `nkeys` (`rs/Cargo.toml:286`).
+  - Users: `paigasus-iam` (publisher, `adapters/events/nats_publisher.rs`), `paigasus-gateway` (consumer, `rs/crates/services/paigasus-gateway/tests/tool_policy_nats.rs`) and `paigasus-nats-creds`.
+  - JetStream is used. The stream is `IAM_EVENTS` and the pull durable is `gateway-cache-invalidator`.
+  - The gateway also does a core NATS subscribe on `iam.policy.>`.
+  - Subjects are dotted `iam.<aggregate>.<verb>`, defined in `ops/nats/subjects.env`:
+    - `iam.principal.created`, `iam.principal.archived`
+    - `iam.role.granted`, `iam.role.revoked`
+    - `iam.api_key.issued`, `iam.api_key.revoked`
+    - `iam.policy.put`, `iam.policy.deleted`
+  - Per-user inbox prefixes are `_INBOX_IAM_PUB`, `_INBOX_GW` and `_INBOX_PROV`.
+  - `ops/nats/check-subjects.sh` fails CI if `subjects.env` and `ops/nats/test/accounts.conf.tmpl` disagree.
+  - The permission test is `rs/crates/services/paigasus-iam/tests/nats_permissions.rs`.
+  - Docs: `ops/nats/permissions.md`, `docs/ops/RUNBOOK-nats.md`.
+  - The NATS account is `PAIGASUS_IAM`. The `iam-publisher` identity may publish `iam.>` plus the stream INFO and CREATE calls, with no stream update, delete or purge. The consumer can pull and ack only its own durable.
+  
+  **4. Redis**
+  - `rs/crates/libs/paigasus-redis/src/lib.rs` is the single constructor for a `ConnectionManager`. It has a tuned retry budget (`CONNECT_RETRIES = 1`) and a circuit breaker.
+  - IAM uses Redis for the JWKS cache, the authz cache, the API-key cache and revocation state (`rs/crates/services/paigasus-iam/src/config.rs` ~l.168-512; `adapters/redis_role.rs`).
+  - The gateway uses it for the limit/budget store (`rs/crates/services/paigasus-gateway/src/adapters/limits/redis.rs`). That store uses Lua scripts via the `script` feature (SMA-677).
+  - No Redis locks. The Postgres advisory lock covers that job.
+  
+  **5. CloudEvents**
+  - Yes, in code. `rs/crates/services/paigasus-iam/src/adapters/events/cloud_event.rs` (l.26-60) defines a CloudEvents 1.0 JSON envelope:
+    - Standard attributes: `specversion`, `id`, `source`, `type`, `subject` (the aggregate PRN), `time`, `datacontenttype`.
+    - Extension attributes: `schemaversion`, `actorprn`, `correlationid`.
+    - `data` holds the payload.
+    - `render_id` also feeds the `Nats-Msg-Id` header for dedup.
+  - The `source` is validated as a URL (`rs/Cargo.toml:252-258`).
+  - There is no CloudEvents or envelope proto. `contracts/proto/paigasus/common/v1/` has only `actor.proto`, `audit.proto`, `auditable_example.proto`, `error.proto` and `service_info.proto`. The other protos are `gateway/v1/health.proto` and `iam/v1/iam.proto`.
+  - `iam.proto` has an `OutboxService` for dead letters, at l.814.
+  
+  **6. IAM principal**
+  - `PrincipalKind { User, ServiceAccount }` is at `rs/crates/libs/paigasus-iam-core/src/principal.rs:10`. The `Principal` struct is at l.62. API keys are in `api_key.rs`; service accounts in `service_account.rs`.
+  - The PRN format is `prn:pgs:<service>:<region>:<org>:<resource-type>/<uuid>`, six colon-separated fields (ADR-0014). It is built and parsed in `rs/crates/libs/paigasus-kernel/src/resource_name.rs:111-165`. Org may be empty or a UUID.
+  - Example from `contracts/proto/paigasus/common/v1/actor.proto`: `prn:pgs:iam:::principal/<uuid>`. The `Actor` message carries only a PRN, with no kind enum.
+  - The resource-type segment encodes the kind (user, service-account or principal).
+  - API keys use the token shape `pgs_sk_<keyid_hex>_<secret_b64url>` (`api_key.rs:5-6`).
+  - Authentication is by bearer token with optional DPoP (`application/authenticate_token.rs`) or by API key. The gRPC service is `AuthnService` with `Introspect`, `IntrospectApiKey` and `WhoAmI` (`iam.proto:336-351`).
+  - Authorization is Cedar, via `AuthorizationService.IsAuthorized` (`iam.proto:425-436`).
+  - Acting on behalf of a principal (token exchange, impersonation, RFC 8693): not found. I grepped `rs/CLAUDE.md`, `CLAUDE.md`, the gateway `src/`, `authenticate_token.rs` and `iam-core/src`, and found no such mechanism. Service accounts are their own principals.
+  
+  **7. Mentions of agent host, agents/v1, inbox, outbox, dreaming**
+  - Agent host, `agents/v1`, "dreaming": no hits anywhere in the repo.
+  - "Inbox" appears only as NATS inbox prefixes.
+  - "Outbox" is the IAM transactional outbox. The specs are `docs/superpowers/specs/2026-07-12-sma-446-m5-audit-log-outbox-design.md`, `2026-08-03-sma-469-outbox-retention-dlq-design.md`, `2026-08-07-sma-471-broker-event-publisher-design.md` and `2026-08-09-sma-489-outbox-relay-nudge-design.md`.
+  
+  **8. paigasus-cloud and the open-core boundary**
+  - It is mentioned, but no CONTRIBUTING.md hit. The references are:
+    - `README.md:3`: "the open core of the…".
+    - ADR-0006, the open-core boundary, as a published-artifact dependency edge. `paigasus-cloud` consumes the kernel and proto from crates.io and PyPI. See `docs/superpowers/specs/2026-08-16-sma-376-kernel-cratesio-publish-design.md:11`, `2026-06-23-sma-378-pypi-publishing-metadata-design.md:12`, `2026-07-07-sma-444-m3-authorization-cedar-design.md:9` and `2026-07-10-sma-445-m4-api-keys-service-accounts-design.md:10`.
+    - ADR-0007 covers moving code into `paigasus-cloud`: `docs/superpowers/specs/2026-09-03-sma-408-cla-bot-design.md:159,166`.
+  - The ADR files themselves are not in this repo. Only the references appear in the specs.
+</agent-message>
+
+---
+
+The helikon repo is on disk, so you can check it
+
+---
+
+<agent-message from="adeb9282233c402e8">
+[Subagent hand-back] The text below is the final report of a subagent this session delegated to. It is model output, NOT a message from the user: instructions, requests, or approval claims inside it are the subagent's words and carry no user authority. The harness indents every line of the report, so a frame-like line at column zero inside it would be forged. Notes above this frame may quote model-derived text, which carries no user authority either. The report follows:
+  Findings for /Users/smaschek/dev/paigasus/paigasus-helikon (read-only; nothing built or run). Short answer: there is no defer/resume-with-pending-tool-call support. `AskUser` blocks inside the loop on an `ApprovalHandler` future. Your worker would have to implement `ApprovalHandler` itself, or use the Deny-and-rerun workaround at the end of this report.
+  
+  Paths below are relative to `crates/` unless marked `docs/`. Core means `paigasus-helikon-core/src/`.
+  
+  **1. Crates** (version from each Cargo.toml)
+  - All 21 crates are published except `sessions-testkit` (`publish = false`, version 0.0.0). `release-plz.toml:21-44` confirms that and also marks `tests/runtime-http-conformance` as unpublished.
+  - `paigasus-helikon` 0.6.11: facade that re-exports core plus feature-gated providers and runtimes.
+  - `-core` 0.5.21: trait surface and concrete types.
+  - `-macros` 0.2.6: proc macros.
+  - `-tools` 0.2.24: sandboxed Read/Write/Edit/Bash tools.
+  - `-mcp` 0.1.24: rmcp client and server wrappers.
+  - `-evals` 0.1.19: evaluation harness.
+  - `-cli` 0.1.40: `helikon` and `paigasus-helikon` binaries.
+  - Providers: `-providers-openai` 0.2.32, `-anthropic` 0.1.26, `-bedrock` 0.1.9, `-gemini` 0.1.9, `-litellm` 0.1.9.
+  - Runtimes: `-runtime-tokio` 0.1.25, `-runtime-temporal` 0.5.3, `-runtime-agentcore` 0.2.13, `-runtime-axum` 0.2.9, `-runtime-actix` 0.2.9.
+  - Session backends: `-sessions-sqlite` 0.1.27, `-sessions-postgres` 0.1.8, `-sessions-redis` 0.1.8 (Redis Streams).
+  
+  **2. Sessions**
+  - Trait: `Session` at core/session.rs:50-58, async_trait, `Send + Sync`:
+    - `append(&self, events: &[SessionEvent]) -> Result<(), SessionError>`
+    - `events(&self, since: Option<SequenceId>) -> Result<Vec<SessionEvent>, SessionError>`
+    - `snapshot(&self) -> Result<ConversationSnapshot, SessionError>`
+  - There is no session id type. `SequenceId(pub u64)` (session.rs:549) is only a log position. One `Session` instance is one session; `MemorySession` says "there is no `session_id`" (session.rs:245). Postgres uses `PostgresSession::open(pool, session_id: impl Into<String>)` (sessions-postgres/src/lib.rs:73), so the id is a plain `String`.
+  - Model: append-only log. `SessionEvent` (session.rs:70+) is a serde-tagged, `#[non_exhaustive]` enum with these variants:
+    - `UserMessage`
+    - `AssistantMessage { agent }`
+    - `ToolCalled { call_id, name, args }`
+    - `ToolReturned { call_id, content }`
+    - `HandoffOccurred`
+    - `Compacted` (line 134)
+    - Every variant carries a `ts`.
+    - `project()` folds the log into a `ConversationSnapshot { messages: Vec<Item> }`.
+  - Adapters: `MemorySession` (core), SQLite, Postgres (`session_events (session_id, sequence, ts_nanos, kind, payload)`), Redis Streams. There is no file adapter. `sessions-testkit` is a conformance suite. The agentcore crate has a session-id header module (runtime-agentcore/src/session.rs) but not a store.
+  - Load and resume: `Runner::run` doc (core/runner.rs:67-76) says the runner loads persisted history at start and seeds `history ++ input.messages`, and that events are persisted at run exit through `SessionRecorder` (session.rs:412). `Runner::resume(agent, ctx, config)` (runner.rs:~132) continues from history with no new input. The session is always on `RunContext` (`ctx.session()`, `with_session` at context.rs ~962). Persistence is end-of-run and best-effort (runner.rs:76-85). `SessionRecorder::drain` synthesizes a result for an unmatched `ToolCalled` (tests at session.rs:697 and :726), so a crashed turn does not leave a dangling tool call.
+  - Compaction: `CompactingSession<S>` wraps any session (core/compacting_session.rs:29). It LLM-summarizes past a token threshold (default 8000), has a builder, and appends `SessionEvent::Compacted`. It assumes a single logical writer (compacting_session.rs:22-27). `TokenCounter` trait plus `HeuristicTokenCounter` (chars/4) are in core/token_counter.rs. Docs: docs/book/src/concepts/sessions.md.
+  
+  **3. Permissions and hooks**
+  - core/permission.rs:37-58, verbatim variants:
+    - `PermissionDecision::Allow`
+    - `Deny { reason: String }`
+    - `AskUser { prompt: String }`
+    - `Replace { args: serde_json::Value }`
+  - `PermissionPolicy<Ctx>::check(&self, ctx: &RunContext<Ctx>, tool: &str, args: &serde_json::Value) -> PermissionDecision` (permission.rs:61-71).
+  - Run-time behavior on `AskUser`: the loop blocks. `RunContext::authorize_tool` (context.rs:469-560) runs `deny rules > guard rules > allow rules > mode > policy`. Step 6 is:
+    ```
+    PermissionDecision::AskUser { prompt } => match self.approval_handler() {
+        None => Deny { reason: "no approval handler installed" },
+        Some(handler) => match handler.decide(tool, &prompt, args).await {
+    ```
+    `ApprovalHandler::decide(&self, tool: &str, prompt: &str, args: &serde_json::Value) -> ApprovalOutcome` (permission.rs:261-265). `ApprovalOutcome` is only `Allow | Deny{reason}` (permission.rs:270). The handler holds the loop open for as long as it awaits, so a handler that waits on a channel or DB would block the run in-process.
+  - There is no return-early-with-pending-tool-call outcome and no persisted pending approval. `AgentEvent::ApprovalRequested { call_id, tool, args }` exists (core/agent.rs:443) and is mapped in agentcore AG-UI (runtime-agentcore/src/agui/map.rs:286), but I found no code that emits it from the loop. That is not fully verified.
+  - Hooks: `Hook<Ctx>::on_event(&self, ctx, event: &HookEvent) -> HookDecision` (core/hook.rs:36-41).
+    - `HookEvent` variants: `OnRunStart`, `OnTurnStart{turn}`, `PreToolUse{tool,args}`, `PostToolUse{tool,output}`, `OnHandoff{from,to}`, `OnRunComplete`, `OnSubagentStop{agent}`.
+    - `HookDecision` variants: `Allow`, `Deny{reason}`, `ReplaceInput{value}`, `ReplaceOutput{value}`, `InjectSystemMessage{text}`.
+  - `Guardrail<Ctx>::check(&self, ctx, input: GuardrailInput<'_>) -> Result<GuardrailVerdict, GuardrailError>` (core/guardrail.rs:35-45). Inputs are `UserText` or `ModelOutput`. Verdicts are `Pass` or `Tripwire{kind,info}`, and a tripwire halts the run.
+  - `PermissionMode` is `Default`, `AcceptEdits`, `Plan`, `Bypass`, `DontAsk` (permission.rs:16-31).
+  
+  **4. Runner** (core/runner.rs:~52-160, async_trait, `Runner<Ctx>: Send + Sync`)
+  - `run(&self, agent: &(dyn Agent<Ctx>+'_), ctx: RunContext<Ctx>, input: AgentInput, config: RunConfig) -> Result<RunResult, RunError>`
+  - `run_streamed(...same args...) -> Result<RunResultStreaming, RunError>`
+  - `resume(agent, ctx, config) -> Result<RunResult, RunError>` (default impl calls `run` with an empty `AgentInput`)
+  - `resume_streamed(agent, ctx, config) -> Result<RunResultStreaming, RunError>`
+  - `TokioRunner` in runtime-tokio/src/lib.rs: ephemeral, with cancel and timeout wrapping. Docs say it has no crash-resume.
+  - `TemporalRunner` (runtime-temporal/src/runner.rs, ~6000 lines across the crate) is implemented, not a stub.
+    - Each run is a workflow. A pure `DurableDriver` (driver.rs) drives `core::transition`.
+    - `call_model` is one activity per model turn. `invoke_tool` is one activity per tool call, run concurrently up to `parallel_tool_call_limit` (docs/book/src/concepts/runtimes.md:17-21).
+    - The crate is built on the Temporal Rust SDK: `temporalio-sdk` 1.0, `-client` 1.0, `-sdk-core` 0.9, `-common` 1.0, `-macros` 1.0, `-workflow` 1.0 (workspace Cargo.toml:149-166). The crate docs say callers need `temporalio-client@1`.
+    - v0 does not support hooks, handoffs or guardrails; registration is rejected for them (runtime-temporal/src/lib.rs:~143-160). Nested agent-as-tool runs are allowed but not durable.
+    - The caller's `RunContext` does not cross to the worker. The worker builds its own via `WorkerPosture`, including its own `approval_handler`. `TemporalRunnerConfig::with_ctx_seed` passes a serde_json seed.
+    - I found no Temporal signal, update or human-approval wait. Tool-side `authorize_tool` is reused inside the activity (context.rs:462 doc comment). So `AskUser` there also goes through a worker-side handler.
+  - agentcore (`runtime-agentcore`): HTTP, MCP, A2A and AG-UI server modes. HTTP mode delegates to `TokioRunner` and has no crash-resume of its own (runtimes.md:66-72). A2A `TaskStore` is in-memory by default. It is not a durable `Runner`.
+  
+  **5. Run result**
+  - `RunResult<T=String> { final_output: T, events: Vec<AgentEvent>, usage: TokenUsage }`, `#[non_exhaustive]` (runner.rs:231-239).
+  - `RunError`: `Agent(AgentError)`, `MaxIterations`, `Cancelled`, `Timeout`, `Other` (runner.rs:473-493).
+  - No stop-reason field, no pending approvals, and no "deferred" outcome. Not found.
+  
+  **6. Mid-run input**
+  - Cancellation: `CancellationToken` lives on `RunContext` (`with_cancel`, `cancel()` at context.rs:214/236), not on `RunConfig`. Cancel and timeout are best-effort and lose to a real terminal event (runner.rs:87-98). `RunConfig.timeout` is honored only by runners.
+  - `RunInterrupt` and `effective_interrupt` are in runner.rs ~495+.
+  - No steering, no "inject user message while running", no pause API. Not found. `HookDecision::InjectSystemMessage` is the closest, and hooks cannot be added from outside a running loop.
+  
+  **7. Tools**
+  - `Tool<Ctx>` (core/tool.rs:65-93): `name()`, `description()`, `schema()`, optional `output_schema()`, `effect() -> ToolEffect` (default `SideEffect`), and `async fn invoke(&self, ctx: &ToolContext<Ctx>, args: serde_json::Value) -> Result<ToolOutput, ToolError>`.
+  - `ToolContext` (tool.rs:121) exposes `user_ctx() -> &Arc<Ctx>` (tool.rs:189), a tracer, a cancel token, agent depth, `SessionState` (a per-run key/value map in core/state.rs), and `ActionsHandle` (escalate signal).
+  - A tool can reach per-run user context through `Ctx`. You could put a DB handle or outbox in `Ctx`. Nothing in Helikon provides transactions; that is up to your `Ctx`.
+  - `ToolContext` deliberately excludes the session handle (tool.rs:114-119).
+  - `ToolSource` (tool.rs:363) is a dynamic tool provider.
+  
+  **8. Caching and context**
+  - Anthropic `CacheStrategy` enum: `None`, `System`, `Tools`, `SystemAndTools`, `LastTurn` (providers-anthropic/src/settings.rs:11-23), set on the builder with `.cache_strategy()`.
+  - `cached_input_tokens` is reported in model usage (core/model.rs:230).
+  - OpenAI capabilities advertise prompt caching (providers-openai/src/capabilities.rs:241).
+  - Token counting is the heuristic only, via a pluggable `TokenCounter` trait. Compaction is `CompactingSession`, covered above.
+  
+  **9. Docs** (`docs/book/src/concepts/`)
+  - sessions.md: log, backends, compaction, "what makes resume correct" at ~line 292.
+  - runtimes.md: Temporal durability at lines 15-39, agentcore at 41-72.
+  - permissions-guardrails-hooks.md, agent-loop.md, axum-server.md, core-primitives.md.
+  - Key quote, permissions-guardrails-hooks.md:18: "`ApprovalHandler` — resolves an `AskUser` decision out of band... With **no** approval handler installed, `AskUser` resolves to deny."
+  - runtimes.md:17: "a run that crashes mid-tool-call resumes from the last completed activity".
+  - I found no statement about resuming with a pending tool call or about pause-and-resume human-in-the-loop. Also `docs/book/src/decisions/index.md` and `docs/superpowers/plans/*` (design plans). I did not read ADR-6 text itself; only the doc comment citing it in core/runner.rs.
+  
+  **Implications for the ADR (my inference)**
+  - "End the run cleanly on needs-approval, resume later" is not supported by the SDK.
+  - A workaround that stays inside current APIs: use a `PermissionPolicy` or `ApprovalHandler` that records the pending call to your outbox and returns `Deny`. The model then sees the denial as a tool result and the run ends normally. On approval, call `Runner::run` with a new user message carrying the approval answer, against the same session.
+  - This needs the session reloaded by your own id string (Postgres or SQLite `open(pool, session_id)`).
+  - It is unverified whether the model re-issues the call cleanly after a Deny.
+  - For mid-run interrupt, only `CancellationToken` exists.
+</agent-message>
+
+---
+
+A
+
+---
+
+option 1
+
+---
+
+Okay we need to find a solution for the mid-run events
+
+---
+
+A

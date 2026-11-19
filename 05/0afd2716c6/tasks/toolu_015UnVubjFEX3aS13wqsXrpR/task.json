@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_015UnVubjFEX3aS13wqsXrpR",
+  "agent_id": "adeb9282233c402e8",
+  "subagent_type": "Explore",
+  "task_description": "Helikon repo recon",
+  "token_usage": {
+    "input_tokens": 22,
+    "cache_creation_tokens": 78548,
+    "cache_read_tokens": 591921,
+    "output_tokens": 9219,
+    "api_call_count": 11
+  },
+  "started_at": "2026-11-18T19:14:58.945874+01:00",
+  "completed_at": "2026-11-18T19:16:32.775702+01:00"
+}

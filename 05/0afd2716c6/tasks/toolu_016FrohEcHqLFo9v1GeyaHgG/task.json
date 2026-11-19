@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_016FrohEcHqLFo9v1GeyaHgG",
+  "agent_id": "ad975c9ff43915872",
+  "subagent_type": "general-purpose",
+  "task_description": "Notion ADRs and article recon",
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 135624,
+    "cache_read_tokens": 445732,
+    "output_tokens": 7332,
+    "api_call_count": 6
+  },
+  "started_at": "2026-11-18T19:11:41.572144+01:00",
+  "completed_at": "2026-11-18T19:12:51.461417+01:00"
+}

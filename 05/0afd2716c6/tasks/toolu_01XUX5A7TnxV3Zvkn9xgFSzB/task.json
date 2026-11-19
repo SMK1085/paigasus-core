@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01XUX5A7TnxV3Zvkn9xgFSzB",
+  "agent_id": "a3fbaa3bcb74e3fd2",
+  "subagent_type": "Explore",
+  "task_description": "Codebase recon for agent host",
+  "token_usage": {
+    "input_tokens": 18,
+    "cache_creation_tokens": 64899,
+    "cache_read_tokens": 381979,
+    "output_tokens": 8560,
+    "api_call_count": 9
+  },
+  "started_at": "2026-11-18T19:11:41.519828+01:00",
+  "completed_at": "2026-11-18T19:12:54.142152+01:00"
+}
