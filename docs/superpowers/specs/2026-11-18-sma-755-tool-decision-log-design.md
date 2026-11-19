@@ -540,8 +540,9 @@ There are three kinds of loss:
    - counts 1 in `gateway_decision_log_redis_resets_total` (an exact count of the incidents)
    - adds its last `XLEN` sample to `gateway_decision_log_lost_estimate_total`, and logs it
 
-   The estimate is **an upper bound**: the last sample can include entries that the relays
-   published after the sample. With a 15 s sample, the error is at most 15 s of publishes. The
+   The estimate is **not a bound**: it is the last sample. Entries that the writer added after
+   the sample make it undercount. Entries that the relays published after the sample make it
+   overcount. With a 15 s sample, the error is about 15 s of writes or publishes. The
    dashboard says "estimate". If no relay has a sample, it adds 0 and logs that the loss is
    unknown.
 3. **Exact gaps in the export.** Each record has a `sequence` per `(instance_id, org)`, which
@@ -587,7 +588,7 @@ New, in `paigasus_observability::names` and in `names::ALL`, each with a registr
 | `gateway_decision_log_published_total` | counter | — | events with a PubAck |
 | `gateway_decision_log_dropped_total` | counter | `reason` (§5.8) | events that the gateway dropped |
 | `gateway_decision_log_redis_resets_total` | counter | — | Redis losses that the relay detected |
-| `gateway_decision_log_lost_estimate_total` | counter | — | an upper-bound estimate of the events in those losses |
+| `gateway_decision_log_lost_estimate_total` | counter | — | an estimate of the events in those losses (it can undercount or overcount) |
 | `gateway_decision_log_task_restarts_total` | counter | `task` = `writer`, `relay` | caught panics |
 | `gateway_decision_log_publish_seconds` | histogram | — | publish to PubAck |
 | `gateway_decision_log_backlog` | gauge | — | `XLEN`, sampled every 15 s |
@@ -860,7 +861,7 @@ ca_file = "/etc/paigasus/nats/ca.pem"   # optional
 | D10 | The CLI is a subcommand of `paigasus-gateway`, with no `clap`. | my call |
 | D11 | The argument digest is HMAC-SHA256 with a deployment key, and no length is logged. | my call, after challenge (A1) |
 | D12 | A NATS account of its own, `PAIGASUS_GATEWAY`, with a required `max-bytes`. | my call, after challenge B1 |
-| D13 | Loss: exact drop counts, an exact Redis-reset count, an upper-bound estimate, and exact gaps per `(instance, org)` sequence in the export. | my call, after challenge |
+| D13 | Loss: exact drop counts, an exact Redis-reset count, an estimate (not a bound), and exact gaps per `(instance, org)` sequence in the export. | my call, after challenge |
 | D14 | Neither Redis nor NATS can stop the boot or the data plane. | my call, after challenge (A2) |
 | D15 | Tenant mode `off` writes records, because floor blocks are real. | my call, after challenge |
 | D16 | The encoder skips records that Dogwood cannot parse, and the CLI reports them. | my call, after challenge B2 |

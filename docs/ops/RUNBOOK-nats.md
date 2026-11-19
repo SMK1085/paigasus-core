@@ -287,6 +287,19 @@ per event, the default disk of 20 GiB holds about 13 decisions per second, susta
 For more traffic, set `DECISIONS_ACCOUNT_DISK_BYTES` before you run `provision-decisions.sh`, or
 accept that `discard old` keeps fewer days.
 
+**Existing deployment.** A larger `DECISIONS_ACCOUNT_DISK_BYTES` and a re-run with `PUSH=1` change only the
+account limit. The script does not change a stream that exists, so `max-bytes` stays at the old value.
+After the re-run, edit the stream with the provisioner identity:
+`nats --server "$NATS_URL" --creds "$OUT_DIR/gateway-decision-provisioner.creds" --inbox-prefix _INBOX_GW_PROV
+stream edit GATEWAY_DECISIONS --max-bytes <DECISIONS_MAX_BYTES>`. The relay then logs a `max_bytes` drift
+warning while its compiled default differs. This warning is expected.
+
+**The relay and a smaller account limit.** If the relay finds no stream, it makes `GATEWAY_DECISIONS` again with the
+fixed `max-bytes` from the code (19 327 352 832 bytes). It does not read `DECISIONS_ACCOUNT_DISK_BYTES`. If you
+lower the account disk limit, keep that fixed value at or below the new limit. If it is above the limit, the
+broker refuses the create and the relay stalls (the `GatewayDecisionLogRelayStalled` alert fires). In that case,
+make the stream with `provision-decisions.sh` and `PUSH=1`, which uses your value.
+
 **Provision.** `ops/nats/provision-decisions.sh` takes the inputs of `provision.sh` (`OPERATOR`,
 `OUT_DIR`, `NATS_URL`, `PUSH`). It is safe to run again. Without `PUSH=1` it makes the account, the
 users and the creds files. With `PUSH=1` it pushes the account, and makes the stream only if
