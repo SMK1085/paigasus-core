@@ -637,6 +637,7 @@ async fn start_zitadel(extra_env: &[(&str, &str)]) -> Option<ZitadelInstance> {
     let https_port = support::docker::mapped_port(&zitadel, HTTPS_PORT, "zitadel https").await;
     let issuer = format!("https://127.0.0.1:{https_port}");
 
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())

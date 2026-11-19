@@ -290,8 +290,10 @@ build itself — they bite the first operator who deploys without reading this s
   follow-up.
 - **Neither service terminates TLS.** Both require a TLS-terminating ingress in front of them.
 - **A private-CA identity provider is supported (SMA-558), and the routes are not equivalent.**
-  Both services' `reqwest` clients now trust the compiled-in Mozilla roots, the image's own store,
-  **and** any bundle you name — unioned, so no route costs you the public roots. Prefer them in
+  Both services' `reqwest` clients now trust the operating-system store (reqwest 0.13, via
+  `rustls-platform-verifier`; there is no compiled-in Mozilla floor) **and** any bundle you name —
+  unioned, so no route costs you the system roots. On Linux, an empty system store with no bundle is a
+  client build error ("No CA certificates were loaded from the system"). Prefer them in
   this order:
 
   1. **`authn.extra_ca_bundle_path`** (`IAM_AUTHN__EXTRA_CA_BUNDLE_PATH`), and

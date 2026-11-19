@@ -25,7 +25,9 @@
 # accept_invalid_tls = false          # default shown
 #
 # Extra trust anchors for the IdP discovery/JWKS fetches — a path to a PEM bundle. ADDS to the
-# trust store (compiled-in Mozilla roots + the image's /etc/ssl/certs); it does NOT replace it.
+# trust store (the operating-system store, via rustls-platform-verifier; there is no compiled-in
+# Mozilla floor, and an empty system store with no bundle is a client build error on Linux);
+# it does NOT replace it.
 # Note this is the OPPOSITE of [outbox.publisher].root_ca_bundle below, which REPLACES — hence
 # the `extra_` prefix. ROOTS ONLY: every certificate here becomes an unconstrained trust anchor
 # for every request the IdP discovery/JWKS client makes, to any host it reaches — not for the

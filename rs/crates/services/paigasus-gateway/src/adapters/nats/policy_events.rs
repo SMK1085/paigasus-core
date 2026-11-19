@@ -80,7 +80,8 @@ pub struct PolicyEvents {
 /// The creds file is read and parsed once here, so a missing or bad file is a boot error that
 /// names the path. Then the callback re-reads it on every connect attempt (SMA-493 D8), so a
 /// rotation takes effect on the next reconnect. An optional `ca_file` REPLACES the system trust
-/// store (`add_root_certificates`), as `outbox.publisher.root_ca_bundle` does in IAM.
+/// store (`add_root_certificates`), as `outbox.publisher.root_ca_bundle` does in IAM. async-nats 0.53 makes `add_root_certificates`
+/// imply `require_tls(true)`, so config validation refuses a `ca_file` with a plain `nats://` url.
 ///
 /// Reconnect backoff (§ 8, the builder's choice): the async-nats 0.51 defaults. That is no limit
 /// on reconnects (`max_reconnects(None)`), a delay of 0 for the first attempt and then
