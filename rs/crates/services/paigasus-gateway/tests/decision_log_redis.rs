@@ -386,6 +386,40 @@ async fn shutdown_covers_the_in_flight_write_and_counts_it_with_the_queue() {
     assert_eq!(snap.written(), 0);
 }
 
+/// M3 (review round 1): a batch with an over-the-cap part, cut off by the shutdown deadline while the `XADD`
+/// is pending, counts each event once. `CLIENT PAUSE ... WRITE` holds the `XADD` and still answers `XLEN`.
+#[tokio::test]
+async fn a_shutdown_during_a_partial_backlog_write_counts_each_event_once() {
+    let Some((node, url)) = redis_7_4("decision_log_redis partial backlog shutdown").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let slot = connected_slot(&url).await;
+    redis_cli(&node, &["CLIENT", "PAUSE", "10000", "WRITE"]).await;
+    let (log, rx) = RedisDecisionLog::new(64);
+    // Room for one of the two events: `XLEN` is 0 and the cap is 1.
+    for seq in 1..=2 {
+        log.record(record(seq));
+    }
+    // The budget ends before the 500 ms response timeout of the Redis handle, so the deadline cuts the write.
+    let writer = Writer::start(rx, slot, 1, Duration::from_millis(100));
+    // The writer has read the batch, passed the `XLEN` check and waits for the paused `XADD`.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    writer.shut_down().await;
+    redis_cli(&node, &["CLIENT", "UNPAUSE"]).await;
+    let counted = snap.dropped("backlog_full") + snap.dropped("shutdown");
+    assert_eq!(
+        counted,
+        2,
+        "each of the two events counts once: backlog_full {} shutdown {}",
+        snap.dropped("backlog_full"),
+        snap.dropped("shutdown")
+    );
+    assert_eq!(snap.written(), 0);
+}
+
 // ---- The relay (SMA-755 Task 11, § 5.7, § 5.8) ----
 
 const ORG_A: &str = "0190a100-0000-7000-8000-0000000000a1";

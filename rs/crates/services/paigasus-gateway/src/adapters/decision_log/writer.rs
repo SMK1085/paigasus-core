@@ -66,6 +66,28 @@ fn classify(err: &redis::RedisError) -> DropReason {
     }
 }
 
+/// What a pipeline of `expected` `XADD` commands did: how many were written, and the reason of each other one.
+#[derive(Debug, PartialEq, Eq)]
+struct Tally {
+    written: u64,
+    dropped: Vec<DropReason>,
+}
+
+/// Count the per-command results of a pipeline. A missing result (a short reply) counts as `write_error`, so
+/// `written + dropped.len() == expected` always holds.
+fn tally(results: &[redis::RedisResult<redis::Value>], expected: usize) -> Tally {
+    let mut written = 0;
+    let mut dropped = Vec::new();
+    for r in results.iter().take(expected) {
+        match r {
+            Ok(_) => written += 1,
+            Err(err) => dropped.push(classify(err)),
+        }
+    }
+    dropped.extend(std::iter::repeat_n(DropReason::WriteError, expected.saturating_sub(results.len())));
+    Tally { written, dropped }
+}
+
 /// Run `fut`, the write of a batch of `n` events. A panic inside it counts the batch as `write_error`: the batch
 /// already left the queue, so no other counter sees it. The panic is returned for the caller to handle.
 async fn counted<F: Future<Output = ()>>(n: u64, fut: F) -> Result<(), Box<dyn Any + Send>> {
@@ -120,29 +142,36 @@ impl State {
         let estimate = backlog.sampled.saturating_add(backlog.written_since);
         let room = self.settings.max_len.saturating_sub(estimate);
         let take = usize::try_from(room).unwrap_or(usize::MAX).min(batch.len());
-        count_dropped(DropReason::BacklogFull, (batch.len() - take) as u64);
+        let over = (batch.len() - take) as u64;
         if take == 0 {
+            count_dropped(DropReason::BacklogFull, over);
             return;
         }
         let guard = self.settings.max_len.saturating_mul(2);
         let mut pipe = redis::pipe();
         for event in &batch[..take] {
-            pipe.cmd("XADD")
-                .arg(&self.settings.key)
-                .arg("MAXLEN")
-                .arg("~")
-                .arg(guard)
-                .arg("*")
-                .arg("e")
-                .arg(event.as_ref())
-                .ignore();
+            pipe.cmd("XADD").arg(&self.settings.key).arg("MAXLEN").arg("~").arg(guard).arg("*").arg("e").arg(event.as_ref());
         }
-        match pipe.query_async::<()>(&mut conn).await {
-            Ok(()) => {
-                backlog.written_since += take as u64;
-                counter!(names::GATEWAY_DECISION_LOG_WRITTEN_TOTAL).increment(take as u64);
+        // One failed `XADD` (for example an out-of-memory reply) must not hide the others. With
+        // `ignore_errors` every command has its own result, and each event is counted once.
+        pipe.ignore_errors();
+        // The over-the-cap drop is counted AFTER the await. A shutdown timeout cancels this future during
+        // the await, and the caller then counts the whole batch as `shutdown`. An earlier count would count
+        // the same events twice and break `recorded = written + dropped`.
+        match pipe.query_async::<Vec<redis::RedisResult<redis::Value>>>(&mut conn).await {
+            Ok(results) => {
+                let tally = tally(&results, take);
+                backlog.written_since += tally.written;
+                counter!(names::GATEWAY_DECISION_LOG_WRITTEN_TOTAL).increment(tally.written);
+                for reason in tally.dropped {
+                    count_dropped(reason, 1);
+                }
+                count_dropped(DropReason::BacklogFull, over);
             }
-            Err(err) => count_dropped(classify(&err), take as u64),
+            Err(err) => {
+                count_dropped(classify(&err), take as u64);
+                count_dropped(DropReason::BacklogFull, over);
+            }
         }
     }
 
@@ -248,6 +277,30 @@ mod tests {
 
     /// A key that makes `write_batch_inner` panic.
     pub(super) const PANIC_KEY: &str = "panic-in-write-batch";
+
+    #[test]
+    fn a_partial_pipeline_counts_each_event_once() {
+        let oom = || redis::RedisError::from((redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError), "OOM", "command not allowed".to_owned()));
+        let ok = || Ok(redis::Value::Okay);
+        let t = tally(&[ok(), Err(oom()), ok()], 3);
+        assert_eq!(
+            t,
+            Tally {
+                written: 2,
+                dropped: vec![DropReason::WriteError]
+            }
+        );
+        // A short reply counts the missing events as write errors.
+        let t = tally(&[ok()], 3);
+        assert_eq!(
+            t,
+            Tally {
+                written: 1,
+                dropped: vec![DropReason::WriteError; 2]
+            }
+        );
+        assert_eq!(tally(&[ok(), ok()], 2), Tally { written: 2, dropped: vec![] });
+    }
 
     #[tokio::test]
     async fn a_panic_inside_write_batch_counts_the_batch_as_write_error() {
