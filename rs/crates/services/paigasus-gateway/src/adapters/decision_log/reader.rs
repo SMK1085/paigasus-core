@@ -209,11 +209,90 @@ pub async fn run(args: Vec<String>) -> Exit {
         return Exit::Nats;
     }
     eprint!("{summary}");
-    if let Some(path) = &args.report
-        && let Err(e) = std::fs::write(path, &summary)
-    {
-        eprintln!("error: the report could not be written: {e}");
-        return Exit::Nats;
+    if let Some(path) = &args.report {
+        match write_report(path, args.out.as_deref(), &summary) {
+            Ok(()) => {}
+            Err(ReportError::Alias) => {
+                eprintln!("error: --out and --report must be different files");
+                return Exit::BadArgs;
+            }
+            Err(ReportError::Io(e)) => {
+                eprintln!("error: the report could not be written: {e}");
+                return Exit::Nats;
+            }
+        }
     }
     Exit::Done
+}
+
+enum ReportError {
+    /// `--report` is the same file as the trace.
+    Alias,
+    Io(std::io::Error),
+}
+
+/// True when `report` already exists and is the same file as `out`: the same device and inode on unix
+/// (this catches a hard link and a symlink that now resolves to the trace), the same canonical path elsewhere.
+fn report_is_trace(report: &std::path::Path, out: &std::path::Path) -> bool {
+    let (Ok(r), Ok(o)) = (std::fs::metadata(report), std::fs::metadata(out)) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        r.dev() == o.dev() && r.ino() == o.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (r, o);
+        matches!((report.canonicalize(), out.canonicalize()), (Ok(a), Ok(b)) if a == b)
+    }
+}
+
+/// Write the summary to `--report`, after the trace is on disk. A report that aliases the trace is refused,
+/// so the summary cannot replace the trace. The up-front check in `parse_args` cannot see a hard link or a
+/// dangling symlink to the trace path.
+fn write_report(report: &std::path::Path, out: Option<&std::path::Path>, summary: &str) -> Result<(), ReportError> {
+    if let Some(out) = out
+        && report_is_trace(report, out)
+    {
+        return Err(ReportError::Alias);
+    }
+    std::fs::write(report, summary).map_err(ReportError::Io)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hard_link_report_is_refused_and_the_trace_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, report) = (dir.path().join("trace.dw"), dir.path().join("report.txt"));
+        std::fs::write(&out, "trace").unwrap();
+        std::fs::hard_link(&out, &report).unwrap();
+        assert!(matches!(write_report(&report, Some(&out), "summary"), Err(ReportError::Alias)));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "trace");
+    }
+
+    #[test]
+    fn a_dangling_symlink_report_to_the_trace_is_refused_and_the_trace_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, report) = (dir.path().join("trace.dw"), dir.path().join("report.txt"));
+        std::os::unix::fs::symlink(&out, &report).unwrap();
+        // The up-front check ran while the trace did not exist. Now the trace is written.
+        std::fs::write(&out, "trace").unwrap();
+        assert!(matches!(write_report(&report, Some(&out), "summary"), Err(ReportError::Alias)));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "trace");
+    }
+
+    #[test]
+    fn two_different_files_still_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, report) = (dir.path().join("trace.dw"), dir.path().join("report.txt"));
+        std::fs::write(&out, "trace").unwrap();
+        assert!(write_report(&report, Some(&out), "summary").is_ok());
+        assert_eq!(std::fs::read_to_string(&report).unwrap(), "summary");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "trace");
+    }
 }
