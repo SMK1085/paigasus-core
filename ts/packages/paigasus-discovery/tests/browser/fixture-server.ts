@@ -15,7 +15,7 @@
 // vitest, so this needs no new devDependency, and its dev-server module graph gives both
 // app.tsx/entry.tsx (JSX + relative ".js"-for-".tsx" specifiers, same convention every other
 // vitest config in this package already relies on) a working TS/JSX transform on demand — this
-// file itself has no JSX, so Node's own `--experimental-transform-types` type-stripping is enough
+// file itself has no JSX, so Node's own default type-stripping is enough
 // to run it directly, with no custom loader.
 import http, { type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';

@@ -4,7 +4,7 @@
 // through the Web-standard `(Request) => Promise<Response>` contract src/server.ts's
 // `createAuthRouteHandler` exposes, since this package targets that contract, not Next's App
 // Router request lifecycle specifically. Started by playwright.config.ts's `webServer` via
-// `node --experimental-transform-types --import tests/fixtures/ts-esm-loader.mjs --import
+// `node --import tests/fixtures/ts-esm-loader.mjs --import
 // tests/e2e/e2e-loader.mjs tests/e2e/fixture-server.ts` — see e2e-loader.mjs's own header for M8
 // (why NOT `NODE_OPTIONS=--conditions=react-server`, the brief's original plan).
 //

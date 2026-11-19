@@ -112,7 +112,7 @@ updates:
         update-types:
           - minor
           - patch
-    # @types/node tracks the Node runtime major (Active LTS 24, .moon/toolchains.yml).
+    # @types/node tracks the Node runtime major (Active LTS 26, .moon/toolchains.yml).
     # Ignore its major bumps so the type defs can't drift ahead of the runtime — bump
     # both deliberately at the next LTS line.
     ignore:
@@ -262,7 +262,7 @@ updates:
           - "version-update:semver-patch"
 
   # SMA-513: ts/Dockerfile pins both of its base images by digest — the builder node:X.Y.Z-bookworm
-  # and the runtime gcr.io/distroless/nodejs24-debian12:nonroot. Covered here for the same reason
+  # and the runtime gcr.io/distroless/nodejs26-debian13:nonroot. Covered here for the same reason
   # the /rs block exists — a pinned-and-never-updated base is the mirror image of the floating-tag
   # risk. As in /rs, digest refreshes on the pinned tags are expected from the dependabot-core
   # source, but the `docker_digest_only_update_suppression` experiment could suppress a refresh on
@@ -291,10 +291,10 @@ updates:
       # The runtime tag `nonroot` holds no digits, so dependabot-core treats it as a
       # NON-comparable tag: it never proposes another tag for it and only refreshes its digest.
       # This ignore therefore never fires today. It is kept as a guard in case the tag is ever
-      # changed to a versioned one. The Node major is part of the image NAME (nodejs24-…), so a
+      # changed to a versioned one. The Node major is part of the image NAME (nodejs26-…), so a
       # Node major bump is a different image that Dependabot never proposes; assert_console_pins
       # in ci/images/run.sh holds that major equal to .prototools' node pin.
-      - dependency-name: "gcr.io/distroless/nodejs24-debian12"
+      - dependency-name: "gcr.io/distroless/nodejs26-debian13"
         update-types:
           - "version-update:semver-major"
       # assert_console_pins in ci/images/run.sh holds the builder's exact X.Y.Z equal to

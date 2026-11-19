@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "license": "Apache-2.0",
   "description": "OIDC relying party, Redis-backed session store, and auth route factory for Paigasus console zones.",

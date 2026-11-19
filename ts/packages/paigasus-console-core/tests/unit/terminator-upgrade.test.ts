@@ -109,7 +109,7 @@ async function refusingUpstream(): Promise<{ url: string; closed: () => boolean 
 function handshake(origin: string, path: string, body = '', connection = 'Upgrade', extraLines: readonly string[] = []): Promise<{ head: string; socket: Duplex }> {
   const url = new URL(origin);
   return new Promise((resolve, reject) => {
-    const socket = tlsConnect({ host: url.hostname, port: Number(url.port), ca: tls.cert, servername: '127.0.0.1' }, () => {
+    const socket = tlsConnect({ host: url.hostname, port: Number(url.port), ca: tls.cert }, () => {
       const extra = extraLines.map((line) => `${line}\r\n`).join('');
       socket.write(
         `GET ${path} HTTP/1.1\r\nhost: ${url.host}\r\nconnection: ${connection}\r\nupgrade: websocket\r\n${extra}sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n${body}`,
