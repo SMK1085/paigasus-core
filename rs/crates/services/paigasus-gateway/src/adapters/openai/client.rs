@@ -167,11 +167,12 @@ enum Attribution<'a> {
 /// client with the SAME options but no added anchors, and is called ONLY when a bundle is
 /// configured.
 ///
-/// Success proves the store did not cause THIS failure — not that it is healthy, since reqwest
-/// errors on the native store only when `valid_count == 0 && invalid_count > 0`, so an absent or
-/// empty store builds fine. Failure names BOTH, because reqwest adds user roots first and
-/// `?`-returns on the first bad one before reaching the native store block: with both broken, the
-/// real build dies on the bundle while the control dies on the store.
+/// Success proves the store did not cause THIS failure. reqwest 0.13 builds through
+/// `rustls-platform-verifier`, and on Linux an empty or absent system store with no extra bundle
+/// is itself a build error, so a failing control build points at the store. Failure names BOTH,
+/// because the added anchors are loaded first and a bad one fails the build before the store is
+/// consulted: with both broken, the real build dies on the bundle while the control dies on the
+/// store.
 fn attribute_build_failure<'a>(bundle: Option<&'a str>, control_build_ok: impl FnOnce() -> bool) -> Attribution<'a> {
     match bundle {
         None => Attribution::NoBundle,
@@ -201,6 +202,9 @@ fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
 /// The client's non-TLS options, in ONE place so the control build differs from the real one by
 /// exactly the added anchors (SMA-570 D6). `ClientBuilder` is not `Clone`, hence a function.
 fn base_builder(connect_timeout: Duration, stream_idle_timeout: Duration) -> reqwest::ClientBuilder {
+    // reqwest 0.13 `rustls-no-provider` panics at `build()` unless a provider is installed. Every
+    // build goes through here (SMA-809). `Err` means one is already installed: fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder().connect_timeout(connect_timeout).read_timeout(stream_idle_timeout)
 }
 
@@ -494,6 +498,7 @@ mod tests {
         // untouched by SMA-570. Minted from a real failed build so the variant is exercised, not
         // just quoted.
         let bad = reqwest::Certificate::from_pem_bundle(INVALID_DER_PEM).expect("parses as one cert");
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut b = reqwest::Client::builder();
         for c in bad {
             b = b.add_root_certificate(c);

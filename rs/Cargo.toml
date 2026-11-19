@@ -113,23 +113,26 @@ futures = "0.3"
 # TLS baseline is rustls + json. If a service needs gzip/brotli/cookies, opt in PER CRATE —
 # do NOT set default-features = true here (it re-introduces openssl across the workspace).
 #
-# BOTH root-store features are on deliberately (SMA-558 D1). reqwest builds ONE RootCertStore by
-# UNION: `add_root_certificate()` calls, then webpki roots if `rustls-tls-webpki-roots`, then the
-# platform store if `rustls-tls-native-roots` (async_impl/client.rs:687-732). So this yields
-# webpki ∪ /etc/ssl/certs ∪ any explicitly configured bundle, not a choice between them — which is
-# what lets an operator trust a private-CA IdP without `accept_invalid_tls`.
+# reqwest 0.13 (SMA-809) removed `rustls-tls`, `rustls-tls-webpki-roots` and
+# `rustls-tls-native-roots`. Its `rustls` feature pulls `aws-lc-rs`, which would link a SECOND
+# rustls CryptoProvider, so this uses `rustls-no-provider`: TLS through rustls with no provider
+# chosen. The one provider is `ring`, enabled by `async-nats`/`sqlx`/`redis` (see the aws-lc-rs
+# note on `async-nats` below); reqwest calls `CryptoProvider::get_default()` and panics when no provider is installed, so the
+# explicit `ring` install before each `Client` build is what prevents the panic. `cargo tree -i aws-lc-rs` must
+# stay empty.
 #
-# Keeping `rustls-tls` alongside is NOT redundancy. reqwest errors on a native store only when it
-# finds certificates that ALL fail to parse (client.rs:715); an ABSENT or EMPTY store falls through
-# and yields a client with zero anchors that fails every handshake at request time. The webpki
-# roots are the floor that makes that unrepresentable.
-#
-# Both features alias through to `__rustls-ring` (reqwest/Cargo.toml:148,154-172), so there is no
-# second CryptoProvider — cf. the aws-lc-rs note on `async-nats` below.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
+# Root store: reqwest 0.13 verifies through `rustls-platform-verifier` (the OS trust store) and
+# has no webpki-roots floor any more. `Certificate`s from `add_root_certificate()` are still
+# added on top of it, so an operator can trust a private-CA IdP without `accept_invalid_tls`.
+# `form` is a feature in 0.13 (it was always on in 0.12); only the Keycloak e2e test uses it.
+# rustls — a DIRECT dependency only to install the `ring` CryptoProvider that reqwest 0.13's
+# `rustls-no-provider` requires before any `Client` is built (SMA-809). `ring` only, no
+# `aws_lc_rs`: the workspace has one provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "form"] }
 # jsonwebtoken — JWT decode/verify + the `jwk` module (`JwkSet`/`Jwk`, `DecodingKey::from_jwk`)
 # for the OIDC adapter's JWKS cache (SMA-443 Task 6) and validator (Task 7). MIT-licensed.
-jsonwebtoken = "11"
+jsonwebtoken = "12"
 # base64 — already an indirect dep via jsonwebtoken; the validator (SMA-443 Task 7) uses it
 # directly (URL_SAFE_NO_PAD engine) to base64url-decode a token's payload segment for the
 # UNVERIFIED `iss` read that picks which issuer's JWKS to check against.
@@ -283,7 +286,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # link a SECOND rustls CryptoProvider and panic at runtime with "no process-level
 # CryptoProvider available", as well as adding a native cmake build dep. `nkeys` backs the
 # `.creds` (JWT + nkey seed) auth `[outbox.publisher].credentials_file` allows.
-async-nats = { version = "0.52", default-features = false, features = [
+async-nats = { version = "0.53", default-features = false, features = [
   "jetstream", "ring", "server_2_10", "server_2_11", "nkeys",
 ] }
 # nkeys — NATS ed25519 key handling, a DIRECT dependency of `paigasus-iam` since SMA-493.
@@ -291,7 +294,7 @@ async-nats = { version = "0.52", default-features = false, features = [
 # workspace enables), so this pins no new build weight. It is needed directly because
 # async-nats' `.creds` parser is `pub(crate)`: rotation-safe auth re-reads and re-signs on every
 # connection attempt via `ConnectOptions::with_auth_callback`, which hands us a raw nonce and
-# expects a signature back (SMA-493 D8). Version tracks what async-nats 0.50 resolves.
+# expects a signature back (SMA-493 D8). Version tracks what async-nats 0.53 resolves.
 nkeys = "0.4.5"
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
