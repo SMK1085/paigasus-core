@@ -717,7 +717,8 @@ paigasus-gateway decisions export --org <uuid> --since <rfc3339> --until <rfc333
 - **Reading.** An ordered, ephemeral pull consumer on `GATEWAY_DECISIONS` with the filter subject
   `gateway.decision.<org>`. The start time is `since - max_lag` (default 1 h), because the store
   time can be later than `decided_at` (backlog, outage, `XAUTOCLAIM`). It reads to the end of the
-  stream and keeps the records with `decided_at` in `[since, until)`.
+  stream and keeps the records with `decided_at` in `[since, until)`. The read stops at
+  `until + max_lag`; the summary warns when it stops early (R5, R13).
 - **Duplicates.** It removes duplicates by `decision_id`.
 - **The org check.** It checks `org_id` a second time after the decode. An event of a different
   org stops the export with exit code 3 (A3).

@@ -87,11 +87,20 @@ async fn connect(args: &ExportArgs, url: &str) -> Result<async_nats::Client, Rea
     opts.connect(url).await.map_err(|e| nats("connect", e.kind()))
 }
 
+/// What the reader returns: the events, and the time bound when the read stopped at it (R13).
+#[derive(Debug)]
+pub struct ReadResult {
+    pub events: Vec<Exported>,
+    /// `Some(until + max_lag)` when a message stored after that time ended the read, so that the stream holds
+    /// later messages. `None` when the read reached the end of the stream, the count `num_pending` or the raw cap.
+    pub stopped_at: Option<SystemTime>,
+}
+
 /// Read the events of `args.org` that JetStream stored from `since - max_lag` on, in stream order. The end of
 /// the read is the first of three limits (P-13):
 /// - the `num_pending` of the consumer at its creation;
 /// - the first message that JetStream stored after `until + max_lag` (symmetric to the start at
-///   `since - max_lag`; that message is not returned);
+///   `since - max_lag`; that message is not returned). The summary warns when this ended the read (R5, R13);
 /// - a raw count above `2 x max_events` (saturating), which is `ReaderError::TooMany` (exit 4). This keeps
 ///   the buffer bounded before `export` makes its exact check of the unique events in the range.
 ///
@@ -99,6 +108,15 @@ async fn connect(args: &ExportArgs, url: &str) -> Result<async_nats::Client, Rea
 ///
 /// [`ReaderError`] when the URL, the connection, the consumer or the read fails.
 pub async fn read(args: &ExportArgs) -> Result<Vec<Exported>, ReaderError> {
+    read_bounded(args).await.map(|r| r.events)
+}
+
+/// [`read`], with the time bound that ended the read, for the summary warning (R13).
+///
+/// # Errors
+///
+/// [`ReaderError`] when the URL, the connection, the consumer or the read fails.
+pub async fn read_bounded(args: &ExportArgs) -> Result<ReadResult, ReaderError> {
     let url = nats_url(args)?;
     let client = connect(args, &url).await?;
     let js = jetstream::new(client);
@@ -118,7 +136,7 @@ pub async fn read(args: &ExportArgs) -> Result<Vec<Exported>, ReaderError> {
     let pending = consumer.cached_info().num_pending;
     let mut out = Vec::new();
     if pending == 0 {
-        return Ok(out);
+        return Ok(ReadResult { events: out, stopped_at: None });
     }
     let mut messages = consumer.messages().await.map_err(|e| nats("start read", e.kind()))?;
     let cap = args.max_events.saturating_mul(2);
@@ -135,8 +153,8 @@ pub async fn read(args: &ExportArgs) -> Result<Vec<Exported>, ReaderError> {
         };
         let info = msg.info().map_err(|e| ReaderError::Nats(format!("read: bad message info: {e}")))?;
         let stored_at = SystemTime::from(info.published);
-        if stop_after.is_some_and(|bound| stored_at > bound) {
-            break;
+        if let Some(bound) = stop_after.filter(|bound| stored_at > *bound) {
+            return Ok(ReadResult { events: out, stopped_at: Some(bound) });
         }
         out.push(Exported {
             stored_at,
@@ -146,7 +164,7 @@ pub async fn read(args: &ExportArgs) -> Result<Vec<Exported>, ReaderError> {
             return Err(ReaderError::TooMany);
         }
     }
-    Ok(out)
+    Ok(ReadResult { events: out, stopped_at: None })
 }
 
 fn write_all(args: &ExportArgs, lines: &[String]) -> std::io::Result<()> {
@@ -170,20 +188,21 @@ pub async fn run(args: Vec<String>) -> Exit {
             return Exit::BadArgs;
         }
     };
-    let events = match read(&args).await {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return e.exit();
-        }
-    };
-    let result = match export(&args, events) {
+    let read = match read_bounded(&args).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
             return e.exit();
         }
     };
+    let mut result = match export(&args, read.events) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return e.exit();
+        }
+    };
+    result.summary.read_stopped_at = read.stopped_at;
     let summary = result.summary.to_string();
     if let Err(e) = write_all(&args, &result.lines) {
         eprintln!("error: the trace could not be written: {e}");

@@ -222,6 +222,10 @@ pub struct Summary {
     pub unregistered: usize,
     /// Events that could not be decoded or mapped: a newer gateway or a forged entry. They are not in the trace.
     pub unmapped: usize,
+    /// Set by the reader when the read stopped at `until + max_lag` while the stream held later messages (R5, R13).
+    /// An event of the range that JetStream stored after that time (for example after a long NATS outage) is
+    /// not in the trace. `export` itself never sets it.
+    pub read_stopped_at: Option<SystemTime>,
 }
 
 /// The result of an export.
@@ -256,6 +260,11 @@ impl fmt::Display for Summary {
         if self.unmapped > 0 {
             writeln!(f, "{} events could not be mapped (a newer gateway or a forged entry); they are not in the trace", self.unmapped)?;
             writeln!(f, "WARNING: the trace misses {} events that this tool could not read.", self.unmapped)?;
+        }
+        if let Some(bound) = self.read_stopped_at {
+            writeln!(f, "WARNING: the read stopped at {}, which is --until plus --max-lag. The stream holds later", rfc3339(bound))?;
+            writeln!(f, "  messages. A decision of the range that JetStream stored after that time (for example after a long")?;
+            writeln!(f, "  NATS outage) is not in the trace. Run the export again with a larger --max-lag to include it.")?;
         }
         writeln!(f, "removed {} duplicates; {} decisions arrived later than 10 min", self.duplicates, self.late)?;
         writeln!(f, "{} lines share a second with another line", self.shared_second)?;
@@ -415,6 +424,7 @@ pub fn export(args: &ExportArgs, events: impl IntoIterator<Item = Exported>) -> 
             gaps,
             unregistered,
             unmapped,
+            read_stopped_at: None,
         },
         lines,
     })
@@ -726,6 +736,16 @@ WARNING: the trace is one history for the org. A policy with @scope(\"session\")
         let err = parse_args(v).unwrap_err();
         assert!(err.contains("unknown argument"), "{err}");
         assert!(!err.contains("pw"), "the value must not be echoed: {err}");
+    }
+
+    /// R13: the summary warns when the read stopped at `until + max_lag`, and only then.
+    #[test]
+    fn the_summary_warns_when_the_read_stopped_at_the_bound() {
+        let mut out = export(&args_of(&[]), Vec::new()).expect("export");
+        assert!(!out.summary.to_string().contains("the read stopped at"));
+        out.summary.read_stopped_at = Some(at(T0 + 3600));
+        let text = out.summary.to_string();
+        assert!(text.contains("WARNING: the read stopped at") && text.contains("--max-lag"), "{text}");
     }
 
     #[test]

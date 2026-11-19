@@ -165,6 +165,7 @@ async fn the_reader_and_the_binary_export_one_org() {
         "{stderr}"
     );
     assert!(stderr.contains("sequence gaps: none"), "{stderr}");
+    assert!(!stderr.contains("the read stopped at"), "the read reached the end of the stream: {stderr}");
     assert_eq!(std::fs::read_to_string(&report).unwrap(), stderr, "the report is the stderr summary");
 
     // A bad argument is exit 1, and a URL on argv is refused.
@@ -203,6 +204,18 @@ async fn the_reader_stops_at_the_first_message_stored_after_until_plus_max_lag()
     .to_vec();
     let read = reader::read(&args_with(&extra, &url_file)).await.expect("the reader reads and ends");
     assert_eq!(ids(&read), [1, 2], "the events stored after until + max_lag are not returned");
+
+    // R13: the read stopped at the bound with later messages in the stream, so the summary says so and
+    // names the flag that moves the bound.
+    let bounded = reader::read_bounded(&args_with(&extra, &url_file)).await.expect("the reader reads and ends");
+    assert!(bounded.stopped_at.is_some(), "the bound ended the read");
+    let dir2 = TempDir::new().unwrap();
+    let (out, report) = (dir2.path().join("trace.log"), dir2.path().join("report.txt"));
+    let (url2, out2, report2, extra2) = (stack.url.clone(), out.clone(), report.clone(), extra.clone());
+    let output = tokio::task::spawn_blocking(move || run_cli(&url2, &extra2, &out2, &report2)).await.unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stderr.contains("WARNING: the read stopped at") && stderr.contains("--max-lag"), "{stderr}");
 }
 
 #[tokio::test]
