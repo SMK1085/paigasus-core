@@ -624,8 +624,8 @@ stub_reset() {
 # The fixture .prototools for the N rows: a fixed node pin, so a Node bump in the real
 # .prototools does not red this self-test.
 mkdir -p "$T/fx-node" "$T/fx-nopin"
-printf '%s\n' 'node = "24.16.0"' 'pnpm = "11.3.0"' > "$T/fx-node/.prototools"
-printf '%s\n' 'pnpm = "11.3.0"' > "$T/fx-nopin/.prototools"
+printf '%s\n' 'node = "24.16.0"' 'pnpm = "12.22.0"' > "$T/fx-node/.prototools"
+printf '%s\n' 'pnpm = "12.22.0"' > "$T/fx-nopin/.prototools"
 
 # SMA-688: each image row takes `<app> <image>` and must hand docker the IMAGE, never a name it
 # builds from `<app>`. The rows pass the load-oci name, which differs from `<app>:dev`, so a row

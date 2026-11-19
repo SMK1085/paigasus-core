@@ -17,7 +17,7 @@ FROM node:24.22.3-bookworm@sha256:9d266751ca3d7fdbe651c878ffd5ad0a42fed49a18c283
 ARG APP
 ARG BASE_PATH
 WORKDIR /build
-RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
+RUN corepack enable && corepack prepare pnpm@12.22.0 --activate
 COPY . /build/
 # SMA-634. WORKDIR is /build, which is ts/, so @paigasus/kernel's `file:` specifiers
 # (../../../rs/crates/bindings/…) resolve to /rs/crates/bindings/…. The named context supplies
