@@ -79,14 +79,17 @@ fn hex_decode(key_id: Uuid, s: &str) -> Result<Vec<u8>, RepositoryError> {
     if !bytes.len().is_multiple_of(2) {
         return Err(backend(format!("api_key {key_id}: key_hash has odd length {}", bytes.len())));
     }
+    // The odd-length guard above makes the (discarded) remainder of `as_chunks` always empty.
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             // `pair` is exactly two raw bytes. `from_utf8` rejects any non-ASCII byte (a
             // multi-byte char's lead/continuation bytes are never valid two-byte UTF-8 that's
             // also valid hex), and `from_str_radix` then rejects any non-hex ASCII — both
             // surface as `Backend`, never a panic.
-            let hex = std::str::from_utf8(pair).map_err(|_| backend(format!("api_key {key_id}: key_hash is not ascii hex")))?;
+            let hex = std::str::from_utf8(pair.as_slice()).map_err(|_| backend(format!("api_key {key_id}: key_hash is not ascii hex")))?;
             u8::from_str_radix(hex, 16).map_err(|_| backend(format!("api_key {key_id}: key_hash is not valid hex")))
         })
         .collect()

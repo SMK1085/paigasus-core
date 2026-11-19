@@ -12,7 +12,7 @@ pnpm:
   version: '11.3.0'
 
 rust:
-  version: '1.95.0'
+  version: '1.100.0'
   components:
     - 'rustfmt'
     - 'clippy'

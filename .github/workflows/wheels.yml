@@ -175,7 +175,7 @@ jobs:
           restore-keys: |
             wheels-rust-${{ runner.os }}-${{ matrix.platform }}-abi3-${{ hashFiles('rs/rust-toolchain.toml') }}-
 
-      # Run from rs/ so rust-toolchain.toml's override selects the pinned 1.95.0 rather than
+      # Run from rs/ so rust-toolchain.toml's override selects the pinned 1.100.0 rather than
       # the runner default (prebuild.yml's lesson). `matrix.extra_target` expands to nothing on
       # the five single-target legs; on the darwin leg it needs no bare-triple twin because no
       # apple target carries a glibc suffix.

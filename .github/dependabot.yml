@@ -241,7 +241,7 @@ updates:
           - minor
           - patch
     # A version bump to `rust` or `ubuntu` is NOT a job this updater can safely do alone: it
-    # would move the FROM tag but leave `ENV RUSTUP_TOOLCHAIN=1.95.0` and
+    # would move the FROM tag but leave `ENV RUSTUP_TOOLCHAIN=1.100.0` and
     # rs/rust-toolchain.toml's channel untouched (rust), or leave `chisel cut --release
     # ubuntu-24.04` hardcoded against a new ubuntu:25.04 base (ubuntu) — three/two-site
     # agreements that ci/images/run.sh's assert_pins checks, but only across sites a human
