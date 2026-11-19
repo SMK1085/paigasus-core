@@ -3,6 +3,7 @@
 //! The decision log port (SMA-755 § 5.5, P-8 to P-10). The recorder builds a record and hands it to
 //! a [`DecisionLog`]. The port never fails: a log that cannot keep a record counts the loss itself.
 
+#[cfg(test)]
 use std::sync::Mutex;
 
 use paigasus_gateway_core::decision_log::{AppliedEffect, DecisionRecord};
@@ -83,13 +84,16 @@ impl DecisionLog for TracingDecisionLog {
     fn record(&self, _record: DecisionRecord) {}
 }
 
-/// A log that keeps the records in memory, for tests. The runtime never builds it (P-9).
+/// A log that keeps the records in memory, for tests. Only test builds have it: the runtime never builds it
+/// (P-9), and no integration test or other crate uses it.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct MemoryDecisionLog {
     wants_digest: bool,
     records: Mutex<Vec<DecisionRecord>>,
 }
 
+#[cfg(test)]
 impl MemoryDecisionLog {
     #[must_use]
     pub fn new(wants_digest: bool) -> Self {
@@ -106,6 +110,7 @@ impl MemoryDecisionLog {
     }
 }
 
+#[cfg(test)]
 impl DecisionLog for MemoryDecisionLog {
     fn wants_digest(&self) -> bool {
         self.wants_digest
