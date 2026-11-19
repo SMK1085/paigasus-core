@@ -271,6 +271,8 @@ RPG_GROUPS="a b c d"
 # `rpg-a2` found; location searched: crates.io index; required by package `rpg-a1 v0.1.0`". The
 # edge is dropped. With R1 all members have the same commits, so G1-G4 do not change; NC2's
 # intermediate value for rpg-b1 changes from 0.1.1 (cascade) to 0.1.0.
+# SMA-814: probed on 0.4.3 with RPG_DEP_EDGE=1: git_only accepts the edge and every G1-G4 check
+# passes. The edge stays 0 so the fixture is unchanged; it is no longer required on 0.4.x.
 RPG_DEP_EDGE=0
 
 # The shape of the real crates' CHANGELOG.md: release-plz's header with `## [Unreleased]`, then a
@@ -432,9 +434,13 @@ rpf::negative_controls() { # real_toml -> 0/1/2
       # NC1: no release_commits. Row 7 (`fix(ci): x`) then bumps to 0.1.1.
       1) rpf::_one_control "NC1 (no release_commits)" rpf::filter_suite no-release-commits \
            r07 "" "$real" || rc=$? ;;
-      # NC2: no changelog_include, release_commits kept. G2's lockstep breaks.
+      # NC2: no changelog_include, release_commits kept. MEASURED (SMA-814): on 0.3.158 the
+      # follower-only commit broke G2's version lockstep (G2-version red). release-plz 0.3.162
+      # fixed that ("update packages in version_group when using release_commits"), so on 0.4.x
+      # the versions stay in step and the CHANGELOG half reds instead: the leader's first section
+      # stays 0.1.0 (G2-changelog). G2-version must now be green in this control.
       2) rpf::_one_control "NC2 (no changelog_include)" rpf::group_suite no-include \
-           G2-version "" "$real" || rc=$? ;;
+           G2-changelog G2-version "$real" || rc=$? ;;
       # NC3: neither key: P1 exactly. G1's versions pass, and the follower's first section
       # stays 0.1.0. The CHANGELOG half must red while the version half passes.
       3) rpf::_one_control "NC3 (no changelog_include, no release_commits)" rpf::group_suite \
