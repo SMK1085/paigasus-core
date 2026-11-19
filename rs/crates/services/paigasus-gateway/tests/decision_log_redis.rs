@@ -406,8 +406,10 @@ async fn a_shutdown_during_a_partial_backlog_write_counts_each_event_once() {
     }
     // The budget ends before the 500 ms response timeout of the Redis handle, so the deadline cuts the write.
     let writer = Writer::start(rx, slot, 1, Duration::from_millis(100));
-    // The writer has read the batch, passed the `XLEN` check and waits for the paused `XADD`.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Wait until the writer has read the batch, passed the `XLEN` check and sent the `XADD` that the pause holds.
+    // `CLIENT LIST` shows that client with `cmd=xadd`. Without this, the shutdown could cut a batch that the
+    // writer never dequeued, and the test would not cover a write cancel.
+    wait_for("the paused XADD is in flight", || async { redis_cli(&node, &["CLIENT", "LIST"]).await.contains("cmd=xadd") }).await;
     writer.shut_down().await;
     redis_cli(&node, &["CLIENT", "UNPAUSE"]).await;
     let counted = snap.dropped("backlog_full") + snap.dropped("shutdown");
