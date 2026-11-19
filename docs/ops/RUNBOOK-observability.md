@@ -1897,6 +1897,20 @@ are not affected. `GatewayLimitsRedisBreakerOpen` does not fire for this role.
 **Remediation:** report the defect with the log lines. Do not restart the gateway as a fix. The task
 already restarted by itself.
 
+#### Replay of the decision trace with Dogwood 1.2
+
+The export CLI prints this warning with every summary. Dogwood 1.2 checks each replayed call
+against the signature of its action. The trace has no tool arguments, so every `request` line has
+`input: {}`. A tool whose schema declares a required `context.input` attribute then replays as `DENY`
+with the error "nonconforming decision event", whatever the policy says. No `dogwood replay` flag
+changes this, and replay still exits 0.
+
+**Manual step.** Make a copy of the tenant schema. In the copy, make every attribute under
+`context.input` optional (`name?: Type`). Replay the trace against the copy. Do not deploy the copy.
+
+SMA-815 plans a generator for this relaxed schema. Until it ships, make the copy by hand. The
+fixture `rs/tools/paigasus-policy-compiler/tests/fixtures/decision-trace.cedarschema` shows the form.
+
 ### `TargetDown` — a scrape target is unreachable (critical)
 
 **Meaning.** `up == 0` for 2 minutes — Prometheus could not scrape `/metrics` on the named

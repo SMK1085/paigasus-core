@@ -269,6 +269,9 @@ impl fmt::Display for Summary {
         writeln!(f, "WARNING: the trace holds no tool arguments and no tool results.")?;
         writeln!(f, "  A policy that reads context.input or context.input_text gets an evaluation error on replay.")?;
         writeln!(f, "  A policy that uses a `response` or `error` event in a temporal block never matches.")?;
+        writeln!(f, "WARNING: Dogwood 1.2 checks each replayed call against its action schema. The trace has no tool")?;
+        writeln!(f, "  arguments, so a tool with a required argument replays as DENY (\"nonconforming decision event\").")?;
+        writeln!(f, "  Replay against a copy of your schema in which every context.input attribute is optional (`name?: Type`).")?;
         if self.unregistered > 0 {
             writeln!(f, "WARNING: {} lines are tools that the live gateway put under Unregistered. Replay takes the", self.unregistered)?;
             writeln!(f, "  action groups from your schema, so `action in Unregistered` can decide differently.")?;
@@ -581,6 +584,9 @@ sequence gaps: none (gaps inside the range only)\n\
 WARNING: the trace holds no tool arguments and no tool results.\n  \
 A policy that reads context.input or context.input_text gets an evaluation error on replay.\n  \
 A policy that uses a `response` or `error` event in a temporal block never matches.\n\
+WARNING: Dogwood 1.2 checks each replayed call against its action schema. The trace has no tool\n  \
+arguments, so a tool with a required argument replays as DENY (\"nonconforming decision event\").\n  \
+Replay against a copy of your schema in which every context.input attribute is optional (`name?: Type`).\n\
 WARNING: 1 lines are tools that the live gateway put under Unregistered. Replay takes the\n  \
 action groups from your schema, so `action in Unregistered` can decide differently.\n\
 WARNING: the trace is one history for the org. A policy with @scope(\"session\") or\n  \

@@ -2,6 +2,7 @@
 // SMA-755: the action schema for the decision-trace replay (tests/decision_trace.rs). Test-only.
 // The gateway encoder logs `input: {}` for every request event, so no `input` field is required.
 // Dogwood 1.2.0 checks a replayed event against the signature of its action.
+// This is exactly the relaxed-schema workaround (SMA-815). A schema with required input fields denies every call.
 
 namespace Pgs::Iam {
   entity Principal;

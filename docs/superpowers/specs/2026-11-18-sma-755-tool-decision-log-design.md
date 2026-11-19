@@ -169,6 +169,10 @@ These facts come from the code and from the Dogwood source at the pinned revisio
   evaluation error for that policy.
 - F29. Dogwood replay takes the action entities from the tenant's schema only (`api.rs:1345-1355`).
   An action that the live kernel puts under `Unregistered` is not under it in replay.
+- F30. Dogwood 1.2.0 checks each replayed event against the signature of its action
+  (`dogwood-language/src/conformance.rs:769`, deny at `api.rs:1766`). The trace writes `input: {}`,
+  so a tool with a required input argument replays as DENY ("nonconforming decision event"). No
+  `dogwood replay` flag relaxes this, and replay exits 0.
 
 ## 4. Approaches
 
@@ -733,6 +737,9 @@ paigasus-gateway decisions export --org <uuid> --since <rfc3339> --until <rfc333
   WARNING: the trace holds no tool arguments and no tool results.
     A policy that reads context.input or context.input_text gets an evaluation error on replay.
     A policy that uses a `response` or `error` event in a temporal block never matches.
+  WARNING: Dogwood 1.2 checks each replayed call against its action schema. The trace has no tool
+    arguments, so a tool with a required argument replays as DENY ("nonconforming decision event").
+    Replay against a copy of your schema in which every context.input attribute is optional (`name?: Type`).
   WARNING: 8 lines are tools that the live gateway put under Unregistered. Replay takes the
     action groups from your schema, so `action in Unregistered` can decide differently.
   WARNING: the trace is one history for the org. A policy with @scope("session") or
@@ -743,6 +750,13 @@ paigasus-gateway decisions export --org <uuid> --since <rfc3339> --until <rfc333
 - The export includes the decisions of every mode. The replay computes its own verdict.
 - Exit codes: 0 = done; 1 = bad arguments; 2 = NATS or stream error; 3 = an event of a wrong
   org; 4 = more than `--max-events`.
+
+**Dogwood 1.2.0 (added after approval).** Dogwood 1.2.0 checks each replayed event against the
+signature of its action (F30). The trace has no tool arguments, so a tool with a required input
+argument replays as DENY ("nonconforming decision event"). The owner chose to ship with an exact
+warning in the export summary and a runbook step. Workaround: replay against a copy of the tenant
+schema in which every attribute under `context.input` is optional (`name?: Type`). SMA-815 plans
+the generator for that schema.
 
 **Proof that Dogwood accepts the trace (A4).** Dogwood cannot join the `rs/` workspace (SMA-748),
 but `rs/tools/paigasus-policy-compiler` already pins it in its own workspace.
@@ -861,6 +875,7 @@ ca_file = "/etc/paigasus/nats/ca.pem"   # optional
 
 ## 9. Follow-ups
 
+- SMA-815: write a relaxed replay schema for the decision trace.
 - SMA-802: the tenant console export.
 - SMA-753: fill the real session id and turn.
 - SMA-754: the finding severity (field 2 of `Finding`) and a `detector` label.
