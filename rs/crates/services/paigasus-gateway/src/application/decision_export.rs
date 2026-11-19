@@ -180,9 +180,28 @@ fn resolve_destination(path: &std::path::Path, flag: &str) -> Result<PathBuf, St
     Ok(dir.join(name))
 }
 
+/// True when both paths exist and are the same file: the same device and inode on unix (this catches a hard
+/// link and a symlink that resolves to the file), the same canonical path elsewhere. A path that does not
+/// exist is never the same file.
+pub fn same_existing_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ma.dev() == mb.dev() && ma.ino() == mb.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (ma, mb);
+        matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+    }
+}
+
 /// True when the two paths write to the same file.
 fn same_destination(out: &std::path::Path, report: &std::path::Path) -> Result<bool, String> {
-    Ok(resolve_destination(out, "--out")? == resolve_destination(report, "--report")?)
+    Ok(resolve_destination(out, "--out")? == resolve_destination(report, "--report")? || same_existing_file(out, report))
 }
 
 /// One message of the stream: its payload and the time that JetStream stored it.
@@ -830,6 +849,20 @@ WARNING: the trace is one history for the org. A policy with @scope(\"session\")
         std::os::unix::fs::symlink(&file, &link).unwrap();
         let err = export_args_with(&file, &link).unwrap_err();
         assert!(err.contains("different files"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn out_and_report_that_are_hard_links_are_refused_before_any_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let (out, report) = (real.join("trace.dw"), real.join("report.txt"));
+        std::fs::write(&out, "original").unwrap();
+        std::fs::hard_link(&out, &report).unwrap();
+        let err = export_args_with(&out, &report).unwrap_err();
+        assert!(err.contains("different files"), "{err}");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(&report).unwrap(), "original");
     }
 
     #[test]

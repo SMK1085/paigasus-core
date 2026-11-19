@@ -13,7 +13,7 @@ use futures::StreamExt;
 use time::OffsetDateTime;
 
 use super::jetstream::{STREAM, subject_for};
-use crate::application::decision_export::{Exit, ExportArgs, Exported, USAGE, export, parse_args};
+use crate::application::decision_export::{Exit, ExportArgs, Exported, USAGE, export, parse_args, same_existing_file};
 
 /// The inbox prefix of `gateway-decision-reader` (P-13).
 pub const READER_INBOX_PREFIX: &str = "_INBOX_GW_RD";
@@ -231,30 +231,12 @@ enum ReportError {
     Io(std::io::Error),
 }
 
-/// True when `report` already exists and is the same file as `out`: the same device and inode on unix
-/// (this catches a hard link and a symlink that now resolves to the trace), the same canonical path elsewhere.
-fn report_is_trace(report: &std::path::Path, out: &std::path::Path) -> bool {
-    let (Ok(r), Ok(o)) = (std::fs::metadata(report), std::fs::metadata(out)) else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        r.dev() == o.dev() && r.ino() == o.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (r, o);
-        matches!((report.canonicalize(), out.canonicalize()), (Ok(a), Ok(b)) if a == b)
-    }
-}
-
 /// Write the summary to `--report`, after the trace is on disk. A report that aliases the trace is refused,
 /// so the summary cannot replace the trace. The up-front check in `parse_args` cannot see a hard link or a
 /// dangling symlink to the trace path.
 fn write_report(report: &std::path::Path, out: Option<&std::path::Path>, summary: &str) -> Result<(), ReportError> {
     if let Some(out) = out
-        && report_is_trace(report, out)
+        && same_existing_file(report, out)
     {
         return Err(ReportError::Alias);
     }
