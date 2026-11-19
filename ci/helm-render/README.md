@@ -197,7 +197,7 @@ Nothing in the repository enforces this rule; review does.
 9. The self-test's `ast` walk does not see a subprocess call through an alias
    (`from subprocess import run as r`) or through `os.system`, and it skips `self_test` itself.
 10. 30 s is a judgment, not a measurement on a CI runner. A render took 0.02-0.03 s on the
-    development Mac (helm 3.22.0, 2026-09-28).
+    development Mac (helm 3.22.0, 2026-09-28; not re-measured on helm 4.3.2).
 
 ## Running it locally
 
