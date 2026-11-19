@@ -35,6 +35,10 @@ NATS_URL="${NATS_URL:?set NATS_URL, e.g. tls://nats.internal:4222}"
 umask 077
 mkdir -p "$OUT_DIR"
 
+# Select the operator for every `nsc` call below. `OPERATOR` was read but never passed on, so a run used
+# whichever operator was current in the nsc store. Under `set -e` an unknown operator stops the script.
+nsc env --operator "$OPERATOR" >/dev/null
+
 # --- 1. Account and limits ---------------------------------------------------------------------
 nsc add account --name "$GATEWAY_ACCOUNT" 2>/dev/null || echo "account $GATEWAY_ACCOUNT already exists"
 
