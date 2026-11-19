@@ -90,6 +90,9 @@ struct Entry {
     bytes: Option<Bytes>,
     /// The entry is published or rejected, and counted. It waits only for its `XACK` and `XDEL`.
     done: bool,
+    /// The last publish was AMBIGUOUS (a timeout while a permission violation came and other publishes were in
+    /// flight). The entry stays pending and the relay publishes it again with nothing else in flight.
+    solo: bool,
 }
 
 enum Outcome {
@@ -99,11 +102,17 @@ enum Outcome {
     /// A transient error that says the stream is gone, or JetStream is not ready (R9). The relay keeps the entry
     /// and makes the stream again before the next publish.
     StreamGone,
+    /// A `TimedOut` that coincided with a violation while other publishes ran. The entry is kept for a solo publish.
+    Ambiguous,
 }
 
 struct Inner {
     carry: Vec<Entry>,
     group_ready: bool,
+    /// Set when `NOGROUP` was seen and the group is not made again yet. It holds the last `XLEN` sample from that
+    /// moment (the sampler may overwrite the shared sample with 0 while Redis is empty). The group creation that
+    /// ends the recovery counts the Redis reset.
+    recovering: Option<Option<u64>>,
     stream_ready: bool,
     backoff: Duration,
     next_claim: Instant,
@@ -118,6 +127,25 @@ struct State {
     /// The last `XLEN` sample. `None` until the first one.
     sample: StdMutex<Option<u64>>,
     inner: Mutex<Inner>,
+}
+
+/// Delete the consumer only if it holds no pending entry at the moment of the delete. `XINFO CONSUMERS` and
+/// `XGROUP DELCONSUMER` are two commands: another relay can claim an entry into the consumer between them, and
+/// Redis drops the pending entries of a deleted consumer. One Lua script checks `XPENDING` and deletes in one
+/// atomic step. `Ok(true)` when it deleted the consumer.
+///
+/// # Errors
+///
+/// The Redis error of the script call.
+pub async fn delete_consumer_if_empty(conn: &mut paigasus_redis::RedisHandle, key: &str, group: &str, consumer: &str) -> Result<bool, redis::RedisError> {
+    let script = redis::Script::new(
+        "local p = redis.call('XPENDING', KEYS[1], ARGV[1], '-', '+', 1, ARGV[2]) \
+         if #p > 0 then return 0 end \
+         redis.call('XGROUP', 'DELCONSUMER', KEYS[1], ARGV[1], ARGV[2]) \
+         return 1",
+    );
+    let deleted: i64 = script.key(key).arg(group).arg(consumer).invoke_async(conn).await?;
+    Ok(deleted == 1)
 }
 
 fn is_code(err: &redis::RedisError, code: &str) -> bool {
@@ -139,7 +167,12 @@ fn entries_of(reply: Option<StreamReadReply>) -> Vec<Entry> {
                 Some(Value::BulkString(b)) => Some(Bytes::from(b.clone())),
                 _ => None,
             };
-            out.push(Entry { id: id.id, bytes, done: false });
+            out.push(Entry {
+                id: id.id,
+                bytes,
+                done: false,
+                solo: false,
+            });
         }
     }
     out
@@ -177,26 +210,39 @@ impl State {
         }
     }
 
+    /// Count one Redis reset and add the lost estimate (the last `XLEN` sample, an upper bound).
+    fn count_reset(&self, sample: Option<u64>) {
+        counter!(names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL).increment(1);
+        match sample {
+            Some(n) => {
+                counter!(names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL).increment(n);
+                tracing::error!(lost_estimate_upper_bound = n, "Redis lost the decision stream; the lost events are an estimate (an upper bound)");
+            }
+            None => tracing::error!("Redis lost the decision stream; the number of lost events is unknown (no XLEN sample)"),
+        }
+        // The new stream is empty.
+        self.set_sample(Some(0));
+    }
+
     /// `NOGROUP`: Redis lost the stream and the group (§ 5.8). Only the relay whose `XGROUP CREATE` answers `OK`
     /// counts the incident.
     async fn handle_nogroup(&self, conn: &mut paigasus_redis::RedisHandle, inner: &mut Inner) {
         match self.create_group(conn).await {
             Ok(true) => {
                 inner.group_ready = true;
-                counter!(names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL).increment(1);
-                match self.last_sample() {
-                    Some(n) => {
-                        counter!(names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL).increment(n);
-                        tracing::error!(lost_estimate_upper_bound = n, "Redis lost the decision stream; the lost events are an estimate (an upper bound)");
-                    }
-                    None => tracing::error!("Redis lost the decision stream; the number of lost events is unknown (no XLEN sample)"),
-                }
-                // The new stream is empty.
-                self.set_sample(Some(0));
+                inner.recovering = None;
+                self.count_reset(self.last_sample());
             }
-            Ok(false) => inner.group_ready = true,
+            Ok(false) => {
+                inner.group_ready = true;
+                inner.recovering = None;
+            }
             Err(err) => {
                 inner.group_ready = false;
+                // Keep the sample of the FIRST failure: a later create in the start arm counts the reset.
+                if inner.recovering.is_none() {
+                    inner.recovering = Some(self.last_sample());
+                }
                 tracing::warn!(kind = ?err.kind(), "the relay cannot make the consumer group again");
             }
         }
@@ -270,7 +316,12 @@ impl State {
                     Some(Value::BulkString(b)) => Some(Bytes::from(b.clone())),
                     _ => None,
                 };
-                out.push(Entry { id: id.id, bytes, done: false });
+                out.push(Entry {
+                    id: id.id,
+                    bytes,
+                    done: false,
+                    solo: false,
+                });
             }
             if reply.next_stream_id == "0-0" {
                 break;
@@ -285,15 +336,16 @@ impl State {
         let reply: StreamInfoConsumersReply = redis::cmd("XINFO").arg("CONSUMERS").arg(&self.s.key).arg(self.s.group).query_async(conn).await?;
         let idle_ms = usize::try_from(self.s.prune_idle.as_millis()).unwrap_or(usize::MAX);
         for c in reply.consumers {
-            if c.name != self.s.consumer && c.pending == 0 && c.idle > idle_ms {
-                redis::cmd("XGROUP").arg("DELCONSUMER").arg(&self.s.key).arg(self.s.group).arg(&c.name).query_async::<i64>(conn).await?;
+            if c.name != self.s.consumer && c.pending == 0 && c.idle > idle_ms && delete_consumer_if_empty(conn, &self.s.key, self.s.group, &c.name).await? {
                 tracing::info!("the relay removed an idle consumer without pending entries");
             }
         }
         Ok(())
     }
 
-    async fn publish_one(&self, e: &Entry) -> Outcome {
+    /// `concurrent` is true when other publishes run at the same time. Then a `TimedOut` that coincides with a
+    /// violation is AMBIGUOUS: the violation can belong to another publish.
+    async fn publish_one(&self, e: &Entry, concurrent: bool) -> Outcome {
         let Some(bytes) = e.bytes.clone() else {
             return Outcome::Rejected;
         };
@@ -319,7 +371,8 @@ impl State {
                 histogram!(names::GATEWAY_DECISION_LOG_PUBLISH_SECONDS).record(started.elapsed().as_secs_f64());
                 Outcome::Published
             }
-            Err(err) => match classify(err.kind(), violation_since(&self.violations, generation)) {
+            Err(err) => match classify(err.kind(), violation_since(&self.violations, generation), concurrent) {
+                PublishClass::Ambiguous => Outcome::Ambiguous,
                 PublishClass::Permanent(class) => {
                     tracing::warn!(class, "the relay rejects an event that JetStream cannot take");
                     Outcome::Rejected
@@ -341,6 +394,29 @@ impl State {
         pipe.query_async::<()>(conn).await
     }
 
+    /// `XACK` and `XDEL` of the done entries of the carry, and drop them from the carry when Redis took the
+    /// command. Entries that are not done stay.
+    async fn settle(&self, conn: &mut paigasus_redis::RedisHandle, inner: &mut Inner) {
+        let ids: Vec<&str> = inner.carry.iter().filter(|e| e.done).map(|e| e.id.as_str()).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let acked = match self.ack(conn, &ids).await {
+            Ok(()) => true,
+            Err(err) if is_code(&err, "NOGROUP") => {
+                self.handle_nogroup(conn, inner).await;
+                true
+            }
+            Err(err) => {
+                tracing::warn!(kind = ?err.kind(), "the relay cannot ack and delete published entries; it keeps them");
+                false
+            }
+        };
+        if acked {
+            inner.carry.retain(|e| !e.done);
+        }
+    }
+
     async fn iteration(&self, mut shutdown: watch::Receiver<()>) {
         let mut inner = self.inner.lock().await;
         let Some(handle) = self.slot.get() else {
@@ -350,7 +426,15 @@ impl State {
         let mut conn = handle.clone();
         if !inner.group_ready {
             match self.create_group(&mut conn).await {
-                Ok(_) => inner.group_ready = true,
+                Ok(created) => {
+                    inner.group_ready = true;
+                    // A group made after a failed recovery is the end of the incident: count it once.
+                    if let Some(sample) = inner.recovering.take()
+                        && created
+                    {
+                        self.count_reset(sample);
+                    }
+                }
                 Err(err) => {
                     tracing::warn!(kind = ?err.kind(), "the relay cannot make the consumer group");
                     self.backoff(&mut inner, &mut shutdown).await;
@@ -404,6 +488,14 @@ impl State {
             nap(self.s.idle_sleep, &mut shutdown).await;
             return;
         }
+        // Entries that a PubAck confirmed (or that the relay rejected) need no stream. Settle them first, so that
+        // a JetStream that is down does not keep them in Redis.
+        if inner.carry.iter().any(|e| e.done) {
+            self.settle(&mut conn, &mut inner).await;
+            if inner.carry.is_empty() {
+                return;
+            }
+        }
         if !inner.stream_ready {
             if self.ensure_stream().await {
                 inner.stream_ready = true;
@@ -413,20 +505,26 @@ impl State {
             }
         }
 
-        // Publish the entries that are not done, up to 32 at a time.
-        let batch = std::mem::take(&mut inner.carry);
+        // Publish the entries that are not done. Entries that were AMBIGUOUS go one at a time after the others, with
+        // nothing else in flight. The others run up to 32 at a time.
+        let (solo, normal): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut inner.carry).into_iter().partition(|e| e.solo && !e.done);
+        let concurrent = normal.iter().filter(|e| !e.done).count() > 1;
         let this = self;
-        let results: Vec<(Entry, Option<Outcome>)> = futures::stream::iter(batch)
+        let mut results: Vec<(Entry, Option<Outcome>)> = futures::stream::iter(normal)
             .map(|e| async move {
                 if e.done {
                     return (e, None);
                 }
-                let outcome = this.publish_one(&e).await;
+                let outcome = this.publish_one(&e, concurrent).await;
                 (e, Some(outcome))
             })
             .buffer_unordered(IN_FLIGHT)
             .collect()
             .await;
+        for e in solo {
+            let outcome = self.publish_one(&e, false).await;
+            results.push((e, Some(outcome)));
+        }
         let mut transient = false;
         let mut kept = Vec::new();
         for (mut e, outcome) in results {
@@ -435,32 +533,28 @@ impl State {
                 Some(Outcome::Published) => {
                     counter!(names::GATEWAY_DECISION_LOG_PUBLISHED_TOTAL).increment(1);
                     e.done = true;
+                    e.solo = false;
                 }
                 Some(Outcome::Rejected) => {
                     count_dropped(DropReason::PublishRejected, 1);
                     e.done = true;
+                    e.solo = false;
                 }
-                Some(Outcome::Transient) => transient = true,
+                Some(Outcome::Transient) => {
+                    transient = true;
+                    e.solo = false;
+                }
                 Some(Outcome::StreamGone) => {
                     transient = true;
+                    e.solo = false;
                     inner.stream_ready = false;
                 }
+                Some(Outcome::Ambiguous) => e.solo = true,
             }
             kept.push(e);
         }
-        let ids: Vec<&str> = kept.iter().filter(|e| e.done).map(|e| e.id.as_str()).collect();
-        let mut acked = false;
-        if !ids.is_empty() {
-            match self.ack(&mut conn, &ids).await {
-                Ok(()) => acked = true,
-                Err(err) if is_code(&err, "NOGROUP") => {
-                    acked = true;
-                    self.handle_nogroup(&mut conn, &mut inner).await;
-                }
-                Err(err) => tracing::warn!(kind = ?err.kind(), "the relay cannot ack and delete published entries; it keeps them"),
-            }
-        }
-        inner.carry = if acked { kept.into_iter().filter(|e| !e.done).collect() } else { kept };
+        inner.carry = kept;
+        self.settle(&mut conn, &mut inner).await;
         if transient || !inner.carry.is_empty() {
             self.backoff(&mut inner, &mut shutdown).await;
         } else {
@@ -497,6 +591,7 @@ pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings
             carry: Vec::new(),
             group_ready: false,
             stream_ready: false,
+            recovering: None,
             backoff: s.backoff_start,
             next_claim: now + s.claim_every,
             next_prune: now + s.prune_every,

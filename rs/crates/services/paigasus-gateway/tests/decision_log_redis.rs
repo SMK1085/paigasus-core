@@ -17,6 +17,7 @@ use bytes::Bytes;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use paigasus_gateway::adapters::decision_log::jetstream as dl_js;
 use paigasus_gateway::adapters::decision_log::redis_conn::breaker_metrics;
+use paigasus_gateway::adapters::decision_log::relay::delete_consumer_if_empty;
 use paigasus_gateway::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, proto, run_relay, run_writer};
 use paigasus_gateway::config::DecisionLogNatsConfig;
 use paigasus_gateway::domain::decision_log::DecisionLog;
@@ -352,6 +353,37 @@ async fn shutdown_with_a_budget_writes_what_is_queued() {
     assert_eq!(xlen(&node).await, 3);
     assert_eq!(snap.written(), 3);
     assert_eq!(snap.dropped("shutdown"), 0);
+}
+
+#[tokio::test]
+async fn shutdown_covers_the_in_flight_write_and_counts_it_with_the_queue() {
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // A Redis that accepts and never answers: the first write stays in flight.
+    let blackhole = paigasus_redis::test_support::start().await;
+    let slot = RedisSlot::new();
+    slot.set(paigasus_redis::new_lazy_for_tests(&blackhole.url, breaker_metrics()).expect("a lazy handle"));
+    let (log, rx) = RedisDecisionLog::new(64);
+    for seq in 1..=2 {
+        log.record(record(seq));
+    }
+    let budget = Duration::from_millis(300);
+    let (stop, shutdown) = watch::channel(());
+    let task = tokio::spawn(run_writer(rx, slot, settings(1000), shutdown, budget));
+    wait_for("the writer dials Redis", || async { blackhole.accepted() >= 1 }).await;
+    // Three more events wait in the queue behind the write in flight.
+    for seq in 3..=5 {
+        log.record(record(seq));
+    }
+    stop.send(()).expect("the writer is alive");
+    // The runtime aborts the task at budget + 500 ms after the signal. The writer must return before that.
+    tokio::time::timeout(budget + Duration::from_millis(500), task)
+        .await
+        .expect("the writer returns inside the runtime grace")
+        .expect("the writer task ends");
+    assert_eq!(snap.dropped("shutdown"), 5, "the batch in flight and the three queued events count as shutdown");
+    assert_eq!(snap.written(), 0);
 }
 
 // ---- The relay (SMA-755 Task 11, § 5.7, § 5.8) ----
@@ -858,5 +890,160 @@ async fn a_real_permission_refusal_is_rejected_and_a_later_outage_is_not() {
     tokio::time::sleep(Duration::from_secs(9)).await;
     assert_eq!(xlen(&node).await, 2, "the entries stay in Redis during the outage");
     assert_eq!(snap.dropped("publish_rejected"), 1, "an outage after a violation is not a rejection");
+    relay.shut_down().await;
+}
+
+/// A reset after a failed first `XGROUP CREATE` counts once, when the retry makes the group.
+#[tokio::test]
+async fn a_group_made_after_a_failed_first_create_counts_one_reset() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay recovery").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    // The stream is empty, so the relay polls XREADGROUP and sees NOGROUP at once after the flush.
+    let dead = format!("nats://127.0.0.1:{}", free_port());
+    let v = Arc::new(AtomicU64::new(0));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&dead, Arc::clone(&v)).await, fast("i1"), v);
+    wait_for("the relay made the group", || async { redis_cli(&node, &["XINFO", "GROUPS", KEY]).await.contains("relay") }).await;
+    // XGROUP is refused, so the first create after the flush fails.
+    redis_cli(&node, &["ACL", "SETUSER", "default", "-xgroup"]).await;
+    redis_cli(&node, &["FLUSHALL"]).await;
+    wait_for("the first create fails", || async { logs.text().contains("cannot make the consumer group again") }).await;
+    assert_eq!(snap.get("gateway_decision_log_redis_resets_total", &[]), 0, "no reset is counted while the group is missing");
+    redis_cli(&node, &["ACL", "SETUSER", "default", "+xgroup"]).await;
+    wait_for("one reset", || async { snap.get("gateway_decision_log_redis_resets_total", &[]) >= 1 }).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(snap.get("gateway_decision_log_redis_resets_total", &[]), 1, "the retry counts the incident once");
+    relay.shut_down().await;
+}
+
+/// A broker config like `NO_PUBLISH_CONF`, but the relay user may publish events and read the stream, and may not
+/// make it.
+const NO_CREATE_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js" }
+authorization {
+  users = [
+    { user: "admin", password: "admin" }
+    { user: "gw", password: "gw", permissions: {
+        publish: { allow: ["$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "gateway.decision.>"] }
+        subscribe: { allow: ["_INBOX_GW_DEC.>"] }
+    } }
+  ]
+}
+no_auth_user: gw
+"#;
+
+/// An entry that a PubAck or a rejection finished must leave Redis even when the next `ensure_stream` fails.
+#[tokio::test]
+async fn done_entries_are_acked_while_the_stream_cannot_be_made() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay settle").await else {
+        return;
+    };
+    let port = free_port();
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", NO_CREATE_CONF.as_bytes().to_vec())
+        .with_mapped_port(port, 4222.tcp());
+    let Some(_nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis relay settle").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let admin = jetstream::new(
+        async_nats::ConnectOptions::with_user_and_password("admin".into(), "admin".into())
+            .connect(nats_url.clone())
+            .await
+            .expect("the admin client connects"),
+    );
+    admin.create_stream(dl_js::stream_config()).await.expect("the admin makes the stream");
+    // The first event makes the relay sure of the stream.
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    let v = Arc::new(AtomicU64::new(0));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    wait_for("the first event is published", || async { snap.published() == 1 && xlen(&node).await == 0 }).await;
+    // Redis refuses XACK, so a finished entry cannot leave. The stream goes away, so the next publish says
+    // StreamGone, and the relay cannot make the stream again (no grant for it).
+    redis_cli(&node, &["ACL", "SETUSER", "default", "-xack", "-xreadgroup"]).await;
+    admin.delete_stream(dl_js::STREAM).await.expect("delete the stream");
+    xadd(&node, &event_with_org(2, "a.b"), 0).await;
+    xadd(&node, &event_with_org(3, ORG_A), 0).await;
+    redis_cli(&node, &["ACL", "SETUSER", "default", "+xreadgroup"]).await;
+    wait_for("the rejected entry cannot be acked", || async { logs.text().contains("cannot ack and delete") }).await;
+    assert_eq!(snap.dropped("publish_rejected"), 1);
+    assert_eq!(xlen(&node).await, 2);
+    redis_cli(&node, &["ACL", "SETUSER", "default", "+xack"]).await;
+    wait_for("the rejected entry leaves while the stream is still missing", || async { xlen(&node).await == 1 }).await;
+    assert_eq!(snap.dropped("publish_rejected"), 1, "the entry counts once");
+    assert_eq!(snap.published(), 1, "the other entry has no PubAck and stays");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_consumer_with_a_new_pending_entry_is_not_deleted() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay prune race").await else {
+        return;
+    };
+    let mut conn = paigasus_redis::connect(&redis_url, breaker_metrics()).await.expect("connect to the test Redis");
+    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    redis_cli(&node, &["XADD", KEY, "*", "e", "x"]).await;
+    // The relay read XINFO while "c1" had no pending entry. Now another relay claims an entry into "c1".
+    redis_cli(&node, &["XREADGROUP", "GROUP", "relay", "c1", "COUNT", "1", "STREAMS", KEY, ">"]).await;
+    let deleted = delete_consumer_if_empty(&mut conn, KEY, "relay", "c1").await.expect("the script runs");
+    assert!(!deleted, "a consumer with a pending entry is not deleted");
+    assert!(redis_cli(&node, &["XINFO", "CONSUMERS", KEY, "relay"]).await.contains("c1"));
+    assert_eq!(redis_cli(&node, &["XPENDING", KEY, "relay"]).await.lines().next(), Some("1"), "the pending entry is still there");
+    // With no pending entry the consumer goes.
+    let id = redis_cli(&node, &["XRANGE", KEY, "-", "+", "COUNT", "1"]).await.lines().next().expect("an entry id").to_owned();
+    redis_cli(&node, &["XACK", KEY, "relay", &id]).await;
+    assert!(delete_consumer_if_empty(&mut conn, KEY, "relay", "c1").await.expect("the script runs"));
+    assert!(!redis_cli(&node, &["XINFO", "CONSUMERS", KEY, "relay"]).await.contains("c1"));
+}
+
+/// Two refused publishes in one batch are AMBIGUOUS (the shared violation counter), so the relay publishes each
+/// one alone, and a solo timeout with a violation is permanent.
+#[tokio::test]
+async fn concurrent_refusals_are_published_again_one_at_a_time_and_then_rejected() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay ambiguous").await else {
+        return;
+    };
+    let port = free_port();
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", NO_PUBLISH_CONF.as_bytes().to_vec())
+        .with_mapped_port(port, 4222.tcp());
+    let Some(_nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis relay ambiguous").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = jetstream::new(
+        async_nats::ConnectOptions::with_user_and_password("admin".into(), "admin".into())
+            .connect(format!("nats://127.0.0.1:{port}"))
+            .await
+            .expect("the admin client connects"),
+    );
+    admin.create_stream(dl_js::stream_config()).await.expect("the admin makes the stream");
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    xadd(&node, &event_with_org(2, ORG_A), 0).await;
+    let violations = Arc::new(AtomicU64::new(0));
+    let relay = Relay::start(
+        connected_slot(&redis_url).await,
+        relay_js(&format!("nats://127.0.0.1:{port}"), Arc::clone(&violations)).await,
+        fast("i1"),
+        Arc::clone(&violations),
+    );
+    wait_for("both refused entries are rejected and deleted", || async {
+        snap.dropped("publish_rejected") == 2 && xlen(&node).await == 0
+    })
+    .await;
+    assert_eq!(snap.published(), 0);
     relay.shut_down().await;
 }

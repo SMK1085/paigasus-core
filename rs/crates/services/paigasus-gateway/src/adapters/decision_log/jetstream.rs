@@ -116,14 +116,20 @@ pub enum PublishClass {
     Transient,
     /// Ack and delete the entry, and count it as `publish_rejected`. The text is the class for the log.
     Permanent(&'static str),
+    /// A `TimedOut` with a violation while other publishes were in flight: the violation can belong to another
+    /// publish. Keep the entry in Redis and publish it again alone.
+    Ambiguous,
 }
 
 /// Classify a publish error. `async-nats` reports a refused publish as `TimedOut`, so `violation_seen` (set
-/// by the connection event callback) turns a `TimedOut` into a permanent error.
+/// by the connection event callback) turns a `TimedOut` into a permanent error. The violation counter is shared
+/// by all publishes. When `concurrent` is true (other publishes ran at the same time), the violation can belong
+/// to another publish, so the result is `Ambiguous`, not `Permanent`.
 #[must_use]
-pub fn classify(kind: PublishErrorKind, violation_seen: bool) -> PublishClass {
+pub fn classify(kind: PublishErrorKind, violation_seen: bool, concurrent: bool) -> PublishClass {
     match kind {
         PublishErrorKind::MaxPayloadExceeded => PublishClass::Permanent("max_payload_exceeded"),
+        PublishErrorKind::TimedOut if violation_seen && concurrent => PublishClass::Ambiguous,
         PublishErrorKind::TimedOut if violation_seen => PublishClass::Permanent("permission_violation"),
         // `async-nats` maps a NO_RESPONDERS reply to `StreamNotFound`. A JetStream that is not ready (a restart, a
         // leader election) answers that way, so "no stream for the subject" is retried (R9). The relay makes the
@@ -218,16 +224,27 @@ mod tests {
         // A violation that came before this publish started does not count.
         generation.fetch_add(1, Ordering::SeqCst);
         let before = generation.load(Ordering::SeqCst);
-        assert_eq!(classify(PublishErrorKind::TimedOut, violation_since(&generation, before)), PublishClass::Transient);
+        assert_eq!(classify(PublishErrorKind::TimedOut, violation_since(&generation, before), false), PublishClass::Transient);
         // A violation during the publish does.
         generation.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
-            classify(PublishErrorKind::TimedOut, violation_since(&generation, before)),
+            classify(PublishErrorKind::TimedOut, violation_since(&generation, before), false),
             PublishClass::Permanent("permission_violation")
         );
         // The next publish reads the new generation and is transient again.
         let before = generation.load(Ordering::SeqCst);
-        assert_eq!(classify(PublishErrorKind::TimedOut, violation_since(&generation, before)), PublishClass::Transient);
+        assert_eq!(classify(PublishErrorKind::TimedOut, violation_since(&generation, before), false), PublishClass::Transient);
+    }
+
+    #[test]
+    fn a_concurrent_timeout_with_a_violation_is_ambiguous_a_solo_one_is_permanent() {
+        assert_eq!(classify(PublishErrorKind::TimedOut, true, true), PublishClass::Ambiguous);
+        assert_eq!(classify(PublishErrorKind::TimedOut, true, false), PublishClass::Permanent("permission_violation"));
+        assert_eq!(classify(PublishErrorKind::TimedOut, false, true), PublishClass::Transient);
+        assert_eq!(classify(PublishErrorKind::TimedOut, false, false), PublishClass::Transient);
+        // Only a timeout is ambiguous: a hard error stays what it is.
+        assert_eq!(classify(PublishErrorKind::MaxPayloadExceeded, true, true), PublishClass::Permanent("max_payload_exceeded"));
+        assert_eq!(classify(PublishErrorKind::BrokenPipe, true, true), PublishClass::Transient);
     }
 
     #[test]
@@ -244,8 +261,9 @@ mod tests {
             (MaxAckPending, PublishClass::Transient, PublishClass::Transient),
         ];
         for (kind, without, with) in table {
-            assert_eq!(classify(kind, false), without, "{kind:?} without the flag");
-            assert_eq!(classify(kind, true), with, "{kind:?} with the flag");
+            assert_eq!(classify(kind, false, false), without, "{kind:?} without the flag");
+            assert_eq!(classify(kind, true, false), with, "{kind:?} with the flag");
+            assert_eq!(classify(kind, false, true), without, "{kind:?} concurrent without the flag");
         }
     }
 

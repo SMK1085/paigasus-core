@@ -8,6 +8,7 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -50,6 +51,11 @@ struct State {
     backlog: Mutex<Backlog>,
     slot: RedisSlot,
     settings: WriterSettings,
+    /// The shutdown budget (SMA-755 A2).
+    budget: Duration,
+    /// The ONE shutdown deadline. It is set when the signal is first seen, by an in-flight write or by the drain,
+    /// and it covers both. The runtime aborts the task `budget` + 500 ms after the signal.
+    deadline: StdMutex<Option<Instant>>,
 }
 
 fn classify(err: &redis::RedisError) -> DropReason {
@@ -71,6 +77,15 @@ async fn counted<F: Future<Output = ()>>(n: u64, fut: F) -> Result<(), Box<dyn A
 }
 
 impl State {
+    /// The shutdown deadline. The first call sets it to now + `budget`.
+    fn deadline(&self) -> Instant {
+        *self
+            .deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(|| Instant::now() + self.budget)
+    }
+
     /// Write one batch, or count each event of it as dropped. A panic counts the batch as `write_error`.
     async fn write_batch(&self, batch: Vec<Bytes>) -> Result<(), Box<dyn Any + Send>> {
         let n = batch.len() as u64;
@@ -151,15 +166,32 @@ impl State {
             }
         }
         drop(rx);
+        let n = batch.len() as u64;
+        let write = self.write_batch(batch);
+        tokio::pin!(write);
+        let result = tokio::select! {
+            r = &mut write => r,
+            _ = shutdown.changed() => {
+                // The signal came with a write in flight. The write and the drain share one deadline. A write that
+                // misses it is cancelled and counts as shutdown: its result is not known.
+                match tokio::time::timeout_at(self.deadline(), &mut write).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        count_dropped(DropReason::Shutdown, n);
+                        return;
+                    }
+                }
+            }
+        };
         // The batch is counted already. The panic goes on to the supervisor, which counts the restart.
-        if let Err(panic) = self.write_batch(batch).await {
+        if let Err(panic) = result {
             std::panic::resume_unwind(panic);
         }
     }
 
-    /// After the shutdown signal: close the queue, write what is left inside `budget`, and count the rest.
-    async fn drain(&self, budget: Duration) {
-        let deadline = Instant::now() + budget;
+    /// After the shutdown signal: close the queue, write what is left before the shutdown deadline, and count the rest.
+    async fn drain(&self) {
+        let deadline = self.deadline();
         let mut rx = self.rx.lock().await;
         rx.close();
         loop {
@@ -195,6 +227,8 @@ pub async fn run_writer(rx: mpsc::Receiver<Bytes>, slot: RedisSlot, s: WriterSet
         backlog: Mutex::new(Backlog::default()),
         slot,
         settings: s,
+        budget,
+        deadline: StdMutex::new(None),
     });
     let it_state = Arc::clone(&state);
     let it_shutdown = shutdown.clone();
@@ -204,7 +238,7 @@ pub async fn run_writer(rx: mpsc::Receiver<Bytes>, slot: RedisSlot, s: WriterSet
         async move { state.iteration(sd).await }
     })
     .await;
-    state.drain(budget).await;
+    state.drain().await;
 }
 
 #[cfg(test)]
