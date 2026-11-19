@@ -129,7 +129,8 @@ pub struct AuthnConfig {
     /// Extra trust anchors for the IdP discovery/JWKS fetches, as a path to a PEM bundle.
     ///
     /// **This ADDS to the trust store, it does not replace it.** The client trusts the
-    /// compiled-in Mozilla roots, the image's own store (`/etc/ssl/certs`), AND every
+    /// operating-system store (reqwest 0.13 uses `rustls-platform-verifier`; there is no
+    /// compiled-in Mozilla floor), AND every
     /// certificate in this bundle. That is the OPPOSITE of the sibling
     /// [`PublisherConfig::root_ca_bundle`] and of the gateway's `iam.tls.ca_cert_path`, both of
     /// which REPLACE — hence the `extra_` prefix (cf. `NODE_EXTRA_CA_CERTS`, which is additive,
@@ -766,15 +767,18 @@ pub struct PublisherConfig {
     /// Path to a PEM bundle of root CAs used to verify the broker's certificate (SMA-493 D7).
     ///
     /// **This REPLACES the system trust store, it does not extend it.**
-    /// `ConnectOptions::add_root_certificates` assigns rather than appends (`options.rs:543`),
+    /// `ConnectOptions::add_root_certificates` assigns rather than appends (`options.rs:580`),
     /// and `config_tls` skips `load_native_certs()` entirely once any certificate is named
     /// (`tls.rs:61`). Concatenate every CA the client needs into one file — naming only a private
     /// CA and later moving the broker behind a public one is a total outage that presents as a
     /// bare TLS error. Omitted, the system trust store is used, which is the pre-SMA-493
     /// behaviour.
     ///
-    /// Re-read on every connection attempt (`connector.rs:544`), so a rotated bundle needs no
+    /// Re-read on every connection attempt (`connector.rs:1100`), so a rotated bundle needs no
     /// restart.
+    ///
+    /// async-nats 0.53 makes a named bundle imply `require_tls(true)`, so validation refuses it
+    /// with a plain `nats://` url (it needs `tls://`).
     pub root_ca_bundle: Option<String>,
     /// The client's `_INBOX` prefix (SMA-493 D4). MUST match the `subscribe` grant in the NATS
     /// account, or every publish times out waiting for an ack it is not allowed to receive.
@@ -1562,6 +1566,14 @@ impl IamConfig {
                     return Err(format!(
                         "outbox.publisher.url must use tls:// for the nats backend (got {scheme_hint:?}) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the credentials_file requirement"
                     ));
+                }
+                // async-nats 0.53: `add_root_certificates` implies `require_tls(true)`, so a
+                // CA bundle with a plain `nats://` URL would fail at every connect attempt.
+                // Refuse it at boot instead, with the cause named.
+                if !scheme_is_tls && p.root_ca_bundle.is_some() {
+                    return Err(
+                        "outbox.publisher.root_ca_bundle requires a tls:// url — async-nats 0.53 makes a named CA bundle imply require_tls(true), so a plain nats:// broker (allow_insecure_broker) would fail to connect; remove root_ca_bundle or use a tls:// url".to_string(),
+                    );
                 }
             }
             if p.credentials_file.is_none() && !p.allow_insecure_broker {
@@ -4211,6 +4223,49 @@ mod tests {
         );
         assert!(err.contains("tls://"), "{err}");
         assert!(err.contains("allow_insecure_broker"), "the message must name the escape hatch: {err}");
+    }
+
+    /// async-nats 0.53: a named CA bundle implies `require_tls(true)`, so it cannot be combined
+    /// with a plain broker.
+    #[test]
+    fn a_ca_bundle_with_a_plaintext_broker_is_rejected() {
+        let err = validate_err(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            allow_insecure_broker = true
+            root_ca_bundle = "/etc/paigasus/nats-ca.pem"
+        "#,
+        );
+        assert!(err.contains("root_ca_bundle requires a tls:// url"), "{err}");
+    }
+
+    #[test]
+    fn a_ca_bundle_with_a_tls_broker_passes_even_with_the_insecure_flag() {
+        validate_result(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "tls://localhost:4222"
+            allow_insecure_broker = true
+            root_ca_bundle = "/etc/paigasus/nats-ca.pem"
+        "#,
+        )
+        .expect("a tls:// url with a CA bundle must validate");
+    }
+
+    #[test]
+    fn a_plaintext_broker_without_a_ca_bundle_still_passes() {
+        validate_result(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            allow_insecure_broker = true
+        "#,
+        )
+        .expect("the plain dev broker without a bundle must validate");
     }
 
     /// D6 rule 3.

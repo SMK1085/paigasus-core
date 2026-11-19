@@ -100,7 +100,7 @@ tasks:
       #   /rs/Cargo.lock          the resolved versions the PR ships
       #   /rs/Cargo.toml          [workspace.dependencies] + feature flips, which never reach the lock
       #   /rs/rust-toolchain.toml the compiler wasm-pack selects (it runs from INSIDE the crate dir
-      #                           precisely so this file's 1.95.0 override wins)
+      #                           precisely so this file's 1.100.0 override wins)
       #   /.prototools            pins wasm-pack itself — the OTHER half of the rs/Cargo.toml:90-97
       #                           invariant, which is bidirectional ("bump the two together")
       #   /rs/.cargo/config.toml  the -undefined dynamic_lookup flags napi's cdylib link needs on

@@ -61,9 +61,10 @@ secrecy = { version = "0.10", features = ["serde"] }
 # `adapters::openai::client::OpenAiClient` — the outbound OpenAI egress adapter (G6). The
 # workspace pins reqwest WITHOUT `stream`; `features = ["stream"]` adds `Response::bytes_stream()`
 # for the UNBUFFERED streaming path (cargo unions features workspace-wide, so this just enables
-# `stream` build-wide). The TLS feature is UNTOUCHED — the workspace baseline `rustls-tls`
+# `stream` build-wide). The TLS feature is UNTOUCHED — the workspace baseline `rustls-no-provider`
 # already resolves to the RING provider here (Cargo.lock has `ring`, no `aws-lc-rs`); a second
 # provider would panic rustls 0.23 at first TLS use (see gateway-iam-integration-facts.md).
+rustls = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 # `bytes::Bytes` is the request/response body currency at the egress boundary — the caller's
 # ORIGINAL raw request bytes flow upstream verbatim, and the non-stream response comes back as

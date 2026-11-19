@@ -567,6 +567,7 @@ mod tests {
 
     /// Produce a genuine `reqwest::Error` (no public constructor) by dialing an unroutable port.
     async fn dead_port_error() -> reqwest::Error {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         reqwest::Client::new()
             .get("http://127.0.0.1:1")
             .timeout(std::time::Duration::from_millis(50))

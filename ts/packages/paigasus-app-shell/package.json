@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "license": "Apache-2.0",
   "description": "Shared console chrome for Paigasus zones: header, primary navigation, org/team switcher, user menu, breadcrumbs, and zone-safe cross-zone links.",

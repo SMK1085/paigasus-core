@@ -35,12 +35,21 @@ setup:
 bash <(curl -fsSL https://moonrepo.dev/install/proto.sh) --yes
 #    add proto to your shell PATH if the installer didn't (see its output)
 
-# 2. Install the pinned Moon binary from .prototools
+# 2. Trust this repository's .prototools (proto 0.63 or newer, see the note below)
+proto trust
+
+# 3. Install the pinned Moon binary from .prototools
 proto install
 
-# 3. Verify
+# 4. Verify
 moon --version
 ```
+
+Since proto 0.63, a local `.prototools` file must be trusted before proto applies its
+`proto` pin, its `[plugins]` and its plugin-based tool pins. Without `proto trust`, a
+plain `proto install` silently skips `buf`, `cargo-nextest`, `lefthook` and the other
+vendored-plugin tools. CI is always trusted. A local shell can instead set
+`PROTO_TRUSTED_PATHS` to the repository directory.
 
 Moon downloads and pins the per-language toolchains (Rust, Node + pnpm, Python +
 uv) from `.moon/toolchains.yml` on first use — no manual language installs needed.

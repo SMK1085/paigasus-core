@@ -99,9 +99,9 @@ pub enum IdpTls<'a> {
     /// DISABLES verification for every fetch the client makes, which is a full authentication
     /// bypass in production.
     AcceptInvalid,
-    /// Verify normally. The client's trust anchors are the compiled-in webpki Mozilla roots, the
-    /// platform store (`/etc/ssl/certs`), AND every certificate in `extra_bundle` if set — all
-    /// three unioned (SMA-558 D1).
+    /// Verify normally. The client's trust anchors are the platform store (through reqwest's
+    /// `rustls-platform-verifier`, since reqwest 0.13) AND every certificate in `extra_bundle`
+    /// if set, unioned (SMA-558 D1). reqwest 0.13 has no compiled-in webpki roots (SMA-809).
     Verify { extra_bundle: Option<&'a str> },
 }
 
@@ -126,9 +126,10 @@ enum Attribution<'a> {
 /// would cost a second `load_native_certs()` for nothing.
 ///
 /// The inference on success is narrow and deliberately so: the control build succeeding does NOT
-/// prove the platform store is healthy — reqwest errors on the native store only when
-/// `valid_count == 0 && invalid_count > 0`, so an ABSENT or EMPTY store builds fine. What it
-/// proves is that the store did not cause THIS failure, and since the two builds differ only in
+/// prove the platform store is healthy. reqwest 0.13 builds through `rustls-platform-verifier`,
+/// and on Linux an empty or absent system store with no extra bundle is itself a build error
+/// ("No CA certificates were loaded from the system"), so a failing control build points at the
+/// store. What a passing control build proves is that the store did not cause THIS failure, and since the two builds differ only in
 /// the added anchors (guaranteed by both going through `base_builder`), the anchors did.
 ///
 /// On failure the disjunction is genuinely incomplete, which is why that arm names both: reqwest
@@ -176,6 +177,9 @@ fn build_failure_message(attribution: &Attribution<'_>, chain: &str) -> String {
 /// future option is added here (SMA-570 D6). `ClientBuilder` is not `Clone`, so this must be a
 /// function rather than a shared value.
 fn base_builder(timeout: Duration) -> reqwest::ClientBuilder {
+    // reqwest 0.13 `rustls-no-provider` panics at `build()` unless a provider is installed. Every
+    // build goes through here (SMA-809). `Err` means one is already installed: fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder().timeout(timeout)
 }
 

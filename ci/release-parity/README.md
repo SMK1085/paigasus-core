@@ -151,14 +151,14 @@ MEASURED, release-plz 0.3.158 in `git_only` mode rejects it — "error: failed t
 package for uploading; Caused by: no matching package named `rpg-a2` found; location searched:
 crates.io index; required by package `rpg-a1 v0.1.0`". Because the edge is dropped, `rpg-b1`
 (G2's leader) does not cascade to a version bump from its dependency: a negative control that
-drops `changelog_include` (NC2) sees a follower-only commit on `rpg-b2` bump only the follower,
-with `rpg-b1` staying at 0.1.0 rather than cascading to 0.1.1 — NC2 still reds.
+drops `changelog_include` (NC2) sees a follower-only commit on `rpg-b2` bump both members on
+0.4.x (0.3.158 bumped only the follower), but `rpg-b1`'s changelog stays at 0.1.0 — NC2 still reds.
 
 **Negative controls.** `run.sh --negative-control` calls the hook
 `ecosystem::extra_negative_control` BEFORE the base control, because the base control exits on
 its own verdict. Each control mutates the fixture config and must make one named assertion fail
 with rc 1; rc 2 is INCONCLUSIVE and fails the control. NC1: no `release_commits`, so row 7
-bumps (`r07`). NC2: no `changelog_include`, so G2's lockstep breaks (`G2-version`). NC3: neither
+bumps (`r07`). NC2: no `changelog_include`, so the leader's changelog misses the follower's commit (`G2-changelog`; on 0.3.158 it was the version lockstep, `G2-version`, which 0.3.162 fixed, SMA-814). NC3: neither
 key, which is P1 exactly: `G1-changelog` must red while `G1-version` stays green.
 
 **Cost.** One filter fixture run: 46.8 s. One group fixture run: 8.2 s (development Mac). The

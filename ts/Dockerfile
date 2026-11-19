@@ -13,11 +13,12 @@ ARG BASE_PATH
 # The builder is digest-pinned like rs/Dockerfile's builder, and the digest is the multi-platform
 # manifest-list (index) digest so the pin resolves on both images.yml legs (amd64 and arm64).
 # Refresh with: PROTO_REPORTER=text crane digest node:X.Y.Z-bookworm
-FROM node:24.22.3-bookworm@sha256:9d266751ca3d7fdbe651c878ffd5ad0a42fed49a18c283509267c97f025b7496 AS builder
+FROM node:26.13.1-bookworm@sha256:b7087bc4d973034b30854b378ba107f9fab622b47514cb7e2592e41b8bab8d49 AS builder
 ARG APP
 ARG BASE_PATH
 WORKDIR /build
-RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
+# Node 25 and later do not bundle corepack, so the builder installs a pinned corepack first.
+RUN npm install -g corepack@0.36.0 && corepack enable && corepack prepare pnpm@11.3.0 --activate
 COPY . /build/
 # SMA-634. WORKDIR is /build, which is ts/, so @paigasus/kernel's `file:` specifiers
 # (../../../rs/crates/bindings/…) resolve to /rs/crates/bindings/…. The named context supplies
@@ -71,7 +72,7 @@ RUN printf "// SPDX-License-Identifier: Apache-2.0\nawait import('./apps/%s/serv
 # connection and never answers. assert_console_pins holds the signal below the --timeout.
 RUN printf '// SPDX-License-Identifier: Apache-2.0\nconst r = await fetch(`http://127.0.0.1:${process.env.PORT ?? 3000}%s/healthz`, { signal: AbortSignal.timeout(2500) });\nprocess.exit(r.ok ? 0 : 1);\n' "$BASE_PATH" > /app/healthcheck.mjs
 
-FROM gcr.io/distroless/nodejs24-debian12:nonroot@sha256:14d42e2511532589a7c7e01a753667a74fcc96266e137e8125006b87b0c32d0a
+FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f92717143215d248fd55771ee1936ef4b3302e531
 COPY --from=builder /app /app
 ENV PORT=3000 HOSTNAME=0.0.0.0 NODE_ENV=production
 EXPOSE 3000

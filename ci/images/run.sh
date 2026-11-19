@@ -197,9 +197,9 @@ assert_console_pins() {
   proto_node="$(sed -n 's/^node = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")"
   proto_pnpm="$(sed -n 's/^pnpm = "\([0-9.]*\)"$/\1/p' "$ROOT/.prototools")"
   want_major="${proto_node%%.*}"
-  base_major="$(sed -n 's#^FROM gcr\.io/distroless/nodejs\([0-9]*\)-debian12.*#\1#p' "$df")"
+  base_major="$(sed -n 's#^FROM gcr\.io/distroless/nodejs\([0-9]*\)-debian13.*#\1#p' "$df")"
   if [ -z "$base_major" ]; then
-    echo "::error::ts/Dockerfile: no gcr.io/distroless/nodejsNN-debian12 FROM line found." >&2
+    echo "::error::ts/Dockerfile: no gcr.io/distroless/nodejsNN-debian13 FROM line found." >&2
     return 1
   fi
   if [ "$base_major" != "$want_major" ]; then
@@ -240,11 +240,11 @@ assert_console_pins() {
   # The two pin regexes are locals because S-FROM below reads them a second time, on the
   # normalised file, so the count of FROM lines and the pins read the same view (SMA-670 D6).
   local n_runtime_pin n_builder_pin rt_pin_re bd_pin_re
-  rt_pin_re='^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}([[:space:]]|$)'
+  rt_pin_re='^FROM gcr\.io/distroless/nodejs[0-9]+-debian13:nonroot@sha256:[0-9a-f]{64}([[:space:]]|$)'
   bd_pin_re='^FROM node:[0-9]+\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}[[:space:]]+AS[[:space:]]+builder([[:space:]]|$)'
   n_runtime_pin="$(grep -cE "$rt_pin_re" "$df")" || n_runtime_pin=0
   if [ "${n_runtime_pin:-0}" -ne 1 ]; then
-    echo "::error::ts/Dockerfile: the runtime FROM line must be exactly one gcr.io/distroless/nodejsNN-debian12:nonroot@sha256:<64 hex> — a missing digest or a different tag leaves the runtime base unpinned." >&2
+    echo "::error::ts/Dockerfile: the runtime FROM line must be exactly one gcr.io/distroless/nodejsNN-debian13:nonroot@sha256:<64 hex> — a missing digest or a different tag leaves the runtime base unpinned." >&2
     return 1
   fi
   n_builder_pin="$(grep -cE "$bd_pin_re" "$df")" || n_builder_pin=0

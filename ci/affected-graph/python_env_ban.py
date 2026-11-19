@@ -92,7 +92,7 @@ EXCLUSIONS: tuple[tuple[str, Callable[[str, frozenset[str]], bool]], ...] = (
 )
 
 # G-wrapper: `shasum -a 256 ci/python-env/run.sh`. A wrapper change needs a change here in the same diff.
-WRAPPER_SHA256 = "d96bd6cd5dc4ba2261fc070952fa5833a04fc35db803101a0606e99ea3d8c082"
+WRAPPER_SHA256 = "e95817c71e97e90ba6a8dc2ea16d480bd7de237c6b3a84f22392cec11e32491b"
 # G-floor: the SMA-765 kernel task must run the isolated reinstall through the wrapper.
 FLOOR_TASK = "paigasus-kernel-py:test"
 FLOOR_TEXT = "ci/python-env/run.sh kernel-test"
@@ -106,7 +106,7 @@ PINNED_LINES: dict[tuple[str, str], str] = {
     (".gitignore", ".venv/"): "ignore pattern: the name of the project environment directory that git must ignore",
     (".moon/toolchains.yml", "packageManager: 'uv'"): "Moon toolchain schema value: the schema accepts only the tool name here",
     (".moon/workspace.yml", "- '**/.venv/**'"): "Moon hasher ignore glob: it names the project environment directory",
-    (".prototools", 'uv = "0.11.16"'): "proto tool version pin: proto reads the tool name as the key",
+    (".prototools", 'uv = "0.13.9"'): "proto tool version pin: proto reads the tool name as the key",
     (
         "py/pyproject.toml",
         'exclude = ["**/__pycache__", "**/node_modules", "**/.venv", "**/dist", "**/build", "**/generated/**"]',
@@ -440,7 +440,7 @@ WRAPPER_CASES: tuple[WrapperCase, ...] = (
     ),
     WrapperCase(
         "kernel-test", "sub", ("kernel-test",), {}, 0, 0, "uv", "py/packages/paigasus-kernel",
-        ("run", "--isolated", "--reinstall-package", "paigasus-py-bindings", "pytest", "tests"),
+        ("run", "--isolated", "--group", "dev", "--reinstall-package", "paigasus-py-bindings", "pytest", "tests"),
     ),
     WrapperCase("script rc 2", "sub", ("script", "f.py", "a"), {}, 2, 2, "uv", "sub", ("run", "--isolated", "--no-project", "--python", ">=3.12", "python3", "f.py", "a")),
     WrapperCase("script rc 3", "sub", ("script", "f.py", "a"), {}, 3, 3, "uv", "sub", ("run", "--isolated", "--no-project", "--python", ">=3.12", "python3", "f.py", "a")),
@@ -816,12 +816,12 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
 
     # G-toolchain (the SMA-765 R-toolchain fixtures, unchanged, and one `installArgs` row).
     for tc, want in (
-        ("unstable_uv:\n  version: '0.11.16'\n  syncArgs: ['--reinstall']\n", True),
+        ("unstable_uv:\n  version: '0.13.9'\n  syncArgs: ['--reinstall']\n", True),
         ("unstable_python:\n  venvArgs:\n    - '--clear'\n", True),
-        ("unstable_uv:\n  # syncArgs: ['--reinstall']\n  version: '0.11.16'\n", False),
-        ("unstable_uv: {version: '0.11.16', syncArgs: ['--reinstall']}\n", True),
+        ("unstable_uv:\n  # syncArgs: ['--reinstall']\n  version: '0.13.9'\n", False),
+        ("unstable_uv: {version: '0.13.9', syncArgs: ['--reinstall']}\n", True),
         ("unstable_uv:\n  \"syncArgs\": ['--reinstall']\n", True),
-        ("unstable_uv:\n  version: '0.11.16' # syncArgs: x\n", False),
+        ("unstable_uv:\n  version: '0.13.9' # syncArgs: x\n", False),
         ("{$schema: ' # local', unstable_uv: {syncArgs: ['--reinstall']}}\n", True),
         ('{$schema: " # local", unstable_uv: {syncArgs: [x]}}\n', True),
         ("{a: 'it''s # x', unstable_uv: {syncArgs: [x]}}\n", True),

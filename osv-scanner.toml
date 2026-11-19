@@ -30,7 +30,7 @@
 #
 # No fix: osv.dev records introduced=0, last_affected=3.0.3, and 3.0.3 is the newest braces
 # on npm. No upgrade removes the path: the newest micromatch (4.0.8), fast-glob (3.3.3),
-# @next/eslint-plugin-next (16.3.8, which pins fast-glob 3.3.1), semantic-release (25.0.9)
+# @next/eslint-plugin-next (16.3.8, which pins fast-glob 3.3.1), semantic-release (26.0.1)
 # and @semantic-release/commit-analyzer (13.0.1) all still reach braces.
 #
 # Who reaches it: only micromatch@4.0.8, and only from the root importer `.` through
