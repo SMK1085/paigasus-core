@@ -46,7 +46,12 @@ plugins:
   # ─── Python: betterproto2 via LOCAL plugin (ADR-0004). Run through the python-env wrapper
   #     so it resolves in the py workspace venv (which also provides the `ruff`
   #     the compiler shells out to). betterproto2-compiler is a py dev dep. ────
+  # SMA-755: `strategy: all` runs the plugin ONCE for every file. The default runs it once per
+  # directory, and each run emits the `__init__.py` of every package it imports from. buf then saw
+  # duplicate package files (common/v1, google/protobuf), kept the first, and that copy could be
+  # partial. One call sees all files, so each package file is written once and is complete.
   - local: ['bash', '../ci/python-env/run.sh', 'protoc-plugin']
+    strategy: all
     out: ../py/packages/paigasus-proto/src/paigasus_proto/generated
     opt:
       - client_generation=async
