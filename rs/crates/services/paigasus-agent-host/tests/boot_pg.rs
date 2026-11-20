@@ -12,19 +12,24 @@ mod support;
 use std::time::Duration;
 
 use paigasus_agent_host::adapters::http::error;
-use paigasus_agent_host::adapters::persistence::MIGRATION_TABLE;
 use paigasus_agent_host::adapters::persistence::migration_lock::MIGRATION_LOCK_KEY;
+use paigasus_agent_host::adapters::persistence::{MIGRATION_TABLE, Migrator};
 use paigasus_proto::paigasus::common::v1::ErrorReason;
 use sea_orm::{ConnectionTrait, SqlErr};
+use sea_orm_migration::MigratorTrait;
 
 const READY_BUDGET: Duration = Duration::from_secs(90);
+
+fn migration_count() -> i64 {
+    Migrator::migrations().len() as i64
+}
 
 async fn applied(db: &sea_orm::DatabaseConnection) -> i64 {
     support::scalar_i64(db, &format!("SELECT count(*)::bigint AS n FROM {MIGRATION_TABLE}")).await
 }
 
 #[tokio::test]
-async fn a_fresh_database_boots_and_applies_m0001_once() {
+async fn a_fresh_database_boots_and_applies_every_migration_once() {
     let Some((_node, url)) = support::start_raw_postgres().await else {
         eprintln!("skipping boot test: Docker unavailable");
         return;
@@ -33,7 +38,7 @@ async fn a_fresh_database_boots_and_applies_m0001_once() {
     let (mut child, port) = support::spawn_service(&url);
     support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
 
-    assert_eq!(applied(&db).await, 1, "m0001 must be recorded exactly once");
+    assert_eq!(applied(&db).await, migration_count(), "every migration must be recorded exactly once");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('inbox') IS NOT NULL AS v").await, "m0001 must create the inbox table");
 }
 
@@ -48,11 +53,11 @@ async fn a_second_boot_applies_nothing() {
         let (mut first, port) = support::spawn_service(&url);
         support::wait_for_status(&mut first, port, "/readyz", 200, READY_BUDGET).await;
     }
-    assert_eq!(applied(&db).await, 1);
+    assert_eq!(applied(&db).await, migration_count());
 
     let (mut second, port) = support::spawn_service(&url);
     support::wait_for_status(&mut second, port, "/readyz", 200, READY_BUDGET).await;
-    assert_eq!(applied(&db).await, 1, "a second boot must not apply m0001 again");
+    assert_eq!(applied(&db).await, migration_count(), "a second boot must not apply any migration again");
 }
 
 #[tokio::test]

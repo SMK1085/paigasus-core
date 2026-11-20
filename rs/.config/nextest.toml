@@ -144,7 +144,7 @@ retries = 1
 [[profile.default.overrides]]
 # SMA-786: the agent host's Postgres-backed binaries, named one by one so the crate's pure unit
 # tests keep retries = 0. Same retry budget and container cap as the gateway's suites.
-filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg))'
+filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg) or binary(schema_pg))'
 retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
 test-group = 'docker-containers'
 

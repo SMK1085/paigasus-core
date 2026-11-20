@@ -168,3 +168,5 @@ pub async fn wait_for_status(child: &mut Child, port: u16, path: &str, want: u16
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+pub mod inbox;

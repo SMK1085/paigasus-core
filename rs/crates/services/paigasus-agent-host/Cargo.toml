@@ -55,6 +55,8 @@ reqwest = { workspace = true }
 rustls = { workspace = true }
 # The test model of `adapters::helikon` names the `BoxStream` type of the core `Model` trait.
 futures = { workspace = true }
+# `tests/support/inbox.rs` — fixed ids. No `rng` feature: a test builds ids with `from_u128`.
+uuid = { workspace = true }
 
 [lints]
 workspace = true
