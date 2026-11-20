@@ -83,6 +83,10 @@ while [ "$i" -lt 30 ]; do
   i=$((i + 1))
   sleep 1
 done
+if [ "$i" -ge 30 ]; then
+  echo "dev.sh: Postgres did not answer a query after 30 s" >&2
+  exit 1
+fi
 
 http_port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
 export AGENT_HOST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:${pg_port}/postgres"
