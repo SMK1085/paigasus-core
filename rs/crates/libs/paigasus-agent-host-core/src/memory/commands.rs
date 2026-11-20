@@ -8,7 +8,7 @@ use std::fmt;
 use serde::Deserialize;
 
 use super::path::tool_reason;
-use super::text::{cut_view, format_size, number_lines, snippet, view_lines};
+use super::text::{format_size, number_lines_cut, snippet, view_lines};
 use super::{CapError, MemoryDir, MemoryPath, MemoryWorkspace, ParsedToolPath, PathError, WorkspaceError, parse_tool_path};
 
 const COMMAND_NAMES: &str = "view, create, str_replace, insert, delete and rename";
@@ -228,7 +228,7 @@ fn view_file(file: &MemoryPath, content: &str, range: Option<(i64, i64)>) -> Res
             (usize::try_from(s).unwrap_or(1), end)
         }
     };
-    let body = cut_view(number_lines(&lines[start - 1..end], start));
+    let body = number_lines_cut(&lines[start - 1..end], start);
     Ok(format!("Here's the content of {} with line numbers:\n{body}", file.to_tool_path()))
 }
 
@@ -416,7 +416,16 @@ async fn str_replace(ws: &mut MemoryWorkspace, raw: &str, old: &str, new: &str) 
             Ok(format!("The memory file has been edited.\n{}", snippet(&edited, first_line, new.matches('\n').count())))
         }
         many => {
-            let lines: Vec<String> = many.iter().map(|at| (line_of(*at) + 1).to_string()).collect();
+            // The hits are in order, so count only the line breaks between one hit and the next.
+            let (mut line, mut from) = (0, 0);
+            let lines: Vec<String> = many
+                .iter()
+                .map(|&at| {
+                    line += content[from..at].matches('\n').count();
+                    from = at;
+                    (line + 1).to_string()
+                })
+                .collect();
             Err(MemoryCommandError::new(format!(
                 "No replacement was performed. Multiple occurrences of old_str `{old}` in lines: {}. Please ensure it is unique",
                 lines.join(", ")
@@ -588,6 +597,11 @@ mod tests {
             "No replacement was performed. Multiple occurrences of old_str `two` in lines: 2, 4. Please ensure it is unique"
         );
         assert_eq!(run(&mut ws, sr("/a", "")).await.unwrap_err(), "Error: old_str must not be empty.");
+        let mut hits = ws_with(&[("/h", "xx\nb\nx")]).await;
+        assert_eq!(
+            run(&mut hits, sr("/h", "x")).await.unwrap_err(),
+            "No replacement was performed. Multiple occurrences of old_str `x` in lines: 1, 1, 3. Please ensure it is unique"
+        );
         assert_eq!(
             run(&mut ws, sr("/missing", "x")).await.unwrap_err(),
             "Error: The path /memories/missing does not exist. Please provide a valid path."
