@@ -3242,6 +3242,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "paigasus-cloudevents"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "paigasus-gateway"
 version = "0.2.0"
 dependencies = [
