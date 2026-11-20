@@ -1525,17 +1525,17 @@ async fn the_kv_adapter_makes_the_bucket_and_does_a_cas() {
 }
 
 #[tokio::test]
-async fn the_kv_adapter_makes_the_handle_again_after_an_outage() {
-    let port = free_port();
-    let Some((nats, url)) = start_nats(Some(port), "decision_log_redis kv outage").await else {
+async fn the_kv_adapter_recovers_after_an_outage() {
+    let Some((nats, url)) = start_nats(None, "decision_log_redis kv outage").await else {
         return;
     };
     let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, entry_key(KEY));
     kv.get().await.expect("get while NATS is up");
-    nats.stop().await.expect("stop NATS");
+    // A pause keeps the connection and the server state. A stop does not: a reconnecting client can still answer.
+    nats.pause().await.expect("pause NATS");
     let down = kv.get().await;
-    assert!(matches!(down, Err(KvError::Timeout | KvError::Other)), "get while NATS is down: {down:?}");
-    nats.start().await.expect("start NATS");
+    assert!(matches!(down, Err(KvError::Timeout | KvError::Other)), "get while NATS is paused: {down:?}");
+    nats.unpause().await.expect("unpause NATS");
     wait_for("get works again", || async { kv.get().await.is_ok() }).await;
 }
 
