@@ -120,7 +120,8 @@ impl Config {
         .merge(Env::prefixed("AGENT_HOST_").split("__"))
     }
 
-    // `figment::Error` is large. The signature stays as the brief specifies it.
+    // `figment::Error` is large (about 200 bytes), and clippy flags it in a `Result`. The public
+    // signature returns it directly, so the lint is allowed here.
     #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, FigmentError> {
         Self::figment().extract()
@@ -170,7 +171,11 @@ mod tests {
     fn database_url_is_required() {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
-            assert!(Config::load().is_err());
+            let err = Config::load().expect_err("database_url is missing");
+            assert!(err.to_string().contains("database_url"), "the error must name database_url: {err}");
+            // Positive control: with the variable set, the same load succeeds.
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            assert!(Config::load().is_ok());
             Ok(())
         });
     }
@@ -205,6 +210,9 @@ mod tests {
             jail.set_env("AGENT_HOST_METRICS__ADDR", "127.0.0.1:8086");
             let cfg = with_url();
             assert_eq!(cfg.validate(), Err(ConfigError::MetricsPortClash));
+            // The negative half: a different port is accepted.
+            jail.set_env("AGENT_HOST_METRICS__ADDR", "127.0.0.1:9100");
+            assert_eq!(with_url().validate(), Ok(()));
             Ok(())
         });
     }

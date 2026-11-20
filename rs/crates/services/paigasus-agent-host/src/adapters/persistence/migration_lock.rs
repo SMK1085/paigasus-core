@@ -11,7 +11,7 @@
 //!
 //! **This key serialises migration runs against each other and NOTHING ELSE.** A migration doing
 //! DDL on a table a background maintainer also touches still needs that maintainer's own key —
-//! see its own key. Do not read this module as licence to drop a
+//! for example IAM's `AUDIT_PARTITION_LOCK_KEY`. Do not read this module as licence to drop a
 //! hand-rolled advisory lock from a future migration.
 
 use std::time::{Duration, Instant};
@@ -116,8 +116,9 @@ async fn applied_count<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
 /// Run `Migrator::up` under a transaction-scoped advisory lock, waiting up to `wait` to acquire it.
 ///
 /// **Production code must never call `Migrator::up` bare.** There is exactly one production call
-/// site (`main.rs`) and this is it; the remaining call sites are integration tests that
-/// deliberately drive migrations step by step.
+/// site (`main.rs`) and this is it. `main.rs` and its guard test arrive in a later task
+/// (SMA-786 Task 6). The remaining call sites are integration tests that deliberately drive
+/// migrations step by step.
 ///
 /// The loop is do-while: an attempt always happens before any give-up decision, so even the
 /// smallest legal `wait` still asks Postgres once.
