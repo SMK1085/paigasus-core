@@ -95,7 +95,11 @@ pub enum GroupOutcome {
 /// Any Redis error other than `BUSYGROUP`.
 pub async fn ensure_group(conn: &mut paigasus_redis::RedisHandle, key: &str, group: &str, fresh_id: &str) -> Result<GroupOutcome, redis::RedisError> {
     let r: String = GROUP.key(key).key(gen_key(key)).arg(group).arg(fresh_id).invoke_async(conn).await?;
-    Ok(if r == "created" { GroupOutcome::Created } else { GroupOutcome::Exists })
+    match r.as_str() {
+        "created" => Ok(GroupOutcome::Created),
+        "exists" => Ok(GroupOutcome::Exists),
+        _ => Err(redis::RedisError::from((redis::ErrorKind::Parse, "the group script returned an unknown answer"))),
+    }
 }
 
 /// What the sample script read.

@@ -1450,6 +1450,15 @@ async fn the_detection_script_repairs_the_generation_and_increments_the_epoch() 
         },
         "the generation is kept and the epoch grows"
     );
+    assert_eq!(
+        detect(&mut conn, KEY, "relay", "id-3").await.expect("detect 3"),
+        RedisView::Live {
+            generation: "id-1".into(),
+            epoch: 3,
+            xlen: 0
+        },
+        "the epoch counts every call"
+    );
 }
 
 #[tokio::test]
@@ -1484,7 +1493,7 @@ async fn the_sample_script_reads_the_keys_and_writes_nothing() {
     redis_cli(&node, &["XADD", KEY, "*", "e", "x"]).await;
     redis_cli(&node, &["SET", &gen_key(KEY), "id-9"]).await;
     redis_cli(&node, &["SET", &epoch_key(KEY), "7"]).await;
-    let before = redis_cli(&node, &["DBSIZE"]).await;
+    let before = state_of(&node).await;
     let got = sample(&mut conn, KEY, "relay").await.expect("sample");
     assert_eq!(
         got,
@@ -1495,5 +1504,41 @@ async fn the_sample_script_reads_the_keys_and_writes_nothing() {
             epoch: Some(7)
         }
     );
-    assert_eq!(redis_cli(&node, &["DBSIZE"]).await, before, "the sample wrote nothing");
+    assert_eq!(state_of(&node).await, before, "the sample changed gen, epoch or the stream");
+    assert_eq!(before, ("id-9".to_owned(), "7".to_owned(), "1".to_owned()));
+}
+
+/// `(GET gen, GET epoch, XLEN)` as `redis-cli` prints them.
+async fn state_of(node: &ContainerAsync<Redis>) -> (String, String, String) {
+    (
+        redis_cli(node, &["GET", &gen_key(KEY)]).await,
+        redis_cli(node, &["GET", &epoch_key(KEY)]).await,
+        redis_cli(node, &["XLEN", KEY]).await,
+    )
+}
+
+/// Run `detect` while the ACL `deny` is set on the default user (for example `-set`). The ACL is restored before
+/// the result is returned.
+async fn detect_with_denied(node: &ContainerAsync<Redis>, conn: &mut paigasus_redis::RedisHandle, deny: &str, allow: &str) -> Result<RedisView, redis::RedisError> {
+    redis_cli(node, &["ACL", "SETUSER", "default", deny]).await;
+    let result = detect(conn, KEY, "relay", "id-2").await;
+    redis_cli(node, &["ACL", "SETUSER", "default", allow]).await;
+    result
+}
+
+#[tokio::test]
+async fn the_detection_script_returns_a_write_error_and_changes_no_epoch() {
+    let Some((node, url)) = redis_7_4("decision_log_redis detect write error").await else {
+        return;
+    };
+    let mut conn = script_conn(&url).await;
+    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    // SET denied: the first write fails. Nothing is written.
+    let err = detect_with_denied(&node, &mut conn, "-set", "+set").await.expect_err("SET is denied");
+    assert!(err.to_string().contains("no permissions to run the 'set' command"), "the ACL error text is returned: {err}");
+    assert_eq!(redis_cli(&node, &["EXISTS", &gen_key(KEY), &epoch_key(KEY)]).await, "0", "no key was written");
+    // INCR denied: the generation is set, the epoch is not.
+    let err = detect_with_denied(&node, &mut conn, "-incr", "+incr").await.expect_err("INCR is denied");
+    assert!(err.to_string().contains("no permissions to run the 'incr' command"), "the ACL error text is returned: {err}");
+    assert_eq!(redis_cli(&node, &["EXISTS", &epoch_key(KEY)]).await, "0", "no epoch change");
 }
