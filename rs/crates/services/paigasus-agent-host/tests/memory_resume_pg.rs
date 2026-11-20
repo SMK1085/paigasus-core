@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! G7 of SMA-789: a fresh run resumes a task from memory alone, and a run that does not commit
-//! leaves nothing. Both go through a real Helikon agent run on a real Postgres.
+//! G7 of SMA-789, on a real Postgres. Run 1 is a real Helikon agent run with the memory tool.
+//! After run 1 commits, a committed task is readable from a fresh store and a fresh workspace
+//! through the run-start helpers (`run_start_context`, `render_run_start`) and `execute`. Phase 2
+//! calls these helpers directly and does not run an agent: no production path calls
+//! `run_start_context` yet (SMA-790). A run 1 that does not commit leaves nothing.
 
 mod support;
 
@@ -84,14 +87,14 @@ async fn migrated_url() -> Option<(testcontainers::ContainerAsync<testcontainers
     Some((node, url))
 }
 
-/// Run 2: a new store on a new connection, a new workspace.
+/// Phase 2: a new store on a new connection, a new workspace. No agent runs.
 async fn fresh_workspace(url: &str, scope: &MemoryScope) -> MemoryWorkspace {
     let store = Arc::new(PgMemoryStore::new(support::connect(url).await));
     MemoryWorkspace::new(store, scope.clone(), MemoryCaps::default())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_fresh_run_resumes_from_memory_alone() {
+async fn a_committed_task_is_readable_from_a_fresh_store_and_workspace_through_the_run_start_helpers() {
     let Some((_node, url)) = migrated_url().await else {
         eprintln!("skipping memory_resume_pg: Docker unavailable");
         return;

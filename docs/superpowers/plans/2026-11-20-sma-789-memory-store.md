@@ -412,7 +412,9 @@ clash `Error: {p} is both a file and a directory. Delete one of them first.`
 - `apply_in_rolls_back_with_the_caller` — `begin`, `apply_in`, `rollback`: a new store finds nothing.
 - `apply_in_conflict_keeps_the_caller_usable` — `begin`, `apply_in` with a stale version → `Conflict`;
   then `SELECT 1` in the same txn succeeds; `commit`; no partial memory row exists.
-- `scope_lock_serializes_apply` — txn B: `INSERT` scope row and `SELECT … FOR UPDATE` on it; start
+- `scope_lock_serializes_apply` — txn B holds an existing, committed scope row `FOR KEY SHARE`
+  (that lock conflicts only with `FOR UPDATE`, spec §7; an `INSERT` + `SELECT … FOR UPDATE` in B
+  would also block the FK check and the counter update, so it could not prove the lock); start
   `apply` for that scope in a task; assert it is not finished after 300 ms; commit B; assert it
   finishes within 5 s. **Prove it bites:** remove `FOR UPDATE` from the adapter, see this test fail,
   restore it; write the result in the commit body.
