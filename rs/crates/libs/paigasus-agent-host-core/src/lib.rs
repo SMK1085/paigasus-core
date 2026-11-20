@@ -4,8 +4,17 @@
 //! No I/O crate is a dependency of this crate (anti-goal A1). IDs and PRNs come from
 //! `paigasus-kernel`.
 
+pub mod agent;
+pub mod deferral;
 pub mod error;
 pub mod ids;
+pub mod inbox;
+pub mod outbox;
+pub mod run;
+pub mod timer;
+
+#[cfg(test)]
+mod value_object_tests;
 
 #[cfg(test)]
 mod tests {

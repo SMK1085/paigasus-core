@@ -105,6 +105,8 @@ tonic-types = "0.14"
 # needs `net` for `TcpListenerStream`); no default features at the workspace baseline.
 tokio-stream = { version = "0.1", default-features = false }
 thiserror = "2"
+# jiff: core time type (SMA-786 section 6.2); Helikon core needs >= 0.2.46, which Task 8 brings in.
+jiff = "0.2"
 anyhow = "1"
 figment = { version = "0.10", features = ["toml", "env"] }
 # Prefer native `async fn` in traits (stable since 1.75); use async-trait only when

@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The inbox and its events.
+
+use jiff::Timestamp;
+use uuid::Uuid;
+
+use crate::error::DomainError;
+use crate::ids::{AgentId, EventId, InboxId, PrincipalId, RunId, ThreadId};
+
+/// An inbox. It belongs to one agent and one principal, in one organization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inbox {
+    pub id: InboxId,
+    pub agent: AgentId,
+    pub principal: PrincipalId,
+    pub created_at: Timestamp,
+}
+
+impl Inbox {
+    /// Make an inbox. The organization of the agent must be the organization of the inbox.
+    pub fn new(id: InboxId, agent: AgentId, principal: PrincipalId, created_at: Timestamp) -> Result<Inbox, DomainError> {
+        if id.org() != agent.org() {
+            return Err(DomainError::OrgMismatch {
+                inbox_org: id.org(),
+                agent_org: agent.org(),
+            });
+        }
+        Ok(Inbox { id, agent, principal, created_at })
+    }
+
+    /// The organization of the inbox. It comes from the inbox PRN.
+    #[must_use]
+    pub fn org(&self) -> Uuid {
+        self.id.org()
+    }
+}
+
+/// The processing state of an inbox event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventStatus {
+    Pending,
+    Done,
+    Dead,
+}
+
+/// An event in an inbox.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboxEvent {
+    pub id: EventId,
+    pub inbox: InboxId,
+    pub source: String,
+    pub ce_id: String,
+    pub ce_type: String,
+    pub thread: Option<ThreadId>,
+    pub received_at: Timestamp,
+    pub status: EventStatus,
+    pub attempts: u32,
+    pub not_before: Timestamp,
+    pub claimed_run: Option<RunId>,
+    pub data: serde_json::Value,
+}

@@ -3184,7 +3184,10 @@ dependencies = [
 name = "paigasus-agent-host-core"
 version = "0.0.0"
 dependencies = [
+ "jiff",
  "paigasus-kernel",
+ "serde",
+ "serde_json",
  "thiserror",
  "uuid",
 ]
