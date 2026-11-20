@@ -803,6 +803,12 @@ class ErrorReason(betterproto2.Enum):
     request or the token.
     """
 
+    STORE_UNAVAILABLE = 910
+    """
+    In the shared range (900-999). Emitted by the agent host (SMA-787).
+    "store-unavailable" — the service cannot reach its database. Retryable (503).
+    """
+
     @classmethod
     def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
         return {
@@ -899,6 +905,7 @@ class ErrorReason(betterproto2.Enum):
             907: "ERROR_REASON_INVALID_QUERY_PARAMETER",
             908: "ERROR_REASON_INVALID_PATH_SEGMENT",
             909: "ERROR_REASON_INVALID_DPOP_PROOF",
+            910: "ERROR_REASON_STORE_UNAVAILABLE",
         }
 
     @classmethod
@@ -997,6 +1004,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_INVALID_QUERY_PARAMETER": 907,
             "ERROR_REASON_INVALID_PATH_SEGMENT": 908,
             "ERROR_REASON_INVALID_DPOP_PROOF": 909,
+            "ERROR_REASON_STORE_UNAVAILABLE": 910,
         }
 
 
