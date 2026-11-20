@@ -124,6 +124,10 @@ struct Ctx {
 struct Worker {
     handle: Option<LeaseHandle>,
     claim: Option<Claim>,
+    /// The model: true after a successful claim (also an empty one) since the last take. The
+    /// next claim must then rotate the token. The test derives this from the operations, not
+    /// from the handle.
+    claimed_since_take: bool,
 }
 
 /// The state of one case.
@@ -188,6 +192,7 @@ impl Case<'_> {
         self.expired = false;
         let worker = &mut self.workers[w];
         worker.handle = Some(handle);
+        worker.claimed_since_take = false;
         if let Some(claim) = worker.claim.take() {
             self.old_claims.push(claim);
         }
@@ -211,8 +216,11 @@ impl Case<'_> {
         let max_token = self.max_token;
         let worker = &mut self.workers[w];
         let Some(handle) = worker.handle.as_mut() else { return Ok(()) };
-        let open = handle.open_claim().is_some();
-        let rotates = handle.needs_rotation();
+        // The expectations come from the model. The handle must agree with the model.
+        let open = worker.claim.is_some();
+        let rotates = worker.claimed_since_take;
+        prop_assert_eq!(handle.open_claim().is_some(), open, "the handle and the model disagree on the open claim");
+        prop_assert_eq!(handle.needs_rotation(), rotates, "the handle and the model disagree on the rotation");
         let before = handle.token().0;
         let valid = live && token == before;
         let result = self.ctx.stores[w].claim(handle, &cfg()).await;
@@ -232,6 +240,7 @@ impl Case<'_> {
                     prop_assert!(t == before && t == max_token, "first claim token {} is not the take token {}", t, before);
                 }
                 self.max_token = t;
+                worker.claimed_since_take = true;
                 if let Some(claim) = claim {
                     prop_assert_eq!(claim.lease_token.0, t);
                     worker.claim = Some(claim);
