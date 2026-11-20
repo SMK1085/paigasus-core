@@ -87,6 +87,9 @@ pub fn free_port() -> u16 {
 /// The status and the body of a GET, or `None` when nothing answers.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub async fn http_status(port: u16, path: &str) -> Option<(u16, String)> {
+    // reqwest 0.13 panics when it builds a `Client` with no installed CryptoProvider (SMA-809).
+    // A second install returns `Err`, which is correct, so the result is ignored.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let resp = reqwest::Client::new().get(format!("http://127.0.0.1:{port}{path}")).timeout(Duration::from_secs(2)).send().await.ok()?;
     let status = resp.status().as_u16();
     Some((status, resp.text().await.ok()?))

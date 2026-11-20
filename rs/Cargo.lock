@@ -3215,6 +3215,7 @@ dependencies = [
  "paigasus-proto",
  "paigasus-test-docker",
  "reqwest",
+ "rustls",
  "sea-orm",
  "sea-orm-migration",
  "serde",

@@ -50,6 +50,9 @@ paigasus-test-docker = { workspace = true }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 reqwest = { workspace = true }
+# reqwest 0.13 uses `rustls-no-provider` (SMA-809). A test installs the `ring` CryptoProvider
+# before it builds a `Client`, or reqwest panics.
+rustls = { workspace = true }
 # The test model of `adapters::helikon` names the `BoxStream` type of the core `Model` trait.
 futures = { workspace = true }
 
