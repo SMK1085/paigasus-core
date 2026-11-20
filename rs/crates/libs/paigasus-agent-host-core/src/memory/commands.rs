@@ -130,13 +130,9 @@ pub async fn execute(ws: &mut MemoryWorkspace, cmd: MemoryCommand) -> Result<Str
         MemoryCommand::Create { path, file_text } => create(ws, &path, file_text).await,
         MemoryCommand::StrReplace { path, old_str, new_str } => str_replace(ws, &path, &old_str, new_str.as_deref().unwrap_or("")).await,
         MemoryCommand::Insert { path, insert_line, insert_text } => insert(ws, &path, insert_line, &insert_text).await,
-        MemoryCommand::Delete { .. } => Err(not_available("delete")),
-        MemoryCommand::Rename { .. } => Err(not_available("rename")),
+        MemoryCommand::Delete { path } => delete(ws, &path).await,
+        MemoryCommand::Rename { old_path, new_path } => rename(ws, &old_path, &new_path).await,
     }
-}
-
-fn not_available(command: &str) -> MemoryCommandError {
-    MemoryCommandError::new(format!("Error: the {command} command is not available yet."))
 }
 
 fn missing_view(tool_path: &str) -> MemoryCommandError {
@@ -230,6 +226,18 @@ async fn create(ws: &mut MemoryWorkspace, raw: &str, text: String) -> Result<Str
             inner.to_tool_path()
         )));
     }
+    if let Some(ancestor) = file_ancestor(ws, &file).await? {
+        return Err(MemoryCommandError::new(format!(
+            "Error: Cannot create the file {tool}. The file {} exists and a file cannot be in a file.",
+            ancestor.to_tool_path()
+        )));
+    }
+    ws.write(&file, text).await?;
+    Ok(format!("File created successfully at: {tool}"))
+}
+
+/// The first existing file that is a directory of the path, if there is one.
+async fn file_ancestor(ws: &mut MemoryWorkspace, file: &MemoryPath) -> Result<Option<MemoryPath>, MemoryCommandError> {
     let mut prefix = String::new();
     let segments: Vec<&str> = file.as_str().split('/').skip(1).collect();
     for segment in &segments[..segments.len() - 1] {
@@ -237,14 +245,103 @@ async fn create(ws: &mut MemoryWorkspace, raw: &str, text: String) -> Result<Str
         prefix.push_str(segment);
         let ancestor = MemoryPath::parse(&prefix)?;
         if ws.read(&ancestor).await?.is_some() {
+            return Ok(Some(ancestor));
+        }
+    }
+    Ok(None)
+}
+
+/// The files a path argument names: the file, or every file under the directory. An empty list
+/// means that the path does not exist. A path that is a file and a directory is a clash.
+async fn targets(ws: &mut MemoryWorkspace, parsed: &ParsedToolPath, raw: &str) -> Result<Vec<MemoryPath>, MemoryCommandError> {
+    let under = ws.list(&parsed.dir).await?;
+    let is_file = match &parsed.file {
+        Some(f) => ws.read(f).await?.is_some(),
+        None => false,
+    };
+    match (&parsed.file, is_file, under.is_empty() || parsed.dir.is_root()) {
+        (Some(_), true, false) => Err(MemoryCommandError::new(format!(
+            "Error: {} is both a file and a directory. Delete one of them first.",
+            raw.strip_suffix('/').unwrap_or(raw)
+        ))),
+        (Some(f), true, true) => Ok(vec![f.clone()]),
+        _ => Ok(under.into_iter().map(|(p, _)| p).collect()),
+    }
+}
+
+fn missing_path(raw: &str) -> MemoryCommandError {
+    MemoryCommandError::new(format!("Error: The path {} does not exist", raw.strip_suffix('/').unwrap_or(raw)))
+}
+
+async fn delete(ws: &mut MemoryWorkspace, raw: &str) -> Result<String, MemoryCommandError> {
+    let parsed = parse_tool_path(raw)?;
+    let shown = raw.strip_suffix('/').unwrap_or(raw);
+    if parsed.dir.is_root() {
+        return Err(MemoryCommandError::new(format!("Error: The memory root {shown} cannot be deleted.")));
+    }
+    let files = targets(ws, &parsed, raw).await?;
+    if files.is_empty() {
+        return Err(missing_path(raw));
+    }
+    for file in &files {
+        ws.remove(file).await?;
+    }
+    Ok(format!("Successfully deleted {shown}"))
+}
+
+async fn rename(ws: &mut MemoryWorkspace, old_raw: &str, new_raw: &str) -> Result<String, MemoryCommandError> {
+    let old = parse_tool_path(old_raw)?;
+    let new = parse_tool_path(new_raw)?;
+    let old_shown = old_raw.strip_suffix('/').unwrap_or(old_raw);
+    let new_shown = new_raw.strip_suffix('/').unwrap_or(new_raw);
+    if old.dir.is_root() {
+        return Err(MemoryCommandError::new(format!("Error: The memory root {old_shown} cannot be renamed.")));
+    }
+    let sources = targets(ws, &old, old_raw).await?;
+    if sources.is_empty() {
+        return Err(missing_path(old_raw));
+    }
+    // A single file that is not a directory moves as a file. Anything else moves as a directory.
+    let as_file = old.file.as_ref().filter(|f| sources.len() == 1 && sources[0] == **f);
+    if old.dir.contains_dir(&new.dir) && old.dir != new.dir {
+        return Err(MemoryCommandError::new(format!("Error: {new_shown} is inside {old_shown}.")));
+    }
+    let exists = new.dir.is_root() || !targets(ws, &new, new_raw).await?.is_empty();
+    if exists {
+        return Err(MemoryCommandError::new(format!("Error: The destination {new_shown} already exists")));
+    }
+    // Check every destination before the first write.
+    let mut moves = Vec::with_capacity(sources.len());
+    for source in &sources {
+        let target = match as_file {
+            Some(_) => new
+                .file
+                .clone()
+                .ok_or_else(|| MemoryCommandError::new(format!("Error: The path {new_raw} ends with / and is a directory path. Give the path of a file.")))?,
+            None => source.rebase(&old.dir, &new.dir).map_err(|e| match e {
+                PathError::Invalid { path, reason } => MemoryCommandError::new(format!("Error: The rename would make the path /memories{path}, which is not valid: {reason}. Nothing changed.")),
+                other => other.into(),
+            })?,
+        };
+        if let Some(ancestor) = file_ancestor(ws, &target).await? {
             return Err(MemoryCommandError::new(format!(
-                "Error: Cannot create the file {tool}. The file {} exists and a file cannot be in a file.",
+                "Error: Cannot rename to {new_shown}. The file {} exists and a file cannot be in a file.",
                 ancestor.to_tool_path()
             )));
         }
+        moves.push((source.clone(), target));
     }
-    ws.write(&file, text).await?;
-    Ok(format!("File created successfully at: {tool}"))
+    let mut contents = Vec::with_capacity(moves.len());
+    for (source, _) in &moves {
+        contents.push(ws.read(source).await?.ok_or_else(|| missing_path(&source.to_tool_path()))?);
+    }
+    for ((_, target), content) in moves.iter().zip(contents) {
+        ws.write(target, content).await?;
+    }
+    for (source, _) in &moves {
+        ws.remove(source).await?;
+    }
+    Ok(format!("Successfully renamed {old_shown} to {new_shown}"))
 }
 
 async fn str_replace(ws: &mut MemoryWorkspace, raw: &str, old: &str, new: &str) -> Result<String, MemoryCommandError> {
@@ -315,6 +412,18 @@ mod tests {
             ws.write(&MemoryPath::parse(p).unwrap(), (*c).to_string()).await.unwrap();
         }
         ws
+    }
+
+    /// A workspace over a store that holds the files already, with an empty buffer.
+    async fn committed_ws(files: &[(&str, &str)]) -> MemoryWorkspace {
+        let store = Arc::new(InMemoryMemoryStore::default());
+        let scope = fresh_scope();
+        let mut seed = MemoryWorkspace::new(store.clone(), scope.clone(), MemoryCaps::default());
+        for (p, c) in files {
+            seed.write(&MemoryPath::parse(p).unwrap(), (*c).to_string()).await.unwrap();
+        }
+        seed.commit().await.unwrap();
+        MemoryWorkspace::new(store, scope, MemoryCaps::default())
     }
 
     async fn run(ws: &mut MemoryWorkspace, v: serde_json::Value) -> Result<String, String> {
@@ -473,16 +582,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sealed_and_deferred_commands() {
+    async fn delete_file_and_dir() {
+        let mut ws = ws_with(&[("/f", "f"), ("/a/x", "x"), ("/a/y/z", "z"), ("/ab/x", "k")]).await;
+        assert_eq!(run(&mut ws, json!({"command":"delete","path":"/memories/f"})).await.unwrap(), "Successfully deleted /memories/f");
+        assert_eq!(content(&mut ws, "/f").await, None);
+        assert_eq!(run(&mut ws, json!({"command":"delete","path":"/memories/a/"})).await.unwrap(), "Successfully deleted /memories/a");
+        assert_eq!(content(&mut ws, "/a/x").await, None);
+        assert_eq!(content(&mut ws, "/a/y/z").await, None);
+        assert_eq!(content(&mut ws, "/ab/x").await.as_deref(), Some("k"));
+    }
+
+    #[tokio::test]
+    async fn delete_root_refused() {
         let mut ws = ws_with(&[("/a", "a")]).await;
-        assert_eq!(
-            run(&mut ws, json!({"command":"delete","path":"/memories/a"})).await.unwrap_err(),
-            "Error: the delete command is not available yet."
-        );
-        assert_eq!(
-            run(&mut ws, json!({"command":"rename","old_path":"/memories/a","new_path":"/memories/b"})).await.unwrap_err(),
-            "Error: the rename command is not available yet."
-        );
+        for p in ["/memories", "/memories/"] {
+            let err = run(&mut ws, json!({"command":"delete","path":p})).await.unwrap_err();
+            assert_eq!(err, "Error: The memory root /memories cannot be deleted.");
+        }
+        assert_eq!(content(&mut ws, "/a").await.as_deref(), Some("a"));
+    }
+
+    #[tokio::test]
+    async fn delete_missing() {
+        let mut ws = ws_with(&[("/a", "a")]).await;
+        let err = run(&mut ws, json!({"command":"delete","path":"/memories/nope"})).await.unwrap_err();
+        assert_eq!(err, "Error: The path /memories/nope does not exist");
+    }
+
+    #[tokio::test]
+    async fn rename_file_and_dir() {
+        let mut ws = ws_with(&[("/f", "f"), ("/a/x", "x"), ("/a/y/z", "z"), ("/ab/x", "k")]).await;
+        let r = |o: &str, n: &str| json!({"command":"rename","old_path":o,"new_path":n});
+        assert_eq!(run(&mut ws, r("/memories/f", "/memories/g")).await.unwrap(), "Successfully renamed /memories/f to /memories/g");
+        assert_eq!(content(&mut ws, "/f").await, None);
+        assert_eq!(content(&mut ws, "/g").await.as_deref(), Some("f"));
+        assert_eq!(run(&mut ws, r("/memories/a", "/memories/b")).await.unwrap(), "Successfully renamed /memories/a to /memories/b");
+        assert_eq!(content(&mut ws, "/a/x").await, None);
+        assert_eq!(content(&mut ws, "/a/y/z").await, None);
+        assert_eq!(content(&mut ws, "/b/x").await.as_deref(), Some("x"));
+        assert_eq!(content(&mut ws, "/b/y/z").await.as_deref(), Some("z"));
+        assert_eq!(content(&mut ws, "/ab/x").await.as_deref(), Some("k"));
+    }
+
+    #[tokio::test]
+    async fn rename_refusals() {
+        let mut ws = committed_ws(&[("/a/x", "x"), ("/b", "b"), ("/a/1/2/3/4/5/6/7", "deep")]).await;
+        let r = |o: &str, n: &str| json!({"command":"rename","old_path":o,"new_path":n});
+        assert_eq!(run(&mut ws, r("/memories/nope", "/memories/c")).await.unwrap_err(), "Error: The path /memories/nope does not exist");
+        assert_eq!(run(&mut ws, r("/memories/a", "/memories/b")).await.unwrap_err(), "Error: The destination /memories/b already exists");
+        assert_eq!(run(&mut ws, r("/memories/a", "/memories/a/q")).await.unwrap_err(), "Error: /memories/a/q is inside /memories/a.");
+        assert_eq!(run(&mut ws, r("/memories", "/memories/c")).await.unwrap_err(), "Error: The memory root /memories cannot be renamed.");
+        assert_eq!(run(&mut ws, r("/memories/b", "/memories")).await.unwrap_err(), "Error: The destination /memories already exists");
+        // The deep file would get 9 segments.
+        let err = run(&mut ws, r("/memories/a", "/memories/q/r")).await.unwrap_err();
+        assert!(err.starts_with("Error: The rename would make the path /memories/q/r/1/2/3/4/5/6/7, which is not valid: "), "{err}");
+        assert!(err.ends_with(". Nothing changed."), "{err}");
+        assert!(ws.take_changes().changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_into_file_dir_clash() {
+        let mut ws = committed_ws(&[("/c.md", "c"), ("/a/x", "x")]).await;
+        let err = run(&mut ws, json!({"command":"rename","old_path":"/memories/a","new_path":"/memories/c.md/a"})).await.unwrap_err();
+        assert!(err.contains("/memories/c.md"), "{err}");
+        assert_eq!(content(&mut ws, "/a/x").await.as_deref(), Some("x"));
+        assert_eq!(content(&mut ws, "/c.md/a/x").await, None);
+        assert!(ws.take_changes().changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_clash_view_and_delete() {
+        let store = Arc::new(InMemoryMemoryStore::default());
+        let scope = fresh_scope();
+        let mut seed = MemoryWorkspace::new(store.clone(), scope.clone(), MemoryCaps::default());
+        seed.write(&MemoryPath::parse("/n").unwrap(), "file".into()).await.unwrap();
+        seed.write(&MemoryPath::parse("/n/a").unwrap(), "inner".into()).await.unwrap();
+        seed.commit().await.unwrap();
+        let mut ws = MemoryWorkspace::new(store, scope, MemoryCaps::default());
+        let out = run(&mut ws, json!({"command":"view","path":"/memories/n"})).await.unwrap();
+        assert!(out.contains("file"), "{out}");
+        let err = run(&mut ws, json!({"command":"delete","path":"/memories/n"})).await.unwrap_err();
+        assert_eq!(err, "Error: /memories/n is both a file and a directory. Delete one of them first.");
+    }
+
+    #[tokio::test]
+    async fn sealed_workspace_refuses_every_command() {
+        let mut ws = ws_with(&[("/a", "a")]).await;
         ws.take_changes();
         for v in [json!({"command":"view","path":"/memories"}), json!({"command":"delete","path":"/memories/a"})] {
             assert_eq!(run(&mut ws, v).await.unwrap_err(), "The run is ending. Memory is read-only now.");
