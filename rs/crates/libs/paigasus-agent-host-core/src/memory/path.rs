@@ -27,6 +27,17 @@ pub enum PathError {
     RootNotAFile,
 }
 
+/// The length refusal of a store path.
+const TOO_LONG: &str = "a path has at most 256 bytes";
+/// The length refusal of a tool path: the store limit plus the bytes of `TOOL_ROOT`.
+const TOOL_TOO_LONG: &str = "a path has at most 265 bytes including /memories";
+
+/// The reason as the model must read it for a tool path. Only the length rule differs, because
+/// the tool path holds the `/memories` prefix and the store path does not.
+pub(super) fn tool_reason(reason: &'static str) -> &'static str {
+    if reason == TOO_LONG { TOOL_TOO_LONG } else { reason }
+}
+
 fn invalid(path: &str, reason: &'static str) -> PathError {
     PathError::Invalid { path: path.to_string(), reason }
 }
@@ -34,7 +45,7 @@ fn invalid(path: &str, reason: &'static str) -> PathError {
 /// Check a path that is not the root. The root `/` is the caller's case.
 fn validate_non_root(path: &str) -> Result<(), PathError> {
     if path.len() > MAX_BYTES {
-        return Err(invalid(path, "a path has at most 256 bytes"));
+        return Err(invalid(path, TOO_LONG));
     }
     let Some(rest) = path.strip_prefix('/') else {
         return Err(invalid(path, "a path starts with /"));
@@ -236,7 +247,7 @@ pub fn parse_tool_path(raw: &str) -> Result<ParsedToolPath, PathError> {
     }
     // Report a refusal with the tool path, not with the store path.
     let rename = |e: PathError| match e {
-        PathError::Invalid { reason, .. } => invalid(raw, reason),
+        PathError::Invalid { reason, .. } => invalid(raw, tool_reason(reason)),
         other => other,
     };
     if let Some(body) = rest.strip_suffix('/') {
@@ -262,6 +273,18 @@ pub fn parse_tool_path(raw: &str) -> Result<ParsedToolPath, PathError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tool_length_refusal_counts_the_tool_root() {
+        assert_eq!(TOOL_TOO_LONG, format!("a path has at most {} bytes including {TOOL_ROOT}", MAX_BYTES + TOOL_ROOT.len()));
+        assert_eq!(TOO_LONG, format!("a path has at most {MAX_BYTES} bytes"));
+        let long_257 = format!("/{}/{}/{}/{}/b", "a".repeat(64), "a".repeat(64), "a".repeat(64), "a".repeat(59));
+        let tool = format!("{TOOL_ROOT}{long_257}");
+        assert_eq!(tool.len(), 266);
+        let err = parse_tool_path(&tool).unwrap_err();
+        assert_eq!(err.to_string(), format!("The path {tool} is not allowed: a path has at most 265 bytes including /memories."));
+        assert_eq!(tool_reason("a path starts with /"), "a path starts with /");
+    }
 
     #[test]
     fn store_path_rules() {

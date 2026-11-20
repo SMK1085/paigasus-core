@@ -7,6 +7,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
+use super::path::tool_reason;
 use super::text::{cut_view, format_size, number_lines, snippet, view_lines};
 use super::{CapError, MemoryDir, MemoryPath, MemoryWorkspace, ParsedToolPath, PathError, WorkspaceError, parse_tool_path};
 
@@ -367,7 +368,10 @@ async fn rename(ws: &mut MemoryWorkspace, old_raw: &str, new_raw: &str) -> Resul
                 .clone()
                 .ok_or_else(|| MemoryCommandError::new(format!("Error: The path {new_raw} ends with / and is a directory path. Give the path of a file.")))?,
             None => source.rebase(&old.dir, &new.dir).map_err(|e| match e {
-                PathError::Invalid { path, reason } => MemoryCommandError::new(format!("Error: The rename would make the path /memories{path}, which is not valid: {reason}. Nothing changed.")),
+                PathError::Invalid { path, reason } => MemoryCommandError::new(format!(
+                    "Error: The rename would make the path /memories{path}, which is not valid: {}. Nothing changed.",
+                    tool_reason(reason)
+                )),
                 other => other.into(),
             })?,
         };
