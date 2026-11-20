@@ -744,10 +744,13 @@ async fn wait_for_kv_steps(admin: &jetstream::Context, n: u64) {
         assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {n} KV steps (saw {changes})");
         tokio::time::sleep(Duration::from_millis(50)).await;
         let now = kv_record(admin).await.map(|r| r.epoch);
-        if now.is_some() && now != last {
-            changes += 1;
+        // A failed read must not count as a step and must not reset `last`.
+        if now.is_some() {
+            if now != last {
+                changes += 1;
+            }
+            last = now;
         }
-        last = now;
     }
 }
 
@@ -925,7 +928,7 @@ async fn the_backlog_gauge_updates_while_the_kv_step_hangs() {
 
 #[tokio::test]
 async fn a_shutdown_during_a_hung_kv_step_ends_in_time() {
-    let Some((_node, redis_url)) = redis_7_4("decision_log_redis shutdown during kv hang").await else {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis shutdown during kv hang").await else {
         return;
     };
     let Some((nats, nats_url)) = start_nats(None, "decision_log_redis shutdown during kv hang").await else {
@@ -936,14 +939,23 @@ async fn a_shutdown_during_a_hung_kv_step_ends_in_time() {
     let _local = metrics::set_default_local_recorder(&recorder);
     let admin = test_js(&nats_url).await;
     let v = dl_js::Violations::default();
-    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, v.clone()).await, fast("i1"), v);
+    // The KV timeout is longer than the 300 ms wait, so the step is still in flight when NATS comes back.
+    let mut s = fast("i1");
+    s.kv_timeout = Duration::from_secs(3);
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, v.clone()).await, s, v);
     wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
     nats.pause().await.expect("pause NATS");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    // The drain budget is 2 s and `kv_timeout` is 1 s.
-    let ended = tokio::time::timeout(Duration::from_secs(2 + 1 + 2), relay.shut_down()).await;
+    // The drain budget is 2 s and `kv_timeout` is 3 s.
+    let ended = tokio::time::timeout(Duration::from_secs(2 + 3 + 2), relay.shut_down()).await;
     assert!(ended.is_ok(), "the relay did not end within the budget plus the KV timeout");
+    // No KV step task outlives the relay. The detection of a step that ran after the shutdown would add 1 to the
+    // Redis epoch, and a step runs `detect` only after its KV read, which needs NATS. So read the epoch while NATS
+    // is still paused, then unpause, and check that it does not move.
+    let before = redis_cli(&node, &["GET", &epoch_key(KEY)]).await;
     nats.unpause().await.expect("unpause NATS");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(redis_cli(&node, &["GET", &epoch_key(KEY)]).await, before, "a KV step ran after the relay ended");
 }
 
 /// Make the group and read `n` entries as a consumer that dies before it acks.
@@ -1214,10 +1226,12 @@ async fn a_group_made_after_a_failed_first_create_counts_one_reset() {
     redis_cli(&node, &["ACL", "SETUSER", "default", "-xgroup"]).await;
     redis_cli(&node, &["FLUSHALL"]).await;
     wait_for("the first create fails", || async { logs.text().contains("cannot make the consumer group again") }).await;
+    // Let several sampler ticks (200 ms) and KV steps run while the group is missing.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(resets(&snap), 0, "no reset is counted while the group is missing");
     redis_cli(&node, &["ACL", "SETUSER", "default", "+xgroup"]).await;
     wait_for("one reset", || async { resets(&snap) >= 1 }).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for_kv_steps(&admin, 3).await;
     assert_eq!(resets(&snap), 1, "the retry counts the incident once");
     relay.shut_down().await;
 }

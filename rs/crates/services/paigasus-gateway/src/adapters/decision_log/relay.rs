@@ -598,8 +598,10 @@ impl State {
                 }
                 if self.kv_in_flight.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                     let this = Arc::clone(&self);
+                    // The guard exists before the spawn, so an abort before the first poll still clears the flag.
+                    let guard = InFlight(Arc::clone(&this));
                     step = Some(tokio::spawn(async move {
-                        let _guard = InFlight(Arc::clone(&this));
+                        let _guard = guard;
                         let (key, group) = (this.s.key.clone(), this.s.group);
                         this.generation
                             .step(
@@ -615,8 +617,10 @@ impl State {
             tokio::select! {
                 () = tokio::time::sleep(self.s.sample_every) => {}
                 _ = shutdown.changed() => {
+                    // The step ends by itself within `kv_timeout`. Wait for it, so that a counting write that was
+                    // already sent is counted by this relay, and no task outlives the relay.
                     if let Some(task) = step {
-                        task.abort();
+                        let _ = task.await;
                     }
                     return;
                 }
