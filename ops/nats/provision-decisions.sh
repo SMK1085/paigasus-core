@@ -4,13 +4,13 @@
 # Provisions the gateway tool decision log (SMA-755 § 5.10): the PAIGASUS_GATEWAY account, its three
 # users, the GATEWAY_DECISIONS stream and (SMA-821) the GATEWAY_DECISIONS_GEN key-value bucket. The account
 # allows 2 streams: the decision stream and the stream KV_GATEWAY_DECISIONS_GEN of the bucket use both.
-# It is idempotent: run it again and it changes nothing that exists. `provision.sh` calls it for a new environment, and an operator can run it alone for an
-# environment that already has the IAM account.
+# It is idempotent: run it again and it changes nothing that exists. `provision.sh` calls it for a new
+# environment, and an operator can run it alone for an environment that already has the IAM account.
 #
 # Inputs are the same as `provision.sh`: OPERATOR, OUT_DIR, NATS_URL and PUSH. With PUSH unset, the
 # script makes the account, the users and the creds files and stops. With PUSH=1 it pushes the account
-# to the running broker and creates the stream and the bucket when they do not exist. It needs `nsc`, and with
-# PUSH=1 also the `nats` CLI.
+# to the running broker and creates the stream and the bucket when they do not exist. It needs `nsc`,
+# and with PUSH=1 also the `nats` CLI.
 #
 # The stream and bucket values come from `subjects.env`; edit them there, never here. The relay in
 # `paigasus-gateway` makes the same stream with the same values (P-20).
@@ -85,7 +85,8 @@ add_user gateway-decision-reader      GW_DEC_READER_PUB      GW_DEC_READER_SUB
 add_user gateway-decision-provisioner GW_DEC_PROVISIONER_PUB GW_DEC_PROVISIONER_SUB
 
 if [ "${PUSH:-0}" != "1" ]; then
-  echo "decision-log account and creds are in $OUT_DIR. Re-run with PUSH=1 to push the account and make the stream and the bucket"
+  echo "decision-log account and creds are in $OUT_DIR." \
+       "Re-run with PUSH=1 to push the account and make the stream and the bucket"
   exit 0
 fi
 
