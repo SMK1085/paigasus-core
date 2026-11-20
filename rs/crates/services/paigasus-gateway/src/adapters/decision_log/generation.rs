@@ -5,7 +5,7 @@
 //! loss inside one generation is counted. It does no I/O.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -359,9 +359,12 @@ impl Generation {
         Fut: Future<Output = Result<RedisView, redis::RedisError>> + Send,
     {
         let before = kv_violations.load(Ordering::Relaxed);
-        let err = match tokio::time::timeout(timeout, self.run(kv, detect)).await {
+        // True while the Redis detection runs. The outer timeout reads it to know which call it cut (M4).
+        let detecting = AtomicBool::new(false);
+        let err = match tokio::time::timeout(timeout, self.run(kv, detect, &detecting)).await {
             Ok(Ok(outcome)) => return outcome,
             Ok(Err(e)) => e,
+            Err(_elapsed) if detecting.load(Ordering::Relaxed) => StepErr::Redis,
             Err(_elapsed) => StepErr::Kv(KvError::Timeout),
         };
         let kind = match err {
@@ -369,27 +372,31 @@ impl Generation {
             StepErr::Kv(KvError::Timeout) if kv_violations.load(Ordering::Relaxed) > before => CheckErrorKind::Permission,
             StepErr::Kv(KvError::Timeout) => CheckErrorKind::Timeout,
             StepErr::Kv(KvError::NoBucket) => CheckErrorKind::NoBucket,
+            // `run` turns a `WrongRevision` of a write into `CasLost`, and the adapter's get never returns it. The
+            // arm stays because the get has the type `KvError`, and the match must cover every variant.
             StepErr::Kv(KvError::Other | KvError::WrongRevision) => CheckErrorKind::Other,
         };
         count_check_error(kind);
-        let warn = {
-            let mut st = self.lock();
-            st.last_own = None;
-            let i = CheckErrorKind::ALL.iter().position(|k| *k == kind).unwrap_or(0);
-            let now = tokio::time::Instant::now();
-            let due = st.last_warn[i].is_none_or(|t| now.duration_since(t) >= WARN_EVERY);
-            if due {
-                st.last_warn[i] = Some(now);
-            }
-            due
-        };
-        if warn {
+        self.lock().last_own = None;
+        if self.warn_due(kind) {
             tracing::warn!(kind = kind.as_label(), "the decision log generation check failed; the next tick tries again");
         }
         StepOutcome::Failed(kind)
     }
 
-    async fn run<K, F, Fut>(&self, kv: &K, detect: F) -> Result<StepOutcome, StepErr>
+    /// True when no log of `kind` came in the last [`WARN_EVERY`]. It then stores the time of this one.
+    fn warn_due(&self, kind: CheckErrorKind) -> bool {
+        let mut st = self.lock();
+        let i = CheckErrorKind::ALL.iter().position(|k| *k == kind).unwrap_or(0);
+        let now = tokio::time::Instant::now();
+        let due = st.last_warn[i].is_none_or(|t| now.duration_since(t) >= WARN_EVERY);
+        if due {
+            st.last_warn[i] = Some(now);
+        }
+        due
+    }
+
+    async fn run<K, F, Fut>(&self, kv: &K, detect: F, detecting: &AtomicBool) -> Result<StepOutcome, StepErr>
     where
         K: GenKv,
         F: FnOnce() -> Fut + Send,
@@ -403,7 +410,10 @@ impl Generation {
         {
             count_loss(kind, c.lost, SystemTime::now());
         }
-        let redis_view = detect().await.map_err(|_| StepErr::Redis)?;
+        detecting.store(true, Ordering::Relaxed);
+        let redis_view = detect().await.map_err(|_| StepErr::Redis);
+        detecting.store(false, Ordering::Relaxed);
+        let redis_view = redis_view?;
         let now = SystemTime::now();
         let action = {
             let st = self.lock();
@@ -412,8 +422,11 @@ impl Generation {
         let (record, revision, count) = match action {
             Action::Nothing => return Ok(StepOutcome::NoGroup),
             Action::Foreign => {
+                // The metric counts every tick. The log is rate-limited like the warnings (spec § 5.3).
                 count_check_error(CheckErrorKind::ForeignWriter);
-                tracing::error!("the generation entry holds a generation that another writer set; two deployments may share one entry");
+                if self.warn_due(CheckErrorKind::ForeignWriter) {
+                    tracing::error!("the generation entry holds a generation that another writer set; two deployments may share one entry");
+                }
                 return Ok(StepOutcome::Foreign);
             }
             Action::Write { record, revision, count } => (record, revision, count),
@@ -792,6 +805,7 @@ mod tests {
         update_fail_without_apply: Option<KvError>,
         update_then_hang: bool,
         get_error: Option<KvError>,
+        get_hang: bool,
         race: Mutex<Option<Bytes>>,
         bump_on_get: Option<Arc<AtomicU64>>,
     }
@@ -831,6 +845,9 @@ mod tests {
             }
             if let Some(e) = self.get_error {
                 return Err(e);
+            }
+            if self.get_hang {
+                std::future::pending::<()>().await;
             }
             Ok(self.inner.lock().expect("lock").entry.clone().map(|(value, revision, live)| KvEntry { value, revision, live }))
         }
@@ -1081,6 +1098,78 @@ mod tests {
         assert_eq!(out, StepOutcome::Failed(CheckErrorKind::Redis));
         assert_eq!(errors(&s, "redis"), 1);
         assert_eq!(kv.revision(), 0);
+    }
+
+    /// T5(1): the claim of an ambiguous counting write survives a step whose KV get fails. The next working step
+    /// counts it once.
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_claim_survives_a_failed_get() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let mut kv = FakeKv::default();
+        kv.set(&rec("K", 1, Some(7), 100, None));
+        // The counting write applies, then returns a timeout: the claim is pending.
+        kv.update_then_fail = Some(KvError::Timeout);
+        assert_eq!(step_with(&g, &kv, live("R", 1, 0)).await, StepOutcome::Failed(CheckErrorKind::Timeout));
+        kv.update_then_fail = None;
+        // The next get fails. The claim must stay pending.
+        kv.get_error = Some(KvError::Timeout);
+        assert_eq!(step_with(&g, &kv, live("R", 2, 1)).await, StepOutcome::Failed(CheckErrorKind::Timeout));
+        assert_eq!(resets(&s), 0);
+        kv.get_error = None;
+        // The recovery step reads the entry with the nonce and counts the loss once.
+        assert_eq!(step_with(&g, &kv, live("R", 3, 1)).await, StepOutcome::Wrote);
+        assert_eq!(resets(&s), 1);
+        assert_eq!(lost(&s), 7);
+    }
+
+    /// M4: the outer timeout fires while the Redis detection runs. That is a Redis error, not a KV timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_timeout_during_the_detection_is_a_redis_error() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let kv = FakeKv::default();
+        let out = g.step(&kv, || std::future::pending::<Result<RedisView, redis::RedisError>>(), &AtomicU64::new(0), T).await;
+        assert_eq!(out, StepOutcome::Failed(CheckErrorKind::Redis));
+        assert_eq!(errors(&s, "redis"), 1);
+        assert_eq!(errors(&s, "timeout"), 0);
+        assert_eq!(kv.revision(), 0);
+        // Control: a KV get that hangs is still a timeout.
+        let hung = FakeKv {
+            get_hang: true,
+            ..FakeKv::default()
+        };
+        let out = g.step(&hung, || async { Ok(RedisView::NoGroup) }, &AtomicU64::new(0), T).await;
+        assert_eq!(out, StepOutcome::Failed(CheckErrorKind::Timeout));
+        assert_eq!(errors(&s, "timeout"), 1);
+        assert_eq!(errors(&s, "redis"), 1);
+    }
+
+    /// M1: the foreign-writer error log is rate-limited to one per 60 s. The metric counts every tick.
+    #[tokio::test(start_paused = true)]
+    async fn the_foreign_writer_log_is_rate_limited_and_the_metric_is_not() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let (logs, _log_guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::ERROR);
+        let g = Generation::new();
+        let kv = FakeKv::default();
+        assert_eq!(step_with(&g, &kv, live("R", 1, 1)).await, StepOutcome::Wrote);
+        kv.set(&rec("K", 9, Some(1), 100, None));
+        let line = "another writer set";
+        for e in 2..5 {
+            assert_eq!(step_with(&g, &kv, live("R", e, 1)).await, StepOutcome::Foreign);
+        }
+        assert_eq!(errors(&s, "foreign_writer"), 3);
+        assert_eq!(logs.text().matches(line).count(), 1, "three foreign ticks inside 60 s log once");
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(step_with(&g, &kv, live("R", 5, 1)).await, StepOutcome::Foreign);
+        assert_eq!(errors(&s, "foreign_writer"), 4);
+        assert_eq!(logs.text().matches(line).count(), 2, "a foreign tick after 60 s logs again");
     }
 
     #[tokio::test(start_paused = true)]
