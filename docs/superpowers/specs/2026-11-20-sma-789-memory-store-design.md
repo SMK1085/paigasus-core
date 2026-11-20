@@ -187,10 +187,12 @@ a read cache and a `MemoryChangeSet`.
   the entries it returns) goes to the store and is cached with its version. A `list` also records
   its directory: a path under a listed directory that the listing did not return has the baseline
   "absent", so a file that another writer creates after the listing is a conflict at the write. A
-  read whose content goes to the model or moves (`view`, `str_replace`, `insert`, the sources of `rename`)
-  of a path that only a listing saw takes the fetched file as the baseline; a cached listing that
-  shows another state of the path is dropped. An internal existence check (`exists`: the targets
-  of `delete` and `rename`, the file-in-file check) keeps the first-sight version. Later reads of that path
+  read whose content goes to the model (`view`, `str_replace`, `insert`) of a path that only a
+  listing saw takes the fetched file as the baseline; a cached listing that shows another state of
+  the path is dropped. An internal check keeps the first-sight version: `exists` (the targets of
+  `delete` and `rename`, the file-in-file check) and the content read of the sources of `rename`,
+  whose content moves but does not go to the model. A source that changed after the first sight
+  is a conflict, so a `rename` never moves a version that the run did not see. Later reads of that path
   come from the cache, then the buffer on top. A buffered `Delete` hides a file. A buffered `Put`
   shows the new content.
 - **Write: the expected value.** A write records a change with the cached version, or `Absent` when
@@ -199,7 +201,10 @@ a read cache and a `MemoryChangeSet`.
   that path again. If it differs from the cached version, the write is refused with the `Conflict`
   text (§6.11). The workspace then removes the cache entry and any buffered change for that path,
   so the next `view` shows the new file. The text says that the run's earlier changes to that file
-  are gone. This puts the normal conflict case in front of the model. A conflict at commit time
+  are gone. The changes that one command stages form a group, and a later write to a path of a
+  group joins that group. A conflict drops the whole group, so a staged `rename` is never dropped
+  by half, and the text then names the other paths whose changes are gone too. This puts the normal
+  conflict case in front of the model. A conflict at commit time
   then needs a write in the short window between the last tool call and the commit.
 - **Write: content rules.** Content with U+0000 is refused (Postgres `text` cannot hold it). The
   file cap and the store caps are checked at write time with `MemoryCaps::check` (§6.7), against the
@@ -235,7 +240,8 @@ end. `n_lines` for `insert` is the split count of the content as stored.
     means the last line. `start < 1`, `start > end` (with `end != -1`) or `start` past the last
     line is refused with a text that gives the line count. An `end` past the last line is clamped.
   - A file view of more than 16,000 characters is cut, with a last line that says to use
-    `view_range` (the Anthropic tool description tells Claude to expect this).
+    `view_range` for the other lines (the Anthropic tool description tells Claude to expect this).
+    A single line longer than the limit cannot be read whole, so the line says that too.
   - Missing: "The path {path} does not exist. Please provide a valid path."
 - `create { path, file_text }`: create the file, or **overwrite** it when it exists. The Anthropic
   doc allows both; Claude's trained description says "creates or overwrites", so overwriting avoids
