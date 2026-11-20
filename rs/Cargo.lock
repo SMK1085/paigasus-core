@@ -3181,6 +3181,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "paigasus-agent-host-core"
+version = "0.0.0"
+dependencies = [
+ "paigasus-kernel",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "paigasus-gateway"
 version = "0.2.0"
 dependencies = [

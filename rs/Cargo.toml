@@ -21,6 +21,7 @@ members = [
   "crates/bindings/paigasus-node-bindings",
   "crates/bindings/paigasus-py-bindings",
   "crates/bindings/paigasus-wasm",
+  "crates/libs/paigasus-agent-host-core",
   "crates/libs/paigasus-gateway-core",
   "crates/libs/paigasus-iam-core",
   "crates/libs/paigasus-kernel",
@@ -202,6 +203,9 @@ paigasus-nats-creds = { path = "crates/libs/paigasus-nats-creds", version = "0.0
 # In-tree path dep: the gateway's sans-IO tool-call interception core (SMA-749). `version` is
 # required: `rs/deny.toml` sets `wildcards = "deny"`.
 paigasus-gateway-core = { path = "crates/libs/paigasus-gateway-core", version = "0.0.0" }
+# In-tree path dep: the agent host's pure domain crate (SMA-786). `version` is required:
+# `rs/deny.toml` sets `wildcards = "deny"`.
+paigasus-agent-host-core = { path = "crates/libs/paigasus-agent-host-core", version = "0.0.0" }
 # paigasus-service-info — the shared `ServiceInfo` builder + HTTP DTO (SMA-505). Owns the wire
 # invariants both services must not re-derive: the UNSPECIFIED sentinel is never advertised,
 # ordering is deterministic, and `capabilities` is always emitted (as `[]` when empty) so a
