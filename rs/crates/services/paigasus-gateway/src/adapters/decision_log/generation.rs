@@ -4,7 +4,10 @@
 //! stored record, the views of Redis and of the KV entry, and `decide`, which says when a Redis reset or a
 //! loss inside one generation is counted. It does no I/O.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use metrics::{counter, gauge};
@@ -54,8 +57,7 @@ impl GenRecord {
 
     #[must_use]
     pub fn to_bytes(&self) -> Bytes {
-        // A record of strings and integers always serializes.
-        Bytes::from(serde_json::to_vec(self).unwrap_or_default())
+        Bytes::from(serde_json::to_vec(self).expect("a record of strings and integers always serializes"))
     }
 }
 
@@ -256,11 +258,199 @@ pub fn count_check_error(kind: CheckErrorKind) {
     counter!(names::GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL, "kind" => kind.as_label()).increment(1);
 }
 
+/// A KV entry as the port returns it. `live` is false for a delete or purge marker.
+#[derive(Debug, Clone)]
+pub struct KvEntry {
+    pub value: Bytes,
+    pub revision: u64,
+    pub live: bool,
+}
+
+/// A failed KV call. `WrongRevision` also covers a create that finds the key (`AlreadyExists`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvError {
+    WrongRevision,
+    Timeout,
+    NoBucket,
+    Other,
+}
+
+/// The KV calls of one generation entry. The real adapter wraps the NATS bucket; tests use a fake.
+pub trait GenKv: Send + Sync {
+    fn get(&self) -> impl Future<Output = Result<Option<KvEntry>, KvError>> + Send;
+    fn create(&self, value: Bytes) -> impl Future<Output = Result<u64, KvError>> + Send;
+    fn update(&self, value: Bytes, revision: u64) -> impl Future<Output = Result<u64, KvError>> + Send;
+}
+
+impl KvView {
+    /// `None` gives `Missing { None }`. A marker, or a value that does not parse, gives `Missing { Some(revision) }`.
+    #[must_use]
+    pub fn from_entry(e: Option<KvEntry>) -> KvView {
+        match e {
+            None => KvView::Missing { revision: None },
+            Some(e) if !e.live => KvView::Missing { revision: Some(e.revision) },
+            Some(e) => match GenRecord::parse(&e.value) {
+                Some(record) => KvView::Record { record, revision: e.revision },
+                None => KvView::Missing { revision: Some(e.revision) },
+            },
+        }
+    }
+}
+
+/// How one KV step ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepOutcome {
+    NoGroup,
+    Wrote,
+    Counted(LossKind),
+    CasLost,
+    Foreign,
+    Failed(CheckErrorKind),
+}
+
+/// The minimum time between two warnings of one error kind.
+const WARN_EVERY: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+struct GenState {
+    /// A counting write that is not confirmed yet. It is stored BEFORE the write await.
+    pending: Option<(LossKind, Claim)>,
+    /// The generation of this relay's last successful KV write.
+    last_own: Option<String>,
+    local: LocalRecord,
+    last_warn: [Option<tokio::time::Instant>; CheckErrorKind::ALL.len()],
+}
+
+/// The state of one relay's generation check.
+#[derive(Debug, Default)]
+pub struct Generation {
+    state: Mutex<GenState>,
+}
+
+enum StepErr {
+    Kv(KvError),
+    Redis,
+}
+
+fn unix_ms(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+impl Generation {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, GenState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Store what the read-only gauge step saw.
+    pub fn observe(&self, t: LocalTuple) {
+        self.lock().local.observe(t);
+    }
+
+    /// One KV step (spec § 5.3), inside one timeout. A failure forgets `last_own`.
+    pub async fn step<K, F, Fut>(&self, kv: &K, detect: F, kv_violations: &AtomicU64, timeout: Duration) -> StepOutcome
+    where
+        K: GenKv,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<RedisView, redis::RedisError>> + Send,
+    {
+        let before = kv_violations.load(Ordering::Relaxed);
+        let err = match tokio::time::timeout(timeout, self.run(kv, detect)).await {
+            Ok(Ok(outcome)) => return outcome,
+            Ok(Err(e)) => e,
+            Err(_elapsed) => StepErr::Kv(KvError::Timeout),
+        };
+        let kind = match err {
+            StepErr::Redis => CheckErrorKind::Redis,
+            StepErr::Kv(KvError::Timeout) if kv_violations.load(Ordering::Relaxed) > before => CheckErrorKind::Permission,
+            StepErr::Kv(KvError::Timeout) => CheckErrorKind::Timeout,
+            StepErr::Kv(KvError::NoBucket) => CheckErrorKind::NoBucket,
+            StepErr::Kv(KvError::Other | KvError::WrongRevision) => CheckErrorKind::Other,
+        };
+        count_check_error(kind);
+        let warn = {
+            let mut st = self.lock();
+            st.last_own = None;
+            let i = CheckErrorKind::ALL.iter().position(|k| *k == kind).unwrap_or(0);
+            let now = tokio::time::Instant::now();
+            let due = st.last_warn[i].is_none_or(|t| now.duration_since(t) >= WARN_EVERY);
+            if due {
+                st.last_warn[i] = Some(now);
+            }
+            due
+        };
+        if warn {
+            tracing::warn!(kind = kind.as_label(), "the decision log generation check failed; the next tick tries again");
+        }
+        StepOutcome::Failed(kind)
+    }
+
+    async fn run<K, F, Fut>(&self, kv: &K, detect: F) -> Result<StepOutcome, StepErr>
+    where
+        K: GenKv,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<RedisView, redis::RedisError>> + Send,
+    {
+        let entry = kv.get().await.map_err(StepErr::Kv)?;
+        let view = KvView::from_entry(entry);
+        let pending = self.lock().pending.take();
+        if let Some((kind, c)) = pending
+            && let Some(c) = resolve_pending(Some(c), &view)
+        {
+            count_loss(kind, c.lost, SystemTime::now());
+        }
+        let redis_view = detect().await.map_err(|_| StepErr::Redis)?;
+        let now = SystemTime::now();
+        let action = {
+            let st = self.lock();
+            decide(&redis_view, &view, st.last_own.as_deref(), &st.local, unix_ms(now), &new_id())
+        };
+        let (record, revision, count) = match action {
+            Action::Nothing => return Ok(StepOutcome::NoGroup),
+            Action::Foreign => {
+                count_check_error(CheckErrorKind::ForeignWriter);
+                tracing::error!("the generation entry holds a generation that another writer set; two deployments may share one entry");
+                return Ok(StepOutcome::Foreign);
+            }
+            Action::Write { record, revision, count } => (record, revision, count),
+        };
+        if let Some((kind, claim)) = &count {
+            self.lock().pending = Some((*kind, claim.clone()));
+        }
+        let generation = record.generation.clone();
+        let bytes = record.to_bytes();
+        let written = match revision {
+            None => kv.create(bytes).await,
+            Some(r) => kv.update(bytes, r).await,
+        };
+        match written {
+            Ok(_) => {
+                let mut st = self.lock();
+                st.last_own = Some(generation);
+                if let Some((kind, claim)) = count {
+                    st.pending = None;
+                    drop(st);
+                    count_loss(kind, claim.lost, SystemTime::now());
+                    Ok(StepOutcome::Counted(kind))
+                } else {
+                    Ok(StepOutcome::Wrote)
+                }
+            }
+            Err(KvError::WrongRevision) => Ok(StepOutcome::CasLost),
+            Err(e) => Err(StepErr::Kv(e)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-    use std::time::Duration;
+    use std::sync::Arc;
 
     fn live(g: &str, e: u64, x: u64) -> RedisView {
         RedisView::Live {
@@ -413,6 +603,8 @@ mod tests {
         assert_eq!(lost(rec("K", 1, Some(0), 1_000, None), Some(tuple("K", 3, 2_000))), Some(3));
         // The KV sample is newer: 5.
         assert_eq!(lost(rec("K", 1, Some(5), 3_000, None), Some(tuple("K", 3, 2_000))), Some(5));
+        // A tie: the KV sample stands (the local one must be strictly newer).
+        assert_eq!(lost(rec("K", 1, Some(5), 2_000, None), Some(tuple("K", 3, 2_000))), Some(5));
         // A local tuple of another generation is ignored.
         assert_eq!(lost(rec("K", 1, Some(5), 3_000, None), Some(tuple("X", 9, 9_999))), Some(5));
         // No sample anywhere: unknown.
@@ -554,5 +746,358 @@ mod tests {
             _ => None,
         });
         assert_eq!(n, Some(1));
+    }
+
+    fn snap_counter(snap: &[(metrics_util::CompositeKey, Option<metrics::Unit>, Option<metrics::SharedString>, DebugValue)], name: &str, label: Option<(&str, &str)>) -> u64 {
+        snap.iter()
+            .filter_map(|(k, _, _, v)| match v {
+                DebugValue::Counter(n) if k.key().name() == name && label.is_none_or(|(lk, lv)| k.key().labels().any(|l| l.key() == lk && l.value() == lv)) => Some(*n),
+                _ => None,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn count_loss_adds_the_estimate_only_when_it_is_known() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            count_loss(LossKind::Rewind, Some(2), UNIX_EPOCH + Duration::from_secs(10));
+        });
+        let snap = snapshotter.snapshot().into_vec();
+        assert_eq!(snap_counter(&snap, names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL, None), 1);
+        assert_eq!(snap_counter(&snap, names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL, None), 2);
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            count_loss(LossKind::Reset, None, UNIX_EPOCH + Duration::from_secs(10));
+        });
+        let snap = snapshotter.snapshot().into_vec();
+        assert_eq!(snap_counter(&snap, names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL, None), 1);
+        assert_eq!(snap_counter(&snap, names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL, None), 0);
+    }
+
+    // ---- the KV step ----
+
+    #[derive(Default)]
+    struct FakeInner {
+        entry: Option<(Bytes, u64, bool)>,
+        rev: u64,
+    }
+
+    #[derive(Default)]
+    struct FakeKv {
+        inner: Mutex<FakeInner>,
+        update_then_fail: Option<KvError>,
+        update_fail_without_apply: Option<KvError>,
+        update_then_hang: bool,
+        get_error: Option<KvError>,
+        race: Mutex<Option<Bytes>>,
+        bump_on_get: Option<Arc<AtomicU64>>,
+    }
+
+    impl FakeKv {
+        fn set(&self, r: &GenRecord) {
+            let mut i = self.inner.lock().expect("lock");
+            i.rev += 1;
+            let rev = i.rev;
+            i.entry = Some((r.to_bytes(), rev, true));
+        }
+        fn set_raw(&self, b: &'static [u8]) {
+            let mut i = self.inner.lock().expect("lock");
+            i.rev += 1;
+            let rev = i.rev;
+            i.entry = Some((Bytes::from_static(b), rev, true));
+        }
+        fn record(&self) -> Option<GenRecord> {
+            self.inner.lock().expect("lock").entry.as_ref().and_then(|(b, _, _)| GenRecord::parse(b))
+        }
+        fn revision(&self) -> u64 {
+            self.inner.lock().expect("lock").rev
+        }
+        fn apply(&self, v: Bytes) -> u64 {
+            let mut i = self.inner.lock().expect("lock");
+            i.rev += 1;
+            let rev = i.rev;
+            i.entry = Some((v, rev, true));
+            rev
+        }
+    }
+
+    impl GenKv for FakeKv {
+        async fn get(&self) -> Result<Option<KvEntry>, KvError> {
+            if let Some(v) = &self.bump_on_get {
+                v.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(e) = self.get_error {
+                return Err(e);
+            }
+            Ok(self.inner.lock().expect("lock").entry.clone().map(|(value, revision, live)| KvEntry { value, revision, live }))
+        }
+        async fn create(&self, value: Bytes) -> Result<u64, KvError> {
+            if self.inner.lock().expect("lock").entry.as_ref().is_some_and(|e| e.2) {
+                return Err(KvError::WrongRevision);
+            }
+            Ok(self.apply(value))
+        }
+        async fn update(&self, value: Bytes, revision: u64) -> Result<u64, KvError> {
+            let race = self.race.lock().expect("lock").take();
+            if let Some(b) = race {
+                self.apply(b);
+            }
+            if let Some(e) = self.update_fail_without_apply {
+                return Err(e);
+            }
+            if self.inner.lock().expect("lock").rev != revision {
+                return Err(KvError::WrongRevision);
+            }
+            let rev = self.apply(value);
+            if let Some(e) = self.update_then_fail {
+                return Err(e);
+            }
+            if self.update_then_hang {
+                std::future::pending::<()>().await;
+            }
+            Ok(rev)
+        }
+    }
+
+    const T: Duration = Duration::from_secs(5);
+
+    async fn step_with(g: &Generation, kv: &FakeKv, r: RedisView) -> StepOutcome {
+        g.step(kv, || async move { Ok(r) }, &AtomicU64::new(0), T).await
+    }
+
+    /// The debugging recorder drains a counter when it reads it, so this keeps the running totals.
+    struct Tally {
+        snapshotter: metrics_util::debugging::Snapshotter,
+        totals: Mutex<std::collections::HashMap<String, u64>>,
+    }
+
+    impl Tally {
+        fn new(snapshotter: metrics_util::debugging::Snapshotter) -> Self {
+            Self {
+                snapshotter,
+                totals: Mutex::default(),
+            }
+        }
+        fn get(&self, name: &str, label: Option<(&str, &str)>) -> u64 {
+            let mut totals = self.totals.lock().expect("lock");
+            for (k, _, _, v) in self.snapshotter.snapshot().into_vec() {
+                if let DebugValue::Counter(n) = v {
+                    let labels: String = k.key().labels().map(|l| format!("{}={};", l.key(), l.value())).collect();
+                    *totals.entry(format!("{}|{labels}", k.key().name())).or_default() += n;
+                }
+            }
+            let want = label.map(|(lk, lv)| format!("{lk}={lv};"));
+            totals
+                .iter()
+                .filter(|(key, _)| {
+                    let (n, l) = key.split_once('|').expect("key");
+                    n == name && want.as_ref().is_none_or(|w| l.contains(w.as_str()))
+                })
+                .map(|(_, v)| *v)
+                .sum()
+        }
+    }
+
+    fn resets(s: &Tally) -> u64 {
+        s.get(names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL, None)
+    }
+    fn lost(s: &Tally) -> u64 {
+        s.get(names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL, None)
+    }
+    fn errors(s: &Tally, kind: &str) -> u64 {
+        s.get(names::GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL, Some(("kind", kind)))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_ambiguous_counting_write_counts_once_on_the_next_get() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let mut kv = FakeKv::default();
+        kv.set(&rec("K", 1, Some(7), 100, None));
+        kv.update_then_fail = Some(KvError::Timeout);
+        assert_eq!(step_with(&g, &kv, live("R", 1, 0)).await, StepOutcome::Failed(CheckErrorKind::Timeout));
+        assert_eq!(resets(&s), 0);
+        kv.update_then_fail = None;
+        assert_eq!(step_with(&g, &kv, live("R", 2, 1)).await, StepOutcome::Wrote);
+        assert_eq!(resets(&s), 1);
+        assert_eq!(lost(&s), 7);
+        for e in 3..6 {
+            assert_eq!(step_with(&g, &kv, live("R", e, 1)).await, StepOutcome::Wrote);
+        }
+        assert_eq!(resets(&s), 1);
+        assert_eq!(lost(&s), 7);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_counting_write_counts_once_on_the_next_get() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let mut kv = FakeKv::default();
+        kv.set(&rec("K", 1, Some(7), 100, None));
+        kv.update_then_hang = true;
+        assert_eq!(step_with(&g, &kv, live("R", 1, 0)).await, StepOutcome::Failed(CheckErrorKind::Timeout));
+        assert_eq!(resets(&s), 0);
+        kv.update_then_hang = false;
+        for e in 2..5 {
+            assert_eq!(step_with(&g, &kv, live("R", e, 1)).await, StepOutcome::Wrote);
+        }
+        assert_eq!(resets(&s), 1);
+        assert_eq!(lost(&s), 7);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_nonce_that_the_entry_does_not_hold_counts_nothing() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let mut kv = FakeKv::default();
+        kv.set(&rec("K", 1, Some(7), 100, None));
+        kv.update_fail_without_apply = Some(KvError::Timeout);
+        assert_eq!(step_with(&g, &kv, live("R", 1, 0)).await, StepOutcome::Failed(CheckErrorKind::Timeout));
+        kv.update_fail_without_apply = None;
+        kv.set(&rec("R", 1, Some(0), 200, None));
+        assert_eq!(step_with(&g, &kv, live("R", 2, 1)).await, StepOutcome::Wrote);
+        assert_eq!(resets(&s), 0);
+        assert_eq!(lost(&s), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_concurrent_write_loses_the_cas_and_counts_nothing() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let kv = FakeKv::default();
+        kv.set(&rec("K", 1, Some(7), 100, None));
+        *kv.race.lock().expect("lock") = Some(rec("R", 1, Some(0), 150, None).to_bytes());
+        assert_eq!(step_with(&g, &kv, live("R", 1, 0)).await, StepOutcome::CasLost);
+        assert_eq!(resets(&s), 0);
+        for k in CheckErrorKind::ALL {
+            assert_eq!(errors(&s, k.as_label()), 0);
+        }
+        assert_eq!(step_with(&g, &kv, live("R", 2, 1)).await, StepOutcome::Wrote);
+        assert_eq!(resets(&s), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unparsable_value_is_replaced_with_its_revision() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let kv = FakeKv::default();
+        kv.set_raw(b"not json");
+        kv.set_raw(b"not json");
+        kv.set_raw(b"not json");
+        assert_eq!(kv.revision(), 3);
+        assert_eq!(step_with(&g, &kv, live("R", 1, 4)).await, StepOutcome::Wrote);
+        assert_eq!(kv.revision(), 4);
+        assert_eq!(kv.record().map(|r| r.generation), Some("R".to_owned()));
+        assert_eq!(resets(&s), 0);
+        for k in CheckErrorKind::ALL {
+            assert_eq!(errors(&s, k.as_label()), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_foreign_entry_counts_a_foreign_writer_error_and_writes_nothing() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let kv = FakeKv::default();
+        assert_eq!(step_with(&g, &kv, live("R", 1, 1)).await, StepOutcome::Wrote);
+        kv.set(&rec("K", 9, Some(1), 100, None));
+        let rev = kv.revision();
+        assert_eq!(step_with(&g, &kv, live("R", 2, 1)).await, StepOutcome::Foreign);
+        assert_eq!(kv.revision(), rev);
+        assert_eq!(errors(&s, "foreign_writer"), 1);
+        assert_eq!(resets(&s), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timeout_with_a_new_kv_violation_is_a_permission_error() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let violations = Arc::new(AtomicU64::new(0));
+        let mut kv = FakeKv {
+            get_error: Some(KvError::Timeout),
+            bump_on_get: Some(Arc::clone(&violations)),
+            ..FakeKv::default()
+        };
+        let out = g.step(&kv, || async { Ok(RedisView::NoGroup) }, &violations, T).await;
+        assert_eq!(out, StepOutcome::Failed(CheckErrorKind::Permission));
+        assert_eq!(errors(&s, "permission"), 1);
+        assert_eq!(errors(&s, "timeout"), 0);
+        kv.bump_on_get = None;
+        let out = g.step(&kv, || async { Ok(RedisView::NoGroup) }, &violations, T).await;
+        assert_eq!(out, StepOutcome::Failed(CheckErrorKind::Timeout));
+        assert_eq!(errors(&s, "timeout"), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_step_forgets_last_own_so_a_restore_still_counts() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let mut kv = FakeKv::default();
+        assert_eq!(step_with(&g, &kv, live("G0", 1, 3)).await, StepOutcome::Wrote);
+        kv.set(&rec("G1", 1, Some(2), 100, None));
+        kv.get_error = Some(KvError::Timeout);
+        assert_eq!(step_with(&g, &kv, live("G1", 1, 2)).await, StepOutcome::Failed(CheckErrorKind::Timeout));
+        kv.get_error = None;
+        assert_eq!(step_with(&g, &kv, live("G0", 2, 3)).await, StepOutcome::Counted(LossKind::Reset));
+        assert_eq!(resets(&s), 1);
+        assert_eq!(errors(&s, "foreign_writer"), 0);
+        // Control: with no failed step in between, the same restore is a foreign writer.
+        let g2 = Generation::new();
+        let kv2 = FakeKv::default();
+        assert_eq!(step_with(&g2, &kv2, live("G0", 1, 3)).await, StepOutcome::Wrote);
+        kv2.set(&rec("G1", 1, Some(2), 100, None));
+        assert_eq!(step_with(&g2, &kv2, live("G0", 2, 3)).await, StepOutcome::Foreign);
+        assert_eq!(resets(&s), 1);
+        assert_eq!(errors(&s, "foreign_writer"), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_redis_error_in_the_detection_is_a_redis_error() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let kv = FakeKv::default();
+        let out = g.step(&kv, || async { Err(redis::RedisError::from(std::io::Error::other("down"))) }, &AtomicU64::new(0), T).await;
+        assert_eq!(out, StepOutcome::Failed(CheckErrorKind::Redis));
+        assert_eq!(errors(&s, "redis"), 1);
+        assert_eq!(kv.revision(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_success_counts_at_once_and_forgets_the_nonce() {
+        let rec_ = DebuggingRecorder::new();
+        let s = Tally::new(rec_.snapshotter());
+        let _guard = metrics::set_default_local_recorder(&rec_);
+        let g = Generation::new();
+        let kv = FakeKv::default();
+        kv.set(&rec("K", 1, Some(7), 100, None));
+        assert_eq!(step_with(&g, &kv, live("R", 1, 0)).await, StepOutcome::Counted(LossKind::Reset));
+        assert_eq!(resets(&s), 1);
+        assert_eq!(lost(&s), 7);
+        assert!(g.lock().pending.is_none());
+        // The entry still holds the claim; the next get must not count it again.
+        assert_eq!(step_with(&g, &kv, live("R", 2, 0)).await, StepOutcome::Wrote);
+        assert_eq!(resets(&s), 1);
+        assert_eq!(lost(&s), 7);
     }
 }
