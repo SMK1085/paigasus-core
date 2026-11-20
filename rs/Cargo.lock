@@ -3436,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-kernel"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "cedar-policy",
  "proptest",
@@ -3506,7 +3506,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-proto"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "paigasus-proto-derive",
  "prost",
@@ -3518,7 +3518,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-proto-derive"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "proc-macro2",
  "quote",
