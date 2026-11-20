@@ -113,6 +113,117 @@ pub async fn run_all(store: &dyn MemoryStore) {
     cross_scope_usage(store).await;
     same_uuids_two_orgs_are_isolated(store).await;
     delete_scope_leaves_others(store).await;
+    same_org_same_agent_two_principals_are_isolated(store).await;
+    same_org_same_principal_two_agents_are_isolated(store).await;
+    usage_tracks_overwrite_delete_and_recreate(store).await;
+    store_bytes_cap_refuses_growth_and_allows_shrinking(store).await;
+    sizes_are_utf8_bytes_and_limits_are_inclusive(store).await;
+}
+
+/// Check that scope `a` and scope `b` do not see or change each other.
+async fn assert_isolated(store: &dyn MemoryStore, a: &MemoryScope, b: &MemoryScope) {
+    write(store, a, &[("/f.md", "from a")]).await;
+    write(store, b, &[("/f.md", "from b"), ("/g.md", "only b")]).await;
+    assert_eq!(store.get(a, &p("/f.md")).await.unwrap().unwrap().content, "from a");
+    assert_eq!(store.get(b, &p("/f.md")).await.unwrap().unwrap().content, "from b");
+    assert_eq!(listed(store, a, "/").await, ["/f.md"]);
+    assert_eq!(listed(store, b, "/").await, ["/f.md", "/g.md"]);
+    assert_eq!(store.usage(a).await.unwrap(), MemoryUsage { files: 1, bytes: 6 });
+    assert_eq!(store.usage(b).await.unwrap(), MemoryUsage { files: 2, bytes: 12 });
+    // The version of a file of b must not match in a, where the path is absent.
+    let vb = version_of(store, b, "/g.md").await;
+    assert_conflict(store.apply(&set(a, vec![put_over("/g.md", "x", &vb)]), &caps()).await, "/g.md");
+    assert_conflict(store.apply(&set(a, vec![del("/g.md", &vb)]), &caps()).await, "/g.md");
+    assert!(store.get(a, &p("/g.md")).await.unwrap().is_none());
+    assert_eq!(store.get(b, &p("/g.md")).await.unwrap().unwrap().content, "only b");
+    store.delete_scope(a).await.unwrap();
+    assert!(store.get(a, &p("/f.md")).await.unwrap().is_none());
+    assert_eq!(store.usage(a).await.unwrap(), MemoryUsage::default());
+    assert_eq!(store.usage(b).await.unwrap(), MemoryUsage { files: 2, bytes: 12 });
+    assert_eq!(listed(store, b, "/").await, ["/f.md", "/g.md"]);
+}
+
+/// Same org and same agent, different principals: two scopes.
+pub async fn same_org_same_agent_two_principals_are_isolated(store: &dyn MemoryStore) {
+    let (org, agent) = (unique_uuid(), unique_uuid());
+    let a = scope(org, agent, unique_uuid());
+    let b = scope(org, agent, unique_uuid());
+    assert_isolated(store, &a, &b).await;
+}
+
+/// Same org and same principal, different agents: two scopes.
+pub async fn same_org_same_principal_two_agents_are_isolated(store: &dyn MemoryStore) {
+    let (org, principal) = (unique_uuid(), unique_uuid());
+    let a = scope(org, unique_uuid(), principal);
+    let b = scope(org, unique_uuid(), principal);
+    assert_isolated(store, &a, &b).await;
+}
+
+/// Usage follows an overwrite, a delete and a re-create.
+pub async fn usage_tracks_overwrite_delete_and_recreate(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    let usage = |files, bytes| MemoryUsage { files, bytes };
+    write(store, &s, &[("/a", "abc"), ("/b", "12")]).await;
+    assert_eq!(store.usage(&s).await.unwrap(), usage(2, 5));
+    let v = version_of(store, &s, "/a").await;
+    store.apply(&set(&s, vec![put_over("/a", "abcdef", &v)]), &caps()).await.unwrap();
+    assert_eq!(store.usage(&s).await.unwrap(), usage(2, 8));
+    let v = version_of(store, &s, "/a").await;
+    store.apply(&set(&s, vec![put_over("/a", "a", &v)]), &caps()).await.unwrap();
+    assert_eq!(store.usage(&s).await.unwrap(), usage(2, 3));
+    let v = version_of(store, &s, "/a").await;
+    store.apply(&set(&s, vec![del("/a", &v)]), &caps()).await.unwrap();
+    assert_eq!(store.usage(&s).await.unwrap(), usage(1, 2));
+    write(store, &s, &[("/a", "xyz")]).await;
+    assert_eq!(store.usage(&s).await.unwrap(), usage(2, 5));
+}
+
+/// The store-bytes cap refuses growth and allows shrinking, also for an over-cap store.
+pub async fn store_bytes_cap_refuses_growth_and_allows_shrinking(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    let ten = MemoryCaps {
+        max_store_bytes: 10,
+        ..MemoryCaps::default()
+    };
+    // Exactly at the limit passes. One byte more is refused.
+    store.apply(&set(&s, vec![put_new("/a", "12345678")]), &ten).await.unwrap();
+    store.apply(&set(&s, vec![put_new("/b", "12")]), &ten).await.unwrap();
+    let result = store.apply(&set(&s, vec![put_new("/c", "1")]), &ten).await;
+    assert!(matches!(result, Err(MemoryApplyError::CapExceeded(_))), "{result:?}");
+    assert!(store.get(&s, &p("/c")).await.unwrap().is_none());
+    assert_eq!(store.usage(&s).await.unwrap().bytes, 10);
+
+    // An over-cap store: write 14 bytes under a large cap, then use the small cap.
+    let o = fresh_scope();
+    write(store, &o, &[("/a", "1234567"), ("/b", "1234567")]).await;
+    let va = version_of(store, &o, "/a").await;
+    let grow = store.apply(&set(&o, vec![put_over("/a", "12345678", &va)]), &ten).await;
+    assert!(matches!(grow, Err(MemoryApplyError::CapExceeded(_))), "{grow:?}");
+    assert_eq!(store.usage(&o).await.unwrap().bytes, 14);
+    store.apply(&set(&o, vec![put_over("/a", "12345", &va)]), &ten).await.unwrap();
+    assert_eq!(store.usage(&o).await.unwrap().bytes, 12);
+    let vb = version_of(store, &o, "/b").await;
+    store.apply(&set(&o, vec![del("/b", &vb)]), &ten).await.unwrap();
+    assert_eq!(store.usage(&o).await.unwrap(), MemoryUsage { files: 1, bytes: 5 });
+}
+
+/// Size is the UTF-8 byte length, and a limit is inclusive.
+pub async fn sizes_are_utf8_bytes_and_limits_are_inclusive(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    // 2 + 3 = 5 bytes, 2 chars.
+    write(store, &s, &[("/m", "é日")]).await;
+    assert_eq!(store.usage(&s).await.unwrap(), MemoryUsage { files: 1, bytes: 5 });
+    assert_eq!(store.list(&s, &MemoryDir::root()).await.unwrap()[0].size_bytes, 5);
+    let five = MemoryCaps {
+        max_file_bytes: 5,
+        ..MemoryCaps::default()
+    };
+    // Exactly 5 bytes passes, also with multibyte characters.
+    store.apply(&set(&s, vec![put_new("/exact", "12345"), put_new("/exact2", "é日")]), &five).await.unwrap();
+    // Two chars, 6 bytes: refused.
+    let result = store.apply(&set(&s, vec![put_new("/big", "日本")]), &five).await;
+    assert!(matches!(result, Err(MemoryApplyError::CapExceeded(_))), "{result:?}");
+    assert!(store.get(&s, &p("/big")).await.unwrap().is_none());
 }
 
 /// A missing file is `None`.
