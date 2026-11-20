@@ -47,7 +47,8 @@ accounts {
   }
 
   # The gateway tool decision log (SMA-755). A separate account, so a full decision stream cannot stop
-  # IAM_EVENTS. max_mem 0: the stream and the reader's ordered consumer must work with file storage only.
+  # IAM_EVENTS. max_mem 0: the stream is file-backed. The reader's ordered consumer asks for memory
+  # storage of its state (async-nats 0.53 sets memory_storage), and the broker accepts it under max_mem 0.
   PAIGASUS_GATEWAY: {
     jetstream: { max_mem: 0, max_file: 268435456, max_streams: 2, max_consumers: 16 }
 

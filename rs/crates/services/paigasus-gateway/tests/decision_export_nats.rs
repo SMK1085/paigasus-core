@@ -168,12 +168,20 @@ async fn the_reader_and_the_binary_export_one_org() {
     assert!(!stderr.contains("the read stopped at"), "the read reached the end of the stream: {stderr}");
     assert_eq!(std::fs::read_to_string(&report).unwrap(), stderr, "the report is the stderr summary");
 
-    // A bad argument is exit 1, and a URL on argv is refused.
+    // A URL on argv is refused at the CLI boundary. The command is complete otherwise (a valid range and a URL in
+    // the environment), so only `--nats-url` can make it fail. The error names the flag and never prints its value.
     let bad = std::process::Command::new(env!("CARGO_BIN_EXE_paigasus-gateway"))
-        .args(["decisions", "export", "--org", ORG_A, "--nats-url", "nats://x"])
+        .args(["decisions", "export", "--org", ORG_A])
+        .args(range(t0))
+        .args(["--nats-url", "nats://user:secret-pw@127.0.0.1:4222"])
+        .env("PAIGASUS_NATS_URL", &stack.url)
         .output()
         .unwrap();
-    assert_eq!(bad.status.code(), Some(1));
+    let bad_stderr = String::from_utf8_lossy(&bad.stderr).to_string();
+    assert_eq!(bad.status.code(), Some(1), "{bad_stderr}");
+    assert!(bad_stderr.contains("unknown argument --nats-url"), "the error names the flag: {bad_stderr}");
+    assert!(!bad_stderr.contains("secret-pw") && !bad_stderr.contains("nats://"), "the error never prints the value: {bad_stderr}");
+    assert!(bad.stdout.is_empty(), "no trace on a refused command");
 }
 
 #[tokio::test]
