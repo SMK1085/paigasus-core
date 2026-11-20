@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! SMA-755 Task 13, § 5.11: the reader and the CLI binary against a real JetStream. Six events of two orgs
-//! go into a stream made with `stream_config()`. The reader returns the four of one org, in stream order. The
+//! go into a stream made with `stream_config(MAX_BYTES)`. The reader returns the four of one org, in stream order. The
 //! real `paigasus-gateway decisions export` binary writes a trace file of `@` lines only and exits 0. The
 //! reader is bounded by the stored time (`until + max_lag`) and by a raw count (`2 x max_events`).
 //!
@@ -79,7 +79,7 @@ async fn stack(what: &str) -> Option<Stack> {
     let port = paigasus_test_docker::mapped_port(&node, 4222, what).await;
     let url = format!("nats://127.0.0.1:{port}");
     let js = jetstream::new(async_nats::connect(&url).await.expect("the test client connects"));
-    js.create_stream(dl_js::stream_config()).await.expect("the stream is made");
+    js.create_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("the stream is made");
     Some(Stack { _node: node, url, js })
 }
 

@@ -883,6 +883,9 @@ async fn the_decision_publisher_ensures_the_stream_and_publishes_with_an_ack() {
     let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
     let (client, _events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
     let js = jetstream::new(client);
+    // The relay reads the account limit first, to size `max_bytes` (SMA-755 § 5.10).
+    let account = js.query_account().await.expect("the publisher grant must cover $JS.API.INFO");
+    assert_eq!(account.limits.max_storage, Some(268_435_456), "the reply holds the limit of the fixture account");
     js.get_or_create_stream(gw_stream_config())
         .await
         .expect("the publisher grant must cover STREAM.INFO and STREAM.CREATE under the account limits");

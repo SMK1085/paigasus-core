@@ -291,14 +291,19 @@ accept that `discard old` keeps fewer days.
 account limit. The script does not change a stream that exists, so `max-bytes` stays at the old value.
 After the re-run, edit the stream with the provisioner identity:
 `nats --server "$NATS_URL" --creds "$OUT_DIR/gateway-decision-provisioner.creds" --inbox-prefix _INBOX_GW_PROV
-stream edit GATEWAY_DECISIONS --max-bytes <DECISIONS_MAX_BYTES>`. The relay then logs a `max_bytes` drift
-warning while its compiled default differs. This warning is expected.
+stream edit GATEWAY_DECISIONS --max-bytes <DECISIONS_MAX_BYTES>`. If the new value is above the default
+(19 327 352 832 bytes), the relay logs a `max_bytes` drift warning, because its value never goes above the
+default. This warning is expected.
 
-**The relay and a smaller account limit.** If the relay finds no stream, it makes `GATEWAY_DECISIONS` again with the
-fixed `max-bytes` from the code (19 327 352 832 bytes). It does not read `DECISIONS_ACCOUNT_DISK_BYTES`. If you
-lower the account disk limit, keep that fixed value at or below the new limit. If it is above the limit, the
-broker refuses the create and the relay stalls (the `GatewayDecisionLogRelayStalled` alert fires). In that case,
-make the stream with `provision-decisions.sh` and `PUSH=1`, which uses your value.
+**The relay and the account limit.** Before the relay makes or checks `GATEWAY_DECISIONS`, it reads the account
+storage limit with `$JS.API.INFO`. It sets `max-bytes` to 90 % of that limit, the rule of `subjects.env`, when
+that is below the default of 19 327 352 832 bytes. With no limit, or a larger one, it uses the default. So a
+smaller `DECISIONS_ACCOUNT_DISK_BYTES` does not make the broker refuse the create, and a stream that
+`provision-decisions.sh` made for that limit is not a drift. If the query fails, the relay logs
+`the relay cannot read the account limits; it uses the default max_bytes` and uses the default. A publisher user
+that was made before the `$JS.API.INFO` grant does not have it: add it with `nsc edit user --account
+PAIGASUS_GATEWAY --name gateway-decision-publisher --allow-pub '$JS.API.INFO'` (§9 shows the pattern). Without it, each stream check waits for the request timeout, and the broker reports a permission
+violation, which the relay logs as `the decision-log NATS publisher has no permission to publish`.
 
 **Provision.** `ops/nats/provision-decisions.sh` takes the inputs of `provision.sh` (`OPERATOR`,
 `OUT_DIR`, `NATS_URL`, `PUSH`). It is safe to run again. Without `PUSH=1` it makes the account, the

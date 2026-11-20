@@ -274,18 +274,23 @@ three identities are in `subjects.env` (`GW_DEC_*`). This table renders that fil
 
 | identity | deployed as | publish (allow) | subscribe (allow) |
 |---|---|---|---|
-| `gateway-decision-publisher` | the gateway decision relay | `gateway.decision.>`, `$JS.API.STREAM.INFO.GATEWAY_DECISIONS`, `$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` | `_INBOX_GW_DEC.>` |
+| `gateway-decision-publisher` | the gateway decision relay | `gateway.decision.>`, `$JS.API.INFO`, `$JS.API.STREAM.INFO.GATEWAY_DECISIONS`, `$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` | `_INBOX_GW_DEC.>` |
 | `gateway-decision-reader` | the export CLI of an operator; never the gateway | `$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS`, `…CREATE.GATEWAY_DECISIONS.>`, `$JS.API.CONSUMER.DELETE.GATEWAY_DECISIONS.*`, `$JS.API.CONSUMER.MSG.NEXT.GATEWAY_DECISIONS.*`, `$JS.API.CONSUMER.INFO.GATEWAY_DECISIONS.*` | `_INBOX_GW_RD.>` |
 | `gateway-decision-provisioner` | nobody; operator tooling only | `$JS.API.INFO`, `$JS.API.STREAM.>` | `_INBOX_GW_PROV.>` |
 
 - The publisher subscribes only to its inbox, for the PubAck. It cannot read, delete or purge the
   stream. A relay that reads its own stream would give a leak of the decisions a second path.
+- The publisher has `$JS.API.INFO`. Before the relay makes the stream, it reads the account storage
+  limit and sets `max-bytes` to 90 % of it when that is below the default. Without this, a smaller
+  account disk makes the broker refuse the create and the relay stalls. `$JS.API.INFO` is read-only:
+  it returns the usage and the limits of the account of the caller only.
 - The reader uses an ordered consumer (P-13). The first create has no name. A recreate after a gap
   has a name and a filter suffix, and it deletes the old consumer first. So the grants have both
   `CREATE` forms and `DELETE`. There is no `$JS.ACK` grant: an ordered consumer has no acks. The
   reader cannot publish to `gateway.decision.>` and cannot purge.
-- The provisioner makes the stream (P-15). The `nats` CLI calls `$JS.API.INFO` at start, which the
-  publisher does not have. It is an operator artifact, as `iam-provisioner` is (§9).
+- The provisioner makes the stream (P-15). The `nats` CLI calls `$JS.API.INFO` at start. The
+  provisioner also has `$JS.API.STREAM.>`, which the publisher does not have. It is an operator
+  artifact, as `iam-provisioner` is (§9).
 - A user in this account cannot see `IAM_EVENTS`: it is in another account. `tests/nats_permissions.rs`
   proves it. It also proves that an ordered consumer works under `max_mem: 0`.
 - The reader also has `$JS.API.CONSUMER.INFO.GATEWAY_DECISIONS.*`. After a client reconnect, the pull

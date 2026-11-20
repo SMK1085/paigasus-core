@@ -53,7 +53,8 @@ pub fn violation_since(generation: &AtomicU64, before: u64) -> bool {
 
 /// 30 days (P-20).
 pub const MAX_AGE_SECS: u64 = 2_592_000;
-/// 90 % of the default 20 GiB account disk (P-20).
+/// 90 % of the default 20 GiB account disk (P-20). The relay uses a smaller value when the account limit is smaller
+/// ([`max_bytes_for`]).
 pub const MAX_BYTES: i64 = 19_327_352_832;
 /// The duplicate window, 2 minutes (P-20).
 pub const DUPLICATE_WINDOW_SECS: u64 = 120;
@@ -83,17 +84,41 @@ pub enum NatsError {
     Connect(async_nats::ConnectErrorKind),
 }
 
-/// The stream config. `provision-decisions.sh` makes the same stream from `ops/nats/subjects.env`. The relay
-/// calls `get_or_create_stream` with this value, so a stream that the relay makes is never unbounded.
+/// The `max_bytes` of the stream for the account storage limit `account_max_storage` (P-20). The rule is the rule of
+/// `subjects.env`: 90 % of the account disk, with integer division. The result is never above [`MAX_BYTES`] and
+/// never below 1. A limit of 0 or less (no limit) gives [`MAX_BYTES`].
 #[must_use]
-pub fn stream_config() -> jetstream::stream::Config {
+pub fn max_bytes_for(account_max_storage: i64) -> i64 {
+    if account_max_storage <= 0 {
+        return MAX_BYTES;
+    }
+    let ninety = i128::from(account_max_storage) * 9 / 10;
+    i64::try_from(ninety).unwrap_or(MAX_BYTES).clamp(1, MAX_BYTES)
+}
+
+/// The file storage limit of the account in a `$JS.API.INFO` reply. The untiered limit comes first. An account
+/// with tiered limits has its R1 limit in the tier `R1` (the stream has one replica). -1 when there is no limit.
+#[must_use]
+pub fn account_max_storage(account: &jetstream::account::Account) -> i64 {
+    let tier = account.tiers.get("R1").and_then(|t| t.limits.max_storage);
+    match account.limits.max_storage {
+        Some(n) if n > 0 => n,
+        _ => tier.filter(|n| *n > 0).unwrap_or(-1),
+    }
+}
+
+/// The stream config, with `max_bytes` from [`max_bytes_for`]. `provision-decisions.sh` makes the same stream from
+/// `ops/nats/subjects.env`. The relay calls `get_or_create_stream` with this value, so a stream that the relay
+/// makes is never unbounded.
+#[must_use]
+pub fn stream_config(max_bytes: i64) -> jetstream::stream::Config {
     jetstream::stream::Config {
         name: STREAM.to_owned(),
         subjects: vec![format!("{SUBJECT_PREFIX}.>")],
         retention: jetstream::stream::RetentionPolicy::Limits,
         storage: jetstream::stream::StorageType::File,
         max_age: Duration::from_secs(MAX_AGE_SECS),
-        max_bytes: MAX_BYTES,
+        max_bytes,
         discard: jetstream::stream::DiscardPolicy::Old,
         duplicate_window: Duration::from_secs(DUPLICATE_WINDOW_SECS),
         max_message_size: MAX_MESSAGE_SIZE,
@@ -415,7 +440,9 @@ mod tests {
             "$(( DECISIONS_ACCOUNT_DISK_BYTES * 9 / 10 ))",
             "the rule that this test applies changed"
         );
-        let cfg = stream_config();
+        assert_eq!(MAX_BYTES, disk_bytes * 9 / 10, "the default max_bytes is 90 % of the default disk");
+        assert_eq!(max_bytes_for(disk_bytes), MAX_BYTES, "the relay rule gives the same value for the default disk");
+        let cfg = stream_config(max_bytes_for(disk_bytes));
         assert_eq!(cfg.name, var(&env, "DECISIONS_STREAM_NAME"));
         assert_eq!(cfg.subjects, vec![var(&env, "DECISIONS_SUBJECTS")]);
         assert_eq!(cfg.max_age, Duration::from_secs(var(&env, "DECISIONS_MAX_AGE_SECS").parse().expect("integer")));
@@ -428,5 +455,54 @@ mod tests {
         assert_eq!(cfg.storage, jetstream::stream::StorageType::File);
         assert_eq!(cfg.retention, jetstream::stream::RetentionPolicy::Limits);
         assert_eq!(format!("{SUBJECT_PREFIX}.>"), cfg.subjects[0]);
+        // The relay reads the account limit with `$JS.API.INFO` before it makes the stream, so the publisher
+        // identity must have that grant.
+        let block = env.split("GW_DEC_PUBLISHER_PUB=(").nth(1).and_then(|s| s.split(')').next()).expect("the publisher grants");
+        assert!(block.lines().any(|l| l.trim() == "'$JS.API.INFO'"), "GW_DEC_PUBLISHER_PUB grants $JS.API.INFO: {block}");
+    }
+
+    #[test]
+    fn max_bytes_for_takes_ninety_percent_of_a_smaller_account_limit() {
+        // No limit: the default.
+        assert_eq!(max_bytes_for(-1), MAX_BYTES);
+        assert_eq!(max_bytes_for(0), MAX_BYTES);
+        assert_eq!(max_bytes_for(i64::MIN), MAX_BYTES);
+        // A smaller limit: 90 %, with integer division as in `subjects.env`.
+        assert_eq!(max_bytes_for(268_435_456), 241_591_910);
+        assert_eq!(max_bytes_for(1_073_741_824), 966_367_641);
+        assert_eq!(max_bytes_for(11), 9);
+        assert_eq!(max_bytes_for(19), 17);
+        // The result is never 0, which JetStream would read as "no limit".
+        assert_eq!(max_bytes_for(1), 1);
+        // The default disk gives the default; a larger limit does not raise it.
+        assert_eq!(max_bytes_for(21_474_836_480), MAX_BYTES);
+        assert_eq!(max_bytes_for(21_474_836_481), MAX_BYTES);
+        assert_eq!(max_bytes_for(1 << 50), MAX_BYTES);
+        assert_eq!(max_bytes_for(i64::MAX), MAX_BYTES);
+        // Just below the default disk: 90 % of it is below the default.
+        assert_eq!(max_bytes_for(21_474_836_470), 19_327_352_823);
+        assert_eq!(stream_config(max_bytes_for(268_435_456)).max_bytes, 241_591_910);
+    }
+
+    #[test]
+    fn account_max_storage_reads_the_untiered_limit_then_the_r1_tier() {
+        use jetstream::account::{Account, Tier};
+        let mut account = Account::default();
+        assert_eq!(account_max_storage(&account), -1, "no limit");
+        account.limits.max_storage = Some(268_435_456);
+        assert_eq!(account_max_storage(&account), 268_435_456);
+        let mut r1 = Tier::default();
+        r1.limits.max_storage = Some(1_048_576);
+        account.tiers.insert("R1".to_owned(), r1);
+        assert_eq!(account_max_storage(&account), 268_435_456, "the untiered limit comes first");
+        account.limits.max_storage = Some(0);
+        assert_eq!(account_max_storage(&account), 1_048_576, "a tiered account has 0 as its untiered limit");
+        account.limits.max_storage = None;
+        assert_eq!(account_max_storage(&account), 1_048_576);
+        let mut r3 = Tier::default();
+        r3.limits.max_storage = Some(5);
+        account.tiers.clear();
+        account.tiers.insert("R3".to_owned(), r3);
+        assert_eq!(account_max_storage(&account), -1, "only the R1 tier counts for a stream with one replica");
     }
 }

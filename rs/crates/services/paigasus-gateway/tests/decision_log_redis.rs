@@ -839,7 +839,7 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
     wait_for("one publish", || async { snap.published() == 1 }).await;
     let mut stream = admin.get_stream(dl_js::STREAM).await.expect("the relay made the stream");
     let live = stream.info().await.expect("stream info").config.clone();
-    let want = dl_js::stream_config();
+    let want = dl_js::stream_config(dl_js::MAX_BYTES);
     assert_eq!(live.max_bytes, want.max_bytes);
     assert_eq!(live.max_age, want.max_age);
     assert_eq!(live.max_message_size, want.max_message_size);
@@ -851,7 +851,7 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
 
     // A stream with no byte limit: the relay warns and does not change it.
     admin.delete_stream(dl_js::STREAM).await.expect("delete the stream");
-    let mut drifted = dl_js::stream_config();
+    let mut drifted = dl_js::stream_config(dl_js::MAX_BYTES);
     drifted.max_bytes = -1;
     admin.create_stream(drifted).await.expect("make the drifted stream");
     xadd(&node, &event_with_org(2, ORG_A), 0).await;
@@ -870,7 +870,8 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
 
 /// A broker config with two users. `admin` can do anything. `gw` is the user of a client that sends no credentials
 /// (`no_auth_user`), and has the grants of the relay identity minus the
-/// right to publish to `gateway.decision.>`: it can read and make the stream and read its PubAck inbox only.
+/// right to publish to `gateway.decision.>`: it can read the account limits, read and make the stream, and read
+/// its PubAck inbox only.
 const NO_PUBLISH_CONF: &str = r#"
 port: 4222
 jetstream: { store_dir: "/tmp/js" }
@@ -878,7 +879,7 @@ authorization {
   users = [
     { user: "admin", password: "admin" }
     { user: "gw", password: "gw", permissions: {
-        publish: { allow: ["$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "$JS.API.STREAM.CREATE.GATEWAY_DECISIONS"] }
+        publish: { allow: ["$JS.API.INFO", "$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "$JS.API.STREAM.CREATE.GATEWAY_DECISIONS"] }
         subscribe: { allow: ["_INBOX_GW_DEC.>"] }
     } }
   ]
@@ -909,7 +910,7 @@ async fn a_real_permission_refusal_is_rejected_and_a_later_outage_is_not() {
             .await
             .expect("the admin client connects"),
     );
-    admin.create_stream(dl_js::stream_config()).await.expect("the admin makes the stream");
+    admin.create_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("the admin makes the stream");
 
     // Part 1: a real broker refuses the publish. The violation generation rises, and the entry is rejected and deleted.
     xadd(&node, &event_with_org(1, ORG_A), 0).await;
@@ -974,7 +975,7 @@ authorization {
   users = [
     { user: "admin", password: "admin" }
     { user: "gw", password: "gw", permissions: {
-        publish: { allow: ["$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "gateway.decision.>"] }
+        publish: { allow: ["$JS.API.INFO", "$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "gateway.decision.>"] }
         subscribe: { allow: ["_INBOX_GW_DEC.>"] }
     } }
   ]
@@ -1007,7 +1008,7 @@ async fn done_entries_are_acked_while_the_stream_cannot_be_made() {
             .await
             .expect("the admin client connects"),
     );
-    admin.create_stream(dl_js::stream_config()).await.expect("the admin makes the stream");
+    admin.create_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("the admin makes the stream");
     // The first event makes the relay sure of the stream.
     xadd(&node, &event_with_org(1, ORG_A), 0).await;
     let v = Arc::new(AtomicU64::new(0));
@@ -1075,7 +1076,7 @@ async fn concurrent_refusals_are_published_again_one_at_a_time_and_then_rejected
             .await
             .expect("the admin client connects"),
     );
-    admin.create_stream(dl_js::stream_config()).await.expect("the admin makes the stream");
+    admin.create_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("the admin makes the stream");
     xadd(&node, &event_with_org(1, ORG_A), 0).await;
     xadd(&node, &event_with_org(2, ORG_A), 0).await;
     let violations = Arc::new(AtomicU64::new(0));
@@ -1121,7 +1122,7 @@ async fn a_full_jetstream_disk_keeps_the_events_until_there_is_free_disk() {
     let _local = metrics::set_default_local_recorder(&recorder);
     let admin = test_js(&url).await;
     // A stream with no byte limit, so that the server limit, not the stream limit, is the first limit to hit.
-    let mut cfg = dl_js::stream_config();
+    let mut cfg = dl_js::stream_config(dl_js::MAX_BYTES);
     cfg.max_bytes = -1;
     admin.create_stream(cfg).await.expect("the admin makes the stream");
     // Fill the disk until the broker refuses a message.
@@ -1150,5 +1151,66 @@ async fn a_full_jetstream_disk_keeps_the_events_until_there_is_free_disk() {
     assert_eq!(snap.dropped("publish_rejected"), 0);
     let ids: Vec<_> = stream_messages(&admin).await.into_iter().map(|m| m.msg_id).collect();
     assert!(ids.contains(&decision_id(1)) && ids.contains(&decision_id(2)), "both events are on the stream: {ids:?}");
+    relay.shut_down().await;
+}
+
+/// A broker config with an account that holds 256 MiB of file storage, less than the default 20 GiB. `gw` has the
+/// grants of the relay identity in `ops/nats/subjects.env`. `admin` can do anything in the same account.
+const SMALL_ACCOUNT_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js" }
+accounts {
+  GW: {
+    jetstream: { max_mem: 0, max_file: 268435456, max_streams: 2, max_consumers: 16 }
+    users: [
+      { user: "admin", password: "admin" }
+      { user: "gw", password: "gw", permissions: {
+          publish: { allow: ["gateway.decision.>", "$JS.API.INFO", "$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "$JS.API.STREAM.CREATE.GATEWAY_DECISIONS"] }
+          subscribe: { allow: ["_INBOX_GW_DEC.>"] }
+      } }
+    ]
+  }
+}
+no_auth_user: gw
+"#;
+
+/// On an account with a smaller disk limit, the relay makes the stream with 90 % of that limit, not with the fixed
+/// default (which the broker refuses). A stream that has that value is not a drift.
+#[tokio::test]
+async fn the_relay_sizes_the_stream_to_a_smaller_account_limit() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay small account").await else {
+        return;
+    };
+    let port = free_port();
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", SMALL_ACCOUNT_CONF.as_bytes().to_vec())
+        .with_mapped_port(port, 4222.tcp());
+    let Some(_nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis relay small account").await else {
+        return;
+    };
+    let url = format!("nats://127.0.0.1:{port}");
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    let admin = jetstream::new(
+        async_nats::ConnectOptions::with_user_and_password("admin".into(), "admin".into())
+            .connect(&url)
+            .await
+            .expect("the admin client connects"),
+    );
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    let v = Arc::new(AtomicU64::new(0));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&url, Arc::clone(&v)).await, fast("i1"), Arc::clone(&v));
+    wait_for("the relay makes the stream and publishes", || async { snap.published() == 1 && xlen(&node).await == 0 }).await;
+    let mut stream = admin.get_stream(dl_js::STREAM).await.expect("the relay made the stream");
+    let live = stream.info().await.expect("stream info").config.clone();
+    assert_eq!(live.max_bytes, 268_435_456 * 9 / 10, "90 % of the account limit");
+    assert_eq!(live.max_bytes, dl_js::max_bytes_for(268_435_456));
+    let text = logs.text();
+    assert!(!text.contains("differs from the expected config"), "no drift warning: {text}");
+    assert!(!text.contains("cannot read the account limits"), "the relay grants cover $JS.API.INFO: {text}");
+    assert_eq!(v.load(std::sync::atomic::Ordering::SeqCst), 0, "no permission violation");
     relay.shut_down().await;
 }

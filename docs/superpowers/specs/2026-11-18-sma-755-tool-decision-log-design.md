@@ -645,6 +645,13 @@ own JetStream limits. A full decision stream then cannot stop `IAM_EVENTS` (F16)
 with the same values, so a stream that the relay makes is never unbounded. On drift, the relay
 logs a warning and does not change the stream.
 
+The relay does not know `DECISIONS_ACCOUNT_DISK_BYTES`. So before `get_or_create_stream` it reads
+the account storage limit with `$JS.API.INFO` (`query_account`). When the limit is above 0, the
+relay uses `min(19 327 352 832, limit × 9 / 10)` as `max-bytes`; with no limit it uses the
+default. The drift check uses the same value. A failed query gives the default and a warning; it
+does not stop the relay. Without this, a smaller account disk makes the broker refuse the create,
+and the relay stalls (CodeRabbit review).
+
 The runbook gets a sizing formula: `disk = peak decisions per second × average event bytes ×
 86 400 × 30`. At 600 bytes per event, 20 GiB holds about 13 decisions per second, sustained, for
 30 days. An operator with more traffic raises the account disk, or the stream keeps fewer days
@@ -652,7 +659,8 @@ The runbook gets a sizing formula: `disk = peak decisions per second × average 
 
 **Two new identities** in the new account, in `ops/nats/subjects.env`:
 
-- `gateway-decision-publisher`, for the relay. Publish: `gateway.decision.>`,
+- `gateway-decision-publisher`, for the relay. Publish: `gateway.decision.>`, `$JS.API.INFO`
+  (read-only, for the account limit),
   `$JS.API.STREAM.INFO.GATEWAY_DECISIONS`, `$JS.API.STREAM.CREATE.GATEWAY_DECISIONS`. Subscribe:
   its inbox prefix `_INBOX_GW_DEC.>`, for the PubAck. No subscribe on `gateway.decision.>`.
 - `gateway-decision-reader`, for the CLI. Publish: the JetStream API subjects that an

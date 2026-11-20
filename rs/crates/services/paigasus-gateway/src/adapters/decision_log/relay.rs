@@ -24,7 +24,7 @@ use redis::streams::{StreamAutoClaimReply, StreamInfoConsumersReply, StreamReadR
 use tokio::sync::{Mutex, watch};
 use tokio::time::Instant;
 
-use super::jetstream::{PublishClass, api_error_of, classify, stream_config, subject_for, violation_since};
+use super::jetstream::{MAX_BYTES, PublishClass, account_max_storage, api_error_of, classify, max_bytes_for, stream_config, subject_for, violation_since};
 use super::redis_conn::RedisSlot;
 use super::supervised::run_supervised;
 use super::{DropReason, count_dropped};
@@ -249,9 +249,24 @@ impl State {
         }
     }
 
-    /// `get_or_create_stream` with `stream_config()`. A live stream that differs gets a warning and no change.
+    /// The `max_bytes` for the stream. The relay reads the account storage limit with `$JS.API.INFO` and takes 90 %
+    /// of it when that is below [`MAX_BYTES`]. A broker refuses a stream above the account limit, so a fixed value
+    /// would stall the relay on a smaller account. If the query fails, the relay uses `MAX_BYTES` and goes on.
+    async fn stream_max_bytes(&self) -> i64 {
+        match self.js.query_account().await {
+            Ok(account) => max_bytes_for(account_max_storage(&account)),
+            Err(err) => {
+                tracing::warn!(kind = ?err.kind(), "the relay cannot read the account limits; it uses the default max_bytes");
+                MAX_BYTES
+            }
+        }
+    }
+
+    /// `get_or_create_stream` with `stream_config(max_bytes)`. A live stream that differs gets a warning and no
+    /// change. The drift check uses the same `max_bytes`, so a stream that `provision-decisions.sh` made for a
+    /// smaller account is not a drift.
     async fn ensure_stream(&self) -> bool {
-        let want = stream_config();
+        let want = stream_config(self.stream_max_bytes().await);
         match self.js.get_or_create_stream(want.clone()).await {
             Ok(stream) => {
                 let have = &stream.cached_info().config;

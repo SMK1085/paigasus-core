@@ -55,7 +55,7 @@ accounts {
       {
         nkey: "{{GW_DEC_PUBLISHER_NKEY}}"
         permissions: {
-          publish:   { allow: [ "gateway.decision.>", "$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "$JS.API.STREAM.CREATE.GATEWAY_DECISIONS" ] }
+          publish:   { allow: [ "gateway.decision.>", "$JS.API.INFO", "$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "$JS.API.STREAM.CREATE.GATEWAY_DECISIONS" ] }
           subscribe: { allow: [ "_INBOX_GW_DEC.>" ] }
         }
       },
