@@ -19,7 +19,7 @@ use paigasus_gateway::adapters::decision_log::generation::{GenKv, GenRecord, KvE
 use paigasus_gateway::adapters::decision_log::jetstream as dl_js;
 use paigasus_gateway::adapters::decision_log::redis_conn::breaker_metrics;
 use paigasus_gateway::adapters::decision_log::relay::delete_consumer_if_empty;
-use paigasus_gateway::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, proto, run_relay, run_writer};
+use paigasus_gateway::adapters::decision_log::{CHECK_ERROR_KINDS, RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, proto, run_relay, run_writer};
 use paigasus_gateway::config::DecisionLogNatsConfig;
 use paigasus_gateway::runtime;
 use paigasus_gateway::domain::decision_log::DecisionLog;
@@ -784,8 +784,6 @@ fn lost(snap: &Tally) -> u64 {
 fn check_errors(snap: &Tally, kind: &str) -> u64 {
     snap.get("gateway_decision_log_generation_check_errors_total", &[("kind", kind)])
 }
-
-const CHECK_ERROR_KINDS: [&str; 6] = ["timeout", "permission", "no_bucket", "redis", "foreign_writer", "other"];
 
 #[tokio::test]
 async fn flushall_with_two_relays_counts_one_reset() {
@@ -1874,15 +1872,15 @@ async fn a_publisher_without_kv_grants_still_relays_every_event() {
     let Some((node, redis_url)) = redis_7_4("decision_log_redis publisher without kv grants").await else {
         return;
     };
-    let port = free_port();
+    // The broker is paused, never restarted, so the port that Docker maps is enough.
+    let what = "decision_log_redis publisher without kv grants";
     let image = Nats::default()
         .with_cmd(["-c", "/etc/nats-test.conf"])
-        .with_copy_to("/etc/nats-test.conf", SMALL_ACCOUNT_CONF.as_bytes().to_vec())
-        .with_mapped_port(port, 4222.tcp());
-    let Some(nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis publisher without kv grants").await else {
+        .with_copy_to("/etc/nats-test.conf", SMALL_ACCOUNT_CONF.as_bytes().to_vec());
+    let Some(nats) = paigasus_test_docker::start_or_skip(image, what).await else {
         return;
     };
-    let url = format!("nats://127.0.0.1:{port}");
+    let url = format!("nats://127.0.0.1:{}", paigasus_test_docker::mapped_port(&nats, 4222, what).await);
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -1922,7 +1920,7 @@ async fn a_publisher_without_kv_grants_still_relays_every_event() {
     assert_eq!(xlen(&node).await, 1, "the event stays in Redis");
     nats.unpause().await.expect("unpause NATS");
     wait_for("21 events are published", || async { snap.published() == 21 && xlen(&node).await == 0 }).await;
-    assert_eq!(snap.dropped("publish_rejected"), 0, "a timeout with KV violations is not a rejection");
+    assert_eq!(snap.dropped("publish_rejected"), 0, "the publish timeouts of the pause rejected no event (a paused broker sends no -ERR)");
     assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "still no publish violation");
     assert!(check_errors(&snap, "permission") > 0, "the KV step still counts permission errors");
     relay.shut_down().await;
