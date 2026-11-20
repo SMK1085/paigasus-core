@@ -240,6 +240,10 @@ pub fn parse_tool_path(raw: &str) -> Result<ParsedToolPath, PathError> {
         other => other,
     };
     if let Some(body) = rest.strip_suffix('/') {
+        // Exactly one trailing slash is allowed. "/memories//" has a body of "/".
+        if body == "/" {
+            return Err(invalid(raw, "a path has no empty segment and no trailing /"));
+        }
         let dir = if body.is_empty() { MemoryDir::root() } else { MemoryDir::parse(body).map_err(rename)? };
         return Ok(ParsedToolPath {
             dir,
@@ -313,7 +317,7 @@ mod tests {
         for raw in ["/memoriesX/a", "memories/a", "/a", ""] {
             assert!(matches!(parse_tool_path(raw), Err(PathError::OutsideMemories { .. })), "{raw:?}");
         }
-        for raw in ["/memories/../x", "/memories//a", "/memories/a//"] {
+        for raw in ["/memories/../x", "/memories//a", "/memories/a//", "/memories//"] {
             assert!(matches!(parse_tool_path(raw), Err(PathError::Invalid { .. })), "{raw:?}");
         }
         assert_eq!(MemoryPath::parse("/tasks/t1.md").unwrap().to_tool_path(), "/memories/tasks/t1.md");
@@ -350,6 +354,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&MemoryPath::parse("/a").unwrap()).unwrap(), "\"/a\"");
         assert!(serde_json::from_str::<MemoryPath>("\"/a/../b\"").is_err());
         assert!(serde_json::from_str::<MemoryDir>("\"/\"").is_ok());
+        assert!(serde_json::from_str::<MemoryDir>("\"/a/\"").is_err());
     }
 
     #[test]

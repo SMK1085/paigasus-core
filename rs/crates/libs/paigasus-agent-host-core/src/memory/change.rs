@@ -183,6 +183,23 @@ mod tests {
     }
 
     #[test]
+    fn change_set_edge_cases() {
+        let mut s = MemoryChangeSet::new();
+        s.record(del("/f", "3"));
+        s.record(del("/f", "9"));
+        assert_eq!(s.changes(), [del("/f", "3")]);
+
+        let mut s = MemoryChangeSet::new();
+        s.record(put("/a", "1", Expected::Absent));
+        s.record(put("/f", "1", Expected::Absent));
+        s.record(del("/f", "9"));
+        s.record(put("/g", "1", Expected::Absent));
+        s.record(put("/f", "2", Expected::Absent));
+        let paths: Vec<_> = s.changes().iter().map(|c| c.path().as_str().to_string()).collect();
+        assert_eq!(paths, ["/a", "/g", "/f"]);
+    }
+
+    #[test]
     fn change_set_keeps_first_record_order_and_supports_lookup() {
         let mut s = MemoryChangeSet::new();
         s.record(put("/b", "1", Expected::Absent));
