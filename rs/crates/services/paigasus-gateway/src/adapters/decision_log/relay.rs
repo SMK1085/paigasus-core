@@ -11,7 +11,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_nats::jetstream::{self, message::PublishMessage};
@@ -26,7 +26,7 @@ use redis::streams::{StreamAutoClaimReply, StreamInfoConsumersReply, StreamReadR
 use tokio::sync::{Mutex, watch};
 use tokio::time::Instant;
 
-use super::jetstream::{MAX_BYTES, PublishClass, STREAM, api_error_of, classify, max_bytes_for_account, stream_config, subject_for, violation_since};
+use super::jetstream::{MAX_BYTES, PublishClass, STREAM, Violations, api_error_of, classify, max_bytes_for_account, stream_config, subject_for, violation_since};
 use super::redis_conn::RedisSlot;
 use super::supervised::run_supervised;
 use super::{DropReason, count_dropped};
@@ -138,7 +138,7 @@ struct State {
     slot: RedisSlot,
     js: jetstream::Context,
     s: RelaySettings,
-    violations: Arc<AtomicU64>,
+    violations: Violations,
     /// The last `XLEN` sample of the stream while it had the consumer group. `None` until the first one.
     sample: StdMutex<Option<u64>>,
     inner: Mutex<Inner>,
@@ -412,7 +412,7 @@ impl State {
         if !event.decision_id.is_empty() {
             msg = msg.message_id(&event.decision_id);
         }
-        let generation = self.violations.load(Ordering::SeqCst);
+        let generation = self.violations.publish.load(Ordering::SeqCst);
         tracing::debug!(concurrent, "the relay publishes an entry");
         let started = Instant::now();
         let result = match self.js.send_publish(subject, msg).await {
@@ -424,7 +424,7 @@ impl State {
                 histogram!(names::GATEWAY_DECISION_LOG_PUBLISH_SECONDS).record(started.elapsed().as_secs_f64());
                 Outcome::Published
             }
-            Err(err) => match classify(err.kind(), api_error_of(&err), violation_since(&self.violations, generation), concurrent) {
+            Err(err) => match classify(err.kind(), api_error_of(&err), violation_since(&self.violations.publish, generation), concurrent) {
                 PublishClass::Ambiguous => Outcome::Ambiguous,
                 PublishClass::Permanent(class) => {
                     let code = api_error_of(&err).map(|a| a.code);
@@ -663,7 +663,7 @@ impl State {
 
 /// Run the relay until the shutdown signal. The batch in flight gets `budget` after the signal. The entries
 /// that are not acked stay in Redis for the next instance.
-pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Arc<AtomicU64>, shutdown: watch::Receiver<()>, budget: Duration) {
+pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Violations, shutdown: watch::Receiver<()>, budget: Duration) {
     let now = Instant::now();
     let state = Arc::new(State {
         slot,

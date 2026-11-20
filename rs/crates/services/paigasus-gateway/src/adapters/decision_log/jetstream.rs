@@ -50,6 +50,49 @@ pub fn is_publish_violation(text: &str) -> bool {
     text.to_lowercase().contains(PERMISSION_VIOLATION)
 }
 
+/// The two refused-publish counters of the decision-log connection. `publish` counts refusals of a
+/// `gateway.decision.` subject. `kv` counts every other refusal, the generation bucket included. Only `publish`
+/// turns a publish timeout into a permanent error, so a refused KV call never deletes an event.
+#[derive(Debug, Clone, Default)]
+pub struct Violations {
+    /// Refusals of a `gateway.decision.` subject.
+    pub publish: Arc<AtomicU64>,
+    /// Refusals of any other subject, and of a text that names no subject.
+    pub kv: Arc<AtomicU64>,
+}
+
+/// The side of a refused publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViolationRoute {
+    /// A `gateway.decision.` subject.
+    Publish,
+    /// Any other subject, or no quoted subject.
+    Kv,
+}
+
+/// The text between the first pair of double quotes, or `None` when the text has no such pair.
+#[must_use]
+pub fn violation_subject(text: &str) -> Option<&str> {
+    let start = text.find('"')? + 1;
+    let len = text[start..].find('"')?;
+    Some(&text[start..start + len])
+}
+
+/// Add 1 to the counter of the side that a refused publish belongs to, and return that side. A subject that
+/// starts with `gateway.decision.` is the publish side. All other texts, with or without a subject, are the KV
+/// side: a KV refusal must never delete an event, so an unknown text goes to the side that deletes nothing.
+pub fn route_violation(text: &str, v: &Violations) -> ViolationRoute {
+    let route = match violation_subject(text) {
+        Some(subject) if subject.starts_with("gateway.decision.") => ViolationRoute::Publish,
+        _ => ViolationRoute::Kv,
+    };
+    match route {
+        ViolationRoute::Publish => v.publish.fetch_add(1, Ordering::SeqCst),
+        ViolationRoute::Kv => v.kv.fetch_add(1, Ordering::SeqCst),
+    };
+    route
+}
+
 /// Whether the broker reported a refused publish since the generation `before` was read.
 #[must_use]
 pub fn violation_since(generation: &AtomicU64, before: u64) -> bool {
@@ -276,13 +319,15 @@ pub fn classify(kind: PublishErrorKind, api: Option<ApiError>, violation_seen: b
 /// Make the JetStream context. The creds file is read and parsed once here, so a missing or bad file is a boot
 /// error that names the path. Then the callback re-reads it on every connect attempt, so a rotation takes
 /// effect on the next reconnect. A broker that is down is not an error: the client connects in the background.
-/// `violations` is a generation counter: the event callback adds 1 each time that the broker reports a refused
-/// publish. A publish reads it before it starts and calls a `TimedOut` permanent only if it changed (P-14).
+/// `violations` holds two generation counters. The event callback routes each refused publish by its quoted
+/// subject ([`route_violation`]) and adds 1 to one of them. A publish reads `violations.publish` before it starts
+/// and calls a `TimedOut` permanent only if it changed (P-14). `violations.kv` counts the other refusals, so a
+/// refused KV call never makes a publish permanent.
 ///
 /// # Errors
 ///
 /// [`NatsError`] when the creds file cannot be read or parsed, or when the options are refused.
-pub async fn connect(cfg: &DecisionLogNatsConfig, violations: Arc<AtomicU64>) -> Result<jetstream::Context, NatsError> {
+pub async fn connect(cfg: &DecisionLogNatsConfig, violations: Violations) -> Result<jetstream::Context, NatsError> {
     let mut opts = match &cfg.creds_file {
         Some(path) => {
             let raw = tokio::fs::read_to_string(path).await.map_err(|source| NatsError::Credentials { path: path.clone(), source })?;
@@ -299,13 +344,24 @@ pub async fn connect(cfg: &DecisionLogNatsConfig, violations: Arc<AtomicU64>) ->
     if let Some(ca) = &cfg.ca_file {
         opts = opts.add_root_certificates(PathBuf::from(ca));
     }
+    let last_kv_log = Arc::new(AtomicU64::new(0));
     opts = opts.event_callback(move |event| {
-        let violations = Arc::clone(&violations);
+        let violations = violations.clone();
+        let last_kv_log = Arc::clone(&last_kv_log);
         async move {
             match &event {
                 async_nats::Event::ServerError(err) if is_publish_violation(&err.to_string()) => {
-                    violations.fetch_add(1, Ordering::SeqCst);
-                    tracing::error!("the decision-log NATS publisher has no permission to publish");
+                    match route_violation(&err.to_string(), &violations) {
+                        ViolationRoute::Publish => tracing::error!("the decision-log NATS publisher has no permission to publish"),
+                        ViolationRoute::Kv => {
+                            // At most one log line each 60 s: the KV step runs on a timer.
+                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                            let last = last_kv_log.load(Ordering::SeqCst);
+                            if (last == 0 || now.saturating_sub(last) >= 60) && last_kv_log.compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                                tracing::error!("the decision-log NATS publisher has no permission for the generation bucket");
+                            }
+                        }
+                    }
                 }
                 async_nats::Event::Connected => tracing::info!("the decision-log NATS client is connected"),
                 async_nats::Event::Disconnected | async_nats::Event::Closed => tracing::warn!(event = %event, "the decision-log NATS connection event"),
@@ -348,6 +404,37 @@ mod tests {
         assert!(is_publish_violation("PERMISSIONS VIOLATION FOR PUBLISH TO \"x\""));
         assert!(!is_publish_violation("nats: Permissions Violation for Subscription to \"x\""));
         assert!(!is_publish_violation("nats: authorization violation"));
+    }
+
+    #[test]
+    fn a_violation_is_routed_by_its_quoted_subject() {
+        let v = Violations::default();
+        assert_eq!(
+            route_violation(r#"nats: Permissions Violation for Publish to "gateway.decision.0190a100-0000-7000-8000-0000000000a1""#, &v),
+            ViolationRoute::Publish
+        );
+        assert_eq!(
+            route_violation(r#"nats: Permissions Violation for Publish to "$JS.API.STREAM.INFO.KV_GATEWAY_DECISIONS_GEN""#, &v),
+            ViolationRoute::Kv
+        );
+        assert_eq!(route_violation(r#"Permissions Violation for Publish to "$KV.GATEWAY_DECISIONS_GEN.ab""#, &v), ViolationRoute::Kv);
+        assert_eq!(
+            route_violation("Permissions Violation for Publish to gateway.decision.x", &v),
+            ViolationRoute::Kv,
+            "no quotes: never the publish side"
+        );
+        assert_eq!(route_violation(r#"Permissions Violation for Publish to "gateway.decisionx""#, &v), ViolationRoute::Kv);
+        assert_eq!(v.publish.load(Ordering::SeqCst), 1);
+        assert_eq!(v.kv.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn a_kv_violation_does_not_make_a_publish_timeout_permanent() {
+        let v = Violations::default();
+        let before = v.publish.load(Ordering::SeqCst);
+        let route = route_violation(r#"Permissions Violation for Publish to "$KV.GATEWAY_DECISIONS_GEN.ab""#, &v);
+        assert_eq!(route, ViolationRoute::Kv);
+        assert_eq!(classify(PublishErrorKind::TimedOut, None, violation_since(&v.publish, before), false), PublishClass::Transient);
     }
 
     #[test]

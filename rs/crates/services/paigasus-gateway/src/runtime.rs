@@ -12,7 +12,6 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use metrics::counter;
@@ -174,8 +173,8 @@ pub async fn build_decision_log(config: &GatewayConfig, clock: Arc<dyn Clock>, e
     }
     let redis_url = dl.redis_url.clone().ok_or_else(|| anyhow::anyhow!("decision_log.enabled = true requires decision_log.redis_url"))?;
     let nats = dl.nats.as_ref().ok_or_else(|| anyhow::anyhow!("decision_log.enabled = true requires [decision_log.nats]"))?;
-    let violations = Arc::new(AtomicU64::new(0));
-    let js = jetstream::connect(nats, Arc::clone(&violations)).await?;
+    let violations = jetstream::Violations::default();
+    let js = jetstream::connect(nats, violations.clone()).await?;
     let (log, queue) = RedisDecisionLog::new(dl.queue_capacity);
     let recorder = Arc::new(DecisionRecorder::new(Arc::new(log), clock, entropy, dl.digest_key()));
     prime_decision_log_metrics();
