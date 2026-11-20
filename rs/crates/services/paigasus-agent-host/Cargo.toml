@@ -55,6 +55,10 @@ reqwest = { workspace = true }
 rustls = { workspace = true }
 # The test model of `adapters::helikon` names the `BoxStream` type of the core `Model` trait.
 futures = { workspace = true }
+# `tests/memory_pg.rs` runs the conformance suite of `MemoryStore` against Postgres.
+paigasus-agent-host-core = { workspace = true, features = ["test-support"] }
+# `tests/memory_pg.rs` reads the scope UUIDs of a raw row.
+uuid = { workspace = true }
 
 [lints]
 workspace = true
