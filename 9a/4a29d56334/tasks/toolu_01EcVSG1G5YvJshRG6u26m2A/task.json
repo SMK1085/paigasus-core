@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01EcVSG1G5YvJshRG6u26m2A",
+  "agent_id": "a4d55fa7a9c2451e5",
+  "subagent_type": "general-purpose",
+  "task_description": "Triage PR 487 CI failure",
+  "token_usage": {
+    "input_tokens": 22,
+    "cache_creation_tokens": 101526,
+    "cache_read_tokens": 859670,
+    "output_tokens": 4478,
+    "api_call_count": 11
+  },
+  "started_at": "2026-11-18T18:10:48.483278+01:00",
+  "completed_at": "2026-11-18T18:11:43.002507+01:00"
+}

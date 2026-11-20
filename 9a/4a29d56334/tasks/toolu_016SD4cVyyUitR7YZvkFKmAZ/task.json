@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_016SD4cVyyUitR7YZvkFKmAZ",
+  "agent_id": "a647f7f36b4239208",
+  "task_description": "Implement SMA-814 release-plz 0.4",
+  "token_usage": {
+    "input_tokens": 88,
+    "cache_creation_tokens": 130569,
+    "cache_read_tokens": 4936069,
+    "output_tokens": 24217,
+    "api_call_count": 44
+  },
+  "started_at": "2026-11-19T00:36:01.142133+01:00",
+  "completed_at": "2026-11-19T00:45:12.294913+01:00"
+}

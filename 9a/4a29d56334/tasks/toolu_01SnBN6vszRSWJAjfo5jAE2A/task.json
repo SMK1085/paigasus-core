@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01SnBN6vszRSWJAjfo5jAE2A",
+  "agent_id": "ac19f09c35e140b4d",
+  "subagent_type": "general-purpose",
+  "task_description": "Analyse cedar GHSA-c33x-vcv4-vg3g",
+  "token_usage": {
+    "input_tokens": 20,
+    "cache_creation_tokens": 90487,
+    "cache_read_tokens": 715829,
+    "output_tokens": 7616,
+    "api_call_count": 10
+  },
+  "started_at": "2026-11-18T19:11:30.283125+01:00",
+  "completed_at": "2026-11-18T19:13:47.123006+01:00"
+}

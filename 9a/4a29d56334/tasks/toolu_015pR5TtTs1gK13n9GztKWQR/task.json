@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_015pR5TtTs1gK13n9GztKWQR",
+  "agent_id": "a0edb2042c4e343c6",
+  "subagent_type": "general-purpose",
+  "task_description": "Survey outdated TS dependencies",
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 83724,
+    "cache_read_tokens": 301930,
+    "output_tokens": 3449,
+    "api_call_count": 5
+  },
+  "started_at": "2026-11-18T19:11:30.295254+01:00",
+  "completed_at": "2026-11-18T19:12:19.951122+01:00"
+}
