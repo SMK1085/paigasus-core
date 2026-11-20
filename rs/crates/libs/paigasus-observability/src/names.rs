@@ -334,7 +334,7 @@ pub const IAM_NATS_PUBLISH_DURATION_SECONDS: &str = "iam_nats_publish_duration_s
 pub const IAM_NATS_CONNECTED: &str = "iam_nats_connected";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
-/// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
+/// `iam_`/`gateway_`/`agent_host_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
 /// trailing `_bucket`/`_sum`/`_count` histogram/summary suffix, and asserts each one is in `ALL`.
 /// Label keys, PromQL function/keyword tokens, and template vars never match the prefix filter,
 /// so they need no separate allowlist.

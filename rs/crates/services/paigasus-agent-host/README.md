@@ -1,7 +1,8 @@
 # paigasus-agent-host
 
-The agent host service. This crate holds the configuration and the database migrations of the
-service. The HTTP surface comes in a later change.
+The agent host service. This crate holds the configuration, the database migrations and the HTTP
+surface of the service. The surface serves `/healthz`, `/readyz` and `/metrics`. Any other path
+returns the 404 error envelope.
 
 The agent host needs its own database. A separate schema in a shared database is not supported.
 

@@ -26,8 +26,7 @@ use super::{MIGRATION_TABLE, Migrator};
 pub const MIGRATION_LOCK_KEY: i64 = 5_580_786;
 
 /// Fixed backoff between acquisition attempts. No jitter: every loser simply waits and then
-/// finds nothing to do, so staggering them buys nothing (contrast `OutboxConfig::wake_debounce_ms`,
-/// where the herd is real).
+/// finds nothing to do, so staggering them buys nothing.
 pub const POLL_BACKOFF: Duration = Duration::from_secs(1);
 
 /// At most one "still waiting" line per this interval.
@@ -45,7 +44,7 @@ pub enum Poll {
 /// The sole authority for backoff and give-up.
 ///
 /// Extracted from the async loop so the timing decision is testable without Docker — the same
-/// discipline `docker::env_flag` and `PgPartitionMaintainer::tick`'s `MaintenanceReport` follow.
+/// discipline of keeping a pure decision function apart from the I/O around it.
 ///
 /// Note the do-while property ("always attempt at least once") is NOT expressed here: it belongs
 /// to `migrate_under_lock`'s loop structure, because this function is only ever consulted AFTER
@@ -117,8 +116,7 @@ async fn applied_count<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
 ///
 /// **Production code must never call `Migrator::up` bare.** There is exactly one production call
 /// site (`main.rs`) and this is it. The test `the_composition_root_still_migrates_under_the_lock`
-/// enforces this. The remaining call sites are integration tests that deliberately drive
-/// migrations step by step.
+/// enforces this. The integration tests also call `migrate_under_lock`, not `Migrator::up`.
 ///
 /// The loop is do-while: an attempt always happens before any give-up decision, so even the
 /// smallest legal `wait` still asks Postgres once.
@@ -152,10 +150,9 @@ pub async fn migrate_under_lock(db: &DatabaseConnection, wait: Duration) -> Resu
         };
 
         if acquired {
-            // Captured now, before the migration runs: `waited` is documented (spec §3.1) as
-            // excluding the migration itself, and Task 4 asserts on it to prove a waiter
-            // genuinely waited — if it silently absorbed migration time too, that assertion
-            // would stop discriminating.
+            // Captured now, before the migration runs: `waited` is documented as
+            // excluding the migration itself. A test uses it to prove that a waiter genuinely
+            // waited. If it also counted the migration time, that test would prove nothing.
             let waited = start.elapsed();
             let before = match applied_count(&txn).await {
                 Ok(n) => n,
