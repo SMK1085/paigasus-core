@@ -1,0 +1,60 @@
+{
+  "cli_version": "0.13.1",
+  "checkpoint_id": "acc24372943e",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-841-bump-images-0-3-0",
+  "checkpoints_count": 11,
+  "files_touched": [
+    "charts/paigasus/tests/golden/iam-and-gateway-httproute.yaml",
+    "charts/paigasus/tests/golden/iam-and-gateway.yaml",
+    "charts/paigasus/tests/golden/iam-dpop.yaml",
+    "charts/paigasus/tests/golden/iam-only.yaml",
+    "charts/paigasus/values.yaml",
+    "rs/Cargo.lock",
+    "rs/crates/services/paigasus-gateway/CHANGELOG.md",
+    "rs/crates/services/paigasus-gateway/Cargo.toml",
+    "rs/crates/services/paigasus-iam/CHANGELOG.md",
+    "rs/crates/services/paigasus-iam/Cargo.toml",
+    "ts/apps/gateway-console/CHANGELOG.md",
+    "ts/apps/gateway-console/package.json",
+    "ts/apps/iam-console/CHANGELOG.md",
+    "ts/apps/iam-console/package.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ac/c24372943e/0/metadata.json",
+      "transcript": "/ac/c24372943e/0/full.jsonl",
+      "compact_transcript": "/ac/c24372943e/0/transcript.jsonl",
+      "content_hash": "/ac/c24372943e/0/content_hash.txt",
+      "prompt": "/ac/c24372943e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 122,
+    "cache_creation_tokens": 64063,
+    "cache_read_tokens": 7666843,
+    "output_tokens": 22625,
+    "api_call_count": 51,
+    "subagent_tokens": {
+      "input_tokens": 62,
+      "cache_creation_tokens": 164634,
+      "cache_read_tokens": 3260310,
+      "output_tokens": 22793,
+      "api_call_count": 31
+    }
+  },
+  "redaction": {
+    "replacements": 419,
+    "layers": {
+      "betterleaks": 42,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 377,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}

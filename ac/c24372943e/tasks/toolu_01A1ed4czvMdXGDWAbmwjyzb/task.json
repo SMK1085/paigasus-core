@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01A1ed4czvMdXGDWAbmwjyzb",
+  "agent_id": "ab9a8c0b7404e65cb",
+  "subagent_type": "general-purpose",
+  "task_description": "Bump four images to 0.3.0",
+  "token_usage": {
+    "input_tokens": 58,
+    "cache_creation_tokens": 136005,
+    "cache_read_tokens": 3558918,
+    "output_tokens": 16425,
+    "api_call_count": 29
+  },
+  "started_at": "2026-11-20T23:54:24.693111+01:00",
+  "completed_at": "2026-11-21T00:03:00.011701+01:00"
+}
