@@ -218,7 +218,9 @@ small injected KV port (get, create, update with revision). The rules:
   If the sample is null, the relay adds 0 and logs that the loss is unknown, as today.
 - **A KV error** (NATS down, a timeout, a permission refusal, no bucket, a Redis error in step 2)
   logs a rate-limited warning with the error kind. It increases
-  `gateway_decision_log_generation_check_errors_total{kind}`. The next tick tries again. A reset
+  `gateway_decision_log_generation_check_errors_total{kind}`. When the time limit of the step stops
+  the Redis call of step 2, the kind is `redis`, not `timeout`. The `foreign_writer` error log uses
+  the same rate limit; its metric counts every tick. The next tick tries again. A reset
   during a NATS outage is counted when NATS is back, as long as Redis still holds the new
   generation.
 - A sample of 0 under the current generation is a real, empty stream. The group lives inside the
