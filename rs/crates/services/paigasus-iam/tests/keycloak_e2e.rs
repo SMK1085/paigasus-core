@@ -110,6 +110,7 @@ async fn keycloak_end_to_end_config_only_oidc() {
 
     // One reqwest client for the test's own IdP calls, trusting the self-signed cert (the test
     // playing the role of the CLI — distinct from the service's JWKS fetcher).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(10))

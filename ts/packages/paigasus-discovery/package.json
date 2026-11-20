@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "license": "Apache-2.0",
   "description": "Lazy, request-scoped service capability discovery with three service states for Paigasus console zones.",

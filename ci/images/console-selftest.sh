@@ -367,7 +367,7 @@ else
   hc_line="$(grep -E '^RUN printf .*> /app/healthcheck\.mjs$' "$REPO/ts/Dockerfile")" || hc_line=""
   hc_fmt="${hc_line#*\'}"
   hc_fmt="${hc_fmt%%\'*}"
-  HC_RUNTIME_REF="$(grep -oE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}' "$REPO/ts/Dockerfile" | sed 's/^FROM //')" || HC_RUNTIME_REF=""
+  HC_RUNTIME_REF="$(grep -oE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian13:nonroot@sha256:[0-9a-f]{64}' "$REPO/ts/Dockerfile" | sed 's/^FROM //')" || HC_RUNTIME_REF=""
   if [ -z "$hc_line" ] || [ "$hc_fmt" = "$hc_line" ]; then
     say_fail F0 "healthcheck printf not found in ts/Dockerfile"
     say_fail F1 "healthcheck printf not found in ts/Dockerfile"

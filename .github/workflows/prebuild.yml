@@ -134,8 +134,8 @@ jobs:
           restore-keys: |
             prebuild-rust-${{ runner.os }}-${{ matrix.target }}-dual-${{ hashFiles('rs/rust-toolchain.toml') }}-
 
-      # Attach the cross target to the pinned 1.95.0 toolchain — run from rs/ so rust-toolchain.toml's
-      # override selects 1.95.0, not the runner default (mirrors ci.yml's serial pre-install; spec §2).
+      # Attach the cross target to the pinned 1.100.0 toolchain — run from rs/ so rust-toolchain.toml's
+      # override selects 1.100.0, not the runner default (mirrors ci.yml's serial pre-install; spec §2).
       - name: Add Rust target(s) (pinned toolchain)
         working-directory: rs
         # rustup accepts several triples at once; matrix.extra_target expands to nothing on the

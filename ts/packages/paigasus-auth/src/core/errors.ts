@@ -158,8 +158,10 @@ export class AuthConfigError extends AuthError {
  */
 export class CallbackRejected extends AuthError {
   readonly code = 'callback_rejected';
-  constructor(readonly reason: 'txn_missing' | 'txn_mismatch' | 'state_unknown' | 'idp_error' | 'code_exchange_failed') {
+  readonly reason: 'txn_missing' | 'txn_mismatch' | 'state_unknown' | 'idp_error' | 'code_exchange_failed';
+  constructor(reason: 'txn_missing' | 'txn_mismatch' | 'state_unknown' | 'idp_error' | 'code_exchange_failed') {
     super(`callback rejected: ${reason}`);
+    this.reason = reason;
   }
 }
 
@@ -180,8 +182,10 @@ export class CallbackRejected extends AuthError {
  */
 export class RefreshRejected extends AuthError {
   readonly code = 'oidc_refresh_rejected';
-  constructor(readonly oauthError: 'invalid_grant') {
+  readonly oauthError: 'invalid_grant';
+  constructor(oauthError: 'invalid_grant') {
     super(`oidc refresh rejected: ${oauthError}`);
+    this.oauthError = oauthError;
   }
 }
 
@@ -210,11 +214,10 @@ export function toTokenErrorCode(value: unknown): TokenErrorCode | 'other' {
  */
 export class RefreshFailed extends AuthError {
   readonly code = 'oidc_refresh_failed';
-  constructor(
-    readonly oauthError: TokenErrorCode | 'other',
-    causeName: string,
-  ) {
+  readonly oauthError: TokenErrorCode | 'other';
+  constructor(oauthError: TokenErrorCode | 'other', causeName: string) {
     super(`oidc refresh_token_grant failed: ${causeName}`);
+    this.oauthError = oauthError;
   }
 }
 

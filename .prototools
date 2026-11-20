@@ -15,7 +15,7 @@ maturin = "1.16.0"
 moon = "2.6.5"
 osv-scanner = "2.7.1"
 promtool = "3.16.0"
-release-plz = "0.3.158"
+release-plz = "0.4.3"
 syft = "1.57.2"
 wasm-pack = "0.15.1"
 
@@ -26,7 +26,7 @@ wasm-pack = "0.15.1"
 # version from .prototools, NOT from .moon/toolchains.yml — without these it fails with
 # `proto::detect::failed`. moon keeps in sync via versionFromPrototools (default true); values
 # mirror .moon/toolchains.yml.
-node = "24.22.3"
+node = "26.13.1"
 pnpm = "12.22.0"
 uv = "0.13.9"
 

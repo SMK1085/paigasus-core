@@ -30,7 +30,7 @@ allowBuilds:
   ssh2: false
 
 # Make the `engines.node` floor a hard error instead of a warning. Every workspace
-# package declares `engines.node: >=24` (Active LTS, matching the 24.22.3 pin in
+# package declares `engines.node: >=26` (Active LTS, matching the 26.13.1 pin in
 # .prototools); without this, pnpm only warns and a developer on Node 20/22 installs
 # happily, then hits failures CI never reproduces. NOTE: the .npmrc `engine-strict=true`
 # form is IGNORED by pnpm 11 and 12 — it downgrades to a plain "[WARN] Unsupported engine"
@@ -53,8 +53,8 @@ overrides:
   # 4.x and 5.x as a single vulnerable range fixed in 5.0.9: upstream published just 4.0.0
   # and 4.0.1, never backported the fix, and ships no maintenance-v4 tag — so no secure
   # 4.x target exists. 5.0.9 requires node "20 || >=22", which this workspace satisfies
-  # (every package declares engines.node >=24, enforced by engineStrict above, and
-  # .prototools pins 24.22.3). Nothing resolves to 4.x today; this
+  # (every package declares engines.node >=26, enforced by engineStrict above, and
+  # .prototools pins 26.13.1). Nothing resolves to 4.x today; this
   # selector exists so a future 4.x consumer is migrated rather than left unpatched.
   'brace-expansion@>=4.0.0 <5.0.9': '>=5.0.9 <6'
   # GHSA-73wf-gq98-2v4g / GHSA-c83g-rgw3-j3cx — browserslist. normalizeStats() walks an
@@ -162,9 +162,9 @@ catalog:
   # Type declarations
   '@types/react': ^19.3.0
   '@types/react-dom': ^19.3.0
-  # Track the Node runtime major (Active LTS 24); Dependabot ignores major bumps so
+  # Track the Node runtime major (Active LTS 26); Dependabot ignores major bumps so
   # the types can't drift ahead of the runtime (see .github/dependabot.yml).
-  '@types/node': ^24.19.2
+  '@types/node': ^26.6.6
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
   '@next/eslint-plugin-next': ^16.4.6
   '@tanstack/eslint-plugin-query': ^5.100.14
@@ -172,7 +172,7 @@ catalog:
   '@commitlint/cli': ^21.2.4
   '@commitlint/config-conventional': ^21.2.4
   # Release tooling (SMA-406 — dormant semantic-release + parity adapter)
-  semantic-release: ^25.0.9
+  semantic-release: ^26.0.1
   '@semantic-release/commit-analyzer': ^13.0.1
   # Protobuf-ES v2 runtime (SMA-389)
   '@bufbuild/protobuf': ^2.17.0
@@ -219,7 +219,7 @@ catalog:
   # the TS equivalent. GitHub Actions `services:` cannot do the cert copy and realm import.
   testcontainers: ^12.2.1
   # SMA-641: runs ts/tooling/dev-stack.ts. The dev stack imports @paigasus/console-core/testing,
-  # whose exports map points at TypeScript source with EXTENSIONLESS relative imports. Node 24
+  # whose exports map points at TypeScript source with EXTENSIONLESS relative imports. Node 26
   # strips types but resolves specifiers literally, so plain `node` cannot load it.
   tsx: ^4.20.6
   # @paigasus/ui foundation (SMA-503, ADR-0021). Tailwind v4 is CSS-first: there is no
