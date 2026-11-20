@@ -165,6 +165,48 @@ async fn apply_in_rolls_back_with_the_caller() {
     assert_eq!(fresh.usage(&s).await.expect("usage"), MemoryUsage::default());
 }
 
+/// A change set with no change takes no scope row and no lock: a run with no memory change does
+/// not wait for a console write of the same scope.
+#[tokio::test]
+async fn an_empty_change_set_takes_no_scope_row_and_no_lock() {
+    let Some((_node, _url, db)) = migrated().await else {
+        eprintln!("skipping memory_pg: Docker unavailable");
+        return;
+    };
+    let store = PgMemoryStore::new(db.clone());
+    let s = fresh_scope();
+    let empty = commit_set(&s, vec![]);
+    store.apply(&empty, &MemoryCaps::default()).await.expect("apply");
+    let txn = db.begin().await.expect("begin");
+    store.apply_in(&txn, &empty, &MemoryCaps::default()).await.expect("apply_in");
+    txn.commit().await.expect("commit");
+    let rows = db
+        .query_one_raw(stmt(
+            "SELECT count(*)::int AS n FROM memory_scope WHERE org_id = $1 AND agent_id = $2 AND principal_id = $3",
+            scope_values(&s),
+        ))
+        .await
+        .expect("count")
+        .expect("row");
+    assert_eq!(rows.try_get::<i32>("", "n").expect("n"), 0);
+
+    // With the scope row locked FOR UPDATE by another transaction, an empty apply does not wait.
+    insert_scope_row(&db, &s).await;
+    let b = db.begin().await.expect("begin B");
+    b.query_one_raw(stmt(
+        "SELECT 1 AS v FROM memory_scope WHERE org_id = $1 AND agent_id = $2 AND principal_id = $3 FOR UPDATE",
+        scope_values(&s),
+    ))
+    .await
+    .expect("lock in B")
+    .expect("the scope row exists");
+    tokio::time::timeout(Duration::from_secs(2), store.apply(&empty, &MemoryCaps::default()))
+        .await
+        .expect("an empty apply does not wait for the lock")
+        .expect("apply");
+    b.commit().await.expect("commit B");
+}
+
 /// A conflict in `apply_in` rolls back to its savepoint. The caller's transaction stays usable,
 /// and no part of the refused change set is written.
 #[tokio::test]

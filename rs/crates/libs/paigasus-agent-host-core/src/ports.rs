@@ -108,19 +108,23 @@ pub enum MemoryStoreError {
 }
 
 /// The refusal or failure of `MemoryStore::apply`.
+///
+/// The `Display` text is for a log line. It holds no path of a principal and no cause (spec
+/// §6.13). The path and the cause stay in the fields. The model texts are on `CapError`,
+/// `WorkspaceError` and `MemoryCommandError`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MemoryApplyError {
     /// The version of a file is not the expected version.
-    #[error("memory conflict at {path}")]
+    #[error("memory conflict")]
     Conflict { path: MemoryPath },
     /// A cap refuses the change set.
-    #[error("{0}")]
+    #[error("memory cap exceeded")]
     CapExceeded(CapError),
     /// Some changes are applied and one failed. Only a store without a transaction returns this.
-    #[error("memory change set partly applied: {applied} applied, failed at {failed_at}: {cause}")]
+    #[error("memory change set partly applied: {applied} applied")]
     Partial { applied: usize, failed_at: MemoryPath, cause: Box<MemoryApplyError> },
-    /// The store failed.
-    #[error("memory store error: {0}")]
+    /// The store failed. The text is the cause.
+    #[error("memory store error")]
     Store(String),
 }
 
@@ -128,6 +132,10 @@ pub enum MemoryApplyError {
 /// Used inside a run: reads go direct, and writes go to the buffer of the workspace. The
 /// `RunCommitter` writes them in the one commit. Used outside a run: the console reads and writes.
 /// Every method takes the scope. The org is part of every key and every query.
+///
+/// Every write is expected to go through `MemoryWorkspace`, which checks the paths, the caps and
+/// the content, and refuses a NUL character with a model text. An adapter refuses content with a
+/// NUL character in `apply` with `MemoryApplyError::Store`, as Postgres `text` does.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Read a file. It returns `None` when the file does not exist.
@@ -174,4 +182,35 @@ pub trait AgentResolver: Send + Sync {
 pub trait RunCommitter: Send + Sync {
     /// Commit the outcome of a run in one transaction.
     async fn commit(&self, handle: RunHandle, outcome: RunOutcome) -> Result<Committed, CommitError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::MemoryPath;
+
+    #[test]
+    fn no_memory_apply_error_display_holds_the_path() {
+        let path = MemoryPath::parse("/people/secret-name.md").unwrap();
+        let cap = CapError::File {
+            path: path.clone(),
+            size: 10,
+            limit: 1,
+        };
+        let errors = [
+            MemoryApplyError::Conflict { path: path.clone() },
+            MemoryApplyError::CapExceeded(cap),
+            MemoryApplyError::Partial {
+                applied: 2,
+                failed_at: path.clone(),
+                cause: Box::new(MemoryApplyError::Conflict { path: path.clone() }),
+            },
+            MemoryApplyError::Store(format!("db error at {path}")),
+        ];
+        let texts: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert_eq!(texts, ["memory conflict", "memory cap exceeded", "memory change set partly applied: 2 applied", "memory store error"]);
+        for text in &texts {
+            assert!(!text.contains("secret-name"), "{text}");
+        }
+    }
 }

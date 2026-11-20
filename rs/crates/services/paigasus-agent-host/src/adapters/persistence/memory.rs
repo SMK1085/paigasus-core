@@ -38,6 +38,11 @@ impl PgMemoryStore {
     /// returns the error, so the caller's transaction stays usable and holds no part of the
     /// change set. It never commits or rolls back `txn`. The scope row lock is held until `txn`
     /// ends.
+    ///
+    /// It expects `txn` at READ COMMITTED, the Postgres default. Under REPEATABLE READ or
+    /// SERIALIZABLE, a console write that commits on the same scope after the snapshot of `txn`
+    /// makes the `SELECT … FOR UPDATE` fail with a serialization error, and that maps to
+    /// `MemoryApplyError::Store`.
     pub async fn apply_in(&self, txn: &DatabaseTransaction, set: &MemoryCommitSet, caps: &MemoryCaps) -> Result<(), MemoryApplyError> {
         let savepoint = txn.begin().await.map_err(apply_err)?;
         let result = apply_body(&savepoint, set, caps).await;
@@ -79,7 +84,7 @@ impl MemoryStore for PgMemoryStore {
                 let path: String = r.try_get("", "path").map_err(store_err)?;
                 let size: i32 = r.try_get("", "size_bytes").map_err(store_err)?;
                 Ok(MemoryEntry {
-                    path: MemoryPath::parse(&path).map_err(|e| MemoryStoreError::Store(format!("invalid stored path {path}: {e}")))?,
+                    path: MemoryPath::parse(&path).map_err(|_| MemoryStoreError::Store("a stored path is not valid".to_string()))?,
                     size_bytes: u64::try_from(size).map_err(|e| MemoryStoreError::Store(e.to_string()))?,
                     version: version_of(r)?,
                 })
@@ -126,6 +131,10 @@ impl MemoryStore for PgMemoryStore {
 /// The work of `apply` and `apply_in` on one transaction (spec §6.8). The caller commits or
 /// rolls back.
 async fn apply_body(txn: &DatabaseTransaction, set: &MemoryCommitSet, caps: &MemoryCaps) -> Result<(), MemoryApplyError> {
+    // A set with no change takes no scope row and no lock.
+    if set.changes.is_empty() {
+        return Ok(());
+    }
     let scope = &set.scope;
     txn.execute_raw(stmt(
         "INSERT INTO memory_scope (org_id, agent_id, principal_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",

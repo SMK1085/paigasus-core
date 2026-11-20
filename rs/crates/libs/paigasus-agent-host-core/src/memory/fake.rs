@@ -102,6 +102,10 @@ impl MemoryStore for InMemoryMemoryStore {
             let current = files.get(&k).map(|(_, v)| *v);
             match change {
                 MemoryChange::Put { path, content, expected } => {
+                    // Postgres `text` cannot hold U+0000. The fake refuses it in the same way.
+                    if content.contains('\0') {
+                        return Err(MemoryApplyError::Store("the content contains a NUL character".to_string()));
+                    }
                     let matches = match (expected, current) {
                         (Expected::Absent, None) => true,
                         (Expected::Version(v), Some(c)) => *v == version(c),
@@ -138,10 +142,27 @@ impl MemoryStore for InMemoryMemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::conformance::run_all;
+    use crate::memory::conformance::{fresh_scope, run_all};
 
     #[tokio::test]
     async fn the_fake_passes_the_conformance_suite() {
         run_all(&InMemoryMemoryStore::default()).await;
+    }
+
+    #[tokio::test]
+    async fn apply_refuses_nul_content_with_a_store_error() {
+        let fake = InMemoryMemoryStore::default();
+        let scope = fresh_scope();
+        let path = MemoryPath::parse("/a").unwrap();
+        let mut changes = crate::memory::MemoryChangeSet::new();
+        changes.record(MemoryChange::Put {
+            path: path.clone(),
+            content: "a\0b".into(),
+            expected: Expected::Absent,
+        });
+        let set = MemoryCommitSet { scope: scope.clone(), changes };
+        let err = fake.apply(&set, &MemoryCaps::default()).await.unwrap_err();
+        assert!(matches!(err, MemoryApplyError::Store(_)), "{err:?}");
+        assert_eq!(fake.get(&scope, &path).await.unwrap(), None);
     }
 }
