@@ -896,6 +896,16 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
     relay.shut_down().await;
 }
 
+/// The `max_bytes` of each stream of the misroute test. JetStream reserves `max_bytes` of the file store for each
+/// stream. Two streams of `MAX_BYTES` (18 GiB each) do not fit a store that the server derives from the free disk of
+/// a small CI runner, and the second create fails with 10047. So the streams are small, and the store is fixed.
+const MISROUTE_STREAM_BYTES: i64 = 67_108_864;
+/// A broker with a fixed JetStream file store of 1 GiB, so that the test does not depend on the free disk of the host.
+const MISROUTE_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js", max_file_store: 1073741824 }
+"#;
+
 /// A drifted `GATEWAY_DECISIONS` lost the decision subjects, and another stream holds them. The relay sends
 /// `Nats-Expected-Stream`, so the broker refuses the publish (10060) and stores nothing. The relay keeps the event in
 /// Redis and does not count it as rejected. When the operator repairs the streams, the event goes out.
@@ -904,18 +914,22 @@ async fn a_publish_that_another_stream_would_take_stays_in_redis() {
     let Some((node, redis_url)) = redis_7_4("decision_log_redis relay misroute").await else {
         return;
     };
-    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay misroute").await else {
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", MISROUTE_CONF.as_bytes().to_vec());
+    let Some(nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis relay misroute").await else {
         return;
     };
+    let nats_url = format!("nats://127.0.0.1:{}", paigasus_test_docker::mapped_port(&nats, 4222, "decision_log_redis relay misroute").await);
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
     let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
     let admin = test_js(&nats_url).await;
-    let mut drifted = dl_js::stream_config(dl_js::MAX_BYTES);
+    let mut drifted = dl_js::stream_config(MISROUTE_STREAM_BYTES);
     drifted.subjects = vec!["gateway.decision-old.>".to_owned()];
     admin.create_stream(drifted).await.expect("make the drifted stream");
-    let mut other = dl_js::stream_config(dl_js::MAX_BYTES);
+    let mut other = dl_js::stream_config(MISROUTE_STREAM_BYTES);
     other.name = "OTHER".to_owned();
     admin.create_stream(other).await.expect("make the other stream");
 
@@ -936,7 +950,7 @@ async fn a_publish_that_another_stream_would_take_stays_in_redis() {
 
     // The operator repairs the streams. The relay publishes the kept event to GATEWAY_DECISIONS.
     admin.delete_stream("OTHER").await.expect("delete the other stream");
-    admin.update_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("repair the subjects");
+    admin.update_stream(dl_js::stream_config(MISROUTE_STREAM_BYTES)).await.expect("repair the subjects");
     wait_for("the kept event is published", || async { snap.published() == 1 && xlen(&node).await == 0 }).await;
     let got = stream_messages(&admin).await;
     assert_eq!(got.len(), 1);
