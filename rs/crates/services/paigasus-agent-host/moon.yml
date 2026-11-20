@@ -5,6 +5,7 @@ layer: 'application'
 language: 'rust'
 
 dependsOn:
+  - 'paigasus-agent-host-core-rs'
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-proto-rs'
@@ -14,6 +15,8 @@ dependsOn:
 # `@group(upstreams)` in .moon/tasks/rust.yml. Asserted by repo:affected-smoke's A6.
 fileGroups:
   upstreams:
+    - '/rs/crates/libs/paigasus-agent-host-core/src/**/*'
+    - '/rs/crates/libs/paigasus-agent-host-core/Cargo.toml'
     - '/rs/crates/libs/paigasus-kernel/src/**/*'
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
     - '/rs/crates/libs/paigasus-logging/src/**/*'

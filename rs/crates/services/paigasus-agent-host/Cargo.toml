@@ -35,6 +35,11 @@ paigasus-observability = { workspace = true }
 paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
 metrics = { workspace = true }
 anyhow = { workspace = true }
+# `adapters::helikon` — the agent runtime.
+# Exact pin (SMA-786 §6.9): the facade re-exports the core, and one facade PATCH release
+# already moved the core from 0.5 to 0.6. A facade bump re-checks §6.9 of the spec.
+paigasus-helikon = { version = "=0.6.12", default-features = false, features = ["runtime-tokio"] }
+paigasus-agent-host-core = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
 [dev-dependencies]
@@ -45,6 +50,8 @@ paigasus-test-docker = { workspace = true }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 reqwest = { workspace = true }
+# The test model of `adapters::helikon` names the `BoxStream` type of the core `Model` trait.
+futures = { workspace = true }
 
 [lints]
 workspace = true
