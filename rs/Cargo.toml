@@ -34,6 +34,7 @@ members = [
   "crates/libs/paigasus-redis",
   "crates/libs/paigasus-service-info",
   "crates/libs/paigasus-test-docker",
+  "crates/services/paigasus-agent-host",
   "crates/services/paigasus-gateway",
   "crates/services/paigasus-iam",
 ]

@@ -1,0 +1,21 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-agent-host-rs'
+layer: 'application'
+language: 'rust'
+
+dependsOn: []
+
+# The transitive dependsOn closure's sources, consumed by build/test/lint via
+# `@group(upstreams)` in .moon/tasks/rust.yml. Asserted by repo:affected-smoke's A6.
+fileGroups:
+  upstreams: []
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']
+    # The Postgres tests start containers. They share a runner with the console e2e tasks.
+    options:
+      mutex: 'heavy-integration'

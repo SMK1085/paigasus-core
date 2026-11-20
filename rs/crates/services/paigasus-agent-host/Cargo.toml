@@ -1,0 +1,31 @@
+[package]
+name = "paigasus-agent-host"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "paigasus_agent_host"
+path = "src/lib.rs"
+
+[dependencies]
+# `adapters::persistence` — the migrator and the advisory-lock runner.
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+async-trait = { workspace = true }
+# `config` — layered configuration.
+figment = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+
+# figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
+
+[lints]
+workspace = true
