@@ -49,10 +49,16 @@ jiff = { workspace = true }
 # `adapters::id` — the kernel mints a UUIDv7 from the host clock and `rand` entropy.
 paigasus-kernel = { workspace = true }
 rand = { workspace = true }
+# `adapters::iam::client` — the outbound IAM gRPC adapter (spec §6.2). `tonic` gives the
+# `Channel` and the `Status`; ring-backed rustls and the platform trust store, as in the gateway.
+tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
+# `adapters::http::auth` reads the `ErrorInfo` reason of an IAM `Status`.
+tonic-types = { workspace = true }
+# The generated IAM clients and messages, and the `ErrorReason` registry of `http::error`.
+paigasus-proto = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
 [dev-dependencies]
-paigasus-proto = { workspace = true }
 figment = { workspace = true, features = ["test"] }
 # The Postgres tests. `paigasus-test-docker` owns the Docker-skip policy.
 paigasus-test-docker = { workspace = true }

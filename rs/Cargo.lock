@@ -3230,6 +3230,8 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tonic",
+ "tonic-types",
  "tower",
  "tracing",
  "uuid",

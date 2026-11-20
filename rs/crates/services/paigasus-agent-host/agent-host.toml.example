@@ -10,3 +10,29 @@
 
 # [migration]
 # lock_wait_secs = 120      # 1 to 3600
+
+# [worker]
+# enabled = true            # read and checked; no effect yet
+
+# [lease]
+# ttl_secs = 30             # 3 to 600, and at least 3 x heartbeat_interval_secs
+# heartbeat_interval_secs = 10   # 1 to 200
+
+# [claim]
+# batch_limit = 20          # 1 to 500
+# max_attempts = 5          # 1 to 100
+# thread_ttl_secs = 86400   # 60 to 31536000
+
+# [ingress]
+# max_body_bytes = 262144   # 1024 to 4194304
+
+# The HTTP event ingress is on only when this section is set.
+# [iam]
+# grpc_addr = "https://iam.internal.example.com:9090"
+# tls = { mode = "tls" }    # optional: ca_cert_path (REPLACES the trust store), and
+#                           # client_cert_path with client_key_path (mTLS: both or neither)
+# call_timeout_ms = 2000    # 100 to 30000
+# For a loopback grpc_addr only: tls = { mode = "loopback_insecure" }
+
+# [mid_run]
+# policy = "queue"          # only "queue"; "fold" and "interrupt" are refused at boot

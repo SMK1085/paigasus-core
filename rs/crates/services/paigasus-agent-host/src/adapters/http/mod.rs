@@ -2,6 +2,7 @@
 
 //! The HTTP surface: `/healthz`, `/readyz` and the 404 envelope (spec §6.7).
 
+pub mod auth;
 pub mod error;
 
 use axum::Router;
