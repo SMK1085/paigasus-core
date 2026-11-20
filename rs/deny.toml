@@ -71,6 +71,12 @@ exceptions = [
 [bans]
 multiple-versions = "warn"  # duplicates common early-stage — surface, don't block
 wildcards = "deny"          # "*" version reqs are a hygiene smell; the catalog uses none
+deny = [
+  { crate = "aws-lc-rs", reason = "ring-only workspace: a second rustls provider panics at first TLS use (SMA-786 §3)" },
+  { crate = "aws-lc-sys", reason = "ring-only workspace (SMA-786 §3)" },
+  { crate = "openssl-sys", reason = "rustls-only workspace: no system OpenSSL (SMA-786 §3)" },
+  { crate = "native-tls", reason = "rustls-only workspace (SMA-786 §3)" },
+]
 
 [sources]
 unknown-registry = "deny"

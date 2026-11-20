@@ -1,0 +1,12 @@
+# The agent host needs its own database. A separate schema in a shared database is not supported.
+
+# http_addr = "0.0.0.0:8086"
+# database_url = "postgres://user:password@localhost/agent_host"   # required
+# log_level = "info"
+
+# [metrics]
+# enabled = true
+# addr = "127.0.0.1:9100"   # optional; the port must differ from the port of http_addr
+
+# [migration]
+# lock_wait_secs = 120      # 1 to 3600
