@@ -25,7 +25,7 @@ use paigasus_gateway_core::decision_log::{DecisionRecord, RecordHeader, Reported
 use paigasus_gateway_core::{Basis, BlockCode, DecisionContext, ReportDecision, ReportEntry};
 use prost::Message;
 use secrecy::SecretString;
-use testcontainers_modules::nats::{Nats, NatsServerCmd};
+use testcontainers_modules::nats::Nats;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::core::{ExecCommand, IntoContainerPort};
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
@@ -459,9 +459,30 @@ fn varint(mut v: u64) -> Vec<u8> {
     }
 }
 
+/// A broker for the relay tests that let the relay make the stream. JetStream reserves the full `max_bytes` of a
+/// stream from the file store when it makes the stream. A broker with no config derives its store from the free disk
+/// of the host, and the relay sizes the stream from the ACCOUNT limit, which is `MAX_BYTES` (18 GiB) when there is
+/// none. On a small CI runner that create fails with 10047. So the store is fixed at 1 GiB, and the account `GW` has
+/// a file limit of 256 MiB. The relay then makes a stream of 90 % of that limit. `no_auth_user` gives the clients
+/// that send no credentials the account `GW`.
+const RELAY_ACCOUNT_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js", max_file_store: 1073741824 }
+accounts {
+  GW: {
+    jetstream: { max_file: 268435456 }
+    users: [ { user: "gw", password: "gw" } ]
+  }
+}
+no_auth_user: gw
+"#;
+/// The file limit of the account `GW` in `RELAY_ACCOUNT_CONF`.
+const RELAY_ACCOUNT_BYTES: i64 = 268_435_456;
+
 async fn start_nats(port: Option<u16>, what: &str) -> Option<(ContainerAsync<Nats>, String)> {
-    let cmd = NatsServerCmd::default().with_jetstream();
-    let image = Nats::default().with_cmd(&cmd);
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", RELAY_ACCOUNT_CONF.as_bytes().to_vec());
     let node = match port {
         Some(p) => paigasus_test_docker::start_or_skip(image.with_mapped_port(p, 4222.tcp()), what).await?,
         None => paigasus_test_docker::start_or_skip(image, what).await?,
@@ -867,7 +888,7 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
     wait_for("one publish", || async { snap.published() == 1 }).await;
     let mut stream = admin.get_stream(dl_js::STREAM).await.expect("the relay made the stream");
     let live = stream.info().await.expect("stream info").config.clone();
-    let want = dl_js::stream_config(dl_js::MAX_BYTES);
+    let want = dl_js::stream_config(dl_js::max_bytes_for(RELAY_ACCOUNT_BYTES));
     assert_eq!(live.max_bytes, want.max_bytes);
     assert_eq!(live.max_age, want.max_age);
     assert_eq!(live.max_message_size, want.max_message_size);
@@ -896,9 +917,10 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
     relay.shut_down().await;
 }
 
-/// The `max_bytes` of each stream of the misroute test. JetStream reserves `max_bytes` of the file store for each
-/// stream. Two streams of `MAX_BYTES` (18 GiB each) do not fit a store that the server derives from the free disk of
-/// a small CI runner, and the second create fails with 10047. So the streams are small, and the store is fixed.
+/// The `max_bytes` of a stream that a test makes itself on a broker with a fixed store. JetStream reserves `max_bytes`
+/// of the file store for each stream. Streams of `MAX_BYTES` (18 GiB each) do not fit a store that the server derives
+/// from the free disk of a small CI runner, and the create fails with 10047. So the streams are small, and the store
+/// is fixed (see `MISROUTE_CONF`, `NO_PUBLISH_CONF` and `NO_CREATE_CONF`).
 const MISROUTE_STREAM_BYTES: i64 = 67_108_864;
 /// A broker with a fixed JetStream file store of 1 GiB, so that the test does not depend on the free disk of the host.
 const MISROUTE_CONF: &str = r#"
@@ -964,7 +986,7 @@ async fn a_publish_that_another_stream_would_take_stays_in_redis() {
 /// its PubAck inbox only.
 const NO_PUBLISH_CONF: &str = r#"
 port: 4222
-jetstream: { store_dir: "/tmp/js" }
+jetstream: { store_dir: "/tmp/js", max_file_store: 1073741824 }
 authorization {
   users = [
     { user: "admin", password: "admin" }
@@ -1000,7 +1022,7 @@ async fn a_real_permission_refusal_is_rejected_and_a_later_outage_is_not() {
             .await
             .expect("the admin client connects"),
     );
-    admin.create_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("the admin makes the stream");
+    admin.create_stream(dl_js::stream_config(MISROUTE_STREAM_BYTES)).await.expect("the admin makes the stream");
 
     // Part 1: a real broker refuses the publish. The violation generation rises, and the entry is rejected and deleted.
     xadd(&node, &event_with_org(1, ORG_A), 0).await;
@@ -1060,7 +1082,7 @@ async fn a_group_made_after_a_failed_first_create_counts_one_reset() {
 /// make it.
 const NO_CREATE_CONF: &str = r#"
 port: 4222
-jetstream: { store_dir: "/tmp/js" }
+jetstream: { store_dir: "/tmp/js", max_file_store: 1073741824 }
 authorization {
   users = [
     { user: "admin", password: "admin" }
@@ -1098,7 +1120,7 @@ async fn done_entries_are_acked_while_the_stream_cannot_be_made() {
             .await
             .expect("the admin client connects"),
     );
-    admin.create_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("the admin makes the stream");
+    admin.create_stream(dl_js::stream_config(MISROUTE_STREAM_BYTES)).await.expect("the admin makes the stream");
     // The first event makes the relay sure of the stream.
     xadd(&node, &event_with_org(1, ORG_A), 0).await;
     let v = Arc::new(AtomicU64::new(0));
@@ -1167,7 +1189,7 @@ async fn concurrent_refusals_are_published_again_one_at_a_time_and_then_rejected
             .await
             .expect("the admin client connects"),
     );
-    admin.create_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("the admin makes the stream");
+    admin.create_stream(dl_js::stream_config(MISROUTE_STREAM_BYTES)).await.expect("the admin makes the stream");
     xadd(&node, &event_with_org(1, ORG_A), 0).await;
     xadd(&node, &event_with_org(2, ORG_A), 0).await;
     let violations = Arc::new(AtomicU64::new(0));
@@ -1259,7 +1281,7 @@ async fn a_full_jetstream_disk_keeps_the_events_until_there_is_free_disk() {
 /// grants of the relay identity in `ops/nats/subjects.env`. `admin` can do anything in the same account.
 const SMALL_ACCOUNT_CONF: &str = r#"
 port: 4222
-jetstream: { store_dir: "/tmp/js" }
+jetstream: { store_dir: "/tmp/js", max_file_store: 1073741824 }
 accounts {
   GW: {
     jetstream: { max_mem: 0, max_file: 268435456, max_streams: 2, max_consumers: 16 }
