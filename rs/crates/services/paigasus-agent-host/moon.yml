@@ -46,7 +46,6 @@ tasks:
       - 'Cargo.toml'
       - '@group(upstreams)'
       - '/rs/Cargo.lock'
-      - '/rs/.config/nextest.toml'
       - '/rs/.cargo/config.toml'
       - 'scripts/dev.sh'
     options:

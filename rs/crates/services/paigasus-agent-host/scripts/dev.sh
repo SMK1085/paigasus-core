@@ -91,8 +91,14 @@ echo "dev.sh: container=$container postgres=127.0.0.1:${pg_port} http=${AGENT_HO
 
 cd "$rs_dir"
 if [ "$mode" = "run" ]; then
-  cargo run --locked -p paigasus-agent-host
-  exit $?
+  # Run in the background and wait, so bash runs the signal traps at once. A foreground child
+  # would delay the trap until the child exits.
+  cargo run --locked -p paigasus-agent-host &
+  app_pid=$!
+  rc=0
+  wait "$app_pid" || rc=$?
+  app_pid=""
+  exit "$rc"
 fi
 
 # --check: build first, so compile time does not count against the 60 s limit.
