@@ -131,6 +131,10 @@ Anti-goals (a failure even if the count works):
   increases `generation_check_errors_total{kind="foreign_writer"}`, writes nothing and counts no
   reset. A restore and a `FLUSHALL` change the Redis generation, so they do not trigger the
   detector.
+- A failed KV step makes the relay forget its last own generation (found in the plan review). A
+  relay with failing KV steps can miss a whole generation. If Redis then goes back to that older
+  generation, a stale memory would show a foreign writer and hide the reset. The relay that wrote
+  the newer generation always knows it, so it counts the reset.
 - The value, as JSON: `{"generation": "<id>", "epoch": <u64>, "sample": <u64 or null>,
   "sampled_at": <unix ms>, "claim": <null or {"nonce": "<id>", "lost": <u64 or null>}>}`.
 - A value that does not parse, and a KV delete or purge marker, are the same as a missing entry.
@@ -316,6 +320,9 @@ Q2 (Sven): detect a loss inside one generation. The design uses an **epoch key**
 - During the rolling deploy from SMA-755, one incident can count twice (§5.4).
 - A relay that made an ambiguous counting write and stops before its next KV get loses that count.
 - The deployment rule of §5.2 (Q1) is only detected, not prevented.
+- A restore to an older generation is missed when the relay that wrote the newer generation has
+  stopped and every other relay saw no KV step fail during that generation. Those relays report a
+  `foreign_writer` error, so the alert of §5.3a still fires.
 - A Redis loss and a return to a generation that the KV holds again are not possible: each new group
   gets a new random id.
 
