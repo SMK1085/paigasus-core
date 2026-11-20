@@ -242,4 +242,13 @@ fn describe_agent_host_metrics() {
     );
     describe_histogram!(names::AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS, "Agent host HTTP request latency in seconds.");
     describe_gauge!(names::AGENT_HOST_HTTP_INFLIGHT_REQUESTS, "Requests currently being handled on the agent host HTTP router.");
+    describe_counter!(names::AGENT_HOST_INBOX_EVENTS_INSERTED_TOTAL, "Events stored as new inbox rows, labeled by channel.");
+    describe_counter!(
+        names::AGENT_HOST_INBOX_EVENTS_DUPLICATE_TOTAL,
+        "Inbox inserts that found a stored row with the same key, labeled by channel."
+    );
+    describe_counter!(
+        names::AGENT_HOST_INBOX_EVENTS_PAYLOAD_MISMATCH_TOTAL,
+        "Duplicate inbox inserts whose type or data differ from the stored row, labeled by channel."
+    );
 }

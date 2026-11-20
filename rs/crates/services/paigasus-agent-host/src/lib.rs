@@ -3,4 +3,5 @@
 //! The agent host service: configuration, persistence and the HTTP surface.
 
 pub mod adapters;
+pub mod application;
 pub mod config;
