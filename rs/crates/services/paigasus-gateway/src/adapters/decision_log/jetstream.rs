@@ -156,7 +156,7 @@ pub enum PublishClass {
 pub struct ApiError {
     /// The status, for example 400 or 503.
     pub status: usize,
-    /// The server error code, for example 10047. 0 when the broker sent none.
+    /// The server error code, for example 10023. 0 when the broker sent none.
     pub code: u64,
 }
 
@@ -184,7 +184,13 @@ pub fn api_error_of(err: &jetstream::context::PublishError) -> Option<ApiError> 
 /// - 10008 `JSClusterNotAvailErr`, 10009 (`ErrorCode::CLUSTER_NOT_LEADER`), 10063 `JSStreamSequenceNotMatchErr`,
 ///   10118 `JSStreamOfflineErr`, 10039 `JSNotEnabledForAccountErr` and 10076 `JSNotEnabledErr`: JetStream is
 ///   not available now.
-pub const TRANSIENT_CODES: [u64; 12] = [10002, 10023, 10028, 10047, 10077, 10120, 10008, 10009, 10063, 10118, 10039, 10076];
+///
+/// Three codes come from newer servers. Their names and texts are from the `async-nats` 0.53 `ErrorCode` table:
+/// - 10158 `STREAM_DUPLICATE_MESSAGE_CONFLICT` ("Stream duplicate message conflict"): the broker still
+///   processes a message with the same id. A retry gets the result of that message.
+/// - 10167 `STREAM_TOO_MANY_REQUESTS` ("Stream too many requests"): the stream is busy now.
+/// - 10194 `STREAM_OFFLINE_REASON` ("Stream offline reason"): the stream is offline now.
+pub const TRANSIENT_CODES: [u64; 15] = [10002, 10023, 10028, 10047, 10077, 10120, 10008, 10009, 10063, 10118, 10039, 10076, 10158, 10167, 10194];
 
 /// The class of a PubAck error. A status 503 with no server code is transient too: `nats-server` sends it when a
 /// clustered stream cannot propose the message. Each other code rejects this message, for example 10054
@@ -370,6 +376,9 @@ mod tests {
             (500, 10118), // stream offline
             (503, 10039), // JetStream not enabled for the account
             (503, 10076), // JetStream not enabled
+            (400, 10158), // duplicate message conflict: the same message id is in process (newer servers)
+            (429, 10167), // stream too many requests (newer servers)
+            (500, 10194), // stream offline reason (newer servers)
             (503, 0),     // a propose failure: status 503 and no code
         ];
         for (status, code) in transient {

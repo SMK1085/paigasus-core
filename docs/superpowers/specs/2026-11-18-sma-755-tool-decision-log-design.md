@@ -519,8 +519,13 @@ pub trait DecisionLog: Send + Sync {
     relay reads the server code from the error source. The transient codes are 10002 (account
     resources exceeded), 10023 (insufficient resources), 10028 and 10047 (no memory or disk),
     10077 (the store failed), 10120 (no limits), and 10008, 10009, 10039, 10063, 10076 and 10118
-    (JetStream not available). A status 503 with no code is transient too. So a full disk does
-    not delete valid events. The meanings come from the nats-server v2.10.14 error table.
+    (JetStream not available). Newer servers add 10158 (a message with the same id is in
+    process), 10167 (too many requests) and 10194 (the stream is offline); they are transient
+    too. A status 503 with no code is transient too. So a full disk does not delete valid events:
+    on the 2.10.14 publish path a full disk gives 10023 (server limit) or 10002 (account limit).
+    The meanings come from the nats-server v2.10.14 error table and the async-nats 0.53
+    `ErrorCode` table. An `Other` with no JetStream code (a closed client, a closed ack
+    semaphore, a PubAck that does not parse) stays permanent.
   - A permanent error (the payload is above `max_payload`, an invalid subject, a permission
     error, a PubAck code that rejects the message, for example 10054 for a message above
     `max-msg-size`): the relay acks and deletes that entry, counts
