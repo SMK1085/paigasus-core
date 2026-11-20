@@ -93,6 +93,21 @@ pub fn route_violation(text: &str, v: &Violations) -> ViolationRoute {
     route
 }
 
+/// The least number of seconds between two KV-refusal log lines.
+const KV_LOG_INTERVAL_SECS: u64 = 60;
+
+/// Whether the KV-refusal log line may be written now. `last` holds the unix seconds of the last line (0 =
+/// none yet). `now` is the unix seconds, and 0 means that the clock read failed: then nothing is logged, so a
+/// broken clock cannot flood the log. `last` changes only when this returns `true`.
+#[must_use]
+pub fn should_log_kv(last: &AtomicU64, now: u64) -> bool {
+    if now == 0 {
+        return false;
+    }
+    let prev = last.load(Ordering::SeqCst);
+    (prev == 0 || now.saturating_sub(prev) >= KV_LOG_INTERVAL_SECS) && last.compare_exchange(prev, now, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+}
+
 /// Whether the broker reported a refused publish since the generation `before` was read.
 #[must_use]
 pub fn violation_since(generation: &AtomicU64, before: u64) -> bool {
@@ -350,15 +365,17 @@ pub async fn connect(cfg: &DecisionLogNatsConfig, violations: Violations) -> Res
         let last_kv_log = Arc::clone(&last_kv_log);
         async move {
             match &event {
-                async_nats::Event::ServerError(err) if is_publish_violation(&err.to_string()) => {
-                    match route_violation(&err.to_string(), &violations) {
-                        ViolationRoute::Publish => tracing::error!("the decision-log NATS publisher has no permission to publish"),
-                        ViolationRoute::Kv => {
-                            // At most one log line each 60 s: the KV step runs on a timer.
-                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                            let last = last_kv_log.load(Ordering::SeqCst);
-                            if (last == 0 || now.saturating_sub(last) >= 60) && last_kv_log.compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                                tracing::error!("the decision-log NATS publisher has no permission for the generation bucket");
+                async_nats::Event::ServerError(err) => {
+                    let text = err.to_string();
+                    if is_publish_violation(&text) {
+                        match route_violation(&text, &violations) {
+                            ViolationRoute::Publish => tracing::error!("the decision-log NATS publisher has no permission to publish"),
+                            ViolationRoute::Kv => {
+                                // At most one log line each 60 s: the KV step runs on a timer. A clock failure gives 0, which logs nothing.
+                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                                if should_log_kv(&last_kv_log, now) {
+                                    tracing::error!("the decision-log NATS publisher has no permission for the generation bucket");
+                                }
                             }
                         }
                     }
@@ -424,8 +441,29 @@ mod tests {
             "no quotes: never the publish side"
         );
         assert_eq!(route_violation(r#"Permissions Violation for Publish to "gateway.decisionx""#, &v), ViolationRoute::Kv);
+        for text in [
+            r#"Permissions Violation for Publish to """#,
+            r#"Permissions Violation for Publish to " gateway.decision.x""#,
+            r#"Permissions Violation for Publish to "GATEWAY.DECISION.x""#,
+            r#"Permissions Violation for Publish to "gateway.decisionx""#,
+        ] {
+            assert_eq!(route_violation(text, &v), ViolationRoute::Kv, "{text}");
+        }
         assert_eq!(v.publish.load(Ordering::SeqCst), 1);
-        assert_eq!(v.kv.load(Ordering::SeqCst), 4);
+        assert_eq!(v.kv.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn the_kv_log_is_limited_to_one_line_each_60_seconds() {
+        let last = AtomicU64::new(0);
+        assert!(should_log_kv(&last, 1000), "the first call passes");
+        assert_eq!(last.load(Ordering::SeqCst), 1000);
+        assert!(!should_log_kv(&last, 1059), "59 s later is suppressed");
+        assert_eq!(last.load(Ordering::SeqCst), 1000, "a suppressed call keeps the stored time");
+        assert!(should_log_kv(&last, 1060), "60 s later passes");
+        assert_eq!(last.load(Ordering::SeqCst), 1060);
+        assert!(!should_log_kv(&last, 0), "a failed clock read logs nothing");
+        assert_eq!(last.load(Ordering::SeqCst), 1060);
     }
 
     #[test]
