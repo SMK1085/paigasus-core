@@ -34,8 +34,8 @@ Helikon session and the one commit transaction on top of it.
   and inserts.
 - **D5 — The property test: approach 2A.** It uses a real Postgres and forces expiry with a
   test-only statement. It does not sleep.
-- **D6 — NATS tenancy: PENDING (Gate 1).** See §9.4. The spec is written with the recommended
-  option.
+- **D6 — NATS tenancy: T1.** An org filter that fails closed (§9.4). Sven approved the spec with
+  this option at Gate 1 (2026-11-20).
 
 ## 3. Goals, non-goals, anti-goals
 
@@ -552,12 +552,12 @@ configured channel subjects. A difference stops boot with a config error.
     delay, count, log at `error`, so the metric alerts.
 - At-least-once delivery with no delivery limit, plus dedup, gives one row per event (AG2).
 
-### 9.4 Tenancy (D6, PENDING at Gate 1)
+### 9.4 Tenancy (D6: T1)
 
 `IAM_EVENTS` holds the events of every organization, and most IAM subjects have no org token. One
 channel would move the events of every tenant into one inbox (AG6).
 
-**Recommended rule (written into this spec): an org filter that fails closed.** The host delivers a
+**The rule: an org filter that fails closed.** The host delivers a
 NATS event to an inbox only when the event names the inbox org:
 
 - the CloudEvents `subject` is the organization PRN of the inbox org; or
@@ -698,7 +698,7 @@ PL/pgSQL functions, which hide the logic in migrations.
 **Property test time.** (2A, chosen) real Postgres with forced expiry. (2B) real sleeps, slow and
 flaky. (2C) a pure model only, which does not test the SQL.
 
-**NATS tenancy (D6, pending).** (T1, recommended) an org filter on the CloudEvents `subject` that
+**NATS tenancy (D6).** (T1, chosen) an org filter on the CloudEvents `subject` that
 fails closed; few IAM events pass today. (T2) NATS channels bind only to an inbox marked as an
 operator inbox, and the operator accepts cross-tenant content. (T3) remove the NATS source from
 SMA-787 and give it to a later issue with its own tenancy design.
