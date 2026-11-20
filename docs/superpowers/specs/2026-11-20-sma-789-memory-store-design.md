@@ -295,8 +295,8 @@ CREATE TABLE memory_file (
 ```
 
 - The `CHECK` is a second guard for AG3. The builder checks that it matches the `..`/`.` rules of
-  §6.2 exactly (the regex as written still allows a `..` segment; the builder adds a
-  `path !~ '/\.\.?(/|$)'` term or an equivalent).
+  §6.2 exactly. The regex already refuses a leading `.`. The migration keeps the extra
+  `path !~ '/\.\.?(/|$)'` term as a guard against a later edit of the regex.
 - Every query binds all three scope columns.
 - A directory `list` matches `path LIKE $dir || '%'` with `%`, `_` and `\` of the directory escaped
   and the directory ending in `/` (the root is `/` itself, never `//`). It sorts `ORDER BY path`,
@@ -384,11 +384,12 @@ guard).
 - The tool holds an `Arc<tokio::sync::Mutex<MemoryWorkspace>>`. The run owns the same `Arc` and
   calls `take_changes` at the end.
 - **The result form.** Every text, success or refusal, goes out as `ToolOutput` with
-  `Value::String(text)`, so Helikon does not escape it (`tool_exec.rs:36`). The builder checks two
-  Helikon facts and records them in the plan: (1) which form sets the provider `is_error` flag
-  without ending the run (the Anthropic doc returns refusals with `is_error: true`); (2) whether
-  output redaction can change file text in a `view`, which would make a later `str_replace` miss. A
-  `Store` error is logged in the tool with its cause; content is never logged.
+  `Value::String(text)`, so Helikon does not escape it (`tool_exec.rs:36`). Helikon 0.6 has no
+  `is_error` flag. An `Err(ToolError)` becomes a plain text result with no redaction
+  (`paigasus-helikon-core-0.6.0/src/agent.rs:1205`). So every text, success or refusal, is
+  `Ok(ToolOutput::new(Value::String(text)))`. `Ok` output goes through redaction of env secrets, on
+  by default (`context.rs:204`). That is accepted: a memory that holds an env secret value is
+  redacted in a `view`. A `Store` error is logged in the tool with its cause; content is never logged.
 - A JSON that does not parse, an unknown command or a missing argument is a refusal text, not a
   run-ending error.
 - **v1 attachment rule.** Only the top-level agent of a run gets the tool. An `AgentAsTool` sub-run
@@ -466,6 +467,8 @@ The model is no longer running, so the text cannot reach it. The contract:
 
 Counters (names through SMA-798): commit-time conflicts, early conflicts, cap refusals. SMA-829 adds
 S3 partial applies and skipped S3 keys. No counter or log line holds memory content or a path of a principal.
+The commit-time conflict counter belongs to SMA-790. The core cannot count it, and this issue has no run commit.
+The tool's counter is `agent_host_memory_refusals_total` with label `kind` (conflict, cap, path, sealed, store), provisional for SMA-798.
 
 ## 7. Tests
 
@@ -516,7 +519,7 @@ adds S3):
 - `apply_in` then caller rollback: a new store finds nothing.
 - `apply_in` with a conflicting change: the error comes back, the caller's transaction is still
   usable, and a later statement in it succeeds.
-- **The scope lock bites:** a second transaction holds the scope row `FOR UPDATE`; `apply` does not
+- **The scope lock bites:** a second transaction holds the committed scope row `FOR KEY SHARE`, which conflicts only with `FOR UPDATE` (a second transaction that held `FOR UPDATE` would also block the FK check and the counter update, so it could not prove the lock); `apply` does not
   finish within N ms; after the release it finishes. A version of the code without the lock must
   fail this test (the repo rule "red-first is not proof — delete the feature").
 - The `CHECK` refuses a raw insert of `/../x`.
