@@ -98,6 +98,10 @@ pub const GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL: &str = "gateway_decision_log
 pub const GATEWAY_DECISION_LOG_PUBLISH_SECONDS: &str = "gateway_decision_log_publish_seconds";
 /// `XLEN` of the decision stream, sampled every 15 s by the relay.
 pub const GATEWAY_DECISION_LOG_BACKLOG: &str = "gateway_decision_log_backlog";
+// Agent host HTTP
+pub const AGENT_HOST_HTTP_REQUESTS_TOTAL: &str = "agent_host_http_requests_total";
+pub const AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS: &str = "agent_host_http_request_duration_seconds";
+pub const AGENT_HOST_HTTP_INFLIGHT_REQUESTS: &str = "agent_host_http_inflight_requests";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -330,11 +334,14 @@ pub const IAM_NATS_PUBLISH_DURATION_SECONDS: &str = "iam_nats_publish_duration_s
 pub const IAM_NATS_CONNECTED: &str = "iam_nats_connected";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
-/// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
+/// `iam_`/`gateway_`/`agent_host_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
 /// trailing `_bucket`/`_sum`/`_count` histogram/summary suffix, and asserts each one is in `ALL`.
 /// Label keys, PromQL function/keyword tokens, and template vars never match the prefix filter,
 /// so they need no separate allowlist.
 pub const ALL: &[&str] = &[
+    AGENT_HOST_HTTP_REQUESTS_TOTAL,
+    AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS,
+    AGENT_HOST_HTTP_INFLIGHT_REQUESTS,
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
     GATEWAY_HTTP_INFLIGHT_REQUESTS,

@@ -11,8 +11,8 @@
 //! Extraction is prefix-anchored rather than a blanket identifier scan: a PromQL `expr` mixes
 //! metric names with label keys (`status_class`, `grpc_status`, `decision`, ...), function names
 //! (`rate`, `sum`, `histogram_quantile`, `by`, `le`, ...), and template vars
-//! (`$__rate_interval`). Every real metric in this repo is prefixed `iam_` or `gateway_`, so a
-//! token only counts as a metric-name reference when it matches `^(iam|gateway)_[a-z0-9_]+$` —
+//! (`$__rate_interval`). Every real metric in this repo is prefixed `iam_`, `gateway_` or `agent_host_`, so a
+//! token only counts as a metric-name reference when it matches `^(iam|gateway|agent_host)_[a-z0-9_]+$` —
 //! that automatically excludes all of the above without needing a label/function blocklist.
 
 use paigasus_observability::names::ALL;
@@ -33,13 +33,13 @@ fn is_known(id: &str) -> bool {
     ALL.contains(&normalized) || ALL.contains(&id)
 }
 
-/// Extract every `iam_`/`gateway_`-prefixed token from a PromQL expression. Tokenizing by
-/// splitting on any char outside `[a-z0-9_]` and filtering to the two real metric prefixes
+/// Extract every `iam_`/`gateway_`/`agent_host_`-prefixed token from a PromQL expression. Tokenizing by
+/// splitting on any char outside `[a-z0-9_]` and filtering to the three real metric prefixes
 /// discards label keys, function names, and template vars (`$__rate_interval` splits into
 /// `__rate_interval`, which fails the prefix check) without needing to enumerate them.
 fn metric_idents(expr: &str) -> Vec<String> {
     expr.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
-        .filter(|token| !token.is_empty() && (token.starts_with("iam_") || token.starts_with("gateway_")))
+        .filter(|token| !token.is_empty() && (token.starts_with("iam_") || token.starts_with("gateway_") || token.starts_with("agent_host_")))
         .map(str::to_owned)
         .collect()
 }
@@ -185,4 +185,9 @@ fn dashboards_and_rules_reference_only_known_metrics() {
         "dashboards/rules reference unknown metrics (not in paigasus_observability::names::ALL):\n{}",
         unknown.into_iter().collect::<Vec<_>>().join("\n")
     );
+}
+
+#[test]
+fn metric_idents_sees_the_agent_host_prefix() {
+    assert_eq!(metric_idents("rate(agent_host_http_requests_total[5m])"), vec!["agent_host_http_requests_total".to_string()]);
 }

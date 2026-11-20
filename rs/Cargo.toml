@@ -21,6 +21,7 @@ members = [
   "crates/bindings/paigasus-node-bindings",
   "crates/bindings/paigasus-py-bindings",
   "crates/bindings/paigasus-wasm",
+  "crates/libs/paigasus-agent-host-core",
   "crates/libs/paigasus-gateway-core",
   "crates/libs/paigasus-iam-core",
   "crates/libs/paigasus-kernel",
@@ -33,6 +34,7 @@ members = [
   "crates/libs/paigasus-redis",
   "crates/libs/paigasus-service-info",
   "crates/libs/paigasus-test-docker",
+  "crates/services/paigasus-agent-host",
   "crates/services/paigasus-gateway",
   "crates/services/paigasus-iam",
 ]
@@ -104,6 +106,8 @@ tonic-types = "0.14"
 # needs `net` for `TcpListenerStream`); no default features at the workspace baseline.
 tokio-stream = { version = "0.1", default-features = false }
 thiserror = "2"
+# jiff: core time type (SMA-786 section 6.2); Helikon core needs >= 0.2.46, which Task 8 brings in.
+jiff = "0.2"
 anyhow = "1"
 figment = { version = "0.10", features = ["toml", "env"] }
 # Prefer native `async fn` in traits (stable since 1.75); use async-trait only when
@@ -205,6 +209,9 @@ paigasus-nats-creds = { path = "crates/libs/paigasus-nats-creds", version = "0.0
 # In-tree path dep: the gateway's sans-IO tool-call interception core (SMA-749). `version` is
 # required: `rs/deny.toml` sets `wildcards = "deny"`.
 paigasus-gateway-core = { path = "crates/libs/paigasus-gateway-core", version = "0.0.0" }
+# In-tree path dep: the agent host's pure domain crate (SMA-786). `version` is required:
+# `rs/deny.toml` sets `wildcards = "deny"`.
+paigasus-agent-host-core = { path = "crates/libs/paigasus-agent-host-core", version = "0.0.0" }
 # paigasus-service-info — the shared `ServiceInfo` builder + HTTP DTO (SMA-505). Owns the wire
 # invariants both services must not re-derive: the UNSPECIFIED sentinel is never advertised,
 # ordering is deterministic, and `capabilities` is always emitted (as `[]` when empty) so a

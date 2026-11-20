@@ -1,0 +1,54 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-agent-host-rs'
+layer: 'application'
+language: 'rust'
+
+dependsOn:
+  - 'paigasus-agent-host-core-rs'
+  - 'paigasus-logging-rs'
+  - 'paigasus-observability-rs'
+  - 'paigasus-proto-rs'
+  - 'paigasus-test-docker-rs'
+
+# The transitive dependsOn closure's sources, consumed by build/test/lint via
+# `@group(upstreams)` in .moon/tasks/rust.yml. Asserted by repo:affected-smoke's A6.
+fileGroups:
+  upstreams:
+    - '/rs/crates/libs/paigasus-agent-host-core/src/**/*'
+    - '/rs/crates/libs/paigasus-agent-host-core/Cargo.toml'
+    - '/rs/crates/libs/paigasus-kernel/src/**/*'
+    - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+    - '/rs/crates/libs/paigasus-logging/src/**/*'
+    - '/rs/crates/libs/paigasus-logging/Cargo.toml'
+    - '/rs/crates/libs/paigasus-observability/src/**/*'
+    - '/rs/crates/libs/paigasus-observability/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
+    - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto/src/**/*'
+    - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+    - '/rs/crates/libs/paigasus-test-docker/src/**/*'
+    - '/rs/crates/libs/paigasus-test-docker/Cargo.toml'
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']
+    # The Postgres tests start containers. They share a runner with the console e2e tasks.
+    options:
+      mutex: 'heavy-integration'
+  dev:
+    command: 'bash scripts/dev.sh'
+    deps: ['^:build']
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - '@group(upstreams)'
+      - '/rs/Cargo.lock'
+      - '/rs/.cargo/config.toml'
+      - 'scripts/dev.sh'
+    options:
+      cache: false
+      persistent: true
+      runInCI: false

@@ -168,6 +168,11 @@ jobs:
           ci/images/run.sh smoke gateway
           ci/images/run.sh smoke iam
 
+      - name: Build and smoke the agent host (no release chain, SMA-786)
+        run: |
+          ci/images/run.sh build agent-host
+          ci/images/run.sh smoke agent-host
+
       - name: Rehearse the publish steps against local registries
         run: ci/images/run.sh rehearse "out/paigasus-gateway-${ARCH}.oci.tar"
 

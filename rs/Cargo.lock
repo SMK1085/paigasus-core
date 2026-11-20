@@ -755,6 +755,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a680398c10c7bc0488067c4612226ea905a85f607134b69f3068d505d58c4214"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1828,6 +1838,19 @@ name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
+name = "globset"
+version = "0.4.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f98b0d85522dc0a824cfebbc9594ff4a9b289c568bea0370319dfbdf20ccdd2d"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
 
 [[package]]
 name = "group"
@@ -3176,6 +3199,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "paigasus-agent-host"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "figment",
+ "futures",
+ "metrics",
+ "paigasus-agent-host-core",
+ "paigasus-helikon",
+ "paigasus-logging",
+ "paigasus-observability",
+ "paigasus-proto",
+ "paigasus-test-docker",
+ "reqwest",
+ "rustls",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "paigasus-agent-host-core"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "jiff",
+ "paigasus-kernel",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "paigasus-gateway"
 version = "0.2.0"
 dependencies = [
@@ -3238,6 +3304,56 @@ dependencies = [
  "sha2 0.11.1",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "paigasus-helikon"
+version = "0.6.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3241c19e7f0ef92461c1b5fea18294ed608c5e13325d4b438b4bb7ee5300739"
+dependencies = [
+ "paigasus-helikon-core",
+ "paigasus-helikon-runtime-tokio",
+]
+
+[[package]]
+name = "paigasus-helikon-core"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3386f5df33a2a147d02b16700158375e789231ae2e564e6d416b333ea786676"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "futures-core",
+ "futures-util",
+ "globset",
+ "jiff",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "paigasus-helikon-runtime-tokio"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce92c1b136132e21c68785c31882fadbda06ae331da938408d40c1099361a2c3"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "fastrand",
+ "futures-core",
+ "futures-util",
+ "paigasus-helikon-core",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -4441,8 +4557,21 @@ checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
 dependencies = [
  "dyn-clone",
  "ref-cast",
+ "schemars_derive",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1c3a92094fa7d61aa124645844facb6b554dfc797136d0f5fd1f890e2bffc69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -4706,6 +4835,17 @@ name = "serde_derive"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5550,6 +5690,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -6074,6 +6215,7 @@ version = "1.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c14b15dffa2f4bd712103e857140aa04a4f2ff6e955c77d7eb8e53ee02a3b64"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "serde_core",
  "wasm-bindgen",
