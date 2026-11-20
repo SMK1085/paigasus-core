@@ -9,6 +9,7 @@ mod commands;
 pub mod conformance;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
+pub mod layout;
 mod path;
 mod text;
 mod workspace;
