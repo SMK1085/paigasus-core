@@ -315,7 +315,8 @@ three identities are in `subjects.env` (`GW_DEC_*`). This table renders that fil
   --max-bucket-size <DECISIONS_GEN_MAX_BYTES>`. It also fails when the 10 % of the account disk that the
   stream leaves free cannot hold the bucket. The smallest disk is then about 10 MiB.
 - `nsc add user` fails for a user that exists, so an existing `gateway-decision-publisher` would keep its old
-  grants. The script runs `nsc edit user` for this user only. The new creds file holds the new grants.
+  grants. The script runs `nsc edit user` for this user only. `nsc edit user` only adds grants. To remove a grant,
+  use `--rm-pub` or `--rm-sub`. The new creds file holds the new grants.
 - Upgrade order: first the new grants, the new creds and the bucket (run `provision-decisions.sh` with
   `PUSH=1`), then the new gateway binary with the new creds.
 - Deployment rule: two gateway deployments with their own Redis, or with another Redis DB index, must not

@@ -3,8 +3,8 @@
 #
 # Provisions the gateway tool decision log (SMA-755 § 5.10): the PAIGASUS_GATEWAY account, its three
 # users, the GATEWAY_DECISIONS stream and (SMA-821) the GATEWAY_DECISIONS_GEN key-value bucket. The account
-# allows 2 streams: the decision stream and the stream KV_GATEWAY_DECISIONS_GEN of the bucket use both. It is idempotent: run it again and it changes nothing that
-# exists. `provision.sh` calls it for a new environment, and an operator can run it alone for an
+# allows 2 streams: the decision stream and the stream KV_GATEWAY_DECISIONS_GEN of the bucket use both.
+# It is idempotent: run it again and it changes nothing that exists. `provision.sh` calls it for a new environment, and an operator can run it alone for an
 # environment that already has the IAM account.
 #
 # Inputs are the same as `provision.sh`: OPERATOR, OUT_DIR, NATS_URL and PUSH. With PUSH unset, the
@@ -85,7 +85,7 @@ add_user gateway-decision-reader      GW_DEC_READER_PUB      GW_DEC_READER_SUB
 add_user gateway-decision-provisioner GW_DEC_PROVISIONER_PUB GW_DEC_PROVISIONER_SUB
 
 if [ "${PUSH:-0}" != "1" ]; then
-  echo "decision-log account and creds are in $OUT_DIR. Re-run with PUSH=1 to push the account and make the stream"
+  echo "decision-log account and creds are in $OUT_DIR. Re-run with PUSH=1 to push the account and make the stream and the bucket"
   exit 0
 fi
 
@@ -115,7 +115,8 @@ else
 fi
 
 # The generation bucket (SMA-821). It is the stream KV_GATEWAY_DECISIONS_GEN. `--max-bucket-size` is the flag of
-# `nats kv add` (checked with `nats kv add --help`); `kv add` has no `--max-bytes`.
+# `nats kv add` (checked with `nats kv add --help` in the image `natsio/nats-box:latest`, which is not pinned,
+# so the CLI version is not recorded); `kv add` has no `--max-bytes`.
 if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" kv info "$DECISIONS_GEN_BUCKET" >/dev/null 2>&1; then
   echo "bucket $DECISIONS_GEN_BUCKET already exists; left unchanged"
 else
