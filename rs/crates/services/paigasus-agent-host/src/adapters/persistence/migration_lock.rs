@@ -63,8 +63,7 @@ pub fn next_poll(elapsed: Duration, wait: Duration) -> Poll {
 /// Returned rather than discarded because a `Result<(), _>` makes the wait unobservable: a test
 /// measuring wall clock around the call cannot tell "waited for the lock" from "ran the
 /// migration", so it would pass with the lock deleted. An advisory lock does not block DDL, so
-/// that is not a theoretical concern. `PgPartitionMaintainer::tick` returns a `MaintenanceReport`
-/// for the same reason.
+/// that is not a theoretical concern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationLockOutcome {
     /// Time spent waiting for the lock, excluding the migration itself.

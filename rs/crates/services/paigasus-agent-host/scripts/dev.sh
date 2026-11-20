@@ -117,7 +117,7 @@ while [ "$i" -lt 60 ]; do
     app_pid=""
     exit 1
   fi
-  code="$(curl -s -o /dev/null -w '%{http_code}' "http://${AGENT_HOST_HTTP_ADDR}/readyz" 2>/dev/null || true)"
+  code="$(curl -s --connect-timeout 1 --max-time 2 -o /dev/null -w '%{http_code}' "http://${AGENT_HOST_HTTP_ADDR}/readyz" 2>/dev/null || true)"
   if [ "$code" = "200" ]; then
     echo "dev.sh: /readyz returned 200"
     exit 0

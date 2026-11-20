@@ -9,12 +9,14 @@ use crate::error::DomainError;
 use crate::ids::{AgentId, EventId, InboxId, PrincipalId, RunId, ThreadId};
 
 /// An inbox. It belongs to one agent and one principal, in one organization.
+///
+/// `Inbox::new` is the only constructor, because it enforces the organization invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inbox {
-    pub id: InboxId,
-    pub agent: AgentId,
-    pub principal: PrincipalId,
-    pub created_at: Timestamp,
+    id: InboxId,
+    agent: AgentId,
+    principal: PrincipalId,
+    created_at: Timestamp,
 }
 
 impl Inbox {
@@ -27,6 +29,30 @@ impl Inbox {
             });
         }
         Ok(Inbox { id, agent, principal, created_at })
+    }
+
+    /// The identity of the inbox.
+    #[must_use]
+    pub fn id(&self) -> &InboxId {
+        &self.id
+    }
+
+    /// The agent that owns the inbox.
+    #[must_use]
+    pub fn agent(&self) -> &AgentId {
+        &self.agent
+    }
+
+    /// The principal of the inbox.
+    #[must_use]
+    pub fn principal(&self) -> &PrincipalId {
+        &self.principal
+    }
+
+    /// The time the inbox was created.
+    #[must_use]
+    pub fn created_at(&self) -> Timestamp {
+        self.created_at
     }
 
     /// The organization of the inbox. It comes from the inbox PRN.
