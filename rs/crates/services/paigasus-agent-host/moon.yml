@@ -8,6 +8,7 @@ dependsOn:
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-proto-rs'
+  - 'paigasus-test-docker-rs'
 
 # The transitive dependsOn closure's sources, consumed by build/test/lint via
 # `@group(upstreams)` in .moon/tasks/rust.yml. Asserted by repo:affected-smoke's A6.
@@ -23,6 +24,8 @@ fileGroups:
     - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto/src/**/*'
     - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+    - '/rs/crates/libs/paigasus-test-docker/src/**/*'
+    - '/rs/crates/libs/paigasus-test-docker/Cargo.toml'
 
 tasks:
   build:

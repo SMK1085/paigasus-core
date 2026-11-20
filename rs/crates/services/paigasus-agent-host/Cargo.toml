@@ -40,6 +40,11 @@ anyhow = { workspace = true }
 [dev-dependencies]
 paigasus-proto = { workspace = true }
 figment = { workspace = true, features = ["test"] }
+# The Postgres tests. `paigasus-test-docker` owns the Docker-skip policy.
+paigasus-test-docker = { workspace = true }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
+reqwest = { workspace = true }
 
 [lints]
 workspace = true

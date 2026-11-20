@@ -135,6 +135,19 @@ filter = 'package(=paigasus-gateway) and (binary(docker_preflight) or binary(lim
 retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
 test-group = 'docker-containers'
 
+[[profile.default.overrides]]
+# SMA-786: the agent host's Docker canary, in the form of the gateway's above. One retry; it
+# inherits `test-group` from the block below.
+filter = 'package(=paigasus-agent-host) and binary(docker_preflight)'
+retries = 1
+
+[[profile.default.overrides]]
+# SMA-786: the agent host's Postgres-backed binaries, named one by one so the crate's pure unit
+# tests keep retries = 0. Same retry budget and container cap as the gateway's suites.
+filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg))'
+retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
+test-group = 'docker-containers'
+
 # JUnit lives on a DEDICATED profile, not on `default`, because nextest resolves the report path
 # relative to the workspace `target/` — so every `cargo nextest` in the workspace would otherwise
 # write the same `target/nextest/default/junit.xml` and clobber the others. One `moon ci` run
