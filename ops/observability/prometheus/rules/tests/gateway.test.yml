@@ -198,8 +198,40 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations:
-              summary: "Gateway decision log lost its Redis stream"
-              description: "The relay found that the Redis decision stream was lost and made the consumer group again. Events in the stream were lost. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+              summary: "Gateway decision log lost entries of its Redis stream"
+              description: "The relay found that the Redis decision stream lost entries: Redis lost the stream, or went back to an older state. Events in the stream were lost. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRedisReset: a fresh pod counts at its first tick, so the counter series starts at 1 and
+  # increase() reads 0. The last-reset gauge fires the alert (SMA-821 § 5.3a).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_redis_resets_total'
+        values: '_ _ _ 1 1 1 1'
+      - series: 'gateway_decision_log_last_reset_timestamp_seconds'
+        values: '_ _ _ 180 180 180 180'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision log lost entries of its Redis stream"
+              description: "The relay found that the Redis decision stream lost entries: Redis lost the stream, or went back to an older state. Events in the stream were lost. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRedisReset quiet: the last reset is older than 900 s.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_redis_resets_total'
+        values: '1x25'
+      - series: 'gateway_decision_log_last_reset_timestamp_seconds'
+        values: '60x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
 
   # GatewayDecisionLogRedisReset quiet: the counter stays at 0.
   - interval: 1m
@@ -209,6 +241,33 @@ tests:
     alert_rule_test:
       - eval_time: 4m
         alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
+
+  # GatewayDecisionLogGenerationCheckFailing: errors for 15m fire. The series rises each minute, `for` is 15m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_generation_check_errors_total{kind="timeout"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatewayDecisionLogGenerationCheckFailing
+        exp_alerts: []
+      - eval_time: 32m
+        alertname: GatewayDecisionLogGenerationCheckFailing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log Redis reset check is failing"
+              description: "The relay could not run the Redis reset check against the NATS KV bucket GATEWAY_DECISIONS_GEN for 15m. While it fails, a Redis reset is not counted. Read gateway_decision_log_generation_check_errors_total by kind. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogGenerationCheckFailing quiet: a flat series does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_generation_check_errors_total{kind="timeout"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 32m
+        alertname: GatewayDecisionLogGenerationCheckFailing
         exp_alerts: []
 
   # GatewayDecisionLogRelayStalled: a backlog is held and published stays at 0. The backlog is above 0 from 2m,
