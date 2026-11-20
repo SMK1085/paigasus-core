@@ -1857,23 +1857,23 @@ async fn a_publisher_without_kv_grants_still_relays_every_event() {
     // The context of `dl_js::connect` is `jetstream::new(client)`: async-nats 0.53 waits 5 s for a publish ack
     // (`DEFAULT_TIMEOUT`). The relay logs nothing and counts nothing on a timeout, but each publish attempt logs
     // "the relay publishes an entry" at DEBUG. With NATS paused for 8 s, the batch is tried again after the first
-    // timeout (measured: one attempt each 5 s, at about 0 s, 5 s and 10 s), so there are at least 2 attempts. Without a
-    // timeout there would be 1.
+    // timeout (measured: one attempt each 5 s, at about 0 s, 5 s and 10 s), so there are at least 2 attempts for one entry.
+    // Without a timeout there would be 1.
     let attempts = |text: &str| text.matches("the relay publishes an entry").count();
-    let attempts_before = attempts(&logs.text());
     nats.pause().await.expect("pause NATS");
-    for _ in 0..2 {
-        seq += 1;
-        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
-    }
+    // Count only the attempts after the pause starts. ONE event goes in: the batch has one entry, so a second
+    // attempt can only be the same entry tried again after its 5 s ack timeout.
+    let attempts_before = attempts(&logs.text());
+    seq += 1;
+    xadd(&node, &event_with_org(seq, ORG_A), 0).await;
     tokio::time::sleep(Duration::from_secs(8)).await;
     let during = attempts(&logs.text()) - attempts_before;
-    assert!(during >= 2, "the first publish timed out after 5 s and was tried again: {during} attempts");
+    assert!(during >= 2, "the one event timed out after 5 s and was tried again: {during} attempts");
     assert_eq!(snap.published(), 20, "nothing is published while NATS is paused");
     assert_eq!(snap.dropped("publish_rejected"), 0, "a publish timeout is not a rejection");
-    assert_eq!(xlen(&node).await, 2, "the events stay in Redis");
+    assert_eq!(xlen(&node).await, 1, "the event stays in Redis");
     nats.unpause().await.expect("unpause NATS");
-    wait_for("22 events are published", || async { snap.published() == 22 && xlen(&node).await == 0 }).await;
+    wait_for("21 events are published", || async { snap.published() == 21 && xlen(&node).await == 0 }).await;
     assert_eq!(snap.dropped("publish_rejected"), 0, "a timeout with KV violations is not a rejection");
     assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "still no publish violation");
     assert!(check_errors(&snap, "permission") > 0, "the KV step still counts permission errors");
