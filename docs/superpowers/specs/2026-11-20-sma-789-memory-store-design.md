@@ -184,7 +184,11 @@ pub trait MemoryStore: Send + Sync {
 a read cache and a `MemoryChangeSet`.
 
 - **Read model: a repeatable read per path.** The first read of a path (by `get`, or by `list` for
-  the entries it returns) goes to the store and is cached with its version. Later reads of that path
+  the entries it returns) goes to the store and is cached with its version. A `list` also records
+  its directory: a path under a listed directory that the listing did not return has the baseline
+  "absent", so a file that another writer creates after the listing is a conflict at the write. A
+  `get` of a path that only a listing saw takes the fetched file as the baseline, because the
+  model now sees that file; a cached listing that shows another state of the path is dropped. Later reads of that path
   come from the cache, then the buffer on top. A buffered `Delete` hides a file. A buffered `Put`
   shows the new content.
 - **Write: the expected value.** A write records a change with the cached version, or `Absent` when
@@ -386,7 +390,7 @@ guard).
 - **The result form.** Every text, success or refusal, goes out as `ToolOutput` with
   `Value::String(text)`, so Helikon does not escape it (`tool_exec.rs:36`). Helikon 0.6 has no
   `is_error` flag. An `Err(ToolError)` becomes a plain text result with no redaction
-  (`paigasus-helikon-core-0.6.0/src/agent.rs:1205`). So every text, success or refusal, is
+  (`paigasus-helikon-core-0.6.0/src/agent.rs:1207`). So every text, success or refusal, is
   `Ok(ToolOutput::new(Value::String(text)))`. `Ok` output goes through redaction of env secrets, on
   by default (`context.rs:204`). That is accepted: a memory that holds an env secret value is
   redacted in a `view`. A `Store` error is logged in the tool with its cause; content is never logged.
@@ -465,7 +469,7 @@ The model is no longer running, so the text cannot reach it. The contract:
 
 ### 6.13 Observability
 
-Counters (names through SMA-798): commit-time conflicts, early conflicts, cap refusals. SMA-829 adds
+Counters (names through SMA-798): early conflicts, cap refusals. SMA-829 adds
 S3 partial applies and skipped S3 keys. No counter or log line holds memory content or a path of a principal.
 The commit-time conflict counter belongs to SMA-790. The core cannot count it, and this issue has no run commit.
 The tool's counter is `agent_host_memory_refusals_total` with label `kind` (conflict, cap, path, sealed, store), provisional for SMA-798.
@@ -551,7 +555,6 @@ finds nothing.
 
 ## 9. Left to the builder
 
-- The exact SQL `CHECK` term for `..` (§6.8).
 - The module layout inside each crate.
 - Cap defaults, if a reason appears (record it).
 - Where the run nonce is made.
