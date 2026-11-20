@@ -288,11 +288,43 @@ async fn scope_lock_serializes_apply() {
     .await
     .expect("lock in B")
     .expect("the scope row exists");
+    let b_pid = b
+        .query_one_raw(stmt("SELECT pg_backend_pid() AS v", Vec::new()))
+        .await
+        .expect("the pid of B")
+        .expect("a row")
+        .try_get::<i32>("", "v")
+        .expect("an int column named v");
 
     let store = PgMemoryStore::new(db.clone());
     let set = commit_set(&s, vec![put_new("/a", "1")]);
     let task = tokio::spawn(async move { store.apply(&set, &MemoryCaps::default()).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A row lock wait shows in `pg_locks` as an ungranted lock of another session that B blocks.
+    // The query of that session must be the adapter's `SELECT … FROM memory_scope … FOR UPDATE`.
+    // B's own session and this poll are not that session. The poll stops after 10 s.
+    let waiting = stmt(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid \
+         WHERE NOT l.granted AND l.pid <> $1 AND $1 = ANY (pg_blocking_pids(l.pid)) \
+         AND a.query LIKE '%FROM memory_scope%FOR UPDATE%') AS v",
+        vec![b_pid.into()],
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = db
+            .query_one_raw(waiting.clone())
+            .await
+            .expect("read pg_locks")
+            .expect("a row")
+            .try_get::<bool>("", "v")
+            .expect("a bool column named v");
+        if seen {
+            break;
+        }
+        assert!(!task.is_finished(), "apply finished without a wait for the scope row lock of B");
+        assert!(tokio::time::Instant::now() < deadline, "apply did not wait for the scope row lock of B within 10 s");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(!task.is_finished(), "apply must wait for the scope row lock of B");
 
     b.commit().await.expect("commit B");
