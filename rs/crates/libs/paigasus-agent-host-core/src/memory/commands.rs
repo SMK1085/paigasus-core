@@ -560,7 +560,7 @@ mod tests {
     async fn view_cuts_long_files() {
         let mut ws = ws_with(&[("/a", &"y".repeat(20_000))]).await;
         let out = run(&mut ws, json!({"command":"view","path":"/memories/a"})).await.unwrap();
-        assert!(out.ends_with("\n[The view is cut at 16,000 characters. Use view_range to read the rest.]"));
+        assert!(out.ends_with("\n[The view is cut at 16,000 characters. Use view_range to read the other lines. A line longer than the limit is shown cut.]"));
         assert!(out.chars().count() < 16_300);
     }
 

@@ -6,7 +6,7 @@
 pub(super) const VIEW_LIMIT_CHARS: usize = 16_000;
 
 /// The line that ends a cut view.
-pub(super) const CUT_LINE: &str = "[The view is cut at 16,000 characters. Use view_range to read the rest.]";
+pub(super) const CUT_LINE: &str = "[The view is cut at 16,000 characters. Use view_range to read the other lines. A line longer than the limit is shown cut.]";
 
 /// The number of lines around an edit in a snippet.
 const SNIPPET_LINES: usize = 4;
