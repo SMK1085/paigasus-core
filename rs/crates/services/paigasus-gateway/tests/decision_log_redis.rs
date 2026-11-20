@@ -1791,11 +1791,11 @@ async fn a_restore_of_an_older_generation_counts_one_reset() {
 
 #[tokio::test]
 async fn a_reset_during_a_nats_outage_counts_after_nats_returns() {
-    let port = free_port();
     let Some((node, redis_url)) = redis_7_4("decision_log_redis reset during nats outage").await else {
         return;
     };
-    let Some((nats, nats_url)) = start_nats(Some(port), "decision_log_redis reset during nats outage").await else {
+    // A pause keeps the port and the store; a stop and start on a fixed port can lose the port to another container.
+    let Some((nats, nats_url)) = start_nats(None, "decision_log_redis reset during nats outage").await else {
         return;
     };
     let recorder = DebuggingRecorder::new();
@@ -1804,19 +1804,20 @@ async fn a_reset_during_a_nats_outage_counts_after_nats_returns() {
     let admin = test_js(&nats_url).await;
     let relay = start_relay(&redis_url, &nats_url, "i1").await;
     wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
-    nats.stop().await.expect("stop NATS");
+    let before = kv_record(&admin).await.expect("a record").generation;
+    let errors = || CHECK_ERROR_KINDS.iter().map(|k| check_errors(&snap, k)).sum::<u64>();
+    let errors_before = errors();
+    nats.pause().await.expect("pause NATS");
     redis_cli(&node, &["FLUSHALL"]).await;
-    wait_for("a check error while NATS is down", || async {
-        CHECK_ERROR_KINDS.iter().map(|k| check_errors(&snap, k)).sum::<u64>() > 0
-    })
-    .await;
+    wait_for("a new check error while NATS is down", || async { errors() > errors_before }).await;
     assert_eq!(resets(&snap), 0, "no reset is counted while the KV cannot be read");
-    nats.start().await.expect("start NATS");
-    wait_for("the KV record is readable again", || async { kv_record(&admin).await.is_some() }).await;
-    assert!(kv_record(&admin).await.is_some(), "the KV record survived the container stop");
+    nats.unpause().await.expect("unpause NATS");
     wait_for("one reset", || async { resets(&snap) >= 1 }).await;
     wait_for_kv_steps(&admin, 3).await;
     assert_eq!(resets(&snap), 1, "the loss during the outage counts once");
+    let after = kv_record(&admin).await.expect("a record").generation;
+    assert_ne!(after, before, "the KV record moved to the new generation");
+    assert_eq!(after, gen_value(&node).await, "the KV record holds the generation of Redis");
     relay.shut_down().await;
 }
 
@@ -1837,6 +1838,7 @@ async fn a_publisher_without_kv_grants_still_relays_every_event() {
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::DEBUG);
     let v = dl_js::Violations::default();
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&url, v.clone()).await, fast("i1"), v.clone());
     let mut seq = 0;
@@ -1852,15 +1854,29 @@ async fn a_publisher_without_kv_grants_still_relays_every_event() {
     assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "no publish violation");
     assert!(v.kv.load(std::sync::atomic::Ordering::SeqCst) > 0, "the KV step saw permission violations");
     assert!(check_errors(&snap, "permission") > 0, "the KV step counts permission errors");
+    // The context of `dl_js::connect` is `jetstream::new(client)`: async-nats 0.53 waits 5 s for a publish ack
+    // (`DEFAULT_TIMEOUT`). The relay logs nothing and counts nothing on a timeout, but each publish attempt logs
+    // "the relay publishes an entry" at DEBUG. With NATS paused for 8 s, the batch is tried again after the first
+    // timeout (measured: one attempt each 5 s, at about 0 s, 5 s and 10 s), so there are at least 2 attempts. Without a
+    // timeout there would be 1.
+    let attempts = |text: &str| text.matches("the relay publishes an entry").count();
+    let attempts_before = attempts(&logs.text());
     nats.pause().await.expect("pause NATS");
     for _ in 0..2 {
         seq += 1;
         xadd(&node, &event_with_org(seq, ORG_A), 0).await;
     }
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let during = attempts(&logs.text()) - attempts_before;
+    assert!(during >= 2, "the first publish timed out after 5 s and was tried again: {during} attempts");
+    assert_eq!(snap.published(), 20, "nothing is published while NATS is paused");
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a publish timeout is not a rejection");
+    assert_eq!(xlen(&node).await, 2, "the events stay in Redis");
     nats.unpause().await.expect("unpause NATS");
     wait_for("22 events are published", || async { snap.published() == 22 && xlen(&node).await == 0 }).await;
-    assert_eq!(snap.dropped("publish_rejected"), 0, "a pause is not a rejection");
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a timeout with KV violations is not a rejection");
+    assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "still no publish violation");
+    assert!(check_errors(&snap, "permission") > 0, "the KV step still counts permission errors");
     relay.shut_down().await;
 }
 
@@ -1915,6 +1931,9 @@ async fn a_group_made_by_an_sma_755_relay_is_repaired_and_counts_one_reset() {
     // One script: the old relay's group is made at once, so the relay never reads NOGROUP.
     let lua = "redis.call('DEL', KEYS[1], KEYS[2], KEYS[3]) return redis.call('XGROUP', 'CREATE', KEYS[1], 'relay', '0', 'MKSTREAM')";
     eval(&node, lua, &[KEY.to_owned(), gen_key(KEY), epoch_key(KEY)]).await;
+    // Within one KV step (a tick is 200 ms) the detection script sets the generation key again.
+    let repaired = tokio::time::timeout(Duration::from_secs(3), wait_for("the generation key is set again", || async { !gen_value(&node).await.is_empty() })).await;
+    assert!(repaired.is_ok(), "the generation key was not set within one KV step");
     wait_for("one reset", || async { resets(&snap) >= 1 }).await;
     wait_for_kv_steps(&admin, 3).await;
     assert_eq!(resets(&snap), 1, "the repaired generation counts one reset");
@@ -1958,6 +1977,7 @@ async fn a_return_to_an_older_state_of_the_same_generation_counts_one_loss() {
     assert_eq!(lost(&snap), 2, "the estimate is the KV sample");
     assert_eq!(gen_value(&node).await, generation, "the generation is unchanged");
     assert_eq!(xlen(&node).await, 2, "the stream is the restored one");
+    assert!(redis_cli(&node, &["XINFO", "GROUPS", KEY]).await.contains("relay"), "the relay group still exists after the restore");
     relay.shut_down().await;
 }
 
