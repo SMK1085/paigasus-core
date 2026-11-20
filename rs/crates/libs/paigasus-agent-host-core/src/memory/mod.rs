@@ -4,15 +4,18 @@
 
 mod caps;
 mod change;
+mod commands;
 #[cfg(any(test, feature = "test-support"))]
 pub mod conformance;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 mod path;
+mod text;
 mod workspace;
 
 pub use caps::{CapError, MemoryCaps};
 pub use change::{Expected, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryVersion};
+pub use commands::{MemoryCommand, MemoryCommandError, execute, parse_command};
 pub use path::{MemoryDir, MemoryPath, ParsedToolPath, PathError, TOOL_ROOT, parse_tool_path};
 pub use workspace::{MemoryWorkspace, WorkspaceError};
 
