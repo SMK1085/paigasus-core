@@ -15,7 +15,7 @@ use bytes::Bytes;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use paigasus_gateway::adapters::decision_log::gen_kv::NatsGenKv;
 use paigasus_gateway::adapters::decision_log::gen_redis::{GroupOutcome, Sample, detect, ensure_group, epoch_key, gen_key, sample};
-use paigasus_gateway::adapters::decision_log::generation::{GenKv, GenRecord, KvError, RedisView, entry_key};
+use paigasus_gateway::adapters::decision_log::generation::{GenKv, GenRecord, KvError, RedisView, entry_key, new_id};
 use paigasus_gateway::adapters::decision_log::jetstream as dl_js;
 use paigasus_gateway::adapters::decision_log::redis_conn::breaker_metrics;
 use paigasus_gateway::adapters::decision_log::relay::delete_consumer_if_empty;
@@ -1720,4 +1720,346 @@ async fn the_detection_script_returns_a_write_error_and_changes_no_epoch() {
     let err = detect_with_denied(&node, &mut conn, "-incr", "+incr").await.expect_err("INCR is denied");
     assert!(err.to_string().contains("no permissions to run the 'incr' command"), "the ACL error text is returned: {err}");
     assert_eq!(redis_cli(&node, &["EXISTS", &epoch_key(KEY)]).await, "0", "no epoch change");
+}
+
+// ---- The scenario tests of the generation record (SMA-821 Task 9) ----
+
+async fn start_relay(redis_url: &str, nats_url: &str, name: &str) -> Relay {
+    let v = dl_js::Violations::default();
+    Relay::start(connected_slot(redis_url).await, relay_js(nats_url, v.clone()).await, fast(name), v)
+}
+
+/// Run one Lua script with the given keys through `redis-cli`.
+async fn eval(node: &ContainerAsync<Redis>, lua: &str, keys: &[String]) -> String {
+    let n = keys.len().to_string();
+    let mut args = vec!["EVAL", lua, n.as_str()];
+    args.extend(keys.iter().map(String::as_str));
+    redis_cli(node, &args).await
+}
+
+#[tokio::test]
+async fn a_fresh_relay_after_flushall_counts_one_reset_with_the_stored_sample() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis fresh relay after flushall").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis fresh relay after flushall").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&nats_url).await;
+    block_publishes(&admin).await;
+    for seq in 1..=3 {
+        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+    }
+    let first = start_relay(&redis_url, &nats_url, "i1").await;
+    wait_for("the KV record holds the sample 3", || async { kv_record(&admin).await.is_some_and(|r| r.sample == Some(3)) }).await;
+    first.shut_down().await;
+    redis_cli(&node, &["FLUSHALL"]).await;
+    let second = start_relay(&redis_url, &nats_url, "i2").await;
+    wait_for("one reset", || async { resets(&snap) >= 1 }).await;
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 1, "a new relay with no memory counts the loss once");
+    assert_eq!(lost(&snap), 3, "the estimate is the KV sample from before the loss");
+    second.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_restore_of_an_older_generation_counts_one_reset() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis restore older generation").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis restore older generation").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&nats_url).await;
+    let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
+    let old = kv_record(&admin).await.expect("a record").generation;
+    let new = new_id();
+    redis_cli(&node, &["SET", &gen_key(KEY), &new]).await;
+    wait_for("one reset", || async { resets(&snap) >= 1 }).await;
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 1, "a changed generation counts one reset");
+    assert_eq!(kv_record(&admin).await.expect("a record").generation, new, "the KV record holds the new generation, not {old}");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_reset_during_a_nats_outage_counts_after_nats_returns() {
+    let port = free_port();
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis reset during nats outage").await else {
+        return;
+    };
+    let Some((nats, nats_url)) = start_nats(Some(port), "decision_log_redis reset during nats outage").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&nats_url).await;
+    let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
+    nats.stop().await.expect("stop NATS");
+    redis_cli(&node, &["FLUSHALL"]).await;
+    wait_for("a check error while NATS is down", || async {
+        CHECK_ERROR_KINDS.iter().map(|k| check_errors(&snap, k)).sum::<u64>() > 0
+    })
+    .await;
+    assert_eq!(resets(&snap), 0, "no reset is counted while the KV cannot be read");
+    nats.start().await.expect("start NATS");
+    wait_for("the KV record is readable again", || async { kv_record(&admin).await.is_some() }).await;
+    assert!(kv_record(&admin).await.is_some(), "the KV record survived the container stop");
+    wait_for("one reset", || async { resets(&snap) >= 1 }).await;
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 1, "the loss during the outage counts once");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_publisher_without_kv_grants_still_relays_every_event() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis publisher without kv grants").await else {
+        return;
+    };
+    let port = free_port();
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", SMALL_ACCOUNT_CONF.as_bytes().to_vec())
+        .with_mapped_port(port, 4222.tcp());
+    let Some(nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis publisher without kv grants").await else {
+        return;
+    };
+    let url = format!("nats://127.0.0.1:{port}");
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let v = dl_js::Violations::default();
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&url, v.clone()).await, fast("i1"), v.clone());
+    let mut seq = 0;
+    for _ in 0..4 {
+        for _ in 0..5 {
+            seq += 1;
+            xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    wait_for("20 events are published and Redis is empty", || async { snap.published() == 20 && xlen(&node).await == 0 }).await;
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a KV refusal does not reject an event");
+    assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "no publish violation");
+    assert!(v.kv.load(std::sync::atomic::Ordering::SeqCst) > 0, "the KV step saw permission violations");
+    assert!(check_errors(&snap, "permission") > 0, "the KV step counts permission errors");
+    nats.pause().await.expect("pause NATS");
+    for _ in 0..2 {
+        seq += 1;
+        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    nats.unpause().await.expect("unpause NATS");
+    wait_for("22 events are published", || async { snap.published() == 22 && xlen(&node).await == 0 }).await;
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a pause is not a rejection");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn an_xack_of_zero_and_a_group_made_by_another_relay_counts_one_reset() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis xack zero").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis xack zero").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    let admin = test_js(&nats_url).await;
+    block_publishes(&admin).await;
+    for seq in 1..=3 {
+        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+    }
+    let a = start_relay(&redis_url, &nats_url, "a").await;
+    wait_for("the KV record holds the sample 3", || async { kv_record(&admin).await.is_some_and(|r| r.sample == Some(3)) }).await;
+    redis_cli(&node, &["FLUSHALL"]).await;
+    let b = start_relay(&redis_url, &nats_url, "b").await;
+    wait_for("one reset", || async { resets(&snap) >= 1 }).await;
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 1, "relay B made the group and the loss counts once");
+    assert_eq!(lost(&snap), 3, "the estimate is the KV sample from before the loss");
+    unblock_publishes(&admin).await;
+    wait_for("relay A settled its batch with an XACK of 0", || async { logs.text().contains("acked=0") }).await;
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 1, "the settle of relay A adds no reset");
+    a.shut_down().await;
+    b.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_group_made_by_an_sma_755_relay_is_repaired_and_counts_one_reset() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis group by sma 755 relay").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis group by sma 755 relay").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&nats_url).await;
+    let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
+    let old = kv_record(&admin).await.expect("a record").generation;
+    // One script: the old relay's group is made at once, so the relay never reads NOGROUP.
+    let lua = "redis.call('DEL', KEYS[1], KEYS[2], KEYS[3]) return redis.call('XGROUP', 'CREATE', KEYS[1], 'relay', '0', 'MKSTREAM')";
+    eval(&node, lua, &[KEY.to_owned(), gen_key(KEY), epoch_key(KEY)]).await;
+    wait_for("one reset", || async { resets(&snap) >= 1 }).await;
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 1, "the repaired generation counts one reset");
+    let new = gen_value(&node).await;
+    assert_ne!(new, old, "the relay set a new generation");
+    assert_eq!(kv_record(&admin).await.expect("a record").generation, new, "the KV record follows the new generation");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_return_to_an_older_state_of_the_same_generation_counts_one_loss() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis return to older state").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis return to older state").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&nats_url).await;
+    block_publishes(&admin).await;
+    for seq in 1..=2 {
+        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+    }
+    let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    wait_for("the KV record holds the sample 2", || async { kv_record(&admin).await.is_some_and(|r| r.sample == Some(2)) }).await;
+    let keys = [KEY.to_owned(), gen_key(KEY), epoch_key(KEY), "side:stream".to_owned(), "side:gen".to_owned(), "side:epoch".to_owned()];
+    eval(&node, "for i = 1, 3 do redis.call('SET', KEYS[i + 3], redis.call('DUMP', KEYS[i])) end return 1", &keys).await;
+    let generation = gen_value(&node).await;
+    wait_for_kv_steps(&admin, 3).await;
+    eval(
+        &node,
+        "for i = 1, 3 do redis.call('RESTORE', KEYS[i], 0, redis.call('GET', KEYS[i + 3]), 'REPLACE') end return 1",
+        &keys,
+    )
+    .await;
+    wait_for("one reset", || async { resets(&snap) >= 1 }).await;
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 1, "a return to an older state counts one loss");
+    assert_eq!(lost(&snap), 2, "the estimate is the KV sample");
+    assert_eq!(gen_value(&node).await, generation, "the generation is unchanged");
+    assert_eq!(xlen(&node).await, 2, "the stream is the restored one");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_foreign_writer_counts_errors_and_no_reset() {
+    let Some((_node, redis_url)) = redis_7_4("decision_log_redis foreign writer").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis foreign writer").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    let admin = test_js(&nats_url).await;
+    let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
+    let store = admin.get_key_value(dl_js::GEN_BUCKET).await.expect("the relay made the bucket");
+    let foreign = GenRecord {
+        generation: new_id(),
+        epoch: 1,
+        sample: Some(0),
+        sampled_at: 1,
+        claim: None,
+    };
+    // The relay writes too, so a write with a stale revision is refused. Read the revision, write, and retry.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let entry = store.entry(entry_key(KEY)).await.expect("read the entry").expect("the entry exists");
+        if store.update(entry_key(KEY), foreign.to_bytes(), entry.revision).await.is_ok() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the foreign write never stuck within 5 s");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    wait_for("three foreign writer errors", || async { check_errors(&snap, "foreign_writer") >= 3 }).await;
+    assert_eq!(resets(&snap), 0, "a foreign writer is an error and no reset");
+    assert!(logs.text().contains("another writer set"), "the error log names the foreign writer: {}", logs.text());
+    assert_eq!(
+        kv_record(&admin).await.expect("a record").generation,
+        foreign.generation,
+        "the relay writes nothing over a foreign entry"
+    );
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_redis_at_its_memory_limit_counts_a_redis_error_and_keeps_the_gauge() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis memory limit").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis memory limit").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&nats_url).await;
+    block_publishes(&admin).await;
+    for seq in 1..=3 {
+        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+    }
+    let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    wait_for("the gauge reads 3", || async { snap.gauge("gateway_decision_log_backlog") == Some(3.0) }).await;
+    wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
+    redis_cli(&node, &["CONFIG", "SET", "maxmemory-policy", "noeviction"]).await;
+    redis_cli(&node, &["CONFIG", "SET", "maxmemory", "1"]).await;
+    wait_for("a redis check error", || async { check_errors(&snap, "redis") > 0 }).await;
+    assert_eq!(resets(&snap), 0, "a refused write is no reset");
+    // XADD is refused at the limit, so XTRIM (which frees memory and is allowed) moves XLEN between the ticks.
+    redis_cli(&node, &["XTRIM", KEY, "MAXLEN", "1"]).await;
+    assert_eq!(xlen(&node).await, 1, "the trim took effect");
+    wait_for("the gauge follows XLEN to 1", || async { snap.gauge("gateway_decision_log_backlog") == Some(1.0) }).await;
+    assert_eq!(resets(&snap), 0, "no reset at the limit");
+    redis_cli(&node, &["CONFIG", "SET", "maxmemory", "0"]).await;
+    wait_for_kv_steps(&admin, 1).await;
+    let baseline = check_errors(&snap, "redis");
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(check_errors(&snap, "redis"), baseline, "no new redis error after the limit is lifted");
+    assert_eq!(resets(&snap), 0, "no reset after the limit is lifted");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn two_fresh_relays_on_a_first_deploy_count_nothing() {
+    let Some((_node, redis_url)) = redis_7_4("decision_log_redis first deploy").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis first deploy").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&nats_url).await;
+    let (a, b) = tokio::join!(start_relay(&redis_url, &nats_url, "a"), start_relay(&redis_url, &nats_url, "b"));
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 0, "a first deploy is not a loss");
+    for kind in CHECK_ERROR_KINDS {
+        assert_eq!(check_errors(&snap, kind), 0, "no check error of kind {kind}");
+    }
+    a.shut_down().await;
+    b.shut_down().await;
 }
