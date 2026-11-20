@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Starter Cedar policy set + the nine system roles (ADR-0013, design §3.2): the base
+//! Starter Cedar policy set + the ten system roles (ADR-0013, design §3.2): the base
 //! `forbid-archived-writes` static policy, one policy template per system role, and the
 //! `Role` catalog those templates back.
 //!
@@ -72,7 +72,10 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 ///
 /// `7`: SMA-781 added `ManageToolPolicyRecompile`. It is a non-restore write, so it joins the
 /// generated forbid list.
-pub const STARTER_POLICY_REVISION: u32 = 7;
+///
+/// `8`: SMA-787 added `WriteInboxEvent` (a non-restore write, so it joins the generated forbid
+/// list) and the `agent_event_writer` role template.
+pub const STARTER_POLICY_REVISION: u32 = 8;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
 /// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
@@ -89,6 +92,7 @@ pub const STARTER_POLICY_IDS: &[&str] = &[
     "project_member",
     "gateway_user",
     "tool_policy_reader",
+    "agent_event_writer",
 ];
 
 /// Whether `id` is one of the code-owned starter policy ids. The public `PutPolicy` API
@@ -101,7 +105,7 @@ pub fn is_starter_policy_id(id: &str) -> bool {
 
 /// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
 #[cfg(test)]
-const EXPECTED_STARTER_CONTENT_HASH: &str = "d40bd1a20359beb48dc1c0a7bc5a529bd1c49cb96cbfdf9fab2317e329a1141e";
+const EXPECTED_STARTER_CONTENT_HASH: &str = "f3c9928affc748cac4723da1d2701052c193c4fdec7c7ebe4b0ceface0380cef";
 
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
@@ -233,7 +237,11 @@ const GATEWAY_USER_ACTIONS: &[Action] = &[Action::InvokeModel];
 /// identity (SMA-775). Of the scoped roles, only this one holds it; `platform_admin` also holds it.
 const TOOL_POLICY_READER_ACTIONS: &[Action] = &[Action::ReadCompiledToolPolicies];
 
-/// The nine system roles (design §3.2), each `system = true` and immutable via the policy/role
+/// `agent_event_writer`: only [WriteInboxEvent], at an Organization (SMA-787 §6.1 — a dedicated
+/// role so `org_admin` and `gateway_user` never gain the right to write agent inbox events).
+const AGENT_EVENT_WRITER_ACTIONS: &[Action] = &[Action::WriteInboxEvent];
+
+/// The ten system roles (design §3.2), each `system = true` and immutable via the policy/role
 /// CRUD API. Every `template_id` equals the role's own `key` (see module docs).
 #[must_use]
 pub fn system_roles() -> Vec<Role> {
@@ -301,6 +309,13 @@ pub fn system_roles() -> Vec<Role> {
             description: "Read the compiled tool policies of every organization and the floor (the gateway's service identity).".to_string(),
             system: true,
         },
+        Role {
+            key: "agent_event_writer".to_string(),
+            template_id: "agent_event_writer".to_string(),
+            scope_kinds: vec![NodeKind::Organization],
+            description: "Write events into the agent inboxes of an organization.".to_string(),
+            system: true,
+        },
     ]
 }
 
@@ -356,7 +371,7 @@ fn forbid_archived_writes_source() -> String {
 /// explicitly.
 ///
 /// # Panics
-/// If `key` doesn't name one of the nine roles this module defines. Every call site in this
+/// If `key` doesn't name one of the ten roles this module defines. Every call site in this
 /// module passes a key from [`system_roles`]'s own output, so this can never actually happen.
 fn template_source(key: &str) -> String {
     if key == PLATFORM_ADMIN_KEY {
@@ -371,6 +386,7 @@ fn template_source(key: &str) -> String {
         "project_member" => PROJECT_MEMBER_ACTIONS,
         "gateway_user" => GATEWAY_USER_ACTIONS,
         "tool_policy_reader" => TOOL_POLICY_READER_ACTIONS,
+        "agent_event_writer" => AGENT_EVENT_WRITER_ACTIONS,
         other => panic!("template_source: unknown system role key {other:?}"),
     };
     format!("permit(principal == ?principal, action in [{}], resource in ?resource);", action_refs(actions))
@@ -899,6 +915,49 @@ mod tests {
                 resource: uni.org_o.prn().clone(),
                 expect: Effect::Deny,
             },
+            // -- SMA-787 §6.1: WriteInboxEvent and the dedicated agent_event_writer role.
+            Case {
+                name: "agent_event_writer allows WriteInboxEvent on its granted org (SMA-787)",
+                grants: vec![grant(143, &uni.principal, "agent_event_writer", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::WriteInboxEvent,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "agent_event_writer denies WriteInboxEvent on a different org (SMA-787)",
+                grants: vec![grant(144, &uni.principal, "agent_event_writer", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::WriteInboxEvent,
+                resource: uni.project_in_other.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "agent_event_writer denies InvokeModel on its org (SMA-787)",
+                grants: vec![grant(145, &uni.principal, "agent_event_writer", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::InvokeModel,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "org_admin does not hold WriteInboxEvent on its own org (SMA-787 §6.1)",
+                grants: vec![grant(146, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::WriteInboxEvent,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "gateway_user denies WriteInboxEvent on its org (SMA-787)",
+                grants: vec![grant(147, &uni.principal, "gateway_user", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::WriteInboxEvent,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "forbid-archived-writes denies WriteInboxEvent on an archived project even for agent_event_writer",
+                grants: vec![grant(148, &uni.principal, "agent_event_writer", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::WriteInboxEvent,
+                resource: uni.archived_project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
             Case {
                 name: "gateway_user at an org allows InvokeModel on the org itself (SMA-635 D4)",
                 grants: vec![grant(93, &uni.principal, "gateway_user", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
@@ -1034,6 +1093,16 @@ mod tests {
         assert!(
             forbid_archived_writes_source().contains(r#"Pgs::Iam::Action::"RetireSystemPolicy""#),
             "RetireSystemPolicy is a write action, so it must appear in forbid-archived-writes"
+        );
+    }
+
+    /// SMA-787: `WriteInboxEvent` is a non-restore write, so it must reach the generated forbid
+    /// list — the reason `STARTER_POLICY_REVISION` moves to 8.
+    #[test]
+    fn the_write_inbox_event_action_is_in_the_generated_forbid_source() {
+        assert!(
+            forbid_archived_writes_source().contains(r#"Pgs::Iam::Action::"WriteInboxEvent""#),
+            "WriteInboxEvent is a write action, so it must appear in forbid-archived-writes"
         );
     }
 
