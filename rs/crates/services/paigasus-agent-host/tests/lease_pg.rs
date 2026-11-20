@@ -267,3 +267,27 @@ async fn release_closes_an_open_claim_and_expires_the_lease() {
     assert!(support::scalar_bool(&db, "SELECT (finished_at IS NOT NULL) AS v FROM run WHERE id = '00000000-0000-0000-0000-000000000032'").await);
     assert!(support::scalar_bool(&db, "SELECT (expires_at < now()) AS v FROM inbox_lease WHERE inbox_id = '00000000-0000-0000-0000-000000000002'").await);
 }
+
+/// A release with a stale handle leaves the live lease of the new holder alone, and it leaves the
+/// run of the new holder alone.
+#[tokio::test]
+async fn a_stale_release_leaves_the_new_lease_alone() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let store = PgLeaseStore::new(db.clone(), HB_TIMEOUT);
+    let mut a = store.acquire(&inbox_id(2), "a", TTL).await.expect("acquire").expect("some");
+    assert_eq!(a.token(), LeaseToken(1));
+    insert_run(&db, u(2), u(50), u(60), 1).await;
+    a.record_claim(a.token(), Some(RunId::new(u(1), u(50))));
+    expire(&db, u(2)).await;
+    let mut b = store.acquire(&inbox_id(2), "b", TTL).await.expect("acquire").expect("some");
+    assert_eq!(b.token(), LeaseToken(2));
+    insert_run(&db, u(2), u(51), u(61), 2).await;
+    b.record_claim(b.token(), Some(RunId::new(u(1), u(51))));
+    let before = expires_us(&db, u(2)).await;
+    store.release(a).await.expect("stale release");
+    assert_eq!(expires_us(&db, u(2)).await, before, "the stale release moved the lease of b");
+    assert_eq!(count(&db, "SELECT count(*) AS n FROM inbox_lease WHERE token = 2 AND expires_at > clock_timestamp()").await, 1);
+    let run_b = format!("SELECT count(*) AS n FROM run WHERE id = '{}' AND status = 'running' AND finished_at IS NULL", u(51));
+    assert_eq!(count(&db, &run_b).await, 1, "the stale release changed the run of b");
+}

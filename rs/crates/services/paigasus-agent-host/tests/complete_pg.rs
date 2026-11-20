@@ -199,3 +199,33 @@ async fn complete_marks_only_the_ids_of_the_claim_value() {
     assert_eq!(done, vec![EventId::from_uuid(u(10))]);
     assert_eq!(status_count(&db, "pending").await, 1);
 }
+
+/// A COMMIT error leaves the state of the complete unknown, so it poisons the handle. A deferred
+/// constraint trigger raises at COMMIT, after every statement of the complete succeeded.
+#[tokio::test]
+async fn a_failed_commit_poisons_the_handle() {
+    let Some((_node, db, store, mut handle)) = setup().await else { return };
+    insert_pending_event(&db, u(INBOX), u(10), 10).await;
+    let claim = store.claim(&mut handle, &cfg()).await.expect("claim").expect("some");
+    exec(
+        &db,
+        "CREATE FUNCTION refuse_run() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused at commit'; END $$",
+    )
+    .await;
+    exec(
+        &db,
+        "CREATE CONSTRAINT TRIGGER refuse_run AFTER UPDATE ON run DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_run()",
+    )
+    .await;
+    let first = store.complete(&mut handle, claim.clone()).await;
+    assert!(matches!(first, Err(CompleteError::Store(_))), "{first:?}");
+    assert!(handle.is_poisoned());
+    // With the trigger gone, the same complete would commit. The poisoned handle sends no SQL.
+    exec(&db, "DROP TRIGGER refuse_run ON run").await;
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    assert_eq!(store.complete(&mut handle, claim).await, Err(CompleteError::LeaseLost));
+    assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, None), 0, "the poisoned path counts nothing");
+    assert_eq!(status_count(&db, "pending").await, 1);
+    assert_eq!(count(&db, "SELECT count(*) AS n FROM run WHERE status = 'running'").await, 1);
+}
