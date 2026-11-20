@@ -7,6 +7,10 @@ rust-version.workspace = true
 authors.workspace = true
 publish = false
 
+[[bin]]
+name = "paigasus-agent-host"
+path = "src/main.rs"
+
 [lib]
 name = "paigasus_agent_host"
 path = "src/lib.rs"
@@ -21,10 +25,20 @@ figment = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+# `adapters::http` and `adapters::boot` — the routes, the JSON bodies and the shared layers.
+axum = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+paigasus-observability = { workspace = true }
+# `main.rs` — logging, the `describe_*` lines and the boot error type.
+paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
+metrics = { workspace = true }
+anyhow = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
 [dev-dependencies]
+paigasus-proto = { workspace = true }
 figment = { workspace = true, features = ["test"] }
 
 [lints]

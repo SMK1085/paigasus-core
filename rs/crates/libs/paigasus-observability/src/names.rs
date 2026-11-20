@@ -74,6 +74,10 @@ pub const GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS: &str = "gateway_tool_policy_over
 pub const GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL: &str = "gateway_tool_policy_nats_invalidations_total";
 /// 1 while the tool-policy NATS client is connected, else 0. Set on each connect and disconnect event.
 pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_connected";
+// Agent host HTTP
+pub const AGENT_HOST_HTTP_REQUESTS_TOTAL: &str = "agent_host_http_requests_total";
+pub const AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS: &str = "agent_host_http_request_duration_seconds";
+pub const AGENT_HOST_HTTP_INFLIGHT_REQUESTS: &str = "agent_host_http_inflight_requests";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -311,6 +315,9 @@ pub const IAM_NATS_CONNECTED: &str = "iam_nats_connected";
 /// Label keys, PromQL function/keyword tokens, and template vars never match the prefix filter,
 /// so they need no separate allowlist.
 pub const ALL: &[&str] = &[
+    AGENT_HOST_HTTP_REQUESTS_TOTAL,
+    AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS,
+    AGENT_HOST_HTTP_INFLIGHT_REQUESTS,
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
     GATEWAY_HTTP_INFLIGHT_REQUESTS,

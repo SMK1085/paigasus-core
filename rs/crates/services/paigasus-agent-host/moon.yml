@@ -4,12 +4,25 @@ id: 'paigasus-agent-host-rs'
 layer: 'application'
 language: 'rust'
 
-dependsOn: []
+dependsOn:
+  - 'paigasus-logging-rs'
+  - 'paigasus-observability-rs'
+  - 'paigasus-proto-rs'
 
 # The transitive dependsOn closure's sources, consumed by build/test/lint via
 # `@group(upstreams)` in .moon/tasks/rust.yml. Asserted by repo:affected-smoke's A6.
 fileGroups:
-  upstreams: []
+  upstreams:
+    - '/rs/crates/libs/paigasus-kernel/src/**/*'
+    - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+    - '/rs/crates/libs/paigasus-logging/src/**/*'
+    - '/rs/crates/libs/paigasus-logging/Cargo.toml'
+    - '/rs/crates/libs/paigasus-observability/src/**/*'
+    - '/rs/crates/libs/paigasus-observability/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
+    - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto/src/**/*'
+    - '/rs/crates/libs/paigasus-proto/Cargo.toml'
 
 tasks:
   build:

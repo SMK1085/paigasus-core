@@ -116,8 +116,8 @@ async fn applied_count<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
 /// Run `Migrator::up` under a transaction-scoped advisory lock, waiting up to `wait` to acquire it.
 ///
 /// **Production code must never call `Migrator::up` bare.** There is exactly one production call
-/// site (`main.rs`) and this is it. `main.rs` and its guard test arrive in a later task
-/// (SMA-786 Task 6). The remaining call sites are integration tests that deliberately drive
+/// site (`main.rs`) and this is it. The test `the_composition_root_still_migrates_under_the_lock`
+/// enforces this. The remaining call sites are integration tests that deliberately drive
 /// migrations step by step.
 ///
 /// The loop is do-while: an attempt always happens before any give-up decision, so even the
@@ -237,6 +237,17 @@ mod tests {
     #[test]
     fn an_overshot_budget_gives_up_rather_than_panicking() {
         assert_eq!(next_poll(Duration::from_secs(2), Duration::from_secs(1)), Poll::GiveUp);
+    }
+
+    /// The composition root must call `migrate_under_lock` with the configured wait, and never
+    /// `Migrator::up`. Comment lines are removed first, so a comment cannot satisfy the test.
+    #[test]
+    fn the_composition_root_still_migrates_under_the_lock() {
+        const MAIN: &str = include_str!("../../main.rs");
+        let code = MAIN.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(code.contains("migrate_under_lock("), "main.rs must call migrate_under_lock");
+        assert!(!code.contains("Migrator::up"), "main.rs must not call Migrator::up bare");
+        assert!(code.contains("config.migration.lock_wait()"), "main.rs must pass the configured wait");
     }
 
     /// The key must differ from both IAM keys, so that the two services never block each other
