@@ -337,7 +337,9 @@ The builder may refine names. The responsibilities and the error shapes are fixe
     inbox (tests and the console).
   - `heartbeat(&LeaseHandle, ttl) -> Result<(), HeartbeatError { LeaseLost, Store }>`. A database
     error is `Store`, never `LeaseLost` (SMA-786 §6.2).
-  - `release(LeaseHandle)`: consumes the handle and closes any open claim.
+  - `release(LeaseHandle)`: consumes the handle and closes any open claim. In one transaction it
+    sets an open claim's `running` run to `discarded` (fenced by the run id and the handle token),
+    then expires the lease (fenced by the token).
 - `ClaimRepository`:
   - `claim(&mut LeaseHandle, &ClaimConfig) -> Result<Option<Claim>, ClaimError { LeaseLost,
     ClaimOpen, Store }>` (§8.4). `Ok(None)` means no claimable event; the lease is still held.
@@ -362,7 +364,9 @@ only through the keeper.
 
 `acquire_next` selects candidate inboxes and takes the first one it can:
 
-1. Candidates: inboxes with at least one claimable event (§8.4 step 4) and no live lease, in order
+1. Candidates: inboxes with at least one pending event whose `not_before` has passed (the §8.4
+   step 4 rules without the `attempts` term, so an inbox with only exhausted events is still taken
+   and its claim moves them to `dead`; ruling during Task 5) and no live lease, in order
    of their oldest claimable `received_at`, so inbox lag stays bounded. The query locks the
    candidate `inbox` rows with `FOR NO KEY UPDATE OF inbox SKIP LOCKED`, `LIMIT` a small number
    (builder's call, for example 8). `FOR NO KEY UPDATE` does not conflict with the `FOR KEY SHARE`
