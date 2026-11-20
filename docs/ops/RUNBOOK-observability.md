@@ -148,12 +148,12 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `gateway_tool_interception_on_failure_total` | counter | `code` | Failures that took the `on_failure` path; `code` ∈ `hold_limit` / `truncated` / `decider_error` / `malformed`. |
 | `gateway_tool_interception_hold_seconds` | histogram | — | Seconds from a hold's first tool-call frame to its completion. |
 | `gateway_tool_policy_findings_total` | counter | `side`, `kind` | SMA-755. Findings that the tool policy saw, per kind. `side` ∈ `request` (one per colliding tool name in the request) / `response` (one per finding of a decided call); `kind` ∈ `name_collision` / `unparsed_arguments` / `other` (a kind this service does not know). Primed at 0 for all six pairs with `[tool_policy] enabled = true`. |
-| `gateway_decision_log_recorded_total` | counter | — | SMA-755. Decision records that the decision log accepted from the recorder. It counts before the queue. Events that the writer dropped do not reach Redis, so `recorded` minus `written` minus `dropped{reason=~"queue_full\|closed\|redis_unavailable\|write_error\|breaker_open\|backlog_full\|shutdown"}` is the events that are still in the writer queue. Do not subtract `publish_rejected` or `redis_deleted`: the relay counts those after the write, and they are already in `written`. Primed at 0 with `[decision_log] enabled = true`. |
+| `gateway_decision_log_recorded_total` | counter | — | SMA-755. Decision records that the decision log accepted from the recorder. It counts before the queue. Events that the writer dropped do not reach Redis, so `recorded` minus `written` minus `dropped{reason=~"queue_full\|closed\|redis_unavailable\|write_error\|breaker_open\|backlog_full\|shutdown"}` is an estimate of the events that are still in the writer queue. It is not an exact queue length: a `write_error` or `shutdown` batch can be in Redis (see `GatewayDecisionLogDrops`). Do not subtract `publish_rejected` or `redis_deleted`: the relay counts those after the write, and they are already in `written`. Primed at 0 with `[decision_log] enabled = true`. |
 | `gateway_decision_log_written_total` | counter | — | SMA-755. Events that the writer put into the Redis stream (`<key_prefix>:decisions`). |
 | `gateway_decision_log_dropped_total` | counter | `reason` | SMA-755. Events that the gateway dropped. `reason` ∈ `queue_full` (the writer queue was full) / `closed` (the queue was closed after shutdown) / `redis_unavailable` (no Redis connection yet) / `write_error` (the write failed) / `breaker_open` (the decision-log Redis breaker was open) / `backlog_full` (the stream held `stream_max_len` entries) / `publish_rejected` / `redis_deleted` (relay reasons) / `shutdown` (still queued when the shutdown budget ended). Primed at 0 for all nine values. |
 | `gateway_decision_log_task_restarts_total` | counter | `task` | SMA-755. Panics that a decision-log task caught before it went on. `task` ∈ `writer` / `relay`. A value above 0 is a defect. Primed at 0 for both values. |
 | `gateway_decision_log_published_total` | counter | — | SMA-755. Events that the relay published to the JetStream stream `GATEWAY_DECISIONS` and that got a PubAck. At rest, `written` and `published` rise together. Primed at 0. |
-| `gateway_decision_log_redis_resets_total` | counter | — | SMA-755. Losses of the Redis decision stream that the relay detected: `NOGROUP`, then the relay that made the consumer group again counts 1. An exact count of the incidents. A Redis restore from an older snapshot keeps the group and is not detected here (the export shows the gaps). Primed at 0. |
+| `gateway_decision_log_redis_resets_total` | counter | — | SMA-755. Losses of the Redis decision stream that the relay detected: `NOGROUP`, then the relay that made the consumer group again counts 1. A best-effort count of the incidents, not an exact one (see `GatewayDecisionLogRedisReset`). A Redis restore from an older snapshot keeps the group and is not detected here (the export shows the gaps). Primed at 0. |
 | `gateway_decision_log_lost_estimate_total` | counter | — | SMA-755. An estimate of the events in those losses: the last `XLEN` sample (every 15 s) of the relay that made the group again. It can undercount (writes after the sample) or overcount (publishes after the sample). The error is about 15 s of writes or publishes. A relay without a sample adds 0 and logs that the loss is unknown. Use `sum()` over the instances. Primed at 0. |
 | `gateway_decision_log_publish_seconds` | histogram | — | SMA-755. Seconds from the publish of one event to its JetStream PubAck. |
 | `gateway_decision_log_backlog` | gauge | — | SMA-755. `XLEN` of the Redis decision stream, sampled every 15 s by each relay. It is not set until the first sample. |
@@ -1854,18 +1854,30 @@ counts them as `publish_rejected`. `permission_violation` and `max_payload_excee
 a JetStream that is not available is not a rejection: the relay keeps those events in Redis.
 
 **Remediation:** make Redis healthy, or make the relay healthy (see `GatewayDecisionLogRelayStalled`).
-The dropped events are lost. A drop is the signal that the audit trail has a gap.
+Most dropped events are lost. A drop is the signal that the audit trail can have a gap.
+Two reasons are uncertain write outcomes, not confirmed losses. `write_error` counts a batch whose `XADD`
+reply failed, for example a reply timeout. `shutdown` counts a batch that was in flight when the shutdown
+deadline expired. In both cases Redis can have stored the events, and the relay then publishes them. The
+export of the decisions shows the true gaps.
 
 #### `GatewayDecisionLogRedisReset` (warning)
 
 **Meaning.** The relay found that the Redis decision stream or its consumer group did not exist
-(`NOGROUP`). The relay made the group again. The events that were in the stream are lost.
+(`NOGROUP`). The relay made the group again, from ID 0. If Redis lost the stream, the events that were in
+it are lost. If only the group was removed (for example `XGROUP DESTROY`), the stream still holds its
+events. The relay then reads them again and publishes them, so nothing is lost, and the lost estimate
+overcounts. The count is best-effort, not exact. Some resets are not counted: a new relay that makes the
+group at its start does not count a reset, and a lost reply to `XGROUP CREATE` can hide the reset from the
+retry, which gets `BUSYGROUP`.
 The relay looks for the loss only when it has no carried batch. A Redis loss during a NATS outage is
 counted when the relay can publish again, so this alert can fire late.
 `gateway_decision_log_lost_estimate_total` gives an estimate of the lost events from the last `XLEN` sample. It can undercount (writes after the sample) or overcount (publishes after the sample).
 
-**Confirm:** did Redis restart without persistence, run `FLUSHALL`, or evict the key? Check the
-Redis `maxmemory-policy`. It must be `noeviction` for this key.
+**Confirm:** did Redis lose the stream or only the group? Run `XLEN <prefix>:decisions` and read
+`gateway_decision_log_published_total`. If the relay publishes a backlog after the alert, the stream stayed
+and only the group was lost. Then this alert shows no gap in the audit trail. Did Redis restart without
+persistence, run `FLUSHALL`, or evict the key? Check the Redis `maxmemory-policy`. It must be `noeviction`
+for this key.
 
 **Remediation:** fix the cause. A restore of Redis from an older snapshot keeps the group, and this
 alert does not detect it. The export of the decisions shows the gaps.
@@ -1884,7 +1896,11 @@ default `stream_max_len`. If you change `stream_max_len`, change the threshold i
 the stream `GATEWAY_DECISIONS` exist? The relay makes a missing stream again and keeps the events in Redis
 until then (a missing stream is not a rejection). A full disk is not a rejection either. On nats-server 2.10.14
 a full server JetStream limit gives PubAck code 10023, and a full account limit gives 10002. A failed store
-(10077) and a JetStream that is not available are transient too. The relay keeps the events and tries again. Read `gateway_decision_log_publish_seconds` and the relay logs.
+(10077) and a JetStream that is not available are transient too. The relay keeps the events and tries again.
+The relay sends `Nats-Expected-Stream: GATEWAY_DECISIONS`. If another stream holds `gateway.decision.>` (for
+example after a drift of `GATEWAY_DECISIONS`), the broker refuses each publish with code 10060 and stores
+nothing. The relay logs `another JetStream stream holds the decision subject; the relay keeps the event in
+Redis` and keeps the events. Repair the subjects of `GATEWAY_DECISIONS` to stop the stall. Read `gateway_decision_log_publish_seconds` and the relay logs.
 When the backlog reaches `stream_max_len`, the gateway drops new events (`backlog_full`).
 
 **Remediation:** make NATS or the account healthy. The relay then publishes the backlog.
