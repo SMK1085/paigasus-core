@@ -779,6 +779,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_conflict_after_a_rename_keeps_the_source() {
+        let (store, scope, mut ws) = committed_parts(&[("/a", "original")], MemoryCaps::default()).await;
+        run(&mut ws, json!({"command":"rename","old_path":"/memories/a","new_path":"/memories/b"})).await.unwrap();
+        other_writer(&store, &scope, "/b", "other").await;
+        let err = run(&mut ws, json!({"command":"create","path":"/memories/b","file_text":"mine"})).await.unwrap_err();
+        assert!(err.contains("Your related changes to /memories/a are also gone."), "{err}");
+        ws.commit().await.unwrap();
+        let mut fresh = MemoryWorkspace::new(store, scope, MemoryCaps::default());
+        assert_eq!(content(&mut fresh, "/a").await.as_deref(), Some("original"));
+        assert_eq!(content(&mut fresh, "/b").await.as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
     async fn existing_clash_view_and_delete() {
         let store = Arc::new(InMemoryMemoryStore::default());
         let scope = fresh_scope();
