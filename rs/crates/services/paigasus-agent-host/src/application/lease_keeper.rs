@@ -43,13 +43,24 @@ pub enum KeeperTimingError {
     /// The lease ttl is shorter than three heartbeat intervals.
     #[error("the lease ttl is shorter than three heartbeat intervals")]
     TtlTooShort,
+    /// The lease ttl is longer than `MAX_LEASE_TTL`.
+    #[error("the lease ttl is longer than {MAX_LEASE_TTL:?}")]
+    TtlTooLong,
 }
 
+/// The longest lease ttl (spec §8.7: `lease.ttl_secs` is at most 600). The bound also keeps the
+/// instant arithmetic of the heartbeat loop far from an overflow.
+pub const MAX_LEASE_TTL: Duration = Duration::from_secs(600);
+
 impl KeeperTiming {
-    /// Check the timing. The interval must not be zero, and `ttl` must be at least three intervals.
+    /// Check the timing. The interval must not be zero, `ttl` must be at least three intervals,
+    /// and `ttl` must be at most `MAX_LEASE_TTL`.
     pub fn new(lease_ttl: Duration, heartbeat_interval: Duration) -> Result<Self, KeeperTimingError> {
         if heartbeat_interval.is_zero() {
             return Err(KeeperTimingError::ZeroInterval);
+        }
+        if lease_ttl > MAX_LEASE_TTL {
+            return Err(KeeperTimingError::TtlTooLong);
         }
         match heartbeat_interval.checked_mul(3) {
             Some(min) if lease_ttl >= min => Ok(Self { lease_ttl, heartbeat_interval }),
@@ -93,10 +104,12 @@ impl LeaseKeeper {
         }
     }
 
-    /// The token that the keeper cancels when the lease is lost. Give it to the run.
+    /// A child of the token that the keeper cancels when the lease is lost. Give it to the run.
+    /// A cancel of the lease reaches the child. A cancel of the child (by a tool, a handoff or a
+    /// shutdown) does not reach the keeper, so only the keeper decides that the lease is lost.
     #[must_use]
     pub fn cancellation(&self) -> CancellationToken {
-        self.cancel.clone()
+        self.cancel.child_token()
     }
 
     /// Claim a batch of events under the mutex. After the lease is lost, it gives `LeaseLost`
@@ -163,7 +176,21 @@ enum Beat {
     Stopped,
 }
 
+/// Cancels the token when the heartbeat task unwinds from a panic. Tokio catches the panic and
+/// no one awaits the task, so without this guard the heartbeats would stop with no cancel. An
+/// abort drops the task with no panic, so an abort does not cancel.
+struct CancelOnPanic(CancellationToken);
+
+impl Drop for CancelOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.cancel();
+        }
+    }
+}
+
 async fn heartbeat_loop(handle: SharedHandle, leases: Arc<dyn LeaseRepository>, timing: KeeperTiming, cancel: CancellationToken, started: Instant) {
+    let _cancel_on_panic = CancelOnPanic(cancel.clone());
     let mut deadline = started + timing.deadline_after();
     let mut next = started + timing.heartbeat_interval;
     loop {
@@ -262,7 +289,9 @@ mod tests {
         heartbeat_sleep: Duration,
         claim_mode: ClaimMode,
         complete_lost: bool,
+        heartbeat_panics: bool,
         heartbeats: AtomicUsize,
+        claims: AtomicUsize,
         tokens: StdMutex<Vec<i64>>,
         in_claim: AtomicBool,
         overlap: AtomicBool,
@@ -275,7 +304,9 @@ mod tests {
                 heartbeat_sleep: Duration::ZERO,
                 claim_mode: ClaimMode::Rotate,
                 complete_lost: false,
+                heartbeat_panics: false,
                 heartbeats: AtomicUsize::new(0),
+                claims: AtomicUsize::new(0),
                 tokens: StdMutex::new(Vec::new()),
                 in_claim: AtomicBool::new(false),
                 overlap: AtomicBool::new(false),
@@ -303,6 +334,7 @@ mod tests {
             }
             self.heartbeats.fetch_add(1, Ordering::SeqCst);
             self.tokens.lock().expect("tokens").push(handle.token().0);
+            assert!(!self.heartbeat_panics, "the fake heartbeat panics");
             if !self.heartbeat_sleep.is_zero() {
                 tokio::time::sleep(self.heartbeat_sleep).await;
             }
@@ -320,6 +352,7 @@ mod tests {
     #[async_trait]
     impl ClaimRepository for Fake {
         async fn claim(&self, handle: &mut LeaseHandle, _cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError> {
+            self.claims.fetch_add(1, Ordering::SeqCst);
             match self.claim_mode {
                 ClaimMode::Hold(d) => {
                     self.in_claim.store(true, Ordering::SeqCst);
@@ -407,6 +440,39 @@ mod tests {
         assert!(KeeperTiming::new(Duration::from_secs(30), Duration::from_secs(10)).is_ok());
         assert_eq!(KeeperTiming::new(Duration::from_secs(29), Duration::from_secs(10)), Err(KeeperTimingError::TtlTooShort));
         assert_eq!(KeeperTiming::new(Duration::from_secs(30), Duration::ZERO), Err(KeeperTimingError::ZeroInterval));
+        assert!(KeeperTiming::new(MAX_LEASE_TTL, Duration::from_secs(200)).is_ok());
+        assert_eq!(KeeperTiming::new(MAX_LEASE_TTL + Duration::from_millis(1), Duration::from_secs(10)), Err(KeeperTimingError::TtlTooLong));
+        // `Instant + Duration::MAX` would panic in the heartbeat task.
+        assert_eq!(KeeperTiming::new(Duration::MAX, Duration::from_secs(10)), Err(KeeperTimingError::TtlTooLong));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_heartbeat_cancels() {
+        let fake = Arc::new(Fake {
+            heartbeat_panics: true,
+            ..Fake::new()
+        });
+        let keeper = start(&fake);
+        sleep_ms(9_900).await;
+        assert!(!keeper.cancellation().is_cancelled());
+        sleep_ms(200).await;
+        assert_eq!(fake.heartbeats(), 1);
+        assert!(keeper.cancellation().is_cancelled(), "a panic in the heartbeat task must cancel");
+        assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
+        assert_eq!(fake.claims.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_the_run_token_does_not_stop_the_keeper() {
+        let fake = Arc::new(Fake::new());
+        let keeper = start(&fake);
+        let run_token = keeper.cancellation();
+        run_token.cancel();
+        sleep_ms(30_100).await;
+        assert_eq!(fake.heartbeats(), 3, "the heartbeats must go on");
+        assert!(!keeper.cancellation().is_cancelled());
+        assert_eq!(keeper.claim(&cfg()).await, Ok(None));
+        assert_eq!(fake.claims.load(Ordering::SeqCst), 1, "the claim must reach the store");
     }
 
     #[tokio::test(start_paused = true)]
