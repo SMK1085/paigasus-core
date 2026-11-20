@@ -15,7 +15,7 @@ use crate::run::{CommitError, Committed, RunHandle, RunOutcome};
 use crate::timer::Timer;
 
 /// The error of a repository port.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RepositoryError {
     /// The record does not exist.
     #[error("not found")]
@@ -38,6 +38,7 @@ pub enum InsertOutcome {
 }
 
 /// The store of inboxes and their events. Owner: SMA-787.
+/// Used outside a run: by ingress and the console.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait InboxRepository: Send + Sync {
@@ -48,6 +49,8 @@ pub trait InboxRepository: Send + Sync {
 }
 
 /// The store of timers. Owner: SMA-788.
+/// Used outside a run: by the scheduler and the console. A run adds or cancels a timer only in the
+/// buffer of the `RunCommitter`, which writes it in the one commit.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait TimerRepository: Send + Sync {
@@ -58,6 +61,7 @@ pub trait TimerRepository: Send + Sync {
 }
 
 /// The scheduler that fires due timers. Owner: SMA-788.
+/// Used outside a run.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait Scheduler: Send + Sync {
@@ -66,6 +70,8 @@ pub trait Scheduler: Send + Sync {
 }
 
 /// The memory store of an agent. Owner: SMA-789.
+/// Used inside a run: reads go direct, and writes go to the buffer. The `RunCommitter` writes them
+/// in the one commit. Used outside a run: the console reads and writes.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
@@ -78,6 +84,8 @@ pub trait MemoryStore: Send + Sync {
 }
 
 /// The outbox of messages that leave the host. Owner: SMA-792.
+/// This is the read side of the durable outbound messages. Used outside a run: by the dispatcher.
+/// A run adds a message only in the buffer of the `RunCommitter`.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait Outbox: Send + Sync {
@@ -88,6 +96,7 @@ pub trait Outbox: Send + Sync {
 }
 
 /// The resolver that finds the agent of an inbox. Owner: SMA-790.
+/// Used inside a run: read only, at the start of the run.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait AgentResolver: Send + Sync {
@@ -96,8 +105,10 @@ pub trait AgentResolver: Send + Sync {
 }
 
 /// The committer of a run outcome. Owner: SMA-790.
+/// Used inside a run: this is the only writer.
 /// Provisional: the owner may change the methods, not the responsibility.
 ///
+/// There is no `Transient` outcome. A transient failure rolls back and does not commit.
 /// A database error is `Store`, never `LeaseLost`. SMA-790 adds an "outcome unknown" case. The
 /// shape of the buffered changes is the design of SMA-790 (spec sections 6.2 and 7).
 #[async_trait]
