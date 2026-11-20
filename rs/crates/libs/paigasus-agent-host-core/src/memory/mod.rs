@@ -9,10 +9,12 @@ pub mod conformance;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 mod path;
+mod workspace;
 
 pub use caps::{CapError, MemoryCaps};
 pub use change::{Expected, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryVersion};
 pub use path::{MemoryDir, MemoryPath, ParsedToolPath, PathError, TOOL_ROOT, parse_tool_path};
+pub use workspace::{MemoryWorkspace, WorkspaceError};
 
 use crate::ids::{AgentId, PrincipalId};
 use uuid::Uuid;
