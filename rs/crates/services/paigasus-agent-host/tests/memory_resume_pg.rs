@@ -71,8 +71,8 @@ async fn run_one(url: &str, scope: &MemoryScope) -> Arc<Mutex<MemoryWorkspace>> 
         .expect("the run completes");
     let texts = tool_result_texts(&result.events);
     assert_eq!(texts.len(), 3, "three tool results: {texts:?}");
-    assert!(texts[0].contains("/memories/tasks/t1.md"), "create 1 succeeded: {}", texts[0]);
-    assert!(texts[1].contains("/memories/tasks/index.md"), "create 2 succeeded: {}", texts[1]);
+    assert_eq!(texts[0], "File created successfully at: /memories/tasks/t1.md");
+    assert_eq!(texts[1], "File created successfully at: /memories/tasks/index.md");
     assert!(texts[2].contains("step 1 done"), "view shows the file: {}", texts[2]);
     ws
 }
@@ -127,9 +127,8 @@ async fn a_run_without_commit_leaves_nothing() {
     let items = run_start_context(&mut ws2).await.expect("run-start context");
     assert!(items.is_empty(), "no item: {items:?}");
     let missing = execute(&mut ws2, parse_command(json!({"command": "view", "path": "/memories/tasks/t1.md"})).expect("parse")).await;
-    let text = match missing {
-        Ok(t) => t,
-        Err(e) => e.to_string(),
-    };
-    assert!(!text.contains("step 1 done"), "view: {text}");
+    match missing {
+        Err(e) => assert_eq!(e.to_string(), "The path /memories/tasks/t1.md does not exist. Please provide a valid path."),
+        Ok(t) => panic!("the view must report a missing path, got: {t}"),
+    }
 }
