@@ -8,8 +8,9 @@
 use async_trait::async_trait;
 
 use crate::agent::ResolvedAgent;
-use crate::ids::{AgentId, InboxId, OutboxMessageId, TimerId};
+use crate::ids::{InboxId, OutboxMessageId, TimerId};
 use crate::inbox::{Inbox, InboxEvent};
+use crate::memory::{CapError, MemoryCaps, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use crate::outbox::OutboxMessage;
 use crate::run::{CommitError, Committed, RunHandle, RunOutcome};
 use crate::timer::Timer;
@@ -69,18 +70,76 @@ pub trait Scheduler: Send + Sync {
     async fn fire_due(&self, limit: u32) -> Result<usize, RepositoryError>;
 }
 
-/// The memory store of an agent. Owner: SMA-789.
-/// Used inside a run: reads go direct, and writes go to the buffer. The `RunCommitter` writes them
-/// in the one commit. Used outside a run: the console reads and writes.
-/// Provisional: the owner may change the methods, not the responsibility.
+/// A file as the store returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryFile {
+    /// The content of the file.
+    pub content: String,
+    /// The version of the file.
+    pub version: MemoryVersion,
+}
+
+/// One file in a listing. The listing has no content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryEntry {
+    /// The path of the file.
+    pub path: MemoryPath,
+    /// The size of the content in UTF-8 bytes.
+    pub size_bytes: u64,
+    /// The version of the file.
+    pub version: MemoryVersion,
+}
+
+/// The size of a scope: the number of files and the total content bytes.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct MemoryUsage {
+    /// The number of files.
+    pub files: u64,
+    /// The total size of the contents in UTF-8 bytes.
+    pub bytes: u64,
+}
+
+/// A store error that is not a refusal of a change.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MemoryStoreError {
+    /// The store failed.
+    #[error("memory store error: {0}")]
+    Store(String),
+}
+
+/// The refusal or failure of `MemoryStore::apply`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MemoryApplyError {
+    /// The version of a file is not the expected version.
+    #[error("memory conflict at {path}")]
+    Conflict { path: MemoryPath },
+    /// A cap refuses the change set.
+    #[error("{0}")]
+    CapExceeded(CapError),
+    /// Some changes are applied and one failed. Only a store without a transaction returns this.
+    #[error("memory change set partly applied: {applied} applied, failed at {failed_at}: {cause}")]
+    Partial { applied: usize, failed_at: MemoryPath, cause: Box<MemoryApplyError> },
+    /// The store failed.
+    #[error("memory store error: {0}")]
+    Store(String),
+}
+
+/// The memory store of an agent: a versioned file store. Owner: SMA-789.
+/// Used inside a run: reads go direct, and writes go to the buffer of the workspace. The
+/// `RunCommitter` writes them in the one commit. Used outside a run: the console reads and writes.
+/// Every method takes the scope. The org is part of every key and every query.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
-    /// Read the content at `path`.
-    async fn read(&self, agent: &AgentId, path: &str) -> Result<Option<String>, RepositoryError>;
-    /// Write the content at `path`.
-    async fn write(&self, agent: &AgentId, path: &str, content: String) -> Result<(), RepositoryError>;
-    /// List the paths that start with `prefix`.
-    async fn list(&self, agent: &AgentId, prefix: &str) -> Result<Vec<String>, RepositoryError>;
+    /// Read a file. It returns `None` when the file does not exist.
+    async fn get(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<Option<MemoryFile>, MemoryStoreError>;
+    /// List every file under `dir`, at any depth, in byte order of the path.
+    async fn list(&self, scope: &MemoryScope, dir: &MemoryDir) -> Result<Vec<MemoryEntry>, MemoryStoreError>;
+    /// The usage of a scope.
+    async fn usage(&self, scope: &MemoryScope) -> Result<MemoryUsage, MemoryStoreError>;
+    /// Apply a change set. The set is all or nothing, except for a store that returns `Partial`.
+    async fn apply(&self, set: &MemoryCommitSet, caps: &MemoryCaps) -> Result<(), MemoryApplyError>;
+    /// Remove every file of a scope.
+    async fn delete_scope(&self, scope: &MemoryScope) -> Result<(), MemoryStoreError>;
 }
 
 /// The outbox of messages that leave the host. Owner: SMA-792.

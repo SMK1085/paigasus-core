@@ -2,9 +2,15 @@
 
 //! The memory store value types: scope, paths, versions and the change set.
 
+mod caps;
 mod change;
+#[cfg(any(test, feature = "test-support"))]
+pub mod conformance;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake;
 mod path;
 
+pub use caps::{CapError, MemoryCaps};
 pub use change::{Expected, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryVersion};
 pub use path::{MemoryDir, MemoryPath, ParsedToolPath, PathError, TOOL_ROOT, parse_tool_path};
 
