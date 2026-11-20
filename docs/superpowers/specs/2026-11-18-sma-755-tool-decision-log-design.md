@@ -549,9 +549,10 @@ There are three kinds of loss:
 1. **Drops that the gateway sees**, counted in `gateway_decision_log_dropped_total{reason}`.
    The reasons are: `queue_full`, `closed`, `redis_unavailable`, `write_error`, `breaker_open`,
    `backlog_full`, `publish_rejected`, `redis_deleted`, `shutdown`. Each count is exact as a count of
-   the events that the gateway gave up. For `write_error` and `shutdown` it is not an exact count of
-   lost events: the batch was in flight, and Redis can have stored it (a reply timeout, or a shutdown
-   deadline during the `XADD`).
+   the events that the gateway gave up. For `write_error` it is not an exact count of lost events:
+   the batch was in flight, and Redis can have stored it (a reply timeout). `shutdown` has two parts.
+   Events that were still in the queue at the shutdown deadline never went to Redis, so they are lost.
+   A batch that was in flight at the deadline has an unknown result, and Redis can have stored it.
 2. **A Redis loss that the relay detects.** When Redis loses the stream, it loses the consumer
    group too, and the next command returns `NOGROUP`. The relay runs `XGROUP CREATE … 0
    MKSTREAM`. Only one relay gets `OK`. That relay:
@@ -908,7 +909,7 @@ ca_file = "/etc/paigasus/nats/ca.pem"   # optional
 | D10 | The CLI is a subcommand of `paigasus-gateway`, with no `clap`. | my call |
 | D11 | The argument digest is HMAC-SHA256 with a deployment key, and no length is logged. | my call, after challenge (A1) |
 | D12 | A NATS account of its own, `PAIGASUS_GATEWAY`, with a required `max-bytes`. | my call, after challenge B1 |
-| D13 | Loss: exact drop counts (`write_error` and `shutdown` are uncertain write outcomes), a best-effort Redis-reset count, an estimate (not a bound), and exact gaps between the observed events per `(instance, org)` sequence in the export. | my call, after challenge |
+| D13 | Loss: exact drop counts (`write_error` and an in-flight `shutdown` batch are uncertain write outcomes), a best-effort Redis-reset count, an estimate (not a bound), and exact gaps between the observed events per `(instance, org)` sequence in the export. | my call, after challenge |
 | D14 | Neither Redis nor NATS can stop the boot or the data plane. | my call, after challenge (A2) |
 | D15 | Tenant mode `off` writes records, because floor blocks are real. | my call, after challenge |
 | D16 | The encoder skips records that Dogwood cannot parse, and the CLI reports them. | my call, after challenge B2 |

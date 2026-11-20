@@ -148,7 +148,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `gateway_tool_interception_on_failure_total` | counter | `code` | Failures that took the `on_failure` path; `code` ∈ `hold_limit` / `truncated` / `decider_error` / `malformed`. |
 | `gateway_tool_interception_hold_seconds` | histogram | — | Seconds from a hold's first tool-call frame to its completion. |
 | `gateway_tool_policy_findings_total` | counter | `side`, `kind` | SMA-755. Findings that the tool policy saw, per kind. `side` ∈ `request` (one per colliding tool name in the request) / `response` (one per finding of a decided call); `kind` ∈ `name_collision` / `unparsed_arguments` / `other` (a kind this service does not know). Primed at 0 for all six pairs with `[tool_policy] enabled = true`. |
-| `gateway_decision_log_recorded_total` | counter | — | SMA-755. Decision records that the decision log accepted from the recorder. It counts before the queue. Events that the writer dropped do not reach Redis, so `recorded` minus `written` minus `dropped{reason=~"queue_full\|closed\|redis_unavailable\|write_error\|breaker_open\|backlog_full\|shutdown"}` is an estimate of the events that are still in the writer queue. It is not an exact queue length: a `write_error` or `shutdown` batch can be in Redis (see `GatewayDecisionLogDrops`). Do not subtract `publish_rejected` or `redis_deleted`: the relay counts those after the write, and they are already in `written`. Primed at 0 with `[decision_log] enabled = true`. |
+| `gateway_decision_log_recorded_total` | counter | — | SMA-755. Decision records that the decision log accepted from the recorder. It counts before the queue. Events that the writer dropped do not reach Redis, so `recorded` minus `written` minus `dropped{reason=~"queue_full\|closed\|redis_unavailable\|write_error\|breaker_open\|backlog_full\|shutdown"}` is an estimate of the events that are still in the writer queue. It is not an exact queue length: a `write_error` batch, or a `shutdown` batch that was in flight, can be in Redis (see `GatewayDecisionLogDrops`). Do not subtract `publish_rejected` or `redis_deleted`: the relay counts those after the write, and they are already in `written`. Primed at 0 with `[decision_log] enabled = true`. |
 | `gateway_decision_log_written_total` | counter | — | SMA-755. Events that the writer put into the Redis stream (`<key_prefix>:decisions`). |
 | `gateway_decision_log_dropped_total` | counter | `reason` | SMA-755. Events that the gateway dropped. `reason` ∈ `queue_full` (the writer queue was full) / `closed` (the queue was closed after shutdown) / `redis_unavailable` (no Redis connection yet) / `write_error` (the write failed) / `breaker_open` (the decision-log Redis breaker was open) / `backlog_full` (the stream held `stream_max_len` entries) / `publish_rejected` / `redis_deleted` (relay reasons) / `shutdown` (still queued when the shutdown budget ended). Primed at 0 for all nine values. |
 | `gateway_decision_log_task_restarts_total` | counter | `task` | SMA-755. Panics that a decision-log task caught before it went on. `task` ∈ `writer` / `relay`. A value above 0 is a defect. Primed at 0 for both values. |
@@ -1855,10 +1855,12 @@ a JetStream that is not available is not a rejection: the relay keeps those even
 
 **Remediation:** make Redis healthy, or make the relay healthy (see `GatewayDecisionLogRelayStalled`).
 Most dropped events are lost. A drop is the signal that the audit trail can have a gap.
-Two reasons are uncertain write outcomes, not confirmed losses. `write_error` counts a batch whose `XADD`
-reply failed, for example a reply timeout. `shutdown` counts a batch that was in flight when the shutdown
-deadline expired. In both cases Redis can have stored the events, and the relay then publishes them. The
-export of the decisions shows the true gaps.
+Some drops are uncertain write outcomes, not confirmed losses. `write_error` counts a batch whose `XADD`
+reply failed, for example a reply timeout. Redis can have stored that batch, and the relay then publishes it.
+`shutdown` has two parts. Events that were still in the queue when the drain reached the shutdown deadline
+never went to Redis: they are lost. A batch that was in flight when the deadline expired has an unknown
+result: Redis can have stored it. The metric does not separate the two parts. The export of the decisions
+shows the true gaps.
 
 #### `GatewayDecisionLogRedisReset` (warning)
 
@@ -1874,11 +1876,11 @@ The relay looks for the loss only when it has no carried batch. A Redis loss dur
 counted when the relay can publish again, so this alert can fire late.
 `gateway_decision_log_lost_estimate_total` gives an estimate of the lost events from the last `XLEN` sample. It can undercount (writes after the sample) or overcount (publishes after the sample).
 
-**Confirm:** did Redis lose the stream or only the group? Run `XLEN <prefix>:decisions` and read
-`gateway_decision_log_published_total`. If the relay publishes a backlog after the alert, the stream stayed
-and only the group was lost. Then this alert shows no gap in the audit trail. Did Redis restart without
-persistence, run `FLUSHALL`, or evict the key? Check the Redis `maxmemory-policy`. It must be `noeviction`
-for this key.
+**Confirm:** did Redis restart without persistence, run `FLUSHALL`, evict the key, or did somebody run
+`XGROUP DESTROY`? Check the Redis log and the Redis `maxmemory-policy`. It must be `noeviction` for this key.
+`XLEN <prefix>:decisions` and `gateway_decision_log_published_total` show that the relay works again. They
+do not show that only the group was lost: Redis can also have lost entries that no relay held. Use the
+export of the decisions to find the gaps.
 
 **Remediation:** fix the cause. A restore of Redis from an older snapshot keeps the group, and this
 alert does not detect it. The export of the decisions shows the gaps.
