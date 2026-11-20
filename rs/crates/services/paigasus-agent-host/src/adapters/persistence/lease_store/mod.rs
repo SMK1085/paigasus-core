@@ -44,6 +44,10 @@ const HEARTBEAT_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp
 const RELEASE_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp() - interval '1 microsecond' \
      WHERE inbox_id = $1 AND token = $2 AND expires_at > clock_timestamp()";
 
+/// `$1` = run, `$2` = token. A release discards the open run of the handle.
+const DISCARD_RUN_SQL: &str = "UPDATE run SET status = 'discarded', finished_at = now() \
+     WHERE id = $1 AND status = 'running' AND lease_token = $2";
+
 /// The lease store on a Postgres pool.
 #[derive(Debug, Clone)]
 pub struct PgLeaseStore {
@@ -119,8 +123,14 @@ impl LeaseRepository for PgLeaseStore {
         if handle.is_poisoned() {
             return Ok(());
         }
+        let txn = self.db.begin().await.map_err(store)?;
+        if let Some(run) = handle.open_claim() {
+            let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, DISCARD_RUN_SQL, [run.uuid().into(), handle.token().0.into()]);
+            txn.execute_raw(stmt).await.map_err(store)?;
+        }
         let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, RELEASE_SQL, [handle.inbox().uuid().into(), handle.token().0.into()]);
-        self.db.execute_raw(stmt).await.map_err(store)?;
+        txn.execute_raw(stmt).await.map_err(store)?;
+        txn.commit().await.map_err(store)?;
         Ok(())
     }
 }

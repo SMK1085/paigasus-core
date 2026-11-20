@@ -11,7 +11,7 @@ use std::time::Duration;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::lease_store::{CANDIDATE_LIMIT, CANDIDATES_SQL, PgLeaseStore};
-use paigasus_agent_host_core::ids::{EventId, InboxId};
+use paigasus_agent_host_core::ids::{EventId, InboxId, RunId};
 use paigasus_agent_host_core::inbox::NewInboxEvent;
 use paigasus_agent_host_core::lease::HeartbeatError;
 use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, LeaseRepository};
@@ -19,7 +19,7 @@ use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{expire, expires_us, insert_pending_event};
+use support::lease::{expire, expires_us, insert_pending_event, insert_run};
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(30);
@@ -163,14 +163,15 @@ async fn acquire_next_takes_the_inbox_with_the_oldest_pending_event() {
     let Some((_node, _url, db)) = migrated_postgres().await else { return };
     insert_inbox(&db, u(1), u(10), u(3), u(4)).await;
     insert_inbox(&db, u(1), u(20), u(30), u(4)).await;
-    // B is inserted first, so the order is by `received_at`, not by insertion.
-    insert_pending_event(&db, u(20), u(201), 9).await;
-    insert_pending_event(&db, u(10), u(101), 10).await;
+    // The older event is in the inbox with the higher id, whose row and event are inserted last.
+    // So only the ORDER BY of the query puts it first: id order and heap order both say u(10).
+    insert_pending_event(&db, u(10), u(101), 9).await;
+    insert_pending_event(&db, u(20), u(201), 10).await;
     let store = PgLeaseStore::new(db, HB_TIMEOUT);
     let first = store.acquire_next("w", TTL).await.expect("acquire_next").expect("some");
-    assert_eq!(first.inbox(), &inbox_id(10));
+    assert_eq!(first.inbox(), &inbox_id(20));
     let second = store.acquire_next("w", TTL).await.expect("acquire_next").expect("some");
-    assert_eq!(second.inbox(), &inbox_id(20));
+    assert_eq!(second.inbox(), &inbox_id(10));
     assert!(store.acquire_next("w", TTL).await.expect("acquire_next").is_none());
 }
 
@@ -251,4 +252,18 @@ async fn an_open_acquirer_does_not_block_an_insert() {
     conn1.execute_unprepared("ROLLBACK").await.expect("rollback");
     let outcome = outcome.expect("the insert must not wait for the open acquirer").expect("insert");
     assert_eq!(outcome, InsertOutcome::Inserted { id: EventId::from_uuid(u(102)) });
+}
+
+#[tokio::test]
+async fn release_closes_an_open_claim_and_expires_the_lease() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let store = PgLeaseStore::new(db.clone(), HB_TIMEOUT);
+    let mut handle = store.acquire(&inbox_id(2), "w1", TTL).await.expect("acquire").expect("some");
+    insert_run(&db, u(2), u(50), u(60), handle.token().0).await;
+    handle.record_claim(handle.token(), Some(RunId::new(u(1), u(50))));
+    store.release(handle).await.expect("release");
+    assert!(support::scalar_bool(&db, "SELECT (status = 'discarded') AS v FROM run WHERE id = '00000000-0000-0000-0000-000000000032'").await);
+    assert!(support::scalar_bool(&db, "SELECT (finished_at IS NOT NULL) AS v FROM run WHERE id = '00000000-0000-0000-0000-000000000032'").await);
+    assert!(support::scalar_bool(&db, "SELECT (expires_at < now()) AS v FROM inbox_lease WHERE inbox_id = '00000000-0000-0000-0000-000000000002'").await);
 }

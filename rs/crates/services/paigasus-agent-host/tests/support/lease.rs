@@ -34,3 +34,16 @@ pub async fn expires_us(db: &DatabaseConnection, inbox: Uuid) -> i64 {
     )
     .await
 }
+
+/// Inserts a thread and a `running` run with the given lease token, as a claim does.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn insert_run(db: &DatabaseConnection, inbox: Uuid, run: Uuid, thread: Uuid, token: i64) {
+    db.execute_unprepared(&format!("INSERT INTO thread (id, inbox_id) VALUES ('{thread}', '{inbox}')"))
+        .await
+        .expect("insert thread");
+    db.execute_unprepared(&format!(
+        "INSERT INTO run (id, inbox_id, thread_id, lease_token, status) VALUES ('{run}', '{inbox}', '{thread}', {token}, 'running')"
+    ))
+    .await
+    .expect("insert run");
+}
