@@ -14,7 +14,8 @@ use async_nats::jetstream;
 use bytes::Bytes;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use paigasus_gateway::adapters::decision_log::gen_kv::NatsGenKv;
-use paigasus_gateway::adapters::decision_log::generation::{GenKv, KvError, entry_key};
+use paigasus_gateway::adapters::decision_log::gen_redis::{GroupOutcome, Sample, detect, ensure_group, epoch_key, gen_key, sample};
+use paigasus_gateway::adapters::decision_log::generation::{GenKv, KvError, RedisView, entry_key};
 use paigasus_gateway::adapters::decision_log::jetstream as dl_js;
 use paigasus_gateway::adapters::decision_log::redis_conn::breaker_metrics;
 use paigasus_gateway::adapters::decision_log::relay::delete_consumer_if_empty;
@@ -1372,4 +1373,127 @@ async fn the_kv_adapter_makes_the_bucket_again_after_it_is_deleted() {
     assert!(after_delete.is_err(), "the cached handle fails on a deleted bucket: {after_delete:?}");
     let again = kv.get().await.expect("the handle is made again and the bucket too");
     assert!(again.is_none(), "the new bucket is empty");
+}
+
+// ---- The generation record Redis scripts (SMA-821 Task 7) ----
+
+async fn script_conn(url: &str) -> paigasus_redis::RedisHandle {
+    paigasus_redis::connect(url, breaker_metrics()).await.expect("connect to the test Redis")
+}
+
+async fn gen_value(node: &ContainerAsync<Redis>) -> String {
+    redis_cli(node, &["GET", &gen_key(KEY)]).await
+}
+
+#[tokio::test]
+async fn the_group_script_makes_a_new_generation_on_create() {
+    let Some((node, url)) = redis_7_4("decision_log_redis group script create").await else {
+        return;
+    };
+    let mut conn = script_conn(&url).await;
+    assert_eq!(ensure_group(&mut conn, KEY, "relay", "id-1").await.expect("first create"), GroupOutcome::Created);
+    assert_eq!(gen_value(&node).await, "id-1");
+    redis_cli(&node, &["DEL", KEY]).await;
+    assert_eq!(ensure_group(&mut conn, KEY, "relay", "id-2").await.expect("create after a stream loss"), GroupOutcome::Created);
+    assert_eq!(gen_value(&node).await, "id-2", "a new group means a new generation");
+}
+
+#[tokio::test]
+async fn the_group_script_keeps_the_generation_on_busygroup_and_repairs_a_missing_one() {
+    let Some((node, url)) = redis_7_4("decision_log_redis group script busygroup").await else {
+        return;
+    };
+    let mut conn = script_conn(&url).await;
+    ensure_group(&mut conn, KEY, "relay", "id-1").await.expect("create");
+    assert_eq!(ensure_group(&mut conn, KEY, "relay", "id-2").await.expect("busygroup"), GroupOutcome::Exists);
+    assert_eq!(gen_value(&node).await, "id-1", "BUSYGROUP keeps the generation");
+    redis_cli(&node, &["DEL", &gen_key(KEY)]).await;
+    assert_eq!(ensure_group(&mut conn, KEY, "relay", "id-3").await.expect("busygroup, no gen"), GroupOutcome::Exists);
+    assert_eq!(gen_value(&node).await, "id-3", "a missing generation is repaired with NX");
+}
+
+#[tokio::test]
+async fn the_group_script_returns_another_error() {
+    let Some((node, url)) = redis_7_4("decision_log_redis group script error").await else {
+        return;
+    };
+    let mut conn = script_conn(&url).await;
+    redis_cli(&node, &["ACL", "SETUSER", "default", "-xgroup"]).await;
+    let result = ensure_group(&mut conn, KEY, "relay", "id-1").await;
+    redis_cli(&node, &["ACL", "SETUSER", "default", "+xgroup"]).await;
+    let err = result.expect_err("XGROUP is denied");
+    assert!(!err.to_string().contains("BUSYGROUP"), "not a BUSYGROUP: {err}");
+    assert_eq!(gen_value(&node).await, "", "the failed script wrote no generation");
+}
+
+#[tokio::test]
+async fn the_detection_script_repairs_the_generation_and_increments_the_epoch() {
+    let Some((node, url)) = redis_7_4("decision_log_redis detect script").await else {
+        return;
+    };
+    let mut conn = script_conn(&url).await;
+    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    assert_eq!(
+        detect(&mut conn, KEY, "relay", "id-1").await.expect("detect 1"),
+        RedisView::Live {
+            generation: "id-1".into(),
+            epoch: 1,
+            xlen: 0
+        }
+    );
+    assert_eq!(
+        detect(&mut conn, KEY, "relay", "id-2").await.expect("detect 2"),
+        RedisView::Live {
+            generation: "id-1".into(),
+            epoch: 2,
+            xlen: 0
+        },
+        "the generation is kept and the epoch grows"
+    );
+}
+
+#[tokio::test]
+async fn the_detection_script_writes_nothing_without_a_group() {
+    let Some((node, url)) = redis_7_4("decision_log_redis detect no group").await else {
+        return;
+    };
+    let mut conn = script_conn(&url).await;
+    assert_eq!(detect(&mut conn, KEY, "relay", "id-1").await.expect("empty Redis"), RedisView::NoGroup);
+    assert_eq!(redis_cli(&node, &["EXISTS", &gen_key(KEY), &epoch_key(KEY)]).await, "0");
+    redis_cli(&node, &["XADD", KEY, "*", "e", "x"]).await;
+    assert_eq!(detect(&mut conn, KEY, "relay", "id-1").await.expect("stream, no group"), RedisView::NoGroup);
+    assert_eq!(redis_cli(&node, &["EXISTS", &gen_key(KEY), &epoch_key(KEY)]).await, "0", "the detection wrote no key");
+}
+
+#[tokio::test]
+async fn the_sample_script_reads_the_keys_and_writes_nothing() {
+    let Some((node, url)) = redis_7_4("decision_log_redis sample script").await else {
+        return;
+    };
+    let mut conn = script_conn(&url).await;
+    assert_eq!(
+        sample(&mut conn, KEY, "relay").await.expect("sample on empty Redis"),
+        Sample {
+            xlen: 0,
+            has_group: false,
+            generation: None,
+            epoch: None
+        }
+    );
+    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    redis_cli(&node, &["XADD", KEY, "*", "e", "x"]).await;
+    redis_cli(&node, &["SET", &gen_key(KEY), "id-9"]).await;
+    redis_cli(&node, &["SET", &epoch_key(KEY), "7"]).await;
+    let before = redis_cli(&node, &["DBSIZE"]).await;
+    let got = sample(&mut conn, KEY, "relay").await.expect("sample");
+    assert_eq!(
+        got,
+        Sample {
+            xlen: 1,
+            has_group: true,
+            generation: Some("id-9".into()),
+            epoch: Some(7)
+        }
+    );
+    assert_eq!(redis_cli(&node, &["DBSIZE"]).await, before, "the sample wrote nothing");
 }

@@ -5,6 +5,7 @@
 //! Redis stream. The connect loop (`redis_conn`) makes the Redis connection without a block of the boot.
 
 pub mod gen_kv;
+pub mod gen_redis;
 pub mod generation;
 pub mod jetstream;
 pub mod proto;
