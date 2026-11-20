@@ -283,9 +283,7 @@ async fn delete(ws: &mut MemoryWorkspace, raw: &str) -> Result<String, MemoryCom
     if files.is_empty() {
         return Err(missing_path(raw));
     }
-    for file in &files {
-        ws.remove(file).await?;
-    }
+    ws.stage(Vec::new(), files).await?;
     Ok(format!("Successfully deleted {shown}"))
 }
 
@@ -335,12 +333,9 @@ async fn rename(ws: &mut MemoryWorkspace, old_raw: &str, new_raw: &str) -> Resul
     for (source, _) in &moves {
         contents.push(ws.read(source).await?.ok_or_else(|| missing_path(&source.to_tool_path()))?);
     }
-    for ((_, target), content) in moves.iter().zip(contents) {
-        ws.write(target, content).await?;
-    }
-    for (source, _) in &moves {
-        ws.remove(source).await?;
-    }
+    let puts = moves.iter().map(|(_, target)| target.clone()).zip(contents).collect();
+    let removes = moves.into_iter().map(|(source, _)| source).collect();
+    ws.stage(puts, removes).await?;
     Ok(format!("Successfully renamed {old_shown} to {new_shown}"))
 }
 
@@ -402,9 +397,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::memory::MemoryCaps;
     use crate::memory::conformance::fresh_scope;
     use crate::memory::fake::InMemoryMemoryStore;
+    use crate::memory::{MemoryCaps, MemoryScope};
 
     async fn ws_with(files: &[(&str, &str)]) -> MemoryWorkspace {
         let mut ws = MemoryWorkspace::new(Arc::new(InMemoryMemoryStore::default()), fresh_scope(), MemoryCaps::default());
@@ -414,8 +409,8 @@ mod tests {
         ws
     }
 
-    /// A workspace over a store that holds the files already, with an empty buffer.
-    async fn committed_ws(files: &[(&str, &str)]) -> MemoryWorkspace {
+    /// A store that holds the files already, and a workspace over it with an empty buffer.
+    async fn committed_parts(files: &[(&str, &str)], caps: MemoryCaps) -> (Arc<InMemoryMemoryStore>, MemoryScope, MemoryWorkspace) {
         let store = Arc::new(InMemoryMemoryStore::default());
         let scope = fresh_scope();
         let mut seed = MemoryWorkspace::new(store.clone(), scope.clone(), MemoryCaps::default());
@@ -423,7 +418,19 @@ mod tests {
             seed.write(&MemoryPath::parse(p).unwrap(), (*c).to_string()).await.unwrap();
         }
         seed.commit().await.unwrap();
-        MemoryWorkspace::new(store, scope, MemoryCaps::default())
+        let ws = MemoryWorkspace::new(store.clone(), scope.clone(), caps);
+        (store, scope, ws)
+    }
+
+    async fn committed_ws(files: &[(&str, &str)]) -> MemoryWorkspace {
+        committed_parts(files, MemoryCaps::default()).await.2
+    }
+
+    /// Change a file in the store as another writer would.
+    async fn other_writer(store: &Arc<InMemoryMemoryStore>, scope: &MemoryScope, path: &str, text: &str) {
+        let mut w = MemoryWorkspace::new(store.clone(), scope.clone(), MemoryCaps::default());
+        w.write(&MemoryPath::parse(path).unwrap(), text.to_string()).await.unwrap();
+        w.commit().await.unwrap();
     }
 
     async fn run(ws: &mut MemoryWorkspace, v: serde_json::Value) -> Result<String, String> {
@@ -583,7 +590,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_file_and_dir() {
-        let mut ws = ws_with(&[("/f", "f"), ("/a/x", "x"), ("/a/y/z", "z"), ("/ab/x", "k")]).await;
+        let mut ws = committed_ws(&[("/f", "f"), ("/a/x", "x"), ("/a/y/z", "z"), ("/ab/x", "k")]).await;
         assert_eq!(run(&mut ws, json!({"command":"delete","path":"/memories/f"})).await.unwrap(), "Successfully deleted /memories/f");
         assert_eq!(content(&mut ws, "/f").await, None);
         assert_eq!(run(&mut ws, json!({"command":"delete","path":"/memories/a/"})).await.unwrap(), "Successfully deleted /memories/a");
@@ -594,24 +601,26 @@ mod tests {
 
     #[tokio::test]
     async fn delete_root_refused() {
-        let mut ws = ws_with(&[("/a", "a")]).await;
+        let mut ws = committed_ws(&[("/a", "a")]).await;
         for p in ["/memories", "/memories/"] {
             let err = run(&mut ws, json!({"command":"delete","path":p})).await.unwrap_err();
             assert_eq!(err, "Error: The memory root /memories cannot be deleted.");
         }
         assert_eq!(content(&mut ws, "/a").await.as_deref(), Some("a"));
+        assert!(ws.take_changes().changes.is_empty());
     }
 
     #[tokio::test]
     async fn delete_missing() {
-        let mut ws = ws_with(&[("/a", "a")]).await;
+        let mut ws = committed_ws(&[("/a", "a")]).await;
         let err = run(&mut ws, json!({"command":"delete","path":"/memories/nope"})).await.unwrap_err();
         assert_eq!(err, "Error: The path /memories/nope does not exist");
+        assert!(ws.take_changes().changes.is_empty());
     }
 
     #[tokio::test]
     async fn rename_file_and_dir() {
-        let mut ws = ws_with(&[("/f", "f"), ("/a/x", "x"), ("/a/y/z", "z"), ("/ab/x", "k")]).await;
+        let mut ws = committed_ws(&[("/f", "f"), ("/a/x", "x"), ("/a/y/z", "z"), ("/ab/x", "k")]).await;
         let r = |o: &str, n: &str| json!({"command":"rename","old_path":o,"new_path":n});
         assert_eq!(run(&mut ws, r("/memories/f", "/memories/g")).await.unwrap(), "Successfully renamed /memories/f to /memories/g");
         assert_eq!(content(&mut ws, "/f").await, None);
@@ -644,10 +653,44 @@ mod tests {
     async fn rename_into_file_dir_clash() {
         let mut ws = committed_ws(&[("/c.md", "c"), ("/a/x", "x")]).await;
         let err = run(&mut ws, json!({"command":"rename","old_path":"/memories/a","new_path":"/memories/c.md/a"})).await.unwrap_err();
-        assert!(err.contains("/memories/c.md"), "{err}");
+        assert_eq!(err, "Error: Cannot rename to /memories/c.md/a. The file /memories/c.md exists and a file cannot be in a file.");
         assert_eq!(content(&mut ws, "/a/x").await.as_deref(), Some("x"));
         assert_eq!(content(&mut ws, "/c.md/a/x").await, None);
         assert!(ws.take_changes().changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_with_zero_net_change_passes_at_the_caps() {
+        let caps = MemoryCaps {
+            max_store_files: 2,
+            max_store_bytes: 4,
+            ..MemoryCaps::default()
+        };
+        let (_s, _c, mut ws) = committed_parts(&[("/a/x", "xx"), ("/a/y", "yy")], caps).await;
+        run(&mut ws, json!({"command":"rename","old_path":"/memories/a/x","new_path":"/memories/a/z"})).await.unwrap();
+        run(&mut ws, json!({"command":"rename","old_path":"/memories/a","new_path":"/memories/b"})).await.unwrap();
+        assert_eq!(content(&mut ws, "/b/z").await.as_deref(), Some("xx"));
+        assert_eq!(content(&mut ws, "/b/y").await.as_deref(), Some("yy"));
+        assert_eq!(content(&mut ws, "/a/y").await, None);
+    }
+
+    #[tokio::test]
+    async fn rename_and_delete_with_a_conflict_change_nothing() {
+        let (store, scope, mut ws) = committed_parts(&[("/a/x", "x"), ("/a/y", "y"), ("/k", "k")], MemoryCaps::default()).await;
+        run(&mut ws, json!({"command":"view","path":"/memories/a"})).await.unwrap();
+        other_writer(&store, &scope, "/a/y", "changed").await;
+        let err = run(&mut ws, json!({"command":"rename","old_path":"/memories/a","new_path":"/memories/b"})).await.unwrap_err();
+        assert!(err.starts_with("The file /memories/a/y changed outside this run."), "{err}");
+        // Read the cached files again, then repeat for a delete.
+        run(&mut ws, json!({"command":"view","path":"/memories/a"})).await.unwrap();
+        other_writer(&store, &scope, "/a/x", "changed").await;
+        let err = run(&mut ws, json!({"command":"delete","path":"/memories/a"})).await.unwrap_err();
+        assert!(err.starts_with("The file /memories/a/x changed outside this run."), "{err}");
+        assert!(ws.take_changes().changes.is_empty());
+        let mut fresh = MemoryWorkspace::new(store, scope, MemoryCaps::default());
+        assert_eq!(content(&mut fresh, "/a/x").await.as_deref(), Some("changed"));
+        assert_eq!(content(&mut fresh, "/a/y").await.as_deref(), Some("changed"));
+        assert_eq!(content(&mut fresh, "/b/x").await, None);
     }
 
     #[tokio::test]
@@ -660,7 +703,7 @@ mod tests {
         seed.commit().await.unwrap();
         let mut ws = MemoryWorkspace::new(store, scope, MemoryCaps::default());
         let out = run(&mut ws, json!({"command":"view","path":"/memories/n"})).await.unwrap();
-        assert!(out.contains("file"), "{out}");
+        assert_eq!(out, "Here's the content of /memories/n with line numbers:\n     1\tfile");
         let err = run(&mut ws, json!({"command":"delete","path":"/memories/n"})).await.unwrap_err();
         assert_eq!(err, "Error: /memories/n is both a file and a directory. Delete one of them first.");
     }

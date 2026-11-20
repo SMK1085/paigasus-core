@@ -104,19 +104,26 @@ impl MemoryWorkspace {
             }
         }
         let file = self.store.get(&self.scope, path).await?;
-        let known = match &file {
-            Some(f) => Known {
-                version: Some(f.version.clone()),
-                size: f.content.len() as u64,
-                content: Some(f.content.clone()),
-            },
-            None => Known {
-                version: None,
-                size: 0,
-                content: None,
-            },
-        };
-        self.known.insert(path.clone(), known);
+        // A path that a listing saw already has its baseline. The first sight stays the
+        // baseline, so the early conflict check still sees a change made after the listing.
+        match self.known.get_mut(path) {
+            Some(k) if k.version.is_some() => k.content = file.as_ref().map(|f| f.content.clone()),
+            _ => {
+                let known = match &file {
+                    Some(f) => Known {
+                        version: Some(f.version.clone()),
+                        size: f.content.len() as u64,
+                        content: Some(f.content.clone()),
+                    },
+                    None => Known {
+                        version: None,
+                        size: 0,
+                        content: None,
+                    },
+                };
+                self.known.insert(path.clone(), known);
+            }
+        }
         Ok(file.map(|f| f.content))
     }
 
@@ -162,40 +169,53 @@ impl MemoryWorkspace {
 
     /// Buffer a write.
     pub async fn write(&mut self, path: &MemoryPath, content: String) -> Result<(), WorkspaceError> {
-        if self.sealed {
-            return Err(WorkspaceError::Sealed);
-        }
-        if content.contains('\0') {
-            return Err(WorkspaceError::NulInContent { path: path.clone() });
-        }
-        self.caps.check_file(path, content.len() as u64).map_err(WorkspaceError::Cap)?;
-        let expected = match self.baseline(path).await? {
-            Some(v) => Expected::Version(v),
-            None => Expected::Absent,
-        };
-        let stored = self.stored_usage().await?;
-        let before = self.effective_usage(stored, &self.changes);
-        let mut tentative = self.changes.clone();
-        tentative.record(MemoryChange::Put {
-            path: path.clone(),
-            content,
-            expected,
-        });
-        let after = self.effective_usage(stored, &tentative);
-        self.caps.check(before, after).map_err(WorkspaceError::Cap)?;
-        self.changes = tentative;
-        Ok(())
+        self.stage(vec![(path.clone(), content)], Vec::new()).await
     }
 
     /// Buffer a delete. A file that does not exist is not an error.
     pub async fn remove(&mut self, path: &MemoryPath) -> Result<(), WorkspaceError> {
+        self.stage(Vec::new(), vec![path.clone()]).await
+    }
+
+    /// Buffer several writes and deletes as one change. Either all of them are buffered or none.
+    /// The caps check the net change of the whole set once.
+    pub async fn stage(&mut self, puts: Vec<(MemoryPath, String)>, removes: Vec<MemoryPath>) -> Result<(), WorkspaceError> {
         if self.sealed {
             return Err(WorkspaceError::Sealed);
         }
-        match self.baseline(path).await? {
-            Some(expected) => self.changes.record(MemoryChange::Delete { path: path.clone(), expected }),
-            None => self.changes.remove(path),
+        for (path, content) in &puts {
+            if content.contains('\0') {
+                return Err(WorkspaceError::NulInContent { path: path.clone() });
+            }
+            self.caps.check_file(path, content.len() as u64).map_err(WorkspaceError::Cap)?;
         }
+        // The early conflict check for every path, before anything is recorded.
+        let mut put_expected = Vec::with_capacity(puts.len());
+        for (path, _) in &puts {
+            put_expected.push(match self.baseline(path).await? {
+                Some(v) => Expected::Version(v),
+                None => Expected::Absent,
+            });
+        }
+        let mut remove_expected = Vec::with_capacity(removes.len());
+        for path in &removes {
+            remove_expected.push(self.baseline(path).await?);
+        }
+        let stored = self.stored_usage().await?;
+        let before = self.effective_usage(stored, &self.changes);
+        let mut tentative = self.changes.clone();
+        for ((path, content), expected) in puts.into_iter().zip(put_expected) {
+            tentative.record(MemoryChange::Put { path, content, expected });
+        }
+        for (path, expected) in removes.into_iter().zip(remove_expected) {
+            match expected {
+                Some(expected) => tentative.record(MemoryChange::Delete { path, expected }),
+                None => tentative.remove(&path),
+            }
+        }
+        let after = self.effective_usage(stored, &tentative);
+        self.caps.check(before, after).map_err(WorkspaceError::Cap)?;
+        self.changes = tentative;
         Ok(())
     }
 
