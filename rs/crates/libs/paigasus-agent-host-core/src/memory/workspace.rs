@@ -3,7 +3,7 @@
 //! The run buffer of the memory tool: a read cache, a change set, an early conflict check, and the
 //! caps at write time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::{CapError, Expected, MemoryCaps, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
@@ -54,7 +54,11 @@ pub struct MemoryWorkspace {
     scope: MemoryScope,
     caps: MemoryCaps,
     known: BTreeMap<MemoryPath, Known>,
+    /// The cached store rows of each listed directory. A row cache can be dropped.
     listings: BTreeMap<String, Vec<(MemoryPath, u64)>>,
+    /// Every directory that the run listed. A path under one of them that has no `known` entry was
+    /// absent when the run looked. This set is never dropped, so the absence stays the baseline.
+    listed: BTreeSet<MemoryDir>,
     usage: Option<MemoryUsage>,
     changes: MemoryChangeSet,
     sealed: bool,
@@ -70,6 +74,7 @@ impl MemoryWorkspace {
             caps,
             known: BTreeMap::new(),
             listings: BTreeMap::new(),
+            listed: BTreeSet::new(),
             usage: None,
             changes: MemoryChangeSet::new(),
             sealed: false,
@@ -104,26 +109,21 @@ impl MemoryWorkspace {
             }
         }
         let file = self.store.get(&self.scope, path).await?;
-        // A path that a listing saw already has its baseline. The first sight stays the
-        // baseline, so the early conflict check still sees a change made after the listing.
-        match self.known.get_mut(path) {
-            Some(k) if k.version.is_some() => k.content = file.as_ref().map(|f| f.content.clone()),
-            _ => {
-                let known = match &file {
-                    Some(f) => Known {
-                        version: Some(f.version.clone()),
-                        size: f.content.len() as u64,
-                        content: Some(f.content.clone()),
-                    },
-                    None => Known {
-                        version: None,
-                        size: 0,
-                        content: None,
-                    },
-                };
-                self.known.insert(path.clone(), known);
-            }
+        let fetched = Known {
+            version: file.as_ref().map(|f| f.version.clone()),
+            size: file.as_ref().map_or(0, |f| f.content.len() as u64),
+            content: file.as_ref().map(|f| f.content.clone()),
+        };
+        // The model now sees the fetched file, so the fetched file is the baseline. When a cached
+        // listing shows another state of the path, that listing is dropped and taken again.
+        let listing_is_stale = match self.known.get(path) {
+            Some(k) => k.version != fetched.version,
+            None => fetched.version.is_some(),
+        };
+        if listing_is_stale {
+            self.drop_listings_of(path);
         }
+        self.known.insert(path.clone(), fetched);
         Ok(file.map(|f| f.content))
     }
 
@@ -131,6 +131,7 @@ impl MemoryWorkspace {
     pub async fn list(&mut self, dir: &MemoryDir) -> Result<Vec<(MemoryPath, u64)>, WorkspaceError> {
         if !self.listings.contains_key(dir.as_str()) {
             let entries = self.store.list(&self.scope, dir).await?;
+            self.listed.insert(dir.clone());
             let mut rows = Vec::with_capacity(entries.len());
             for e in entries {
                 self.known.entry(e.path.clone()).or_insert_with(|| Known {
@@ -235,19 +236,33 @@ impl MemoryWorkspace {
     }
 
     /// The early conflict check. It reads the store version of `path` and compares it with the
-    /// cached one. The first sight of a path becomes its baseline. On a conflict, the cache entry,
-    /// the buffered change and the cached listings of the path are dropped.
+    /// baseline. The first sight of a path becomes its baseline: a read, a listing that returns
+    /// the path, or a listing of a directory that holds the path but does not return it (then the
+    /// baseline is "absent"). On a conflict, the cache entry, the buffered change and the cached
+    /// listings of the path are dropped.
     async fn baseline(&mut self, path: &MemoryPath) -> Result<Option<MemoryVersion>, WorkspaceError> {
         let fetched = self.store.get(&self.scope, path).await?;
         let fetched_version = fetched.as_ref().map(|f| f.version.clone());
-        match self.known.get(path) {
-            Some(k) if k.version != fetched_version => {
+        let seen = match self.known.get(path) {
+            Some(k) => Some(k.version.clone()),
+            None if self.listed.iter().any(|d| d.contains(path)) => Some(None),
+            None => None,
+        };
+        match seen {
+            Some(v) if v != fetched_version => {
                 self.known.remove(path);
                 self.changes.remove(path);
-                self.listings.retain(|d, _| !MemoryDir::parse(d).is_ok_and(|d| d.contains(path)));
+                self.drop_listings_of(path);
                 Err(WorkspaceError::Conflict { path: path.clone() })
             }
-            Some(k) => Ok(k.version.clone()),
+            Some(v) => {
+                self.known.entry(path.clone()).or_insert(Known {
+                    version: None,
+                    size: 0,
+                    content: None,
+                });
+                Ok(v)
+            }
             None => {
                 self.known.insert(
                     path.clone(),
@@ -260,6 +275,11 @@ impl MemoryWorkspace {
                 Ok(fetched_version)
             }
         }
+    }
+
+    /// Drop the cached rows of every listing that holds `path`. The `listed` set stays.
+    fn drop_listings_of(&mut self, path: &MemoryPath) {
+        self.listings.retain(|d, _| !MemoryDir::parse(d).is_ok_and(|d| d.contains(path)));
     }
 
     /// The stored usage. One `store.usage` call, cached on first need.
@@ -496,6 +516,80 @@ mod tests {
         assert!(ws.is_dir(&dir).await.unwrap());
         assert!(ws.is_dir(&MemoryDir::root()).await.unwrap());
         assert!(!ws.is_dir(&MemoryDir::parse("/none").unwrap()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_listed_file_changed_outside_the_run_is_a_conflict_on_write() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/x.md", "v1").await;
+        ws.list(&MemoryDir::parse("/tasks").unwrap()).await.unwrap();
+        direct(&f, &s, "/tasks/x.md", "console").await;
+        let err = ws.write(&p("/tasks/x.md"), "mine".into()).await.unwrap_err();
+        assert_eq!(err, WorkspaceError::Conflict { path: p("/tasks/x.md") });
+        ws.commit().await.unwrap();
+        assert_eq!(f.get(&s, &p("/tasks/x.md")).await.unwrap().unwrap().content, "console");
+    }
+
+    #[tokio::test]
+    async fn a_path_absent_from_a_listing_and_created_outside_the_run_is_a_conflict_on_write() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/other.md", "o").await;
+        let listed = ws.list(&MemoryDir::parse("/tasks").unwrap()).await.unwrap();
+        assert_eq!(listed, vec![(p("/tasks/other.md"), 1)]);
+        direct(&f, &s, "/tasks/x.md", "console").await;
+        let err = ws.write(&p("/tasks/x.md"), "mine".into()).await.unwrap_err();
+        assert_eq!(err, WorkspaceError::Conflict { path: p("/tasks/x.md") });
+        ws.commit().await.unwrap();
+        assert_eq!(f.get(&s, &p("/tasks/x.md")).await.unwrap().unwrap().content, "console");
+    }
+
+    #[tokio::test]
+    async fn a_root_listing_makes_every_unseen_path_absent() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        ws.list(&MemoryDir::root()).await.unwrap();
+        direct(&f, &s, "/deep/a/b.md", "console").await;
+        assert!(matches!(ws.write(&p("/deep/a/b.md"), "mine".into()).await, Err(WorkspaceError::Conflict { .. })));
+        // The conflict sends the model back to view. After it reads the file, the write passes.
+        assert_eq!(ws.read(&p("/deep/a/b.md")).await.unwrap().as_deref(), Some("console"));
+        ws.write(&p("/deep/a/b.md"), "mine".into()).await.unwrap();
+        ws.commit().await.unwrap();
+        assert_eq!(f.get(&s, &p("/deep/a/b.md")).await.unwrap().unwrap().content, "mine");
+    }
+
+    #[tokio::test]
+    async fn a_read_after_a_listing_takes_the_fetched_file_as_the_baseline() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/d/x", "v1").await;
+        let dir = MemoryDir::parse("/d").unwrap();
+        assert_eq!(ws.list(&dir).await.unwrap(), vec![(p("/d/x"), 2)]);
+        direct(&f, &s, "/d/x", "changed").await;
+        // The model sees the new content, so the new content is the baseline.
+        assert_eq!(ws.read(&p("/d/x")).await.unwrap().as_deref(), Some("changed"));
+        assert_eq!(ws.list(&dir).await.unwrap(), vec![(p("/d/x"), 7)]);
+        let v = f.get(&s, &p("/d/x")).await.unwrap().unwrap().version;
+        ws.write(&p("/d/x"), "mine".into()).await.unwrap();
+        assert_eq!(
+            ws.take_changes().changes.get(&p("/d/x")),
+            Some(&MemoryChange::Put {
+                path: p("/d/x"),
+                content: "mine".into(),
+                expected: Expected::Version(v)
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_after_a_listing_of_a_file_deleted_outside_the_run_shows_it_absent() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/d/x", "v1").await;
+        let dir = MemoryDir::parse("/d").unwrap();
+        ws.list(&dir).await.unwrap();
+        let v = f.get(&s, &p("/d/x")).await.unwrap().unwrap().version;
+        let mut changes = MemoryChangeSet::new();
+        changes.record(MemoryChange::Delete { path: p("/d/x"), expected: v });
+        f.apply(&MemoryCommitSet { scope: s.clone(), changes }, &MemoryCaps::default()).await.unwrap();
+        assert_eq!(ws.read(&p("/d/x")).await.unwrap(), None);
+        assert_eq!(ws.list(&dir).await.unwrap(), vec![]);
     }
 
     #[tokio::test]

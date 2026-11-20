@@ -728,6 +728,8 @@ mod tests {
     async fn rename_and_delete_with_a_conflict_change_nothing() {
         let (store, scope, mut ws) = committed_parts(&[("/a/x", "x"), ("/a/y", "y"), ("/k", "k")], MemoryCaps::default()).await;
         run(&mut ws, json!({"command":"view","path":"/memories/a"})).await.unwrap();
+        // A buffered write: the rename reads /a/y from the buffer, so only stage sees the conflict.
+        run(&mut ws, json!({"command":"create","path":"/memories/a/y","file_text":"mine"})).await.unwrap();
         other_writer(&store, &scope, "/a/y", "changed").await;
         let err = run(&mut ws, json!({"command":"rename","old_path":"/memories/a","new_path":"/memories/b"})).await.unwrap_err();
         assert!(err.starts_with("The file /memories/a/y changed outside this run."), "{err}");
