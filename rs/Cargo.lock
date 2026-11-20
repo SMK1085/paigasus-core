@@ -3217,6 +3217,7 @@ dependencies = [
  "paigasus-observability",
  "paigasus-proto",
  "paigasus-test-docker",
+ "proptest",
  "rand 0.10.4",
  "reqwest",
  "rustls",

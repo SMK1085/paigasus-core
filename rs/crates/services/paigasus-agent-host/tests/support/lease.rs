@@ -3,7 +3,7 @@
 //! Shared SQL of the lease tests. The statements live here, never in the adapter.
 
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-use sea_orm::{ConnectionTrait, DatabaseConnection};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use uuid::Uuid;
 
 /// Expires the lease of an inbox one second in the past. The row stays.
@@ -84,4 +84,35 @@ pub async fn insert_run(db: &DatabaseConnection, inbox: Uuid, run: Uuid, thread:
     ))
     .await
     .expect("insert run");
+}
+
+/// The token of the lease row and whether the lease is live on the database clock. `None`: no
+/// lease row yet.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn lease_state(db: &DatabaseConnection, inbox: Uuid) -> Option<(i64, bool)> {
+    let sql = format!("SELECT token, expires_at > clock_timestamp() AS live FROM inbox_lease WHERE inbox_id = '{inbox}'");
+    let row = db.query_one_raw(Statement::from_string(DatabaseBackend::Postgres, sql)).await.expect("lease state")?;
+    Some((row.try_get("", "token").expect("token"), row.try_get("", "live").expect("live")))
+}
+
+/// The thread of the newest run of an inbox, if the inbox has a run.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn newest_run_thread(db: &DatabaseConnection, inbox: Uuid) -> Option<Uuid> {
+    let sql = format!("SELECT thread_id FROM run WHERE inbox_id = '{inbox}' ORDER BY started_at DESC, id DESC LIMIT 1");
+    let row = db.query_one_raw(Statement::from_string(DatabaseBackend::Postgres, sql)).await.expect("newest run")?;
+    Some(row.try_get("", "thread_id").expect("thread_id"))
+}
+
+/// Every `inbox_event`, `run` and `thread` row of an inbox as one text. Two equal texts mean that
+/// no row of these tables changed.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn snapshot(db: &DatabaseConnection, inbox: Uuid) -> String {
+    let mut out = String::new();
+    for table in ["inbox_event", "run", "thread"] {
+        let sql = format!("SELECT coalesce(string_agg(row_to_json(x)::text, '|' ORDER BY x.id), '') AS s FROM {table} x WHERE x.inbox_id = '{inbox}'");
+        let row = db.query_one_raw(Statement::from_string(DatabaseBackend::Postgres, sql)).await.expect("snapshot").expect("row");
+        out.push_str(&row.try_get::<String>("", "s").expect("text column named s"));
+        out.push('\n');
+    }
+    out
 }

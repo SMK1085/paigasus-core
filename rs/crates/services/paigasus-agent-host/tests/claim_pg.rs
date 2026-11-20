@@ -146,6 +146,32 @@ async fn events_of_one_thread_are_claimed_together() {
 }
 
 #[tokio::test]
+async fn an_oldest_event_with_no_thread_claims_only_no_thread_events() {
+    let Some((_node, db, store, mut handle)) = setup().await else { return };
+    insert_thread(&db, u(INBOX), u(70)).await;
+    insert_pending_event(&db, u(INBOX), u(10), 100).await;
+    insert_event_on_thread(&db, u(INBOX), u(11), 90, u(70)).await;
+    insert_pending_event(&db, u(INBOX), u(12), 80).await;
+    let claim = store.claim_events(&mut handle, &cfg()).await.expect("claim").expect("some");
+    assert_eq!(ids(&claim), vec![u(10), u(12)]);
+    assert_ne!(claim.thread, ThreadId::from_uuid(u(70)));
+    let sql = format!("SELECT count(*) AS n FROM inbox_event WHERE id = '{}' AND claimed_run_id IS NULL AND attempts = 0", u(11));
+    assert_eq!(count(&db, &sql).await, 1);
+}
+
+#[tokio::test]
+async fn events_of_another_inbox_never_enter_the_claim() {
+    let Some((_node, db, store, mut handle)) = setup().await else { return };
+    insert_inbox(&db, u(1), u(5), u(6), u(7)).await;
+    insert_pending_event(&db, u(5), u(20), 100).await;
+    insert_pending_event(&db, u(INBOX), u(10), 10).await;
+    let claim = store.claim_events(&mut handle, &cfg()).await.expect("claim").expect("some");
+    assert_eq!(ids(&claim), vec![u(10)]);
+    let sql = format!("SELECT count(*) AS n FROM inbox_event WHERE id = '{}' AND claimed_run_id IS NULL AND attempts = 0", u(20));
+    assert_eq!(count(&db, &sql).await, 1);
+}
+
+#[tokio::test]
 async fn the_batch_limit_caps_the_claim() {
     let Some((_node, db, store, mut handle)) = setup().await else { return };
     for (i, age) in [(10, 50), (11, 40), (12, 30), (13, 20), (14, 10)] {

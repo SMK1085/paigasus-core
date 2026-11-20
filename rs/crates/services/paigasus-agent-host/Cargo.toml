@@ -68,6 +68,8 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 # The counter tests of `application::ingest` read a local `DebuggingRecorder`.
 metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
+# `tests/lease_property_pg.rs` — the sequential property test of the lease and the claim.
+proptest = { workspace = true }
 
 [lints]
 workspace = true

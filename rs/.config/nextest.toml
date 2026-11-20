@@ -142,9 +142,16 @@ filter = 'package(=paigasus-agent-host) and binary(docker_preflight)'
 retries = 1
 
 [[profile.default.overrides]]
+# SMA-787 §10.1: the lease property test. A failure must red at once: a retry runs new seeds and
+# can hide the failure. This block comes BEFORE the block below, because the first block that
+# matches and sets `retries` wins. It inherits `test-group` from the block below.
+filter = 'package(=paigasus-agent-host) and binary(lease_property_pg)'
+retries = 0
+
+[[profile.default.overrides]]
 # SMA-786: the agent host's Postgres-backed binaries, named one by one so the crate's pure unit
 # tests keep retries = 0. Same retry budget and container cap as the gateway's suites.
-filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg) or binary(schema_pg) or binary(inbox_repository_pg) or binary(lease_pg) or binary(claim_pg) or binary(complete_pg) or binary(keeper_pg))'
+filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg) or binary(schema_pg) or binary(inbox_repository_pg) or binary(lease_pg) or binary(claim_pg) or binary(complete_pg) or binary(keeper_pg) or binary(lease_property_pg))'
 retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
 test-group = 'docker-containers'
 
