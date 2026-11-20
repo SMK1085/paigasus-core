@@ -124,8 +124,9 @@ pub fn max_bytes_for_account(account: &jetstream::account::Account) -> i64 {
     account_max_stream_bytes(account).map_or(bytes, |cap| bytes.min(cap))
 }
 
-/// The stream config, with `max_bytes` from [`max_bytes_for`]. `provision-decisions.sh` makes the same stream from
-/// `ops/nats/subjects.env`. The relay calls `get_or_create_stream` with this value, so a stream that the relay
+/// The stream config, with `max_bytes` from [`max_bytes_for_account`]. `provision-decisions.sh` makes the same
+/// stream from `ops/nats/subjects.env`, with one difference: the script does not read a per-stream limit of the
+/// account, because the account that it makes has none. The relay calls `get_or_create_stream` with this value, so a stream that the relay
 /// makes is never unbounded.
 #[must_use]
 pub fn stream_config(max_bytes: i64) -> jetstream::stream::Config {

@@ -1866,7 +1866,8 @@ export of the decisions shows the true gaps.
 (`NOGROUP`). The relay made the group again, from ID 0. If Redis lost the stream, the events that were in
 it are lost. If only the group was removed (for example `XGROUP DESTROY`), the stream still holds its
 events. The relay then reads them again and publishes them, so nothing is lost, and the lost estimate
-overcounts. The count is best-effort, not exact. Some resets are not counted: a new relay that makes the
+overcounts. The old backlog sample stays after an `XGROUP DESTROY` alone, so the reset adds it to
+`gateway_decision_log_lost_estimate_total` although no event was lost. The count is best-effort, not exact. Some resets are not counted: a new relay that makes the
 group at its start does not count a reset, and a lost reply to `XGROUP CREATE` can hide the reset from the
 retry, which gets `BUSYGROUP`.
 The relay looks for the loss only when it has no carried batch. A Redis loss during a NATS outage is

@@ -734,6 +734,7 @@ async fn flushall_with_two_relays_counts_one_reset() {
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
     // NATS is down until after the flush, so that no entry is published and deleted before it. The test starts
     // NATS again after the flush, so that each relay can finish its carried batch and then find the loss.
     nats.stop().await.expect("stop NATS");
@@ -770,6 +771,12 @@ async fn flushall_with_two_relays_counts_one_reset() {
         snap.get("gateway_decision_log_lost_estimate_total", &[]),
         3,
         "the estimate is the last XLEN sample from before the loss, not a sample of the stream after it"
+    );
+    // Each relay settled its batch after the flush, so XACK found no group and acked 0 of 3.
+    let text = logs.text();
+    assert!(
+        text.contains("the relay acked fewer entries than it settled") && text.contains("acked=0") && text.contains("settled=3"),
+        "a settle after the loss logs the two counts: {text}"
     );
     for r in relays {
         r.shut_down().await;

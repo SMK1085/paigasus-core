@@ -9,6 +9,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -47,6 +48,8 @@ const SAMPLE_SCRIPT: &str = "local n = redis.call('XLEN', KEYS[1]) \
        end \
      end \
      return {n, 0}";
+/// The sampler script, made once. `Script::new` hashes the text, so the 15 s loop does not do it again.
+static SAMPLE: LazyLock<redis::Script> = LazyLock::new(|| redis::Script::new(SAMPLE_SCRIPT));
 
 /// What the relay needs to know about the stream and about its own timing. `new` gives the production values.
 #[derive(Debug, Clone)]
@@ -438,15 +441,17 @@ impl State {
         }
     }
 
-    /// `XACK` and `XDEL` of the done entries in one `MULTI`.
-    async fn ack(&self, conn: &mut paigasus_redis::RedisHandle, ids: &[&str]) -> Result<(), redis::RedisError> {
+    /// `XACK` and `XDEL` of the done entries in one `MULTI`. The result is the sum of the `XACK` replies: the
+    /// number of entries that were pending in the group.
+    async fn ack(&self, conn: &mut paigasus_redis::RedisHandle, ids: &[&str]) -> Result<u64, redis::RedisError> {
         let mut pipe = redis::pipe();
         pipe.atomic();
         for id in ids {
-            pipe.cmd("XACK").arg(&self.s.key).arg(self.s.group).arg(*id).ignore();
+            pipe.cmd("XACK").arg(&self.s.key).arg(self.s.group).arg(*id);
             pipe.cmd("XDEL").arg(&self.s.key).arg(*id).ignore();
         }
-        pipe.query_async::<()>(conn).await
+        let acks: Vec<u64> = pipe.query_async(conn).await?;
+        Ok(acks.iter().sum())
     }
 
     /// `XACK` and `XDEL` of the done entries of the carry, and drop them from the carry when Redis took the
@@ -457,7 +462,18 @@ impl State {
             return;
         }
         let acked = match self.ack(conn, &ids).await {
-            Ok(()) => true,
+            Ok(n) => {
+                // `XACK` returns 0, not `NOGROUP`, for a missing stream or group. Another relay that settled a
+                // claimed entry first also gives a lower count. So this is a warning, not a reset.
+                if n < ids.len() as u64 {
+                    tracing::warn!(
+                        acked = n,
+                        settled = ids.len(),
+                        "the relay acked fewer entries than it settled; another relay settled them, or Redis lost the group"
+                    );
+                }
+                true
+            }
             Err(err) if is_code(&err, "NOGROUP") => {
                 self.handle_nogroup(conn, inner).await;
                 true
@@ -627,8 +643,7 @@ impl State {
         loop {
             if let Some(handle) = self.slot.get() {
                 let mut conn = handle.clone();
-                let script = redis::Script::new(SAMPLE_SCRIPT);
-                if let Ok((n, has_group)) = script.key(&self.s.key).arg(self.s.group).invoke_async::<(u64, u64)>(&mut conn).await {
+                if let Ok((n, has_group)) = SAMPLE.key(&self.s.key).arg(self.s.group).invoke_async::<(u64, u64)>(&mut conn).await {
                     // A stream without the group is a stream after a Redis loss that no relay has found yet. Its
                     // length is not the lost backlog, so the sample of the stream before the loss stays.
                     if has_group == 1 {

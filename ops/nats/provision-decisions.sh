@@ -42,7 +42,8 @@ nsc env --operator "$OPERATOR" >/dev/null
 # --- 1. Account and limits ---------------------------------------------------------------------
 nsc add account --name "$GATEWAY_ACCOUNT" 2>/dev/null || echo "account $GATEWAY_ACCOUNT already exists"
 
-# --js-mem-storage 0: the stream is file-backed, and the ordered consumer of the reader needs no memory.
+# --js-mem-storage 0: the stream is file-backed. The ordered consumer of the reader asks for memory storage of
+# its state (async-nats 0.53 sets memory_storage), and the broker accepts it under a memory limit of 0.
 nsc edit account --name "$GATEWAY_ACCOUNT" \
   --js-mem-storage 0 \
   --js-disk-storage "$DECISIONS_ACCOUNT_DISK_BYTES" \
@@ -83,6 +84,8 @@ prov_creds="$OUT_DIR/gateway-decision-provisioner.creds"
 if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" stream info "$DECISIONS_STREAM_NAME" >/dev/null 2>&1; then
   echo "stream $DECISIONS_STREAM_NAME already exists; left unchanged"
 else
+  # This script sets no per-stream limit on the account. The relay also caps max_bytes at the account
+  # storage_max_stream_bytes. If an operator adds a per-stream limit, apply the same cap here.
   nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" \
     stream add "$DECISIONS_STREAM_NAME" \
     --subjects "$DECISIONS_SUBJECTS" \

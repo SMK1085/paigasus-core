@@ -598,6 +598,10 @@ Known limits, which the runbook states:
   is not built. The export shows the gaps.
 - If only the consumer group is removed (`XGROUP DESTROY`), `NOGROUP` counts a reset, but the stream
   still holds its events. The relay reads them again from ID 0, so the lost estimate overcounts.
+- A cross-account import of `gateway.decision.>` into an account with a stream that captures it gives
+  two PubAck responders. The foreign stream answers 10060. If that answer comes first, the relay retries
+  without end, although `GATEWAY_DECISIONS` stored the event. Nothing in `ops/nats` exports the subject
+  today.
 
 ### 5.9 Metrics and alerts
 
