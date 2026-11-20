@@ -109,9 +109,18 @@ impl MemoryStore for PgMemoryStore {
 
     async fn delete_scope(&self, scope: &MemoryScope) -> Result<(), MemoryStoreError> {
         let txn = self.db.begin().await.map_err(store_err)?;
-        // The `UPDATE` comes first: it takes the scope row lock, so a concurrent `apply` of this
-        // scope waits for the erasure, or the erasure waits for it.
+        // The scope row lock comes first, as in `apply`: the row is inserted when it does not
+        // exist, then locked. So a concurrent first `apply` of this scope waits for the erasure,
+        // or the erasure waits for it. Without the insert, an `UPDATE` of a missing row locks
+        // nothing, and the counters can disagree with the files.
         let result = async {
+            txn.execute_raw(stmt(
+                "INSERT INTO memory_scope (org_id, agent_id, principal_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                scope_values(scope),
+            ))
+            .await?;
+            txn.query_one_raw(stmt(&format!("SELECT files FROM memory_scope WHERE {SCOPE} FOR UPDATE"), scope_values(scope)))
+                .await?;
             txn.execute_raw(stmt(&format!("UPDATE memory_scope SET files = 0, bytes = 0 WHERE {SCOPE}"), scope_values(scope)))
                 .await?;
             txn.execute_raw(stmt(&format!("DELETE FROM memory_file WHERE {SCOPE}"), scope_values(scope))).await?;

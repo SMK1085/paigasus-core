@@ -59,7 +59,6 @@ pub struct MemoryWorkspace {
     /// Every directory that the run listed. A path under one of them that has no `known` entry was
     /// absent when the run looked. This set is never dropped, so the absence stays the baseline.
     listed: BTreeSet<MemoryDir>,
-    usage: Option<MemoryUsage>,
     changes: MemoryChangeSet,
     sealed: bool,
 }
@@ -75,7 +74,6 @@ impl MemoryWorkspace {
             known: BTreeMap::new(),
             listings: BTreeMap::new(),
             listed: BTreeSet::new(),
-            usage: None,
             changes: MemoryChangeSet::new(),
             sealed: false,
         }
@@ -174,16 +172,22 @@ impl MemoryWorkspace {
     pub async fn list(&mut self, dir: &MemoryDir) -> Result<Vec<(MemoryPath, u64)>, WorkspaceError> {
         if !self.listings.contains_key(dir.as_str()) {
             let entries = self.store.list(&self.scope, dir).await?;
-            self.listed.insert(dir.clone());
             let mut rows = Vec::with_capacity(entries.len());
             for e in entries {
-                self.known.entry(e.path.clone()).or_insert_with(|| Known {
-                    version: Some(e.version.clone()),
-                    size: e.size_bytes,
-                    content: None,
-                });
+                // A path with no `known` entry under a directory that the run listed before was
+                // absent at its first sight. That absence stays the baseline, so a write to the
+                // path is a conflict. The listing still shows the file to the model.
+                let first_sight_absent = !self.known.contains_key(&e.path) && self.listed.iter().any(|d| d.contains(&e.path));
+                if !first_sight_absent {
+                    self.known.entry(e.path.clone()).or_insert_with(|| Known {
+                        version: Some(e.version.clone()),
+                        size: e.size_bytes,
+                        content: None,
+                    });
+                }
                 rows.push((e.path, e.size_bytes));
             }
+            self.listed.insert(dir.clone());
             self.listings.insert(dir.as_str().to_string(), rows);
         }
         let mut merged: BTreeMap<String, (MemoryPath, u64)> = self.listings[dir.as_str()].iter().map(|(p, s)| (p.as_str().to_string(), (p.clone(), *s))).collect();
@@ -245,7 +249,9 @@ impl MemoryWorkspace {
         for path in &removes {
             remove_expected.push(self.baseline(path).await?);
         }
-        let stored = self.stored_usage().await?;
+        // A fresh read for each stage, so that the usage and the baselines describe nearly the same
+        // time. A usage cached for the run goes stale when another writer changes the store.
+        let stored = self.store.usage(&self.scope).await?;
         let before = self.effective_usage(stored, &self.changes);
         let mut tentative = self.changes.clone();
         for ((path, content), expected) in puts.into_iter().zip(put_expected) {
@@ -326,16 +332,6 @@ impl MemoryWorkspace {
     /// Drop the cached rows of every listing that holds `path`. The `listed` set stays.
     fn drop_listings_of(&mut self, path: &MemoryPath) {
         self.listings.retain(|d, _| !MemoryDir::parse(d).is_ok_and(|d| d.contains(path)));
-    }
-
-    /// The stored usage. One `store.usage` call, cached on first need.
-    async fn stored_usage(&mut self) -> Result<MemoryUsage, WorkspaceError> {
-        if let Some(u) = self.usage {
-            return Ok(u);
-        }
-        let u = self.store.usage(&self.scope).await?;
-        self.usage = Some(u);
-        Ok(u)
     }
 
     /// The stored usage plus the net delta of a change set. An overwrite or a delete subtracts
@@ -636,6 +632,61 @@ mod tests {
         f.apply(&MemoryCommitSet { scope: s.clone(), changes }, &MemoryCaps::default()).await.unwrap();
         assert_eq!(ws.read(&p("/d/x")).await.unwrap(), None);
         assert_eq!(ws.list(&dir).await.unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn a_later_listing_keeps_an_earlier_absence_as_the_baseline() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        assert_eq!(ws.list(&MemoryDir::root()).await.unwrap(), vec![]);
+        direct(&f, &s, "/d/x", "console").await;
+        // The listing shows the file to the model, but the first sight of the path was "absent".
+        assert_eq!(ws.list(&MemoryDir::parse("/d").unwrap()).await.unwrap(), vec![(p("/d/x"), 7)]);
+        let err = ws.write(&p("/d/x"), "mine".into()).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "The file /memories/d/x changed outside this run. Your changes to it in this run are gone. Use view to read it again."
+        );
+        ws.commit().await.unwrap();
+        assert_eq!(f.get(&s, &p("/d/x")).await.unwrap().unwrap().content, "console");
+    }
+
+    #[tokio::test]
+    async fn a_first_listing_records_the_version_of_a_listed_file() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/d/x", "v1").await;
+        let v = f.get(&s, &p("/d/x")).await.unwrap().unwrap().version;
+        ws.list(&MemoryDir::parse("/d").unwrap()).await.unwrap();
+        ws.write(&p("/d/x"), "mine".into()).await.unwrap();
+        assert_eq!(
+            ws.take_changes().changes.get(&p("/d/x")),
+            Some(&MemoryChange::Put {
+                path: p("/d/x"),
+                content: "mine".into(),
+                expected: Expected::Version(v)
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_byte_cap_uses_a_fresh_stored_usage() {
+        let caps = MemoryCaps {
+            max_store_bytes: 10,
+            ..MemoryCaps::default()
+        };
+        let (f, s, mut ws) = setup(caps);
+        direct(&f, &s, "/old", "0123456789").await;
+        // A first stage reads the stored usage (10 bytes).
+        ws.remove(&p("/nope")).await.unwrap();
+        // Another writer deletes /old and creates a 1-byte /new.
+        let v = f.get(&s, &p("/old")).await.unwrap().unwrap().version;
+        let mut changes = MemoryChangeSet::new();
+        changes.record(MemoryChange::Delete { path: p("/old"), expected: v });
+        f.apply(&MemoryCommitSet { scope: s.clone(), changes }, &MemoryCaps::default()).await.unwrap();
+        direct(&f, &s, "/new", "n").await;
+        // The real result is 2 bytes, so the cap must not refuse the write.
+        ws.write(&p("/new"), "ab".into()).await.unwrap();
+        ws.commit().await.unwrap();
+        assert_eq!(f.usage(&s).await.unwrap(), MemoryUsage { files: 1, bytes: 2 });
     }
 
     #[tokio::test]

@@ -113,6 +113,7 @@ pub async fn run_all(store: &dyn MemoryStore) {
     cross_scope_usage(store).await;
     same_uuids_two_orgs_are_isolated(store).await;
     delete_scope_leaves_others(store).await;
+    delete_scope_of_a_never_written_scope_succeeds(store).await;
     same_org_same_agent_two_principals_are_isolated(store).await;
     same_org_same_principal_two_agents_are_isolated(store).await;
     usage_tracks_overwrite_delete_and_recreate(store).await;
@@ -400,6 +401,17 @@ pub async fn same_uuids_two_orgs_are_isolated(store: &dyn MemoryStore) {
     assert_eq!(store.usage(&b).await.unwrap(), MemoryUsage::default());
     write(store, &b, &[("/f", "org b")]).await;
     assert_eq!(store.get(&a, &p("/f")).await.unwrap().unwrap().content, "org a");
+}
+
+/// `delete_scope` of a scope that was never written succeeds and leaves the usage at zero.
+pub async fn delete_scope_of_a_never_written_scope_succeeds(store: &dyn MemoryStore) {
+    let a = fresh_scope();
+    store.delete_scope(&a).await.unwrap();
+    assert_eq!(store.usage(&a).await.unwrap(), MemoryUsage::default());
+    assert!(listed(store, &a, "/").await.is_empty());
+    // The scope stays usable after the erasure.
+    write(store, &a, &[("/f", "x")]).await;
+    assert_eq!(store.usage(&a).await.unwrap(), MemoryUsage { files: 1, bytes: 1 });
 }
 
 /// `delete_scope` removes one scope and leaves the others.
