@@ -45,6 +45,36 @@ accounts {
       }
     ]
   }
+
+  # The gateway tool decision log (SMA-755). A separate account, so a full decision stream cannot stop
+  # IAM_EVENTS. max_mem 0: the stream and the reader's ordered consumer must work with file storage only.
+  PAIGASUS_GATEWAY: {
+    jetstream: { max_mem: 0, max_file: 268435456, max_streams: 2, max_consumers: 16 }
+
+    users: [
+      {
+        nkey: "{{GW_DEC_PUBLISHER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "gateway.decision.>", "$JS.API.INFO", "$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "$JS.API.STREAM.CREATE.GATEWAY_DECISIONS" ] }
+          subscribe: { allow: [ "_INBOX_GW_DEC.>" ] }
+        }
+      },
+      {
+        nkey: "{{GW_DEC_READER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS", "$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS.>", "$JS.API.CONSUMER.DELETE.GATEWAY_DECISIONS.*", "$JS.API.CONSUMER.MSG.NEXT.GATEWAY_DECISIONS.*", "$JS.API.CONSUMER.INFO.GATEWAY_DECISIONS.*" ] }
+          subscribe: { allow: [ "_INBOX_GW_RD.>" ] }
+        }
+      },
+      {
+        nkey: "{{GW_DEC_PROVISIONER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "$JS.API.INFO", "$JS.API.STREAM.>" ] }
+          subscribe: { allow: [ "_INBOX_GW_PROV.>" ] }
+        }
+      }
+    ]
+  }
 }
 
 system_account: SYS

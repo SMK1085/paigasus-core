@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use bytes::Bytes;
-use paigasus_gateway_core::{Action, BlockCode, Decision, Format, Interceptor, Limits, Metric, OnFailure, ToolCall};
+use paigasus_gateway_core::{Action, BlockCode, DecidedCall, Decision, Format, Interceptor, Limits, Metric, OnFailure, ToolCall};
 
 pub const TERMINAL: &[u8] = b"\n\ndata: {\"error\":{\"message\":\"terminal\"}}\n\n";
 
@@ -97,7 +97,7 @@ fn run(i: &mut Interceptor, pending: &mut Vec<Action>, o: &mut Outcome, decide: 
                 Action::Decide { hold, calls } => {
                     let ds: Vec<Decision> = calls.iter().map(decide).collect();
                     o.decided.extend(calls.iter().cloned().zip(ds.iter().copied()));
-                    pending.extend(i.decided(hold, Ok(ds), now));
+                    pending.extend(i.decided(hold, Ok(ds.into_iter().map(DecidedCall::from).collect()), now));
                 }
                 Action::Count(m) => o.metrics.push(m),
                 _ => {}

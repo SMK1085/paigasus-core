@@ -92,6 +92,9 @@ struct Fixture {
     publisher: Identity,
     consumer: Identity,
     provisioner: Identity,
+    gw_publisher: Identity,
+    gw_reader: Identity,
+    gw_provisioner: Identity,
 }
 
 /// Renders `accounts.conf.tmpl` with freshly minted identities and boots the broker with the
@@ -106,6 +109,9 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
     let publisher = mint(dir.path(), "iam-publisher");
     let consumer = mint(dir.path(), "gateway-consumer");
     let provisioner = mint(dir.path(), "iam-provisioner");
+    let gw_publisher = mint(dir.path(), "gateway-decision-publisher");
+    let gw_reader = mint(dir.path(), "gateway-decision-reader");
+    let gw_provisioner = mint(dir.path(), "gateway-decision-provisioner");
     let sys = mint(dir.path(), "sys");
 
     // The permission lists are read from the COMMITTED template verbatim; only the identities are
@@ -117,7 +123,10 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
         .replace("{{SYS_NKEY}}", &sys.public_key)
         .replace("{{PUBLISHER_NKEY}}", &publisher.public_key)
         .replace("{{CONSUMER_NKEY}}", &consumer.public_key)
-        .replace("{{PROVISIONER_NKEY}}", &provisioner.public_key);
+        .replace("{{PROVISIONER_NKEY}}", &provisioner.public_key)
+        .replace("{{GW_DEC_PUBLISHER_NKEY}}", &gw_publisher.public_key)
+        .replace("{{GW_DEC_READER_NKEY}}", &gw_reader.public_key)
+        .replace("{{GW_DEC_PROVISIONER_NKEY}}", &gw_provisioner.public_key);
 
     // Named, not inlined: `server_conf` varies per caller (the TLS fixture picks a different file),
     // so a typo must panic with the path it looked for rather than a bare "os error 2".
@@ -143,6 +152,9 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
         publisher,
         consumer,
         provisioner,
+        gw_publisher,
+        gw_reader,
+        gw_provisioner,
     })
 }
 
@@ -825,4 +837,184 @@ async fn a_rotated_credential_restores_a_denied_publish_without_a_restart() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The gateway tool decision log account (SMA-755 § 5.10, P-13, P-15, P-16). The calls below are the
+// exact calls of the relay (`get_or_create_stream`, `send_publish` with a message id) and of the
+// export CLI (`get_stream_no_info`, `create_consumer(OrderedConfig)`).
+// ---------------------------------------------------------------------------------------------
+
+const GW_STREAM: &str = "GATEWAY_DECISIONS";
+const GW_PUBLISHER_INBOX: &str = "_INBOX_GW_DEC";
+const GW_READER_INBOX: &str = "_INBOX_GW_RD";
+const GW_PROVISIONER_INBOX: &str = "_INBOX_GW_PROV";
+
+/// The stream config of `ops/nats/subjects.env`, except `max_bytes`: the fixture account holds
+/// 256 MiB, and a limit above the account limit is refused by the broker.
+fn gw_stream_config() -> jetstream::stream::Config {
+    jetstream::stream::Config {
+        name: GW_STREAM.to_string(),
+        subjects: vec!["gateway.decision.>".to_string()],
+        retention: jetstream::stream::RetentionPolicy::Limits,
+        storage: jetstream::stream::StorageType::File,
+        max_age: Duration::from_secs(2_592_000),
+        max_bytes: 134_217_728,
+        discard: jetstream::stream::DiscardPolicy::Old,
+        duplicate_window: Duration::from_secs(120),
+        max_message_size: 65_536,
+        num_replicas: 1,
+        ..Default::default()
+    }
+}
+
+/// Publishes one event with a message id, as the relay does, and waits for the PubAck.
+async fn gw_publish(js: &jetstream::Context, subject: &str, id: &str) -> jetstream::publish::PublishAck {
+    let publish = jetstream::message::PublishMessage::build().message_id(id).payload("{}".into());
+    js.send_publish(subject.to_string(), publish)
+        .await
+        .expect("the publish is accepted locally")
+        .await
+        .expect("the publisher grant must deliver a PubAck")
+}
+
+#[tokio::test]
+async fn the_decision_publisher_ensures_the_stream_and_publishes_with_an_ack() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, _events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    let js = jetstream::new(client);
+    // The relay reads the account limit first, to size `max_bytes` (SMA-755 § 5.10).
+    let account = js.query_account().await.expect("the publisher grant must cover $JS.API.INFO");
+    assert_eq!(account.limits.max_storage, Some(268_435_456), "the reply holds the limit of the fixture account");
+    js.get_or_create_stream(gw_stream_config())
+        .await
+        .expect("the publisher grant must cover STREAM.INFO and STREAM.CREATE under the account limits");
+    let subject = format!("gateway.decision.{}", Uuid::from_u128(7));
+    let ack = gw_publish(&js, &subject, "decision-1").await;
+    assert_eq!(ack.stream, GW_STREAM);
+    assert_eq!(ack.sequence, 1);
+}
+
+#[tokio::test]
+async fn the_decision_publisher_cannot_read_delete_or_touch_iam() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    let _sub = client.subscribe("gateway.decision.>").await.expect("subscribe is accepted locally, then refused");
+    client.flush().await.expect("flush");
+    expect_permissions_violation(&mut events, "gateway.decision.>").await;
+    expect_publish_denied(&client, &mut events, "$JS.API.STREAM.DELETE.GATEWAY_DECISIONS").await;
+    expect_publish_denied(&client, &mut events, "$JS.API.STREAM.PURGE.GATEWAY_DECISIONS").await;
+    expect_publish_denied(&client, &mut events, "iam.role.granted").await;
+}
+
+#[tokio::test]
+async fn the_decision_reader_reads_with_an_ordered_consumer() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    jetstream::new(pclient)
+        .get_or_create_stream(gw_stream_config())
+        .await
+        .expect("the provisioner grant must cover stream creation");
+    let (wclient, _wevents) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    let wjs = jetstream::new(wclient);
+    let subject = format!("gateway.decision.{}", Uuid::from_u128(9));
+    gw_publish(&wjs, &subject, "decision-1").await;
+    gw_publish(&wjs, &subject, "decision-2").await;
+
+    let (client, _events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    let js = jetstream::new(client);
+    let stream = js.get_stream_no_info(GW_STREAM).await.expect("get_stream_no_info makes no network call");
+    // The account has `max_mem: 0`: this create fails if an ordered consumer asks for memory storage.
+    // `DeliverPolicy::All` here, not `ByStartTime`: the latter needs the `time` crate, and the
+    // permission subjects are the same for both.
+    let consumer = stream
+        .create_consumer(jetstream::consumer::pull::OrderedConfig {
+            filter_subject: subject.clone(),
+            deliver_policy: jetstream::consumer::DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .expect("an ordered consumer must work under the account limits (max_mem 0) with the reader grants");
+    assert_eq!(consumer.cached_info().num_pending, 2);
+    let mut messages = consumer.clone().messages().await.expect("start the read");
+    for _ in 0..2 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), messages.next())
+            .await
+            .expect("a published event must be delivered")
+            .expect("stream yields a message")
+            .expect("message is Ok");
+        assert_eq!(msg.subject.as_str(), subject);
+    }
+
+    // Delete the consumer server side with the reader's own DELETE grant. The ordered consumer must
+    // recreate itself (a named CREATE with a filter suffix) and read on.
+    let name = consumer.cached_info().name.clone();
+    stream.delete_consumer(&name).await.expect("the reader grant must cover CONSUMER.DELETE on its own consumer");
+    gw_publish(&wjs, &subject, "decision-3").await;
+    let msg = tokio::time::timeout(Duration::from_secs(40), messages.next())
+        .await
+        .expect("the ordered consumer must recreate itself and deliver the third event")
+        .expect("stream yields a message")
+        .expect("message is Ok");
+    assert_eq!(msg.subject.as_str(), subject);
+    // All three events share one subject and one payload. Only the stream sequence shows that the
+    // recreated consumer did not replay the first or the second event.
+    let info = msg.info().expect("a stream message carries its info");
+    assert_eq!(info.stream_sequence, 3, "the recreated consumer must read on from the third event");
+}
+
+#[tokio::test]
+async fn the_decision_reader_cannot_publish_or_purge() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    expect_publish_denied(&client, &mut events, "gateway.decision.x").await;
+    expect_publish_denied(&client, &mut events, "$JS.API.STREAM.PURGE.GATEWAY_DECISIONS").await;
+    expect_publish_denied(&client, &mut events, "$JS.API.STREAM.CREATE.X").await;
+}
+
+#[tokio::test]
+async fn a_gateway_account_user_cannot_see_iam_events() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    // The IAM stream exists, in the other account.
+    provision(&fixture).await;
+    let (client, mut events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    let js = jetstream::new(client);
+    let stream = js.get_stream_no_info(STREAM).await.expect("get_stream_no_info makes no network call");
+    let created = stream
+        .create_consumer(jetstream::consumer::pull::OrderedConfig {
+            filter_subject: "iam.>".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(created.is_err(), "the reader must not create a consumer on IAM_EVENTS");
+    expect_permissions_violation(&mut events, "$JS.API.CONSUMER.CREATE.IAM_EVENTS").await;
+
+    // A user with the stream API right in the gateway account still does not find IAM_EVENTS.
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    let found = jetstream::new(pclient).get_stream(STREAM).await;
+    assert!(found.is_err(), "IAM_EVENTS lives in another account and must not be visible");
+}
+
+/// After a reconnect, an ordered consumer calls `consumer.get_info()` (async-nats 0.52 `pull.rs:990`),
+/// which sends `$JS.API.CONSUMER.INFO.<stream>.<name>`. The reader grant must cover it.
+#[tokio::test]
+async fn the_decision_reader_can_read_its_consumer_info() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    jetstream::new(pclient)
+        .get_or_create_stream(gw_stream_config())
+        .await
+        .expect("the provisioner grant must cover stream creation");
+    let (client, _events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    let stream = jetstream::new(client).get_stream_no_info(GW_STREAM).await.expect("get_stream_no_info makes no network call");
+    let mut consumer = stream
+        .create_consumer(jetstream::consumer::pull::OrderedConfig {
+            filter_subject: "gateway.decision.>".to_string(),
+            deliver_policy: jetstream::consumer::DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .expect("create the ordered consumer");
+    let info = consumer.info().await.expect("the reader grant must cover CONSUMER.INFO on its own consumer");
+    assert_eq!(info.stream_name, GW_STREAM);
 }

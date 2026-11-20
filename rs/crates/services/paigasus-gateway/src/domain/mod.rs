@@ -4,6 +4,7 @@
 //! bearer credential, and the organization resolution the OIDC path uses (SMA-635). Consumed by
 //! the chat handler to log request metadata (never the prompt/response body or any other PII).
 
+pub mod decision_log;
 pub mod limits;
 pub mod tool_policy;
 

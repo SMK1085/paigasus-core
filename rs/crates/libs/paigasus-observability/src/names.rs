@@ -74,6 +74,30 @@ pub const GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS: &str = "gateway_tool_policy_over
 pub const GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL: &str = "gateway_tool_policy_nats_invalidations_total";
 /// 1 while the tool-policy NATS client is connected, else 0. Set on each connect and disconnect event.
 pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_connected";
+/// Tool-policy findings (SMA-755 § 5.9). `side` = `request` | `response`; `kind` = `name_collision` |
+/// `unparsed_arguments` | `other` (a kind that this service does not know).
+pub const GATEWAY_TOOL_POLICY_FINDINGS_TOTAL: &str = "gateway_tool_policy_findings_total";
+// Gateway tool decision log (SMA-755 § 5.9). No label carries a tool name, an org or an argument.
+/// Records that the decision log accepted from the recorder (counted before the queue).
+pub const GATEWAY_DECISION_LOG_RECORDED_TOTAL: &str = "gateway_decision_log_recorded_total";
+/// Events that the writer put into the Redis stream.
+pub const GATEWAY_DECISION_LOG_WRITTEN_TOTAL: &str = "gateway_decision_log_written_total";
+/// Events that the gateway dropped; `reason` = `queue_full` | `closed` | `redis_unavailable` |
+/// `write_error` | `breaker_open` | `backlog_full` | `publish_rejected` | `redis_deleted` | `shutdown`.
+pub const GATEWAY_DECISION_LOG_DROPPED_TOTAL: &str = "gateway_decision_log_dropped_total";
+/// Panics that a decision-log task caught and survived; `task` = `writer` | `relay`.
+pub const GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL: &str = "gateway_decision_log_task_restarts_total";
+/// Events with a JetStream PubAck (the relay).
+pub const GATEWAY_DECISION_LOG_PUBLISHED_TOTAL: &str = "gateway_decision_log_published_total";
+/// Redis losses that the relay detected (`NOGROUP`, then the group was made again). One per incident.
+pub const GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL: &str = "gateway_decision_log_redis_resets_total";
+/// An estimate of the events in the Redis losses (the last `XLEN` sample of the relay). It can undercount (writes
+/// after the sample) or overcount (publishes after the sample).
+pub const GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL: &str = "gateway_decision_log_lost_estimate_total";
+/// Seconds from the publish of an event to its PubAck.
+pub const GATEWAY_DECISION_LOG_PUBLISH_SECONDS: &str = "gateway_decision_log_publish_seconds";
+/// `XLEN` of the decision stream, sampled every 15 s by the relay.
+pub const GATEWAY_DECISION_LOG_BACKLOG: &str = "gateway_decision_log_backlog";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -340,6 +364,16 @@ pub const ALL: &[&str] = &[
     GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
     GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
     GATEWAY_TOOL_POLICY_NATS_CONNECTED,
+    GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+    GATEWAY_DECISION_LOG_RECORDED_TOTAL,
+    GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
+    GATEWAY_DECISION_LOG_DROPPED_TOTAL,
+    GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
+    GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+    GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+    GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+    GATEWAY_DECISION_LOG_PUBLISH_SECONDS,
+    GATEWAY_DECISION_LOG_BACKLOG,
     IAM_HTTP_REQUESTS_TOTAL,
     IAM_HTTP_REQUEST_DURATION_SECONDS,
     IAM_HTTP_INFLIGHT_REQUESTS,
@@ -431,7 +465,29 @@ mod tests {
 
     #[test]
     fn the_gateway_tool_policy_decision_families_are_registered() {
-        for name in [GATEWAY_TOOL_POLICY_DECISIONS_TOTAL, GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS] {
+        for name in [
+            GATEWAY_TOOL_POLICY_DECISIONS_TOTAL,
+            GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
+            GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
+            GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_gateway_decision_log_families_are_registered() {
+        for name in [
+            GATEWAY_DECISION_LOG_RECORDED_TOTAL,
+            GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
+            GATEWAY_DECISION_LOG_DROPPED_TOTAL,
+            GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
+            GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+            GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+            GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+            GATEWAY_DECISION_LOG_PUBLISH_SECONDS,
+            GATEWAY_DECISION_LOG_BACKLOG,
+        ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }
     }

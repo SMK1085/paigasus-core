@@ -114,7 +114,10 @@ check_identity() {
 
 check_identity iam-publisher    '{{PUBLISHER_NKEY}}'   PUBLISHER_PUB   PUBLISHER_SUB   '{{CONSUMER_NKEY}}'
 check_identity gateway-consumer '{{CONSUMER_NKEY}}'    CONSUMER_PUB    CONSUMER_SUB    '{{PROVISIONER_NKEY}}'
-check_identity iam-provisioner  '{{PROVISIONER_NKEY}}' PROVISIONER_PUB PROVISIONER_SUB ''
+check_identity iam-provisioner  '{{PROVISIONER_NKEY}}' PROVISIONER_PUB PROVISIONER_SUB '{{GW_DEC_PUBLISHER_NKEY}}'
+check_identity gateway-decision-publisher   '{{GW_DEC_PUBLISHER_NKEY}}'   GW_DEC_PUBLISHER_PUB   GW_DEC_PUBLISHER_SUB   '{{GW_DEC_READER_NKEY}}'
+check_identity gateway-decision-reader      '{{GW_DEC_READER_NKEY}}'      GW_DEC_READER_PUB      GW_DEC_READER_SUB      '{{GW_DEC_PROVISIONER_NKEY}}'
+check_identity gateway-decision-provisioner '{{GW_DEC_PROVISIONER_NKEY}}' GW_DEC_PROVISIONER_PUB GW_DEC_PROVISIONER_SUB ''
 
 if [ "$fail" -ne 0 ]; then
   echo "ops/nats: accounts.conf.tmpl and subjects.env disagree" >&2

@@ -259,3 +259,69 @@ chmod 600 "$OUT_DIR/gateway-consumer.creds"
 Deploy the new `gateway-consumer.creds` with the gateway. Then restart the gateway: the server
 reads the permissions from the user JWT when the client connects. Check that the log has no new
 `ServerError` line. Do not look for a metric: none exists.
+
+---
+
+## 10. The gateway decision log: account, stream and identities (SMA-755)
+
+The gateway tool decision log keeps its events in the stream `GATEWAY_DECISIONS` in the account
+`PAIGASUS_GATEWAY`. The account is separate from `PAIGASUS_IAM`, so a full decision stream cannot
+stop `IAM_EVENTS`. The reasons for each grant are in
+[`ops/nats/permissions.md`](../../ops/nats/permissions.md) §11.
+
+**Identities.**
+
+| identity | use | deploy it? |
+|---|---|---|
+| `gateway-decision-publisher` | the gateway relay | yes, with the gateway (`[decision_log.nats] creds_file`) |
+| `gateway-decision-reader` | the export CLI | **never** with the gateway; give it to the person who runs the export |
+| `gateway-decision-provisioner` | makes the stream | **never**; an operator artifact |
+
+**Stream.** Name `GATEWAY_DECISIONS`, subjects `gateway.decision.>`, file storage, retention
+limits, `max-age` 30 days, `max-bytes` 90 % of the account disk, `discard old`, duplicate window
+120 s, max message size 65 536, 1 replica. The values are in `ops/nats/subjects.env`. The relay makes
+the same stream if it is absent, and it warns about a drift but does not change a stream that exists.
+
+**Sizing.** `disk = peak decisions per second x average event bytes x 86 400 x 30`. At 600 bytes
+per event, the default disk of 20 GiB holds about 13 decisions per second, sustained, for 30 days.
+For more traffic, set `DECISIONS_ACCOUNT_DISK_BYTES` before you run `provision-decisions.sh`, or
+accept that `discard old` keeps fewer days.
+
+**Existing deployment.** A larger `DECISIONS_ACCOUNT_DISK_BYTES` and a re-run with `PUSH=1` change only the
+account limit. The script does not change a stream that exists, so `max-bytes` stays at the old value.
+After the re-run, edit the stream with the provisioner identity:
+`nats --server "$NATS_URL" --creds "$OUT_DIR/gateway-decision-provisioner.creds" --inbox-prefix _INBOX_GW_PROV
+stream edit GATEWAY_DECISIONS --max-bytes <DECISIONS_MAX_BYTES>`. If the new value is above the default
+(19 327 352 832 bytes), the relay logs a `max_bytes` drift warning, because its value never goes above the
+default. This warning is expected.
+
+**The relay and the account limit.** Before the relay makes or checks `GATEWAY_DECISIONS`, it reads the account
+storage limit with `$JS.API.INFO`. It sets `max-bytes` to 90 % of that limit, the rule of `subjects.env`, when
+that is below the default of 19 327 352 832 bytes. With no limit, or a larger one, it uses the default. So a
+smaller `DECISIONS_ACCOUNT_DISK_BYTES` does not make the broker refuse the create, and a stream that
+`provision-decisions.sh` made for that limit is not a drift. If the query fails, the relay logs
+`the relay cannot read the account limits; it uses the default max_bytes` and uses the default. A publisher user
+that was made before the `$JS.API.INFO` grant does not have it: add it with `nsc edit user --account
+PAIGASUS_GATEWAY --name gateway-decision-publisher --allow-pub '$JS.API.INFO'` (§9 shows the pattern). Without it, each stream check waits for the request timeout, and the broker reports a permission
+violation, which the relay logs as `the decision-log NATS publisher has no permission to publish`.
+
+**Provision.** `ops/nats/provision-decisions.sh` takes the inputs of `provision.sh` (`OPERATOR`,
+`OUT_DIR`, `NATS_URL`, `PUSH`). It is safe to run again. Without `PUSH=1` it makes the account, the
+users and the creds files. With `PUSH=1` it pushes the account, and makes the stream only if
+`nats stream info` finds none. An existing user keeps its old permissions: use `nsc edit user` to
+change one (§9 shows the pattern). `provision.sh` calls the script for a new environment.
+
+**Rollout order.** 1. Provision (the script above). 2. Deploy `gateway-decision-publisher.creds`
+with the gateway and set `[decision_log.nats]`. 3. Set `[decision_log] enabled = true`. Events wait
+in Redis until the relay can publish.
+
+**Operator rules.**
+
+- The reader creds are never deployed with the gateway. The provisioner creds are an operator artifact.
+- Write access to the Redis of the decision log equals write access to the decision log. Protect it as
+  you protect the log.
+- Use Redis 7.0 or later with `maxmemory-policy noeviction` and `appendonly yes`. Use a Redis instance
+  apart from the limits store.
+- The gateway hosts need NTP. A clock skew of a few seconds can put two calls in the wrong order.
+- Keep an old `digest_key` for 30 days after a rotation, the same as the stream retention. Without it,
+  you cannot check an old event.
