@@ -10,6 +10,26 @@ A maintainer writes this file by hand. The version source is the `version` field
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-20
+
+### Added
+
+- The header shows the Paigasus logo, then the product name. Each console serves a
+  `favicon.ico`, also for a visitor who is not signed in (SMA-773).
+- The navigation is a collapsible sidebar beside the page. It lists the pages of this console
+  only, in groups named Directory and Administration. A "Navigation" button collapses it at any
+  width. It starts open from 768 px and collapsed on a narrow screen (SMA-783).
+- The brand is a console switcher. A click opens a menu with the other consoles (SMA-783).
+- The user menu button and the organization switcher show initials. The full names stay in the
+  accessible names (SMA-783).
+
+### Changed
+
+- The dialog footer is one right-aligned row at every width. The focus ring has a contrast of 3.6:1
+  in the light theme. The destructive text has a contrast of 6.1:1 in the dark theme (SMA-783).
+- The error page for a quota refusal shows "Usage limit reached". Its text tells the user that the
+  organization used its token budget for the period (SMA-677).
+
 ## [0.2.0] - 2026-09-27
 
 ### Added

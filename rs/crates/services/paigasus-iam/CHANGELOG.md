@@ -10,6 +10,8 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-20
+
 ### Added
 
 - A new table, `[authn.dpop]`, turns on the DPoP proof check of the gateway path (RFC 9449). It is
@@ -46,6 +48,54 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 - The Helm chart has a new value, `oidc.accessTokenRequiredClaims`. It renders the list into
   `IAM_AUTHN__ISSUERS`. The default is `[]`, and the render does not change. A change of the value
   restarts the IAM pod (SMA-731).
+
+- A new table, `[tool_policies]`, turns on the tool catalog and the tool policy sets of an
+  organization. It is off by default (`enabled = false`). With `enabled = true`, IAM runs the
+  policy compiler child process `compiler_path` once at boot. If the compiler is missing, IAM
+  still boots and the feature reports `capability-disabled`. The table also sets the compiler
+  limits: `compile_timeout_ms`, `max_source_bytes`, `max_result_bytes`, `rlimit_as_bytes`,
+  `rlimit_cpu_secs`, `compiler_permits` and `max_window_secs`. It sets the catalog limits:
+  `max_tools`, `max_input_schema_bytes`, `max_schema_depth` and `max_catalog_response_bytes`
+  (SMA-774).
+- IAM gets a tool catalog for each organization, and a tool policy set with a version history.
+  The routes are `/v1/organizations/{id}/tools`, `/v1/organizations/{id}/tool-imports`,
+  `/v1/organizations/{id}/tool-policy-set` and `/v1/tool-policy-floor`. The gRPC API has the same
+  calls. IAM compiles a Dogwood policy source to Cedar in a hardened child process (SMA-774).
+- Each organization has two tool policy settings: `mode` (`off`, `log_only` or `enforce`) and
+  `fail_mode` (`closed` or `open`). Use `PUT` and `GET` on
+  `/v1/organizations/{id}/tool-policy-settings`. The new actions are `ManageToolPolicySettings` and
+  `ReadToolPolicies`. The `org_admin` role has both (SMA-775).
+- IAM serves the compiled tool policies to the gateway on
+  `/v1/organizations/{id}/compiled-tool-policies` and `/v1/compiled-tool-policy-floor`. The gateway
+  reads them with a service credential, an API key with the new `tool_policy_reader` role
+  (SMA-775).
+- IAM compiles the live tool policy sets again after a compiler or schema change. When the output
+  differs, or the compile rejects the set, IAM keeps the live version and stores a held version. The
+  gateway never reads a held version. An admin lists, accepts or discards a held version on
+  `/v1/organizations/{id}/held-tool-policy-versions`. Routes for the whole platform are
+  `/v1/held-tool-policy-versions`, `/v1/tool-policy-floor/held-versions/{version}/accept` and
+  `/v1/tool-policy-recompile`. A write of the tool catalog fails with
+  `tool-policy-recompile-pending` while a held version waits. IAM adds the migration
+  `m0015_tool_policy_held_versions` (SMA-781).
+
+### Changed
+
+- The policy compiler uses Dogwood 1.2.0 and `cedar-policy` 4.14.0. `COMPILER_GENERATION` is now 2,
+  so IAM compiles the live tool policy sets again after the upgrade. Cedar 4.14 prints
+  `context.findings.contains` where it printed `(context.findings).contains`. Dogwood 1.2.0 now
+  rejects an impossible policy in its own validation step, before the shape and window checks
+  (SMA-800).
+- The HTTP clients of IAM use `reqwest` 0.13 with the operating-system trust store. The image no
+  longer has a compiled-in Mozilla root list. On Linux, an empty system store with no
+  `extra_ca_bundle_path` is a client build error. The `jsonwebtoken` and `async-nats` libraries
+  moved to 12 and 0.53 (SMA-809).
+- IAM refuses to boot when `outbox.publisher.root_ca_bundle` is set and the broker URL is plain
+  `nats://`. `async-nats` 0.53 makes a root certificate imply TLS (SMA-809).
+
+### Security
+
+- The policy compiler moves to `cedar-policy` 4.14.0. This closes the Dependabot alert
+  GHSA-c33x-vcv4-vg3g, which needs `cedar-policy` 4.11.1 or newer (SMA-800).
 
 ## [0.2.1] - 2026-10-03
 
