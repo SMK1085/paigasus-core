@@ -295,7 +295,7 @@ async fn file_ancestor(ws: &mut MemoryWorkspace, file: &MemoryPath) -> Result<Op
         prefix.push('/');
         prefix.push_str(segment);
         let ancestor = MemoryPath::parse(&prefix)?;
-        if ws.read(&ancestor).await?.is_some() {
+        if ws.exists(&ancestor).await? {
             return Ok(Some(ancestor));
         }
     }
@@ -307,7 +307,7 @@ async fn file_ancestor(ws: &mut MemoryWorkspace, file: &MemoryPath) -> Result<Op
 async fn targets(ws: &mut MemoryWorkspace, parsed: &ParsedToolPath, raw: &str) -> Result<Vec<MemoryPath>, MemoryCommandError> {
     let under = ws.list(&parsed.dir).await?;
     let is_file = match &parsed.file {
-        Some(f) => ws.read(f).await?.is_some(),
+        Some(f) => ws.exists(f).await?,
         None => false,
     };
     match (&parsed.file, is_file, under.is_empty() || parsed.dir.is_root()) {
@@ -726,6 +726,35 @@ mod tests {
         assert_eq!(content(&mut ws, "/b/z").await.as_deref(), Some("xx"));
         assert_eq!(content(&mut ws, "/b/y").await.as_deref(), Some("yy"));
         assert_eq!(content(&mut ws, "/a/y").await, None);
+    }
+
+    #[tokio::test]
+    async fn delete_of_a_listed_file_changed_outside_the_run_is_a_conflict() {
+        let (store, scope, mut ws) = committed_parts(&[("/k", "v1")], MemoryCaps::default()).await;
+        run(&mut ws, json!({"command":"view","path":"/memories"})).await.unwrap();
+        other_writer(&store, &scope, "/k", "console").await;
+        let err = run(&mut ws, json!({"command":"delete","path":"/memories/k"})).await.unwrap_err();
+        assert_eq!(
+            err,
+            "The file /memories/k changed outside this run. Your changes to it in this run are gone. Use view to read it again."
+        );
+        ws.commit().await.unwrap();
+        let mut fresh = MemoryWorkspace::new(store, scope, MemoryCaps::default());
+        assert_eq!(content(&mut fresh, "/k").await.as_deref(), Some("console"));
+    }
+
+    #[tokio::test]
+    async fn the_ancestor_check_keeps_the_first_sight_version() {
+        let (store, scope, mut ws) = committed_parts(&[("/a", "v1")], MemoryCaps::default()).await;
+        run(&mut ws, json!({"command":"view","path":"/memories"})).await.unwrap();
+        other_writer(&store, &scope, "/a", "console").await;
+        let err = run(&mut ws, json!({"command":"create","path":"/memories/a/b","file_text":"x"})).await.unwrap_err();
+        assert!(err.contains("The file /memories/a exists"), "{err}");
+        let err = run(&mut ws, json!({"command":"create","path":"/memories/a","file_text":"mine"})).await.unwrap_err();
+        assert!(err.starts_with("The file /memories/a changed outside this run."), "{err}");
+        ws.commit().await.unwrap();
+        let mut fresh = MemoryWorkspace::new(store, scope, MemoryCaps::default());
+        assert_eq!(content(&mut fresh, "/a").await.as_deref(), Some("console"));
     }
 
     #[tokio::test]

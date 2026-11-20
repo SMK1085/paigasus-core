@@ -187,8 +187,10 @@ a read cache and a `MemoryChangeSet`.
   the entries it returns) goes to the store and is cached with its version. A `list` also records
   its directory: a path under a listed directory that the listing did not return has the baseline
   "absent", so a file that another writer creates after the listing is a conflict at the write. A
-  `get` of a path that only a listing saw takes the fetched file as the baseline, because the
-  model now sees that file; a cached listing that shows another state of the path is dropped. Later reads of that path
+  read whose content goes to the model (`view`, `str_replace`, `insert`, the sources of `rename`)
+  of a path that only a listing saw takes the fetched file as the baseline; a cached listing that
+  shows another state of the path is dropped. An internal existence check (`exists`: the targets
+  of `delete` and `rename`, the file-in-file check) keeps the first-sight version. Later reads of that path
   come from the cache, then the buffer on top. A buffered `Delete` hides a file. A buffered `Put`
   shows the new content.
 - **Write: the expected value.** A write records a change with the cached version, or `Absent` when

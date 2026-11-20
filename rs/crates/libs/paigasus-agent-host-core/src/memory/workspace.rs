@@ -127,6 +127,49 @@ impl MemoryWorkspace {
         Ok(file.map(|f| f.content))
     }
 
+    /// True when the file exists for this run. This is an internal check: the model does not get
+    /// the content, so the first-sight version stays the baseline. It answers from the buffer
+    /// and the cache first. A path that the run has not seen is fetched. When a listing saw the
+    /// path absent and the store now holds it, the answer is `true`, but the baseline stays
+    /// "absent", so a write to the path is a conflict.
+    pub async fn exists(&mut self, path: &MemoryPath) -> Result<bool, WorkspaceError> {
+        match self.changes.get(path) {
+            Some(MemoryChange::Put { .. }) => return Ok(true),
+            Some(MemoryChange::Delete { .. }) => return Ok(false),
+            None => {}
+        }
+        if let Some(k) = self.known.get(path) {
+            return Ok(k.version.is_some());
+        }
+        let file = self.store.get(&self.scope, path).await?;
+        let listed_absent = self.listed.iter().any(|d| d.contains(path));
+        match file {
+            Some(_) if listed_absent => Ok(true),
+            Some(f) => {
+                self.known.insert(
+                    path.clone(),
+                    Known {
+                        version: Some(f.version),
+                        size: f.content.len() as u64,
+                        content: Some(f.content),
+                    },
+                );
+                Ok(true)
+            }
+            None => {
+                self.known.insert(
+                    path.clone(),
+                    Known {
+                        version: None,
+                        size: 0,
+                        content: None,
+                    },
+                );
+                Ok(false)
+            }
+        }
+    }
+
     /// List every file under `dir` with its size, in byte order of the path.
     pub async fn list(&mut self, dir: &MemoryDir) -> Result<Vec<(MemoryPath, u64)>, WorkspaceError> {
         if !self.listings.contains_key(dir.as_str()) {
