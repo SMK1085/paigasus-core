@@ -1,7 +1,8 @@
 # @paigasus/app-shell
 
-The shared chrome of every Paigasus console zone: the header, the primary
-navigation, the org and team switcher, the user menu, and breadcrumbs.
+The shared chrome of every Paigasus console zone: the header, the console
+switcher, the primary navigation sidebar, the org and team switcher, the user
+menu, and breadcrumbs.
 
 The package is also the one place that knows the zone map. A link to another
 zone must be a hard navigation (ADR-0017). `ZoneLink` makes it one.
@@ -14,6 +15,27 @@ zone must be a hard navigation (ADR-0017). `ZoneLink` makes it one.
 | `PublicShell`                         | `ZoneProvider` only. It never calls `useSession()`.                                                                                          |
 | `PrimaryNav`                          | `ZoneProvider` and `SessionProvider`.                                                                                                        |
 | `ZoneLink`, `Switcher`, `Breadcrumbs` | `ZoneProvider`.                                                                                                                              |
+
+## The shell layout (SMA-783)
+
+`AppShell` renders a header and, below it, the Primary nav as a left sidebar
+beside `main`.
+
+- **Header:** the sidebar toggle, the brand, the switchers, and the user menu.
+- **Console switcher:** pass `consoles` (every console, the current one
+  included) and the brand becomes a menu button that lists them. The Pegasus
+  mark morphs into a grid glyph on hover and focus. A click opens the menu, and
+  hover never does. With fewer than two consoles, the brand stays a plain link.
+- **Sidebar:** the toggle ("Navigation", with `aria-expanded`) shows and hides
+  it. The sidebar is open by default from 768px up and collapsed below. On a
+  narrow screen it opens over `main`, and Escape or a followed link closes it.
+  The choice lasts until the next full page load.
+- **Groups:** give a `NavEntry` a `group` to put it under that heading.
+- **Switcher badge:** pass `initials` for a square badge of the current item's
+  initials. The name then truncates, and hides below 768px. `icon` (for example
+  `OrganizationIcon`) shows while nothing is selected.
+- **User menu:** the trigger is an avatar with the user's initials. Its
+  accessible name and tooltip are the full name.
 
 The app's server layout calls `getPublicConfig()` from
 `@paigasus/next-config/runtime` and passes `zone` and `zones` to `ZoneProvider`
@@ -94,10 +116,15 @@ as the entry's `state`. `navStateOf` applies `@paigasus/discovery`'s
 `capabilityOutcome`, which is the one copy of `<Capability>`'s branch table.
 `navStateOf` has no `'use client'` directive, so a server layout can call it.
 
-For each entry, the first rule that applies decides:
+For each entry, the first rule that applies decides. `PrimaryNav` and the
+console switcher share the rules (`src/nav/rows.ts`), and only `PrimaryNav`
+applies rule 2a:
 
 1. The entry's `zone` is not in the zone map: nothing.
 2. The entry's `href` does not resolve to its `zone`: `ZoneLinkError`.
+   2a. The entry's `zone` is not the current zone: `ZoneLinkError`. The Primary
+   nav lists the current console's pages only. Another console goes in
+   `consoles`.
 3. The state is `absent`: nothing.
 4. `requires` is set and `can(session, requires)` is false: nothing. This is
    cosmetic only, and `can()` fails open when grants are not available.

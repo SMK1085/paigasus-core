@@ -66,7 +66,7 @@ export function DialogHeader({ className, ...props }: ComponentPropsWithoutRef<'
 }
 
 export function DialogFooter({ className, ...props }: ComponentPropsWithoutRef<'div'>): ReactElement {
-  return <div className={cn('flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)} {...props} />;
+  return <div className={cn('flex flex-row items-center justify-end gap-2', className)} {...props} />;
 }
 
 export function DialogTitle({ className, ...props }: ComponentPropsWithoutRef<typeof DialogPrimitive.Title>): ReactElement {

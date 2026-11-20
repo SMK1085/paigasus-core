@@ -194,6 +194,30 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   fixed-path `.mjs` files".
   The kind-only specs in `apps/iam-console/tests/cluster/` run only from `ci/kind/run.sh specs a|b|journeys`.
 
+## pnpm
+
+- **pnpm is 12.22.0** (SMA-812; was 11.3.0). The pin lives in four places that must agree: `.prototools`,
+  `.moon/toolchains.yml`, the `corepack prepare pnpm@X.Y.Z` line of `ts/Dockerfile`, and the fixtures
+  in `ci/images/console-selftest.sh`. `ci/images/run.sh` checks the Dockerfile against `.prototools`.
+  The lockfile stays `lockfileVersion: '9.0'`. The 12.22.0 install did not change it, and no package
+  version moved. No key of `ts/pnpm-workspace.yaml` needed a rename. Since pnpm 12, an unknown key in
+  that file fails the command (`ERR_PNPM_UNRECOGNIZED_WORKSPACE_SETTINGS`), so a typo there is now loud.
+- **Three behaviours, MEASURED on 12.22.0 in scratch projects outside the repo (11.3.0 results were
+  measured earlier).** All three hold.
+  1. `allowBuilds`: an unlisted dependency with a build script fails the install with
+     `ERR_PNPM_IGNORED_BUILDS`. `allowBuilds: { <pkg>: true }` runs it. `<pkg>: false` skips it with no
+     error. The old `onlyBuiltDependencies` key is still ignored. One trap: a `file:` tarball
+     dependency is NOT matched by its bare name. It needs the full key, for example
+     `'probe-build@file:../probe-build-1.0.0.tgz'`. A registry package matches by name.
+  2. `engineStrict: true` in `pnpm-workspace.yaml` fails with `ERR_PNPM_UNSUPPORTED_ENGINE`. This holds
+     for a workspace member with `engines.node` above the running Node and for a dependency that
+     declares it. `engine-strict=true` in `.npmrc` still only warns, or does nothing for a dependency.
+  3. `minimumReleaseAge`: an explicit `minimumReleaseAge: 1440` refuses a version that is 16 hours old
+     (`vitest@5.1.1`) on a fresh install, and a `^5` range falls back to the older release. The built-in
+     default (no key) still refuses the same version in `pnpm install --frozen-lockfile`, which is the
+     CI path. A fresh, non-frozen install of an exact too-new pin with no key did NOT refuse. That case
+     was not measured on 11.3.0, so it is not known to be a change.
+
 ## Auth, sessions and the console packages
 
 - **`@paigasus/auth` under a Next `basePath`** (MEASURED on Next 16.3.4, SMA-511 spec § 13 row 1).

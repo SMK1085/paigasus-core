@@ -86,10 +86,12 @@ test('R9: the cross-zone link is a hard navigation and the same-zone one is not 
   // The window was never replaced, so the marker this test set is still there.
   expect(await readMarker(page)).toBe('first-load');
 
-  // CROSS ZONE: the primary nav's "IAM" entry targets `/iam/orgs`, a different zone, so ZoneLink
-  // renders it as a plain <a> (a hard navigation — spec § 6.2, ADR-0017).
+  // CROSS ZONE: the console switcher's "IAM" item targets `/iam/orgs`, a different zone, so ZoneLink
+  // renders it as a plain <a> (a hard navigation — spec § 6.2, ADR-0017). Since SMA-783 another
+  // console is reached through the switcher on the brand, not through the Primary nav.
   const crossZoneStart = log.length;
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'IAM', exact: true }).click();
+  await page.getByRole('banner').getByRole('button', { name: 'Switch console: Paigasus AI Gateway' }).click();
+  await page.getByRole('menuitem', { name: 'IAM', exact: true }).click();
   await page.waitForURL(`${harness.origin}/iam/orgs`);
   // Exactly one `document` request, for the target path: a real, full page load.
   expect(documentsAfter(log, crossZoneStart).map((entry) => entry.pathname)).toEqual(['/iam/orgs']);

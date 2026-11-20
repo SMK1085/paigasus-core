@@ -586,6 +586,7 @@ async fn client_abort_cancels_upstream_request() {
     });
 
     // A REAL reqwest client starts the stream with a valid bearer.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{gw_addr}/v1/chat/completions"))

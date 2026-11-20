@@ -144,8 +144,10 @@ async fn a_catalog_delete_that_breaks_a_live_policy_is_rejected_by_the_real_comp
 }
 
 #[tokio::test]
-async fn the_boot_probe_reads_generation_1() {
-    let Some(path) = support::real_compiler_path("the_boot_probe_reads_generation_1") else { return };
+async fn the_boot_probe_reads_the_current_generation() {
+    let Some(path) = support::real_compiler_path("the_boot_probe_reads_the_current_generation") else {
+        return;
+    };
     assert!(path.is_file(), "{}", path.display());
     let config = ToolPoliciesConfig {
         enabled: true,
@@ -153,7 +155,7 @@ async fn the_boot_probe_reads_generation_1() {
         ..ToolPoliciesConfig::default()
     };
     let compiler = probe(&config).await.expect("the boot probe accepts the real compiler");
-    assert_eq!(compiler.generation(), 1);
+    assert_eq!(compiler.generation(), 2);
 }
 
 /// Saves a policy that reads a field the JSON Schema mapping dropped. Prints the real message.
@@ -225,5 +227,5 @@ async fn the_job_applies_an_identical_result_with_the_real_compiler() {
     assert_eq!(results[0].outcome, RecompileOutcome::Identical { version: 2 });
     let repo = PgToolPolicies::new(env.state.db.clone());
     let live = repo.live(&ToolPolicySetKey::Floor).await.unwrap().expect("a live floor");
-    assert_eq!((live.version, live.origin, live.compiler_generation), (2, VersionOrigin::Recompile, 1));
+    assert_eq!((live.version, live.origin, live.compiler_generation), (2, VersionOrigin::Recompile, 2));
 }

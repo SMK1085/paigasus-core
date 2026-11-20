@@ -147,6 +147,16 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `gateway_tool_interception_decisions_total` | counter | `decision`, `basis` | One per decided tool call; `decision` ∈ `allow` / `block`, `basis` ∈ `decider` / `on_failure`. |
 | `gateway_tool_interception_on_failure_total` | counter | `code` | Failures that took the `on_failure` path; `code` ∈ `hold_limit` / `truncated` / `decider_error` / `malformed`. |
 | `gateway_tool_interception_hold_seconds` | histogram | — | Seconds from a hold's first tool-call frame to its completion. |
+| `gateway_tool_policy_findings_total` | counter | `side`, `kind` | SMA-755. Findings that the tool policy saw, per kind. `side` ∈ `request` (one per colliding tool name in the request) / `response` (one per finding of a decided call); `kind` ∈ `name_collision` / `unparsed_arguments` / `other` (a kind this service does not know). Primed at 0 for all six pairs with `[tool_policy] enabled = true`. |
+| `gateway_decision_log_recorded_total` | counter | — | SMA-755. Decision records that the decision log accepted from the recorder. It counts before the queue. Events that the writer dropped do not reach Redis, so `recorded` minus `written` minus `dropped{reason=~"queue_full\|closed\|redis_unavailable\|write_error\|breaker_open\|backlog_full\|shutdown"}` is the events that are still in the writer queue. Do not subtract `publish_rejected` or `redis_deleted`: the relay counts those after the write, and they are already in `written`. Primed at 0 with `[decision_log] enabled = true`. |
+| `gateway_decision_log_written_total` | counter | — | SMA-755. Events that the writer put into the Redis stream (`<key_prefix>:decisions`). |
+| `gateway_decision_log_dropped_total` | counter | `reason` | SMA-755. Events that the gateway dropped. `reason` ∈ `queue_full` (the writer queue was full) / `closed` (the queue was closed after shutdown) / `redis_unavailable` (no Redis connection yet) / `write_error` (the write failed) / `breaker_open` (the decision-log Redis breaker was open) / `backlog_full` (the stream held `stream_max_len` entries) / `publish_rejected` / `redis_deleted` (relay reasons) / `shutdown` (still queued when the shutdown budget ended). Primed at 0 for all nine values. |
+| `gateway_decision_log_task_restarts_total` | counter | `task` | SMA-755. Panics that a decision-log task caught before it went on. `task` ∈ `writer` / `relay`. A value above 0 is a defect. Primed at 0 for both values. |
+| `gateway_decision_log_published_total` | counter | — | SMA-755. Events that the relay published to the JetStream stream `GATEWAY_DECISIONS` and that got a PubAck. At rest, `written` and `published` rise together. Primed at 0. |
+| `gateway_decision_log_redis_resets_total` | counter | — | SMA-755. Losses of the Redis decision stream that the relay detected: `NOGROUP`, then the relay that made the consumer group again counts 1. An exact count of the incidents. A Redis restore from an older snapshot keeps the group and is not detected here (the export shows the gaps). Primed at 0. |
+| `gateway_decision_log_lost_estimate_total` | counter | — | SMA-755. An estimate of the events in those losses: the last `XLEN` sample (every 15 s) of the relay that made the group again. It can undercount (writes after the sample) or overcount (publishes after the sample). The error is about 15 s of writes or publishes. A relay without a sample adds 0 and logs that the loss is unknown. Use `sum()` over the instances. Primed at 0. |
+| `gateway_decision_log_publish_seconds` | histogram | — | SMA-755. Seconds from the publish of one event to its JetStream PubAck. |
+| `gateway_decision_log_backlog` | gauge | — | SMA-755. `XLEN` of the Redis decision stream, sampled every 15 s by each relay. It is not set until the first sample. |
 
 **The `chat completion metered` log line** (`info` when tokens > 0, `debug` otherwise) is the
 per-org spend record: fields `org`, `tokens`, `source`, `outcome` (`charged` / `store_unavailable`
@@ -255,8 +265,13 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `GatewayHighErrorRate` | `sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `GatewayIamDependencyUnavailable` | `rate(gateway_iam_calls_total{result="unavailable"}[5m]) > 0` for 5m | critical |
 | `GatewayUpstreamErrors` | `sum(rate(gateway_upstream_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_upstream_requests_total[5m])) > 0.05` for 10m | warning |
-| `GatewayLimitsRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state) != 0` for 2m | warning |
+| `GatewayLimitsRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state{role="limits"}) != 0` for 2m | warning |
 | `GatewayLimitStoreUnavailable` | `sum by (job, op, kind) (increase(gateway_limit_store_unavailable_total[10m])) > 0` | warning |
+| `GatewayDecisionLogDrops` | `sum(increase(gateway_decision_log_dropped_total{reason!="shutdown"}[15m])) > 0` | warning |
+| `GatewayDecisionLogRedisReset` | `sum(increase(gateway_decision_log_redis_resets_total[15m])) > 0` | warning |
+| `GatewayDecisionLogRelayStalled` | `(max(gateway_decision_log_backlog) > 0 and sum(increase(gateway_decision_log_published_total[5m])) == 0) or max(gateway_decision_log_backlog) > 50000` for 5m | warning |
+| `GatewayDecisionLogRedisBreakerOpen` | `max by (job, role) (gateway_redis_breaker_state{role="decision_log"}) != 0` for 2m | warning |
+| `GatewayDecisionLogTaskRestarts` | `sum(increase(gateway_decision_log_task_restarts_total[15m])) > 0` | warning |
 | `TargetDown` | `up == 0` for 2m | critical |
 
 ### `IamDenialAuditDrops` — denial-audit rows being dropped
@@ -1812,6 +1827,103 @@ that does not send `stream_options.include_usage` is charged an estimate.
 
 **Latency when Redis is unreachable (D20).** The first three requests that meet an unreachable
 Redis each wait about 2.1 s. Then the breaker opens.
+
+### Gateway decision log
+
+The decision log (SMA-755) records one event for each tool-call decision. The gateway writes the
+event to a Redis stream. The relay reads the stream and publishes to the JetStream stream
+`GATEWAY_DECISIONS`. A failure of the decision log never stops or changes a tool call. The cost is
+a gap in the audit trail. The five alerts below cover the gaps.
+
+#### `GatewayDecisionLogDrops` (warning)
+
+**Meaning.** The gateway dropped decision events in the last 15m. The alert does not count
+`reason="shutdown"`, because each deploy can drop the events that are still in the queue.
+
+**Confirm:** read `gateway_decision_log_dropped_total` by `reason`. `queue_full`: the writer
+is slower than the decisions. `redis_unavailable`, `write_error` and `breaker_open`: Redis is down
+or slow. `backlog_full`: the stream holds `stream_max_len` entries, because the relay does not
+publish. `publish_rejected` and `redis_deleted`: see the relay logs. The log line
+`the relay rejects an event that JetStream cannot take` has a `class` and a `code`.
+`class="message_too_large"` (code 10054): the event is above `max-msg-size`. `header_too_large`
+(10097) and `stream_sealed` (10109) name their code. `jetstream_rejected`: another JetStream code
+that rejects the message; read `code`. `other`: an error with no JetStream code, for example an
+invalid subject. A failed `send_publish` with no JetStream code (a closed client, a closed ack
+semaphore, or a PubAck that does not parse) is also `other`: the relay deletes those events and
+counts them as `publish_rejected`. `permission_violation` and `max_payload_exceeded` name their cause. A full disk or
+a JetStream that is not available is not a rejection: the relay keeps those events in Redis.
+
+**Remediation:** make Redis healthy, or make the relay healthy (see `GatewayDecisionLogRelayStalled`).
+The dropped events are lost. A drop is the signal that the audit trail has a gap.
+
+#### `GatewayDecisionLogRedisReset` (warning)
+
+**Meaning.** The relay found that the Redis decision stream or its consumer group did not exist
+(`NOGROUP`). The relay made the group again. The events that were in the stream are lost.
+The relay looks for the loss only when it has no carried batch. A Redis loss during a NATS outage is
+counted when the relay can publish again, so this alert can fire late.
+`gateway_decision_log_lost_estimate_total` gives an estimate of the lost events from the last `XLEN` sample. It can undercount (writes after the sample) or overcount (publishes after the sample).
+
+**Confirm:** did Redis restart without persistence, run `FLUSHALL`, or evict the key? Check the
+Redis `maxmemory-policy`. It must be `noeviction` for this key.
+
+**Remediation:** fix the cause. A restore of Redis from an older snapshot keeps the group, and this
+alert does not detect it. The export of the decisions shows the gaps.
+
+#### `GatewayDecisionLogRelayStalled` (warning)
+
+**Meaning.** The Redis stream holds a backlog (`gateway_decision_log_backlog` above 0) and the relay
+published none in a 5m window, and this lasts 5m. The alert fires about 10m after the last publish. The second
+branch (the backlog is above 50000) also waits 5m, because both branches share one `for`. A burst of events and then no traffic still fires it, because the
+backlog stays while the relay is stalled. Every replica samples the same shared stream, so the
+alert uses `max` over the replicas, not `sum`. The value 50000 is 50 percent of the
+default `stream_max_len`. If you change `stream_max_len`, change the threshold in
+`ops/observability/prometheus/rules/gateway.rules.yml` too.
+
+**Confirm:** is NATS reachable from the gateway? Does the `PAIGASUS_GATEWAY` account have disk? Does
+the stream `GATEWAY_DECISIONS` exist? The relay makes a missing stream again and keeps the events in Redis
+until then (a missing stream is not a rejection). A full disk is not a rejection either. On nats-server 2.10.14
+a full server JetStream limit gives PubAck code 10023, and a full account limit gives 10002. A failed store
+(10077) and a JetStream that is not available are transient too. The relay keeps the events and tries again. Read `gateway_decision_log_publish_seconds` and the relay logs.
+When the backlog reaches `stream_max_len`, the gateway drops new events (`backlog_full`).
+
+**Remediation:** make NATS or the account healthy. The relay then publishes the backlog.
+
+#### `GatewayDecisionLogRedisBreakerOpen` (warning)
+
+**Meaning.** The decision-log Redis circuit breaker
+(`gateway_redis_breaker_state{role="decision_log"}`) has been open or half-open for 2m. The
+gateway drops decision events (`reason="breaker_open"`). Tool calls are not affected, and the limits
+are not affected. `GatewayLimitsRedisBreakerOpen` does not fire for this role.
+
+**Confirm:** is the Redis of the decision log up and reachable? See the Redis checks for
+`GatewayLimitsRedisBreakerOpen`.
+
+**Remediation:** make Redis healthy. The breaker closes by itself.
+
+#### `GatewayDecisionLogTaskRestarts` (warning)
+
+**Meaning.** A decision-log task (`task="writer"` or `task="relay"`) caught a panic in the last
+15m and went on. This is a defect. Events can be lost.
+
+**Confirm:** find the panic in the gateway logs for the `task` label.
+
+**Remediation:** report the defect with the log lines. Do not restart the gateway as a fix. The task
+already restarted by itself.
+
+#### Replay of the decision trace with Dogwood 1.2
+
+The export CLI prints this warning with every summary. Dogwood 1.2 checks each replayed call
+against the signature of its action. The trace has no tool arguments, so every `request` line has
+`input: {}`. A tool whose schema declares a required `context.input` attribute then replays as `DENY`
+with the error "nonconforming decision event", whatever the policy says. No `dogwood replay` flag
+changes this, and replay still exits 0.
+
+**Manual step.** Make a copy of the tenant schema. In the copy, make every attribute under
+`context.input` optional (`name?: Type`). Replay the trace against the copy. Do not deploy the copy.
+
+SMA-815 plans a generator for this relaxed schema. Until it ships, make the copy by hand. The
+fixture `rs/tools/paigasus-policy-compiler/tests/fixtures/decision-trace.cedarschema` shows the form.
 
 ### `TargetDown` — a scrape target is unreachable (critical)
 

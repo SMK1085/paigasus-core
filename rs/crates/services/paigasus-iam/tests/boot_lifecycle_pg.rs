@@ -108,6 +108,7 @@ fn free_port() -> u16 {
 }
 
 async fn http_status(port: u16, path: &str) -> Option<(u16, String)> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let resp = reqwest::Client::new().get(format!("http://127.0.0.1:{port}{path}")).timeout(Duration::from_secs(2)).send().await.ok()?;
     let status = resp.status().as_u16();
     Some((status, resp.text().await.ok()?))

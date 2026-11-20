@@ -13,6 +13,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::application::decision_log::DigestKey;
 use crate::domain::limits::{BudgetPeriod, LimitRules, MAX_REQUESTS_PER_MINUTE, MAX_TOKENS_PER_PERIOD, OrgOverride};
 use crate::domain::parse_org_uuid;
 
@@ -58,6 +59,9 @@ pub struct GatewayConfig {
     /// SMA-752: tool-call decisions from Cedar policies. Off by default (D8).
     #[serde(default)]
     pub tool_policy: ToolPolicyConfig,
+    /// SMA-755: the tool decision log. Off by default (§ 5.12).
+    #[serde(default)]
+    pub decision_log: DecisionLogConfig,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -142,7 +146,9 @@ pub struct OpenAiConfig {
     /// Extra trust anchors for the outbound upstream calls, as a path to a PEM bundle.
     ///
     /// **This ADDS to the trust store, it does not replace it** — the client trusts the
-    /// compiled-in Mozilla roots, the image's own store, AND every certificate here. The
+    /// operating-system store (reqwest 0.13 uses `rustls-platform-verifier`; there is no
+    /// compiled-in Mozilla floor, and on Linux an empty system store with no bundle is a client
+    /// build error), AND every certificate here. The
     /// opposite of the sibling `iam.tls.ca_cert_path`, which PINS; hence the `extra_` prefix.
     /// For a self-hosted vLLM/LiteLLM upstream behind a corporate CA (SMA-558).
     ///
@@ -624,6 +630,7 @@ impl GatewayConfig {
         self.tool_interception.validate()?;
         self.responses.validate()?;
         self.tool_policy.validate(&self.tool_interception)?;
+        self.decision_log.validate(&self.tool_policy)?;
         // SMA-775: the cross-table rule that `ToolPolicyConfig::validate` cannot see (it has no `iam`).
         // A blank or padded path is refused at all times (as a blank `tool_policy.nats.creds_file` is).
         // Only "the file is required" waits for `enabled`.
@@ -717,6 +724,115 @@ pub struct ToolPolicyNatsConfig {
     pub url: SecretString,
     pub creds_file: Option<String>,
     pub ca_file: Option<String>,
+}
+
+/// `[decision_log]` (SMA-755 § 5.12). Off by default: with `enabled = false` the gateway only writes the tracing line.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DecisionLogConfig {
+    pub enabled: bool,
+    /// The URL can hold credentials: skipped on `Serialize`, redacted on `Debug` (the `limits.redis_url` pattern).
+    #[serde(skip_serializing)]
+    pub redis_url: Option<SecretString>,
+    pub key_prefix: String,
+    pub stream_max_len: u64,
+    pub queue_capacity: usize,
+    /// The HMAC key of the argument digest, at least 32 bytes. Never serialized.
+    #[serde(skip_serializing)]
+    pub digest_key: Option<SecretString>,
+    pub digest_key_id: String,
+    pub nats: Option<DecisionLogNatsConfig>,
+}
+
+impl Default for DecisionLogConfig {
+    fn default() -> Self {
+        DecisionLogConfig {
+            enabled: false,
+            redis_url: None,
+            key_prefix: "paigasus:gateway".to_string(),
+            stream_max_len: 100_000,
+            queue_capacity: 4096,
+            digest_key: None,
+            digest_key_id: String::new(),
+            nats: None,
+        }
+    }
+}
+
+/// `[decision_log.nats]`: the relay's publisher connection. The key names match `[tool_policy.nats]` (P-21).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionLogNatsConfig {
+    #[serde(skip_serializing)]
+    pub url: SecretString,
+    pub creds_file: Option<String>,
+    /// A PEM bundle that REPLACES the system trust store: async-nats loads the native system roots only when no CA
+    /// file is set. Absent: the native system roots. The export CLI flag `--ca` behaves the same way.
+    pub ca_file: Option<String>,
+}
+
+fn is_blank(secret: &Option<SecretString>) -> bool {
+    secret.as_ref().is_none_or(|s| s.expose_secret().trim().is_empty())
+}
+
+impl DecisionLogConfig {
+    /// # Errors
+    /// A message that names the key of the first invalid value.
+    pub fn validate(&self, tp: &ToolPolicyConfig) -> Result<(), String> {
+        if self.key_prefix.trim().is_empty() {
+            return Err("decision_log.key_prefix must not be empty".to_string());
+        }
+        if self.key_prefix != self.key_prefix.trim() {
+            return Err(format!("decision_log.key_prefix has leading/trailing whitespace, which is never valid config: {:?}", self.key_prefix));
+        }
+        if self.stream_max_len == 0 {
+            return Err("decision_log.stream_max_len must be at least 1".to_string());
+        }
+        if self.queue_capacity == 0 {
+            return Err("decision_log.queue_capacity must be at least 1".to_string());
+        }
+        if let Some(nats) = &self.nats {
+            if nats.url.expose_secret().trim().is_empty() {
+                return Err("decision_log.nats.url must not be empty (omit the [decision_log.nats] table to run without it)".to_string());
+            }
+            for (key, v) in [("decision_log.nats.creds_file", &nats.creds_file), ("decision_log.nats.ca_file", &nats.ca_file)] {
+                if v.as_deref().is_some_and(|p| p.trim().is_empty()) {
+                    return Err(format!("{key} must not be empty (omit the key to use none)"));
+                }
+            }
+        }
+        if let Some(key) = &self.digest_key
+            && let Err(e) = DigestKey::new(self.digest_key_id.clone(), SecretString::from(key.expose_secret().to_owned()))
+        {
+            return Err(format!("decision_log.digest_key: {e}"));
+        }
+        if !self.enabled {
+            return Ok(());
+        }
+        if !tp.enabled {
+            return Err("decision_log.enabled = true requires tool_policy.enabled = true: the log records tool-policy decisions".to_string());
+        }
+        if is_blank(&self.redis_url) {
+            return Err("decision_log.redis_url is required when decision_log.enabled = true (set GATEWAY_DECISION_LOG__REDIS_URL)".to_string());
+        }
+        if is_blank(&self.digest_key) {
+            return Err("decision_log.digest_key is required when decision_log.enabled = true (at least 32 bytes)".to_string());
+        }
+        if self.digest_key_id.trim().is_empty() {
+            return Err("decision_log.digest_key_id is required when decision_log.enabled = true".to_string());
+        }
+        if self.nats.is_none() {
+            return Err("decision_log.nats is required when decision_log.enabled = true: without it events wait in Redis until the backlog cap drops them".to_string());
+        }
+        Ok(())
+    }
+
+    /// The digest key, when a valid one is configured.
+    #[must_use]
+    pub fn digest_key(&self) -> Option<DigestKey> {
+        let key = self.digest_key.as_ref()?;
+        DigestKey::new(self.digest_key_id.clone(), SecretString::from(key.expose_secret().to_owned())).ok()
+    }
 }
 
 /// One `[[tool_policy.org]]` entry (D7, D34).
@@ -814,6 +930,15 @@ impl ToolPolicyConfig {
             for (key, v) in [("tool_policy.nats.creds_file", &nats.creds_file), ("tool_policy.nats.ca_file", &nats.ca_file)] {
                 if v.as_deref().is_some_and(|p| p.trim().is_empty()) {
                     return Err(format!("{key} must not be empty (omit the key to use none)"));
+                }
+            }
+            // async-nats 0.53: `add_root_certificates` implies `require_tls(true)`, so a CA file
+            // with a plain `nats://` url fails at every connect. Refuse it at boot.
+            if nats.ca_file.is_some() {
+                let url = nats.url.expose_secret().trim();
+                let scheme_is_tls = url.split_once("://").is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("tls"));
+                if !scheme_is_tls {
+                    return Err("tool_policy.nats.ca_file requires a tls:// url — async-nats 0.53 makes a named CA file imply require_tls(true), so a plain nats:// broker would fail to connect; remove ca_file or use a tls:// url".to_string());
                 }
             }
         }
@@ -1578,7 +1703,7 @@ mod tests {
     #[test]
     fn a_full_enabled_table_loads_and_validates() {
         let cfg = tp_load(&tp_enabled_toml(
-            "default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"nats://x:4222\"\ncreds_file = \"/c\"\nca_file = \"/ca\"",
+            "default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"tls://x:4222\"\ncreds_file = \"/c\"\nca_file = \"/ca\"",
         ))
         .expect("loads");
         assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
@@ -1586,6 +1711,19 @@ mod tests {
         assert_eq!(cfg.tool_policy.source, Some(PolicySourceConfig::File { dir: "/etc/policies".to_string() }));
         let json = serde_json::to_string(&cfg.tool_policy).expect("serialises");
         assert!(!json.contains("x:4222"), "the NATS url must not be serialised");
+    }
+
+    #[test]
+    fn a_ca_file_with_a_plaintext_nats_url_is_rejected() {
+        let cfg = tp_load(&tp_enabled_toml("default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"nats://x:4222\"\nca_file = \"/ca\"")).expect("loads");
+        let err = cfg.validate().expect_err("ca_file implies require_tls");
+        assert!(err.contains("tool_policy.nats.ca_file requires a tls:// url"), "{err}");
+    }
+
+    #[test]
+    fn a_plaintext_nats_url_without_a_ca_file_still_validates() {
+        let cfg = tp_load(&tp_enabled_toml("default_mode = \"log_only\"\n[tool_policy.nats]\nurl = \"nats://x:4222\"")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
     }
 
     #[test]
@@ -1820,6 +1958,107 @@ mod tests {
         ] {
             let err = tp_load(&tp_toml(body)).expect("loads").validate().expect_err(body);
             assert!(err.contains(key), "{body}: {err}");
+        }
+    }
+
+    // --- SMA-755 `[decision_log]` ---------------------------------------------------------------
+
+    const DL_KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn dl_full_body() -> String {
+        format!(
+            "enabled = true\nredis_url = \"redis://:hunter2@redis.internal:6379\"\ndigest_key = \"{DL_KEY}\"\ndigest_key_id = \"2026-11\"\n\n[decision_log.nats]\nurl = \"nats://:natspw@nats.internal:4222\"\n"
+        )
+    }
+
+    fn dl_toml(body: &str) -> String {
+        format!("{}\n[decision_log]\n{body}\n", tp_enabled_toml(""))
+    }
+
+    fn dl_validate(body: &str) -> Result<(), String> {
+        tp_load(&dl_toml(body))?.validate()
+    }
+
+    #[test]
+    fn the_decision_log_is_off_by_default() {
+        let cfg = tp_load(valid_toml()).expect("loads");
+        assert!(!cfg.decision_log.enabled);
+        assert_eq!(cfg.decision_log.key_prefix, "paigasus:gateway");
+        assert_eq!(cfg.decision_log.stream_max_len, 100_000);
+        assert_eq!(cfg.decision_log.queue_capacity, 4096);
+        assert!(cfg.decision_log.digest_key().is_none());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn enabled_without_the_tool_policy_is_refused() {
+        let cfg = tp_load(&format!("{}\n[decision_log]\n{}", valid_toml(), dl_full_body())).expect("loads");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("decision_log.enabled") && err.contains("tool_policy"), "{err}");
+    }
+
+    #[test]
+    fn enabled_needs_redis_url_digest_key_key_id_and_nats() {
+        assert!(dl_validate(&dl_full_body()).is_ok());
+        let nats = "[decision_log.nats]\nurl = \"nats://n:4222\"";
+        let cases = [
+            ("decision_log.redis_url", format!("enabled = true\ndigest_key = \"{DL_KEY}\"\ndigest_key_id = \"k\"\n{nats}")),
+            ("decision_log.digest_key ", format!("enabled = true\nredis_url = \"redis://r:6379\"\ndigest_key_id = \"k\"\n{nats}")),
+            (
+                "decision_log.digest_key_id",
+                format!("enabled = true\nredis_url = \"redis://r:6379\"\ndigest_key = \"{DL_KEY}\"\n{nats}"),
+            ),
+            (
+                "decision_log.nats",
+                format!("enabled = true\nredis_url = \"redis://r:6379\"\ndigest_key = \"{DL_KEY}\"\ndigest_key_id = \"k\""),
+            ),
+        ];
+        for (key, body) in cases {
+            let err = dl_validate(&body).unwrap_err();
+            assert!(err.contains(key), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_digest_key_under_32_bytes_is_refused() {
+        let err = dl_validate(&dl_full_body().replace(DL_KEY, "short")).unwrap_err();
+        assert!(err.contains("decision_log.digest_key"), "{err}");
+        let cfg = tp_load(&dl_toml(&dl_full_body())).expect("loads");
+        assert!(cfg.decision_log.digest_key().is_some());
+    }
+
+    #[test]
+    fn zero_capacity_and_zero_max_len_are_refused() {
+        let err = dl_validate("queue_capacity = 0").unwrap_err();
+        assert!(err.contains("decision_log.queue_capacity"), "{err}");
+        let err = dl_validate("stream_max_len = 0").unwrap_err();
+        assert!(err.contains("decision_log.stream_max_len"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_or_padded_key_prefix_is_refused() {
+        for v in ["", " ", " paigasus", "paigasus "] {
+            let err = dl_validate(&format!("key_prefix = {v:?}")).unwrap_err();
+            assert!(err.contains("decision_log.key_prefix"), "{v:?}: {err}");
+        }
+        assert!(dl_validate("key_prefix = \"tenant-a:gateway\"").is_ok());
+    }
+
+    #[test]
+    fn a_misspelt_decision_log_key_fails_extraction() {
+        assert!(tp_load(&dl_toml("stream_maxlen = 1")).is_err());
+        assert!(tp_load(&dl_toml("[decision_log.nats]\nurl = \"nats://n:4222\"\ncredentials_file = \"x\"")).is_err());
+    }
+
+    #[test]
+    fn the_decision_log_secrets_do_not_serialize_and_debug_is_redacted() {
+        let cfg = tp_load(&dl_toml(&dl_full_body())).expect("loads");
+        let serialized = serde_json::to_string(&cfg).expect("serializes");
+        let debug = format!("{cfg:?}");
+        for text in [&serialized, &debug] {
+            for secret in ["hunter2", "redis.internal", DL_KEY, "natspw", "nats.internal"] {
+                assert!(!text.contains(secret), "{secret} leaked: {text}");
+            }
         }
     }
 }

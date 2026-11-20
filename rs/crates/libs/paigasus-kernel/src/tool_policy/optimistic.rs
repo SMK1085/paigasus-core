@@ -209,7 +209,7 @@ pub(crate) fn optimistic(merged: &PolicySet, drop_reads: &[ContextAttr], strip_p
 /// Evaluate a given optimistic set for the tool `name`, with Cedar's normal handling: an errored
 /// policy is skipped, so an errored forbid does not deny.
 fn evaluate(set: &PolicySet, name: &str, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> ToolVerdict {
-    let Some((request, entities)) = request(None, name, facts, findings, policies) else {
+    let Some((request, entities, ..)) = request(None, name, facts, findings, policies) else {
         return ToolVerdict::MayAllow;
     };
     let response = Authorizer::new().is_authorized(&request, set, &entities);

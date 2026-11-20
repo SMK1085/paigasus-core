@@ -446,7 +446,7 @@ publisher accepts an exchange with no environment claim, which removes the §3 b
 package silently. Pass it on all nine, then read all nine back with `npm trust list`.
 
 **Which npm you run this from matters.** The flags above were measured against **npm 11.13.0**,
-the npm bundled with the repo-pinned Node 24.16.0. Use **npm >= 11.5.1** on your machine — that is
+the npm bundled with the repo-pinned Node 26.13.1. Use **npm >= 11.5.1** on your machine — that is
 the floor for trusted publishing, and `npm trust` does not exist below it. Newer npm documents
 `--allow-publish` and `--allow-stage-publish`; 11.13.0 has neither (`grep -r allow-publish` over
 its `lib/` returns nothing), so a publisher it creates carries whatever the registry defaults to.

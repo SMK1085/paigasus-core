@@ -17,7 +17,7 @@ use paigasus_gateway::adapters::http::responses::RESPONSES_TERMINAL_SSE_ERROR;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::application::limits::Limits;
 use paigasus_gateway::service_info::Capabilities;
-use paigasus_gateway_core::{AllowAll, BlockCode, DecideFuture, Decision, DecisionContext, Limits as CoreLimits, OnFailure, ToolCall, ToolCallDecider, ToolTurn};
+use paigasus_gateway_core::{AllowAll, BlockCode, DecideFuture, DecidedCall, Decision, DecisionContext, Limits as CoreLimits, OnFailure, ToolCall, ToolCallDecider, ToolTurn};
 use serde_json::{Value, json};
 use support::MockOpenAi;
 use support::limits::{CALLER_KEY, ORG_A_PRN, PRINCIPAL_1, RecordingStore, ScopedIam, Sent, limits, openai, rules};
@@ -47,9 +47,9 @@ impl ToolCallDecider for BlockNamed {
             .iter()
             .map(|c| {
                 if c.name.starts_with("blocked_") {
-                    Decision::Block { code: BlockCode::Policy }
+                    DecidedCall::from(Decision::Block { code: BlockCode::Policy })
                 } else {
-                    Decision::Allow
+                    DecidedCall::from(Decision::Allow)
                 }
             })
             .collect();
@@ -65,6 +65,7 @@ fn ti_with(on_failure: OnFailure, decider: Arc<dyn ToolCallDecider>) -> Option<A
     Some(Arc::new(ToolInterception {
         limits: CoreLimits { on_failure, ..CoreLimits::defaults() },
         decider,
+        recorder: None,
     }))
 }
 
@@ -714,6 +715,7 @@ async fn client_abort_cancels_upstream() {
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/responses"))
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {CALLER_KEY}"))

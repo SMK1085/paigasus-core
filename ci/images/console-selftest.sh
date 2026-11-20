@@ -367,7 +367,7 @@ else
   hc_line="$(grep -E '^RUN printf .*> /app/healthcheck\.mjs$' "$REPO/ts/Dockerfile")" || hc_line=""
   hc_fmt="${hc_line#*\'}"
   hc_fmt="${hc_fmt%%\'*}"
-  HC_RUNTIME_REF="$(grep -oE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian12:nonroot@sha256:[0-9a-f]{64}' "$REPO/ts/Dockerfile" | sed 's/^FROM //')" || HC_RUNTIME_REF=""
+  HC_RUNTIME_REF="$(grep -oE '^FROM gcr\.io/distroless/nodejs[0-9]+-debian13:nonroot@sha256:[0-9a-f]{64}' "$REPO/ts/Dockerfile" | sed 's/^FROM //')" || HC_RUNTIME_REF=""
   if [ -z "$hc_line" ] || [ "$hc_fmt" = "$hc_line" ]; then
     say_fail F0 "healthcheck printf not found in ts/Dockerfile"
     say_fail F1 "healthcheck printf not found in ts/Dockerfile"
@@ -624,8 +624,8 @@ stub_reset() {
 # The fixture .prototools for the N rows: a fixed node pin, so a Node bump in the real
 # .prototools does not red this self-test.
 mkdir -p "$T/fx-node" "$T/fx-nopin"
-printf '%s\n' 'node = "24.16.0"' 'pnpm = "11.3.0"' > "$T/fx-node/.prototools"
-printf '%s\n' 'pnpm = "11.3.0"' > "$T/fx-nopin/.prototools"
+printf '%s\n' 'node = "24.16.0"' 'pnpm = "12.22.0"' > "$T/fx-node/.prototools"
+printf '%s\n' 'pnpm = "12.22.0"' > "$T/fx-nopin/.prototools"
 
 # SMA-688: each image row takes `<app> <image>` and must hand docker the IMAGE, never a name it
 # builds from `<app>`. The rows pass the load-oci name, which differs from `<app>:dev`, so a row

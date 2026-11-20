@@ -21,6 +21,8 @@ sha2 = "0.11"
 # The kernel's tool-policy types (SMA-752 Task 7).
 paigasus-kernel = { workspace = true, features = ["tool-policy"] }
 thiserror = { workspace = true }
+# The decision record's ids and org (SMA-755). No clock and no entropy: the caller passes both in.
+uuid = { workspace = true }
 
 [dev-dependencies]
 # The differential oracle's hostile-stream generators (spec § 8.1). `bytes` and `serde_json` are
@@ -28,8 +30,6 @@ thiserror = { workspace = true }
 proptest = { workspace = true }
 # The decision-report reasons are checked against the canonical error registry (SMA-752 D10).
 paigasus-proto = { workspace = true }
-# The policy mapping tests build a kernel `Facts` with an org id.
-uuid = { workspace = true }
 
 [lints]
 workspace = true

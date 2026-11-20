@@ -5,7 +5,9 @@ use std::str::FromStr;
 
 use cedar_policy::{AuthorizationError, Authorizer, Context, Decision, Entities, EntityId, EntityTypeName, EntityUid, PolicyId, Request, RestrictedExpression};
 
-use super::compile::{PolicyOrigin, PolicyRef, RESOURCE_TYPE, ToolPolicies, action_entity};
+use std::collections::BTreeSet;
+
+use super::compile::{ActionGroup, PolicyOrigin, PolicyRef, RESOURCE_TYPE, ToolPolicies, action_entity};
 use super::input::map_input;
 use super::normalise::normalise;
 use super::types::{Facts, Findings, ToolInvocation, UNPARSED_ARGUMENTS};
@@ -34,18 +36,24 @@ pub struct Verdict {
     pub errored_forbid: bool,
     /// Whether the decision is `Deny` and a floor `forbid` is determining or errored (P-3, D33).
     pub floor_denied: bool,
+    /// The final finding kinds that Cedar saw: the caller set, plus `unparsed_arguments` when the kernel added it.
+    pub findings: BTreeSet<String>,
+    /// The action group of the tool name.
+    pub action_group: ActionGroup,
 }
 
 impl Verdict {
     /// The request cannot be evaluated, so the floor was not evaluated. Treat it as floor-denied,
     /// so that the floor stays enforced in every tenant mode (D33).
-    fn unevaluable() -> Self {
+    fn unevaluable(findings: &Findings, action_group: ActionGroup) -> Self {
         Self {
             decision: Effect::Deny,
             determining: Vec::new(),
             errored: Vec::new(),
             errored_forbid: true,
             floor_denied: true,
+            findings: findings.iter().map(str::to_owned).collect(),
+            action_group,
         }
     }
 }
@@ -60,13 +68,13 @@ fn record<const N: usize>(pairs: [(&str, RestrictedExpression); N]) -> Restricte
 
 /// The Cedar context of a call. `None` is the optimistic context of `decide_tool`:
 /// `input` is `{}` and `call.declared` is `"yes"`.
-pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &Findings) -> Context {
-    let mut kinds: Vec<String> = findings.iter().map(str::to_owned).collect();
+pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &Findings) -> (Context, BTreeSet<String>) {
+    let mut kinds: BTreeSet<String> = findings.iter().map(str::to_owned).collect();
     let (input, input_text, declared) = match call {
         Some(c) => {
             let mapped = map_input(&c.input);
-            if mapped.unparsed && !kinds.iter().any(|k| k == UNPARSED_ARGUMENTS) {
-                kinds.push(UNPARSED_ARGUMENTS.to_owned());
+            if mapped.unparsed {
+                kinds.insert(UNPARSED_ARGUMENTS.to_owned());
             }
             (mapped.input, mapped.input_text, c.declared.as_str())
         }
@@ -92,7 +100,7 @@ pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &F
     if let Some(text) = input_text {
         pairs.push(("input_text".to_owned(), RestrictedExpression::new_string(text)));
     }
-    Context::from_pairs(pairs).expect("the context keys are distinct")
+    (Context::from_pairs(pairs).expect("the context keys are distinct"), kinds)
 }
 
 fn uid(entity_type: &str, id: &str) -> Option<EntityUid> {
@@ -105,14 +113,15 @@ fn sorted(mut refs: Vec<PolicyRef>) -> Vec<PolicyRef> {
 }
 
 /// The Cedar request and the entities for the tool `name`, with the context of `call` (or the
-/// optimistic context for `None`). `None` if Cedar cannot build the request.
-pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Option<(Request, Entities)> {
-    let (action, entities) = action_entity(policies, &normalise(name));
+/// optimistic context for `None`), the final finding kinds and the action group. `None` if Cedar cannot build the request.
+pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Option<(Request, Entities, BTreeSet<String>, ActionGroup)> {
+    let (action, entities, group) = action_entity(policies, &normalise(name));
     let org = facts.org.as_hyphenated().to_string();
     let principal = uid(&facts.principal.entity_type, &facts.principal.entity_id)?;
     let resource = uid(RESOURCE_TYPE, &org)?;
-    let request = Request::new(principal, action, resource, context(call, facts, findings), None).ok()?;
-    Some((request, entities))
+    let (context, kinds) = context(call, facts, findings);
+    let request = Request::new(principal, action, resource, context, None).ok()?;
+    Some((request, entities, kinds, group))
 }
 
 /// Decide one tool call. Pure: no I/O, no clock, no random numbers, no global state.
@@ -122,8 +131,8 @@ pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, 
 /// `errored_forbid` true.
 #[must_use]
 pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Verdict {
-    let Some((request, entities)) = request(Some(call), &call.name, facts, findings, policies) else {
-        return Verdict::unevaluable();
+    let Some((request, entities, kinds, action_group)) = request(Some(call), &call.name, facts, findings, policies) else {
+        return Verdict::unevaluable(findings, action_entity(policies, &normalise(&call.name)).2);
     };
     let response = Authorizer::new().is_authorized(&request, policies.set(), &entities);
     let diagnostics = response.diagnostics();
@@ -150,5 +159,7 @@ pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policie
         errored,
         errored_forbid,
         floor_denied,
+        findings: kinds,
+        action_group,
     }
 }

@@ -1,7 +1,7 @@
 {
   "outcome": "rejected",
   "protocol_version": 1,
-  "compiler_generation": 1,
+  "compiler_generation": 2,
   "rejections": [
     {
       "policy_id": "floor-after-error",
@@ -9,13 +9,6 @@
       "column": null,
       "reason": "tool-policy-shape-unsupported",
       "message": "policy \"floor-after-error\": the temporal block p_floor_hafter_herror_0__temporal_0 uses the unsupported shape `error-event`: an `error` event pattern is not supported in v1"
-    },
-    {
-      "policy_id": "floor-missing-field",
-      "line": null,
-      "column": null,
-      "reason": "tool-policy-invalid",
-      "message": "Cedar validation: for policy `p_floor_hmissing_hfield_0`, policy is impossible: the policy expression evaluates to false for all valid requests; a guarded field may be missing from the schema"
     },
     {
       "policy_id": "floor-permit",

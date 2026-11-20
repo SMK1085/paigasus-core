@@ -242,6 +242,7 @@ pub(crate) mod tests {
     /// Produce a real `reqwest::Error` (there is no public constructor) by forcing a connection
     /// failure against an unroutable address.
     pub(crate) async fn make_reqwest_error() -> reqwest::Error {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         reqwest::Client::new()
             .get("http://127.0.0.1:1")
             .timeout(std::time::Duration::from_millis(50))

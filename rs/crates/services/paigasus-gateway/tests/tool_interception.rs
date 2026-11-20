@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use paigasus_gateway::adapters::http::interception::ToolInterception;
-use paigasus_gateway_core::{AllowAll, BlockCode, DecideFuture, Decision, DecisionContext, Limits, ToolCall, ToolCallDecider, ToolTurn};
+use paigasus_gateway_core::{AllowAll, BlockCode, DecideFuture, DecidedCall, Decision, DecisionContext, Limits, ToolCall, ToolCallDecider, ToolTurn};
 use support::MockOpenAi;
 use support::limits::*;
 
@@ -22,9 +22,9 @@ impl ToolCallDecider for BlockNamed {
             .iter()
             .map(|c| {
                 if c.name.starts_with("blocked_") {
-                    Decision::Block { code: BlockCode::Policy }
+                    DecidedCall::from(Decision::Block { code: BlockCode::Policy })
                 } else {
-                    Decision::Allow
+                    DecidedCall::from(Decision::Allow)
                 }
             })
             .collect();
@@ -41,7 +41,7 @@ impl ToolCallDecider for HangNamed {
             return Box::pin(std::future::pending());
         }
         let n = calls.len();
-        Box::pin(std::future::ready(Ok(vec![Decision::Allow; n])))
+        Box::pin(std::future::ready(Ok(vec![DecidedCall::from(Decision::Allow); n])))
     }
 }
 
@@ -50,7 +50,7 @@ fn ti(decider: Arc<dyn ToolCallDecider>) -> Option<Arc<ToolInterception>> {
 }
 
 fn ti_with(limits: Limits, decider: Arc<dyn ToolCallDecider>) -> Option<Arc<ToolInterception>> {
-    Some(Arc::new(ToolInterception { limits, decider }))
+    Some(Arc::new(ToolInterception { limits, decider, recorder: None }))
 }
 
 /// A choice-0 tool-call delta. Every chunk carries `"object":"chat.completion.chunk"` (the `object` rule, spec § 11).
@@ -247,6 +247,7 @@ async fn client_abort_cancels_upstream_with_interception_on() {
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/chat/completions"))
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {CALLER_KEY}"))

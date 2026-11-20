@@ -67,7 +67,10 @@ case "$op" in
     [ "$#" -eq 0 ] || die "kernel-test takes no argument"
     need_tool uv
     cd "$ROOT/py/packages/paigasus-kernel"
-    uv run --isolated --reinstall-package paigasus-py-bindings pytest tests
+    # `--group dev`: pytest lives in the workspace root's dev group. uv 0.13 no longer adds that
+    # group for a member run with --isolated, so pytest was missing ("Failed to spawn: pytest").
+    # Measured on uv 0.13.9 (SMA-808): without the flag the task fails, with it 151 tests pass.
+    uv run --isolated --group dev --reinstall-package paigasus-py-bindings pytest tests
     ;;
   script)
     [ "$#" -ge 1 ] || die "script needs a file"

@@ -53,6 +53,26 @@ impl ToolCallKind {
     }
 }
 
+impl ToolCallKind {
+    /// Whether the provider may run a call of this kind itself, so that a gateway block does not
+    /// prevent it (SMA-755 § 5.4). No `_` arm: a new kind must be classified here.
+    #[must_use]
+    pub fn provider_may_run(self) -> bool {
+        match self {
+            ToolCallKind::Shell | ToolCallKind::ToolSearch => true,
+            ToolCallKind::Function
+            | ToolCallKind::Custom
+            | ToolCallKind::LegacyFunctionCall
+            | ToolCallKind::AnthropicToolUse
+            | ToolCallKind::Other
+            | ToolCallKind::Computer
+            | ToolCallKind::LocalShell
+            | ToolCallKind::ApplyPatch
+            | ToolCallKind::McpApprovalRequest => false,
+        }
+    }
+}
+
 /// One complete tool call, as the decider sees it.
 ///
 /// `arguments` holds (spec § 4.1): the concatenated `function.arguments` string (Function,
@@ -198,6 +218,26 @@ pub enum Format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_may_run_per_kind() {
+        use ToolCallKind::*;
+        for (k, want) in [
+            (Function, false),
+            (Custom, false),
+            (LegacyFunctionCall, false),
+            (AnthropicToolUse, false),
+            (Other, false),
+            (Computer, false),
+            (LocalShell, false),
+            (Shell, true),
+            (ApplyPatch, false),
+            (ToolSearch, true),
+            (McpApprovalRequest, false),
+        ] {
+            assert_eq!(k.provider_may_run(), want, "{k:?}");
+        }
+    }
 
     #[test]
     fn block_codes_have_stable_kebab_labels() {

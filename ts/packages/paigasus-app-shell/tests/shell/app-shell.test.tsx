@@ -20,7 +20,7 @@ vi.mock('next/navigation', () => import('../support/next-navigation-double'));
 const BRAND = { label: 'IAM', href: '/iam' };
 const NAV: readonly NavEntry[] = [
   { zone: 'iam', href: '/iam/users', label: 'Users', state: { state: 'available' } },
-  { zone: 'gateway', href: '/gateway/usage', label: 'Gateway', state: { state: 'degraded', service: 'gateway', reason: 'timeout' } },
+  { zone: 'iam', href: '/iam/gateway', label: 'Gateway', state: { state: 'degraded', service: 'gateway', reason: 'timeout' } },
 ];
 const ORGS: SwitcherProps = {
   label: 'Organisation',
@@ -49,7 +49,7 @@ afterEach(() => {
 });
 
 describe('AppShell (spec § 8.1)', () => {
-  it('renders a skip link, then a banner with the brand, the Primary nav, the switcher and the user menu, then main', () => {
+  it('renders a skip link, then a banner with the brand, the switcher and the user menu, then the Primary nav as a sidebar beside main', () => {
     render(inShell(<Shell />));
     const skip = screen.getByRole('link', { name: 'Skip to content' });
     expect(skip).toHaveAttribute('href', '#main');
@@ -61,13 +61,19 @@ describe('AppShell (spec § 8.1)', () => {
     expect(logos.map((img) => img.className)).toEqual(['size-8 dark:hidden', 'hidden size-8 dark:block']);
     for (const img of logos) expect(img.getAttribute('src')).toMatch(/^data:image\/webp;base64,[A-Za-z0-9+/]+=*$/);
     expect(logos[0]?.getAttribute('src')).not.toBe(logos[1]?.getAttribute('src'));
-    expect(within(banner).getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
+    // The Primary nav is a left sidebar, not part of the banner: it comes after the header and
+    // shares a row with main, before it in document (and tab) order.
+    expect(within(banner).queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
+    const nav = screen.getByRole('navigation', { name: 'Primary' });
     expect(within(banner).getByRole('button', { name: 'Organisation: Acme' })).toBeInTheDocument();
     expect(within(banner).getByRole('button', { name: 'Ada Lovelace' })).toBeInTheDocument();
     const main = screen.getByRole('main');
     expect(main).toHaveAttribute('id', 'main');
     expect(main).toHaveAttribute('tabindex', '-1');
     expect(main).toHaveTextContent('page content');
+    // The nav sits in the collapsible sidebar, a sibling of main.
+    expect(nav.parentElement?.parentElement).toBe(main.parentElement);
+    expect(nav.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('throws UseSessionOutsideProviderError with no SessionProvider: a missing provider is loud (F6)', () => {
@@ -160,6 +166,26 @@ describe('axe (AC 5)', () => {
   });
 });
 
+describe('AppShell with consoles (SMA-783)', () => {
+  it('makes the brand the console switcher inside the banner, and keeps the Primary nav to the current console', () => {
+    const consoles: readonly NavEntry[] = [
+      { zone: 'iam', href: '/iam/users', label: 'IAM', state: { state: 'available' } },
+      { zone: 'gateway', href: '/gateway/overview', label: 'AI Gateway', state: { state: 'available' } },
+    ];
+    render(
+      inShell(
+        <AppShell brand={BRAND} nav={NAV} consoles={consoles}>
+          <p>page content</p>
+        </AppShell>,
+      ),
+    );
+    const banner = screen.getByRole('banner');
+    expect(within(banner).getByRole('button', { name: 'Switch console: Paigasus IAM' })).toBeInTheDocument();
+    expect(within(banner).queryByRole('link', { name: 'Paigasus IAM' })).not.toBeInTheDocument();
+    expect(within(screen.getByRole('navigation', { name: 'Primary' })).queryByText('AI Gateway')).not.toBeInTheDocument();
+  });
+});
+
 describe('the keyboard script (AC 5, spec § 10.2)', () => {
   it('Tab order, Enter to open, ArrowDown, Escape back to the trigger, Enter to activate', async () => {
     const user = userEvent.setup();
@@ -168,15 +194,21 @@ describe('the keyboard script (AC 5, spec § 10.2)', () => {
     await user.tab();
     expect(screen.getByRole('link', { name: 'Skip to content' })).toHaveFocus();
     await user.tab();
+    expect(screen.getByRole('button', { name: 'Navigation' })).toHaveFocus();
+    await user.tab();
     expect(screen.getByRole('link', { name: 'Paigasus IAM' })).toHaveFocus();
+    await user.tab();
+    const trigger = screen.getByRole('button', { name: 'Organisation: Acme' });
+    expect(trigger).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Ada Lovelace' })).toHaveFocus();
+    // The Primary nav is a sidebar after the banner, so its entries follow the account menu.
     await user.tab();
     expect(screen.getByRole('link', { name: 'Users' })).toHaveFocus();
     await user.tab();
     // The degraded entry is in the tab order (spec § 7.3).
     expect(screen.getByRole('link', { name: 'Gateway' })).toHaveFocus();
-    await user.tab();
-    const trigger = screen.getByRole('button', { name: 'Organisation: Acme' });
-    expect(trigger).toHaveFocus();
+    trigger.focus();
 
     await user.keyboard('{Enter}');
     await waitFor(() => {

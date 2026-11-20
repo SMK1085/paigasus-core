@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The ONE function that builds PrimaryNav's entries. Every entry's `state` comes from
+// The ONE function that builds PrimaryNav's entries, and the one that builds the console
+// switcher's (SMA-783). Every entry's `state` comes from
 // @paigasus/app-shell's navStateOf(): no entry here decides its own visibility from a capability
 // list.
 //
@@ -18,15 +19,24 @@ import type { ServiceState } from '@paigasus/discovery/types';
  */
 export const GATEWAY_BASE_PATH = '/gateway';
 
-export function buildNavEntries(input: { iam: ServiceState; gateway: ServiceState; zones: ZoneMap }): NavEntry[] {
-  const entries: NavEntry[] = [{ zone: 'gateway', href: `${GATEWAY_BASE_PATH}/overview`, label: 'Overview', state: navStateOf(input.gateway) }];
-  // A cross-zone entry. PrimaryNav drops it when `iam` is not a zone (its rule 1), and navStateOf
-  // answers `absent` when `iam` is not a configured service. The mirror image of iam-console's own
-  // gateway entry, so the link appears in both directions as soon as the zone map names both.
+export function buildNavEntries(input: { gateway: ServiceState }): NavEntry[] {
+  // Since SMA-783 the Primary nav lists this console's pages only; IAM is reached through the
+  // console switcher (buildConsoleEntries, below).
+  return [{ zone: 'gateway', href: `${GATEWAY_BASE_PATH}/overview`, label: 'Overview', state: navStateOf(input.gateway) }];
+}
+
+/**
+ * The console switcher's entries (SMA-783): every console, this one included, in the same order in
+ * every zone (the mirror image of iam-console/lib/nav.ts). The switcher drops a console whose zone
+ * is not in the map (its rule 1), and navStateOf answers `absent` for a service that is not configured.
+ */
+export function buildConsoleEntries(input: { iam: ServiceState; gateway: ServiceState; zones: ZoneMap }): NavEntry[] {
+  const entries: NavEntry[] = [];
   const iamBase = input.zones['iam'];
   if (iamBase !== undefined) {
     entries.push({ zone: 'iam', href: `${iamBase}/orgs`, label: 'IAM', state: navStateOf(input.iam) });
   }
+  entries.push({ zone: 'gateway', href: `${GATEWAY_BASE_PATH}/overview`, label: 'AI Gateway', state: navStateOf(input.gateway) });
   return entries;
 }
 

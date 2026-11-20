@@ -59,6 +59,9 @@ exceptions = [
   # a permissive (non-copyleft) data license, not code-copyleft — which predates this repo's
   # allow-list. Covers both the legacy 0.26.x series and the 1.x it now re-exports from.
   { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+  # reqwest 0.13 -> rustls-platform-verifier -> webpki-root-certs (the same Mozilla root data,
+  # same CDLA-Permissive-2.0 license; used on platforms with no native verifier). SMA-809.
+  { name = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
   # xxhash-rust is BSL-1.0-only (Boost Software License 1.0: permissive, OSI-approved),
   # pulled in unconditionally by redis (SMA-443 Task 8's RedisJwksCache). Scoped here
   # rather than globally allowed so a future BSL-1.0 dependency is a conscious decision.

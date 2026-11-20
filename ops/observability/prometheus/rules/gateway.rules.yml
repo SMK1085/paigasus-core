@@ -20,8 +20,8 @@ groups:
       - alert: GatewayLimitsRedisBreakerOpen
         # SMA-677 § 4.8, in the form of IamRedisBreakerOpen. While the breaker is open or half-open
         # the limits are NOT applied: every request is admitted and its tokens are not charged
-        # (fail-open, D10). `max by (job, role)`: every replica sets its own gauge, so sum() is wrong.
-        expr: max by (job, role) (gateway_redis_breaker_state) != 0
+        # (fail-open, D10). `{role="limits"}` (SMA-755): the decision-log breaker has its own alert and does not fail open. `max by (job, role)`: every replica sets its own gauge, so sum() is wrong.
+        expr: max by (job, role) (gateway_redis_breaker_state{role="limits"}) != 0
         for: 2m
         labels: { severity: warning }
         annotations: { summary: "Gateway limits Redis circuit breaker is not closed (role {{ $labels.role }})", description: "The gateway's limits Redis circuit breaker has been open or half-open for 2m. The rate limits and token budgets are NOT applied (fail-open), and the tokens used now are not charged to any budget. See RUNBOOK-observability.md, section \"Gateway limits: fail-open and Redis requirements\"." }
@@ -33,3 +33,33 @@ groups:
         for: 0m
         labels: { severity: warning }
         annotations: { summary: "Gateway limit store calls are failing (op {{ $labels.op }}, kind {{ $labels.kind }})", description: "Limit-store calls failed in the last 10m. A failed check admits the request with no limit, and a failed charge is not counted against any budget (fail-open). kind=io: Redis is down or unreachable. kind=server or decode: Redis answered with an error (for example OOM under noeviction, or READONLY from a replica), which never opens the breaker. See RUNBOOK-observability.md, section \"Gateway limits: fail-open and Redis requirements\"." }
+      - alert: GatewayDecisionLogDrops
+        # SMA-755 § 5.9. `shutdown` is left out: every deploy can drop queued events. The series are primed at 0.
+        expr: sum(increase(gateway_decision_log_dropped_total{reason!="shutdown"}[15m])) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway decision log is dropping events", description: "The gateway dropped decision-log events in the last 15m for a reason other than shutdown. The audit trail has gaps. See RUNBOOK-observability.md, section \"Gateway decision log\"." }
+      - alert: GatewayDecisionLogRedisReset
+        expr: sum(increase(gateway_decision_log_redis_resets_total[15m])) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway decision log lost its Redis stream", description: "The relay found that the Redis decision stream was lost and made the consumer group again. Events in the stream were lost. See RUNBOOK-observability.md, section \"Gateway decision log\"." }
+      - alert: GatewayDecisionLogRelayStalled
+        # SMA-755 § 5.9. 50000 is 50 percent of the default `stream_max_len`. Change it with that setting.
+        # The first branch reads the backlog, not the write counter: a burst and then no traffic still leaves a retained
+        # backlog while the relay is stalled, and `increase(written[10m])` is 0 again after 10m.
+        # Both branches use max, not sum: every replica samples the same shared Redis stream, so a sum counts it N times.
+        expr: (max(gateway_decision_log_backlog) > 0 and sum(increase(gateway_decision_log_published_total[5m])) == 0) or max(gateway_decision_log_backlog) > 50000
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway decision-log relay is not publishing to NATS", description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"." }
+      - alert: GatewayDecisionLogRedisBreakerOpen
+        expr: max by (job, role) (gateway_redis_breaker_state{role="decision_log"}) != 0
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway decision-log Redis circuit breaker is not closed", description: "The decision-log Redis circuit breaker has been open or half-open for 2m. The gateway drops decision events. Tool calls are not affected. See RUNBOOK-observability.md, section \"Gateway decision log\"." }
+      - alert: GatewayDecisionLogTaskRestarts
+        expr: sum(increase(gateway_decision_log_task_restarts_total[15m])) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "A gateway decision-log task panicked and restarted", description: "A decision-log writer or relay task caught a panic in the last 15m. This is a defect. See RUNBOOK-observability.md, section \"Gateway decision log\"." }

@@ -102,7 +102,11 @@ fn tp_settings_on(mode: TenantMode, on: OnUnavailable) -> ToolPolicySettings {
 /// The request side over `source`, as `runtime::build_tool_policy` builds it.
 fn tp_with(source: Arc<dyn PolicySource>, settings: ToolPolicySettings) -> Option<Arc<RequestToolPolicy>> {
     let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
-    Some(Arc::new(RequestToolPolicy::new(cache, settings)))
+    Some(Arc::new(RequestToolPolicy::new(
+        cache,
+        settings,
+        Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()),
+    )))
 }
 
 /// `tp_with`, with the floor loaded into the cache before the first request. A request then
@@ -110,7 +114,11 @@ fn tp_with(source: Arc<dyn PolicySource>, settings: ToolPolicySettings) -> Optio
 async fn tp_preloaded(source: Arc<dyn PolicySource>, settings: ToolPolicySettings) -> Option<Arc<RequestToolPolicy>> {
     let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
     assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)), "the floor loads");
-    Some(Arc::new(RequestToolPolicy::new(cache, settings)))
+    Some(Arc::new(RequestToolPolicy::new(
+        cache,
+        settings,
+        Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()),
+    )))
 }
 
 /// The request side over the file source in `dir`.
@@ -169,11 +177,12 @@ fn ti(decider: Arc<dyn ToolCallDecider>) -> Option<Arc<ToolInterception>> {
     Some(Arc::new(ToolInterception {
         limits: CoreLimits::defaults(),
         decider,
+        recorder: None,
     }))
 }
 
 fn cedar() -> Option<Arc<ToolInterception>> {
-    ti(Arc::new(CedarDecider))
+    ti(Arc::new(CedarDecider::new(Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()))))
 }
 
 // --- the router and the endpoints ------------------------------------------------------------
@@ -729,7 +738,10 @@ async fn mode_off_everywhere_keeps_request_and_response_bytes() {
         let mut seen = Vec::new();
         for (decider, tp) in [
             (Arc::new(AllowAll) as Arc<dyn ToolCallDecider>, None),
-            (Arc::new(CedarDecider) as Arc<dyn ToolCallDecider>, tool_policy(&dir, TenantMode::Off)),
+            (
+                Arc::new(CedarDecider::new(Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()))) as Arc<dyn ToolCallDecider>,
+                tool_policy(&dir, TenantMode::Off),
+            ),
         ] {
             let mock = ep.mock(CALLS).await;
             let app = app_for(ORG_A_PRN, &mock.base_url, None, ti(decider), tp);

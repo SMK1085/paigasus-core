@@ -387,7 +387,7 @@ async fn an_org_in_mode_off_still_gets_the_floor() {
     let (_dir, path) = credential("K");
     let cfg = settings();
     let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg));
-    let policy = RequestToolPolicy::new(cache, cfg);
+    let policy = RequestToolPolicy::new(cache, cfg, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()));
 
     let body = Bytes::from_static(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"rm","parameters":{}}},{"type":"function","function":{"name":"ls","parameters":{}}}]}"#);
     let turn = parse_request(Format::OpenAiChat, &body);
@@ -412,7 +412,7 @@ async fn a_mode_change_alone_at_iam_applies_on_the_next_load() {
     let (_dir, path) = credential("K");
     let cfg = settings();
     let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg));
-    let policy = RequestToolPolicy::new(Arc::clone(&cache), cfg);
+    let policy = RequestToolPolicy::new(Arc::clone(&cache), cfg, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()));
 
     let body = Bytes::from_static(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"x","parameters":{}}},{"type":"function","function":{"name":"y","parameters":{}}}]}"#);
     let ctx = DecisionContext::new(PRINCIPAL, ORG_PRN, Some("req-1".into()));
@@ -456,7 +456,7 @@ async fn an_iam_that_is_down_at_boot_does_not_stop_the_gateway() {
         config = Some(cfg);
         Ok(())
     });
-    let runtime = build_tool_policy(&config.expect("config")).expect("the gateway builds with IAM down");
+    let runtime = build_tool_policy(&config.expect("config"), Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing())).expect("the gateway builds with IAM down");
     let (cache, _) = runtime.policy.expect("the tool policy is on");
     assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Unavailable));
 }

@@ -368,7 +368,7 @@ fn translate_all(lowered: &LoweredPolicySet, checked: &[Checked<'_>], rejections
     conditions
 }
 
-/// The strict `cedar-policy` 4.11 validation of the lowered Cedar (errors, and the
+/// The strict `cedar-policy` 4.14 validation of the lowered Cedar (errors, and the
 /// impossible-policy warning), and the floor effect rule.
 fn cedar_checks(kind: SetKind, lowered: &LoweredPolicySet, checked: &[Checked<'_>], rejections: &mut Vec<Rejection>) {
     let validator = cedar_policy::Validator::new(lowered.cedar_schema().clone());

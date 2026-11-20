@@ -10,11 +10,11 @@ ARG BIN
 # Builder glibc MUST be <= runtime glibc (bookworm 2.36 <= noble 2.39). Inverting this produces
 # `GLIBC_2.4x not found` at CONTAINER START, not at build time — invisible on a PR, since the
 # image workflow is not a required check.
-FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS builder
+FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS builder
 # `rust-toolchain.toml` is inside the build context, so rustup would honour it over this image's
 # own toolchain and could fetch a DIFFERENT channel over the network — the `FROM` pin above
 # would be decorative. Pin explicitly (SMA-500 D3); ci/images/run.sh asserts the two agree.
-ENV RUSTUP_TOOLCHAIN=1.95.0
+ENV RUSTUP_TOOLCHAIN=1.100.0
 ARG BIN
 WORKDIR /src
 # `cargo auditable` embeds the crate list in the binary, which is what makes the image SBOM list

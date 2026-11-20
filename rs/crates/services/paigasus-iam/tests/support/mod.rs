@@ -1171,7 +1171,7 @@ pub const JIT_DISABLED_LINE: &str = "request refused: the identity is not provis
 
 /// The answer of a good fake compiler to `revision`.
 #[allow(dead_code)]
-const COMPILER_REVISION_JSON: &str = r#"{"compiler_generation":1,"protocol_version":1,"revision":"1+dogwood.000000000000+proto.1"}"#;
+const COMPILER_REVISION_JSON: &str = r#"{"compiler_generation":2,"protocol_version":1,"revision":"2+dogwood.000000000000+proto.1"}"#;
 
 /// Writes a fake `paigasus-policy-compiler` into `dir`: `revision` answers a good revision, and
 /// `compile` answers the content of `dir/result.json` (set by `result_json`, changed later with
@@ -1257,7 +1257,7 @@ pub fn accepted_result(cedar_policies: &str, cedar_schema_json: &Value) -> Strin
     serde_json::json!({
         "outcome": "accepted",
         "protocol_version": 1,
-        "compiler_generation": 1,
+        "compiler_generation": 2,
         "compiled": {"cedar_policies": cedar_policies, "cedar_schema_json": cedar_schema_json, "conditions": []}
     })
     .to_string()
@@ -1270,7 +1270,7 @@ pub fn rejected_result(rejections: &[(&str, &str)]) -> String {
         .iter()
         .map(|(reason, message)| serde_json::json!({"policy_id": "p1", "line": 2, "column": 5, "reason": reason, "message": message}))
         .collect();
-    serde_json::json!({"outcome": "rejected", "protocol_version": 1, "compiler_generation": 1, "rejections": rejections}).to_string()
+    serde_json::json!({"outcome": "rejected", "protocol_version": 1, "compiler_generation": 2, "rejections": rejections}).to_string()
 }
 
 /// The wiring of `main.rs` for the tool policy feature: probe only when the toggle is on, then

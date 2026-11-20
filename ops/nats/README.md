@@ -15,10 +15,11 @@ only the mechanics of using the directory; `permissions.md` covers the *why*.
 | path | purpose |
 |---|---|
 | `subjects.env` | The single source of truth for every subject/inbox-prefix grant. `provision.sh` and `check-subjects.sh` both source it — edit grants here, nowhere else. |
-| `provision.sh` | Mints the account, its three users, the `.creds` files, the stream, and the durable consumer against a real broker. Run once per environment, by hand. |
+| `provision-decisions.sh` | Idempotent. Mints the `PAIGASUS_GATEWAY` account, its three decision-log users and creds, and (with `PUSH=1`) the `GATEWAY_DECISIONS` stream. `provision.sh` calls it for a new environment. |
+| `provision.sh` | Mints the IAM account, its three users, the `.creds` files, the stream, and the durable consumer against a real broker. At the end it calls `provision-decisions.sh` for the `PAIGASUS_GATEWAY` account. Run once per environment, by hand. |
 | `check-subjects.sh` | CI gate: asserts `test/accounts.conf.tmpl` grants *exactly* the subjects declared in `subjects.env`, in both directions. Keeps the artifact that is tested from drifting away from the artifact that is deployed. |
 | `permissions.md` | The design rationale behind every grant — read this before editing `subjects.env`. |
-| `test/accounts.conf.tmpl` | A static-nkey mirror of the production account, for a `nats-server` fixture in integration tests. `{{SYS_NKEY}}`, `{{PUBLISHER_NKEY}}`, `{{CONSUMER_NKEY}}`, `{{PROVISIONER_NKEY}}` are rendered at test time with freshly minted public keys — never committed key material. |
+| `test/accounts.conf.tmpl` | A static-nkey mirror of the production account, for a `nats-server` fixture in integration tests. `{{SYS_NKEY}}`, `{{PUBLISHER_NKEY}}`, `{{CONSUMER_NKEY}}`, `{{PROVISIONER_NKEY}}`, `{{GW_DEC_PUBLISHER_NKEY}}`, `{{GW_DEC_READER_NKEY}}` and `{{GW_DEC_PROVISIONER_NKEY}}` are rendered at test time with freshly minted public keys — never committed key material. |
 | `test/nats-server.conf` | Plaintext fixture broker config; `include "accounts.conf"` (the rendered template). |
 | `test/nats-server-tls.conf` | Same fixture, plus a `tls` block expecting a certificate/key at `/etc/nats/server-cert.pem` / `server-key.pem`, minted per test run. |
 

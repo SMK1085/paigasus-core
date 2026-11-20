@@ -45,10 +45,10 @@ interface WorkerResult {
 function runWorker(redisUrl: string, keyPrefix: string, sid: string): Promise<WorkerResult> {
   return new Promise((resolvePromise, reject) => {
     const child = fork(workerPath, [redisUrl, keyPrefix, sid], {
-      // --experimental-transform-types (not the bare default strip-only mode): src/core/errors.ts
-      // is reached transitively via the redis-store import and uses a TS parameter property,
-      // which strip-only mode rejects outright (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX, measured).
-      execArgv: ['--experimental-transform-types', '--import', loaderUrl],
+      // No type-stripping flag: Node 26 strips types by default. That mode rejects non-erasable
+      // syntax (a parameter property, an enum), so src/ must stay erasable. tsconfig.json sets
+      // `erasableSyntaxOnly` to enforce that.
+      execArgv: ['--import', loaderUrl],
       stdio: ['ignore', 'pipe', 'inherit', 'ipc'],
     });
     let out = '';

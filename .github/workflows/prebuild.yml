@@ -107,7 +107,7 @@ jobs:
       # Pin node/pnpm/rust via proto (matches .prototools / rust-toolchain.toml). Every leg runs on a
       # real glibc/macOS/Windows host (no job-level container), so GitHub JS actions work everywhere —
       # incl. the musl legs, which cross-compile via zig instead of an Alpine container (that container
-      # can't run JS actions on arm64 and ships pnpm 9 vs the repo's pnpm 11 lockfile — SMA-428 CI,
+      # can't run JS actions on arm64 and ships pnpm 9 vs the repo's pnpm 12 lockfile — SMA-428 CI,
       # decision #6 revised).
       - name: Set up proto + Moon
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
@@ -134,8 +134,8 @@ jobs:
           restore-keys: |
             prebuild-rust-${{ runner.os }}-${{ matrix.target }}-dual-${{ hashFiles('rs/rust-toolchain.toml') }}-
 
-      # Attach the cross target to the pinned 1.95.0 toolchain — run from rs/ so rust-toolchain.toml's
-      # override selects 1.95.0, not the runner default (mirrors ci.yml's serial pre-install; spec §2).
+      # Attach the cross target to the pinned 1.100.0 toolchain — run from rs/ so rust-toolchain.toml's
+      # override selects 1.100.0, not the runner default (mirrors ci.yml's serial pre-install; spec §2).
       - name: Add Rust target(s) (pinned toolchain)
         working-directory: rs
         # rustup accepts several triples at once; matrix.extra_target expands to nothing on the

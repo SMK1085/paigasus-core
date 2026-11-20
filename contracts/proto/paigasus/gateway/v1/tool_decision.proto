@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package paigasus.gateway.v1;
+
+import "google/protobuf/duration.proto";
+import "paigasus/common/v1/audit.proto";
+
+// One applied tool decision of the gateway (ADR-0027 (i)). It never holds raw arguments,
+// tool results or any other content.
+message ToolDecisionEvent {
+  string decision_id = 1; // UUIDv7, hyphenated, lower case
+  paigasus.common.v1.AuditMetadata audit = 2;
+  string org_id = 3; // the org uuid; empty for a scope with no org
+  string principal_prn = 4;
+  CedarUid principal = 5;
+  string api_key_id = 6; // empty for an OIDC caller
+  string scope_prn = 7;
+  string request_id = 8;
+  string session_id = 9; // "" until SMA-753
+  int64 turn = 10; // 0 until SMA-753
+  DecisionSide side = 11;
+  ToolRef tool = 12;
+  string ingress = 13;
+  string model = 14;
+  DecisionMode mode = 15; // UNSPECIFIED when the policy set is unavailable
+  DecisionEffect applied = 16; // what the gateway did (F2)
+  string block_code = 17; // BlockCode::as_kebab(), applied or would-be
+  DecisionBasis basis = 18;
+  Prevention prevention = 19;
+  RequestAction request_action = 20; // request side only
+  CedarDetail cedar = 21; // unset when no Cedar evaluation ran
+  ArgumentDigest arguments = 22; // response side only
+  string instance_id = 23;
+  uint64 sequence = 24; // per (instance_id, org_id), starts at 1
+}
+
+message CedarUid {
+  string entity_type = 1;
+  string entity_id = 2;
+}
+
+message ToolRef {
+  string name = 1; // sanitize_name(name), at most 128 bytes
+  string namespace = 2; // at most 256 bytes
+  string action_id = 3; // normalise(name), at most 256 bytes
+  bool truncated = 4; // true when any field of ToolRef was cut
+  string kind = 5; // ToolCallKind::as_str()
+  string call_id = 6; // at most 256 bytes
+}
+
+message CedarDetail {
+  DecisionEffect effect = 1; // the kernel verdict, before the interceptor
+  repeated PolicyRef determining = 2;
+  repeated PolicyRef errored = 3;
+  bool floor_denied = 4;
+  repeated Finding findings = 5;
+  string declared = 6; // yes | no | unknown
+  ActionGroup action_group = 7;
+  google.protobuf.Duration decide_duration = 8;
+}
+
+message PolicyRef {
+  PolicyOrigin origin = 1;
+  string id = 2;
+}
+
+message Finding {
+  string kind = 1;
+  // Field 2 is kept for the severity (SMA-754). Do not use it for anything else.
+}
+
+message ArgumentDigest {
+  bytes hmac_sha256 = 1; // HMAC-SHA256 of the raw argument bytes (§5.3)
+  string key_id = 2; // which digest key made it
+}
+
+enum DecisionSide {
+  DECISION_SIDE_UNSPECIFIED = 0;
+  DECISION_SIDE_REQUEST = 1;
+  DECISION_SIDE_RESPONSE = 2;
+}
+
+enum DecisionMode {
+  DECISION_MODE_UNSPECIFIED = 0;
+  DECISION_MODE_OFF = 1;
+  DECISION_MODE_LOG_ONLY = 2;
+  DECISION_MODE_ENFORCE = 3;
+}
+
+enum DecisionEffect {
+  DECISION_EFFECT_UNSPECIFIED = 0;
+  DECISION_EFFECT_ALLOW = 1;
+  DECISION_EFFECT_OBSERVE = 2;
+  DECISION_EFFECT_BLOCK = 3;
+}
+
+enum DecisionBasis {
+  DECISION_BASIS_UNSPECIFIED = 0;
+  DECISION_BASIS_POLICY = 1;
+  DECISION_BASIS_ERRORED_FORBID = 2;
+  DECISION_BASIS_UNAVAILABLE = 3;
+  DECISION_BASIS_ON_FAILURE = 4;
+}
+
+enum Prevention {
+  PREVENTION_UNSPECIFIED = 0;
+  PREVENTION_NOT_APPLICABLE = 1;
+  PREVENTION_PREVENTED = 2;
+  PREVENTION_PROVIDER_MAY_RUN = 3;
+}
+
+enum RequestAction {
+  REQUEST_ACTION_UNSPECIFIED = 0;
+  REQUEST_ACTION_REMOVE_DEFINITION = 1;
+  REQUEST_ACTION_REPLACE_RESULT = 2;
+  REQUEST_ACTION_RESET_TOOL_CHOICE = 3;
+  REQUEST_ACTION_REFUSE = 4;
+}
+
+enum PolicyOrigin {
+  POLICY_ORIGIN_UNSPECIFIED = 0;
+  POLICY_ORIGIN_FLOOR = 1;
+  POLICY_ORIGIN_TENANT = 2;
+}
+
+enum ActionGroup {
+  ACTION_GROUP_UNSPECIFIED = 0;
+  ACTION_GROUP_CATALOG = 1;
+  ACTION_GROUP_UNREGISTERED = 2;
+}

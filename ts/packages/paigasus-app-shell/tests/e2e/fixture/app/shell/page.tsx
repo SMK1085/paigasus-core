@@ -12,7 +12,9 @@ const GATEWAY_DOWN: ServiceState = { state: 'degraded', service: 'gateway', reas
 export default function ShellPage(): ReactElement {
   const nav: NavEntry[] = [
     { zone: 'iam', href: '/iam/users', label: 'Users', state: navStateOf(IAM_UP) },
-    { zone: 'gateway', href: '/gateway/usage', label: 'Gateway', state: navStateOf(GATEWAY_DOWN) },
+    // In the current zone: since SMA-783 the Primary nav holds no other console (its rule 2a). The
+    // entry still takes the gateway service's degraded state, which is what E5 exercises.
+    { zone: 'iam', href: '/iam/gateway', label: 'Gateway', state: navStateOf(GATEWAY_DOWN) },
   ];
   return (
     <AppShell brand={{ label: 'IAM', href: '/iam' }} nav={nav}>
