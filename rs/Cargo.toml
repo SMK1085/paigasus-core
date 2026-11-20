@@ -106,6 +106,10 @@ tonic-types = "0.14"
 # expects. Consumers add the features they need (e.g. the iam service's gRPC boot test
 # needs `net` for `TcpListenerStream`); no default features at the workspace baseline.
 tokio-stream = { version = "0.1", default-features = false }
+# tokio-util — the `CancellationToken` of the agent host's `LeaseKeeper` (SMA-787 §8.6). Helikon
+# 0.6.12 re-exports `tokio_util::sync::CancellationToken` as its run-context token, so the two are
+# one type. Keep the 0.7 line that Helikon resolves, so the lock holds one tokio-util.
+tokio-util = { version = "0.7", default-features = false }
 thiserror = "2"
 # jiff: core time type (SMA-786 section 6.2); Helikon core needs >= 0.2.46, which Task 8 brings in.
 jiff = "0.2"
