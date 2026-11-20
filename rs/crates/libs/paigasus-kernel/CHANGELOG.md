@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-kernel-v0.2.1...paigasus-kernel-v0.3.0) - 2026-11-20
+
+### Added
+
+- *(rs)* add the gateway tool decision log (SMA-755) ([#509](https://github.com/SMK1085/paigasus-core/pull/509))
+- *(rs)* add Cedar InvokeTool decisions to the gateway (SMA-752) ([#475](https://github.com/SMK1085/paigasus-core/pull/475))
+
 ## [0.2.1](https://github.com/SMK1085/paigasus-core/compare/paigasus-kernel-v0.2.0...paigasus-kernel-v0.2.1) - 2026-11-14
 
 ### Fixed
