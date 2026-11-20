@@ -34,7 +34,7 @@ cleanup() {
     wait "$app_pid" 2>/dev/null || true
   fi
   if [ -n "$container" ]; then
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker rm -fv "$container" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -49,7 +49,7 @@ for id in $stale; do
     continue
   fi
   echo "dev.sh: removing stale container $id (owner pid ${owner:-unknown})"
-  docker rm -f "$id" >/dev/null 2>&1 || true
+  docker rm -fv "$id" >/dev/null 2>&1 || true
 done
 
 # 2. Start Postgres on a free loopback port.
@@ -110,19 +110,23 @@ cargo build --locked -p paigasus-agent-host
 cargo run --locked -p paigasus-agent-host &
 app_pid=$!
 code=""
-i=0
-while [ "$i" -lt 60 ]; do
+# The 60 s limit is wall-clock time (SECONDS), not an attempt count: a slow curl must not stretch it.
+start=$SECONDS
+while [ $((SECONDS - start)) -lt 60 ]; do
   if ! kill -0 "$app_pid" 2>/dev/null; then
     echo "dev.sh: the service exited before /readyz answered" >&2
     app_pid=""
     exit 1
   fi
-  code="$(curl -s --connect-timeout 1 --max-time 2 -o /dev/null -w '%{http_code}' "http://${AGENT_HOST_HTTP_ADDR}/readyz" 2>/dev/null || true)"
+  remaining=$((60 - (SECONDS - start)))
+  max_time=2
+  if [ "$remaining" -lt "$max_time" ]; then max_time="$remaining"; fi
+  if [ "$max_time" -lt 1 ]; then break; fi
+  code="$(curl -s --connect-timeout 1 --max-time "$max_time" -o /dev/null -w '%{http_code}' "http://${AGENT_HOST_HTTP_ADDR}/readyz" 2>/dev/null || true)"
   if [ "$code" = "200" ]; then
     echo "dev.sh: /readyz returned 200"
     exit 0
   fi
-  i=$((i + 1))
   sleep 1
 done
 echo "dev.sh: /readyz did not return 200 within 60 s (last code: ${code:-none})" >&2

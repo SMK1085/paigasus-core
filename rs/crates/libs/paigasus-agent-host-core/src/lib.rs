@@ -41,7 +41,21 @@ mod tests {
     /// The kind of a table header: `Some(None)` is a table of dependencies, `Some(Some(name))` is
     /// the table of one dependency, `None` is any other table (dev-dependencies included).
     fn dependency_table(header: &str) -> Option<Option<String>> {
-        let h = header.trim().trim_start_matches('[').trim_end_matches(']').trim();
+        // Drop a trailing TOML comment: the first `#` outside a quoted string.
+        let mut quote: Option<char> = None;
+        let mut end = header.len();
+        for (i, c) in header.char_indices() {
+            match (quote, c) {
+                (None, '"' | '\'') => quote = Some(c),
+                (Some(q), _) if c == q => quote = None,
+                (None, '#') => {
+                    end = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let h = header[..end].trim().trim_start_matches('[').trim_end_matches(']').trim();
         for marker in ["dependencies", "build-dependencies"] {
             if h == marker || h.ends_with(&format!(".{marker}")) {
                 return Some(None);
@@ -102,10 +116,13 @@ mod tests {
             ("[build-dependencies]\ntokio = \"1\"\n", "tokio"),
             ("[target.'cfg(unix)'.dependencies.tokio]\nversion = \"1\"\n", "tokio"),
             ("[dependencies]\ntokio.workspace = true\n", "tokio"),
+            ("[target.'cfg(unix)'.dependencies] # platform-only\ntokio = \"1\"\n", "tokio"),
+            ("[dependencies.tokio] # [1]\nversion = \"1\"\n", "tokio"),
         ];
         for (manifest, bad) in cases {
             assert_eq!(forbidden(manifest), vec![bad.to_string()], "{manifest}");
         }
         assert!(forbidden("[dependencies]\nuuid = \"1\"\n[dev-dependencies]\ntokio = \"1\"\n").is_empty());
+        assert!(forbidden("[dev-dependencies] # test-only\ntokio = \"1\"\n").is_empty());
     }
 }

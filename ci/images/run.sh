@@ -876,7 +876,7 @@ IAM_NAME="smoke-iam-${RUN_ID}"
 PG_NAME="smoke-pg-${RUN_ID}"
 CERTPROBE_NAME="certprobe-${RUN_ID}"
 cleanup() {
-  docker rm -f "$IAM_NAME" "$GW_NAME" "$PG_NAME" "$AH_NAME" "$AH_PG_NAME" "$CERTPROBE_NAME" >/dev/null 2>&1 || true
+  docker rm -fv "$IAM_NAME" "$GW_NAME" "$PG_NAME" "$AH_NAME" "$AH_PG_NAME" "$CERTPROBE_NAME" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 

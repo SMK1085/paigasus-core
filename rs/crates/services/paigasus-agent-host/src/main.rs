@@ -80,6 +80,11 @@ async fn serve() -> anyhow::Result<()> {
         _ => None,
     };
 
+    // Register the signal listeners before any task serves a request. A SIGTERM that arrives
+    // once `/healthz` answers must reach the drain path, not the default handler.
+    let mut shutdown = std::pin::pin!(shutdown_signal()?);
+    let mut interrupted = false;
+
     let (tx, rx) = tokio::sync::watch::channel(());
     let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
@@ -134,8 +139,6 @@ async fn serve() -> anyhow::Result<()> {
 
     // One signal registration for the whole life of the process. A second registration can lose a
     // signal that arrives in the gap between the two.
-    let mut shutdown = std::pin::pin!(shutdown_signal());
-    let mut interrupted = false;
     let outcome: anyhow::Result<()> = tokio::select! {
         r = boot(&db, &config, &slot) => r,
         () = &mut shutdown => {
@@ -205,21 +208,26 @@ async fn drain(servers: &mut JoinSet<anyhow::Result<()>>) {
     }
 }
 
-/// Resolves on SIGINT or SIGTERM.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c().await.expect("install Ctrl+C handler");
-    };
+/// Registers the SIGINT and SIGTERM listeners now and returns a future that resolves on the first
+/// of them. The registration is eager: a signal that arrives before the first poll is kept.
+fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()>> {
     #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("install SIGTERM handler").recv().await;
-    };
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        Ok(async move {
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
+        })
+    }
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
+    {
+        Ok(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
     }
 }
 

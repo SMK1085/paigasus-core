@@ -256,7 +256,8 @@ mod tests {
     fn principal_id_spellings_never_name_another_principal() {
         let id = PrincipalId::from_uuid(u(0xabcdef));
         assert_eq!(PrincipalId::parse(&id.as_prn().canonical()), Ok(id.clone()));
-        let upper = id.as_prn().canonical().to_uppercase();
+        let uuid = id.uuid().to_string();
+        let upper = id.as_prn().canonical().replace(&uuid, &uuid.to_uppercase());
         if let Ok(parsed) = PrincipalId::parse(&upper) {
             assert_eq!(parsed, id);
         }
