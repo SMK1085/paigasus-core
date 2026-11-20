@@ -4,6 +4,7 @@
 //! the proto, encodes it and puts it into a bounded queue. The writer task (`writer`) moves the queue into a
 //! Redis stream. The connect loop (`redis_conn`) makes the Redis connection without a block of the boot.
 
+pub mod generation;
 pub mod jetstream;
 pub mod proto;
 pub mod reader;
