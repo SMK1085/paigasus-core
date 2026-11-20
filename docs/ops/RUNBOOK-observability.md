@@ -1902,8 +1902,8 @@ no relay held. Use the export of the decisions to find the gaps.
 `GATEWAY_DECISIONS_GEN` for 15 minutes. **While this alert fires, a Redis reset is not counted.** Read
 `gateway_decision_log_generation_check_errors_total` by `kind`:
 
-- `permission`: the publisher creds do not have the KV grants. Run `ops/nats/provision-decisions.sh` again
-  and deploy the new creds to the gateway.
+- `permission`: the publisher creds do not have the KV grants. Run `PUSH=1 ops/nats/provision-decisions.sh`
+  again and deploy the new creds to the gateway. Without `PUSH=1` the script does not push the account.
 - `no_bucket`: the bucket does not exist and the relay cannot make it. Make it with
   `PUSH=1 ops/nats/provision-decisions.sh`. Check the limit of 2 streams for the account: the stream
   `GATEWAY_DECISIONS` and the stream `KV_GATEWAY_DECISIONS_GEN` use both.
@@ -1911,7 +1911,8 @@ no relay held. Use the export of the decisions to find the gaps.
 - `redis`: the Redis call of the check failed. Check the Redis memory and the Redis ACL.
 - `foreign_writer`: another deployment writes the same KV entry. The deployment rule is broken: two
   gateway deployments must not share one NATS account AND one Redis prefix (the default prefix is
-  `paigasus:gateway`). Give the second deployment its own NATS account or its own Redis prefix.
+  `paigasus:gateway`). This holds also when each deployment has its own Redis: another DB index on the same
+  Redis server does not change the rule. Give the second deployment its own NATS account or its own Redis prefix.
 - `other`: read the gateway logs.
 
 **Upgrade order.** First run `PUSH=1 ops/nats/provision-decisions.sh` (the new grants, the new creds and
