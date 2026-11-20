@@ -24,7 +24,7 @@ use redis::streams::{StreamAutoClaimReply, StreamInfoConsumersReply, StreamReadR
 use tokio::sync::{Mutex, watch};
 use tokio::time::Instant;
 
-use super::jetstream::{PublishClass, classify, stream_config, subject_for, violation_since};
+use super::jetstream::{PublishClass, api_error_of, classify, stream_config, subject_for, violation_since};
 use super::redis_conn::RedisSlot;
 use super::supervised::run_supervised;
 use super::{DropReason, count_dropped};
@@ -372,10 +372,11 @@ impl State {
                 histogram!(names::GATEWAY_DECISION_LOG_PUBLISH_SECONDS).record(started.elapsed().as_secs_f64());
                 Outcome::Published
             }
-            Err(err) => match classify(err.kind(), violation_since(&self.violations, generation), concurrent) {
+            Err(err) => match classify(err.kind(), api_error_of(&err), violation_since(&self.violations, generation), concurrent) {
                 PublishClass::Ambiguous => Outcome::Ambiguous,
                 PublishClass::Permanent(class) => {
-                    tracing::warn!(class, "the relay rejects an event that JetStream cannot take");
+                    let code = api_error_of(&err).map(|a| a.code);
+                    tracing::warn!(class, code, "the relay rejects an event that JetStream cannot take");
                     Outcome::Rejected
                 }
                 PublishClass::Transient if err.kind() == jetstream::context::PublishErrorKind::StreamNotFound => Outcome::StreamGone,

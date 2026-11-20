@@ -514,8 +514,16 @@ pub trait DecisionLog: Send + Sync {
     tries again with a backoff from 1 s to 30 s.
     No stream for the subject is retried too, because async-nats reports a JetStream that is not
     ready the same way (R9). The relay makes the stream again before the next publish.
+  - A PubAck error with a resource or availability code is transient too. async-nats 0.53
+    reports each PubAck error code as `PublishErrorKind::Other` (except 10070 and 10071), so the
+    relay reads the server code from the error source. The transient codes are 10002 (account
+    resources exceeded), 10023 (insufficient resources), 10028 and 10047 (no memory or disk),
+    10077 (the store failed), 10120 (no limits), and 10008, 10009, 10039, 10063, 10076 and 10118
+    (JetStream not available). A status 503 with no code is transient too. So a full disk does
+    not delete valid events. The meanings come from the nats-server v2.10.14 error table.
   - A permanent error (the payload is above `max_payload`, an invalid subject, a permission
-    error): the relay acks and deletes that entry, counts
+    error, a PubAck code that rejects the message, for example 10054 for a message above
+    `max-msg-size`): the relay acks and deletes that entry, counts
     `dropped{reason="publish_rejected"}`, logs the error class, and goes on. One poison entry
     must not stop the relay.
   - An entry whose `org_id` fails the check is a permanent error too. Anybody with Redis write

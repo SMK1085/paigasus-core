@@ -1092,3 +1092,63 @@ async fn concurrent_refusals_are_published_again_one_at_a_time_and_then_rejected
     assert_eq!(snap.published(), 0);
     relay.shut_down().await;
 }
+
+/// A broker config whose JetStream holds 1 MiB of file storage for the whole server.
+const FULL_DISK_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js", max_file_store: 1048576 }
+"#;
+
+/// A full JetStream disk is a resource condition, not a rejection of the event. The PubAck has error code 10023
+/// (`JSInsufficientResourcesErr`), and `async-nats` reports it as `Other`. The relay keeps the entries in Redis and
+/// publishes them when there is free disk again.
+#[tokio::test]
+async fn a_full_jetstream_disk_keeps_the_events_until_there_is_free_disk() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay full disk").await else {
+        return;
+    };
+    let port = free_port();
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", FULL_DISK_CONF.as_bytes().to_vec())
+        .with_mapped_port(port, 4222.tcp());
+    let Some(_nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis relay full disk").await else {
+        return;
+    };
+    let url = format!("nats://127.0.0.1:{port}");
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&url).await;
+    // A stream with no byte limit, so that the server limit, not the stream limit, is the first limit to hit.
+    let mut cfg = dl_js::stream_config();
+    cfg.max_bytes = -1;
+    admin.create_stream(cfg).await.expect("the admin makes the stream");
+    // Fill the disk until the broker refuses a message.
+    let mut code = None;
+    for n in 0..64 {
+        let fill = jetstream::message::PublishMessage::build().payload(Bytes::from(vec![b'x'; 60 * 1024])).message_id(format!("fill-{n}"));
+        if let Err(err) = admin.send_publish("gateway.decision._none", fill).await.expect("the fill publish is sent").await {
+            code = dl_js::api_error_of(&err).map(|a| a.code);
+            break;
+        }
+    }
+    assert_eq!(code, Some(10023), "the broker refuses a message when the disk is full");
+
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    xadd(&node, &event_with_org(2, ORG_A), 0).await;
+    let v = Arc::new(AtomicU64::new(0));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&url, Arc::clone(&v)).await, fast("i1"), v);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a full disk is not a rejection");
+    assert_eq!(snap.published(), 0);
+    assert_eq!(xlen(&node).await, 2, "the entries stay in Redis while the disk is full");
+
+    // Free the disk. The relay publishes the kept entries.
+    admin.get_stream(dl_js::STREAM).await.expect("the stream exists").purge().await.expect("purge the stream");
+    wait_for("both kept entries are published", || async { snap.published() == 2 && xlen(&node).await == 0 }).await;
+    assert_eq!(snap.dropped("publish_rejected"), 0);
+    let ids: Vec<_> = stream_messages(&admin).await.into_iter().map(|m| m.msg_id).collect();
+    assert!(ids.contains(&decision_id(1)) && ids.contains(&decision_id(2)), "both events are on the stream: {ids:?}");
+    relay.shut_down().await;
+}

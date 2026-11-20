@@ -1843,7 +1843,13 @@ a gap in the audit trail. The five alerts below cover the gaps.
 **Confirm:** read `gateway_decision_log_dropped_total` by `reason`. `queue_full`: the writer
 is slower than the decisions. `redis_unavailable`, `write_error` and `breaker_open`: Redis is down
 or slow. `backlog_full`: the stream holds `stream_max_len` entries, because the relay does not
-publish. `publish_rejected` and `redis_deleted`: see the relay logs.
+publish. `publish_rejected` and `redis_deleted`: see the relay logs. The log line
+`the relay rejects an event that JetStream cannot take` has a `class` and a `code`.
+`class="message_too_large"` (code 10054): the event is above `max-msg-size`. `header_too_large`
+(10097) and `stream_sealed` (10109) name their code. `jetstream_rejected`: another JetStream code
+that rejects the message; read `code`. `other`: an error with no JetStream code, for example an
+invalid subject. `permission_violation` and `max_payload_exceeded` name their cause. A full disk or
+a JetStream that is not available is not a rejection: the relay keeps those events in Redis.
 
 **Remediation:** make Redis healthy, or make the relay healthy (see `GatewayDecisionLogRelayStalled`).
 The dropped events are lost. A drop is the signal that the audit trail has a gap.
@@ -1874,7 +1880,9 @@ default `stream_max_len`. If you change `stream_max_len`, change the threshold i
 
 **Confirm:** is NATS reachable from the gateway? Does the `PAIGASUS_GATEWAY` account have disk? Does
 the stream `GATEWAY_DECISIONS` exist? The relay makes a missing stream again and keeps the events in Redis
-until then (a missing stream is not a rejection). Read `gateway_decision_log_publish_seconds` and the relay logs.
+until then (a missing stream is not a rejection). A full account or server disk (PubAck codes 10002, 10023,
+10047 and 10077) and a JetStream that is not available are not rejections either: the relay keeps the events
+and tries again. Read `gateway_decision_log_publish_seconds` and the relay logs.
 When the backlog reaches `stream_max_len`, the gateway drops new events (`backlog_full`).
 
 **Remediation:** make NATS or the account healthy. The relay then publishes the backlog.
