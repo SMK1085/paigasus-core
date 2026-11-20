@@ -10,11 +10,29 @@ pub mod error;
 pub mod ids;
 pub mod inbox;
 pub mod outbox;
+pub mod ports;
 pub mod run;
 pub mod timer;
 
 #[cfg(test)]
 mod value_object_tests;
+
+#[cfg(test)]
+mod port_tests {
+    use crate::ports::*;
+
+    #[test]
+    fn every_port_is_object_safe_send_and_sync() {
+        fn assert_port<T: ?Sized + Send + Sync>() {}
+        assert_port::<dyn InboxRepository>();
+        assert_port::<dyn TimerRepository>();
+        assert_port::<dyn Scheduler>();
+        assert_port::<dyn MemoryStore>();
+        assert_port::<dyn Outbox>();
+        assert_port::<dyn AgentResolver>();
+        assert_port::<dyn RunCommitter>();
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -65,13 +83,15 @@ mod tests {
     }
 
     /// A1: the core crate depends on no I/O crate. The guard reads every non-dev dependency table
-    /// of this crate's manifest. It asserts a subset: the dependencies arrive over several tasks,
-    /// and `repo:machete` forbids a dependency with no use.
+    /// of this crate's manifest. It asserts set equality with the allowed set (spec §6.2).
     #[test]
     fn the_core_crate_depends_on_no_io_crate() {
         const MANIFEST: &str = include_str!("../Cargo.toml");
         assert!(!dependency_keys(MANIFEST).is_empty(), "[dependencies] must not be empty");
         assert_eq!(forbidden(MANIFEST), Vec::<String>::new(), "a dependency is not allowed in the core crate (A1)");
+        let found: std::collections::BTreeSet<String> = dependency_keys(MANIFEST).into_iter().collect();
+        let allowed: std::collections::BTreeSet<String> = ALLOWED.iter().map(|k| k.to_string()).collect();
+        assert_eq!(found, allowed, "the dependency set must equal the spec section 6.2 set");
     }
 
     #[test]

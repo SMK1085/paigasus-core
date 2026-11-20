@@ -3184,6 +3184,7 @@ dependencies = [
 name = "paigasus-agent-host-core"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "jiff",
  "paigasus-kernel",
  "serde",
