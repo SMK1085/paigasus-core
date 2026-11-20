@@ -251,4 +251,8 @@ fn describe_agent_host_metrics() {
         names::AGENT_HOST_INBOX_EVENTS_PAYLOAD_MISMATCH_TOTAL,
         "Duplicate inbox inserts whose type or data differ from the stored row, labeled by channel."
     );
+    describe_counter!(
+        names::AGENT_HOST_LEASE_LOST_TOTAL,
+        "Inbox leases found lost, labeled by operation (heartbeat, claim, complete or deadline)."
+    );
 }

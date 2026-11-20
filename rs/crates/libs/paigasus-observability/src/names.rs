@@ -109,6 +109,8 @@ pub const AGENT_HOST_INBOX_EVENTS_INSERTED_TOTAL: &str = "agent_host_inbox_event
 pub const AGENT_HOST_INBOX_EVENTS_DUPLICATE_TOTAL: &str = "agent_host_inbox_events_duplicate_total";
 /// Duplicates whose type or data differ from the stored row.
 pub const AGENT_HOST_INBOX_EVENTS_PAYLOAD_MISMATCH_TOTAL: &str = "agent_host_inbox_events_payload_mismatch_total";
+/// Lease losses of the agent host. The label `operation` is `heartbeat`, `claim`, `complete` or `deadline`.
+pub const AGENT_HOST_LEASE_LOST_TOTAL: &str = "agent_host_lease_lost_total";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -352,6 +354,7 @@ pub const ALL: &[&str] = &[
     AGENT_HOST_INBOX_EVENTS_INSERTED_TOTAL,
     AGENT_HOST_INBOX_EVENTS_DUPLICATE_TOTAL,
     AGENT_HOST_INBOX_EVENTS_PAYLOAD_MISMATCH_TOTAL,
+    AGENT_HOST_LEASE_LOST_TOTAL,
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
     GATEWAY_HTTP_INFLIGHT_REQUESTS,

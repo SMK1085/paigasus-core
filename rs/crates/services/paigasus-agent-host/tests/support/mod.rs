@@ -170,3 +170,4 @@ pub async fn wait_for_status(child: &mut Child, port: u16, path: &str, want: u16
 }
 
 pub mod inbox;
+pub mod lease;
