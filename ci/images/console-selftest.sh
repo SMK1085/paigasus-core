@@ -1300,7 +1300,7 @@ pin_rows P16 "$T/fn-console_smoke_cleanup.sh" 'docker network rm "$CONSOLE_SMOKE
 # library) and fails unless each CONSOLE smoke step sets CONSOLE_PARITY_REQUIRED: '1' in its own
 # step env, nothing else sets the variable, and the host-build step comes first. A console smoke
 # step is a step whose run: calls `ci/images/run.sh all-consoles`, or `ci/images/run.sh smoke`
-# with a first argument other than the cargo keys iam and gateway.
+# with a first argument other than the cargo keys iam, gateway and agent-host.
 W1_WF="$REPO/.github/workflows/images.yml"
 
 # w1_scan <workflow> — one line per step of the steps: list, in file order:
@@ -1337,7 +1337,7 @@ w1_scan() {
         rest = substr(line, p + 22)
         if (rest == "" || substr(rest, 1, 1) == " ") {
           sub(/^ +/, "", rest); w = rest; sub(/ .*/, "", w); gsub("[\"" q "]", "", w)
-          if (w != "" && w != "iam" && w != "gateway") console = 1
+          if (w != "" && w != "iam" && w != "gateway" && w != "agent-host") console = 1
         }
       }
     }
