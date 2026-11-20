@@ -6,6 +6,7 @@ language: 'rust'
 
 dependsOn:
   - 'paigasus-agent-host-core-rs'
+  - 'paigasus-kernel-rs'
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-proto-rs'

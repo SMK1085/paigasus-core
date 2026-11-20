@@ -255,4 +255,6 @@ fn describe_agent_host_metrics() {
         names::AGENT_HOST_LEASE_LOST_TOTAL,
         "Inbox leases found lost, labeled by operation (heartbeat, claim, complete or deadline)."
     );
+    describe_counter!(names::AGENT_HOST_CLAIMS_TOTAL, "Committed claims of inbox events. Each claim opens one run.");
+    describe_counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL, "Inbox events moved to dead after the maximum number of attempts.");
 }

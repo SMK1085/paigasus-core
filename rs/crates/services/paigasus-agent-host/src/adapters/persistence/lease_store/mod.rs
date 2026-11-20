@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The Postgres adapter of `LeaseRepository` (spec §8.2, §8.3). Every time that decides that a
-//! lease is valid is the database clock (AG4).
+//! The Postgres adapter of `LeaseRepository` and of the claim (spec §8.2, §8.3, §8.4). Every
+//! time that decides that a lease is valid is the database clock (AG4).
 
+mod claim;
 mod take;
 
 use std::time::Duration;
@@ -15,6 +16,7 @@ use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 use uuid::Uuid;
 
+pub use claim::DEAD_REASON;
 use take::{take, ttl_micros};
 
 /// The number of candidate inboxes that `acquire_next` locks.

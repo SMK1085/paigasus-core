@@ -16,8 +16,9 @@ name = "paigasus_agent_host"
 path = "src/lib.rs"
 
 [dependencies]
-# `adapters::persistence` — the migrator and the advisory-lock runner.
-sea-orm = { workspace = true }
+# `adapters::persistence` — the migrator and the advisory-lock runner. `postgres-array` binds
+# the `uuid[]` parameters of the claim (`lease_store::claim`).
+sea-orm = { workspace = true, features = ["postgres-array"] }
 sea-orm-migration = { workspace = true }
 async-trait = { workspace = true }
 # `config` — layered configuration.
@@ -43,6 +44,9 @@ paigasus-agent-host-core = { workspace = true }
 # `adapters::persistence` and `application::ingest` — ids and microsecond timestamps.
 uuid = { workspace = true }
 jiff = { workspace = true }
+# `adapters::id` — the kernel mints a UUIDv7 from the host clock and `rand` entropy.
+paigasus-kernel = { workspace = true }
+rand = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
 [dev-dependencies]

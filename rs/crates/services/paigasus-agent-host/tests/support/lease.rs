@@ -2,6 +2,7 @@
 
 //! Shared SQL of the lease tests. The statements live here, never in the adapter.
 
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use sea_orm::{ConnectionTrait, DatabaseConnection};
 use uuid::Uuid;
 
@@ -35,12 +36,49 @@ pub async fn expires_us(db: &DatabaseConnection, inbox: Uuid) -> i64 {
     .await
 }
 
-/// Inserts a thread and a `running` run with the given lease token, as a claim does.
+/// Inserts one live thread: not closed, never run, with no successor.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
-pub async fn insert_run(db: &DatabaseConnection, inbox: Uuid, run: Uuid, thread: Uuid, token: i64) {
+pub async fn insert_thread(db: &DatabaseConnection, inbox: Uuid, thread: Uuid) {
     db.execute_unprepared(&format!("INSERT INTO thread (id, inbox_id) VALUES ('{thread}', '{inbox}')"))
         .await
         .expect("insert thread");
+}
+
+/// Inserts one pending event on a thread, received `age_secs` seconds ago and due now.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn insert_event_on_thread(db: &DatabaseConnection, inbox: Uuid, event: Uuid, age_secs: i64, thread: Uuid) {
+    insert_pending_event(db, inbox, event, age_secs).await;
+    db.execute_unprepared(&format!("UPDATE inbox_event SET thread_id = '{thread}' WHERE id = '{event}'"))
+        .await
+        .expect("set event thread");
+}
+
+/// The sum of the counter `name` in one snapshot of the recorder. With `label`, only the series
+/// that carry that label value count. A snapshot drains the counters, so read each one once.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub fn counter(recorder: &DebuggingRecorder, name: &str, label: Option<(&str, &str)>) -> u64 {
+    recorder
+        .snapshotter()
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter_map(|(key, _, _, v)| {
+            let DebugValue::Counter(n) = v else { return None };
+            if key.key().name() != name {
+                return None;
+            }
+            match label {
+                Some((k, want)) => key.key().labels().any(|l| l.key() == k && l.value() == want).then_some(n),
+                None => Some(n),
+            }
+        })
+        .sum()
+}
+
+/// Inserts a thread and a `running` run with the given lease token, as a claim does.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn insert_run(db: &DatabaseConnection, inbox: Uuid, run: Uuid, thread: Uuid, token: i64) {
+    insert_thread(db, inbox, thread).await;
     db.execute_unprepared(&format!(
         "INSERT INTO run (id, inbox_id, thread_id, lease_token, status) VALUES ('{run}', '{inbox}', '{thread}', {token}, 'running')"
     ))

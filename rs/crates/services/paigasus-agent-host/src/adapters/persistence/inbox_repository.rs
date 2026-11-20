@@ -4,10 +4,10 @@
 
 use async_trait::async_trait;
 use paigasus_agent_host_core::error::DomainError;
-use paigasus_agent_host_core::ids::{AgentId, EventId, InboxId, PrincipalId};
-use paigasus_agent_host_core::inbox::{Inbox, NewInboxEvent};
-use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, RepositoryError};
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement, Value};
+use paigasus_agent_host_core::ids::{AgentId, EventId, InboxId, PrincipalId, RunId, ThreadId};
+use paigasus_agent_host_core::inbox::{EventStatus, Inbox, InboxEvent, NewInboxEvent};
+use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, RepositoryError, StoreError};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, QueryResult, Statement, Value};
 use uuid::Uuid;
 
 use super::time::from_micros;
@@ -25,6 +25,52 @@ const STORED_SQL: &str = "SELECT id, ce_type, (envelope -> 'data')::text AS data
 
 const INBOX_SQL: &str = "SELECT org_id, agent_id, principal_id, \
      (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_us FROM inbox WHERE id = $1";
+
+/// The columns that `row_to_event` reads, as a literal for `concat!`, for a `SELECT` or a
+/// `RETURNING` on `inbox_event`. Times cross the boundary as epoch microseconds.
+macro_rules! event_columns {
+    () => {
+        "id, source, ce_id, ce_type, thread_id, status, attempts::bigint AS attempts, claimed_run_id, \
+         envelope::text AS envelope, \
+         (EXTRACT(EPOCH FROM received_at) * 1000000)::bigint AS received_us, \
+         (EXTRACT(EPOCH FROM not_before) * 1000000)::bigint AS not_before_us"
+    };
+}
+pub(crate) use event_columns;
+
+/// Map a row with the `event_columns!()` of an event of `inbox` to the domain event.
+pub(crate) fn row_to_event(row: &QueryResult, inbox: &InboxId) -> Result<InboxEvent, StoreError> {
+    let err = |e: DbErr| StoreError(e.to_string());
+    let status: String = row.try_get("", "status").map_err(err)?;
+    let status = match status.as_str() {
+        "pending" => EventStatus::Pending,
+        "done" => EventStatus::Done,
+        "dead" => EventStatus::Dead,
+        other => return Err(StoreError(format!("unknown inbox event status {other:?}"))),
+    };
+    let attempts: i64 = row.try_get("", "attempts").map_err(err)?;
+    let attempts = u32::try_from(attempts).map_err(|_| StoreError(format!("attempts out of range: {attempts}")))?;
+    let thread: Option<Uuid> = row.try_get("", "thread_id").map_err(err)?;
+    let run: Option<Uuid> = row.try_get("", "claimed_run_id").map_err(err)?;
+    let envelope: String = row.try_get("", "envelope").map_err(err)?;
+    let envelope: serde_json::Value = serde_json::from_str(&envelope).map_err(|e| StoreError(e.to_string()))?;
+    let data = envelope.get("data").cloned().unwrap_or(serde_json::Value::Null);
+    Ok(InboxEvent {
+        id: EventId::from_uuid(row.try_get("", "id").map_err(err)?),
+        inbox: inbox.clone(),
+        source: row.try_get("", "source").map_err(err)?,
+        ce_id: row.try_get("", "ce_id").map_err(err)?,
+        ce_type: row.try_get("", "ce_type").map_err(err)?,
+        thread: thread.map(ThreadId::from_uuid),
+        received_at: from_micros(row.try_get("", "received_us").map_err(err)?)?,
+        status,
+        attempts,
+        not_before: from_micros(row.try_get("", "not_before_us").map_err(err)?)?,
+        claimed_run: run.map(|r| RunId::new(inbox.org(), r)),
+        envelope,
+        data,
+    })
+}
 
 /// The inbox repository on a Postgres pool.
 #[derive(Debug, Clone)]
