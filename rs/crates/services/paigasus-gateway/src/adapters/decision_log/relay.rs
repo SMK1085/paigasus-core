@@ -576,7 +576,7 @@ impl State {
 
     /// The gauge, the local record and the single-flight KV step, each tick. The gauge is set first and from a
     /// read-only script, so a KV outage or a full Redis never stops it. The KV step runs in its own task.
-    async fn sampler(self: Arc<Self>, mut shutdown: watch::Receiver<()>) {
+    async fn sampler(self: Arc<Self>, mut shutdown: watch::Receiver<()>, budget: Duration) {
         let mut step: Option<tokio::task::JoinHandle<()>> = None;
         loop {
             if let Some(handle) = self.slot.get() {
@@ -617,9 +617,16 @@ impl State {
             tokio::select! {
                 () = tokio::time::sleep(self.s.sample_every) => {}
                 _ = shutdown.changed() => {
-                    // The step ends by itself within `kv_timeout`. Wait for it, so that a counting write that was
-                    // already sent is counted by this relay, and no task outlives the relay.
-                    if let Some(task) = step {
+                    // Wait for the step, so that a counting write that was already sent is counted by this relay.
+                    // Wait at most [`step_shutdown_wait`], which fits inside the drain budget of the gateway. Then
+                    // abort the step and await it, so that no step outlives the relay. The claim is stored before
+                    // the write await, so an aborted counting write is an ambiguous write: the write can be in the
+                    // KV, and this relay stops before its next KV get. That is the limit of spec § 5.5 ("a relay
+                    // that made an ambiguous counting write and stops before its next KV get loses that count").
+                    if let Some(mut task) = step
+                        && tokio::time::timeout(step_shutdown_wait(&self.s, budget), &mut task).await.is_err()
+                    {
+                        task.abort();
                         let _ = task.await;
                     }
                     return;
@@ -627,6 +634,14 @@ impl State {
             }
         }
     }
+}
+
+/// How long the sampler waits for an in-flight KV step after the shutdown signal, before it aborts the step.
+/// It is never longer than the shutdown `budget` of [`run_relay`], so the relay ends inside the drain time that
+/// the gateway gives it (`runtime::DecisionLogTasks::drain`). A step ends by itself within `kv_timeout`.
+#[must_use]
+pub fn step_shutdown_wait(s: &RelaySettings, budget: Duration) -> Duration {
+    budget.min(s.kv_timeout)
 }
 
 /// Clears `kv_in_flight` when the KV step task ends, also when it is aborted.
@@ -677,7 +692,7 @@ pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings
             }
         }
     });
-    let sampler = Arc::clone(&state).sampler(shutdown);
+    let sampler = Arc::clone(&state).sampler(shutdown, budget);
     tokio::join!(relay, sampler);
 }
 

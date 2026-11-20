@@ -21,6 +21,7 @@ use paigasus_gateway::adapters::decision_log::redis_conn::breaker_metrics;
 use paigasus_gateway::adapters::decision_log::relay::delete_consumer_if_empty;
 use paigasus_gateway::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, proto, run_relay, run_writer};
 use paigasus_gateway::config::DecisionLogNatsConfig;
+use paigasus_gateway::runtime;
 use paigasus_gateway::domain::decision_log::DecisionLog;
 use paigasus_gateway_core::decision_log::{DecisionRecord, RecordHeader, ReportedCall, build_response};
 use paigasus_gateway_core::{Basis, BlockCode, DecisionContext, ReportDecision, ReportEntry};
@@ -952,6 +953,53 @@ async fn a_shutdown_during_a_hung_kv_step_ends_in_time() {
     // No KV step task outlives the relay. The detection of a step that ran after the shutdown would add 1 to the
     // Redis epoch, and a step runs `detect` only after its KV read, which needs NATS. So read the epoch while NATS
     // is still paused, then unpause, and check that it does not move.
+    let before = redis_cli(&node, &["GET", &epoch_key(KEY)]).await;
+    nats.unpause().await.expect("unpause NATS");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(redis_cli(&node, &["GET", &epoch_key(KEY)]).await, before, "a KV step ran after the relay ended");
+}
+
+/// I1 (final review): the same hung KV step, with the PRODUCTION values: `kv_timeout` 5 s from
+/// `RelaySettings::new`, and the gateway's own `DecisionLogTasks::drain` with `DECISION_LOG_DRAIN_BUDGET`. The
+/// relay must end inside the drain budget, so drain logs no "aborted" warning, and no KV step outlives it.
+#[tokio::test]
+async fn a_production_drain_during_a_hung_kv_step_aborts_nothing_and_leaves_no_step() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis production drain during kv hang").await else {
+        return;
+    };
+    let Some((nats, nats_url)) = start_nats(None, "decision_log_redis production drain during kv hang").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let _snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    let admin = test_js(&nats_url).await;
+    let v = dl_js::Violations::default();
+    let mut s = fast("i1");
+    s.kv_timeout = RelaySettings::new(KEY.to_owned(), "i1".to_owned()).kv_timeout;
+    assert_eq!(s.kv_timeout, Duration::from_secs(5), "the production KV timeout");
+    let (stop, shutdown) = watch::channel(());
+    let relay = tokio::spawn(run_relay(
+        connected_slot(&redis_url).await,
+        relay_js(&nats_url, v.clone()).await,
+        s,
+        v,
+        shutdown,
+        runtime::DECISION_LOG_DRAIN_BUDGET,
+    ));
+    let tasks = runtime::DecisionLogTasks::new(stop, tokio::spawn(async {}), relay, tokio::spawn(async {}));
+    wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
+    nats.pause().await.expect("pause NATS");
+    // A step starts within one 200 ms tick and hangs on its KV get.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    tasks.drain(runtime::DECISION_LOG_DRAIN_BUDGET).await;
+    assert!(
+        !logs.text().contains("did not stop in time and was aborted"),
+        "the relay outlived the drain budget: {}",
+        logs.text()
+    );
+    // The same epoch check as above: a step that outlived the relay would run `detect` after NATS comes back.
     let before = redis_cli(&node, &["GET", &epoch_key(KEY)]).await;
     nats.unpause().await.expect("unpause NATS");
     tokio::time::sleep(Duration::from_millis(1500)).await;
