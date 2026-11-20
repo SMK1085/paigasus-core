@@ -40,6 +40,8 @@ const FOREIGN_THREAD: Uuid = Uuid::from_u128(11);
 const HB_TIMEOUT: Duration = Duration::from_millis(500);
 /// The upper bound of drain rounds. Each round completes one claim.
 const DRAIN_ROUNDS: usize = 500;
+/// How long a task that expired its own lease waits for another task to take the lease.
+const TAKEOVER_WAIT: Duration = Duration::from_millis(100);
 
 fn timing() -> KeeperTiming {
     KeeperTiming::new(Duration::from_secs(3), Duration::from_secs(1)).expect("timing")
@@ -95,11 +97,32 @@ struct Log {
     takes: usize,
     /// A complete that lost the lease after the task expired it.
     stale: usize,
-    /// A stale complete while another task held the lease.
+    /// A stale complete that started while another task held a live lease with a newer token.
+    /// Only the token half of the complete fence refuses it.
     stale_under_new_holder: usize,
+    /// A stale complete that started while the lease row still had the own token, expired.
+    /// The expiry half of the complete fence refuses it (unless a take came in between).
+    stale_own_row: usize,
     /// A claim or a complete that lost the lease with no expire. Only a local deadline under
     /// heavy load can cause it. It is not a safety violation.
     lost_without_expire: usize,
+}
+
+/// After an expire, waits up to `TAKEOVER_WAIT` for another task to take the lease. It returns
+/// true when the lease row then has a live lease with a token other than `own`. The caller
+/// completes after this read, so a true result means that the new holder was live before the
+/// stale complete started. (Its lease lives 3 s, far longer than one round.)
+async fn wait_for_new_holder(db: &DatabaseConnection, own: i64) -> bool {
+    let deadline = std::time::Instant::now() + TAKEOVER_WAIT;
+    loop {
+        if lease_state(db, INBOX).await.is_some_and(|(t, live)| live && t != own) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed: u64) -> Log {
@@ -116,12 +139,21 @@ async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed
         match keeper.claim(&cfg()).await {
             Ok(Some(claim)) => {
                 let expired = rng.below(4) == 0;
+                let (run, token) = (claim.run.uuid(), claim.lease_token.0);
+                // True when another task holds a live lease with a newer token at the stale
+                // complete. Then only the token half of the complete fence can refuse it.
+                let mut overlap = false;
+                // True when the lease row still has the own token, read after the expire and
+                // before the complete. Then the expiry half of the fence refuses it.
+                let mut own_row = false;
                 if expired {
                     expire(&db, INBOX).await;
-                    // Give another task the time to take the lease before the stale complete.
-                    tokio::time::sleep(Duration::from_millis(3)).await;
+                    if rng.below(2) == 0 {
+                        overlap = wait_for_new_holder(&db, token).await;
+                    } else {
+                        own_row = lease_state(&db, INBOX).await.is_some_and(|(t, live)| !live && t == token);
+                    }
                 }
-                let (run, token) = (claim.run.uuid(), claim.lease_token.0);
                 match keeper.complete(claim).await {
                     Ok(done) => {
                         assert!(!expired, "seed {seed}: worker {w} completed run {run} after its lease was expired");
@@ -133,8 +165,11 @@ async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed
                     }
                     Err(CompleteError::LeaseLost) if expired => {
                         log.stale += 1;
-                        if lease_state(&db, INBOX).await.is_some_and(|(t, _)| t != token) {
+                        if overlap {
                             log.stale_under_new_holder += 1;
+                        }
+                        if own_row {
+                            log.stale_own_row += 1;
                         }
                     }
                     Err(CompleteError::LeaseLost) => log.lost_without_expire += 1,
@@ -236,10 +271,11 @@ async fn concurrent_workers_never_complete_one_event_twice() {
 
     let worker_completes: usize = logs.iter().map(|l| l.completes.len()).sum();
     let sum = |f: fn(&Log) -> usize| logs.iter().map(f).sum::<usize>();
-    let (takes, stale, overlap, lost) = (sum(|l| l.takes), sum(|l| l.stale), sum(|l| l.stale_under_new_holder), sum(|l| l.lost_without_expire));
+    let (takes, stale, lost) = (sum(|l| l.takes), sum(|l| l.stale), sum(|l| l.lost_without_expire));
+    let (overlap, own_row) = (sum(|l| l.stale_under_new_holder), sum(|l| l.stale_own_row));
     eprintln!(
         "lease_stress_pg: seed {seed}, {:?}: takes {takes}, worker completes {worker_completes}, drain completes {}, \
-         stale completes {stale} ({overlap} under a new holder), lost with no expire {lost}",
+         stale completes {stale} ({overlap} under a new holder, {own_row} on the own expired row), lost with no expire {lost}",
         started.elapsed(),
         drained.len()
     );
@@ -294,4 +330,7 @@ async fn concurrent_workers_never_complete_one_event_twice() {
     // Coverage: the run did contend.
     assert!(worker_completes >= 1, "seed {seed}: coverage: no worker completed a claim");
     assert!(stale >= 1, "seed {seed}: coverage: no stale complete");
+    assert!(overlap >= 1, "seed {seed}: coverage: no stale complete under a live new holder");
+    // `own_row` is printed, not asserted: a take can come in before the read, and one run
+    // measured only 1. `complete_pg` and `lease_property_pg` pin the expiry half of the fence.
 }
