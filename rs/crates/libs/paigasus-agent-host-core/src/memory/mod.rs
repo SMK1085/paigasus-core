@@ -16,7 +16,7 @@ mod workspace;
 
 pub use caps::{CapError, MemoryCaps};
 pub use change::{Expected, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryVersion};
-pub use commands::{MemoryCommand, MemoryCommandError, execute, parse_command};
+pub use commands::{MemoryCommand, MemoryCommandError, MemoryRefusalKind, execute, parse_command};
 pub use path::{MemoryDir, MemoryPath, ParsedToolPath, PathError, TOOL_ROOT, parse_tool_path};
 pub use workspace::{MemoryWorkspace, WorkspaceError};
 

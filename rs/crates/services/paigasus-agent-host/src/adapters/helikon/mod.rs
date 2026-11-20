@@ -2,6 +2,8 @@
 
 //! The Helikon adapter: the only place where the agent host meets the agent runtime.
 
+pub mod memory_tool;
+
 use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_helikon::core::{LlmAgent, Model};
 

@@ -70,11 +70,51 @@ pub enum MemoryCommand {
 pub struct MemoryCommandError {
     text: String,
     cause: Option<String>,
+    kind: MemoryRefusalKind,
+}
+
+/// The class of a refusal, for a counter label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRefusalKind {
+    /// The file changed in the store during the run.
+    Conflict,
+    /// A cap refused the change.
+    Cap,
+    /// The path or the arguments are not valid, or the target is missing.
+    Path,
+    /// The workspace is sealed.
+    Sealed,
+    /// The store failed.
+    Store,
+}
+
+impl MemoryRefusalKind {
+    /// The label value of the kind.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryRefusalKind::Conflict => "conflict",
+            MemoryRefusalKind::Cap => "cap",
+            MemoryRefusalKind::Path => "path",
+            MemoryRefusalKind::Sealed => "sealed",
+            MemoryRefusalKind::Store => "store",
+        }
+    }
 }
 
 impl MemoryCommandError {
     fn new(text: impl Into<String>) -> Self {
-        MemoryCommandError { text: text.into(), cause: None }
+        MemoryCommandError {
+            text: text.into(),
+            cause: None,
+            kind: MemoryRefusalKind::Path,
+        }
+    }
+
+    /// The class of the refusal.
+    #[must_use]
+    pub fn kind(&self) -> MemoryRefusalKind {
+        self.kind
     }
 
     /// The store cause for the log. It is not for the model.
@@ -98,7 +138,14 @@ impl From<WorkspaceError> for MemoryCommandError {
             WorkspaceError::Store(c) => Some(c.clone()),
             _ => None,
         };
-        MemoryCommandError { text: e.to_string(), cause }
+        let kind = match &e {
+            WorkspaceError::Conflict { .. } => MemoryRefusalKind::Conflict,
+            WorkspaceError::Cap(_) => MemoryRefusalKind::Cap,
+            WorkspaceError::NulInContent { .. } => MemoryRefusalKind::Path,
+            WorkspaceError::Sealed => MemoryRefusalKind::Sealed,
+            WorkspaceError::Store(_) => MemoryRefusalKind::Store,
+        };
+        MemoryCommandError { text: e.to_string(), cause, kind }
     }
 }
 
@@ -110,7 +157,10 @@ impl From<PathError> for MemoryCommandError {
 
 impl From<CapError> for MemoryCommandError {
     fn from(e: CapError) -> Self {
-        MemoryCommandError::new(e.to_string())
+        MemoryCommandError {
+            kind: MemoryRefusalKind::Cap,
+            ..MemoryCommandError::new(e.to_string())
+        }
     }
 }
 
@@ -715,5 +765,18 @@ mod tests {
         for v in [json!({"command":"view","path":"/memories"}), json!({"command":"delete","path":"/memories/a"})] {
             assert_eq!(run(&mut ws, v).await.unwrap_err(), "The run is ending. Memory is read-only now.");
         }
+    }
+
+    #[tokio::test]
+    async fn refusals_carry_a_kind() {
+        let mut ws = ws_with(&[]).await;
+        let bad = parse_command(json!({"command":"nope"})).unwrap_err();
+        assert_eq!(bad.kind(), MemoryRefusalKind::Path);
+        let outside = execute(&mut ws, parse_command(json!({"command":"view","path":"/a"})).unwrap()).await.unwrap_err();
+        assert_eq!(outside.kind(), MemoryRefusalKind::Path);
+        ws.take_changes();
+        let sealed = execute(&mut ws, parse_command(json!({"command":"view","path":"/memories"})).unwrap()).await.unwrap_err();
+        assert_eq!(sealed.kind(), MemoryRefusalKind::Sealed);
+        assert_eq!(sealed.kind().as_str(), "sealed");
     }
 }

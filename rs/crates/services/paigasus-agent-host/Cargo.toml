@@ -40,6 +40,9 @@ anyhow = { workspace = true }
 # already moved the core from 0.5 to 0.6. A facade bump re-checks §6.9 of the spec.
 paigasus-helikon = { version = "=0.6.12", default-features = false, features = ["runtime-tokio"] }
 paigasus-agent-host-core = { workspace = true }
+# `adapters::helikon::memory_tool::run_nonce` — a random value per run. `v4` needs `getrandom`,
+# which this native-only service crate may use. `tests/memory_pg.rs` also reads scope UUIDs.
+uuid = { workspace = true, features = ["v4"] }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
 [dev-dependencies]
@@ -57,8 +60,6 @@ rustls = { workspace = true }
 futures = { workspace = true }
 # `tests/memory_pg.rs` runs the conformance suite of `MemoryStore` against Postgres.
 paigasus-agent-host-core = { workspace = true, features = ["test-support"] }
-# `tests/memory_pg.rs` reads the scope UUIDs of a raw row.
-uuid = { workspace = true }
 
 [lints]
 workspace = true
