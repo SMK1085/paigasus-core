@@ -301,7 +301,9 @@ Q2 (Sven): detect a loss inside one generation. The design uses an **epoch key**
   the deploy one incident can count twice. This ends when the last old relay stops.
 - **Two deployments that share one KV entry (against the rule of §5.2).** Each relay sees the KV
   move away from its own unchanged generation. The detector of §5.2 counts `foreign_writer` errors,
-  and its alert fires. No reset is counted.
+  and its alert fires. A running relay counts no reset. A fresh relay has no `last_own` yet, so its
+  first KV step reads the other deployment's generation as a reset and counts it. So each pod
+  restart in either deployment adds one false reset.
 
 ### 5.5 Limits that stay
 
@@ -319,6 +321,9 @@ Q2 (Sven): detect a loss inside one generation. The design uses an **epoch key**
 - The estimates are the last stored sample, with about one `sample_every` of error.
 - During the rolling deploy from SMA-755, one incident can count twice (§5.4).
 - A relay that made an ambiguous counting write and stops before its next KV get loses that count.
+- A relay that only loses CAS races keeps a stale `last_own`: only a successful write sets it, and a lost
+  CAS does not clear it. After a later restore to that generation, this relay can report a false
+  `foreign_writer` error. Another relay still counts the restore.
 - The deployment rule of §5.2 (Q1) is only detected, not prevented.
 - A restore to an older generation is missed when the relay that wrote the newer generation has
   stopped and every other relay saw no KV step fail during that generation. Those relays report a

@@ -1882,6 +1882,13 @@ the loss. During a NATS outage no KV step runs. The alert then fires when NATS i
 deploy from SMA-755, an old relay and a new relay can both count one incident, so it can count twice. This
 ends when the last old relay stops.
 
+A relay makes the group again only when it reads the stream and gets `NOGROUP`. A relay that holds a
+carried batch does not read. This occurs during a publish outage while the KV works: a stream that blocks
+the decision subjects, a full JetStream disk, or a refused stream create. If every relay holds a carried
+batch, no relay makes the group again, and the KV step finds no group and counts nothing. The count then
+waits for the end of the whole publish outage. Two resets inside one NATS outage count once, because the
+KV step sees only the generation at the end of the outage.
+
 **Redis setting.** The generation key and the epoch key need `maxmemory-policy noeviction`, like the stream.
 If somebody deletes only one of the two keys, the relay counts a false reset or a false loss.
 
@@ -1913,6 +1920,8 @@ no relay held. Use the export of the decisions to find the gaps.
   gateway deployments must not share one NATS account AND one Redis prefix (the default prefix is
   `paigasus:gateway`). This holds also when each deployment has its own Redis: another DB index on the same
   Redis server does not change the rule. Give the second deployment its own NATS account or its own Redis prefix.
+  With `foreign_writer` above 0, a `GatewayDecisionLogRedisReset` at a pod restart is probably false: a
+  fresh relay reads the generation of the other deployment as a reset and counts it.
 - `other`: read the gateway logs.
 
 **Upgrade order.** First run `PUSH=1 ops/nats/provision-decisions.sh` (the new grants, the new creds and
@@ -1929,7 +1938,10 @@ the bucket). Then deploy the new gateway binary with the new creds. A new binary
   whole outage.
 - An operator `XSETID` or `RESTORE ... REPLACE` on the stream key alone keeps both keys. It is not detected.
 - A relay that made an ambiguous counting write and stops before its next KV get loses that count.
-- The deployment rule is only detected, not prevented (`foreign_writer`).
+- The deployment rule is only detected, not prevented (`foreign_writer`). While two deployments share one
+  KV entry, each pod restart in either deployment adds one false reset.
+- A relay that only loses CAS races keeps an old record of its own last write. After a later restore to
+  that generation, it can report a false `foreign_writer` error. Another relay still counts the restore.
 - A return to an older generation is missed when the relay that wrote the newer generation has stopped and
   no other relay saw a failed KV step. The `foreign_writer` error and its alert still fire.
 
