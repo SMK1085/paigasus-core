@@ -58,6 +58,25 @@ if (( DECISIONS_ACCOUNT_DISK_BYTES - DECISIONS_MAX_BYTES < DECISIONS_GEN_MAX_BYT
   exit 1
 fi
 
+# A byte value for the `nats` CLI. The CLI refuses a bare number ("bytes must end in B, K, KB, …"), and it
+# refuses a `B` value above 2147483647. It reads K, M, G and T as powers of 1024 (measured with nats-box 0.20.2:
+# `--max-bytes 18GB` gives max_bytes 19327352832). So write the value in the largest unit that divides it.
+cli_bytes() {
+  local n="$1" unit
+  for unit in T:1099511627776 G:1073741824 M:1048576 K:1024; do
+    if (( n >= ${unit#*:} && n % ${unit#*:} == 0 )); then echo "$(( n / ${unit#*:} ))${unit%%:*}B"; return 0; fi
+  done
+  if (( n > 2147483647 )); then
+    echo "$n bytes is not a multiple of 1024 and is above 2147483647: the nats CLI cannot take it" >&2
+    return 1
+  fi
+  echo "${n}B"
+}
+# Assignments, not inline `$(…)` in the arguments: under `set -e` only an assignment stops the script on a failure.
+stream_max_bytes="$(cli_bytes "$DECISIONS_MAX_BYTES")"
+stream_max_msg_size="$(cli_bytes "$DECISIONS_MAX_MSG_SIZE")"
+gen_max_bytes="$(cli_bytes "$DECISIONS_GEN_MAX_BYTES")"
+
 # --- 2. Users ----------------------------------------------------------------------------------
 add_user() {
   local name="$1"; shift
@@ -107,17 +126,20 @@ else
     --storage file \
     --retention limits \
     --max-age "${DECISIONS_MAX_AGE_SECS}s" \
-    --max-bytes "$DECISIONS_MAX_BYTES" \
+    --max-bytes "$stream_max_bytes" \
     --discard old \
     --dupe-window "${DECISIONS_DUPE_WINDOW_SECS}s" \
-    --max-msg-size "$DECISIONS_MAX_MSG_SIZE" \
+    --max-msg-size "$stream_max_msg_size" \
     --replicas 1 \
     --defaults
 fi
 
 # The generation bucket (SMA-821). It is the stream KV_GATEWAY_DECISIONS_GEN. `--max-bucket-size` is the flag of
-# `nats kv add` (checked with `nats kv add --help` in the image `natsio/nats-box:latest`, which is not pinned,
-# so the CLI version is not recorded); `kv add` has no `--max-bytes`.
+# `nats kv add`; `kv add` has no `--max-bytes`. The relay reads the bucket with DIRECT.GET only, so the stream must
+# have allow_direct. `kv add` has no flag for it and sets it by default. MEASURED (SMA-821 final review): this
+# script ran twice with PUSH=1 against a `nats:2.10.14` broker in operator mode, with the `nats` and `nsc` CLIs of
+# the image `natsio/nats-box:0.20.2` (nsc 2.15.0). `stream info KV_GATEWAY_DECISIONS_GEN` showed allow_direct
+# true, and the publisher put and read a key. The second run changed no grant of the publisher.
 if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" kv info "$DECISIONS_GEN_BUCKET" >/dev/null 2>&1; then
   echo "bucket $DECISIONS_GEN_BUCKET already exists; left unchanged"
 else
@@ -126,7 +148,7 @@ else
     --history 1 \
     --storage file \
     --replicas 1 \
-    --max-bucket-size "$DECISIONS_GEN_MAX_BYTES"
+    --max-bucket-size "$gen_max_bytes"
 fi
 
 echo "provisioned. Deploy gateway-decision-publisher.creds with the gateway."
