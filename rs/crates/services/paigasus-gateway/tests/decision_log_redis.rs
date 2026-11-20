@@ -21,8 +21,8 @@ use paigasus_gateway::adapters::decision_log::redis_conn::breaker_metrics;
 use paigasus_gateway::adapters::decision_log::relay::delete_consumer_if_empty;
 use paigasus_gateway::adapters::decision_log::{CHECK_ERROR_KINDS, RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, proto, run_relay, run_writer};
 use paigasus_gateway::config::DecisionLogNatsConfig;
-use paigasus_gateway::runtime;
 use paigasus_gateway::domain::decision_log::DecisionLog;
+use paigasus_gateway::runtime;
 use paigasus_gateway_core::decision_log::{DecisionRecord, RecordHeader, ReportedCall, build_response};
 use paigasus_gateway_core::{Basis, BlockCode, DecisionContext, ReportDecision, ReportEntry};
 use prost::Message;
@@ -992,11 +992,7 @@ async fn a_production_drain_during_a_hung_kv_step_aborts_nothing_and_leaves_no_s
     // A step starts within one 200 ms tick and hangs on its KV get.
     tokio::time::sleep(Duration::from_millis(300)).await;
     tasks.drain(runtime::DECISION_LOG_DRAIN_BUDGET).await;
-    assert!(
-        !logs.text().contains("did not stop in time and was aborted"),
-        "the relay outlived the drain budget: {}",
-        logs.text()
-    );
+    assert!(!logs.text().contains("did not stop in time and was aborted"), "the relay outlived the drain budget: {}", logs.text());
     // The same epoch check as above: a step that outlived the relay would run `detect` after NATS comes back.
     let before = redis_cli(&node, &["GET", &epoch_key(KEY)]).await;
     nats.unpause().await.expect("unpause NATS");
@@ -1920,7 +1916,11 @@ async fn a_publisher_without_kv_grants_still_relays_every_event() {
     assert_eq!(xlen(&node).await, 1, "the event stays in Redis");
     nats.unpause().await.expect("unpause NATS");
     wait_for("21 events are published", || async { snap.published() == 21 && xlen(&node).await == 0 }).await;
-    assert_eq!(snap.dropped("publish_rejected"), 0, "the publish timeouts of the pause rejected no event (a paused broker sends no -ERR)");
+    assert_eq!(
+        snap.dropped("publish_rejected"),
+        0,
+        "the publish timeouts of the pause rejected no event (a paused broker sends no -ERR)"
+    );
     assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "still no publish violation");
     assert!(check_errors(&snap, "permission") > 0, "the KV step still counts permission errors");
     relay.shut_down().await;

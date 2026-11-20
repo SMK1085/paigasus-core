@@ -1133,16 +1133,13 @@ mod tests {
         let _guard = metrics::set_default_local_recorder(&rec_);
         let g = Generation::new();
         let kv = FakeKv::default();
-        let out = g.step(&kv, || std::future::pending::<Result<RedisView, redis::RedisError>>(), &AtomicU64::new(0), T).await;
+        let out = g.step(&kv, std::future::pending::<Result<RedisView, redis::RedisError>>, &AtomicU64::new(0), T).await;
         assert_eq!(out, StepOutcome::Failed(CheckErrorKind::Redis));
         assert_eq!(errors(&s, "redis"), 1);
         assert_eq!(errors(&s, "timeout"), 0);
         assert_eq!(kv.revision(), 0);
         // Control: a KV get that hangs is still a timeout.
-        let hung = FakeKv {
-            get_hang: true,
-            ..FakeKv::default()
-        };
+        let hung = FakeKv { get_hang: true, ..FakeKv::default() };
         let out = g.step(&hung, || async { Ok(RedisView::NoGroup) }, &AtomicU64::new(0), T).await;
         assert_eq!(out, StepOutcome::Failed(CheckErrorKind::Timeout));
         assert_eq!(errors(&s, "timeout"), 1);
