@@ -2,16 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Provisions the gateway tool decision log (SMA-755 § 5.10): the PAIGASUS_GATEWAY account, its three
-# users and the GATEWAY_DECISIONS stream. It is idempotent: run it again and it changes nothing that
+# users, the GATEWAY_DECISIONS stream and (SMA-821) the GATEWAY_DECISIONS_GEN key-value bucket. The account
+# allows 2 streams: the decision stream and the stream KV_GATEWAY_DECISIONS_GEN of the bucket use both. It is idempotent: run it again and it changes nothing that
 # exists. `provision.sh` calls it for a new environment, and an operator can run it alone for an
 # environment that already has the IAM account.
 #
 # Inputs are the same as `provision.sh`: OPERATOR, OUT_DIR, NATS_URL and PUSH. With PUSH unset, the
 # script makes the account, the users and the creds files and stops. With PUSH=1 it pushes the account
-# to the running broker and creates the stream when the stream does not exist. It needs `nsc`, and with
+# to the running broker and creates the stream and the bucket when they do not exist. It needs `nsc`, and with
 # PUSH=1 also the `nats` CLI.
 #
-# The stream values come from `subjects.env`; edit them there, never here. The relay in
+# The stream and bucket values come from `subjects.env`; edit them there, never here. The relay in
 # `paigasus-gateway` makes the same stream with the same values (P-20).
 #
 # The creds files:
@@ -50,11 +51,19 @@ nsc edit account --name "$GATEWAY_ACCOUNT" \
   --js-streams 2 \
   --js-consumer 16
 
+# The 10 % of the account disk that the stream leaves free must hold the generation bucket.
+if (( DECISIONS_ACCOUNT_DISK_BYTES - DECISIONS_MAX_BYTES < DECISIONS_GEN_MAX_BYTES )); then
+  echo "DECISIONS_ACCOUNT_DISK_BYTES=$DECISIONS_ACCOUNT_DISK_BYTES is too small: the 10 % left after the stream" \
+       "($(( DECISIONS_ACCOUNT_DISK_BYTES - DECISIONS_MAX_BYTES )) bytes) cannot hold the generation bucket ($DECISIONS_GEN_MAX_BYTES bytes)" >&2
+  exit 1
+fi
+
 # --- 2. Users ----------------------------------------------------------------------------------
 add_user() {
   local name="$1"; shift
   local -n pub_ref="$1"; shift
   local -n sub_ref="$1"; shift
+  local edit="${1:-}"
 
   local args=() s
   for s in "${pub_ref[@]}"; do args+=(--allow-pub "$s"); done
@@ -62,11 +71,16 @@ add_user() {
 
   # No --expiry, as in `provision.sh`: a non-expiring user JWT cannot strand a running process.
   nsc add user --account "$GATEWAY_ACCOUNT" --name "$name" "${args[@]}" 2>/dev/null || echo "user $name already exists"
+  # An existing user keeps its old grants: `nsc add user` fails for it. With `edit`, add the grants now, so a
+  # user that exists before SMA-821 gets the generation bucket subjects. `nsc edit user` adds and is idempotent.
+  if [ "$edit" = "edit" ]; then
+    nsc edit user --account "$GATEWAY_ACCOUNT" --name "$name" "${args[@]}"
+  fi
   nsc generate creds --account "$GATEWAY_ACCOUNT" --name "$name" > "$OUT_DIR/$name.creds"
   chmod 600 "$OUT_DIR/$name.creds"
 }
 
-add_user gateway-decision-publisher   GW_DEC_PUBLISHER_PUB   GW_DEC_PUBLISHER_SUB
+add_user gateway-decision-publisher   GW_DEC_PUBLISHER_PUB   GW_DEC_PUBLISHER_SUB edit
 add_user gateway-decision-reader      GW_DEC_READER_PUB      GW_DEC_READER_SUB
 add_user gateway-decision-provisioner GW_DEC_PROVISIONER_PUB GW_DEC_PROVISIONER_SUB
 
@@ -98,6 +112,19 @@ else
     --max-msg-size "$DECISIONS_MAX_MSG_SIZE" \
     --replicas 1 \
     --defaults
+fi
+
+# The generation bucket (SMA-821). It is the stream KV_GATEWAY_DECISIONS_GEN. `--max-bucket-size` is the flag of
+# `nats kv add` (checked with `nats kv add --help`); `kv add` has no `--max-bytes`.
+if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" kv info "$DECISIONS_GEN_BUCKET" >/dev/null 2>&1; then
+  echo "bucket $DECISIONS_GEN_BUCKET already exists; left unchanged"
+else
+  nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" \
+    kv add "$DECISIONS_GEN_BUCKET" \
+    --history 1 \
+    --storage file \
+    --replicas 1 \
+    --max-bucket-size "$DECISIONS_GEN_MAX_BYTES"
 fi
 
 echo "provisioned. Deploy gateway-decision-publisher.creds with the gateway."

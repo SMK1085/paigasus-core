@@ -26,6 +26,11 @@ use crate::config::DecisionLogNatsConfig;
 
 /// The name of the stream.
 pub const STREAM: &str = "GATEWAY_DECISIONS";
+/// The name of the generation record bucket (SMA-821). The bucket is the stream `KV_GATEWAY_DECISIONS_GEN`.
+pub const GEN_BUCKET: &str = "GATEWAY_DECISIONS_GEN";
+/// The size limit of the generation bucket, in bytes. It must stay inside the 10 % of the account disk that the
+/// decision stream leaves free.
+pub const GEN_MAX_BYTES: i64 = 1_048_576;
 /// The subject prefix. The stream takes `gateway.decision.>`.
 pub const SUBJECT_PREFIX: &str = "gateway.decision";
 /// The subject token of an event that has no org.
@@ -141,6 +146,21 @@ pub fn stream_config(max_bytes: i64) -> jetstream::stream::Config {
         duplicate_window: Duration::from_secs(DUPLICATE_WINDOW_SECS),
         max_message_size: MAX_MESSAGE_SIZE,
         num_replicas: 1,
+        ..Default::default()
+    }
+}
+
+/// The config of the generation bucket. `provision-decisions.sh` makes the same bucket from `ops/nats/subjects.env`,
+/// and a unit test pins the two together. History is 1, because only the newest value of a key matters.
+#[must_use]
+pub fn gen_kv_config() -> jetstream::kv::Config {
+    jetstream::kv::Config {
+        bucket: GEN_BUCKET.to_owned(),
+        history: 1,
+        storage: jetstream::stream::StorageType::File,
+        num_replicas: 1,
+        max_age: Duration::ZERO,
+        max_bytes: GEN_MAX_BYTES,
         ..Default::default()
     }
 }
@@ -485,6 +505,15 @@ mod tests {
         assert_eq!(cfg.discard, jetstream::stream::DiscardPolicy::Old);
         assert_eq!(cfg.storage, jetstream::stream::StorageType::File);
         assert_eq!(cfg.retention, jetstream::stream::RetentionPolicy::Limits);
+        assert_eq!(GEN_BUCKET, var(&env, "DECISIONS_GEN_BUCKET"));
+        assert_eq!(GEN_MAX_BYTES.to_string(), var(&env, "DECISIONS_GEN_MAX_BYTES"));
+        let kv = gen_kv_config();
+        assert_eq!(kv.bucket, var(&env, "DECISIONS_GEN_BUCKET"));
+        assert_eq!(kv.history, 1);
+        assert_eq!(kv.storage, jetstream::stream::StorageType::File);
+        assert_eq!(kv.num_replicas, 1);
+        assert_eq!(kv.max_age, Duration::ZERO);
+        assert_eq!(kv.max_bytes, GEN_MAX_BYTES);
         assert_eq!(format!("{SUBJECT_PREFIX}.>"), cfg.subjects[0]);
         // The relay reads the account limit with `$JS.API.INFO` before it makes the stream, so the publisher
         // identity must have that grant.

@@ -907,6 +907,52 @@ async fn the_decision_publisher_cannot_read_delete_or_touch_iam() {
     expect_publish_denied(&client, &mut events, "iam.role.granted").await;
 }
 
+/// The generation bucket config of `ops/nats/subjects.env` (SMA-821). A literal copy, as `gw_stream_config` is.
+fn gw_gen_config() -> jetstream::kv::Config {
+    jetstream::kv::Config {
+        bucket: "GATEWAY_DECISIONS_GEN".to_string(),
+        history: 1,
+        storage: jetstream::stream::StorageType::File,
+        num_replicas: 1,
+        max_age: Duration::ZERO,
+        max_bytes: 1_048_576,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn the_decision_publisher_uses_the_generation_bucket() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, _events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    let js = jetstream::new(client);
+    // The calls of the relay, in its order: get the bucket, make it on a 404, read, create, update.
+    assert!(js.get_key_value("GATEWAY_DECISIONS_GEN").await.is_err(), "no bucket yet");
+    js.create_key_value(gw_gen_config()).await.expect("STREAM.CREATE.KV_… and $JS.API.INFO");
+    let kv = js.get_key_value("GATEWAY_DECISIONS_GEN").await.expect("STREAM.INFO.KV_…");
+    assert!(kv.entry("k1").await.expect("direct get of a missing key").is_none());
+    let rev = kv.create("k1", "a".into()).await.expect("$KV.GATEWAY_DECISIONS_GEN.>");
+    let rev2 = kv.update("k1", "b".into(), rev).await.expect("CAS update");
+    assert!(kv.update("k1", "c".into(), rev).await.is_err(), "a stale revision fails");
+    assert_eq!(kv.entry("k1").await.expect("direct get").map(|e| e.revision), Some(rev2));
+}
+
+#[tokio::test]
+async fn the_decision_publisher_cannot_reach_beyond_the_generation_bucket() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    for subject in [
+        "$KV.OTHER.k",
+        "$JS.API.STREAM.DELETE.KV_GATEWAY_DECISIONS_GEN",
+        "$JS.API.STREAM.PURGE.KV_GATEWAY_DECISIONS_GEN",
+        "$JS.API.STREAM.MSG.GET.KV_GATEWAY_DECISIONS_GEN",
+        "$JS.API.DIRECT.GET.GATEWAY_DECISIONS",
+        "$JS.API.STREAM.MSG.GET.GATEWAY_DECISIONS",
+        "$JS.API.CONSUMER.CREATE.KV_GATEWAY_DECISIONS_GEN",
+    ] {
+        expect_publish_denied(&client, &mut events, subject).await;
+    }
+}
+
 #[tokio::test]
 async fn the_decision_reader_reads_with_an_ordered_consumer() {
     let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };

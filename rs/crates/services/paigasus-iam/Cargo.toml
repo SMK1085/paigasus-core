@@ -148,6 +148,8 @@ tempfile = "3"
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
 # a dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
+# The KV calls of the gateway decision relay (generation bucket), run in `tests/nats_permissions.rs` (SMA-821).
+async-nats = { workspace = true, features = ["kv"] }
 figment = { workspace = true, features = ["test"] }
 # `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener);
 # `tower` is now a normal dependency (Task 12's gRPC `AuthLayer`), visible to tests too.
