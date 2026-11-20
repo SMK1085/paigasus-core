@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01Ssnnb4P4xsjtTwCgSagnRZ",
+  "agent_id": "a4bdd733a5c0f7450",
+  "subagent_type": "general-purpose",
+  "task_description": "Fix JetStream store dependency in tests",
+  "token_usage": {
+    "input_tokens": 30,
+    "cache_creation_tokens": 98715,
+    "cache_read_tokens": 1446993,
+    "output_tokens": 11871,
+    "api_call_count": 15
+  },
+  "started_at": "2026-11-20T21:45:48.850572+01:00",
+  "completed_at": "2026-11-20T21:50:43.823978+01:00"
+}

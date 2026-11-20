@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.13.1",
+  "checkpoint_id": "2ef2468e6ee6",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-755-decision-log-test-store",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "rs/crates/services/paigasus-gateway/tests/decision_export_nats.rs",
+    "rs/crates/services/paigasus-gateway/tests/decision_log_e2e.rs",
+    "rs/crates/services/paigasus-gateway/tests/decision_log_redis.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2e/f2468e6ee6/0/metadata.json",
+      "transcript": "/2e/f2468e6ee6/0/full.jsonl",
+      "compact_transcript": "/2e/f2468e6ee6/0/transcript.jsonl",
+      "content_hash": "/2e/f2468e6ee6/0/content_hash.txt",
+      "prompt": "/2e/f2468e6ee6/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 54,
+    "cache_creation_tokens": 96666,
+    "cache_read_tokens": 2259813,
+    "output_tokens": 14119,
+    "api_call_count": 24,
+    "subagent_tokens": {
+      "input_tokens": 18,
+      "cache_creation_tokens": 170636,
+      "cache_read_tokens": 577773,
+      "output_tokens": 5091,
+      "api_call_count": 9
+    }
+  },
+  "redaction": {
+    "replacements": 185,
+    "layers": {
+      "betterleaks": 42,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 143,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
