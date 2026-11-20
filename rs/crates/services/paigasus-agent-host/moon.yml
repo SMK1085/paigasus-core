@@ -38,3 +38,18 @@ tasks:
     # The Postgres tests start containers. They share a runner with the console e2e tasks.
     options:
       mutex: 'heavy-integration'
+  dev:
+    command: 'bash scripts/dev.sh'
+    deps: ['^:build']
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - '@group(upstreams)'
+      - '/rs/Cargo.lock'
+      - '/rs/.config/nextest.toml'
+      - '/rs/.cargo/config.toml'
+      - 'scripts/dev.sh'
+    options:
+      cache: false
+      persistent: true
+      runInCI: false

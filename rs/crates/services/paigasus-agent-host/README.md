@@ -24,3 +24,21 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 
 The service keeps its migration state in the table `agent_host_migrations`. It runs the migrations
 under the advisory lock with the key `5_580_786`.
+
+## Local run
+
+Run `moon run paigasus-agent-host-rs:dev`. The command calls `scripts/dev.sh`.
+
+The script starts a Postgres 16 container on a free port of `127.0.0.1`. Then it runs
+`cargo run --locked -p paigasus-agent-host` with `AGENT_HOST_DATABASE_URL` and
+`AGENT_HOST_HTTP_ADDR=127.0.0.1:<free port>`. The script prints both ports. Press Ctrl-C to stop
+the service. The script then removes its container.
+
+Use `scripts/dev.sh --check` to test the boot. The script builds the service first. Then it starts
+the service, waits up to 60 s for `/readyz` to return 200, and stops. It exits 0 on success and 1
+on failure.
+
+Each container has the label `paigasus.dev=agent-host` and the label `paigasus.dev.pid=<pid of the
+script>`. At start, the script removes only labelled containers whose process is no longer alive.
+A second run from another worktree keeps its own container. A SIGKILL leaves a container. The next
+run removes it.
